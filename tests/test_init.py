@@ -1,6 +1,9 @@
 """`brindle init`: detect a repo's setup and checks, write the config, check tools."""
 
 import json
+import shutil
+import subprocess
+from pathlib import Path
 
 from typer.testing import CliRunner
 
@@ -80,6 +83,41 @@ def test_init_with_committed_config_says_nothing_about_committing(repo, monkeypa
     res = CliRunner().invoke(app, ["init"])
     assert res.exit_code == 0, res.output
     assert "commit .brindle/" not in res.output
+
+
+def test_preflight_names_missing_cli(monkeypatch, tmp_path):
+    monkeypatch.setenv("BRINDLE_CLAUDE_BIN", "/nonexistent/claude")
+    assert any("Claude Code" in p for p in doctor.preflight("claude"))
+    assert not any("Claude Code" in p for p in doctor.preflight("shell"))
+    # install.sh installs brindle (uv tool install), and says its folder is missing only
+    # from the user's own PATH, not from the one install.sh extends for itself.
+    for on_path in (False, True):
+        bin_dir, out = _install_sh(tmp_path / str(on_path), on_path)
+        assert (bin_dir / "brindle").exists()
+        assert (str(bin_dir) in out) is not on_path
+
+
+def _install_sh(tmp_path, on_path):
+    """scripts/install.sh's bin folder and output on a box with no uv, brindle
+    or claude (curl, uv: stubs)."""
+    home, stubs = tmp_path / "home", tmp_path / "stubs"
+    stubs.mkdir(parents=True)
+    uv = ('case "$2" in dir) echo "$HOME/.local/bin" ;; install) printf \'#!/bin/sh\\necho brindle 0.5.5\\n\' '
+          '> "$HOME/.local/bin/brindle"; chmod +x "$HOME/.local/bin/brindle" ;; esac')
+    (stubs / "curl").write_text(f'#!/bin/sh\nmkdir -p "$HOME/.local/bin"; touch "$HOME/.local/bin/env"\n'
+                               f"printf '%s\\n' '#!/bin/sh' '{uv}' > \"$HOME/.local/bin/uv\"\n"
+                               'chmod +x "$HOME/.local/bin/uv"; echo "exit 0"\n')
+    (stubs / "tmux").write_text("#!/bin/sh\n")
+    for stub in ("curl", "tmux"):
+        (stubs / stub).chmod(0o755)
+    for tool in ("sh", "uname", "mkdir", "chmod", "touch", "cut", "printf"):
+        if not (stubs / tool).exists():
+            (stubs / tool).symlink_to(shutil.which(tool))
+    script = Path(__file__).resolve().parents[1] / "scripts" / "install.sh"
+    path = f"{home}/.local/bin:{stubs}" if on_path else str(stubs)
+    res = subprocess.run(["sh", str(script)], env={"HOME": str(home), "PATH": path}, capture_output=True, text=True)
+    assert res.returncode == 0, res.stderr
+    return home / ".local" / "bin", res.stdout
 
 
 def test_history_share_card(db, repo):

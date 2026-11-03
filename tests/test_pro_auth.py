@@ -248,11 +248,28 @@ def test_without_the_lock_concurrent_refreshers_would_trip_reuse_detection(
 
 
 @pytest.mark.variant("credentials rotate between routing's initial read and refresh lock entry")
-def test_routing_refresh_observes_rotation_at_lock_entry(backend, monkeypatch):
+@pytest.mark.parametrize("entry", ["routing", "captured"])
+def test_routing_refresh_observes_rotation_at_lock_entry(backend, monkeypatch, entry):
     from contextlib import contextmanager
+    from subprocess import CompletedProcess
+    from brindle import keystore
 
+    external = credentials.default_store()
+
+    def run(self, args, stdin=None):
+        if args[0] == "-i":
+            external.save(keystore._decode(stdin.split('"')[-2]))
+        elif args[0] == "delete-generic-password":
+            external.delete()
+        record = external.load()
+        return CompletedProcess(args, 0 if record else 44, keystore._encode(record) if record else "", "")
+
+    monkeypatch.setenv(keystore.FORCE_ENV, "keychain")
+    monkeypatch.setattr(keystore, "_keychain_reads", {})
+    monkeypatch.setattr(keystore.KeychainStore, "_run", run)
     store = credentials.default_store()
-    seen = seed(store, backend)
+    seen = seed(external, backend)
+    assert store.load() == seen  # prime this process's cache before external rotation
     client = auth.Client(BASE, backend)
     real_lock = auth.refresh_lock
     rotated = False
@@ -262,14 +279,19 @@ def test_routing_refresh_observes_rotation_at_lock_entry(backend, monkeypatch):
         nonlocal rotated
         if not rotated:
             rotated = True
-            auth.refresh(client, store, seen)
+            auth.refresh(client, external, seen)
         with real_lock():
             yield
 
     monkeypatch.setattr(auth, "refresh_lock", lock)
     monkeypatch.setattr(auth, "Client", lambda *a, **k: client)
-    with license.reading():
-        assert license.current().plan == "pro"
+    if entry == "routing":
+        with license.reading():
+            assert license.current().plan == "pro"
+    else:
+        with pytest.raises(AuthError) as exc:
+            auth.refresh_captured(store, seen, backend)
+        assert exc.value.code == "record_changed"
     assert backend.paths().count("POST /token/refresh") == 1
     assert not backend.revoked
     assert store.load()["refresh_token"] == "cpr_2"

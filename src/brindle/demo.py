@@ -10,11 +10,17 @@ The repo is plain Python (unittest, no dependencies) under
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import subprocess
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from brindle.config import brindle_home
+
+if TYPE_CHECKING:
+    from brindle.db import DB
 
 FILES = {
     "README.md": "# brindle demo\n\nA small text toolkit. Run the tests with `python3 -m unittest -q`.\n",
@@ -79,7 +85,17 @@ check: python3 -m unittest tests.test_wrap -q
 """
 
 
-def _config(local: bool) -> dict:
+# The worker and reviewer profiles a demo runs on, by the CLI the person has
+# signed in to (the app's demo): every agent of the demo on that one provider.
+PROFILES = {
+    "claude": ("developer", "reviewer"),
+    "codex": ("developer-codex", "reviewer-codex"),
+    "antigravity": ("developer-gemini", "reviewer-gemini"),
+    "opencode": ("developer-opencode", "reviewer-opencode"),
+}
+
+
+def _config(local: bool, provider: str | None = None) -> dict:
     cfg = {
         # What every branch must pass to merge. Not the whole suite: until both
         # milestones land, each branch still has the other's failing stub, and
@@ -97,14 +113,54 @@ def _config(local: bool) -> dict:
     if local:
         cfg.update(default_agent="developer-local", review_profile="reviewer-local",
                    routing={"light": ["developer-local"]})
+    elif provider in PROFILES:
+        developer, reviewer = PROFILES[provider]
+        cfg.update(local_models=False, default_agent=developer, review_profile=reviewer,
+                   routing={"light": [developer]})
     else:
         # Fast and predictable: no local model, even when one is configured.
         cfg.update(local_models=False, routing={"light": ["developer"]})
     return cfg
 
 
-def create(local: bool = False) -> Path:
-    """A fresh demo repo with one commit; returns its path."""
+def _config_path(root: Path) -> Path:
+    return root / ".brindle" / "config.json"
+
+
+def unused(db: DB) -> list[Path]:
+    """The practice repos no session has run in yet (one a launch's preflight
+    held while the person settled it), newest first."""
+    return [root for root in sorted((brindle_home() / "demo").glob("textkit-*"), reverse=True)
+            if (root / ".brindle" / "goals.md").exists()
+            and not any(db.list_agents(ws.id) for ws in db.find_workspaces(os.path.realpath(root)))]
+
+
+def held(db: DB, provider: str | None = None) -> Path | None:
+    """The newest unused practice repo made for ``provider``, None when there is
+    none. Every other unused one is discarded: at most one is ever kept."""
+    found = None
+    for root in unused(db):
+        try:
+            made = json.loads(_config_path(root).read_text())
+        except (OSError, ValueError):
+            made = None
+        if found is None and made == _config(False, provider):
+            found = root
+        else:
+            discard(db, root)
+    return found
+
+
+def discard(db: DB, root: Path) -> None:
+    """Remove an unused practice repo and forget it (its preflight was cancelled)."""
+    for ws in db.find_workspaces(os.path.realpath(root)):
+        db.delete_workspace(ws.id)
+    shutil.rmtree(root, ignore_errors=True)
+
+
+def create(local: bool = False, provider: str | None = None) -> Path:
+    """A fresh demo repo with one commit; returns its path. ``provider``: the
+    CLI its workers and reviewers run on (PROFILES); Claude's when None."""
     base = brindle_home() / "demo"
     base.mkdir(parents=True, exist_ok=True)
     # A new name every time, so no earlier demo's sessions or branches show up.
@@ -118,7 +174,7 @@ def create(local: bool = False) -> Path:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
     (root / ".brindle").mkdir()
-    (root / ".brindle" / "config.json").write_text(json.dumps(_config(local), indent=2) + "\n")
+    _config_path(root).write_text(json.dumps(_config(local, provider), indent=2) + "\n")
     (root / ".brindle" / "goals.md").write_text(GOALS)
     git = ["git", "-c", "user.name=brindle demo", "-c", "user.email=demo@brindle.invalid"]
     subprocess.run(["git", "init", "-q", "-b", "main"], cwd=root, check=True)

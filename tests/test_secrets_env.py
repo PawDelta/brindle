@@ -141,7 +141,7 @@ def test_a_pane_starts_without_the_servers_secrets_but_with_its_credentials(sess
         got = _pane_env(session, tmp_path, {"BRINDLE_AGENT_ID": "a1"}, keep=secrets.provider_credentials("claude"))
         assert not {"GH_TOKEN", "GH_ENTERPRISE_TOKEN", "BRINDLE_PRO_TOKEN"} & set(got), sorted(got)
         assert got["ANTHROPIC_API_KEY"] == "sk-ant-ok" and got["AWS_SESSION_TOKEN"] == "aws-ok"
-        assert got["OPENAI_API_KEY"] == "sk-oa-ok", "other variables are left alone"
+        assert "OPENAI_API_KEY" not in got, "another provider's key never reaches it"
         assert got["BRINDLE_AGENT_ID"] == "a1" and "TMUX_PANE" in got and "PATH" in got
         # Neither a profile's own -e value nor keep gets a job secret through.
         got = _pane_env(session, tmp_path, {"GH_TOKEN": "from-profile"}, keep=["BRINDLE_PRO_TOKEN"], name="p")

@@ -27,8 +27,9 @@ against the URL; mcp/other against the tool name. A few named matchers
 ``@default`` is the repo's default branch), matched against every ``git push``
 in the command.
 
-Nothing is built in: every rule in force lives in the person's store, where
-it can be edited or removed, the ones a preset seeded included (see
+Shell commands that print credentials are always denied. Otherwise every
+rule in force lives in the person's store, where it can be edited or
+removed, the ones a preset seeded included (see
 ``PRESETS``: Autonomous, the default for a new store, Permissive, Standard
 and Secure; ``apply_preset`` seeds the store and records the choice). A
 rule's ``decision`` is allow, deny or ask: an ask rule names what a person
@@ -410,8 +411,8 @@ ROUTINE_ALLOWS: tuple[Rule, ...] = (
           "readonly-pipeline", "allow"),
 )
 DESTRUCTIVE_DENIES: tuple[Rule, ...] = (
-    _seed("d-git-force", "bash", "a git command with a force flag, or a push that forces or deletes a branch",
-          "git-force", "deny"),
+    _seed("d-git-force", "bash", "a git command that discards work (a force flag other than add -f or "
+          "worktree add -f, push --delete, branch -D, reset --hard, switch --discard-changes)", "git-force", "deny"),
     _seed("d-rm", "bash", "a recursive rm of the root, a top-level folder or the home directory",
           "rm-destructive", "deny"),
 )
@@ -1132,7 +1133,7 @@ def _part_decision(req: Request, words: list[str], checks: list[str] | None,
     mistake argument text for shell syntax."""
     from brindle.native.permissions import _joined
 
-    denied = _matching_restriction([replace(req, command=_joined(words))], checks, rules)
+    denied = _matching_restriction([replace(req, command=_joined(words))], checks, rules, [words])
     if denied is not None:
         return denied
     if all(SIMPLE_COMMAND.fullmatch(word) and " " not in word for word in words):
@@ -1258,11 +1259,122 @@ def is_tracked(path: str | None, roots: list[str]) -> bool:
     return False
 
 
+# Every character the shell may cut a command at, quoted or not.
+_SEPARATORS = r"[;&|\n()`]|\$\("
+
+
+def _command_texts(command: str) -> list[str]:
+    """``command`` cut at the shell's separators (``;&|``, newline,
+    parentheses, backticks, ``$(``) that quoting leaves active: never inside
+    single quotes, and inside double quotes only where a substitution opens
+    or closes. A cut inside double quotes closes the quote and reopens it, so
+    each text still reads as shell words. ``$'...'`` honours its backslash
+    escapes, an unquoted ``#`` that starts a word comments out the rest of its
+    line, and a heredoc body is cut at every separator with its quotes read as
+    text. A quote that never closes falls back to cutting at every separator
+    (_SEPARATORS), so a stray apostrophe can't hide a command."""
+    texts: list[str] = []
+    text: list[str] = []
+    stack: list[str] = []      # what is open: '"' (a double quote), "$(" or "`" (a substitution)
+    heredocs: list[str] = []   # delimiters of heredocs whose bodies start at the next newline
+
+    def quoted() -> bool:
+        return bool(stack) and stack[-1] == '"'
+
+    def cut() -> None:
+        if quoted():
+            text.append('"')
+        texts.append("".join(text))
+        text.clear()
+
+    def reopen() -> None:
+        if quoted():
+            text.append('"')
+
+    i, n = 0, len(command)
+    while i < n:
+        c = command[i]
+        if c == "\\":
+            text.append(command[i:i + 2])
+            i += 2
+            continue
+        if command.startswith("$'", i) and not quoted():
+            m = re.compile(r"\$'(?:[^'\\]|\\.)*'", re.DOTALL).match(command, i)
+            if m is None:
+                return re.split(_SEPARATORS, command)
+            text.append(m.group())
+            i = m.end()
+            continue
+        if c == "'" and not quoted():
+            j = command.find("'", i + 1)
+            if j < 0:
+                return re.split(_SEPARATORS, command)
+            text.append(command[i:j + 1])
+            i = j + 1
+            continue
+        if c == "#" and not quoted() and (i == 0 or command[i - 1] in " \t\n;&|()`"):
+            j = command.find("\n", i)
+            i = n if j < 0 else j      # the newline still cuts
+            continue
+        if command.startswith("<<", i) and not quoted() and not command.startswith("<<<", i):
+            m = re.compile(r"<<-?[ \t]*([\"']?)(\w+)\1").match(command, i)
+            if m is not None:
+                heredocs.append(m.group(2))
+                text.append(m.group())
+                i = m.end()
+                continue
+        if c == "\n" and heredocs and not quoted():
+            cut()
+            i += 1
+            for delimiter in heredocs:   # each body, through its closing line, is cut as the old splitter cut it
+                close = re.compile(r"^[ \t]*" + re.escape(delimiter) + r"[ \t]*$", re.MULTILINE).search(command, i)
+                end = close.end() if close is not None else n
+                texts.extend(re.split(_SEPARATORS, command[i:end]))
+                i = end
+            heredocs.clear()
+            continue
+        if command.startswith("$(", i):
+            cut()
+            stack.append("$(")
+            i += 2
+            continue
+        if c == "`":
+            cut()
+            if stack and stack[-1] == "`":
+                stack.pop()
+            else:
+                stack.append("`")
+            reopen()
+        elif c == '"':
+            if quoted():
+                stack.pop()
+            else:
+                stack.append('"')
+            text.append(c)
+        elif quoted():
+            text.append(c)
+        elif c == ")":
+            cut()
+            if stack and stack[-1] == "$(":
+                stack.pop()
+            reopen()
+        elif c in ";&|\n(":
+            cut()
+        else:
+            text.append(c)
+        i += 1
+    if '"' in stack:
+        return re.split(_SEPARATORS, command)
+    texts.append("".join(text))
+    return texts
+
+
 def _segments(command: str) -> list[list[str]]:
-    """Each simple command in ``command``, split at the shell's separators,
-    as words (best effort: only used to find things to deny)."""
+    """Each simple command in ``command``, split at the shell's separators
+    outside quotes (_command_texts), as words (best effort: only used to
+    find things to deny)."""
     out = []
-    for part in re.split(r"[;&|\n()`]|\$\(", command):
+    for part in _command_texts(command):
         try:
             words = shlex.split(part)
         except ValueError:
@@ -1883,6 +1995,60 @@ def forced_push(command: str) -> bool:
     return any(p.force or p.delete for p in push_calls(command))
 
 
+# git commands a force flag can't make discard work: those that only read,
+# add -f (adds an ignored file), config -f (names the file), rebase -f
+# (rebases anyway) and gc --force. Any other forced command may (switch -f,
+# rm -f, mv -f, tag -f ...), so the list names the safe ones.
+_GIT_UNFORCED = frozenset({*READONLY_GIT, "rev-parse", "merge-base", "rev-list", "ls-files", "ls-tree", "cat-file",
+                           "describe", "shortlog", "blame", "grep", "for-each-ref", "name-rev", "show-ref", "add",
+                           "config", "rebase", "gc"})
+# The git commands whose -m/-F (--message/--file) take a message or its file: their value is never an option.
+_GIT_MESSAGES = frozenset({"commit", "tag", "merge", "notes", "stash"})
+
+
+def _git_options(sub: str, args: list[str]) -> list[str]:
+    """``args`` without the values of a message option (``-m "drop -f"``). In a
+    short cluster the first letter taking a value ends it: the rest is that value
+    (``-mfix`` is -m with "fix"), and with nothing after it the next word is."""
+    if sub not in _GIT_MESSAGES:
+        return args
+    valued = "mFsX" if sub == "merge" else "mF"
+    out, skip = [], False
+    for arg in args:
+        if skip:
+            skip = False
+        elif arg == "--":
+            break
+        elif arg in ("--message", "--file"):
+            out.append(arg)
+            skip = True
+        elif re.match(r"-[A-Za-z]", arg):
+            at = next((i for i, c in enumerate(arg[1:], 1) if c in valued), None)
+            out.append(arg if at is None else arg[:at + 1])
+            skip = at == len(arg) - 1
+        else:
+            out.append(arg)
+    return out
+
+
+def destructive_git(command: str) -> bool:
+    """A git command that discards work: a push that forces or deletes, branch
+    -D, reset --hard, switch --discard-changes, or a force flag on any command
+    but those in _GIT_UNFORCED and a worktree command other than remove."""
+    for sub, args in _git_calls(command):
+        if sub == "reset" and "--hard" in args:
+            return True
+        if sub == "branch" and any(re.fullmatch(r"-[A-Za-z]*D[A-Za-z]*", a) for a in args):
+            return True
+        if sub == "switch" and "--discard-changes" in args:
+            return True
+        if sub in _GIT_UNFORCED or sub == "worktree" and (not args or args[0] != "remove"):
+            continue
+        if any(_is_force(a) for a in _git_options(sub, args)):
+            return True
+    return forced_push(command)
+
+
 def _in_worktree(req: Request) -> bool:
     """A path (resolved) inside a checkout of the session (session_roots), not under .git."""
     if not req.path:
@@ -1913,7 +2079,7 @@ def _builtin_matches(rule: Rule, req: Request, checks: list[str]) -> bool:
     if rule.match_type == "push":
         return push_matches(rule.match, req, loose=rule.decision != "allow")
     if rule.match_type == "git-force":
-        return any(_is_force(a) for _, args in _git_calls(command) for a in args) or forced_push(command)
+        return destructive_git(command)
     if rule.match_type == "rm-destructive":
         return destructive_rm(command)
     if rule.match_type == "readonly-pipeline":
@@ -2030,6 +2196,261 @@ def _rule_decision(req: Request, rules: list[Rule], checks: list[str] | None) ->
     return None
 
 
+# A secret's name has a _-separated part that is, or ends in, one of these
+# words (GH_TOKEN, OPENAI_APIKEY, NPM_AUTHTOKEN), or is PAT or PASS, or a PWD
+# after another part (MYSQL_PWD, not PWD), each maybe numbered (GH_TOKEN2); a
+# word that only starts a part (TOKENIZERS, AUTHOR) doesn't count.
+_SECRET_NAME = re.compile(r"(?:(?:^|_)(?:[A-Z0-9]*(?:TOKEN|SECRET|KEY|PASSWORD|PASSWD|AUTH|CREDENTIAL|PRIVATE)S?"
+                          r"|PATS?|PASS)|_PWD)\d*(?=_|$)", re.I)
+_NOT_SECRET = frozenset({"SSH_AUTH_SOCK"})    # a socket path
+
+
+def _secret_name(name: str) -> bool:
+    return name.upper() not in _NOT_SECRET and bool(_SECRET_NAME.search(name))
+
+
+def _credential_file(req: Request, part: ShellPart, name: str) -> bool:
+    """Recognizable credential stores, including patterns and uncertain cwd reads."""
+    name = os.path.expanduser(name)
+    path = os.path.normpath(os.path.join(part.cwd or "", name))
+    home = os.path.expanduser("~")
+    if fnmatch.fnmatch(path, "/proc/*/environ") or part.cwd is None and name == "environ":
+        return True
+    if (path in (f"{home}/.netrc", f"{home}/.npmrc", f"{home}/.git-credentials", f"{home}/.docker/config.json")
+            or path.startswith(f"{home}/.config/") or path == f"{home}/.config"):
+        return True
+    if path.startswith(f"{home}/.aws/") and fnmatch.fnmatch("credentials", os.path.basename(path)):
+        return True
+    return (os.path.basename(path) == ".env"
+            and (part.cwd is None or not req.worktree or _inside(path, req.worktree) is None))
+
+
+def _credential_options(args: list[str], valued: set[str]) -> tuple[list[str], set[str]]:
+    """CLI operands and option names, excluding the values options consume."""
+    operands, options = [], set()
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        index += 1
+        if arg == "--":
+            operands.extend(args[index:])
+            break
+        if arg.startswith("--"):
+            name, equals, _ = arg.partition("=")
+            options.add(name)
+            index += name in valued and not equals
+        elif arg.startswith("-") and arg != "-":
+            for pos, char in enumerate(arg[1:], 2):
+                name = "-" + char
+                options.add(name)
+                if name in valued:
+                    index += pos == len(arg)
+                    break
+        else:
+            operands.append(arg)
+    return operands, options
+
+
+# Credential-printing command paths, with each CLI's options that take a value and those that don't.
+_CLI_CREDENTIALS = {
+    "gh": (("auth", "token"),
+           {"-R", "--repo", "-h", "--hostname", "-u", "--user"},
+           {"--help", "--secure-storage", "--insecure-storage"}),
+    "gcloud": (("auth", "print-access-token"),
+               {"--project", "--account", "--configuration", "--billing-project", "--impersonate-service-account",
+                "--format", "--verbosity", "--flags-file", "--access-token-file", "--trace-token", "--lifetime",
+                "--filter", "--limit", "--page-size", "--sort-by", "--scopes", "--audiences"},
+               {"-q", "--quiet", "--log-http", "--no-log-http", "--user-output-enabled",
+                "--no-user-output-enabled", "-h", "--help"}),
+    "aws": (("configure", "export-credentials"),
+            {"--profile", "--region", "--endpoint-url", "--output", "--query", "--color", "--ca-bundle",
+             "--cli-binary-format", "--format", "--cli-read-timeout",
+             "--cli-connect-timeout"},
+            {"--debug", "--no-verify-ssl", "--no-paginate", "--no-sign-request", "--no-cli-pager",
+             "--cli-auto-prompt", "--no-cli-auto-prompt", "--version"}),
+}
+
+
+def _command_path(args: list[str], valued: set[str], flags: set[str], target: tuple[str, ...]) -> bool:
+    """Whether ``args`` may select ``target`` as the command path: an option
+    neither set knows may or may not consume the word after it."""
+    words: list[tuple[str, bool]] = []    # (operand, maybe an unknown option's value)
+    index, maybe = 0, False
+    while index < len(args):
+        arg = args[index]
+        index += 1
+        if arg == "--":
+            words.extend((a, False) for a in args[index:])
+            break
+        if arg.startswith("--"):
+            name, equals, _ = arg.partition("=")
+            index += name in valued and not equals
+            maybe = not equals and name not in valued and name not in flags
+            continue
+        if arg.startswith("-") and arg != "-":
+            # Left to right: the first option that takes a value ends the cluster, with the
+            # rest of the word as its value or, when nothing follows, the next word. An
+            # unknown option may itself take the rest, so a later one's value is a maybe.
+            unknown, consumes, ended = False, False, False
+            for pos, char in enumerate(arg[1:], 2):
+                if "-" + char in valued:
+                    consumes, ended = pos == len(arg), True
+                    break
+                unknown |= "-" + char not in flags
+            index += consumes and not unknown
+            maybe = unknown and (consumes or not ended and "-" + arg[-1] not in flags)
+            continue
+        words.append((arg, maybe))
+        maybe = False
+
+    def match(at: int, want: int) -> bool:
+        if want == len(target):
+            return True
+        if at == len(words):
+            return False
+        word, skippable = words[at]
+        return (word == target[want] and match(at + 1, want + 1)
+                or skippable and match(at + 1, want))
+    return match(0, 0)
+
+
+def _credential_shell(req: Request, part: ShellPart, args: list[str], depth: int) -> bool:
+    """Find a shell's command string after actual options, never inside --norc."""
+    index, command_string = 0, False
+    while index < len(args):
+        arg = args[index]
+        if arg == "--":
+            index += 1
+            break
+        if arg.startswith("--"):
+            name, equals, _ = arg.partition("=")
+            index += 2 if name in ("--rcfile", "--init-file") and not equals else 1
+        elif arg.startswith(("-", "+")) and len(arg) > 1:
+            for pos, char in enumerate(arg[1:], 2):
+                command_string |= arg[0] == "-" and char == "c"
+                if char in "oO":
+                    index += pos == len(arg)
+                    break
+            index += 1
+        else:
+            break
+    return (command_string and index < len(args)
+            and prints_credentials(replace(req, command=args[index], cwd=part.cwd or ""), depth + 1))
+
+
+def _credential_words(req: Request, part: ShellPart, words: list[str], depth: int,
+                      references: list[tuple[str, ...]] | None = None) -> bool:
+    """Classify output, unwrapping only commands that actually execute their operands."""
+    if not words or depth > 30:
+        return False
+    if references is None:
+        references = part.references
+    program, args = os.path.basename(words[0]), words[1:]
+    if program in ("command", "builtin", "exec", "sudo", "doas", "env", "nohup"):
+        index = 0
+        valued = {"-u", "--unset", "-C", "--chdir"} if program == "env" else {
+            "-u", "-g", "-h", "-p", "-C", "-T", "--user", "--group", "--host", "--prompt"}
+        if program in ("command", "builtin", "nohup"):
+            valued = set()
+        while index < len(args):
+            arg = args[index]
+            if arg == "--":
+                index += 1
+                break
+            if (program == "env" and arg in ("--help", "--version")
+                    or program == "command" and arg.startswith("-") and re.search("[vV]", arg[1:])):
+                return False
+            if program == "env" and arg in ("-S", "--split-string") and index + 1 < len(args):
+                try:
+                    split = shlex.split(args[index + 1])
+                except ValueError:
+                    return False
+                tokens = _script_tokens(args[index + 1], credential_scan=True) or []
+                refs = [tuple(ref[2] for ref in t[1].refs) for t in tokens if t[0] == "word"]
+                return _credential_words(req, part, ["env", *split, *args[index + 2:]], depth + 1,
+                                         [(), *refs, *references[index + 3:]])
+            if arg in valued:
+                index += 2
+            elif arg.startswith("-") or program == "env" and _ASSIGNMENT.match(arg):
+                index += 1
+            else:
+                break
+        return (program == "env" and index >= len(args)
+                or _credential_words(req, part, args[index:], depth + 1, references[index + 1:]))
+    if program in ("sh", "bash", "zsh", "dash", "ksh"):
+        return _credential_shell(req, part, args, depth)
+    if program == "printenv":
+        if any(a in ("--help", "--version") for a in args):
+            return False
+        names = [a for a in args if not a.startswith("-")]
+        return not names or any(_secret_name(a) for a in names)
+    if program in ("echo", "printf"):
+        if program == "printf" and args and args[0] == "-v":
+            return False
+        # Only output arguments count; assignments and wrapper operands don't print.
+        return any(_secret_name(name) for refs in references[1:] for name in refs)
+    if program == "set":
+        return not args    # with arguments it sets options (-x traces) or positional parameters
+    if program in ("export", "declare", "typeset"):
+        options = "".join(a[1:] for a in args if a.startswith("-"))
+        operands = [a for a in args if not a.startswith("-")]
+        return not args or (not operands and ("p" in options or "x" in options))
+    if program == "tmux":
+        index = 0
+        while index < len(args) and args[index].startswith("-"):
+            index += 2 if args[index] in ("-L", "-S", "-f", "-c", "-T") else 1
+        # tmux also accepts multiple commands separated by a literal semicolon.
+        commands = [args[index:]]
+        commands += [args[i + 1:] for i, a in enumerate(args) if a == ";"]
+        return any(c and (c[0] in ("showenv", "show-environment", "show-env")
+                          or "show-environment".startswith(c[0]) and c[0].startswith("show"))
+                   for c in commands)
+    if program == "ps":
+        # BSD e prints the environment; POSIX -e only selects all processes.
+        index = 0
+        while index < len(args):
+            arg = args[index]
+            if arg in ("-o", "-O", "-p", "-t", "-u", "-U", "-G", "--format", "--pid", "--user"):
+                index += 2
+                continue
+            if (not arg.startswith("-") and re.fullmatch(r"[a-zA-Z]+", arg) and "e" in arg
+                    or arg.startswith("-") and "E" in arg):
+                return True
+            index += 1
+        return False
+    if program in _CLI_CREDENTIALS:
+        target, valued, flags = _CLI_CREDENTIALS[program]
+        return _command_path(args, valued, flags, target)
+    if program == "security":
+        operands, options = _credential_options(args, {"-a", "-c", "-C", "-d", "-D", "-j", "-l", "-p", "-s", "-t"})
+        return (bool(operands) and operands[0] in ("find-generic-password", "find-internet-password")
+                and bool(options & {"-w", "-g"}))
+    if program == "dd":
+        inputs = [arg[3:] for arg in args if arg.startswith("if=")]
+        return any(_credential_file(req, part, name) for name in [*inputs, *part.reads])
+    if program in (*READERS, "awk", "less", "more", "strings", "od", "xxd"):
+        return any(_credential_file(req, part, name) for name in [*words[1:], *part.written[1:], *part.reads])
+    return False
+
+
+def prints_credentials(req: Request, depth: int = 0) -> bool:
+    """A non-overridable output restriction, independent of grants and policy.
+
+    Keep already read parts when later syntax is unknown: an unreadable tail
+    cannot make an earlier credential dump safe.
+    """
+    if req.kind != "bash" or not req.command or depth > 30:
+        return False
+    reader = _PartReader(req, credential_scan=True)
+    try:
+        reader.read(req.command)
+    except ValueError:
+        fallback = _PartReader(req, credential_scan=True)
+        fallback.scan(req.command)
+        reader.parts.extend(fallback.parts)
+    return any(_credential_words(req, part, part.words, depth) for part in reader.parts)
+
+
 def decide(req: Request | None, *, checks: list[str] | None = None,
            rules: list[Rule] | None = None, unmatched: str | None = None,
            session: str | None = None, saved: list[SavedAction] | None = None,
@@ -2041,6 +2462,9 @@ def decide(req: Request | None, *, checks: list[str] | None = None,
     settled only by a saved approval within the org's limits."""
     if req is None or req.kind not in KINDS:
         return Decision("ask", "brindle couldn't read the request")
+    if prints_credentials(req):
+        return Decision("deny", 'would print credentials; check a variable with [ -n "$VAR" ] '
+                                'or print a non-secret one')
     from brindle import permission_grants
 
     rules = all_rules(req.repo_root or None) if rules is None else rules
@@ -2364,12 +2788,21 @@ def _globs_excluded(req: Request, parts: list[list[str]], rules: list[Rule],
     return True
 
 
+# Matchers that must tell a word from its neighbours (an option from a message
+# that mentions one), so they see the words quoted as written, not re-joined.
+_WORD_MATCHERS = ("git-force",)
+
+
 def _matching_restriction(parts: list[Request], checks: list[str] | None,
-                          rules: list[Rule]) -> Decision | None:
+                          rules: list[Rule], words: list[list[str]] | None = None) -> Decision | None:
+    """The first deny (else ask) in ``rules`` a part matches; with ``words``
+    (each part's words), a _WORD_MATCHERS rule matches them shell-quoted."""
+    quoted = [replace(part, command=shlex.join(w)) for part, w in zip(parts, words)] if words else parts
     for wanted in ("deny", "ask"):
-        for part in parts:
+        for part, exact in zip(parts, quoted):
             for rule in rules:
-                if rule.decision == wanted and rule_matches(rule, part, checks):
+                if rule.decision == wanted and rule_matches(
+                        rule, exact if rule.match_type in _WORD_MATCHERS else part, checks):
                     return Decision(wanted, f"{VERBS[wanted]} by {rule.source} rule {rule.id} ({rule.describe()})",
                                     rule)
     return None
@@ -2428,7 +2861,7 @@ def _restriction_in_parts(req: Request, *, checks: list[str] | None,
                 if parsed is None else None)
     words = parsed if parsed is not None else patterns if patterns is not None else _segments(req.command)
     parts = [replace(req, command=" ".join(" ".join(part).split())) for part in words]
-    matched = _matching_restriction(parts, checks, rules)
+    matched = _matching_restriction(parts, checks, rules, words)
     if matched is not None:
         return matched
     if patterns is not None:
@@ -2459,6 +2892,7 @@ SUBSTITUTION_DATA_OPTIONS: dict[tuple[str, str], tuple[str, ...]] = {
 }
 # Stands in for a substitution's output once its inner commands are checked.
 _SUBSTITUTED = "BRINDLESUBSTITUTION"
+_UNREADABLE = "BRINDLEUNREADABLE"    # a word prints_credentials' scan steps over
 
 
 def _substituted(req: Request, checks: list[str] | None, rules: list[Rule]) -> Request | Decision:
@@ -2713,11 +3147,83 @@ class _Word:
         return self.raw if re.fullmatch(r"[A-Za-z0-9_\-./:=@%+,{}!\[\]]+", self.raw) else None
 
 
-def _script_word(command: str, i: int) -> tuple[str, list, list, int] | None:
+def _backtick_inner(inner: str, quoted: bool) -> str:
+    """A backtick substitution's inner command as its shell reads it: backticks
+    remove the backslash before $, ` and \\ (and " inside double quotes)."""
+    return re.sub(r'\\([$`\\"])' if quoted else r"\\([$`\\])", r"\1", inner)
+
+
+def _parameter_word(command: str, start: int, quoted: bool) -> tuple[int, list, list] | None:
+    """Read a ${...} for credential inspection without evaluating its operators."""
+    base = re.match(r"\$\{([!#]?)([A-Za-z_]\w*)", command[start:])
+    i = start + base.end() if base else start + 2
+    refs, subs, quote = [], [], ""
+    while i < len(command):
+        char = command[i]
+        if char == "\\":
+            i += 2
+        elif char == "'" and not quote and not quoted:    # inside "${...}" a ' is literal
+            end = command.find("'", i + 1)
+            if end < 0:
+                return None
+            i = end + 1
+        elif char == '"':
+            quote = "" if quote else char
+            i += 1
+        elif char == "}" and not quote:
+            if base and base.group(1) != "#":
+                refs.insert(0, (start, i + 1, base.group(2), quoted))
+            return i + 1, refs, subs
+        elif char == "`" or command.startswith("$(", i):
+            end = _substitution_end(command, i)
+            if end is None:
+                return None
+            inner = command[i + (1 if char == "`" else 2):end - 1]
+            subs.append(_backtick_inner(inner, quoted or bool(quote)) if char == "`" else inner)
+            i = end
+        elif command.startswith("${", i):
+            nested = _parameter_word(command, i, quoted or bool(quote))
+            if nested is None:
+                return None
+            i, inner_refs, inner_subs = nested
+            refs.extend(inner_refs)
+            subs.extend(inner_subs)
+        elif char == "$" and (found := _REFERENCE.match(command, i)):
+            refs.append((i, found.end(), found.group(1) or found.group(2), quoted or bool(quote)))
+            i = found.end()
+        else:
+            i += 1
+    return None
+
+
+_ANSI_C_ESCAPES = {"a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f", "n": "\n", "r": "\r",
+                   "t": "\t", "v": "\v", "\\": "\\", "'": "'", '"': '"', "?": "?"}
+
+
+def _ansi_c(body: str) -> str:
+    """The text a ``$'...'`` body stands for, as bash decodes it (a NUL ends it)."""
+    def one(found: re.Match) -> str:
+        escape = found.group(0)[1:]
+        if escape[0] in "01234567":
+            return chr(int(escape, 8) & 0xFF)
+        if escape[0] in "xuU":
+            return chr(min(int(escape[1:], 16), 0x10FFFF)) if len(escape) > 1 else found.group(0)
+        if escape[0] == "c":
+            return chr(ord(escape[1].upper()) & 0x1F) if len(escape) > 1 else found.group(0)
+        return _ANSI_C_ESCAPES.get(escape, found.group(0))
+    text = re.sub(r"\\(?:[0-7]{1,3}|x[0-9a-fA-F]{0,2}|u[0-9a-fA-F]{0,4}|U[0-9a-fA-F]{0,8}|c.?|.)", one, body,
+                  flags=re.S)
+    return text.split("\0", 1)[0]
+
+
+def _script_word(command: str, i: int, *, credential_scan: bool = False) -> tuple[str, list, list, int] | None:
     """The word starting at ``i``: (raw text, references, substitutions,
     end), or None for quoting or an expansion it doesn't read (``$'...'``,
-    ``${x:-y}``) or an unclosed quote or substitution."""
+    ``${x:-y}``) or an unclosed quote or substitution. A credential scan
+    reads ``$'...'`` as the single-quoted text it decodes to, and a backtick
+    substitution's inner command with the escape layer backticks remove."""
     start, refs, subs, quoted, n = i, [], [], False, len(command)
+    pieces, copied, shift = [], i, 0    # credential_scan: $'...' rewritten as the '...' it stands for
     while i < n:
         c = command[i]
         if not quoted and (c in " \t\n" or c in ";&|<>()"):
@@ -2737,14 +3243,32 @@ def _script_word(command: str, i: int) -> tuple[str, list, list, int] | None:
                 return None
             inner = command[i + (1 if c == "`" else 2):end - 1]
             if c == "`" and "\\" in inner:
-                return None    # backticks remove an escape layer before the inner shell reads it
+                if not credential_scan:
+                    return None    # backticks remove an escape layer before the inner shell reads it
+                inner = _backtick_inner(inner, quoted)
             subs.append(inner)
             i = end
         elif c == "$":
             found = _REFERENCE.match(command, i)
             if found:
-                refs.append((i - start, found.end() - start, found.group(1) or found.group(2), quoted))
+                refs.append((i - start + shift, found.end() - start + shift, found.group(1) or found.group(2), quoted))
                 i = found.end()
+            elif credential_scan and command.startswith("${", i):
+                parameter = _parameter_word(command, i, quoted)
+                if parameter is None:
+                    return None
+                i, inner_refs, inner_subs = parameter
+                refs.extend((s - start + shift, e - start + shift, name, q) for s, e, name, q in inner_refs)
+                subs.extend(inner_subs)
+            elif credential_scan and not quoted and command.startswith("$'", i):
+                close = re.match(r"\$'((?:[^'\\]|\\.)*)'", command[i:], re.S)
+                if close is None:
+                    return None
+                literal = "'" + _ansi_c(close.group(1)).replace("'", "'\\''") + "'"
+                pieces += [command[copied:i], literal]
+                shift += len(literal) - close.end()
+                i += close.end()
+                copied = i
             elif command.startswith("${", i) or not quoted and command.startswith("$'", i):
                 return None
             else:
@@ -2753,17 +3277,18 @@ def _script_word(command: str, i: int) -> tuple[str, list, list, int] | None:
             i += 1
     if quoted:
         return None
-    return command[start:i], refs, subs, i
+    return "".join(pieces) + command[copied:i], refs, subs, i
 
 
-def _script_tokens(command: str) -> list[tuple] | None:
+def _script_tokens(command: str, *, credential_scan: bool = False,
+                   partial: list[tuple] | None = None) -> list[tuple] | None:
     """``("word", _Word)``, ``("op", text, spaced)`` and ``("heredoc", body,
     expands, spaced)`` for each word, operator and heredoc of ``command``,
     or None for what _flat_script doesn't read: a comment, a subshell,
     process substitution, ``;;`` or an unclosed heredoc."""
     from brindle.native.permissions import _tokens
 
-    out: list[tuple] = []
+    out: list[tuple] = [] if partial is None else partial
     pending: list[tuple[str, bool, list]] = []   # heredocs whose body starts after the next newline
     i, n, spaced = 0, len(command), True
     while i < n:
@@ -2788,10 +3313,15 @@ def _script_tokens(command: str) -> list[tuple] | None:
             pending = []
             continue
         if c == "#":
-            return None
+            if not credential_scan:
+                return None
+            end = command.find("\n", i)
+            i = n if end < 0 else end
+            continue
         if c in ";&|<>()":
             op = next(o for o in _SCRIPT_OPERATORS if command.startswith(o, i))
-            if op in ("(", ")", ";;") or op in ("<", ">") and command.startswith("(", i + 1):
+            if not credential_scan and (op in (";;", "(", ")")
+                                        or op in ("<", ">") and command.startswith("(", i + 1)):
                 return None
             i += len(op)
             if op in ("<<", "<<-"):
@@ -2809,7 +3339,12 @@ def _script_tokens(command: str) -> list[tuple] | None:
                 out.append(("op", op, spaced))
             spaced = False
             continue
-        word = _script_word(command, i)
+        word = _script_word(command, i, credential_scan=credential_scan)
+        if word is None and partial is not None and credential_scan:
+            end = i + 1
+            while end < n and command[end] not in " \t\n;&|<>()":
+                end += 1
+            word = (_UNREADABLE, [], [], end)
         if word is None:
             return None
         raw, refs, subs, i = word
@@ -2828,14 +3363,28 @@ def _script_items(tokens: list[tuple]) -> list[tuple]:
     commands: list[tuple[list, str, str]] = []
     current: list[tuple] = []
     before = ""
+    after_subshell = False
     for token in [*tokens, ("op", "", False)]:
+        if token[:2] == ("op", "("):
+            if current:
+                raise ValueError("a subshell after words")
+            commands.append(([("word", _Word("{", True, [], []))], "|", ""))
+            continue
+        if token[:2] == ("op", ")"):
+            if current:
+                commands.append((current, before, ""))
+            commands.append(([("word", _Word("}", True, [], []))], "", "|"))
+            current, before = [], ""
+            after_subshell = True
+            continue
         if token[0] != "op" or token[1] not in (*_SCRIPT_SEPARATORS, ""):
             current.append(token)
         elif current:
             commands.append((current, before, token[1]))
             current, before = [], token[1]
-        elif token[1] not in ("\n", ""):
+        elif token[1] not in ("\n", "") and not after_subshell:
             raise ValueError("an empty command")
+        after_subshell = False
     items: list[tuple] = []
     negated = False    # a ! before a { on a line of its own marks the group's first command
     for toks, before, after in commands:
@@ -2959,8 +3508,9 @@ class _Flattener:
     pattern)`` for a for loop's pattern word), and collects the simple
     commands it runs."""
 
-    def __init__(self, cwd: str):
+    def __init__(self, cwd: str, *, credential_scan: bool = False):
         self.cwd = cwd
+        self.credential_scan = credential_scan
         self.out: list[str] = []
         # Whether each runs in this shell whenever the script does (not in an if, a loop,
         # after && or ||, in a pipeline, or a substitution's subshell).
@@ -2981,7 +3531,7 @@ class _Flattener:
             raise ValueError("too many commands")
 
     def script(self, command: str, env: dict) -> None:
-        tokens = _script_tokens(command)
+        tokens = _script_tokens(command, credential_scan=self.credential_scan)
         if tokens is None:
             raise ValueError("unreadable syntax")
         if any(t[0] == "heredoc" for t in tokens) and any(
@@ -3044,7 +3594,7 @@ class _Flattener:
         return values
 
     def substitution(self, inner: str, env: dict) -> None:
-        sub = _Flattener(self.cwd)
+        sub = _Flattener(self.cwd, credential_scan=self.credential_scan)
         sub.script(inner, dict(env))
         for command in sub.out:
             self.emit(command)
@@ -3054,6 +3604,8 @@ class _Flattener:
         replaced by text the shell reads as the same words; any other stays."""
         out, last = [], 0
         for start, end, name, quoted in word.refs:
+            if _REFERENCE.fullmatch(word.raw[start:end]) is None:
+                continue    # a parameter operator isn't a plain variable substitution
             value = env.get(name)
             replacement = None
             if value is not None and value[0] == "glob":
@@ -3188,6 +3740,7 @@ class ShellPart:
     tilde: bool = False
     assigned: bool = False
     redirect_glob: bool = False
+    references: list[tuple[str, ...]] = field(default_factory=list)    # expanded variable names per word
 
 
 class _Unverifiable(ValueError):
@@ -3196,13 +3749,48 @@ class _Unverifiable(ValueError):
 
 
 class _PartReader:
-    def __init__(self, req: Request):
+    def __init__(self, req: Request, *, credential_scan: bool = False):
         self.req = req
+        self.credential_scan = credential_scan
         self.cwd: str | None = req.cwd or req.worktree or None
         self.settled = self.cwd    # where the shell is once a cd's && chain ends, whether the cd ran or not
         self.parts: list[ShellPart] = []
         self.wrote = False    # an earlier part may have made files a later pattern would match
         self.expanded = self.tilde = False    # the part being read's ShellPart.expanded and .tilde
+
+    def scan(self, command: str) -> None:
+        """Inspect recognizable commands even when the full script isn't verifiable.
+
+        This only supplies evidence for a hard deny, never for an allow. The
+        lexer retains its prefix on failure; unsupported groups don't discard
+        simple commands elsewhere in the token stream.
+        """
+        tokens: list[tuple] = []
+        _script_tokens(command, credential_scan=True, partial=tokens)
+        chunk: list[tuple] = []
+        case_patterns: list[bool] = []
+        for token in [*tokens, ("op", ";", False)]:
+            if token[0] != "op" or token[1] not in (*_SCRIPT_SEPARATORS, ";;", "(", ")"):
+                chunk.append(token)
+                continue
+            while chunk and chunk[0][0] == "word" and chunk[0][1].plain() in (*_SCRIPT_OPENERS, "!"):
+                chunk.pop(0)
+            head = chunk[0][1].plain() if chunk and chunk[0][0] == "word" else None
+            if head == "case":
+                case_patterns.append(True)
+            elif head == "esac" and case_patterns:
+                case_patterns.pop()
+            elif chunk and not (case_patterns and case_patterns[-1]):
+                line = " ".join(t[1].raw if t[0] == "word" else t[1] for t in chunk if t[0] != "heredoc")
+                try:
+                    self.part(line, False)
+                except ValueError:
+                    pass
+            if case_patterns and token[1] == ")":
+                case_patterns[-1] = False
+            elif case_patterns and token[1] == ";;":
+                case_patterns[-1] = True
+            chunk = []
 
     def read(self, command: str, definite: bool = True, chains: bool = True) -> None:
         """``command``'s parts; ``definite``: whether it surely runs in this
@@ -3211,8 +3799,14 @@ class _PartReader:
         if "<<" in command and any(os.path.basename(w) in _CODE_RUNNERS
                                    for w in re.split(r"[\s;&|()<>`\"'$=]+", command)):
             raise ValueError("a heredoc a program may run as code")
-        flattener = _Flattener(self.cwd or "")
-        flattener.script(command, {})
+        flattener = _Flattener(self.cwd or "", credential_scan=self.credential_scan)
+        try:
+            flattener.script(command, {})
+        except ValueError:
+            if not self.credential_scan:
+                raise
+            self.scan(command)
+            return
         for line, sure, (chained, leads) in zip(flattener.out, flattener.definite, flattener.chained):
             self.part(line, definite and sure, chains and chained, chains and leads)
 
@@ -3227,7 +3821,7 @@ class _PartReader:
         """One simple command; ``chained``: it runs only if the one before it
         succeeded (_Flattener.chained); ``leads``: what follows it runs only if
         it succeeded."""
-        tokens = _script_tokens(line)
+        tokens = _script_tokens(line, credential_scan=self.credential_scan)
         if tokens is None or any(t[0] == "heredoc" for t in tokens):
             raise ValueError("unreadable syntax")
         if not chained:
@@ -3235,6 +3829,7 @@ class _PartReader:
         part = ShellPart([], line, self.cwd)
         self.expanded = self.tilde = False
         program: str | None = None
+        runner_unknown, env_assignments = False, False
         i = 0
         while i < len(tokens):
             token = tokens[i]
@@ -3245,6 +3840,7 @@ class _PartReader:
                 if previous is not None and previous[0] == "word" and previous[1].raw.isdigit() and not token[2]:
                     part.words.pop()    # the 2 of 2>&1 names a descriptor
                     part.written.pop()
+                    part.references.pop()
                 self.redirect(part, token[1], tokens[i + 1][1])
                 i += 2
                 continue
@@ -3269,7 +3865,17 @@ class _PartReader:
                 if not known or len(names) != 1 or written is not None:
                     raise ValueError("a program only the run knows")
                 program = os.path.basename(names[0])
+                env_assignments = program == "env"
+            else:
+                # A fully quoted env assignment stays one argument and cannot
+                # select the executable; an unquoted value can split into words.
+                env_value = (env_assignments and not word.substitutions
+                             and re.fullmatch(r'[A-Za-z_]\w*="(?:[^"\\]|\\.)*"', word.raw)
+                             and not _PROGRAM_VARIABLES.match(word.raw))
+                runner_unknown |= not known and not env_value
+                env_assignments &= bool(_ASSIGNMENT.match(word.raw))
             part.words += names
+            part.references.extend([tuple(ref[2] for ref in word.refs)] * len(names))
             part.written.append(written or (names[0] if known else word.raw))
             part.globs |= written is not None
             part.unknown |= not known
@@ -3285,7 +3891,7 @@ class _PartReader:
             return
         if program == "eval":
             raise _Unverifiable("eval runs what only the run knows")
-        if program in ("source", ".") or program in _WRAPPERS and part.unknown:
+        if program in ("source", ".") or program in _WRAPPERS and runner_unknown and not self.credential_scan:
             raise ValueError(f"{program} runs what only the run knows")
         self.parts.append(part)
         if program in ("cd", "pushd"):
@@ -3384,9 +3990,6 @@ def shell_parts(req: Request, why: list[ValueError] | None = None) -> list[Shell
     return reader.parts or None
 
 
-# git commands that only read: no force flag or push hides in them.
-_GIT_UNFORCED = frozenset({*READONLY_GIT, "rev-parse", "merge-base", "rev-list", "ls-files", "ls-tree", "cat-file",
-                           "describe", "shortlog", "blame", "grep", "for-each-ref", "name-rev", "show-ref"})
 
 
 def _unread(word: str) -> bool:
@@ -3411,7 +4014,7 @@ def _wild_match(rule: Rule, part: ShellPart) -> bool:
             args = args[2:] if args[0] in ("-C", "-c") else args[1:]
         sub = args[0] if args and not _unread(args[0]) else None
         if rule.match_type == "git-force":
-            return sub not in _GIT_UNFORCED    # a force flag means nothing to a command that only reads
+            return sub not in _GIT_UNFORCED    # a force flag discards nothing in these
         return sub in (None, "push")
     if rule.match_type == "rm-destructive":
         return program == "rm"
@@ -3471,8 +4074,9 @@ def read_parts(req: Request, rules: list[Rule], checks: list[str] | None = None,
                 part.cwd is None or not _reads_clear(at, part.written, path_denies)):
             return None    # it may read a file a deny covers, or where brindle can't tell
         # With the files it redirects to too: a deny on a name sees them.
-        texts = [replace(at, command=_joined(words)) for words in (part.words, [*part.words, *part.writes, *part.reads])]
-        matched = _matching_restriction(texts, checks, restrictions)
+        spans = [part.words, [*part.words, *part.writes, *part.reads]]
+        texts = [replace(at, command=_joined(words)) for words in spans]
+        matched = _matching_restriction(texts, checks, restrictions, spans)
         if matched is not None and matched.decision == "deny":
             return parts, matched
         for path in part.reads:

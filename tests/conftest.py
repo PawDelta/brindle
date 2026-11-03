@@ -1,7 +1,9 @@
+import contextvars
 import os
 import re
 import shutil
 import subprocess
+import threading
 from pathlib import Path
 
 import pytest
@@ -100,6 +102,28 @@ _TEST_SERVER: list[str] = []
 _TEST_COUNT = [0]
 
 
+@pytest.fixture
+def real_process_scan():
+    """Opts a test out of ``process_scan``: it runs the real ``procs.cwds``
+    (against a fake /proc or lsof of its own)."""
+
+
+@pytest.fixture(autouse=True)
+def process_scan(request, monkeypatch):
+    """``procs.cwds`` without the host's processes: just this one, in its
+    folder, plus whatever the test adds to the dict returned (pid -> folder).
+    The real scan reads every process of this user on the machine, so a
+    removal or cleanup test would depend on what else runs there (a CI
+    runner's ``systemd --user``, a developer's dev server). Tests of the scan
+    itself ask for ``real_process_scan``."""
+    from brindle import procs
+
+    added: dict[int, str] = {}
+    if "real_process_scan" not in request.fixturenames:
+        monkeypatch.setattr(procs, "cwds", lambda ignore=(): {os.getpid(): os.getcwd(), **added})
+    return added
+
+
 @pytest.fixture(autouse=True)
 def _fresh_google_token_cache():
     """The Google token-expiry cache is process-wide; a test never inherits one."""
@@ -185,6 +209,39 @@ def pytest_collection_modifyitems(config, items):
     if skipped:
         config.hook.pytest_deselected(items=skipped)
         items[:] = [item for item in items if not item.get_closest_marker("brindle_ci")]
+
+
+# A test's call phase must finish within BRINDLE_TEST_DURATION_LIMIT seconds
+# (default 10; 0 turns the guard off) unless it is marked
+# @pytest.mark.slow("why"). Slow tests are what make the suite take hours.
+_SLOW_TESTS: list[tuple[str, float]] = []
+
+
+def _duration_limit() -> float:
+    return float(os.environ.get("BRINDLE_TEST_DURATION_LIMIT", "10"))
+
+
+def _over_limit(report, limit: float) -> bool:
+    return (limit > 0 and report.when == "call" and report.passed
+            and report.duration > limit and "slow" not in report.keywords)
+
+
+def pytest_runtest_logreport(report):
+    if _over_limit(report, _duration_limit()):
+        _SLOW_TESTS.append((report.nodeid, report.duration))
+
+
+def pytest_sessionfinish(session, exitstatus):
+    if hasattr(session.config, "workerinput") or not _SLOW_TESTS:
+        return
+    limit = _duration_limit()
+    lines = [f"{nodeid}: {secs:.1f}s" for nodeid, secs in sorted(_SLOW_TESTS, key=lambda t: -t[1])]
+    session.config.get_terminal_writer().line(
+        f"\n{len(lines)} test(s) ran longer than {limit:g}s: make them faster "
+        "(fakes, DB rows, a fake clock) or mark them @pytest.mark.slow(\"why\"):\n  "
+        + "\n  ".join(lines), red=True)
+    if session.exitstatus == 0:
+        session.exitstatus = 1
 
 
 @pytest.hookimpl(hookwrapper=True)
@@ -303,12 +360,28 @@ def fake_agent_cli(tmp_path, monkeypatch):
 def machine_has_room(monkeypatch):
     """Workers and check runs start at once, however loaded the machine
     running the tests is (spawn.no_room); a test that wants it busy sets
-    spawn._load itself. No detached helper waits for room either."""
-    from brindle import spawn, tasks
+    spawn._load itself. No detached helper waits for room either, nor for
+    disk (a test that wants it full sets disk.free_bytes): a task
+    assign/handoff queued starts in-process when it replies, if there's room."""
+    from brindle import disk, spawn, tasks
 
+    def start_once(task_id: str) -> None:
+        def start() -> None:
+            db = DB()
+            t = db.get_task(task_id)
+            if t is not None:
+                tasks.start_with_room_now(db, t)
+
+        # Off the request's event loop, as the real helper process is.
+        thread = threading.Thread(target=contextvars.copy_context().run, args=(start,))
+        thread.start()
+        thread.join()
+
+    monkeypatch.setattr(disk, "free_bytes", lambda path: 1 << 50)
     monkeypatch.setattr(spawn, "_load", lambda: 0.0)
     monkeypatch.setattr(spawn, "pressure", lambda: 1)
     monkeypatch.setattr(tasks, "_wait_in_background", lambda task_id: None)
+    monkeypatch.setattr(tasks, "start_in_background", start_once)
 
 
 @pytest.fixture(autouse=True)
@@ -375,6 +448,7 @@ def provider_http(monkeypatch):
 def brindle_home(tmp_path, monkeypatch):
     home = tmp_path / "brindle-home"
     monkeypatch.setenv("BRINDLE_HOME", str(home))
+    monkeypatch.setenv("BRINDLE_CACHE_DIR", str(tmp_path / "brindle-cache"))   # not ~/Library/Caches
     # A fresh store is a new person's: the Autonomous preset, which runs what no
     # rule covers. The tests' policy is Standard (asks), so a test that wants the
     # default behaviour says so (tests/test_permission_presets.py).

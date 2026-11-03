@@ -6,17 +6,17 @@ processes that keep running: each session's `brindle mcp` server and its
 profiles, say) would then see a half-replaced tree, or a newer one than the
 code they already loaded.
 
-The MCP server never restarts for that: its client doesn't reconnect a stdio
-server that exits, so every agent would lose brindle's tools. Instead it loads
-everything it will ever read from the install when it starts (`preload`), and
-keeps serving that version consistently; a server started after the upgrade
-gets the new one. Once the new version has migrated the database, though, the
-old code's rows would miss what the new one expects, so the server refuses
-every tool and tells its client to reconnect. (Re-exec'ing on the same stdio
-isn't safe instead: other tool calls may be mid-way through a merge, the
-client won't initialize the new process again, and requests already read
-into this one's buffers would be lost.) The sidebar checks between refreshes whether the install
-changed and, if it did, execs itself again in its pane."""
+The MCP server never exits for that: its client doesn't reconnect a stdio
+server that exits, so every agent would lose brindle's tools. It loads
+everything it will ever read from the install when it starts (`preload`), so
+it serves one version consistently, and once the install changed or the
+database moved past it, it execs the new install in place on the same stdio,
+between requests (mcp_stdio.py), after `brindle mcp --check` showed that
+install works with the database. It looks at its install while idle too. When
+no reload works, the server refuses every tool once a newer version has
+migrated the database, and tells its client to reconnect. The sidebar checks between
+refreshes whether the install changed and, if it did, execs itself again in
+its pane."""
 
 from __future__ import annotations
 
@@ -26,6 +26,7 @@ import pkgutil
 import shutil
 import sys
 import time
+from collections.abc import Callable
 from contextlib import asynccontextmanager
 
 import brindle
@@ -67,6 +68,11 @@ def _stamp() -> tuple[int, ...] | None:
     return (st.st_ino, st.st_mtime_ns, st.st_size, parent.st_ino, parent.st_ctime_ns)
 
 
+def stamp() -> tuple[int, ...] | None:
+    """The install's identity now (see `_stamp`)."""
+    return _stamp()
+
+
 class InstallWatch:
     """Whether brindle's installed files changed since this was made (at the
     process's start). Once changed it stays changed: a tree that was replaced
@@ -99,34 +105,51 @@ def check_launch() -> None:
         raise StaleInstall("brindle was updated; it is restarting on the new version, try again in a moment")
 
 
-def reexec() -> None:
-    """Replace this process with a fresh run of the same brindle command, from
-    the install as it is now. Never returns.
+def exec_install(args: list[str], ready: Callable[[list[str]], bool] | None = None) -> bool:
+    """Replace this process with ``brindle <args>`` from the install as it is
+    now. False when no install could be exec'd; True only from a fake exec.
+    ``ready(argv)``: exec ``argv`` only if it says the install there works
+    (an exec can't be taken back, so a half-written install would kill this
+    process instead of leaving it serving).
 
-    An app replacement can remove the running engine's interpreter entirely.
-    Keep this pane alive until an engine is available, including when the
-    replacement is reachable through the installed CLI at a different path.
+    An app replacement can remove the running engine's interpreter entirely,
+    and the replacement may be reachable only through the installed CLI at a
+    different path.
     """
     from brindle.providers import _in_worktree, brindle_invocation
 
     sys.stdout.flush()
     sys.stderr.flush()
+    argv = [*brindle_invocation(), *args]
+    if _exec(argv, ready):
+        return True     # only a fake returns
+    # sys.executable still names the old engine after it is removed.
+    # Discover the installed launcher again on each pass; never use a
+    # worktree's venv, whose lifetime is shorter than this session's.
+    installed = shutil.which("brindle")
+    if installed and installed != argv[0] and not _in_worktree(installed):
+        return _exec([installed, *args], ready)
+    return False
+
+
+def _exec(argv: list[str], ready: Callable[[list[str]], bool] | None) -> bool:
+    if ready is not None and not ready(argv):
+        return False
+    try:
+        os.execv(argv[0], argv)
+        return True     # only a fake returns
+    except OSError:
+        return False
+
+
+def reexec() -> None:
+    """Replace this process with a fresh run of the same brindle command, from
+    the install as it is now. Never returns: it keeps this pane alive until
+    an engine is available."""
     # An upgrade deletes the old environment before the new one is in place, so
     # the exec fails until the install is complete: wait for it, don't exit.
     while True:
-        argv = [*brindle_invocation(), *sys.argv[1:]]
-        try:
-            os.execv(argv[0], argv)
+        if exec_install(sys.argv[1:]):
             return      # only a fake returns
-        except OSError:
-            # sys.executable still names the old engine after it is removed.
-            # Discover the installed launcher again on each pass; never use a
-            # worktree's venv, whose lifetime is shorter than this session's.
-            installed = shutil.which("brindle")
-            if installed and installed != argv[0] and not _in_worktree(installed):
-                try:
-                    os.execv(installed, [installed, *sys.argv[1:]])
-                    return      # only a fake returns
-                except OSError:
-                    pass
+        else:
             time.sleep(0.5)

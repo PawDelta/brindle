@@ -21,6 +21,7 @@ const open = async (page: Page, scene: string) => {
 
 test("New Session: the project search filters, and closes on an outside click and on Esc", async ({ page }) => {
   await open(page, "new");
+  await expect(page.getByRole("button", { name: "Start the demo" })).toHaveCount(0); // the offer stays hidden once decided
   const repo = page.getByRole("combobox", { name: "Repo" });
   const list = page.getByRole("listbox", { name: "Projects" });
 

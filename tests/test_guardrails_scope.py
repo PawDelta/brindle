@@ -180,21 +180,23 @@ def session(tmp_path):
 
 def test_a_pane_with_env_allow_really_starts_without_the_rest(session, tmp_path):
     tmux._tmux("set-environment", "-g", "DATABASE_URL", "postgres://secret")
-    tmux._tmux("set-environment", "-g", "NPM_TOKEN", "npm-ok")
+    tmux._tmux("set-environment", "-g", "NPM_TOKEN", "npm-secret")
+    tmux._tmux("set-environment", "-g", "NPM_REGISTRY", "npm-ok")
     tmux._tmux("set-environment", "-g", "ANTHROPIC_API_KEY", "sk-ant-ok")
     try:
         out = tmp_path / "pane.env"
         tmux.new_window(session, "w", str(tmp_path), ["/bin/sh", "-c", f'env > "{out}"'],
                         {"BRINDLE_AGENT_ID": "a1", "FROM_PROFILE": "p"},
-                        keep=secrets.provider_credentials("claude"), allow=["NPM_TOKEN"])
+                        keep=secrets.provider_credentials("claude"), allow=["NPM_TOKEN", "NPM_REGISTRY"])
         deadline = time.time() + 10
         while time.time() < deadline and not out.exists():
             time.sleep(0.05)
         time.sleep(0.2)
         got = dict(line.split("=", 1) for line in out.read_text().splitlines() if "=" in line)
         assert "DATABASE_URL" not in got
-        assert got["NPM_TOKEN"] == "npm-ok" and got["ANTHROPIC_API_KEY"] == "sk-ant-ok"
+        assert got["NPM_REGISTRY"] == "npm-ok" and got["ANTHROPIC_API_KEY"] == "sk-ant-ok"
+        assert "NPM_TOKEN" not in got, "a secret-looking name never passes, even when allowed"
         assert got["BRINDLE_AGENT_ID"] == "a1" and got["FROM_PROFILE"] == "p" and "PATH" in got
     finally:
-        for name in ("DATABASE_URL", "NPM_TOKEN", "ANTHROPIC_API_KEY"):
+        for name in ("DATABASE_URL", "NPM_TOKEN", "NPM_REGISTRY", "ANTHROPIC_API_KEY"):
             tmux._tmux("set-environment", "-g", "-r", name, check=False)

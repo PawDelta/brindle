@@ -670,7 +670,7 @@ def set_goal(db: DB, root_id: str, goal: str,
     ap = db.get_autopilot(root_id)
     from brindle.pro import analysis_brief
 
-    # A goal that becomes large work (new, or grown to 2+ milestones) gets the
+    # A goal that becomes large work (new, or grown to 3+ milestones) gets the
     # server's brief once, whichever way it was set.
     briefed = analysis_brief.large_work(milestones=len(old)) and ap is not None and ap.goal == goal.strip()
     fields: dict[str, object] = {}
@@ -702,15 +702,16 @@ def set_goal(db: DB, root_id: str, goal: str,
 
 
 def _goal_doc_rule(db: DB, root_id: str) -> str:
-    """For a goal of 2+ milestones, now reached: the rule to leave its analysis doc."""
+    """For a goal of 3+ milestones, now reached: the rule to leave its analysis doc."""
     from brindle.pro import analysis_brief
 
     try:
         root = db.get_agent(root_id)
         ws = db.get_workspace(root.workspace_id) if root else None
-        if ws is None or not analysis_brief.large_work(milestones=len(db.milestones(root_id))):
+        if ws is None or not analysis_brief.large_work(milestones=len(db.milestones(root_id)),
+                                                       branch=ws.branch):
             return ""
-        return ("This goal had 2+ milestones: before you tell the user, leave its analysis doc.\n\n"
+        return ("This goal had 3+ milestones: before you tell the user, leave its analysis doc.\n\n"
                 + analysis_brief.doc_rule(db, ws.repo_root, ws.branch))
     except Exception:  # noqa: BLE001 - extra guidance, never a reason to lose the verdict
         log.info("goal analysis doc rule not added", exc_info=True)
@@ -1072,11 +1073,6 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
                     why.append(f"fallback profile {orig_name} capped to {name} by max_weight {ceiling}")
             routed["baseline"] = cfg.default_agent
         routed["prior"] = learned and learning.used_prior(cfg, repo_root)
-    if decision is not None:
-        decision.update(profile=name, learned=learned, weight=weight,
-                        prior=bool(routed.get("prior")),
-                        baseline=routed.get("baseline", name) if learned else name,
-                        demoted_from=routed.get("demoted_from"))
     if ceiling and weight_order[profile_weight(name, cfg, repo_root)] > weight_order[ceiling]:
         permissible = [
             n for n in cfg.routing.get(ceiling, [])
@@ -1097,12 +1093,30 @@ def choose_profile(db: DB, caller_id: str, repo_root: str, requested: str | None
         else:
             raise AutopilotError(f"no permissible agent profile under max_weight {ceiling!r}")
     try:
-        load_profile(name, repo_root)
+        selected = load_profile(name, repo_root)
     except KeyError:
         raise AutopilotError(
             f"no agent profile named {name!r}; see list_agent_profiles, "
             "or pass agent_profile explicitly"
         ) from None
+    from brindle.local_setup import memory_problem
+
+    if problem := memory_problem(selected):
+        tier = weight or profile_weight(name, cfg, repo_root)
+        alternatives = list(dict.fromkeys([*cfg.routing.get(tier, []), *selected.fallback]))
+        replacement = next((n for n in alternatives if n != name and
+                            (not ceiling or weight_order[profile_weight(n, cfg, repo_root)] <= weight_order[ceiling]) and
+                            not _unavailable(n, cfg, repo_root, weight=tier)), None)
+        if replacement is None:
+            raise AutopilotError(f"{problem}; no available fallback for {name}")
+        if why is not None:
+            why.append(f"{problem}; using {replacement} instead of {name}")
+        name, learned = replacement, False
+    if decision is not None:
+        decision.update(profile=name, learned=learned, weight=weight,
+                        prior=bool(routed.get("prior")),
+                        baseline=routed.get("baseline", name) if learned else name,
+                        demoted_from=routed.get("demoted_from"))
     if why is not None:
         info_str = model_cost_info(name, cfg, repo_root)
         if info_str and not any("cost tier" in w for w in why):
@@ -1356,7 +1370,7 @@ def check_milestones(db: DB, root_id: str, ws: Workspace, position: int | None =
             found = repos.resolve_attached(db, root_id, alias)
             if found is None:
                 return f"repo {alias!r} isn't attached to this session (`brindle repo ls`)"
-            other = repos.target_workspace(db, found.repo_root)
+            other = repos.target_workspace(db, root_id, found.repo_root)
             sites[alias] = (other, load_repo_config(other.repo_root), commit_of(other))
         return sites[alias]
 

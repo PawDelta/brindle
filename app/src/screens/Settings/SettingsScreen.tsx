@@ -61,6 +61,8 @@
    (src-tauri/src/updates.rs). Beside it, staff can install the release
    branch's latest build, before it ships, and restart into it
    (ReleaseBuildUpdate), and go back to stable (Return to stable).
+   Storage (Storage.tsx): brindle's disk use by category and the abandoned
+   worktrees, each with Clean, and Clean all, asked before anything goes.
    Last, About: the app's version and its license files (About.tsx). */
 
 import { useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
@@ -78,6 +80,7 @@ import { ProviderSignIn } from "../../components/ProviderSignIn";
 import { ThemeToggle } from "../../components/ThemeToggle";
 import { About } from "./About";
 import { DocSwitches } from "./DocSwitches";
+import { Storage } from "./Storage";
 import { TeamDestination } from "./TeamDestination";
 import { OrgApprovals } from "./OrgApprovals";
 import { Permissions } from "./Permissions";
@@ -127,8 +130,8 @@ export interface SettingsScreenProps {
   /* About's updates for a build that updates by itself: last checked, Check
      now, Restart to update (the shell's, api/tauri.ts AppUpdates). */
   appUpdates?: AppUpdates;
-  /* The section to scroll to on opening: "providers" from the sidebar's problem line, "permissions" from the Inbox. */
-  section?: "providers" | "permissions";
+  /* The section to scroll to on opening: "providers" from the sidebar's problem line, "permissions" or "storage" from the Inbox. */
+  section?: "providers" | "permissions" | "storage";
   /* A new value asks to scroll to `section` again, the page already open. */
   ask?: number;
   /* A permission rule to open in its editor (the Inbox's "Open the deny rule"). */
@@ -146,6 +149,7 @@ const SECTIONS = [
   { id: "permissions", label: "Permissions" },
   { id: "providers", label: "Providers" },
   { id: "engine", label: "Engine & health" },
+  { id: "storage", label: "Storage" },
   { id: "about", label: "About" },
 ];
 
@@ -1600,6 +1604,8 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
           </div>
         )}
       </Section>
+
+      <Storage client={client} />
 
       <DocSwitches client={client} />
 

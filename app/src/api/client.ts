@@ -434,12 +434,18 @@ export interface MapNode {
   kind: "doc" | "path";
   title?: string;
   doc_id?: string;
+  /* Indexed on this device: open the file instead of the hosted doc reader. */
+  local_path?: string;
+  updated_at?: number;
+  topics?: string[];
   path?: string;
   paths?: string[];
   source?: DocSource;
   created_by?: string;
   scope?: DocScope;
   created_at?: number;
+  /* A doc's category (see AnalysisDoc.category). */
+  category?: string;
 }
 
 export interface MapEdge {
@@ -468,6 +474,7 @@ interface WireListedDoc {
   findings?: string[];
   open_questions?: string[];
   topics?: string[];
+  category?: string;
   mentions?: WireMentions;
   related?: string[];
   supersedes?: string[];
@@ -492,6 +499,10 @@ export interface AnalysisDoc {
   scope?: DocScope;
   summary?: string;
   topics?: string[];
+  /* A short label ("Security", "Desktop updates") the server's reader model
+     picks when the doc is created and reuses across the scope; absent when
+     the server gave none. */
+  category?: string;
   version?: number;
   created_at?: number;
   used_in_briefs?: number;
@@ -520,13 +531,19 @@ export interface DocTopic {
 
 const sameScope = (a: DocScope, b: DocScope) => a.kind === b.kind && a.id === b.id;
 
-export function listedDoc({ doc_id, mentions: _, ...rest }: WireListedDoc): AnalysisDoc {
-  return { ...rest, id: doc_id };
+/* A blank or non-text category is no category. */
+export function categoryOf(raw: unknown): { category?: string } {
+  return typeof raw === "string" && raw.trim() ? { category: raw.trim() } : {};
 }
 
-export function docDetail({ mentions, scopes, files, ...rest }: WireDoc): AnalysisDocDetail {
+export function listedDoc({ doc_id, mentions: _, category, ...rest }: WireListedDoc): AnalysisDoc {
+  return { ...rest, id: doc_id, ...categoryOf(category) };
+}
+
+export function docDetail({ mentions, scopes, files, category, ...rest }: WireDoc): AnalysisDocDetail {
   return {
     ...rest,
+    ...categoryOf(category),
     files: files ?? [],
     mentions: [...(mentions?.files ?? []), ...(mentions?.symbols ?? []), ...(mentions?.services ?? [])],
     shared_with: (scopes ?? []).filter((s) => !rest.scope || !sameScope(s, rest.scope)),
@@ -939,6 +956,9 @@ export interface Note {
 /* A started session, or (choice "o") the running one to open instead. */
 export type StartResult = (SessionDTO & { notes: Note[] }) | { opened: SessionDTO };
 
+/* POST /demo (routes_actions.start_demo): the session started in `brindle demo`'s practice repo, and that repo's root. */
+export type DemoResult = SessionDTO & { repo: string; notes: Note[] };
+
 export interface ContinueResult {
   state: "recovered" | "running" | "resumed";
   restarted: number;
@@ -1038,6 +1058,52 @@ export interface Transferred {
   commits: number;
 }
 
+/* GET /storage (disk.storage_report): brindle's disk use. A worktree is
+   Tree.to_json: `removable` false with `reason` (uncommitted changes, a live
+   session, not brindle's, still in use) when Clean would keep it. */
+export type StorageState = "merged" | "abandoned" | "active";
+
+export interface StorageWorktree {
+  path: string;
+  repo_root: string;
+  branch: string;
+  sha: string;
+  state: StorageState;
+  /* Epoch seconds: its last commit, checkout or creation. */
+  last_activity: number;
+  dirty: boolean;
+  live: boolean;
+  owned: boolean;
+  size: number;
+  build_size: number;
+  workspace_id: string | null;
+  removable: boolean;
+  reason: string | null;
+}
+
+export interface StorageCategory {
+  name: string;
+  size: number;
+  detail: string;
+}
+
+export interface StorageReport {
+  worktrees: StorageWorktree[];
+  categories: StorageCategory[];
+  /* Bytes Clean and retention could give back. */
+  reclaimable: number;
+  free_bytes: number | null;
+  low_disk: string | null;
+  dead_branches: { repo_root: string; name: string; sha: string; last_commit: number; merged: boolean }[];
+}
+
+/* POST /storage/clean (disk.clean): what went, and what was kept and why
+   (the engine refuses a dirty or live worktree). */
+export interface StorageCleaned {
+  removed: { path: string; repo_root: string; branch: string; state: StorageState; size: number; archived: string | null; branch_kept: string | null }[];
+  kept: { path: string; reason: string }[];
+}
+
 export interface DaemonConfig {
   /* Where the daemon listens, e.g. http://127.0.0.1:47321 (routes live under /v1). */
   baseUrl: string;
@@ -1057,6 +1123,8 @@ export class DaemonError extends Error {
   readonly preflight?: PreflightDTO;
   /* Set on a 409 "not_ready": what keeps the session from a PR (session_review.NotReady). */
   readonly reasons?: string[];
+  /* Set on a 409 "preflight" of POST /demo: the practice repo kept for that launch. */
+  repo?: string;
 
   constructor(code: string, message: string, status: number, conflict?: SessionConflict, preflight?: PreflightDTO, reasons?: string[]) {
     super(message);
@@ -1111,6 +1179,19 @@ export class DaemonClient {
      repo: ask, then call again with `choice` and `session_id`. */
   startSession(body: StartSession) {
     return this.post<StartResult>("/sessions", body);
+  }
+
+  /* `brindle demo` from the app: a practice repo of brindle's own (never one of the person's)
+     and a session started there, on the CLI this Mac is signed in to. Throws a DaemonError with
+     `preflight` set as startSession does, and `repo` the practice repo kept for it (the next
+     start launches there), and code "airgap" in air-gap mode. */
+  startDemo() {
+    return this.post<DemoResult>("/demo", {});
+  }
+
+  /* DELETE /demo: the practice repo a held demo kept goes (the person didn't go on with it). */
+  cancelDemo() {
+    return this.delete<{ removed: string[] }>("/demo", {});
   }
 
   /* Resume a paused session (or recover its chat if it has stopped). */
@@ -1378,8 +1459,9 @@ export class DaemonClient {
     return this.get<{ scopes: DocScope[] }>("/analysis-docs/scopes", { repo });
   }
 
-  knowledgeMap(repo: string, scope: DocScope, paths: string[] = []) {
-    return this.get<KnowledgeMap>("/analysis-docs/map", { repo, scope_kind: scope.kind, scope_id: scope.id, paths: JSON.stringify(paths), depth: 1 });
+  async knowledgeMap(repo: string, scope: DocScope, paths: string[] = []): Promise<KnowledgeMap> {
+    const got = await this.get<KnowledgeMap>("/analysis-docs/map", { repo, scope_kind: scope.kind, scope_id: scope.id, paths: JSON.stringify(paths), depth: 1 });
+    return { ...got, nodes: got.nodes.map(({ category, ...node }) => ({ ...node, ...categoryOf(category) })) };
   }
 
   async doc(id: string, repo?: string): Promise<AnalysisDocDetail> {
@@ -1421,6 +1503,19 @@ export class DaemonClient {
   /* Sets one of the person's own switches; the daemon refuses (403) one the org has locked. */
   async setDocSwitch(name: DocSwitchName, on: boolean) {
     return (await this.put<{ switches: DocSwitch[] }>("/analysis-docs/switches", { name, on })).switches;
+  }
+
+  /* brindle's disk use (slow: the daemon measures every worktree). */
+  storage(repo?: string) {
+    return this.get<StorageReport>("/storage", { repo });
+  }
+
+  /* Removes one worktree (merged or abandoned; the engine checks it again),
+     its branch tip archived first. The app asks the person before calling
+     this, and sends one call per confirmed path: never the route's
+     `abandoned`, which removes whatever the engine lists at that moment. */
+  cleanStorage(target: { path: string }) {
+    return this.post<StorageCleaned>("/storage/clean", target);
   }
 
   /* The public client ids for the in-app Google / Microsoft sign-in; null hides that button. */
@@ -1840,12 +1935,14 @@ export class DaemonClient {
     }
     const body: unknown = await response.json().catch(() => undefined);
     if (!response.ok) {
-      const got = body as { error?: { code?: string; message?: string }; conflict?: SessionConflict; preflight?: PreflightDTO | PreflightItemDTO[]; reasons?: string[] } | undefined;
+      const got = body as { error?: { code?: string; message?: string }; conflict?: SessionConflict; preflight?: PreflightDTO | PreflightItemDTO[]; reasons?: string[]; repo?: string } | undefined;
       if (got?.conflict) throw new DaemonError("conflict", got.conflict.message, response.status, got.conflict);
       const err = got?.error;
       if (got?.preflight) {
         const preflight = preflightResult(got.preflight);
-        throw new DaemonError("preflight", err?.message ?? `${preflight.provider} needs setting up first`, response.status, undefined, preflight);
+        const held = new DaemonError("preflight", err?.message ?? `${preflight.provider} needs setting up first`, response.status, undefined, preflight);
+        if (typeof got.repo === "string") held.repo = got.repo;
+        throw held;
       }
       throw new DaemonError(err?.code ?? "http", err?.message ?? response.statusText, response.status, undefined, undefined, Array.isArray(got?.reasons) ? got.reasons : undefined);
     }

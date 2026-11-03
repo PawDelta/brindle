@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from brindle import agents, cli, git, workspaces
+from brindle import agents, cli, git, procs, tmux, workspaces
 from brindle.db import Agent
 from conftest import sh
 
@@ -55,21 +55,67 @@ def staged_deletion_in_a_gutted_tree(path):
 def test_a_damaged_worktree_with_work_in_it_is_never_wiped(db, repo, damage, error):
     path = Path(workspaces.create(db, str(repo), "feat/damaged", reuse_registered=True).workspace.path)
     kept = damage(path)
-    with pytest.raises(workspaces.WorkspaceError, match=error):
+    with pytest.raises(workspaces.WorkspaceError, match=error) as refused:
         workspaces.create(db, str(repo), "feat/damaged", reuse_registered=True)
+    assert "force" not in str(refused.value)
     for name in kept:
         assert (path / name).exists()
     if damage is staged_deletion_in_a_gutted_tree:
         assert "D  extra.py" in git.out(["status", "--porcelain"], str(path))
 
 
-def test_damaged_worktree_missing_git_empty_recreated(db, repo):
-    ws = workspaces.create(db, str(repo), "feat/empty-broken", reuse_registered=True).workspace
-    gut(Path(ws.path))
-    reused = workspaces.create(db, str(repo), "feat/empty-broken", reuse_registered=True)
+def broken_git_link(path):
+    gut(path)
+    (path / ".git").write_text("gitdir: /nowhere\n")
+
+
+@pytest.fixture
+def ended(monkeypatch):
+    """Sessions the reuse ended (tmux faked)."""
+    killed = []
+    monkeypatch.setattr(workspaces, "_rescue_sidebar", lambda db, ws: None)
+    monkeypatch.setattr(tmux, "kill_session", killed.append)
+    return killed
+
+
+@pytest.mark.parametrize("damage", [gut, broken_git_link, shutil.rmtree])
+def test_a_wiped_worktree_is_repaired_in_the_same_folder(db, repo, ended, damage):
+    """Panes and the tmux server may sit in a wiped worktree: it is filled
+    again in place (same inode, session kept); only a folder that is gone
+    is added afresh."""
+    ws = workspaces.create(db, str(repo), "feat/wiped", reuse_registered=True).workspace
+    inode = Path(ws.path).stat().st_ino
+    damage(Path(ws.path))
+    reused = workspaces.create(db, str(repo), "feat/wiped", reuse_registered=True)
     assert reused.workspace.id == ws.id
-    assert (Path(reused.workspace.path) / ".git").exists()
-    assert (Path(reused.workspace.path) / "app.py").exists()
+    assert (Path(ws.path) / ".git").exists() and (Path(ws.path) / "app.py").exists()
+    if damage is not shutil.rmtree:
+        assert Path(ws.path).stat().st_ino == inode and ended == []
+    else:
+        assert ended == [ws.tmux_session]   # a folder added afresh ends the session that sat in the old one
+
+
+def test_a_wiped_worktree_something_lives_in_is_never_replaced(db, repo, ended, monkeypatch):
+    """When it can't be repaired in place the folder would be replaced:
+    refused while a process (fake table) sits in it."""
+    ws = workspaces.create(db, str(repo), "feat/held", reuse_registered=True).workspace
+    gut(Path(ws.path))
+    real_add = git.add_worktree
+
+    def add(root, path, branch, start):
+        if Path(path).exists():
+            raise git.GitError(f"'{path}' already exists")
+        return real_add(root, path, branch, start)
+
+    monkeypatch.setattr(git, "add_worktree", add)
+    monkeypatch.setattr(procs, "table", lambda: {})
+    monkeypatch.setattr(procs, "cwds", lambda *_: {4242: str(Path(ws.path).resolve())})
+    monkeypatch.setattr(tmux, "session_panes", lambda name: [])
+    monkeypatch.setattr(tmux, "list_sessions", lambda: [])
+    with pytest.raises(workspaces.WorkspaceError, match="in use") as refused:
+        workspaces.create(db, str(repo), "feat/held", reuse_registered=True)
+    assert "force" not in str(refused.value)
+    assert Path(ws.path).is_dir() and ended == []
 
 
 def test_remove_workspace_refuses_to_forget_when_directory_remains(db, repo, monkeypatch):
