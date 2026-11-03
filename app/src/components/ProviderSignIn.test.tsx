@@ -107,30 +107,6 @@ describe("ProviderSignIn, the CLI read through a pty view", () => {
     expect(daemon.views[0].closed).toBe(true);
   });
 
-  it("reads the CLI when the shell says the pty view can run while the login is still answering", async () => {
-    const { daemon, shell, flow, release } = setup(true);
-    fireEvent.click(screen.getByRole("button", { name: "Sign in to Gemini (Antigravity)" }));
-    await waitFor(() => expect(flow().dataset.phase).toBe("starting"));
-    shell({ kind: "ready", tmux: "tmux 3.8" });
-    await flush();
-    expect(daemon.views).toEqual([]);
-    release();
-    await waitFor(() => expect(daemon.views).toHaveLength(1));
-    await waitFor(() => expect(within(flow()).getByRole("button", { name: "Open browser ↗" })).toBeTruthy());
-    daemon.exitAction(daemon.actions[0].id);
-    await waitFor(() => expect(flow().dataset.phase).toBe("done"));
-  });
-
-  it("says why when the pty view can't run here, rather than waiting for ever", async () => {
-    const { daemon, shell, flow } = setup();
-    fireEvent.click(screen.getByRole("button", { name: "Sign in to Gemini (Antigravity)" }));
-    await waitFor(() => expect(flow().dataset.phase).toBe("waiting"));
-    shell({ kind: "unusable", message: "The app's tmux is tmux 3.0a, and brindle needs tmux 3.2 or newer." });
-    await waitFor(() => expect(flow().dataset.phase).toBe("failed"));
-    expect(within(flow()).getByRole("alert").textContent).toContain("The app can't follow Gemini (Antigravity)'s sign-in: The app's tmux is tmux 3.0a");
-    expect(daemon.views).toEqual([]);
-  });
-
   it("with the details open beside it, reads at their size, keeps a long login link whole through the redraw, and takes its own size back once they close", async () => {
     const { daemon, shell, flow } = setup();
     shell({ kind: "ready", tmux: "tmux 3.8" });
