@@ -147,6 +147,10 @@ def test_a_new_store_is_autonomous_and_an_old_one_migrates_to_standard_keeping_i
     (lambda ws: bash(ws, "git rm -f $(cat stale.txt)"), "deny", "d-git-force"),
     (lambda ws: bash(ws, "git worktree add -f ../wt topic"), "allow", None),       # a forced add discards nothing
     (lambda ws: bash(ws, "git add -f build/out.txt"), "allow", None),
+    (lambda ws: bash(ws, 'git commit -m "Add --force option"'), "allow", None),     # a message, not an option
+    (lambda ws: bash(ws, "git config -f .gitmodules submodule.x.url u"), "allow", None),   # -f is --file
+    (lambda ws: bash(ws, "git rebase -f main"), "allow", None),
+    (lambda ws: bash(ws, "git gc --force"), "allow", None),
     (lambda ws: bash(ws, "rm -rf / --no-preserve-root"), "deny", "d-rm"),
     (lambda ws: bash(ws, "rm -fr /"), "deny", "d-rm"),
     (lambda ws: bash(ws, "rm -Rf ~/"), "deny", "d-rm"),

@@ -1133,7 +1133,7 @@ def _part_decision(req: Request, words: list[str], checks: list[str] | None,
     mistake argument text for shell syntax."""
     from brindle.native.permissions import _joined
 
-    denied = _matching_restriction([replace(req, command=_joined(words))], checks, rules)
+    denied = _matching_restriction([replace(req, command=_joined(words))], checks, rules, [words])
     if denied is not None:
         return denied
     if all(SIMPLE_COMMAND.fullmatch(word) and " " not in word for word in words):
@@ -1884,11 +1884,31 @@ def forced_push(command: str) -> bool:
     return any(p.force or p.delete for p in push_calls(command))
 
 
-# git commands a force flag can't make discard work: those that only read, and
-# git add -f, which only adds an ignored file. Any other forced command may
-# (switch -f, rm -f, mv -f, tag -f ...), so the list names the safe ones.
+# git commands a force flag can't make discard work: those that only read,
+# add -f (adds an ignored file), config -f (names the file), rebase -f
+# (rebases anyway) and gc --force. Any other forced command may (switch -f,
+# rm -f, mv -f, tag -f ...), so the list names the safe ones.
 _GIT_UNFORCED = frozenset({*READONLY_GIT, "rev-parse", "merge-base", "rev-list", "ls-files", "ls-tree", "cat-file",
-                           "describe", "shortlog", "blame", "grep", "for-each-ref", "name-rev", "show-ref", "add"})
+                           "describe", "shortlog", "blame", "grep", "for-each-ref", "name-rev", "show-ref", "add",
+                           "config", "rebase", "gc"})
+# The git commands whose -m/-F (--message/--file) take a message or its file: their value is never an option.
+_GIT_MESSAGES = frozenset({"commit", "tag", "merge", "notes", "stash"})
+
+
+def _git_options(sub: str, args: list[str]) -> list[str]:
+    """``args`` without the values of a message option (``-m "drop -f"``)."""
+    if sub not in _GIT_MESSAGES:
+        return args
+    out, skip = [], False
+    for arg in args:
+        if skip:
+            skip = False
+        elif arg == "--":
+            break
+        else:
+            out.append(arg)
+            skip = arg in ("--message", "--file") or bool(re.fullmatch(r"-[A-Za-z]*[mF]", arg))
+    return out
 
 
 def destructive_git(command: str) -> bool:
@@ -1904,7 +1924,7 @@ def destructive_git(command: str) -> bool:
             return True
         if sub in _GIT_UNFORCED or sub == "worktree" and (not args or args[0] != "remove"):
             continue
-        if any(_is_force(a) for a in args):
+        if any(_is_force(a) for a in _git_options(sub, args)):
             return True
     return forced_push(command)
 
@@ -2057,10 +2077,11 @@ def _rule_decision(req: Request, rules: list[Rule], checks: list[str] | None) ->
 
 
 # A secret's name has a _-separated part that is, or ends in, one of these
-# words (GH_TOKEN, OPENAI_APIKEY, NPM_AUTHTOKEN), or is PAT; a word that only
-# starts a part (TOKENIZERS, AUTHOR) doesn't count.
-_SECRET_NAME = re.compile(r"(?:^|_)(?:[A-Z0-9]*(?:TOKEN|SECRET|KEY|PASSWORD|PASSWD|AUTH|CREDENTIAL|PRIVATE)S?|PATS?)"
-                          r"(?=_|$)", re.I)
+# words (GH_TOKEN, OPENAI_APIKEY, NPM_AUTHTOKEN), or is PAT or PASS, or a PWD
+# after another part (MYSQL_PWD, not PWD), each maybe numbered (GH_TOKEN2); a
+# word that only starts a part (TOKENIZERS, AUTHOR) doesn't count.
+_SECRET_NAME = re.compile(r"(?:(?:^|_)(?:[A-Z0-9]*(?:TOKEN|SECRET|KEY|PASSWORD|PASSWD|AUTH|CREDENTIAL|PRIVATE)S?"
+                          r"|PATS?|PASS)|_PWD)\d*(?=_|$)", re.I)
 _NOT_SECRET = frozenset({"SSH_AUTH_SOCK"})    # a socket path
 
 
@@ -2075,7 +2096,8 @@ def _credential_file(req: Request, part: ShellPart, name: str) -> bool:
     home = os.path.expanduser("~")
     if fnmatch.fnmatch(path, "/proc/*/environ") or part.cwd is None and name == "environ":
         return True
-    if path == f"{home}/.netrc" or path.startswith(f"{home}/.config/") or path == f"{home}/.config":
+    if (path in (f"{home}/.netrc", f"{home}/.npmrc", f"{home}/.git-credentials", f"{home}/.docker/config.json")
+            or path.startswith(f"{home}/.config/") or path == f"{home}/.config"):
         return True
     if path.startswith(f"{home}/.aws/") and fnmatch.fnmatch("credentials", os.path.basename(path)):
         return True
@@ -2646,12 +2668,21 @@ def _globs_excluded(req: Request, parts: list[list[str]], rules: list[Rule],
     return True
 
 
+# Matchers that must tell a word from its neighbours (an option from a message
+# that mentions one), so they see the words quoted as written, not re-joined.
+_WORD_MATCHERS = ("git-force",)
+
+
 def _matching_restriction(parts: list[Request], checks: list[str] | None,
-                          rules: list[Rule]) -> Decision | None:
+                          rules: list[Rule], words: list[list[str]] | None = None) -> Decision | None:
+    """The first deny (else ask) in ``rules`` a part matches; with ``words``
+    (each part's words), a _WORD_MATCHERS rule matches them shell-quoted."""
+    quoted = [replace(part, command=shlex.join(w)) for part, w in zip(parts, words)] if words else parts
     for wanted in ("deny", "ask"):
-        for part in parts:
+        for part, exact in zip(parts, quoted):
             for rule in rules:
-                if rule.decision == wanted and rule_matches(rule, part, checks):
+                if rule.decision == wanted and rule_matches(
+                        rule, exact if rule.match_type in _WORD_MATCHERS else part, checks):
                     return Decision(wanted, f"{VERBS[wanted]} by {rule.source} rule {rule.id} ({rule.describe()})",
                                     rule)
     return None
@@ -2710,7 +2741,7 @@ def _restriction_in_parts(req: Request, *, checks: list[str] | None,
                 if parsed is None else None)
     words = parsed if parsed is not None else patterns if patterns is not None else _segments(req.command)
     parts = [replace(req, command=" ".join(" ".join(part).split())) for part in words]
-    matched = _matching_restriction(parts, checks, rules)
+    matched = _matching_restriction(parts, checks, rules, words)
     if matched is not None:
         return matched
     if patterns is not None:
@@ -3923,8 +3954,9 @@ def read_parts(req: Request, rules: list[Rule], checks: list[str] | None = None,
                 part.cwd is None or not _reads_clear(at, part.written, path_denies)):
             return None    # it may read a file a deny covers, or where brindle can't tell
         # With the files it redirects to too: a deny on a name sees them.
-        texts = [replace(at, command=_joined(words)) for words in (part.words, [*part.words, *part.writes, *part.reads])]
-        matched = _matching_restriction(texts, checks, restrictions)
+        spans = [part.words, [*part.words, *part.writes, *part.reads]]
+        texts = [replace(at, command=_joined(words)) for words in spans]
+        matched = _matching_restriction(texts, checks, restrictions, spans)
         if matched is not None and matched.decision == "deny":
             return parts, matched
         for path in part.reads:
