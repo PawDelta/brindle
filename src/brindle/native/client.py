@@ -167,7 +167,7 @@ class Client:
         self._sleep = sleep
         self.on_text = on_text
         self.fallback = fallback  # finds a local model to ask when the endpoint's model refuses
-        self._ollama_hosts: dict[str, bool] = {}
+        self._ollama_hosts: dict[str, bool] = {}   # only what discovery confirmed
 
     # -- the one public call ------------------------------------------------
 
@@ -195,13 +195,23 @@ class Client:
                     self._release_local()
         return reply
 
-    def _local_ollama(self) -> bool:
+    def _ollama_kind(self) -> bool | None:
+        """Whether the endpoint is a local Ollama server (see
+        ``runner.ollama_kind``). A failed discovery (None) isn't kept, so it
+        neither sticks as "not Ollama" nor skips a later check."""
+        from brindle.local_setup import TAGS_TIMEOUT
         from brindle.native import runner, serve
 
         base = self.endpoint.base_url
         if base not in self._ollama_hosts:
-            self._ollama_hosts[base] = serve.is_local(base) and runner.is_ollama(self.endpoint)
+            kind = serve.is_local(base) and runner.ollama_kind(self.endpoint, TAGS_TIMEOUT)
+            if kind is None:
+                return None
+            self._ollama_hosts[base] = kind
         return self._ollama_hosts[base]
+
+    def _local_ollama(self) -> bool:
+        return self._ollama_kind() is True
 
     def _release_local(self) -> None:
         # Ollama's OpenAI compatibility API can ignore keep_alive. A native
@@ -226,11 +236,17 @@ class Client:
         on_text = on_text or self.on_text
         anthropic = self.endpoint.api == "anthropic"
         payload = (self._anthropic_request if anthropic else self._openai_request)(system, messages, tools)
-        if self._local_ollama():
+        kind = self._ollama_kind()
+        if kind is None:   # not known to be Ollama or not: no memory check, so no load
+            raise ClientError(f"couldn't reach {self.endpoint.base_url} to tell whether it is "
+                              "Ollama, so its free memory can't be checked; not sending the request")
+        if kind:
             from brindle.local_setup import endpoint_memory_problem
 
             # Admission at launch isn't enough: each request reloads the model.
-            if problem := endpoint_memory_problem(self.endpoint.base_url, self.endpoint.model):
+            # An Ollama server this client already identified stays Ollama.
+            if problem := endpoint_memory_problem(self.endpoint.base_url, self.endpoint.model,
+                                                  ollama=kind):
                 raise LocalMemoryError(f"{problem}; not loading it. Requeue this task on a cloud profile")
             payload["keep_alive"] = "0"
         parse = self._parse_anthropic if anthropic else self._parse_openai

@@ -149,7 +149,16 @@ def refusal_fallback(endpoint: Endpoint, repo_root: str | None = None) -> Endpoi
 def is_ollama(endpoint: Endpoint, timeout: float = 3.0) -> bool:
     """Whether the endpoint is an Ollama server: its host answers
     ``GET /api/version``, or the URL uses Ollama's default port."""
+    return ollama_kind(endpoint, timeout) is True
+
+
+def ollama_kind(endpoint: Endpoint, timeout: float) -> bool | None:
+    """True for an Ollama server (Ollama's default port, or ``GET
+    /api/version`` answers with a version), False for a server that answered
+    as something else (a 4xx, or a reply without a version), None when
+    discovery failed (no answer, a 5xx), so nothing is known."""
     import json
+    import urllib.error
     import urllib.request
 
     host = _host(endpoint)
@@ -157,9 +166,14 @@ def is_ollama(endpoint: Endpoint, timeout: float = 3.0) -> bool:
         return True
     try:
         with urllib.request.urlopen(host + "/api/version", timeout=timeout) as resp:
-            return "version" in json.loads(resp.read().decode("utf-8", "replace"))
-    except (OSError, ValueError, TypeError):
-        return False
+            body = json.loads(resp.read().decode("utf-8", "replace"))
+    except urllib.error.HTTPError as e:
+        return False if 400 <= e.code < 500 else None
+    except ValueError:
+        return False   # it answered, but not with Ollama's JSON
+    except (OSError, TypeError):
+        return None
+    return isinstance(body, dict) and "version" in body
 
 
 def _host(endpoint: Endpoint) -> str:

@@ -108,17 +108,23 @@ def memory_problem(profile) -> str | None:
     return endpoint_memory_problem(profile.base_url or "", profile.model or "")
 
 
-def endpoint_memory_problem(base_url: str, model: str) -> str | None:
+def endpoint_memory_problem(base_url: str, model: str, ollama: bool | None = None) -> str | None:
     """Why a local Ollama server can't load ``model`` now: free RAM below the
     model's size plus the margin. None for remote endpoints and for local
-    servers that aren't Ollama (llama.cpp, LM Studio), whose model size
-    brindle can't discover."""
+    servers confirmed not to be Ollama (llama.cpp, LM Studio), whose model
+    size brindle can't discover. ``ollama``: what the caller already knows
+    about the server (True: Ollama); otherwise it is discovered here, and a
+    discovery that fails is a problem, not a pass."""
     if not serve.is_local(base_url):
         return None
-    from brindle.native import client, runner
+    if ollama is None:
+        from brindle.native import client, runner
 
-    if not runner.is_ollama(client.Endpoint(base_url, model)):
+        ollama = runner.ollama_kind(client.Endpoint(base_url, model), TAGS_TIMEOUT)
+    if ollama is False:
         return None
+    if ollama is None:
+        return f"cannot tell whether {base_url} is Ollama, so cannot verify free memory for {model}"
     host = base_url.rstrip("/").removesuffix("/v1")
     try:
         free = free_memory_gb()

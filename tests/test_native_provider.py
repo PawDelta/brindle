@@ -17,7 +17,7 @@ from test_native_loop import FakeEndpoint, anthropic_reply, openai_reply
 
 @pytest.fixture
 def fake(monkeypatch):
-    monkeypatch.setattr("brindle.native.runner.is_ollama", lambda endpoint, *a: False)
+    monkeypatch.setattr("brindle.native.runner.ollama_kind", lambda endpoint, *a: False)
     ep = FakeEndpoint()
     yield ep
     ep.close()
