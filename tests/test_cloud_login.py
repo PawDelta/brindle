@@ -170,6 +170,13 @@ def test_signed_out_never_prompts(provider, stderr, tmp_path):
     assert how == "no lapse"
 
 
+def test_agent_routing_env_is_cleared_for_every_test():
+    # The suite may run under an agent's inherited env (BRINDLE_CLOUD_ROUTE="");
+    # the autouse ambient_brindle_env fixture clears it before the test body.
+    assert [k for k in ("BRINDLE_CLOUD_ROUTE", "BRINDLE_CLAUDE_BIN", "BRINDLE_PRO_TOKEN")
+            if k in os.environ] == []
+
+
 def test_custom_adc_lapse_does_not_open_a_different_login(tmp_path, monkeypatch):
     monkeypatch.setenv("BRINDLE_HOME", str(tmp_path / "home"))
     env = {"CLAUDE_CODE_USE_VERTEX": "1", "GOOGLE_APPLICATION_CREDENTIALS": str(tmp_path / "adc.json")}
