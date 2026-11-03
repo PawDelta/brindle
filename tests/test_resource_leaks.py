@@ -4,6 +4,7 @@ import subprocess
 import sys
 import textwrap
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -20,22 +21,31 @@ def gone(pid):
     return out.strip().startswith("Z")
 
 
-def test_an_app_server_that_never_answers_is_gone_with_its_children(tmp_path):
+def test_an_app_server_that_never_answers_is_gone_with_its_children(tmp_path, monkeypatch):
     """The hook trust step gave up on a silent ``codex app-server`` but killed
     only the process it started, leaving whatever that spawned running."""
     pidfile = tmp_path / "child.pid"
     fake = tmp_path / "codex"
     fake.write_text(textwrap.dedent(f"""\
         #!{sys.executable}
-        import subprocess, sys, threading
+        import os, subprocess, sys, threading
         wait = "import threading; threading.Event().wait()"
         child = subprocess.Popen([sys.executable, "-c", wait])
-        open({str(pidfile)!r}, "w").write(str(child.pid))
+        with open({str(pidfile) + ".tmp"!r}, "w") as f:
+            f.write(str(child.pid))
+        os.replace({str(pidfile) + ".tmp"!r}, {str(pidfile)!r})   # published whole, at once
+        print("starting up", flush=True)   # not an answer
         threading.Event().wait()
     """))
     fake.chmod(0o755)
+    # Its wait for an answer runs out once the child's pid is published (the
+    # line printed after it wakes the wait), not after the real seconds: the
+    # file only ever exists complete, so the pid read below is whole. Should it
+    # already be there when the wait starts, the wait just runs its seconds.
+    monkeypatch.setattr(codex_hook, "time",
+                        SimpleNamespace(monotonic=lambda: 1e9 if pidfile.exists() else 0.0))
 
-    with pytest.raises(codex_hook.CodexHookError):
+    with pytest.raises(codex_hook.CodexHookError, match="didn't answer"):
         codex_hook._AppServer(str(fake), [], 3.0)
 
     child = int(pidfile.read_text())

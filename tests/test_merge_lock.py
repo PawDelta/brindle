@@ -1,20 +1,18 @@
 """Merges into one checkout are serialized by a file lock, and a transient
 index-lock failure is retried instead of being reported."""
 
-import os
 import subprocess
 import threading
 
 import pytest
 
-from brindle import git, workspaces
+from conftest import sh
+from brindle import git, spawn, workspaces
+from test_merge_order import _repo_template, repo, worktree  # noqa: F401 - fixture
 
 
 def _feature(db, repo, name="feature", fname="new.py"):
-    ws = workspaces.create(db, str(repo), name).workspace
-    open(os.path.join(ws.path, fname), "w").write("x = 1\n")
-    git.commit_all(ws.path, "work")
-    return ws
+    return worktree(db, repo, name, files={fname: "x = 1\n"})
 
 
 def test_checkout_lock_gives_up_on_a_hung_holder(repo):
@@ -41,8 +39,7 @@ def test_checkout_lock_gives_up_on_a_hung_holder(repo):
 
 def test_merge_refuses_a_target_with_uncommitted_changes(db, repo, monkeypatch):
     (repo / "README.md").write_text("base\n")
-    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
-    subprocess.run(["git", "commit", "-qm", "readme"], cwd=repo, check=True)
+    sh("git add -A && git commit -qm readme", repo)
     ws = _feature(db, repo)
     (repo / "README.md").write_text("supervisor edit\n")
     # tracked uncommitted change blocks the merge outright, untouched
@@ -51,10 +48,27 @@ def test_merge_refuses_a_target_with_uncommitted_changes(db, repo, monkeypatch):
     assert (repo / "README.md").read_text() == "supervisor edit\n"
 
 
-def test_two_concurrent_merges_both_succeed(db, repo):
+def test_two_concurrent_merges_both_succeed(db, repo, monkeypatch):
     a = _feature(db, repo, "feat-a", "a.py")
     b = _feature(db, repo, "feat-b", "b.py")
     errors = []
+    # On a busy machine a git read outlasts spawn's first poll; it polls again
+    # and the merge carries on. Every read here outlasts one poll.
+    real_wait, polled_again = spawn._wait_read, []
+
+    def outlasts_first_poll(p, argv, input, *a, **k):
+        if input is None:
+            real = p.communicate
+
+            def first_poll(input=None, timeout=None):
+                p.communicate = real
+                polled_again.append(argv)
+                raise subprocess.TimeoutExpired(argv, timeout)
+
+            p.communicate = first_poll
+        return real_wait(p, argv, input, *a, **k)
+
+    monkeypatch.setattr(spawn, "_wait_read", outlasts_first_poll)
 
     def go(ws):
         try:
@@ -70,6 +84,7 @@ def test_two_concurrent_merges_both_succeed(db, repo):
 
     assert errors == []
     assert (repo / "a.py").exists() and (repo / "b.py").exists()
+    assert any(args[0] == "git" for args in polled_again)
 
 
 def test_persistent_index_failure_is_reported_after_retries(db, repo, monkeypatch):

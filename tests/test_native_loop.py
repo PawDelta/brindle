@@ -64,7 +64,8 @@ class FakeEndpoint:
                 pass
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        # A short poll: close() (shutdown) waits up to one poll interval, 0.5s by default.
+        self.thread = threading.Thread(target=self.server.serve_forever, args=(0.01,), daemon=True)
         self.thread.start()
 
     @property

@@ -13,6 +13,7 @@ import pytest
 from typer.testing import CliRunner
 
 from conftest import sh
+from git_snapshots import fast_host_tools, repo, restore_or_build  # noqa: F401  (fixtures)
 from brindle import agents, autopilot, cli, git, mcp_server, repos, tasks, workspaces
 from brindle.db import Agent
 from brindle.pro import license
@@ -41,34 +42,36 @@ def entitled(monkeypatch):
 def git_repo(path: Path, name: str, config: dict) -> Path:
     work = path / name
     work.mkdir()
-    sh("git init -q -b main", work)
     (work / "app.py").write_text(f"print('{name}')\n")
     (work / ".brindle").mkdir()
     (work / ".brindle" / "config.json").write_text(json.dumps(config))
-    sh("git add -A && git commit -qm init", work)
+    sh("git init -q -b main && git add -A && git commit -qm init", work)
     return work
 
 
 @pytest.fixture
-def web(tmp_path):
+def web(tmp_path, tmp_path_factory):
     """A second repo with its own config: its check leaves a marker under
-    the brindle home, so a test can tell whose checks ran."""
-    return git_repo(tmp_path, "web", {
+    the brindle home, so a test can tell whose checks ran. Built once and copied."""
+    return restore_or_build("multi:web", tmp_path, tmp_path_factory, ("web",), lambda: git_repo(tmp_path, "web", {
         "pipeline": False, "overlap": "warn", "review": False,
         "checks": ['test -f app.py && touch "$BRINDLE_HOME/web-checked"'],
-    })
+    }))
 
 
 @pytest.fixture
-def boss(db, repo, monkeypatch):
+def boss(db, repo, tmp_path, tmp_path_factory, monkeypatch):
     """A supervisor adopted on the main checkout, whose repo's check leaves
     its own marker."""
-    (repo / ".brindle").mkdir(exist_ok=True)
-    (repo / ".brindle" / "config.json").write_text(json.dumps({
-        "pipeline": False, "overlap": "warn", "review": False,
-        "checks": ['touch "$BRINDLE_HOME/main-checked"'],
-    }))
-    sh("git add -A && git commit -qm config", repo)   # a clean checkout records check shas
+    def commit_config():
+        (repo / ".brindle").mkdir(exist_ok=True)
+        (repo / ".brindle" / "config.json").write_text(json.dumps({
+            "pipeline": False, "overlap": "warn", "review": False,
+            "checks": ['touch "$BRINDLE_HOME/main-checked"'],
+        }))
+        sh("git add -A && git commit -qm config", repo)   # a clean checkout records check shas
+
+    restore_or_build("multi:boss", tmp_path, tmp_path_factory, ("origin.git", "proj"), commit_config)
     ws = workspaces.adopt_root(db, str(repo))
     db.add_agent(Agent("boss", ws.id, "supervisor", "claude", None, "interactive", "processing",
                         "@0", None, time.time()))
@@ -142,6 +145,7 @@ def test_attach_a_repo_whose_folder_name_matches_the_session_repo(db, repo, boss
     assert pool.pool_dir(str(twin)) == Path(e2.path).parent
 
 
+@pytest.mark.slow("the end-to-end run: two sessions each attach, start a worker, commit and merge in real git (~150 calls)")
 def test_two_live_sessions_attach_one_repo_and_each_merges_into_its_own_branch(
         db, repo, web, boss, tmp_path, monkeypatch):
     from brindle import view

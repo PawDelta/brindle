@@ -59,6 +59,8 @@ def test_handoff_makes_a_workspace_and_starts_nothing(db, boss, monkeypatch):
     assert "report_result" not in prompt  # the subagent shares the supervisor's brindle tools
 
 
+@pytest.mark.slow("the subagent provider's one end-to-end run: a real worktree, commit, "
+                  "merge and removal, about a hundred git commands")
 def test_subagent_is_working_until_completed_then_merges_and_removes(db, boss, repo):
     process_worker = Agent("process", boss.id, "developer", "claude", "boss", "assign", "processing",
                            "@1", None, time.time())

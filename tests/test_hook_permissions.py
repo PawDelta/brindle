@@ -9,15 +9,16 @@ from pathlib import Path
 
 import pytest
 
-from brindle import agents, cull, workspaces
+from brindle import agents, cull
 from brindle.db import Agent
 from brindle.profiles import load_profile
 from brindle.providers import ClaudeCode, LaunchContext
+from workspace_template import copy_workspace, workspace_template  # noqa: F401 (a fixture)
 
 
 @pytest.fixture
-def ws(db, repo):
-    return workspaces.create(db, str(repo), "feature").workspace
+def ws(db, workspace_template, tmp_path):
+    return copy_workspace(workspace_template, db, tmp_path)
 
 
 def worker(db, ws, profile="developer", provider="claude"):
