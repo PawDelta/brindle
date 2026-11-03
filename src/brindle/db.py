@@ -1063,6 +1063,7 @@ class Task:
     waiting_since: float | None = None
     pipeline: str | None = None        # the pipeline state its worker starts in (brindle.pipeline)
     forced: int | None = None          # 1: a supervisor started it despite the load (brindle.tasks.start_now)
+    wait_noted: float | None = None    # when its supervisor was told it waits long for room (claim_wait_note)
 
 
 def _load(cls, row):
@@ -1236,6 +1237,8 @@ class DB:
             self.conn.execute("ALTER TABLE tasks ADD COLUMN pipeline TEXT")
         if "forced" not in task_cols:
             self.conn.execute("ALTER TABLE tasks ADD COLUMN forced INTEGER")
+        if "wait_noted" not in task_cols:
+            self.conn.execute("ALTER TABLE tasks ADD COLUMN wait_noted REAL")
         cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(autopilot)")}
         if "checking_since" not in cols:
             self.conn.execute("ALTER TABLE autopilot ADD COLUMN checking_since REAL")
@@ -2696,6 +2699,18 @@ class DB:
                 "UPDATE tasks SET waiting=?, waiting_since=COALESCE(waiting_since, ?) "
                 "WHERE id=? AND state='pending'", (why, since, task_id),
             ).rowcount == 1
+
+    def claim_wait_note(self, task_id: str, at: float) -> bool:
+        """Atomically mark that the long-wait note of pending task ``task_id``
+        is being sent: only the one sweep that wins may send it, once."""
+        with self.tx() as c:
+            return c.execute("UPDATE tasks SET wait_noted=? WHERE id=? AND state='pending' "
+                             "AND wait_noted IS NULL", (at, task_id)).rowcount == 1
+
+    def release_wait_note(self, task_id: str, at: float) -> None:
+        """Undo ``claim_wait_note`` when the note couldn't be sent."""
+        with self.tx() as c:
+            c.execute("UPDATE tasks SET wait_noted=NULL WHERE id=? AND wait_noted=?", (task_id, at))
 
     def get_reported_spend(self, agent_id: str) -> float:
         row = self.conn.execute("SELECT reported_usd FROM agent_reported_spend WHERE agent_id=?", (agent_id,)).fetchone()
