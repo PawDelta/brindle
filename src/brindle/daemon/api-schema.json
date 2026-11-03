@@ -7146,6 +7146,14 @@
       "path": "/v1/decisions"
     },
     {
+      "method": "DELETE",
+      "path": "/v1/demo"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/demo"
+    },
+    {
       "method": "GET",
       "path": "/v1/doctor"
     },
@@ -7504,6 +7512,14 @@
     {
       "method": "GET",
       "path": "/v1/snapshot"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/storage"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/storage/clean"
     },
     {
       "method": "POST",

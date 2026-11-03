@@ -98,7 +98,7 @@ signed in. Claude Code is the default for the supervisor, workers and reviewer
 There's also a free brindle desktop app for macOS and Linux (on Windows, use the CLI inside WSL2). It's a download from the brindle website and runs on the same engine; the CLI keeps working alongside it. `brindle app` opens the app, or prints the download link if it isn't installed. `brindle daemon` runs the local API the app talks to: over a Unix socket by default, or on `--tcp` at 127.0.0.1 for WSL. Over `--tcp` the daemon can't check whether a caller is an agent, so its token is the only gate: keep TCP for the WSL client.
 
 `brindle --version` prints the installed version; the tmux status bar of every brindle
-session shows it too (`brindle 0.5.11`). A session started before an upgrade keeps
+session shows it too (`brindle 0.5.12`). A session started before an upgrade keeps
 running the old code, and shows the old number, until you restart it.
 
 ## Quick start
@@ -683,7 +683,10 @@ Goal driving, merge gates and cleanup:
 | `limit_cooldown_minutes` | `300` for Antigravity | how long a provider that hit its limit counts as unavailable |
 | `graphify` | if the graph is there | point agents at the repo's [graphify](https://github.com/safishamsi/graphify) code map (`false` turns it off) |
 | `graphify_auto_refresh` | `true` | automatically rebuild untracked code maps; `false` disables rebuilds while keeping queries available |
-| `stale_after` | `30` | minutes before a worker that reported and sat idle is closed, or `brindle prune` closes a stale paused/exited agent whose workspace is merged or gone (`0`: never) |
+| `stale_after` | `30` | minutes before a worker that reported and sat idle is closed (one whose branch is still in review, fixing or ready is left open and its supervisor told), or `brindle prune` closes a stale paused/exited agent whose workspace is merged or gone (`0`: never) |
+| `stall_alert_after` | `10` | minutes a branch in review, fixing or ready may sit with no live worker, reviewer or check run before its supervisor is told, once (`0`: never) |
+| `idle_supervisor_days` | `3` | days without input (no client attached, no running workers) before the sweep stops a supervisor; it stays resumable with `brindle continue` and the Inbox says so (`0`: never) |
+| `superseded_after` | `6` | hours without a commit, turn or output before a worker whose branch is already in its base is stopped (its supervisor is told; uncommitted changes only notify), or one whose work closely matches a newly merged branch is reported (`0`: never) |
 | `pipeline` | `true` | brindle reviews and merges reported branches itself; the supervisor gets one message per branch |
 | `review_rounds` | `2` | fix-and-re-review rounds the pipeline runs before handing findings to the supervisor |
 | `goal_audit` | `true` | once every milestone passes, an adversarial reviewer checks the work against the original goal before the goal counts as reached |
@@ -696,12 +699,14 @@ Goal driving, merge gates and cleanup:
 | `plan_first` | `false` | workers propose a plan (`submit_plan`) and wait for `approve_plan` before editing |
 | `overlap` | unset | a task whose `files` overlap a running task's: `"block"` refuses it, `"warn"` starts it with a warning, `"queue"` queues it until that task merges. Unset, it is refused within a session and queued behind another session's task (both sessions' supervisors are told; the other session's work is never cancelled), and the queued task starts from that task's merge commit |
 | `protected_paths` | `[]` | paths or globs (`"migrations/"`, `"*.lock"`) whose merge conflicts brindle never hands to a worker to resolve: the branch waits for you instead (see "Conflict-aware merging") |
+| `live_check_ignore` | `[]` | names of processes (`["my-sync-daemon"]`) that never run in your projects, so a worktree is removed even though Linux won't show brindle their folder. Anything else whose folder can't be read keeps every worktree; systemd's user manager, `ssh-agent` and `gpg-agent` are excused already |
 | `pool_size` | `1` if `setup` is set, else `0` | pre-built worktrees (checked out, files copied, setup run) kept ready so a new worker doesn't wait on `setup`; `0` disables it |
 | `add_dirs` | `[]` | directories outside the worktree that Claude Code agents may use (`--add-dir`; full tool access, see "Directories outside the workspace") |
 | `local_models` | `true` | When a native profile points at Ollama on this machine and it isn't running, `brindle` starts `ollama serve` in the background (with the context length the profiles need) and loads their models, then stops it when the last session closes. `false`: brindle uses a server that's already running and never starts or preloads one |
 | `sidebar` | `"left"` | where the dashboard sits in each window: `"left"` of the chat, or `"bottom"` (full-width rows under it) |
 | `delegation` | `"balanced"` | how readily the supervisor hands work to workers. `"conservative"` does most work in its own chat (fewest tokens), `"fast"` splits any multi-part request across parallel workers straight away (quickest, most tokens). `brindle delegation fast` saves it for every repo and session (in `~/.brindle/config.json`; `--repo` for this repo only) and tells a running supervisor |
 | `delete_merged_branches` | `true` | removing a worktree (after a merge, `brindle rm`, `brindle prune`, session cleanup) also deletes its branch once every commit is in its base, so finished branches don't pile up. An unmerged branch is always kept; `false` keeps them all. If GitHub keeps merged PR branches, the first `brindle pr` in a repo offers to turn on its automatic deletion with your `gh` login (repo admins only) |
+| `shared_cargo_target` | `true` | workers, check runs and setup commands in a worktree build Rust into one `CARGO_TARGET_DIR` per repo (`~/.brindle/cache/<repo>/cargo-target`) instead of a multi-GB `target/` each; Cargo's lock serializes concurrent builds. `false` gives each worktree its own. They also share uv's global cache, and a new worktree whose lockfile matches the base checkout's gets a copy-on-write clone of its `node_modules` (macOS) instead of running the install in `setup` |
 | `pr_footer` | `true` | `brindle pr` ends the PR description with one line: "🌲 Built in parallel and verified with brindle" (a link). `false` leaves it out. Never added to commit messages |
 | `message_delivery` | `"pull"` | how agent and brindle messages reach an interactive supervisor: `"pull"` keeps them unread and delivers one notice ("brindle (16:25:03): 2 new messages (from 9f742c5c, pipeline). Call read_messages."; the time keeps Claude Code from dropping a repeat; the sidebar shows an unread count), `"push"` delivers each message's text. Messages you send (`brindle send`, typing) and messages to workers are always pushed |
 | `learning` | `"auto"` | hosted learning (brindle Pro, via the API; see below): `"auto"` uses it when your plan includes it and nothing otherwise; `"cloud"`; `"off"`. Any other value means off |

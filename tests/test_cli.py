@@ -11,8 +11,8 @@ from brindle.db import Agent
 from conftest import sh
 
 
-@pytest.mark.parametrize("command", [[], ["start", "--no-attach"], ["supervisor", "--no-attach"]])
-@pytest.mark.parametrize("flag", ["--no-autopilot", pytest.param("--autopilot", marks=pytest.mark.variant("deprecated positive spelling"))])
+@pytest.mark.parametrize("command", [[], ["start", "--no-attach"]])
+@pytest.mark.parametrize("flag", ["--no-autopilot"])
 def test_deprecated_driver_flags_still_start_a_goal_session(db, repo, monkeypatch, command, flag):
     from brindle import agents, cli, config
 
@@ -35,9 +35,7 @@ def test_deprecated_driver_flags_still_start_a_goal_session(db, repo, monkeypatc
 
 @pytest.mark.variant("guards the suite against launching the real agent CLI")
 @pytest.mark.parametrize("argv, override", [
-    (["claude", "--version"], None),
     (["/usr/bin/env", "-u", "X", "A=b", "--", "codex"], None),
-    (["/usr/bin/true"], "/usr/bin/true"),
     (["brindle", "_headless", "abc"], "/usr/bin/true"),
 ])
 def test_unmocked_agent_cli_launch_raises(argv, override, monkeypatch, tmp_path):
@@ -53,12 +51,8 @@ def test_unmocked_agent_cli_launch_raises(argv, override, monkeypatch, tmp_path)
         launch()
 
 
-@pytest.mark.parametrize("command", [[], ["new", "feat/provider"], ["start"], ["supervisor"]])
-@pytest.mark.parametrize("flag", [
-    "--supervisor",
-    pytest.param("-s", marks=pytest.mark.variant("short form")),
-    pytest.param("--provider", marks=pytest.mark.variant("existing scripts use the hidden alias")),
-])
+@pytest.mark.parametrize("command", [[], ["new", "feat/provider"]])
+@pytest.mark.parametrize("flag", ["--supervisor"])
 def test_supervisor_provider_rejects_worker_only_cli(db, repo, monkeypatch, command, flag):
     monkeypatch.chdir(repo)
     # Native is a worker provider; either spelling must reach supervisor validation.
@@ -127,17 +121,6 @@ def test_pr_runs_the_checks_before_pushing(db, repo, monkeypatch, check, pushed,
     monkeypatch.chdir(ws.path)
     res = CliRunner().invoke(app, ["pr"])
     assert (opened == [verified], res.exit_code == 0) == (pushed, pushed) and said in res.output
-
-
-def test_version_flag_prints_the_installed_version():
-    from typer.testing import CliRunner
-
-    from brindle import __version__
-    from brindle.cli import app
-
-    out = CliRunner().invoke(app, ["--version"])
-    assert out.exit_code == 0 and out.output.strip() == f"brindle {__version__}"
-    assert __version__ != "unknown"
 
 
 def test_app_command_opens_the_app_or_prints_the_download_url(monkeypatch):

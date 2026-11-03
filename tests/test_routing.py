@@ -50,6 +50,7 @@ def boss(db, repo, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def everything_available(monkeypatch):
+    monkeypatch.setattr("brindle.local_setup.memory_problem", lambda profile: None)
     monkeypatch.setattr("shutil.which", lambda cli: f"/usr/bin/{cli}")
     monkeypatch.setattr(quota, "headroom", lambda provider, cfg=None, repo_root=None: 100.0)
 

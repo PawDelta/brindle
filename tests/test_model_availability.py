@@ -437,7 +437,8 @@ def test_provisioning_checks_managed_model_and_exact_pane_environment(db, repo, 
                 auth="subscription", env_allow=["CUSTOM"])
     monkeypatch.setattr(agents, "load_profile", lambda *a: p)
     monkeypatch.setattr(guardrails, "effective", lambda p: p)
-    monkeypatch.setattr(secrets, "agent_credentials", lambda *a: frozenset({"OPENAI_API_KEY"}))
+    # a stored key is one of the provider's credentials (pane_keys only hands those out)
+    monkeypatch.setattr(secrets, "agent_credentials", lambda *a: frozenset({"OPENAI_API_KEY", "STORED_KEY"}))
     monkeypatch.setattr(keystore, "pane_keys", lambda *a: {"STORED_KEY": "stored"})
     monkeypatch.setattr(tmux, "inherited_env", lambda *a: {
         "HOME": "/effective-home", "CODEX_HOME": "/effective-account",

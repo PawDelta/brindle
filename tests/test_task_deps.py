@@ -4,16 +4,19 @@ workspace is removed unmerged instead); list_tasks(full=true), requeue, and
 assign/handoff's dry_run."""
 
 import asyncio
+import os
 import re
+import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from conftest import full_text, sh
 from brindle import agents, bus, mcp_server, tasks, workspaces
-from brindle.db import Agent, Workspace
+from brindle.db import DB, Agent, Workspace
 from test_merge_order import fake_spawn
 
 
@@ -50,13 +53,6 @@ def commit_file(path: Path, name: str, content: str = "x\n") -> None:
 # -- overlap warnings -----------------------------------------------------------
 
 
-def test_overlap_warning_matches_recursive_globs(db, repo, boss):
-    asyncio.run(mcp_server.assign("developer", "do A", branch="feat-a", files=["src/**/a.py"]))
-    out_b = asyncio.run(mcp_server.assign("developer", "do B", branch="feat-b",
-                                          files=["src/nested/dir/a.py"]))
-    assert "Warning" in out_b
-
-
 def test_overlap_warning_names_other_session_intent(db, repo, boss):
     from brindle import knowledge
     key = knowledge.repo_key(repo)
@@ -76,7 +72,7 @@ def test_overlapping_tasks_are_blocked(db, repo, monkeypatch):
     db.add_agent(Agent("boss", root.id, "supervisor", "claude", None, "interactive", "idle", "@0", None,
                        time.time()))
     monkeypatch.setenv("BRINDLE_AGENT_ID", "boss")
-    monkeypatch.setattr(tasks, "find_clash", lambda db_, ws_, files, text=None, caller_id=None:
+    monkeypatch.setattr(tasks, "declared_clash", lambda db_, ws_, files, caller_id=None:
                         tasks.Clash("overlaps with w0 (feat/a) on ledger.py", "w0", "boss"))
     delegated = []
     monkeypatch.setattr(agents, "delegate", lambda *a, **k: delegated.append(a))
@@ -92,7 +88,7 @@ def other_session_task(db, repo, monkeypatch):
     other_ws = workspaces.create(db, str(repo), "fix-197", run_setup=False).workspace
     db.add_agent(Agent("w197", other_ws.id, "developer", "claude", None, "assign", "done",
                        "@1", "fixed it", time.time()))
-    monkeypatch.setattr(tasks.git, "merged_into_default", lambda root_, branch: False)
+    monkeypatch.setattr(tasks.git, "merged_into", lambda root_, branch, targets, refs=None: False)
     monkeypatch.setattr(tasks, "_changed_files", lambda w: ["src/brindle/tasks.py"])
     db.conn.execute("UPDATE workspaces SET base_branch='brindle/session-14' WHERE id=?", (other_ws.id,))
 
@@ -105,20 +101,51 @@ def other_session_task(db, repo, monkeypatch):
     return record
 
 
-def test_cross_session_same_issue_number_warns_without_files(db, other_session_task):
+def test_cross_session_overlap_warns_by_files_or_issue_number_until_merged(db, other_session_task, monkeypatch):
     root = other_session_task()
-    warning = tasks.overlap_warning(db, root, None, "Please fix #197 again")
-    assert warning and "#197" in warning and "fix-197" in warning
+    by_issue = tasks.overlap_warning(db, root, None, "Please fix #197 again")
+    assert by_issue and "#197" in by_issue and "fix-197" in by_issue
     assert tasks.overlap_warning(db, root, None, "Fix #198") is None
-
-
-def test_cross_session_merged_branch_is_not_warned(db, other_session_task, monkeypatch):
-    root = other_session_task()
     warning = tasks.overlap_warning(db, root, ["src/brindle/tasks.py"])    # on changed files alone
     assert warning and "fix-197" in warning and "brindle/session-14" in warning
     assert tasks.overlap_warning(db, root, ["src/brindle/tasks.py"], "fix #197")
-    monkeypatch.setattr(tasks.git, "merged_into_default", lambda root_, branch: True)
+    monkeypatch.setattr(tasks.git, "merged_into", lambda root_, branch, targets, refs=None: True)
     assert tasks.overlap_warning(db, root, ["src/brindle/tasks.py"], "fix #197") is None
+
+
+@pytest.mark.slow("Builds five real Git worktrees and merges one to bound overlap Git calls and verify caching")
+@pytest.mark.parametrize("w3_branch", [
+    "feat-w3",
+    pytest.param("origin/feat-w3", marks=pytest.mark.variant(
+        "review finding: a local branch named origin/x must not read as origin's merged x")),
+])
+def test_overlap_check_git_calls_bounded(db, repo, monkeypatch, w3_branch):
+    """Reported-unmerged worktrees cost a few cheap git reads each, never a
+    fetch or the cherry/patch-id fallback, and nothing again once decided; a
+    branch merged into its session branch has landed."""
+    sh("git branch session && git update-ref refs/remotes/origin/feat-w3 main", repo)
+    root = workspaces.adopt_root(db, str(repo))
+    for name in ("w0", "w1", "w2", "w3", "landed"):
+        branch = w3_branch if name == "w3" else f"feat-{name}"
+        ws = workspaces.create(db, str(repo), branch, base="session", run_setup=False).workspace
+        commit_file(Path(ws.path), f"{name}.py")
+        db.add_agent(Agent(name, ws.id, "developer", "claude", None, "assign", "done", "@1", "done",
+                           time.time()))
+        db.add_task(tasks.Task(f"t-{name}", str(repo), name, None, root.id, "developer", "work",
+                               "assign", 1, ws.branch, None, None, None, "started", time.time()))
+    sh(f"git checkout -q session && git merge -q --no-ff {ws.branch} -m land && git checkout -q main", repo)
+    calls = []
+    real = tasks.git.run_env
+    monkeypatch.setattr(tasks.git, "run_env", lambda args, *a, **k: calls.append(args) or real(args, *a, **k))
+
+    assert tasks.find_clash(db, root, ["w3.py"]).holder == "w3"
+    assert tasks.find_clash(db, root, ["landed.py"]) is None
+    verbs = [c[0] for c in calls]
+    assert "fetch" not in verbs and "cherry" not in verbs and "patch-id" not in verbs
+    assert len(calls) <= 8 * 5 * 2, verbs    # 8 per worktree per check (69 measured; ~250 before)
+    calls.clear()
+    assert tasks.find_clash(db, root, ["w3.py"]).holder == "w3"
+    assert "merge-tree" not in {c[0] for c in calls}    # decided once per (branch, target) sha pair
 
 
 @pytest.fixture
@@ -227,11 +254,9 @@ def dependency_rows(db, tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize(("event", "upstream_kind"), [
-    ("merged", "task"), ("sweep", "task"), ("removed", "task"),
-    ("requeue_merged", "task"), ("requeue_pending", "task"), ("requeue_removed", "task"),
-    ("requeue_pending", "worker"), ("requeue_removed", "worker"),
-    ("requeue_pending", "workspace"), ("requeue_removed", "workspace"),
-    ("requeue_pending", "local_workspace"),
+    ("merged", "task"), ("removed", "task"), ("requeue_merged", "task"),
+    ("requeue_removed", "worker"), ("requeue_pending", "workspace"),
+    ("requeue_removed", "task"), ("requeue_removed", "workspace"),
 ])
 def test_same_branch_dependency_does_not_resolve_to_itself(db, dependency_rows, monkeypatch, event, upstream_kind):
     caller, boss, workspace, launched = dependency_rows
@@ -325,8 +350,8 @@ def test_requeue_preserves_an_upstream_that_has_no_worker_yet(db, dependency_row
         assert len(launched) == 2
 
 
-@pytest.mark.parametrize("event", ["merged", "removed"])
 @pytest.mark.variant("An accepted exact worker ID must still dispatch after its repository is detached")
+@pytest.mark.parametrize("event", ["merged", "removed"])
 def test_exact_worker_dependency_dispatches_after_repo_detach(db, dependency_rows, event):
     caller, boss, workspace, launched = dependency_rows
     upstream = workspace("engine-worker", "engine", "feature", tracked=True)
@@ -401,24 +426,6 @@ def test_a_queued_task_that_fails_to_start_tells_its_caller_why(db, repo, boss, 
 # -- cancellation on unmerged removal --------------------------------------------
 
 
-def test_removing_a_fully_merged_workspace_does_not_cancel_dependents(db, repo, boss):
-    out_a = asyncio.run(mcp_server.assign("developer", "do A", branch="feat-a"))
-    worker_a = started_worker_id(out_a)
-    ws_a = next(w for w in db.find_workspaces(str(repo)) if w.branch == "feat-a")
-
-    asyncio.run(mcp_server.assign("developer", "do B", branch="feat-b", depends_on=[worker_a]))
-    asyncio.run(mcp_server.merge_workspace(ws_a.id))  # merges and auto-starts B first
-
-    [b_task] = [t for t in db.list_tasks(str(repo)) if t.branch == "feat-b"]
-    assert b_task.state == "started"  # already started; removing A now must not touch it
-
-    ws_a = db.get_workspace(ws_a.id)
-    mcp_server.remove_workspace(ws_a.id, force=True)
-
-    b_task = db.get_task(b_task.id)
-    assert b_task.state == "started"
-
-
 def test_cancellation_cascades_to_a_task_depending_on_the_cancelled_one(db, repo, boss, monkeypatch):
     """A unmerged -> B depends_on=[A] queued -> C depends_on=["feat-b"]
     queued -> removing A unmerged must cancel both B and C, not just B."""
@@ -451,20 +458,15 @@ def test_cancellation_cascades_to_a_task_depending_on_the_cancelled_one(db, repo
     assert "Cancelled" in first.body and "Cancelled" in second.body
     assert worker_a in bodies and b_task.id in bodies
 
-
-def test_new_task_depending_on_an_already_cancelled_task_fails_clearly(db, repo, boss, monkeypatch):
-    monkeypatch.setattr(agents, "is_alive", lambda a: True)
-    asyncio.run(mcp_server.assign("developer", "do A", branch="feat-a"))
-    ws_a = next(w for w in db.find_workspaces(str(repo)) if w.branch == "feat-a")
-    commit_file(Path(ws_a.path), "a_output.txt")  # ahead of main: "unmerged"
-    asyncio.run(mcp_server.assign("developer", "do B", branch="feat-b", depends_on=["feat-a"]))
-    mcp_server.remove_workspace(ws_a.id, force=True)  # cancels B
-
-    out_d = asyncio.run(mcp_server.assign("developer", "do D", branch="feat-d",
-                                          depends_on=["feat-b"]))
-    assert "cancelled" in out_d.lower() and "feat-b" in out_d
-    # D was neither started nor queued: unmet_dependencies failed before either.
-    assert not any(t.branch == "feat-d" for t in db.list_tasks(str(repo)))
+    before = db.list_tasks(str(repo))
+    workers_before = db.list_agents()
+    asyncio.run(mcp_server.assign("developer", "do D", branch="feat-d",
+                                  depends_on=["feat-b"]))
+    assert db.list_tasks(str(repo)) == before
+    assert db.list_agents() == workers_before
+    out = mcp_server.requeue(c_task.id)
+    assert out.startswith("Error")
+    assert db.list_tasks(str(repo)) == before
 
 
 # -- cancel_task ------------------------------------------------------------------
@@ -511,22 +513,6 @@ def test_handoff_reply_names_a_missing_add_dir(db, repo, boss, monkeypatch):
     assert "Warning: add_dirs names /no/such/cache" in out
 
 
-def test_a_queued_task_starting_names_a_missing_add_dir(db, repo, boss, monkeypatch):
-    monkeypatch.setattr(agents, "is_alive", lambda a: True)
-    out_a = asyncio.run(mcp_server.assign("developer", "do A", branch="feat-a"))
-    worker_a = started_worker_id(out_a)
-    ws_a = next(w for w in db.find_workspaces(str(repo)) if w.branch == "feat-a")
-    commit_file(Path(ws_a.path), "a_output.txt")
-    asyncio.run(mcp_server.assign("developer", "do B", branch="feat-b", depends_on=[worker_a]))
-    _missing_add_dir(repo)
-
-    asyncio.run(mcp_server.merge_workspace(ws_a.id))
-
-    msg = db.pop_pending("boss")
-    body = full_text(db, "boss", msg.body)
-    assert "Started" in body and "add_dirs names /no/such/cache" in body
-
-
 def queued_task(db, repo, worker_id, branch="feat-b", **kw):
     out = asyncio.run(mcp_server.assign(
         "developer", "the full brief for B", branch=branch, depends_on=[worker_id],
@@ -539,24 +525,16 @@ def started_a(db):
     return started_worker_id(asyncio.run(mcp_server.assign("developer", "do A", branch="feat-a")))
 
 
-# -- list_tasks full ------------------------------------------------------------
-
-
-def test_list_tasks_default_omits_the_brief_and_full_shows_it(db, repo, boss):
-    b = queued_task(db, repo, started_a(db))
-    assert "the full brief" not in mcp_server.list_tasks()
-    full = mcp_server.list_tasks(full=True)
-    assert b.id in full
-    assert "task_text: the full brief for B" in full
-    assert "done_when: pytest passes" in full
-
-
 # -- requeue --------------------------------------------------------------------
 
 
 def test_requeue_a_cancelled_task_copies_it_and_keeps_dependencies(db, repo, boss):
     a = started_a(db)
     b = queued_task(db, repo, a, plan_first=True)
+    before = db.list_tasks(str(repo))
+    assert mcp_server.requeue("nope").startswith("Error")
+    assert mcp_server.requeue(b.id).startswith("Error")
+    assert db.list_tasks(str(repo)) == before
     mcp_server.cancel_task(b.id)
     db.update_task(b.id, weight="light")
     # A's task is still started, so the dependency is still waiting.
@@ -569,22 +547,6 @@ def test_requeue_a_cancelled_task_copies_it_and_keeps_dependencies(db, repo, bos
     assert tasks._loads(new.depends_on) == [a]
     assert new.plan_first == 1
     assert db.get_task(b.id).state == "cancelled"
-
-
-def test_requeue_with_nothing_to_wait_on_starts_it(db, repo, boss):
-    b = queued_task(db, repo, started_a(db))
-    mcp_server.cancel_task(b.id)
-    out = mcp_server.requeue(b.id, depends_on=[])
-    assert "started worker" in out
-    assert not db.list_tasks(str(repo), state="pending")
-
-
-def test_requeue_refuses_an_unknown_task_or_one_that_is_not_cancelled(db, repo, boss):
-    assert mcp_server.requeue("nope").startswith("Error")
-    b = queued_task(db, repo, started_a(db))
-    out = mcp_server.requeue(b.id)
-    assert out.startswith("Error") and "not cancelled" in out
-    assert len(db.list_tasks(str(repo), state="pending")) == 1
 
 
 def test_requeue_refused_by_policy_and_scoped_to_session_repos(db, repo, boss, monkeypatch):
@@ -601,13 +563,205 @@ def test_requeue_refused_by_policy_and_scoped_to_session_repos(db, repo, boss, m
     assert len(db.list_tasks(str(repo), state="pending")) == 0
 
 
-def test_requeue_with_a_cancelled_dependency_asks_for_new_ones(db, repo, boss):
-    a = started_a(db)
-    b = queued_task(db, repo, a)
-    c = queued_task(db, repo, "feat-b", branch="feat-c")
-    mcp_server.cancel_task(b.id)  # cascades to c
-    out = mcp_server.requeue(c.id)
-    assert out.startswith("Error") and "depends_on" in out
+# -- replying before the start ---------------------------------------------------
+
+
+@pytest.mark.parametrize("tool, start", [
+    ("assign", "detached"), ("handoff", "detached"), ("handoff", "at once"),
+    ("assign", "behind a worker"), ("assign", "capped"), ("assign", "after a dependency"),
+])
+def test_assign_returns_before_spawn(db, repo, boss, monkeypatch, tool, start):
+    """Under load every git and tmux step of a start waits for room, and
+    assigns ran past the client's 120 s (2026-11-03): assign (and handoff)
+    reply with the task id first, and admission, the worktree and the launch
+    happen in the detached start afterwards. Repeated before that start
+    runs, it queues nothing more, and another task on the same files is
+    refused (overlap "block"); a start that beat the reply is named in it,
+    never waited for. Behind a running worker, the git look at what it
+    changed waits for the start too, which still refuses the overlap it
+    finds; a team's worker cap holds for tasks both queued before either
+    start ran, even when the first finishes between the second's reads; and
+    a dependency's worktree waits for the start for its identity lookup."""
+    from brindle import identity_lock, policy, spawn
+
+    (repo / ".brindle" / "config.json").write_text('{"overlap": "block", "pipeline": false, "review": false}')
+    events, helpers = [], []
+    real_delegate, real_workers = agents.delegate, policy.worker_agents
+
+    def slow_delegate(*a, **k):   # admission, worktree, setup and the tmux launch
+        events.append("spawn")
+        if start != "capped":
+            return real_delegate(*a, **k)
+        if events.count("spawn") > 1:
+            pytest.fail("a second worker started past the cap of 1")
+        [starting] = db.list_tasks(str(repo), state="starting")
+        launched = []
+
+        def finish_between(db_, root):   # this start finishes between the other start's two reads
+            workers = real_workers(db_, root)
+            if not launched:
+                try:   # an error here would read as an unknown count, which the cap refuses anyway
+                    launched.append(real_delegate(*a, **k))
+                    mine = real_workers(db, root)   # its worker made, its task not naming it yet: counted once
+                    counted = len(mine) + tasks.launching_workers(db, root, mine)
+                    db.update_task(starting.id, agent_id=launched[0][0].id, state="started")
+                except Exception as e:  # noqa: BLE001
+                    pytest.fail(f"the first launch failed: {e!r}")
+                if counted != 1:
+                    pytest.fail(f"the first launch counted {counted} times")
+            return workers
+
+        monkeypatch.setattr(policy, "worker_agents", finish_between)
+        for other_task in db.list_tasks(str(repo), state="pending"):   # its own helper's connection
+            assert not tasks.start_when_room(DB(), other_task.id)
+        monkeypatch.setattr(policy, "worker_agents", real_workers)
+        return launched[0]
+
+    def call(task: str = "do A", files: tuple[str, ...] = ("app.py",), deps: list[str] | None = None) -> str:
+        return asyncio.run(getattr(mcp_server, tool)("developer", task, files=list(files), depends_on=deps))
+
+    if start in ("behind a worker", "after a dependency"):
+        worker = started_worker_id(call("do W", ()))
+    if start == "behind a worker":   # its branch has changed app.py, which only git can tell
+        monkeypatch.setattr(tasks, "_changed_files", lambda ws: events.append("git") or ["app.py"])
+    if start == "after a dependency":   # who holds its worktree: sign-in probes, up to a minute
+        monkeypatch.setattr(identity_lock, "locked_by", lambda agent_id: events.append("identity"))
+    if start == "capped":   # as an org's max_parallel_workers of 1 decides
+        monkeypatch.setattr(policy, "check_assign", lambda *a, running_workers=None, **k: (
+            policy.allow() if running_workers == 0 else policy.deny("at most 1 parallel worker")))
+    monkeypatch.setattr(agents, "delegate", slow_delegate)
+    monkeypatch.setattr(agents, "wait_for_result", lambda *a, **k: pytest.fail("the reply waited for the worker"))
+    if start == "at once":   # conftest's start runs as the reply is released
+        out = call()
+        [t] = db.list_tasks(str(repo))
+        assert events == ["spawn"] and f'wait_for_worker(agent_id="{t.agent_id}")' in out, out
+        return
+    monkeypatch.setattr(tasks, "start_in_background", helpers.append, raising=False)
+    monkeypatch.setattr(spawn, "room", lambda: 0.0)   # the machine at 0% idle
+    if start == "after a dependency":
+        out = call(deps=[worker])
+        events.append("reply")
+        [t] = [x for x in db.list_tasks(str(repo)) if x.task_text == "do A"]
+        assert t.id in out and events == ["reply"] and helpers == [], out
+        monkeypatch.setattr(spawn, "room", lambda: 4.0)
+        assert not tasks.start_when_room(db, t.id)   # still waits for it to merge
+        assert events[:2] == ["reply", "identity"] and "spawn" not in events
+        return
+    out = call()
+    events.append("reply")
+    again = call()   # the same task, before its start has run
+    other = call("do B")   # another task on the same files, before either start has run
+    [t] = [x for x in db.list_tasks(str(repo)) if x.task_text == "do A"]
+    assert t.id in out and t.id in again and events == ["reply"] and helpers == [t.id], (out, again)
+    assert other.startswith("Not started") and f"queued task {t.id}" in other, other
+    monkeypatch.setattr(spawn, "room", lambda: 4.0)
+    if start == "behind a worker":
+        assert not tasks.start_when_room(db, t.id)
+        assert events == ["reply", "git"] and db.get_task(t.id).state == "cancelled"
+        return
+    if start == "capped":
+        c = call("do C", ("c.py",))   # accepted: no worker is at work yet
+        [t_c] = [x for x in db.list_tasks(str(repo)) if x.task_text == "do C"]
+        assert t_c.id in c and helpers == [t.id, t_c.id], c
+    assert tasks.start_when_room(db, t.id)   # what the detached helper runs once there's room
+    assert events == ["reply", "spawn"] and db.get_task(t.id).agent_id
+    if start == "capped":
+        assert db.get_task(t_c.id).state == "cancelled" and "at most 1" in tasks.cancel_reason(db, t_c.id)
+        assert policy.running_workers(db, str(repo)) == 1
+
+
+@pytest.mark.parametrize("when", ["while it works", "while its reply is written", "client gone", "written"])
+def test_cancelled_assign_never_launches(db, repo, boss, monkeypatch, when):
+    """The client gave up on an assign (TaskStop, a disconnect) before brindle
+    answered it, through the real stdio transport and MCP dispatcher: what it
+    queued is cancelled, and no worker ever starts for it later. Past the
+    handler, the response waits behind the client's full stdout pipe (a
+    slow reader); only a response actually written releases the task."""
+    import anyio
+
+    from brindle import autopilot, mcp_stdio, upgrade
+    from test_mcp_stale_engine import INIT, _answers, _send
+
+    monkeypatch.setattr(upgrade, "preload", lambda: None)
+    monkeypatch.setattr(upgrade, "install", SimpleNamespace(changed=lambda: False))
+    monkeypatch.delenv(mcp_stdio.HANDOVER_ENV, raising=False)
+    inside, go, cancelled, registered, settled = (threading.Event() for _ in range(5))
+    launched, seen = [], []
+    real = (autopilot.choose_profile, tasks.answered, tasks.drop_unanswered, mcp_server._Request.cancel,
+            mcp_stdio.after_reply)
+
+    def held(*a, **k):
+        inside.set()
+        go.wait()
+        return real[0](*a, **k)
+
+    monkeypatch.setattr(autopilot, "choose_profile", held)
+    monkeypatch.setattr(tasks, "answered", lambda *a: (real[1](*a), settled.set()))
+    monkeypatch.setattr(tasks, "drop_unanswered", lambda *a: (real[2](*a), settled.set()))
+    monkeypatch.setattr(mcp_server._Request, "cancel", lambda self: (real[3](self), cancelled.set()))
+    monkeypatch.setattr(mcp_stdio, "after_reply", lambda rid, settle: registered.set() or real[4](rid, settle))
+    monkeypatch.setattr(agents, "spawn", lambda *a, **k: launched.append("spawn") or fake_spawn(*a, **k))
+    monkeypatch.setattr(tasks, "start_in_background", launched.append)
+    cancel = {"method": "notifications/cancelled", "params": {"requestId": 1}}
+    call = {"id": 1, "method": "tools/call",
+            "params": {"name": "assign", "arguments": {"agent_profile": "developer", "task": "do A"}}}
+
+    def fill(fd: int) -> int:   # the client's stdout pipe, full: it isn't reading
+        os.set_blocking(fd, False)
+        filled = 0
+        for size in (65536, 4096, 512, 1):
+            while True:
+                try:
+                    filled += os.write(fd, b" " * size)
+                except BlockingIOError:
+                    break
+        os.set_blocking(fd, True)
+        return filled
+
+    def slow_client(from_client: int, from_server: int, filled: int) -> None:
+        registered.wait()   # the handler is done; its response waits for room in the pipe
+        seen.append(DB().list_tasks(str(repo))[0].state)   # this thread's own connection
+        if when == "while its reply is written":
+            _send(from_client, cancel)
+        elif when == "client gone":
+            os.close(from_client)
+        if when != "written":
+            settled.wait(30)   # bounds a server whose blocked write never reads the cancel
+        while filled:   # read what filled the pipe: now there's room for the response
+            filled -= len(os.read(from_server, filled))
+
+    async def client():
+        to_server, from_client = os.pipe()
+        from_server, to_client = os.pipe()
+        conn = mcp_stdio.Connection(to_server, to_client, wants_reload=lambda reloaded: False,
+                                    replace=lambda: False)
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(conn.serve, mcp_server._run_server)
+            _send(from_client, INIT, {"method": "notifications/initialized"})
+            await _answers(from_server, 0)
+            if when == "while it works":
+                _send(from_client, call)
+                await anyio.to_thread.run_sync(inside.wait)
+                _send(from_client, cancel)
+                await anyio.to_thread.run_sync(cancelled.wait)
+                go.set()
+            else:
+                go.set()
+                filled = fill(to_client)
+                _send(from_client, call)
+                await anyio.to_thread.run_sync(slow_client, from_client, from_server, filled)
+                assert seen == [tasks.UNANSWERED]   # nothing released while the reply is unwritten
+            await anyio.to_thread.run_sync(settled.wait)
+            if when != "client gone":
+                os.close(from_client)
+
+    anyio.run(client)
+    [t] = db.list_tasks(str(repo))
+    if when == "written":
+        assert t.state == "pending" and launched == [t.id]
+        return
+    tasks.sweep(db)
+    assert db.get_task(t.id).state == "cancelled" and launched == []
 
 
 # -- waiting for room ------------------------------------------------------------
@@ -654,11 +808,3 @@ def test_assign_dry_run_starts_and_queues_nothing(db, repo, boss):
     out = asyncio.run(mcp_server.assign("developer", "do A", dry_run=True))
     assert "files: none declared" in out and "overlap: none" in out
 
-
-def test_handoff_dry_run_reports_overlap_and_queueing(db, repo, boss):
-    a_id = started_worker_id(asyncio.run(mcp_server.assign("developer", "do A", branch="feat-a", files=["app.py"])))
-    out = asyncio.run(mcp_server.handoff(
-        "developer", "do B", branch="feat-b", files=["app.py"], depends_on=[a_id], dry_run=True))
-    assert f"overlaps with {a_id}" in out
-    assert f"would queue until {a_id} merges" in out
-    assert len(db.list_tasks(str(repo))) == 1

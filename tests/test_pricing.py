@@ -65,11 +65,10 @@ def test_overrides_merge_from_user_repo_and_local_config(repo, brindle_home):
     extra = pricing.repo_overrides(str(repo))
     assert {k: v.input for k, v in extra.items()} == {"a": 1, "b": 2, "c": 3}
     assert {k: v.input for k, v in pricing.repo_overrides(None).items()} == {"a": 1, "b": 1}
-
-
-def test_a_broken_config_means_list_prices_only(repo):
-    (repo / ".brindle").mkdir()
+    # a broken config means list prices only
     (repo / ".brindle" / "config.json").write_text("{nope")
+    (repo / ".brindle" / "config.local.json").unlink()
+    (brindle_home / "config.json").unlink()
     assert pricing.repo_overrides(str(repo)) == {}
 
 
@@ -102,9 +101,7 @@ def test_usage_cost():
     assert usage.usage_cost(None) is None
     line = usage.summary_line(u, usage.usage_cost(u))
     assert line.endswith("· sonnet · ~$0.07")
-
-
-def test_a_free_model_reads_free_in_the_result_line():
+    # a free model reads free in the result line
     u = usage.Usage(5000, 500, model="qwen3-coder:30b")
     assert usage.usage_cost(u, fallback=pricing.FREE) == 0.0
     assert usage.summary_line(u, 0.0, free=True).endswith("· qwen3-coder · Free")
@@ -146,6 +143,7 @@ def codex_worker(db, repo, session_ref=None, created=None):
 def test_codex_usage_is_the_rollouts_latest_total(db, repo, tmp_path):
     home = tmp_path / "codex-home"
     a, ws = codex_worker(db, repo)
+    assert usage.agent_usage(db, a) is None  # unknown without a rollout
     path = rollout(home, "01abc", ws.path, a.created_at + 1,
                    [(17075, 6912, 244), (35344, 23040, 290)])
     u = usage.agent_usage(db, a)
@@ -170,11 +168,6 @@ def test_codex_rollout_by_cwd_skips_older_and_other_sessions(db, repo, tmp_path)
     rollout(home, "01mine", ws.path, a.created_at + 2, [(300, 0, 3)])
     rollout(home, "01reviewer", ws.path, a.created_at + 90, [(4, 0, 1)])         # a later session there
     assert usage.agent_usage(db, a).input_tokens == 300
-
-
-def test_codex_usage_unknown_without_a_rollout(db, repo):
-    a, _ = codex_worker(db, repo)
-    assert usage.agent_usage(db, a) is None
 
 
 def test_codex_notify_records_the_thread_as_session_ref(db, repo, monkeypatch):

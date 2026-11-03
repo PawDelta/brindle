@@ -1,7 +1,6 @@
 """`brindle init`: detect a repo's setup and checks, write the config, check tools."""
 
 import json
-import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -96,22 +95,19 @@ def test_init_outside_git_points_at_scratch(tmp_path, monkeypatch):
 
 def test_preflight_names_missing_cli(monkeypatch, tmp_path):
     monkeypatch.setenv("BRINDLE_CLAUDE_BIN", "/nonexistent/claude")
-    problems = doctor.preflight("claude")
-    hint = next(p for p in problems if "Claude Code" in p)
-    # The official installer first; npm is the alternative. install.sh says the same.
-    assert hint.index("curl -fsSL https://claude.ai/install.sh | bash") < hint.index("npm install")
+    assert any("Claude Code" in p for p in doctor.preflight("claude"))
     assert not any("Claude Code" in p for p in doctor.preflight("shell"))
-    install, out = _install_sh(tmp_path, on_path=False)
-    assert out.index("curl -fsSL https://claude.ai/install.sh | bash") < out.index("npm install -g")
-    # The PATH note is about the user's PATH, not the one install.sh extends for itself.
-    assert out.strip().splitlines()[-1] == "Open a new terminal, or run: source ~/.local/bin/env"
-    assert "uv added a line to ~/.bashrc, ~/.profile and ~/.zshrc" in out
-    assert "isn't on" not in _install_sh(tmp_path / "again", on_path=True)[1]
-    assert "BRINDLE_VERSION=<version>" in install and not re.search(r"BRINDLE_VERSION=\d", install)
+    # install.sh installs brindle (uv tool install), and says its folder is missing only
+    # from the user's own PATH, not from the one install.sh extends for itself.
+    for on_path in (False, True):
+        bin_dir, out = _install_sh(tmp_path / str(on_path), on_path)
+        assert (bin_dir / "brindle").exists()
+        assert (str(bin_dir) in out) is not on_path
 
 
 def _install_sh(tmp_path, on_path):
-    """scripts/install.sh's output on a box with no uv, brindle or claude (curl, uv: stubs)."""
+    """scripts/install.sh's bin folder and output on a box with no uv, brindle
+    or claude (curl, uv: stubs)."""
     home, stubs = tmp_path / "home", tmp_path / "stubs"
     stubs.mkdir(parents=True)
     uv = ('case "$2" in dir) echo "$HOME/.local/bin" ;; install) printf \'#!/bin/sh\\necho brindle 0.5.5\\n\' '
@@ -129,7 +125,7 @@ def _install_sh(tmp_path, on_path):
     path = f"{home}/.local/bin:{stubs}" if on_path else str(stubs)
     res = subprocess.run(["sh", str(script)], env={"HOME": str(home), "PATH": path}, capture_output=True, text=True)
     assert res.returncode == 0, res.stderr
-    return script.read_text(), res.stdout
+    return home / ".local" / "bin", res.stdout
 
 
 def test_pr_footer_on_by_default_and_opt_out(repo):

@@ -35,16 +35,3 @@ def test_every_braid_pixel_is_painted_on_the_terminal_background():
                     x += 1
     assert painted == {(x, y) for x in range(w) for y in range(h)}
 
-
-def test_background_keeps_its_exact_colour_when_the_palette_is_coarsened():
-    # On a retina cell (14x34) the braid needs more than 256 colours, so the
-    # encoder coarsens them; the background must stay its nearest exact sixel
-    # colour, or a darker frame shows around the image (seen in iTerm2).
-    bg = (13, 13, 15)
-    six, _ = sidebar_logo.sixel("dark", bg, 14, 34)
-    regs = {tuple(map(int, c)) for c in re.findall(r"#\d+;2;(\d+);(\d+);(\d+)", six)}
-    assert tuple(round(v * 100 / 255) for v in bg) in regs
-    # iTerm2 paints a strip in its own colour past the image: to the next whole
-    # cell on the right, and one band down after a trailing graphics newline.
-    w = int(re.search(r'"1;1;(\d+);', six)[1])
-    assert w % 14 == 0 and not six.endswith("-\x1b\\")

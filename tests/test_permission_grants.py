@@ -240,7 +240,7 @@ def test_pending_asks_group_by_general_form_and_one_decision_resolves_the_group(
 
 
 @pytest.mark.parametrize("approved, siblings", [
-    ("git log --oneline -5", [("git diff HEAD~1 | head -50", "allow"), ("git log -1 && git reset --hard", "ask")]),
+    ("git log --oneline -5", [("git diff HEAD~1 | head -50", "allow"), ("git log -1 && git reset --hard", "deny")]),
     ("ls -la src | head", [("cd src && grep -rn foo . | wc -l", "allow"), ("ls && cd $DIR && cat secret.txt", "ask")]),
     ("uv run pytest tests/test_a.py -q 2>&1 | tail -5", [("uv run pytest tests/test_b.py", "allow"),
                                                            ("uv run rm -rf build", "ask")]),
@@ -287,10 +287,11 @@ def test_cd_chain_keeps_its_family(ws):
 
 @pytest.mark.parametrize("approved, siblings", [
     ("git add -A", [("git commit -m wip && git switch -c topic && git stash pop && git rebase main", "allow"),
-                    ("git branch -D old && git tag -d v1 && git stash drop && git merge -s ours topic", "allow"),
+                    ("git tag -d v1 && git stash drop && git merge -s ours topic", "allow"),
+                    ("git branch -D old && git merge -s ours topic", "deny"),         # branch -D: d-git-force
                     ("git commit -m wip && git push origin HEAD:main", "ask"),        # never a push
                     ("git push -f origin feature", "deny"),
-                    ("git reset --hard", "ask"),
+                    ("git reset --hard", "deny"),                                     # d-git-force
                     ("git clean -fdx", "deny"),
                     ("git checkout -- .", "ask"),                                     # the whole checkout
                     ("git -c core.hooksPath=/x commit -m wip", "ask"),
@@ -315,6 +316,7 @@ def test_cd_chain_keeps_its_family(ws):
                         ("rm -rf {lib}", "ask"),
                         ("rm -rf {out}/x", "ask"),                                   # outside every repo
                         ("mv app.py {out}/", "ask"),
+                        ("echo x > {out}/notes.txt", "ask"),
                         ("echo x > .git/hooks/pre-commit", "ask")]),
     ("uv run pytest tests/test_a.py", [("cd {lib} && uv run pytest", "allow")]),
 ])

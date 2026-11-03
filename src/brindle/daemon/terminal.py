@@ -21,7 +21,7 @@ from brindle.service.dto import ActionTerminalDTO
 log = logging.getLogger(__name__)
 
 ACTION_SESSION = "brindle-app"  # the daemon's own tmux session: the app's action terminals
-ACTION_TAG = "@brindle_terminal"
+ACTION_TAG = tmux.TERMINAL_TAG   # the person's own terminal: new_window leaves their variables
 ACTION_ID = re.compile(r"t-[0-9a-f]{16}")
 SHELL_KIND = "shell"        # the window name of the app's plain shells
 WINDOW_SIZE_RESET = "window-size-reset"     # under brindle's home: reset_window_sizes has run

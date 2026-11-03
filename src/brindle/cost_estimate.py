@@ -340,12 +340,15 @@ def available_reviewers(repo_root: str | None) -> list[str]:
     from brindle import agents
     from brindle.profiles import list_profiles
     from brindle.providers import unusable
+    from brindle.local_setup import memory_problem
 
     out = []
     for p in list_profiles(repo_root):
         if not p.name.startswith("reviewer"):
             continue
         if p.provider == "native":
+            if memory_problem(p):
+                continue
             if p.name == "reviewer-local" and not agents._local_reviewer_available():
                 continue
         elif p.provider in ("claude", "codex", "antigravity"):
@@ -364,7 +367,10 @@ def cheaper(tasks: list[TaskSpec], reviewer: str, candidates: list[str], *, dist
     """The same goal with the reviewer swapped for the cheapest available
     one (a local model first), or None if none is cheaper."""
     base = base or estimate(tasks, reviewer, dists=dists, price=price, repo_root=repo_root)
+    from brindle.local_setup import memory_problem
+
     others = [c for c in dict.fromkeys(candidates) if c != reviewer]
+    others = [c for c in others if not ((p := _profile(c, repo_root)) and memory_problem(p))]
     if not others:
         return None
     local = [c for c in others if is_local(c, repo_root)]
