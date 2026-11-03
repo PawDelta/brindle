@@ -637,7 +637,7 @@ def restart_review(db: DB, worker: Agent, ws: Workspace, since: float) -> bool:
         try:
             second = second_profile(db, cfg, current, ws)
             first = agents.default_review_profile(cfg, current, db, ws.repo_root, current.task) if second else None
-            profile = agents._review_profile(db, ws, first, cfg)
+            profile = agents._review_choice(db, ws, first, cfg)[0]   # start_review tells the reason
             sha = gates.head(ws)
             if agents._live_reviewer(db, ws, sha, profile) or (
                     cfg.checks and agents._review_pending(ws.id, profile, sha)):

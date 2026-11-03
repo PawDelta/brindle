@@ -81,7 +81,8 @@ def test_never_a_single_number_even_when_percentiles_match(db):
     assert low < high
 
 
-def test_cheaper_alternative_prefers_a_local_reviewer(db):
+def test_cheaper_alternative_prefers_a_local_reviewer(db, monkeypatch):
+    monkeypatch.setattr("brindle.local_setup.memory_problem", lambda profile: None)
     seed(db, "/repo", 6)
     seed(db, "/repo", 6, reviewer="reviewer-codex", weight="light", base=50_000)
     text = ce.describe([ce.TaskSpec("developer", "medium")] * 2, "reviewer", repo_root="/repo",

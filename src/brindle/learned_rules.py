@@ -302,6 +302,7 @@ def default_call(repo_root: str, db: DB | None = None) -> ModelCall:
                 f"{chosen.base_url}: the grouping step only sends findings off this machine "
                 "through a profile in ~/.brindle/agents or a built-in one")
     else:
+        from brindle.local_setup import memory_problem
         from brindle.native import runner
 
         for name in profile_names(repo_root):
@@ -313,6 +314,10 @@ def default_call(repo_root: str, db: DB | None = None) -> ModelCall:
                 continue
             try:
                 if runner.probe(runner.endpoint_for(p), timeout=2.0)[0]:
+                    # A model that doesn't fit would reload under memory pressure: use Claude.
+                    if why := memory_problem(p):
+                        log.info("grouping step skips %s: %s", p.name, why)
+                        continue
                     chosen = p
                     break
             except ValueError:

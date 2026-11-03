@@ -819,6 +819,10 @@ def model_problem(profile_name: str, ws: Workspace, *, agent: Agent | None = Non
         if m is not None:
             profile = managed_models.apply_profile(m, profile)
     _airgap_check(profile, ws.repo_root)
+    from brindle.local_setup import memory_problem
+
+    if problem := memory_problem(profile):
+        return problem
     if not get_provider(profile.provider).launches_process:
         return None
     agent = agent or Agent("preflight", ws.id, profile_name, profile.provider, None,
@@ -2942,11 +2946,13 @@ def default_review_profile(cfg: RepoConfig, worker: Agent | None, db: DB | None 
 
 def _local_reviewer_available() -> bool:
     """Whether the built-in ``reviewer-local`` profile's model is served
-    right now. Any failure counts as not available."""
+    right now and fits in free memory. Any failure counts as not available."""
+    from brindle.local_setup import memory_problem
     from brindle.native import runner
 
     try:
-        return runner.served(load_profile("reviewer-local"))
+        profile = load_profile("reviewer-local")
+        return runner.served(profile) and not memory_problem(profile)
     except Exception:
         return False
 
@@ -2969,12 +2975,31 @@ def _review_worktree_present(ws: Workspace) -> None:
 
 
 def _review_profile(db: DB, ws: Workspace, profile: str | None, cfg: RepoConfig) -> str:
+    """``_review_choice``'s profile. When it passed over a reviewer that can't
+    run (a local model that doesn't fit in memory, say), the supervisor of
+    ``ws``'s worker is told why, whichever path dispatches the review."""
+    name, note = _review_choice(db, ws, profile, cfg)
+    if note:
+        log.warning("%s", note)
+        worker = workspace_worker(db, ws)
+        if worker and worker.parent_id and db.get_agent(worker.parent_id):
+            try:
+                send_message(db, worker.parent_id, note)
+            except AgentError:
+                pass   # a supervisor that can't take messages has the log
+    return name
+
+
+def _review_choice(db: DB, ws: Workspace, profile: str | None,
+                   cfg: RepoConfig) -> tuple[str, str | None]:
     """The reviewer profile to use, checked to be one that can run, rather than
-    spawning a reviewer doomed to fail in a dead pane. ``profile`` asked for by
+    spawning a reviewer doomed to fail in a dead pane, and why any earlier
+    candidate was passed over (None when the first could run). ``profile`` asked for by
     name is the only candidate; otherwise the owner's pick, then each of
     ``cfg.reviewer_fallbacks`` in order: the first that exists, can run on its
     provider here and that policy allows. Raises ``AgentError`` for the first
-    candidate's problem when none can."""
+    candidate's problem when none can. Sends nothing: a check before dispatch
+    uses it so the supervisor hears the reason once."""
     if profile is not None:
         candidates = [profile]
     else:
@@ -2985,9 +3010,11 @@ def _review_profile(db: DB, ws: Workspace, profile: str | None, cfg: RepoConfig)
     for name in candidates:
         try:
             _reviewer_can_run(name, ws, cfg)
-            return name
         except AgentError as e:
             first = first or e
+            continue
+        return name, (f"Review of {ws.branch}: {first}; reviewing with {name} instead."
+                      if first is not None else None)
     raise first
 
 
@@ -3000,6 +3027,10 @@ def _reviewer_can_run(name: str, ws: Workspace, cfg: RepoConfig) -> None:
     except KeyError as e:
         raise AgentError(str(e)) from e
     _airgap_check(chosen, ws.repo_root)   # before any of the branch is read for the brief
+    from brindle.local_setup import memory_problem
+
+    if why := memory_problem(chosen):
+        raise AgentError(f"reviewer profile {name!r} can't run: {why}")
     if why := unusable(chosen.provider, chosen.env):
         raise AgentError(
             f"reviewer profile {name!r} can't run: {why}. "
