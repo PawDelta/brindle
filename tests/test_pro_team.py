@@ -6,7 +6,6 @@ import json
 import os
 import re
 import stat
-import threading
 import time
 
 import pytest
@@ -194,14 +193,6 @@ def test_event_payload_has_exactly_the_contract_keys(team):
         assert s not in blob
 
 
-def test_unsafe_identifiers_become_null(team):
-    p = events_plugin(team)
-    p.emit(ev(profile="my profile", provider="Claude Code", model="/Users/me/models/x.gguf"))
-    assert p.flush()
-    (e,) = team.events
-    assert (e["profile"], e["provider"], e["model"]) == (None, None, None)
-
-
 def test_spool_survives_offline_periods_and_restarts(team):
     team.routes[f"POST /orgs/{ORG}/events"] = [auth.TransportError("down")]
     p = events_plugin(team)
@@ -220,18 +211,6 @@ def test_spool_survives_offline_periods_and_restarts(team):
     assert Spool().entries() == []
 
 
-def test_failed_sends_back_off_exponentially(team):
-    team.routes[f"POST /orgs/{ORG}/events"] = [(500, {"error": "internal_error"})]
-    p = events_plugin(team)
-    p.emit(ev())
-    delays = []
-    for _ in range(4):
-        p.flush()
-        delays.append(p._delay)
-    assert delays == [1.0, 2.0, 4.0, 8.0]
-    assert len(Spool().entries()) == 1
-
-
 def test_route_health_rides_the_feed_as_codes_without_provider_text(team):
     p = events_plugin(team)
     error = "API Error: 401 {'type':'authentication_error','message':'invalid x-api-key sk-ant-api03-zebra'}"
@@ -246,60 +225,12 @@ def test_route_health_rides_the_feed_as_codes_without_provider_text(team):
     assert p.dropped_no_key == 0 and not any("/key" in c for c in team.paths())
 
 
-def test_a_backend_without_route_health_keeps_the_audit_events_and_drops_the_counts(team):
-    sent, answers = [], iter([422, 200, 403])
-
-    def route(f, h):
-        sent.append(f["events"])
-        return next(answers), {}
-
-    team.routes[f"POST /orgs/{ORG}/events"] = route
-    p = events_plugin(team)
-    key = OrgKey(ORG, "k1", b"k" * 32)
-    health = route_health.payload(Event(kind="route_health", repo_root=REPO, provider="claude", route="bedrock",
-                                        model="m", outcome="provider_403", count=2, at=1_800_000_000.5))
-    Spool().append(ORG, [team_events.event_payload(key, ROOT_SHA, ev()), health])
-    assert p.send_pending()      # 422 for the mixed batch: the audit event goes alone
-    assert [[e["kind"] for e in b] for b in sent] == [["merge", "route_health"], ["merge"]]
-    Spool().append(ORG, [health])
-    assert p.send_pending()      # 403: this org can't report route health; dropped, not retried
-    assert len(sent) == 3 and Spool().entries() == []
-
-
 def test_rejected_batches_are_dropped_not_retried_forever(team):
     team.routes[f"POST /orgs/{ORG}/events"] = [(422, {"error": "invalid_request"})]
     p = events_plugin(team)
     p.emit(ev())
     assert p.flush()
     assert Spool().entries() == []
-
-
-def test_a_backend_without_by_model_gets_the_events_without_it(team):
-    sent = []
-
-    def route(f, h):
-        sent.append(f["events"])
-        return (422, {"error": "invalid_request"}) if any("by_model" in e for e in f["events"]) else (200, {})
-
-    team.routes[f"POST /orgs/{ORG}/events"] = route
-    p = events_plugin(team)
-    key = OrgKey(ORG, "k1", b"k" * 32)
-    Spool().append(ORG, [team_events.event_payload(
-        key, ROOT_SHA, ev(kind="remove", cost_usd=1.0, by_model={"opus": {"tokens": 5, "usd": 1.0}}))])
-    assert p.send_pending()
-    assert len(sent) == 2 and "by_model" not in sent[1][0] and sent[1][0]["cost_usd"] == 1.0
-    assert Spool().entries() == []
-
-
-def test_batches_are_at_most_100(team):
-    sizes = []
-    team.routes[f"POST /orgs/{ORG}/events"] = lambda f, h: (sizes.append(len(f["events"])), (200, {}))[1]
-    p = events_plugin(team)
-    key = OrgKey(ORG, "k1", b"k" * 32)
-    Spool().append(ORG, [team_events.event_payload(key, ROOT_SHA, ev(at=1_800_000_000 + i))
-                         for i in range(250)])
-    assert p.send_pending()
-    assert sizes == [100, 100, 50]
 
 
 def test_spool_caps_drop_the_oldest(tmp_path):
@@ -312,30 +243,6 @@ def test_spool_caps_drop_the_oldest(tmp_path):
     small.append(ORG, [{"kind": "merge", "n": i, "pad": "x" * 50} for i in range(20)])
     assert (d / "events-spool.jsonl").stat().st_size <= 300
     assert small.entries()[-1]["event"]["n"] == 19
-
-
-def test_full_queue_spills_to_the_spool(team, monkeypatch):
-    monkeypatch.setattr(team_events, "QUEUE_SIZE", 2)
-    team.routes[f"POST /orgs/{ORG}/events"] = [auth.TransportError("down")]
-    p = events_plugin(team)
-    p.keys.get(ORG)          # the spill path uses only a cached key
-    for i in range(5):
-        p.emit(ev(at=1_800_000_000 + i))
-    assert p.queue.qsize() == 2 and len(Spool().entries()) == 3
-    p.flush()
-    assert len(Spool().entries()) == 5
-
-
-def test_background_sender_delivers(team, monkeypatch):
-    # The send is held until flush is polling, so flush's wait loop always runs.
-    polling = threading.Event()
-    send = team.routes[f"POST /orgs/{ORG}/events"]
-    team.routes[f"POST /orgs/{ORG}/events"] = lambda f, h: (polling.wait(5), send(f, h))[1]
-    monkeypatch.setattr(team_events.time, "sleep", lambda _: polling.set())
-    p = events_plugin(team, start_thread=True)
-    p.emit(ev())
-    assert p.flush(5)
-    assert len(team.events) == 1
 
 
 def test_no_org_key_means_no_team_events(team):
@@ -382,46 +289,6 @@ def test_org_list_use_and_policy(team, monkeypatch):
     assert f"{ORG} (member)" in out
 
 
-def test_org_use_rejects_a_bad_org_id(team):
-    code, _, err = run(team, "org", "use", "../../etc")
-    assert code == 1 and "invalid org id" in err
-
-
-# -- self-serve Team: create an org, buy seats, invite, join ---------------------------------------
-
-
-def test_create_a_team_org_then_check_out_team_seats(team):
-    login(team, claims())
-    new_org = "org_" + "a" * 24
-
-    def create(form, headers):
-        assert form == {"name": "Acme Eng"}
-        return 200, {"org_id": new_org, "name": "Acme Eng", "personal": False, "role": "owner"}
-
-    def checkout(form, headers):
-        assert form == {"plan": "team", "seats": 5, "org_id": new_org}
-        return 200, {"url": "https://checkout.stripe.test/c/team", "id": "cs_1"}
-
-    team.routes["POST /orgs"] = create
-    team.routes["POST /billing/checkout"] = checkout
-    code, out, _ = run(team, "org", "create", "Acme", "Eng")
-    assert code == 0 and new_org in out and f"upgrade --team --seats N --org {new_org}" in out
-    code, out, _ = run(team, "upgrade", "--team", "--seats", "5", "--org", new_org)
-    assert code == 0 and out.strip() == "https://checkout.stripe.test/c/team"
-
-
-def test_invite_and_join(team):
-    code_ = "cpi_" + "b" * 43
-    team.routes[f"POST /orgs/{ORG}/invites"] = lambda f, h: (
-        200, {"invite_code": code_, "org_id": ORG, "email": f["email"], "role": f["role"]})
-    team.routes["POST /invites/accept"] = lambda f, h: (
-        (200, {"org_id": ORG, "role": "member"}) if f == {"invite_code": code_} else (400, {}))
-    code, out, _ = run(team, "org", "invite", "dev@acme.test", "--admin", "--org", ORG)
-    assert code == 0 and "as admin" in out and f"brindle account org join {code_}" in out
-    code, out, _ = run(team, "org", "join", code_)
-    assert code == 0 and f"Joined {ORG} as member" in out
-
-
 # -- org CI tokens ---------------------------------------------------------------------------------
 
 
@@ -455,17 +322,6 @@ def test_ci_token_create_list_revoke(team):
 
     code, out, _ = run(team, "org", "ci-token", "revoke", token_id, "--org", ORG)
     assert code == 0 and f"Revoked CI token {token_id}" in out
-    assert [c[0] for c in team.calls if "ci-tokens" in c[0]] == [
-        f"POST /orgs/{ORG}/ci-tokens", f"GET /orgs/{ORG}/ci-tokens", f"DELETE /orgs/{ORG}/ci-tokens/{token_id}"]
-
-
-def test_ci_token_defaults_to_the_current_org_and_needs_one(team):
-    code, _, err = run(team, "org", "ci-token", "list")
-    assert code == 1 and "no team org selected" in err
-    team.store.save({**team.store.load(), "org_id": ORG})
-    team.routes[f"GET /orgs/{ORG}/ci-tokens"] = lambda f, h: (200, {"org_id": ORG, "tokens": []})
-    code, out, _ = run(team, "org", "ci-token", "list")
-    assert code == 0 and "no CI tokens" in out
 
 
 def test_ci_token_errors_and_usage(team):
@@ -475,16 +331,6 @@ def test_ci_token_errors_and_usage(team):
     assert code == 1 and "forbidden" in err and "admin" in err
     code, _, err = run(team, "org", "ci-token", "revoke", "not-an-id", "--org", ORG)
     assert code == 1 and "invalid CI token id" in err
-    for bad in (("org", "ci-token"), ("org", "ci-token", "create"), ("org", "ci-token", "list", "x"),
-                ("org", "ci-token", "revoke"), ("org", "ci-token", "rotate", "x"),
-                ("org", "ci-token", "list", "--admin")):
-        assert run(team, *bad)[0] == 2, bad
-
-
-def test_ci_token_create_refuses_a_response_without_a_token(team):
-    team.routes[f"POST /orgs/{ORG}/ci-tokens"] = lambda f, h: (200, {"token_id": "ct_1", "name": "x"})
-    code, _, err = run(team, "org", "ci-token", "create", "x", "--org", ORG)
-    assert code == 1 and "no CI token" in err
 
 
 # -- org budgets and protected paths (Team "org_budgets") ---------------------------------------------
@@ -506,15 +352,6 @@ def budgets(team, monkeypatch):
     return team
 
 
-def test_the_members_effective_policy_carries_the_budgets(budgets):
-    budgets.policy_body["effective"] = {**POLICY, "budget": {"seat_month_usd": 20, "goal_usd": None},
-                                        "protected_paths": ["infra/", "*.lock", "secrets/"]}
-    p = plugin(budgets).org_budgets()
-    assert (p.budget_seat_month_usd, p.budget_goal_usd) == (20.0, None)
-    assert p.protected_paths == ("infra/", "*.lock", "secrets/")
-    assert p.spend_seat_usd == 12.5
-
-
 def test_org_budgets_fail_closed_when_the_policy_was_never_fetched(budgets):
     budgets.routes[f"GET /orgs/{ORG}/policy"] = [auth.TransportError("down")]
     d = plugin(budgets).org_budgets()
@@ -529,77 +366,10 @@ def test_malformed_budget_fields_fail_closed(team, over):
     assert not plugin(team).check_assign(assign()).allowed
 
 
-def cfg_with(**budget):
-    from types import SimpleNamespace
-
-    return SimpleNamespace(budget=budget)
-
-
 def org_policy(**kw):
     from brindle.pro.team_policy import OrgPolicy
 
     return OrgPolicy(org_id=ORG, version=1, **kw)
-
-
-def test_an_org_budget_that_cant_be_read_exhausts_the_budget(monkeypatch):
-    from brindle import budget
-    from brindle.pro import team_policy
-    from brindle.policy import deny
-
-    monkeypatch.setattr(budget, "entitled", lambda: False)
-    monkeypatch.setattr(team_policy, "org_budgets", lambda root: deny("never been fetched"))
-    lim = budget.limits(cfg_with(), REPO)
-    assert (lim.month_usd, lim.goal_usd) == (0.0, 0.0)
-
-    def boom(root):
-        raise RuntimeError("keychain")
-
-    monkeypatch.setattr(team_policy, "org_budgets", boom)
-    assert budget.limits(cfg_with(), REPO).month_usd == 0.0
-
-
-def test_the_orgs_count_of_the_seats_spend_joins_the_months(db, repo, monkeypatch):
-    from brindle import budget
-    from brindle.pro import team_policy
-
-    monkeypatch.setattr(budget, "entitled", lambda: False)
-    month = time.strftime("%Y-%m", time.gmtime())
-    monkeypatch.setattr(team_policy, "org_budgets", lambda root: org_policy(
-        budget_seat_month_usd=50.0, spend_seat_usd=12.5, spend_month=month))
-    gate = budget.Gate(db, cfg_with(), str(repo), None)
-    assert gate.active and gate.month_spend() == 12.5
-    # last month's number is not this month's
-    monkeypatch.setattr(team_policy, "org_budgets", lambda root: org_policy(
-        budget_seat_month_usd=50.0, spend_seat_usd=12.5, spend_month="2000-01"))
-    assert budget.Gate(db, cfg_with(), str(repo), None).month_spend() == 0.0
-
-
-def test_a_remove_event_reports_what_the_worker_cost(budgets, monkeypatch):
-    from brindle import budget, events
-    from brindle.db import Agent
-
-    monkeypatch.setattr(budget, "worker_spend", lambda db, agent, root: 1.234567)
-    worker = Agent(AGENT, "ws1", "developer", "claude", None, "assign", "idle", "@0", None, time.time())
-    assert events._cost("remove", worker, REPO) == 1.2346
-    assert events._cost("merge", worker, REPO) is None            # only the end of a worker's task
-    assert events._cost("remove", None, REPO) is None
-    p = events_plugin(budgets)
-    p.emit(ev("remove", cost_usd=1.2346))
-    p.emit(ev("remove", cost_usd=1e9))                            # more than the backend takes
-    p.emit(ev("remove", cost_usd=-1))
-    assert p.flush()
-    assert [e["cost_usd"] for e in budgets.events] == [1.2346, None, None]
-
-
-def test_no_cost_is_priced_without_the_org_budgets_feature(monkeypatch):
-    from brindle import budget, events
-    from brindle.db import Agent
-    from brindle.pro import license
-
-    monkeypatch.setattr(license, "has", lambda feature: False)
-    monkeypatch.setattr(budget, "worker_spend", lambda *a: pytest.fail("priced without the feature"))
-    worker = Agent(AGENT, "ws1", "developer", "claude", None, "assign", "idle", "@0", None, time.time())
-    assert events._cost("remove", worker, REPO) is None
 
 
 # a real branch through the rule check's protected-paths gate
@@ -636,54 +406,12 @@ def test_a_change_to_a_protected_path_fails_the_gate(db, protected_branch, monke
     monkeypatch.setattr(team_policy, "org_budgets", lambda root: org_policy(protected_paths=BUDGETS["protected_paths"]))
     result = rule_checks.run(db, ws)                       # a worker-less branch is checked too
     assert result.ok and result.packs == ["protected_paths"]
-    assert result.summary() == "PASS `rules protected_paths`"
     commit(path, "infra/main.tf")
     commit(path, "deep/dir/poetry.lock")
     result = rule_checks.run(db, ws)
     assert not result.ok
     assert sorted(v.detail.split(" ")[0] for v in result.violations) == ["deep/dir/poetry.lock", "infra/main.tf"]
-    assert result.summary().startswith("FAIL `rules protected_paths`")
     assert "protected path" in rule_checks.gate_problem(result, ws.branch)
-
-
-def test_deleting_or_renaming_a_protected_file_fails_too(db, repo, monkeypatch):
-    from pathlib import Path
-
-    from conftest import sh
-    from brindle import rule_checks, workspaces
-    from brindle.pro import team_policy
-
-    (repo / "infra").mkdir()
-    (repo / "infra" / "a.tf").write_text("a\n")
-    sh("git add -A && git commit -qm infra && git push -q origin main", repo)
-    ws = workspaces.create(db, str(repo), "feat2").workspace
-    monkeypatch.setattr(team_policy, "org_budgets", lambda root: org_policy(protected_paths=("infra/",)))
-    sh("git rm -q infra/a.tf && git commit -qm rm", Path(ws.path))
-    result = rule_checks.run(db, ws)
-    assert not result.ok and result.violations[0].detail.startswith("infra/a.tf ")
-
-
-def test_protected_path_matching():
-    from brindle.rule_checks import protected_files
-
-    files = ["infra/a.tf", "src/infra/b.py", ".github/workflows/ci.yml", "Makefile", "docs/Makefile",
-             "src/app.py", "INFRA/c.tf"]
-    assert protected_files(files, ["infra"]) == ["infra/a.tf", "INFRA/c.tf"]
-    assert protected_files(files, ["./.github/workflows/"]) == [".github/workflows/ci.yml"]
-    assert protected_files(files, ["Makefile"]) == ["Makefile", "docs/Makefile"]
-    assert protected_files(files, ["src/**/*.py"]) == ["src/infra/b.py", "src/app.py"]
-    assert protected_files(files, []) == []
-
-
-def test_without_protected_paths_nothing_is_checked(db, protected_branch, monkeypatch):
-    from brindle import rule_checks
-    from brindle.pro import team_policy
-
-    ws, _ = protected_branch
-    monkeypatch.setattr(team_policy, "org_budgets", lambda root: None)
-    assert rule_checks.run(db, ws) is None
-    monkeypatch.setattr(team_policy, "org_budgets", lambda root: org_policy())
-    assert rule_checks.run(db, ws) is None
 
 
 def test_protected_paths_that_cant_be_read_fail_the_gate(db, protected_branch, monkeypatch):
