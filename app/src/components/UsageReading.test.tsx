@@ -14,6 +14,7 @@ import { REPO, root } from "../test/fixtures";
 import { PtyViewsProvider } from "../api/ptyView";
 import { standInViews } from "../test/panes";
 import { DESIGN_NOW, usageScenario, type UsageScenario } from "../test/usage";
+import { DEMO_OFFERED_KEY } from "../screens/Onboarding";
 import { Sidebar } from "./Sidebar";
 
 vi.mock("./PtyTerminal", () => import("../test/panes"));
@@ -22,6 +23,7 @@ const session: SessionDTO = { id: "sup1", workspace_id: "proj", profile: "superv
 
 beforeEach(() => {
   localStorage.clear();
+  localStorage.setItem(DEMO_OFFERED_KEY, "1");     // past the first launch's demo offer
   // The design's clock, so the readings say what it says; timers stay real.
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(DESIGN_NOW);

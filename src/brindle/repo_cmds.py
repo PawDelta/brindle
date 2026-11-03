@@ -38,13 +38,14 @@ def repo_add(
         a = repos.attach(db, root_id, path, name)
     except repos.RepoError as e:
         _fail(str(e))
-    typer.echo(f"attached {a.repo_root} as {a.alias}")
+    typer.echo(f"attached {a.repo_root} as {a.alias} (this session's branch there: {a.branch})")
     try:
         agents.send_message(
             db, root_id,
             f"[brindle] The user attached the repo {a.repo_root} to this session as `{a.alias}`. "
             f"Pass repo=\"{a.alias}\" to assign or handoff to put a worker there; it gets that "
-            "repo's own checks, review and merge. list_repos shows every attached repo.",
+            f"repo's own checks and review, and merges into this session's branch there, {a.branch}. "
+            "list_repos shows every attached repo.",
             sender_id=None)
     except Exception:  # noqa: BLE001 - paused or unreachable: it learns on resume
         pass
@@ -52,7 +53,7 @@ def repo_add(
 
 @app.command("rm")
 def repo_rm(ref: str = typer.Argument(..., metavar="ALIAS_OR_PATH")) -> None:
-    """Detach a repo from the current session (its worktrees and branches stay)."""
+    """Detach a repo from the current session (its worktrees and branches, the session's own included, stay)."""
     db = DB()
     root_id = _root(db)
     try:

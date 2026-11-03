@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import Callable
 
 from brindle.db import DB, HistoryEntry, LearnedRule
+from brindle.redact import mask
 
 log = logging.getLogger(__name__)
 
@@ -185,7 +186,9 @@ New findings:
 def build_prompt(findings: list[Finding], known: list[LearnedRule]) -> str:
     known_text = "\n".join(f"- key {r.key} (profile {r.profile}): {r.title}: {r.rule}" for r in known) or "(none)"
     found_text = "\n\n".join(f"[{f.id}] profile {f.profile}, branch {f.branch}:\n{f.text}" for f in findings)
-    return PROMPT.format(known=known_text, findings=found_text)
+    # The grouping call can leave the machine; findings recorded before
+    # history rows were masked still hold whatever the reviewer quoted.
+    return mask(PROMPT.format(known=known_text, findings=found_text))
 
 
 @dataclass
@@ -302,6 +305,7 @@ def default_call(repo_root: str, db: DB | None = None) -> ModelCall:
                 f"{chosen.base_url}: the grouping step only sends findings off this machine "
                 "through a profile in ~/.brindle/agents or a built-in one")
     else:
+        from brindle.local_setup import memory_problem
         from brindle.native import runner
 
         for name in profile_names(repo_root):
@@ -313,6 +317,10 @@ def default_call(repo_root: str, db: DB | None = None) -> ModelCall:
                 continue
             try:
                 if runner.probe(runner.endpoint_for(p), timeout=2.0)[0]:
+                    # A model that doesn't fit would reload under memory pressure: use Claude.
+                    if why := memory_problem(p):
+                        log.info("grouping step skips %s: %s", p.name, why)
+                        continue
                     chosen = p
                     break
             except ValueError:

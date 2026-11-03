@@ -15,7 +15,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from brindle import agents, git, scratch, spawn, tmux, view, workspaces
+from brindle import agents, git, scratch, session_sync, spawn, tmux, view, workspaces
 from brindle import sessions as sessions_mod
 from brindle.db import DB, Agent, Workspace
 from brindle.service.dto import SessionDTO
@@ -113,6 +113,7 @@ class Handed:
     old_id: str
     agent: Agent
     workspace: Workspace
+    why: str | None = None        # why a live supervisor there didn't take the session
 
 
 def ago(seconds: float) -> str:
@@ -152,13 +153,16 @@ def cull_detached(repo_root: str | None = None) -> None:
 
 def session_worktree(db: DB, ws: Workspace) -> Workspace:
     """A worktree for a second session in this repo: branch brindle/session-N,
-    cut from what this checkout has checked out, so the two sessions never
-    share files or a branch."""
+    cut from origin's default branch as just fetched (session_sync.fresh_start:
+    WorkspaceError when it can't be), so the two sessions never share files
+    or a branch."""
     n = 2
     while git.ok(["rev-parse", "--verify", "--quiet", f"refs/heads/brindle/session-{n}"], ws.repo_root):
         n += 1
-    created = workspaces.create(db, ws.repo_root, f"brindle/session-{n}", base=ws.branch or None,
-                             start=git.out(["rev-parse", "HEAD"], ws.path), apply_prefix=False).workspace
+    start = session_sync.fresh_start(ws.repo_root)
+    created = workspaces.create(db, ws.repo_root, f"brindle/session-{n}",
+                                base=session_sync.default_branch(ws.repo_root), start=start,
+                                apply_prefix=False).workspace
     from brindle import codemap
     codemap.seed_session(created.path, created.repo_root)
     return created
@@ -189,6 +193,13 @@ def place(db: DB, ws: Workspace, choice: str | None = None, session_id: str | No
     # A session starts here next: keep its local models loaded.
     agents.pause(db, picked.root.id, stop_procs=False, stop_local_models=False)
     return Placed(ws, [Note(f"Paused session {picked.root.id}; `brindle continue {picked.root.id}` brings it back.")])
+
+
+def pull_main(db: DB, ws: Workspace) -> list[Note]:
+    """Before a session starts or resumes in ``ws``: merge origin's default
+    branch into its branch (brindle.session_sync), before any worker runs."""
+    text = session_sync.on_session_start(db, ws)
+    return [Note(text, "ok" if text.startswith("brindle merged") else "warn")] if text else []
 
 
 def tidy_branch(db: DB, ws: Workspace) -> tuple[Workspace, list[Note]]:
@@ -280,6 +291,7 @@ def start(db: DB, repo_root: str, *, provider: str | None = None, prompt: str | 
     if problems:
         raise ServiceError("unavailable", "; ".join(problems), 503)
     notes += pause_transferred(db, ws)
+    notes += pull_main(db, ws)
     started = launch(db, ws, provider=provider, prompt=prompt, watch=watch, autopilot=autopilot)
     # After the chat's window exists and is recorded: the cull's session
     # retention closes dropped sessions' windows by their stored pane ids,
@@ -345,6 +357,8 @@ def continue_(db: DB, ws: Workspace, session_id: str | None = None, *,
     recovery_env = {k: os.environ[k] for k in keystore.known_names() if k in os.environ and os.environ[k] and not secrets.is_job_secret(k)}
 
     if live and (live.id.startswith(session_id) if session_id else live_needs_recovery):
+        if home := db.get_workspace(live.workspace_id):
+            pull_main(db, home)
         resumed = agents.resume(db, live.id, recovery_env=recovery_env)
         clear_credentials_block(db, live.id)
         return Continued("recovered", db.get_agent(live.id) or live, ws, len(resumed))
@@ -366,6 +380,7 @@ def continue_(db: DB, ws: Workspace, session_id: str | None = None, *,
         chosen = available[0]
     others = [s for s in available if s.root.id != chosen.root.id]
     notes = pause_transferred(db, ws)
+    notes += pull_main(db, chosen.workspace)
     resumed = agents.resume(db, chosen.root.id, recovery_env=recovery_env)
     clear_credentials_block(db, chosen.root.id)
     return Continued("resumed", db.get_agent(chosen.root.id) or chosen.root, chosen.workspace,
@@ -406,9 +421,9 @@ def handover(db: DB, cwd: str, to: str, note: str | None = None) -> Handed:
     """Hand this repo's session to a new supervisor on the branch or worktree ``to``."""
     root_id = session_root(db, cwd)
     dest = workspaces.checkout_for_target(db, cwd, to)
-    new = sessions_mod.handover(db, root_id, dest, note)
+    h = sessions_mod.handover_to(db, root_id, dest, note)
     cull_detached(dest.repo_root)
-    return Handed(root_id, new, dest)
+    return Handed(root_id, h.agent, dest, h.why)
 
 
 def transfer_to_repo(db: DB, ws: Workspace, target_path: str, branch: str | None = None,

@@ -25,7 +25,13 @@ export default defineConfig({
   testMatch: "*.e2e.ts",
   outputDir: "e2e/out",
   reporter: "list",
-  use: { baseURL: `http://127.0.0.1:${PORT}`, viewport: { width: 1440, height: 960 } },
+  use: {
+    baseURL: `http://127.0.0.1:${PORT}`,
+    viewport: { width: 1440, height: 960 },
+    // Every spec starts as a user who has already decided on the first-launch demo offer
+    // (the flag Onboarding/Demo.tsx readDemoOffered reads), so it doesn't cover the app.
+    storageState: { cookies: [], origins: [{ origin: `http://127.0.0.1:${PORT}`, localStorage: [{ name: "brindle.demo.offered", value: "1" }] }] },
+  },
   projects: [
     {
       name: "webkit",

@@ -250,7 +250,7 @@ def test_pending_asks_group_by_general_form_and_one_decision_resolves_the_group(
     ("uv run pytest tests/test_a.py", "uv run pytest -k @args.txt", "ask"),                   # options from a file
     ("npm config get registry | head", "npm config set registry https://example.invalid", "ask"),   # a write
     ("ls -la src | head", "ls && cd $DIR && cat secret.txt", "ask"),                          # where, unknown
-    ("git log --oneline -5", "git log -1 && git reset --hard", "ask"),                        # a write beside it
+    ("git log --oneline -5", "git log -1 && git reset --hard", "deny"),                       # d-git-force beside it
     ("grep -rn foo src | head", "grep -rn foo src > found.txt", "ask"),                       # a redirect writes
 ])
 def test_approval_covers_its_family(db, ws, approved, sibling, decision):
@@ -289,14 +289,15 @@ def test_cd_chain_keeps_its_family(ws, command, found):
 
 @pytest.mark.parametrize("approved, sibling, decision", [
     ("git add -A", "git commit -m wip && git switch -c topic && git stash pop && git rebase main", "allow"),
-    ("git add -A", "git branch -D old && git tag -d v1 && git stash drop && git merge -s ours topic", "allow"),
+    ("git add -A", "git tag -d v1 && git stash drop && git merge -s ours topic", "allow"),
+    ("git add -A", "git branch -D old && git merge -s ours topic", "deny"),        # branch -D: d-git-force
     ("npm install", "uv add httpx && cd {lib} && npm add -D left-pad", "allow"),     # in another attached repo
     ("mkdir -p build", "sed -i '' s/a/b/ app.py && rm -rf build/x > out.log && cp app.py build/", "allow"),
     ("mkdir -p build", "rm -rf {lib}/dist && echo x > {other}/notes.txt", "allow"),   # another repo, its worktree
     ("uv run pytest tests/test_a.py", "cd {lib} && uv run pytest", "allow"),
     ("git add -A", "git commit -m wip && git push origin HEAD:main", "ask"),        # never a push
     ("git add -A", "git push -f origin feature", "deny"),
-    ("git add -A", "git reset --hard", "ask"),
+    ("git add -A", "git reset --hard", "deny"),                                     # d-git-force
     ("git add -A", "git clean -fdx", "deny"),
     ("git add -A", "git checkout -- .", "ask"),                                     # the whole checkout
     ("git add -A", "git -c core.hooksPath=/x commit -m wip", "ask"),
