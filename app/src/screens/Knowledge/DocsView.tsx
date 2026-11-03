@@ -217,17 +217,22 @@ interface ReaderProps {
   onOpen(id: string): void;
   /* The scopes the doc turned out to be in, so the view learns teams from it. */
   onScopes(scopes: DocScope[]): void;
+  /* A locally indexed document, shown from its own text rather than fetched as an analysis doc; it can't be shared, exported or deleted. */
+  local?: { title: string; markdown: string };
 }
 
 /* The doc as written, and beside it what the server read from it. */
-export function Reader({ client, repo, id, targets, titles, pickFolder, onBack, onDeleted, onOpen, onScopes }: ReaderProps) {
-  const [doc, setDoc] = useState<AnalysisDocDetail | null>(null);
+export function Reader({ client, repo, id, targets, titles, pickFolder, onBack, onDeleted, onOpen, onScopes, local }: ReaderProps) {
+  const [doc, setDoc] = useState<AnalysisDocDetail | null>(
+    local ? ({ id, title: local.title, files: [{ name: "", md: local.markdown }], shared_with: [] } as unknown as AnalysisDocDetail) : null,
+  );
   const [error, setError] = useState<string | null>(null);
   const [menu, setMenu] = useState<"share" | "export" | "delete" | null>(null);
   const [busy, setBusy] = useState(false);
   const [said, setSaid] = useState<string | null>(null);
 
   const load = useCallback(() => {
+    if (local) return;
     client.doc(id, repo).then(
       (d) => {
         setDoc(d);
@@ -236,7 +241,7 @@ export function Reader({ client, repo, id, targets, titles, pickFolder, onBack, 
       },
       (e: unknown) => setError(message(e)),
     );
-  }, [client, id, repo, onScopes]);
+  }, [client, id, repo, onScopes, local]);
   useEffect(load, [load]);
 
   const act = async (what: () => Promise<string>) => {
@@ -286,7 +291,7 @@ export function Reader({ client, repo, id, targets, titles, pickFolder, onBack, 
         <button type="button" className={quiet} onClick={onBack}>
           ← Docs
         </button>
-        <div className="relative flex flex-wrap gap-1">
+        {!local && <div className="relative flex flex-wrap gap-1">
           <button type="button" className={button} disabled={!doc || busy} aria-expanded={menu === "share"} onClick={() => setMenu(menu === "share" ? null : "share")}>
             Share
           </button>
@@ -296,7 +301,7 @@ export function Reader({ client, repo, id, targets, titles, pickFolder, onBack, 
           <button type="button" className={`${quiet} text-sap`} disabled={!doc || busy} onClick={() => setMenu(menu === "delete" ? null : "delete")}>
             Delete
           </button>
-        </div>
+        </div>}
       </div>
       {menu === "share" && (
         <div className={`${card} flex flex-wrap items-center gap-1 px-s2 py-s1 text-sm`} role="group" aria-label="Share with">
