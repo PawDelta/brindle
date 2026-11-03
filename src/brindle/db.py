@@ -149,8 +149,18 @@ CREATE TABLE IF NOT EXISTS session_repos (
     alias TEXT NOT NULL,
     repo_root TEXT NOT NULL,
     added_at REAL NOT NULL,
-    branch TEXT,                   -- the session's own branch there, its workers' merge target (NULL: attached before there was one)
     PRIMARY KEY (root_id, alias)
+);
+-- The session's own branch in an attached repo, its workers' merge target. A
+-- table of its own, not a column of session_repos: an older brindle refuses
+-- its MCP tools when a table it declares has columns it doesn't (see
+-- migrated_by_newer), so released tables never gain columns.
+CREATE TABLE IF NOT EXISTS session_repo_branches (
+    root_id TEXT NOT NULL,
+    alias TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    PRIMARY KEY (root_id, alias),
+    FOREIGN KEY (root_id, alias) REFERENCES session_repos(root_id, alias) ON DELETE CASCADE
 );
 CREATE TABLE IF NOT EXISTS session_credentials (
     session_id TEXT NOT NULL,
@@ -1279,8 +1289,12 @@ class DB:
                           ("hold_until", "REAL")):
             if col not in request_cols:
                 self.conn.execute(f"ALTER TABLE permission_requests ADD COLUMN {col} {kind}")
-        if "branch" not in {r["name"] for r in self.conn.execute("PRAGMA table_info(session_repos)")}:
-            self.conn.execute("ALTER TABLE session_repos ADD COLUMN branch TEXT")
+        if "branch" in {r["name"] for r in self.conn.execute("PRAGMA table_info(session_repos)")}:
+            # A development build kept the branch on session_repos itself.
+            self.conn.execute(
+                "INSERT OR IGNORE INTO session_repo_branches (root_id, alias, branch) "
+                "SELECT root_id, alias, branch FROM session_repos WHERE branch IS NOT NULL")
+            self.conn.execute("ALTER TABLE session_repos DROP COLUMN branch")
         if "merged_at" not in {r["name"] for r in self.conn.execute("PRAGMA table_info(session_prs)")}:
             self.conn.execute("ALTER TABLE session_prs ADD COLUMN merged_at REAL")
         health_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(launch_health)")}
@@ -1392,8 +1406,11 @@ class DB:
 
     def add_session_repo(self, root_id: str, alias: str, repo_root: str, branch: str | None = None) -> None:
         with self.tx() as c:
-            c.execute("INSERT INTO session_repos (root_id, alias, repo_root, added_at, branch) VALUES (?,?,?,?,?)",
-                      (root_id, alias, repo_root, time.time(), branch))
+            c.execute("INSERT INTO session_repos (root_id, alias, repo_root, added_at) VALUES (?,?,?,?)",
+                      (root_id, alias, repo_root, time.time()))
+            if branch is not None:
+                c.execute("INSERT INTO session_repo_branches (root_id, alias, branch) VALUES (?,?,?)",
+                          (root_id, alias, branch))
 
     def remove_session_repo(self, root_id: str, alias: str) -> bool:
         with self.tx() as c:
@@ -1403,11 +1420,12 @@ class DB:
     def session_repos(self, root_id: str | None = None) -> list[SessionRepo]:
         """A session's attached repos in the order they were added; every
         session's when ``root_id`` is None."""
+        sql = ("SELECT r.root_id, r.alias, r.repo_root, r.added_at, b.branch FROM session_repos r "
+               "LEFT JOIN session_repo_branches b ON b.root_id=r.root_id AND b.alias=r.alias")
         if root_id:
-            rows = self.conn.execute(
-                "SELECT * FROM session_repos WHERE root_id=? ORDER BY added_at", (root_id,))
+            rows = self.conn.execute(sql + " WHERE r.root_id=? ORDER BY r.added_at", (root_id,))
         else:
-            rows = self.conn.execute("SELECT * FROM session_repos ORDER BY added_at")
+            rows = self.conn.execute(sql + " ORDER BY r.added_at")
         return [_load(SessionRepo, r) for r in rows]
 
     def used_port_bases(self) -> set[int]:
