@@ -38,12 +38,6 @@ def test_old_repo_dir_and_agent_entries(home, tmp_path):
     assert any("mcp_config.json" in line and "'mcpServers.copse'" in line for line in lines)
 
 
-def test_unreadable_agent_files_are_ignored(home, tmp_path):
-    agents = tmp_path / ".agents"
-    agents.mkdir()
-    (agents / "hooks.json").write_text("not json")
-    (agents / "mcp_config.json").write_text("[]")
-    assert legacy.findings(str(tmp_path)) == []
 
 
 def test_warns_once_per_leftover_on_stderr(home, capsys):

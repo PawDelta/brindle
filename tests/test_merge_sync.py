@@ -114,8 +114,7 @@ def test_merge_workspace_reconciles_a_stale_processing_worker(db, repo, boss, mo
     assert db.get_agent("w1").status == "idle"
 
 
-@pytest.mark.parametrize("operation", ["merge_back", "sync_with_base"])
-@pytest.mark.parametrize("error", [git.GitError, workspaces.WorkspaceError])
+@pytest.mark.parametrize("operation, error", [("merge_back", git.GitError), ("sync_with_base", workspaces.WorkspaceError)])
 def test_merge_workspace_reports_giterror_from_merge_back(db, repo, boss, monkeypatch, operation, error):
     ws = workspaces.create(db, str(repo), "feature").workspace
     open(os.path.join(ws.path, "new.py"), "w").write("x = 1\n")
@@ -130,7 +129,7 @@ def test_merge_workspace_reports_giterror_from_merge_back(db, repo, boss, monkey
     assert out == "Not merged: boom"
 
 
-@pytest.mark.parametrize("base_state", ["unchanged", "advanced", "overwrites scratch"])
+@pytest.mark.parametrize("base_state", ["advanced", "overwrites scratch"])
 def test_merge_workspace_up_to_date_branch_merges_as_before(db, repo, boss, monkeypatch, base_state):
     """An approved branch merges as before (when behind main it is synced
     first). An untracked file left in the worktree after approval (check

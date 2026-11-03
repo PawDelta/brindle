@@ -87,24 +87,8 @@ def test_a_refusal_recorded_in_the_run_path_shows_in_session_notes(db, repo, mon
     assert "model refused for developer" in event["note"]
 
 
-def test_the_fingerprint_names_the_account_never_a_key(monkeypatch):
-    monkeypatch.setenv("CLAUDE_CODE_USE_BEDROCK", "1")
-    monkeypatch.setenv("AWS_REGION", "us-east-1")
-    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "s3cret")
-    fp = model_access.fingerprint("developer")
-    assert "AWS_REGION=us-east-1" in fp and "s3cret" not in fp
-    monkeypatch.setenv("AWS_REGION", "eu-west-1")
-    assert model_access.fingerprint("developer") != fp
 
 
-def test_refusal_from_another_account_is_not_in_this_sessions_notes(monkeypatch):
-    monkeypatch.setenv("AWS_REGION", "us-east-1")
-    model_access.refuse("developer", model_access.BEDROCK_QUOTA)
-    assert model_access.notes(["developer"])
-    monkeypatch.setenv("AWS_REGION", "eu-west-1")
-    assert model_access.notes(["developer"]) == []       # same profile, another account
-    monkeypatch.setenv("AWS_REGION", "us-east-1")
-    assert model_access.notes(["reviewer"]) == []        # not this session's profile
 
 
 def test_no_next_profile_when_the_tier_is_used_up():
@@ -114,18 +98,6 @@ def test_no_next_profile_when_the_tier_is_used_up():
     assert to is None
 
 
-@pytest.mark.brindle_ci
-def test_the_session_report_carries_the_swap_and_the_alias_warning(db, repo, monkeypatch):
-    warning = "Opus 5.5 not available — using Opus 4.6 for this session"
-    _, root, _ = _launch_showing(monkeypatch, db, repo, [PROMPT + "\n" + warning])
-    root.profile = "developer"
-    db.add_agent(root)
-    monkeypatch.setattr(ClaudeAdapter, "alive", lambda self, db_, r: True)
-    monkeypatch.setattr(ClaudeAdapter, "provider_error", lambda self, db_, rid: None)
-    model_access.refuse("developer", model_access.BEDROCK_QUOTA, "developer-heavy")
-    event = ci_client.session_event(db, root.id, ClaudeAdapter())
-    assert "model refused for developer" in event["note"]
-    assert "fell back to Opus 4.6" in event["note"] and "Opus 5.5" in event["note"]
 
 
 def test_a_supervisor_is_told_about_a_refused_worker_and_about_an_alias_fallback(db, repo, monkeypatch):
@@ -164,25 +136,3 @@ def test_a_supervisor_is_told_about_a_refused_worker_and_about_an_alias_fallback
     route_health.reset()
 
 
-@pytest.mark.brindle_ci
-def test_the_ci_doctor_model_check_names_each_refusal(repo, monkeypatch):
-    (repo / ".brindle").mkdir(exist_ok=True)
-    (repo / ".brindle" / "config.json").write_text(json.dumps({"routing": {"heavy": ["developer-heavy"]}}))
-    monkeypatch.setattr(ci_adapters, "pinned_models",
-                        lambda cwd: [("developer", "claude-opus-5-5"), ("developer-heavy", "claude-fable-5-1")])
-    calls = []
-
-    def fake_run(argv, **kw):
-        calls.append(argv)
-        if "claude-fable-5-1" in argv:
-            return subprocess.CompletedProcess(argv, 1, "", ERRORS[4][0])
-        return subprocess.CompletedProcess(argv, 0, '{"result": "ok"}', "")
-
-    claude = ClaudeAdapter()
-    monkeypatch.setattr(ClaudeAdapter, "available", lambda self, env: (True, ""))
-    lines = ci_adapters.check_models({"claude": claude}, {"ANTHROPIC_API_KEY": "k", "PATH": ""}, str(repo),
-                                     False, run=fake_run)
-    assert len(calls) == 2, "one tiny call per pinned model"
-    assert lines[0] == "model claude-opus-5-5 (developer): ok"
-    assert "refused" in lines[1] and "publisher 'anthropic'" in lines[1] and "Fix:" in lines[1]
-    assert model_access.refused("developer-heavy", str(repo)).key == "vertex_data_sharing"

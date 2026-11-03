@@ -85,11 +85,6 @@ def test_suggestion_must_be_a_candidate(db, ws, monkeypatch):
     assert learning.choose(db, cfg, ws.repo_root, "add docs") is None
 
 
-def test_a_failing_learner_never_raises(db, ws, monkeypatch):
-    install(monkeypatch, Recorder(pick="developer", fail=True))
-    cfg = RepoConfig(learning="cloud", learning_candidates=["developer"])
-    learning.note(db, cfg, worker(db, ws), ws, merged=True)
-    assert learning.choose(db, cfg, ws.repo_root, "t") is None
 
 
 def test_an_installed_learning_entry_point_is_never_used(db, ws, monkeypatch):

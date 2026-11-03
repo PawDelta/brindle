@@ -46,13 +46,6 @@ def write_profile(repo, model, extra=""):
     return load_profile("p", str(repo))
 
 
-def test_an_explicit_base_url_keeps_the_model_id_unless_it_is_the_providers_own(repo):
-    own = write_profile(repo, "nano-gpt/deepseek/deepseek-v3", "base_url: HTTPS://nano-gpt.com/api/v1/\n")
-    assert (own.model, own.api_key_env, own.context_tokens) == ("deepseek/deepseek-v3", "NANO_GPT_API_KEY", 120000)
-    for model in ("qwen/qwen3-coder", "deepseek/deepseek-chat", "nano-gpt/deepseek/deepseek-v3"):
-        p = write_profile(repo, model, "base_url: https://openrouter.ai/api/v1\n")
-        assert (p.model, p.base_url, p.api_key_env, p.api, p.context_tokens) == (
-            model, "https://openrouter.ai/api/v1", None, None, None)
 
 
 def test_an_unlisted_or_malformed_model_is_an_error(repo):

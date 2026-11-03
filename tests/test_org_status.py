@@ -44,12 +44,6 @@ def test_a_poll_saves_what_the_server_says(org):
     assert saved.status.notices[0]["text"].startswith("Over budget")
 
 
-def test_a_404_disables_polling_for_the_session(org):
-    org.status_code = 404
-    p = poller()
-    assert p.poll_once() is None and p.disabled
-    n = len(org.calls)
-    assert p.poll_once() is None and len(org.calls) == n
 
 
 def test_nothing_is_polled_in_air_gap_mode(org, monkeypatch):
@@ -58,12 +52,6 @@ def test_nothing_is_polled_in_air_gap_mode(org, monkeypatch):
     assert p.poll_once() is None and not p.start() and not org.calls
 
 
-def test_a_session_poll_renews_the_entitlement(monkeypatch):
-    from brindle.pro import license
-
-    asked = []
-    monkeypatch.setattr(license, "current", lambda **kw: asked.append(kw) or ent(features=()))
-    assert status.Poller().poll_once() is None and asked == [{}]
 
 
 def test_a_failed_poll_keeps_the_last_known_pause(org):

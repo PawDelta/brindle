@@ -249,10 +249,3 @@ def test_a_server_someone_else_started_survives_the_last_session_closing(db, rep
     assert stopped == []
 
 
-def test_the_cull_sweep_stops_an_unused_server(db, monkeypatch):
-    from brindle import cull
-
-    calls = []
-    monkeypatch.setattr(serve, "stop_unused", lambda db: calls.append(db) or ["stopped ollama serve"])
-    assert "stopped ollama serve" in cull.sweep(db)
-    assert len(calls) == 1

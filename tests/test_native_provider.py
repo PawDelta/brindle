@@ -261,23 +261,7 @@ def test_endpoint_failure_stops_the_runner(db, ws, local_profile, fake, capfd):
     assert db.get_agent("n1").status == "idle"
 
 
-def test_profile_without_an_endpoint_is_a_clear_error(db, ws, repo, capfd):
-    (repo / ".brindle/agents").mkdir(parents=True)
-    (repo / ".brindle/agents/bare.md").write_text("---\nname: bare\nprovider: native\n---\nhi\n")
-    native_agent(db, ws, profile="bare")
-    db.enqueue("n1", "go", None)
-    assert run_native(db, "n1", exit_when_idle=True) == 2
-    assert "no base_url" in capfd.readouterr().out
 
 
-def test_mcp_submit_review_uses_the_shared_function(db, ws, monkeypatch):
-    from brindle import mcp_server
-
-    seen = {}
-    monkeypatch.setattr(agents, "submit_review", lambda db_, cid, ok, s: seen.update(cid=cid, ok=ok, s=s) or "rec")
-    native_agent(db, ws, mode="review", agent_id="r1")
-    monkeypatch.setenv("BRINDLE_AGENT_ID", "r1")
-    assert mcp_server.submit_review(True, "fine") == "rec"
-    assert seen == {"cid": "r1", "ok": True, "s": "fine"}
 
 

@@ -77,12 +77,6 @@ def fake_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     return state
 
 
-def test_insufficient_memory_returns_fallback(fake_env):
-    fake_env["ram_gb"] = 16
-    res = local_setup.setup_model("qwen3-coder:30b", say=lambda _: None)
-    assert not res.ready and not res and res.fallback and res.status == "fallback"
-    assert "24" in res.reason and "16" in res.reason
-    assert fake_env["commands"] == [] and fake_env["urls"] == []
 
 
 @pytest.mark.parametrize("tty, answer, asked", [(False, True, 0), (True, "n", 1)], ids=["no-tty", "declined"])

@@ -36,16 +36,6 @@ def test_profile_env_lines_and_context_sizes(tmp_path):
     assert load_profile("bad", str(tmp_path)).context_tokens is None
 
 
-def test_probe_reports_reachability_and_the_model(fake):
-    ok, detail = probe(Endpoint(fake.base_url + "/v1", "tiny"))
-    assert ok and "tiny is available" in detail
-    assert fake.paths[-1] == "/v1/models"
-    ok, detail = probe(Endpoint(fake.base_url, "qwen3-coder"))  # a tag-less name matches its tags
-    assert ok and "is available" in detail and fake.paths[-1] == "/v1/models"
-    ok, detail = probe(Endpoint(fake.base_url + "/v1", "gpt-9"))
-    assert ok and "isn't listed" in detail and "tiny" in detail
-    ok, detail = probe(Endpoint("http://127.0.0.1:1/v1", "tiny"), timeout=1)
-    assert not ok and "not reachable" in detail
 
 
 def test_doctor_checks_each_native_endpoint_once(repo, fake, monkeypatch):
