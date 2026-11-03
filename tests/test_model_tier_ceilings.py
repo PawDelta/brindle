@@ -1,8 +1,10 @@
+import time
+
 import pytest
 
 from brindle import autopilot, pipeline, mcp_server
 from brindle.config import RepoConfig
-from brindle.db import Workspace, Task
+from brindle.db import Agent, Task, Workspace
 from brindle import agents
 
 pytestmark = pytest.mark.usefixtures("fake_agent_cli")
@@ -161,16 +163,21 @@ def test_max_weight_ceiling_caps_heavy_to_medium(db, repo, monkeypatch):
     assert profile in cfg.routing["medium"]
 
 
-def test_retry_on_heavy_refuses_when_max_weight_medium(db, repo):
+def test_retry_on_heavy_refuses_when_max_weight_medium(db, repo, monkeypatch):
     ws = Workspace("ws-m", str(repo), "feat/m", "main", "main", "worktree", str(repo), 20000, "tmux-m", 0)
     db.add_workspace(ws)
-    worker = agents.spawn(db, ws, "developer", mode="assign")
-    # Record task with heavy weight
-    t = Task("t-1", str(repo), worker.id, None, ws.id, "developer", "task", "assign", 1, "feat/m", None, None, None, "started", 0.0, weight="heavy")
-    db.add_task(t)
+    worker = Agent("w-m", ws.id, "developer", "claude", None, "assign", "processing", "%m", None, time.time())
+    db.add_agent(worker)
+    db.add_task(Task("t-1", str(repo), worker.id, None, ws.id, "developer", "task", "assign", 1, "feat/m", None,
+                     None, None, "started", 0.0, weight="heavy"))
 
-    cfg = RepoConfig(max_weight="medium")
-    # Must refuse retry on heavy
+    def no_retry(*a, **k):
+        raise AssertionError("a retry started although max_weight is medium")
+
+    monkeypatch.setattr(agents, "is_alive", lambda a: False)
+    monkeypatch.setattr(agents, "delegate", no_retry)
+    # Otherwise eligible: escalation on, developer-heavy routed for heavy; only max_weight forbids it.
+    cfg = RepoConfig(max_weight="medium", fable_escalation=True, routing={"heavy": ["developer-heavy"]})
     assert not pipeline._retry_on_heavy(db, worker, ws, cfg, "failed review", "worker report")
 
 
