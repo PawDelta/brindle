@@ -4,14 +4,41 @@ with the whole failure (#186), every reviewer's standing verdict decides a
 merge (#216), and an approval leads to a merge or a clear message (#217)."""
 import json
 import threading
-from pathlib import Path
+from contextlib import contextmanager
 
 import pytest
 
 from conftest import full_text, sh
-from brindle import gates, pipeline, workspaces
+from brindle import agents, gates, pipeline, workspaces
 from brindle.db import DB
-from test_pipeline_idempotent import approved, drain, keep_worktree  # noqa: F401 - fixture
+from test_merge_order import _repo_template, add, quiet_removal, repo, worktree  # noqa: F401 - fixture
+from test_pipeline_idempotent import drain, keep_worktree
+
+
+@pytest.fixture
+def approved(db, repo, monkeypatch):
+    """test_pipeline_idempotent's ``approved`` (a piped branch both rev0 and
+    rev1 approved, and a count of gate runs), on a worktree made in one git run."""
+    (repo / ".brindle").mkdir()
+    (repo / ".brindle" / "config.json").write_text(json.dumps(
+        {"review": True, "auto_merge_default_branch": True}))
+    root = workspaces.adopt_root(db, str(repo))
+    add(db, root, "boss", "interactive", "supervisor", status="processing")  # busy: messages queue
+    ws = worktree(db, repo, "feat", files={"new.py": "x = 1\n"})
+    add(db, ws, "w1", "assign", parent="boss", status="processing")
+    db.update_agent("w1", result="added new.py", pipeline="reviewing")
+    for rid in ("rev0", "rev1"):
+        add(db, ws, rid, "review", "reviewer", parent="boss", status="processing")
+        db.add_review(ws.id, gates.head(ws), rid, True, "lgtm")
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
+    monkeypatch.setattr(agents, "reconcile", lambda db_, a, **kw: a)
+    monkeypatch.setattr(agents, "_stop", lambda db_, a: None)
+    monkeypatch.setattr(agents, "close_later", lambda agent_id, delay=5.0: None)
+    quiet_removal(monkeypatch)
+    runs = []
+    real_run = gates.run
+    monkeypatch.setattr(gates, "run", lambda *a, **k: (runs.append(1), real_run(*a, **k))[1])
+    return ws, runs
 
 
 @pytest.mark.variant("race from a live incident (#197): two merges into one base; the only test of the ordering")
@@ -20,41 +47,59 @@ def test_a_merge_waits_for_another_merge_into_the_same_base(db, repo, monkeypatc
     the pipeline merged another into the same base, and git then failed with
     "MERGE_HEAD exists". The second merge waits for the first, sync to merge."""
     workspaces.adopt_root(db, str(repo))
-    spaces = []
-    for name in ("one", "two"):
-        ws = workspaces.create(db, str(repo), name).workspace
-        (Path(ws.path) / f"{name}.py").write_text("x = 1\n")
-        sh(f"git add {name}.py && git commit -qm {name}", Path(ws.path))
-        spaces.append(ws)
-    in_gates, second_in_gates, release = threading.Event(), threading.Event(), threading.Event()
-    real_run = gates.run
+    quiet_removal(monkeypatch)
+    spaces = [worktree(db, repo, name, files={f"{name}.py": "x = 1\n"}) for name in ("one", "two")]
+    in_gates, release = threading.Event(), threading.Event()
+    events = []
+    real_run, real_lock = gates.run, pipeline.base_lock
 
     def slow_first(db_, ws_, *a, **k):
+        events.append(f"{ws_.branch} gates")
         if ws_.id == spaces[0].id:
             in_gates.set()
             assert release.wait(10)
-        else:
-            second_in_gates.set()
         return real_run(db_, ws_, *a, **k)
 
+    @contextmanager
+    def watched(repo_root, base, wait=True):
+        me = threading.current_thread().name
+        if base != "main":
+            with real_lock(repo_root, base, wait):
+                yield
+            return
+        if me == "two":   # the first merge is in its gates: main must be held
+            try:
+                with real_lock(repo_root, base, wait=False):
+                    events.append("two found main free")
+            except BlockingIOError:
+                events.append("two waits")
+            release.set()
+        with real_lock(repo_root, base, wait):
+            try:
+                yield
+            finally:
+                events.append(f"{me} done")   # still holding main
+
     monkeypatch.setattr(gates, "run", slow_first)
+    monkeypatch.setattr(pipeline, "base_lock", watched)
     out = {}
 
     def merge(ws):
         out[ws.branch] = pipeline.merge(DB(), None, ws)   # each in its own process, in production
 
-    first = threading.Thread(target=merge, args=(spaces[0],))
+    first = threading.Thread(target=merge, args=(spaces[0],), name="one")
+    second = threading.Thread(target=merge, args=(spaces[1],), name="two")
     first.start()
     try:
         assert in_gates.wait(10)
-        second = threading.Thread(target=merge, args=(spaces[1],))
         second.start()
-        # Waiting for the merge into main that's under way, before its own sync.
-        assert not second_in_gates.wait(1)
     finally:
+        release.wait(10)
         release.set()
         first.join(20)
         second.join(20)
+    # Waiting for the merge into main that's under way, before its own sync.
+    assert events == ["one gates", "two waits", "one done", "two gates", "two done"]
     assert out["one"].startswith("Merged one") and out["two"].startswith("Merged two")
     assert {"one.py", "two.py"} <= set(sh("git ls-tree --name-only HEAD", repo).split())
 

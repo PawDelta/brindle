@@ -3,6 +3,7 @@ into it, a session resuming and a merged session PR bring origin/main in when
 that's clean; a conflict blocks merges into it until a branch resolves it, and
 a branch behind origin/main gets no PR."""
 
+import shutil
 import time
 from pathlib import Path
 
@@ -14,6 +15,7 @@ from brindle.daemon import session_review
 from brindle.db import Agent
 from brindle.service import inbox
 from brindle.service import sessions as svc
+from test_merge_order import _repo_template, quiet_removal, repo, worktree  # noqa: F401 - fixture
 
 
 @pytest.fixture
@@ -26,8 +28,9 @@ def told(monkeypatch):
 
 
 @pytest.fixture
-def sess(db, repo, tmp_path, told):
+def sess(db, repo, tmp_path, told, monkeypatch):
     """Session ``lead`` on branch ``sess`` (cut from main) in its own checkout."""
+    quiet_removal(monkeypatch)
     sh(f"git worktree add -q -b sess {tmp_path / 'sess'} main", repo)
     ws = workspaces.adopt_root(db, str(tmp_path / "sess"))
     db.add_agent(Agent("lead", ws.id, "supervisor", "claude", None, "interactive", "idle", "%9", None, time.time()))
@@ -35,10 +38,13 @@ def sess(db, repo, tmp_path, told):
 
 
 @pytest.fixture
-def other(repo, tmp_path):
-    """Another clone, where commits land on origin/main without the session."""
+def other(repo, tmp_path, _repo_template):
+    """Another clone, where commits land on origin/main without the session:
+    the template's checkout, a clone of the same origin, pointed at this one."""
     path = tmp_path / "other"
-    sh(f"git clone -q {repo.parent / 'origin.git'} {path}", tmp_path)
+    shutil.copytree(_repo_template / "proj", path, symlinks=True)
+    cfg = path / ".git" / "config"
+    cfg.write_text(cfg.read_text().replace(str(_repo_template), str(tmp_path)))
     return path
 
 
@@ -51,9 +57,7 @@ def commit(path: Path, name: str, text: str, push: bool = False) -> str:
 
 
 def worker(db, repo, name: str):
-    ws = workspaces.create(db, str(repo), name, base="sess", fetch=False).workspace
-    commit(Path(ws.path), f"{name}.txt", name)
-    return ws
+    return worktree(db, repo, name, base="sess", files={f"{name}.txt": name})
 
 
 def contains(path, sha: str) -> bool:
@@ -117,7 +121,7 @@ def test_a_conflicting_sync_blocks_merges_until_a_branch_resolves_it(db, repo, s
     assert not contains(sess.path, main) and sh("git status --porcelain", Path(sess.path)) == ""
     [item] = [i for i in inbox.items(db, str(repo), panes={}) if i.kind == "sync_conflict"]
     assert item.root_id == "lead" and "app.py" in item.detail
-    fix = workspaces.create(db, str(repo), "fix", base="sess", fetch=False).workspace
+    fix = workspaces.create(db, str(repo), "fix", base="sess", fetch=False).workspace   # sess isn't on origin
     sh("git merge -q origin/main || true", Path(fix.path))
     commit(Path(fix.path), "app.py", "both\n")
     assert pipeline.merge(db, None, fix).startswith("Merged")

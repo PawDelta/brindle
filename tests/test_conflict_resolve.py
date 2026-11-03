@@ -9,7 +9,7 @@ import pytest
 
 from conftest import full_text, sh
 from brindle import agents, conflicts, gates, pipeline, workspaces
-from test_merge_order import add
+from test_merge_order import _repo_template, add, quiet_removal, repo, worktree  # noqa: F401 - fixture
 
 
 # -- protected paths -----------------------------------------------------------------
@@ -41,9 +41,7 @@ def conflicted(db, repo, monkeypatch):
             "checks": ["grep -q mine app.py && grep -q theirs app.py"], **config}))
         root = workspaces.adopt_root(db, str(repo))
         add(db, root, "boss", "interactive", "supervisor", status="processing")
-        ws = workspaces.create(db, str(repo), "feat").workspace
-        (Path(ws.path) / "app.py").write_text("mine\n")
-        sh("git add -A && git commit -qm mine", Path(ws.path))
+        ws = worktree(db, repo, "feat", files={"app.py": "mine\n"})
         (repo / "app.py").write_text("theirs\n")
         sh("git add -A && git commit -qm theirs", repo)
         add(db, ws, "w1", "assign", parent="boss", status="processing",
@@ -74,6 +72,7 @@ def conflicted(db, repo, monkeypatch):
 
     monkeypatch.setattr(agents, "_detach", detach)
     monkeypatch.setattr(agents, "_stop", lambda db_, a: None)
+    quiet_removal(monkeypatch)
     setup.reviews = started
     return setup
 
