@@ -247,34 +247,82 @@ def test_abandoned_worktree_is_only_listed_until_cleaned(db, repo, monkeypatch):
     assert sh("git branch --list stalled", repo).strip() == ""
 
 
-@pytest.mark.parametrize("failure", ["proc-unreadable", "lsof-partial"])
-def test_a_partial_process_scan_keeps_every_worktree(db, repo, tmp_path, monkeypatch, failure):
+def _status(uids: tuple[int, ...] | None = None, gids: tuple[int, ...] | None = None,
+            cap_prm: int = 0) -> str:
+    """A /proc/<pid>/status: real, effective, saved and filesystem ids
+    (this user's unless given) and permitted capabilities."""
+    uids = uids or (os.getuid(),) * 4
+    gids = gids or (os.getgid(),) * 4
+    return (f"Name:\tx\nUid:\t{chr(9).join(map(str, uids))}\nGid:\t{chr(9).join(map(str, gids))}\n"
+            f"CapPrm:\t{cap_prm:016x}\nCapEff:\t{cap_prm:016x}\n")
+
+
+RUNNER = (2100, 2101, 2102, 2103, 2104)   # pytest and its xdist workers, in the checkout
+
+
+@pytest.mark.parametrize("scan, refused, kept", [
+    ("proc-unreadable", None, True),
+    ("lsof-partial", None, True),
+    # GitHub's ubuntu runner: a service whose /proc entry shows this user as
+    # its owner (its effective uid), but whose folder the kernel won't show
+    # this user because it runs with another's ids or with privileges this
+    # user hasn't. Not this user's, any more than a root process is.
+    ("runner", _status(uids=(0, os.getuid(), 0, os.getuid())), False),
+    ("runner", _status(gids=(os.getgid() + 1,) * 4), False),
+    ("runner", _status(cap_prm=1 << 10), False),
+    # Refused with this user's own credentials: can't be told, so in use.
+    ("runner", _status(), True),
+    ("runner", None, True),                       # nor can its credentials be read
+    # Whatever the service, this user's own process in the worktree keeps it.
+    ("runner+shell", _status(uids=(0, os.getuid(), 0, os.getuid())), True),
+], ids=["proc-unreadable", "lsof-partial", "runner-root-ids", "runner-other-group", "runner-capabilities",
+        "runner-own-credentials", "runner-no-status", "runner-and-a-shell-in-the-worktree"])
+def test_a_partial_process_scan_keeps_every_worktree(db, repo, tmp_path, monkeypatch, scan, refused, kept):
     """One live process whose folder can't be read (or an lsof that failed
-    part way) must not read as no process at all."""
+    part way) must not read as no process at all, unless the process isn't
+    this user's: it runs with another's ids, or privileges this user hasn't."""
     wt = _worktree(repo, "idea", days_old=30)
     fake = tmp_path / "proc"
     (fake / "self").mkdir(parents=True)
     monkeypatch.setattr(procs, "PROC", fake)
-    if failure == "proc-unreadable":
-        os.symlink("/", fake / "self" / "cwd")
-        for pid, cwd in (("100", "/"), ("200", str(wt))):
-            (fake / pid).mkdir()
-            os.symlink(cwd, fake / pid / "cwd")
-        (fake / "300").mkdir()               # exited while the scan ran: no cwd left
-        (fake / "200").chmod(0)              # live, but its folder can't be read
-    else:
+    if scan == "lsof-partial":
         listing = subprocess.CompletedProcess([], 1, stdout=f"p{os.getpid()}\nfcwd\nn/\np200\n",
                                               stderr="lsof: can't stat a process")
         monkeypatch.setattr(spawn, "read", lambda *a, **kw: listing)
+    else:
+        os.symlink(str(repo), fake / "self" / "cwd")
+        (fake / "self" / "status").write_text(_status())
+        rows = {100: "/", 200: str(wt)} if scan == "proc-unreadable" else (
+            {100: "/", **{pid: str(repo) for pid in RUNNER}, 1354: str(wt)}
+            | ({2200: str(wt / "src")} if scan == "runner+shell" else {}))
+        for pid, cwd in rows.items():
+            (fake / str(pid)).mkdir()
+            os.symlink(cwd, fake / str(pid) / "cwd")
+            if scan != "proc-unreadable" and (pid != 1354 or refused):
+                (fake / str(pid) / "status").write_text(refused if pid == 1354 else _status())
+        (fake / "300").mkdir()               # exited while the scan ran: no cwd left
+        if scan == "proc-unreadable":
+            (fake / "200").chmod(0)          # live, but its folder can't be read
+        real_readlink = os.readlink
+
+        def readlink(path, *a, **kw):   # the kernel refusing /proc/1354/cwd, its status still readable
+            if Path(path) == fake / "1354" / "cwd":
+                raise PermissionError(13, "Permission denied", str(path))
+            return real_readlink(path, *a, **kw)
+
+        monkeypatch.setattr(os, "readlink", readlink)
     try:
-        with pytest.raises(OSError):
-            procs.cwds()
+        if not kept:
+            assert set(procs.cwds()) == {100, *RUNNER}
+        elif scan != "runner+shell":
+            with pytest.raises(OSError):
+                procs.cwds()
         out = disk.clean(db, path=str(wt))
     finally:
         if (fake / "200").exists():
             (fake / "200").chmod(0o755)
 
-    assert out["removed"] == [] and wt.is_dir()
+    assert (out["removed"] == []) == kept and wt.is_dir() == kept
 
 
 def test_retention_caps_backups_archive_and_logs(brindle_home):

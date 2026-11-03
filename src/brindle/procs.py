@@ -284,12 +284,42 @@ def all_agent_ids(procs: dict[int, Proc] | None = None) -> set[str]:
     return ids
 
 
+def _status(d: Path) -> dict[str, list[str]]:
+    """``d/status`` (``/proc/<pid>/status``, readable by anyone) by field."""
+    out = {}
+    for line in (d / "status").read_text().splitlines():
+        key, _, value = line.partition(":")
+        out[key] = value.split()
+    return out
+
+
+def _not_this_users(d: Path) -> bool:
+    """Whether the process at ``d`` (``/proc/<pid>``), whose folder this user
+    was refused, runs with credentials this user doesn't have: a uid or gid
+    (real, effective, saved or filesystem) other than this user's, or
+    capabilities beyond this user's. Those are what the kernel refuses it
+    for (ptrace_may_access), though ``d`` shows this user as its owner when
+    only its effective uid is this user's: a system service like that
+    (GitHub's Linux runner has one) is no more this user's than a root
+    process, which ``cwds`` leaves out too. False (so: can't be told) when
+    its credentials are this user's own, or can't be read."""
+    try:
+        theirs, mine = _status(d), _status(PROC / "self")
+        if ({int(u) for u in theirs["Uid"]} != {os.getuid()}
+                or {int(g) for g in theirs["Gid"]} != {os.getgid()}):
+            return True
+        return int(theirs["CapPrm"][0], 16) & ~int(mine["CapPrm"][0], 16) != 0
+    except (OSError, KeyError, IndexError, ValueError):
+        return False
+
+
 def cwds() -> dict[int, str]:
     """The current folder of every process of this user, whatever started it
     (a detached dev server, a shell on any tmux server or terminal). Raises
     OSError when it can't be told: a caller deciding whether something is in
     use must then assume it is: one process of this user it can't read
-    (not one that exited during the scan) or an lsof that failed part way."""
+    (not one that exited during the scan, nor one running with another's
+    credentials: see ``_not_this_users``) or an lsof that failed part way."""
     proc = PROC
     if (proc / "self" / "cwd").exists():
         out: dict[int, str] = {}
@@ -300,6 +330,9 @@ def cwds() -> dict[int, str]:
                         out[int(d.name)] = os.readlink(d / "cwd")
                 except (FileNotFoundError, ProcessLookupError):
                     continue   # it exited meanwhile (or is a zombie): no folder to hold
+                except PermissionError:
+                    if not _not_this_users(d):
+                        raise
         return out
     lsof = shutil.which("lsof") or "/usr/sbin/lsof"
     try:
