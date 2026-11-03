@@ -2007,18 +2007,27 @@ _GIT_MESSAGES = frozenset({"commit", "tag", "merge", "notes", "stash"})
 
 
 def _git_options(sub: str, args: list[str]) -> list[str]:
-    """``args`` without the values of a message option (``-m "drop -f"``)."""
+    """``args`` without the values of a message option (``-m "drop -f"``). In a
+    short cluster the first letter taking a value ends it: the rest is that value
+    (``-mfix`` is -m with "fix"), and with nothing after it the next word is."""
     if sub not in _GIT_MESSAGES:
         return args
+    valued = "mFsX" if sub == "merge" else "mF"
     out, skip = [], False
     for arg in args:
         if skip:
             skip = False
         elif arg == "--":
             break
+        elif arg in ("--message", "--file"):
+            out.append(arg)
+            skip = True
+        elif re.match(r"-[A-Za-z]", arg):
+            at = next((i for i, c in enumerate(arg[1:], 1) if c in valued), None)
+            out.append(arg if at is None else arg[:at + 1])
+            skip = at == len(arg) - 1
         else:
             out.append(arg)
-            skip = arg in ("--message", "--file") or bool(re.fullmatch(r"-[A-Za-z]*[mF]", arg))
     return out
 
 

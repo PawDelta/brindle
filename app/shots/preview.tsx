@@ -68,6 +68,7 @@ const SCENES: Record<string, Route> = {
   "account-free": { screen: "account" },
   "account-signed-out": { screen: "account" },
   session: { screen: "session", root: "sup-42", repo: REPO, agent: "a7aaa807" },
+  "session-review": { screen: "session", root: "sup-42", repo: REPO, agent: "sup-42", sheet: { kind: "review" } },
   // One scene per agent of the session: the supervisor, each worker, the reviewer, in the state its row shows.
   "agent-supervisor": { screen: "session", root: "sup-42", repo: REPO, agent: "sup-42" },
   "agent-working": { screen: "session", root: "sup-42", repo: REPO, agent: "a7aaa807" },
@@ -87,6 +88,15 @@ const SCENES: Record<string, Route> = {
 };
 
 const daemon = new FakeDaemon(structuredClone(data));
+if (scene === "session-review") {
+  daemon.data.sessionReview["sup-42"] = { ready: true, reasons: [], branch: "desktop/ux-revamp", base: "main", diff: "" };
+  daemon.data.sessionBase["sup-42"] = { "src/session.ts": "export const ready = false;\n" };
+  daemon.data.sessionFiles["sup-42"] = { "src/session.ts": "export const ready = true;\n", "src/review.ts": "export const review = 'PR';\n" };
+  if (daemon.data.goal) {
+    daemon.data.goal.goal_phase = "ready_for_pr";
+    daemon.data.goal.milestones.forEach((m) => { m.status = "passed"; m.state = "passed"; });
+  }
+}
 if (scene === "settings-login" || scene === "settings-signin") {
   daemon.data.providers = freshProviders({
     claude: { path: "/home/u/.local/bin/claude", version: "2.1.47" },

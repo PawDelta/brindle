@@ -211,7 +211,7 @@ def _target(db: DB, caller: Agent | None, here: Workspace, repo: str | None) -> 
     repo_root = repos.resolve(db, root_id, here.repo_root, repo)
     if os.path.realpath(repo_root) == os.path.realpath(here.repo_root):
         return here
-    return repos.target_workspace(db, repo_root)
+    return repos.target_workspace(db, root_id, repo_root)
 
 
 def _session_repos(db: DB, caller: Agent | None, here: Workspace) -> list[tuple[str | None, str]]:
@@ -619,8 +619,9 @@ async def handoff(
     for your approve_plan before it may edit files (default: the repo's
     `plan_first` config). Use it for large or risky tasks.
 
-    analysis_doc: the worker leaves an analysis doc of its work, as heavy and
-    advanced tasks always do.
+    analysis_doc: the worker leaves an analysis doc of its work. Off by
+    default whatever the weight; ask only for work worth documenting (never
+    for merge or sync chores).
     """
     def run(req: _Request):
         db = DB()
@@ -749,8 +750,9 @@ async def assign(
     for your approve_plan before it may edit files (default: the repo's
     `plan_first` config). Use it for large or risky tasks.
 
-    analysis_doc: the worker leaves an analysis doc of its work, as heavy and
-    advanced tasks always do.
+    analysis_doc: the worker leaves an analysis doc of its work. Off by
+    default whatever the weight; ask only for work worth documenting (never
+    for merge or sync chores).
     """
     def run(req: _Request):
         db = DB()

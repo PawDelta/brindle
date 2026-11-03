@@ -13,7 +13,7 @@ import pytest
 from typer.testing import CliRunner
 
 from conftest import sh
-from brindle import agents, autopilot, cli, mcp_server, repos, tasks, workspaces
+from brindle import agents, autopilot, cli, git, mcp_server, repos, tasks, workspaces
 from brindle.db import Agent
 from brindle.pro import license
 from test_task_deps import dependency_rows
@@ -153,18 +153,51 @@ def test_attach_a_repo_whose_folder_name_matches_the_session_repo(db, repo, boss
     assert pool.pool_dir(str(twin)) == Path(e2.path).parent
 
 
-def test_attach_refuses_a_repo_attached_to_another_live_session(db, repo, web, boss, tmp_path, monkeypatch):
-    other_repo = git_repo(tmp_path, "other", {})
+def test_two_live_sessions_attach_one_repo_and_each_merges_into_its_own_branch(
+        db, repo, web, boss, tmp_path, monkeypatch):
+    from brindle import view
+
+    other_repo = git_repo(tmp_path, "other", {"pipeline": False, "review": False})
     ows = workspaces.adopt_root(db, str(other_repo))
     db.add_agent(Agent("other", ows.id, "supervisor", "claude", None, "interactive", "processing",
                         "@1", None, time.time()))
-    repos.attach(db, "other", str(web), "web")
-    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id == "other")
-    with pytest.raises(repos.RepoError, match="another running session"):
-        repos.attach(db, "boss", str(web), "web")
-    # Once that session is gone (not live), the repo can move here.
-    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: False)
-    assert repos.attach(db, "boss", str(web), "web").alias == "web"
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id in ("boss", "other"))
+    # The repo's merge_into must not pull either session's workers onto its main.
+    cfg = web / ".brindle" / "config.json"
+    cfg.write_text(json.dumps({**json.loads(cfg.read_text()), "merge_into": "main"}))
+    sh("git add -A && git commit -qm merge-into", web)
+    theirs = repos.attach(db, "other", str(web), "web")
+    mine = repos.attach(db, "boss", str(web), "web")
+    assert {mine.branch, theirs.branch} == {"brindle/session-2", "brindle/session-3"}
+
+    merged = {}
+    for session in ("other", "boss"):
+        monkeypatch.setenv("BRINDLE_AGENT_ID", session)
+        wws = db.get_workspace(db.get_agent(started_worker_id(asyncio.run(
+            mcp_server.assign("developer", "w", branch=f"feat-{session}", repo="web")))).workspace_id)
+        assert wws.base_branch == repos.session_branch(db, session, str(web))
+        commit_file(Path(wws.path), f"{session}.txt")
+        merged[session] = asyncio.run(mcp_server.merge_workspace(wws.id))
+        assert merged[session].startswith(f"Merged feat-{session} into {wws.base_branch}"), merged[session]
+    target = {s: repos.target_workspace(db, s, str(web)) for s in ("boss", "other")}
+    assert (Path(target["boss"].path) / "boss.txt").exists() and not (Path(target["boss"].path) / "other.txt").exists()
+    assert (Path(target["other"].path) / "other.txt").exists() and not (Path(target["other"].path) / "boss.txt").exists()
+    assert not (web / "boss.txt").exists() and not (web / "other.txt").exists()   # the shared checkout's branch is untouched
+    # Another session's merge target is reserved, even though no worker ever ran in it.
+    refused = asyncio.run(mcp_server.assign("developer", "w", branch=theirs.branch, repo="web"))
+    assert "belongs to session other" in refused, refused
+    assert not db.list_agents(target["other"].id)
+    # The cleanup sweep keeps a session's merge target while it's attached, with
+    # nothing on it yet and after a finished non-isolated worker ran there.
+    monkeypatch.setattr(view, "UNUSED_WORKTREE_GRACE", -1)
+    sh(f"git reset -q --hard {sh('git rev-parse main', web)}", Path(target["boss"].path))
+    assert not view.retired(db, target["boss"], set())
+    shared = started_worker_id(asyncio.run(mcp_server.assign("developer", "w", isolate=False, repo="web")))
+    assert db.get_agent(shared).workspace_id == target["boss"].id
+    db.set_status(shared, "done")
+    assert not view.retired(db, target["boss"], set())
+    assert repos.detach(db, "boss", "web").branch == mine.branch
+    assert git.branch_exists(str(web), mine.branch)              # detach keeps the branch
 
 
 def test_cli_repo_add_ls_rm(db, repo, web, boss, monkeypatch):
@@ -185,25 +218,26 @@ def test_cli_repo_add_ls_rm(db, repo, web, boss, monkeypatch):
 
 
 def test_assign_into_an_attached_repo_works_checks_and_merges_there(db, repo, web, boss, brindle_home):
-    repos.attach(db, "boss", str(web), "web")
+    attached = repos.attach(db, "boss", str(web), "web")
     out = asyncio.run(mcp_server.assign("developer", "do web", branch="feat-web", repo="web"))
     worker_id = started_worker_id(out)
     assert "(repo web:" in out
     worker = db.get_agent(worker_id)
     wws = db.get_workspace(worker.workspace_id)
-    assert wws.repo_root == str(web) and wws.base_branch == "main"
+    assert wws.repo_root == str(web) and wws.base_branch == attached.branch
     assert Path(wws.path).is_dir() and "/web/" in wws.path
     assert (Path(wws.path) / "app.py").read_text() == "print('web')\n"
     assert not [w for w in db.find_workspaces(str(repo)) if w.kind == "worktree"]
     [t] = db.list_tasks(str(web), state="started")
-    assert t.agent_id == worker_id and t.caller_ws_id == workspaces.adopt_root(db, str(web)).id
+    target = repos.target_workspace(db, "boss", str(web))
+    assert t.agent_id == worker_id and t.caller_ws_id == target.id and target.branch == attached.branch
 
     commit_file(Path(wws.path), "web_output.txt", "from the web worker\n")
     # The workspace tools find it by name within the repo given.
     assert "web_output.txt" in mcp_server.workspace_diff("feat-web", repo="web")
     merged = asyncio.run(mcp_server.merge_workspace(wws.id))
-    assert merged.startswith("Merged feat-web into main"), merged
-    assert (web / "web_output.txt").read_text() == "from the web worker\n"
+    assert merged.startswith(f"Merged feat-web into {attached.branch}"), merged
+    assert (Path(target.path) / "web_output.txt").read_text() == "from the web worker\n"
     assert not (repo / "web_output.txt").exists()
     assert (brindle_home / "web-checked").exists()          # web's own checks ran
     assert not (brindle_home / "main-checked").exists()     # the session's repo's didn't
@@ -320,7 +354,7 @@ def test_handover_repoints_a_queued_task_whose_caller_workspace_is_gone(db, repo
     b = db.get_task(b.id)
     assert b.caller_id == new.id
     ws = db.get_workspace(b.caller_ws_id)
-    assert ws is not None and ws.repo_root == str(web) and ws.kind == "main"
+    assert ws is not None and ws.repo_root == str(web) and ws.branch == repos.session_branch(db, new.id, str(web))
     [c] = [t for t in db.list_tasks(str(repo), state="pending") if t.branch == "feat-c"]
     assert c.caller_id == new.id and c.caller_ws_id == boss.id
     assert [x.alias for x in repos.attached(db, new.id)] == ["web"] and repos.attached(db, "boss") == []
@@ -386,11 +420,15 @@ def test_milestone_check_runs_in_the_attached_repo(db, repo, web, boss):
     [m_main, m_web] = db.milestones("boss")
     assert m_main.status == "passed" and m_web.status == "failed"
 
-    commit_file(web, "web.txt")
+    commit_file(web, "web.txt")       # on the shared checkout's branch: not this session's
+    autopilot.check_milestones(db, "boss", boss, position=2)
+    assert db.milestones("boss")[1].status == "failed"
+    mine = Path(repos.target_workspace(db, "boss", str(web)).path)
+    commit_file(mine, "web.txt")
     autopilot.check_milestones(db, "boss", boss, position=2)
     [m_main, m_web] = db.milestones("boss")
     assert m_web.status == "passed"
-    assert m_web.checked_sha == sh("git rev-parse HEAD", web)
+    assert m_web.checked_sha == sh("git rev-parse HEAD", mine)
     assert m_main.checked_sha == sh("git rev-parse HEAD", repo)
 
     assert "isn't attached" in mcp_server.set_goal("G", [{"title": "X", "check": "@nope: true"}])

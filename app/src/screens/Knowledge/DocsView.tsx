@@ -4,8 +4,11 @@
    (GET /v1/analysis-docs/results, worked out on this machine): review rounds
    of tasks whose brief drew on the docs against similar tasks without one,
    or "not enough data yet". Below it, scope chips and a search box, a rail
-   of topics (the server's, filtered there) and kinds (filtered here), and a
-   card per doc. A card opens the reader: the doc exactly as written
+   of categories (filtered here, when the server gave any) and topics (the
+   server's, filtered there), and a card per doc (its kind on the card),
+   under collapsible category headers when there are categories (the
+   largest first, uncategorised last; which are collapsed is remembered on
+   this device, per repo). A card opens the reader: the doc exactly as written
    (Markdown, rendered safely) beside what the server read from it, with
    Share, Export and Delete. `session` narrows the list to the docs one
    session wrote or used (the session goal panel links here with it). */
@@ -33,6 +36,42 @@ export interface DocsViewProps {
 }
 
 const message = (e: unknown) => plain(e instanceof Error ? e.message : String(e));
+
+const UNCATEGORISED = "Uncategorised";
+const COLLAPSED_KEY = "brindle.docs.collapsed";
+
+/* Docs under their categories: the largest first, then by name, and the
+   docs without one last. */
+export function byCategory(docs: AnalysisDoc[]): [string, AnalysisDoc[]][] {
+  const groups = new Map<string, AnalysisDoc[]>();
+  for (const d of docs) {
+    const name = d.category ?? UNCATEGORISED;
+    if (!groups.has(name)) groups.set(name, []);
+    groups.get(name)!.push(d);
+  }
+  return [...groups].sort(([a, x], [b, y]) => Number(a === UNCATEGORISED) - Number(b === UNCATEGORISED) || y.length - x.length || a.localeCompare(b));
+}
+
+/* The categories collapsed in a repo's list, kept in this device's storage. */
+function readCollapsed(repo = ""): Set<string> {
+  try {
+    const got: unknown = JSON.parse(localStorage.getItem(COLLAPSED_KEY) ?? "{}");
+    const list: unknown = got && typeof got === "object" ? (got as Record<string, unknown>)[repo] : null;
+    return new Set(Array.isArray(list) ? list.filter((s): s is string => typeof s === "string") : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function writeCollapsed(repo = "", collapsed: Set<string>): void {
+  try {
+    const got: unknown = JSON.parse(localStorage.getItem(COLLAPSED_KEY) ?? "{}");
+    const all = got && typeof got === "object" ? (got as Record<string, unknown>) : {};
+    localStorage.setItem(COLLAPSED_KEY, JSON.stringify({ ...all, [repo]: [...collapsed] }));
+  } catch {
+    // No storage: the headers stay as they are for this window.
+  }
+}
 
 /* A doc's scope as the daemon's filter takes it: user, team:<id> or org:<id>. */
 export function scopeSpec(s: DocScope): string {
@@ -370,7 +409,7 @@ type Listing = { state: "loading" } | { state: "loaded"; docs: AnalysisDoc[] } |
 export function DocsView({ client, repo, session: initialSession, doc, pickFolder, onBack }: DocsViewProps) {
   const [scope, setScope] = useState("");
   const [topic, setTopic] = useState("");
-  const [kind, setKind] = useState("");
+  const [category, setCategory] = useState("");
   const [query, setQuery] = useState("");
   const [session, setSession] = useState(initialSession);
   const [listing, setListing] = useState<Listing>({ state: "loading" });
@@ -383,6 +422,24 @@ export function DocsView({ client, repo, session: initialSession, doc, pickFolde
      stays while another is picked. */
   const [scopes, setScopes] = useState<DocScope[]>([]);
   const learn = useCallback((more: DocScope[]) => setScopes((had) => withScopes(had, more)), []);
+  /* The collapsed headers belong to the repo they were read for; another
+     repo reads its own. */
+  const [stored, setStored] = useState(() => ({ repo, collapsed: readCollapsed(repo) }));
+  const collapsed = stored.repo === repo ? stored.collapsed : readCollapsed(repo);
+  const setOpenHeader = (name: string, open: boolean) => {
+    const next = new Set(collapsed);
+    if (open) next.delete(name);
+    else next.add(name);
+    setStored({ repo, collapsed: next });
+    writeCollapsed(repo, next);
+  };
+  const toggle = (name: string) => setOpenHeader(name, collapsed.has(name));
+  /* Picking a category in the rail opens its header once; the header then
+     collapses as any other. */
+  const pickCategory = (name: string) => {
+    setCategory(name);
+    if (name && collapsed.has(name)) setOpenHeader(name, true);
+  };
 
   useEffect(() => {
     client.docScopes(repo).then(
@@ -435,13 +492,20 @@ export function DocsView({ client, repo, session: initialSession, doc, pickFolde
   }, [client, repo]);
 
   const docs = listing.state === "loaded" ? listing.docs : [];
-  const kinds = useMemo(() => {
-    const counts = new Map<string, number>();
-    for (const d of docs) if (d.kind) counts.set(d.kind, (counts.get(d.kind) ?? 0) + 1);
-    return [...counts.entries()].sort((a, b) => b[1] - a[1]);
-  }, [docs]);
   const q = query.trim().toLowerCase();
-  const shown = docs.filter((d) => (!kind || d.kind === kind) && (!q || [d.title, d.summary, ...(d.topics ?? [])].some((t) => t?.toLowerCase().includes(q))));
+  /* The rail's categories, in the list's order, when the server gave any. */
+  const categories = useMemo((): [string, number][] => (docs.some((d) => d.category) ? byCategory(docs).map(([name, list]) => [name, list.length]) : []), [docs]);
+  /* A picked category that the listing no longer has filters nothing, and is
+     dropped once that listing has loaded, so no doc is hidden behind a
+     filter the rail can't show. */
+  const picked = categories.some(([name]) => name === category) ? category : "";
+  useEffect(() => {
+    if (listing.state === "loaded" && category && !picked) setCategory("");
+  }, [listing.state, category, picked]);
+  const shown = docs.filter((d) => (!picked || (d.category ?? UNCATEGORISED) === picked) && (!q || [d.title, d.summary, ...(d.topics ?? [])].some((t) => t?.toLowerCase().includes(q))));
+  const docCard = (d: AnalysisDoc) => (
+    <DocCard key={d.id} d={d} scope={d.scope && (scopes.find((s) => scopeSpec(s) === scopeSpec(d.scope!)) ?? d.scope)} onOpen={() => setOpen(d.id)} />
+  );
   const chips: [string, string][] = [["", "All"], ["user", "Mine"], ...scopes.filter((s) => s.kind !== "user").map((s): [string, string] => [scopeSpec(s), scopeName(s)])];
 
   if (open) {
@@ -533,25 +597,32 @@ export function DocsView({ client, repo, session: initialSession, doc, pickFolde
       {listing.state !== "unavailable" && (
         <div className="grid gap-s2 md:grid-cols-[12rem_minmax(0,1fr)]">
           <nav className="flex flex-col gap-s2" aria-label="Topics and kinds">
+            {categories.length > 0 && rail("Categories", categories, picked, pickCategory)}
             {rail(
               "Topics",
               topics.map((t) => [t.name, t.count]),
               topic,
               setTopic,
             )}
-            {kinds.length > 0 && rail("Kinds", kinds, kind, setKind)}
           </nav>
           <div className="flex min-w-0 flex-col gap-s1">
             {listing.state === "loading" && <p className="text-sm text-ink-3">Loading…</p>}
             {listing.state === "loaded" && docs.length === 0 && <p className="text-sm text-ink-2">No docs here yet. Large work (a goal with several milestones, or a heavy task) leaves one when its branch merges.</p>}
             {listing.state === "loaded" && docs.length > 0 && shown.length === 0 && <p className="text-sm text-ink-2">No doc matches.</p>}
-            {shown.length > 0 && (
-              <ul className="flex flex-col gap-s1">
-                {shown.map((d) => (
-                  <DocCard key={d.id} d={d} scope={d.scope && (scopes.find((s) => scopeSpec(s) === scopeSpec(d.scope!)) ?? d.scope)} onOpen={() => setOpen(d.id)} />
-                ))}
-              </ul>
-            )}
+            {shown.length > 0 && !shown.some((d) => d.category) && <ul className="flex flex-col gap-s1">{shown.map(docCard)}</ul>}
+            {shown.some((d) => d.category) && byCategory(shown).map(([name, list]) => {
+              const closed = collapsed.has(name);
+              return (
+                <section key={name} aria-label={name} className="flex flex-col gap-s1">
+                  <button type="button" aria-expanded={!closed} onClick={() => toggle(name)} className="flex items-center gap-1.5 border-b border-line pb-1 pt-s2 text-left text-[15px] font-semibold text-ink hover:text-branch">
+                    <span aria-hidden className={`inline-block w-3 text-ink-3 transition-transform ${closed ? "" : "rotate-90"}`}>›</span>
+                    {name}
+                    <span className="text-sm font-normal text-ink-3">{list.length}</span>
+                  </button>
+                  {!closed && <ul className="flex flex-col gap-s1">{list.map(docCard)}</ul>}
+                </section>
+              );
+            })}
           </div>
         </div>
       )}
