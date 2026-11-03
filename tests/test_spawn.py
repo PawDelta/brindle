@@ -74,7 +74,7 @@ def _a_worker_keeps_waiting_past_its_room_wait_limit(db, tmp_path, monkeypatch, 
     worker = Agent("worker", "w", "developer", "claude", "boss", "assign", "processing", "@1", None, 1.0)
     launched, sent = [], []
     monkeypatch.setattr(agents, "delegate", lambda *a, **kw: (launched.append(worker) or worker, db.get_workspace("w")))
-    monkeypatch.setattr(agents, "send_message", lambda db_, recipient, text, **kw: sent.append(text))
+    monkeypatch.setattr(agents, "send_message", lambda db_, recipient, text, **kw: sent.append(recipient))
     monkeypatch.setattr(tasks, "_wait_in_background", lambda _: None)
 
     polls = []
@@ -86,7 +86,7 @@ def _a_worker_keeps_waiting_past_its_room_wait_limit(db, tmp_path, monkeypatch, 
         elif len(polls) == 2:   # past the limit: a concurrent sweep too, and still nothing started
             assert tasks.start_with_room(db) == 0
             assert db.get_task(task.id).state == "pending" and not launched
-            assert len(sent) == 1 and f"waited {(limit + 1) / 60:.0f} min" in sent[0] and (low[0] or "load 9.0") in sent[0]
+            assert sent == ["boss"]   # the one long-wait notice, to the task's caller alone
             low[0] = None
             monkeypatch.setattr(spawn, "_load", lambda: 0.5)   # room returns
         else:
@@ -96,7 +96,7 @@ def _a_worker_keeps_waiting_past_its_room_wait_limit(db, tmp_path, monkeypatch, 
     assert tasks.start_with_room(db) == 0
     assert tasks.start_when_room(db, task.id)
     assert len(polls) == 2 and db.get_task(task.id).state == "started" and launched == [worker]
-    assert len(sent) == 2 and "was waiting for room" in sent[1]
+    assert sent == ["boss", "boss"]   # the notice, then the start report
     assert tasks.start_with_room(db) == 0
 
 
