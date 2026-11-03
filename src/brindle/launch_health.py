@@ -20,7 +20,7 @@ import uuid
 from dataclasses import replace
 from pathlib import Path
 
-from brindle import model_access, tmux
+from brindle import build_caches, model_access, tmux
 from brindle.pro import route_health
 
 FOLLOWUP_SECONDS = 5.0
@@ -31,7 +31,7 @@ DELIVERY_SECONDS = 120.0
 _LAUNCH_ENV = frozenset({"BRINDLE_AGENT_ID", "BRINDLE_ROOT_PATH", "BRINDLE_WORKSPACE_PATH",
                          "BRINDLE_WORKSPACE_NAME", "BRINDLE_WORKSPACE_ID", "BRINDLE_BRANCH",
                          "BRINDLE_BASE_BRANCH", "BRINDLE_PORT_BASE", "BRINDLE_TMUX_SOCKET",
-                         "PWD", "TMUX", "TMUX_PANE"})
+                         "PWD", "TMUX", "TMUX_PANE", *build_caches.ENV_KEYS})
 AUTH = model_access.LAUNCH_AUTH
 MODEL = model_access.LAUNCH_MODEL
 CAPACITY = model_access.LAUNCH_CAPACITY
