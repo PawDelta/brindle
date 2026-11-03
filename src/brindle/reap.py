@@ -323,11 +323,10 @@ def _idle_supervisors(db: DB, now: float, live: set[str], panes,
         # Closing them stops every process in them: one brindle didn't start (a
         # dev server, a training run in a split pane) keeps the supervisor.
         ids = {m.id for m in tree}
-        # A pane is a member's by its tag; by recorded id only while that member
-        # runs there (a stopped one's old id may now be someone else's pane).
-        own = {p for p, tags in panes.tags.items() if tags.get(agents.AGENT_TAG) in ids} | {
-            m.tmux_window for m in tree
-            if m.tmux_window and m.id in live and agents.same_server(m, panes)}
+        # A pane is a member's only by its tag (every launch tags it): a recorded
+        # id may name someone else's pane since tmux restarted. An untagged one
+        # (an older brindle's) keeps the supervisor running.
+        own = {p for p, tags in panes.tags.items() if tags.get(agents.AGENT_TAG) in ids}
         if any(not p.idle() and p.id not in own for t in touched for p in t.panes):
             continue
         last = max([a.created_at, a.status_since or 0, _last_activity(s),
