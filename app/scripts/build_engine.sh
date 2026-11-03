@@ -52,7 +52,10 @@ export CFLAGS="-O2 -Werror=unguarded-availability-new"
 
 APP="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="$APP/src-tauri/engine"
-WORK="${CARGO_TARGET_DIR:-$APP/src-tauri/target}/engine-build"
+# This checkout's own, never under CARGO_TARGET_DIR: worktrees share that
+# (brindle.build_caches), and the build deletes and recreates its staging
+# dirs here outside Cargo's lock.
+WORK="$APP/src-tauri/target/engine-build"
 # What the engine's wheel is built from: everything else in the repo is the app's.
 ENGINE_PATHS=(src pyproject.toml uv.lock README.md LICENSE SCHEDULE-A)
 FORCE=0

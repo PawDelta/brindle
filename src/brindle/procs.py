@@ -24,9 +24,12 @@ its ancestors are never included.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
+import shutil
 import signal
+import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,19 +38,38 @@ from brindle import spawn
 
 # Seconds ``ps`` may take, waiting for room included (see brindle.spawn).
 PS_LIMIT = 30.0
+PROC = Path("/proc")   # Linux's process table; absent on macOS
+log = logging.getLogger(__name__)
 
 
 @dataclass
 class Proc:
     pid: int
     ppid: int
-    text: str    # command line, plus (on macOS) the environment ps appends
+    text: str    # command line, plus the process's environment
+    cmd: str | None = None   # the command line alone (None: a hand-made table's ``text`` is one)
+
+
+def command_line(p: Proc) -> str:
+    """``p``'s command line, without its environment: what it runs, not
+    what it inherited (TMUX=, a PWD, whatever its parent had)."""
+    return p.text.split(" BRINDLE_", 1)[0].strip() if p.cmd is None else p.cmd.strip()
+
+
+def _ps(flags: str) -> dict[int, tuple[int, str]]:
+    listing = spawn.read(["ps", flags, "-o", "pid=,ppid=,command="], timeout=PS_LIMIT).stdout
+    out = {}
+    for line in listing.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit():
+            out[int(parts[0])] = (int(parts[1]), parts[2])
+    return out
 
 
 def table() -> dict[int, Proc]:
     """Every process of this user."""
     out: dict[int, Proc] = {}
-    proc = Path("/proc")
+    proc = PROC
     if (proc / "self" / "stat").exists():
         for d in proc.iterdir():
             if not d.name.isdigit():
@@ -59,14 +81,15 @@ def table() -> dict[int, Proc]:
             except OSError:
                 continue
             ppid = int(stat.rsplit(")", 1)[1].split()[1])
-            out[int(d.name)] = Proc(int(d.name), ppid, f"{cmd} {env}")
+            out[int(d.name)] = Proc(int(d.name), ppid, f"{cmd} {env}", cmd)
         return out
-    # macOS (BSD ps): `e` appends each process's environment to its command.
-    listing = spawn.read(["ps", "xeww", "-o", "pid=,ppid=,command="], timeout=PS_LIMIT).stdout
-    for line in listing.splitlines():
-        parts = line.split(None, 2)
-        if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit():
-            out[int(parts[0])] = Proc(int(parts[0]), int(parts[1]), parts[2])
+    # macOS (BSD ps): `e` appends each process's environment to its command,
+    # with nothing to tell where one ends, so the command line is read apart.
+    # A process that started between the two has no command line: it counts
+    # as a command (see is_command), whatever its environment says.
+    commands = _ps("xww")
+    for pid, (ppid, text) in _ps("xeww").items():
+        out[pid] = Proc(pid, ppid, text, commands.get(pid, (ppid, ""))[1])
     return out
 
 
@@ -80,7 +103,7 @@ def _ancestors(procs: dict[int, Proc]) -> set[int]:
 
 
 def _is_daemon(p: Proc) -> bool:
-    return bool(re.search(r"\bclaude daemon\b|\bdaemon run\b", p.text.split(" BRINDLE_", 1)[0]))
+    return bool(re.search(r"\bclaude daemon\b|\bdaemon run\b", command_line(p)))
 
 
 def _names_agent(p: Proc, agent_id: str) -> bool:
@@ -106,6 +129,55 @@ def _home_matches(p: Proc, from_config: bool = False) -> bool:
     return (m.group(1) if m else None) == os.environ.get("BRINDLE_HOME")
 
 
+def root_agent(p: Proc) -> str | None:
+    """The agent ``p`` is a root process of, read from ``p`` alone (its text
+    holds its command line and environment): a CLI launched with brindle's
+    MCP config, or a brindle MCP server. :func:`agent_pids` finds the same
+    roots by scanning every process."""
+    for aid in re.findall(r'BRINDLE_AGENT_ID(?:": | = \\?)"([0-9a-f]+)', p.text):
+        if _names_agent(p, aid) and _home_matches(p, from_config=True):
+            return aid
+    for aid in re.findall(r"(?:^|\s)BRINDLE_AGENT_ID=([0-9a-f]+)", p.text):
+        if _is_brindle_mcp_for(p, aid) and _home_matches(p):
+            return aid
+    return None
+
+
+def is_spare(p: Proc) -> bool:
+    """A pre-started spare session: a root when its brindle MCP server is."""
+    return "bg-spare" in command_line(p)
+
+
+def is_daemon(p: Proc) -> bool:
+    """Claude Code's daemon: what it hosts isn't the agent's that started it."""
+    return _is_daemon(p)
+
+
+def _panes_stamp() -> Path:
+    from brindle.config import brindle_home
+
+    return brindle_home() / "agent-panes.stamp"
+
+
+def agent_panes_changed() -> None:
+    """Note that an agent got a new tmux pane, so every process's cached
+    snapshot of agent panes (brindle.daemon.peer) stops clearing callers."""
+    path = _panes_stamp()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    token = os.urandom(16).hex()
+    tmp = path.with_name(f"{path.name}.{token}")
+    tmp.write_text(token)
+    os.replace(tmp, path)
+
+
+def agent_panes_stamp() -> str:
+    """Changes whenever :func:`agent_panes_changed` is called, in any process."""
+    try:
+        return _panes_stamp().read_text()
+    except OSError:
+        return ""
+
+
 def agent_pids(agent_ids: set[str] | list[str], pane_pids: dict[str, list[int]] | None = None,
                procs: dict[int, Proc] | None = None, through_ancestors: bool = False) -> dict[str, set[int]]:
     """Process ids by agent. ``pane_pids``: agent id -> the pids of its tmux
@@ -129,7 +201,7 @@ def agent_pids(agent_ids: set[str] | list[str], pane_pids: dict[str, list[int]] 
             elif _is_brindle_mcp_for(p, aid) and _home_matches(p):
                 roots.add(p.pid)
                 parent = procs.get(p.ppid)
-                if parent and "bg-spare" in parent.text.split(" BRINDLE_", 1)[0]:
+                if parent and is_spare(parent):
                     roots.add(parent.pid)   # a pre-started spare made for this agent
         found, queue = set(), [r for r in roots if r in procs]
         while queue:
@@ -184,17 +256,22 @@ def running_commands(agent_id: str, pane_pids: list[int] | None = None,
     procs = table() if procs is None else procs
     pids = agent_pids([agent_id], {agent_id: pane_pids or []}, procs,
                       through_ancestors=True).get(agent_id, set())
-    out = []
-    for pid in pids:
-        p = procs.get(pid)
-        if p is None:
-            continue
-        cmd = p.text.split(" BRINDLE_", 1)[0].strip()
-        first = os.path.basename(cmd.split(None, 1)[0]) if cmd else ""
-        if first.lstrip("-") in _SHELLS or _PLUMBING.search(cmd) or _is_cli(cmd):
-            continue
-        out.append(p)
-    return out
+    return [procs[pid] for pid in pids if pid in procs and is_command(procs[pid])]
+
+
+def is_command(p: Proc, inside: str | None = None) -> bool:
+    """Whether ``p`` looks like a command (a test run, a build, a dev server),
+    not a provider CLI, its MCP servers, hooks or a bare shell. Only its
+    command line counts, never its environment. ``inside``: a folder (a
+    worktree) whose paths count by their last part alone, so a
+    ``node_modules`` or a "brindle" in the folder's own path doesn't make
+    what runs from it plumbing."""
+    cmd = command_line(p)
+    for folder in sorted({inside, os.path.realpath(inside)}, key=len, reverse=True) if inside else ():
+        cmd = re.sub(re.escape(folder.rstrip(os.sep)) + r"(?:/(\S*))?",
+                     lambda m: os.path.basename(m.group(1) or "") or ".", cmd)
+    first = os.path.basename(cmd.split(None, 1)[0]) if cmd else ""
+    return not (first.lstrip("-") in _SHELLS or _PLUMBING.search(cmd) or _is_cli(cmd))
 
 
 def all_agent_ids(procs: dict[int, Proc] | None = None) -> set[str]:
@@ -209,14 +286,196 @@ def all_agent_ids(procs: dict[int, Proc] | None = None) -> set[str]:
     return ids
 
 
+def _status(d: Path) -> dict[str, list[str]]:
+    """``d/status`` (``/proc/<pid>/status``, readable by anyone) by field."""
+    out = {}
+    for line in (d / "status").read_text().splitlines():
+        key, _, value = line.partition(":")
+        out[key] = value.split()
+    return out
+
+
+# Processes of this user whose folder the kernel may refuse to show this user
+# (systemd's user manager holds CAP_WAKE_ALARM, say) but which never live in a
+# project folder, so a refusal of theirs keeps no worktree. By Name (as
+# /proc/<pid>/status gives it), with why each qualifies.
+NEVER_IN_A_PROJECT = {
+    # The user's service manager (``systemd --user``): PID 1 starts it in /
+    # for each logged-in user and it stays there; the services it starts are
+    # processes of their own. It runs on nearly every Linux desktop and server.
+    "systemd": "the user's service manager",
+    # Both chdir to / when they daemonize, so they never hold a folder.
+    "ssh-agent": "the SSH agent",
+    "gpg-agent": "the GnuPG agent",
+}
+
+
+class Refused(OSError):
+    """A process of this user whose folder can't be read: it could be in any
+    worktree. ``name`` (its Name, or ``?``) and ``pid`` say which, so a
+    refusal can name it."""
+
+    def __init__(self, pid: int, name: str):
+        super().__init__(f"the folder of process {name} (pid {pid}) can't be read")
+        self.pid, self.name = pid, name
+
+
+def _is_known_manager(name: str, status: dict[str, list[str]], argv0: str) -> bool:
+    """Whether the process is one of NEVER_IN_A_PROJECT: systemd only as the
+    user's manager (started by PID 1, argv[0] ``systemd``), not anything
+    else that calls itself that."""
+    if name not in NEVER_IN_A_PROJECT:
+        return False
+    return name != "systemd" or (status.get("PPid") == ["1"] and argv0 == "systemd")
+
+
+def _argv0(d: Path) -> str:
+    """The basename of argv[0] of the process at ``d``, or ``?``."""
+    try:
+        argv0 = (d / "cmdline").read_bytes().split(b"\0", 1)[0].decode(errors="replace")
+    except OSError:
+        return "?"
+    return os.path.basename(argv0) or "?"
+
+
+def _excused(d: Path, ignore: frozenset[str] = frozenset()) -> bool:
+    """Whether the process at ``d`` (``/proc/<pid>``), whose folder this user
+    was refused, can be left out of ``cwds``:
+
+    - it runs with another's ids: a uid or gid (real, effective, saved or
+      filesystem) other than this user's. That is one thing the kernel
+      refuses it for (ptrace_may_access), though ``d`` shows this user as its
+      owner when only its effective uid is this user's: a system service like
+      that is no more this user's than a root process, which ``cwds`` leaves
+      out too;
+    - it has this user's ids but is a known process that never lives in a
+      project folder (NEVER_IN_A_PROJECT), or one the person excused by name
+      (``ignore``: a repo's ``live_check_ignore``, matched against its Name
+      or the basename of its argv[0]).
+
+    Anything else refused (capabilities, say, non-dumpable, or a security
+    module refused it), or whose ids can't be read, can't be told: False.
+    Except for a known or excused process, it logs one warning saying what
+    the process is (``_describe``)."""
+    try:
+        status = _status(d)
+        uids, gids = [int(u) for u in status["Uid"]], [int(g) for g in status["Gid"]]
+    except (OSError, KeyError, ValueError) as e:
+        log.warning("brindle: a process's folder can't be read and nor can its ids (%s), so it counts "
+                    "as in use: %s", type(e).__name__, _describe(d, {}))
+        return False
+    slots = ("real", "effective", "saved", "filesystem")
+    differ = [f"{kind} {slot} {n}" for kind, ids, mine in (("uid", uids, os.getuid()), ("gid", gids, os.getgid()))
+              for slot, n in zip(slots, ids) if n != mine]
+    if differ:
+        log.warning("brindle: a process's folder can't be read, but it runs with another's ids (%s), so it "
+                    "isn't this user's: %s", ", ".join(differ), _describe(d, status))
+        return True
+    name, argv0 = " ".join(status.get("Name", [])), _argv0(d)
+    if _is_known_manager(name, status, argv0):
+        log.debug("brindle: %s (pid %s) has a folder that can't be read, but never runs in a project",
+                  NEVER_IN_A_PROJECT[name], d.name)
+        return True
+    if name in ignore or argv0 in ignore:
+        log.debug("brindle: %s (pid %s) has a folder that can't be read; live_check_ignore excuses it",
+                  name, d.name)
+        return True
+    log.warning("brindle: a process with this user's ids has a folder that can't be read, so it counts "
+                "as in use: %s", _describe(d, status))
+    return False
+
+
+def _name(d: Path) -> str:
+    """The Name of the process at ``d``, or ``?``."""
+    try:
+        return " ".join(_status(d).get("Name", [])) or "?"
+    except OSError:
+        return "?"
+
+
+def _describe(d: Path, status: dict[str, list[str]]) -> str:
+    """What the process at ``d`` is, for a log: its pid, Name, State, parent
+    (pid and Name), ids, CapEff, NoNewPrivs, Seccomp, start (seconds since
+    boot) and the basename of argv[0]. Nothing else of its command line and
+    never its environment. Whatever can't be read shows as ``?``."""
+    def field(st: dict[str, list[str]], key: str) -> str:
+        return " ".join(st.get(key, [])) or "?"
+
+    ppid, start = field(status, "PPid"), "?"
+    try:
+        after = (d / "stat").read_text().rsplit(")", 1)[1].split()   # fields 3 on
+        ppid = after[1] if ppid == "?" else ppid
+        start = f"{int(after[19]) / os.sysconf('SC_CLK_TCK'):.2f}s"   # field 22, in clock ticks
+    except (OSError, IndexError, ValueError):
+        pass
+    try:
+        parent = field(_status(PROC / ppid), "Name") if ppid.isdigit() else "?"
+    except OSError:
+        parent = "?"
+    argv0 = _argv0(d)
+    return (f"pid {d.name}, Name {field(status, 'Name')}, State {field(status, 'State')}, PPid {ppid} "
+            f"({parent}), Uid {field(status, 'Uid')}, Gid {field(status, 'Gid')}, "
+            f"CapEff {field(status, 'CapEff')}, NoNewPrivs {field(status, 'NoNewPrivs')}, "
+            f"Seccomp {field(status, 'Seccomp')}, started {start} after boot, argv[0] {argv0}")
+
+
+def cwds(ignore: frozenset[str] | set[str] | list[str] = frozenset()) -> dict[int, str]:
+    """The current folder of every process of this user, whatever started it
+    (a detached dev server, a shell on any tmux server or terminal). Raises
+    OSError when it can't be told: a caller deciding whether something is in
+    use must then assume it is: one process of this user it can't read
+    (``Refused``; not one that exited during the scan, one running with
+    another's ids, a known service manager or agent, nor one named in
+    ``ignore``: see ``_excused``) or an lsof that failed part way."""
+    ignore = frozenset(ignore)
+    proc = PROC
+    if (proc / "self" / "cwd").exists():
+        out: dict[int, str] = {}
+        for d in proc.iterdir():
+            if d.name.isdigit():
+                try:
+                    if d.stat().st_uid == os.getuid():
+                        out[int(d.name)] = os.readlink(d / "cwd")
+                except (FileNotFoundError, ProcessLookupError):
+                    continue   # it exited meanwhile (or is a zombie): no folder to hold
+                except PermissionError as e:
+                    if not _excused(d, ignore):
+                        raise Refused(int(d.name), _name(d)) from e
+        return out
+    lsof = shutil.which("lsof") or "/usr/sbin/lsof"
+    try:
+        listing = spawn.read([lsof, "-w", "-n", "-P", "-a", "-u", str(os.getuid()), "-d", "cwd", "-Fpn"],
+                             timeout=PS_LIMIT)
+    except (spawn.Busy, subprocess.SubprocessError) as e:
+        raise OSError(f"lsof: {e}") from e
+    if listing.returncode != 0:   # some process it couldn't look at: the rest isn't all
+        raise OSError(f"lsof failed ({listing.stderr.strip() or listing.returncode})")
+    out, listed = {}, []
+    for line in listing.stdout.splitlines():
+        if line.startswith("p") and line[1:].isdigit():
+            listed.append(int(line[1:]))
+        elif line.startswith("n") and listed:
+            out[listed[-1]] = line[1:]
+    if os.getpid() not in out or set(listed) - set(out):   # this process has a folder too
+        raise OSError(f"lsof left out a process's folder ({listing.stderr.strip() or 'no error'})")
+    return out
+
+
 def alive(pid: int) -> bool:
+    """Whether ``pid`` is a running process. On Linux a process that has
+    exited but isn't reaped yet (a zombie, e.g. an orphan waiting on its
+    new parent) still answers kill(0); it runs nothing, so it isn't alive."""
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
     except PermissionError:
         return True
-    return True
+    try:
+        stat = (PROC / str(pid) / "stat").read_text()
+    except OSError:   # no /proc (macOS), or it exited just now
+        return True
+    return stat.rpartition(")")[2].split()[:1] != ["Z"]
 
 
 def terminate(pids: set[int] | list[int], grace: float = 3.0) -> int:

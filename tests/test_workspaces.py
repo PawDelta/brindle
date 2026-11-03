@@ -9,7 +9,7 @@ from typer.testing import CliRunner
 
 import brindle
 from brindle import cli
-from brindle import agents, bus, gates, git, mcp_server, providers, services, workspaces
+from brindle import agents, bus, disk, gates, git, mcp_server, providers, services, workspaces
 from brindle.config import load_repo_config
 
 from conftest import sh
@@ -120,6 +120,21 @@ def test_remove_refuses_dirty_and_keeps_branch(db, repo):
     assert [(e["kind"], e["workspace_id"], e["repo_root"])
             for e in bus.tail(db, kinds=("workspace.created", "workspace.removed"))] == [
         ("workspace.created", ws.id, ws.repo_root), ("workspace.removed", ws.id, ws.repo_root)]
+
+    # Merged, plainly or by squash: the branch goes with its workspace, its tip archived.
+    plain = workspaces.create(db, str(repo), "plain").workspace
+    squashed = workspaces.create(db, str(repo), "squashed").workspace
+    for merged in (plain, squashed):
+        Path(merged.path, f"{merged.name}.txt").write_text("work\n")
+        sh(f"git add -A && git commit -qm {merged.name} && git commit -q --allow-empty -m more", merged.path)
+    sh(f"git merge -q --no-ff {plain.branch}", repo)
+    sh(f"git merge -q --squash {squashed.branch} && git commit -qm 'Squash merge'", repo)
+    tip = sh(f"git rev-parse {squashed.branch}", repo).strip()
+    for merged in (plain, squashed):
+        assert workspaces.remove(db, merged).branch_deleted
+    assert sh("git branch --list plain squashed", repo).strip() == ""
+    assert sh(f"git rev-parse {disk.ARCHIVE_REF}squashed", repo).strip() == tip
+    assert sh(f"git rev-parse {disk.ARCHIVE_REF}plain", repo).strip()
 
 
 @pytest.mark.parametrize("ref", ["worker", "missing-worker"])

@@ -120,12 +120,16 @@ class RepoConfig:
     max_agents: int = 5                # workers running at once per session; 0 means no cap
     check_timeout: int = 900           # seconds allowed for each check command
     wait_for_room: bool = True         # a new worker or check run waits while the machine is busy; false starts it at once
+    room_wait_max: int = 300           # seconds a worker waits for room before starting despite the load
     check_concurrency: int = 4         # check runs at once on this machine, across branches; the rest queue (0: no cap)
     usage_limit: int = 90              # autopilot stops pushing on at this % of the Claude usage limit
     limit_cooldown_minutes: int | None = None  # how long a provider that hit its limit counts as unavailable (default 300 for Antigravity)
     graphify: bool | None = None       # point agents at graphify-out/graph.json (None: if it's there)
     graphify_auto_refresh: bool = True  # rebuild untracked code maps automatically; queries work when false
     stale_after: int = 30              # minutes before an idle, reported worker is closed; 0: never
+    stall_alert_after: int = 10        # minutes a piped branch may sit with nothing working on it before the supervisor is told; 0: never
+    idle_supervisor_days: float = 3    # days without input before an idle supervisor is stopped (resumable); 0: never
+    superseded_after: float = 6        # hours without activity before a worker whose work already landed is stopped; 0: never
     pipeline: bool = True              # brindle reviews and merges reported branches itself (brindle.pipeline)
     review_start_delay: int = 60       # seconds before recovering a reported branch with no review in progress
     goal_audit: bool = True            # an adversarial reviewer checks a finished goal against the original request before it counts as reached
@@ -176,6 +180,10 @@ class RepoConfig:
     # Paths/globs whose merge conflicts brindle never hands to a worker to
     # resolve (migrations, lockfiles, generated code): they go to the person.
     protected_paths: list[str] = field(default_factory=list)
+    # Names of processes (as Linux shows them, or argv[0]'s basename) whose
+    # folder may be unreadable but which never run in a project, so they don't
+    # keep a worktree from removal (see brindle.procs.cwds).
+    live_check_ignore: list[str] = field(default_factory=list)
     # Worktree pool: pre-built worktrees (checked out, files copied, setup run)
     # that `create` claims instead of doing that work live. None here means
     # "not set"; load_repo_config resolves it to 1 if the repo has `setup`
@@ -197,6 +205,9 @@ class RepoConfig:
     # false to never start or preload one.
     local_models: bool = True
     delete_merged_branches: bool = True  # removing a worktree deletes its branch once fully merged into its base
+    shared_cargo_target: bool = True   # worktrees share one CARGO_TARGET_DIR per repo (see brindle.build_caches)
+    delete_pushed_branches: bool = False  # delete the origin branch brindle pushed once its PR merged
+    min_free_disk_gb: float = 10.0     # a new worker or check run waits for disk below this much free (0: never)
     pr_footer: bool = True             # `brindle pr` ends the PR body with one "built with brindle" line
     sidebar: str = "left"              # where the dashboard sits: "left" of the chat or "bottom"
     # Standing rules for the supervisor ("fix review findings without asking", ...):
@@ -235,6 +246,14 @@ class RepoConfig:
     # Dollar budgets (brindle Pro; see brindle.budget): {"task_usd", "goal_usd", "month_usd", "stop"?},
     # merged per key: user, then repo, then config.local.json.
     budget: dict = field(default_factory=dict)
+    # Environment variables (names or globs) an agent's pane may inherit on top of
+    # brindle's built-in allowlist (secrets.env_allowed), from the person's file,
+    # the repo's and config.local.json, all kept. A secret-looking name never passes.
+    agent_env: list[str] = field(default_factory=list)
+    # "report": a pane keeps the variables off the allowlist, and each launch logs
+    # their names (see agent_env_report, `brindle doctor`); "enforce": they're dropped.
+    # Secret-looking names are dropped in either mode.
+    agent_env_mode: str = "report"
 
 
 def _merge_commands(shared: list[str], local: object) -> list[str]:
@@ -377,20 +396,22 @@ def load_repo_config(repo_root: str | Path, *, user_only: bool = False, branch: 
     user = user_settings()
 
     cfg = RepoConfig()
-    for key in ("setup", "teardown", "copy", "checks", "add_dirs", "worker_extra_read_dirs", "protected_paths"):
+    for key in ("setup", "teardown", "copy", "checks", "add_dirs", "worker_extra_read_dirs", "protected_paths",
+                "live_check_ignore"):
         merged = _merge_commands(list(shared.get(key, [])), local.get(key))
         setattr(cfg, key, merged)
     for key in ("base_branch", "branch_prefix", "worktree_root", "default_agent", "fetch", "auto_update", "review",
                 "reviewer", "review_profile", "pre_commit", "max_agents", "check_timeout",
-                "check_concurrency", "wait_for_room",
-                "usage_limit", "pool_size", "graphify", "graphify_auto_refresh", "stale_after", "pipeline",
+                "check_concurrency", "wait_for_room", "room_wait_max", "min_free_disk_gb", "delete_pushed_branches",
+                "usage_limit", "pool_size", "graphify", "graphify_auto_refresh", "stale_after", "stall_alert_after", "pipeline",
+                "idle_supervisor_days", "superseded_after",
                 "review_rounds", "review_start_delay", "fable_escalation", "goal_audit", "overlap", "coordinator", "local_models", "merge_into",
-                "auto_merge_default_branch", "delete_merged_branches", "delegation", "max_weight", "sidebar", "pr_footer", "plan_first", "learning",
+                "auto_merge_default_branch", "delete_merged_branches", "shared_cargo_target", "delegation", "max_weight", "sidebar", "pr_footer", "plan_first", "learning",
                 "learning_candidates", "limit_cooldown_minutes", "message_delivery", "permission_policy",
                 "permission_hold_seconds", "permission_supervisor_hold_seconds", "agy_approvals",
                 "learned_rules_repeats", "learned_rules_profile", "exclude_providers",
                 "reviewer_fallbacks", "supervisor_profile", "supervisor_fallbacks", "scoped_checks",
-                "scoped_checks_max_files"):
+                "scoped_checks_max_files", "agent_env_mode"):
         for source in (local, shared, user):
             if key in source:
                 setattr(cfg, key, source[key])
@@ -402,6 +423,12 @@ def load_repo_config(repo_root: str | Path, *, user_only: bool = False, branch: 
             if isinstance(rule, str) and rule.strip() and rule.strip() not in rules:
                 rules.append(rule.strip())
     cfg.rules = rules
+    cfg.agent_env = []
+    for source in (user, shared, local):
+        found = source.get("agent_env")
+        for name in found if isinstance(found, list) else []:
+            if isinstance(name, str) and name.strip() and name.strip() not in cfg.agent_env:
+                cfg.agent_env.append(name.strip())
     if not any("check_concurrency" in source for source in (local, shared, user)):
         cfg.check_concurrency = host_check_concurrency()
     if not any("permission_policy" in source for source in (local, shared, user)):

@@ -80,6 +80,83 @@ def machine_memory_gb() -> float:
     return (os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")) / (1024 ** 3)
 
 
+def free_memory_gb() -> float:
+    """Currently available RAM, without counting swap, in GiB."""
+    if sys.platform == "darwin":
+        import ctypes
+
+        libc = ctypes.CDLL(None)
+        stats = (ctypes.c_uint32 * 38)()
+        count = ctypes.c_uint32(len(stats))
+        libc.mach_host_self.restype = ctypes.c_uint32
+        if libc.host_statistics64(libc.mach_host_self(), 4, ctypes.byref(stats),
+                                  ctypes.byref(count)) != 0:
+            raise OSError("cannot read free RAM")
+        # free_count already includes speculative pages (mach/vm_statistics.h);
+        # compressed or inactive application pages are not room for a new model.
+        return stats[0] * os.sysconf("SC_PAGE_SIZE") / 2**30
+    for line in Path("/proc/meminfo").read_text().splitlines():
+        if line.startswith("MemAvailable:"):
+            return int(line.split()[1]) * 1024 / 2**30
+    raise OSError("cannot read free RAM")
+
+
+def memory_problem(profile) -> str | None:
+    """A fresh memory check for local native profiles; unknown size fails closed."""
+    if profile.provider != "native":
+        return None
+    return endpoint_memory_problem(profile.base_url or "", profile.model or "")
+
+
+def endpoint_memory_problem(base_url: str, model: str, ollama: bool | None = None) -> str | None:
+    """Why a local Ollama server can't load ``model`` now: free RAM below the
+    model's size plus the margin. None for remote endpoints and for local
+    servers confirmed not to be Ollama (llama.cpp, LM Studio), whose model
+    size brindle can't discover. ``ollama``: what the caller already knows
+    about the server (True: Ollama); otherwise it is discovered here, and a
+    discovery that fails is a problem, not a pass."""
+    if not serve.is_local(base_url):
+        return None
+    if ollama is None:
+        from brindle.native import client, runner
+
+        ollama = runner.ollama_kind(client.Endpoint(base_url, model), TAGS_TIMEOUT)
+    if ollama is False:
+        return None
+    if ollama is None:
+        return f"cannot tell whether {base_url} is Ollama, so cannot verify free memory for {model}"
+    host = base_url.rstrip("/").removesuffix("/v1")
+    try:
+        free = free_memory_gb()
+        margin = float(os.environ.get("BRINDLE_LOCAL_MEMORY_MARGIN_GB", "4"))
+        if margin < 0 or not margin < float("inf"):
+            raise ValueError("invalid margin")
+        sizes = []
+        resident = 0.0
+        for path in ("/api/ps", "/api/tags"):
+            with urllib.request.urlopen(host + path, timeout=TAGS_TIMEOUT) as response:
+                data = json.load(response)
+            for entry in data.get("models", []):
+                name = entry.get("name") or entry.get("model")
+                if name not in (model, model + ":latest"):
+                    continue
+                size = float(entry["size"]) / 2**30
+                if not 0 < size < float("inf"):
+                    raise ValueError("invalid model size")
+                sizes.append(size)
+                if path == "/api/ps":
+                    resident = size
+        if not sizes:
+            return f"cannot determine local model size for {model}"
+        size = max(sizes)
+        if free + resident < size + margin:
+            return (f"insufficient free memory for {model}: {free:.1f} GiB free, "
+                    f"{size:.1f} GiB model ({resident:.1f} GiB resident) + {margin:g} GiB margin")
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return f"cannot verify free memory and local model size for {model}"
+    return None
+
+
 def is_tty() -> bool:
     """Whether standard input is an interactive terminal."""
     return sys.stdin.isatty()
