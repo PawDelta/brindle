@@ -162,6 +162,14 @@ CREATE TABLE IF NOT EXISTS session_repo_branches (
     PRIMARY KEY (root_id, alias),
     FOREIGN KEY (root_id, alias) REFERENCES session_repos(root_id, alias) ON DELETE CASCADE
 );
+-- One-shot notices about a task (kind 'wait': its supervisor was told it waits
+-- long for room). A table of its own, not a column of tasks: see above.
+CREATE TABLE IF NOT EXISTS task_notes (
+    task_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    noted REAL NOT NULL,
+    PRIMARY KEY (task_id, kind)
+);
 CREATE TABLE IF NOT EXISTS session_credentials (
     session_id TEXT NOT NULL,
     key TEXT NOT NULL,
@@ -1063,7 +1071,6 @@ class Task:
     waiting_since: float | None = None
     pipeline: str | None = None        # the pipeline state its worker starts in (brindle.pipeline)
     forced: int | None = None          # 1: a supervisor started it despite the load (brindle.tasks.start_now)
-    wait_noted: float | None = None    # when its supervisor was told it waits long for room (claim_wait_note)
 
 
 def _load(cls, row):
@@ -1237,8 +1244,6 @@ class DB:
             self.conn.execute("ALTER TABLE tasks ADD COLUMN pipeline TEXT")
         if "forced" not in task_cols:
             self.conn.execute("ALTER TABLE tasks ADD COLUMN forced INTEGER")
-        if "wait_noted" not in task_cols:
-            self.conn.execute("ALTER TABLE tasks ADD COLUMN wait_noted REAL")
         cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(autopilot)")}
         if "checking_since" not in cols:
             self.conn.execute("ALTER TABLE autopilot ADD COLUMN checking_since REAL")
@@ -1310,6 +1315,7 @@ class DB:
             if col not in request_cols:
                 self.conn.execute(f"ALTER TABLE permission_requests ADD COLUMN {col} {kind}")
         self._move_session_repo_branches()
+        self._move_task_wait_noted()
         if "merged_at" not in {r["name"] for r in self.conn.execute("PRAGMA table_info(session_prs)")}:
             self.conn.execute("ALTER TABLE session_prs ADD COLUMN merged_at REAL")
         health_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(launch_health)")}
@@ -1347,6 +1353,22 @@ class DB:
             c.execute("INSERT OR IGNORE INTO session_repo_branches (root_id, alias, branch) "
                       "SELECT root_id, alias, branch FROM session_repos WHERE branch IS NOT NULL")
             c.execute("ALTER TABLE session_repos DROP COLUMN branch")
+
+    def _move_task_wait_noted(self) -> None:
+        """A development build kept the long-wait note on tasks.wait_noted:
+        copy it to task_notes and drop the column (same transaction pattern as
+        _move_session_repo_branches)."""
+        def has_col(c: sqlite3.Connection) -> bool:
+            return "wait_noted" in {r["name"] for r in c.execute("PRAGMA table_info(tasks)")}
+
+        if not has_col(self.conn):
+            return
+        with self.tx() as c:
+            if not has_col(c):
+                return
+            c.execute("INSERT OR IGNORE INTO task_notes (task_id, kind, noted) "
+                      "SELECT id, 'wait', wait_noted FROM tasks WHERE wait_noted IS NOT NULL")
+            c.execute("ALTER TABLE tasks DROP COLUMN wait_noted")
 
     @contextmanager
     def tx(self) -> Iterator[sqlite3.Connection]:
@@ -2704,13 +2726,16 @@ class DB:
         """Atomically mark that the long-wait note of pending task ``task_id``
         is being sent: only the one sweep that wins may send it, once."""
         with self.tx() as c:
-            return c.execute("UPDATE tasks SET wait_noted=? WHERE id=? AND state='pending' "
-                             "AND wait_noted IS NULL", (at, task_id)).rowcount == 1
+            return c.execute(
+                "INSERT OR IGNORE INTO task_notes (task_id, kind, noted) "
+                "SELECT id, 'wait', ? FROM tasks WHERE id=? AND state='pending'",
+                (at, task_id)).rowcount == 1
 
     def release_wait_note(self, task_id: str, at: float) -> None:
         """Undo ``claim_wait_note`` when the note couldn't be sent."""
         with self.tx() as c:
-            c.execute("UPDATE tasks SET wait_noted=NULL WHERE id=? AND wait_noted=?", (task_id, at))
+            c.execute("DELETE FROM task_notes WHERE task_id=? AND kind='wait' AND noted=?",
+                      (task_id, at))
 
     def get_reported_spend(self, agent_id: str) -> float:
         row = self.conn.execute("SELECT reported_usd FROM agent_reported_spend WHERE agent_id=?", (agent_id,)).fetchone()
