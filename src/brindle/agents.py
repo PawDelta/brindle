@@ -2968,11 +2968,13 @@ def review_base(ws: Workspace, prev_sha: str) -> ReviewBase:
             if not git.ok(["merge-base", "--is-ancestor", p2, ws.base_branch], ws.path):
                 return ReviewBase()
             clean = git.run(["merge-tree", "--write-tree", p1, p2], ws.path, check=False)
-            if clean.returncode != 0:
+            # Exit 1 is a conflict: git still wrote a tree (with markers), which
+            # a hand resolution differs from. Any other failure is git failing.
+            if clean.returncode not in (0, 1) or not clean.stdout.split():
                 return ReviewBase()
             actual = git.out(["rev-parse", f"{m}^{{tree}}"], ws.path)
             tree = clean.stdout.split()[0]
-            if tree != actual:
+            if tree != actual or clean.returncode == 1:
                 edited = git.paths(["diff", "--name-only", tree, actual], ws.path)
                 return ReviewBase(edited=edited)
             newest = p2
@@ -2982,9 +2984,12 @@ def review_base(ws: Workspace, prev_sha: str) -> ReviewBase:
         commit = git.out(["-c", "user.name=brindle", "-c", "user.email=brindle@localhost",
                           "commit-tree", merged.stdout.split()[0], "-p", prev_sha,
                           "-m", "review base"], ws.path)
-        # Files changed by the merged base commits and by the worker since prev.
+        # Files the merged base commits touched, and files the worker's own
+        # commits since prev touched (not the merges): an identical edit on
+        # both sides leaves no residual diff but is still worth a look.
         theirs = set(git.paths(["diff", "--name-only", f"{prev_sha}...{newest}"], ws.path))
-        mine = set(git.paths(["diff", "--name-only", commit, "HEAD"], ws.path))
+        mine = set(git.paths(["log", "--first-parent", "--no-merges", "--name-only",
+                              "--format=", f"{prev_sha}..HEAD"], ws.path))
         git.run(["update-ref", review_base_ref(ws.id), commit], ws.path)
         return ReviewBase(sha=review_base_ref(ws.id), merged=newest, both=sorted(theirs & mine))
     except git.GitError:
