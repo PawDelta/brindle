@@ -31,6 +31,32 @@ from brindle.pro import license
 TOKEN = "t" * 43
 
 
+@pytest.fixture(scope="module")
+def _repo_template(tmp_path_factory):
+    """conftest's ``repo`` (main, one commit, pushed to a bare origin), built once per module."""
+    base = tmp_path_factory.mktemp("repo-template")
+    work = base / "proj"
+    work.mkdir()
+    sh(f"git init -q --bare -b main {base / 'origin.git'} && git init -q -b main", work)
+    (work / "app.py").write_text("print('hi')\n")
+    (work / ".gitignore").write_text(".env\n")
+    (work / ".env").write_text("SECRET=1\n")
+    sh("git add -A && git -c user.name=t -c user.email=t@example.com commit -qm init"
+       f" && git remote add origin {base / 'origin.git'} && git push -q -u origin main"
+       " && git remote set-head origin main", work)
+    return base
+
+
+@pytest.fixture
+def repo(_repo_template, tmp_path):
+    """A copy of the module's template repo, its origin the copy's own."""
+    for name in ("origin.git", "proj"):
+        shutil.copytree(_repo_template / name, tmp_path / name, symlinks=True)
+    config = tmp_path / "proj" / ".git" / "config"
+    config.write_text(config.read_text().replace(str(_repo_template / "origin.git"), str(tmp_path / "origin.git")))
+    return tmp_path / "proj"
+
+
 def _get(path: str, headers: dict[str, str], query: str = "", peer_pid: int | None = None) -> tuple[int, dict]:
     """One HTTP request straight through the ASGI app (``peer_pid``: as if
     that process called on the Unix socket)."""
@@ -656,8 +682,9 @@ def test_window_size_cleanup_unsets_manual_only_on_brindles_own_windows_once(db,
     db.add_agent(Agent("w3", "ws", "developer", "claude", None, "assign", "done", "%2", None, 1.0,
                        tmux_server="gone"))
     here = tmux.current_server()
-    # list-panes rows: pane, its agent tag, its action-terminal tag (%4 a sidebar, %5 not brindle's)
-    panes = {here: ["%1\tw1\t", "%4\t\t", "%5\t\t", "%9\t\tt-1"], "other": ["%1\tw2\t"]}
+    # list-panes rows: pane, its agent tag, its action-terminal tag (%4 a sidebar, %5 not brindle's,
+    # %7 brindle's but never left at manual)
+    panes = {here: ["%1\tw1\t", "%4\t\t", "%5\t\t", "%7\tw3\t", "%9\t\tt-1"], "other": ["%1\tw2\t"]}
     manual = {(here, "%1"), ("other", "%1"), (here, "%4"), (here, "%5"), (here, "%9")}
     refused: dict = {}          # (server, command) tmux fails -> what it says
     ran = []
@@ -1032,7 +1059,8 @@ def _session_diff_concurrent_asks_share_one_computation(db, repo, tmp_path, monk
                  marks=pytest.mark.variant("24 concurrent requests for one caller share a single check that allows")),
     pytest.param(_caller_check_single_flight, {"outcome": "error"}, id="caller_check-error"),
     pytest.param(_caller_check_single_flight, {"outcome": "limit"}, id="caller_check-limit"),
-    pytest.param(_session_diff_reruns_git_only_for_what_changed, {}, id="session_diff-reruns"),
+    pytest.param(_session_diff_reruns_git_only_for_what_changed, {}, id="session_diff-reruns",
+                 marks=pytest.mark.slow("counts the real git commands an incremental diff runs: ~240 git calls")),
     pytest.param(_session_diff_concurrent_asks_share_one_computation, {}, id="session_diff-concurrent"),
 ])
 def test_daemon_overload_lanes_health_caller_check_and_session_diff(request, scenario, params):
