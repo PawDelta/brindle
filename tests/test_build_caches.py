@@ -97,6 +97,7 @@ def test_new_worktree_clones_node_modules_when_the_lockfile_matches(db, repo, mo
         assert clones == [(app / "node_modules", Path(created.workspace.path) / "app" / "node_modules")]
 
 
+@pytest.mark.variant("race: two worktrees' engine builds sharing a CARGO_TARGET_DIR must not delete each other's staging dirs (shell code coverage can't see)")
 def test_engine_builds_of_two_worktrees_sharing_a_cargo_target_keep_separate_work_dirs(tmp_path):
     """build_engine.sh deletes and recreates its staging dirs outside Cargo's
     lock, so a shared CARGO_TARGET_DIR must not make two worktrees share them.

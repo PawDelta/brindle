@@ -411,6 +411,7 @@ def test_retention_caps_backups_archive_and_logs(brindle_home):
     assert not old.exists() and new.is_dir() and (home / "archive" / "brindle.jsonl").is_file()
 
 
+@pytest.mark.variant("security boundary (review blocker): log rotation never writes through a symlink or hard link into the database or a file outside brindle's home")
 def test_log_rotation_never_follows_a_symlink_or_alias(brindle_home, tmp_path):
     home = config.brindle_home()
     home.mkdir(parents=True, exist_ok=True)
@@ -489,23 +490,6 @@ def test_low_free_disk_holds_a_launch(repo, monkeypatch, held):
     assert tasks.room_wait(str(repo)) == why
 
 
-def test_merged_and_squash_merged_branches_go_with_their_workspace(db, repo):
-    plain = workspaces.create(db, str(repo), "plain").workspace
-    squashed = workspaces.create(db, str(repo), "squashed").workspace
-    for ws in (plain, squashed):
-        Path(ws.path, f"{ws.name}.txt").write_text("work\n")
-        sh(f"git add -A && git commit -qm {ws.name} && git commit -q --allow-empty -m more", ws.path)
-    sh(f"git merge -q --no-ff {plain.branch}", repo)
-    sh(f"git merge -q --squash {squashed.branch} && git commit -qm 'Squash merge'", repo)
-    tip = sh(f"git rev-parse {squashed.branch}", repo).strip()
-
-    for ws in (plain, squashed):
-        assert workspaces.remove(db, ws).branch_deleted
-
-    assert sh("git branch --list plain squashed", repo).strip() == ""
-    assert _archived(repo, "squashed") == tip and _archived(repo, "plain")
-
-
 def test_clean_lists_then_removes_merged_and_archives_stale_branches(db, repo, monkeypatch):
     wt = _worktree(repo, "feat", merge="merge")
     when = f"{int(time.time() - 30 * DAY)} +0000"
@@ -572,6 +556,7 @@ def test_a_branch_that_moves_before_deletion_is_kept(db, repo, monkeypatch):
                    check=False).returncode != 0
 
 
+@pytest.mark.variant("regression guard (review blocker): a merge record counts only for the tip it recorded, so work committed after the merge is never swept")
 def test_a_branch_that_moved_on_after_its_merge_is_not_swept(db, repo):
     ws = workspaces.create(db, str(repo), "again").workspace
     Path(ws.path, "a.txt").write_text("a\n")

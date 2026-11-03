@@ -74,19 +74,34 @@ def test_a_merge_into_the_session_tells_the_supervisor_how_far_behind_main_it_is
     assert not contains(sess.path, main)
 
 
-@pytest.mark.parametrize("diverged", [True, False], ids=["diverged", "linear"])
-def test_a_clean_sync_merges_main_in_and_checks_what_it_brought(db, repo, sess, other, told, diverged):
+@pytest.mark.parametrize("trigger, diverged", [("merge", True), ("merge", False), ("resume", True)],
+                         ids=["diverged", "linear", "resume"])
+def test_a_clean_sync_merges_main_in_and_checks_what_it_brought(db, repo, sess, other, told, monkeypatch,
+                                                                 trigger, diverged):
     config.set_local(sess.repo_root, "checks", ["test -f hot.py"])
+    if trigger == "resume":
+        db.set_status("lead", "paused")
+        # Cut, as sessions once were, from another branch: it still keeps up with main.
+        db.conn.execute("UPDATE workspaces SET base_branch = 'feat/old' WHERE id = ?", (sess.id,))
     before = commit(Path(sess.path), "a.py", "a\n") if diverged else sh("git rev-parse HEAD", Path(sess.path))
     main = commit(other, "hot.py", "fix\n", push=True)
-    feat = worker(db, repo, "feat")
 
-    out = pipeline.merge(db, None, feat)
+    if trigger == "resume":
+        resumed = []
+        monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: False)
+        monkeypatch.setattr(agents, "resume", lambda db_, rid, **kw: resumed.append(contains(sess.path, main)) or [])
+        got = svc.continue_(db, workspaces.adopt_root(db, str(repo)), "lead")
+        assert got.state == "resumed" and resumed == [True]   # main is merged in before the session resumes
+        assert any(n.text.startswith("brindle merged origin/main into sess") for n in got.notes)
+        synced = "HEAD"
+    else:
+        out = pipeline.merge(db, None, worker(db, repo, "feat"))
+        assert out.startswith("Merged"), out
+        assert any(to == "lead" and "brindle merged origin/main into sess" in text for to, text in told)
+        synced = "HEAD~1"                  # a merge commit of origin/main, then the worker's merge
 
-    assert out.startswith("Merged"), out
-    parents = sh("git rev-list --parents -n 1 HEAD~1", Path(sess.path)).split()[1:]
-    assert parents == [before, main]       # a merge commit of origin/main, then the worker's merge
-    assert any(to == "lead" and "brindle merged origin/main into sess" in text for to, text in told)
+    parents = sh(f"git rev-list --parents -n 1 {synced}", Path(sess.path)).split()[1:]
+    assert parents == [before, main]
     [args] = [a for to, a in told if to == "detached"]
     assert session_sync.run_checks(db, args[-2], args[-1]).startswith("The checks passed")
 
@@ -119,22 +134,6 @@ def test_a_session_behind_main_gets_no_pr(db, repo, sess, other):
     with pytest.raises(workspaces.WorkspaceError, match="not opening a PR: origin/main"):
         with gates.pr_checked(db, sess):
             pass
-
-
-def test_resuming_a_session_merges_origin_main_in_first(db, repo, sess, other, monkeypatch):
-    db.set_status("lead", "paused")
-    # Cut, as sessions once were, from another branch: it still keeps up with main.
-    db.conn.execute("UPDATE workspaces SET base_branch = 'feat/old' WHERE id = ?", (sess.id,))
-    commit(Path(sess.path), "a.py", "a\n")
-    main = commit(other, "hot.py", "fix\n", push=True)
-    resumed = []
-    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: False)
-    monkeypatch.setattr(agents, "resume", lambda db_, rid, **kw: resumed.append(contains(sess.path, main)) or [])
-
-    got = svc.continue_(db, workspaces.adopt_root(db, str(repo)), "lead")
-
-    assert got.state == "resumed" and resumed == [True]
-    assert any(n.text.startswith("brindle merged origin/main into sess") for n in got.notes)
 
 
 def test_a_squashed_session_pr_syncs_back_once_its_landing_is_known(db, repo, sess, other, monkeypatch):

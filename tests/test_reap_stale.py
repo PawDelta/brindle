@@ -236,6 +236,7 @@ def test_leftover_reviewers_and_coordinator_rows(db, repo, fake_tmux, case, gone
     assert (a is None or a.dismissed_at is not None) == gone
 
 
+@pytest.mark.variant("race: a client, uncommitted work or input arriving between planning and the stop keeps the session")
 @pytest.mark.parametrize("change", ["a client attaches", "uncommitted work appears", "input arrives"])
 def test_what_changed_since_planning_is_not_reaped(db, repo, tmp_path, fake_tmux, monkeypatch, change):
     """Planning (git probes and all) takes a while: a stop acts on the state
@@ -267,6 +268,7 @@ def test_what_changed_since_planning_is_not_reaped(db, repo, tmp_path, fake_tmux
         assert db.get_agent("boss").status != "paused"
 
 
+@pytest.mark.variant("race: state that changes during the re-plan's own git probes keeps the session")
 @pytest.mark.parametrize("probe", ["workspaces_merged", "contained"])
 def test_what_changes_during_the_revalidation_probe_is_not_reaped(db, repo, fake_tmux, monkeypatch, probe):
     """The re-plan's own git probes take a while too: the stop acts on safety
