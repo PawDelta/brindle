@@ -2914,11 +2914,13 @@ def default_review_profile(cfg: RepoConfig, worker: Agent | None, db: DB | None 
 
 def _local_reviewer_available() -> bool:
     """Whether the built-in ``reviewer-local`` profile's model is served
-    right now. Any failure counts as not available."""
+    right now and fits in free memory. Any failure counts as not available."""
+    from brindle.local_setup import memory_problem
     from brindle.native import runner
 
     try:
-        return runner.served(load_profile("reviewer-local"))
+        profile = load_profile("reviewer-local")
+        return runner.served(profile) and not memory_problem(profile)
     except Exception:
         return False
 
@@ -2957,9 +2959,12 @@ def _review_profile(db: DB, ws: Workspace, profile: str | None, cfg: RepoConfig)
     for name in candidates:
         try:
             _reviewer_can_run(name, ws, cfg)
-            return name
         except AgentError as e:
             first = first or e
+            continue
+        if first is not None:
+            log.warning("%s; reviewing with %s instead", first, name)
+        return name
     raise first
 
 
@@ -2972,6 +2977,10 @@ def _reviewer_can_run(name: str, ws: Workspace, cfg: RepoConfig) -> None:
     except KeyError as e:
         raise AgentError(str(e)) from e
     _airgap_check(chosen, ws.repo_root)   # before any of the branch is read for the brief
+    from brindle.local_setup import memory_problem
+
+    if why := memory_problem(chosen):
+        raise AgentError(f"reviewer profile {name!r} can't run: {why}")
     if why := unusable(chosen.provider, chosen.env):
         raise AgentError(
             f"reviewer profile {name!r} can't run: {why}. "

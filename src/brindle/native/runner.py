@@ -25,7 +25,7 @@ from pathlib import Path
 from brindle import agents, codemap, git, workspaces
 from brindle.config import brindle_home
 from brindle.db import DB, Workspace
-from brindle.native.client import Client, ClientError, Endpoint
+from brindle.native.client import Client, ClientError, Endpoint, LocalMemoryError
 from brindle.native.loop import LoopConfig, NativeAgent
 from brindle.native.lsp import LSP
 from brindle.native.permissions import Permissions
@@ -418,6 +418,12 @@ def _run_native(db: DB, agent_id: str, resume: str | None, poll: float,
             answer = loop.run(msg.body)
         except ClientError as e:
             print(f"\n── brindle: the model endpoint failed: {e}; this worker has stopped ──", flush=True)
+            if isinstance(e, LocalMemoryError) and agent.parent_id:
+                try:   # the supervisor reroutes; nothing else wakes it for this
+                    agents.send_message(db, agent.parent_id,
+                                        f"Worker {agent_id} stopped before loading its local model: {e}.")
+                except Exception:  # noqa: BLE001 -- a gone supervisor has nothing to reroute
+                    pass
             return 1
         loop.save(saved)
         if streamed["text"].strip():  # the answer is already on screen

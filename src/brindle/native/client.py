@@ -150,6 +150,11 @@ class ClientError(Exception):
         self.body = body
 
 
+class LocalMemoryError(ClientError):
+    """The local model no longer fits in free memory, so it was not loaded.
+    The task should move to a cloud profile."""
+
+
 # A model declining the request: Anthropic's stop_reason, OpenAI's finish_reason.
 REFUSALS = ("refusal", "content_filter")
 
@@ -222,6 +227,11 @@ class Client:
         anthropic = self.endpoint.api == "anthropic"
         payload = (self._anthropic_request if anthropic else self._openai_request)(system, messages, tools)
         if self._local_ollama():
+            from brindle.local_setup import endpoint_memory_problem
+
+            # Admission at launch isn't enough: each request reloads the model.
+            if problem := endpoint_memory_problem(self.endpoint.base_url, self.endpoint.model):
+                raise LocalMemoryError(f"{problem}; not loading it. Requeue this task on a cloud profile")
             payload["keep_alive"] = "0"
         parse = self._parse_anthropic if anthropic else self._parse_openai
         if on_text is None:

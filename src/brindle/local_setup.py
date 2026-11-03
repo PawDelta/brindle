@@ -92,9 +92,9 @@ def free_memory_gb() -> float:
         if libc.host_statistics64(libc.mach_host_self(), 4, ctypes.byref(stats),
                                   ctypes.byref(count)) != 0:
             raise OSError("cannot read free RAM")
-        # Free and speculative pages are immediately available; avoid counting
-        # compressed or inactive application pages as room for a new model.
-        return (stats[0] + stats[23]) * os.sysconf("SC_PAGE_SIZE") / 2**30
+        # free_count already includes speculative pages (mach/vm_statistics.h);
+        # compressed or inactive application pages are not room for a new model.
+        return stats[0] * os.sysconf("SC_PAGE_SIZE") / 2**30
     for line in Path("/proc/meminfo").read_text().splitlines():
         if line.startswith("MemAvailable:"):
             return int(line.split()[1]) * 1024 / 2**30
@@ -103,9 +103,23 @@ def free_memory_gb() -> float:
 
 def memory_problem(profile) -> str | None:
     """A fresh memory check for local native profiles; unknown size fails closed."""
-    if profile.provider != "native" or not serve.is_local(profile.base_url or ""):
+    if profile.provider != "native":
         return None
-    host = profile.base_url.rstrip("/").removesuffix("/v1")
+    return endpoint_memory_problem(profile.base_url or "", profile.model or "")
+
+
+def endpoint_memory_problem(base_url: str, model: str) -> str | None:
+    """Why a local Ollama server can't load ``model`` now: free RAM below the
+    model's size plus the margin. None for remote endpoints and for local
+    servers that aren't Ollama (llama.cpp, LM Studio), whose model size
+    brindle can't discover."""
+    if not serve.is_local(base_url):
+        return None
+    from brindle.native import client, runner
+
+    if not runner.is_ollama(client.Endpoint(base_url, model)):
+        return None
+    host = base_url.rstrip("/").removesuffix("/v1")
     try:
         free = free_memory_gb()
         margin = float(os.environ.get("BRINDLE_LOCAL_MEMORY_MARGIN_GB", "4"))
@@ -116,25 +130,24 @@ def memory_problem(profile) -> str | None:
         for path in ("/api/ps", "/api/tags"):
             with urllib.request.urlopen(host + path, timeout=TAGS_TIMEOUT) as response:
                 data = json.load(response)
-            for model in data.get("models", []):
-                name = model.get("name") or model.get("model")
-                wanted = profile.model or ""
-                if name not in (wanted, wanted + ":latest"):
+            for entry in data.get("models", []):
+                name = entry.get("name") or entry.get("model")
+                if name not in (model, model + ":latest"):
                     continue
-                size = float(model["size"]) / 2**30
+                size = float(entry["size"]) / 2**30
                 if not 0 < size < float("inf"):
                     raise ValueError("invalid model size")
                 sizes.append(size)
                 if path == "/api/ps":
                     resident = size
         if not sizes:
-            return f"cannot determine local model size for {profile.model}"
+            return f"cannot determine local model size for {model}"
         size = max(sizes)
         if free + resident < size + margin:
-            return (f"insufficient free memory for {profile.model}: {free:.1f} GiB free, "
+            return (f"insufficient free memory for {model}: {free:.1f} GiB free, "
                     f"{size:.1f} GiB model ({resident:.1f} GiB resident) + {margin:g} GiB margin")
     except (OSError, ValueError, TypeError, KeyError, AttributeError):
-        return f"cannot verify free memory and local model size for {profile.model}"
+        return f"cannot verify free memory and local model size for {model}"
     return None
 
 
