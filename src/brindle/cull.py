@@ -292,16 +292,19 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
 RUNNING_STATUSES = ("processing", "idle", "waiting", "unknown")
 
 
-def exit_cause(status: int | None, signum: int | None) -> str:
+def exit_cause(status: int | None, signum: int | str | None) -> str:
     """How a dead pane's program ended, for people: "status 143 (SIGTERM)",
     "signal 9 (SIGKILL)", "status 1". A status above 128 from a shell is
-    128 plus the signal that killed what it ran."""
+    128 plus the signal that killed what it ran. A signal tmux named but
+    Python doesn't know stays as tmux named it."""
     def name(n: int) -> str | None:
         try:
             return signal.Signals(n).name
         except ValueError:
             return None
 
+    if isinstance(signum, str):
+        return f"signal {signum}"
     if signum is not None:
         return f"signal {signum} ({name(signum) or 'unknown signal'})"
     if status is None:
@@ -329,18 +332,16 @@ def note_dead_panes(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
                 or now - max(a.created_at, a.status_since or 0) <= LAUNCH_GRACE):
             continue
         cause = exit_cause(*exits[a.tmux_window])
-        db.end_native_subagents(a.id)
-        target = "done" if a.result is not None else "failed"
-        if target == "failed":
-            db.update_agent(a.id, failed_why=f"exited: {cause}")  # before the status, as launch_health
-        # Only from the status it was read in: a hook that moved it since wins.
-        db.set_status(a.id, target, only_if=a.status)
-        if db.get_agent(a.id).status != target:
+        # Only from the status it was read in, and only once: a hook that
+        # moved it since, or another sweep that got there first, wins.
+        status = db.claim_exited(a.id, a.status, f"exited: {cause}")
+        if status is None:
             continue
-        if target == "done":
+        db.end_native_subagents(a.id)
+        if status == "done":
             done.append(f"marked {a.id} done: its pane died ({cause}) after it reported")
             continue
-        agents._note_reviewer_end(db, a)
+        agents._note_reviewer_end(db, db.get_agent(a.id) or a)
         done.append(f"marked {a.id} failed: its pane died ({cause})")
         if not a.parent_id:
             continue

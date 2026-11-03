@@ -6,6 +6,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -611,18 +612,36 @@ class PaneSnapshot(dict):
     pane id -> {tag: value} for every live-or-dead pane that carries one of
     PANE_TAGS, and ``server``, the tmux server it was taken from (see
     current_server): it says nothing about panes on any other server.
-    ``exits``: dead pane id -> (exit status, signal), either None when tmux
-    doesn't say (a signal only on a tmux that reports one)."""
+    ``exits``: dead pane id -> (exit status, signal), each None when tmux
+    doesn't give it: a status for a program that exited, a signal (its
+    number; see _signal_number) for one a signal killed."""
 
     tags: dict[str, dict[str, str]]
     server: str | None
-    exits: dict[str, tuple[int | None, int | None]]
+    exits: dict[str, tuple[int | None, int | str | None]]
 
     def __init__(self, server: str | None = None) -> None:
         super().__init__()
         self.tags = {}
         self.server = server
         self.exits = {}
+
+
+def _signal_number(text: str) -> int | str | None:
+    """#{pane_dead_signal} as a signal number. tmux names the signal
+    (sig2name: sys_signame's "term" on macOS and the BSDs) or, where the
+    platform has no names, gives its number. A name Python doesn't know is
+    kept as tmux gave it; None when the program wasn't killed by a signal."""
+    text = text.strip()
+    if not text:
+        return None
+    if text.isdigit():
+        return int(text)
+    name = text.upper()
+    try:
+        return signal.Signals[name if name.startswith("SIG") else f"SIG{name}"].value
+    except KeyError:
+        return text
 
 
 def list_panes(server: object = _THIS_SERVER) -> PaneSnapshot:
@@ -646,13 +665,13 @@ def list_panes(server: object = _THIS_SERVER) -> PaneSnapshot:
     if proc.returncode != 0:
         return result
     for line in proc.stdout.splitlines():
-        window_id, pane_id, dead, status, signal, *values = line.split("\t")
+        window_id, pane_id, dead, status, sig, *values = line.split("\t")
         alive = dead.strip() == "0"
         result[pane_id] = alive
         result[window_id] = result.get(window_id, False) or alive
         if dead.strip() == "1":
             result.exits[pane_id] = (int(status) if status.strip().isdigit() else None,
-                                     int(signal) if signal.strip().isdigit() else None)
+                                     _signal_number(sig))
         tags = {k: v for k, v in zip(PANE_TAGS, values) if v}
         if tags:
             result.tags[pane_id] = tags
