@@ -136,3 +136,21 @@ def test_a_supervisor_is_told_about_a_refused_worker_and_about_an_alias_fallback
     route_health.reset()
 
 
+def test_the_fingerprint_names_the_account_never_a_key(monkeypatch):
+    monkeypatch.setenv("CLAUDE_CODE_USE_BEDROCK", "1")
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "s3cret")
+    fp = model_access.fingerprint("developer")
+    assert "AWS_REGION=us-east-1" in fp and "s3cret" not in fp
+    monkeypatch.setenv("AWS_REGION", "eu-west-1")
+    assert model_access.fingerprint("developer") != fp
+
+
+def test_refusal_from_another_account_is_not_in_this_sessions_notes(monkeypatch):
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
+    model_access.refuse("developer", model_access.BEDROCK_QUOTA)
+    assert model_access.notes(["developer"])
+    monkeypatch.setenv("AWS_REGION", "eu-west-1")
+    assert model_access.notes(["developer"]) == []       # same profile, another account
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
+    assert model_access.notes(["reviewer"]) == []        # not this session's profile

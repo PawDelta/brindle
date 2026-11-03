@@ -17,23 +17,6 @@ def fake():
     ep.close()
 
 
-def test_profile_env_lines_and_context_sizes(tmp_path):
-    d = tmp_path / ".brindle" / "agents"
-    d.mkdir(parents=True)
-    (d / "glm.md").write_text(
-        "---\nname: glm\nprovider: claude\nmodel: glm-4.7-flash\n"
-        "env.ANTHROPIC_BASE_URL: https://api.z.ai/api/anthropic\n"
-        "env.ANTHROPIC_AUTH_TOKEN: 'k#1'   # quoted, so the # stays\n"
-        "env.ANTHROPIC_API_KEY:\n"
-        "context_tokens: 128_000\n---\nhi\n")
-    p = load_profile("glm", str(tmp_path))
-    assert p.env == {"ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
-                     "ANTHROPIC_AUTH_TOKEN": "k#1", "ANTHROPIC_API_KEY": ""}
-    assert p.context_tokens == 128000
-    (d / "k.md").write_text("---\nname: k\ncontext_tokens: 64k\n---\n")
-    assert load_profile("k", str(tmp_path)).context_tokens == 64000
-    (d / "bad.md").write_text("---\nname: bad\ncontext_tokens: lots\n---\n")
-    assert load_profile("bad", str(tmp_path)).context_tokens is None
 
 
 

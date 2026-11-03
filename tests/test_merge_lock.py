@@ -70,3 +70,21 @@ def test_two_concurrent_merges_both_succeed(db, repo):
 
     assert errors == []
     assert (repo / "a.py").exists() and (repo / "b.py").exists()
+
+
+def test_persistent_index_failure_is_reported_after_retries(db, repo, monkeypatch):
+    ws = _feature(db, repo)
+    monkeypatch.setattr(git, "RETRY_DELAYS", (0, 0))
+    real_run = git.run
+    calls = {"n": 0}
+
+    def always(args, cwd, check=True):
+        if args[:2] == ["merge", "--no-ff"]:
+            calls["n"] += 1
+            return subprocess.CompletedProcess(args, 128, "", "fatal: index.lock exists")
+        return real_run(args, cwd, check)
+
+    monkeypatch.setattr(git, "run", always)
+    with pytest.raises(git.GitError, match="index.lock"):
+        workspaces.merge_back(db, ws)
+    assert calls["n"] == 3  # first try + two retries

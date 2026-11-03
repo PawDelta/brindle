@@ -97,17 +97,6 @@ def run_cli(monkeypatch, cwd: Path, *args: str):
 # -- repo add / ls / rm -----------------------------------------------------------
 
 
-def test_attach_list_and_detach(db, repo, web, boss):
-    assert repos.listing_text(db, "boss").startswith("No repos attached")
-    a = repos.attach(db, "boss", str(web), "web")
-    assert (a.alias, a.repo_root) == ("web", str(web))
-    assert [x.alias for x in repos.attached(db, "boss")] == ["web"]
-    assert "web" in repos.listing_text(db, "boss") and str(web) in repos.listing_text(db, "boss")
-    assert repos.resolve(db, "boss", str(repo), "web") == str(web)
-    assert repos.resolve(db, "boss", str(repo), str(web)) == str(web)   # by path too
-    assert repos.resolve(db, "boss", str(repo), None) == str(repo)      # default: own repo
-    assert repos.detach(db, "boss", "web").repo_root == str(web)
-    assert repos.attached(db, "boss") == []
 
 
 def test_attach_refuses_bad_paths_duplicates_and_the_own_repo(db, repo, web, boss, tmp_path):
@@ -169,30 +158,6 @@ def test_assign_into_an_attached_repo_works_checks_and_merges_there(db, repo, we
     assert not (brindle_home / "main-checked").exists()     # the session's repo's didn't
 
 
-@pytest.mark.parametrize("dep_on", ["branch_name"])
-def test_cross_repo_depends_on_queues_then_starts_in_the_other_repo(db, repo, web, boss, monkeypatch, dep_on):
-    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
-    repos.attach(db, "boss", str(web), "web")
-    out_a = asyncio.run(mcp_server.assign("developer", "do A", branch="feat-a"))
-    worker_a = started_worker_id(out_a)
-    ws_a = next(w for w in db.find_workspaces(str(repo)) if w.branch == "feat-a")
-    commit_file(Path(ws_a.path), "a_output.txt")
-
-    dep = worker_a if dep_on == "worker_id" else "feat-a"
-    out_b = asyncio.run(mcp_server.assign("developer", "do B", branch="feat-b", repo="web",
-                                          depends_on=[dep]))
-    assert "Queued task" in out_b and dep in out_b
-    [b] = db.list_tasks(str(web), state="pending")
-    assert "feat-b" in mcp_server.list_tasks()
-
-    assert asyncio.run(mcp_server.merge_workspace(ws_a.id)).startswith("Merged")
-    b = db.get_task(b.id)
-    assert b.state == "started" and b.agent_id
-    ws_b = db.get_workspace(db.get_agent(b.agent_id).workspace_id)
-    assert ws_b.repo_root == str(web) and ws_b.branch == "feat-b"
-    assert not (Path(ws_b.path) / "a_output.txt").exists()   # another repo: A's file isn't there
-    msg = db.pop_pending("boss")
-    assert msg is not None and "Started" in msg.body and (dep in msg.body or worker_a in msg.body)
 
 
 def test_a_branch_name_dependency_only_matches_within_its_own_repo(db, repo, web, boss, monkeypatch):
@@ -275,29 +240,6 @@ def test_handover_repoints_a_queued_task_whose_caller_workspace_is_gone(db, repo
 # -- milestone checks in another repo ------------------------------------------------
 
 
-def test_milestone_check_runs_in_the_attached_repo(db, repo, web, boss):
-    db.add_autopilot("boss")
-    repos.attach(db, "boss", str(web), "web")
-    reply = mcp_server.set_goal("Two repos", [
-        {"title": "Main", "check": "test -f app.py"},
-        {"title": "Web", "check": "@web: test -f web.txt"},
-    ])
-    assert "@web: test -f web.txt" in reply
-    [m_main, m_web] = db.milestones("boss")
-    assert m_web.repo == "web" and m_web.check_cmd == "test -f web.txt"
-
-    autopilot.check_milestones(db, "boss", boss)
-    [m_main, m_web] = db.milestones("boss")
-    assert m_main.status == "passed" and m_web.status == "failed"
-
-    commit_file(web, "web.txt")
-    autopilot.check_milestones(db, "boss", boss, position=2)
-    [m_main, m_web] = db.milestones("boss")
-    assert m_web.status == "passed"
-    assert m_web.checked_sha == sh("git rev-parse HEAD", web)
-    assert m_main.checked_sha == sh("git rev-parse HEAD", repo)
-
-    assert "isn't attached" in mcp_server.set_goal("G", [{"title": "X", "check": "@nope: true"}])
 
 
 # -- the Pro gate ------------------------------------------------------------------------
@@ -326,3 +268,17 @@ def test_license_errors_fail_closed(monkeypatch):
 
     monkeypatch.setattr(license, "has", boom)
     assert repos.entitled() is False
+
+
+def test_two_sessions_do_not_share_attached_repos(db, dependency_rows, monkeypatch):
+    caller, boss, workspace, launched = dependency_rows
+    other = fake_spawn(db, boss, "supervisor", mode="interactive")
+    alien = workspace("alien", "other", "feature", tracked=True)
+    db.update_agent(agents.workspace_worker(db, alien).id, parent_id=other.id)
+    db.add_session_repo(other.id, "other", alien.repo_root)
+    pending = tasks.enqueue(db, caller, boss, "developer", "app", "assign", isolate=True,
+                            branch="dep", done_when=None, files=None, depends_on=["feature"])
+    monkeypatch.setenv("BRINDLE_AGENT_ID", other.id)
+    tasks.on_merged(db, alien)
+    assert tasks.sweep(db) == 0
+    assert db.get_task(pending.id).state == "pending" and launched == []

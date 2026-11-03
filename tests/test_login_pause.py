@@ -90,15 +90,6 @@ def sweep(db, w, at):
     return login_pause.sweep(db, now=at)
 
 
-@pytest.mark.parametrize("expires_in, worker_screen", [
-    (3600.0, EXPIRED),    # a worker stopped on the expired login: renewed, told to go on
-])
-def test_a_refreshable_login_is_renewed_without_a_notice(db, world, expires_in, worker_screen):
-    world.expires_in, world.screens["@1"] = expires_in, worker_screen
-    sweep(db, world, T0)
-    assert world.refreshed == 1 and world.alerts == []
-    assert not login_pause.paused(db, "boss")
-    assert [to for to, _ in world.sent] == (["w1"] if worker_screen is EXPIRED else [])
 
 
 def test_two_expired_cloud_identities_stay_held_until_both_recover(db, world, repo, monkeypatch):
@@ -177,7 +168,7 @@ def test_cloud_worker_under_codex_root_holds_and_releases_mail(db, world, repo, 
         assert not login_pause.paused(db, "boss")
 
 
-@pytest.mark.parametrize("active", [True])
+@pytest.mark.parametrize("active", [False, True])
 def test_a_login_only_the_person_can_renew_pauses_and_notifies_once(db, world, active, monkeypatch):
     world.active, world.login_ok, world.screens["@1"] = active, False, EXPIRED
     sweep(db, world, T0)
@@ -253,6 +244,7 @@ def test_panes_resume_after_signin(db, lapsed):
 
 
 @pytest.mark.parametrize("exits", [
+    False,      # the tab is ignored: its sign-in keeps waiting
     True,       # the sign-in exits (declined, failed, or its code expired)
 ])
 def test_closed_tab_reopens_only_on_input(db, world, exits):

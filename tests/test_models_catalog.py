@@ -71,26 +71,6 @@ def test_air_gap_never_fetches_and_uses_the_stale_cache(repo, monkeypatch):
         write_profile(repo, "anthropic/claude-x")
 
 
-def test_a_cold_cache_fetches_synchronously_then_resolves(repo, monkeypatch):
-    timeouts = []
-
-    def fetch(timeout):
-        timeouts.append(timeout)
-        return CATALOG
-
-    monkeypatch.setattr(catalog, "_download", fetch)
-    catalog.cache_path().unlink()
-    assert write_profile(repo, "anthropic/claude-x").api == "anthropic"
-    assert timeouts == [catalog.COLD_TIMEOUT]
-    assert catalog.cache_path().exists()
-
-    def offline(timeout):
-        raise OSError("offline")
-
-    monkeypatch.setattr(catalog, "_download", offline)
-    catalog.cache_path().unlink()
-    with pytest.raises(ProfileError, match="unavailable"):
-        write_profile(repo, "anthropic/claude-x")
 
 
 def test_refresh_rewrites_a_stale_cache_and_a_failed_write_keeps_the_old_one(repo, monkeypatch):

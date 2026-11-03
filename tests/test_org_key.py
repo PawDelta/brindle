@@ -103,3 +103,20 @@ def test_key_helper_output_never_appears_in_logs(db, repo, monkeypatch, brindle_
         pane_script(db, repo, monkeypatch, brindle_home, "developer", m=managed(cfg))
     out = capsys.readouterr()
     assert ORG_KEY not in caplog.text and ORG_KEY not in out.out and ORG_KEY not in out.err
+
+
+def test_the_policy_rejects_a_key_env_naming_a_brindle_secret():
+    with pytest.raises(PolicyUnavailable):
+        parse_policy(ORG, {"version": 1, "policy": {**POLICY, "provider_config": anthropic(key_env="GITHUB_TOKEN")}})
+
+
+def test_the_helper_runs_without_a_shell(monkeypatch, tmp_path):
+    marker = tmp_path / "pwned"
+    cfg = ProviderConfig("anthropic", key_helper=(sys.executable, "-c", "print('k')", f"; touch {marker}"))
+    assert managed_models.org_key_env(managed(cfg), "claude") == {"ANTHROPIC_API_KEY": "k"}
+    assert not marker.exists()
+
+
+def test_the_org_key_is_not_kept_after_the_launch(db, repo, monkeypatch, brindle_home):
+    pane_script(db, repo, monkeypatch, brindle_home, "developer", m=managed(helper_cfg()))
+    assert secrets.org_key_exempt({"ANTHROPIC_API_KEY": ORG_KEY}) == {}

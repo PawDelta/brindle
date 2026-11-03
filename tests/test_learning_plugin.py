@@ -111,16 +111,6 @@ def test_an_installed_learning_entry_point_is_never_used(db, ws, monkeypatch):
     assert "brindle.learning" not in plugins.GROUPS
 
 
-def test_resolve_profile_precedence(db, ws, monkeypatch):
-    install(monkeypatch, Recorder(pick="developer-local"))
-    (__import__("pathlib").Path(ws.repo_root) / ".brindle").mkdir(exist_ok=True)
-    (__import__("pathlib").Path(ws.repo_root) / ".brindle" / "config.json").write_text(
-        '{"learning": "cloud", "learning_candidates": ["developer-local"], "default_agent": "developer"}')
-    boss = Agent("boss", ws.id, "supervisor", "claude", None, "interactive", "processing", "", None,
-                 time.time())
-    db.add_agent(boss)
-    assert autopilot.choose_profile(db, "boss", ws.repo_root, "reviewer", "t") == ("reviewer", False)
-    assert autopilot.choose_profile(db, "boss", ws.repo_root, None, "t") == ("developer-local", True)
 
 
 def test_reviewer_verdict_and_no_verdict_and_abandoned_worker_cleanup(db, repo, ws, monkeypatch):

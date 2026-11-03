@@ -432,18 +432,31 @@ BYPASS = pytest.mark.variant("spelled so the families don't read it: a bypass at
 
 @pytest.mark.parametrize("control, command, decision, cap", [
     (INSTALLS, "npm install left-pad", "deny", None),
+    pytest.param(INSTALLS, "FOO=bar npm install left-pad", "deny", None, marks=BYPASS),
     (COMMITS, "git add -A", "ask", 60),
+    pytest.param(COMMITS, "FOO=bar git add -A", "ask", 60, marks=BYPASS),
     # The member's own push rule asks for at most 10 minutes at the branch: the offer is held to both.
     ({"rule": "bash git-push any git push", "decision": "ask", "reason": "pushes are reviewed"},
      "git push origin fix:main", "ask", 10),
     ({"rule": "bash glob *prod*", "decision": "deny", "reason": "nothing runs against prod"}, "npm test -- prod",
      "deny", None),
+    ({"rule": "bash prefix npm install", "decision": "deny"}, "FOO=1 npm --prefix web install x", "deny", None),
     (DEPLOYS, "gh workflow run release.yml", "deny", None),
+    pytest.param(DEPLOYS, "gh --repo o/r workflow run release.yml", "deny", None, marks=BYPASS),
     pytest.param(DEPLOYS, "vercel --prod", "deny", None, marks=BYPASS),
     pytest.param(PACKAGES, "npm --prefix web install left-pad", "deny", None, marks=BYPASS),
     # However many wrappers or options lead to it: no limit on the reading drops it.
     pytest.param(PACKAGES, "npm " + "--registry https://registry.npmjs.org " * 33 + "install left-pad", "deny", None,
                  marks=BYPASS),
+    ({"group": "network/fetch", "decision": "ask"}, "curl -s https://example.com", "ask", 60),
+    (PACKAGES, "pip install requests", "deny", None),
+    (PACKAGES, "python -m pip install requests", "deny", None),
+    pytest.param(PACKAGES, "python -I -m pip install requests", "deny", None, marks=BYPASS),
+    pytest.param(PACKAGES, "npm --location global install left-pad", "deny", None, marks=BYPASS),
+    pytest.param(PACKAGES, "sudo --user root npm install left-pad", "deny", None, marks=BYPASS),
+    pytest.param(PACKAGES, "uv pip install httpx", "deny", None, marks=BYPASS),
+    pytest.param(PACKAGES, "env env env env env npm install left-pad", "deny", None, marks=BYPASS),
+    ({"group": "shell/unchecked", "decision": "deny"}, 'eval "$X"', "deny", None),
     (None, "npm install left-pad", "allow", None),
 ])
 def test_org_blocks_family(db, ws, monkeypatch, control, command, decision, cap):

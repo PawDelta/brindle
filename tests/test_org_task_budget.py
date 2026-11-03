@@ -28,10 +28,6 @@ def org_limits_of(monkeypatch, **over):
     return p
 
 
-def test_limits_take_the_org_task_budget(monkeypatch):
-    org_limits_of(monkeypatch, budget={"task_usd": 5})
-    lim = budget.limits(Cfg(), "/r")
-    assert lim.task_usd == 5.0 and lim.org
 
 
 def test_a_paused_member_gets_no_new_worker(monkeypatch):

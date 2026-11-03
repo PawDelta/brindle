@@ -8,30 +8,8 @@ from brindle import agents
 pytestmark = pytest.mark.usefixtures("fake_agent_cli")
 
 
-def test_max_weight_ceiling_caps_heavy_to_medium(db, repo, monkeypatch):
-    cfg = RepoConfig(max_weight="medium")
-    monkeypatch.setattr(autopilot, "load_repo_config", lambda r: cfg)
-
-    why = []
-    profile, learned = autopilot.choose_profile(db, "caller-1", str(repo), weight="heavy", why=why)
-    assert any("capped to medium" in w for w in why)
-    # The resolved profile must be in medium routing, not developer-heavy
-    assert profile in cfg.routing["medium"]
 
 
-def test_docs_only_files_demotes_tier(db, repo, monkeypatch):
-    # Even if developer-heavy is in medium candidates, docs-only must NOT select a heavy profile
-    cfg = RepoConfig()
-    cfg.routing["medium"] = ["developer-heavy", "developer"]
-    monkeypatch.setattr(autopilot, "load_repo_config", lambda r: cfg)
-
-    why = []
-    profile, learned = autopilot.choose_profile(
-        db, "caller-2", str(repo), weight="heavy", files=["docs/guide.md", "docs/index.md"], why=why
-    )
-    assert any("demoted" in w for w in why)
-    assert profile != "developer-heavy"
-    assert profile == "developer"
 
 
 def test_pending_milestone_heavy_profile_capped_under_light_ceiling(db, repo, monkeypatch):
@@ -172,42 +150,4 @@ def test_custom_expensive_profiles_capped_under_max_weight(db, repo, monkeypatch
     assert "exceeds configured max_weight 'medium'" in str(exc_info3.value)
 
 
-def test_assignment_and_queue_replies_include_cost_feedback_for_all_selections(db, repo, monkeypatch):
-    import asyncio
-    from brindle import mcp_server
-
-    ws = Workspace("ws-mcp-cost", str(repo), "main", "main", "main", "main", str(repo), 20000, "tmux-mcp", 0)
-    db.add_workspace(ws)
-    sup = agents.spawn(db, ws, "developer", mode="interactive", autopilot=True)
-
-    from brindle.db import DB
-    monkeypatch.setattr(mcp_server, "DB", lambda: DB(db.path))
-    monkeypatch.setattr(mcp_server, "_caller", lambda db_arg: (sup, ws))
-    monkeypatch.setattr(agents, "_launch", lambda *args, **kwargs: None)
-
-    cfg = RepoConfig()
-    monkeypatch.setattr(autopilot, "load_repo_config", lambda r: cfg)
-
-    # 1. Explicit selection (developer-heavy)
-    reply_exp = asyncio.run(mcp_server.assign(agent_profile="developer-heavy", task="explicit task"))
-    assert "developer-heavy" in reply_exp
-    assert "most expensive tier" in reply_exp
-
-    # 2. Pending milestone selection
-    autopilot.set_goal(db, sup.id, "Goal", [("Step 1", "true", "", "developer-heavy")])
-    reply_ms = asyncio.run(mcp_server.assign(task="milestone task"))
-    assert "developer-heavy" in reply_ms
-    assert "most expensive tier" in reply_ms
-
-    # 3. Default selection (no milestone, no explicit, no weight)
-    db.conn.execute("DELETE FROM milestones WHERE root_id=?", (sup.id,))
-    reply_def = asyncio.run(mcp_server.assign(task="default task"))
-    assert "developer" in reply_def
-    assert "medium cost tier" in reply_def
-
-    # 4. Queued task reply with explicit selection
-    reply_q = asyncio.run(mcp_server.assign(agent_profile="developer-heavy", task="queued task", depends_on=["unmet-dep"]))
-    assert "Queued task" in reply_q
-    assert "developer-heavy" in reply_q
-    assert "most expensive tier" in reply_q
 

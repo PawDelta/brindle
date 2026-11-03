@@ -440,3 +440,17 @@ def test_modes_and_rules():
     assert p.decide("Edit", {"path": "tests/a.py"}) == "deny"
     assert p.decide("Write", {"path": "anywhere"}) == "allow"
     assert p.decide("Bash", {"command": "rm -rf x"}) == "allow"  # a bare Bash rule allows everything
+
+
+def test_unknown_tool_is_an_error_not_a_crash(fake, tmp_path):
+    fake.replies = [openai_reply(calls=[("c1", "Teleport", {})]), openai_reply("ok")]
+    a = agent(fake, tmp_path)
+    assert a.run("go") == "ok"
+    assert "unknown tool 'Teleport'" in fake.requests[1]["messages"][-1]["content"]
+
+
+def test_unreachable_endpoint_raises_client_error():
+    ep = Endpoint("http://127.0.0.1:1", "m", retries=0, timeout=1)
+    with pytest.raises(ClientError) as e:
+        Client(ep, sleep=lambda s: None).complete(None, [{"role": "user", "content": "hi"}], [])
+    assert "couldn't reach" in str(e.value)

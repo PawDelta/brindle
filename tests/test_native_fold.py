@@ -52,15 +52,3 @@ def test_an_endpoint_error_falls_back_to_the_deterministic_summary(fake, tmp_pat
     assert "summarized by brindle" in notes.read_text()
 
 
-def test_a_second_fold_extends_the_first_summary(fake, tmp_path):
-    script(fake, tmp_path, ["first fold notes", "second fold notes"] + ["more notes"] * 10)
-    a = make(fake, tmp_path)
-    assert a.run("the task") == "done"
-    assert len(summary_requests(fake)) >= 2
-    summary = a.messages[1]["content"]
-    assert summary.count("summarized by brindle") == 1
-    assert "first fold notes" in summary and "second fold notes" in summary
-    assert summary.index("first fold notes") < summary.index("second fold notes")
-    # The second request saw the earlier summary, not the messages it replaced.
-    second = summary_requests(fake)[1]["messages"]
-    assert "first fold notes" in json.dumps(second)

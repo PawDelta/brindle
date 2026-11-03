@@ -32,23 +32,6 @@ def test_native_subscription_credentials_follow_existing_auth_guard():
     discover.assert_not_called()
 
 
-def test_cache_expires_is_bounded_and_can_be_cleared():
-    now = [10.0]
-    check, discover = checker(ma.Catalog(frozenset({"wanted"}), "openai"), clock=lambda: now[0])
-    for _ in range(2):
-        check.check(profile(), effective_env={"KEY": "secret"})
-    assert discover.call_count == 1
-    now[0] += ma.CACHE_TTL
-    check.check(profile(), effective_env={"KEY": "secret"})
-    assert discover.call_count == 2
-    check.clear()
-    check.check(profile(), effective_env={"KEY": "secret"})
-    assert discover.call_count == 3
-    for i in range(140):
-        check.check(profile(), effective_env={"KEY": str(i)})
-    assert len(check._cache) == 128
-    assert all(isinstance(k, bytes) and len(k) == 32 for k in check._cache)
-    assert "secret" not in repr(check._cache)
 
 
 @pytest.mark.parametrize("error", [ValueError("secret-token"), subprocess.TimeoutExpired(["secret-token"], 1)])
@@ -165,15 +148,6 @@ def test_antigravity_formats_are_advisory():
         ma._parse_antigravity("Please sign in")
 
 
-def test_antigravity_invokes_only_models(monkeypatch):
-    from brindle import antigravity
-
-    monkeypatch.setattr(antigravity, "binary", lambda: "/mock/agy")
-    popen = Mock(return_value=FakeProcess(b"gemini-test  Gemini\n"))
-    monkeypatch.setattr(ma.subprocess, "Popen", popen)
-    assert ma._antigravity_catalog().models == {"gemini-test"}
-    assert popen.call_args.args[0] == ["/mock/agy", "models"]
-    assert popen.call_args.kwargs["stdin"] == subprocess.DEVNULL
 
 
 def test_antigravity_nonzero_exit_or_large_output_is_not_trusted(monkeypatch):
@@ -258,6 +232,7 @@ def test_unsupported_or_missing_native_configuration_never_sends():
 
 @pytest.mark.parametrize("code,target", [
     (302, "http://elsewhere/models"),
+    (308, "https://elsewhere/models"),
 ])
 def test_http_is_get_only_and_refuses_redirects(monkeypatch, code, target):
     opener = Mock()

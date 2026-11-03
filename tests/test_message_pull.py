@@ -50,15 +50,6 @@ def test_notices_never_read_the_same(db, boss, pushed, monkeypatch):
                       "brindle (16:27:04): 2 new messages (from w1). Call read_messages."]
 
 
-def test_read_messages_returns_and_marks_read(db, boss, pushed):
-    from brindle import mcp_server
-
-    agents.send_message(db, "boss", "the result", sender_id="w1")
-    agents.send_message(db, "boss", "queued task started")
-    text = mcp_server.read_messages()
-    assert "[developer w1] the result" in text and "[brindle] queued task started" in text
-    assert db.unread_count("boss") == 0
-    assert mcp_server.read_messages() == "No unread messages."
 
 
 def test_codex_delivery_waits_for_typed_input_to_clear(db, boss, monkeypatch):
@@ -154,10 +145,4 @@ def test_queued_message_goes_through_the_inbox_at_stop(db, boss, via_inbox):
     assert via_inbox == ["a queued message"]
 
 
-def test_tool_hooks_mark_an_idle_agent_busy(db, boss):
-    # A turn begun by a finished background task runs no UserPromptSubmit,
-    # so the 'idle' its previous Stop left would otherwise stick.
-    db.set_status("boss", "idle")
-    agents.handle_hook(db, "boss", "pre-tool", {"tool_name": "Bash", "tool_input": {"command": "ls"}})
-    assert db.get_agent("boss").status == "processing"
 

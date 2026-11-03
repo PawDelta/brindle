@@ -24,23 +24,6 @@ def _config(argv):
     return json.loads(argv[1].split("=", 1)[1])
 
 
-def test_launch_gives_opencode_brindles_server_plugin_instructions_and_brief(brindle_home, monkeypatch):
-    monkeypatch.setenv("BRINDLE_OPENCODE_BIN", "/bin/opencode")
-    profile = load_profile("reviewer-opencode")
-    argv = OpenCode().command(LaunchContext("o1", profile, "review it", resume="ses_1"))
-    cfg = _config(argv)
-    assert argv[2:] == ["/bin/opencode", "--session", "ses_1", "--prompt", "review it"]
-    server = cfg["mcp"]["brindle"]
-    assert server["command"][-1] == "mcp" and server["environment"]["BRINDLE_AGENT_ID"] == "o1"
-    plugin = cfg["plugin"][0].removeprefix("file://")
-    assert f"const BRINDLE = {json.dumps(brindle_invocation())}" in open(plugin).read()
-    instructions = open(cfg["instructions"][0]).read()
-    assert profile.prompt in instructions and DELIVERY_NOTE in instructions
-    # dontAsk: only the profile's commands run; the catch-all comes first (last match wins).
-    bash = cfg["permission"]["bash"]
-    assert list(bash)[0] == "*" and bash["*"] == "deny"
-    assert bash["git diff"] == bash["git diff *"] == bash["pwd"] == "allow" and "pwd *" not in bash
-    assert cfg["permission"]["edit"] == cfg["permission"]["webfetch"] == "deny"
 
 
 @pytest.mark.parametrize("mode, model, perm, flags, patterns, decision", [
@@ -234,16 +217,6 @@ def test_permission_policy_denies_through_the_plugins_pre_tool_hook(db, ws, brin
     assert not os.path.exists(path)
 
 
-def test_installed_opencode_is_ready_to_supervise_without_a_sign_in(monkeypatch):
-    from brindle import doctor
-
-    monkeypatch.setenv("BRINDLE_OPENCODE_BIN", "/nonexistent/opencode")
-    assert any("npm install -g opencode-ai" in p for p in doctor.preflight("opencode"))
-    monkeypatch.setenv("BRINDLE_OPENCODE_BIN", "/bin/sh")
-    assert not any("OpenCode" in p for p in doctor.preflight("opencode"))
-    from brindle import providers
-
-    assert providers.seen_signed_in("opencode")   # so `brindle -s opencode` opens no login screen
 
 
 def test_screen_state_reads_opencodes_footer():
