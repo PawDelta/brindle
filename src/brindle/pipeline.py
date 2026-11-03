@@ -618,7 +618,7 @@ def restart_review(db: DB, worker: Agent, ws: Workspace, since: float) -> bool:
             profile = agents._review_choice(db, ws, first, cfg)[0]   # start_review tells the reason
             sha = gates.head(ws)
             if agents._live_reviewer(db, ws, sha, profile) or (
-                    cfg.checks and agents._review_pending(ws.id, profile, sha)):
+                    cfg.checks and agents._review_pending(ws.id, profile, sha, current.reviewing_since)):
                 return False
         except agents.AgentError:
             pass   # _start_review reports an unavailable reviewer through the usual escalation

@@ -344,7 +344,8 @@ def test_issue186_a_reported_branch_nobody_is_checking_is_reviewed_again(db, rep
         assert len(launched) == (1 if check_run == "at work" else 2) and told == []
         active = claim.read_text()
         agents.report_result(db, "w1", "done again")
-        assert claim.read_text() == active
+        # A report of its own: the helper still pending for the earlier one retires.
+        assert claim.read_text() != active
     assert db.get_agent("w1").pipeline == "reviewing"
 
 
@@ -389,14 +390,23 @@ def test_fix_round_resumes_exited_worker(db, repo, monkeypatch, session, exits_m
     assert [e["agent_id"] for e in bus.tail(db, kinds=("pipeline.escalated",))] == ["w1"]
 
 
-@pytest.mark.parametrize("passes", [True, False])
-def test_reviewer_starts_only_after_passing_checks(db, repo, monkeypatch, passes):
+@pytest.mark.parametrize("outcomes", [
+    ("PASS", "PASS"),
+    ("FAIL", "FAIL"),
+    pytest.param(("FAIL", "PASS"), marks=pytest.mark.variant(
+        "review blocker: a pending second review passed after the first one's failure sent a fix round")),
+])
+def test_reviewer_starts_only_after_passing_checks(db, repo, monkeypatch, outcomes):
     """No reviewer runs while the checks do: it starts once they pass, with
     their results in its prompt. When they fail none starts at all: the worker
     gets the failing output as one fix round, and a required second review's
-    run for the same report doesn't send it again."""
-    ws = _reported(db, repo, reviewing_since=time.time())
+    run for the same report (even one whose checks pass, queued before the
+    failure) neither sends it again nor reviews the report the worker left."""
+    passes = outcomes == ("PASS", "PASS")
+    since = time.time()
+    ws = _reported(db, repo, reviewing_since=since)
     sent, spawned, running = [], [], []
+    results = list(outcomes)
 
     def spawn(db_, ws_, prof, **kw):
         assert not running, "a reviewer started while the checks were running"
@@ -407,7 +417,7 @@ def test_reviewer_starts_only_after_passing_checks(db, repo, monkeypatch, passes
     def checks(db_, ws_, cfg, cancel=None):
         running.append(1)
         try:
-            return "PASS `true`" if passes else "FAIL `true`\nexit 1: boom"
+            return "PASS `true`" if results.pop(0) == "PASS" else "FAIL `true`\nexit 1: boom"
         finally:
             running.clear()
 
@@ -415,8 +425,8 @@ def test_reviewer_starts_only_after_passing_checks(db, repo, monkeypatch, passes
     monkeypatch.setattr(gates, "check_summary", checks)
     monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id == "w1")
     monkeypatch.setattr(agents, "send_message", lambda db_, to, body, **k: sent.append((to, body)))
-    agents.review_after_checks(db, "boss", ws)
-    agents.review_after_checks(db, "boss", ws, "reviewer", second=True)
+    agents.review_after_checks(db, "boss", ws, report=since)
+    agents.review_after_checks(db, "boss", ws, "reviewer", second=True, report=since)
     if passes:
         assert len(spawned) == 2 and all("PASS `true`" in p for p in spawned) and sent == []
         assert db.get_agent("w1").pipeline == "reviewing"

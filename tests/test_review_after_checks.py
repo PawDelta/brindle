@@ -119,6 +119,20 @@ def test_with_checks_nothing_starts_until_a_detached_process_has_run_them(db, ws
     assert argv[argv.index("--focus") + 1] == "the parser"
 
 
+def test_a_helper_queued_for_an_older_report_is_not_reused_by_a_newer_one(db, ws, boss, spawned, detached):
+    """The worker reported again on the same commit: the helper still pending
+    for the first report retires itself, so the new report gets its own."""
+    add(db, ws, "w1", "assign", parent="boss", status="processing", pipeline="reviewing")
+    cfg = RepoConfig(checks=["true"])
+    db.update_agent("w1", reviewing_since=100.0)
+    agents.start_review(db, boss, ws, "reviewer", None, cfg)
+    agents.start_review(db, boss, ws, "reviewer", None, cfg)   # same report: reused
+    assert len(detached) == 1 and "100.0" in detached[0]
+    db.update_agent("w1", reviewing_since=200.0)
+    agents.start_review(db, boss, ws, "reviewer", None, cfg)
+    assert len(detached) == 2 and "200.0" in detached[1]
+
+
 def test_a_reviewer_already_at_work_on_this_commit_means_no_second_run(db, ws, boss, spawned,
                                                                      detached, monkeypatch):
     add(db, ws, "rev0", "review", "reviewer", parent="boss", status="processing",
