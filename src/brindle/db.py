@@ -1289,12 +1289,7 @@ class DB:
                           ("hold_until", "REAL")):
             if col not in request_cols:
                 self.conn.execute(f"ALTER TABLE permission_requests ADD COLUMN {col} {kind}")
-        if "branch" in {r["name"] for r in self.conn.execute("PRAGMA table_info(session_repos)")}:
-            # A development build kept the branch on session_repos itself.
-            self.conn.execute(
-                "INSERT OR IGNORE INTO session_repo_branches (root_id, alias, branch) "
-                "SELECT root_id, alias, branch FROM session_repos WHERE branch IS NOT NULL")
-            self.conn.execute("ALTER TABLE session_repos DROP COLUMN branch")
+        self._move_session_repo_branches()
         if "merged_at" not in {r["name"] for r in self.conn.execute("PRAGMA table_info(session_prs)")}:
             self.conn.execute("ALTER TABLE session_prs ADD COLUMN merged_at REAL")
         health_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(launch_health)")}
@@ -1315,6 +1310,23 @@ class DB:
                               "text, heading_path, chunk_id UNINDEXED)")
         except sqlite3.OperationalError:
             pass
+
+    def _move_session_repo_branches(self) -> None:
+        """A development build kept the branch on session_repos itself: copy
+        it to session_repo_branches and drop the column. In one transaction,
+        rechecked inside it, so a second process opening at the same time
+        finds the move done instead of failing on the vanished column."""
+        def has_branch(c: sqlite3.Connection) -> bool:
+            return "branch" in {r["name"] for r in c.execute("PRAGMA table_info(session_repos)")}
+
+        if not has_branch(self.conn):
+            return
+        with self.tx() as c:
+            if not has_branch(c):
+                return
+            c.execute("INSERT OR IGNORE INTO session_repo_branches (root_id, alias, branch) "
+                      "SELECT root_id, alias, branch FROM session_repos WHERE branch IS NOT NULL")
+            c.execute("ALTER TABLE session_repos DROP COLUMN branch")
 
     @contextmanager
     def tx(self) -> Iterator[sqlite3.Connection]:
