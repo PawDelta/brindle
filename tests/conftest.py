@@ -379,12 +379,12 @@ def no_real_agent_cli(tmp_path, monkeypatch):
 
     def guarded_init(self, args, *a, **kw):
         check(args)
-        # A child that may use tmux (tmux itself, a brindle CLI or helper) finds
-        # the test's server already up, keeper and all (see test_tmux_server).
+        # A brindle child (the CLI, a detached helper) that may use tmux finds
+        # the test's server already up, keeper and all (see test_tmux_server);
+        # brindle.tmux's own runs in this process start it themselves.
         if _START_TEST_SERVER and not isinstance(args, (str, os.PathLike)):
             argv = [os.fspath(x) for x in args[:5]]
-            if (argv and os.path.basename(executable(argv)) in ("tmux", "brindle")
-                    or "brindle" in argv):
+            if argv and (os.path.basename(executable(argv)) == "brindle" or "brindle" in argv):
                 _START_TEST_SERVER[0]()
         real_init(self, args, *a, **kw)
 

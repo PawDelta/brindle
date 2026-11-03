@@ -191,3 +191,12 @@ def test_startup_reaper_parses_the_owner_pid(monkeypatch, name, alive, reaped):
     monkeypatch.setattr(tmux, "reap_server", seen.append)
     conftest._reap_dead_test_servers()
     assert seen == ([name] if reaped else [])
+
+
+@pytest.mark.variant("suite overhead: a test's tmux server starts at its first tmux write, keeper "
+                     "first (#199); the lazy start lives in unmeasured conftest.py")
+def test_a_tests_tmux_server_starts_at_its_first_write_with_the_keeper(tmp_path):
+    socket = tmux.socket_dir() / os.environ["BRINDLE_TMUX_SOCKET"]
+    assert not tmux.has_session("brindle-test-keeper") and not socket.exists()   # a read starts nothing
+    tmux.ensure_session("first", str(tmp_path), {})
+    assert tmux.has_session("brindle-test-keeper") and socket.exists()
