@@ -7207,6 +7207,10 @@
     },
     {
       "method": "GET",
+      "path": "/v1/kb/docs/{id}"
+    },
+    {
+      "method": "GET",
       "path": "/v1/kb/search"
     },
     {
