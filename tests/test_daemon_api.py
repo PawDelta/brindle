@@ -583,27 +583,35 @@ def test_peer_agent_callers_are_refused_on_the_unix_socket(seeded, monkeypatch, 
         assert code == 200
 
 
-@pytest.mark.parametrize("snapshot,caller,refused_as", [
-    ("refresh pending", 310, "w1"),
-    ("refresh failed", 310, "w1"),
-    ("pane created since", 310, "w1"),
+@pytest.mark.parametrize("snapshot,caller,refused_as,tmux_reads", [
+    ("refresh pending", 310, "w1", 0),
+    ("refresh failed", 310, "w1", 0),
+    ("pane created since", 310, "w1", 0),
     # A pane split into w1's window after a fresh snapshot runs under the tmux server.
-    ("pane split since", 510, "w1"),
+    ("pane split since", 510, "w1", 1),
     # r1's exited pane had pid 310, now another's: an old snapshot may refuse, never grant.
-    ("supervisor pid recycled", 310, "r1"),
+    ("supervisor pid recycled", 310, "r1", 0),
+    # The app never runs under the snapshot's tmux server: a fresh snapshot clears it
+    # with no tmux call, unless that server is unknown or gone.
+    ("app, server known", 40, None, 0),
+    ("app, server unknown", 40, None, 1),
+    ("app, server gone", 40, None, 1),
 ])
 def test_caller_under_a_new_agent_pane_is_not_cleared_by_an_old_snapshot(seeded, monkeypatch, snapshot, caller,
-                                                                         refused_as):
+                                                                         refused_as, tmux_reads):
     from concurrent.futures import Future
 
     table = {p.pid: p for p in [procs.Proc(200, 1, "claude --model opus"),
                                 procs.Proc(310, 200, "curl --unix-socket daemon.sock HOME=/u"),
                                 procs.Proc(90, 1, "tmux new-session -d"),
                                 procs.Proc(500, 90, "sh -c curl"),
-                                procs.Proc(510, 500, "curl --unix-socket daemon.sock")]}
+                                procs.Proc(510, 500, "curl --unix-socket daemon.sock"),
+                                procs.Proc(40, 1, "/Applications/brindle.app/Contents/MacOS/brindle")]}
     monkeypatch.setattr(peer.process_probe, "process", lambda pid, **kw: table.get(pid))
     monkeypatch.setattr(tmux, "window_pids", lambda w, server=None: {"@2": [200]}.get(w, []))   # w1's new pane
-    monkeypatch.setattr(tmux, "pane_windows", lambda server=None: {200: "@2", 500: "@2"})
+    reads = []
+    monkeypatch.setattr(tmux, "pane_windows", lambda server=None: reads.append(1) or {200: "@2", 500: "@2"})
+    monkeypatch.setattr(tmux, "server_pid", lambda server=None: 90)
     monkeypatch.setattr(peer, "time", SimpleNamespace(monotonic=lambda: 1000.0))
 
     def submit(fn):
@@ -623,15 +631,27 @@ def test_caller_under_a_new_agent_pane_is_not_cleared_by_an_old_snapshot(seeded,
     if snapshot == "refresh failed":
         refresh.set_exception(OSError("tmux busy"))
     # The empty snapshot is long expired, or fresh but older than the new pane.
-    cache = {"pane created since": (1000.0, stamp, {}), "pane split since": (1000.0, stamp, {"w1": [200]}),
-             "supervisor pid recycled": (0.0, "older", {"r1": [310]})}.get(snapshot, (0.0, stamp, {}))
+    def panes(server):
+        found = peer._Panes({"w1": [200]})
+        found.server = server
+        return found
+
+    cache = {"pane created since": (1000.0, stamp, {}), "pane split since": (1000.0, stamp, panes(90)),
+             "supervisor pid recycled": (0.0, "older", {"r1": [310]}),
+             "app, server known": (1000.0, stamp, panes(90)),
+             "app, server unknown": (1000.0, stamp, panes(None)),
+             "app, server gone": (1000.0, stamp, panes(95))}.get(snapshot, (0.0, stamp, {}))
     monkeypatch.setattr(peer, "_pane_cache", cache)
     monkeypatch.setattr(peer, "_pane_refresh", (stamp, refresh) if snapshot.startswith("refresh") else None)
     if snapshot == "pane created since":
         procs.agent_panes_changed()
     code, body = _get("/v1/meta", AUTH, peer_pid=caller)
-    assert code == 403 and refused_as in body["error"]["message"]
-    assert peer.caller_agents(caller) == {"w1"}
+    if refused_as:
+        assert code == 403 and refused_as in body["error"]["message"]
+    else:
+        assert code == 200
+    assert len(reads) == tmux_reads
+    assert peer.caller_agents(caller) == ({"w1"} if refused_as else set())
 
 
 def test_peer_pid_names_the_unix_socket_caller():
