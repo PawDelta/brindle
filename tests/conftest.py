@@ -660,15 +660,15 @@ def db(brindle_home):
     return DB()
 
 
-@pytest.fixture(scope="session")
-def _repo_template(tmp_path_factory, _claude_stub_dir):
-    """``repo``'s repo and origin, built once per run (about seven git runs)."""
-    base = tmp_path_factory.mktemp("repo-template")
+def _build_repo(base: Path, path_first: Path | None = None) -> Path:
+    """``repo``'s repo (``base/proj``) and its bare origin (``base/origin.git``),
+    made with git (about seven runs); ``path_first`` goes first on its PATH."""
     origin = base / "origin.git"
     work = base / "proj"
+    path = os.environ.get("PATH", "")
     env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com",
-           "PATH": f"{_claude_stub_dir}{os.pathsep}{os.environ.get('PATH', '')}"}
+           "PATH": f"{path_first}{os.pathsep}{path}" if path_first else path}
     for k in ("GIT_DIR", "GIT_WORK_TREE"):
         env.pop(k, None)
     binary = shutil.which("git", path=env["PATH"]) or "git"
@@ -687,17 +687,36 @@ def _repo_template(tmp_path_factory, _claude_stub_dir):
     git("remote", "add", "origin", str(origin))
     git("push", "-q", "-u", "origin", "main")
     git("remote", "set-head", "origin", "main")
+    return work
+
+
+# Where _repo_template built repo's template, once this process has.
+_REPO_TEMPLATE: list[Path] = []
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _repo_template(tmp_path_factory, _claude_stub_dir):
+    """``repo``'s repo and origin, built once per test process. ``repo``
+    finds it here rather than as a parameter, so it can still be called with
+    just a path (tests/workspace_template.py builds its template that way)."""
+    base = tmp_path_factory.mktemp("repo-template")
+    _build_repo(base, _claude_stub_dir)
+    _REPO_TEMPLATE[:] = [base]
     return base
 
 
 @pytest.fixture
-def repo(tmp_path, _repo_template):
+def repo(tmp_path):
     """A repo on ``main`` with one commit, pushed to a bare ``origin``: a
-    copy of a template built once, with its origin's path made this test's."""
+    copy of a template built once, with its origin's path made this test's
+    (built in place when there is no template yet)."""
+    if not _REPO_TEMPLATE:
+        return _build_repo(tmp_path)
+    template = _REPO_TEMPLATE[0]
     for name in ("origin.git", "proj"):
-        shutil.copytree(_repo_template / name, tmp_path / name, symlinks=True)
+        shutil.copytree(template / name, tmp_path / name, symlinks=True)
     work = tmp_path / "proj"
     config = work / ".git" / "config"
     config.write_text(config.read_text().replace(
-        f"url = {_repo_template / 'origin.git'}\n", f"url = {tmp_path / 'origin.git'}\n"))
+        f"url = {template / 'origin.git'}\n", f"url = {tmp_path / 'origin.git'}\n"))
     return work
