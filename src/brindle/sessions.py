@@ -236,8 +236,11 @@ def handover_to(db: DB, old_root_id: str, dest: Workspace, note: str | None = No
         c.execute("UPDATE tasks SET caller_id=? WHERE caller_id=? AND state IN ('pending', 'started')",
                   (new.id, old_root_id))
         # The attached repos (brindle.repos) move across with the session.
-        c.execute("INSERT OR IGNORE INTO session_repos (root_id, alias, repo_root, added_at, branch) "
-                  "SELECT ?, alias, repo_root, added_at, branch FROM session_repos WHERE root_id=?",
+        c.execute("INSERT OR IGNORE INTO session_repos (root_id, alias, repo_root, added_at) "
+                  "SELECT ?, alias, repo_root, added_at FROM session_repos WHERE root_id=?",
+                  (new.id, old_root_id))
+        c.execute("INSERT OR IGNORE INTO session_repo_branches (root_id, alias, branch) "
+                  "SELECT ?, alias, branch FROM session_repo_branches WHERE root_id=?",
                   (new.id, old_root_id))
         c.execute("DELETE FROM session_repos WHERE root_id=?", (old_root_id,))
         # So does an outside job it waits on (wait_on), or the notice of one
