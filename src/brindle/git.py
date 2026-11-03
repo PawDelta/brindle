@@ -147,53 +147,157 @@ def merged_into_default(root: str | Path, branch: str) -> bool:
             run(["fetch", "origin", f"+refs/heads/{base}:refs/remotes/origin/{base}"], root, timeout=5, check=False)
         except GitError:
             pass
-    targets = [base]
-    if remote_branch_exists(root, base):
-        targets.append(f"origin/{base}")
-    for target in targets:
-        if ok(["merge-base", "--is-ancestor", branch, target], root):
+    refs = ref_shas(root)
+    return merged_into(root, branch, default_targets(root, refs, base), refs=refs, thorough=True)
+
+
+def ref_shas(root: str | Path) -> dict[str, str]:
+    """Every local and remote-tracking branch's commit, by full ref name
+    (``refs/heads/main``, ``refs/remotes/origin/main``), in one git call. Full
+    names keep a local branch called ``origin/x`` apart from origin's ``x``."""
+    shas: dict[str, str] = {}
+    lines = out(["for-each-ref", "--format=%(refname) %(objectname)", "refs/remotes", "refs/heads"],
+                root).splitlines()
+    for line in lines:
+        ref, _, sha = line.partition(" ")
+        if sha:
+            shas[ref] = sha
+    return shas
+
+
+def _full_ref(name: str) -> str:
+    """A branch name as its ref: ``refs/...`` as given, else a local branch."""
+    return name if name.startswith("refs/") else f"refs/heads/{name}"
+
+
+def default_targets(root: str | Path, refs: dict[str, str], base: str | None = None) -> list[str]:
+    """The default branch and, when it exists, its origin copy: what
+    "merged" means without a more specific target."""
+    base = base or default_branch(root)
+    remote = f"refs/remotes/origin/{base}"
+    return [base] + ([remote] if remote in refs else [])
+
+
+# Decided "merged" per (branch sha, target sha): a commit graph is content-addressed,
+# so an answer for one pair never goes stale. "thorough" answers live under a third key.
+_MERGED: dict[tuple[str, ...], bool | None] = {}
+_MERGED_MAX = 4096
+
+
+def merged_into(root: str | Path, branch: str, targets: list[str], *,
+                refs: dict[str, str] | None = None, thorough: bool = False) -> bool:
+    """Whether local branch ``branch`` has landed in any of ``targets`` (local
+    branch names, or full ``refs/...`` names; see ``ref_shas``): an ancestor of one, the same tree, no changes of its own,
+    or a merge into it that changes nothing. Never fetches, and each
+    (branch, target) pair is decided once per pair of commits. Only when
+    those checks can't tell (a conflicting merge-tree, unrelated histories)
+    and ``thorough`` is set does it compare patches (cherry, patch-id): a
+    squash merge that main has since edited over."""
+    if not branch or branch == "HEAD":
+        return False
+    refs = ref_shas(root) if refs is None else refs
+    own = _full_ref(branch)
+    b = refs.get(own)
+    if b is None:
+        return False
+    full = [_full_ref(t) for t in targets]
+    shas = list(dict.fromkeys(refs[t] for t in full if t != own and t in refs))
+    unsure = []
+    for t in shas:
+        verdict = _merged_cheap(root, b, t)
+        if verdict:
             return True
-        try:
-            b_tree = out(["rev-parse", f"{branch}^{{tree}}"], root).strip()
-            t_tree = out(["rev-parse", f"{target}^{{tree}}"], root).strip()
-            if b_tree == t_tree:
-                return True
-            mb = out(["merge-base", target, branch], root).strip()
-            if mb:
-                mb_tree = out(["rev-parse", f"{mb}^{{tree}}"], root).strip()
-                if b_tree == mb_tree:
-                    return True
-                try:
-                    res = out(["merge-tree", "--write-tree", target, branch], root).strip()
-                    if res == t_tree:
-                        return True
-                except GitError:
-                    pass
-        except GitError:
-            pass
-        try:
-            cherry = out(["cherry", target, branch], root).splitlines()
-            if cherry and all(line.startswith("-") for line in cherry):
-                return True
-        except GitError:
-            pass
-        try:
-            mb = out(["merge-base", target, branch], root).strip()
-            if mb:
-                feat_diff = out(["diff", f"{mb}..{branch}"], root)
-                if feat_diff:
-                    feat_pid_res = run(["patch-id"], root, input=feat_diff, check=False)
-                    if feat_pid_res.returncode == 0 and feat_pid_res.stdout.strip():
-                        feat_pid = feat_pid_res.stdout.strip().split()[0]
-                        commits = out(["rev-list", f"{mb}..{target}"], root).splitlines()
-                        for c in commits:
-                            c_diff = out(["diff", f"{c}~1..{c}"], root)
-                            c_pid_res = run(["patch-id"], root, input=c_diff, check=False)
-                            if c_pid_res.returncode == 0 and c_pid_res.stdout.strip():
-                                if c_pid_res.stdout.strip().split()[0] == feat_pid:
-                                    return True
-        except GitError:
-            pass
+        if verdict is None:
+            unsure.append(t)
+    if not thorough:
+        return False
+    for t in unsure:
+        key = (b, t, "thorough")
+        if key not in _MERGED:
+            try:
+                _remember(key, _merged_by_patch(root, b, t))
+            except GitBusy:
+                continue
+        if _MERGED[key]:
+            return True
+    return False
+
+
+def _remember(key: tuple[str, ...], verdict: bool | None) -> None:
+    if len(_MERGED) >= _MERGED_MAX:
+        _MERGED.clear()
+    _MERGED[key] = verdict
+
+
+def _merged_cheap(root: str | Path, b: str, t: str) -> bool | None:
+    """Commit ``b`` landed in commit ``t``: True, False, or None when the
+    cheap checks can't tell. Cached; a busy machine's answer isn't."""
+    key = (b, t)
+    if key in _MERGED:
+        return _MERGED[key]
+    try:
+        verdict = _cheap_verdict(root, b, t)
+    except GitBusy:
+        return None
+    _remember(key, verdict)
+    return verdict
+
+
+def _cheap_verdict(root: str | Path, b: str, t: str) -> bool | None:
+    if b == t:
+        return True
+    try:
+        proc = run(["merge-base", t, b], root, check=False)
+        mb = proc.stdout.strip()
+        if proc.returncode != 0 or not mb:
+            return None
+        if mb == b:
+            return True
+        b_tree, t_tree, mb_tree = out(["rev-parse", f"{b}^{{tree}}", f"{t}^{{tree}}", f"{mb}^{{tree}}"],
+                                      root).split()
+        if b_tree in (t_tree, mb_tree):
+            return True
+        merged = run(["merge-tree", "--write-tree", t, b], root, check=False)
+    except GitBusy:
+        raise
+    except (GitError, ValueError):
+        return None
+    if merged.returncode == 0 and merged.stdout.strip():
+        return merged.stdout.split()[0] == t_tree
+    return None    # conflicts (or a git too old for --write-tree)
+
+
+def _merged_by_patch(root: str | Path, b: str, t: str) -> bool:
+    """Every patch of commit ``b`` is already in commit ``t`` (cherry), or its
+    whole change matches one commit of ``t``'s (patch-id): the slow checks.
+    Raises GitBusy rather than answer from a read the machine had no room for."""
+    try:
+        cherry = out(["cherry", t, b], root).splitlines()
+        if cherry and all(line.startswith("-") for line in cherry):
+            return True
+    except GitBusy:
+        raise
+    except GitError:
+        pass
+    try:
+        mb = out(["merge-base", t, b], root).strip()
+        if mb:
+            feat_diff = out(["diff", f"{mb}..{b}"], root)
+            if feat_diff:
+                feat_pid_res = run(["patch-id"], root, input=feat_diff, check=False)
+                if feat_pid_res.returncode == 0 and feat_pid_res.stdout.strip():
+                    feat_pid = feat_pid_res.stdout.strip().split()[0]
+                    commits = out(["rev-list", f"{mb}..{t}"], root).splitlines()
+                    for c in commits:
+                        c_diff = out(["diff", f"{c}~1..{c}"], root)
+                        c_pid_res = run(["patch-id"], root, input=c_diff, check=False)
+                        if c_pid_res.returncode == 0 and c_pid_res.stdout.strip():
+                            if c_pid_res.stdout.strip().split()[0] == feat_pid:
+                                return True
+    except GitBusy:
+        raise
+    except GitError:
+        pass
     return False
 
 

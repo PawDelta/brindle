@@ -92,7 +92,7 @@ def other_session_task(db, repo, monkeypatch):
     other_ws = workspaces.create(db, str(repo), "fix-197", run_setup=False).workspace
     db.add_agent(Agent("w197", other_ws.id, "developer", "claude", None, "assign", "done",
                        "@1", "fixed it", time.time()))
-    monkeypatch.setattr(tasks.git, "merged_into_default", lambda root_, branch: False)
+    monkeypatch.setattr(tasks.git, "merged_into", lambda root_, branch, targets, refs=None: False)
     monkeypatch.setattr(tasks, "_changed_files", lambda w: ["src/brindle/tasks.py"])
     db.conn.execute("UPDATE workspaces SET base_branch='brindle/session-14' WHERE id=?", (other_ws.id,))
 
@@ -117,8 +117,42 @@ def test_cross_session_merged_branch_is_not_warned(db, other_session_task, monke
     warning = tasks.overlap_warning(db, root, ["src/brindle/tasks.py"])    # on changed files alone
     assert warning and "fix-197" in warning and "brindle/session-14" in warning
     assert tasks.overlap_warning(db, root, ["src/brindle/tasks.py"], "fix #197")
-    monkeypatch.setattr(tasks.git, "merged_into_default", lambda root_, branch: True)
+    monkeypatch.setattr(tasks.git, "merged_into", lambda root_, branch, targets, refs=None: True)
     assert tasks.overlap_warning(db, root, ["src/brindle/tasks.py"], "fix #197") is None
+
+
+@pytest.mark.parametrize("w3_branch", [
+    "feat-w3",
+    pytest.param("origin/feat-w3", marks=pytest.mark.variant(
+        "review finding: a local branch named origin/x must not read as origin's merged x")),
+])
+def test_overlap_check_git_calls_bounded(db, repo, monkeypatch, w3_branch):
+    """Reported-unmerged worktrees cost a few cheap git reads each, never a
+    fetch or the cherry/patch-id fallback, and nothing again once decided; a
+    branch merged into its session branch has landed."""
+    sh("git branch session && git update-ref refs/remotes/origin/feat-w3 main", repo)
+    root = workspaces.adopt_root(db, str(repo))
+    for name in ("w0", "w1", "w2", "w3", "landed"):
+        branch = w3_branch if name == "w3" else f"feat-{name}"
+        ws = workspaces.create(db, str(repo), branch, base="session", run_setup=False).workspace
+        commit_file(Path(ws.path), f"{name}.py")
+        db.add_agent(Agent(name, ws.id, "developer", "claude", None, "assign", "done", "@1", "done",
+                           time.time()))
+        db.add_task(tasks.Task(f"t-{name}", str(repo), name, None, root.id, "developer", "work",
+                               "assign", 1, ws.branch, None, None, None, "started", time.time()))
+    sh(f"git checkout -q session && git merge -q --no-ff {ws.branch} -m land && git checkout -q main", repo)
+    calls = []
+    real = tasks.git.run_env
+    monkeypatch.setattr(tasks.git, "run_env", lambda args, *a, **k: calls.append(args) or real(args, *a, **k))
+
+    assert tasks.find_clash(db, root, ["w3.py"]).holder == "w3"
+    assert tasks.find_clash(db, root, ["landed.py"]) is None
+    verbs = [c[0] for c in calls]
+    assert "fetch" not in verbs and "cherry" not in verbs and "patch-id" not in verbs
+    assert len(calls) <= 8 * 5 * 2, verbs    # 8 per worktree per check (69 measured; ~250 before)
+    calls.clear()
+    assert tasks.find_clash(db, root, ["w3.py"]).holder == "w3"
+    assert "merge-tree" not in {c[0] for c in calls}    # decided once per (branch, target) sha pair
 
 
 @pytest.fixture
