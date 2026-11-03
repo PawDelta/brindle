@@ -50,6 +50,7 @@ class WorkspaceError(RuntimeError):
 class SetupResult:
     ok: bool
     log: str
+    waiting: str | None = None   # not run: why it waits ("waiting for disk: ..."), see setup_admitted
 
 
 # -- lookup ----------------------------------------------------------------
@@ -225,6 +226,18 @@ def run_commands(commands: list[str], cwd: str, env: dict[str, str]) -> SetupRes
     return SetupResult(True, "\n".join(log))
 
 
+def setup_admitted(commands: list[str], cwd: str, env: dict[str, str], repo_root: str, *,
+              anyway: bool = False) -> SetupResult:
+    """``run_commands`` for setup, which builds (dependencies, a venv,
+    node_modules): held while free disk is low (``disk.low_disk``), unless
+    ``anyway`` (the person's ``brindle setup --anyway``, or a start a
+    supervisor forced). Held, it runs nothing and says why in ``waiting``."""
+    why = None if anyway or not commands else disk.low_disk(repo_root)
+    if why is not None:
+        return SetupResult(False, f"{why}; setup not run (`brindle setup --anyway` runs it now)", why)
+    return run_commands(commands, cwd, env)
+
+
 def live_workers(db: DB, ws: Workspace) -> list:
     """Agents in ``ws`` whose process is still running."""
     from brindle import agents
@@ -339,10 +352,13 @@ def create(
     apply_prefix: bool = True,
     reuse_registered: bool = False,
     session_root: str | None = None,
+    setup_anyway: bool = False,
 ) -> Created:
     """``reuse_registered`` (assign/handoff): a branch that already has a
     registered workspace reuses it, or is refused while a worker is live in
-    it. Otherwise (``brindle new``) a taken branch is an error from git."""
+    it. Otherwise (``brindle new``) a taken branch is an error from git.
+    Setup waits while free disk is low (``setup_admitted``; ``setup_anyway``:
+    run it regardless)."""
     repo_root = git.main_repo_root(repo_path)
     cfg: RepoConfig = load_repo_config(repo_root)
     branch = branch_name(repo_root, branch, apply_prefix)
@@ -432,13 +448,14 @@ def create(
 
         copied = _copy_local_files(repo_root, path, cfg.copy, overwrite_changed=True)
         if cfg.setup and pool.fingerprint(repo_root, start_sha, cfg) != claimed.fingerprint:
-            setup = run_commands(cfg.setup, path, workspace_env(ws))
+            setup = setup_admitted(cfg.setup, path, workspace_env(ws), repo_root, anyway=setup_anyway)
         else:
             setup = None
         pool.fill_in_background(repo_root)
     else:
         copied = _copy_local_files(repo_root, path, cfg.copy)
-        setup = run_commands(cfg.setup, path, workspace_env(ws)) if run_setup and cfg.setup else None
+        setup = (setup_admitted(cfg.setup, path, workspace_env(ws), repo_root, anyway=setup_anyway)
+                 if run_setup and cfg.setup else None)
     return Created(ws, how, start_point, copied, setup)
 
 
@@ -692,13 +709,13 @@ def remove(db: DB, ws: Workspace, *, force: bool = False, delete_branch: bool | 
 
     deleted, note = False, None
     if delete_branch is None:
-        if cfg.delete_merged_branches and _merged_into_base(ws, db):
+        tip = disk.tip(ws.repo_root, ws.branch)   # before judging it: only this commit goes
+        if tip and cfg.delete_merged_branches and _merged_into_base(ws, db):
             try:
-                disk.archive_tip(ws.repo_root, ws.branch)   # restorable from refs/brindle-archive/
-                git.delete_branch(ws.repo_root, ws.branch, force=True)
+                disk.drop_branch(ws.repo_root, ws.branch, tip)   # restorable from refs/brindle-archive/
                 return _forget(db, ws, Removed(True, f"merged branch {ws.branch} deleted", teardown))
             except git.GitError:
-                pass  # e.g. checked out in another worktree
+                pass  # checked out in another worktree, or it moved on since
         note = f"branch {ws.branch} kept"
     elif delete_branch:
         try:

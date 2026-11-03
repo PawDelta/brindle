@@ -26,7 +26,9 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import signal
+import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -207,6 +209,39 @@ def all_agent_ids(procs: dict[int, Proc] | None = None) -> set[str]:
         if re.search(r"-m brindle mcp\b|\bbrindle mcp\b", p.text) and _home_matches(p):
             ids.update(re.findall(r"(?:^|\s)BRINDLE_AGENT_ID=([0-9a-f]+)", p.text))
     return ids
+
+
+def cwds() -> dict[int, str]:
+    """The current folder of every process of this user, whatever started it
+    (a detached dev server, a shell on any tmux server or terminal). Raises
+    OSError when it can't be told: a caller deciding whether something is in
+    use must then assume it is."""
+    proc = Path("/proc")
+    if (proc / "self" / "cwd").exists():
+        out: dict[int, str] = {}
+        for d in proc.iterdir():
+            if d.name.isdigit():
+                try:
+                    if d.stat().st_uid == os.getuid():
+                        out[int(d.name)] = os.readlink(d / "cwd")
+                except OSError:
+                    continue
+        return out
+    lsof = shutil.which("lsof") or "/usr/sbin/lsof"
+    try:
+        listing = spawn.read([lsof, "-w", "-n", "-P", "-a", "-u", str(os.getuid()), "-d", "cwd", "-Fpn"],
+                             timeout=PS_LIMIT)
+    except (spawn.Busy, subprocess.SubprocessError) as e:
+        raise OSError(f"lsof: {e}") from e
+    out, pid = {}, None
+    for line in listing.stdout.splitlines():
+        if line.startswith("p") and line[1:].isdigit():
+            pid = int(line[1:])
+        elif line.startswith("n") and pid is not None:
+            out[pid] = line[1:]
+    if not out:   # this process has a folder too: nothing listed means lsof failed
+        raise OSError(f"lsof listed no process ({listing.stderr.strip() or listing.returncode})")
+    return out
 
 
 def alive(pid: int) -> bool:

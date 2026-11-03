@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from brindle import agents, config, disk, doctor, history, spawn, tasks, workspaces
+from brindle import agents, config, disk, doctor, git, history, procs, spawn, tasks, workspaces
 from brindle.cli import app
 from brindle.daemon import routes_actions
 from brindle.db import Agent
@@ -68,11 +68,17 @@ def test_upgrade_sweep_removes_merged_worktrees_whole_once_and_never_a_dirty_one
     assert disk.upgrade_sweep(db) is None   # recorded: it runs once
 
 
-@pytest.mark.parametrize("state", ["dirty", "live"])
+@pytest.mark.parametrize("state", ["dirty", "live", "process", "unknown"])
 def test_dirty_or_live_abandoned_worktree_is_never_removed(db, repo, monkeypatch, state):
     wt = _worktree(repo, "idea", days_old=30)
     if state == "dirty":
         (wt / "notes.txt").write_text("unsaved thought\n")
+    elif state == "process":   # a detached dev server, or a shell on another tmux server
+        monkeypatch.setattr(procs, "cwds", lambda: {4242: str(wt / "web")})
+    elif state == "unknown":   # processes can't be inspected: fail closed
+        def blind():
+            raise OSError("lsof: not found")
+        monkeypatch.setattr(procs, "cwds", blind)
     else:
         ws = workspaces.adopt_root(db, str(wt))
         db.add_agent(Agent("w1", ws.id, "developer", "claude", None, "assign", "processing",
@@ -134,6 +140,71 @@ def test_retention_caps_backups_archive_and_logs(brindle_home):
     assert not old.exists() and new.is_dir() and (home / "archive" / "brindle.jsonl").is_file()
 
 
+def test_log_rotation_never_follows_a_symlink_or_alias(brindle_home, tmp_path):
+    home = config.brindle_home()
+    home.mkdir(parents=True, exist_ok=True)
+    database = home / "brindle.db"
+    database.write_bytes(b"d" * (2 * disk.MB))
+    (home / "hooks.log").symlink_to(database)
+    os.link(database, home / "agent.log")
+    outside = tmp_path / "theirs.txt"
+    outside.write_text("theirs\n")
+    (home / "ollama.log").write_bytes(b"y" * (2 * disk.MB))
+    (home / "ollama.log.1").symlink_to(outside)
+    _settings({"retention": {"log_mb": 1}})
+
+    disk.retain()
+
+    assert database.read_bytes() == b"d" * (2 * disk.MB)
+    assert outside.read_text() == "theirs\n"
+    rotated = home / "ollama.log.1"
+    assert not rotated.is_symlink() and rotated.read_bytes() == b"y" * (2 * disk.MB)
+    assert (home / "ollama.log").stat().st_size == 0
+
+
+def test_archive_cap_trims_oldest_records_with_their_transcripts(brindle_home):
+    archive = history.archive_dir()
+    (archive / "transcripts").mkdir(parents=True)
+    lines = []
+    for i in range(4):
+        tdir = archive / "transcripts" / f"a{i}"
+        tdir.mkdir()
+        (tdir / "t.jsonl.gz").write_bytes(b"t" * 300)
+        lines.append(json.dumps({"ts": time.time() - (4 - i) * 60, "pad": "r" * 2000,
+                                 "agents": [{"id": f"a{i}", "transcripts": [f"transcripts/a{i}/t.jsonl.gz"]}]}))
+    (archive / "proj.jsonl").write_text("\n".join(lines) + "\n")
+    os.chmod(archive / "proj.jsonl", 0o600)
+    cap = 5000
+    _settings({"retention": {"archive_gb": cap / disk.GB, "archive_days": 0}})
+
+    disk.retain()
+
+    kept = (archive / "proj.jsonl").read_text().splitlines()
+    assert kept == lines[2:] and disk.size_of(archive) <= cap
+    assert [d.name for d in sorted((archive / "transcripts").iterdir())] == ["a2", "a3"]
+    assert (archive / "proj.jsonl").stat().st_mode & 0o777 == 0o600
+
+
+def test_setup_waits_for_disk_unless_overridden(db, repo, monkeypatch):
+    (repo / ".brindle").mkdir()
+    (repo / ".brindle" / "config.json").write_text(json.dumps({"setup": ["touch built"]}))
+    sh("git add -A && git commit -qm setup", repo)
+    monkeypatch.setattr(disk, "free_bytes", lambda path: 3 * disk.GB)
+
+    created = workspaces.create(db, str(repo), "lowdisk")
+
+    ws = created.workspace
+    assert not created.setup.ok and created.setup.waiting.startswith("waiting for disk")
+    assert not Path(ws.path, "built").exists()
+    monkeypatch.chdir(ws.path)
+    held = CliRunner().invoke(app, ["setup"])
+    assert held.exit_code == 1 and "waiting for disk" in held.output and "--anyway" in held.output
+    assert not Path(ws.path, "built").exists()
+    forced = CliRunner().invoke(app, ["setup", "--anyway"])
+    assert forced.exit_code == 0, forced.output
+    assert Path(ws.path, "built").is_file()
+
+
 @pytest.mark.parametrize("held", [
     lambda repo: agents.admission("developer", str(repo)),
     lambda repo: spawn.check_no_room(str(repo)),
@@ -166,9 +237,12 @@ def test_merged_and_squash_merged_branches_go_with_their_workspace(db, repo):
 
 def test_clean_lists_then_removes_merged_and_archives_stale_branches(db, repo, monkeypatch):
     wt = _worktree(repo, "feat", merge="merge")
-    sh("git checkout -q -b old-idea && git commit -q --allow-empty -m idea && git checkout -q main", repo)
+    when = f"{int(time.time() - 30 * DAY)} +0000"
+    (repo / "idea.txt").write_text("an idea main doesn't have\n")
+    sh(f"git checkout -q -b old-idea && git add idea.txt && GIT_AUTHOR_DATE='{when}' "
+       f"GIT_COMMITTER_DATE='{when}' git commit -qm idea && git checkout -q main", repo)
     tip = sh("git rev-parse old-idea", repo).strip()
-    _settings({"retention": {"stale_branch_days": 0}})
+    assert not disk.merged(str(repo), "old-idea", "main")
     monkeypatch.chdir(repo)
     runner = CliRunner()
 
@@ -180,26 +254,92 @@ def test_clean_lists_then_removes_merged_and_archives_stale_branches(db, repo, m
     assert "old-idea" in report["dead branches"] and str(wt) in report["merged worktrees"]
     sh("git worktree add -q ../noise -b noise", repo)   # not made by brindle: never removed
 
+    plain = runner.invoke(app, ["clean"])
+    declined = runner.invoke(app, ["clean", "--branches"], input="n\n")
+
+    assert plain.exit_code == declined.exit_code == 0, plain.output + declined.output
+    assert not wt.exists() and _archived(repo, "feat")
+    assert sh("git rev-parse old-idea", repo).strip() == tip
+    assert git.run(["rev-parse", "--verify", "--quiet", f"{disk.ARCHIVE_REF}old-idea"], repo,
+                   check=False).returncode != 0
+
     done = runner.invoke(app, ["clean", "--branches", "--yes"])
 
     assert done.exit_code == 0, done.output
-    assert not wt.exists() and _archived(repo, "feat")
     assert sh("git branch --list old-idea", repo).strip() == ""
     assert _archived(repo, "old-idea") == tip
     assert "noise" in sh("git branch --list noise", repo)
 
 
-def test_pushed_branch_is_deleted_on_origin_once_its_pr_merged(repo):
+def test_a_branch_that_moves_before_deletion_is_kept(db, repo, monkeypatch):
+    wt = _worktree(repo, "stalled", days_old=30)
+    removing = git.remove_worktree
+
+    def commit_during_teardown(root, path, force=False):
+        (Path(path) / "late.txt").write_text("late\n")
+        sh("git add late.txt && git commit -qm late", Path(path))
+        removing(root, path, force)
+
+    monkeypatch.setattr(git, "remove_worktree", commit_during_teardown)
+
+    [out] = disk.clean(db, path=str(wt))["removed"]
+
+    assert not wt.exists() and out["archived"] is None
+    assert sh("git log -1 --format=%s stalled", repo) == "late"
+    when = f"{int(time.time() - 30 * DAY)} +0000"
+    sh(f"git checkout -q -b old && echo o > o.txt && git add o.txt && GIT_AUTHOR_DATE='{when}' "
+       f"GIT_COMMITTER_DATE='{when}' git commit -qm old && git checkout -q main", repo)
+    [listed] = [b for b in disk.dead_branches(db, str(repo)) if b.name == "old"]
+    sh("git checkout -q old && echo n > n.txt && git add n.txt && git commit -qm newer"
+       " && git checkout -q main", repo)
+
+    with pytest.raises(git.GitError):
+        disk.delete_branch(db, str(repo), listed)
+
+    assert sh("git log -1 --format=%s old", repo) == "newer"
+    assert git.run(["rev-parse", "--verify", "--quiet", f"{disk.ARCHIVE_REF}old"], repo,
+                   check=False).returncode != 0
+
+
+def test_a_branch_that_moved_on_after_its_merge_is_not_swept(db, repo):
+    ws = workspaces.create(db, str(repo), "again").workspace
+    Path(ws.path, "a.txt").write_text("a\n")
+    sh("git add a.txt && git commit -qm a", ws.path)
+    sh(f"git merge -q --no-ff -m m {ws.branch}", repo)
+    db.set_merged(ws.id, sh("git rev-parse HEAD", ws.path))
+    Path(ws.path, "b.txt").write_text("more work\n")
+    sh("git add b.txt && git commit -qm b", ws.path)
+    later = time.time() + 2 * disk.FRESH
+
+    assert disk.sweep_merged(db, later) == []
+
+    assert Path(ws.path, "b.txt").is_file()
+    assert [t.state for t in disk.trees(db, str(repo), later, sizes=False)] == [disk.ACTIVE]
+
+
+def test_pushed_branch_is_deleted_on_origin_once_its_pr_merged(repo, monkeypatch):
     sh("git checkout -q -b brindle/session-1 && git commit -q --allow-empty -m s"
-       " && git push -q origin brindle/session-1 && git checkout -q main", repo)
-    sha = sh("git rev-parse brindle/session-1", repo).strip()
+       " && git push -q origin brindle/session-1 && git commit -q --allow-empty -m newer"
+       " && git checkout -q main", repo)
+    sha = sh("git rev-parse brindle/session-1~1", repo).strip()
+    newer = sh("git rev-parse brindle/session-1", repo).strip()
     ws = workspaces.Workspace(id="r/s", repo_root=str(repo), name="s", kind="main",
                               branch="brindle/session-1", base_branch="main", path=str(repo),
                               port_base=None, tmux_session="x", created_at=0.0)
     assert disk.delete_pushed_remote(ws, sha) is None   # off by default
     _settings({"delete_pushed_branches": True})
+    running, raced = git.run, []
 
-    assert disk.delete_pushed_remote(ws, sha)
+    def someone_pushes_first(args, *rest, **kw):
+        if args[0] == "push" and not raced:
+            raced.append(sh(f"git push -q origin {newer}:refs/heads/brindle/session-1", repo))
+        return running(args, *rest, **kw)
+
+    monkeypatch.setattr(git, "run", someone_pushes_first)
+
+    assert disk.delete_pushed_remote(ws, sha) is None
+    assert sh("git ls-remote --heads origin brindle/session-1", repo).split()[0] == newer
+    assert disk.delete_pushed_remote(ws, newer)
     assert sh("git ls-remote --heads origin brindle/session-1", repo).strip() == ""
 
 

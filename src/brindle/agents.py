@@ -2812,6 +2812,8 @@ def delegate(
                 db, caller_ws.path, branch, base, fetch=False, start=start,
                 apply_prefix=False, reuse_registered=True,
                 session_root=pilot.root_of(db, caller.id) if caller else None,
+                # Admission (low disk included) was just looked at, or a supervisor forced the start.
+                setup_anyway=not admit,
             )
             if created.setup and not created.setup.ok:
                 raise AgentError(f"workspace setup failed:\n{created.setup.log}")

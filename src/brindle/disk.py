@@ -16,12 +16,17 @@ takes back what is finished or has aged out, and nothing else:
   abandoned one). A worktree with uncommitted changes is never removed by
   any path, only flagged;
 - ``retain`` keeps the newest ``db_backups`` ``brindle.db.before-*`` copies,
-  ages and caps ``archive/transcripts``, and rotates brindle's own top-level
-  ``*.log`` files past ``log_mb`` (settings: ``retention`` in
-  ~/.brindle/config.json, see ``Retention``). The database itself is never
-  touched;
-- ``low_disk`` holds a new worker or check run while free space is under the
-  repo's ``min_free_disk_gb`` (see ``spawn.no_room``);
+  ages and caps the archive (whole records: a ``<repo>.jsonl`` line with the
+  transcripts it names), and rotates brindle's own top-level ``*.log`` files
+  past ``log_mb``, never through a symlink or hard link (settings:
+  ``retention`` in ~/.brindle/config.json, see ``Retention``). The database
+  itself is never touched;
+- ``low_disk`` holds a new worker, check run or setup while free space is
+  under the repo's ``min_free_disk_gb`` (see ``spawn.no_room`` and
+  ``workspaces.setup_admitted``);
+- a branch is only ever deleted in one ref transaction with its archive ref,
+  at the commit it was judged at (``drop_branch``); a worktree with a live
+  agent, pane or any process in it is never removed (``live_in``);
 - local branches with no worktree: merged ones go with their workspace
   (``workspaces.remove``, tip archived); others nothing uses are only listed
   (``dead_branches``) until ``brindle clean --branches``;
@@ -33,10 +38,13 @@ daemon serves it at ``GET /v1/storage`` and cleans at ``POST /v1/storage/clean``
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shutil
+import stat
 import sys
+import tempfile
 import time
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
@@ -182,10 +190,23 @@ def _inside(child: str, parent: str) -> bool:
     return child == parent or child.startswith(parent + os.sep)
 
 
-def live_in(db, path: str | Path) -> bool:
-    """Whether a session is live in ``path``: a running agent of a workspace
-    there, any tmux pane sitting in it, or this very process. Unknown counts
-    as live."""
+def _cwds() -> list[str] | None:
+    """Every process's folder (``procs.cwds``), resolved; None when they
+    can't be inspected."""
+    from brindle import procs
+
+    try:
+        return [os.path.realpath(c) for c in procs.cwds().values()]
+    except OSError as e:
+        log.warning("brindle: can't see which processes use a worktree, so none is removed: %s", e)
+        return None
+
+
+def live_in(db, path: str | Path, cwds: list[str] | None | bool = False) -> bool:
+    """Whether anything is live in ``path``: a running agent of a workspace
+    there, any process whose folder is in it (a detached dev server, a shell
+    on any tmux server or terminal, this very process) or a pane of brindle's
+    tmux server. ``cwds``: ``_cwds()`` already taken. Unknown counts as live."""
     from brindle import tmux, workspaces
 
     real = os.path.realpath(path)
@@ -194,6 +215,9 @@ def live_in(db, path: str | Path) -> bool:
             return True
     except OSError:
         pass
+    cwds = _cwds() if cwds is False else cwds
+    if cwds is None or any(_inside(c, real) for c in cwds):
+        return True
     for ws in db.find_workspaces():
         if _inside(os.path.realpath(ws.path), real) and workspaces.live_workers(db, ws):
             return True
@@ -212,6 +236,7 @@ class Tree:
     path: str
     repo_root: str
     branch: str
+    sha: str                    # the branch tip it was classified at
     state: str                  # MERGED, ABANDONED or ACTIVE
     last_activity: float        # its last commit, checkout or creation
     dirty: bool                 # uncommitted changes (untracked files count)
@@ -279,6 +304,7 @@ def trees(db, repo_root: str, now: float | None = None, *, sizes: bool = True,
     for ws in db.find_workspaces(repo_root):
         rows.setdefault(os.path.realpath(ws.path), []).append(ws)
     out = []
+    cwds: list[str] | None | bool = False   # taken once, at the first worktree that needs it
     for wt in git.list_worktrees(repo_root)[1:]:   # the first is the main checkout
         path, ref = wt.get("worktree", ""), wt.get("branch", "")
         if not path or not ref.startswith("refs/heads/") or not os.path.isdir(path):
@@ -290,8 +316,13 @@ def trees(db, repo_root: str, now: float | None = None, *, sizes: bool = True,
         base = next((w.base_branch for w in here if w.base_branch), None) or default
         if branch.startswith(POOL_PREFIX) or branch in (base, default):
             continue
+        # The tip first: whatever is decided below holds for this commit only
+        # (a branch that moves on later is refused when it is deleted).
+        sha = git.run(["rev-parse", "--verify", "--quiet", ref], repo_root, check=False).stdout.strip()
+        if not sha:
+            continue
         last = _last_activity(repo_root, path, branch, here)
-        recorded = any(db.merged_sha(w.id) for w in here)
+        recorded = any(db.merged_sha(w.id) == sha for w in here)   # a merge of this very tip
         is_merged = (recorded or merged(repo_root, branch, base)
                      or (base != default and merged(repo_root, branch, default))
                      or any(merged_pr(db, w) for w in here))
@@ -306,7 +337,9 @@ def trees(db, repo_root: str, now: float | None = None, *, sizes: bool = True,
         except git.GitError:
             dirty = True
         paused = any(a.status == "paused" for w in here for a in db.list_agents(w.id))
-        t = Tree(path, repo_root, branch, state, last, dirty, paused or live_in(db, path),
+        if cwds is False:
+            cwds = _cwds()
+        t = Tree(path, repo_root, branch, sha, state, last, dirty, paused or live_in(db, path, cwds),
                  bool(here) or _owned(repo_root, path), workspace_id=here[0].id if here else None)
         if sizes:
             t.size = size_of(path)
@@ -344,7 +377,10 @@ def remove_tree(db, path: str, *, states: tuple[str, ...] = (MERGED, ABANDONED),
     branch's tip under ``refs/brindle-archive/<branch>`` first. Its state is
     looked at again here, so a worktree that changed since a report was
     taken is kept: only one in ``states`` that ``Tree.reason`` lets go.
-    Raises ``CantClean`` otherwise. What was removed, as for the route."""
+    Raises ``CantClean`` otherwise. The branch goes only while it is still
+    at the tip that was judged (``drop_branch``): one that got a commit
+    meanwhile (in teardown, say) is kept, with ``archived`` None and
+    ``branch_kept`` saying why. What was removed, as for the route."""
     from brindle import workspaces
 
     try:
@@ -359,7 +395,6 @@ def remove_tree(db, path: str, *, states: tuple[str, ...] = (MERGED, ABANDONED),
         raise CantClean(f"kept {path}: {t.reason}")
     if t.state not in states:
         raise CantClean(f"kept {path}: it is {t.state}")
-    sha = archive_tip(root, t.branch)
     for ws in db.find_workspaces(root):
         if os.path.realpath(ws.path) == os.path.realpath(path):
             try:
@@ -369,10 +404,14 @@ def remove_tree(db, path: str, *, states: tuple[str, ...] = (MERGED, ABANDONED),
     if os.path.isdir(path):
         git.remove_worktree(root, path)   # never forced: git refuses a dirty one too
     git.run(["worktree", "prune"], root, check=False)
-    if sha and git.branch_exists(root, t.branch):
-        git.delete_branch(root, t.branch, force=True)
+    kept = None
+    try:
+        drop_branch(root, t.branch, t.sha)
+    except git.GitError as e:
+        kept = str(e)
+        log.info("brindle: kept branch %s: %s", t.branch, e)
     return {"path": t.path, "repo_root": root, "branch": t.branch, "state": t.state, "size": t.size,
-            "archived": f"{ARCHIVE_REF}{t.branch}" if sha else None}
+            "archived": None if kept else f"{ARCHIVE_REF}{t.branch}", "branch_kept": kept}
 
 
 def clean(db, *, path: str | None = None, abandoned: bool = False, here: str | None = None) -> dict:
@@ -461,14 +500,23 @@ def merged_pr(db, ws) -> bool:
     return tip == row["pushed_sha"]
 
 
-def archive_tip(repo_root: str, branch: str) -> str | None:
-    """Keep ``branch``'s tip under ``refs/brindle-archive/<branch>`` (restore it
-    with ``git branch <branch> refs/brindle-archive/<branch>``)."""
-    sha = git.run(["rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"], repo_root,
-                  check=False).stdout.strip()
-    if sha:
-        git.run(["update-ref", f"{ARCHIVE_REF}{branch}", sha], repo_root)
-    return sha or None
+def tip(repo_root: str, branch: str) -> str | None:
+    return git.run(["rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"], repo_root,
+                   check=False).stdout.strip() or None
+
+
+def drop_branch(repo_root: str, branch: str, sha: str) -> None:
+    """Keep ``sha`` under ``refs/brindle-archive/<branch>`` (restore it with
+    ``git branch <branch> refs/brindle-archive/<branch>``) and delete local
+    ``branch``, in one ref transaction that happens only while the branch
+    still points at ``sha``: a branch that moved since it was judged, or
+    that a worktree has checked out, is left as it is (``git.GitError``)."""
+    out = [wt for wt in git.list_worktrees(repo_root) if wt.get("branch") == f"refs/heads/{branch}"]
+    if out:
+        raise git.GitError(f"{branch} is checked out at {out[0].get('worktree')}")
+    git.run(["update-ref", "--stdin"], repo_root,
+            input=f"update {ARCHIVE_REF}{branch} {sha}\ndelete refs/heads/{branch} {sha}\n")
+    git.run(["config", "--remove-section", f"branch.{branch}"], repo_root, check=False)
 
 
 @dataclass
@@ -508,10 +556,13 @@ def dead_branches(db, repo_root: str, now: float | None = None) -> list[Branch]:
     return out
 
 
-def delete_branch(repo_root: str, b: Branch) -> None:
-    """Archive ``b``'s tip, then delete it."""
-    git.run(["update-ref", f"{ARCHIVE_REF}{b.name}", b.sha], repo_root)
-    git.delete_branch(repo_root, b.name, force=True)
+def delete_branch(db, repo_root: str, b: Branch) -> None:
+    """Archive ``b``'s tip and delete it (``drop_branch``), only while it is
+    still a dead branch at the commit it was listed at. Raises
+    ``git.GitError`` otherwise."""
+    if not any(d.name == b.name and d.sha == b.sha for d in dead_branches(db, repo_root)):
+        raise git.GitError(f"{b.name} changed or is in use since it was listed")
+    drop_branch(repo_root, b.name, b.sha)
 
 
 def delete_pushed_remote(ws, pushed_sha: str | None) -> str | None:
@@ -523,11 +574,11 @@ def delete_pushed_remote(ws, pushed_sha: str | None) -> str | None:
             return None
     except ValueError:
         return None
-    proc = git.run(["ls-remote", "--heads", "origin", f"refs/heads/{ws.branch}"], ws.repo_root, check=False)
-    tip = proc.stdout.split("\t", 1)[0].strip() if proc.returncode == 0 else ""
-    if tip != pushed_sha:
-        return None
-    if git.run(["push", "origin", "--delete", ws.branch], ws.repo_root, check=False).returncode != 0:
+    ref = f"refs/heads/{ws.branch}"
+    # The lease makes origin refuse the delete unless the branch is still at
+    # pushed_sha at that moment: a newer push is never lost.
+    if git.run(["push", f"--force-with-lease={ref}:{pushed_sha}", "origin", f":{ref}"], ws.repo_root,
+               check=False).returncode != 0:
         return None
     return f"deleted origin/{ws.branch} (its PR merged)"
 
@@ -540,6 +591,23 @@ class Item:
     path: Path
     size: int
     why: str
+    lines: frozenset[str] = frozenset()   # archived records to drop from the file at ``path``
+
+
+LOG = "log to rotate"
+RECORDS = "archived records past retention"
+TRANSCRIPTS = "archived transcripts past retention"
+
+
+def _own_file(p: Path) -> os.stat_result | None:
+    """``p``'s lstat when it is a regular file of this user's with no other
+    name (not a symlink, nor a hard link to the database, say), else None."""
+    try:
+        st = p.lstat()
+    except OSError:
+        return None
+    ok = stat.S_ISREG(st.st_mode) and st.st_nlink == 1 and st.st_uid == os.getuid()
+    return st if ok else None
 
 
 def _backups() -> list[Path]:
@@ -548,7 +616,8 @@ def _backups() -> list[Path]:
 
 
 def _logs() -> list[Path]:
-    return sorted(p for p in config.brindle_home().glob("*.log") if p.is_file())
+    """brindle's own top-level logs: never a symlink or another name of a file."""
+    return sorted(p for p in config.brindle_home().glob("*.log") if _own_file(p))
 
 
 def _transcripts() -> list[Path]:
@@ -561,39 +630,138 @@ def _transcripts() -> list[Path]:
                   key=lambda p: p.stat().st_mtime)
 
 
-def aged(now: float | None = None) -> list[Item]:
-    """brindle's own files past their retention: old DB backups, archived
-    transcripts past ``archive_days`` or beyond ``archive_gb`` (oldest
-    first), and logs past ``log_mb`` (rotated, not deleted)."""
+def _record_files() -> list[Path]:
     from brindle import history
 
+    root = history.archive_dir()
+    return sorted(p for p in root.glob("*.jsonl") if _own_file(p)) if root.is_dir() else []
+
+
+def _transcript_dirs(line: str) -> set[str]:
+    """The ``archive/transcripts/<id>`` folders an archived record names."""
+    try:
+        entry = json.loads(line)
+        paths = [t for a in entry.get("agents") or [] for t in a.get("transcripts") or []]
+    except (ValueError, AttributeError, TypeError):
+        return set()
+    return {Path(t).parts[1] for t in paths
+            if isinstance(t, str) and len(Path(t).parts) > 2 and Path(t).parts[0] == "transcripts"}
+
+
+def _archive_entries() -> list[tuple[float, Path | None, str | None, list[Path]]]:
+    """Each archived record ``(ts, file, line, its transcript folders)``, and
+    each transcript folder no record names ``(mtime, None, None, [folder])``,
+    oldest first. A line that can't be read is never one of them."""
+    entries = []
+    named: set[str] = set()
+    folders = {d.name: d for d in _transcripts()}
+    for f in _record_files():
+        try:
+            lines = f.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeDecodeError):
+            continue
+        for line in lines:
+            try:
+                ts = float(json.loads(line)["ts"])
+            except (ValueError, KeyError, TypeError):
+                continue
+            ids = _transcript_dirs(line)
+            named |= ids
+            entries.append((ts, f, line, [folders[i] for i in sorted(ids) if i in folders]))
+    for name, d in folders.items():
+        if name not in named:
+            entries.append((d.stat().st_mtime, None, None, [d]))
+    return sorted(entries, key=lambda e: e[0])
+
+
+def _aged_archive(r: Retention, now: float) -> list[Item]:
+    """Whole archived records (their line and transcripts) past
+    ``archive_days``, then the oldest while the archive is over
+    ``archive_gb``: the records count, not just the transcripts."""
+    from brindle import history
+
+    total = size_of(history.archive_dir())
+    drop: dict[Path, set[str]] = {}
+    dirs: list[Path] = []
+    for ts, f, line, folders in _archive_entries():
+        old = bool(r.archive_days) and now - ts > r.archive_days * DAY
+        big = bool(r.archive_gb) and total > r.archive_gb * GB
+        if not (old or big):
+            continue
+        if f is None and now - ts < FRESH:
+            continue   # transcripts copied a moment ago, their record not written yet
+        if f is not None and line is not None:
+            drop.setdefault(f, set()).add(line)
+            total -= len(line.encode()) + 1
+        for d in folders:
+            if d not in dirs:
+                dirs.append(d)
+                total -= size_of(d)
+    out = [Item(f, sum(len(x.encode()) + 1 for x in lines), RECORDS, frozenset(lines))
+           for f, lines in drop.items()]
+    return out + [Item(d, size_of(d), TRANSCRIPTS) for d in dirs]
+
+
+def aged(now: float | None = None) -> list[Item]:
+    """brindle's own files past their retention: old DB backups, archived
+    records with their transcripts past ``archive_days`` or beyond
+    ``archive_gb`` (oldest first), and logs past ``log_mb`` (rotated, not
+    deleted)."""
     now = time.time() if now is None else now
     r = retention()
     out = []
     if r.db_backups:
         out += [Item(p, p.stat().st_size, "old database backup") for p in _backups()[r.db_backups:]]
     if r.archive_days or r.archive_gb:
-        total = size_of(history.archive_dir())
-        for d in _transcripts():
-            old = bool(r.archive_days) and now - d.stat().st_mtime > r.archive_days * DAY
-            big = bool(r.archive_gb) and total > r.archive_gb * GB
-            if not (old or big):
-                continue
-            size = size_of(d)
-            total -= size
-            out.append(Item(d, size, "archived transcripts past retention"))
+        out += _aged_archive(r, now)
     if r.log_mb:
-        out += [Item(p, p.stat().st_size, "log to rotate") for p in _logs()
-                if p.stat().st_size > r.log_mb * MB]
+        out += [Item(p, p.stat().st_size, LOG) for p in _logs() if p.stat().st_size > r.log_mb * MB]
     return out
 
 
+def _replace(dest: Path, write, mode: int = 0o600) -> None:
+    """Write ``dest`` afresh (``write(file)``) and swap it in atomically: a
+    symlink at ``dest`` is replaced, never followed."""
+    fd, tmp = tempfile.mkstemp(dir=dest.parent, prefix=f".{dest.name}.")
+    try:
+        with os.fdopen(fd, "wb") as out:
+            os.fchmod(out.fileno(), mode)
+            write(out)
+        os.replace(tmp, dest)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
+
+
 def rotate(log_file: Path) -> None:
-    """Copy ``log_file`` to ``<name>.1`` (replacing the last one) and empty it
-    in place, so a process still appending to it carries on in the same file."""
-    shutil.copyfile(log_file, log_file.with_name(log_file.name + ".1"))
-    with open(log_file, "r+b") as f:
-        f.truncate(0)
+    """Copy ``log_file`` to ``<name>.1`` (replacing the last one, never
+    writing through a link there) and empty it in place, so a process still
+    appending to it carries on in the same file. Only a regular file of
+    brindle's own with no other name: a symlink or hard link (to the
+    database, say) raises OSError and is left alone."""
+    fd = os.open(log_file, os.O_RDWR | os.O_NOFOLLOW)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or st.st_uid != os.getuid():
+            raise OSError(f"{log_file} isn't a log file of brindle's own")
+        with os.fdopen(os.dup(fd), "rb") as src:
+            _replace(log_file.with_name(log_file.name + ".1"), lambda out: shutil.copyfileobj(src, out),
+                     stat.S_IMODE(st.st_mode))
+        os.ftruncate(fd, 0)
+    finally:
+        os.close(fd)
+
+
+def _drop_records(f: Path, lines: frozenset[str]) -> None:
+    """Rewrite archived-records file ``f`` without ``lines``, under the
+    archive's lock so a record being appended is never lost."""
+    from brindle import history
+
+    with history.archive_lock():
+        if not _own_file(f):
+            raise OSError(f"{f} isn't an archive file of brindle's own")
+        keep = [x for x in f.read_text(encoding="utf-8").splitlines() if x not in lines]
+        _replace(f, lambda out: out.write("".join(x + "\n" for x in keep).encode()))
 
 
 def retain(dry_run: bool = False) -> list[Item]:
@@ -602,16 +770,26 @@ def retain(dry_run: bool = False) -> list[Item]:
     if dry_run:
         return items
     done = []
-    for it in items:
+    named: set[str] | None = None
+    for it in sorted(items, key=lambda i: i.why == TRANSCRIPTS):   # records before their transcripts
         try:
-            if it.why == "log to rotate":
+            if it.why == LOG:
                 rotate(it.path)
+            elif it.why == RECORDS:
+                _drop_records(it.path, it.lines)
+            elif it.why == TRANSCRIPTS:
+                if named is None:   # what the records left still name stays
+                    named = {i for f in _record_files()
+                             for x in f.read_text(encoding="utf-8").splitlines() for i in _transcript_dirs(x)}
+                if it.path.name in named:
+                    continue
+                shutil.rmtree(it.path)
             elif it.path.is_dir():
                 shutil.rmtree(it.path)
             else:
                 it.path.unlink()
             done.append(it)
-        except OSError as e:
+        except (OSError, UnicodeDecodeError) as e:
             log.warning("brindle: couldn't apply retention to %s: %s", it.path, e)
     return done
 
@@ -682,8 +860,8 @@ def storage_report(db, here: str | None = None, now: float | None = None) -> dic
     branches = []
     for root in _repos(db, here):
         try:
-            branches += [{"repo_root": root, "name": b.name, "last_commit": b.last_commit, "merged": b.merged}
-                         for b in dead_branches(db, root, now)]
+            branches += [{"repo_root": root, "name": b.name, "sha": b.sha, "last_commit": b.last_commit,
+                          "merged": b.merged} for b in dead_branches(db, root, now)]
         except git.GitError:
             continue
     try:

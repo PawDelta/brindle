@@ -24,12 +24,15 @@ the report, merge or check it describes.
 
 from __future__ import annotations
 
+import fcntl
 import gzip
 import json
 import logging
 import os
 import shutil
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
 
@@ -130,6 +133,18 @@ def archive_dir() -> Path:
     return brindle_home() / "archive"
 
 
+@contextmanager
+def archive_lock() -> Iterator[None]:
+    """Held while a records file under ``archive_dir()`` is appended to or
+    rewritten, so neither loses the other's lines."""
+    fd = os.open(_private_dir(archive_dir()) / ".lock", os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
 def _private_dir(d: Path) -> Path:
     """``d`` (under ``archive_dir()``) and every folder from there down to it,
     made 0700."""
@@ -193,10 +208,11 @@ def archive(db: DB, ws: Workspace | None, members: list[Agent], reason: str) -> 
         }
         name = os.path.basename(repo_root.rstrip(os.sep)) or "unknown"
         path = _private_dir(archive_dir()) / f"{name}.jsonl"
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-        with os.fdopen(fd, "a") as f:
-            os.fchmod(f.fileno(), 0o600)
-            f.write(json.dumps(entry) + "\n")
+        with archive_lock():   # retention may be rewriting this file (disk.retain)
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            with os.fdopen(fd, "a") as f:
+                os.fchmod(f.fileno(), 0o600)
+                f.write(json.dumps(entry) + "\n")
     except Exception:
         log.exception("brindle: couldn't archive %s", ws.id if ws else members[0].id)
         return False
