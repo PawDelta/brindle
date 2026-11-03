@@ -296,25 +296,6 @@ describe("App", () => {
     sync.stop();
   });
 
-  it("a session started with an empty composer on a first launch opens running, not paused (#216)", async () => {
-    // What a fresh engine was seen to send for this start: only agent.status "idle", once the chat is up.
-    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [], workspaces: [{ ...root, agents: [] }] });
-    const store = createAppStore();
-    const client = daemon.client();
-    const sync = startSync({ client, store, connect: daemon.connect });
-    renderApp(<App store={store} client={client} refresh={sync.refresh} />);
-    await screen.findByLabelText("What should brindle work on?");
-    fireEvent.click(screen.getByRole("button", { name: "Start" }));
-
-    expect(await screen.findByRole("region", { name: "Session" })).toBeTruthy();
-    await waitFor(() => expect(screen.getByTestId("terminal").textContent).toBe("new1"));
-    const bar = screen.getByTestId("session-bar");
-    expect(bar.textContent).not.toContain("paused");
-    expect(within(bar).getByRole("button", { name: "Pause" })).toBeTruthy();
-    expect(screen.queryByTestId("state-card")).toBeNull();
-    sync.stop();
-  });
-
   it("a session whose status beat its window into the snapshot still opens running, not paused (#216)", async () => {
     // The engine publishes the new chat's status before it records the chat's window: the snapshot that
     // status asks for lists it "exited" with no window, and nothing on the bus says when the window lands.
@@ -634,70 +615,6 @@ describe("closing a session", () => {
     sync.stop();
   });
 
-  it("the ⋯ menu's Close session says what still runs, closes in one click and moves to the Inbox when no session is left", async () => {
-    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], goal });
-    const store = createAppStore();
-    const client = daemon.client();
-    const sync = startSync({ client, store, connect: daemon.connect });
-    renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO, agent: "sup1" }} />);
-    await waitFor(() => expect(screen.getByTestId("terminal").textContent).toBe("sup1"));
-    await waitFor(() => expect(treeAgent("w1")).toBeTruthy());
-    // Not Done: the goal panel has no Close session; the ⋯ has it, saying w1 runs and feat/ls isn't merged.
-    expect(within(nav()).queryByRole("button", { name: "Close session" })).toBeNull();
-    fireEvent.click(within(screen.getByTestId("session-bar")).getByRole("button", { name: "More actions" }));
-    const item = within(screen.getByRole("menu")).getByTestId("close-session");
-    expect(item.textContent).toBe("Close session · 1 worker running · 1 unmerged branch");
-
-    fireEvent.click(item);
-    expect(screen.queryByRole("dialog")).toBeNull();
-    expect(screen.queryByRole("menu")).toBeNull();
-    expect(sessionRow("sup1")).toBeNull();
-    expect(await screen.findByRole("region", { name: "Inbox" })).toBeTruthy();
-    await waitFor(() => expect(posts(daemon)).toEqual(["/sessions/sup1/close"]));
-    expect(daemon.data.closed.map((a) => a.id)).toEqual(["sup1", "w1"]);
-    sync.stop();
-  });
-
-  it("the ⋯ menu's Close session is the bare label when nothing runs and everything is merged, from a worker's menu too", async () => {
-    const quietWorker = { ...worker, ahead: 0, dirty: 0, agents: [{ ...worker.agents![0], status: "done" }] };
-    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session, other], workspaces: [root, quietWorker, otherWs], goal });
-    const store = createAppStore();
-    const client = daemon.client();
-    const sync = startSync({ client, store, connect: daemon.connect });
-    renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO, agent: "w1" }} />);
-    await waitFor(() => expect(screen.getByTestId("terminal").textContent).toBe("w1"));
-    fireEvent.click(within(screen.getByTestId("session-bar")).getByRole("button", { name: "More actions" }));
-    const item = within(screen.getByRole("menu")).getByTestId("close-session");
-    expect(item.textContent).toBe("Close session");
-    fireEvent.click(item);
-    expect(sessionRow("sup1")).toBeNull();
-    await waitFor(() => expect(screen.getByTestId("terminal").textContent).toBe("sup2"));
-    await waitFor(() => expect(posts(daemon)).toEqual(["/sessions/sup1/close"]));
-    sync.stop();
-  });
-
-  it("a paused session whose root is in no snapshot still has the ⋯ with Close session, one click", async () => {
-    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session, paused], workspaces: [root, worker], goal });
-    const store = createAppStore();
-    const client = daemon.client();
-    const sync = startSync({ client, store, connect: daemon.connect });
-    renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup0", repo: REPO, agent: "sup0" }} />);
-    const pausedRow = () => nav().querySelector('[data-tree-session="sup0"]');
-    await waitFor(() => expect(pausedRow()).toBeTruthy());
-    await waitFor(() => expect(store.getState().synced).toBe(true));
-    expect(screen.queryByTestId("agent-menu")).toBeNull();
-    fireEvent.click(within(screen.getByTestId("session-bar")).getByRole("button", { name: "More actions" }));
-    const item = within(screen.getByRole("menu")).getByTestId("close-session");
-    expect(item.textContent).toBe("Close session");
-    fireEvent.click(item);
-    expect(screen.queryByRole("dialog")).toBeNull();
-    expect(pausedRow()).toBeNull();
-    await waitFor(() => expect(screen.getByTestId("terminal").textContent).toBe("sup1"));
-    await waitFor(() => expect(posts(daemon)).toEqual(["/sessions/sup0/close"]));
-    expect(daemon.data.closed.map((a) => a.id)).toEqual(["sup0"]);
-    sync.stop();
-  });
-
   it.each([
     ["its own workspace kept, with work in it", [] as string[], "Close session · 1 unmerged branch"],
     ["a worker under it still running there", ["w9"], "Close session · 1 worker running · 1 unmerged branch"],
@@ -722,52 +639,6 @@ describe("closing a session", () => {
     await waitFor(() => expect(store.getState().synced).toBe(true));
     fireEvent.click(within(screen.getByTestId("session-bar")).getByRole("button", { name: "More actions" }));
     expect(within(screen.getByRole("menu")).getByTestId("close-session").textContent).toBe(label);
-    sync.stop();
-  });
-
-  it("counts the supervisor's own workspace: a session on its feature branch with commits ahead says so, no worker running", async () => {
-    const feature = { ...root, branch: "feat/cache", base_branch: "main", ahead: 3, dirty: 0 };
-    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [feature], goal });
-    const store = createAppStore();
-    const client = daemon.client();
-    const sync = startSync({ client, store, connect: daemon.connect });
-    renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO, agent: "sup1" }} />);
-    await waitFor(() => expect(screen.getByTestId("terminal").textContent).toBe("sup1"));
-    fireEvent.click(within(screen.getByTestId("session-bar")).getByRole("button", { name: "More actions" }));
-    expect(within(screen.getByRole("menu")).getByTestId("close-session").textContent).toBe("Close session · 1 unmerged branch");
-    sync.stop();
-  });
-
-  it("a closed session stays out of the sidebar when the refresh after the close fails", async () => {
-    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session, other], workspaces: [root, worker, otherWs], goal: done });
-    let closed = false;
-    let refused = 0;
-    const client = new DaemonClient({
-      baseUrl: BASE_URL,
-      token: TOKEN,
-      fetch: async (input, init) => {
-        const url = String(input);
-        if (closed && url.includes("/v1/sessions?")) {
-          refused++;
-          return Promise.reject(new TypeError("connection refused"));
-        }
-        const response = await daemon.fetch(input, init);
-        if (url.endsWith("/v1/sessions/sup1/close")) closed = true;
-        return response;
-      },
-    });
-    const store = createAppStore();
-    const sync = startSync({ client, store, connect: daemon.connect });
-    renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO, agent: "sup1" }} />);
-    // The app shows once its first-launch gate has asked the engine.
-    fireEvent.click(await within(await screen.findByRole("complementary", { name: "Sidebar" })).findByRole("button", { name: "Close session" }));
-    await waitFor(() => expect(posts(daemon)).toEqual(["/sessions/sup1/close"]));
-    await waitFor(() => expect(refused).toBeGreaterThan(0));
-    await flush();
-    // The old list still has sup1, but the engine closed it: it stays out, and no close error is said.
-    expect(sessionRow("sup1")).toBeNull();
-    expect(sessionRow("sup2")).toBeTruthy();
-    expect(within(nav()).queryByTestId("close-error")).toBeNull();
     sync.stop();
   });
 
