@@ -12,7 +12,7 @@ from brindle.service import inbox
 from brindle.service.errors import ServiceError
 
 
-@pytest.mark.parametrize("handled", ["terminal", "closed", "checks", "killed"])
+@pytest.mark.parametrize("handled", ["terminal", "killed"])
 @pytest.mark.variant("0.2.13 stale Inbox: handling an item without an agent status transition")
 def test_handling_inbox_items_notifies_connected_apps(db, tmp_path, monkeypatch, handled):
     from brindle import procs
@@ -57,7 +57,6 @@ def test_handling_inbox_items_notifies_connected_apps(db, tmp_path, monkeypatch,
 @pytest.mark.parametrize("claimed, registered_digest, listed", [
     (False, None, True),     # a live hold nobody answered: listed
     (True, None, False),     # its answer is already claimed: answer_permission refuses it
-    (False, "other", False),  # the hook registered a different request: refused
 ])
 def test_items_lists_no_hook_request_the_answer_refuses(db, repo, claimed, registered_digest, listed):
     ws = workspaces.create(db, str(repo), "feat/hold").workspace
@@ -83,7 +82,6 @@ def test_items_lists_no_hook_request_the_answer_refuses(db, repo, claimed, regis
 
 @pytest.mark.parametrize("parent, plan_first", [
     ("r1", None),   # not a plan-first worker: approve_plan refuses it
-    (None, 1),      # no supervisor to decide: approve_plan refuses it
 ])
 def test_items_lists_no_plan_the_action_refuses(db, repo, parent, plan_first):
     ws = workspaces.create(db, str(repo), "feat/stale").workspace

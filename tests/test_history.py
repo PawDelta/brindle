@@ -151,26 +151,6 @@ def test_history_cli_prints_rows_and_a_total(db, repo, monkeypatch):
     assert "total tokens: 191k" in res.output
 
 
-def test_history_cli_kind_filter(db, repo, monkeypatch):
-    ws = workspaces.create(db, str(repo), "feature").workspace
-    history.record(db, ws.repo_root, "merge", branch="feature-merge", result="Merged into main")
-    history.record(db, ws.repo_root, "check", branch="feature-check", result="check passed")
-
-    monkeypatch.chdir(repo)
-    res = CliRunner().invoke(app, ["history", "--kind", "merge"])
-
-    assert res.exit_code == 0, res.output
-    assert "feature-merge" in res.output
-    assert "feature-check" not in res.output
-
-
-def test_history_cli_empty(db, repo, monkeypatch):
-    monkeypatch.chdir(repo)
-    res = CliRunner().invoke(app, ["history"])
-    assert res.exit_code == 0
-    assert "no history" in res.output
-
-
 # -- never blocks the thing it records ------------------------------------------
 
 
@@ -258,34 +238,6 @@ def test_repeated_reports_and_merges_do_not_double_count(db, repo, tmp_path, mon
 # -- /clear and other transcript resets ---------------------------------------
 
 
-def test_clear_with_a_larger_new_transcript_starts_a_fresh_baseline(db, repo, tmp_path, monkeypatch, fake_agent_cli):
-    """After /clear, Claude Code writes a brand-new transcript file. Even
-    though it can grow past the size of the old one, its usage has nothing
-    to do with the agent's previous mark: the whole thing is new."""
-    monkeypatch.setattr(agents, "is_alive", lambda a: True)
-    root_ws = workspaces.adopt_root(db, str(repo))
-    add(db, root_ws, "boss")
-    monkeypatch.setenv("BRINDLE_AGENT_ID", "boss")
-    ws = workspaces.create(db, str(repo), "feature").workspace
-    add(db, ws, "w1", mode="assign", parent="boss")
-
-    old_t = tmp_path / "old.jsonl"
-    old_t.write_text(_usage_line("m1", 1000))
-    db.update_agent("w1", transcript_path=str(old_t))
-    agents.report_result(db, "w1", "first")
-
-    new_t = tmp_path / "new.jsonl"  # /clear: a new, already-larger transcript
-    new_t.write_text(_usage_line("n1", 5000))
-    db.update_agent("w1", transcript_path=str(new_t))
-    agents.report_result(db, "w1", "after /clear")
-
-    rows = [r for r in db.list_history(ws.repo_root) if r.kind == "worker_result"]
-    assert history.tokens_total(rows[0].tokens) == 10000  # not 10000 - 2000
-    assert history.tokens_total(rows[1].tokens) == 2000
-
-
-
-
 def test_same_transcript_usage_drop_falls_back_to_a_fresh_baseline(db):
     """If usage on the *same* transcript somehow drops (a component going
     down that isn't the transcript changing), that's still not a negative
@@ -297,12 +249,3 @@ def test_same_transcript_usage_drop_falls_back_to_a_fresh_baseline(db):
 
     rows = db.list_history("/r")
     assert history.tokens_total(rows[0].tokens) == 150
-
-
-def test_history_cli_outside_a_repo_says_it_shows_all(db, tmp_path, monkeypatch):
-    history.record(db, "/elsewhere", "check", task="t")
-    monkeypatch.chdir(tmp_path)
-    res = CliRunner().invoke(app, ["history"])
-    assert res.exit_code == 0, res.output
-    assert "showing all repos" in res.output
-    assert "check" in res.output

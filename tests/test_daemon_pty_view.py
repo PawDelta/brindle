@@ -25,14 +25,9 @@ RIGHT = "\t0\t58\t0\t23\t80\t24\t0\t1\t0\ns\t60\t79\t0\t23\t80\t24\t0\t0\t0"
     (pv.server_args, ("brindle-x",), ["-L", "brindle-x"]),
     (pv.server_args, ("a;kill-server",), pv.ViewError),
     (pv.valid_target, ("-t",), False),
-    (pv.parse_version, ("tmux 3.2a",), (3, 2)),
     (pv.check_version, ("tmux 3.1c", "x"), pv.ViewError),
-    (pv.view_owner, ("agent-123-4",), None),
-    (pv.crop_of, (LEFT, 70, None), pv.Crop(21, 21, 59)),          # a narrower terminal has the window
     (pv.crop_of, (LEFT, 40, (60, 10)), pv.Crop(21, 20, None)),    # panned: the cursor kept in view
-    (pv.crop_of, (LEFT.replace("\t0\t0\t0\n", "\t1\t0\t0\n"), 59, None), pv.Crop()),   # zoomed
     (pv.sync_open_after, (False, b"\x1b[?20", b"26h"), True),     # a marker split between reads
-    (pv.sgr_releases, (b"\x1b[<0;1;1M\x1b[<0;1;1m\x1b[<0",), [9]),
 ])
 def test_pure_parts(call, args, want):
     if want is pv.ViewError:

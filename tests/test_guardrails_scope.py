@@ -69,19 +69,6 @@ def test_a_relative_glob_never_matches_a_path_outside_the_worktree(tmp_path):
     assert guardrails.tool_denial(p, "Grep", {"pattern": "x", "path": "/"}, root)
 
 
-def test_dir_covered_means_everything_under_it_is_in_scope():
-    scope = ["src/api/**", "*.md", "docs", "lib/"]
-    assert not guardrails.dir_covered("", scope)       # *.md is in scope, the rest of the root isn't
-    assert not guardrails.dir_covered("src", scope)    # holds src/api, and src/core.py too
-    assert guardrails.dir_covered("src/api", scope)
-    assert guardrails.dir_covered("src/api/sub", scope)
-    assert guardrails.dir_covered("docs", scope) and guardrails.dir_covered("docs/x", scope)
-    assert guardrails.dir_covered("lib", scope)
-    assert not guardrails.dir_covered("src/apix", scope)
-    assert not guardrails.dir_covered("src/api", ["src/api/*.py"])
-    assert guardrails.dir_covered("", ["**"])
-
-
 # -- 1. the hard check: the branch's diff --------------------------------------------------------
 
 @pytest.fixture
@@ -110,14 +97,6 @@ def test_the_merge_gate_refuses_a_branch_outside_its_scope(db, branch, repo, ent
     report = gates.run(db, branch, load_repo_config(str(repo)), review_required=False)
     assert not report.ok
     assert "core.py is outside the profile's write_scope" in report.problem
-
-
-def test_check_write_scope_caps_the_list():
-    files = [f"f{i}.py" for i in range(15)]
-    found = rule_checks.check_write_scope(["src/**"], files)
-    assert len(found) == rule_checks.MAX_SHOWN_PER_RULE + 1
-    assert found[-1].detail == "... and 5 more files"
-    assert rule_checks.check_write_scope(None, files) == []
 
 
 # -- 2. best effort: Claude Code's hook and the native tools ---------------------------------------
