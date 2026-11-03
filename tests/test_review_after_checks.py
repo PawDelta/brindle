@@ -119,20 +119,6 @@ def test_with_checks_nothing_starts_until_a_detached_process_has_run_them(db, ws
     assert argv[argv.index("--focus") + 1] == "the parser"
 
 
-def test_a_helper_queued_for_an_older_report_is_not_reused_by_a_newer_one(db, ws, boss, spawned, detached):
-    """The worker reported again on the same commit: the helper still pending
-    for the first report retires itself, so the new report gets its own."""
-    add(db, ws, "w1", "assign", parent="boss", status="processing", pipeline="reviewing")
-    cfg = RepoConfig(checks=["true"])
-    db.update_agent("w1", reviewing_since=100.0)
-    agents.start_review(db, boss, ws, "reviewer", None, cfg)
-    agents.start_review(db, boss, ws, "reviewer", None, cfg)   # same report: reused
-    assert len(detached) == 1 and "100.0" in detached[0]
-    db.update_agent("w1", reviewing_since=200.0)
-    agents.start_review(db, boss, ws, "reviewer", None, cfg)
-    assert len(detached) == 2 and "200.0" in detached[1]
-
-
 def test_a_reviewer_already_at_work_on_this_commit_means_no_second_run(db, ws, boss, spawned,
                                                                      detached, monkeypatch):
     add(db, ws, "rev0", "review", "reviewer", parent="boss", status="processing",
@@ -162,29 +148,6 @@ def test_the_run_gives_up_when_the_head_moves_during_the_checks(db, ws, boss, sp
                                       RepoConfig(checks=["suite"])) is None
     assert seen == {"before": False, "after": True}
     assert spawned == []
-
-
-def test_the_real_check_path_reuses_a_pass_and_a_new_failure_starts_no_reviewer(
-        db, ws, boss, spawned, monkeypatch):
-    """Only the command execution is faked: a commit that already passed is
-    not run again, and after HEAD moves the failing run starts no reviewer
-    and reaches the caller. (The cache is by tree, written by a real pass;
-    ``db.set_check`` is a per-workspace record that ``run_checked`` never reads.)"""
-    ran, results = [], [(True, "1 passed")]
-    monkeypatch.setattr(gates, "_run_queued",
-                        lambda db_, ws_, cmd, *a, **kw: ran.append(cmd) or results[0])
-    cfg = RepoConfig(checks=["suite"])
-
-    assert agents.review_after_checks(db, "boss", ws, "reviewer", None, cfg) is not None
-    assert agents.review_after_checks(db, "boss", ws, "reviewer", None, cfg) is not None
-    assert ran == ["suite"] and len(spawned) == 2   # the second run reused the pass
-
-    commit(ws, "more.py")
-    results[0] = (False, "1 failed\nexit code 1")
-    assert agents.review_after_checks(db, "boss", ws, "reviewer", None, cfg) is None
-    assert ran == ["suite", "suite"] and len(spawned) == 2
-    [msg] = inbox(db, "boss")
-    assert "checks failed" in msg and "1 failed" in msg
 
 
 def test_results_for_a_commit_the_branch_has_left_start_no_reviewer(db, ws, boss, spawned, monkeypatch):

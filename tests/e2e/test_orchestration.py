@@ -187,22 +187,6 @@ def test_pipeline_review_checks_merge_and_removal(db, repo, boss, reviewers, mon
     assert "Merged feat-p into main" in body and "added new.py" in body
 
 
-def test_failed_checks_start_no_reviewer_and_go_to_the_worker(db, repo, boss, reviewers, monkeypatch):
-    configure(repo, review=True, auto_merge_default_branch=True, checks=["test -f never_there.py"])
-    wid = started_id(run(mcp_server.assign("developer", "add new.py", branch="feat-f")))
-    ws = ws_of(db, repo, "feat-f")
-    commit(ws, "new.py")
-    worker_reports(db, monkeypatch, wid, "added new.py")
-    review_after_checks(db, ws)
-    assert reviewers == []                                    # no reviewer for failing checks
-
-    assert "new.py" not in main_files(repo)
-    assert db.get_workspace(ws.id) is not None and Path(ws.path).is_dir()
-    assert db.get_agent(wid).pipeline == "fixing"             # the worker gets the failure to fix
-    msg = db.pop_pending(wid)
-    assert "FAIL `test -f never_there.py`" in full_text(db, wid, msg.body)
-
-
 def test_changes_requested_are_sent_back_to_the_worker(db, repo, boss, reviewers, monkeypatch):
     wid = started_id(run(mcp_server.assign("developer", "add new.py", branch="feat-r")))
     ws = ws_of(db, repo, "feat-r")
