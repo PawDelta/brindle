@@ -52,7 +52,13 @@ def _room(monkeypatch, load, level, expected):
         assert spawn.no_room() is None
 
 
-def _a_worker_starts_after_its_room_wait_limit(db, tmp_path, monkeypatch, overloaded, maximum):
+def _a_worker_keeps_waiting_past_its_room_wait_limit(db, tmp_path, monkeypatch, overloaded, maximum, disk):
+    """Past room_wait_max (low disk or load) its supervisor is told once and nothing else
+    changes: the task starts on its own only once room returns."""
+    from brindle import disk as disk_mod
+
+    low = ["waiting for disk: 1.0 GB free (under 10 GB)" if disk else None]
+    monkeypatch.setattr(disk_mod, "low_disk", lambda repo_root=None: low[0])
     cfg = tmp_path / ".brindle"
     cfg.mkdir()
     (cfg / "config.json").write_text(json.dumps({"room_wait_max": maximum} if maximum else {}))
@@ -68,27 +74,30 @@ def _a_worker_starts_after_its_room_wait_limit(db, tmp_path, monkeypatch, overlo
     worker = Agent("worker", "w", "developer", "claude", "boss", "assign", "processing", "@1", None, 1.0)
     launched, sent = [], []
     monkeypatch.setattr(agents, "delegate", lambda *a, **kw: (launched.append(worker) or worker, db.get_workspace("w")))
-    monkeypatch.setattr(agents, "send_message", lambda db_, recipient, text, **kw: sent.append(text))
+    monkeypatch.setattr(agents, "send_message", lambda db_, recipient, text, **kw: sent.append(recipient))
     monkeypatch.setattr(tasks, "_wait_in_background", lambda _: None)
 
-    def advance(_):
-        assert clock[0] == 100.0, "worker stayed queued past the room wait limit"
-        clock[0] += limit + 1
+    polls = []
 
-    monkeypatch.setattr(tasks, "threading", SimpleNamespace(Event=lambda: SimpleNamespace(wait=advance)))
+    def poll(_):
+        polls.append(clock[0])
+        if len(polls) == 1:
+            clock[0] += limit + 1
+        elif len(polls) == 2:   # past the limit: a concurrent sweep too, and still nothing started
+            assert tasks.start_with_room(db) == 0
+            assert db.get_task(task.id).state == "pending" and not launched
+            assert sent == ["boss"]   # the one long-wait notice, to the task's caller alone
+            low[0] = None
+            monkeypatch.setattr(spawn, "_load", lambda: 0.5)   # room returns
+        else:
+            raise AssertionError("still waiting after room returned")
+
+    monkeypatch.setattr(tasks, "threading", SimpleNamespace(Event=lambda: SimpleNamespace(wait=poll)))
     assert tasks.start_with_room(db) == 0
     assert tasks.start_when_room(db, task.id)
-    assert db.get_task(task.id).state == "started" and launched == [worker]
-    assert len(sent) == 1 and f"started after waiting {limit / 60:.0f} min: {task.waiting}" in sent[0]
+    assert len(polls) == 2 and db.get_task(task.id).state == "started" and launched == [worker]
+    assert sent == ["boss", "boss"]   # the notice, then the start report
     assert tasks.start_with_room(db) == 0
-
-
-def _a_disk_wait_outlasts_the_room_wait_limit(tmp_path):
-    """Low free disk holds a start past room_wait_max: starting anyway could fill the disk."""
-    task = Task("t", str(tmp_path), None, "boss", "w", "developer", "do work", "assign", 0,
-                None, None, None, None, "pending", 1.0, waiting_since=1.0)
-    assert tasks._room_wait_overrun(task, "waiting for disk: 1.0 GB free (under 10 GB)") is None
-    assert tasks._room_wait_overrun(task, "load 9.0 on 8 cores") is not None
 
 
 def _a_high_load_average_with_idle_cpus_leaves_room(monkeypatch):
@@ -438,9 +447,9 @@ def _row(scenario, id, why=None, **params):
 @pytest.mark.parametrize("scenario, params", [
     _row(_room, "room-pressure-critical", load=2.0, level=4, expected=-1.0),  # nothing but what's running
     _row(_room, "room-pressure-warn", load=5.5, level=2, expected=1.5),
-    _row(_a_worker_starts_after_its_room_wait_limit, "room-wait-limit", maximum=None),
-    _row(_a_worker_starts_after_its_room_wait_limit, "room-wait-configured-limit", maximum=60),
-    _row(_a_disk_wait_outlasts_the_room_wait_limit, "room-wait-not-for-disk"),
+    _row(_a_worker_keeps_waiting_past_its_room_wait_limit, "room-wait-limit", maximum=None, disk=False),
+    _row(_a_worker_keeps_waiting_past_its_room_wait_limit, "room-wait-configured-limit", maximum=60, disk=False),
+    _row(_a_worker_keeps_waiting_past_its_room_wait_limit, "room-wait-not-for-disk", maximum=None, disk=True),
     _row(_a_high_load_average_with_idle_cpus_leaves_room, "room-idle-cpu-high-loadavg"),
     _row(_a_start_whose_room_sample_outlasts_its_deadline_is_refused, "room-sample-past-deadline"),
     _row(_checks_and_setup_run_at_normal_priority, "normal-priority-checks"),
