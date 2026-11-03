@@ -35,7 +35,7 @@ from pathlib import Path
 
 from brindle.config import brindle_home
 from brindle.db import DB, Agent, HistoryEntry, Workspace
-from brindle.redact import mask, mask_data
+from brindle.redact import REDACTED, mask, mask_data
 from brindle.usage import Usage, agent_transcripts, agent_usage, format_tokens
 
 log = logging.getLogger(__name__)
@@ -144,12 +144,14 @@ def _private_dir(d: Path) -> Path:
 def _masked_record(line: str) -> str:
     """One transcript line with the secrets in its text masked. A JSON record
     is parsed first, so a value JSON escapes (a quote, a line break) is
-    matched as written; a line that isn't JSON is masked as text."""
+    matched as written; a line that isn't JSON is masked as text, and a
+    broken JSON record (cut short), whose escaped values can't be matched, is
+    replaced whole."""
     end = "\n" if line.endswith("\n") else ""
     try:
         record = json.loads(line)
     except ValueError:
-        return mask(line)
+        return REDACTED + end if line.lstrip().startswith(("{", "[")) else mask(line)
     return json.dumps(mask_data(record), ensure_ascii=False) + end
 
 

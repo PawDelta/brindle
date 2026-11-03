@@ -22,6 +22,8 @@ from test_pro_remote_learning import login_as
 SLACK = "xoxb-" + "1234567890-" + "AbCdEfGhIjKlMnOp"
 PAT = "ghp_" + "A1b2C3d4E5" * 4
 TEXT = f"use {SLACK} and {PAT} to post"
+LABELLED_KEY = "QwErTyUiOpAsDfGhJkLzXcVbNm"
+MULTILINE = "line-one-x9\nline-two-y8"
 MASKED = "use [redacted] and [redacted] to post"
 
 
@@ -46,12 +48,13 @@ def test_message_and_analysis_doc_upload_are_masked(tmp_path, db, remote, fixed_
     assert remote.docs[0]["source"]["ref"] == MASKED
 
 
-def test_check_output_learned_rule_and_graphify_log_are_masked(tmp_path, db):
+def test_check_output_learned_rule_and_graphify_log_are_masked(tmp_path, db, monkeypatch):
+    monkeypatch.setenv("MULTILINE_SECRET", MULTILINE)
     ws = _workspace(db, tmp_path)
     db.set_check(ws.id, "a" * 40, "pytest", False, TEXT)
     db.save_learned_rule(LearnedRule(str(tmp_path), "k1", "dev", TEXT, TEXT, None, "[]", "[]", "suggested", 1.0))
     log = tmp_path / "graphify.log"
-    codemap._log_masked(io.BytesIO(f"{TEXT}\n".encode()), log)
+    codemap._log_masked(io.BytesIO(f"{TEXT}\nkey {MULTILINE} end\n".encode()), log)
     try:
         raise RuntimeError(TEXT)
     except RuntimeError:
@@ -62,7 +65,7 @@ def test_check_output_learned_rule_and_graphify_log_are_masked(tmp_path, db):
     rule = db.get_learned_rule(str(tmp_path), "k1")
     assert db.get_check(ws.id, "a" * 40, "pytest").output == MASKED
     assert (rule.title, rule.rule) == (MASKED, MASKED)
-    assert log.read_text() == MASKED + "\n"
+    assert log.read_text() == MASKED + "\nkey [redacted] end\n"
     for text in ((config.brindle_home() / "sidebar.log").read_text(), watch_line):
         assert PAT not in text and SLACK not in text and MASKED in text
 
@@ -92,7 +95,7 @@ class _Scripted:
 
 def test_native_transcript_and_saved_state_are_masked_but_the_live_conversation_is_not(tmp_path):
     (tmp_path / "secret.txt").write_text(f"token {PAT}\n")
-    client = _Scripted([Reply("reading", [ToolCall("t1", "Read", {"path": "secret.txt"})], "tool_calls"),
+    client = _Scripted([Reply("reading", [ToolCall("t1", "Read", {"path": "secret.txt", "API_KEY": LABELLED_KEY})], "tool_calls"),
                         Reply(f"done: {SLACK}", [], "stop")])
     a = NativeAgent(client, Toolbox().add(*core_tools(str(tmp_path))),
                     Permissions("acceptEdits", []), "sys", transcript=tmp_path / "t.jsonl")
@@ -100,7 +103,8 @@ def test_native_transcript_and_saved_state_are_masked_but_the_live_conversation_
     a.save(tmp_path / "saved.json")
 
     for persisted in ((tmp_path / "t.jsonl").read_text(), (tmp_path / "saved.json").read_text()):
-        assert PAT not in persisted and SLACK not in persisted and "[redacted]" in persisted
+        assert PAT not in persisted and SLACK not in persisted and LABELLED_KEY not in persisted
+        assert "[redacted]" in persisted
     assert PAT in json.dumps([m.get("content") for m in a.messages])
 
 
@@ -113,6 +117,7 @@ def test_native_transcript_and_saved_state_are_masked_but_the_live_conversation_
     ("DB_PASSWORD=Xk29fLq0Zp7 and token: 1200", "DB_PASSWORD=[redacted] and token: 1200"),
     ("run with my-env-secret-42 set", "run with [redacted] set"),
     ("pin k9x, not k9xy", "pin [redacted], not k9xy"),
+    ("password=on, step 1 of 3", "password=[redacted], step 1 of 3"),
     ("pw /opt9-secret here", "pw [redacted] here"),
     ("key file /Users/me/key.pem", "key file /Users/me/key.pem"),
 ])
@@ -120,6 +125,8 @@ def test_mask(text, expected, monkeypatch):
     monkeypatch.setenv("MY_SERVICE_TOKEN", "my-env-secret-42")
     monkeypatch.setenv("MY_PIN_TOKEN", "k9x")
     monkeypatch.setenv("MY_PASSWORD", "/opt9-secret")
+    monkeypatch.setenv("SERVICE_PASSWORD", "on")
+    monkeypatch.setenv("MY_TOKEN_ENABLED", "1")
     monkeypatch.setenv("SIGNING_KEY_FILE", "/Users/me/key.pem")
     assert redact.mask(text) == expected
 
@@ -134,20 +141,25 @@ def test_no_false_positives():
 
 def test_archived_transcript_masks_values_json_escapes(tmp_path, db, monkeypatch):
     monkeypatch.setenv("QUOTED_SECRET", 'alpha"bravo-42')
-    monkeypatch.setenv("MULTILINE_SECRET", "line-one-x9\nline-two-y8")
+    monkeypatch.setenv("MULTILINE_SECRET", MULTILINE)
     src = tmp_path / "s.jsonl"
-    record = {"type": "assistant", "message": {"content": 'got alpha"bravo-42 and line-one-x9\nline-two-y8'}}
-    src.write_text(json.dumps(record) + "\nnot json: alpha\"bravo-42\n")
+    record = {"type": "assistant", "message": {"content": f'got alpha"bravo-42 and {MULTILINE}'},
+              "input": {"API_KEY": LABELLED_KEY, "headers": {"Authorization": "Bearer AbCdEfGhIjKlMnOp"}}}
+    truncated = json.dumps({"message": {"content": 'alpha"bravo-42'}})[:-1]
+    src.write_text(json.dumps(record) + "\nnot json: alpha\"bravo-42\n" + truncated + "\n")
     monkeypatch.setattr(history, "agent_transcripts", lambda db, a: [src])
     monkeypatch.setattr(history, "archive_dir", lambda: tmp_path / "archive")
 
     [rel] = history._copy_transcripts(db, Agent("w1", "ws", "dev", "shell", None, "handoff", "done", "", None, 1.0))
     lines = gzip.decompress((tmp_path / "archive" / rel).read_bytes()).decode().splitlines()
-    assert json.loads(lines[0])["message"]["content"] == "got [redacted] and [redacted]"
-    assert lines[1] == "not json: [redacted]"
+    archived = json.loads(lines[0])
+    assert archived["message"]["content"] == "got [redacted] and [redacted]"
+    assert archived["input"] == {"API_KEY": "[redacted]", "headers": {"Authorization": "Bearer [redacted]"}}
+    assert lines[1:] == ["not json: [redacted]", redact.REDACTED]
 
 
-def test_masking_stream_holds_a_token_split_across_writes_and_flushes():
+def test_masking_stream_holds_a_token_split_across_writes_and_flushes(monkeypatch):
+    monkeypatch.setenv("MULTILINE_SECRET", MULTILINE)
     out = io.StringIO()
     stream = redact.MaskingStream(out)
     stream.write("Traceback: " + PAT[:10])
@@ -159,3 +171,9 @@ def test_masking_stream_holds_a_token_split_across_writes_and_flushes():
     stream.write(SLACK[8:])
     stream.finish()
     assert out.getvalue() == "Traceback: [redacted]\ntail [redacted]"
+    out.truncate(0)
+    out.seek(0)
+    pad = "a " * redact._HOLD_MAX                  # one line past the hold limit
+    for text in (pad + PAT[:10], PAT[10:] + "\n", "env " + MULTILINE[:12], MULTILINE[12:] + " ok\n"):
+        stream.write(text)
+    assert out.getvalue() == pad + "[redacted]\nenv [redacted] ok\n"

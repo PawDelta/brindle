@@ -475,16 +475,19 @@ def _start_refresh(checkout: str, repo_root: str | None, lock_fd: int) -> Callab
 
 
 def _log_masked(stream, log: Path) -> None:
-    """Append what ``stream`` (graphify's output pipe) says to ``log``, a line
-    at a time with secrets masked, until it closes."""
+    """Append what ``stream`` (graphify's output pipe) says to ``log``, with
+    secrets masked (by a MaskingStream, so one split across lines is held
+    whole), until it closes."""
     if stream is None:
         return
-    from brindle.redact import mask
+    from brindle.redact import MaskingStream
 
     with stream, open(log, "a", encoding="utf-8") as out:
+        masked = MaskingStream(out)
         for raw in stream:
-            out.write(mask(raw.decode("utf-8", "replace") if isinstance(raw, bytes) else raw))
-            out.flush()
+            masked.write(raw.decode("utf-8", "replace") if isinstance(raw, bytes) else raw)
+            masked.flush()
+        masked.finish()
 
 
 def remove_session_graph(checkout: str | Path) -> None:

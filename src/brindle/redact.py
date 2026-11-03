@@ -66,10 +66,14 @@ _SECRET_NAME = re.compile(r"(?i)token|secret|passw|passphrase|api_?key|access_?k
 # neither holds the secret.
 _PATH_NAME = re.compile(r"(?i)_(?:path|file|dir|home|sock|socket|config|url"
                         r"|store|backend|mode|type|kind|provider|helper)$")
-# Flag values, not secrets: masking every "1" or "true" would wreck the text.
-_FLAG_VALUES = frozenset({"0", "1", "true", "false", "yes", "no", "on", "off"})
+# A variable named as a switch or a count (MY_TOKEN_ENABLED=1, MAX_OUTPUT_TOKENS)
+# holds a setting, not a secret: masking every "1" or "true" would wreck the
+# text. Decided by name only; a secret variable's value is masked whatever it is.
+_FLAG_NAME = re.compile(r"(?i)(?:^|_)(?:enable|enabled|disable|disabled|use|no|skip|allow|debug"
+                        r"|verbose|max|min|limit|count)(?:_|$)")
 _SHORT_ENV = 8          # a shorter env value is masked only as a whole word
-_HOLD_MAX = 64 * 1024
+_HOLD_MAX = 64 * 1024   # an unfinished line longer than this is passed on in part
+_KEEP = 4096            # ... all but its last _KEEP characters (or longest secret)
 
 
 def _entropy(value: str) -> float:
@@ -99,14 +103,15 @@ def _secret_like(value: str) -> bool:
 def env_values(environ=None) -> list[str]:
     """The values of secret-named variables in ``environ`` (default: brindle's
     own environment), longest first. A variable named for a path (``*_FILE``,
-    ``*_SOCK`` ...) and flag values are left out."""
+    ``*_SOCK`` ...) or a switch (``*_ENABLED``) is left out."""
     env = os.environ if environ is None else environ
     named = {*secrets.SECRET_ENV, *secrets.PERSONAL_KEYS}
     found = set()
     for name, value in env.items():
-        if not value or value.strip().lower() in _FLAG_VALUES:
+        if not value:
             continue
-        if name in named or (_SECRET_NAME.search(name) and not _PATH_NAME.search(name)):
+        if name in named or (_SECRET_NAME.search(name) and not _PATH_NAME.search(name)
+                             and not _FLAG_NAME.search(name)):
             found.add(value)
     return sorted(found, key=len, reverse=True)
 
@@ -128,47 +133,99 @@ def mask(text: str) -> str:
     return _LABELLED.sub(lambda m: m.group(1) + REDACTED if _secret_like(m.group(2)) else m.group(0), text)
 
 
+def _mask_field(key: Any, value: str) -> str:
+    """A dict's string value masked as ``key: value`` would be, so its key
+    labels it (``{"API_KEY": ...}``, ``{"Authorization": "Bearer ..."}``)."""
+    if not isinstance(key, str) or not key or not value:
+        return mask(value)
+    label = f"{key}: "
+    masked = mask(label + value)
+    return masked[len(label):] if masked.startswith(label) else mask(value)
+
+
 def mask_data(value: Any) -> Any:
     """``value`` (JSON-shaped data) with :func:`mask` applied to every string
-    in it; keys and non-string values are kept."""
+    in it, a dict value labelled by its key; keys and non-string values are
+    kept."""
     if isinstance(value, str):
         return mask(value)
     if isinstance(value, dict):
-        return {k: mask_data(v) for k, v in value.items()}
+        return {k: _mask_field(k, v) if isinstance(v, str) else mask_data(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
         return [mask_data(v) for v in value]
     return value
 
 
+def _spans(text: str) -> list[tuple[int, int]]:
+    """Where in ``text`` something :func:`mask` would replace lies."""
+    found = [m.span() for p in (_TOKEN, _AUTHORIZATION, _AUTH_SCHEME, _LABELLED) for m in p.finditer(text)]
+    for value in env_values():
+        at = text.find(value)
+        while at >= 0:
+            found.append((at, at + len(value)))
+            at = text.find(value, at + 1)
+    return found
+
+
+def _safe_cut(text: str, cut: int) -> int:
+    """``cut`` moved back until masking ``text[:cut]`` on its own masks all
+    it would in ``text``: no match lies across it, and what follows it is not
+    the start of a multiline secret still to come."""
+    spans = _spans(text)
+    starts = [at for value in env_values() if "\n" in value
+              for at in range(max(0, len(text) - len(value) + 1), len(text)) if value.startswith(text[at:])]
+    while True:
+        moved = min([cut, *starts, *(s for s, e in spans if s < cut < e)])
+        if moved == cut:
+            return cut
+        cut = moved
+
+
 class MaskingStream:
     """A text stream that masks what is written to it before passing it on.
 
-    Text is passed on only as whole lines: an unfinished line is held, across
-    ``flush`` too, since the next write may complete a token in it (or the
-    credential after ``Authorization: Bearer``). :meth:`finish` is the end of
-    the stream (at exit, or when a line grows past ``_HOLD_MAX``) and passes
-    on everything, masked."""
+    Text is passed on only as whole lines, and only up to where nothing that
+    could be a secret runs on into what is still held: across ``flush`` too,
+    since the next write may complete a token (or a multiline secret, or the
+    credential after ``Authorization: Bearer``). A line longer than
+    ``_HOLD_MAX`` is passed on in part, keeping back its last ``_KEEP``
+    characters the same way; one that can't be split safely by four times
+    that is dropped to its end. :meth:`finish` is the end of the stream (at
+    exit) and passes on everything, masked."""
 
     def __init__(self, stream) -> None:
         self._stream = stream
         self._pending = ""
+        self._dropping = False
 
     def write(self, text: str) -> int:
+        n = len(text)
+        if self._dropping:
+            end = text.find("\n")
+            if end < 0:
+                return n
+            self._dropping, text = False, text[end + 1:]
         self._pending += text
-        if "\n" in self._pending:
-            done, _, self._pending = self._pending.rpartition("\n")
-            self._stream.write(mask(done + "\n"))
-        if len(self._pending) > _HOLD_MAX:   # no line end in sight: don't hold it all
-            self.finish()
-        return len(text)
+        cut = self._pending.rfind("\n") + 1
+        if len(self._pending) - cut > _HOLD_MAX:   # no line end in sight: don't hold it all
+            cut = len(self._pending) - max([_KEEP, *map(len, env_values())])
+        cut = _safe_cut(self._pending, cut) if cut > 0 else 0
+        if cut > 0:
+            done, self._pending = self._pending[:cut], self._pending[cut:]
+            self._stream.write(mask(done))
+        if len(self._pending) > 4 * _HOLD_MAX:     # can't be split safely: fail closed
+            self._stream.write(REDACTED)
+            self._pending, self._dropping = "", True
+        return n
 
     def flush(self) -> None:
-        self._stream.flush()         # the unfinished line stays held
+        self._stream.flush()         # what is held stays held
 
     def finish(self) -> None:
         if self._pending:
             self._stream.write(mask(self._pending))
             self._pending = ""
+        self._dropping = False
         self._stream.flush()
 
     def __getattr__(self, name: str):
