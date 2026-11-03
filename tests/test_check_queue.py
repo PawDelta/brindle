@@ -199,25 +199,38 @@ def test_a_passing_run_records_its_duration_and_a_failing_one_does_not(db, repo,
     assert db.check_duration(ws.repo_root, "true") is not None
 
 
-@pytest.mark.parametrize("own, repo_wide, warns", [
-    (None, 0.05, True),     # no run of its own: the repo-wide value, at a higher multiple
-    (5.0, 0.05, False),     # its own last run was long: another branch's short one doesn't count
-    (0.05, 5.0, True),      # its own last run was short
-    (None, 0.4, False),     # the repo-wide value only warns past 3x
-])
-def test_a_run_far_past_its_last_duration_is_reported_to_the_supervisor(
-        db, session, monkeypatch, own, repo_wide, warns):
+def test_a_run_far_past_its_last_duration_is_reported_to_the_supervisor(db, session, monkeypatch):
     root, ws = session
     monkeypatch.setattr(gates, "SLOW_MIN_EXTRA", 0.0)
-    db.set_check_duration(ws.repo_root, "suite", repo_wide, "other")
-    if own is not None:
-        db.set_check_duration(ws.repo_root, "suite", own, ws.branch)
+    db.set_check_duration(ws.repo_root, "suite", 0.05)
     monkeypatch.setattr(autopilot, "run_check", Meter(hold=0.6))
     gates.run_checked(db, ws, "suite", {}, 30)
-    msgs = inbox(db, "boss")
-    assert bool(msgs) is warns
-    if warns:
-        assert "`suite` on `feat` has been running" in msgs[0] and "check_concurrency" in msgs[0]
+    [msg] = inbox(db, "boss")
+    assert "`suite` on `feat` has been running" in msg and "check_concurrency" in msg
+
+
+@pytest.mark.parametrize("own, other, threshold", [
+    (5.0, 0.05, 10.0),    # the branch's own long run, not another branch's short one, sets the mark
+    (None, 0.4, 1.2),     # no run of its own: the repo-wide value at 3x (2x would be 0.8)
+    (None, None, None),   # no baseline at all: no watch
+])
+def test_the_slow_run_baseline_is_the_branchs_own_last_passing_run(
+        db, session, monkeypatch, own, other, threshold):
+    root, ws = session
+    monkeypatch.setattr(gates, "SLOW_MIN_EXTRA", 0.0)
+    if own is not None:
+        db.set_check_duration(ws.repo_root, "suite", own, ws.branch)
+    if other is not None:   # written after: the repo-wide row now holds the other branch's value
+        db.set_check_duration(ws.repo_root, "suite", other, "other")
+    marks = []
+
+    def watch(db_, ws_, cmd, last, timeout, *factor):
+        marks.append(gates.slow_after(last, *factor))
+
+    monkeypatch.setattr(gates, "_watch_slow", watch)
+    monkeypatch.setattr(autopilot, "run_check", lambda *a, **kw: (True, "ok"))
+    gates.run_checked(db, ws, "suite", {}, 30)
+    assert marks == ([] if threshold is None else [pytest.approx(threshold)])
 
 
 def test_a_slow_milestone_check_in_the_supervisors_checkout_reaches_it(db, session):
