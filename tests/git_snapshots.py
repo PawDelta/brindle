@@ -27,15 +27,11 @@ def _path_records(root: Path):
             dirs.remove(".git")
             yield Path(top, ".git", "config")
             yield from Path(top, ".git").glob("worktrees/*/gitdir")
-        if top.endswith(".git") and "objects" in dirs:   # a bare repo
-            dirs.clear()
-            yield Path(top, "config")
 
 
 def _copy(src: Path, dst: Path, names) -> None:
     for name in names:
-        if (dst / name).exists():
-            shutil.rmtree(dst / name)
+        shutil.rmtree(dst / name, ignore_errors=True)
         shutil.copytree(src / name, dst / name, symlinks=True)
 
 
@@ -45,9 +41,8 @@ def _relocate(value, old: str, new: str):
     if isinstance(value, tuple):
         return tuple(_relocate(v, old, new) for v in value)
     if dataclasses.is_dataclass(value):
-        return dataclasses.replace(value, **{f.name: _relocate(getattr(value, f.name), old, new)
-                                             for f in dataclasses.fields(value)
-                                             if isinstance(getattr(value, f.name), str)})
+        return dataclasses.replace(value, **{f.name: getattr(value, f.name).replace(old, new) for f in
+                                             dataclasses.fields(value) if isinstance(getattr(value, f.name), str)})
     return value
 
 
