@@ -44,11 +44,19 @@ _LOCKFILES = {
 }
 # `[cd <dir> &&] <install> [--flags]`: a plain install of what the lockfile
 # says. Anything else (a package name, a pipe, a second command) runs as is.
+# Only flags in _SAFE_FLAGS: any other (--prefix, --omit, --ignore-scripts,
+# ...) can change what is installed or where, so the command runs as is.
 _INSTALL = re.compile(
     r"^\s*(?:cd\s+(?P<dir>[^\s;&|<>`$()]+)\s*&&\s*)?"
     r"(?P<pm>npm|pnpm|yarn|bun)(?:\s+(?P<sub>ci|install|i))?"
     r"(?P<flags>(?:\s+-[^\s;&|<>`$()]+)*)\s*$"
 )
+
+_SAFE_FLAGS = frozenset({
+    "--no-audit", "--no-fund", "--no-progress", "--progress=false", "--no-update-notifier",
+    "--silent", "--quiet", "-s", "-q", "--prefer-offline", "--offline",
+    "--frozen-lockfile", "--pure-lockfile", "--immutable", "--non-interactive",
+})
 
 
 def repo_cache_dir(repo_root: str | Path) -> Path:
@@ -115,6 +123,8 @@ def _install_dir(cmd: str, worktree: Path) -> tuple[Path, str] | None:
         return None
     if sub == "ci" and pm != "npm":
         return None
+    if not all(flag in _SAFE_FLAGS or flag.startswith("--loglevel=") for flag in m.group("flags").split()):
+        return None
     rel = shlex.split(m.group("dir"))[0] if m.group("dir") else "."
     target = (worktree / rel).resolve()
     if not target.is_relative_to(worktree.resolve()):
@@ -147,32 +157,25 @@ def _matches(src: Path, dst: Path, pm: str) -> bool:
     return bool(present) and all(_same(src / name, dst / name) for name in present)
 
 
-def clone_node_modules(commands: list[str], worktree: str | Path,
-                       bases: list[str | Path]) -> tuple[list[str], list[str]]:
-    """Clone node_modules into ``worktree`` for each plain install command in
-    ``commands`` whose package matches one of the ``bases`` checkouts, and
-    return the commands still to run and a log of what was cloned."""
+def clone_node_modules(cmd: str, worktree: str | Path, bases: list[str | Path]) -> str | None:
+    """If ``cmd`` is a plain install whose package matches one of the ``bases``
+    checkouts now, clone that checkout's node_modules into ``worktree`` in its
+    place and return a log line; None means run ``cmd`` as configured. Called
+    when setup reaches ``cmd``, so earlier commands' effects count."""
     if not can_clone():
-        return list(commands), []
+        return None
     worktree = Path(worktree)
-    remaining: list[str] = []
-    log: list[str] = []
-    for cmd in commands:
-        found = _install_dir(cmd, worktree)
-        cloned = False
-        if found is not None:
-            target, pm = found
-            rel = target.relative_to(worktree.resolve())
-            for base in bases:
-                src = Path(base) / rel
-                if src.resolve() == target or not _matches(src, target, pm):
-                    continue
-                dst = target / "node_modules"
-                if clone_tree(src / "node_modules", dst):
-                    log.append(f"$ cp -c -R {src / 'node_modules'} {dst}  (lockfile unchanged; skipped: {cmd})")
-                    cloned = True
-                    break
-                shutil.rmtree(dst, ignore_errors=True)
-        if not cloned:
-            remaining.append(cmd)
-    return remaining, log
+    found = _install_dir(cmd, worktree)
+    if found is None:
+        return None
+    target, pm = found
+    rel = target.relative_to(worktree.resolve())
+    for base in bases:
+        src = Path(base) / rel
+        if src.resolve() == target or not _matches(src, target, pm):
+            continue
+        dst = target / "node_modules"
+        if clone_tree(src / "node_modules", dst):
+            return f"$ cp -c -R {src / 'node_modules'} {dst}  (lockfile unchanged; skipped: {cmd})"
+        shutil.rmtree(dst, ignore_errors=True)
+    return None

@@ -96,9 +96,18 @@ def run_setup_commands(ws: Workspace, cfg: RepoConfig) -> SetupResult:
             found = None
         if found:
             bases.insert(0, found)
-    commands, cloned = build_caches.clone_node_modules(cfg.setup, ws.path, bases)
-    result = run_commands(commands, ws.path, workspace_env(ws, cfg))
-    return SetupResult(result.ok, "\n".join([*cloned, result.log]).strip())
+    env = workspace_env(ws, cfg)
+    log: list[str] = []
+    for cmd in cfg.setup:
+        cloned = build_caches.clone_node_modules(cmd, ws.path, bases)
+        if cloned:
+            log.append(cloned)
+            continue
+        result = run_commands([cmd], ws.path, env)
+        log.append(result.log)
+        if not result.ok:
+            return SetupResult(False, "\n".join(log).strip())
+    return SetupResult(True, "\n".join(log).strip())
 
 
 def resolve(db: DB, ref: str, cwd: str | None = None) -> Workspace:
