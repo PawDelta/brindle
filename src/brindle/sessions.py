@@ -133,6 +133,16 @@ def handover_prompt(db: DB, old_root: Agent, note: str | None) -> str:
     )
 
 
+# The note on a goal handed to another session: it is no longer this one's.
+# set_goal clears it, so a goal set afterwards is the session's own again.
+HANDED_AWAY = "Handed over to session "
+
+
+def handed_away(ap) -> bool:
+    """Whether autopilot row ``ap``'s goal was handed to another session."""
+    return ap.state == "blocked" and (ap.note or "").startswith(HANDED_AWAY)
+
+
 @dataclass
 class Handover:
     agent: Agent                  # the supervisor that now has the session
@@ -170,7 +180,7 @@ def handover_to(db: DB, old_root_id: str, dest: Workspace, note: str | None = No
     # an unfinished goal of its own, which taking over would overwrite.
     new, why = _live_supervisor(db, dest, old_root_id), None
     own = db.get_autopilot(new.id) if new else None
-    if own and own.goal and own.state != "done":
+    if own and own.goal and own.state != "done" and not handed_away(own):
         why = (f"{new.id} is live in {dest.id} with an unfinished goal of its own "
                f"(\"{goal_line(db, new)}\"), so a new supervisor was started instead")
         new = None
@@ -203,7 +213,7 @@ def handover_to(db: DB, old_root_id: str, dest: Workspace, note: str | None = No
             pilot.remove_goals_file(db, old_root_id)  # active work lives in the new session's file
         pilot.sync_goals_file(db, new.id)
     if ap and ap.state != "done":
-        db.update_autopilot(old_root_id, state="blocked", note=f"Handed over to session {new.id}", question=None)
+        db.update_autopilot(old_root_id, state="blocked", note=f"{HANDED_AWAY}{new.id}", question=None)
     with db.tx() as c:
         # Preserve only messages this supervisor sent while it still owned
         # these descendants. A sender-wide alias would also trust unrelated
@@ -247,8 +257,8 @@ def handover_to(db: DB, old_root_id: str, dest: Workspace, note: str | None = No
         # Told once everything is its own, so get_progress shows the goal.
         try:
             agents.send_message(db, new.id, prompt)
-        except agents.AgentError:
-            db.enqueue(new.id, prompt, None)   # its pane went away just now: kept for its resume
+        except Exception:   # any failed delivery (tmux too): the move is saved, so finish it
+            db.enqueue(new.id, prompt, None)   # kept for delivery when it can take it
     bus.publish_agent(db, "session.handover", new.id, from_root=old_root_id)
     if pause_old:
         agents.pause(db, old_root_id, stop_local_models=False)
