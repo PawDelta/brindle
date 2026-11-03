@@ -122,3 +122,27 @@ def test_a_piped_branch_nothing_works_on_is_reported_once_not_closed(db, repo, m
     told = [b for b in inbox(db) if "feat" in b and ("nothing is working on" in b or "left it open" in b
                                                    or "no reviewer has been running" in b)]
     assert len(told) == 1
+
+
+def test_two_sweeps_reading_one_snapshot_report_a_stalled_branch_once(db, repo, monkeypatch):
+    """The daemon and each session's MCP server sweep side by side: two that
+    read the workers before either noted the stall send it once between them."""
+    from brindle.db import DB
+
+    ws = _reported(db, repo)
+    old = time.time() - 7200
+    db.update_agent("w1", pipeline="fixing", created_at=old, status_since=old)
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id == "boss")
+    monkeypatch.setattr(agents, "reconcile", lambda db_, a, **kw: a)
+    monkeypatch.setattr(agents, "same_server", lambda a, panes=None: True)
+    snapshot = db.list_agents()
+    other = DB()
+    for conn in (db, other):
+        real = conn.list_agents
+        monkeypatch.setattr(conn, "list_agents",
+                            lambda ws_id=None, real=real: snapshot if ws_id is None else real(ws_id))
+    now = time.time()
+    cull.note_stalled(db, now, {})
+    cull.note_stalled(other, now, {})
+    told = [b for b in inbox(db) if ws.branch in b and "nothing is working on" in b]
+    assert len(told) == 1

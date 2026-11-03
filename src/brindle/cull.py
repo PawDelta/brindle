@@ -634,7 +634,8 @@ def note_reported_stuck(db: DB, now: float, panes: dict[str, bool]) -> list[str]
             if unacted is not None and a.stuck_noted != unacted.created_at:
                 # A verdict on record that never moved the branch on (the
                 # pipeline dropped it): act on it once, and say so.
-                db.update_agent(a.id, stuck_noted=unacted.created_at)
+                if not db.claim_note(a.id, unacted.created_at)[0]:
+                    continue   # another process's sweep took it
                 if not pipeline.replay_verdict(db, ws, unacted, a, head, now):
                     continue   # acted on since ``a`` was read
                 verdict = "approved" if unacted.approved else "requested changes on"
@@ -642,7 +643,7 @@ def note_reported_stuck(db: DB, now: float, panes: dict[str, bool]) -> list[str]
                 done.extend(_tell_stalled(db, a, unacted.created_at, (
                     f"Reviewer {unacted.reviewer_id} {verdict} {where} at {unacted.sha[:8]} "
                     f"{int((now - unacted.created_at) // 60)} min ago, but the pipeline never acted on "
-                    f"it. brindle has acted on it now; the branch stands at: {state}.")))
+                    f"it. brindle has acted on it now; the branch stands at: {state}."), claimed=True))
                 continue
             since = max([a.reviewing_since] + [r.created_at for r in reviewers])
             if now - since < cfg.review_start_delay or db.latest_review(ws.id, head) or reviewing:
@@ -673,14 +674,23 @@ def note_reported_stuck(db: DB, now: float, panes: dict[str, bool]) -> list[str]
 PIPED = ("reviewing", "fixing", "ready")
 
 
-def _tell_stalled(db: DB, a: Agent, since: float, body: str) -> list[str]:
+def _tell_stalled(db: DB, a: Agent, since: float, body: str, *, claimed: bool = False) -> list[str]:
     """Tell ``a``'s supervisor ``body`` about its piped branch, once per
-    ``since`` (kept in stuck_noted, as the other notes do)."""
+    ``since`` (kept in stuck_noted, as the other notes do). Every brindle
+    process sweeps from its own read of the workers, so the note is claimed
+    in the database before it is sent: only one of them sends it. A caller
+    that has ``claimed`` it already says so."""
+    previous = None
+    if not claimed:
+        won, previous = db.claim_note(a.id, since)
+        if not won:
+            return []
     try:
         agents.send_message(db, a.parent_id, f"[brindle pipeline] {body}", sender_id=a.id)
     except agents.AgentError:
+        if not claimed:
+            db.release_note(a.id, since, previous)
         return []
-    db.update_agent(a.id, stuck_noted=since)
     return [f"told {a.parent_id} that the branch of {a.id} is stalled"]
 
 
