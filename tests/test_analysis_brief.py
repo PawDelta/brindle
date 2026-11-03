@@ -42,6 +42,7 @@ def boss(db, tmp_path, monkeypatch):
     pytest.param({"requested": True, "branch": "team/alice/merge/main"}, False,
                  marks=pytest.mark.variant("branch_prefix puts the namespace in front of the chore name")),
 ])
+@pytest.mark.variant("large_work is one expression, so line coverage cannot see these cases: weight no longer asks, 2 vs 3 milestones, chore branches at any prefix depth")
 def test_large_work_needs_a_request_or_a_three_milestone_goal(kwargs, large):
     assert ab.large_work(**kwargs) is large
 
