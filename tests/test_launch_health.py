@@ -542,6 +542,52 @@ def test_concurrent_resume_cannot_report_or_mutate_replacement_launch(db, health
         other.conn.close()
 
 
+def test_old_helper_started_after_resume_does_not_observe_new_launch(db, health, monkeypatch):
+    lh, a, _, sleeps, _, reports = health
+    old_token = a._launch_health_token
+    resumed = db.get_agent(a.id)
+    lh.prepare(db, resumed, "resumed-account")
+    lh.bind(db, resumed, resumed.tmux_window)
+    lh.delivered(db, resumed)
+    monkeypatch.setattr(cli, "_helper_db", lambda: db)
+    assert lh.inspect(db, a.id, token=old_token) is None
+    cli.launch_health_cmd(a.id, startup=True, token=old_token)
+    cli.after_launch_cmd(a.id, token=old_token)
+    assert sleeps == [] and reports == []
+    assert db.conn.execute("SELECT outcome FROM launch_health WHERE agent_id=?", (a.id,)).fetchone()[0] is None
+
+
+def test_health_never_captures_a_reassigned_pane(db, health, monkeypatch):
+    lh, a, _, _, _, reports = health
+    monkeypatch.setattr(agents, "owns_pane", lambda *a: False)
+    monkeypatch.setattr(lh, "capture", lambda *a: pytest.fail("read someone else's pane"))
+    lh.delivered(db, a)
+    assert lh.inspect(db, a.id) is None and reports == []
+
+
+def test_delivery_capture_binds_launch_before_concurrent_resume(db, health, monkeypatch):
+    lh, a, _, _, started, _ = health
+    fresh = db.get_agent(a.id)  # flush/runner loads an Agent without an in-memory token
+
+    def capture(agent):
+        lh.prepare(db, db.get_agent(a.id), "replacement")
+        return "old screen"
+
+    monkeypatch.setattr(lh, "capture", capture)
+    lh.delivered(db, fresh, lh.before_delivery(db, fresh))
+    assert started == []
+    assert db.conn.execute("SELECT delivered_at FROM launch_health WHERE agent_id=?", (a.id,)).fetchone()[0] is None
+
+
+def test_old_launch_cannot_bind_replacement_pane(db, health):
+    lh, old, _, _, started, _ = health
+    replacement = db.get_agent(old.id)
+    lh.prepare(db, replacement, "replacement")
+    lh.bind(db, old, "%old")
+    row = db.conn.execute("SELECT pane FROM launch_health WHERE agent_id=?", (old.id,)).fetchone()
+    assert row["pane"] == "" and started == []
+
+
 @pytest.mark.parametrize("replacement_point", ["readiness"])
 def test_readiness_helper_cannot_arm_concurrently_replaced_argv_launch(db, health, monkeypatch, replacement_point):
     lh, a, _, _, started, reports = health
@@ -944,6 +990,7 @@ def test_mcp_retry_extends_inherited_startup_budget(db, root, launches, detached
 
 @pytest.mark.parametrize("stamp,sid,outcome", [
     ("1970-01-01T00-01-40-800Z", "sess-1", "mcp-failed"),     # same second as the launch
+    ("1970-01-01T00-01-40-800Z", "other-session", None),      # another session's failure
     ("1970-01-01T00-00-10-000Z", "sess-1", None),             # a log from before this launch
 ])
 def test_failed_brindle_mcp_start_is_told_to_the_supervisor(db, health, monkeypatch, tmp_path,

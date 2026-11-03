@@ -171,6 +171,14 @@ def test_agent_turns_hide_the_conversation_of_a_locked_agent(db, ws, who):
     assert res.exit_code != 0 and f"locked: {ACME}" in res.output
 
 
+def test_agent_peek_is_refused(db, ws, who):
+    worker(db, ws)
+    db.update_agent("w1", tmux_window="brindle:1")
+    who.ident = OTHER
+    res = CliRunner().invoke(app, ["agent", "peek", "w1"])
+    assert res.exit_code != 0 and LOCKED in res.output
+
+
 def test_ls_lists_the_agent_as_locked(db, repo, ws, who, monkeypatch):
     worker(db, ws)
     monkeypatch.chdir(repo)
