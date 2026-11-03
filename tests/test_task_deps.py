@@ -132,6 +132,7 @@ def overlap_template(tmp_path_factory):
     return base, made, start
 
 
+@pytest.mark.slow("The overlap check under test runs ~90 real git reads over five worktrees")
 @pytest.mark.parametrize("w3_branch", [
     "feat-w3",
     pytest.param("origin/feat-w3", marks=pytest.mark.variant(
