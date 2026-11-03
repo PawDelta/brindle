@@ -6,8 +6,27 @@ directory themselves, so an agent still runs in its worktree on that server;
 
 import os
 import shutil
+from types import SimpleNamespace
 
 from brindle import doctor, tmux
+
+
+def test_dead_pane_exits_are_read_as_tmux_prints_them(monkeypatch):
+    """#{pane_dead_status} is only set for a program that exited, and
+    #{pane_dead_signal} only for one a signal killed: tmux's sig2name prints
+    sys_signame's "term" on macOS, the number where there are no names."""
+    out = "\n".join([
+        "@1\t%1\t1\t143\t\t\t",      # a wrapper shell that exited 128 + SIGTERM
+        "@2\t%2\t1\t\tterm\t\t",     # the CLI itself, killed: macOS
+        "@3\t%3\t1\t\t15\t\t",       # the same on Linux
+        "@4\t%4\t1\t\tzzz\t\t",      # a name Python doesn't know
+        "@5\t%5\t0\t\t\tabc\t",      # alive, an agent's
+    ]) + "\n"
+    monkeypatch.setattr(tmux, "_tmux", lambda *a, **k: SimpleNamespace(returncode=0, stdout=out))
+    panes = tmux.list_panes()
+    assert panes.exits == {"%1": (143, None), "%2": (None, 15), "%3": (None, 15),
+                           "%4": (None, "zzz")}
+    assert panes["%5"] and not panes["%1"] and panes.tags == {"%5": {tmux.AGENT_TAG: "abc"}}
 
 
 def test_a_pane_runs_in_its_worktree_on_a_server_whose_directory_was_deleted(tmp_path, monkeypatch):

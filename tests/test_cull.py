@@ -241,6 +241,57 @@ def test_reported_branch_problems_reach_the_supervisor(db, ws, monkeypatch, prob
     assert len(sent) == 1 and sent[0][0] == "boss" and ws.id in sent[0][1]
 
 
+@pytest.mark.parametrize("case,exit_,cause", [
+    ("sweep", (143, None), "status 143 (SIGTERM)"),     # the CLI's wrapper shell exited 128 + 15
+    ("leftover", (None, 15), "signal 15 (SIGTERM)"),    # the CLI itself was the pane's program
+    ("overlap", (143, None), "status 143 (SIGTERM)"),   # two sweeps read it 'processing'
+    ("report", (143, None), None),                      # its report lands after the read
+])
+def test_dead_pane_marks_agent_stopped(db, ws, monkeypatch, case, exit_, cause):
+    """A worker's CLI killed outside brindle leaves its pane dead ("Pane is
+    dead (status 143)") with no process left for step 1 to find: it stayed
+    'processing' forever and its supervisor never heard. Now it's failed and
+    its supervisor told once, however many sweeps saw it; one that had
+    reported first, even a moment before the claim, is just done. A helper
+    process it left behind is stopped without step 1 turning 'failed' back
+    into 'paused'."""
+    add(db, ws, "boss", mode="interactive", status="processing", profile="supervisor", tmux_window="%1")
+    add(db, ws, "w1", parent_id="boss", status="processing", tmux_window="%2",
+        status_since=time.time() - 120)
+    add(db, ws, "w2", parent_id="boss", status="idle", tmux_window="%3", result="done",
+        status_since=time.time() - 120)
+    panes = tmux.PaneSnapshot(tmux.current_server())
+    panes.update({"%1": True, "%2": False, "%3": False})
+    panes.exits = {"%2": exit_, "%3": (143, None)}
+    sent = []
+    monkeypatch.setattr(tmux, "list_panes", lambda *a, **k: panes)
+    monkeypatch.setattr(tmux, "kill_window", lambda *a, **k: None)
+    monkeypatch.setattr(agents, "send_message", lambda db_, to, body, **k: sent.append((to, body)))
+    stopped = []
+    monkeypatch.setattr(procs, "all_agent_ids", lambda table: ["w1"] if case == "leftover" else [])
+    monkeypatch.setattr(procs, "agent_pids", lambda ids, procs=None: {i: {4242} for i in ids})
+    monkeypatch.setattr(procs, "terminate", lambda pids: stopped.extend(pids) or len(pids))
+    if case in ("overlap", "report"):
+        stale = db.list_agents()   # what both sweeps read before either acted
+        monkeypatch.setattr(db, "list_agents", lambda *a, **k: stale)
+        if case == "report":
+            db.set_result("w1", "done")
+        cull.note_dead_panes(db, time.time(), panes)
+        cull.note_dead_panes(db, time.time(), panes)
+    else:
+        cull.sweep(db)
+        cull.sweep(db)
+    assert stopped == ([4242, 4242] if case == "leftover" else [])
+    assert db.get_agent("w2").status == "done"
+    w1 = db.get_agent("w1")
+    if cause is None:
+        assert w1.status == "done" and sent == []
+        return
+    assert w1.status == "failed" and w1.failed_why == f"exited: {cause}"
+    assert [to for to, _ in sent] == ["boss"]
+    assert all(s in sent[0][1] for s in ("w1", ws.branch, cause, "rewind"))
+
+
 def test_stopped_workers_of_a_paused_session_stay_resumable(db, ws):
     add(db, ws, "boss", mode="interactive", status="paused", profile="supervisor")
     add(db, ws, "w1", parent_id="boss", status="paused")

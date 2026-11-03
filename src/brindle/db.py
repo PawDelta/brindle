@@ -1592,6 +1592,27 @@ class DB:
         if changed:
             bus.publish_agent(self, "agent.status", agent_id, status=status)
 
+    def claim_exited(self, agent_id: str, from_status: str, failed_why: str) -> str | None:
+        """Atomically mark an agent whose process is gone stopped, if it is
+        still in ``from_status`` and not dismissed: 'done' when it has a
+        result (read in the same statement, so a report that just landed
+        counts), else 'failed' with ``failed_why``. Returns the status set,
+        or None when another caller changed the row first: only the caller
+        that gets a status back may act on the change."""
+        with self.tx() as c:
+            changed = c.execute(
+                "UPDATE agents SET status_since=?, "
+                "failed_why = CASE WHEN result IS NULL THEN ? ELSE failed_why END, "
+                "status = CASE WHEN result IS NULL THEN 'failed' ELSE 'done' END "
+                "WHERE id=? AND status=? AND dismissed_at IS NULL",
+                (time.time(), failed_why, agent_id, from_status),
+            ).rowcount
+            status = (c.execute("SELECT status FROM agents WHERE id=?", (agent_id,)).fetchone()[0]
+                      if changed else None)
+        if status:
+            bus.publish_agent(self, "agent.status", agent_id, status=status)
+        return status
+
     def set_result(self, agent_id: str, result: str) -> None:
         with self.tx() as c:
             c.execute("UPDATE agents SET result=? WHERE id=?", (mask(result), agent_id))
