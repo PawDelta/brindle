@@ -10,7 +10,9 @@ in:
   the request's deadline (see :func:`deadline`) or its own ``timeout``; at
   that point, or when the request is stopped (the app disconnected), its
   whole process group gets SIGTERM, then SIGKILL after :data:`GRACE`.
-  Stopping a read loses nothing: the next request computes it again. Every
+  Stopping a read loses nothing: the next request computes it again. A
+  read still running when this process exits is stopped too: it runs in its
+  own session, so nothing else would (see :func:`exit_on_hangup`). Every
   read runs with ``GIT_OPTIONAL_LOCKS=0`` so git never takes the index lock
   for it, and git removes its own lock files on SIGTERM anyway.
 - :func:`action` starts a process that changes something (a merge, a commit,
@@ -49,6 +51,7 @@ everywhere.
 
 from __future__ import annotations
 
+import atexit
 import contextlib
 import contextvars
 import ctypes
@@ -559,6 +562,18 @@ def _run_read(argv: list[str], cwd: Any, env: dict[str, str] | None, input: str 
     p = subprocess.Popen(_background(argv), cwd=cwd, env=env, text=text, start_new_session=True,
                          stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
                          stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    with _reads_lock:
+        _reads.add(p)
+    try:
+        return _wait_read(p, argv, input, timeout, dl, end, own_end, reap)
+    finally:
+        with _reads_lock:
+            _reads.discard(p)
+
+
+def _wait_read(p: subprocess.Popen, argv: list[str], input: str | bytes | None,
+               timeout: float | None, dl: Deadline | None, end: float, own_end: float,
+               reap: bool) -> subprocess.CompletedProcess:
     first = True
     try:
         while True:
@@ -586,6 +601,37 @@ def _run_read(argv: list[str], cwd: Any, env: dict[str, str] | None, input: str 
     if own_end <= end:
         raise subprocess.TimeoutExpired(argv, timeout or 0.0, out, err)
     raise Busy(f"{_name(argv)} was stopped: the request's deadline passed")
+
+
+# The reads running now. Each runs in its own session, beyond the reach of the
+# hangup that ends this process (the sidebar's, when tmux closes its pane), so
+# this process stops them as it exits, or nothing would.
+_reads: set[subprocess.Popen] = set()
+_reads_lock = threading.Lock()
+
+
+@atexit.register
+def _stop_reads_at_exit() -> None:
+    with _reads_lock:
+        left = list(_reads)
+    for p in left:
+        _signal_group(p.pid, signal.SIGKILL)
+    for p in left:
+        try:
+            p.wait(timeout=GRACE)
+        except subprocess.TimeoutExpired:
+            pass
+
+
+def exit_on_hangup() -> None:
+    """Exit normally on SIGHUP and SIGTERM, so a long-lived process (the
+    sidebar) stops its running reads on the way out instead of dying with
+    them still running. Call it from the main thread."""
+    def _exit(signum: int, frame: Any) -> None:
+        raise SystemExit(128 + signum)
+
+    for sig in (signal.SIGHUP, signal.SIGTERM):
+        signal.signal(sig, _exit)
 
 
 def _signal_group(pid: int, sig: int) -> None:

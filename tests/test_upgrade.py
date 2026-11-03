@@ -85,6 +85,7 @@ def test_an_upgrade_under_the_mcp_server_leaves_it_serving_the_version_it_starte
 
 def test_an_upgraded_sidebar_runs_again_in_its_pane(monkeypatch):
     monkeypatch.setattr(watch, "_log_to_file", lambda: None)
+    monkeypatch.setattr("brindle.spawn.exit_on_hangup", lambda: None)
     monkeypatch.setattr(watch.curses, "wrapper", lambda fn, root, sidebar, *_: watch.RESTART)
     monkeypatch.setattr(upgrade.sys, "argv", ["brindle", "watch", "--sidebar"])
     monkeypatch.setattr("brindle.providers.brindle_invocation", lambda: ["/venv/bin/brindle"])
@@ -115,6 +116,7 @@ def test_sidebar_upgrade_waits_for_the_new_install_instead_of_exiting(monkeypatc
     assert len(attempts) == 3
 
     monkeypatch.setattr(watch, "_log_to_file", lambda: None)
+    monkeypatch.setattr("brindle.spawn.exit_on_hangup", lambda: None)
     monkeypatch.setattr(watch.curses, "wrapper", lambda *a: watch.RESTART)
     daemon = SimpleNamespace(command=None, clock=0)
     monkeypatch.setattr(upgrade.time, "monotonic", lambda: daemon.clock)

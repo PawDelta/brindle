@@ -1132,6 +1132,11 @@ def run(repo_root: str | None, sidebar: bool = False) -> None:
     # tell a lone Esc from the start of an arrow key's escape sequence.
     os.environ.setdefault("ESCDELAY", "25")
     _log_to_file()
+    # tmux hangs up the sidebar as it closes the pane: exit cleanly, stopping the
+    # `claude -p /usage` the costs thread may be waiting on (its own session).
+    from brindle import spawn
+
+    spawn.exit_on_hangup()
     # shortcut: the text logo everywhere; the braid image (sidebar_logo.probe())
     # broke the sidebar in iTerm2 after a session switch. Bring it back once fixed.
     logo = None
