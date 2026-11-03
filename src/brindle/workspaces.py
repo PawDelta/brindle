@@ -324,6 +324,11 @@ def _reuse_registered(db: DB, repo_root: str, branch: str, base: str) -> Created
                     f"workspace {ws.id} at {ws.path} appears damaged but has surviving files ({shown}). "
                     f"Preserve your files, or remove with remove_workspace(\"{ws.id}\", force=True) to discard and recreate."
                 )
+        # The folder is deleted and made again at the same path: every pane of the
+        # workspace's session (no live worker, see above) would be left in the dead
+        # copy, so the session ends first, as remove() ends it.
+        _rescue_sidebar(db, ws)
+        tmux.kill_session(ws.tmux_session)
         try:
             git.remove_worktree(repo_root, ws.path, force=True)
         except Exception:

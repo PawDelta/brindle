@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from brindle import agents, cli, git, workspaces
+from brindle import agents, cli, git, tmux, workspaces
 from brindle.db import Agent
 from conftest import sh
 
@@ -65,8 +65,11 @@ def test_a_damaged_worktree_with_work_in_it_is_never_wiped(db, repo, damage, err
 
 def test_damaged_worktree_missing_git_empty_recreated(db, repo):
     ws = workspaces.create(db, str(repo), "feat/empty-broken", reuse_registered=True).workspace
+    tmux.ensure_session(ws.tmux_session, ws.path, {})
     gut(Path(ws.path))
     reused = workspaces.create(db, str(repo), "feat/empty-broken", reuse_registered=True)
+    # The folder is made again at the same path: a pane left in its session would sit in the dead copy.
+    assert not tmux.has_session(ws.tmux_session)
     assert reused.workspace.id == ws.id
     assert (Path(reused.workspace.path) / ".git").exists()
     assert (Path(reused.workspace.path) / "app.py").exists()

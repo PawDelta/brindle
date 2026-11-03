@@ -70,6 +70,46 @@ def current_server() -> str | None:
     return os.environ.get("BRINDLE_TMUX_SOCKET") or None
 
 
+def _server_pid(server: str | None) -> int | None:
+    proc = _tmux("display-message", "-p", "#{pid}", check=False, server=server)
+    out = proc.stdout.strip()
+    return int(out) if proc.returncode == 0 and out.isdigit() else None
+
+
+def cwd_gone(server: str | None) -> bool:
+    """Whether the running tmux ``server``'s working directory was deleted
+    (and maybe recreated at the same path: a new directory, a different
+    inode). Every window such a server opens then starts in the dead
+    directory, whatever ``-c`` says (tmux 3.8), and Claude Code exits at once
+    with "The current directory no longer exists" unless the pane changes
+    directory itself (in_dir, which every pane brindle starts does).
+    `brindle doctor` warns about it. False when the server isn't running or
+    its directory can't be read."""
+    pid = _server_pid(server)
+    if pid is None:
+        return False
+    if os.path.isdir("/proc/self"):     # Linux: the link names a deleted directory so
+        try:
+            return os.readlink(f"/proc/{pid}/cwd").endswith(" (deleted)")
+        except OSError:
+            return False
+    if not shutil.which("lsof"):
+        return False
+    try:
+        proc = spawn.read(["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fin"], timeout=timeout())
+    except (spawn.Busy, subprocess.TimeoutExpired, OSError):
+        return False
+    fields = {line[0]: line[1:] for line in proc.stdout.splitlines() if line[:1] in ("i", "n")}
+    if not fields.get("i", "").isdigit() or not fields.get("n"):
+        return False
+    try:
+        return os.stat(fields["n"]).st_ino != int(fields["i"])
+    except OSError:
+        return True
+
+
+
+
 def _bin() -> str:
     """BRINDLE_TMUX_BIN, else ``tmux`` on PATH."""
     return os.environ.get("BRINDLE_TMUX_BIN") or "tmux"
@@ -278,9 +318,22 @@ def scrubbed(command: list[str], unset: list[str]) -> list[str]:
     return ["/usr/bin/env", *(a for n in unset for a in ("-u", n)), "--", *command]
 
 
+# The pane tag of the daemon's action terminals (sign-ins, upgrades, the
+# app's shell tabs): the person's own terminals, not agents' (see new_window).
+TERMINAL_TAG = "@brindle_terminal"
+
+
+def in_dir(cwd: str, command: list[str]) -> list[str]:
+    """``command`` run in ``cwd``: the pane changes there itself, so it never
+    depends on tmux's start directory (a server sitting in a deleted
+    directory starts every window there, whatever ``-c`` says)."""
+    return ["/bin/sh", "-c", 'cd -- "$0" && exec "$@"', cwd, *command]
+
+
 def new_window(session: str, name: str, cwd: str, command: list[str], env: dict[str, str],
                tag: tuple[str, str] | None = None, keep: Iterable[str] = (),
-               allow: Iterable[str] | None = None, deny: Iterable[str] = ()) -> str:
+               allow: Iterable[str] | None = None, deny: Iterable[str] = (),
+               agent_env: Iterable[str] = (), enforce: bool = False) -> str:
     """Open a window running ``command``. Returns the agent's PANE id (``%<n>``),
     not the window's: a window can hold more than one pane (e.g. the watch
     dashboard beside a supervisor), and keys sent to a window go to whichever
@@ -288,14 +341,21 @@ def new_window(session: str, name: str, cwd: str, command: list[str], env: dict[
     set_pane_tag) is set on the pane before this returns, so the pane says
     whose it is from the moment anything else can see it.
 
-    The pane starts without brindle's secrets (secrets.SECRET_ENV and
-    SECRET_PREFIXES: the Pro token, GitHub's tokens), which it would otherwise
-    inherit from the tmux server. Whatever ``env`` sets (a profile's own key)
-    and the names in ``keep`` (the agent's provider's credentials, see
-    secrets.provider_credentials) are left alone. With ``allow`` (a profile's
-    ``env_allow``), every other inherited variable is taken out too (see
-    secrets.env_allowed). The names in ``deny`` (an org's managed models: the
-    person's own keys) are taken out whatever else says."""
+    An agent's pane starts without any secret-looking variable
+    (secrets.secret_looking: brindle's own secrets, and a SLACK_BOT_TOKEN the
+    person's shell exported), which it would otherwise inherit from the tmux
+    server. Whatever ``env`` sets (a profile's own key) and the names in
+    ``keep`` (the agent's provider's credentials, see
+    secrets.provider_credentials) are left alone. With ``enforce`` (a repo's
+    ``agent_env_mode``), every inherited variable off the allowlist (see
+    secrets.env_allowed, with the repo's ``agent_env``) is taken out too;
+    with ``allow`` (a profile's ``env_allow``) the allowlist is that, always
+    enforced. The names in ``deny`` (an org's managed models: the person's
+    own keys) are taken out whatever else says. A pane tagged TERMINAL_TAG
+    (an action terminal the person types into) loses only brindle's own
+    secrets.
+
+    The pane changes to ``cwd`` itself (in_dir)."""
     from brindle import secrets
 
     # The federation proxy's token isn't a person's key: set explicitly, so a
@@ -304,10 +364,19 @@ def new_window(session: str, name: str, cwd: str, command: list[str], env: dict[
     if exempt:
         env = {**env, **exempt}
     deny = secrets.pane_deny(deny, env)
-    unset = secrets.pane_unset(inherited_names(session), keep=(*keep, *env), allow=allow, deny=deny)
+    names = inherited_names(session)
+    if not tag or tag[0] != TERMINAL_TAG:
+        # What the launch sets itself is filtered too: a secret-looking name in a
+        # profile's env passes only as the provider's credential.
+        unset = secrets.pane_unset({*names, *env}, keep=secrets.launch_keep(keep, env), allow=allow,
+                                   deny=deny, agent_env=agent_env, enforce=enforce)
+        env = {k: v for k, v in env.items() if k not in unset}
+    else:
+        unset = secrets.pane_unset([n for n in names if secrets.is_job_secret(n)], keep=(*keep, *env),
+                                   allow=allow, deny=deny)
     proc = _tmux(
         "new-window", "-d", "-P", "-F", "#{pane_id}", "-t", f"={session}:",
-        "-n", name, "-c", cwd, "--", *_short(scrubbed(command, unset), env),
+        "-n", name, "-c", cwd, "--", *_short(scrubbed(in_dir(cwd, command), unset), env),
     )
     target = proc.stdout.strip()
     if tag:
@@ -445,7 +514,7 @@ def split_left(target: str, cwd: str, command: list[str], env: dict[str, str],
     geometry, axis = _sidebar_geometry(position, columns)
     proc = _tmux(
         "split-window", "-d", *geometry, "-P", "-F", "#{pane_id}",
-        "-t", target, "-c", cwd, *env_args, "--", *command,
+        "-t", target, "-c", cwd, *env_args, "--", *in_dir(cwd, command),
     )
     pane = proc.stdout.strip()
     # tmux grows every pane proportionally when a client attaches at a bigger
@@ -517,7 +586,7 @@ def start_sidebar(pane: str, cwd: str, command: list[str], env: dict[str, str], 
     env_args = [a for k, v in env.items() for a in ("-e", f"{k}={v}")]
     _tmux_batch([["set-option", "-p", "-t", pane, "remain-on-exit", "failed"],
                  ["set-hook", "-p", "-t", pane, "pane-died", f"run-shell -b {shlex.quote(shell)}"],
-                 ["respawn-pane", "-k", "-t", pane, "-c", cwd, *env_args, "--", *command]])
+                 ["respawn-pane", "-k", "-t", pane, "-c", cwd, *env_args, "--", *in_dir(cwd, command)]])
 
 
 def window_alive(target: str, server: object = _THIS_SERVER) -> bool:

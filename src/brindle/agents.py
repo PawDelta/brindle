@@ -679,12 +679,16 @@ def _open_window(db: DB, agent: Agent, ws: Workspace, name: str, argv: list[str]
     tmux.ensure_session(ws.tmux_session, ws.path, workspaces.workspace_env(ws))
     try:
         env, credentials, allow, deny, org_env = _window_environment(agent, ws, m)
+        agent_env, enforce = _agent_env_policy(ws)
         with secrets.org_key(org_env):
             target = tmux.new_window(ws.tmux_session, name, ws.path, argv, env,
                                      tag=(AGENT_TAG, agent.id),
                                      keep=credentials,
                                      **({"allow": allow} if allow is not None else {}),
-                                     **({"deny": deny} if deny else {}))
+                                     **({"deny": deny} if deny else {}),
+                                     **({"agent_env": agent_env} if agent_env else {}),
+                                     **({"enforce": True} if enforce else {}))
+            _record_env_drops(agent, ws, env, credentials, allow, deny, agent_env, enforce)
         agent.__dict__.pop("_pane_environment", None)
         # The pane id only means anything on the server that issued it (a
         # resumed agent may come back on a different one), so record both.
@@ -705,6 +709,32 @@ def _open_window(db: DB, agent: Agent, ws: Workspace, name: str, argv: list[str]
             tmux.open_gate(gate)
     tmux.apply_theme(ws.tmux_session)
     return target
+
+
+def _agent_env_policy(ws: Workspace) -> tuple[list[str], bool]:
+    """The repo's (and the person's) ``agent_env`` allowlist additions, and
+    whether ``agent_env_mode`` enforces the allowlist (else it only reports)."""
+    from brindle.config import load_repo_config
+
+    cfg = load_repo_config(ws.repo_root)
+    return list(cfg.agent_env), cfg.agent_env_mode == "enforce"
+
+
+def _record_env_drops(agent: Agent, ws: Workspace, env, credentials, allow, deny,
+                      agent_env: list[str], enforce: bool) -> None:
+    """Log the names the allowlist took out of ``agent``'s pane (enforce) or
+    would have (report): names only. Never fails the launch."""
+    try:
+        kept = secrets.launch_keep(credentials, env)
+        names = secrets.allowlist_drops({*tmux.inherited_names(ws.tmux_session), *env}, kept, allow,
+                                        secrets.pane_deny(deny, env), agent_env)
+        secrets.record_env(ws.repo_root, agent.id, "enforce" if enforce else "report", names)
+        if names:
+            log.info("agent %s environment: %s %s (agent_env_mode %s)", agent.id,
+                     "dropped" if enforce else "would drop", ", ".join(names),
+                     "enforce" if enforce else "report")
+    except Exception:
+        log.debug("could not record agent %s's environment report", agent.id, exc_info=True)
 
 
 def _window_environment(agent: Agent, ws: Workspace, m=_UNREAD):
@@ -756,11 +786,13 @@ def _window_environment(agent: Agent, ws: Workspace, m=_UNREAD):
 
 def _effective_window_env(agent: Agent, ws: Workspace, m=_UNREAD) -> dict[str, str]:
     env, keep, allow, deny, org_env = _window_environment(agent, ws, m)
+    agent_env, enforce = _agent_env_policy(ws)
     inherited = tmux.inherited_env(ws.tmux_session)
     with secrets.org_key(org_env):
         env = {**env, **secrets.proxy_exempt(env)}
-        unset = secrets.pane_unset(inherited, keep=(*keep, *env), allow=allow,
-                                   deny=secrets.pane_deny(deny, env))
+        unset = secrets.pane_unset({*inherited, *env}, keep=secrets.launch_keep(keep, env), allow=allow,
+                                   deny=secrets.pane_deny(deny, env), agent_env=agent_env,
+                                   enforce=enforce)
     return {k: v for k, v in {**inherited, **env}.items() if k not in unset}
 
 
