@@ -161,6 +161,12 @@ def test_a_new_store_is_autonomous_and_an_old_one_migrates_to_standard_keeping_i
     (lambda ws: bash(ws, "rm -rf / --no-preserve-root"), "deny", "d-rm"),
     (lambda ws: bash(ws, "rm -fr /"), "deny", "d-rm"),
     (lambda ws: bash(ws, "rm -Rf ~/"), "deny", "d-rm"),
+    # An apostrophe in a comment, a $'...' escape or a heredoc body opens no quote.
+    (lambda ws: bash(ws, "ls # it's fine\nrm -rf /"), "deny", "d-rm"),
+    (lambda ws: bash(ws, "echo hi # don't\nrm -rf ~"), "deny", "d-rm"),
+    (lambda ws: bash(ws, "echo $'it\\'s'; rm -rf /"), "deny", "d-rm"),
+    (lambda ws: bash(ws, "echo $'it\\'s' && rm -rf $HOME"), "deny", "d-rm"),
+    (lambda ws: bash(ws, "cat <<EOF\nit's $(date)\nEOF\nrm -rf /"), "deny", "d-rm"),
     (lambda ws: bash(ws, "rm -rf build/"), "allow", None),
     (lambda ws: read(ws, os.path.expanduser("~/.aws/credentials")), "deny", "d-aws"),
     (lambda ws: read(ws, os.path.join(ws.repo_root, ".env")), "deny", "d-env"),

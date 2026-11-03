@@ -1259,15 +1259,24 @@ def is_tracked(path: str | None, roots: list[str]) -> bool:
     return False
 
 
+# Every character the shell may cut a command at, quoted or not.
+_SEPARATORS = r"[;&|\n()`]|\$\("
+
+
 def _command_texts(command: str) -> list[str]:
     """``command`` cut at the shell's separators (``;&|``, newline,
     parentheses, backticks, ``$(``) that quoting leaves active: never inside
     single quotes, and inside double quotes only where a substitution opens
     or closes. A cut inside double quotes closes the quote and reopens it, so
-    each text still reads as shell words."""
+    each text still reads as shell words. ``$'...'`` honours its backslash
+    escapes, an unquoted ``#`` that starts a word comments out the rest of its
+    line, and a heredoc body is cut at every separator with its quotes read as
+    text. A quote that never closes falls back to cutting at every separator
+    (_SEPARATORS), so a stray apostrophe can't hide a command."""
     texts: list[str] = []
     text: list[str] = []
     stack: list[str] = []      # what is open: '"' (a double quote), "$(" or "`" (a substitution)
+    heredocs: list[str] = []   # delimiters of heredocs whose bodies start at the next newline
 
     def quoted() -> bool:
         return bool(stack) and stack[-1] == '"'
@@ -1289,11 +1298,40 @@ def _command_texts(command: str) -> list[str]:
             text.append(command[i:i + 2])
             i += 2
             continue
+        if command.startswith("$'", i) and not quoted():
+            m = re.compile(r"\$'(?:[^'\\]|\\.)*'", re.DOTALL).match(command, i)
+            if m is None:
+                return re.split(_SEPARATORS, command)
+            text.append(m.group())
+            i = m.end()
+            continue
         if c == "'" and not quoted():
             j = command.find("'", i + 1)
-            j = n if j < 0 else j + 1
-            text.append(command[i:j])
-            i = j
+            if j < 0:
+                return re.split(_SEPARATORS, command)
+            text.append(command[i:j + 1])
+            i = j + 1
+            continue
+        if c == "#" and not quoted() and (i == 0 or command[i - 1] in " \t\n;&|()`"):
+            j = command.find("\n", i)
+            i = n if j < 0 else j      # the newline still cuts
+            continue
+        if command.startswith("<<", i) and not quoted() and not command.startswith("<<<", i):
+            m = re.compile(r"<<-?[ \t]*([\"']?)(\w+)\1").match(command, i)
+            if m is not None:
+                heredocs.append(m.group(2))
+                text.append(m.group())
+                i = m.end()
+                continue
+        if c == "\n" and heredocs and not quoted():
+            cut()
+            i += 1
+            for delimiter in heredocs:   # each body, through its closing line, is cut as the old splitter cut it
+                close = re.compile(r"^[ \t]*" + re.escape(delimiter) + r"[ \t]*$", re.MULTILINE).search(command, i)
+                end = close.end() if close is not None else n
+                texts.extend(re.split(_SEPARATORS, command[i:end]))
+                i = end
+            heredocs.clear()
             continue
         if command.startswith("$(", i):
             cut()
@@ -1325,6 +1363,8 @@ def _command_texts(command: str) -> list[str]:
         else:
             text.append(c)
         i += 1
+    if '"' in stack:
+        return re.split(_SEPARATORS, command)
     texts.append("".join(text))
     return texts
 
