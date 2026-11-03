@@ -96,19 +96,14 @@ def test_sweep_stops_processes_of_paused_agents(db, ws, proc_cleanup):
     assert any("leftover" in n for n in notes)
 
 
-def test_a_process_ignoring_sigterm_is_killed_after_the_grace_period():
-    stubborn = subprocess.Popen(
-        [sys.executable, "-c", "import signal, threading; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
-         "print('ready', flush=True); threading.Event().wait()"],
-        stdout=subprocess.PIPE, text=True, start_new_session=True)
-    try:
-        assert stubborn.stdout.readline() == "ready\n"   # its SIGTERM handler is in place
-        assert procs.terminate([stubborn.pid], grace=0) == 1
-        assert stubborn.wait(5) == -9                     # SIGKILLed, not left running
-    finally:
-        stubborn.kill()
-        stubborn.wait()
-        stubborn.stdout.close()
+def test_a_process_ignoring_sigterm_is_killed_after_the_grace_period(monkeypatch):
+    import signal
+
+    sent = []
+    monkeypatch.setattr(procs, "os", SimpleNamespace(kill=lambda pid, sig: sent.append((pid, sig))))
+    monkeypatch.setattr(procs, "alive", lambda pid: True)   # it ignores SIGTERM: still running
+    assert procs.terminate([4242], grace=0) == 1
+    assert sent == [(4242, signal.SIGTERM), (4242, signal.SIGKILL)]
 
 
 def test_sweep_pauses_agents_whose_window_is_gone(db, ws, proc_cleanup, monkeypatch):
