@@ -325,13 +325,24 @@ def unacted_verdict(db: DB, ws: Workspace, worker: Agent, head: str, now: float)
     return review
 
 
-def replay_verdict(db: DB, ws: Workspace, review: Review) -> None:
-    """Act on ``review`` as ``on_review`` would have when it was given."""
+def replay_verdict(db: DB, ws: Workspace, review: Review, worker: Agent, head: str, now: float) -> bool:
+    """Act on ``review`` as ``on_review`` would have when it was given, if
+    it is still ``worker``'s unacted verdict once under the lock: the
+    caller's ``worker`` may predate a checks_finished that acted on it.
+    Returns whether it acted."""
     with merge_lock(ws.id):
+        current = db.get_agent(worker.id)
+        if (current is None or current.pipeline != "reviewing"
+                or current.reviewing_since != worker.reviewing_since):
+            return False
+        again = unacted_verdict(db, ws, current, head, now)
+        if again is None or again.id != review.id:
+            return False
         ready = _on_review(db, reviewer_of(db, review), ws, bool(review.approved),
                            review.summary or "")[1]
     if ready:
         drain(db, ws.repo_root, ws.base_branch)
+    return True
 
 
 def _hold_verdict(ws: Workspace, reviewer: Agent, sha: str) -> bool:

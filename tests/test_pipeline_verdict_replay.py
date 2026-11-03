@@ -73,15 +73,45 @@ def test_sweep_replays_a_verdict_nothing_acted_on_once(db, repo, acted, approved
     assert len(told) == 1 and "feat" in told[0]
 
 
-@pytest.mark.parametrize("state, worker_alive", [("fixing", False), ("ready", False), ("fixing", True)])
+@pytest.mark.parametrize("approved", [True, False])
+def test_sweep_reading_the_worker_before_checks_finished_does_not_act_again(db, repo, acted,
+                                                                             monkeypatch, approved):
+    """The sweep reads its workers once; a held verdict that checks_finished
+    acted on after that read is not replayed on the stale row."""
+    now = time.time()
+    ws = _reported_merging(db, repo, now - 600)
+    sha = gates.head(ws)
+    add(db, ws, "rev1", "review", "reviewer", parent="boss")
+    db.update_agent("rev1", review_sha=sha)
+    with pipeline.review_run(ws.id):
+        pipeline.checks_started(db, ws, sha)
+        db.add_review(ws.id, sha, "rev1", approved, "lgtm" if approved else "Blocker: the null check is missing.")
+        agents.finish_review(db, "rev1", ws.id)
+        snapshot = db.list_agents()                      # the sweep's read: w1 still in review
+        pipeline.checks_finished(db, ws, sha, None)
+    rounds = db.get_agent("w1").pipeline_rounds
+    real = db.list_agents
+    monkeypatch.setattr(db, "list_agents", lambda ws_id=None: snapshot if ws_id is None else real(ws_id))
+    cull.note_reported_stuck(db, time.time() + pipeline.UNACTED_AFTER + 1, {})
+    _assert_acted(db, acted, approved)
+    assert db.get_agent("w1").pipeline_rounds == rounds
+    assert not [b for b in inbox(db) if "never acted on" in b]
+
+
+@pytest.mark.parametrize("state, worker_alive", [("fixing", False), ("ready", False), ("fixing", True),
+                                                 ("reviewing", True)])
 def test_a_piped_branch_nothing_works_on_is_reported_once_not_closed(db, repo, monkeypatch,
                                                                      state, worker_alive):
     """A dead worker's branch in fixing or ready, with no reviewer and no
     check run, is reported after stall_alert_after minutes; a live idle one
-    past stale_after is reported instead of closed."""
+    past stale_after is reported instead of closed. One in review that nobody
+    reviews is reported once, by note_reported_stuck alone: the stale note
+    keeps its de-dupe value in the same stuck_noted."""
     ws = _reported(db, repo)
     old = time.time() - 7200
     db.update_agent("w1", pipeline=state, created_at=old, status_since=old)
+    if state == "reviewing":   # its review already restarted once
+        db.update_agent("w1", reviewing_since=old + 60, review_restarted=old + 60)
     monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id == "boss" or worker_alive and a.id == "w1")
     monkeypatch.setattr(agents, "reconcile", lambda db_, a, **kw: a)
     monkeypatch.setattr(agents, "owns_pane", lambda db_, a, owners=None: True)
@@ -89,5 +119,6 @@ def test_a_piped_branch_nothing_works_on_is_reported_once_not_closed(db, repo, m
     cull.sweep(db)
     cull.sweep(db)
     assert db.get_agent("w1").dismissed_at is None and db.get_agent("w1").pipeline == state
-    told = [b for b in inbox(db) if "feat" in b and ("nothing is working on" in b or "left it open" in b)]
+    told = [b for b in inbox(db) if "feat" in b and ("nothing is working on" in b or "left it open" in b
+                                                   or "no reviewer has been running" in b)]
     assert len(told) == 1

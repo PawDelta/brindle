@@ -215,6 +215,8 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
         coordinator.log.exception("brindle: coordinator wake failed")
 
     # 2. Workers nobody needs any more.
+    from brindle import pipeline
+
     limits: dict[str, float] = {}
     for a in db.list_agents():
         if (a.mode not in agents.REPORTING_MODES or a.dismissed_at is not None
@@ -233,13 +235,12 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
         # continue`; one whose session carried on without it won't.
         root = db.get_agent(_root(db, a))
         gone = not running and (a.status != "paused" or root is None or root.status != "paused")
-        if (finished or gone) and a.pipeline in PIPED:
+        ws = db.get_workspace(a.workspace_id) if a.pipeline in PIPED else None
+        if (finished or gone) and ws is not None and pipeline._settled(db, ws) is None:
             # The pipeline still owns its branch: closing it would leave the
-            # branch with nobody on it. A stopped one is note_stalled's.
-            ws = db.get_workspace(a.workspace_id)
-            if finished and a.parent_id and ws is not None and a.stuck_noted != idle_since:
-                from brindle import pipeline
-
+            # branch with nobody on it. A stopped one is note_stalled's; one
+            # in review is note_reported_stuck's (its stuck_noted de-dupe).
+            if finished and a.parent_id and a.pipeline != "reviewing" and a.stuck_noted != idle_since:
                 done.extend(_tell_stalled(db, a, idle_since, (
                     f"Worker {a.id} has sat idle {int(idle_for // 60)} min, but its branch `{ws.branch}` "
                     f"is still in the pipeline ({pipeline.review_state(db, ws) or a.pipeline}), so "
@@ -542,7 +543,8 @@ def note_reported_stuck(db: DB, now: float, panes: dict[str, bool]) -> list[str]
                 # A verdict on record that never moved the branch on (the
                 # pipeline dropped it): act on it once, and say so.
                 db.update_agent(a.id, stuck_noted=unacted.created_at)
-                pipeline.replay_verdict(db, ws, unacted)
+                if not pipeline.replay_verdict(db, ws, unacted, a, head, now):
+                    continue   # acted on since ``a`` was read
                 verdict = "approved" if unacted.approved else "requested changes on"
                 state = pipeline.review_state(db, ws) or "out of the pipeline"
                 done.extend(_tell_stalled(db, a, unacted.created_at, (
