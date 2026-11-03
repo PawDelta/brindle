@@ -282,7 +282,7 @@ def script(tmp_path, name="brindle", mode=0o755, directory="bin"):
     return str(p)
 
 
-@pytest.mark.parametrize("how", ["world_writable_file", "world_writable_dir", "quote"])
+@pytest.mark.parametrize("how", ["relative", "world_writable_file", "world_writable_dir", "quote", "missing", "not_executable"])
 def test_a_hook_path_that_could_be_swapped_or_misread_is_refused(how, tmp_path):
     exe = script(tmp_path)
     if how == "relative":

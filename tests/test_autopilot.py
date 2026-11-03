@@ -447,6 +447,19 @@ def test_missing_attached_checkout_is_recorded_and_the_rest_still_run(db, root, 
     assert db.milestones("boss")[0].state == "failed"
 
 
+def test_old_milestone_rows_get_a_state(db, root):
+    db.set_milestones("boss", [("a", "c", None), ("b", "c", None), ("c", "c", None), ("d", "c", None)])
+    ids = [m.id for m in db.milestones("boss")]
+    with db.tx() as c:
+        c.execute("UPDATE milestones SET status='passed', state=NULL WHERE id=?", (ids[0],))
+        c.execute("UPDATE milestones SET status='failed', state=NULL, passed_sha='abc' WHERE id=?", (ids[1],))
+        c.execute("UPDATE milestones SET status='failed', state=NULL, output='(exit 127)' WHERE id=?", (ids[2],))
+        c.execute("UPDATE milestones SET status='failed', state=NULL, passed_sha='abc', "
+                  "output=\"repo 'other' isn't attached to this session\" WHERE id=?", (ids[3],))
+    db._migrate()
+    assert [m.state for m in db.milestones("boss")] == ["passed", "regressed", "failed", "failed"]
+
+
 def commit_all(repo, msg="work"):
     sh(f"git add -A && git commit -qm {msg}", repo)
 

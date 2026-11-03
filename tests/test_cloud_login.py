@@ -101,6 +101,7 @@ AZ_TOKEN = json.dumps({"accessToken": "SECRET", "expiresOn": "2027-01-15 08:00:0
 
 @pytest.mark.parametrize("proc, now, ok", [
     (SimpleNamespace(returncode=0, stdout=AZ_TOKEN, stderr=""), NOW - 5, True),
+    (SimpleNamespace(returncode=0, stdout=AZ_TOKEN, stderr=""), NOW + 5, False),
     (SimpleNamespace(returncode=1, stdout="", stderr="AADSTS70043: refresh token expired"), NOW, False),
 ])
 def test_azure_expiry_comes_from_the_cli_token(proc, now, ok):
@@ -118,6 +119,7 @@ def test_azure_expiry_comes_from_the_cli_token(proc, now, ok):
 @pytest.mark.parametrize("proc, ok, left", [
     (SimpleNamespace(returncode=0, stdout="ya29.SECRET\n", stderr=""), True, 1800.0),
     (SimpleNamespace(returncode=1, stdout="", stderr="invalid_grant: Bad Request invalid_rapt"), False, None),
+    (SimpleNamespace(returncode=0, stdout="ya29.SECRET\n", stderr=""), False, 0.0),
 ])
 def test_google_status_refreshes_through_gcloud_in_the_given_env(proc, ok, left, tmp_path):
     calls = []

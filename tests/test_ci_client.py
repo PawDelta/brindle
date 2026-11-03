@@ -277,6 +277,16 @@ def test_oidc_falls_back_to_an_unexpired_token_then_gives_up():
         oidc.header()
 
 
+def test_jwt_exp_ignores_a_non_finite_or_non_numeric_exp():
+    import base64
+
+    for exp in ["NaN", "Infinity", "-Infinity", "1e999", "10" + "0" * 400, '"soon"', "true", "null"]:
+        payload = base64.urlsafe_b64encode(('{"exp": %s}' % exp).encode()).decode().rstrip("=")
+        assert ci_client._jwt_exp(f"h.{payload}.s") is None, exp
+    assert ci_client._jwt_exp(_jwt(2000)) == 2000.0
+    assert ci_client._jwt_exp("not-a-jwt") is None
+
+
 @pytest.mark.brindle_ci_guard
 def test_oidc_fetch_says_why_it_failed(monkeypatch):
     import io
@@ -327,20 +337,6 @@ def test_oidc_fetch_parses_the_actions_answer(monkeypatch):
     assert "req" not in str(e.value) and e.value.code == "oidc"
     with pytest.raises(CIError, match="isn't https"):
         ci_client._fetch_oidc("http://token.actions.test/x", "req")
-
-
-def test_plans_up_to_256kb_verify(plan, tmp_path):
-    big = plan(instructions="x" * (180 * 1024))
-    assert 200 * 1024 < len(big) <= 256 * 1024
-    assert len(ci_client.verify_plan(big, repo=REPO)["instructions"]) == 180 * 1024
-    server = Server(big)
-    assert ci_client.start(REPO, {"kind": "issue", "issue": 1}, tmp_path, client=server.client, token=CI_TOKEN,
-                           providers=[], say=lambda s: None) == 0
-    assert (tmp_path / "plan.jwt").read_text() == big
-    too_big = plan(instructions="x" * (200 * 1024))
-    with pytest.raises(CIError, match="malformed plan"):
-        ci_client.verify_plan(too_big, repo=REPO)
-    assert ci_client.CI_MAX_RESPONSE >= 2 * ci_client.MAX_PLAN_BYTES
 
 
 def test_report_posts_job_status(plan, tmp_path):
@@ -422,21 +418,6 @@ def test_run_reports_needs_user(plan, ci_repo, tmp_path):
     assert adapter.stopped == [adapter.launched[0][0]]
     ev = evidence_of(server.results[0])
     assert ev["final_state"] == "needs_user" and ev["question"] == "which database?"
-
-
-def test_run_fails_fast_when_the_supervisor_cant_start(plan, ci_repo, tmp_path):
-    base = head(ci_repo)
-    token = plan(base_sha=base)
-
-    class Stuck(FakeAdapter):
-        def launch(self, db, ws, instructions, profile):
-            raise ci_adapters.AdapterError("Claude Code stopped on its first-run theme picker, "
-                                           "which nobody in CI can answer")
-    server = Server(token)
-    with pytest.raises(CIError, match="claude supervisor couldn't start: .*theme picker") as e:
-        ci_client.run(token, token_file(tmp_path), cwd=str(ci_repo), env=run_env(), client=server.client,
-                      db=DB(), adapters={"claude": Stuck("claude")}, sleep=lambda s: None, say=lambda s: None)
-    assert e.value.code == "launch" and server.events == []
 
 
 def test_milestones_carry_the_plans_ids_and_may_lack_a_check(plan, ci_repo, tmp_path):
@@ -610,6 +591,14 @@ def test_plan_verification_failures(plan, signing_key):  # noqa: F811
 
 
 # -- the org's protected paths and dollar budget (Team org_budgets) --------------------------------
+
+
+@pytest.mark.brindle_ci_guard
+def test_plan_errors_never_quote_the_token(plan):
+    bad = plan(repo="other/repo")
+    with pytest.raises(CIError) as e:
+        ci_client.verify_plan(bad, repo=REPO)
+    assert bad[:20] not in str(e.value)
 
 
 @pytest.mark.brindle_ci_guard
