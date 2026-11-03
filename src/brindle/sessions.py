@@ -149,10 +149,18 @@ def handover(db: DB, old_root_id: str, dest: Workspace, note: str | None = None,
         raise agents.AgentError(f"no session {old_root_id}")
     ap = db.get_autopilot(old_root_id)
     prompt = handover_prompt(db, old, note)
-    # Always a supervisor, even from a session started as something else.
-    new = agents.spawn(db, dest, agents.SUPERVISOR, prompt=prompt, provider_name=old.provider,
-                       watch_pane=True, background_setup=True, autopilot=True,
-                       claim_goals=False)
+    # A live supervisor already in ``dest`` takes the session over: a second
+    # one there would split the work. Only with none (or a dead or paused
+    # one) is a new supervisor started.
+    new = _live_supervisor(db, dest, old_root_id)
+    took_over = new is not None
+    if not took_over:
+        # Always a supervisor, even from a session started as something else.
+        new = agents.spawn(db, dest, agents.SUPERVISOR, prompt=prompt, provider_name=old.provider,
+                           watch_pane=True, background_setup=True, autopilot=True,
+                           claim_goals=False)
+    elif db.get_autopilot(new.id) is None:
+        db.add_autopilot(new.id)
     if ap and ap.goal:
         old_ms = db.milestones(old_root_id)
         pilot.set_goal(db, new.id, ap.goal,
@@ -211,10 +219,32 @@ def handover(db: DB, old_root_id: str, dest: Workspace, note: str | None = None,
         c.execute("UPDATE inbox SET agent_id=? WHERE agent_id=? AND delivered_at IS NULL "
                   "AND instr(body, ?) > 0", (new.id, old_root_id, pilot.WAIT_ENDED_HEAD))
     _repoint_orphaned_tasks(db, new.id)
+    # The goal is the new supervisor's now: the old session stops announcing
+    # it to the repo's other sessions (who_is_working), paused or not.
+    knowledge.note(db, old_root_id, knowledge.END)
+    if took_over:
+        # Told once everything is its own, so get_progress shows the goal.
+        try:
+            agents.send_message(db, new.id, prompt)
+        except agents.AgentError:
+            db.enqueue(new.id, prompt, None)   # its pane went away just now: kept for its resume
     bus.publish_agent(db, "session.handover", new.id, from_root=old_root_id)
     if pause_old:
         agents.pause(db, old_root_id, stop_local_models=False)
     return new
+
+
+def _live_supervisor(db: DB, ws: Workspace, other_than: str) -> Agent | None:
+    """The newest live session chat (an interactive root) running in ``ws``,
+    other than ``other_than``: one whose pane is up and still its own."""
+    panes = tmux.list_panes()
+    owners = agents.pane_owners(db, panes)
+    for a in reversed(db.list_agents(ws.id)):
+        if (a.id != other_than and a.mode == "interactive" and a.parent_id is None
+                and a.status not in ("paused", "done")
+                and agents.is_alive(a, panes) and agents.owns_pane(db, a, owners)):
+            return a
+    return None
 
 
 def _repoint_orphaned_tasks(db: DB, root_id: str) -> None:

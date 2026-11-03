@@ -106,3 +106,54 @@ def test_checkout_for_target_reads_a_slashed_name_as_a_branch(db, repo, monkeypa
     monkeypatch.chdir(repo)
     ws = workspaces.checkout_for_target(db, str(repo), "fix/handover")
     assert ws.branch == "fix/handover" and not (repo / "fix").exists()
+
+
+def test_handover_to_a_live_supervisor_delivers_to_it_instead_of_starting_another(db, repo, monkeypatch):
+    root = workspaces.adopt_root(db, str(repo))
+    dest = workspaces.checkout_for(db, str(repo), branch="integration")
+    add(db, root, "old")
+    add(db, dest, "gone", status="paused")      # a paused chat there is not the one taking over
+    add(db, dest, "there")
+    worker = workspaces.create(db, str(repo), "w-branch").workspace
+    add(db, worker, "w1", mode="assign", parent="old")
+    db.add_autopilot("old")
+    autopilot.set_goal(db, "old", "ship it", [("one", "true", None)])
+    db.add_task(Task("t1", str(repo), None, "old", root.id, "developer", "later", "assign", 1, None,
+                     None, None, '["w1"]', "pending", time.time()))
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id == "there")
+    monkeypatch.setattr(agents, "owns_pane", lambda *a: True)
+    monkeypatch.setattr(agents, "spawn", lambda *a, **kw: pytest.fail("started a second supervisor"))
+    told = []
+    monkeypatch.setattr(agents, "send_message", lambda db_, to, body, *a, **kw: told.append((to, body)))
+
+    new = sessions.handover(db, "old", dest, "rule: never push to main", pause_old=False)
+
+    assert new.id == "there" and db.get_autopilot("there").goal == "ship it"
+    assert db.get_agent("w1").parent_id == "there" and db.get_task("t1").caller_id == "there"
+    assert [to for to, _ in told] == ["there"] and "rule: never push to main" in told[0][1]
+
+
+def test_handed_over_session_stops_advertising_its_goal(db, repo, monkeypatch):
+    from brindle import knowledge
+
+    root = workspaces.adopt_root(db, str(repo))
+    dest = workspaces.checkout_for(db, str(repo), branch="integration")
+    for aid in ("old", "onlooker"):
+        add(db, root, aid)
+    db.add_autopilot("old")
+    autopilot.set_goal(db, "old", "ship it", [("one", "true", None)])
+
+    def fake_spawn(db_, ws, profile, **kw):
+        a = add(db_, ws, "new")
+        db_.add_autopilot("new")
+        return a
+
+    monkeypatch.setattr(agents, "spawn", fake_spawn)
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id != "new")
+    monkeypatch.setattr(agents, "owns_pane", lambda *a: True)
+    # The MCP tool's handover: the old supervisor is still up, ending its own turn.
+    sessions.handover(db, "old", dest, pause_old=False)
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
+
+    found = knowledge.who_is_working(db, knowledge.repo_key(str(repo)), "onlooker")
+    assert [s["session"] for s in found] == ["new"]
