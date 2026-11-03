@@ -320,27 +320,27 @@ class Imports:
         self._scans: dict[str, tuple[set[str], set[str]]] = {}
 
     def tests_reaching(self, path: str) -> set[str]:
-        """The test files importing ``path``'s module; when none does, those
-        importing a module that imports it (one level; a module that may
-        import anything, such as one loading every submodule, isn't one)."""
+        """The test files that may import ``path``'s module. When none names
+        it outright (one that only may, through a nonliteral import, doesn't
+        count), those importing a module that names it are added (one level)."""
         module = _module_path(self.root, path)
         if module is None:
             raise Unscoped(f"{path} is not in a package, so no import can name it")
         tests = [f for f in self.files if is_test_file(f)]
         found = {t for t in tests if self.imports(t, module)}
-        if found:
+        if any(self.imports(t, module, loose=False) for t in found):
             return found
         importers = {m for f in self.files if f != path and not is_test_file(f)
-                     and (m := _module_path(self.root, f)) and self.imports(f, module, catch_all=False)}
-        return {t for t in tests if any(self.imports(t, m) for m in importers)}
+                     and (m := _module_path(self.root, f)) and self.imports(f, module, loose=False)}
+        return found | {t for t in tests if any(self.imports(t, m) for m in importers)}
 
-    def imports(self, path: str, module: str, catch_all: bool = True) -> bool:
-        """Whether ``path`` may import ``module`` (``catch_all``: counting an import of anything)."""
+    def imports(self, path: str, module: str, loose: bool = True) -> bool:
+        """Whether ``path`` may import ``module`` (``loose``: also through a nonliteral import)."""
         if path not in self._scans:
             self._scans[path] = self._scan(path)
         names, prefixes = self._scans[path]
         return (any(n == module or n.startswith(module + ".") for n in names)
-                or any((catch_all if not p else module == p or module.startswith(p + ".")) for p in prefixes))
+                or loose and any(not p or module == p or module.startswith(p + ".") for p in prefixes))
 
     def _scan(self, path: str) -> tuple[set[str], set[str]]:
         """(the modules ``path`` names, the packages it may import anything under; "" for all)."""
@@ -355,9 +355,14 @@ class Imports:
         loaders = {"__import__"} | {n.asname or n.name for node in ast.walk(tree)
                                     if isinstance(node, ast.ImportFrom) and node.module == "importlib"
                                     for n in node.names if n.name == "import_module"}
+        bound: dict[str, set[str]] = {}   # a name an import binds -> the absolute names it may stand for
+        chains: list[str] = []
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 names.update(n.name for n in node.names)
+                for n in node.names:
+                    if n.asname:
+                        bound.setdefault(n.asname, set()).add(n.name)
             elif isinstance(node, ast.ImportFrom):
                 prefix = _relative(package, node.level, node.module or "")
                 if prefix is None:
@@ -369,15 +374,19 @@ class Imports:
                         prefixes.add(prefix)
                     else:
                         names.add(f"{prefix}.{n.name}")
+                        bound.setdefault(n.asname or n.name, set()).add(f"{prefix}.{n.name}")
             elif isinstance(node, ast.Call) and (isinstance(node.func, ast.Name) and node.func.id in loaders
                                                  or isinstance(node.func, ast.Attribute)
                                                  and node.func.attr == "import_module"):
                 _dynamic(node, package, names, prefixes)
             elif isinstance(node, ast.Attribute) and (dotted := _dotted(node)):
-                names.add(dotted)
+                chains.append(dotted)
             elif isinstance(node, ast.Constant) and isinstance(node.value, str) and "." in node.value \
                     and all(p.isidentifier() for p in node.value.split(".")):
                 names.add(node.value)
+        for dotted in chains:   # ``d.routes.x`` after ``import a.d as d`` or ``from a import d``: a.d.routes.x
+            root, _, rest = dotted.partition(".")
+            names.update([dotted, *(f"{target}.{rest}" for target in bound.get(root, ()))])
         return names, prefixes
 
 

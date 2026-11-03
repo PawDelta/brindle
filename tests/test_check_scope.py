@@ -23,12 +23,17 @@ TESTS = {
     "tests/test_dotted.py": "import brindle.daemon.routes_read\n",
     "tests/test_lazy.py": "def test_l():\n    from brindle.daemon import routes_read\n",
     "tests/test_attr.py": "import brindle.daemon\n\n\ndef test_a():\n    brindle.daemon.routes_read.X\n",
+    "tests/test_alias.py": "import brindle.daemon as d\n\n\ndef test_a():\n    d.routes_read.X\n",
+    "tests/test_bound.py": "from brindle import daemon\n\n\ndef test_b():\n    daemon.routes_read.X\n",
+    "tests/test_any.py": "import importlib\n\n\ndef test_any(name):\n    importlib.import_module(name)\n",   # may be anything
     # A real repo has one of these; it once made every module unresolved.
     "tests/test_dynamic.py": "__import__('brindle.other', fromlist=names)\n",
     "tests/test_unrelated.py": "import os\n",
     "tests/test_loader.py": "from brindle import loader\n",   # loader may import low, but so may anything
 }
-AGENTS = ["tests/test_agents.py", "tests/test_member.py", "tests/test_patch.py"]
+AGENTS = ["tests/test_agents.py", "tests/test_any.py", "tests/test_member.py", "tests/test_patch.py"]
+ROUTES = ["tests/test_alias.py", "tests/test_any.py", "tests/test_attr.py", "tests/test_bound.py",
+          "tests/test_dotted.py", "tests/test_lazy.py"]
 CAPPED = check_scope.CAP_NOTE.format(max=2, tests="tests/test_agents.py")
 
 
@@ -38,8 +43,8 @@ def run(tests):
 
 @pytest.mark.parametrize("changed,max_files,ran", [
     ("src/brindle/agents.py", 0, run(AGENTS)),   # the graph reaches no test from f()
-    ("src/brindle/daemon/routes_read.py", 0, run(["tests/test_attr.py", "tests/test_dotted.py", "tests/test_lazy.py"])),
-    ("src/brindle/low.py", 0, run(AGENTS)),      # no test imports it: those importing agents, which does
+    ("src/brindle/daemon/routes_read.py", 0, run(ROUTES)),
+    ("src/brindle/low.py", 0, run(AGENTS)),      # only test_any may import it: add those importing agents, which does
     ("src/brindle/agents.py", 2, f"printf '%s\\n' {shlex.quote(CAPPED)}; {run(['tests/test_agents.py'])}"),
 ], ids=["graph-reaches-none", "import-forms", "one-level", "capped"])
 def test_imports_scope_the_check(repo, tmp_path, monkeypatch, changed, max_files, ran):
