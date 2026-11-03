@@ -496,9 +496,6 @@ def document(db: DB, repo_key: str, doc_id: int) -> dict | None:
         (doc_id, repo_key)).fetchone()
     if doc is None:
         return None
-    if db.conn.execute("SELECT 1 FROM kb_chunks WHERE doc_id = ? AND quarantined IS NULL", (doc_id,)).fetchone() is None \
-            and db.conn.execute("SELECT 1 FROM kb_chunks WHERE doc_id = ?", (doc_id,)).fetchone() is not None:
-        return None
     url = urlsplit(doc["url"] or "")
     if url.scheme != "file" or url.netloc not in ("", "localhost"):
         return None
@@ -506,11 +503,25 @@ def document(db: DB, repo_key: str, doc_id: int) -> dict | None:
     try:
         if path.is_symlink() or not path.resolve().is_relative_to(Path(doc["scope"]).resolve()) or not path.is_file():
             return None
-        text = path.read_bytes().decode("utf-8-sig", errors="replace")
+        text = _safe_text(path.read_bytes().decode("utf-8-sig", errors="replace"))
     except OSError:
         return None
+    if text is None:
+        return None
     return {"id": doc["id"], "title": doc["title"], "url": doc["url"], "updated_at": doc["updated_at"],
-            "text": mask(text)}
+            "text": text}
+
+
+def _safe_text(text: str) -> str | None:
+    """``text`` as it is now, whole except the chunks scan_document quarantines,
+    with secrets redacted by the KB policy and then by redact.mask. None when
+    nothing safe is left or a signature survives the removal."""
+    lines = _normalized(text).split("\n")
+    dropped = {n for chunk, reason in scan_document(text) if reason for n in chunk.lines}
+    kept = "\n".join(line for n, line in enumerate(lines) if n not in dropped)
+    if not kept.strip() or quarantine_reason(kept):
+        return None
+    return mask(redact(kept))
 
 
 def _hit(r) -> dict:
