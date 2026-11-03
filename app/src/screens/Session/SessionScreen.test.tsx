@@ -884,11 +884,20 @@ describe("SessionScreen, the pty view", () => {
 
   it("shows the supervisor's and each worker's pane through a tmux client on its window, one view at a time", async () => {
     const v = views({ kind: "ready", tmux: "tmux 3.8" });
-    const { sync, term } = mount({ sup1: live, w1: live }, {}, undefined, "sup1", ["sup1", "w1"], REPO, v.value);
+    // The supervisor starts up on a prompt (status "starting" until a hook fires), with prompts pending.
+    const starting = { ...root, agents: [{ ...root.agents![0], status: "starting" }] };
+    const { daemon, sync, term } = mount({ sup1: live, w1: live }, { workspaces: [starting, worker], inbox: [permissionInTerminal, permission] }, undefined, "sup1", ["sup1", "w1"], REPO, v.value);
     await waitFor(() => expect(v.opened).toHaveLength(1));
     expect(v.opened[0].at).toEqual({ server: "brindle", target: windowOf("sup1") });
     expect(screen.getByTestId("terminal").dataset.pty).toBe("1");
-    expect(surface().dataset.card).toBe("live");
+    await waitFor(() => expect(surface().dataset.card).toBe("live"));
+    // Whatever status the engine reports while a prompt is up, the live pane stays.
+    for (const status of ["waiting", "processing", "idle", "unknown"]) {
+      act(() => daemon.publish("agent.status", { root_id: "sup1", agent_id: "sup1", payload: { status } }));
+      await flush();
+      expect(surface().dataset.card).toBe("live");
+    }
+    expect(v.opened[0].closed).toBe(false);
     // The client's bytes are drawn as they come; what xterm.js says goes back as is.
     act(() => v.opened[0].handlers.onData(new TextEncoder().encode("\x1b[?1049hclaude")));
     expect(term().written).toBe("\x1b[?1049hclaude");
@@ -965,21 +974,6 @@ describe("SessionScreen, the pty view", () => {
     expect(v.opened[1].at).toEqual(v.opened[0].at);
     expect(screen.queryByTestId("state-card")).toBeNull();
     expect(screen.getByTestId("terminal").dataset.pty).toBe("1");
-    sync.stop();
-  });
-
-  it.each(["waiting", "processing", "idle", "unknown", "starting"])("keeps the live pane, not a card, over a running agent (%s) that is up on a shell or permission prompt", async (status) => {
-    const v = views({ kind: "ready", tmux: "tmux 3.8" });
-    const asking = { ...root, agents: [{ ...root.agents![0], status }] };
-    const { sync } = mount({ sup1: live, w1: live }, { workspaces: [asking, worker], inbox: [permissionInTerminal, permission] }, undefined, "sup1", ["sup1", "w1"], REPO, v.value);
-    await waitFor(() => expect(v.opened).toHaveLength(1));
-    // The provider redraws for its prompt, and the sweep says the process is alive.
-    act(() => v.opened[0].handlers.onData(new TextEncoder().encode("\x1b[?1049hAllow this command?")));
-    await flush();
-    expect(screen.queryByTestId("state-card")).toBeNull();
-    expect(surface().dataset.card).toBe("live");
-    expect(screen.getByTestId("terminal").dataset.pty).toBe("1");
-    expect(v.opened[0].closed).toBe(false);
     sync.stop();
   });
 
