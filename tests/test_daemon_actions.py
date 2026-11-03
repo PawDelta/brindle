@@ -630,7 +630,7 @@ def test_login_and_secret_actions_open_one_terminal_while_it_runs(world, monkeyp
 
 
 
-def test_terminal_input_takes_one_printable_line_into_an_action_terminal_only(world, monkeypatch):
+def test_terminal_input_takes_one_printable_line_into_an_action_terminal_only(world, repo, monkeypatch):
     from brindle import providers, tmux
 
     windows, typed = {}, []
@@ -639,13 +639,20 @@ def test_terminal_input_takes_one_printable_line_into_an_action_terminal_only(wo
     monkeypatch.setattr(tmux, "new_window", lambda session, name, cwd, argv, env, tag:
                         windows.setdefault(tag[1], argv) and f"%{len(windows)}")
     monkeypatch.setattr(tmux, "tagged_panes", lambda session, key: [
-        (f"%{i + 1}", "login claude", True, tid) for i, tid in enumerate(windows)])
+        (f"%{i + 1}", "shell" if argv[-1] == "-l" else "login claude", True, tid)
+        for i, (tid, argv) in enumerate(windows.items())])
     monkeypatch.setattr(tmux, "send_keys", lambda target, *keys, **kw: typed.append((target, *keys)))
+    monkeypatch.setenv("SHELL", "/bin/zsh")
+    code, shell = _send("POST", "/v1/terminals/shell", {"cwd": str(repo)})
+    assert code == 200 and shell["started"]
+    # An ordinary shell is typed into in the app's own tmux client, never through the API.
+    assert _send("POST", f"/v1/terminals/{shell['terminal']}/input", {"text": "ls"})[0] == 404
+    assert typed == []
     assert _send("POST", "/v1/providers/claude/login", {"method": "device"})[0] == 400
     code, reply = _send("POST", "/v1/providers/claude/login", {"method": "console"})
     assert code == 200 and windows[reply["terminal"]] == ["claude", "auth", "login", "--console"]
     code, sent = _send("POST", f"/v1/terminals/{reply['terminal']}/input", {"text": "ab-12"})
-    assert code == 200 and typed == [("%1", "-l", "--", "ab-12"), ("%1", "Enter")]
+    assert code == 200 and typed == [("%2", "-l", "--", "ab-12"), ("%2", "Enter")]
     # One printable line only, and only into a running action terminal (never an agent's pane).
     assert _send("POST", f"/v1/terminals/{reply['terminal']}/input", {"text": "a\nb"})[0] == 400
     assert _send("POST", "/v1/terminals/wk/input", {"text": "ab-12"})[0] == 404
