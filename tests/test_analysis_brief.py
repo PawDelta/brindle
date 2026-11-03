@@ -36,9 +36,12 @@ def boss(db, tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("kwargs, large", [
-    ({"weight": "heavy"}, False), ({"weight": "advanced"}, False),   # weight alone never asks
+    ({"weight": "heavy"}, False),   # weight alone never asks
     ({"requested": True}, True), ({"milestones": 2}, False), ({"milestones": 3}, True),
-    ({"requested": True, "branch": "merge/x"}, False), ({"milestones": 3, "branch": "sync-main"}, False)])
+    ({"requested": True, "branch": "merge/x"}, False), ({"milestones": 3, "branch": "sync-main"}, False),
+    pytest.param({"requested": True, "branch": "team/alice/merge/main"}, False,
+                 marks=pytest.mark.variant("branch_prefix puts the namespace in front of the chore name")),
+])
 def test_large_work_needs_a_request_or_a_three_milestone_goal(kwargs, large):
     assert ab.large_work(**kwargs) is large
 

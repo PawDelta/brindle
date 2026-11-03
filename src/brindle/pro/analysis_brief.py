@@ -41,7 +41,7 @@ HEADER = ("What earlier analysis docs say about this work, composed by brindle P
 
 
 GOAL_DOC_MILESTONES = 3     # a goal of this many milestones gets one doc, as a whole
-_CHORE = re.compile(r"^(?:[\w.-]+/)?(?:merge|sync|chore)(?:[-_/]|$)", re.I)
+_CHORE = re.compile(r"^(?:[\w.-]+/)*(?:merge|sync|chore)(?:[-_/]|$)", re.I)   # any namespace depth: team/alice/merge/x
 
 
 def is_chore(branch: str | None) -> bool:
