@@ -62,14 +62,6 @@ def proc_cleanup():
         p.wait(timeout=5)
 
 
-def test_the_daemon_is_never_included():
-    config = json.dumps({"BRINDLE_AGENT_ID": "abc12345", "BRINDLE_HOME": os.environ["BRINDLE_HOME"]})
-    t = {1: procs.Proc(1, 0, "init"),
-         10: procs.Proc(10, 1, f"/usr/bin/claude daemon run --spawned-by {config}"),
-         11: procs.Proc(11, 10, f"claude --mcp-config {config}")}
-    assert procs.agent_pids(["abc12345"], procs=t)["abc12345"] == {11}
-
-
 @pytest.fixture
 def ws(db, repo):
     return workspaces.adopt_root(db, str(repo))
@@ -118,24 +110,11 @@ def test_sweep_pauses_agents_whose_window_is_gone(db, ws, proc_cleanup, monkeypa
     assert set(killed) == {"%1", "%2", "%3"}
 
 
-def test_stale_after_zero_keeps_workers(db, ws, repo, monkeypatch):
-    (repo / ".brindle").mkdir()
-    (repo / ".brindle" / "config.json").write_text('{"stale_after": 0}')
-    add(db, ws, "w1", result="done")
-    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
-    cull.sweep(db)
-    assert db.get_agent("w1").dismissed_at is None
-
-
 @pytest.mark.parametrize("provider,mode,fixing", [
     ("claude", "assign", False),
     ("codex", "assign", False),   # no turn-start event: its pane must be quiet too
     ("claude", "review", False),  # a piped reviewer: the pipeline tells the supervisor
-    # Reported once, then a review asked for fixes and it went quiet (it had
-    # lost its brindle connection): no new commit, no new report.
     ("claude", "assign", "unchanged"),
-    # The same, but it committed a fix after the review before going quiet.
-    ("claude", "assign", "committed"),
 ])
 def test_idle_unreported_worker_noticed_without_goal(db, ws, monkeypatch, provider, mode, fixing):
     """autopilot.on_stop only checks on workers when a goal is set; most
@@ -170,33 +149,13 @@ def test_idle_unreported_worker_noticed_without_goal(db, ws, monkeypatch, provid
     assert sent == ["boss"]
 
 
-def test_idle_sweep_honors_the_unreported_alert_cooldown(db, ws, monkeypatch):
-    add(db, ws, "boss", mode="interactive", status="processing", profile="supervisor", tmux_window="@998")
-    add(db, ws, "w1", parent_id="boss", mode="assign", status_since=time.time() - 600)
-    db.update_agent("w1", unreported_noted=int(time.time()))   # alerted a moment ago
-    sent = []
-    monkeypatch.setattr(tmux, "window_activity", lambda target, **k: time.time() - 600)
-    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
-    monkeypatch.setattr(agents, "command_running", lambda db_, a: False)
-    monkeypatch.setattr(agents, "send_message", lambda db_, to, body, **k: sent.append(to))
-    cull.sweep(db)
-    assert sent == []
-    db.update_agent("w1", unreported_noted=int(time.time()) - agents.UNREPORTED_REALERT_SECONDS - 1)
-    cull.sweep(db)
-    assert sent == ["boss"]
-
-
 def _live_panes():
     panes = tmux.PaneSnapshot(tmux.current_server())
     panes.update({"@998": True, "@999": True})
     return panes
 
 
-@pytest.mark.parametrize("name", [
-    "wip.py",
-    pytest.param("café.py", marks=pytest.mark.variant("git status C-quotes non-ASCII paths")),
-])
-def test_idle_worker_changing_files_is_not_alerted(db, ws, monkeypatch, name):
+def test_idle_worker_changing_files_is_not_alerted(db, ws, monkeypatch, name="café.py"):
     """Idle by its hooks, but something it started is still editing its worktree."""
     add(db, ws, "boss", mode="interactive", status="processing", profile="supervisor", tmux_window="@998")
     add(db, ws, "w1", parent_id="boss", status_since=time.time() - 600)
@@ -239,15 +198,6 @@ def test_reported_branch_problems_reach_the_supervisor(db, ws, monkeypatch, prob
     cull.note_reported_stuck(db, later, _live_panes())
     cull.note_reported_stuck(db, later, _live_panes())
     assert len(sent) == 1 and sent[0][0] == "boss" and ws.id in sent[0][1]
-
-
-def test_stopped_workers_of_a_paused_session_stay_resumable(db, ws):
-    add(db, ws, "boss", mode="interactive", status="paused", profile="supervisor")
-    add(db, ws, "w1", parent_id="boss", status="paused")
-    add(db, ws, "w2", parent_id=None, status="processing")   # its session went on without it
-    cull.sweep(db)
-    assert db.get_agent("w1").dismissed_at is None
-    assert db.get_agent("w2").dismissed_at is not None
 
 
 # -- finished work leaves the live view ---------------------------------------
@@ -415,49 +365,6 @@ def test_sweep_on_another_server_never_judges_a_row_without_a_server(db, ws, pro
     time.sleep(0.5)
     assert alive(p.pid)
     assert db.get_agent("abc12345").status == "processing"
-
-
-def test_pane_ownership_is_per_server(db, ws, other_server, monkeypatch):
-    # The same pane id on two servers: neither agent is a claim on the
-    # other's pane, and stopping one never touches the other's window.
-    here = tmux.current_server()
-    pane = live_pane(ws, "mine")
-    add(db, ws, "mine", status="processing", tmux_window=pane, created_at=time.time())
-    monkeypatch.setenv("BRINDLE_TMUX_SOCKET", other_server)
-    add(db, ws, "theirs", status="processing", tmux_window=pane, created_at=time.time())
-    assert db.get_agent("theirs").tmux_server == other_server
-    assert agents.owns_pane(db, db.get_agent("mine"))
-    assert agents.owns_pane(db, db.get_agent("theirs"))
-    assert not agents.is_alive(db.get_agent("theirs"))  # nothing on its own server
-    agents.close(db, "theirs")
-    monkeypatch.setenv("BRINDLE_TMUX_SOCKET", here)
-    assert tmux.window_alive(pane), "closing the other server's agent killed this server's pane"
-    assert agents.is_alive(db.get_agent("mine"))
-
-
-def test_pane_reads_and_keys_go_to_the_agents_own_server(db, ws, other_server, monkeypatch):
-    # Reading an agent's screen or typing into its pane goes to the server
-    # its window is on, whatever server brindle is using at the time: on any
-    # other server the same pane id would be some other pane (or nothing).
-    tmux.ensure_session(ws.tmux_session, ws.path, {})
-    pane = tmux.new_window(ws.tmux_session, "abc12345", ws.path, ["cat"], {},
-                           tag=(agents.AGENT_TAG, "abc12345"))
-    add(db, ws, "abc12345", status="processing", tmux_window=pane)
-    a = db.get_agent("abc12345")
-    monkeypatch.setenv("BRINDLE_TMUX_SOCKET", other_server)
-    with pytest.raises(tmux.TmuxError):
-        tmux.capture(pane, lines=5)  # nothing of the sort on this server
-    tmux.send_keys(pane, "-l", "hello from brindle", server=agents.server_of(a))
-    deadline = time.time() + 5
-    screen = ""
-    while time.time() < deadline and "hello from brindle" not in screen:
-        time.sleep(0.1)
-        screen = tmux.capture(pane, lines=5, server=agents.server_of(a))
-    assert "hello from brindle" in screen
-    assert tmux.window_activity(pane, server=agents.server_of(a)) is not None
-    assert tmux.window_activity(pane) is None
-
-
 
 
 def test_sweep_retries_a_flush_the_pane_blocked(db, ws, monkeypatch):

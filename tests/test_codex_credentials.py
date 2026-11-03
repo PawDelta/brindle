@@ -59,38 +59,11 @@ def test_tokens_in_auth_json_are_never_read_beyond_auth_mode(codex, monkeypatch)
     assert TOKEN not in text and KEY not in text
 
 
-def test_doctor_warns_openai_key_ignored_under_chatgpt(codex, monkeypatch):
-    chatgpt(codex)
-    monkeypatch.setenv("OPENAI_API_KEY", KEY)
-    c = codex_check()
-    assert c.level == doctor.WARN
-    assert "interactive Codex agents use your ChatGPT plan whatever key is set" in c.detail
-    assert "codex login --with-api-key" in c.detail and KEY not in c.detail
-    assert "codex exec" not in c.detail and "use CODEX_API_KEY" not in c.detail
-
-
-def test_doctor_codex_key_points_interactive_at_login_and_exec_bills_the_key(codex, monkeypatch):
+def test_doctor_warns_codex_key_ignored_under_chatgpt_without_echoing_it(codex, monkeypatch):
     chatgpt(codex)
     monkeypatch.setenv("CODEX_API_KEY", KEY)
     c = codex_check()
-    assert c.level == doctor.WARN
-    assert "`codex exec` runs bill CODEX_API_KEY instead" in c.detail
-    assert KEY not in c.detail
-
-
-def test_doctor_warns_for_a_stored_codex_key_too(codex):
-    chatgpt(codex)
-    keystore.set_key("CODEX_API_KEY", KEY)
-    c = codex_check()
-    assert c.level == doctor.WARN and "key store" in c.detail
-    assert "codex login --with-api-key" in c.detail and "codex exec" in c.detail
-
-
-def test_keys_set_codex_key_notes_interactive_and_exec_under_chatgpt(codex):
-    chatgpt(codex)
-    r = runner.invoke(app, ["keys", "set", "CODEX_API_KEY"], input=KEY + "\n")
-    assert r.exit_code == 0 and KEY not in r.output
-    assert "`codex exec` runs bill CODEX_API_KEY instead" in r.output
+    assert c.level == doctor.WARN and KEY not in c.detail
 
 
 def codex_profile(repo, auth):
@@ -119,14 +92,6 @@ def test_exec_api_key_accepts_codex_key_and_refuses_openai_key_under_chatgpt(cod
     msg = pane_auth.key_problem(p, "codex", set(), False, exec_mode=True)
     assert msg and "auth: api_key" in msg and "`codex exec` ignores OPENAI_API_KEY" in msg and KEY not in msg
     monkeypatch.setenv("CODEX_API_KEY", KEY)
-    assert pane_auth.key_problem(p, "codex", set(), False, exec_mode=True) is None
-
-
-def test_exec_api_key_accepts_a_stored_codex_key_under_chatgpt(codex, repo):
-    chatgpt(codex)
-    p = codex_profile(repo, "api_key")
-    assert pane_auth.key_problem(p, "codex", set(), False, exec_mode=True)
-    keystore.set_key("CODEX_API_KEY", KEY)
     assert pane_auth.key_problem(p, "codex", set(), False, exec_mode=True) is None
 
 

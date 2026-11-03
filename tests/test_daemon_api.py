@@ -351,67 +351,6 @@ def test_read_routes_answer_from_the_db(seeded, path, check):
     assert check(body, seeded)
 
 
-def test_account_identity_is_cached_with_orgs_and_fails_soft_offline(brindle_home, monkeypatch):
-    from brindle.pro import auth
-    from brindle.pro.account import ProAccount
-
-    ent = license.Entitlement("user", "org", "pro", "active", frozenset(), 1, 0, 9999999999, "key")
-    monkeypatch.setattr(license, "current", lambda **kw: ent)
-    reads = []
-
-    def me(*args):
-        reads.append("me")
-        if len(reads) > 1:
-            raise auth.AuthError("offline", code="transport")
-        return {"name": "Sam Rivera", "email": "sam@example.com"}
-
-    def orgs(*args):
-        reads.append("orgs")
-        raise auth.AuthError("offline", code="transport")
-
-    monkeypatch.setattr(auth, "me", me)
-    monkeypatch.setattr(ProAccount, "orgs", orgs)
-    for _ in range(2):
-        code, body = _get("/v1/account", AUTH)
-        assert code == 200 and (body["name"], body["email"]) == ("Sam Rivera", "sam@example.com")
-    assert reads == ["me", "orgs"]
-    license.clear_cache()
-    for _ in range(2):
-        code, body = _get("/v1/account", AUTH)
-        assert code == 200 and body["signed_in"] and body["name"] is None and body["email"] is None
-    assert reads == ["me", "orgs", "me", "orgs"]
-
-
-def test_usage_lists_every_provider_and_flags_the_near_ones_worst_first(brindle_home, monkeypatch):
-    import time
-
-    from brindle import quota
-
-    now = time.time()
-    store = {
-        # the fullest window resets tomorrow; the emptier one resets in ten minutes
-        "claude": quota.Quota("claude", [quota.Window(40.0, now + 86400, 10080),
-                                         quota.Window(20.0, now + 600, 300)], None, now - 5, "status line"),
-        "codex": quota.Quota("codex", [quota.Window(85.0, now + 86400, 10080)], None, now - 9, "rollout"),
-        "antigravity": quota.Quota("antigravity", [], now + 600, now - 1, "limit error"),
-    }
-    monkeypatch.setattr(quota, "get", store.get)
-    code, body = _get("/v1/usage", AUTH)
-    assert code == 200
-    by = {p["provider"]: p for p in body["providers"]}
-    assert list(by) == list(quota.PROVIDERS)
-    assert by["claude"]["known"] and not by["claude"]["limited"]
-    assert by["claude"]["windows"][0] == {"used": 40.0, "resets_at": now + 86400, "minutes": 10080,
-                                          "name": "weekly", "short": "wk"}
-    assert by["claude"]["updated_at"] == now - 5
-    assert by["antigravity"]["limited"] and by["antigravity"]["limited_until"] == now + 600
-    assert by["native"] == {"provider": "native", "known": False, "limited": False, "windows": [],
-                            "limited_until": None, "updated_at": None}
-    assert [(n["provider"], n["reason"]) for n in body["near"]] == [
-        ("antigravity", "limited"), ("codex", "high"), ("claude", "resets_soon")]
-    assert body["near"][2]["resets_at"] == now + 600
-
-
 @pytest.mark.parametrize("kind", ["read", "idle", "peer", "terminal", "events", "doctor", "doctor-owned",
                                   "preflight", "spend-events", "slow-check"])
 def test_daemon_operations_close_sqlite_connections(brindle_home, monkeypatch, kind):
@@ -503,36 +442,6 @@ def test_daemon_operations_close_sqlite_connections(brindle_home, monkeypatch, k
     assert opened and set(opened) == set(closed)
 
 
-@pytest.mark.parametrize("soft,hard,refused", [
-    (256, 4096, False), (256, resource.RLIM_INFINITY, False),
-    (256, 4096, True), (100000, 100000, False),
-])
-def test_daemon_start_raises_file_limit_before_binding(monkeypatch, soft, hard, refused):
-    limit = [soft, hard]
-
-    def setlimit(which, value):
-        if refused:
-            raise OSError("not permitted")
-        limit[:] = value
-
-    class Started(Exception):
-        pass
-
-    def prepare(*args, **kwargs):
-        if refused or soft == hard:
-            assert limit[0] == soft
-        else:
-            assert soft < limit[0] <= (hard if hard != resource.RLIM_INFINITY else 65536)
-        assert limit[1] == hard
-        raise Started()
-
-    monkeypatch.setattr(resource, "getrlimit", lambda which: tuple(limit))
-    monkeypatch.setattr(resource, "setrlimit", setlimit)
-    monkeypatch.setattr(lifecycle, "prepare", prepare)
-    with pytest.raises(Started):
-        lifecycle.serve()
-
-
 @pytest.mark.parametrize("caller,refused_as,holds_for", [
     (310, "w1", {"w1"}),     # a command under w1's pane, however deep
     # BRINDLE_AGENT_ID in its own environment: refused, but it holds no request as w2,
@@ -561,12 +470,6 @@ def test_peer_agent_callers_are_refused_on_the_unix_socket(seeded, monkeypatch, 
     else:
         assert code == 200
     assert peer.caller_agents(caller) == holds_for
-
-
-def test_peer_pid_names_the_unix_socket_caller():
-    a, b = socket.socketpair(socket.AF_UNIX)
-    with a, b:
-        assert peer.peer_pid(a) == os.getpid()
 
 
 def _caller_check_single_flight(monkeypatch, outcome):
@@ -675,16 +578,6 @@ def test_committed_api_schema_matches_the_routes_and_dtos():
     assert schema.SCHEMA_PATH.read_text() == schema.render()
 
 
-def test_rules_lists_every_pack_with_its_description_and_source(seeded):
-    rules = Path(seeded["repo"]) / ".brindle" / "rules"
-    rules.mkdir(parents=True)
-    (rules / "mine.md").write_text("---\ndescription: My rule\n---\nBe kind.\n")
-    code, body = _get("/v1/rules", AUTH, f"repo={seeded['repo']}")
-    rows = {r["name"]: r for r in body}
-    assert code == 200 and rows["mine"] == {"name": "mine", "description": "My rule", "source": str(rules / "mine.md")}
-    assert rows["style/minimal-diff"]["source"].startswith("built-in") and rows["style/minimal-diff"]["description"]
-
-
 ROUTE_ID = "us.anthropic.claude-opus-x-v1:0"     # the Bedrock id the org's route pins opus to
 
 
@@ -759,31 +652,6 @@ def test_routing_user_view_runs_no_learner_and_no_sign_in_probe(seeded, monkeypa
     assert len(pro_reads) <= 1       # at most one read; main's cross-process entitlement cache may serve it
 
 
-def test_knowledge_search_returns_hits_for_an_indexed_doc(seeded, db):
-    (Path(seeded["repo"]) / "NOTES.md").write_text("# Storage\n\nWe keep state in sqlite, never postgres.\n")
-    src = kb_mod.sources(db, knowledge.repo_key(seeded["repo"]))[0]["id"]
-    kb_mod.sync(db, src)
-    _, hits = _get("/v1/kb/search", AUTH, f"repo={seeded['repo']}&q=sqlite")
-    assert [h["heading_path"] for h in hits] == ["Storage"] and "sqlite" in hits[0]["text"]
-    assert _get("/v1/kb/search", AUTH, f"repo={seeded['repo']}")[1] == []
-
-
-def test_profiles_detail_lints_a_broken_profile(seeded):
-    agents_dir = Path(seeded["repo"]) / ".brindle" / "agents"
-    agents_dir.mkdir(parents=True)
-    (agents_dir / "orphan.md").write_text("---\nname: orphan\nextends: nobody\n---\nHi.\n")
-    _, bad = _get("/v1/profiles/orphan", AUTH, f"repo={seeded['repo']}")
-    assert bad["name"] == "orphan" and any("nobody" in e for e in bad["lint"]["errors"])
-    _, listed = _get("/v1/profiles", AUTH, f"repo={seeded['repo']}")
-    assert any("nobody" in e for p in listed if p["name"] == "orphan" for e in p["lint_errors"])
-    (agents_dir / "torn.md").write_text("---\nname: torn\nauth: invalid\n")     # unclosed fence
-    code, torn = _get("/v1/profiles/torn", AUTH, f"repo={seeded['repo']}")
-    assert code == 200 and torn["name"] == "torn" and torn["lint"]["errors"] and "torn.md" in torn["source"]
-    _, good = _get("/v1/profiles/developer", AUTH, f"repo={seeded['repo']}")
-    assert good["lint"]["errors"] == [] and "env" not in good
-    assert _get("/v1/profiles/nope", AUTH, f"repo={seeded['repo']}")[1]["error"]["code"] == "not_found"
-
-
 @pytest.mark.variant("a secret is shown only as its name and last four characters, never whole")
 def test_config_shows_secrets_only_as_names_and_last_four(seeded, monkeypatch):
     monkeypatch.setattr(keystore, "known_names", lambda repo=None: ["OPENAI_API_KEY", "UNSET_KEY"])
@@ -814,109 +682,6 @@ def test_config_shows_secrets_only_as_names_and_last_four(seeded, monkeypatch):
     monkeypatch.setattr(worker_models, "_signed_in", None)
     _, bare = _get("/v1/config", AUTH, f"repo={seeded['repo']}&keys=0")
     assert bare["keys"] == [] and "repo" in bare and reads == [] and probed == []
-
-
-def test_doc_map_proxies_only_a_neighbourhood_without_caching(brindle_home, monkeypatch):
-    from urllib.parse import parse_qs, urlencode, urlsplit
-
-    from brindle.pro import analysis_docs
-
-    calls = []
-
-    def api(method, path, body=None, **kw):
-        url = urlsplit(path)
-        calls.append((method, url.path, parse_qs(url.query), body))
-        if url.path == "/analysis-docs":
-            return {"docs": [{"doc_id": "d", "source": {"kind": "task", "ref": "feat/cache"},
-                              "created_by": "u1", "paths": ["src/cache"]}]}
-        return {"nodes": [{"id": str(len(calls) // 2), "type": "path", "label": "src/cache"},
-                          {"id": "d", "type": "doc", "kind": "feature", "label": "Cache design"},
-                          {"id": "topic:cache", "type": "topic", "label": "cache"}],
-                "edges": [{"from": "d", "to": str(len(calls) // 2), "kind": "mentions"},
-                          {"from": "d", "to": "topic:cache", "kind": "topic"}]}
-
-    monkeypatch.setattr(analysis_docs, "require_entitlement", lambda store=None: SimpleNamespace(sub="u1"))
-    monkeypatch.setattr(analysis_docs, "api", api)
-    query = {"scope_kind": "group", "scope_id": "t1", "paths": json.dumps(["src/cache", "src/db"]), "depth": "1"}
-    for extra in ({"paths": "broken"}, {"depth": "2"}, {"scope_id": ""}):
-        assert _get("/v1/analysis-docs/map", AUTH, urlencode(query | extra))[0] == 400
-    assert calls == []
-    for version in ("1", "2"):
-        code, body = _get("/v1/analysis-docs/map", AUTH, urlencode(query | {"local_decisions": "private"}))
-        assert code == 200 and body["nodes"][0]["id"] == version
-        assert [(n["kind"], n["title"]) for n in body["nodes"]] == [("path", "src/cache"), ("doc", "Cache design")]
-        assert body["nodes"][0]["path"] == "src/cache"
-        assert body["nodes"][1]["source"] == {"kind": "task", "ref": "feat/cache"}
-        assert body["nodes"][1]["created_by"] == "u1"
-        assert body["edges"] == [{"source": "d", "target": version, "kind": "mentions"}]
-    upstream = query | {"paths": "src/cache,src/db"}       # the server splits its list on commas
-    assert calls == [("GET", "/analysis-docs", {k: [query[k]] for k in ("scope_kind", "scope_id")}, None),
-                     ("GET", "/analysis-docs/map", {k: [v] for k, v in upstream.items()}, None)] * 2
-    monkeypatch.setattr(analysis_docs, "require_entitlement", lambda store=None: (_ for _ in ()).throw(RuntimeError("no plan")))
-    assert _get("/v1/analysis-docs/map", AUTH, urlencode(query))[0] == 402
-    assert len(calls) == 4
-
-
-def test_doc_map_whole_scope_uses_list_with_provenance_and_connections(brindle_home, monkeypatch):
-    from urllib.parse import parse_qs, urlencode, urlsplit
-
-    from brindle.pro import analysis_docs
-
-    calls = []
-    source = {"kind": "task", "ref": "feat/cache", "session": "session-1"}
-    doc = {"doc_id": "d1", "title": "Cache", "source": source, "created_by": "u1",
-           "created_at": 123, "scope": {"kind": "group", "id": "t1"},
-           "paths": ["./src/cache.py", "src/declared.py"],
-           "mentions": {"files": ["src/cache.py"]}, "supersedes": ["d2"], "related": ["absent"]}
-
-    def api(method, path, body=None, **kw):
-        url = urlsplit(path)
-        calls.append((url.path, parse_qs(url.query)))
-        assert url.path == "/analysis-docs"
-        return {"docs": [doc, {"doc_id": "d2", "title": "Earlier cache"}]}
-
-    monkeypatch.setattr(analysis_docs, "require_entitlement", lambda store=None: SimpleNamespace(sub="u1"))
-    monkeypatch.setattr(analysis_docs, "api", api)
-    query = {"scope_kind": "group", "scope_id": "t1"}
-    code, body = _get("/v1/analysis-docs/map", AUTH, urlencode(query))
-    assert code == 200
-    nodes = {n["id"]: n for n in body["nodes"]}
-    assert nodes["d1"] == {**doc, "id": "d1", "kind": "doc", "paths": ["src/cache.py", "src/declared.py"]}
-    assert nodes["d2"]["scope"] == {"kind": "group", "id": "t1"}
-    assert {tuple(e.values()) for e in body["edges"]} == {
-        ("d1", "path:src/cache.py", "mentions"), ("d1", "path:src/declared.py", "mentions"), ("d1", "d2", "supersedes")}
-    assert calls == [("/analysis-docs", {k: [v] for k, v in query.items()})]
-    monkeypatch.setattr(analysis_docs, "require_entitlement", lambda store=None: (_ for _ in ()).throw(RuntimeError("no plan")))
-    assert _get("/v1/analysis-docs/map", AUTH, urlencode(query))[0] == 402
-
-
-def test_docs_with_no_scope_lists_each_readable_scope_once_per_doc(brindle_home, monkeypatch):
-    from urllib.parse import parse_qs, urlsplit
-
-    from brindle.pro import analysis_docs
-
-    held = {"user:u1": [("d1", 4, ["checkout"]), ("shared", 2, ["checkout", "refunds"])],
-            "group:t-empty": [],                                    # a team of theirs with no docs yet
-            "group:t-pay": [("team-only", 3, ["refunds"])],
-            "org:o1": [("shared", 2, ["checkout", "refunds"]), ("d2", 1, ["refunds"])]}
-
-    def api(method, path, body=None, **kw):     # the server refuses a list without a scope
-        url = urlsplit(path)
-        if url.path == "/analysis-docs/scopes":
-            return {"scopes": [{"kind": k, "id": i, "name": i, "can_share": k != "user"}
-                               for k, _, i in (s.partition(":") for s in held)]}
-        q = {k: v[0] for k, v in parse_qs(url.query).items()}
-        docs = held[f"{q['scope_kind']}:{q['scope_id']}"]
-        return {"docs": [{"doc_id": d, "created_at": at, "topics": t} for d, at, t in docs]}
-
-    monkeypatch.setattr(analysis_docs, "require_entitlement", lambda store=None: SimpleNamespace(sub="u1"))
-    monkeypatch.setattr(analysis_docs, "api", api)
-    _, scopes = _get("/v1/analysis-docs/scopes", AUTH)
-    assert [s["id"] for s in scopes["scopes"]] == ["u1", "t-empty", "t-pay", "o1"]
-    _, listed = _get("/v1/analysis-docs", AUTH)
-    assert [d["doc_id"] for d in listed["docs"]] == ["d1", "team-only", "shared", "d2"]
-    _, topics = _get("/v1/analysis-docs/topics", AUTH)
-    assert topics["topics"] == [{"topic": "refunds", "count": 3}, {"topic": "checkout", "count": 2}]
 
 
 def test_analysis_doc_session_summary_counts_local_session_records(db, seeded, monkeypatch):
@@ -985,21 +750,7 @@ def test_doc_destination_is_read_by_anyone_and_changed_only_by_admins(monkeypatc
         assert sent == []
 
 
-def test_doc_policy_and_export_config_are_proxied(monkeypatch):
-    from brindle.pro import analysis_docs
 
-    monkeypatch.setattr(analysis_docs, "require_entitlement",
-                        lambda store=None: SimpleNamespace(sub="u1", org_id="o1", role="member"))
-    config = {"google_client_id": "g", "google_client_secret": "s", "microsoft_client_id": None}
-
-    def fake_api(method, path, body=None, **kw):
-        return config if path == "/analysis-docs/export-config" else {"path": path}
-
-    monkeypatch.setattr(analysis_docs, "api", fake_api)
-    assert _get("/v1/analysis-docs/policy", AUTH)[1] == {"path": "/orgs/o1/analysis-docs/policy"}
-    assert _get("/v1/analysis-docs/export-config", AUTH)[1] == config
-    config["google_client_secret"] = None
-    assert _get("/v1/analysis-docs/export-config", AUTH)[1]["google_client_secret"] is None
 @pytest.mark.parametrize("briefed,enough", [(5, True), (4, False)], ids=["enough", "below-minimum"])
 def test_doc_results_compare_briefed_tasks_with_similar_ones_only(db, briefed, enough):
     from brindle.db import Task

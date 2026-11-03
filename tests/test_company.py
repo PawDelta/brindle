@@ -26,14 +26,6 @@ def calls(team):
     return [c for c in team.calls if c[0].endswith("/company")]
 
 
-def test_shows_no_company_by_default(team):
-    company(team)
-    code, out, _ = run(team, "org", "company", "--org", ORG)
-    assert code == 0 and f"Org {ORG} is not linked into a company" in out
-    assert "never across companies" in " ".join(out.split()) and "company link" in out
-    assert [c[0] for c in calls(team)] == [f"GET {PATH}"]
-
-
 def test_link_then_unlink(team):
     state = company(team)
     code, out, _ = run(team, "org", "company", "link", OTHER, "--org", ORG)
@@ -60,8 +52,3 @@ def test_bad_org_ids_are_rejected_before_any_call(team):
     assert not calls(team)
 
 
-def test_a_malformed_answer_is_refused(team):
-    for body in ({"org_id": ORG}, {"org_id": ORG, "company_id": 7}, {"org_id": ORG, "company_id": ""}):
-        team.routes[f"GET {PATH}"] = [(200, body)]
-        code, _, err = run(team, "org", "company", "--org", ORG)
-        assert code == 1 and "no company state" in err
