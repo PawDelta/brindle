@@ -3759,6 +3759,8 @@ def codex_pre_tool_decision(db: DB, agent: Agent, payload: dict) -> dict | None:
         cfg = load_repo_config(ws.repo_root)
         if cfg.permission_policy != "on":
             return None
+        if permissions.codex_terminal_input(payload):
+            return permissions.codex_pre_tool_output(permissions.Decision("deny", permissions.TERMINAL_INPUT))
         reqs = permissions.from_codex(payload, worktree=ws.path, repo_root=ws.repo_root, agent=agent.id)
         if not reqs:
             return None
@@ -3837,6 +3839,16 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
             return None
         profile_rules = profile_rules_for(agent.profile, ws.repo_root)
         session = _session_of(db, agent)   # for saved actions that last this session
+        if provider == "codex" and policy and permissions.codex_terminal_input(payload):
+            # Input typed into a process already running (write_stdin): no
+            # PreToolUse sees it, and brindle can't tell what the process does
+            # with it, so it never goes in.
+            decision = permissions.Decision("deny", permissions.TERMINAL_INPUT)
+            try:
+                _note_decision(db, agent, ws, "bash", "write_stdin", decision)
+            except Exception:  # noqa: BLE001 - bookkeeping never changes the answer
+                log.exception("brindle: couldn't record a Codex terminal-input deny")
+            return permissions.codex_output(decision)
         if provider == "codex":
             # No tool_use_id in Codex's payload: nothing to pair an approval
             # with, so nothing is kept for learning.

@@ -708,6 +708,24 @@ def decide_all(reqs: list[Request] | None, *, checks: list[str] | None = None,
     return next(d for d in decisions if d.decision == "ask")
 
 
+TERMINAL_INPUT = ("typing into a running process (write_stdin) isn't checked by brindle's policy, so it isn't "
+                  "sent. Run what you need as one command instead (bash -c '...', python -c '...', a script), "
+                  "with its input given up front (a file, a heredoc or a pipe)")
+
+
+def codex_terminal_input(payload: dict) -> bool:
+    """Whether Codex's PermissionRequest is for input to a process already
+    running (its write_stdin tool, which never runs PreToolUse): non-empty
+    characters, or ones brindle can't read. An empty poll (only reading the
+    output) types nothing."""
+    ti = payload.get("tool_input")
+    ti = ti if isinstance(ti, dict) else {}
+    if payload.get("tool_name") != "write_stdin" and "chars" not in ti:
+        return False
+    chars = ti.get("chars")
+    return not isinstance(chars, str) or chars != ""
+
+
 CODEX_PRE_TOOL_UNCHECKED = ("brindle couldn't check this call against the permission policy, so it doesn't "
                             "run; try again, and if it keeps failing tell your supervisor (send_message)")
 

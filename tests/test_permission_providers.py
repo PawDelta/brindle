@@ -658,9 +658,7 @@ def _sandboxed(command):
 def test_codex_pre_tool_hook_denies_what_codex_runs_without_asking(db, ws, monkeypatch, command, expected):
     """Codex runs a sandboxed command without asking, so its PermissionRequest
     hook never sees it: the launch passes a PreToolUse hook, run before every
-    shell command, which answers brindle's denies. Codex runs each command
-    once (no unified exec): write_stdin into a live shell (bash -m, env --
-    bash, sh -c bash ...) would never reach PreToolUse."""
+    shell command, which answers brindle's denies."""
     import re
 
     monkeypatch.setattr(codex_hook, "_AppServer", FakeAppServer)
@@ -669,13 +667,32 @@ def test_codex_pre_tool_hook_denies_what_codex_runs_without_asking(db, ws, monke
     argv = launch_argv(ws)
     [flag] = [arg for arg in argv if arg.startswith("hooks.PreToolUse=")]
     assert argv[argv.index(flag) - 1] == "-c"
-    assert argv[argv.index("features.unified_exec=false") - 1] == "-c"
     assert re.search(flag.split('matcher="', 1)[1].split('"', 1)[0], "Bash")
     hook = hook_command_of(flag)
     assert codex_hook.status() == codex_hook.TRUSTED   # trusted with the PermissionRequest hook
     payload = {**codex_payload("Bash", {"command": command}, ws.path), "hook_event_name": "PreToolUse"}
     out = agents.hook_main(db, a.id, hook.rsplit(" ", 1)[1], json.dumps(payload), trusted=False)
     assert (json.loads(out)["hookSpecificOutput"]["permissionDecision"] if out else None) == expected
+
+
+@pytest.mark.parametrize("event,chars,expected", [
+    # Codex 0.162.1 asks before write_stdin (write_stdin_approval), and runs no
+    # PreToolUse for it: a live shell (bash, bash -m, env -- bash, sh -c bash)
+    # would run what's typed into it unchecked.
+    ("codex-permission-request", "cat ~/.aws/credentials\n", "deny"),
+    ("codex-pre-tool", "env\n", "deny"),       # should a Codex ever run PreToolUse for it
+    ("codex-permission-request", "", None),    # an empty poll types nothing
+])
+def test_codex_terminal_input_is_never_sent(db, ws, monkeypatch, event, chars, expected):
+    monkeypatch.setattr(agents, "_hold_for_app", lambda *args, **kwargs: None)
+    turn_on(ws)
+    a = worker(db, ws)
+    payload = {**codex_payload("write_stdin", {"session_id": 7, "chars": chars}, ws.path),
+               "hook_event_name": "PreToolUse" if event == "codex-pre-tool" else "PermissionRequest"}
+    out = agents.hook_main(db, a.id, event, json.dumps(payload))
+    answer = json.loads(out)["hookSpecificOutput"] if out else {}
+    decided = answer.get("permissionDecision") or (answer.get("decision") or {}).get("behavior")
+    assert (decided if decided == "deny" else None) == expected
 
 
 @pytest.mark.parametrize("broken,command,reason", [

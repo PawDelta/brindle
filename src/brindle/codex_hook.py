@@ -69,13 +69,12 @@ TIMEOUT = 86400 + 30
 # (shell commands and exec_command match as Bash). It only denies, so it
 # holds nothing for the person: a short timeout.
 PRE_TOOL_EVENT = "codex-pre-tool"
-PRE_TOOL_MATCHER = "^(Bash|apply_patch|mcp__.*)$"
+# write_stdin too, should a Codex ever run PreToolUse for it: 0.162.1 doesn't,
+# and asks for approval instead (its write_stdin_approval feature), where the
+# PermissionRequest hook denies the input (permissions.codex_terminal_input).
+# Users can't turn unified exec (resumable processes) off: Codex ignores it.
+PRE_TOOL_MATCHER = "^(Bash|apply_patch|write_stdin|mcp__.*)$"
 PRE_TOOL_SECONDS = 120
-# Codex's unified exec keeps a command's process open for write_stdin, which
-# never runs PreToolUse again: a shell started there would run whatever is
-# typed into it unchecked. With the policy on, Codex runs each command once
-# (its plain shell tool), so every command it runs is one PreToolUse saw.
-ONE_SHOT_EXEC = ["-c", "features.unified_exec=false"]
 SOURCE = "sessionFlags"
 
 
@@ -277,7 +276,7 @@ def launch_flags(cwd: str | None, review: bool = False) -> list[str]:
             command = hook_command()
         if ensure(command=command) != TRUSTED:
             return []
-        return [*config_flags(command), *(ONE_SHOT_EXEC if policy_on(cwd) else [])]
+        return config_flags(command)
     except Exception:  # noqa: BLE001 - never stop a launch over this
         return []
 
