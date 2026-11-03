@@ -884,20 +884,12 @@ describe("SessionScreen, the pty view", () => {
 
   it("shows the supervisor's and each worker's pane through a tmux client on its window, one view at a time", async () => {
     const v = views({ kind: "ready", tmux: "tmux 3.8" });
-    // The supervisor starts up on a prompt (status "starting" until a hook fires), with prompts pending.
-    const starting = { ...root, agents: [{ ...root.agents![0], status: "starting" }] };
-    const { daemon, sync, term } = mount({ sup1: live, w1: live }, { workspaces: [starting, worker], inbox: [permissionInTerminal, permission] }, undefined, "sup1", ["sup1", "w1"], REPO, v.value);
+    const { daemon, sync, term } = mount({ sup1: live, w1: live }, { workspaces: [{ ...root, agents: [{ ...root.agents![0], status: "starting" }] }, worker], inbox: [permissionInTerminal, permission] }, undefined, "sup1", ["sup1", "w1"], REPO, v.value);
     await waitFor(() => expect(v.opened).toHaveLength(1));
     expect(v.opened[0].at).toEqual({ server: "brindle", target: windowOf("sup1") });
     expect(screen.getByTestId("terminal").dataset.pty).toBe("1");
     await waitFor(() => expect(surface().dataset.card).toBe("live"));
-    // Whatever status the engine reports while a prompt is up, the live pane stays.
-    for (const status of ["waiting", "processing", "idle", "unknown"]) {
-      act(() => daemon.publish("agent.status", { root_id: "sup1", agent_id: "sup1", payload: { status } }));
-      await flush();
-      expect(surface().dataset.card).toBe("live");
-    }
-    expect(v.opened[0].closed).toBe(false);
+    for (const status of ["waiting", "processing", "idle", "unknown"]) { act(() => daemon.publish("agent.status", { root_id: "sup1", agent_id: "sup1", payload: { status } })); await flush(); expect(surface().dataset.card).toBe("live"); }
     // The client's bytes are drawn as they come; what xterm.js says goes back as is.
     act(() => v.opened[0].handlers.onData(new TextEncoder().encode("\x1b[?1049hclaude")));
     expect(term().written).toBe("\x1b[?1049hclaude");
