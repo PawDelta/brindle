@@ -26,8 +26,8 @@ def _libproc():
     return lib
 
 
-def _procargs(pid: int) -> bytes:
-    """Only this process's environment, from macOS KERN_PROCARGS2."""
+def _procargs(pid: int) -> tuple[bytes, bytes]:
+    """This process's arguments and environment, from macOS KERN_PROCARGS2."""
     lib = _libproc()
     mib = (ctypes.c_int * 2)(1, 8)  # CTL_KERN, KERN_ARGMAX
     argmax = ctypes.c_int()
@@ -44,16 +44,19 @@ def _procargs(pid: int) -> bytes:
     offset = raw.index(b"\0", 4) + 1  # executable path, then padding
     while offset < len(raw) and raw[offset] == 0:
         offset += 1
+    start = offset
     for _ in range(argc):
         offset = raw.index(b"\0", offset) + 1
-    return raw[offset:]
+    return raw[start:offset], raw[offset:]
 
 
-def process(pid: int, *, environment: bool = False) -> Proc | None:
+def process(pid: int, *, environment: bool = False, command: bool = False) -> Proc | None:
     """Read one of this user's processes, never enumerate other processes.
 
-    Ancestors need only their parent and owner. Only the caller needs its
-    environment; no subprocess or full command/environment table is involved.
+    ``command`` and ``environment`` add its command line and environment to
+    ``text``, in that order, as :func:`brindle.procs.table` does; without
+    them it carries only the parent and owner. No subprocess or full
+    command/environment table is involved.
     None means the process is gone or belongs to another user. Other probe
     failures propagate so the guard does not cache them as identity refusals.
     """
@@ -70,16 +73,48 @@ def process(pid: int, *, environment: bool = False) -> Proc | None:
             uid = struct.unpack_from("I", info.raw, 36)[0]
             if found != pid or uid != os.getuid():
                 return None
-            env = _procargs(pid) if environment else b""
+            args, env = _procargs(pid) if environment or command else (b"", b"")
         else:
             path = Path("/proc") / str(pid)
             if path.stat().st_uid != os.getuid():
                 return None
             stat = (path / "stat").read_text()
             ppid = int(stat.rsplit(")", 1)[1].split()[1])
+            args = (path / "cmdline").read_bytes() if command else b""
             env = (path / "environ").read_bytes() if environment else b""
-        return Proc(pid, ppid, env.replace(b"\0", b" ").decode(errors="replace"))
+        parts = ([args] if command else []) + ([env] if environment else [])
+        return Proc(pid, ppid, " ".join(p.replace(b"\0", b" ").decode(errors="replace") for p in parts))
     except OSError as exc:
         if exc.errno in (errno.ESRCH, errno.ENOENT):
             return None
         raise
+
+
+def children(pid: int) -> list[int]:
+    """The pids whose parent is ``pid``, without reading any of their details."""
+    if sys.platform == "darwin":
+        lib = _libproc()
+        lib.proc_listchildpids.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_int]
+        lib.proc_listchildpids.restype = ctypes.c_int
+        count = lib.proc_listchildpids(pid, None, 0)
+        if count < 0:
+            raise OSError(ctypes.get_errno(), "process probe failed")
+        buf = (ctypes.c_int * (count + 64))()
+        count = lib.proc_listchildpids(pid, buf, ctypes.sizeof(buf))
+        if count < 0:
+            raise OSError(ctypes.get_errno(), "process probe failed")
+        return [p for p in buf[:count] if p > 0]
+    task = Path("/proc") / str(pid) / "task"
+    try:
+        listed = [(t / "children").read_text().split() for t in task.iterdir()]
+        return [int(p) for found in listed for p in found]
+    except OSError:
+        pass
+    out = []
+    for d in Path("/proc").iterdir():
+        try:
+            if d.name.isdigit() and int((d / "stat").read_text().rsplit(")", 1)[1].split()[1]) == pid:
+                out.append(int(d.name))
+        except (OSError, IndexError, ValueError):
+            continue
+    return out

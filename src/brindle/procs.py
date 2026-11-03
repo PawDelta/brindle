@@ -106,6 +106,55 @@ def _home_matches(p: Proc, from_config: bool = False) -> bool:
     return (m.group(1) if m else None) == os.environ.get("BRINDLE_HOME")
 
 
+def root_agent(p: Proc) -> str | None:
+    """The agent ``p`` is a root process of, read from ``p`` alone (its text
+    holds its command line and environment): a CLI launched with brindle's
+    MCP config, or a brindle MCP server. :func:`agent_pids` finds the same
+    roots by scanning every process."""
+    for aid in re.findall(r'BRINDLE_AGENT_ID(?:": | = \\?)"([0-9a-f]+)', p.text):
+        if _names_agent(p, aid) and _home_matches(p, from_config=True):
+            return aid
+    for aid in re.findall(r"(?:^|\s)BRINDLE_AGENT_ID=([0-9a-f]+)", p.text):
+        if _is_brindle_mcp_for(p, aid) and _home_matches(p):
+            return aid
+    return None
+
+
+def is_spare(p: Proc) -> bool:
+    """A pre-started spare session: a root when its brindle MCP server is."""
+    return "bg-spare" in p.text.split(" BRINDLE_", 1)[0]
+
+
+def is_daemon(p: Proc) -> bool:
+    """Claude Code's daemon: what it hosts isn't the agent's that started it."""
+    return _is_daemon(p)
+
+
+def _panes_stamp() -> Path:
+    from brindle.config import brindle_home
+
+    return brindle_home() / "agent-panes.stamp"
+
+
+def agent_panes_changed() -> None:
+    """Note that an agent got a new tmux pane, so every process's cached
+    snapshot of agent panes (brindle.daemon.peer) stops clearing callers."""
+    path = _panes_stamp()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    token = os.urandom(16).hex()
+    tmp = path.with_name(f"{path.name}.{token}")
+    tmp.write_text(token)
+    os.replace(tmp, path)
+
+
+def agent_panes_stamp() -> str:
+    """Changes whenever :func:`agent_panes_changed` is called, in any process."""
+    try:
+        return _panes_stamp().read_text()
+    except OSError:
+        return ""
+
+
 def agent_pids(agent_ids: set[str] | list[str], pane_pids: dict[str, list[int]] | None = None,
                procs: dict[int, Proc] | None = None, through_ancestors: bool = False) -> dict[str, set[int]]:
     """Process ids by agent. ``pane_pids``: agent id -> the pids of its tmux
@@ -129,7 +178,7 @@ def agent_pids(agent_ids: set[str] | list[str], pane_pids: dict[str, list[int]] 
             elif _is_brindle_mcp_for(p, aid) and _home_matches(p):
                 roots.add(p.pid)
                 parent = procs.get(p.ppid)
-                if parent and "bg-spare" in parent.text.split(" BRINDLE_", 1)[0]:
+                if parent and is_spare(parent):
                     roots.add(parent.pid)   # a pre-started spare made for this agent
         found, queue = set(), [r for r in roots if r in procs]
         while queue:

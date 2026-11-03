@@ -5,17 +5,19 @@ Agents run as the same OS user as the person, so they can read the token in
 connecting process (LOCAL_PEERPID on macOS, SO_PEERCRED on Linux), so the
 guard refuses a caller that is, or descends from, a live brindle agent's
 process (its tmux pane, its CLI, its MCP server: see :mod:`brindle.procs`),
-or whose own environment carries BRINDLE_AGENT_ID. A platform that names no
+or one whose environment carries BRINDLE_AGENT_ID. A platform that names no
 peer keeps token-only, as TCP does."""
 
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 import socket
 import struct
 import sys
 import time
+from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from threading import Lock
 
@@ -28,8 +30,9 @@ LOCAL_PEERPID = 2
 PANE_TTL = 5.0
 _pane_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="brindle-agent-panes")
 _pane_lock = Lock()
-_pane_cache: tuple[float, dict[str, list[int]]] | None = None
-_pane_refresh: Future | None = None
+# (when taken, agent_panes_stamp it was taken under, agent id -> pane pids)
+_pane_cache: tuple[float, str, dict[str, list[int]]] | None = None
+_pane_refresh: tuple[str, Future] | None = None
 
 
 def peer_pid(sock) -> int | None:
@@ -85,55 +88,88 @@ def _agent_panes() -> dict[str, list[int]]:
         db.conn.close()
 
 
+def _ancestry(pid: int, identity: bool) -> Iterator[procs.Proc]:
+    """``pid`` and then its ancestors, read one process at a time: nothing
+    when ``pid`` can't be read. ``identity`` reads each one's command line
+    and environment too, and stops below Claude Code's daemon and this
+    process, which :func:`brindle.procs.agent_pids` never walks through."""
+    seen: set[int] = set()
+    current = process_probe.process(pid, environment=identity, command=identity)
+    while current is not None and current.pid not in seen:
+        if identity and seen and (current.pid == os.getpid() or procs.is_daemon(current)):
+            return
+        yield current
+        seen.add(current.pid)
+        current = (process_probe.process(current.ppid, environment=identity, command=identity)
+                   if current.ppid > 1 else None)
+
+
+def _launched_by(p: procs.Proc) -> str | None:
+    """The agent whose environment, launch command or brindle MCP server
+    makes ``p`` one of its processes (see :mod:`brindle.procs`)."""
+    if (m := re.search(r"(?:^|\s)BRINDLE_AGENT_ID=(\S+)", p.text)):
+        return m.group(1)
+    if (aid := procs.root_agent(p)) is not None:
+        return aid
+    if procs.is_spare(p):
+        for child in process_probe.children(p.pid):
+            c = process_probe.process(child, environment=True, command=True)
+            if c is not None and (aid := procs.root_agent(c)) is not None:
+                return aid
+    return None
+
+
 def agent_caller(pid: int) -> str | None:
-    """Why process ``pid`` is refused: it belongs to a brindle agent (it has
-    BRINDLE_AGENT_ID in its environment, or it or an ancestor is one of a
-    live agent's processes), or it can't be checked. None for anyone else's."""
-    me = process_probe.process(pid, environment=True)
-    if me is None:
+    """Why process ``pid`` is refused: it belongs to a brindle agent (it or an
+    ancestor has BRINDLE_AGENT_ID in its environment, is an agent's CLI or
+    brindle MCP server, or is one of a live agent's panes), or it can't be
+    checked. None for anyone else's. Reads only ``pid``'s own ancestry, never
+    the whole process table."""
+    chain: set[int] = set()
+    for p in _ancestry(pid, identity=True):
+        if (aid := _launched_by(p)) is not None:
+            return f"the caller runs under brindle agent {aid}"
+        chain.add(p.pid)
+    if not chain:
         # Gone already (a request sent before exiting) or not this user's:
         # unchecked is refused, or an agent could fire and exit.
         return "the caller can't be checked (it exited, or isn't this user's process)"
-    if (m := re.search(r"(?:^|\s)BRINDLE_AGENT_ID=(\S+)", me.text)):
-        return f"the caller runs under brindle agent {m.group(1)}"
-    chain, current = set(), me
-    while current is not None and current.pid not in chain:
-        chain.add(current.pid)
-        current = process_probe.process(current.ppid) if current.ppid > 1 else None
-    owned = _cached_agent_panes()
-    return next((f"the caller runs under brindle agent {aid}"
-                 for aid, pids in owned.items() if set(pids) & chain), None)
+    owners = _pane_owners(chain)
+    return next((f"the caller runs under brindle agent {aid}" for aid in sorted(owners)), None)
 
 
-def _cached_agent_panes() -> dict[str, list[int]]:
-    """Share the initial snapshot; refresh stale snapshots off the caller lane.
+def _pane_owners(chain: set[int]) -> set[str]:
+    """The agents one of whose pane processes is in ``chain``.
 
-    Keep serving the last snapshot while a refresh is in flight. Never
-    substitute an empty snapshot when the initial collection fails.
+    A snapshot shows that a pane is an agent's even after it expires, but
+    it shows that one isn't only while it is fresh: younger than PANE_TTL
+    and taken since the last new agent pane (brindle.procs.agent_panes_changed).
+    Otherwise this waits for a new snapshot, shared by every caller, and
+    raises if it can't be taken, so the guard answers "unavailable" rather
+    than letting the caller through.
     """
     global _pane_cache, _pane_refresh
+    stamp = procs.agent_panes_stamp()
     with _pane_lock:
-        if _pane_refresh is not None and _pane_refresh.done():
-            finished, _pane_refresh = _pane_refresh, None
-            try:
-                _pane_cache = (time.monotonic(), finished.result())
-            except Exception:
-                if _pane_cache is None:
-                    raise
-        if _pane_cache is not None and time.monotonic() - _pane_cache[0] <= PANE_TTL:
-            return _pane_cache[1]
-        if _pane_refresh is None:
-            _pane_refresh = _pane_executor.submit(_agent_panes)
-        pending = _pane_refresh
+        if _pane_refresh is not None and _pane_refresh[1].done():
+            (taken, finished), _pane_refresh = _pane_refresh, None
+            if not finished.cancelled() and finished.exception() is None:
+                _pane_cache = (time.monotonic(), taken, finished.result())
         if _pane_cache is not None:
-            return _pane_cache[1]
-    # Cold start must know the pane roots before it can clear a caller.
-    result = pending.result()
+            when, taken, panes = _pane_cache
+            if owners := {aid for aid, pids in panes.items() if chain.intersection(pids)}:
+                return owners
+            if taken == stamp and time.monotonic() - when <= PANE_TTL:
+                return set()
+        if _pane_refresh is None or _pane_refresh[0] != stamp:
+            _pane_refresh = (stamp, _pane_executor.submit(_agent_panes))
+        pending = _pane_refresh
+    panes = pending[1].result()
     with _pane_lock:
         if _pane_refresh is pending:
-            _pane_cache = (time.monotonic(), result)
+            _pane_cache = (time.monotonic(), pending[0], panes)
             _pane_refresh = None
-    return result
+    return {aid for aid, pids in panes.items() if chain.intersection(pids)}
 
 
 def caller_agents(pid: int) -> set[str]:
@@ -142,12 +178,10 @@ def caller_agents(pid: int) -> set[str]:
     can't be checked. Only what brindle itself knows counts, never what a
     process says of itself (its environment, its command line), which an
     agent could set to pass for another. A permission hook holds requests
-    only for these (brindle.daemon.holds)."""
-    table = procs.table()
-    if pid not in table:
+    only for these (brindle.daemon.holds). Like :func:`agent_caller`, it
+    reads only ``pid``'s own ancestry."""
+    try:
+        chain = {p.pid for p in _ancestry(pid, identity=False)}
+        return _pane_owners(chain) if chain else set()
+    except Exception:
         return set()
-    chain, p = set(), pid
-    while p in table and p not in chain:
-        chain.add(p)
-        p = table[p].ppid
-    return {aid for aid, pids in _agent_panes().items() if set(pids) & chain}

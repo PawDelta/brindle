@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from brindle import procs
 from brindle.daemon import peer, process_probe as probe
 
 
@@ -63,25 +64,62 @@ def test_caller_linux_probe_checks_owner_and_reads_one_process(monkeypatch, tmp_
     assert probe.process(30) is None
 
 
-def test_caller_pane_cache_shares_background_refresh_and_retains_agent_roots(monkeypatch):
+def test_caller_pane_snapshot_proves_ownership_when_expired_but_never_clears(monkeypatch):
     clock, jobs = [100.0], []
+    outcomes = [OSError("tmux busy"), {"w2": [30]}]
     def submit(fn):
         job = Future()
         jobs.append(job)
-        if len(jobs) == 1:
-            job.set_result({"w1": [20]})
+        outcome = outcomes.pop(0)
+        job.set_exception(outcome) if isinstance(outcome, Exception) else job.set_result(outcome)
         return job
     monkeypatch.setattr(peer, "time", SimpleNamespace(monotonic=lambda: clock[0]))
-    monkeypatch.setattr(peer, "_pane_cache", None)
+    monkeypatch.setattr(peer, "_pane_cache", (100.0, procs.agent_panes_stamp(), {"w1": [20]}))
     monkeypatch.setattr(peer, "_pane_refresh", None)
     monkeypatch.setattr(peer, "_pane_executor", SimpleNamespace(submit=submit))
-    assert peer._cached_agent_panes() == {"w1": [20]}
     clock[0] += peer.PANE_TTL + 1
-    for _ in range(3):
-        assert peer._cached_agent_panes() == {"w1": [20]}
-    assert len(jobs) == 2
-    jobs[-1].set_exception(OSError("unavailable"))
-    assert peer._cached_agent_panes() == {"w1": [20]}
-    jobs[-1].set_result({"w2": [40]})
-    assert peer._cached_agent_panes() == {"w2": [40]}
-    assert peer._cached_agent_panes() == {"w2": [40]} and len(jobs) == 3
+    assert peer._pane_owners({20, 1}) == {"w1"} and not jobs
+    with pytest.raises(OSError):
+        peer._pane_owners({30})     # no fresh snapshot: never cleared
+    assert peer._pane_owners({30}) == {"w2"}
+    assert peer._pane_owners({31}) == set() and len(jobs) == 2
+
+
+_CONFIG = '{"mcpServers": {"brindle": {"env": {"BRINDLE_AGENT_ID": "ab1", "BRINDLE_HOME": "/h"}}}}'
+_TREE = {p.pid: p for p in [
+    procs.Proc(300, 1, f"claude --mcp-config {_CONFIG} HOME=/u BRINDLE_AGENT_ID=ab1"),
+    procs.Proc(400, 300, "claude daemon run HOME=/u BRINDLE_AGENT_ID=ab1"),   # started by ab1
+    procs.Proc(500, 400, f"claude --mcp-config {_CONFIG} HOME=/u"),   # ab1's session the daemon hosts
+    procs.Proc(510, 500, "/bin/zsh -c make HOME=/u"),
+    procs.Proc(511, 510, "curl --unix-socket daemon.sock HOME=/u"),
+    procs.Proc(600, 400, "claude --bg-spare HOME=/u"),
+    procs.Proc(601, 600, "python -m brindle mcp HOME=/u BRINDLE_AGENT_ID=ab2 BRINDLE_HOME=/h"),
+    procs.Proc(610, 600, "curl --unix-socket daemon.sock HOME=/u"),
+    procs.Proc(700, 1, "-zsh HOME=/u BRINDLE_AGENT_ID=ab3"),
+    procs.Proc(710, 700, "curl --unix-socket daemon.sock HOME=/u"),   # dropped the variable
+    procs.Proc(800, 400, "claude HOME=/u"),     # a person's session the daemon hosts
+    procs.Proc(810, 800, "curl --unix-socket daemon.sock HOME=/u"),
+]}
+
+
+@pytest.mark.parametrize("caller,agent", [
+    (511, "ab1"),   # under a daemon-hosted session, outside any pane
+    (610, "ab2"),   # under the pre-started spare that owns ab2's MCP server
+    (710, "ab3"),   # an ancestor's environment names the agent
+    (810, None),    # the daemon's environment belongs to whoever started it
+])
+def test_caller_ancestry_finds_agents_without_a_pane(monkeypatch, caller, agent):
+    monkeypatch.setenv("BRINDLE_HOME", "/h")
+    monkeypatch.setattr(procs, "table", lambda: pytest.fail("caller read the full process table"))
+    monkeypatch.setattr(probe, "process", lambda pid, **kw: _TREE.get(pid))
+    monkeypatch.setattr(probe, "children", lambda pid: [p.pid for p in _TREE.values() if p.ppid == pid],
+                        raising=False)
+    monkeypatch.setattr(peer, "_pane_cache", None)
+    monkeypatch.setattr(peer, "_pane_refresh", None)
+    def submit(fn):
+        job = Future()
+        job.set_result({})
+        return job
+    monkeypatch.setattr(peer, "_pane_executor", SimpleNamespace(submit=submit))
+    reason = peer.agent_caller(caller)
+    assert (reason and reason.rsplit(" ", 1)[-1]) == agent

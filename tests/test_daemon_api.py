@@ -554,24 +554,60 @@ def test_peer_agent_callers_are_refused_on_the_unix_socket(seeded, monkeypatch, 
     ]}
     monkeypatch.setattr(procs, "table", lambda: table)
     probes = []
-    def probe(pid, *, environment=False):
-        probes.append((pid, environment))
+    def probe(pid, *, environment=False, command=False):
+        probes.append(pid)
         return table.get(pid)
     monkeypatch.setattr(peer.process_probe, "process", probe)
-    monkeypatch.setattr(peer, "_pane_cache", None, raising=False)
+    monkeypatch.setattr(peer, "_pane_cache", None)
+    monkeypatch.setattr(peer, "_pane_refresh", None)
     monkeypatch.setattr(tmux, "window_pids", lambda w, server=None: {"@1": [150], "@2": [200]}.get(w, []))
     with monkeypatch.context() as local:
         local.setattr(procs, "table", lambda: pytest.fail("caller read the full process table"))
         reason = peer.agent_caller(caller)
         assert bool(reason) == bool(refused_as)
-    assert probes == [(p, p == caller) for p in chain]
+        assert probes == chain
+        assert peer.caller_agents(caller) == holds_for
     code, body = _get("/v1/meta", AUTH, peer_pid=caller)
     if refused_as:
         assert code == 403 and body["error"]["code"] == "agent_caller"
         assert refused_as in body["error"]["message"]
     else:
         assert code == 200
-    assert peer.caller_agents(caller) == holds_for
+
+
+@pytest.mark.parametrize("snapshot", ["refresh pending", "refresh failed", "pane created since"])
+def test_caller_under_a_new_agent_pane_is_not_cleared_by_an_old_snapshot(seeded, monkeypatch, snapshot):
+    from concurrent.futures import Future
+
+    table = {p.pid: p for p in [procs.Proc(200, 1, "claude --model opus"),
+                                procs.Proc(310, 200, "curl --unix-socket daemon.sock HOME=/u")]}
+    monkeypatch.setattr(peer.process_probe, "process", lambda pid, **kw: table.get(pid))
+    monkeypatch.setattr(tmux, "window_pids", lambda w, server=None: {"@2": [200]}.get(w, []))   # w1's new pane
+    monkeypatch.setattr(peer, "time", SimpleNamespace(monotonic=lambda: 1000.0))
+
+    def submit(fn):
+        job = Future()
+        job.set_result(fn())
+        return job
+
+    class Pending(Future):      # finishes only once a caller waits for it
+        def result(self, *args):
+            if not self.done():
+                self.set_result(peer._agent_panes())
+            return super().result(*args)
+
+    monkeypatch.setattr(peer, "_pane_executor", SimpleNamespace(submit=submit))
+    stamp = procs.agent_panes_stamp()
+    refresh = Pending() if snapshot == "refresh pending" else Future()
+    if snapshot == "refresh failed":
+        refresh.set_exception(OSError("tmux busy"))
+    # The empty snapshot is long expired, or fresh but older than the new pane.
+    monkeypatch.setattr(peer, "_pane_cache", (1000.0 if snapshot == "pane created since" else 0.0, stamp, {}))
+    monkeypatch.setattr(peer, "_pane_refresh", None if snapshot == "pane created since" else (stamp, refresh))
+    if snapshot == "pane created since":
+        procs.agent_panes_changed()
+    code, body = _get("/v1/meta", AUTH, peer_pid=310)
+    assert code == 403 and "w1" in body["error"]["message"]
 
 
 def test_peer_pid_names_the_unix_socket_caller():
