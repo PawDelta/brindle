@@ -26,11 +26,12 @@ from pathlib import Path
 # be running from the very worktree ``remove`` deletes (a reviewer's `uv run`
 # in it), and a module first imported after that can't be found, which left
 # the row behind.
-from brindle import build_caches, git, history, rewind, services, spawn, tmux
+from brindle import build_caches, disk, git, history, rewind, services, spawn, tmux
 from brindle.config import (
     PORT_BLOCK_SIZE,
     PORT_RANGE_START,
     RepoConfig,
+    brindle_home,
     load_repo_config,
     workspace_config,
     worktree_root,
@@ -49,6 +50,7 @@ class WorkspaceError(RuntimeError):
 class SetupResult:
     ok: bool
     log: str
+    waiting: str | None = None   # not run: why it waits ("waiting for disk: ..."), see setup_admitted
 
 
 # -- lookup ----------------------------------------------------------------
@@ -85,9 +87,13 @@ def workspace_env(ws: Workspace, cfg: RepoConfig | None = None) -> dict[str, str
     return env
 
 
-def run_setup_commands(ws: Workspace, cfg: RepoConfig) -> SetupResult:
+def run_setup_commands(ws: Workspace, cfg: RepoConfig, *, anyway: bool = False) -> SetupResult:
     """Run ``cfg.setup`` in a new worktree, cloning node_modules from a base
-    checkout instead of installing where the lockfile matches (build_caches)."""
+    checkout instead of installing where the lockfile matches (build_caches).
+    Held while free disk is low, as ``setup_admitted`` is, unless ``anyway``."""
+    why = None if anyway or not cfg.setup else disk.low_disk(ws.repo_root)
+    if why is not None:
+        return SetupResult(False, f"{why}; setup not run (`brindle setup --anyway` runs it now)", why)
     bases = [ws.repo_root]
     if ws.base_branch:
         try:
@@ -174,6 +180,8 @@ def new_worktree_root(repo_root: str, cfg: RepoConfig | None = None) -> Path:
     the repo's ``git status`` when it lies inside the checkout."""
     root = worktree_root(repo_root, cfg)
     git.exclude(repo_root, root)
+    root.mkdir(parents=True, exist_ok=True)   # a worktree is added there next
+    disk.keep_out_of_spotlight(root, brindle_home())
     return root
 
 
@@ -247,6 +255,18 @@ def run_commands(commands: list[str], cwd: str, env: dict[str, str]) -> SetupRes
             log.append(f"(exit {proc.returncode})")
             return SetupResult(False, "\n".join(log))
     return SetupResult(True, "\n".join(log))
+
+
+def setup_admitted(commands: list[str], cwd: str, env: dict[str, str], repo_root: str, *,
+              anyway: bool = False) -> SetupResult:
+    """``run_commands`` for setup, which builds (dependencies, a venv,
+    node_modules): held while free disk is low (``disk.low_disk``), unless
+    ``anyway`` (the person's ``brindle setup --anyway``, or a start a
+    supervisor forced). Held, it runs nothing and says why in ``waiting``."""
+    why = None if anyway or not commands else disk.low_disk(repo_root)
+    if why is not None:
+        return SetupResult(False, f"{why}; setup not run (`brindle setup --anyway` runs it now)", why)
+    return run_commands(commands, cwd, env)
 
 
 def live_workers(db: DB, ws: Workspace) -> list:
@@ -368,10 +388,13 @@ def create(
     apply_prefix: bool = True,
     reuse_registered: bool = False,
     session_root: str | None = None,
+    setup_anyway: bool = False,
 ) -> Created:
     """``reuse_registered`` (assign/handoff): a branch that already has a
     registered workspace reuses it, or is refused while a worker is live in
-    it. Otherwise (``brindle new``) a taken branch is an error from git."""
+    it. Otherwise (``brindle new``) a taken branch is an error from git.
+    Setup waits while free disk is low (``setup_admitted``; ``setup_anyway``:
+    run it regardless)."""
     repo_root = git.main_repo_root(repo_path)
     cfg: RepoConfig = load_repo_config(repo_root)
     branch = branch_name(repo_root, branch, apply_prefix)
@@ -461,13 +484,13 @@ def create(
 
         copied = _copy_local_files(repo_root, path, cfg.copy, overwrite_changed=True)
         if cfg.setup and pool.fingerprint(repo_root, start_sha, cfg) != claimed.fingerprint:
-            setup = run_setup_commands(ws, cfg)
+            setup = run_setup_commands(ws, cfg, anyway=setup_anyway)
         else:
             setup = None
         pool.fill_in_background(repo_root)
     else:
         copied = _copy_local_files(repo_root, path, cfg.copy)
-        setup = run_setup_commands(ws, cfg) if run_setup and cfg.setup else None
+        setup = run_setup_commands(ws, cfg, anyway=setup_anyway) if run_setup and cfg.setup else None
     return Created(ws, how, start_point, copied, setup)
 
 
@@ -641,17 +664,25 @@ def _rescue_sidebar(db: DB, ws: Workspace) -> None:
 
 
 def remove(db: DB, ws: Workspace, *, force: bool = False, delete_branch: bool | None = None,
-           keep_session: bool = False) -> Removed:
+           keep_session: bool = False, stop=()) -> Removed:
     """``delete_branch``: True deletes the branch (only if merged, unless
     ``force``), False keeps it, and None (the default) follows the repo's
     ``delete_merged_branches``: the branch goes once it is fully merged into
     its base, so finished branches don't pile up, and is kept otherwise.
     ``keep_session`` leaves the workspace's tmux session running: for a
     caller that itself runs in it (the pipeline's reviewer), which killing
-    the session would take down mid-cleanup."""
+    the session would take down mid-cleanup. ``stop``: agents of it to stop
+    first, once the worktree is known to go: kept, it keeps them."""
+    def stop_them():
+        from brindle import agents
+
+        for a in stop:
+            agents._stop(db, a)
+
     if ws.kind == "main":
         from brindle import pipeline
 
+        stop_them()
         if not keep_session:
             _rescue_sidebar(db, ws)
             tmux.kill_session(ws.tmux_session)
@@ -674,6 +705,7 @@ def remove(db: DB, ws: Workspace, *, force: bool = False, delete_branch: bool | 
             )
         if not live:
             # Only stale rows share the folder: drop this row, keep the worktree.
+            stop_them()
             if not keep_session:
                 _rescue_sidebar(db, ws)
                 tmux.kill_session(ws.tmux_session)
@@ -689,6 +721,14 @@ def remove(db: DB, ws: Workspace, *, force: bool = False, delete_branch: bool | 
                 f"{ws.name} has uncommitted changes ({shown}). "
                 "Commit them, or pass --force to discard."
             )
+        # Before teardown, its agents or its session go.
+        if disk.live_in(db, ws.path, own=ws, keep_session=keep_session, stopping=[a.id for a in stop]):
+            raise WorkspaceError(
+                f"{ws.name}'s worktree {ws.path} is in use: a process or a pane of another session "
+                "is in it, someone is attached to its session (or that can't be told). It is kept "
+                "for a later sweep; pass --force to remove it anyway."
+            )
+    stop_them()
 
     cfg = config_for(db, ws)
     teardown = None
@@ -721,12 +761,13 @@ def remove(db: DB, ws: Workspace, *, force: bool = False, delete_branch: bool | 
 
     deleted, note = False, None
     if delete_branch is None:
-        if cfg.delete_merged_branches and _merged_into_base(ws):
+        tip = disk.tip(ws.repo_root, ws.branch)   # before judging it: only this commit goes
+        if tip and cfg.delete_merged_branches and _merged_into_base(ws, db):
             try:
-                git.delete_branch(ws.repo_root, ws.branch, force=True)
+                disk.drop_branch(ws.repo_root, ws.branch, tip)   # restorable from refs/brindle-archive/
                 return _forget(db, ws, Removed(True, f"merged branch {ws.branch} deleted", teardown))
             except git.GitError:
-                pass  # e.g. checked out in another worktree
+                pass  # checked out in another worktree, or it moved on since
         note = f"branch {ws.branch} kept"
     elif delete_branch:
         try:
@@ -751,11 +792,14 @@ def _forget(db: DB, ws: Workspace, removed: Removed) -> Removed:
     return removed
 
 
-def _merged_into_base(ws: Workspace) -> bool:
-    """Every commit on ``ws.branch`` is already in its base branch."""
-    return bool(ws.base_branch) and git.ok(
-        ["merge-base", "--is-ancestor", f"refs/heads/{ws.branch}", f"refs/heads/{ws.base_branch}"],
-        ws.repo_root)
+def _merged_into_base(ws: Workspace, db: DB | None = None) -> bool:
+    """Every change on ``ws.branch`` is already in its base branch: merged,
+    squash-merged (``disk.merged``), or landed through a session PR
+    session_review saw merge, unchanged since (``disk.merged_pr``)."""
+    if not ws.base_branch or not git.branch_exists(ws.repo_root, ws.branch):
+        return False
+    return (disk.merged(ws.repo_root, ws.branch, ws.base_branch)
+            or (db is not None and disk.merged_pr(db, ws)))
 
 
 # -- review and integration ------------------------------------------------

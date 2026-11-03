@@ -24,17 +24,21 @@ the report, merge or check it describes.
 
 from __future__ import annotations
 
+import fcntl
 import gzip
+import io
 import json
 import logging
 import os
-import shutil
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import asdict
 from pathlib import Path
 
 from brindle.config import brindle_home
 from brindle.db import DB, Agent, HistoryEntry, Workspace
+from brindle.redact import REDACTED, mask, mask_data
 from brindle.usage import Usage, agent_transcripts, agent_usage, format_tokens
 
 log = logging.getLogger(__name__)
@@ -130,6 +134,18 @@ def archive_dir() -> Path:
     return brindle_home() / "archive"
 
 
+@contextmanager
+def archive_lock() -> Iterator[None]:
+    """Held while a records file under ``archive_dir()`` is appended to or
+    rewritten, so neither loses the other's lines."""
+    fd = os.open(_private_dir(archive_dir()) / ".lock", os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
 def _private_dir(d: Path) -> Path:
     """``d`` (under ``archive_dir()``) and every folder from there down to it,
     made 0700."""
@@ -138,6 +154,20 @@ def _private_dir(d: Path) -> Path:
         p.mkdir(mode=0o700, parents=True, exist_ok=True)
         os.chmod(p, 0o700)
     return d
+
+
+def _masked_record(line: str) -> str:
+    """One transcript line with the secrets in its text masked. A JSON record
+    is parsed first, so a value JSON escapes (a quote, a line break) is
+    matched as written; a line that isn't JSON is masked as text, and a
+    broken JSON record (cut short), whose escaped values can't be matched, is
+    replaced whole."""
+    end = "\n" if line.endswith("\n") else ""
+    try:
+        record = json.loads(line)
+    except ValueError:
+        return REDACTED + end if line.lstrip().startswith(("{", "[")) else mask(line)
+    return json.dumps(mask_data(record), ensure_ascii=False) + end
 
 
 def _copy_transcripts(db: DB, a: Agent) -> list[str]:
@@ -154,8 +184,10 @@ def _copy_transcripts(db: DB, a: Agent) -> list[str]:
         _private_dir(dest.parent)
         fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "wb") as raw, gzip.GzipFile(fileobj=raw, mode="wb") as gz, \
-                open(src, "rb") as f:
-            shutil.copyfileobj(f, gz)
+                io.TextIOWrapper(gz, encoding="utf-8", errors="surrogateescape", newline="") as copy, \
+                open(src, encoding="utf-8", errors="surrogateescape", newline="") as f:
+            for line in f:              # the copy keeps no secret the conversation quoted
+                copy.write(_masked_record(line))
         out.append(str(dest.relative_to(archive_dir())))
     return out
 
@@ -193,10 +225,11 @@ def archive(db: DB, ws: Workspace | None, members: list[Agent], reason: str) -> 
         }
         name = os.path.basename(repo_root.rstrip(os.sep)) or "unknown"
         path = _private_dir(archive_dir()) / f"{name}.jsonl"
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-        with os.fdopen(fd, "a") as f:
-            os.fchmod(f.fileno(), 0o600)
-            f.write(json.dumps(entry) + "\n")
+        with archive_lock():   # retention may be rewriting this file (disk.retain)
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            with os.fdopen(fd, "a") as f:
+                os.fchmod(f.fileno(), 0o600)
+                f.write(json.dumps(mask_data(entry)) + "\n")
     except Exception:
         log.exception("brindle: couldn't archive %s", ws.id if ws else members[0].id)
         return False

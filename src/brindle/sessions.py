@@ -133,15 +133,40 @@ def handover_prompt(db: DB, old_root: Agent, note: str | None) -> str:
     )
 
 
+# The note on a goal handed to another session: it is no longer this one's.
+# set_goal clears it, so a goal set afterwards is the session's own again.
+HANDED_AWAY = "Handed over to session "
+
+
+def handed_away(ap) -> bool:
+    """Whether autopilot row ``ap``'s goal was handed to another session."""
+    return ap.state == "blocked" and (ap.note or "").startswith(HANDED_AWAY)
+
+
+@dataclass
+class Handover:
+    agent: Agent                  # the supervisor that now has the session
+    why: str | None = None        # why a live supervisor in the destination didn't take it
+
+
 def handover(db: DB, old_root_id: str, dest: Workspace, note: str | None = None, *,
              pause_old: bool = True) -> Agent:
-    """Hand a supervisor session to a new supervisor running in ``dest``.
+    """:func:`handover_to`'s supervisor."""
+    return handover_to(db, old_root_id, dest, note, pause_old=pause_old).agent
+
+
+def handover_to(db: DB, old_root_id: str, dest: Workspace, note: str | None = None, *,
+                pause_old: bool = True) -> Handover:
+    """Hand a supervisor session to a supervisor running in ``dest``: the
+    live one there, else a new one.
 
     Carries over the goal and milestones (with their last results), the
     workers (their ``parent_id``), queued and started tasks, and a handoff note
     that becomes the new supervisor's first message. The old supervisor's
     goal driver is blocked and, with ``pause_old``, the old session paused
-    (not when the old supervisor itself is calling: it ends its own turn)."""
+    (not when the old supervisor itself is calling: it ends its own turn).
+    A live supervisor with an unfinished goal of its own keeps it: a new
+    supervisor is started beside it, and ``why`` says so."""
     from brindle import autopilot as pilot
 
     old = db.get_agent(old_root_id)
@@ -149,10 +174,24 @@ def handover(db: DB, old_root_id: str, dest: Workspace, note: str | None = None,
         raise agents.AgentError(f"no session {old_root_id}")
     ap = db.get_autopilot(old_root_id)
     prompt = handover_prompt(db, old, note)
-    # Always a supervisor, even from a session started as something else.
-    new = agents.spawn(db, dest, agents.SUPERVISOR, prompt=prompt, provider_name=old.provider,
-                       watch_pane=True, background_setup=True, autopilot=True,
-                       claim_goals=False)
+    # A live supervisor already in ``dest`` takes the session over: a second
+    # one there would split the work. Only with none (or a dead or paused
+    # one) is a new supervisor started -- or when that live one is busy with
+    # an unfinished goal of its own, which taking over would overwrite.
+    new, why = _live_supervisor(db, dest, old_root_id), None
+    own = db.get_autopilot(new.id) if new else None
+    if own and own.goal and own.state != "done" and not handed_away(own):
+        why = (f"{new.id} is live in {dest.id} with an unfinished goal of its own "
+               f"(\"{goal_line(db, new)}\"), so a new supervisor was started instead")
+        new = None
+    took_over = new is not None
+    if not took_over:
+        # Always a supervisor, even from a session started as something else.
+        new = agents.spawn(db, dest, agents.SUPERVISOR, prompt=prompt, provider_name=old.provider,
+                           watch_pane=True, background_setup=True, autopilot=True,
+                           claim_goals=False)
+    elif db.get_autopilot(new.id) is None:
+        db.add_autopilot(new.id)
     if ap and ap.goal:
         old_ms = db.milestones(old_root_id)
         pilot.set_goal(db, new.id, ap.goal,
@@ -174,7 +213,7 @@ def handover(db: DB, old_root_id: str, dest: Workspace, note: str | None = None,
             pilot.remove_goals_file(db, old_root_id)  # active work lives in the new session's file
         pilot.sync_goals_file(db, new.id)
     if ap and ap.state != "done":
-        db.update_autopilot(old_root_id, state="blocked", note=f"Handed over to session {new.id}", question=None)
+        db.update_autopilot(old_root_id, state="blocked", note=f"{HANDED_AWAY}{new.id}", question=None)
     with db.tx() as c:
         # Preserve only messages this supervisor sent while it still owned
         # these descendants. A sender-wide alias would also trust unrelated
@@ -211,10 +250,32 @@ def handover(db: DB, old_root_id: str, dest: Workspace, note: str | None = None,
         c.execute("UPDATE inbox SET agent_id=? WHERE agent_id=? AND delivered_at IS NULL "
                   "AND instr(body, ?) > 0", (new.id, old_root_id, pilot.WAIT_ENDED_HEAD))
     _repoint_orphaned_tasks(db, new.id)
+    # The goal is the new supervisor's now: the old session stops announcing
+    # it to the repo's other sessions (who_is_working), paused or not.
+    knowledge.note(db, old_root_id, knowledge.END)
+    if took_over:
+        # Told once everything is its own, so get_progress shows the goal.
+        try:
+            agents.send_message(db, new.id, prompt)
+        except Exception:   # any failed delivery (tmux too): the move is saved, so finish it
+            db.enqueue(new.id, prompt, None)   # kept for delivery when it can take it
     bus.publish_agent(db, "session.handover", new.id, from_root=old_root_id)
     if pause_old:
         agents.pause(db, old_root_id, stop_local_models=False)
-    return new
+    return Handover(new, why)
+
+
+def _live_supervisor(db: DB, ws: Workspace, other_than: str) -> Agent | None:
+    """The newest live session chat (an interactive root) running in ``ws``,
+    other than ``other_than``: one whose pane is up and still its own."""
+    panes = tmux.list_panes()
+    owners = agents.pane_owners(db, panes)
+    for a in reversed(db.list_agents(ws.id)):
+        if (a.id != other_than and a.mode == "interactive" and a.parent_id is None
+                and a.status not in ("paused", "done")
+                and agents.is_alive(a, panes) and agents.owns_pane(db, a, owners)):
+            return a
+    return None
 
 
 def _repoint_orphaned_tasks(db: DB, root_id: str) -> None:

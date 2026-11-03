@@ -247,7 +247,9 @@ def _last_assistant_text(transcript: str) -> str | None:
 
 
 def _trim(text: str, limit: int = SUMMARY_CHARS) -> str:
-    text = text.strip()
+    from brindle.redact import mask
+
+    text = mask(text).strip()           # it is kept in the snapshot's message
     if len(text) <= limit:
         return text
     return text[: limit - 3].rstrip() + "..."

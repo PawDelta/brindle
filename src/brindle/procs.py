@@ -26,7 +26,9 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import signal
+import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,19 +37,37 @@ from brindle import spawn
 
 # Seconds ``ps`` may take, waiting for room included (see brindle.spawn).
 PS_LIMIT = 30.0
+PROC = Path("/proc")   # Linux's process table; absent on macOS
 
 
 @dataclass
 class Proc:
     pid: int
     ppid: int
-    text: str    # command line, plus (on macOS) the environment ps appends
+    text: str    # command line, plus the process's environment
+    cmd: str | None = None   # the command line alone (None: a hand-made table's ``text`` is one)
+
+
+def command_line(p: Proc) -> str:
+    """``p``'s command line, without its environment: what it runs, not
+    what it inherited (TMUX=, a PWD, whatever its parent had)."""
+    return p.text.split(" BRINDLE_", 1)[0].strip() if p.cmd is None else p.cmd.strip()
+
+
+def _ps(flags: str) -> dict[int, tuple[int, str]]:
+    listing = spawn.read(["ps", flags, "-o", "pid=,ppid=,command="], timeout=PS_LIMIT).stdout
+    out = {}
+    for line in listing.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit():
+            out[int(parts[0])] = (int(parts[1]), parts[2])
+    return out
 
 
 def table() -> dict[int, Proc]:
     """Every process of this user."""
     out: dict[int, Proc] = {}
-    proc = Path("/proc")
+    proc = PROC
     if (proc / "self" / "stat").exists():
         for d in proc.iterdir():
             if not d.name.isdigit():
@@ -59,14 +79,15 @@ def table() -> dict[int, Proc]:
             except OSError:
                 continue
             ppid = int(stat.rsplit(")", 1)[1].split()[1])
-            out[int(d.name)] = Proc(int(d.name), ppid, f"{cmd} {env}")
+            out[int(d.name)] = Proc(int(d.name), ppid, f"{cmd} {env}", cmd)
         return out
-    # macOS (BSD ps): `e` appends each process's environment to its command.
-    listing = spawn.read(["ps", "xeww", "-o", "pid=,ppid=,command="], timeout=PS_LIMIT).stdout
-    for line in listing.splitlines():
-        parts = line.split(None, 2)
-        if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit():
-            out[int(parts[0])] = Proc(int(parts[0]), int(parts[1]), parts[2])
+    # macOS (BSD ps): `e` appends each process's environment to its command,
+    # with nothing to tell where one ends, so the command line is read apart.
+    # A process that started between the two has no command line: it counts
+    # as a command (see is_command), whatever its environment says.
+    commands = _ps("xww")
+    for pid, (ppid, text) in _ps("xeww").items():
+        out[pid] = Proc(pid, ppid, text, commands.get(pid, (ppid, ""))[1])
     return out
 
 
@@ -80,7 +101,7 @@ def _ancestors(procs: dict[int, Proc]) -> set[int]:
 
 
 def _is_daemon(p: Proc) -> bool:
-    return bool(re.search(r"\bclaude daemon\b|\bdaemon run\b", p.text.split(" BRINDLE_", 1)[0]))
+    return bool(re.search(r"\bclaude daemon\b|\bdaemon run\b", command_line(p)))
 
 
 def _names_agent(p: Proc, agent_id: str) -> bool:
@@ -106,6 +127,55 @@ def _home_matches(p: Proc, from_config: bool = False) -> bool:
     return (m.group(1) if m else None) == os.environ.get("BRINDLE_HOME")
 
 
+def root_agent(p: Proc) -> str | None:
+    """The agent ``p`` is a root process of, read from ``p`` alone (its text
+    holds its command line and environment): a CLI launched with brindle's
+    MCP config, or a brindle MCP server. :func:`agent_pids` finds the same
+    roots by scanning every process."""
+    for aid in re.findall(r'BRINDLE_AGENT_ID(?:": | = \\?)"([0-9a-f]+)', p.text):
+        if _names_agent(p, aid) and _home_matches(p, from_config=True):
+            return aid
+    for aid in re.findall(r"(?:^|\s)BRINDLE_AGENT_ID=([0-9a-f]+)", p.text):
+        if _is_brindle_mcp_for(p, aid) and _home_matches(p):
+            return aid
+    return None
+
+
+def is_spare(p: Proc) -> bool:
+    """A pre-started spare session: a root when its brindle MCP server is."""
+    return "bg-spare" in command_line(p)
+
+
+def is_daemon(p: Proc) -> bool:
+    """Claude Code's daemon: what it hosts isn't the agent's that started it."""
+    return _is_daemon(p)
+
+
+def _panes_stamp() -> Path:
+    from brindle.config import brindle_home
+
+    return brindle_home() / "agent-panes.stamp"
+
+
+def agent_panes_changed() -> None:
+    """Note that an agent got a new tmux pane, so every process's cached
+    snapshot of agent panes (brindle.daemon.peer) stops clearing callers."""
+    path = _panes_stamp()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    token = os.urandom(16).hex()
+    tmp = path.with_name(f"{path.name}.{token}")
+    tmp.write_text(token)
+    os.replace(tmp, path)
+
+
+def agent_panes_stamp() -> str:
+    """Changes whenever :func:`agent_panes_changed` is called, in any process."""
+    try:
+        return _panes_stamp().read_text()
+    except OSError:
+        return ""
+
+
 def agent_pids(agent_ids: set[str] | list[str], pane_pids: dict[str, list[int]] | None = None,
                procs: dict[int, Proc] | None = None, through_ancestors: bool = False) -> dict[str, set[int]]:
     """Process ids by agent. ``pane_pids``: agent id -> the pids of its tmux
@@ -129,7 +199,7 @@ def agent_pids(agent_ids: set[str] | list[str], pane_pids: dict[str, list[int]] 
             elif _is_brindle_mcp_for(p, aid) and _home_matches(p):
                 roots.add(p.pid)
                 parent = procs.get(p.ppid)
-                if parent and "bg-spare" in parent.text.split(" BRINDLE_", 1)[0]:
+                if parent and is_spare(parent):
                     roots.add(parent.pid)   # a pre-started spare made for this agent
         found, queue = set(), [r for r in roots if r in procs]
         while queue:
@@ -184,17 +254,22 @@ def running_commands(agent_id: str, pane_pids: list[int] | None = None,
     procs = table() if procs is None else procs
     pids = agent_pids([agent_id], {agent_id: pane_pids or []}, procs,
                       through_ancestors=True).get(agent_id, set())
-    out = []
-    for pid in pids:
-        p = procs.get(pid)
-        if p is None:
-            continue
-        cmd = p.text.split(" BRINDLE_", 1)[0].strip()
-        first = os.path.basename(cmd.split(None, 1)[0]) if cmd else ""
-        if first.lstrip("-") in _SHELLS or _PLUMBING.search(cmd) or _is_cli(cmd):
-            continue
-        out.append(p)
-    return out
+    return [procs[pid] for pid in pids if pid in procs and is_command(procs[pid])]
+
+
+def is_command(p: Proc, inside: str | None = None) -> bool:
+    """Whether ``p`` looks like a command (a test run, a build, a dev server),
+    not a provider CLI, its MCP servers, hooks or a bare shell. Only its
+    command line counts, never its environment. ``inside``: a folder (a
+    worktree) whose paths count by their last part alone, so a
+    ``node_modules`` or a "brindle" in the folder's own path doesn't make
+    what runs from it plumbing."""
+    cmd = command_line(p)
+    for folder in sorted({inside, os.path.realpath(inside)}, key=len, reverse=True) if inside else ():
+        cmd = re.sub(re.escape(folder.rstrip(os.sep)) + r"(?:/(\S*))?",
+                     lambda m: os.path.basename(m.group(1) or "") or ".", cmd)
+    first = os.path.basename(cmd.split(None, 1)[0]) if cmd else ""
+    return not (first.lstrip("-") in _SHELLS or _PLUMBING.search(cmd) or _is_cli(cmd))
 
 
 def all_agent_ids(procs: dict[int, Proc] | None = None) -> set[str]:
@@ -207,6 +282,42 @@ def all_agent_ids(procs: dict[int, Proc] | None = None) -> set[str]:
         if re.search(r"-m brindle mcp\b|\bbrindle mcp\b", p.text) and _home_matches(p):
             ids.update(re.findall(r"(?:^|\s)BRINDLE_AGENT_ID=([0-9a-f]+)", p.text))
     return ids
+
+
+def cwds() -> dict[int, str]:
+    """The current folder of every process of this user, whatever started it
+    (a detached dev server, a shell on any tmux server or terminal). Raises
+    OSError when it can't be told: a caller deciding whether something is in
+    use must then assume it is: one process of this user it can't read
+    (not one that exited during the scan) or an lsof that failed part way."""
+    proc = PROC
+    if (proc / "self" / "cwd").exists():
+        out: dict[int, str] = {}
+        for d in proc.iterdir():
+            if d.name.isdigit():
+                try:
+                    if d.stat().st_uid == os.getuid():
+                        out[int(d.name)] = os.readlink(d / "cwd")
+                except (FileNotFoundError, ProcessLookupError):
+                    continue   # it exited meanwhile (or is a zombie): no folder to hold
+        return out
+    lsof = shutil.which("lsof") or "/usr/sbin/lsof"
+    try:
+        listing = spawn.read([lsof, "-w", "-n", "-P", "-a", "-u", str(os.getuid()), "-d", "cwd", "-Fpn"],
+                             timeout=PS_LIMIT)
+    except (spawn.Busy, subprocess.SubprocessError) as e:
+        raise OSError(f"lsof: {e}") from e
+    if listing.returncode != 0:   # some process it couldn't look at: the rest isn't all
+        raise OSError(f"lsof failed ({listing.stderr.strip() or listing.returncode})")
+    out, listed = {}, []
+    for line in listing.stdout.splitlines():
+        if line.startswith("p") and line[1:].isdigit():
+            listed.append(int(line[1:]))
+        elif line.startswith("n") and listed:
+            out[listed[-1]] = line[1:]
+    if os.getpid() not in out or set(listed) - set(out):   # this process has a folder too
+        raise OSError(f"lsof left out a process's folder ({listing.stderr.strip() or 'no error'})")
+    return out
 
 
 def alive(pid: int) -> bool:
