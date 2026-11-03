@@ -161,6 +161,8 @@ def test_resumed_headless_worker_gets_a_turn_to_continue(db, ws, monkeypatch):
 
 
 @pytest.mark.skipif(not shutil.which("tmux"), reason="tmux not installed")
+@pytest.mark.slow("the real headless runner in a tmux pane runs fake-claude turns end to end; "
+                  "~4s idle, past 10s when the machine's cores are oversubscribed")
 def test_headless_worker_lifecycle_in_tmux(db, ws, fake_claude, cheap_profile):
     a = agents.spawn(db, ws, cheap_profile, prompt="build it", mode="assign")
     try:

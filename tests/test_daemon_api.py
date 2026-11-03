@@ -1032,7 +1032,9 @@ def _session_diff_concurrent_asks_share_one_computation(db, repo, tmp_path, monk
                  marks=pytest.mark.variant("24 concurrent requests for one caller share a single check that allows")),
     pytest.param(_caller_check_single_flight, {"outcome": "error"}, id="caller_check-error"),
     pytest.param(_caller_check_single_flight, {"outcome": "limit"}, id="caller_check-limit"),
-    pytest.param(_session_diff_reruns_git_only_for_what_changed, {}, id="session_diff-reruns"),
+    pytest.param(_session_diff_reruns_git_only_for_what_changed, {}, id="session_diff-reruns",
+                 marks=pytest.mark.slow("real git commits, diffs and blames across a session's merges; "
+                                        "~4s idle, past 10s when the machine's cores are oversubscribed")),
     pytest.param(_session_diff_concurrent_asks_share_one_computation, {}, id="session_diff-concurrent"),
 ])
 def test_daemon_overload_lanes_health_caller_check_and_session_diff(request, scenario, params):

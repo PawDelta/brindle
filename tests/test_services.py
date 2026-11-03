@@ -58,6 +58,18 @@ def test_removed_on_remove(db, repo, fake_docker, entitled):
     assert fake_docker()[-2:] == [f"ps -aq --filter label=brindle.workspace={ws.id}", "rm -f c0ffee"]
 
 
+def test_no_containers_means_nothing_to_remove(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    bindir, log = tmp_path / "bin", tmp_path / "docker.log"
+    bindir.mkdir()
+    (bindir / "docker").write_text(f'#!/bin/sh\necho "$@" >> {log}\n')    # lists nothing
+    (bindir / "docker").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
+    assert services.down(SimpleNamespace(id="ws-1")) == []
+    assert log.read_text().splitlines() == ["ps -aq --filter label=brindle.workspace=ws-1"]
+
+
 def test_not_entitled_runs_nothing(db, repo, fake_docker, monkeypatch, capsys):
     monkeypatch.setattr(license, "has", lambda feature: False)
     configure(repo, [{"name": "db", "preset": "postgres"}])

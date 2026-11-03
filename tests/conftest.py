@@ -159,8 +159,9 @@ def test_tmux_server(monkeypatch):
 
     The server starts lazily, with the keeper, just before this process's
     first tmux command that could start it: most tests never touch tmux, and
-    starting and reaping a server is most of an empty test's overhead. A test
-    whose tmux use runs in a child process asks for ``tmux_server_up``."""
+    starting and reaping a server is most of an empty test's overhead. A
+    brindle child process the test starts brings it up first too (see
+    no_real_agent_cli)."""
     from brindle import tmux
 
     _TEST_COUNT[0] += 1
@@ -188,14 +189,6 @@ def test_tmux_server(monkeypatch):
 
     monkeypatch.setattr(tmux, "_start", start)
     _START_TEST_SERVER[:] = [keeper]
-    return keeper
-
-
-@pytest.fixture
-def tmux_server_up(test_tmux_server):
-    """The test's tmux server, keeper and all, started now rather than at its
-    first in-process tmux command (for tmux use that happens in a child)."""
-    test_tmux_server()
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -577,9 +570,10 @@ def no_real_docker(tmp_path, monkeypatch):
     from brindle import services
 
     root = tmp_path.resolve()
+    real = services.docker_path
 
     def docker_path():
-        found = shutil.which("docker")
+        found = real()
         return found if found and Path(found).resolve().is_relative_to(root) else None
 
     monkeypatch.setattr(services, "docker_path", docker_path)
