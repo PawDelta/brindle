@@ -36,10 +36,11 @@ def _calling_agent() -> Agent | None:
 
 
 def _migrated_under_us() -> bool:
-    """Whether brindle was upgraded under this server and the new version has
-    migrated the database since: this server's code no longer writes the rows
-    that version expects (see upgrade.py)."""
-    return upgrade.install.changed() and migrated_by_newer()
+    """Whether a newer brindle has migrated the database: this server's code
+    no longer writes the rows that version expects (see upgrade.py). Whether
+    or not this install changed: a reload can land on code that is still
+    older (another install migrated the database), or fail."""
+    return migrated_by_newer()
 
 
 class _Server(MCPServer):
@@ -1664,10 +1665,67 @@ def _report_server_exit(error: Exception | None = None) -> None:
         logger.exception("Could not deliver the MCP recovery notice")
 
 
+def _wants_reload(reloaded: bool) -> bool:
+    """Whether to exec the installed brindle in place before serving the next
+    request: the install changed under this server, or a newer brindle
+    migrated the database. A server that a reload started and still finds
+    the database newer than its code gets nothing from another one."""
+    return upgrade.install.changed() or (not reloaded and migrated_by_newer())
+
+
+async def _run_server(read_stream, write_stream) -> None:
+    server = mcp._lowlevel_server
+    await server.run(read_stream, write_stream, server.create_initialization_options())
+
+
+async def _serve_stdio(handover) -> None:
+    from brindle import mcp_stdio
+
+    in_fd, out_fd = mcp_stdio.claim_stdio()
+    await _serve(mcp_stdio.Connection(in_fd, out_fd, handover, wants_reload=_wants_reload,
+                                      replace=mcp_stdio.replace, std=True))
+
+
+INSTALL_WATCH_INTERVAL = 5.0   # seconds between an idle server's looks at its install
+
+
+async def _serve(conn, wait=None) -> None:
+    """Serve the client on ``conn`` (an mcp_stdio.Connection). Every
+    INSTALL_WATCH_INTERVAL it looks at the install, as the daemon does, and
+    wakes ``conn`` when that changed since its last look: an update reloads
+    an idle server too, however it was installed (app, `uv tool upgrade`, by
+    hand) and whether or not a daemon runs. A change mid-update wakes it
+    again on the next look, once the install is complete."""
+    import anyio
+
+    from brindle.daemon.lifecycle import _elapse
+
+    wait = wait or _elapse
+
+    async def watch_install():
+        seen = upgrade.stamp()
+        while True:
+            await wait(INSTALL_WATCH_INTERVAL)
+            now = upgrade.stamp()
+            if now != seen and upgrade.install.changed():
+                conn.wake()
+            seen = now
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(watch_install)
+        await conn.serve(_run_server)
+        tg.cancel_scope.cancel()
+
+
 def main() -> None:
+    import anyio
+
+    from brindle import mcp_stdio
+
+    handover = mcp_stdio.take_handover()    # before anything this process starts inherits it
     refresher = start_azure_refresher()
     try:
-        mcp.run()
+        anyio.run(_serve_stdio, handover)
     except Exception as error:
         _report_server_exit(error)
         raise

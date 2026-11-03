@@ -2742,8 +2742,14 @@ def send(agent_id: str, message: str) -> None:
 
 
 @app.command()
-def mcp() -> None:
+def mcp(check: bool = typer.Option(False, "--check", hidden=True)) -> None:
     """Run the brindle MCP server on stdio (agents launch this automatically)."""
+    if check:
+        # A running server asks this of an install before it reloads onto it.
+        from brindle import mcp_server, mcp_stdio  # noqa: F401 - the whole server imports
+        from brindle.db import migrated_by_newer
+
+        raise typer.Exit(1 if migrated_by_newer() else 0)
     from brindle.mcp_server import main
 
     main()
