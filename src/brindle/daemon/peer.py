@@ -89,15 +89,13 @@ def _agent_panes() -> dict[str, list[int]]:
 
 
 def _ancestry(pid: int, identity: bool) -> Iterator[procs.Proc]:
-    """``pid`` and then its ancestors, read one process at a time: nothing
-    when ``pid`` can't be read. ``identity`` reads each one's command line
-    and environment too, and stops below Claude Code's daemon and this
-    process, which :func:`brindle.procs.agent_pids` never walks through."""
+    """``pid`` and then every one of its ancestors, read one process at a
+    time: nothing when ``pid`` can't be read. ``identity`` reads each one's
+    command line and environment too. Never cut short by what a process
+    says of itself: an agent can write anything into a command line."""
     seen: set[int] = set()
     current = process_probe.process(pid, environment=identity, command=identity)
     while current is not None and current.pid not in seen:
-        if identity and seen and (current.pid == os.getpid() or procs.is_daemon(current)):
-            return
         yield current
         seen.add(current.pid)
         current = (process_probe.process(current.ppid, environment=identity, command=identity)
@@ -124,12 +122,33 @@ def agent_caller(pid: int) -> str | None:
     ancestor has BRINDLE_AGENT_ID in its environment, is an agent's CLI or
     brindle MCP server, or is one of a live agent's panes), or it can't be
     checked. None for anyone else's. Reads only ``pid``'s own ancestry, never
-    the whole process table."""
+    the whole process table.
+
+    The pane check covers the whole ancestry. What processes say of
+    themselves counts only below this process (known by its pid) and below
+    the topmost of Claude Code's daemons, which carries the environment of
+    whoever started it (:func:`brindle.procs.agent_pids` never walks
+    through it either). Only that one, topmost, is the boundary: a command line can claim
+    to be a daemon, but a process an agent starts sits below that agent's
+    own processes, under its pane or the real daemon, so a fake one hides
+    nothing the pane check or the real daemon's boundary doesn't cover."""
     chain: set[int] = set()
-    for p in _ancestry(pid, identity=True):
-        if (aid := _launched_by(p)) is not None:
-            return f"the caller runs under brindle agent {aid}"
+    claims: list[tuple[int, str]] = []   # (position in the ancestry, agent) above a daemon
+    daemon = mine = None                 # positions of the topmost daemon and of this process
+    for i, p in enumerate(_ancestry(pid, identity=True)):
         chain.add(p.pid)
+        if mine is not None:
+            continue
+        if i and p.pid == os.getpid():
+            mine = i
+        elif i and procs.is_daemon(p):
+            daemon = i
+        elif (aid := _launched_by(p)) is not None:
+            if daemon is None:
+                return f"the caller runs under brindle agent {aid}"
+            claims.append((i, aid))
+    if (aid := next((aid for i, aid in claims if daemon is not None and i < daemon), None)) is not None:
+        return f"the caller runs under brindle agent {aid}"
     if not chain:
         # Gone already (a request sent before exiting) or not this user's:
         # unchecked is refused, or an agent could fire and exit.
@@ -138,18 +157,22 @@ def agent_caller(pid: int) -> str | None:
     return next((f"the caller runs under brindle agent {aid}" for aid in sorted(owners)), None)
 
 
-def _pane_owners(chain: set[int]) -> set[str]:
+def _pane_owners(chain: set[int], *, fresh_only: bool = False) -> set[str]:
     """The agents one of whose pane processes is in ``chain``.
 
-    A snapshot shows that a pane is an agent's even after it expires, but
-    it shows that one isn't only while it is fresh: younger than PANE_TTL
-    and taken since the last new agent pane (brindle.procs.agent_panes_changed).
+    A snapshot is fresh while younger than PANE_TTL and taken since the last
+    new agent pane (brindle.procs.agent_panes_changed). An old one still
+    shows that a pane is an agent's, which may only ever refuse a caller, so
+    ``fresh_only`` (whoever grants authority by it) never trusts that. A
+    fresh one shows that a pane isn't an agent's only once tmux confirms
+    that none of ``chain``'s panes was split into an agent's window since.
     Otherwise this waits for a new snapshot, shared by every caller, and
     raises if it can't be taken, so the guard answers "unavailable" rather
     than letting the caller through.
     """
     global _pane_cache, _pane_refresh
     stamp = procs.agent_panes_stamp()
+    fresh: dict[str, list[int]] | None = None
     with _pane_lock:
         if _pane_refresh is not None and _pane_refresh[1].done():
             (taken, finished), _pane_refresh = _pane_refresh, None
@@ -157,19 +180,40 @@ def _pane_owners(chain: set[int]) -> set[str]:
                 _pane_cache = (time.monotonic(), taken, finished.result())
         if _pane_cache is not None:
             when, taken, panes = _pane_cache
-            if owners := {aid for aid, pids in panes.items() if chain.intersection(pids)}:
+            current = taken == stamp and time.monotonic() - when <= PANE_TTL
+            if (owners := _owners(panes, chain)) and (current or not fresh_only):
                 return owners
-            if taken == stamp and time.monotonic() - when <= PANE_TTL:
-                return set()
-        if _pane_refresh is None or _pane_refresh[0] != stamp:
-            _pane_refresh = (stamp, _pane_executor.submit(_agent_panes))
-        pending = _pane_refresh
+            if current:
+                fresh = panes
+        if fresh is None:
+            if _pane_refresh is None or _pane_refresh[0] != stamp:
+                _pane_refresh = (stamp, _pane_executor.submit(_agent_panes))
+            pending = _pane_refresh
+    if fresh is not None:
+        return _split_owners(fresh, chain)
     panes = pending[1].result()
     with _pane_lock:
         if _pane_refresh is pending:
             _pane_cache = (time.monotonic(), pending[0], panes)
             _pane_refresh = None
+    return _owners(panes, chain)
+
+
+def _owners(panes: dict[str, list[int]], chain: set[int]) -> set[str]:
     return {aid for aid, pids in panes.items() if chain.intersection(pids)}
+
+
+def _split_owners(panes: dict[str, list[int]], chain: set[int]) -> set[str]:
+    """The agents of ``panes`` (a fresh snapshot) one of whose windows holds,
+    by tmux now, a pane in ``chain``: a pane split into an agent's own
+    window since the snapshot (``tmux split-window -t "$TMUX_PANE"``) runs
+    under the tmux server, not the agent, and is the agent's all the same."""
+    from brindle import tmux
+
+    windows = tmux.pane_windows()
+    if not (mine := {windows[pid] for pid in chain if pid in windows}):
+        return set()
+    return {aid for aid, pids in panes.items() if any(windows.get(pid) in mine for pid in pids)}
 
 
 def caller_agents(pid: int) -> set[str]:
@@ -177,11 +221,13 @@ def caller_agents(pid: int) -> set[str]:
     one of whose pane processes ``pid`` descends from: empty when none, or it
     can't be checked. Only what brindle itself knows counts, never what a
     process says of itself (its environment, its command line), which an
-    agent could set to pass for another. A permission hook holds requests
-    only for these (brindle.daemon.holds). Like :func:`agent_caller`, it
+    agent could set to pass for another, and only from a fresh snapshot of
+    agent panes: an old one may name a pid that an exited pane's process
+    had and another process has now. A permission hook holds requests only
+    for these (brindle.daemon.holds), and a supervisor answers as one. Like :func:`agent_caller`, it
     reads only ``pid``'s own ancestry."""
     try:
         chain = {p.pid for p in _ancestry(pid, identity=False)}
-        return _pane_owners(chain) if chain else set()
+        return _pane_owners(chain, fresh_only=True) if chain else set()
     except Exception:
         return set()

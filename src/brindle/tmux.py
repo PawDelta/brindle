@@ -1093,6 +1093,19 @@ def tagged_pane_ids(keys: Iterable[str], server: object = _THIS_SERVER) -> list[
     return [pane for pane, *tags in rows if any(tags)]
 
 
+def pane_windows(server: object = _THIS_SERVER) -> dict[int, str]:
+    """Every pane's process id on ``server`` -> its window's id, as tmux has
+    them now; empty when no server runs there. Raises TmuxError when the
+    server can't be asked, so an answer it never gave isn't read as "none"."""
+    proc = _tmux("list-panes", "-a", "-F", "#{pane_pid}\t#{window_id}", check=False, server=server)
+    if proc.returncode != 0:
+        if _NO_SERVER.search(proc.stderr):
+            return {}
+        raise TmuxError(f"tmux list-panes: {proc.stderr.strip()}")
+    rows = (line.split("\t") for line in proc.stdout.splitlines())
+    return {int(pid): window for pid, window in rows if pid.isdigit()}
+
+
 def window_size_option(target: str, server: object = _THIS_SERVER) -> str | None:
     """The ``window-size`` set on ``target``'s window itself (not one it
     inherits from the global options); None when it sets none. Raises

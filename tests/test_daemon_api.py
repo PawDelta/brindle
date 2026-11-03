@@ -540,6 +540,10 @@ def test_daemon_start_raises_file_limit_before_binding(monkeypatch, soft, hard, 
     (420, "w2", set(), [420]),
     (410, None, set(), [410, 400]),     # a person's terminal
     (999, "can't be checked", set(), [999]),   # exited before the check: fire and forget
+    # A command line saying "daemon run" under w1's pane cuts nothing short: a child
+    # that cleared its environment is still refused as w1, its pane's.
+    (330, "w1", {"w1"}, [330, 320, 300, 200, 100]),
+    (350, "w1", {"w1"}, [350, 340, 300, 200, 100]),
 ])
 def test_peer_agent_callers_are_refused_on_the_unix_socket(seeded, monkeypatch, caller, refused_as, holds_for, chain):
     table = {p.pid: p for p in [
@@ -551,6 +555,10 @@ def test_peer_agent_callers_are_refused_on_the_unix_socket(seeded, monkeypatch, 
         procs.Proc(400, 1, "-zsh HOME=/u"),
         procs.Proc(410, 400, "brindle daemon status HOME=/u"),
         procs.Proc(420, 400, "curl --unix-socket daemon.sock HOME=/u BRINDLE_AGENT_ID=w2"),
+        procs.Proc(320, 300, "sh -c echo daemon run; env -i curl HOME=/u BRINDLE_AGENT_ID=w1"),
+        procs.Proc(330, 320, "curl --unix-socket daemon.sock"),
+        procs.Proc(340, 300, "sh -c echo daemon run; env -i curl HOME=/u"),
+        procs.Proc(350, 340, "curl --unix-socket daemon.sock"),
     ]}
     monkeypatch.setattr(procs, "table", lambda: table)
     probes = []
@@ -575,14 +583,27 @@ def test_peer_agent_callers_are_refused_on_the_unix_socket(seeded, monkeypatch, 
         assert code == 200
 
 
-@pytest.mark.parametrize("snapshot", ["refresh pending", "refresh failed", "pane created since"])
-def test_caller_under_a_new_agent_pane_is_not_cleared_by_an_old_snapshot(seeded, monkeypatch, snapshot):
+@pytest.mark.parametrize("snapshot,caller,refused_as", [
+    ("refresh pending", 310, "w1"),
+    ("refresh failed", 310, "w1"),
+    ("pane created since", 310, "w1"),
+    # A pane split into w1's window after a fresh snapshot runs under the tmux server.
+    ("pane split since", 510, "w1"),
+    # r1's exited pane had pid 310, now another's: an old snapshot may refuse, never grant.
+    ("supervisor pid recycled", 310, "r1"),
+])
+def test_caller_under_a_new_agent_pane_is_not_cleared_by_an_old_snapshot(seeded, monkeypatch, snapshot, caller,
+                                                                         refused_as):
     from concurrent.futures import Future
 
     table = {p.pid: p for p in [procs.Proc(200, 1, "claude --model opus"),
-                                procs.Proc(310, 200, "curl --unix-socket daemon.sock HOME=/u")]}
+                                procs.Proc(310, 200, "curl --unix-socket daemon.sock HOME=/u"),
+                                procs.Proc(90, 1, "tmux new-session -d"),
+                                procs.Proc(500, 90, "sh -c curl"),
+                                procs.Proc(510, 500, "curl --unix-socket daemon.sock")]}
     monkeypatch.setattr(peer.process_probe, "process", lambda pid, **kw: table.get(pid))
     monkeypatch.setattr(tmux, "window_pids", lambda w, server=None: {"@2": [200]}.get(w, []))   # w1's new pane
+    monkeypatch.setattr(tmux, "pane_windows", lambda server=None: {200: "@2", 500: "@2"})
     monkeypatch.setattr(peer, "time", SimpleNamespace(monotonic=lambda: 1000.0))
 
     def submit(fn):
@@ -602,12 +623,15 @@ def test_caller_under_a_new_agent_pane_is_not_cleared_by_an_old_snapshot(seeded,
     if snapshot == "refresh failed":
         refresh.set_exception(OSError("tmux busy"))
     # The empty snapshot is long expired, or fresh but older than the new pane.
-    monkeypatch.setattr(peer, "_pane_cache", (1000.0 if snapshot == "pane created since" else 0.0, stamp, {}))
-    monkeypatch.setattr(peer, "_pane_refresh", None if snapshot == "pane created since" else (stamp, refresh))
+    cache = {"pane created since": (1000.0, stamp, {}), "pane split since": (1000.0, stamp, {"w1": [200]}),
+             "supervisor pid recycled": (0.0, "older", {"r1": [310]})}.get(snapshot, (0.0, stamp, {}))
+    monkeypatch.setattr(peer, "_pane_cache", cache)
+    monkeypatch.setattr(peer, "_pane_refresh", (stamp, refresh) if snapshot.startswith("refresh") else None)
     if snapshot == "pane created since":
         procs.agent_panes_changed()
-    code, body = _get("/v1/meta", AUTH, peer_pid=310)
-    assert code == 403 and "w1" in body["error"]["message"]
+    code, body = _get("/v1/meta", AUTH, peer_pid=caller)
+    assert code == 403 and refused_as in body["error"]["message"]
+    assert peer.caller_agents(caller) == {"w1"}
 
 
 def test_peer_pid_names_the_unix_socket_caller():
