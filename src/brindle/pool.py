@@ -112,10 +112,7 @@ def fill_one(db: DB, repo_root: str, cfg: RepoConfig | None = None) -> PoolEntry
         kind="worktree", branch=branch, base_branch=base, path=path, port_base=port_base,
         tmux_session=workspaces._session_name(repo_root, name, slug), created_at=entry.created_at,
     )
-    setup = (
-        workspaces.run_commands(cfg.setup, path, workspaces.workspace_env(placeholder))
-        if cfg.setup else None
-    )
+    setup = workspaces.run_setup_commands(placeholder, cfg) if cfg.setup else None
     if setup is not None and not setup.ok:
         db.delete_pool_entry(path)
         discard(repo_root, entry, cfg)

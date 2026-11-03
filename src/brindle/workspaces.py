@@ -26,7 +26,7 @@ from pathlib import Path
 # be running from the very worktree ``remove`` deletes (a reviewer's `uv run`
 # in it), and a module first imported after that can't be found, which left
 # the row behind.
-from brindle import git, history, rewind, services, spawn, tmux
+from brindle import build_caches, git, history, rewind, services, spawn, tmux
 from brindle.config import (
     PORT_BLOCK_SIZE,
     PORT_RANGE_START,
@@ -77,10 +77,37 @@ def workspace_env(ws: Workspace, cfg: RepoConfig | None = None) -> dict[str, str
             env[key] = os.environ[key]
     if ws.kind != "main" and os.path.isdir(ws.repo_root):
         try:
-            env.update(services.env(ws, cfg or workspace_config(ws)))
+            cfg = cfg or workspace_config(ws)
+            env.update(build_caches.env(ws.repo_root, cfg))
+            env.update(services.env(ws, cfg))
         except ValueError:
             pass  # a broken config is reported elsewhere
     return env
+
+
+def run_setup_commands(ws: Workspace, cfg: RepoConfig) -> SetupResult:
+    """Run ``cfg.setup`` in a new worktree, cloning node_modules from a base
+    checkout instead of installing where the lockfile matches (build_caches)."""
+    bases = [ws.repo_root]
+    if ws.base_branch:
+        try:
+            found = git.worktree_for_branch(ws.repo_root, ws.base_branch)
+        except git.GitError:
+            found = None
+        if found:
+            bases.insert(0, found)
+    env = workspace_env(ws, cfg)
+    log: list[str] = []
+    for cmd in cfg.setup:
+        cloned = build_caches.clone_node_modules(cmd, ws.path, bases)
+        if cloned:
+            log.append(cloned)
+            continue
+        result = run_commands([cmd], ws.path, env)
+        log.append(result.log)
+        if not result.ok:
+            return SetupResult(False, "\n".join(log).strip())
+    return SetupResult(True, "\n".join(log).strip())
 
 
 def resolve(db: DB, ref: str, cwd: str | None = None) -> Workspace:
@@ -429,13 +456,13 @@ def create(
 
         copied = _copy_local_files(repo_root, path, cfg.copy, overwrite_changed=True)
         if cfg.setup and pool.fingerprint(repo_root, start_sha, cfg) != claimed.fingerprint:
-            setup = run_commands(cfg.setup, path, workspace_env(ws))
+            setup = run_setup_commands(ws, cfg)
         else:
             setup = None
         pool.fill_in_background(repo_root)
     else:
         copied = _copy_local_files(repo_root, path, cfg.copy)
-        setup = run_commands(cfg.setup, path, workspace_env(ws)) if run_setup and cfg.setup else None
+        setup = run_setup_commands(ws, cfg) if run_setup and cfg.setup else None
     return Created(ws, how, start_point, copied, setup)
 
 
