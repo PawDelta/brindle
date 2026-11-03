@@ -533,15 +533,15 @@ def test_daemon_start_raises_file_limit_before_binding(monkeypatch, soft, hard, 
         lifecycle.serve()
 
 
-@pytest.mark.parametrize("caller,refused_as,holds_for", [
-    (310, "w1", {"w1"}),     # a command under w1's pane, however deep
+@pytest.mark.parametrize("caller,refused_as,holds_for,chain", [
+    (310, "w1", {"w1"}, [310, 300, 200, 100]),     # a command under w1's pane, however deep
     # BRINDLE_AGENT_ID in its own environment: refused, but it holds no request as w2,
     # since a process's word about itself is no proof (permission holds).
-    (420, "w2", set()),
-    (410, None, set()),     # a person's terminal
-    (999, "can't be checked", set()),   # exited before the check: fire and forget
+    (420, "w2", set(), [420]),
+    (410, None, set(), [410, 400]),     # a person's terminal
+    (999, "can't be checked", set(), [999]),   # exited before the check: fire and forget
 ])
-def test_peer_agent_callers_are_refused_on_the_unix_socket(seeded, monkeypatch, caller, refused_as, holds_for):
+def test_peer_agent_callers_are_refused_on_the_unix_socket(seeded, monkeypatch, caller, refused_as, holds_for, chain):
     table = {p.pid: p for p in [
         procs.Proc(1, 0, "/sbin/launchd"),
         procs.Proc(100, 1, "tmux new-session -d"),
@@ -553,7 +553,18 @@ def test_peer_agent_callers_are_refused_on_the_unix_socket(seeded, monkeypatch, 
         procs.Proc(420, 400, "curl --unix-socket daemon.sock HOME=/u BRINDLE_AGENT_ID=w2"),
     ]}
     monkeypatch.setattr(procs, "table", lambda: table)
+    probes = []
+    def probe(pid, *, environment=False):
+        probes.append((pid, environment))
+        return table.get(pid)
+    monkeypatch.setattr(peer.process_probe, "process", probe)
+    monkeypatch.setattr(peer, "_pane_cache", None, raising=False)
     monkeypatch.setattr(tmux, "window_pids", lambda w, server=None: {"@1": [150], "@2": [200]}.get(w, []))
+    with monkeypatch.context() as local:
+        local.setattr(procs, "table", lambda: pytest.fail("caller read the full process table"))
+        reason = peer.agent_caller(caller)
+        assert bool(reason) == bool(refused_as)
+    assert probes == [(p, p == caller) for p in chain]
     code, body = _get("/v1/meta", AUTH, peer_pid=caller)
     if refused_as:
         assert code == 403 and body["error"]["code"] == "agent_caller"
@@ -569,6 +580,27 @@ def test_peer_pid_names_the_unix_socket_caller():
         assert peer.peer_pid(a) == os.getpid()
 
 
+@pytest.mark.variant("a loaded Mac completes the caller probe after the old five second deadline")
+def test_caller_probe_can_finish_after_five_seconds(monkeypatch):
+    from brindle.daemon import auth
+    clock = [100.0]
+    monkeypatch.setattr(auth, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+
+    async def exercise():
+        loop = asyncio.get_running_loop()
+        def submit(executor, fn, pid):
+            result = loop.create_future()
+            def finish():
+                clock[0] += 6.0
+                result.set_result(None)
+            loop.call_soon(finish)
+            return result
+        monkeypatch.setattr(loop, "run_in_executor", submit)
+        code, _ = await _read_request(build_app(TOKEN), "/v1/meta", AUTH, peer_pid=123)
+        assert code == 200
+    asyncio.run(exercise())
+
+
 def _caller_check_single_flight(monkeypatch, outcome):
     from brindle.daemon import auth
     release = threading.Event()
@@ -576,7 +608,7 @@ def _caller_check_single_flight(monkeypatch, outcome):
     def check(pid):
         calls.append(threading.current_thread().name)
         release.wait()
-        if outcome == "error":
+        if outcome == "error" and len(calls) == 1:
             raise RuntimeError("private process data")
     monkeypatch.setattr(peer, "agent_caller", check)
     bounded = hasattr(auth, "CALLER_CHECK_LIMIT")
@@ -603,20 +635,32 @@ def _caller_check_single_flight(monkeypatch, outcome):
             if outcome != "limit" or not bounded:
                 release.set()
             statuses = await asyncio.gather(*requests)
-            assert statuses == [200 if outcome == "allowed" else 403] * 24
-            assert await request() == statuses[0]
+            assert statuses == [200 if outcome == "allowed" else 503] * 24
+            if outcome == "error":
+                assert 123 not in guard._callers
+                assert await request() == 200
+            else:
+                assert await request() == statuses[0]
             if outcome == "limit":
+                frames = []
+                async def connect():
+                    return {"type": "websocket.connect"}
+                async def send_frame(frame):
+                    frames.append(frame)
+                await guard({**scope, "type": "websocket"}, connect, send_frame)
+                assert frames[-1] == {"type": "websocket.close", "code": 1013}
                 guard._callers[123] = (-float("inf"), None)
                 monkeypatch.setattr(auth, "CALLER_CHECK_LIMIT", auth.CALLER_TTL)
                 asyncio.get_running_loop().call_soon(release.set)
-                assert await request() == 403
+                assert await request() == 503
         finally:
             release.set()
             await asyncio.gather(*getattr(guard, "_caller_checks", {}).values(), return_exceptions=True)
         if outcome == "limit":
-            assert await request() == 403
+            assert 123 not in guard._callers
+            assert await request() == 200
     asyncio.run(exercise())
-    assert len(calls) == 1
+    assert len(calls) == (1 if outcome == "allowed" else 2)
     assert calls[0].startswith("brindle-caller")
 
 

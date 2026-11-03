@@ -15,12 +15,21 @@ import re
 import socket
 import struct
 import sys
+import time
+from concurrent.futures import Future, ThreadPoolExecutor
+from threading import Lock
 
 from brindle import procs
+from brindle.daemon import process_probe
 
 PEER_PID = "brindle.peer_pid"   # scope key: the pid of a Unix-socket caller
 SOL_LOCAL = 0                    # macOS <sys/un.h>
 LOCAL_PEERPID = 2
+PANE_TTL = 5.0
+_pane_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="brindle-agent-panes")
+_pane_lock = Lock()
+_pane_cache: tuple[float, dict[str, list[int]]] | None = None
+_pane_refresh: Future | None = None
 
 
 def peer_pid(sock) -> int | None:
@@ -80,23 +89,51 @@ def agent_caller(pid: int) -> str | None:
     """Why process ``pid`` is refused: it belongs to a brindle agent (it has
     BRINDLE_AGENT_ID in its environment, or it or an ancestor is one of a
     live agent's processes), or it can't be checked. None for anyone else's."""
-    table = procs.table()
-    me = table.get(pid)
+    me = process_probe.process(pid, environment=True)
     if me is None:
         # Gone already (a request sent before exiting) or not this user's:
         # unchecked is refused, or an agent could fire and exit.
         return "the caller can't be checked (it exited, or isn't this user's process)"
     if (m := re.search(r"(?:^|\s)BRINDLE_AGENT_ID=(\S+)", me.text)):
         return f"the caller runs under brindle agent {m.group(1)}"
-    chain, p = set(), pid
-    while p in table and p not in chain:
-        chain.add(p)
-        p = table[p].ppid
-    panes = _agent_panes()
-    owned = procs.agent_pids(procs.all_agent_ids(table) | set(panes), panes, table,
-                             through_ancestors=True)
+    chain, current = set(), me
+    while current is not None and current.pid not in chain:
+        chain.add(current.pid)
+        current = process_probe.process(current.ppid) if current.ppid > 1 else None
+    owned = _cached_agent_panes()
     return next((f"the caller runs under brindle agent {aid}"
-                 for aid, pids in owned.items() if pids & chain), None)
+                 for aid, pids in owned.items() if set(pids) & chain), None)
+
+
+def _cached_agent_panes() -> dict[str, list[int]]:
+    """Share the initial snapshot; refresh stale snapshots off the caller lane.
+
+    Keep serving the last snapshot while a refresh is in flight. Never
+    substitute an empty snapshot when the initial collection fails.
+    """
+    global _pane_cache, _pane_refresh
+    with _pane_lock:
+        if _pane_refresh is not None and _pane_refresh.done():
+            finished, _pane_refresh = _pane_refresh, None
+            try:
+                _pane_cache = (time.monotonic(), finished.result())
+            except Exception:
+                if _pane_cache is None:
+                    raise
+        if _pane_cache is not None and time.monotonic() - _pane_cache[0] <= PANE_TTL:
+            return _pane_cache[1]
+        if _pane_refresh is None:
+            _pane_refresh = _pane_executor.submit(_agent_panes)
+        pending = _pane_refresh
+        if _pane_cache is not None:
+            return _pane_cache[1]
+    # Cold start must know the pane roots before it can clear a caller.
+    result = pending.result()
+    with _pane_lock:
+        if _pane_refresh is pending:
+            _pane_cache = (time.monotonic(), result)
+            _pane_refresh = None
+    return result
 
 
 def caller_agents(pid: int) -> set[str]:
