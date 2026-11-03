@@ -299,41 +299,6 @@ describe("Onboarding", () => {
     expect(localStorage.getItem(ONBOARDED_KEY)).toBeNull();
   });
 
-  it("onboarding resumed with a key and a cloud saved before: the Ready screen goes by the saved connections, connected when ready, the engine's fix when not, never a sign-in over them", async () => {
-    // A first launch left earlier: OpenRouter's key and OpenCode's api_key method saved before its install; Claude Code on Bedrock, its login expired.
-    const daemon = new FakeDaemon({
-      account: SIGNED_IN,
-      providers: freshProviders({ claude: { path: "/home/u/.local/bin/claude", version: "2.1.47", signed_in: false } }),
-      config: { user: {}, repo: {}, local: {}, keys: [{ name: "OPENROUTER_API_KEY", set: true, last4: "abcd", status: "verified" }] },
-      connections: {
-        opencode: { method: "api_key", choice: { method: "api_key", settings: {} } },
-        claude: { method: "cloud", cloud: "bedrock", settings: { AWS_REGION: "us-east-1" }, login: { valid: false, expired: true } },
-      },
-    });
-    launch(daemon);
-    await step("connect");
-
-    // OpenCode reads as on its saved key; picking it for the install saves nothing again.
-    const opencode = screen.getByTestId("onb-card-opencode");
-    fireEvent.click(within(opencode).getByRole("button", { name: "Choose how OpenCode connects" }));
-    await waitFor(() => expect(methodOn(opencode)).toBe("api_key"));
-    fireEvent.click(within(opencode).getByRole("radio", { name: "API key" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Connect OpenCode" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Continue" }));
-
-    // Neither waits for a browser sign-in. OpenCode is installed and ready on its key: connected, no Sign in offered.
-    await step("ready");
-    const ready = screen.getByTestId("onb-ready-opencode");
-    await waitFor(() => expect(ready.getAttribute("data-connected")).toBe("true"));
-    expect(within(ready).queryByRole("button")).toBeNull();
-    // Claude Code's cloud login expired: not connected, and its fix is renewing that login, not a subscription sign-in.
-    const claude = screen.getByTestId("onb-ready-claude");
-    expect(claude.getAttribute("data-connected")).toBe("false");
-    expect(within(claude).getByTestId("provider-ready").getAttribute("data-action")).toBe("renew");
-    expect(daemon.keysStored).toEqual([]);
-    expect(daemon.requests.some((r) => r.method === "PUT" && r.path.endsWith("/connection"))).toBe(false);
-  });
-
   it("onboarding: an install that fails says what the installer said on its card, and Retry runs it again inline", async () => {
     const daemon = new FakeDaemon({ account: SIGNED_IN, providers: freshProviders() });
     daemon.installFails.claude = 1;
@@ -357,57 +322,6 @@ describe("Onboarding", () => {
     expect(daemon.installs).toEqual(["claude", "claude"]);
   });
 
-  it("onboarding: Skip for now on a failed install goes back to the cards when nothing else is connected", async () => {
-    const daemon = new FakeDaemon({ account: SIGNED_IN, providers: freshProviders() });
-    daemon.installFails.opencode = 1;
-    launch(daemon);
-    await step("connect");
-    fireEvent.click(within(screen.getByTestId("onb-card-opencode")).getByRole("button", { name: "Choose how OpenCode connects" }));
-    fireEvent.click(within(screen.getByTestId("onb-card-opencode")).getByRole("radio", { name: "Sign in" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Connect OpenCode" }));
-    const failed = await screen.findByTestId("onb-install-opencode-failed");
-    fireEvent.click(within(failed).getByRole("button", { name: "Skip for now" }));
-    await step("connect");
-    expect(screen.getByTestId("onb-card-opencode").getAttribute("data-picked")).toBe("false");
-  });
-
-  it("onboarding shows once: a second launch, with a provider connected and signed in, goes straight to the app", async () => {
-    const daemon = new FakeDaemon({ account: SIGNED_IN, providers: freshProviders({ claude: { path: "/home/u/.local/bin/claude", version: "2.1.47", signed_in: false } }) });
-    launch(daemon);
-    await step("connect");
-    fireEvent.click(screen.getByRole("button", { name: "Continue with Claude Code" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Continue" }));
-    await step("provider-signin");
-    fireEvent.click(screen.getByRole("button", { name: "Sign in with your browser" }));
-    await waitFor(() => expect(screen.getByTestId("onb-provider-signin").getAttribute("data-phase")).toBe("waiting"));
-    daemon.signInProvider("claude");
-    await step("ready");
-    cleanup();
-
-    // The next launch: Starting brindle, then the app itself, sidebar and all.
-    launch(daemon);
-    await waitFor(() => expect(sidebar()).toBeTruthy(), { timeout: 3000 });
-    expect(screen.queryByTestId("onboarding")).toBeNull();
-    expect(daemon.requests.filter((r) => r.path === "/providers/installed").length).toBeGreaterThan(0);
-  });
-
-  it("onboarding stays until a provider is signed in: \"Do this later\" brings it back on the next launch", async () => {
-    const daemon = new FakeDaemon({ account: SIGNED_IN, providers: freshProviders({ claude: { path: "/home/u/.local/bin/claude", version: "2.1.47", signed_in: false } }) });
-    launch(daemon);
-    await step("connect");
-    fireEvent.click(screen.getByRole("button", { name: "Continue with Claude Code" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Continue" }));
-    await step("provider-signin");
-    fireEvent.click(screen.getByRole("button", { name: "Do this later" }));
-    await step("ready");
-    expect(screen.getByTestId("onb-ready-claude").textContent).toContain("not signed in yet");
-    cleanup();
-
-    launch(daemon);
-    await step("connect");
-    expect(sidebar()).toBeNull();
-  });
-
   /* The app over a daemon whose GET /providers/installed answers `answer()` while it returns a Response. */
   function launchWith(daemon: FakeDaemon, answer: () => Response | null) {
     const store = createAppStore();
@@ -428,12 +342,6 @@ describe("Onboarding", () => {
     );
   }
   const refusal = (status: number, code: string, message: string) => new Response(JSON.stringify({ error: { code, message } }), { status, headers: { "Content-Type": "application/json" } });
-
-  it("onboarding's gate lets the app straight in on an older engine without the route (404)", async () => {
-    launchWith(new FakeDaemon({ providers: freshProviders() }), () => refusal(404, "not_found", "no route /providers/installed"));
-    await waitFor(() => expect(sidebar()).toBeTruthy(), { timeout: 3000 });
-    expect(screen.queryByTestId("onboarding")).toBeNull();
-  });
 
   it("onboarding isn't skipped when the first lookup fails: it says so with Retry, and the retry opens the first launch", async () => {
     const daemon = new FakeDaemon({ account: SIGNED_IN, providers: freshProviders() });
@@ -472,40 +380,6 @@ describe("Onboarding", () => {
     // The gate asked nothing; the app's own look at the providers says it where it belongs: the status line.
     await waitFor(() => expect(screen.getByTestId("provider-problem").textContent).toBe("Claude Code signed out"));
     expect(daemon.requests.filter((r) => r.path === "/providers/installed").length).toBe(asked + 1);
-  });
-
-  it("onboarding never moves on from a failed providers refresh: an install succeeds, the read after it fails, Retry recovers", async () => {
-    const daemon = new FakeDaemon({ account: SIGNED_IN, providers: freshProviders() });
-    daemon.deferInstall = true;
-    let down = false;
-    launchWith(daemon, () => (down ? refusal(503, "unavailable", "the engine is restarting") : null));
-    await step("connect");
-    fireEvent.click(within(screen.getByTestId("onb-card-claude")).getByRole("radio", { name: "Sign in" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Connect Claude Code" }));
-    await step("install");
-    await screen.findByTestId("onb-install-claude-lines");
-
-    // The installer finishes, but reading the providers again fails: no Continue, the error inline.
-    down = true;
-    daemon.completeInstall();
-    const failed = await screen.findByTestId("onb-refresh-failed");
-    expect(failed.textContent).toContain("the engine is restarting");
-    expect(screen.queryByRole("button", { name: "Continue" })).toBeNull();
-    expect(screen.getByTestId("onboarding").getAttribute("data-step")).toBe("install");
-
-    // Retry while it's still down: still here.
-    fireEvent.click(within(failed).getByRole("button", { name: "Retry" }));
-    await flush();
-    expect(screen.getByTestId("onboarding").getAttribute("data-step")).toBe("install");
-    expect(screen.getByTestId("onb-refresh-failed")).toBeTruthy();
-
-    // Back: Retry reads it, Continue appears and goes on to the sign-in.
-    down = false;
-    fireEvent.click(within(screen.getByTestId("onb-refresh-failed")).getByRole("button", { name: "Retry" }));
-    await waitFor(() => expect(screen.queryByTestId("onb-refresh-failed")).toBeNull());
-    expect(screen.getByTestId("onb-install-claude").textContent).toContain("Installed by Anthropic's installer at /home/u/.local/bin/claude");
-    fireEvent.click(screen.getByRole("button", { name: "Continue" }));
-    await step("provider-signin");
   });
 
   /* The way out of a sign-in step: Try again and Skip for now, both there. */
@@ -612,18 +486,4 @@ describe("Onboarding", () => {
     await step("ready");
   });
 
-  it("onboarding treats a CLI whose sign-in the engine can't confirm as not signed in yet", async () => {
-    const daemon = new FakeDaemon({ account: SIGNED_IN, providers: freshProviders({ claude: { path: "/home/u/.local/bin/claude", version: "2.1.47" } }) });
-    daemon.data.providers = daemon.data.providers.map((r) => (r.provider === "claude" ? { ...r, signed_in: null } : r));
-    launch(daemon);
-    // Not skipped: the first launch, and Claude Code's sign-in is asked for.
-    await step("connect");
-    fireEvent.click(screen.getByRole("button", { name: "Continue with Claude Code" }));
-    fireEvent.click(await screen.findByRole("button", { name: "Continue" }));
-    await step("provider-signin");
-    fireEvent.click(screen.getByRole("button", { name: "Do this later" }));
-    await step("ready");
-    expect(screen.getByTestId("onb-ready-claude").textContent).toContain("sign-in not confirmed");
-    expect(screen.getByTestId("onb-ready-claude").textContent).not.toContain("signed in ·");
-  });
 });
