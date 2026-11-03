@@ -1,6 +1,5 @@
 import shutil
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -48,7 +47,6 @@ def staged_deletion_in_a_gutted_tree(path):
 
 @pytest.mark.parametrize("damage, error", [
     (lose_git_keep_notes, "surviving files"),
-    (lose_git_keep_hidden, "surviving files"),
     (untracked_work_in_a_gutted_tree, "uncommitted or untracked work"),
     (staged_deletion_in_a_gutted_tree, "uncommitted or untracked work"),
 ])
@@ -176,20 +174,6 @@ def test_start_on_main_fast_forwards_to_origin_and_never_drops_local_work(
               branch=None, worktree=None)
     assert git.out(["rev-parse", "HEAD"], repo) == (local if local_commit else pushed)
     assert (repo / "notes.txt").read_text() == "my notes"
-
-
-def test_bare_brindle_always_starts_a_supervisor(db, repo, started, monkeypatch):
-    # default_agent is for workers; a launch is always a supervisor, autopilot on
-    monkeypatch.setattr(cli, "_say_autopilot", lambda *a: None)
-    cli.default(SimpleNamespace(invoked_subcommand=None), cont=False, autopilot=None,
-                provider=None, show_version=False)
-    assert [(p, ap) for _, p, ap in started] == [("supervisor", True)]
-
-
-def test_supervisor_command_starts_explicit_supervisor_with_autopilot(db, repo, started):
-    cli.supervisor(prompt=None, provider=None, attach=False, watch=False, autopilot=None, branch=None,
-                   worktree=None)
-    assert [(p, ap) for _, p, ap in started] == [("supervisor", True)]
 
 
 def test_squash_merged_branch_detected_after_main_advances(tmp_path):

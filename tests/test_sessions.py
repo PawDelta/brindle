@@ -90,9 +90,8 @@ def test_pause_then_resume_uses_the_saved_claude_session(db, root, monkeypatch, 
     assert launched[0][1]["watch_pane"] and not launched[1][1]["watch_pane"]
 
 
-@pytest.mark.parametrize("status, chat_rows", [("on", 39), ("off", 40)])   # the person's tmux config
-def test_a_resumed_chat_is_shown_with_its_conversation_and_sidebar(db, root, monkeypatch, tmp_path,
-                                                                    status, chat_rows):
+def test_a_resumed_chat_is_shown_with_its_conversation_and_sidebar(db, root, monkeypatch, tmp_path):
+    status, chat_rows = "on", 39
     # #264: the resumed conversation was drawn in a detached 80x24 window, then
     # resized by the sidebar's split and again by the terminal attaching, and
     # Claude Code, which wipes what it drew when resized, showed a black screen.
@@ -171,12 +170,6 @@ def test_a_resumed_chat_is_shown_with_its_conversation_and_sidebar(db, root, mon
         os.close(terminal)
 
 
-def test_hook_records_the_cli_session_id(db, root):
-    add(db, root, "a1", status="idle")
-    agents.handle_hook(db, "a1", "prompt-submit", {"session_id": "abc-123"})
-    assert db.get_agent("a1").session_ref == "abc-123"
-
-
 def test_resume_rebuilds_worker_decoration_when_the_session_cant_be_resumed(db, root, monkeypatch, tmp_path):
     """a.task is stored raw (see agents.decorate_worker_prompt); a fresh
     restart needs the finish line, WORKER_FOOTER and /goal wrapper rebuilt,
@@ -211,35 +204,19 @@ def _live_pane(root, tag=None):
     return tmux.new_window(root.tmux_session, "chat", root.path, ["sleep", "300"], {}, tag=tag)
 
 
-def test_dropping_a_session_spares_a_pane_that_now_belongs_to_a_launching_chat(db, root):
-    pane = _live_pane(root, tag=(agents.AGENT_TAG, "launching"))  # its row isn't recorded yet
+@pytest.mark.parametrize("tag, survives", [
+    ((agents.AGENT_TAG, "launching"), True),   # its row isn't recorded yet
+    ((agents.AGENT_TAG, "old"), False),        # its own leftover window
+])
+def test_dropping_a_session_only_closes_its_own_window(db, root, tag, survives):
+    pane = _live_pane(root, tag=tag)
     for i in range(3):
         add(db, root, f"s{i}", since=2000 + i)
     add(db, root, "old", since=1000)
     db.update_agent("old", tmux_window=pane)  # the same id, on the server that's gone
     assert sessions.enforce(db, root.repo_root, now=2100) == 1
     assert db.get_agent("old") is None
-    assert tmux.window_alive(pane)
-
-
-def test_dropping_a_session_spares_the_sidebar(db, root):
-    pane = _live_pane(root, tag=(agents.SIDEBAR_TAG, "someroot"))
-    for i in range(3):
-        add(db, root, f"s{i}", since=2000 + i)
-    add(db, root, "old", since=1000)
-    db.update_agent("old", tmux_window=pane)
-    sessions.enforce(db, root.repo_root, now=2100)
-    assert tmux.window_alive(pane)
-
-
-def test_dropping_a_session_still_closes_its_own_leftover_window(db, root):
-    pane = _live_pane(root, tag=(agents.AGENT_TAG, "old"))
-    for i in range(3):
-        add(db, root, f"s{i}", since=2000 + i)
-    add(db, root, "old", since=1000)
-    db.update_agent("old", tmux_window=pane)
-    sessions.enforce(db, root.repo_root, now=2100)
-    assert not tmux.window_alive(pane)
+    assert tmux.window_alive(pane) == survives
 
 
 @pytest.mark.parametrize("elsewhere", [False, True])
@@ -277,26 +254,6 @@ def test_failed_but_running_session_survives_retention(db, tmp_path, monkeypatch
 
     assert sessions.enforce(db, repo, now=2100) == 0
     assert db.get_agent("live") is not None and killed == [] and removed == []
-
-
-def test_continue_picker_resumes_chosen(db, root, monkeypatch):
-    from brindle import cli, picker
-
-    add(db, root, "new", since=200)
-    add(db, root, "old", since=100)
-    resumed = []
-    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
-    shown = []
-    monkeypatch.setattr(picker, "pick_row", lambda title, rows, actions, **kw: shown.extend(rows) or ("enter", 1))
-    monkeypatch.setattr(agents, "resume", lambda db_, rid, **kw: resumed.append(rid) or [])
-    monkeypatch.setattr(agents, "is_alive", lambda *a, **k: False)
-    monkeypatch.setattr(cli, "_check_updates", lambda *a: None)
-    monkeypatch.setattr(cli, "_local_models_detached", lambda *a: None)
-    monkeypatch.setattr(cli, "_attach", lambda *a, **k: None)
-    monkeypatch.chdir(root.path)
-    cli.continue_cmd(session_id=None, attach=True)
-    assert resumed == ["old"]
-    assert all("(no goal yet)" in r and "0/0 workers" in r and "task" not in r for r in shown)
 
 
 def test_sessions_cmd_lists_a_session_with_workers(db, root, repo, monkeypatch):

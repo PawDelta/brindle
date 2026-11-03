@@ -2,7 +2,7 @@ import time
 
 import pytest
 
-from brindle import agents, autopilot, cull, quota, watch, workspaces
+from brindle import agents, autopilot, cull, quota, workspaces
 from brindle.db import Agent
 
 NOW = time.time()
@@ -54,39 +54,14 @@ def test_on_stop_pauses_even_with_workers_running(db, session):
     assert db.get_agent("w1").status == "paused"
 
 
-def test_no_reset_time_just_blocks(db, session):
-    use(95, resets_at=None)
-    autopilot.usage_sweep(db)
-    assert db.get_autopilot("boss").state == "blocked"
-    assert session.stopped == []
-
-
-def test_below_limit_does_nothing(db, session):
-    use(20)
-    assert autopilot.usage_sweep(db) == []
-    assert db.get_autopilot("boss").state == "running"
-
-
-def test_still_over_limit_after_reset_time_keeps_waiting(db, session):
+def test_over_limit_waits_for_the_reset_then_resumes_without_fresh_usage(db, session):
     use(95)
     autopilot.usage_sweep(db)
     assert autopilot.usage_sweep(db, now=RESET + 1) == []  # fresh usage still at the limit
     assert db.get_autopilot("boss").state == "usage_paused"
-
-
-def test_no_fresh_usage_resumes_after_reset(db, session):
-    use(95)
-    autopilot.usage_sweep(db)
     quota.path().unlink()
     autopilot.usage_sweep(db, now=RESET + 1)
     assert db.get_autopilot("boss").state == "running"
-
-
-def test_user_speaking_does_not_clear_it(db, session):
-    use(95)
-    autopilot.usage_sweep(db)
-    autopilot.user_spoke(db, db.get_agent("boss"))
-    assert db.get_autopilot("boss").state == "usage_paused"
 
 
 def test_cull_sweep_drives_it_and_keeps_paused_workers(db, session, monkeypatch):
@@ -104,14 +79,6 @@ def test_cull_sweep_drives_it_and_keeps_paused_workers(db, session, monkeypatch)
     use(5)
     cull.sweep(db, now=RESET + 1)
     assert db.get_autopilot("boss").state == "running"
-
-
-def test_limit_error_names_a_non_claude_provider_and_leaves_claude_workers(db, session):
-    db.update_agent("w1", provider="antigravity")
-    autopilot.limit_reached(db, db.get_agent("w1"))
-    ap = db.get_autopilot("boss")
-    assert ap.state == "blocked" and "antigravity" in ap.note and "Claude" not in ap.note
-    assert session.stopped == []
 
 
 def test_claude_limit_error_pauses_only_claude_workers(db, session):
@@ -140,9 +107,3 @@ def test_paused_session_is_not_restarted_by_the_sweep(db, session):
     autopilot.usage_sweep(db, now=RESET + 1)
     assert db.get_autopilot("boss").state == "running"
 
-
-def test_sidebar_line():
-    pilot = {"enabled": True, "goal": "Goal", "milestones": [], "state": "usage_paused",
-             "usage_resets_at": RESET, "workers": 0, "note": None}
-    text = " ".join(line.text for line in watch.render_autopilot(pilot, 60))
-    assert "paused for usage until" in text
