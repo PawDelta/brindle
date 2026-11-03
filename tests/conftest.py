@@ -128,8 +128,9 @@ AMBIENT_BRINDLE_ENV = (
 def ambient_brindle_env(monkeypatch):
     """Every test starts without the routing, cloud, identity and credential
     variables of the shell or agent that runs the suite (AMBIENT_BRINDLE_ENV);
-    tests that need one set it themselves. Defined before the other autouse
-    fixtures, so it runs first and they set what they need on top."""
+    tests that need one set it themselves. brindle_home requests this fixture,
+    so it runs first and its own overrides (the credential store, managed
+    settings) are set after the cleanup, not wiped by it."""
     for name in AMBIENT_BRINDLE_ENV:
         monkeypatch.delenv(name, raising=False)
 
@@ -444,7 +445,7 @@ def provider_http(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def brindle_home(tmp_path, monkeypatch):
+def brindle_home(tmp_path, monkeypatch, ambient_brindle_env):
     home = tmp_path / "brindle-home"
     monkeypatch.setenv("BRINDLE_HOME", str(home))
     monkeypatch.setenv("BRINDLE_CACHE_DIR", str(tmp_path / "brindle-cache"))   # not ~/Library/Caches
