@@ -12,6 +12,7 @@ import pytest
 from brindle import agents, mcp_server, pipeline, workspaces
 from brindle.db import Agent
 from conftest import sh
+from git_snapshots import fast_host_tools, repo, workspaces_once  # noqa: F401  (fixtures)
 
 
 @pytest.fixture
@@ -36,11 +37,18 @@ def duplicate_row(db, ws, suffix="-2"):
     return twin
 
 
+@pytest.fixture
+def feat_x(db, repo, tmp_path, tmp_path_factory):
+    """``workspaces.create(db, repo, "feat/x")``, built once and copied."""
+    return workspaces_once("sharing:feat/x", db, tmp_path, tmp_path_factory,
+                           lambda: (workspaces.create(db, str(repo), "feat/x").workspace,))[0]
+
+
 # -- creation ---------------------------------------------------------------------
 
 
-def test_assign_with_branch_of_live_worker_is_refused(db, repo, live, monkeypatch):
-    first = workspaces.create(db, str(repo), "feat/x").workspace
+def test_assign_with_branch_of_live_worker_is_refused(db, repo, feat_x, live, monkeypatch):
+    first = feat_x
     add_agent(db, first, "busy1")
     live.add("busy1")
     root = workspaces.adopt_root(db, str(repo))
@@ -119,8 +127,8 @@ def test_concurrent_sessions_merge_their_workers_into_the_checkout(db, repo, liv
 # -- removal ----------------------------------------------------------------------
 
 
-def test_remove_refuses_while_another_live_row_shares_the_path(db, repo, live):
-    ws = workspaces.create(db, str(repo), "feat/x").workspace
+def test_remove_refuses_while_another_live_row_shares_the_path(db, feat_x, live):
+    ws = feat_x
     twin = duplicate_row(db, ws)
     add_agent(db, twin, "busy1")
     live.add("busy1")
@@ -136,8 +144,8 @@ def test_remove_refuses_while_another_live_row_shares_the_path(db, repo, live):
     assert os.path.isdir(twin.path)
 
 
-def test_mcp_remove_workspace_refuses_then_force_removes(db, repo, live, monkeypatch):
-    ws = workspaces.create(db, str(repo), "feat/x").workspace
+def test_mcp_remove_workspace_refuses_then_force_removes(db, feat_x, live, monkeypatch):
+    ws = feat_x
     twin = duplicate_row(db, ws)
     add_agent(db, twin, "busy1")
     live.add("busy1")

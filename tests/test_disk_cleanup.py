@@ -20,6 +20,7 @@ from brindle.daemon import routes_actions
 from brindle.db import Agent
 
 from conftest import sh
+from git_snapshots import fast_host_tools, repo, restore_or_build, workspaces_once  # noqa: F401  (fixtures)
 
 DAY = 86400
 
@@ -51,6 +52,25 @@ def _worktree(repo: Path, branch: str, merge: str | None = None, days_old: float
     return wt
 
 
+@pytest.fixture
+def old_worktree(repo, tmp_path, tmp_path_factory):
+    """``_worktree(repo, branch, days_old=30)``, built once per branch and copied."""
+    return lambda branch: restore_or_build(f"disk:{branch}", tmp_path, tmp_path_factory, ("origin.git", "proj"),
+                                           lambda: _worktree(repo, branch, days_old=30))
+
+
+@pytest.fixture
+def shipped(db, repo, tmp_path, tmp_path_factory):
+    """A workspace "shipped" with one commit, merged into main; built once and copied."""
+    def build():
+        ws = workspaces.create(db, str(repo), "shipped").workspace
+        Path(ws.path, "a.txt").write_text("a\n")
+        sh(f"git add a.txt && git commit -qm a && cd {repo} && git merge -q --no-ff -m m {ws.branch}", ws.path)
+        return (ws,)
+
+    return workspaces_once("disk:shipped", db, tmp_path, tmp_path_factory, build)[0]
+
+
 def _archived(repo: Path, branch: str) -> str:
     return sh(f"git rev-parse {disk.ARCHIVE_REF}{branch}", repo).strip()
 
@@ -73,8 +93,8 @@ def test_upgrade_sweep_removes_merged_worktrees_whole_once_and_never_a_dirty_one
 
 
 @pytest.mark.parametrize("state", ["dirty", "live", "process", "unknown"])
-def test_dirty_or_live_abandoned_worktree_is_never_removed(db, repo, monkeypatch, state):
-    wt = _worktree(repo, "idea", days_old=30)
+def test_dirty_or_live_abandoned_worktree_is_never_removed(db, repo, old_worktree, monkeypatch, state):
+    wt = old_worktree("idea")
     if state == "dirty":
         (wt / "notes.txt").write_text("unsaved thought\n")
     elif state == "process":   # a detached dev server, or a shell on another tmux server
@@ -98,15 +118,12 @@ def test_dirty_or_live_abandoned_worktree_is_never_removed(db, repo, monkeypatch
 
 @pytest.mark.parametrize("cleanup", ["post-merge", "retired"])
 @pytest.mark.parametrize("other", ["pane", "process", None])
-def test_automatic_cleanup_keeps_a_worktree_something_else_is_live_in(db, repo, process_scan, cleanup, other):
+def test_automatic_cleanup_keeps_a_worktree_something_else_is_live_in(db, shipped, process_scan, cleanup, other):
     """The pipeline's post-merge removal and the sweep of retired workspaces
     go through workspaces.remove: a pane of another session or a detached
     process in the worktree (the scan, faked, shows it there) keeps it,
     while the workspace's own session (which the removal ends) doesn't."""
-    ws = workspaces.create(db, str(repo), "shipped").workspace
-    Path(ws.path, "a.txt").write_text("a\n")
-    sh("git add a.txt && git commit -qm a", ws.path)
-    sh(f"git merge -q --no-ff -m m {ws.branch}", repo)
+    ws = shipped
     db.add_agent(Agent("w1", ws.id, "developer", "claude", None, "assign", "done",
                        "@999", None, time.time() - 7200))
     tmux.ensure_session(ws.tmux_session, ws.path, {})
@@ -170,16 +187,13 @@ def test_scratch_prune_and_pool_sweep_keep_a_folder_a_process_is_in(db, repo, mo
     ("post-merge", None, False),
     ("post-merge", "vite", False),
 ])
-def test_a_command_in_the_workspaces_own_pane_keeps_its_worktree(db, repo, monkeypatch, cleanup, child,
+def test_a_command_in_the_workspaces_own_pane_keeps_its_worktree(db, repo, shipped, monkeypatch, cleanup, child,
                                                                  attached):
     """What the removal ends (the pane's own process when its session is
     killed, the agents the pipeline stops) is excused; a dev server or test
     run started in the workspace's own pane is not, though its environment
     (TMUX=, a PWD in the worktree) and its paths there look like brindle's."""
-    ws = workspaces.create(db, str(repo), "shipped").workspace
-    Path(ws.path, "a.txt").write_text("a\n")
-    sh("git add a.txt && git commit -qm a", ws.path)
-    sh(f"git merge -q --no-ff -m m {ws.branch}", repo)
+    ws = shipped
     wt = os.path.realpath(ws.path)
     keep = None
     if cleanup == "post-merge":   # the worker's CLI in the pane; the approving reviewer runs this
@@ -230,8 +244,8 @@ def test_a_command_in_the_workspaces_own_pane_keeps_its_worktree(db, repo, monke
     assert stopped == (["w1"] if removed and keep else [])
 
 
-def test_abandoned_worktree_is_only_listed_until_cleaned(db, repo, monkeypatch):
-    wt = _worktree(repo, "stalled", days_old=30)
+def test_abandoned_worktree_is_only_listed_until_cleaned(db, repo, old_worktree, monkeypatch):
+    wt = old_worktree("stalled")
     tip = sh("git rev-parse stalled", repo).strip()
     monkeypatch.chdir(repo)
 
@@ -303,14 +317,14 @@ STARTED = f"started {123456 / os.sysconf('SC_CLK_TCK'):.2f}s after boot, argv[0]
         "runner-own-ids", "runner-no-status", "runner-and-a-shell-in-the-worktree", "systemd-user-manager",
         "systemd-not-from-pid-1", "ssh-agent", "live-check-ignore", "unknown-is-named",
         "worktree-config-ignored"])
-def test_a_partial_process_scan_keeps_every_worktree(db, repo, tmp_path, monkeypatch, caplog, real_process_scan,
-                                                     scan, refused, kept, logged):
+def test_a_partial_process_scan_keeps_every_worktree(db, repo, old_worktree, tmp_path, monkeypatch, caplog,
+                                                     real_process_scan, scan, refused, kept, logged):
     """One live process whose folder can't be read (or an lsof that failed
     part way) must not read as no process at all, unless the process isn't
     this user's (it runs with another's uid or gid), or it is one that never
     runs in a project: a known service manager or agent, or one the repo's
     ``live_check_ignore`` names."""
-    wt = _worktree(repo, "idea", days_old=30)
+    wt = old_worktree("idea")
     if scan == "ignored":
         (repo / ".brindle").mkdir(exist_ok=True)
         (repo / ".brindle" / "config.json").write_text(json.dumps({"live_check_ignore": ["syncd"]}))
@@ -526,8 +540,8 @@ def test_clean_lists_then_removes_merged_and_archives_stale_branches(db, repo, m
     assert "noise" in sh("git branch --list noise", repo)
 
 
-def test_a_branch_that_moves_before_deletion_is_kept(db, repo, monkeypatch):
-    wt = _worktree(repo, "stalled", days_old=30)
+def test_a_branch_that_moves_before_deletion_is_kept(db, repo, old_worktree, monkeypatch):
+    wt = old_worktree("stalled")
     removing = git.remove_worktree
 
     def commit_during_teardown(root, path, force=False):
@@ -557,11 +571,8 @@ def test_a_branch_that_moves_before_deletion_is_kept(db, repo, monkeypatch):
 
 
 @pytest.mark.variant("regression guard (review blocker): a merge record counts only for the tip it recorded, so work committed after the merge is never swept")
-def test_a_branch_that_moved_on_after_its_merge_is_not_swept(db, repo):
-    ws = workspaces.create(db, str(repo), "again").workspace
-    Path(ws.path, "a.txt").write_text("a\n")
-    sh("git add a.txt && git commit -qm a", ws.path)
-    sh(f"git merge -q --no-ff -m m {ws.branch}", repo)
+def test_a_branch_that_moved_on_after_its_merge_is_not_swept(db, repo, shipped):
+    ws = shipped
     db.set_merged(ws.id, sh("git rev-parse HEAD", ws.path))
     Path(ws.path, "b.txt").write_text("more work\n")
     sh("git add b.txt && git commit -qm b", ws.path)

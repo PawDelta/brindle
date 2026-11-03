@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from conftest import sh
+from fast_repo import build_repo, copy_tree, moved, scratch_db
 from brindle import agents, usage, workspaces
 from brindle.db import Agent
 from brindle.native import runner
@@ -23,9 +24,25 @@ def fake(monkeypatch):
     ep.close()
 
 
+@pytest.fixture(scope="module")
+def ws_template(tmp_path_factory):
+    """The repo with the ``feature`` worktree, made once by workspaces.create."""
+    base = tmp_path_factory.mktemp("ws-template")
+    repo_ = build_repo(base)
+    with scratch_db(tmp_path_factory.mktemp("ws-template-home")) as db_:
+        return base, workspaces.create(db_, str(repo_), "feature").workspace
+
+
 @pytest.fixture
-def ws(db, repo):
-    return workspaces.create(db, str(repo), "feature").workspace
+def repo(ws_template, tmp_path):
+    return copy_tree(ws_template[0], tmp_path)
+
+
+@pytest.fixture
+def ws(db, repo, ws_template, tmp_path):
+    w = moved(ws_template[1], ws_template[0], tmp_path)
+    db.add_workspace(w)
+    return w
 
 
 @pytest.fixture
@@ -208,7 +225,9 @@ def test_reviewer_cannot_edit_under_dontask(db, ws, local_profile, fake, monkeyp
 
 
 
-def test_endpoint_failure_stops_the_runner(db, ws, local_profile, fake, capfd):
+def test_endpoint_failure_stops_the_runner(db, ws, local_profile, fake, capfd, monkeypatch):
+    real_client = runner.Client   # the 500s after the 401 are retried, with no backoff waits
+    monkeypatch.setattr(runner, "Client", lambda endpoint, **kw: real_client(endpoint, lambda seconds: None, **kw))
     native_agent(db, ws)
     db.enqueue("n1", "go", None)
     fake.replies = [401]
