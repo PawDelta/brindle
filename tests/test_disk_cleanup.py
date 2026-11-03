@@ -297,9 +297,12 @@ STARTED = f"started {123456 / os.sysconf('SC_CLK_TCK'):.2f}s after boot, argv[0]
     ("ignored", _status(name="syncd"), False, None),   # the repo's live_check_ignore names it
     # Anything else refused keeps every worktree, and a removal says what it was.
     ("unknown", _status(name="syncd"), True, "Name syncd"),
+    # A worktree's own config can't excuse what holds it: only the repo's base config does.
+    ("own-config", _status(name="syncd"), True, "Name syncd"),
 ], ids=["proc-unreadable", "lsof-partial", "runner-root-ids", "runner-other-group", "runner-capabilities",
         "runner-own-ids", "runner-no-status", "runner-and-a-shell-in-the-worktree", "systemd-user-manager",
-        "systemd-not-from-pid-1", "ssh-agent", "live-check-ignore", "unknown-is-named"])
+        "systemd-not-from-pid-1", "ssh-agent", "live-check-ignore", "unknown-is-named",
+        "worktree-config-ignored"])
 def test_a_partial_process_scan_keeps_every_worktree(db, repo, tmp_path, monkeypatch, caplog, real_process_scan,
                                                      scan, refused, kept, logged):
     """One live process whose folder can't be read (or an lsof that failed
@@ -358,8 +361,12 @@ def test_a_partial_process_scan_keeps_every_worktree(db, repo, tmp_path, monkeyp
             with pytest.raises(OSError):
                 procs.cwds(ignore)
         out = disk.clean(db, path=str(wt))
-        if scan == "unknown":   # it keeps any worktree, and the refusal says which process to excuse
+        if scan in ("unknown", "own-config"):   # it keeps any worktree, and the refusal names the process
             other = workspaces.create(db, str(repo), "other").workspace
+            if scan == "own-config":   # the worker's branch lists it, committed and in its checkout
+                Path(other.path, ".brindle").mkdir(exist_ok=True)
+                Path(other.path, ".brindle", "config.json").write_text(json.dumps({"live_check_ignore": ["syncd"]}))
+                sh("git add -f .brindle/config.json && git commit -qm ignore", other.path)
             with pytest.raises(workspaces.WorkspaceError) as refusal:
                 workspaces.remove(db, other)
             assert "process syncd (pid 1354)" in str(refusal.value), refusal.value
