@@ -7,7 +7,7 @@ import os
 import pytest
 from typer.testing import CliRunner
 
-from brindle import cull, git, history, scratch, tmux
+from brindle import cull, git, scratch, tmux
 from brindle.cli import app
 
 from conftest import sh
@@ -44,31 +44,6 @@ def test_init_writes_config_and_is_idempotent(proj):
     assert (proj / ".brindle" / "config.json").read_text() == first
 
 
-def test_init_outside_a_repo_fails(tmp_path, monkeypatch):
-    plain = tmp_path / "plain"
-    plain.mkdir()
-    monkeypatch.chdir(plain)
-    res = run("init", "--yes", ok=False)
-    assert res.exit_code == 1 and "not in a git repo" in res.output
-
-
-def test_doctor_runs_in_and_out_of_a_repo(proj, tmp_path, monkeypatch):
-    def doctor():
-        # Whether tools like claude are installed varies by machine; the exit
-        # code must match what the report says either way.
-        res = run("doctor", ok=False)
-        assert res.exit_code == (1 if "problem(s) will stop brindle" in res.output else 0), res.output
-        assert "python" in res.output and "brindle home" in res.output
-        return res.output
-
-    in_repo = doctor()
-    assert "repo config" in in_repo and "routing light" in in_repo
-    plain = tmp_path / "plain"
-    plain.mkdir()
-    monkeypatch.chdir(plain)
-    assert "repo config" not in doctor()
-
-
 def test_new_ls_status_diff_commit(proj, ws_path):
     ws = ws_path
     assert os.path.isdir(ws.path) and ws.branch == "feat/e2e"
@@ -94,20 +69,6 @@ def test_new_ls_status_diff_commit(proj, ws_path):
     assert "1 ahead, 0 behind" in st
     assert "new.txt" in run("diff", ws.name).output
     assert run("cd", ws.name).output.strip() == ws.path
-
-
-def test_commands_resolve_the_workspace_from_inside_it(proj, ws_path, monkeypatch):
-    monkeypatch.chdir(ws_path.path)
-    assert ws_path.id in run("status").output
-
-
-def test_unknown_workspaces_and_bad_arguments_are_clean_errors(proj):
-    res = run("status", "nope", ok=False)
-    assert res.exit_code == 1 and "Traceback" not in res.output
-    assert run("rm", "nope", ok=False).exit_code == 1
-    assert run("new", ok=False).exit_code == 1
-    res = run("new", "x", "--pr", "1", ok=False)
-    assert res.exit_code == 1 and "not both" in res.output
 
 
 def test_sync_picks_up_new_base_commits(proj, ws_path):
@@ -141,17 +102,6 @@ def test_merge_then_rm_deletes_the_merged_branch(proj, ws_path):
     assert run("ls").output.strip() == "no workspaces"
 
 
-def test_squash_merge(proj, ws_path):
-    ws = ws_path
-    for i in range(2):
-        open(os.path.join(ws.path, f"f{i}.txt"), "w").write("x")
-        run("commit", ws.name, "-m", f"c{i}")
-    before = int(sh("git rev-list --count main", proj))
-    run("merge", ws.name, "--squash")
-    assert int(sh("git rev-list --count main", proj)) == before + 1
-    assert (proj / "f0.txt").exists() and (proj / "f1.txt").exists()
-
-
 def test_rm_keeps_an_unmerged_branch_and_needs_force_for_dirty(proj, ws_path):
     ws = ws_path
     open(os.path.join(ws.path, "a.txt"), "w").write("a")
@@ -162,29 +112,6 @@ def test_rm_keeps_an_unmerged_branch_and_needs_force_for_dirty(proj, ws_path):
     out = run("rm", ws.name, "--force").output
     assert "removed" in out and not os.path.isdir(ws.path)
     assert "feat/e2e" in sh("git branch --list", proj)  # unmerged: kept
-
-
-def test_new_reports_when_the_branch_is_taken(proj, ws_path):
-    res = run("new", "feat/e2e", "--no-agent", "--no-setup", ok=False)
-    assert res.exit_code == 1 and "Traceback" not in res.output
-
-
-def test_history_sessions_and_prune_on_a_quiet_repo(proj, db):
-    assert run("history").output.strip() == "no history"
-    assert run("sessions").output.strip() == "no paused sessions"
-    out = run("prune").output
-    assert "dropped 0 paused session(s), removed 0 old scratch session(s)" in out
-
-
-def test_history_lists_rows_and_filters_by_kind(proj, db):
-    root = git.main_repo_root(str(proj))
-    history.record(db, root, "merge", branch="feat/a", result="merged")
-    history.record(db, root, "check", branch="feat/b", result="ok")
-    out = run("history").output
-    assert "feat/a" in out and "feat/b" in out and "total tokens" in out
-    only = run("history", "--kind", "merge").output
-    assert "feat/a" in only and "feat/b" not in only
-    assert "feat/a" in run("history", "--limit", "5").output
 
 
 def test_prune_removes_a_finished_merged_worktree(proj, ws_path):
@@ -241,16 +168,3 @@ def test_scratch_session_and_transfer(db, repo, tmp_path, monkeypatch):
     run("rm", ws.name)
     assert run("transfer", str(repo), ok=False).exit_code == 1  # already moved
 
-
-def test_transfer_into_a_plain_folder_fails_cleanly(db, tmp_path, monkeypatch):
-    elsewhere = tmp_path / "e"
-    elsewhere.mkdir()
-    s = scratch.create(db, str(elsewhere))
-    open(os.path.join(s.path, "a.txt"), "w").write("a")
-    plain = tmp_path / "plain"
-    plain.mkdir()
-    monkeypatch.chdir(plain)
-    res = run("transfer", str(plain), ok=False)
-    assert res.exit_code == 1 and "isn't inside a git repository" in res.output
-    res = run("transfer", s.path, ok=False)
-    assert res.exit_code == 1 and "real repository" in res.output

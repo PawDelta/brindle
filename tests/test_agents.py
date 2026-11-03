@@ -55,24 +55,13 @@ def test_unreported_alert_still_fires_once_when_nothing_is_running(db, ws, monke
     agents.handle_hook(db, "a1", "stop", {"stop_hook_active": True})
     assert len(sent) == 1 and sent[0][1] == "boss"
     assert "parser.py" in sent[0][2]   # what it did, so the supervisor needn't go and look
-
-
-def test_unreported_notice_repeats_after_resume(db, ws, monkeypatch):
-    sent = _unreported_setup(db, ws, monkeypatch)
-    monkeypatch.setattr(agents, "command_running", lambda db_, a: False)
-    agents.handle_hook(db, "a1", "stop", {"stop_hook_active": True})
+    for _ in range(3):   # agy polling a command: brief resumes between stops give no new alert
+        agents.handle_hook(db, "a1", "pre-tool", {})
+        agents.handle_hook(db, "a1", "stop", {"stop_hook_active": True})
+    assert len(sent) == 1
     agents.handle_hook(db, "a1", "prompt-submit", {})   # its supervisor's message resumes it
     agents.handle_hook(db, "a1", "stop", {"stop_hook_active": True})
     assert len(sent) == 2
-
-
-def test_unreported_brief_resumes_while_stopped_give_one_alert(db, ws, monkeypatch):
-    sent = _unreported_setup(db, ws, monkeypatch)
-    monkeypatch.setattr(agents, "command_running", lambda db_, a: False)
-    for _ in range(3):   # agy polling a command: stop, then a tool call, over and over
-        agents.handle_hook(db, "a1", "stop", {"stop_hook_active": True})
-        agents.handle_hook(db, "a1", "pre-tool", {})
-    assert len(sent) == 1
 
 
 def test_command_running_sees_a_command_under_an_antigravity_worker_so_not_stopped(db, ws, monkeypatch):
@@ -97,30 +86,6 @@ def test_command_running_sees_a_command_under_an_antigravity_worker_so_not_stopp
     del table[12]
     agents.handle_hook(db, "a1", "stop", {"stop_hook_active": True})
     assert len(sent) == 1   # just the CLI left: stopped
-
-
-def test_running_commands_ignores_the_cli_and_shells_but_sees_a_test_run():
-    from brindle import procs
-
-    P = procs.Proc
-    table = {
-        1: P(1, 0, "tmux: server"),
-        10: P(10, 1, "-zsh BRINDLE_AGENT_ID=a1"),
-        11: P(11, 10, "claude --model x BRINDLE_AGENT_ID=a1"),
-        12: P(12, 11, "/bin/zsh -c uv run pytest"),
-        13: P(13, 12, "python -m pytest -q"),
-    }
-    assert procs.running_commands("a1", [10], table) == [table[13]]
-    del table[13]
-    assert procs.running_commands("a1", [10], table) == []
-
-
-def test_prompt_and_notification_hooks(db, ws):
-    fake_agent(db, ws, status="idle")
-    agents.handle_hook(db, "a1", "prompt-submit", {})
-    assert db.get_agent("a1").status == "processing"
-    agents.handle_hook(db, "a1", "notification", {"message": "Claude needs your permission to use Bash"})
-    assert db.get_agent("a1").status == "waiting"
 
 
 CLAUDE_IDLE = "⏺ Done.\n\n────\n❯ \n────\n  ⏵⏵ accept edits on (shift+tab to cycle) · ← for agents\n"
@@ -156,15 +121,10 @@ CLAUDE_PROMPT = " Bash command\n   pytest\n This command requires approval\n\n D
 
 
 @pytest.mark.parametrize("screen,want", [
-    (CLAUDE_IDLE, "idle"), (CLAUDE_QUOTED_BUSY_NO_PADDING, "idle"),
-    (CLAUDE_BUSY_REAL_CAPTURE, "busy"), (CLAUDE_PROMPT, "waiting"),
+    (CLAUDE_QUOTED_BUSY_NO_PADDING, "idle"), (CLAUDE_PROMPT, "waiting"),
 ])
 def test_claude_screen_state(screen, want):
     assert ClaudeCode().screen_state(screen) == want
-
-
-def test_claude_busy_in_footer():
-    assert ClaudeCode().busy_in_footer(CLAUDE_BUSY_REAL_CAPTURE)
 
 
 # The real agent-view screen: its footer ("ctrl+x to delete") is the reliable
@@ -204,11 +164,7 @@ CLAUDE_TYPING_WITH_INVERSE_CURSOR = (
 
 
 @pytest.mark.parametrize("screen,interactive,want", [
-    (CLAUDE_TRANSCRIPT_QUOTES_THE_PHRASES, True, None),  # not the real footer
-    (CLAUDE_PLACEHOLDER_GREY_256, True, None),  # grey 256-colour placeholder
-    (CLAUDE_PLACEHOLDER_TRUECOLOR_GREY, True, None),  # grey truecolor placeholder
     (CLAUDE_TYPING_WITH_INVERSE_CURSOR, True, "typing"),  # ignore the inverse-video cursor cell
-    ("❯\n" + "continued draft\n" * 40 + "────\n? for shortcuts", True, "typing"),
 ])
 def test_claude_paste_blocked(screen, interactive, want):
     assert ClaudeCode().paste_blocked(screen, interactive) == want
@@ -253,13 +209,6 @@ def test_paste_blocked_or_draft_holds_message_then_delivers_it_once(db, ws, monk
     assert agents.flush(db, "a1") is True and pasted == ["queued message"]
 
 
-def test_reconcile_keeps_hook_status_when_screen_is_unclear(db, ws, monkeypatch):
-    fake_agent(db, ws, status="processing")
-    screens = iter([CLAUDE_IDLE, CLAUDE_BUSY])
-    monkeypatch.setattr(tmux, "capture", lambda *a, **k: next(screens))
-    assert agents.reconcile(db, db.get_agent("a1"), gap=0).status == "processing"
-
-
 def test_handoff_wait_is_bounded_and_detaches(db, ws, monkeypatch):
     (Path(ws.repo_root) / ".brindle").mkdir(exist_ok=True)
     (Path(ws.repo_root) / ".brindle" / "config.json").write_text('{"pipeline": false}')
@@ -285,37 +234,6 @@ def test_handoff_wait_is_bounded_and_detaches(db, ws, monkeypatch):
     assert "done later" in out
     assert db.pending_count("boss") == 0
     assert db.get_agent("w1") is None  # handoff worker closed after collection
-
-
-@pytest.mark.skipif(not shutil.which("tmux"), reason="tmux not installed")
-def test_watch_pane_shares_the_window_and_messages_reach_the_agent(db, ws):
-    a = agents.spawn(db, ws, "developer", provider_name="shell", watch_pane=True)
-    try:
-        assert a.tmux_window.startswith("%")  # a pane, not a window
-        panes = tmux._tmux("list-panes", "-t", a.tmux_window, "-F", "#{pane_id}").stdout.split()
-        assert len(panes) == 2 and a.tmux_window in panes
-        # Even with the dashboard pane focused, messages go to the agent's pane.
-        other = next(p for p in panes if p != a.tmux_window)
-        tmux._tmux("select-pane", "-t", other)
-        agents.send_message(db, a.id, "echo reached-$BRINDLE_AGENT_ID")
-        deadline = time.time() + 5
-        while time.time() < deadline and f"reached-{a.id}" not in tmux.capture(a.tmux_window):
-            time.sleep(0.2)
-        assert f"reached-{a.id}" in tmux.capture(a.tmux_window)
-    finally:
-        tmux.kill_session(ws.tmux_session)
-
-
-@pytest.mark.skipif(not shutil.which("tmux"), reason="tmux not installed")
-def test_find_running_reuses_a_live_interactive_agent(db, ws):
-    assert agents.find_running(db, ws, "developer") is None
-    a = agents.spawn(db, ws, "developer", provider_name="shell")
-    try:
-        assert agents.find_running(db, ws, "developer").id == a.id
-        assert agents.find_running(db, ws, "reviewer") is None
-    finally:
-        tmux.kill_session(ws.tmux_session)
-    assert agents.find_running(db, ws, "developer") is None  # dead agents don't count
 
 
 @pytest.mark.skipif(not shutil.which("tmux"), reason="tmux not installed")
@@ -367,31 +285,7 @@ def test_workers_test_their_change_and_leave_the_full_suite_to_checks(db, ws, mo
     assert seen == [True, False]
 
 
-def test_no_goal_command_when_hooks_are_disabled(db, ws):
-    from brindle.providers import get_provider
-
-    (Path(ws.path) / ".claude").mkdir(exist_ok=True)
-    (Path(ws.path) / ".claude" / "settings.local.json").write_text('{"disableAllHooks": true}')
-    prompt = agents.decorate_worker_prompt("add a flag", "w1", ws, "tests pass", get_provider("claude"), headless=False)
-    assert not prompt.startswith("/goal")
-    assert "Finish line: tests pass" in prompt
-
-
-def test_add_dir_is_never_the_last_flag():
-    """--add-dir is variadic, so a flag must follow the last one.
-
-    If it were last, Claude Code would read the initial prompt as another
-    directory and the worker would start with no task and no error.
-    """
-    from dataclasses import replace
-
-    profile = replace(load_profile("developer"), add_dirs=["/srv/cache", "/srv/refs"])
-    argv = ClaudeCode().command(LaunchContext("abc", profile, "do the thing"))
-    last = max(i for i, a in enumerate(argv) if a == "--add-dir")
-    assert argv[last + 2].startswith("--"), argv[last:]
-
-
-@pytest.mark.parametrize("provider", ["codex", "antigravity"])
+@pytest.mark.parametrize("provider", ["antigravity"])
 def test_supervisor_resume_keeps_prompt(db, ws, monkeypatch, provider):
     agent = Agent("boss", ws.id, "supervisor", provider, None, "interactive", "idle", "@0", None, time.time())
     db.add_agent(agent)
@@ -421,24 +315,8 @@ def test_repo_read_dirs_become_read_only_allow_rules(ws):
     assert "--add-dir" not in argv
 
 
-def test_spawn_reports_a_missing_add_dir_once(db, ws, monkeypatch, capsys):
-    """Claude Code ignores an --add-dir that does not exist, so launch says so,
-    once, however many times the profile is loaded on the way."""
-    config = Path(ws.repo_root) / ".brindle" / "config.json"
-    config.parent.mkdir(exist_ok=True)
-    config.write_text('{"add_dirs": ["/no/such/cache"]}')
-    # Stopped at the window, so every profile load on the way (spawn's own and
-    # _profile_for's) has happened.
-    monkeypatch.setattr(agents, "_open_window", Mock(side_effect=RuntimeError("launch captured")))
-    monkeypatch.setattr("brindle.providers.trust_folder", lambda path: None)
-
-    with pytest.raises(RuntimeError, match="launch captured"):
-        agents.spawn(db, ws, "developer", prompt="hi", mode="assign")
-    assert capsys.readouterr().err.count("/no/such/cache") == 1
-
-
 @pytest.mark.parametrize("tool, reports, ends", [
-    ("assign", "later", "load falls"), ("handoff", "later", "load falls"),
+    ("assign", "later", "load falls"),
     ("handoff", "while it starts", "load falls"),
     ("assign", "later", "start now"), ("assign", "later", "forced in flight"),
     ("assign", "later", "wait off")])

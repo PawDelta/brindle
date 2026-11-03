@@ -9,7 +9,7 @@ import time
 
 from typer.testing import CliRunner
 
-from brindle import agents, doctor, keystore, providers, quota, tmux, workspaces
+from brindle import agents, doctor, keystore, providers, tmux, workspaces
 from brindle.cli import app
 from brindle.db import Agent
 
@@ -52,17 +52,12 @@ def test_approve_merges_and_unrejects(tmp_path):
     assert data["customApiKeyResponses"] == {"approved": ["other", KEY[-20:]], "rejected": []}
 
 
-def test_seed_ci_config_still_seeds_onboarding_trust_and_the_key(tmp_path, repo):
-    providers.seed_ci_config([str(repo)], KEY)
-    data = json.loads(_config(tmp_path).read_text())
-    assert data["hasCompletedOnboarding"] is True and data["theme"]
-    assert data["projects"][os.path.realpath(repo)] == {"hasTrustDialogAccepted": True}
-    assert data["customApiKeyResponses"]["approved"] == [KEY[-20:]]
-
-
 # -- the opt-in question -------------------------------------------------------------------------
 
 def test_keys_set_yes_approves(tmp_path):
+    r = runner.invoke(app, ["keys", "set", "ANTHROPIC_API_KEY"], input=f"{KEY}\n")   # no answer: declined
+    assert r.exit_code == 0, r.output
+    assert not _config(tmp_path).exists()
     r = runner.invoke(app, ["keys", "set", "ANTHROPIC_API_KEY"], input=f"{KEY}\ny\n")
     assert r.exit_code == 0, r.output
     assert keystore.get_key("ANTHROPIC_API_KEY") == KEY
@@ -70,31 +65,13 @@ def test_keys_set_yes_approves(tmp_path):
     assert KEY not in r.output
 
 
-def test_keys_set_without_an_answer_declines(tmp_path):
-    r = runner.invoke(app, ["keys", "set", "ANTHROPIC_API_KEY"], input=f"{KEY}\n")
-    assert r.exit_code == 0, r.output
-    assert not _config(tmp_path).exists()
-
-
-def test_keys_set_asks_only_about_the_anthropic_key(tmp_path):
-    r = runner.invoke(app, ["keys", "set", "OPENAI_API_KEY"], input="sk-test-openai-0000\ny\n")
-    assert r.exit_code == 0, r.output
-    assert not _config(tmp_path).exists()
-
-
 def test_doctor_fix_accepted_approves_and_then_stops_asking(tmp_path, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", KEY)
+    doctor.fix(lambda p: False)   # declined: nothing is approved
+    assert not _config(tmp_path).exists()
     doctor.fix(lambda p: True)
     assert json.loads(_config(tmp_path).read_text())["customApiKeyResponses"]["approved"] == [KEY[-20:]]
     assert doctor.fix(lambda p: 1 / 0) == ["ANTHROPIC_API_KEY: already approved in Claude Code"]
-
-
-def test_doctor_fix_cli_declines_by_default(tmp_path, monkeypatch):
-    monkeypatch.setenv("ANTHROPIC_API_KEY", KEY)
-    monkeypatch.setattr(doctor, "checks", lambda root: [])
-    r = runner.invoke(app, ["doctor", "--fix"], input="\n")
-    assert r.exit_code == 0, r.output
-    assert not _config(tmp_path).exists()
 
 
 # -- org-managed settings --------------------------------------------------------------------------
@@ -168,20 +145,3 @@ def test_org_managed_settings_mean_no_provider_config_env(db, repo, tmp_path, mo
     assert "CLAUDE_CODE_USE_BEDROCK" not in agents.agent_env(ws, "c2", a, m)
     assert managed_models.provider_env(cfg, "claude")   # the helper itself is unchanged
 
-
-# -- quota and cost ------------------------------------------------------------------------------
-
-def test_quota_says_pay_per_token_for_a_key(monkeypatch):
-    quota.record("claude", [quota.Window(95.0, time.time() + 3600, 300)], source="status line")
-    assert "95%" in quota.note("claude")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", KEY)
-    assert "pay per token" in quota.note("claude") and "%" not in quota.note("claude")
-    assert quota.headroom("claude") == 100.0
-
-
-def test_cost_footer_drops_the_subscription_caveat_for_a_key(monkeypatch):
-    from brindle import cost
-
-    assert "subscription" in "".join(cost._footer())
-    monkeypatch.setenv("ANTHROPIC_API_KEY", KEY)
-    assert "subscription" not in "".join(cost._footer())

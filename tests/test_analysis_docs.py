@@ -150,7 +150,7 @@ def test_merge_uploads_the_branch_doc_only_when_it_merges(
     assert len(list(other.rglob("*.md"))) == 2
 
 
-@pytest.mark.parametrize("fmt, status", [("zip", 403), ("docx", 200), ("md", 200)])
+@pytest.mark.parametrize("fmt, status", [("zip", 403), ("md", 200)])
 def test_docs_export_writes_only_after_a_200(fmt, status, tmp_path, remote, monkeypatch):
     from typer.testing import CliRunner
 

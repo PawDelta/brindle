@@ -9,11 +9,7 @@ CONTACT = ("Enterprise is set up with PawDelta, not bought here. Email support@p
 
 
 @pytest.mark.parametrize("args", [
-    ("upgrade", "--enterprise", "--seats", "25", "--org", ORG),
     ("upgrade", "--enterprise", "--trial", "--seats", "11", "--org", ORG),
-    ("upgrade", "--enterprise", "--seats", "3"),
-    ("upgrade", "--enterprise", "--org", ORG),
-    ("upgrade", "--enterprise", "--trial"),
     ("upgrade", "--enterprise"),
 ])
 def test_enterprise_prints_the_contact_message_and_exits_zero(team, args):

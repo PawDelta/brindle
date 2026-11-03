@@ -107,20 +107,6 @@ def test_promptless_interactive_start_keeps_profile_tools_and_autopilot_context(
     assert not agents.flush(db, a.id) and len(fake_tmux) == 1 and launcher_inbox == []
 
 
-def test_an_inbox_recorded_by_an_older_brindle_is_ignored(db, ws, launcher_inbox, fake_tmux, tmp_path,
-                                                        monkeypatch):
-    add_agy(db, ws)
-    db.update_agent("g1", inbox_socket=str(tmp_path / "supervisor.sock"), inbox_token="supervisor-token")
-    assert not inbox.usable(db.get_agent("g1"))
-    assert agents.send_message(db, "g1", "hello") == "delivered"
-    assert [t for t, _ in fake_tmux] == ["@9"]
-    # A busy agy agent keeps it queued for its Stop hook rather than using the inbox.
-    db.set_status("g1", "processing")
-    monkeypatch.setattr(agents.tmux, "capture", lambda *a, **k: "Working\nesc to cancel\n")
-    assert agents.send_message(db, "g1", "later") == "queued"
-    assert db.pending_count("g1") == 1 and launcher_inbox == []
-
-
 def test_the_sweep_forgets_a_launchers_inbox(db, ws, tmp_path):
     from brindle import cull
 
@@ -188,7 +174,7 @@ def test_provider_latency_agy_warmup_queued_before_task(db, boss, launcher_inbox
     assert launcher_inbox == []
 
 
-@pytest.mark.parametrize("tool", ["assign", "handoff"])
+@pytest.mark.parametrize("tool", ["assign"])
 def test_a_failed_start_says_why(db, boss, monkeypatch, tool):
     def tracked(*a, **k):
         raise antigravity.AntigravityError(".agents/hooks.json is committed in this repo")

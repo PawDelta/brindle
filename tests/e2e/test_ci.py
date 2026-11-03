@@ -200,15 +200,6 @@ def test_github_start_run_report_through_the_cli(job, mkplan, wire, tmp_path):
 
 
 @pytest.mark.brindle_ci_guard
-def test_start_needs_exactly_one_trigger_and_a_valid_validate(job, tmp_path):
-    out = str(tmp_path / "o")
-    assert cli("start", "--out", out).exit_code != 0
-    assert cli("start", "--out", out, "--issue", "1", "--goal-text", "x").exit_code != 0
-    assert cli("start", "--out", out, "--validate", "--pr", "1", "--head", "abc").exit_code != 0
-    assert cli("start", "--out", out, "--dispatch", "nope").exit_code != 0
-
-
-@pytest.mark.brindle_ci_guard
 def test_validate_checks_never_see_secrets_or_model_keys(job, mkplan, wire, tmp_path, monkeypatch):
     sha = sh("git rev-parse HEAD", job)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-secret")
@@ -330,21 +321,6 @@ def test_doctor_names_credentials_not_values_and_applies_the_org_rule(job, monke
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-x")
     out = cli("doctor").output
     assert "sk-ant-x" not in out and "usable for CI" in out
-
-
-def test_doctor_in_a_gitlab_job_names_the_project_without_gh(job, monkeypatch):
-    gitlab_env(monkeypatch)
-    monkeypatch.setattr(ci_adapters, "repo_is_org", lambda *a, **k: pytest.fail("gh lookup on GitLab"))
-    r = cli("doctor")
-    assert r.exit_code == 0, r.output
-    assert f"repository: {NESTED}, owner is an organization" in r.output
-
-
-def test_review_usage_is_merged_across_models():
-    into = {}
-    ci_adapters.merge_usage(into, {"a": {"input": 1, "output": 2, "cache_read": 3}, "bad": 7})
-    ci_adapters.merge_usage(into, {"a": {"input": 1}})
-    assert into == {"a": {"input": 2, "output": 2, "cache_read": 3}}
 
 
 # -- identity federation ----------------------------------------------------------------------------

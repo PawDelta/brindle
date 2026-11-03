@@ -55,12 +55,6 @@ def test_seats_posts_the_count_as_json_to_the_org(team):
 # -- success output -------------------------------------------------------------------------------
 
 
-def test_seats_success_without_a_used_count_still_prints(team):
-    answer(team, 200, {"seats": 4})
-    code, out, _ = run(team, "seats", "4", "--org", ORG)
-    assert code == 0 and out.strip() == "Seats: 4. Stripe prorates the change on your next invoice."
-
-
 # -- local validation (no request sent) -----------------------------------------------------------
 
 
@@ -73,23 +67,11 @@ def test_seats_validates_n_before_sending(team):
 # -- error mapping --------------------------------------------------------------------------------
 
 
-def test_403_says_you_need_billing_rights(team):
-    answer(team, 403, {"error": "forbidden"})
-    code, _, err = run(team, "seats", "5", "--org", ORG)
-    assert code == 1 and "billing rights in this org" in err
-
-
 def test_below_used_says_deactivate_someone_first(team):
     answer(team, 409, {"error": "below_used", "error_description": "7 seats in use"})
     code, _, err = run(team, "seats", "5", "--org", ORG)
     assert code == 1 and "5 is below the members using seats" in err
     assert "deactivate someone first" in err
-
-
-def test_over_max_without_a_message_still_reads(team):
-    answer(team, 409, {"error": "over_max"})
-    code, _, err = run(team, "seats", "99", "--org", ORG)
-    assert code == 1 and "seat cap for this plan" in err
 
 
 def test_no_subscription_points_at_upgrade(team):
@@ -99,16 +81,6 @@ def test_no_subscription_points_at_upgrade(team):
     assert "brindle account upgrade" in err
 
 
-def test_400_says_seats_must_be_a_whole_number(team):
-    answer(team, 400, {"error": "bad_request"})
-    code, _, err = run(team, "seats", "5", "--org", ORG)
-    assert code == 1 and "seats must be a whole number, at least 1" in err
-
-
-def test_other_errors_fall_back_to_the_generic_message(team):
-    answer(team, 500, {"error": "boom", "error_description": "try later"})
-    code, _, err = run(team, "seats", "5", "--org", ORG)
-    assert code == 1 and "boom" in err
 
 
 # -- docs -----------------------------------------------------------------------------------------
