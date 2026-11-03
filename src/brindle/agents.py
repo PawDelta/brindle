@@ -3081,6 +3081,7 @@ def _live_reviewer(db: DB, ws: Workspace, sha: str, profile: str | None = None) 
 
     for a in db.list_agents(ws.id):
         if a.mode == "review" and a.result is None and alive_or_starting(a) and a.review_sha == sha \
+                and not a.unreported_noted \
                 and (profile is None or a.profile == profile) and not launch_health.has_mcp_failure(db, a, ws):
             return a
     return None
@@ -3248,28 +3249,33 @@ def review_after_checks(db: DB, caller_id: str | None, ws: Workspace, profile: s
                         or not _review_requested(ws.id, profile, request_id))
             except gates.Abandoned:
                 summary = None
-            except Exception as e:  # noqa: BLE001 - the review goes ahead, saying so
-                summary = f"(running the checks crashed: {e})"
+            except Exception as e:  # noqa: BLE001 - checks that never finished are a failed gate
+                summary = f"FAIL `{' && '.join(cfg.checks)}`\n(running the checks crashed: {e})"
             if db.get_workspace(ws.id) is None or not _review_requested(ws.id, profile, request_id):
                 return None
-            if gates.head(ws) == sha:
-                break
-            if not pipeline.still_claimed(db, ws, since):
-                return None
-        else:
-            pipeline.on_moved_during_checks(db, ws)
-            return None
-        text = f"Checks for {ws.branch} at {sha[:8]}:\n\n{summary}" if summary else None
-        if summary and gates.summary_failed(summary):
-            pipeline.on_checks_failed(db, ws, sha, since, text)
-            return None
-        caller = db.get_agent(caller_id) if caller_id else None
-        # A newer request cannot slip between the final claim check and spawn.
-        with review_dispatch_lock(ws.id):
-            if not _review_requested(ws.id, profile, request_id):
-                return None
-            return request_review(db, caller, ws, profile, focus, cfg, check_summary=text,
-                                  second=second, slot=slot)
+            if gates.head(ws) != sha:
+                if not pipeline.still_claimed(db, ws, since):
+                    return None
+                continue
+            text = f"Checks for {ws.branch} at {sha[:8]}:\n\n{summary}" if summary else None
+            caller = db.get_agent(caller_id) if caller_id else None
+            # A newer request cannot slip between the final claim check and
+            # spawn, and the reviewer is bound to the commit that was checked.
+            with review_dispatch_lock(ws.id):
+                if not _review_requested(ws.id, profile, request_id):
+                    return None
+                if gates.head(ws) != sha:
+                    continue   # moved while waiting for the lock: check the new commit
+                if summary and gates.summary_failed(summary):
+                    pipeline.on_checks_failed(db, ws, sha, since, text, caller)
+                    return None
+                try:
+                    return request_review(db, caller, ws, profile, focus, cfg, check_summary=text,
+                                          second=second, slot=slot, expected_sha=sha)
+                except ReviewHeadMoved:
+                    continue
+        pipeline.on_moved_during_checks(db, ws)
+        return None
 
 
 def review_dispatch_lock(workspace_id: str, *, timeout: float | None = None):
@@ -3287,13 +3293,20 @@ def review_dispatch_lock(workspace_id: str, *, timeout: float | None = None):
 def request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | None = None,
                    focus: str | None = None, cfg: RepoConfig | None = None,
                    check_summary: str | None = None, second: bool = False,
-                   *, slot: str | None = None) -> Agent | None:
+                   *, slot: str | None = None, expected_sha: str | None = None) -> Agent | None:
     """Start or reuse a review, replacing an MCP-broken reviewer once. None
-    while another dispatcher is still starting this commit's reviewer."""
+    while another dispatcher is still starting this commit's reviewer.
+    ``expected_sha``: the commit ``check_summary`` is for; ``ReviewHeadMoved``
+    when the branch has left it."""
     # Serialize hook recovery with explicit requests, including the interval
     # between stopping the broken reviewer and publishing its replacement.
     with review_dispatch_lock(ws.id):
-        return _request_review(db, caller, ws, profile, focus, cfg, check_summary, second, slot)
+        return _request_review(db, caller, ws, profile, focus, cfg, check_summary, second, slot,
+                               expected_sha)
+
+
+class ReviewHeadMoved(AgentError):
+    """The branch moved off the commit whose check results a review was to carry."""
 
 
 def _review_claim_slot(profile: str | None, slot: str | None) -> str:
@@ -3359,7 +3372,7 @@ def _review_context(db: DB, ws: Workspace, worker: Agent | None, files: list[str
 def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | None,
                     focus: str | None, cfg: RepoConfig | None,
                     check_summary: str | None, second: bool = False,
-                    slot: str | None = None) -> Agent | None:
+                    slot: str | None = None, expected_sha: str | None = None) -> Agent | None:
     """Start a reviewer in a worker's workspace right away. Its verdict is
     recorded for the merge gate and forwarded to ``caller`` as a message.
     ``profile`` picks the reviewer profile; None uses
@@ -3382,6 +3395,8 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
     if second and not slot:
         slot = profile
     sha = gates.head(ws)
+    if expected_sha is not None and sha != expected_sha:
+        raise ReviewHeadMoved(f"{ws.branch} moved off {expected_sha[:8]} before its reviewer started")
     failed = None
     for old in db.list_agents(ws.id):
         if (old.mode == "review" and old.result is None and old.review_sha == sha

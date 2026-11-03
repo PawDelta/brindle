@@ -35,7 +35,7 @@ def test_reviewer_without_verdict_gets_fallback_then_an_escalation_event(db, rep
         started.append(profile)
         add(db, ws, "rev1", "review", profile, parent=caller.id)
 
-    monkeypatch.setattr(agents, "request_review", fallback)
+    monkeypatch.setattr(agents, "start_review", fallback)
     # A second review's verdict on the same commit isn't rev0's (#172).
     db.add_review(ws.id, gates.head(ws), "rev-second", True, "lgtm")
 
@@ -74,7 +74,7 @@ def test_stalled_reviewer_reopens_own_session_once_before_fallback(db, repo, tmp
         launched.append(agents.get_provider(a.provider).command(ctx))
 
     monkeypatch.setattr(agents, "_launch", fake_launch)
-    monkeypatch.setattr(agents, "request_review", lambda *a, **k: fallbacks.append(1))
+    monkeypatch.setattr(agents, "start_review", lambda *a, **k: fallbacks.append(1))
 
     # 1. Recent transcript write on a live reviewer -> treated as still active.
     assert agents.tell_parent_unreported(db, db.get_agent("rev0")) is False
@@ -142,18 +142,17 @@ def test_fallback_reviewer_reuses_cached_checks_and_partial_findings(db, repo, t
     monkeypatch.setattr(autopilot, "_unavailable", lambda *a, **k: None)
     monkeypatch.setattr(gates, "check_summary", lambda *a, **k: (_ for _ in ()).throw(AssertionError("re-ran checks")))
     spawned = []
-    monkeypatch.setattr(
-        agents, "spawn",
-        lambda db_, ws_, prof, prompt=None, **kw: spawned.append((prof, prompt)),
-    )
+    # The fallback goes through start_review, like every reviewer: with checks
+    # a detached helper runs them (reusing the cached results for this commit)
+    # before it starts the reviewer.
+    monkeypatch.setattr(agents, "_detach", lambda argv: spawned.append(argv))
 
-    # Unpinned config -> routes to the cheaper reviewer-light tier and reuses cached checks + findings.
+    # Unpinned config -> routes to the cheaper reviewer-light tier and carries the findings.
     assert agents.tell_parent_unreported(db, db.get_agent("rev0")) is True
     assert len(spawned) == 1
-    prof, prompt = spawned[0]
-    assert prof == "reviewer-light"
-    assert "Blocker in big.py line 12" in prompt
-    assert "pytest -q" in prompt
+    argv = spawned[0]
+    assert argv[argv.index("--profile") + 1] == "reviewer-light"
+    assert "Blocker in big.py line 12" in argv[argv.index("--focus") + 1]
 
     # Pinned config -> keeps the pinned reviewer profile instead of downgrading.
     (repo / ".brindle" / "config.json").write_text(
@@ -161,7 +160,7 @@ def test_fallback_reviewer_reuses_cached_checks_and_partial_findings(db, repo, t
     )
     db.update_agent("rev0", unreported_noted=None)
     assert agents.tell_parent_unreported(db, db.get_agent("rev0")) is True
-    assert spawned[-1][0] == "reviewer"
+    assert spawned[-1][spawned[-1].index("--profile") + 1] == "reviewer"
 
 
 def test_small_diff_stalled_reviewer_escalates_summary_to_supervisor(db, repo, tmp_path, monkeypatch):
@@ -186,7 +185,7 @@ def test_small_diff_stalled_reviewer_escalates_summary_to_supervisor(db, repo, t
     monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
     monkeypatch.setattr(agents, "command_running", lambda db_, a: False)
     monkeypatch.setattr(agents, "close_later", lambda agent_id, delay=5.0: None)
-    monkeypatch.setattr(agents, "request_review", lambda *a, **k: (_ for _ in ()).throw(AssertionError("spawned fallback")))
+    monkeypatch.setattr(agents, "start_review", lambda *a, **k: (_ for _ in ()).throw(AssertionError("spawned fallback")))
 
     assert agents.tell_parent_unreported(db, db.get_agent("rev0")) is True
     assert db.get_agent("w1").pipeline is None

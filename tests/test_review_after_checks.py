@@ -66,11 +66,40 @@ def detached(monkeypatch):
 # -- the results are in the reviewer's prompt ------------------------------------------
 
 
-def test_a_crashing_check_run_still_starts_the_review_and_says_so(db, ws, boss, spawned, monkeypatch):
+def test_a_crashing_check_run_starts_no_review_and_tells_the_caller(db, ws, boss, spawned, monkeypatch):
+    """Explicit request (no pipeline report): the caller is told, no reviewer."""
     monkeypatch.setattr(gates, "check_summary",
                         lambda *a, **kw: (_ for _ in ()).throw(RuntimeError("boom")))
-    agents.review_after_checks(db, "boss", ws, "reviewer", None, RepoConfig(checks=["true"]))
-    assert "crashed" in spawned[0] and "boom" in spawned[0]
+    assert agents.review_after_checks(db, "boss", ws, "reviewer", None,
+                                      RepoConfig(checks=["true"])) is None
+    assert spawned == []
+    told = db.pop_pending("boss")
+    assert told is not None and "crashed" in told.body and "boom" in told.body
+
+
+def test_a_branch_that_moves_before_dispatch_is_checked_again_not_reviewed_unchecked(
+        db, ws, boss, spawned, monkeypatch):
+    """The head moves after the checks end, while the run waits for the
+    dispatch lock: the old commit's results never reach a reviewer of the new one."""
+    ran = []
+
+    def checks(db_, ws_, cfg, cancel=None):
+        ran.append(gates.head(ws))
+        return "PASS `suite`"
+
+    real_lock = agents.review_dispatch_lock
+    moved = []
+
+    def lock(ws_id, **kw):
+        if ran and not moved:
+            moved.append(1)
+            commit(ws, "more.py")   # moved on lock acquisition
+        return real_lock(ws_id, **kw)
+
+    monkeypatch.setattr(gates, "check_summary", checks)
+    monkeypatch.setattr(agents, "review_dispatch_lock", lock)
+    agents.review_after_checks(db, "boss", ws, "reviewer", None, RepoConfig(checks=["suite"]))
+    assert len(ran) == 2 and ran[0] != ran[1] and len(spawned) == 1 and ran[1][:8] in spawned[0]
 
 
 # -- no reviewer until the checks finish -----------------------------------------------

@@ -183,15 +183,28 @@ def review_running(ws_id: str) -> bool:
     return gates.marked("review-run", ws_id)
 
 
-def on_checks_failed(db: DB, ws: Workspace, sha: str, since: float | None, summary: str) -> None:
+def on_checks_failed(db: DB, ws: Workspace, sha: str, since: float | None, summary: str,
+                     caller: Agent | None = None) -> None:
     """The repo's checks failed at ``sha``, so no reviewer runs: send the
     worker the failing output as a fix round (the review happens on its next
     report), or hand the branch to the supervisor once the rounds are spent.
-    Acts only while the branch is still in review for the report ``since``
-    and at ``sha``: a second review's run of the same checks finds the worker
-    already sent back and does nothing."""
+    For a branch in review for the report ``since`` it acts only while that
+    report is still current and at ``sha``: a second review's run of the same
+    checks finds the worker already sent back and does nothing. A review
+    requested outside a pipeline report (``since`` None: a handoff, an
+    escalated branch) has no worker round to spend: ``caller`` is told."""
     with merge_lock(ws.id):
-        if _settled(db, ws) or not still_claimed(db, ws, since):
+        if _settled(db, ws):
+            return
+        if since is None:
+            worker = piped_worker(db, ws)
+            if caller is not None and (worker is None or not worker.pipeline):
+                gates.tell(db, caller.id,
+                           f"[brindle] The repo's checks failed on `{ws.branch}` at {sha[:8]}, so no "
+                           f"reviewer was started. Fix them, then request_review(\"{ws.id}\") again."
+                           f"\n\n{summary}")
+            return   # a branch the pipeline holds (a fix round, ready) was already dealt with
+        if not still_claimed(db, ws, since):
             return
         worker = piped_worker(db, ws)
         try:
@@ -912,9 +925,10 @@ def on_reviewer_unreported(db: DB, reviewer: Agent, ws: Workspace) -> bool:
                 f"its partial findings:\n{partial}"
             )
         try:
-            agents.request_review(
-                db, parent, ws, profile, focus="\n\n".join(focus_parts),
-                cfg=cfg, check_summary=check_summary,
+            # Through start_review: with checks they run (or are reused, by
+            # sha) on the branch's current commit before the fallback starts.
+            agents.start_review(
+                db, parent, ws, profile, focus="\n\n".join(focus_parts), cfg=cfg,
                 second=bool(_review_slot(db, reviewer)),   # in the stopped reviewer's place
                 slot="" if db.review_slot(reviewer.id) == "" else None,
             )
@@ -1113,9 +1127,9 @@ def _send_back(db: DB, ws: Workspace, worker: Agent, cfg: RepoConfig, summary: s
         current = db.get_agent(worker.id) or worker
         if not agents.is_alive(current) and agents.reopen_worker(db, current, ws, fix):
             return
-    if not needs_sup and _retry_on_heavy(
-            db, worker, ws, cfg,
-            f"the {what} still asked for changes after {rounds - 1} fix round(s): {summary}", report):
+    if not needs_sup and _retry_on_heavy(db, worker, ws, cfg,
+                       f"the {what} still asked for changes after {rounds - 1} fix round(s): "
+                       f"{summary}", report):
         return
     db.update_agent(worker.id, pipeline=None)
     _escalate(db, ws, worker)
