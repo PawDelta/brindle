@@ -1,4 +1,3 @@
-import sqlite3
 import time
 
 import pytest
@@ -66,7 +65,9 @@ V0_5_12 = {
 }
 
 
-def test_session_repo_branch_column_moves_out_and_no_released_table_gains_a_column(tmp_path, monkeypatch):
+@pytest.mark.parametrize("interleaved", [False, True])
+def test_session_repo_branch_column_moves_out_and_no_released_table_gains_a_column(
+        tmp_path, monkeypatch, interleaved):
     """A development database has the branch on session_repos: opening it
     copies the branch to its own table and drops the column, even when another
     process finishes that move between this one's check and its transaction.
@@ -86,20 +87,16 @@ def test_session_repo_branch_column_moves_out_and_no_released_table_gains_a_colu
     moved = []
 
     def tx_after_other_process(self):
-        # Another process does the whole move after this one saw the column.
+        # Another process opens, and so moves, after this one saw the column.
         if not moved:
             moved.append(1)
-            other = sqlite3.connect(path)
-            other.execute("INSERT OR IGNORE INTO session_repo_branches SELECT root_id, alias, branch "
-                          "FROM session_repos WHERE branch IS NOT NULL")
-            other.execute("ALTER TABLE session_repos DROP COLUMN branch")
-            other.commit()
-            other.close()
+            DB(path).conn.close()
         return real_tx(self)
 
-    monkeypatch.setattr(DB, "tx", tx_after_other_process)
+    if interleaved:
+        monkeypatch.setattr(DB, "tx", tx_after_other_process)
     db = DB(path)
-    assert moved
+    assert bool(moved) == interleaved
     assert [(r.alias, r.branch) for r in db.session_repos("root")] == [("a", "feat"), ("b", None)]
     now = _columns(db.conn)
     assert {t: sorted(now[t] - set(cols.split())) for t, cols in V0_5_12.items()
