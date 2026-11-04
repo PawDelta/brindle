@@ -191,7 +191,7 @@ function paintBlock(block: Line[], cols: number): string[] {
   const failed = block.some((l) => typeof l === "string" && l.startsWith("  ⎿  Error"));
   if (typeof first === "string" && first.startsWith("> ")) {
     // A prompt sent: its rows on their ground, the pane's whole width.
-    return (block as string[]).map((l, i) => `\x1b[48;5;${CC.promptBg}m${fg(i ? CC.white : CC.dim, l.slice(0, 2).replace(">", "❯"))}${fg(CC.white, l.slice(2))}${" ".repeat(Math.max(0, cols - l.length))}\x1b[49m`);
+    return (block as string[]).map((l, i) => `\x1b[48;5;${CC.promptBg}m${fg(i ? CC.white : CC.dim, (l.startsWith(">") ? `❯${l.slice(1, 2)}` : l.slice(0, 2)))}${fg(CC.white, l.slice(2))}${" ".repeat(Math.max(0, cols - l.length))}\x1b[49m`);
   }
   return block.map((l) => {
     if (typeof l !== "string") return paintDiff(l, cols);
