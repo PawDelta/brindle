@@ -359,7 +359,7 @@ def test_fix_round_resumes_exited_worker(db, repo, monkeypatch, session, exits_m
     report_result got a blocker review, and the pipeline handed its branch to
     the supervisor "after 0 fix round(s)" instead of starting a fix round.
     The worker is reopened (its own session, else a fresh start on its task)
-    with the findings, and only a branch out of rounds goes to the supervisor."""
+    with the findings past the suggested cap, which notifies the supervisor once."""
     root = workspaces.adopt_root(db, str(repo))
     add(db, root, "boss", "interactive", "supervisor", status="processing")  # busy: messages queue
     ws = workspaces.create(db, str(repo), "feat").workspace
@@ -375,7 +375,7 @@ def test_fix_round_resumes_exited_worker(db, repo, monkeypatch, session, exits_m
     monkeypatch.setattr(agents, "_launch", lambda db_, a, ws_, *, prompt, resume, **kw:
                         launched.append((a.id, resume, prompt)))
     summary = "- blocker: missing check for None.\nNeeds supervisor action: None."
-    for rounds in (1, 2):
+    for rounds in (1, 2, 3, 4):
         db.update_agent("w1", pipeline="reviewing")
         live[:] = [True] if exits_mid_delivery else []
         assert pipeline.on_review(db, db.get_agent("rev"), ws, False, summary)
@@ -383,10 +383,11 @@ def test_fix_round_resumes_exited_worker(db, repo, monkeypatch, session, exits_m
         assert (worker, resume) == ("w1", session) and "missing check for None" in prompt
         assert session or "Add the None check" in prompt
         assert (db.get_agent("w1").pipeline, db.get_agent("w1").pipeline_rounds) == ("fixing", rounds)
-        assert drain(db) == []
+        assert len(drain(db)) == (1 if rounds == 3 else 0)
     db.update_agent("w1", pipeline="reviewing")
-    assert pipeline.on_review(db, db.get_agent("rev"), ws, False, summary)
-    assert len(launched) == 2 and db.get_agent("w1").pipeline is None
+    assert pipeline.on_review(db, db.get_agent("rev"), ws, False,
+                              "Needs supervisor action: ask the user about scope.")
+    assert len(launched) == 4 and db.get_agent("w1").pipeline is None
     assert [e["agent_id"] for e in bus.tail(db, kinds=("pipeline.escalated",))] == ["w1"]
 
 

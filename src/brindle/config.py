@@ -134,7 +134,7 @@ class RepoConfig:
     pipeline: bool = True              # brindle reviews and merges reported branches itself (brindle.pipeline)
     review_start_delay: int = 60       # seconds before recovering a reported branch with no review in progress
     goal_audit: bool = True            # an adversarial reviewer checks a finished goal against the original request before it counts as reached
-    review_rounds: int = 2             # fix-and-re-review rounds the pipeline runs before asking the supervisor
+    review_rounds: int = 2             # suggested fix-round cap; notify the supervisor once, then keep fixing
     # Retry a failed heavy task once on developer-heavy (Fable) before asking the supervisor.
     # None: on, except where the worker runs on a cloud account (Bedrock, Vertex, Foundry),
     # which may not have Fable; true or false forces it (see brindle.pipeline.fable_enabled).

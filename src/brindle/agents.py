@@ -21,6 +21,7 @@ import sys
 import time
 import uuid
 from contextlib import ExitStack, contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 
@@ -120,6 +121,11 @@ class AgentError(RuntimeError):
 
 class StillRunning(AgentError):
     """The wait ended before the worker reported; it's still working."""
+
+
+class Cancelled(Exception):
+    """The caller of resume stopped it (its ``gate``): nothing more of the
+    session is launched."""
 
 
 # Modes whose workers must finish with report_result. A handoff whose caller
@@ -1113,7 +1119,11 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
     The CLI's config home is the one stored on the agent at spawn
     (provider_homes.decide): its identity check, preflight, pane and every
     resume use it, even after a sign-in inside brindle. An agent recorded by
-    an older brindle has none yet: it is decided and stored here, once."""
+    an older brindle has none yet: it is decided and stored here, once.
+
+    Within a gated resume (resume's ``gate``), the preflight checks the gate
+    and the launch itself holds it (_gate_commit)."""
+    _gate_check()
     try:
         upgrade.check_launch()
     except upgrade.StaleInstall as e:
@@ -1129,14 +1139,14 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
         agent.config_home = provider_homes.decide(agent.provider)
         if agent.config_home is not None:
             db.update_agent(agent.id, config_home=agent.config_home)
-    with provider_homes.using(agent.provider, agent.config_home):
+    with provider_homes.using(agent.provider, agent.config_home), ExitStack() as hold:
         _launch_resolved(db, agent, ws, prompt=prompt, resume=resume, watch_pane=watch_pane,
-                         background_setup=background_setup, model_checked=model_checked)
+                         background_setup=background_setup, model_checked=model_checked, hold=hold)
 
 
 def _launch_resolved(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
                      resume: str | None, watch_pane: bool, background_setup: bool = False,
-                     model_checked: bool = False) -> None:
+                     model_checked: bool = False, hold: ExitStack | None = None) -> None:
     m = managed(ws.repo_root)   # read once for this launch
     profile = _profile_for(db, agent, ws, m)
     _airgap_check(profile, ws.repo_root)
@@ -1147,6 +1157,7 @@ def _launch_resolved(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
             raise AgentError(why)
     if not provider.launches_process:
         # Nothing to start: the caller's own subagent does the work.
+        _gate_commit(hold)
         status = "done" if agent.result is not None else "processing"
         db.set_status(agent.id, status)
         agent.status = status
@@ -1155,6 +1166,7 @@ def _launch_resolved(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
     # different identity; one that can't be told never blocks.
     from brindle import provider_homes
 
+    _gate_check()
     why, outcome, route = company_identity.launch_check(
         provider.name, home=provider_homes.env_for(agent.provider, agent.config_home))
     if outcome:
@@ -1187,6 +1199,7 @@ def _launch_resolved(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
     warning = _add_dirs_warning(profile, provider.name)
     if warning:
         print(f"brindle: {warning}", file=sys.stderr)
+    _gate_commit(hold)     # what follows changes what runs
     if agent.headless:
         _launch_headless(db, agent, ws, prompt=prompt, resume=resume, watch_pane=watch_pane, m=m)
         return
@@ -1483,23 +1496,9 @@ def pause(db: DB, root_id: str, *, stop_procs: bool = True,
 
     Records every status first and closes windows last: this can run inside
     one of the windows it closes (see _pause_when_done)."""
-    paused, sessions, windows = [], set(), []
-    owners = pane_owners(db)
-    for a in tree(db, root_id):
-        ws = db.get_workspace(a.workspace_id)
-        if ws:
-            sessions.add(ws.tmux_session)
-        # A window on another tmux server isn't reachable from here, and its
-        # pane id would name some other pane on this one (see same_server).
-        if a.tmux_window and same_server(a) and owns_pane(db, a, owners):
-            windows.append(a.tmux_window)
-        # Its own SubagentStop hooks will never fire once its process stops.
-        db.end_native_subagents(a.id)
-        if a.mode != "interactive" and a.result is not None:
-            db.set_status(a.id, "done")
-        else:
-            db.set_status(a.id, "paused")
-            paused.append(a)
+    owners = pane_owners(db)    # first: a tmux server that doesn't answer stops the pause before anything changes
+    closing = _record_pause(db, root_id)
+    windows = closing.windows(db, owners)
     # The sidebar follows the person around, so it may not be sitting in any
     # of the windows about to close: find it wherever it is and stop it too,
     # rather than leaving it running with nothing left to show it. Status was
@@ -1526,19 +1525,118 @@ def pause(db: DB, root_id: str, *, stop_procs: bool = True,
         from brindle import procs
 
         procs.stop([a.id for a in tree(db, root_id)], grace=2.0)
-    root = db.get_agent(root_id)
-    root_ws = db.get_workspace(root.workspace_id) if root else None
-    for session in sessions:
-        # The chat's own session always closes, so an attached terminal gets
-        # its prompt back every time. Workers' sessions close once they hold
-        # nothing but the idle starter shell.
-        if (root_ws and session == root_ws.tmux_session) or set(tmux.windows(session)) <= {"shell"}:
+    for session in closing.sessions:
+        if closing.closes(session, tmux.windows(session)):
             tmux.kill_session(session)
     if stop_local_models:
         _stop_local_models(db)
-    knowledge.note(db, root_id, knowledge.PAUSE)
-    bus.publish_agent(db, "session.paused", root_id, agents=[a.id for a in paused])
-    return paused
+    _paused(db, closing)
+    return closing.paused
+
+
+@dataclass
+class Closing:
+    """A pause whose statuses are recorded (_record_pause, record_pauses),
+    and what it closes next."""
+    root_id: str
+    agents: list[Agent]         # the root and everything it started
+    paused: list[Agent]         # those now paused (the rest had reported: done)
+    sessions: set[str]          # their workspaces' tmux sessions
+    root_session: str | None    # the chat's own
+    repo_root: str | None
+
+    def windows(self, db: DB, owners: dict[str, str]) -> list[str]:
+        """The agents' panes to close, each with its window: only those on
+        this tmux server (a pane id on another names some other pane here,
+        see same_server) and still theirs (owns_pane, by ``owners``)."""
+        return [a.tmux_window for a in self.agents
+                if a.tmux_window and same_server(a) and owns_pane(db, a, owners)]
+
+    def closes(self, session: str, names: list[str]) -> bool:
+        """Whether ``session``, holding windows named ``names`` once the
+        agents' are closed, closes too. The chat's own session always does,
+        so an attached terminal gets its prompt back every time. Workers'
+        sessions close once they hold nothing but the idle starter shell."""
+        return session == self.root_session or set(names) <= {"shell"}
+
+
+def _record_pause(db: DB, root_id: str) -> Closing:
+    """A pause's first step: ``root_id`` and everything it started marked
+    paused (done, for a worker that had reported), nothing closed yet."""
+    agents, paused, sessions = tree(db, root_id), [], set()
+    for a in agents:
+        ws = db.get_workspace(a.workspace_id)
+        if ws:
+            sessions.add(ws.tmux_session)
+        # Its own SubagentStop hooks will never fire once its process stops.
+        db.end_native_subagents(a.id)
+        if a.mode != "interactive" and a.result is not None:
+            db.set_status(a.id, "done")
+        else:
+            db.set_status(a.id, "paused")
+            paused.append(a)
+    root = db.get_agent(root_id)
+    root_ws = db.get_workspace(root.workspace_id) if root else None
+    return Closing(root_id, agents, paused, sessions, root_ws.tmux_session if root_ws else None,
+                   root_ws.repo_root if root_ws else None)
+
+
+def _paused(db: DB, closing: Closing, key: str | None = None) -> None:
+    """A pause's last step, once everything is closed: noted and announced."""
+    knowledge.note(db, closing.root_id, knowledge.PAUSE, key=key)
+    bus.publish_agent(db, "session.paused", closing.root_id, agents=[a.id for a in closing.paused])
+
+
+def record_pauses(db: DB, root_ids: list[str]) -> list[Closing]:
+    """The first step of pausing the sessions ``root_ids`` all at once (the
+    app's daemon on its way out, lifecycle.pause_for_exit): every status
+    recorded, nothing closed yet. ``close_paused`` does the rest."""
+    return [_record_pause(db, root_id) for root_id in root_ids]
+
+
+def close_paused(db: DB, closings: list[Closing]) -> None:
+    """The rest of pausing sessions all at once, as ``pause(stop_procs=False)``
+    would one by one, with as few tmux commands as there can be: from one
+    look at the tmux server, every window, sidebar and session they close
+    goes in one tmux command; then each is noted and announced (their repos
+    looked up side by side). Raises if tmux can't be reached: some windows
+    may still be open then."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ExitStack() as locks:
+        # As pause holds each one's sidebar lock around its closes.
+        for root_id in sorted({c.root_id for c in closings}):
+            locks.enter_context(_sidebar_lock(root_id))
+        panes, where = tmux.list_panes(), tmux.pane_places()
+        owners = pane_owners(db, panes)
+        session_of = {p.window: p.session for p in where.values()}
+        window_of = {pane: p.window for pane, p in where.items()} | {w: w for w in session_of}  # or a window id
+        windows = {window_of[w] for c in closings for w in c.windows(db, owners) if w in window_of}
+        left: dict[str, set[str]] = {}      # each session's window names once those windows close
+        for p in where.values():
+            if p.window not in windows:
+                left.setdefault(p.session, set()).add(p.name)
+        # A session with no window left has closed already.
+        sessions = {s for c in closings for s in c.sessions if s in left and c.closes(s, list(left[s]))}
+        sidebars = []
+        for c in closings:
+            pane = db.get_sidebar_pane(c.root_id)
+            # Ours, as _valid_sidebar tells (dead or alive), from the same look.
+            if pane in where and (panes.tags.get(pane) or {}).get(SIDEBAR_TAG) == c.root_id:
+                sidebars.append((c.root_id, pane))
+        # What a session or window closing takes along isn't closed again (tmux would refuse it).
+        tmux.close(panes=[p for _, p in sidebars if where[p].window not in windows
+                          and where[p].session not in sessions],
+                   windows=sorted(w for w in windows if session_of[w] not in sessions),
+                   sessions=sorted(sessions))
+        for root_id, _ in sidebars:
+            db.clear_sidebar_pane(root_id)
+    repos = {c.repo_root for c in closings if c.repo_root}
+    with ThreadPoolExecutor(max_workers=max(1, len(repos))) as pool:
+        keys = dict(zip(repos, pool.map(knowledge.repo_key, repos)))
+    _stop_local_models(db)
+    for c in closings:
+        _paused(db, c, keys.get(c.repo_root) if c.repo_root else None)
 
 
 def _stop_local_models(db: DB) -> None:
@@ -1561,13 +1659,51 @@ def latest_paused(db: DB, ws: Workspace) -> Agent | None:
 
 def resume(db: DB, root_id: str, *, watch_pane: bool = True,
            only: set[str] | list[str] | None = None,
-           recovery_env: dict[str, str] | None = None) -> list[Agent]:
+           recovery_env: dict[str, str] | None = None, gate=None) -> list[Agent]:
     """Bring a paused session back: the supervisor and its paused workers
     restart in their own workspaces. Claude Code picks up its previous
     conversation (--resume); other CLIs restart on their original task.
-    With ``only``, just those agents (if paused) restart."""
+    With ``only``, just those agents (if paused) restart.
+
+    ``gate``: a context manager factory the caller can stop this resume
+    with (lifecycle.Recovery.launching), which raises Cancelled once
+    stopped. Every launch this resume makes (its agents', and the workers of
+    the queued tasks it starts) goes through it: checked during the preflight
+    and held only from the launch's first change of what runs (_gate_commit),
+    so a slow preflight (an identity probe) never holds the caller's stop up."""
+    if gate is None:
+        return _resume(db, root_id, watch_pane=watch_pane, only=only, recovery_env=recovery_env)
+    token = _launch_gate.set(gate)
+    try:
+        return _resume(db, root_id, watch_pane=watch_pane, only=only, recovery_env=recovery_env)
+    finally:
+        _launch_gate.reset(token)
+
+
+_launch_gate: ContextVar = ContextVar("brindle_launch_gate", default=None)   # resume's gate, for every launch it makes
+
+
+def _gate_check() -> None:
+    """Raise Cancelled if the resume under way has been stopped (its gate)."""
+    gate = _launch_gate.get()
+    if gate is not None:
+        with gate():
+            pass
+
+
+def _gate_commit(hold: ExitStack | None) -> None:
+    """A launch is about to change what runs: from here to its end it holds
+    the resume's gate (or is refused, Cancelled), so a stop waiting on that
+    gate sees it launched or not at all."""
+    gate = _launch_gate.get()
+    if gate is not None and hold is not None:
+        hold.enter_context(gate())
+
+
+def _resume(db: DB, root_id: str, *, watch_pane: bool, only, recovery_env) -> list[Agent]:
     from brindle import identity_lock, providers
 
+    _gate_check()
     providers.invalidate_signed_in()
     from brindle import keystore, secrets
 
@@ -1602,6 +1738,7 @@ def resume(db: DB, root_id: str, *, watch_pane: bool = True,
                   if a.status in ("paused", "failed") and (only is None or a.id in only)]
     for a in candidates:   # all or nothing: a session never half-resumes under another identity
         identity_lock.ensure(a)
+    _gate_check()
     if any(a.id == root_id for a in candidates):
         from brindle import autopilot as pilot
 
@@ -1630,6 +1767,7 @@ def resume(db: DB, root_id: str, *, watch_pane: bool = True,
         if ref and not provider.can_resume(ref):
             ref = None  # nothing was ever said in it: start that agent fresh
         prompt = None if ref else _fresh_start_prompt(db, a, ws, provider, RESUME_NOTE)
+        _gate_check()
         if a.dismissed_at is not None:
             db.update_agent(a.id, dismissed_at=None)  # running again: show it again
         _launch(db, a, ws, prompt=prompt, resume=ref,
@@ -1640,7 +1778,9 @@ def resume(db: DB, root_id: str, *, watch_pane: bool = True,
         from brindle import tasks
 
         try:
-            tasks.on_resumed(db, root_id)   # queued tasks the pause held back
+            tasks.on_resumed(db, root_id)   # queued tasks the pause held back (their launches gated too)
+        except Cancelled:
+            raise
         except Exception:  # noqa: BLE001 - a queued task must never keep the session from resuming
             log.exception("brindle: starting %s's queued tasks on resume failed", root_id)
     ap = db.get_autopilot(root_id)

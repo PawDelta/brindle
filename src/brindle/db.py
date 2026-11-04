@@ -31,7 +31,8 @@ NATIVE_SUBAGENT_STALE = 2 * 3600
 NATIVE_SUBAGENT_PRUNE_AFTER = 3600
 
 # SQLite user_version: 0 identifies databases written before version tracking.
-# Bump this when changing SCHEMA or _migrate so older engines refuse the result.
+# Bump for incompatible SCHEMA or _migrate changes so older engines refuse the result.
+# Additive tables stay compatible with installed helpers launched from worktrees.
 SCHEMA_VERSION = 1
 
 SCHEMA = """
@@ -48,6 +49,11 @@ CREATE TABLE IF NOT EXISTS workspaces (
     created_at REAL NOT NULL,
     session_root TEXT,
     UNIQUE (repo_root, name)
+);
+-- A suggested review cap is announced once for the branch's workspace,
+-- including when a replacement worker starts immediately or from the queue.
+CREATE TABLE IF NOT EXISTS review_cap_notices (
+    workspace_id TEXT PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE
 );
 CREATE TABLE IF NOT EXISTS agents (
     id TEXT PRIMARY KEY,
@@ -1425,6 +1431,16 @@ class DB:
     def get_workspace(self, ws_id: str) -> Workspace | None:
         row = self.conn.execute("SELECT * FROM workspaces WHERE id=?", (ws_id,)).fetchone()
         return _load(Workspace, row) if row else None
+
+    def claim_review_cap_notice(self, workspace_id: str) -> bool:
+        """Claim a workspace's cap notice once, across worker replacements.
+
+        Consult persisted state rather than a worker's round count or a
+        caller's workspace snapshot; removal clears the claim by cascade.
+        """
+        with self.tx() as c:
+            return c.execute("INSERT OR IGNORE INTO review_cap_notices (workspace_id) VALUES (?)",
+                             (workspace_id,)).rowcount == 1
 
     def find_workspaces(self, repo_root: str | None = None) -> list[Workspace]:
         if repo_root:

@@ -23,7 +23,9 @@ With ``pipeline`` on (the default), brindle runs those stages itself:
    report and the review.
    The reviewer requests changes: brindle sends the findings straight to the
    worker, which fixes them and reports again, back to step 1; after
-   ``review_rounds`` rounds it hands the findings to the supervisor instead.
+   ``review_rounds`` rounds it suggests the supervisor reconsider the approach,
+   while fix rounds continue. Findings needing supervisor action still go
+   straight to the supervisor.
 3. A branch whose sync with its base conflicts goes back to its worker to
    resolve (a light worker in its worktree if that one has finished); its
    next report starts a fresh review, and the checks run again, before it
@@ -1113,14 +1115,22 @@ def _send_back(db: DB, ws: Workspace, worker: Agent, cfg: RepoConfig, summary: s
                sender_id: str | None) -> None:
     """Send ``worker`` the findings in ``summary`` (a review's, or the failing
     checks' output) as a fix round, or hand the branch to the supervisor when
-    they need it or the rounds are spent. ``subject`` and ``verb`` open the
+    they need it or the worker cannot be reopened. ``subject`` and ``verb`` open the
     fix message; ``what``: "review" or "checks", for the wording. Under the
     merge lock."""
     report = worker.result or ""
     rounds = (worker.pipeline_rounds or 0) + 1
-    if not needs_sup and rounds <= cfg.review_rounds:
+    if not needs_sup:
         db.update_agent(worker.id, pipeline="fixing", pipeline_rounds=rounds)
-        fix = (f"{subject} (round {rounds} of {cfg.review_rounds}) {verb}:\n\n{summary}\n\n"
+        if rounds > cfg.review_rounds and db.claim_review_cap_notice(ws.id):
+            _tell(db, worker.parent_id,
+                  f"[brindle pipeline] `{ws.branch}` reached the suggested cap of "
+                  f"{cfg.review_rounds} fix round(s); fixes continue. Strongly consider "
+                  "redesigning the approach, deferring, or asking the user; "
+                  "stop it with remove_workspace.", worker.id)
+        progress = (f"round {rounds}, past the suggested {cfg.review_rounds}"
+                    if rounds > cfg.review_rounds else f"round {rounds} of {cfg.review_rounds}")
+        fix = (f"{subject} ({progress}) {verb}:\n\n{summary}\n\n"
                "Fix what's valid, commit, and call report_result "
                f"again; brindle will have it {'checked and ' if what == 'checks' else ''}"
                "reviewed again.")
@@ -1373,8 +1383,8 @@ def _queue_for_room(db: DB, parent: Agent | None, ws: Workspace, profile: str, t
 
 def _retry_on_heavy(db: DB, worker: Agent, ws: Workspace, cfg: RepoConfig, why: str,
                     report: str) -> bool:
-    """A heavy task's worker failed (the review still asks for changes after
-    its rounds, or the checks fail): start ``developer-heavy`` on the same
+    """A heavy task's worker failed (it cannot resume fixing the review's
+    findings, or the checks fail): start ``developer-heavy`` on the same
     branch, once, instead of handing the branch to a person. False when the
     task isn't heavy, Fable isn't enabled, this was already the retry, or no
     worker could start; the caller then escalates as before."""
