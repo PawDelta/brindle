@@ -7,9 +7,10 @@ from pathlib import Path
 import pytest
 
 from conftest import sh
-from brindle import agents, pipeline, workspaces
+from brindle import agents, pipeline, tasks, workspaces
 from brindle.db import Task
 from test_merge_order import add
+from test_pipeline_idempotent import drain
 
 
 @pytest.fixture
@@ -80,18 +81,10 @@ def reject(db, ws, summary="the design is wrong"):
 def test_no_retry_when_the_original_worker_cannot_be_stopped(db, heavy, monkeypatch):
     ws, retries, configure = heavy
     configure(fable_escalation=True)
-    other = agents.is_alive
+    alive = iter((False, False))  # delivery cannot reopen it; it is still alive when escalation checks
     monkeypatch.setattr(agents, "is_alive",
-                        lambda agent, panes=None: True if agent.id == "w1" else other(agent, panes))
+                        lambda agent, panes=None: agent.id != "w1" or next(alive, True))
     monkeypatch.setattr(agents, "close", lambda db_, agent_id, panes=None: db_.get_agent(agent_id))
-    send = agents.send_message
-
-    def cannot_deliver(db_, to, body, **kw):
-        if to == "w1":
-            raise agents.AgentError("worker unavailable")
-        return send(db_, to, body, **kw)
-
-    monkeypatch.setattr(agents, "send_message", cannot_deliver)
     reject(db, ws)
     assert retries == []                       # two agents never share the worktree
     msg = db.pop_pending("boss")
@@ -107,12 +100,36 @@ def test_fable_is_off_by_default_on_a_cloud_account(db, heavy, monkeypatch):
     assert "needs you" in db.pop_pending("boss").body
 
 
-def test_failing_checks_retry_a_heavy_task_too(db, heavy, monkeypatch):
+@pytest.mark.parametrize("queued", [False, True])
+def test_heavy_escalation_preserves_cap_notice(db, heavy, monkeypatch, queued):
     ws, retries, configure = heavy
-    configure(fable_escalation=True)
+    configure(fable_escalation=True, review_rounds=0)
+    cfg = workspaces.config_for(db, ws)
+    alive, delegate = agents.is_alive, agents.delegate
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
+    pipeline._send_back(db, ws, db.get_agent("w1"), cfg, "findings", False,
+                        subject="Review", verb="requested changes", what="review", sender_id=None)
+    assert len(drain(db)) == 1
+    monkeypatch.setattr(agents, "is_alive", alive)
+    if queued:
+        def no_room(*a, **kw):
+            raise agents.NoRoom("full")
+        monkeypatch.setattr(agents, "delegate", no_room)
+        monkeypatch.setattr(tasks, "wait_for_room", lambda *a: None)
     agents.report_result(db, "w1", "did it")
     db.update_agent("w1", pipeline="ready")
     monkeypatch.setattr(pipeline, "merge", lambda *a, **kw: "Not merged. check `pytest` failed: 2 failed")
     pipeline._finish_locked(db, db.get_agent("w1"), ws, None)
+    assert len(drain(db)) == 1
+    if queued:
+        monkeypatch.setattr(agents, "delegate", delegate)
+        tasks.start_queued(db, next(t for t in db.list_tasks(ws.repo_root) if t.state == "pending"))
     assert [r[0] for r in retries] == ["developer-heavy"]
     assert "check `pytest` failed" in retries[0][1]
+    worker = next(a for a in db.list_agents(ws.id) if a.profile == pipeline.ESCALATION_PROFILE)
+    for round_number in (1, 2):
+        pipeline._send_back(db, db.get_workspace(ws.id), db.get_agent(worker.id), cfg, "findings", False,
+                            subject="Review", verb="requested changes", what="review", sender_id=None)
+        current = db.get_agent(worker.id)
+        assert (current.pipeline, current.pipeline_rounds) == ("fixing", round_number)
+        assert drain(db) == []

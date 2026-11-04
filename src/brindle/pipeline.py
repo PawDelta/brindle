@@ -1122,7 +1122,7 @@ def _send_back(db: DB, ws: Workspace, worker: Agent, cfg: RepoConfig, summary: s
     rounds = (worker.pipeline_rounds or 0) + 1
     if not needs_sup:
         db.update_agent(worker.id, pipeline="fixing", pipeline_rounds=rounds)
-        if rounds == cfg.review_rounds + 1:
+        if rounds > cfg.review_rounds and db.claim_review_cap_notice(ws.id):
             _tell(db, worker.parent_id,
                   f"[brindle pipeline] `{ws.branch}` reached the suggested cap of "
                   f"{cfg.review_rounds} fix round(s); fixes continue. Strongly consider "
