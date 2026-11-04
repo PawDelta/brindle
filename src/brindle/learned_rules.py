@@ -591,10 +591,24 @@ def write_rule(repo_root: str, r: LearnedRule) -> Path:
                 lines.extend([f"{k}:{eol}", *(f"  - {i}{eol}" for i in items)])
                 continue
             if re.match(rf"{k}[ \t]*:[ \t]*(#.*)?\r?\n?$", lines[at]) is None:
-                # an inline list (`k: [a, b]`): turn that one line into a block holding both
+                # an inline list (`k: [a, b]`): grow it in place, comment and spacing kept
+                body_line = lines[at].rstrip("\r\n")
+                le = lines[at][len(body_line):]
+                note = re.search(r"[ \t]+#.*$", body_line)
+                raw = body_line[:note.start()] if note else body_line
+                main = raw.rstrip()
+                gap = raw[len(main):] + (note.group(0) if note else "")
+                if any("," in i or "]" in i for i in items):
+                    pass                          # can't sit in an inline list: fall to a block
+                elif main.endswith("]"):
+                    inner = main[:-1].rstrip()
+                    lines[at] = inner + ("" if inner.endswith("[") else ", ") + ", ".join(items) + "]" + gap + le
+                    continue
+                elif "[" not in main:
+                    lines[at] = main + ", " + ", ".join(items) + gap + le
+                    continue
                 kept = [q for q in map(_frontmatter_item, _list(meta.get(k)) or []) if q]
-                note = re.search(r"[ \t]+#.*?(?=\r?\n?$)", lines[at])
-                lines[at:at + 1] = [f"{k}:{note.group(0) if note else ''}{eol}", *(f"  - {i}{eol}" for i in kept + items)]
+                lines[at:at + 1] = [f"{k}:{gap}{eol}", *(f"  - {i}{eol}" for i in kept + items)]
                 continue
             end = at + 1
             for i in range(at + 1, len(lines)):

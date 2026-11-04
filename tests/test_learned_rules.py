@@ -159,32 +159,26 @@ PACK_HEAD = ("---\nname: learned\n# why this pack exists\n"
 @pytest.mark.parametrize("eol", ["\n", "\r\n"])
 def test_accept_keeps_the_packs_comments(db, tmp_path, pro, eol):
     root = str(tmp_path)
-    s = suggest_one(db, root, lambda ids: bare_except(ids, deny_patterns=[]))   # nothing for the header
+    s = suggest_one(db, root, lambda ids: bare_except(
+        ids, deny_deps=["pickle"], require_tests_for=["src/**/*.py"]))
     path = learned_pack_path(root)
     path.parent.mkdir(parents=True)
-    head = PACK_HEAD.replace("\n", eol).encode()
-    path.write_bytes(head + f"Intro.{eol}- old rule{eol}".encode())
+    head = PACK_HEAD.replace("\n", eol)
+    path.write_bytes((head + f"Intro.{eol}- old rule{eol}").encode())
     learned_rules.accept(db, root, s.key)
-    data = path.read_bytes()
-    assert data.startswith(head + f"Intro.{eol}- old rule{eol}- Catch".encode())
-    assert data.endswith(f"rule {s.key}){eol}".encode())
+    text = path.read_bytes().decode()
+    assert text.endswith(f"rule {s.key}){eol}") and f"Intro.{eol}- old rule{eol}- Catch" in text
 
-
-def test_accept_merges_new_checks_beside_the_packs_text(db, tmp_path, pro):
-    root = str(tmp_path)
-    s = suggest_one(db, root, lambda ids: bare_except(ids, deny_deps=["pickle"]))
-    path = learned_pack_path(root)
-    path.parent.mkdir(parents=True)
-    path.write_text(PACK_HEAD + "Intro.\n")
-    learned_rules.accept(db, root, s.key)
-    text = path.read_text()
-    assert "  - 'print\\('   # no prints\n  - except\\s*:\n" in text
-    assert text.replace("  - except\\s*:\n", "").startswith(PACK_HEAD.replace(
-        "deny_deps: [marshal]  # keep this annotation\n",
-        "deny_deps:  # keep this annotation\n  - marshal\n  - pickle\n"))
+    # every original line survives in order; only the inline list line grew, in place
+    grown = f"deny_deps: [marshal, pickle]  # keep this annotation{eol}"
+    expected = [grown if ln.startswith("deny_deps:") else ln for ln in head.splitlines(keepends=True)]
+    got = iter(text.splitlines(keepends=True))
+    assert all(ln in got for ln in expected)
+    assert text.count("#") == head.count("#")
     pack = [p for p in load_rule_packs(load_profile("reviewer", root), root) if p.name == "learned"][0]
-    assert pack.deny_deps == ["marshal", "pickle"] and pack.direct_spawn_allowed == [
-        "src/spawn.py", "src/tmux.py"]
+    assert pack.deny_deps == ["marshal", "pickle"] and pack.deny_patterns == ["print\\(", r"except\s*:"]
+    assert pack.require_tests_for == ["src/**/*.py"]
+    assert pack.direct_spawn_allowed == ["src/spawn.py", "src/tmux.py"]
 
 
 def test_a_rejected_rule_is_never_proposed_again(db, tmp_path, pro):
