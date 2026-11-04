@@ -2358,9 +2358,17 @@ def credential_paths() -> list[str]:
 
 
 def _credential_store(rel: str) -> bool:
-    """Whether ``rel``, a path relative to a home, is or is under a credential store."""
-    rel = rel.rstrip("/")
-    return rel in _CREDENTIAL_FILES or any(rel == d or rel.startswith(d + "/") for d in _CREDENTIAL_DIRS)
+    """Whether ``rel``, a path relative to a home, is a credential store, is
+    under one, or holds one (~/.docker); a pattern (.s*h, .aws/cred*) counts
+    when it can match one."""
+    parts = [p for p in rel.split("/") if p and p != "."]
+    if not parts:
+        return False
+    for store in (*_CREDENTIAL_DIRS, *_CREDENTIAL_FILES):
+        names = store.split("/")
+        if all(fnmatch.fnmatchcase(name, pattern) for name, pattern in zip(names, parts)):
+            return True
+    return False
 
 
 def _credential_file(req: Request, part: ShellPart, name: str) -> bool:
@@ -2395,22 +2403,32 @@ def _argument_paths(word: str) -> list[str]:
     return paths
 
 
+# A word's prefix only the run knows ($X, ${X}, $(...), `...`), maybe quoted.
+_UNRESOLVED_PREFIX = re.compile(r"""^["']?(?:\$\w+|\$\{[^}]*\}|\$\([^)]*\)|`[^`]*`)["']?(?=/)""")
+
+
+def _unresolved_store(word: str) -> bool:
+    """A word whose unresolved prefix may be a home ($d/.npmrc, $(echo ~)/.aws/
+    credentials): what follows it names a store, so the word may."""
+    found = _UNRESOLVED_PREFIX.match(word)
+    return found is not None and _credential_store(word[found.end():].replace('"', "").replace("'", ""))
+
+
 def _touches_credentials(req: Request, part: ShellPart, words: list[str]) -> bool:
-    """Whether a command names a credential store in any argument or redirection."""
+    """Whether a command names a credential store in any argument or redirection,
+    resolved where the shell's reading is known (_Flattener resolves $HOME, ~ and
+    the command's own assignments first) and taken as written otherwise."""
     operands = [*words[1:], *part.written[1:], *part.reads, *part.writes]
-    return any(_credential_file(req, part, path) for word in operands for path in _argument_paths(word))
-
-
-# A redirection target only the run knows: a variable, a substitution, a pattern.
-_UNRESOLVED_TARGET = re.compile(r"[$`*?\[]")
+    return any(_credential_file(req, part, path) or _unresolved_store(path)
+               for word in operands for path in _argument_paths(word))
 
 
 def _harmless_check(req: Request, part: ShellPart, words: list[str]) -> bool:
     """A listing or metadata check (_HARMLESS_CHECKS) whose every redirection
-    is a literal path that is no store: ``ls > ~/.ssh/authorized_keys``
+    resolves to a path that is no store: ``ls > ~/.ssh/authorized_keys``
     truncates one, and so may ``ls > "$f"`` with f bound to it by a loop."""
     return (bool(words) and os.path.basename(words[0]) in _HARMLESS_CHECKS
-            and not any(_UNRESOLVED_TARGET.search(path) or _credential_file(req, part, path)
+            and not any(path in part.unresolved or _credential_file(req, part, path)
                         for path in [*part.reads, *part.writes]))
 
 
@@ -2419,9 +2437,9 @@ _INTERPRETERS = frozenset({"python", "pypy", "node", "ruby", "perl", "php", "osa
 # A credential store named in an interpreter's inline code (_credential_file's, as text).
 _CREDENTIAL_TEXT = re.compile(r"\.aws\b|\.npmrc|\.netrc|\.git-credentials|\.docker\W+config\.json"
                               r"|\.ssh\b|\.gnupg\b|\.config\W+(?:gh|gcloud)\b|/environ\b")
-# A credential path as written anywhere in a command (a loop's word list, an
-# interpreter's string, a script the splitter can't read): under a home,
-# spelled with a tilde, $HOME or the home's path.
+# A credential path as written in text brindle can't resolve (an interpreter's
+# inline code, a script the splitter can't read): under a home, spelled with
+# a tilde, $HOME or the home's path.
 _CREDENTIAL_PATH_TEXT = (
     r"(?:~[A-Za-z0-9_.-]*|\$\{HOME\}|\$HOME|/Users/[^/\s'\"]+|/home/[^/\s'\"]+|/var/root|/root|%s)"
     r"/(?:\.ssh|\.gnupg|\.aws|\.npmrc|\.netrc|\.git-credentials|\.docker/config\.json|\.config/gh|\.config/gcloud)"
@@ -2433,8 +2451,8 @@ def _credential_path_text(home: str) -> re.Pattern:
     return re.compile(_CREDENTIAL_PATH_TEXT % re.escape(home))
 
 
-def _mentions_credentials(command: str) -> bool:
-    """Whether ``command``'s text names a store: a home store in any spelling,
+def _names_store_in_text(command: str) -> bool:
+    """Whether unresolvable text names a store: a home store in any spelling,
     or one of brindle's own by its path or, under the home, by ``~/``, ``$HOME/``
     or ``${HOME}/`` (as an interpreter's expanduser would read it)."""
     home = os.path.expanduser("~")
@@ -2605,7 +2623,9 @@ def _credential_words(req: Request, part: ShellPart, words: list[str], depth: in
     if program in ("sh", "bash", "zsh", "dash", "ksh") and _credential_shell(req, part, args, depth):
         return True
     if program in _HARMLESS_CHECKS:
-        return not _harmless_check(req, part, words)    # reveals no content, unless redirected into a store
+        # Reveals no content; only a redirection into a store touches one (a target only the
+        # run knows is prints_credentials' whole-command question, when a store is named).
+        return any(_credential_file(req, part, path) for path in [*part.reads, *part.writes])
     if any(_SECRET_FLAG.match(arg) for arg in args) or _touches_credentials(req, part, words):
         return True
     if program == "printenv":
@@ -2665,7 +2685,7 @@ def _credential_words(req: Request, part: ShellPart, words: list[str], depth: in
         return any(_credential_file(req, part, name) for name in [*words[1:], *part.written[1:], *part.reads])
     if re.sub(r"[\d.]+$", "", program) in _INTERPRETERS:
         # Code given inline (python -c, node -e ...) that names a credential store reads it.
-        return any(_CREDENTIAL_TEXT.search(arg) for arg in args)
+        return any(_CREDENTIAL_TEXT.search(arg) or _names_store_in_text(arg) for arg in args)
     return False
 
 
@@ -2687,12 +2707,18 @@ def prints_credentials(req: Request, depth: int = 0) -> bool:
         reader.parts.extend(fallback.parts)
     if any(_credential_words(req, part, part.words, depth) for part in reader.parts):
         return True
-    # A credential path written anywhere else (a loop's words, a script the
-    # splitter can't read) is touched by whatever runs: only a command made
-    # wholly of harmless checks (_HARMLESS_CHECKS) may name one.
-    return _mentions_credentials(req.command) and (
-        reader.unread or not reader.parts
-        or not all(_harmless_check(req, part, part.words) for part in reader.parts))
+    # Does the command name a store anywhere: a part's words or redirections, an
+    # assignment's value, a loop's list? Then a word or target only the run knows
+    # may be that store ($f, "${a[0]}", $(...)): fail closed, unless every part is
+    # a harmless check whose redirections resolve elsewhere. Without a store
+    # named, an unresolved word is the policy's ordinary question.
+    where = ShellPart([], "", req.cwd or req.worktree or None)
+    named = (any(_touches_credentials(req, part, part.words) for part in reader.parts)
+             or any(_credential_file(req, where, value) for value in reader.named))
+    if reader.unread:    # text the splitter can't read is never resolved: what it names, it may touch
+        return named or _names_store_in_text(req.command)
+    return (named and any(part.unresolved for part in reader.parts)
+            and not all(_harmless_check(req, part, part.words) for part in reader.parts))
 
 
 def decide(req: Request | None, *, checks: list[str] | None = None,
@@ -3766,6 +3792,9 @@ class _Flattener:
         self.chained: list[tuple[bool, bool]] = []
         self.track = True
         self.changed = False
+        # A credential scan's record of what assignments and for-loop lists resolve to:
+        # paths a part never sees as a word (f=~/.ssh; for f in "$HOME"/.ssh/*).
+        self.named: list[str] = []
 
     def emit(self, command: str, definite: bool = False, chained: tuple[bool, bool] = (False, False)) -> None:
         self.out.append(command)
@@ -3782,6 +3811,10 @@ class _Flattener:
                 t[0] == "word" and os.path.basename(t[1].raw) in _STDIN_RUNNERS for t in tokens):
             raise ValueError("a heredoc may be run as commands")
         nodes, _ = _script_tree(_script_items(tokens))
+        if self.credential_scan:
+            # The shell's $HOME is known before the run: a credential scan resolves it (and ~) to the
+            # real home in every word, so "$HOME"/.aws or d="$HOME"; cat "$d/.npmrc" names the store.
+            env.setdefault("HOME", ("lit", os.path.expanduser("~")))
         self.walk(nodes, env, True)
 
     def walk(self, nodes: list[tuple], env: dict, definite: bool, chains: bool = True) -> None:
@@ -3825,7 +3858,9 @@ class _Flattener:
         for word in words:
             for inner in word.substitutions:
                 self.substitution(inner, env)
-            text = self.text(word, env)
+            text = self.resolved(self.text(word, env))
+            if self.credential_scan:
+                self.named.append(text)
             if word.substitutions:
                 return [None]
             found = _tokens(text, word_pattern=SIMPLE_COMMAND)
@@ -3842,6 +3877,24 @@ class _Flattener:
         sub.script(inner, dict(env))
         for command in sub.out:
             self.emit(command)
+        self.named += sub.named
+
+    def resolved(self, text: str) -> str:
+        """A credential scan's reading of an assignment value or loop word
+        once known variables are in: an unquoted leading ~ is the home (the
+        shell expands it there), and one quoted piece is unquoted."""
+        if not self.credential_scan:
+            return text
+        if re.match(r"~(?=/|$)", text):
+            text = os.path.expanduser("~") + text[1:]
+        if any(c in text for c in "\"'"):
+            try:
+                pieces = shlex.split(text)
+            except ValueError:
+                return text
+            if len(pieces) == 1:
+                text = pieces[0]
+        return text
 
     def text(self, word: _Word, env: dict, assignment: bool = False) -> str:
         """``word`` as written with each reference to a known variable
@@ -3897,7 +3950,9 @@ class _Flattener:
                     raise ValueError(f"{name} changes which program runs or how words split")
                 for inner in word.substitutions:
                     self.substitution(inner, seen)
-                text = self.text(word, seen, assignment=True)[len(name) + 1:]
+                text = self.resolved(self.text(word, seen, assignment=True)[len(name) + 1:])
+                if self.credential_scan:
+                    self.named.append(text)
                 found = _tokens(text) if text else [(False, "")]
                 known = (definite and not word.substitutions and "~" not in text and found is not None
                          and len(found) == 1 and not found[0][0])
@@ -3985,6 +4040,9 @@ class ShellPart:
     assigned: bool = False
     redirect_glob: bool = False
     references: list[tuple[str, ...]] = field(default_factory=list)    # expanded variable names per word
+    # Words and redirection targets only the run knows, as written (prints_credentials fails
+    # closed on them when the command names a credential store).
+    unresolved: list[str] = field(default_factory=list)
 
 
 class _Unverifiable(ValueError):
@@ -4000,6 +4058,7 @@ class _PartReader:
         self.settled = self.cwd    # where the shell is once a cd's && chain ends, whether the cd ran or not
         self.parts: list[ShellPart] = []
         self.unread = False   # the splitter couldn't read the whole command (parts are what scan() found)
+        self.named: list[str] = []    # assignment values and loop lists, resolved (_Flattener.named)
         self.wrote = False    # an earlier part may have made files a later pattern would match
         self.expanded = self.tilde = False    # the part being read's ShellPart.expanded and .tilde
 
@@ -4053,6 +4112,7 @@ class _PartReader:
             self.unread = True
             self.scan(command)
             return
+        self.named += flattener.named
         for line, sure, (chained, leads) in zip(flattener.out, flattener.definite, flattener.chained):
             self.part(line, definite and sure, chains and chained, chains and leads)
 
@@ -4123,6 +4183,8 @@ class _PartReader:
             part.words += names
             part.references.extend([tuple(ref[2] for ref in word.refs)] * len(names))
             part.written.append(written or (names[0] if known else word.raw))
+            if not known:
+                part.unresolved.append(word.raw)
             part.globs |= written is not None
             part.unknown |= not known
             i += 1
@@ -4201,6 +4263,7 @@ class _PartReader:
         # A name only the run knows stays as written (not absolute): read_parts and the groups take it so.
         if name is None:
             name = target.raw
+            part.unresolved.append(name)
         elif self.cwd is not None or os.path.isabs(name):
             name = os.path.normpath(os.path.join(self.cwd or "", name))
         if op == "<":
