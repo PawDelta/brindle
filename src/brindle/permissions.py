@@ -2403,13 +2403,20 @@ def _credential_file(req: Request, part: ShellPart, name: str) -> bool:
 
 
 def _argument_paths(word: str) -> list[str]:
-    """The paths an argument may name: itself, and what follows an ``@`` (curl
-    -d @file, -F name=@file) or an ``=`` (--upload-file=file, if=file)."""
-    paths = [word]
-    if "=" in word:
-        paths.append(word.partition("=")[2])
-    if "@" in word:
-        paths.append(word.partition("@")[2])
+    """The paths an argument may name: itself; a value attached to a short
+    option after any number of its letters (-T/path, -o~/x, -sT/path, -d@path);
+    and in each, what follows an ``@`` (curl -d @file, -F name=@file) or an
+    ``=`` (--upload-file=file, if=file)."""
+    candidates = [word]
+    if (letters := re.match(r"-([A-Za-z]+)", word)) and not word.startswith("--"):
+        candidates += [word[1 + count:] for count in range(1, len(letters.group(1)) + 1)]
+    paths = []
+    for candidate in candidates:
+        paths.append(candidate)
+        if "=" in candidate:
+            paths.append(candidate.partition("=")[2])
+        if "@" in candidate:
+            paths.append(candidate.partition("@")[2])
     return paths
 
 
