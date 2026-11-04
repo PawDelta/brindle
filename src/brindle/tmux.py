@@ -1096,6 +1096,32 @@ def session_pane_ids(session: str) -> list[str]:
     return proc.stdout.split() if proc.returncode == 0 else []
 
 
+@dataclass(frozen=True)
+class Place:
+    window: str     # its window's id
+    session: str
+    name: str       # its window's name
+
+
+def pane_places() -> dict[str, Place]:
+    """Where every pane on this server is, by pane id, in one call: empty
+    when no server runs. Raises TmuxTimeout when the server doesn't answer."""
+    proc = _tmux("list-panes", "-a", "-F", "#{pane_id}\t#{window_id}\t#{session_name}\t#{window_name}",
+                 check=False)
+    places = {}
+    for line in proc.stdout.splitlines() if proc.returncode == 0 else []:
+        pane, window, session, name = (line.split("\t", 3) + ["", "", ""])[:4]
+        places[pane] = Place(window, session, name)
+    return places
+
+
+def close(panes: Iterable[str] = (), windows: Iterable[str] = (), sessions: Iterable[str] = ()) -> None:
+    """Kill ``panes``, then ``windows``, then the sessions named ``sessions``,
+    in one tmux command (_tmux_batch: best effort)."""
+    _tmux_batch([*(["kill-pane", "-t", p] for p in panes), *(["kill-window", "-t", w] for w in windows),
+                 *(["kill-session", "-t", f"={s}"] for s in sessions)])
+
+
 def session_panes(session: str) -> list[tuple[int, str]]:
     """``(pid, current folder)`` of every pane of ``session``; the folder is
     empty when tmux can't say (the process's folder was deleted, say)."""

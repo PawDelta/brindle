@@ -121,13 +121,14 @@ def _apply(c, event) -> None:
                   (event["session"], event["repo_key"]))
 
 
-def note(db: DB, root_id: str, kind: str, payload: dict | None = None) -> None:
-    """Record an event for session root ``root_id`` in its workspace's repo.
+def note(db: DB, root_id: str, kind: str, payload: dict | None = None, *, key: str | None = None) -> None:
+    """Record an event for session root ``root_id`` in its workspace's repo
+    (``key``: that repo's repo_key, when the caller has looked it up).
     Does nothing for a session whose root or workspace is gone."""
     root = db.get_agent(root_id)
     ws = db.get_workspace(root.workspace_id) if root else None
     if ws is not None:
-        append(db, repo_key(ws.repo_root), kind, payload or {}, session=root_id)
+        append(db, key or repo_key(ws.repo_root), kind, payload or {}, session=root_id)
 
 
 def last_intent(db: DB, root_id: str) -> str | None:

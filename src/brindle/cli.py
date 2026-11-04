@@ -1326,11 +1326,15 @@ def daemon_cmd(
     from brindle import redact
 
     redact.guard_std()                  # the app keeps the daemon's stderr in app-daemon.log
+    code = 0
     try:
         lifecycle.serve(unix=unix, tcp=tcp, idle_exit=idle_exit)
     except (lifecycle.DaemonError, OSError) as e:
         typer.secho(str(e), fg="red", err=True)
         raise typer.Exit(1)
+    except SystemExit as e:     # serve's way out of a SIGTERM, once it has stopped
+        code = e.code if isinstance(e.code, int) else 0
+    lifecycle.leave(code)       # nothing left in the process holds up its exit
 
 
 @daemon_app.command("status")
