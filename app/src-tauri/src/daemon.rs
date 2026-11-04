@@ -62,6 +62,9 @@ const MAX_CONNECTIONS: usize = 16;
 const STREAM_POLL: Duration = Duration::from_millis(40);
 /// Where a started daemon's stderr goes, in brindle's home, for when it fails.
 pub(crate) const START_LOG: &str = "app-daemon.log";
+/// The launchd job that runs the daemon on macOS (`start_daemon`), in brindle's home.
+#[cfg(target_os = "macos")]
+const LAUNCHD_PLIST: &str = "app-daemon.plist";
 /// How long a liveness check's connect and answer may take.
 const CHECK_TIMEOUT: Duration = Duration::from_secs(3);
 /// How a start's failure begins when the installed brindle predates `brindle
@@ -72,13 +75,13 @@ pub(crate) const ENGINE_TOO_OLD: &str = "engine too old";
 /// another install's `brindle daemon`, one a person started, using brindle's home.
 pub(crate) const ENGINE_CONFLICT: &str = "engine conflict";
 /// How long a daemon being replaced has to shut down after SIGTERM before it
-/// is killed, as `brindle daemon stop` kills one (lifecycle.STOP_GRACE). What
-/// it still runs was asked by an app that has gone (one that quit for its
-/// update); the daemon gives that work lifecycle.SHUTDOWN_GRACE, but an
-/// older one waited it out, a provider's sign-in probe 10s at a time, and an
-/// app that waited on it showed its first-run screen after 15s.
+/// is killed. The app's daemon pauses every session it runs on its way out
+/// (lifecycle.pause_for_exit: their windows closed, their work kept, for the
+/// next daemon to resume), which takes a few tmux commands per session; as
+/// long as launchd gives a job it stops (its ExitTimeOut). What it still
+/// ran gets lifecycle.SHUTDOWN_GRACE before that.
 #[cfg(not(windows))]
-const STOP_GRACE: Duration = Duration::from_secs(2);
+const STOP_GRACE: Duration = Duration::from_secs(20);
 /// How long a killed daemon has to be gone.
 #[cfg(not(windows))]
 const KILL_GRACE: Duration = Duration::from_secs(2);
@@ -262,7 +265,8 @@ fn find_brindle(path: &OsStr) -> Option<PathBuf> {
 }
 
 /// `brindle daemon --idle-exit` with `path` for its PATH, in its own process
-/// group (it outlives the app, and exits once idle).
+/// group (it outlives the app, and exits once idle). How it is started is
+/// `start_daemon`'s: on macOS as launchd's job, outside the app's coalition.
 #[cfg_attr(windows, allow(dead_code))]
 fn daemon_command(bin: &Path, path: &OsStr) -> Command {
     let mut cmd = Command::new(bin);
@@ -276,6 +280,339 @@ fn daemon_command(bin: &Path, path: &OsStr) -> Command {
         cmd.process_group(0);
     }
     cmd
+}
+
+/// A daemon this app started, before it listens: what started it says
+/// whether it still runs.
+#[cfg(not(windows))]
+enum Daemon {
+    /// A child of the app, in a process group of its own: Linux, and macOS
+    /// when the person has switched brindle off under Allow in the Background.
+    Child(std::process::Child),
+    /// A job of the person's launchd (macOS), see `start_daemon`: `pid` once
+    /// launchd has spawned it. `adopted`: another start's job (an earlier app
+    /// process's), found loaded and waited on rather than started here.
+    #[cfg(target_os = "macos")]
+    Launchd { label: String, pid: Option<u32>, adopted: bool },
+}
+
+#[cfg(not(windows))]
+impl Daemon {
+    /// Its pid: 0 for a launchd job not spawned yet.
+    fn id(&self) -> u32 {
+        match self {
+            Daemon::Child(child) => child.id(),
+            #[cfg(target_os = "macos")]
+            Daemon::Launchd { pid, .. } => pid.unwrap_or(0),
+        }
+    }
+
+    /// Whether the daemon `pid` is the one this start made. An adopted job's
+    /// isn't: its daemon.json is judged as any daemon found running is.
+    fn owns(&self, pid: u32) -> bool {
+        match self {
+            Daemon::Child(child) => child.id() == pid,
+            #[cfg(target_os = "macos")]
+            Daemon::Launchd { pid: own, adopted, .. } => !adopted && *own == Some(pid),
+        }
+    }
+
+    /// Whether this is another start's job, adopted (see `Launchd`).
+    fn adopted(&self) -> bool {
+        match self {
+            Daemon::Child(_) => false,
+            #[cfg(target_os = "macos")]
+            Daemon::Launchd { adopted, .. } => *adopted,
+        }
+    }
+
+    /// None while it runs; how it ended once it has (an exit status's words,
+    /// or launchd's `last exit code = 1`). A launchd job that has ended is
+    /// unloaded, so the next start loads its job afresh.
+    fn try_wait(&mut self) -> Result<Option<String>, String> {
+        match self {
+            Daemon::Child(child) => Ok(child.try_wait().map_err(|e| e.to_string())?.map(|status| status.to_string())),
+            #[cfg(target_os = "macos")]
+            Daemon::Launchd { label, pid, .. } => match launchd_job(label)? {
+                Some(job) if job.pid.is_some() => {
+                    *pid = job.pid;
+                    Ok(None)
+                }
+                // Loaded, and launchd hasn't spawned it yet.
+                Some(job) if job.runs == 0 => Ok(None),
+                Some(job) => {
+                    let _ = launchctl(&["bootout", &launchd_service(label)]);
+                    Ok(Some(job.exit))
+                }
+                None => Ok(Some("unloaded from launchd".into())),
+            },
+        }
+    }
+
+    /// Done waiting on it: a child is reaped once it exits; launchd reaps its own jobs.
+    fn release(self) {
+        match self {
+            Daemon::Child(mut child) => {
+                std::thread::spawn(move || child.wait());
+            }
+            #[cfg(target_os = "macos")]
+            Daemon::Launchd { .. } => {}
+        }
+    }
+}
+
+/// Start the daemon `cmd` (`daemon_command`) as a child of the app, in a
+/// process group of its own, its stderr appended to `log`.
+#[cfg(unix)]
+fn start_child(mut cmd: Command, log: &Path) -> Result<Daemon, String> {
+    let log = File::options().append(true).open(log).map_err(|e| format!("{}: {e}", log.display()))?;
+    let child = cmd
+        .stderr(log)
+        .spawn()
+        .map_err(|e| format!("couldn't start {} daemon: {e}", Path::new(cmd.get_program()).display()))?;
+    Ok(Daemon::Child(child))
+}
+
+/// Start the daemon `cmd` (`daemon_command`) with brindle's home `home`, its
+/// stderr appended to `log`: a child of the app.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn start_daemon(cmd: Command, _home: &Path, log: &Path) -> Result<Daemon, String> {
+    start_child(cmd, log)
+}
+
+/// Start the daemon `cmd` (`daemon_command`) with brindle's home `home`, its
+/// stderr appended to `log`: as a job of the person's launchd that the app
+/// loads (its plist in brindle's home, written afresh at every start: this
+/// engine's path and PATH, as the bundle is now) and kickstarts, not as a
+/// child. launchd gives the job a coalition of its own; a child of the app is
+/// in the app's, and so is everything it starts (the tmux server, every
+/// agent's pane), whatever its process group. LaunchServices counts the
+/// coalition's members as the app's subordinates: an updated app's old Dock
+/// icon stayed as "exited-with-subordinates" while they ran, and quitting
+/// that icon killed them all. A job the app loads is the app's: launchd
+/// stops it (SIGTERM) when the app goes away, quit, force quit or restarted
+/// into an update, and the daemon pauses the sessions it runs on its way
+/// out, for the next daemon to resume (brindle.daemon.lifecycle).
+///
+/// One job per home and app process (`launchd_label`): a job still running
+/// under it is a daemon an earlier start of this process made, and is
+/// adopted and waited on instead of starting a second, which would find its
+/// lock and exit; `start_in` judges the daemon it turns out to be
+/// (`launchd_plan`). An earlier app process's job keeps its own label, so
+/// launchd's teardown of it (by label, moments after that app exits) never
+/// takes this process's job: the relaunched app waits for it instead
+/// (`wait_for_predecessor`).
+///
+/// Switched off under Login Items → Allow in the Background
+/// (`launchd_disabled`), launchd won't run it: the daemon is then the app's
+/// child, as on Linux, and stops with the app the same way.
+#[cfg(target_os = "macos")]
+fn start_daemon(cmd: Command, home: &Path, log: &Path) -> Result<Daemon, String> {
+    let label = launchd_label(home, std::process::id());
+    if launchd_disabled(&label)? {
+        return start_child(cmd, log);
+    }
+    match launchd_plan(launchd_job(&label)?.as_ref()) {
+        Plan::Adopt(pid) => return Ok(Daemon::Launchd { label, pid: Some(pid), adopted: true }),
+        Plan::Reload => {
+            launchctl(&["bootout", &launchd_service(&label)])?;
+        }
+        Plan::Load => {}
+    }
+    let plist = home.join(LAUNCHD_PLIST);
+    let staged = home.join(format!("{LAUNCHD_PLIST}.{}", std::process::id()));
+    // The person's own, like daemon.json: it carries the app's environment.
+    use std::os::unix::fs::OpenOptionsExt;
+    File::options()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&staged)
+        .and_then(|mut file| file.write_all(daemon_plist(&label, &cmd, log).as_bytes()))
+        .and_then(|()| std::fs::rename(&staged, &plist))
+        .map_err(|e| {
+            let _ = std::fs::remove_file(&staged);
+            format!("{}: {e}", plist.display())
+        })?;
+    launchctl(&["bootstrap", &launchd_domain(), &plist.to_string_lossy()])?;
+    launchctl(&["kickstart", &launchd_service(&label)])?;
+    let pid = launchd_job(&label)?.and_then(|job| job.pid);
+    Ok(Daemon::Launchd { label, pid, adopted: false })
+}
+
+/// What `start_daemon` does about the job launchd has under the daemon's label.
+#[cfg(target_os = "macos")]
+#[derive(Debug, PartialEq)]
+enum Plan {
+    /// None is loaded: load this start's.
+    Load,
+    /// It runs (its pid): another start's, adopted.
+    Adopt(u32),
+    /// Loaded and idle (at login, or its last run over): unloaded, then this
+    /// start's plist is loaded and run.
+    Reload,
+}
+
+#[cfg(target_os = "macos")]
+fn launchd_plan(job: Option<&LaunchdJob>) -> Plan {
+    match job {
+        None => Plan::Load,
+        Some(LaunchdJob { pid: Some(pid), .. }) => Plan::Adopt(*pid),
+        Some(_) => Plan::Reload,
+    }
+}
+
+/// Whether the person has switched the daemon's job `label` off (System
+/// Settings → Login Items → Allow in the Background): launchd then refuses
+/// to load it, with no more than an I/O error to say so.
+#[cfg(target_os = "macos")]
+fn launchd_disabled(label: &str) -> Result<bool, String> {
+    Ok(disabled_in(&launchctl(&["print-disabled", &launchd_domain()])?, label))
+}
+
+/// Whether `launchctl print-disabled`'s `text` lists `label` as disabled (`"label" => disabled`).
+#[cfg(target_os = "macos")]
+fn disabled_in(text: &str, label: &str) -> bool {
+    let entry = format!("\"{label}\" => ");
+    text.lines().any(|line| line.trim().strip_prefix(&entry).is_some_and(|state| state.trim() == "disabled"))
+}
+
+/// The launchd label of the daemon the app process `app` runs on brindle's
+/// home `home`: one per home (an app on another home, BRINDLE_HOME, has a
+/// job of its own) and per app process (see `start_daemon`).
+#[cfg(target_os = "macos")]
+fn launchd_label(home: &Path, app: u32) -> String {
+    use std::os::unix::ffi::OsStrExt;
+    // FNV-1a over the path: short, stable, and only a label's characters.
+    let hash = home
+        .as_os_str()
+        .as_bytes()
+        .iter()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |h, b| (h ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3));
+    format!("com.pawdelta.brindle.daemon.{hash:016x}.{app}")
+}
+
+/// Relaunched into an update (instance::relaunch), after the app process
+/// `predecessor` has exited: wait until its daemon is gone too. launchd
+/// stops that job moments after the app exits (the daemon pauses what it
+/// ran on the way out, for this app's daemon to resume); started before
+/// that, this app's daemon would find the old one's lock, or the app would
+/// connect to the old one and lose it. Waited on by its pid (`wait_for_exit`),
+/// and unloaded if launchd has left it, idle, by then.
+#[cfg(target_os = "macos")]
+pub(crate) fn wait_for_predecessor(predecessor: u32) {
+    let label = launchd_label(&brindle_home(), predecessor);
+    let Ok(Some(job)) = launchd_job(&label) else { return };
+    if let Some(pid) = job.pid {
+        crate::instance::wait_for_exit(pid);
+    }
+    if matches!(launchd_job(&label), Ok(Some(job)) if job.pid.is_none()) {
+        let _ = launchctl(&["bootout", &launchd_service(&label)]);
+    }
+}
+
+/// The person's launchd domain: their GUI session's.
+#[cfg(target_os = "macos")]
+fn launchd_domain() -> String {
+    // SAFETY: getuid has no preconditions and only reads.
+    format!("gui/{}", unsafe { libc::getuid() })
+}
+
+/// The job `label` as launchctl names it, in the person's domain.
+#[cfg(target_os = "macos")]
+fn launchd_service(label: &str) -> String {
+    format!("{}/{label}", launchd_domain())
+}
+
+/// `launchctl args`: its output, or what it said when it failed.
+#[cfg(target_os = "macos")]
+fn launchctl(args: &[&str]) -> Result<String, String> {
+    let out = Command::new("/bin/launchctl")
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("couldn't run launchctl: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("launchctl {}: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim()));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// What launchd says of a job: its pid while it runs, how many times it ran,
+/// and its `last exit code = …` line.
+#[cfg(target_os = "macos")]
+struct LaunchdJob {
+    pid: Option<u32>,
+    runs: u32,
+    exit: String,
+}
+
+/// The job `label` as launchd has it (`launchctl print`), or None when none is loaded.
+#[cfg(target_os = "macos")]
+fn launchd_job(label: &str) -> Result<Option<LaunchdJob>, String> {
+    match launchctl(&["print", &launchd_service(label)]) {
+        Ok(text) => Ok(Some(parse_launchd_job(&text))),
+        Err(why) if why.contains("Could not find service") => Ok(None),
+        Err(why) => Err(why),
+    }
+}
+
+/// A job as `launchctl print` describes it: its `pid = N` (only while it
+/// runs), `runs = N` and `last exit code = …` lines.
+#[cfg(target_os = "macos")]
+fn parse_launchd_job(text: &str) -> LaunchdJob {
+    let field = |name: &str| text.lines().map(str::trim).find_map(|line| line.strip_prefix(name)?.strip_prefix(" = "));
+    LaunchdJob {
+        pid: field("pid").and_then(|v| v.parse().ok()),
+        runs: field("runs").and_then(|v| v.parse().ok()).unwrap_or(0),
+        exit: format!("last exit code = {}", field("last exit code").unwrap_or("unknown")),
+    }
+}
+
+/// The launchd job `label` that runs `cmd` (its program and arguments, with
+/// its environment over the app's own, as a child would get), with stderr
+/// appended to `log`. It runs only when the app kickstarts it, never when
+/// loaded, and is never restarted: a second daemon would only find the first
+/// one's lock. What it starts (the tmux server, a hook) is left running when
+/// it exits, as a child's would be; launchd's SIGTERM when the app goes away
+/// is what makes the daemon pause the sessions it runs.
+#[cfg(target_os = "macos")]
+fn daemon_plist(label: &str, cmd: &Command, log: &Path) -> String {
+    let escape = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+    let mut env: std::collections::BTreeMap<String, String> = std::env::vars().collect();
+    for (key, value) in cmd.get_envs() {
+        let key = key.to_string_lossy().into_owned();
+        match value {
+            Some(value) => env.insert(key, value.to_string_lossy().into_owned()),
+            None => env.remove(&key),
+        };
+    }
+    let mut plist = String::from(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+         <plist version=\"1.0\">\n<dict>\n",
+    );
+    plist += &format!("\t<key>Label</key>\n\t<string>{}</string>\n", escape(label));
+    plist += "\t<key>ProgramArguments</key>\n\t<array>\n";
+    for arg in std::iter::once(cmd.get_program()).chain(cmd.get_args()) {
+        plist += &format!("\t\t<string>{}</string>\n", escape(&arg.to_string_lossy()));
+    }
+    plist += "\t</array>\n\t<key>EnvironmentVariables</key>\n\t<dict>\n";
+    for (key, value) in &env {
+        plist += &format!("\t\t<key>{}</key>\n\t\t<string>{}</string>\n", escape(key), escape(value));
+    }
+    plist += "\t</dict>\n";
+    if let Some(cwd) = cmd.get_current_dir().map(Path::to_path_buf).or_else(|| std::env::current_dir().ok()) {
+        plist += &format!("\t<key>WorkingDirectory</key>\n\t<string>{}</string>\n", escape(&cwd.to_string_lossy()));
+    }
+    plist += &format!("\t<key>StandardErrorPath</key>\n\t<string>{}</string>\n", escape(&log.to_string_lossy()));
+    plist += "\t<key>RunAtLoad</key>\n\t<false/>\n\
+              \t<key>KeepAlive</key>\n\t<false/>\n\
+              \t<key>AbandonProcessGroup</key>\n\t<true/>\n\
+              \t<key>ProcessType</key>\n\t<string>Interactive</string>\n\
+              </dict>\n</plist>\n";
+    plist
 }
 
 pub(crate) fn log_tail(path: &Path) -> String {
@@ -330,7 +667,7 @@ fn start(engine: Option<&Path>) -> Result<DaemonInfo, String> {
 /// waiting, and when it was started.
 #[cfg(not(windows))]
 struct Starting {
-    child: std::process::Child,
+    child: Daemon,
     since: Instant,
 }
 
@@ -401,11 +738,9 @@ fn start_in(
         Some(starting) => starting,
         None => {
             std::fs::create_dir_all(home).map_err(|e| format!("{}: {e}", home.display()))?;
-            let log = File::create(&log_path).map_err(|e| format!("{}: {e}", log_path.display()))?;
-            let child = daemon_command(bin, path)
-                .stderr(log)
-                .spawn()
-                .map_err(|e| format!("couldn't start {} daemon: {e}", bin.display()))?;
+            // Each start's log begins afresh.
+            File::create(&log_path).map_err(|e| format!("{}: {e}", log_path.display()))?;
+            let child = start_daemon(daemon_command(bin, path), home, &log_path)?;
             Starting { child, since: Instant::now() }
         }
     };
@@ -414,11 +749,28 @@ fn start_in(
     loop {
         // daemon.json is written once the sockets are bound, a moment before they listen.
         let listening = running_in(home).filter(|info| Conn::open(info).is_ok());
-        if let Some(info) = listening.filter(|info| info.pid == child.id() || usable(info)) {
-            std::thread::spawn(move || child.wait());
-            return Ok(info);
+        if let Some(info) = listening {
+            if child.owns(info.pid) || usable(&info) {
+                child.release();
+                return Ok(info);
+            }
+            if child.adopted() {
+                // An adopted job's daemon, and not one to use: judged as ensure_in judges
+                // one found running. Another build's is stopped, and this start's own
+                // takes its place.
+                match engine.map(|engine| reuse_running(engine, &info)) {
+                    Some(Reuse::Conflict(why)) => return Err(why),
+                    _ => {
+                        set_step(home, Some((StartStep::Stopping { pid: info.pid }, since)));
+                        stop_daemon(info.pid, STOP_GRACE)?;
+                        child = start_daemon(daemon_command(bin, path), home, &log_path)?;
+                        set_step(home, Some((StartStep::Starting { pid: child.id() }, since)));
+                        continue;
+                    }
+                }
+            }
         }
-        if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
+        if let Some(status) = child.try_wait()? {
             // One started by someone else in the meantime makes this one exit: use that, if it may be.
             if let Some(info) = running_in(home) {
                 return match engine.map(|engine| reuse_running(engine, &info)) {
@@ -1486,6 +1838,194 @@ mod tests {
         }
         assert!(is_daemon(child.id()), "ps doesn't show {argv0} as a daemon");
         child
+    }
+
+    /// Unloads the daemon job `label` when dropped: a test's fake daemon
+    /// doesn't stay under launchd, however the test ends.
+    #[cfg(target_os = "macos")]
+    struct Unload(String);
+
+    #[cfg(target_os = "macos")]
+    impl Drop for Unload {
+        fn drop(&mut self) {
+            let _ = launchctl(&["bootout", &launchd_service(&self.0)]);
+        }
+    }
+
+    /// A daemon loaded under the home's label by an earlier start (another
+    /// app process's) is adopted and waited on, not started over; once it
+    /// listens it is judged as a daemon found running is, and another
+    /// build's is stopped and replaced by this start's own.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_adopted_jobs_daemon_of_another_build_is_replaced_once_it_listens() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::current_dir().unwrap().join("target/adopted-daemon");
+        let home = dir.join("home");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&home).unwrap();
+        let engine = engine_of_build(&dir, Some("00b2"));
+        // A daemon that, once `gate` (a fifo) is written to, records its pid, writes
+        // the home's daemon.json and listens on its socket. It exits on SIGTERM.
+        let fake = |name: &str, gate: Option<&Path>| -> PathBuf {
+            let bin = dir.join(name).join("brindle");
+            std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+            let sock = format!("target/adopted-{name}.sock");
+            let _ = std::fs::remove_file(&sock);
+            let wait = gate.map_or(String::new(), |gate| format!("read < '{}'\n", gate.display()));
+            std::fs::write(
+                &bin,
+                format!(
+                    "#!/bin/bash\n{wait}echo $$ > '{dir}/{name}.started'\n\
+                     printf '{{\"socket\": \"{sock}\", \"token\": \"t\", \"pid\": %s}}' $$ > '{home}/daemon.json'\n\
+                     /usr/bin/nc -lkU {sock} & trap 'kill $!; exit 0' TERM; wait\n",
+                    dir = dir.display(),
+                    home = home.display()
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+            bin
+        };
+        let gate = dir.join("gate");
+        let c_gate = std::ffi::CString::new(gate.to_str().unwrap()).unwrap();
+        // SAFETY: mkfifo only reads the path it is given.
+        assert_eq!(unsafe { libc::mkfifo(c_gate.as_ptr(), 0o600) }, 0);
+        let old = fake("old", Some(&gate));
+        let new = fake("new", None);
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let log = home.join(START_LOG);
+        File::create(&log).unwrap();
+        let patience = Duration::from_millis(300);
+
+        // An earlier app process loaded the old build's daemon; it doesn't listen yet.
+        let earlier = start_daemon(daemon_command(&old, &path), &home, &log).unwrap();
+        let _unload = Unload(launchd_label(&home, std::process::id()));
+        assert!(!earlier.adopted());
+        // This start finds launchd's job and waits on it: nothing is started over it.
+        let err = start_in(&new, &path, &home, Some(&engine), patience).unwrap_err();
+        assert!(err.starts_with(ENGINE_STARTING), "{err}");
+        assert!(!dir.join("new.started").exists(), "started a daemon over the loaded job");
+        assert!(STARTING.lock().unwrap().as_ref().unwrap()[&home].child.adopted());
+
+        // The old one publishes its daemon.json and listens. It isn't this engine's build
+        // (no brindle-build on its command line; `--idle-exit`: Replace), so it is stopped
+        // and this start's own daemon takes its place.
+        std::fs::write(&gate, "go\n").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let info = loop {
+            match start_in(&new, &path, &home, Some(&engine), patience) {
+                Ok(info) => break info,
+                Err(err) => assert!(err.starts_with(ENGINE_STARTING), "{err}"),
+            }
+            assert!(Instant::now() < deadline, "never replaced");
+        };
+        let started = |name: &str| std::fs::read_to_string(dir.join(format!("{name}.started"))).unwrap().trim().parse::<u32>().unwrap();
+        let (old_pid, new_pid) = (started("old"), started("new"));
+        assert_eq!(info.pid, new_pid);
+        assert_ne!(new_pid, old_pid);
+        assert!(!is_daemon(old_pid), "the other build's daemon still runs");
+        assert!(Conn::open(&info).is_ok());
+        assert!(!starting_in(&home));
+        // SAFETY: kill(2) only sends a signal, to the fake daemon's own process group (launchd's job leads one).
+        unsafe { libc::kill(-(new_pid as libc::pid_t), libc::SIGKILL) };
+    }
+
+    /// The jetsam coalition `pid` is in: what `lsappinfo` lists as an app's
+    /// "coalition", and whose members LaunchServices counts as the app's subordinates.
+    #[cfg(target_os = "macos")]
+    fn coalition_of(pid: u32) -> u64 {
+        #[repr(C)]
+        struct Coalitions {
+            ids: [u64; 2],
+            reserved: [u64; 3],
+        }
+        const PROC_PIDCOALITIONINFO: libc::c_int = 20;
+        let mut info = Coalitions { ids: [0; 2], reserved: [0; 3] };
+        let size = std::mem::size_of::<Coalitions>() as libc::c_int;
+        // SAFETY: proc_pidinfo writes at most `size` bytes into `info`, which is that big.
+        let n = unsafe { libc::proc_pidinfo(pid as libc::c_int, PROC_PIDCOALITIONINFO, 0, (&mut info as *mut Coalitions).cast(), size) };
+        assert!(n > 0, "proc_pidinfo({pid}) failed");
+        info.ids[1]
+    }
+
+    /// The app's daemon on macOS is launchd's job, in a coalition of its own
+    /// rather than the app's (which LaunchServices would keep as the app's
+    /// subordinates, kept and killed with the app's Dock icon), started with
+    /// the command's PATH, and seen through to its end: unloaded once it exits.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_daemon_is_launchds_job_outside_the_apps_coalition() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::current_dir().unwrap().join("target/launchd-daemon");
+        let home = dir.join("home");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&home).unwrap();
+        let bin = dir.join("brindle");
+        // A daemon that records its PATH and stays until SIGTERM, as the engine's does.
+        std::fs::write(
+            &bin,
+            format!("#!/bin/bash\necho \"$PATH\" > '{}/path'\ntail -f /dev/null & trap 'kill $!; exit 0' TERM; wait\n", dir.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = OsString::from("/usr/bin:/bin:/the/apps/tools");
+        let log = home.join(START_LOG);
+        File::create(&log).unwrap();
+
+        // Nothing loaded: this start's job is loaded. A loaded job is adopted while it runs;
+        // one loaded and idle (at login, or its last run over) is reloaded and run.
+        assert_eq!(launchd_plan(None), Plan::Load);
+        assert_eq!(launchd_plan(Some(&LaunchdJob { pid: Some(7), runs: 1, exit: String::new() })), Plan::Adopt(7));
+        assert_eq!(launchd_plan(Some(&LaunchdJob { pid: None, runs: 0, exit: String::new() })), Plan::Reload);
+        assert_eq!(launchd_plan(Some(&LaunchdJob { pid: None, runs: 1, exit: String::new() })), Plan::Reload);
+        // Switched off under Allow in the Background, as launchctl print-disabled lists it.
+        let listing = "gui/501 = {\n\t\t\"com.apple.foo\" => enabled\n\t\t\"the.label\" => disabled\n\t}\n";
+        assert!(disabled_in(listing, "the.label"));
+        assert!(!disabled_in(listing, "com.apple.foo") && !disabled_in(listing, "the"));
+
+        let mut daemon = start_daemon(daemon_command(&bin, &path), &home, &log).unwrap();
+        let Daemon::Launchd { label, adopted: false, .. } = &daemon else { panic!("not launchd's job, or adopted") };
+        let label = label.clone();
+        let _unload = Unload(label.clone());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        // launchd may spawn the job a moment after loading it: its pid comes with that.
+        while daemon.id() == 0 {
+            assert!(matches!(daemon.try_wait(), Ok(None)), "ended before it ran");
+            assert!(Instant::now() < deadline, "launchd didn't spawn {}", bin.display());
+        }
+        let pid = daemon.id();
+        assert!(daemon.owns(pid) && !daemon.adopted());
+        let recorded = loop {
+            let recorded = std::fs::read_to_string(dir.join("path")).unwrap_or_default();
+            if is_daemon(pid) && recorded.ends_with('\n') {
+                break recorded;
+            }
+            assert!(Instant::now() < deadline, "launchd didn't run {}", bin.display());
+        };
+        assert_eq!(recorded.trim(), path.to_str().unwrap());
+        // The job's plist carries the app's environment: the person's own to read. It runs
+        // only when kickstarted, never at load.
+        let plist = std::fs::read_to_string(home.join(LAUNCHD_PLIST)).unwrap();
+        assert_eq!(std::fs::metadata(home.join(LAUNCHD_PLIST)).unwrap().permissions().mode() & 0o777, 0o600);
+        assert!(plist.contains("<key>RunAtLoad</key>\n\t<false/>"), "{plist}");
+        assert!(!launchctl(&["print", &launchd_service(&label)]).unwrap().contains("keepalive"));
+        // Its own coalition, not this process's (the app's, when the app starts it): what
+        // the pid's parent being launchd (ppid 1) alone doesn't give a child of the app's.
+        assert_ne!(coalition_of(pid), coalition_of(std::process::id()), "in the app's coalition");
+        assert!(matches!(daemon.try_wait(), Ok(None)));
+
+        // Stopped as an old build's daemon is (stop_daemon): seen as ended, and unloaded.
+        stop_daemon(pid, Duration::from_secs(5)).unwrap();
+        let ended = loop {
+            if let Some(how) = daemon.try_wait().unwrap() {
+                break how;
+            }
+            assert!(Instant::now() < deadline, "launchd still shows the daemon running");
+        };
+        assert_eq!(ended, "last exit code = 0");
+        assert!(launchd_job(&label).unwrap().is_none(), "still loaded");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// `root/brindle.app`'s engine, of build `build` (none when None).

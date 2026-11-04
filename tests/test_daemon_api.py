@@ -1249,3 +1249,41 @@ def test_account_identity_is_cached_with_orgs_and_fails_soft_offline(brindle_hom
         code, body = _get("/v1/account", AUTH)
         assert code == 200 and body["signed_in"] and body["name"] is None and body["email"] is None
     assert reads == ["me", "orgs", "me", "orgs"]
+
+
+def test_the_app_daemon_pauses_what_runs_on_its_way_out_and_the_next_one_resumes_it(db, repo, monkeypatch):
+    from brindle import agents
+    from brindle.service import sessions as svc
+
+    ws = workspaces.create(db, str(repo), "feat/exit").workspace
+    now = 1000.0
+    # A running session (its worker too), one already done, one the person paused.
+    db.add_agent(Agent("live", ws.id, "supervisor", "claude", None, "interactive", "idle", "@1", None, now))
+    db.add_agent(Agent("w1", ws.id, "developer", "claude", "live", "assign", "running", "@2", None, now))
+    db.add_agent(Agent("gone", ws.id, "supervisor", "claude", None, "interactive", "done", "@3", "ok", now))
+    db.add_agent(Agent("rest", ws.id, "supervisor", "claude", None, "interactive", "paused", "@4", None, now))
+    calls = []
+
+    def pause(db_, root_id, **kw):
+        calls.append(("pause", root_id, kw.get("stop_procs")))
+        db_.set_status(root_id, "paused")
+        return []
+
+    monkeypatch.setattr(agents, "pause", pause)
+    monkeypatch.setattr(svc, "cull_detached", lambda repo_root=None: calls.append(("cull", None, None)))
+    monkeypatch.setattr(agents, "resume", lambda db_, root_id, **kw: calls.append(("resume", root_id, None)) or [])
+    # On the way out: only the running session is paused (its processes left to the cull), and recorded.
+    assert lifecycle.pause_for_exit() == ["live"]
+    assert calls == [("pause", "live", False), ("cull", None, None)]
+    assert db.get_agent("live").status == "paused"
+    # The next daemon brings back exactly that one, once.
+    assert lifecycle.resume_after_start() == ["live"]
+    assert lifecycle.resume_after_start() == []
+    assert calls[2:] == [("resume", "live", None)]
+    # One the person closed meanwhile isn't resumed: the record names it, its status doesn't.
+    db.set_status("live", "idle")
+    assert lifecycle.pause_for_exit() == ["live"]
+    db.set_status("live", "done")
+    assert lifecycle.resume_after_start() == []
+    # Nothing running: nothing recorded, and nothing to resume.
+    assert lifecycle.pause_for_exit() == [] and not lifecycle._resume_path().exists()

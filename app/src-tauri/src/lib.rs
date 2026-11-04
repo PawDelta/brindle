@@ -22,6 +22,7 @@
 mod about;
 mod daemon;
 mod engine;
+mod instance;
 mod oauth;
 mod pty_bridge;
 /// Every pane the webview shows, through a real tmux client on a pty.
@@ -174,8 +175,23 @@ pub fn run() {
             return;
         }
         Some("--headless-check") => std::process::exit(headless_check()),
+        // Relaunched into an update (instance::relaunch): the instance that was runs out
+        // first, and so does its daemon (daemon::wait_for_predecessor).
+        #[cfg(target_os = "macos")]
+        Some(instance::AFTER_EXIT_FLAG) => {
+            if let Some(pid) = std::env::args().nth(2).and_then(|pid| pid.parse().ok()) {
+                instance::wait_for_exit(pid);
+                daemon::wait_for_predecessor(pid);
+            }
+        }
         _ => {}
     }
+    // One brindle at a time: a second launch brings the running one to the front and ends here.
+    let exe = std::env::current_exe().ok();
+    let _place = match instance::take_place(&daemon::brindle_home(), exe.as_deref()) {
+        instance::Place::Ours(claim) => claim,
+        instance::Place::Taken => return,
+    };
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
