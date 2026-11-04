@@ -285,7 +285,7 @@ def _a_hung_up_sidebar_leaves_no_read_running(tmp_path):
     try:
         os.kill(sidebar.pid, signal.SIGHUP)
         sidebar.wait()
-        assert not procs.alive(pid)
+        assert _until(lambda: not procs.alive(pid))  # the kill lands just after the sidebar exits
     finally:
         if procs.alive(pid):
             os.kill(pid, signal.SIGKILL)
