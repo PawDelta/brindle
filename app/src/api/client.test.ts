@@ -28,17 +28,24 @@ describe("DaemonClient", () => {
   });
 
   it.each([
-    ["the routing's supervisor choice", { routingConfig: { user: { supervisor: "chat-codex" }, repo: {}, local: {} } }],
-    ["the remembered pick", { supervisorPick: "codex" }],
-  ])("starts a provider-less session on %s over Claude when both are usable", async (_case, data) => {
+    ["the routing's supervisor choice", { routingConfig: { user: { supervisor: "chat-codex" }, repo: {}, local: {} } }, null],
+    ["the remembered pick", { supervisorPick: "codex" }, null],
+    // Set in the local scope: the choice lands in the user's file, its fallbacks in the local one, and
+    // OpenCode isn't installed, so its Codex fallback is the one that runs.
+    ["a fallback set in another scope than its choice", {}, { model: "chat-opencode", fallbacks: ["chat-codex"] }],
+  ])("starts a provider-less session on %s over Claude when both are usable", async (_case, data, supervisor) => {
     const both = freshProviders({ claude: { path: "/bin/claude", version: "2" }, codex: { path: "/bin/codex", version: "1" } });
     const daemon = new FakeDaemon({
       repos: [{ repo_root: REPO, name: "proj" }],
       workspaces: [{ ...root, agents: [] }],
       providers: both,
-      routingProfiles: [{ name: "chat-codex", provider: "codex", model: "gpt-x", cost_tier: "medium", installed: true, signed_in: true }],
+      routingProfiles: [
+        { name: "chat-codex", provider: "codex", model: "gpt-x", cost_tier: "medium", installed: true, signed_in: true },
+        { name: "chat-opencode", provider: "opencode", model: "oc-x", cost_tier: "medium", installed: false, signed_in: false },
+      ],
       ...data,
     });
+    if (supervisor) await daemon.client().putRouting({ repo: REPO, scope: "local", kinds: { supervisor } });
     const usable = await (await daemon.fetch(`${BASE_URL}/v1/providers/usable?repo=${encodeURIComponent(REPO)}`, { headers: { authorization: `Bearer ${daemon.token}` } })).json();
     expect(usable).toEqual({ usable: ["codex", "claude"], default: "codex" });
     await daemon.client().startSession({ repo: REPO });

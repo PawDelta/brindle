@@ -1496,13 +1496,16 @@ export class FakeDaemon {
      supervisor session in `repo` could run on, in the service's preference
      order: the routing's supervisor choice (then its fallbacks) whose profile
      the org allows and whose CLI is usable, the remembered pick, the
-     supervisor profile's own CLI, Claude, then the rest. */
+     supervisor profile's own CLI, Claude, then the rest. The choice and its
+     fallbacks are each resolved local over repo over user on their own, as
+     load_repo_config reads supervisor_profile and supervisor_fallbacks. */
   private usableProviders(repo: string): string[] {
     const files = this.routingFiles(repo);
-    const scope = (["local", "repo", "user"] as RoutingScope[]).find((s) => files[s].supervisor);
-    const fallbacks = scope ? files[scope].kind_fallbacks?.supervisor ?? [] : [];
+    const precedence: RoutingScope[] = ["local", "repo", "user"];
+    const primary = precedence.map((s) => files[s].supervisor).find((v) => v);
+    const fallbacks = precedence.map((s) => files[s].kind_fallbacks?.supervisor).find((v) => v) ?? [];
     const byName = new Map(this.data.routingProfiles.map((p) => [p.name, p]));
-    const choice = (scope ? [files[scope].supervisor!, ...fallbacks] : [])
+    const choice = [...(primary ? [primary] : []), ...fallbacks]
       .map((name) => byName.get(name))
       .find((p) => p && !this.refusal(p) && !this.supervisorProblem(p.provider));
     const order = [choice?.provider, this.data.supervisorPick, byName.get("supervisor")?.provider, ...LOGIN_PROVIDERS];
