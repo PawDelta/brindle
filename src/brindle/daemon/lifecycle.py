@@ -230,9 +230,10 @@ def _resume_path() -> Path:
     return brindle_home() / RESUME_FILE
 
 
-def _record_resume(entries: list[dict]) -> None:
+def _record_resume(entries: list[dict]) -> bool:
     """Replace the resume record with ``entries`` in one step: a reader sees
-    the old record or the new one, never half of one."""
+    the old record or the new one, never half of one. False when it couldn't
+    be written: the old record, if any, is left as it was."""
     path = _resume_path()
     staged = path.with_name(f"{path.name}.{os.getpid()}")
     try:
@@ -241,6 +242,8 @@ def _record_resume(entries: list[dict]) -> None:
     except OSError:
         staged.unlink(missing_ok=True)
         log.warning("brindle: couldn't record the paused sessions for the next daemon", exc_info=True)
+        return False
+    return True
 
 
 def pause_for_exit() -> list[str]:
@@ -255,9 +258,13 @@ def pause_for_exit() -> list[str]:
     The record of what is paused, with the server each session is on, is
     written before the first pause, so a pause cut short (a tmux failure,
     the daemon killed mid-way) still leaves its session to recover; each
-    entry is marked paused once its pause has finished. Processes the panes
-    hosted are left to a detached cull: the time to go is short. A session
-    that can't be paused is only logged. Returns the roots paused."""
+    entry is marked paused once its pause has finished (a later write that
+    fails leaves it unfinished, which recovery treats the safe way). No
+    record, no pause: a session paused with nothing to bring it back would
+    stay paused, so one that can't be recorded is left running. Processes
+    the panes hosted are left to a detached cull: the time to go is short
+    (the next start stops what the cull left, resume_after_start). A
+    session that can't be paused is only logged. Returns the roots paused."""
     from brindle import agents, tmux
     from brindle.db import DB
     from brindle.service import sessions as svc
@@ -273,7 +280,8 @@ def pause_for_exit() -> list[str]:
                 return paused
             server = tmux.current_server()
             entries = [{"id": root.id, "server": server, "paused": False} for root in roots]
-            _record_resume(entries)
+            if not _record_resume(entries):
+                return paused
             for entry in entries:
                 try:
                     agents.pause(db, entry["id"], stop_procs=False)
@@ -309,9 +317,11 @@ def resume_after_start() -> list[str]:
     that can't come back isn't tried at every start. Only roots still paused
     are resumed (the person may have closed one meanwhile), and only those on
     this daemon's own tmux server, recorded there and still there. One whose
-    pause never finished is paused again first, its processes stopped, so
-    what still runs of it isn't left beside the restarted session."""
-    from brindle import agents, tmux
+    pause never finished is paused again first (its windows and session
+    closed). Then, for every one, what still runs of it is stopped: the
+    detached cull pause_for_exit left that to may not have run, and once its
+    agents run again the cull would leave the old processes be."""
+    from brindle import agents, procs, tmux
     from brindle.db import DB
 
     entries = _read_resume()
@@ -331,7 +341,8 @@ def resume_after_start() -> list[str]:
                 continue
             try:
                 if not entry.get("paused"):
-                    agents.pause(db, root.id, stop_procs=True)
+                    agents.pause(db, root.id, stop_procs=False)
+                procs.stop([a.id for a in agents.tree(db, root.id)], grace=2.0)
                 agents.resume(db, root.id)
                 resumed.append(root.id)
             except Exception:  # noqa: BLE001 - the others still come back
