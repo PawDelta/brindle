@@ -2324,6 +2324,8 @@ _CREDENTIAL_DIRS = (".ssh", ".gnupg", ".aws", ".config")
 _CREDENTIAL_FILES = (".netrc", ".npmrc", ".git-credentials", ".docker/config.json")
 # Another account's home, whose stores are as secret as this one's.
 _OTHER_HOME = re.compile(r"^(?:/Users/[^/]+|/home/[^/]+|/var/root|/root)(?=/|$)")
+# A word that is a path under a home once its quotes are gone: ~user and path components.
+_TILDE_PATH = re.compile(r"~[A-Za-z0-9_.-]*(?:/[A-Za-z0-9_.\-*?\[\]+@%,]+)*/?")
 # What may touch a credential path: a listing, an existence or size test, metadata.
 _HARMLESS_CHECKS = frozenset({"ls", "test", "[", "[[", "stat"})
 # An option that makes a command print a secret it would otherwise keep
@@ -2364,6 +2366,10 @@ def _credential_store(rel: str) -> bool:
     parts = [p for p in rel.split("/") if p and p != "."]
     if not parts:
         return False
+    # Every store starts with a dot, which a shell pattern matches only by a literal
+    # one: ~/* and $d/* never select one, .s*h and .* do.
+    if re.search(r"[*?\[]", parts[0]) and not parts[0].startswith("."):
+        return False
     for store in (*_CREDENTIAL_DIRS, *_CREDENTIAL_FILES):
         names = store.split("/")
         if all(fnmatch.fnmatchcase(name, pattern) for name, pattern in zip(names, parts)):
@@ -2376,7 +2382,11 @@ def _credential_file(req: Request, part: ShellPart, name: str) -> bool:
     home = os.path.expanduser("~")
     # The credential scan keeps a word as written: quotes in place, $HOME unexpanded.
     written = _HOME_REFERENCE.sub(lambda _: home, name.replace('"', "").replace("'", ""))
-    name = os.path.expanduser(written)
+    # A quoted ~ is literal to the shell; it is read as the home anyway when the word is
+    # a path ('~'/.ssh/id_rsa: fail closed), not when it is a pattern or prose
+    # (grep "~/.ssh\|~/.aws" tests/).
+    quoted_tilde = written.startswith("~") and written != name
+    name = written if quoted_tilde and not _TILDE_PATH.fullmatch(written) else os.path.expanduser(written)
     if name.startswith("~"):    # ~user, for a user this host doesn't know: still a home
         return _credential_store(name.partition("/")[2])
     path = os.path.normpath(os.path.join(part.cwd or "", name))
@@ -2418,7 +2428,9 @@ def _touches_credentials(req: Request, part: ShellPart, words: list[str]) -> boo
     """Whether a command names a credential store in any argument or redirection,
     resolved where the shell's reading is known (_Flattener resolves $HOME, ~ and
     the command's own assignments first) and taken as written otherwise."""
-    operands = [*words[1:], *part.written[1:], *part.reads, *part.writes]
+    # The words as written (variables and ~ resolved, a pattern still a pattern): the names
+    # the splitter expands a pattern to include dot entries a shell's glob skips.
+    operands = [*part.written[1:], *part.reads, *part.writes]
     return any(_credential_file(req, part, path) or _unresolved_store(path)
                for word in operands for path in _argument_paths(word))
 

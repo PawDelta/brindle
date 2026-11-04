@@ -228,6 +228,12 @@ def _bypass(command):
     _bypass('ls ~/.ssh > "$OUTPUT"'),    # a store named, a target only the run knows
     pytest.param('ls > "$OUTPUT"', "allow",
                  marks=pytest.mark.variant("no store named: an unresolved target is the policy's question")),
+    pytest.param("du -sh ~/*", "allow",
+                 marks=pytest.mark.variant("replayed traffic: a shell glob never selects a dot store")),
+    pytest.param("d=$(pwd); du -sh $d/*", "allow",
+                 marks=pytest.mark.variant("replayed traffic: an unknown prefix before a bare pattern names nothing")),
+    pytest.param('grep -rln "~/.ssh\\|~/.aws\\|\\.npmrc" tests/', "allow",
+                 marks=pytest.mark.variant("replayed traffic: a quoted ~ in a pattern is prose, not a path")),
     _bypass("ls > ~/.ssh/authorized_keys"),    # a harmless check redirected into a store truncates it
     _bypass("test -e README.md > ~/.aws/credentials"),
     _bypass('for f in ~/.aws/credentials; do test -e README.md > "$f"; done'),    # a store bound by a loop
