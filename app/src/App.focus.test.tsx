@@ -9,7 +9,6 @@ import { FakeDaemon } from "./test/fakeDaemon";
 import { REPO, question, root, worker } from "./test/fixtures";
 import { standInViews } from "./test/panes";
 import type { Route } from "./routes";
-import { DEMO_OFFERED_KEY } from "./screens/Onboarding";
 
 const terminal = vi.hoisted(() => ({ mount: null as Promise<void> | null }));
 
@@ -31,7 +30,6 @@ vi.mock("./components/PtyTerminal", async () => {
 
 beforeEach(() => {
   localStorage.clear();
-  localStorage.setItem(DEMO_OFFERED_KEY, "1");     // past the first launch's demo offer
   terminal.mount = null;
 });
 afterEach(cleanup);

@@ -13,7 +13,6 @@ import { PtyViewsProvider, wsPtyView, type PtyViews } from "../src/api/ptyView";
 import type { AppUpdateStatus, AppUpdates } from "../src/api/tauri";
 import { THEME_KEY, applyTheme } from "../src/components/ThemeToggle";
 import type { Route } from "../src/routes";
-import { DEMO_OFFERED_KEY } from "../src/screens/Onboarding";
 import { createAppStore } from "../src/store/store";
 import { startSync } from "../src/store/sync";
 import { FakeDaemon, freshProviders } from "../src/test/fakeDaemon";
@@ -95,7 +94,6 @@ const SCENES: Record<string, Route> = {
 
 const daemon = new FakeDaemon(structuredClone(data));
 if (scene === "knowledge-map") {
-  localStorage.setItem(DEMO_OFFERED_KEY, "1");
   // The reported 0.5.12 account has no hosted docs in any of its scopes.
   daemon.data.docScopes = [
     { kind: "user", id: "personal", name: "Personal" },
@@ -110,8 +108,7 @@ if (scene === "knowledge-map") {
   ];
   daemon.data.decisions.push({ ...daemon.data.decisions[0], id: "daemon-reads", topic: "Read-only daemon access", scope: ["docs/**", "src/brindle/daemon/**"] });
 }
-// First run: no project yet, the demo already offered.
-if (scene === "new-first" || scene === "new-composer" || scene === "new-codex-only") localStorage.setItem(DEMO_OFFERED_KEY, "1");
+// First run: no project yet.
 if (scene === "new-first") daemon.data.repos = [];
 // Only Codex on this Mac: Claude Code neither installed nor signed in.
 if (scene === "new-codex-only") daemon.data.providers = freshProviders({ codex: { path: "/opt/homebrew/bin/codex", version: "0.48.0" } });
@@ -120,6 +117,11 @@ if (scene === "flow") {
   daemon.data.repos = [];
   daemon.data.providers = freshProviders({ codex: { path: "/opt/homebrew/bin/codex", version: "0.48.0" } });
   daemon.notGitFolders = ["/home/sam/Notes/runbooks"];
+  // As the engine's preflight answers (brindle/preflight.py): Claude Code not on PATH; Antigravity installed, not signed in.
+  daemon.data.preflight = {
+    claude: [{ id: "claude.install", kind: "setup" as never, label: "Install Claude Code", detail: "Claude Code (`claude`) isn't on PATH. Install: curl -fsSL https://claude.ai/install.sh | bash", done: false }],
+    antigravity: [{ id: "antigravity.signin", kind: "signin", label: "Sign in to Antigravity", detail: "Antigravity isn't signed in on this Mac.", done: false }],
+  };
 }
 if (scene === "session-review") {
   daemon.data.sessionReview["sup-42"] = { ready: true, reasons: [], branch: "desktop/ux-revamp", base: "main", diff: "" };
