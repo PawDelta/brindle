@@ -1970,7 +1970,8 @@ mod tests {
         let mut cmd = Command::new("/bin/cat");
         let mut daemon = cmd.stdin(Stdio::piped()).stdout(Stdio::null()).spawn().unwrap();
         let pid = daemon.id();
-        let home = std::env::current_dir().unwrap().join("target/predecessor-daemon");
+        // Concurrent test binaries must not overwrite each other's pause marker.
+        let home = std::env::current_dir().unwrap().join(format!("target/predecessor-daemon-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(&home).unwrap();
         let mut elapsed = Vec::new();
