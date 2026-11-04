@@ -30,6 +30,9 @@ export interface PreflightProps {
   /* The launch on another CLI, offered (one per CLI installed here) when
      this one's CLI is missing or turned off: nothing in the card settles that. */
   onUseInstead?(provider: string): void;
+  /* The CLIs that can run here (GET /providers/usable): offered instead of
+     whatever is merely installed. */
+  usable?: string[] | null;
 }
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
@@ -116,7 +119,7 @@ function useInstalledElsewhere(provider: string, wanted: boolean): string[] {
   return wanted ? found : [];
 }
 
-export function Preflight({ preflight, onRefresh, onLaunch, launchLabel = "Start", repo, launching = false, onUseInstead }: PreflightProps) {
+export function Preflight({ preflight, onRefresh, onLaunch, launchLabel = "Start", repo, launching = false, onUseInstead, usable }: PreflightProps) {
   const client = useDaemon();
   const { provider, items } = preflight;
   const name = providerName(provider);
@@ -124,7 +127,8 @@ export function Preflight({ preflight, onRefresh, onLaunch, launchLabel = "Start
   const refresh = () => void client.preflight(provider, repo).then(onRefresh).catch(() => undefined);
   // The CLI itself isn't there (not installed, or turned off in brindle): the card can't settle that.
   const absent = open.some((i) => i.kind === "off" || (i.kind === "setup" && i.id === `${provider}.install`));
-  const instead = useInstalledElsewhere(provider, absent && !!onUseInstead);
+  const installed = useInstalledElsewhere(provider, absent && !!onUseInstead && !usable);
+  const instead = usable ? (absent && onUseInstead ? usable.filter((p) => p !== provider) : []) : installed;
   return (
     <section className={`${card} flex w-full max-w-xl flex-col gap-s2 px-s3 py-s2`} aria-label={`Before ${name} can start`} data-testid="preflight">
       <div>

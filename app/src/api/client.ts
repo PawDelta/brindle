@@ -1735,6 +1735,11 @@ export class DaemonClient {
     return this.post<ActionTerminal>(`/providers/${encodeURIComponent(provider)}/login`, { ...context, ...(method ? { method } : {}), ...(restart ? { restart } : {}) });
   }
 
+  /* The CLIs a new supervisor session in `repo` can run on, in preference order (engine: GET /providers/usable). */
+  usableProviders(repo: string) {
+    return this.get<{ usable: string[]; default: string | null }>("/providers/usable", { repo });
+  }
+
   /* Each provider CLI as brindle detects it: where it is, its version, whether it's signed in. */
   providersInstalled() {
     return this.get<ProviderInstalled[]>("/providers/installed");

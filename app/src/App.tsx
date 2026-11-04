@@ -154,7 +154,7 @@ function Screen({ route, navigate, client, refresh, store, openUrl, pickFolder, 
     case "account":
       return <AccountScreen client={client} openUrl={openUrl} onNavigate={(screen) => navigate({ screen })} section={route.section} ask={route.ask} />;
     case "new":
-      return <NewSession key={route.repo} client={client} onOpen={openSession} initialRepo={route.repo} pickFolder={pickFolder} refresh={refresh} />;
+      return <NewSession key={route.repo} client={client} onOpen={openSession} initialRepo={route.repo} pickFolder={pickFolder} refresh={refresh} onSignIn={() => navigate({ screen: "settings", section: "providers", ask: ++providerAsks })} />;
     case "inbox":
       return <InboxScreen client={client} refresh={refresh} onOpen={openSession} onNavigate={navigate} session={route.session ?? null} onShowAll={() => navigate({ screen: "inbox" })} onOpenRule={(rule) => navigate({ screen: "settings", section: "permissions", rule, ask: ++providerAsks })} appUpdates={appUpdates} openUrl={openUrl} />;
     case "session":
