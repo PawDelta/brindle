@@ -9,15 +9,16 @@ starts the new one), and with ``--idle-exit`` once nobody has used it for
 IDLE_SECONDS while no agent runs. It removes its files on the way out.
 
 The app's daemon (``--idle-exit``) is a job of the person's launchd that the
-app loaded, and launchd stops it when the app goes away (quit, force quit,
-restarted into an update); the app replacing an older build's daemon stops
-it the same way. With that job switched off the daemon is the app's own
+app loaded. It outlives the app (quit, force quit, restarted into an update):
+the sessions it runs carry on, and the next app adopts it. It stops when an
+app of a newer build replaces it, at ``brindle daemon stop`` (``stop``), at
+logout, once its install has changed, or once idle. With that job switched off the daemon is the app's own
 child: the app stops it when it exits, and it stops itself once the app has
 gone after a force quit (APP_PID_ENV). On its way out it pauses every session it runs
 (``pause_for_exit``), as the person's Pause does, saying so meanwhile
-(``say_pausing``: only then does the app wait more than a moment for it to go),
-and the next daemon the app starts resumes them (``resume_after_start``).
-Nothing else holds up its exit (``_run``, ``leave``)."""
+(``say_pausing``: only then does whoever stops it wait more than a moment for
+it to go), and the next daemon the app starts resumes them (``resume_after_start``).
+Nothing else holds up its exit, not a second stop (``serve``, ``_run``, ``leave``)."""
 
 from __future__ import annotations
 
@@ -254,7 +255,7 @@ def _record_resume(entries: list[dict]) -> bool:
 
 
 PAUSING_FILE = "daemon-pausing"     # the pid of the app daemon pausing on its way out (daemon.rs PAUSING_FILE)
-PAUSE_BUDGET = 10.0     # seconds pause_for_exit may take (the app waits up to 20 while it says it's pausing)
+PAUSE_BUDGET = 10.0     # seconds pause_for_exit may take (its stopper waits up to PAUSE_GRACE while it says it's pausing)
 
 
 def _pausing_path() -> Path:
@@ -262,9 +263,10 @@ def _pausing_path() -> Path:
 
 
 def say_pausing() -> None:
-    """Tell the app that stops this daemon to give it time: it is on its
-    way to pausing its sessions (pause_for_exit). Without this the app kills
-    it after a short wait (daemon.rs stop_daemon)."""
+    """Tell whoever stops this daemon (the app, daemon.rs stop_daemon;
+    ``brindle daemon stop``, stop) to give it time: it is on its way to
+    pausing its sessions (pause_for_exit). Without this they kill it after a
+    short wait."""
     try:
         _write_private(_pausing_path(), f"{os.getpid()}\n")
     except OSError:
@@ -300,7 +302,7 @@ def pause_for_exit(recovery: Recovery | None = None) -> list[str]:
     next start stops what the cull left, resume_after_start). A pause that
     fails is only logged. Returns the roots paused.
 
-    The app waits for this (daemon.rs PAUSE_GRACE), so it is quick and has
+    Whoever stops the daemon waits for this (daemon.rs PAUSE_GRACE, stop's), so it is quick and has
     an end: the sessions are paused all at once (agents.record_pauses, then
     agents.close_paused: a few tmux commands in all, not a few per
     session), and what isn't closed after PAUSE_BUDGET seconds (a tmux
@@ -655,7 +657,12 @@ def serve(*, unix: bool = True, tcp: bool = False, idle_exit: bool = False) -> d
     try:
         _run(run())
     finally:
-        # The app's daemon, once it served: the app has gone (or replaced it), and
+        # On its way out now: a further SIGTERM (the app's daemon outlives the app, so the
+        # next app, `brindle daemon stop` and a logout may each stop it) would cut the pause
+        # and the cleanup short. Whoever stops it kills it if it overstays (stop, daemon.rs).
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        # The app's daemon, once it served: stopped (a newer app replacing it, `brindle
+        # daemon stop`, a logout) or exiting by itself (idle, its install changed), and
         # what it ran is paused for the next daemon. One that never served
         # (its start failed) runs nothing to pause.
         try:
@@ -719,15 +726,50 @@ def leave(code: int = 0) -> None:
     os._exit(code)
 
 
-def stop() -> dict | None:
+PAUSE_GRACE = 20.0     # seconds in all `daemon stop` waits while the daemon says it is pausing (daemon.rs PAUSE_GRACE)
+
+
+def _says_pausing(pid: int) -> bool:
+    """Whether the daemon ``pid`` says it is pausing on its way out (say_pausing)."""
+    try:
+        return _pausing_path().read_text().strip() == str(pid)
+    except OSError:
+        return False
+
+
+def _signal(pid: int, sig: int) -> None:
+    try:
+        os.kill(pid, sig)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def stop(*, clock=time.monotonic, wait=threading.Event().wait) -> dict | None:
     """Stop the running daemon. Returns its info, or None if none ran (and
-    clears a dead one's files)."""
+    clears a dead one's files). SIGTERM, then SIGKILL once STOP_GRACE has
+    passed; while the daemon says it is pausing its sessions (say_pausing),
+    the wait goes on, up to PAUSE_GRACE in all, and ends STOP_GRACE after it
+    stops saying so, as the app's own stop does (daemon.rs stop_daemon). The
+    app's daemon outlives the app, so this is how it is stopped with no app
+    about, and it pauses what it runs on its way out."""
     info = read_info()
     if info is None:
         return None
-    if not _is_daemon(info["pid"]):
+    pid = info["pid"]
+    if not _is_daemon(pid):
         cleanup(info)
         return None
-    procs.terminate([info["pid"]], grace=STOP_GRACE)
+    _signal(pid, signal.SIGTERM)
+    stopped = clock()
+    deadline, said = stopped + STOP_GRACE, False
+    while procs.alive(pid):
+        if _says_pausing(pid):
+            deadline, said = stopped + PAUSE_GRACE, True
+        elif said:      # its pause is over: what it still does on its way out gets the short wait
+            deadline, said = min(clock() + STOP_GRACE, stopped + PAUSE_GRACE), False
+        if clock() >= deadline:
+            _signal(pid, signal.SIGKILL)
+            break
+        wait(0.1)
     cleanup(info)
     return info
