@@ -285,6 +285,7 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
     done.extend(note_idle_unreported(db, now, panes))
     done.extend(note_reported_stuck(db, now, panes))
     done.extend(note_stalled(db, now, panes))
+    done.extend(note_long_commands(db, now, panes))
     done.extend(note_silent(db, now, panes))
     done.extend(note_model_refused(db, now, panes))
 
@@ -756,6 +757,71 @@ def note_stalled(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
             f"working on it: worker {a.id} isn't running, and no reviewer or check run is at work, "
             f"for {int((now - since) // 60)} min. This needs you: send_message the worker what it "
             f"needs, assign a new one on the branch, or merge_workspace(\"{ws.id}\") if it's approved.")))
+    return done
+
+
+# A tool call still running in a worker's pane: "⏺ Bash(cmd)" over
+# "⎿  Running… (41m 9s · esc to interrupt)".
+_RUNNING = re.compile(r"^\s*⎿\s*Running(?: command)?(?:…|\.{3})\s*\((?:(\d+)h\s*)?(?:(\d+)m\s*)?(\d+)s\b")
+_TOOL_CALL = re.compile(r"^\s*⏺\s*\w+\((.*)$")
+# Two reads of one command's start differ by a second or so.
+SAME_COMMAND_WITHIN = 120.0
+
+
+def _running_command(screen: str) -> tuple[str, float] | None:
+    """The command the pane shows running, as (its first line, seconds it has run)."""
+    lines = screen.splitlines()
+    for i in range(len(lines) - 1, -1, -1):
+        m = _RUNNING.match(lines[i])
+        if m:
+            hours, minutes, seconds = (int(g or 0) for g in m.groups())
+            call = next((_TOOL_CALL.match(ln) for ln in reversed(lines[:i]) if _TOOL_CALL.match(ln)), None)
+            return (call.group(1).strip() if call else ""), hours * 3600.0 + minutes * 60.0 + seconds
+    return None
+
+
+def note_long_commands(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
+    """Tell each supervisor, once per command, about a worker whose pane has
+    shown one shell command running for the repo's long_command_alert_after
+    seconds. Nothing is stopped: a pane with a command running counts as
+    active, so no other notice would ever say the worker sits in it."""
+    from brindle import redact
+
+    done = []
+    owners = agents.pane_owners(db, panes)
+    limits: dict[str, float] = {}
+    for a in db.list_agents():
+        if (a.mode not in agents.REPORTING_MODES or not a.parent_id or a.dismissed_at is not None
+                or a.status != "processing" or not agents.runs_process(a) or not agents.same_server(a, panes)
+                or not agents.is_alive(a, panes) or not agents.owns_pane(db, a, owners)):
+            continue
+        ws = db.get_workspace(a.workspace_id)
+        if ws is None:
+            continue
+        if ws.repo_root not in limits:
+            try:
+                limits[ws.repo_root] = float(load_repo_config(ws.repo_root).long_command_alert_after)
+            except ValueError:
+                limits[ws.repo_root] = 0.0
+        if limits[ws.repo_root] <= 0:
+            continue
+        try:
+            screen = tmux.capture(a.tmux_window, lines=40, server=agents.server_of(a))
+        except tmux.TmuxError:
+            continue
+        running = _running_command(screen)
+        if running is None or running[1] < limits[ws.repo_root]:
+            continue
+        command, elapsed = running
+        since = float(int((now - elapsed) // 60 * 60))   # the command's start, to the minute
+        if a.stuck_noted is not None and abs(a.stuck_noted - since) < SAME_COMMAND_WITHIN:
+            continue
+        first = redact.mask(command.splitlines()[0]) if command else "(unknown)"
+        body = (f"[brindle] Worker {a.id} on branch `{ws.branch}` has been inside one command for "
+                f"{int(elapsed // 60)} min: {first}\n\nNothing was stopped. Check what it is doing "
+                f"(`brindle attach {ws.name}`) or send_message the worker.")
+        if _send_note(db, a, since, body):
+            done.append(f"told {a.parent_id} that worker {a.id} has run one command for {int(elapsed // 60)} min")
     return done
 
 

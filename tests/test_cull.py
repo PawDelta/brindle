@@ -231,6 +231,30 @@ def test_reported_branch_problems_reach_the_supervisor(db, ws, monkeypatch, prob
     assert len(sent) == 1 and sent[0][0] == "boss" and ws.id in sent[0][1]
 
 
+@pytest.mark.parametrize("elapsed,jitter,expected", [
+    ("12m 4s", 0, 0),      # under the limit: nothing yet
+    ("41m 9s", 0, 1),      # long: told once, however many sweeps read it
+    ("41m 9s", 1, 1),      # the next sweep reads a second more: still the same command
+])
+def test_long_running_command_reaches_the_supervisor_once(db, ws, monkeypatch, elapsed, jitter, expected):
+    add(db, ws, "boss", mode="interactive", status="processing", profile="supervisor", tmux_window="@998")
+    add(db, ws, "w1", parent_id="boss", status="processing")
+    sent = []
+    screen = ("⏺ Bash(./slow.sh --token sk-ant-api03-abcdefghijklmnopqrstuv\n  more)\n"
+              f"  ⎿  Running… ({elapsed} · esc to interrupt)\n")
+    monkeypatch.setattr(tmux, "capture", lambda *a, **k: screen)
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
+    monkeypatch.setattr(agents, "send_message", lambda db_, to, body, **k: sent.append((to, body)))
+    now = time.time()
+    cull.note_long_commands(db, now, _live_panes())
+    screen = screen.replace(elapsed, "41m 10s") if jitter else screen  # one second on
+    cull.note_long_commands(db, now + jitter, _live_panes())
+    assert len(sent) == expected
+    if expected:
+        assert sent[0][0] == "boss" and "./slow.sh" in sent[0][1] and "sk-ant" not in sent[0][1]
+        assert "41 min" in sent[0][1]
+
+
 @pytest.mark.parametrize("case,exit_,cause", [
     ("sweep", (143, None), "status 143 (SIGTERM)"),     # the CLI's wrapper shell exited 128 + 15
     ("leftover", (None, 15), "signal 15 (SIGTERM)"),    # the CLI itself was the pane's program
