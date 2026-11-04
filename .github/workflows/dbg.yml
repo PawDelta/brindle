@@ -8,12 +8,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - run: sudo apt-get update -q && sudo apt-get install -yq tmux
-      - run: tmux -V
       - uses: astral-sh/setup-uv@v10.2.0
         with:
           python-version: "3.12"
       - run: uv sync
-      - run: uv run pytest -q -s tests/test_daemon_pty_view.py -k "pane_types" -p no:cacheprovider -x
-        continue-on-error: true
-      - run: uv run pytest -q -s tests/test_daemon_pty_view.py -k "pane_types" -p no:cacheprovider -x
+      - run: uv run pytest -q -s -n auto -m 'not serial' -p no:cacheprovider 2>&1 | grep -E "DBG|passed|failed|FAILED"
         continue-on-error: true
