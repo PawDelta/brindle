@@ -308,11 +308,12 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, on
         <button type="button" className={quiet} aria-expanded={options} onClick={() => setOptions((o) => !o)}>
           Options {options ? "▴" : "▾"}
         </button>
-        <span className="flex-1" />
-        <span className="text-xs text-ink-3">⌘↵</span>
-        <button type="submit" disabled={busy || !repo || usable === null || needsPick} className={main}>
-          Start
-        </button>
+        <div className="ml-auto flex shrink-0 items-center gap-s1">
+          <span className="text-xs text-ink-3">⌘↵</span>
+          <button type="submit" disabled={busy || !repo || usable === null || needsPick} className={main}>
+            Start
+          </button>
+        </div>
       </div>
       {lookupFailed && (
         <p role="alert" className={`${alert} flex items-center gap-s2`}>
