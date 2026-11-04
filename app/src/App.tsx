@@ -26,9 +26,11 @@
    the screen when the engine isn't one the app can simply use, or its
    event stream is down (components/EngineBanner.tsx). Before all of it, on
    a first launch, the full-window flow that connects the first provider
-   (screens/Onboarding: no sidebar), until one is connected and signed in. */
+   (screens/Onboarding: no sidebar), until one is connected and signed in.
+   And before that, on every launch, the sign-in gate (SignInGate below):
+   nothing but brindle's sign-in until the account reads signed in. */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { DaemonError, type DaemonClient, type ProviderInstalled } from "./api/client";
 import { plain } from "./api/wording";
 import { DaemonContext } from "./api/context";
@@ -47,7 +49,7 @@ import { AccountScreen } from "./screens/Account";
 import { InboxScreen } from "./screens/Inbox";
 import { KnowledgeScreen } from "./screens/Knowledge";
 import { NewSession } from "./screens/New";
-import { Onboarding, Starting, markOnboarded, onboarded, readOnboarded } from "./screens/Onboarding";
+import { BrindleSignIn, Onboarding, Starting, markOnboarded, onboarded, readOnboarded } from "./screens/Onboarding";
 import { AgentsScreen } from "./screens/Agents";
 import { SessionScreen } from "./screens/Session";
 import { SettingsScreen } from "./screens/Settings";
@@ -56,7 +58,7 @@ import { SessionsProvider, useCloseSession, useSessions } from "./store/sessions
 import { ProvidersProvider } from "./store/providers";
 import { UsageProvider } from "./store/usage";
 import type { AppState, AppStore } from "./store/store";
-import { StoreContext, useAppState } from "./store/useStore";
+import { StoreContext, useAppState, useStore } from "./store/useStore";
 
 export interface AppProps {
   store: AppStore;
@@ -347,13 +349,79 @@ function FirstLaunch(props: AppProps) {
   );
 }
 
+/* The sign-in gate: the app needs a brindle account. Once the engine
+   answers (Launch is past "ready" when App mounts), the app asks it for the
+   account (GET /account) and, until that reads signed in, shows brindle's
+   sign-in (Onboarding's step 1, BrindleSignIn) and nothing else: no
+   onboarding, no sidebar, whatever `brindle.onboarded` or the providers
+   say. A read that fails (an engine without the route, the network) says
+   so on the same screen with Retry; it never falls through to the app.
+   Signed in, the first launch's own gate (FirstLaunch) takes over. A
+   sign-out later (the Account page's, which puts the account it reads
+   into the store) brings the gate back. A page with no engine has no
+   account to ask about: it goes on to say so. */
+type Signed = { kind: "checking" } | { kind: "error"; error: string } | { kind: "out" } | { kind: "in" };
+
+function SignInGate({ client, openUrl = openExternal, children }: { client: DaemonClient | null; openUrl?: OpenUrl; children: ReactNode }) {
+  const store = useStore();
+  const [signed, setSigned] = useState<Signed>(client ? { kind: "checking" } : { kind: "in" });
+  /* Reads asked so far: Retry and a finished sign-in ask again. */
+  const [asked, setAsked] = useState(0);
+  const checking = signed.kind === "checking";
+  useEffect(() => {
+    if (!client || !checking) return;
+    let live = true;
+    client.account().then(
+      (a) => {
+        if (!live) return;
+        // The store's copy first: the sidebar and the sign-out watch below read it.
+        store.dispatch({ type: "account", account: a });
+        setSigned(a.signed_in ? { kind: "in" } : { kind: "out" });
+      },
+      (e: unknown) => live && setSigned({ kind: "error", error: plain(e instanceof Error ? e.message : String(e)) }),
+    );
+    return () => {
+      live = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [client, asked]);
+  const ask = useCallback(() => {
+    setSigned({ kind: "checking" });
+    setAsked((n) => n + 1);
+  }, []);
+  // Signed out from inside the app: back to the gate.
+  const out = useAppState((s) => s.account?.signed_in === false);
+  useEffect(() => {
+    if (out && signed.kind === "in") setSigned({ kind: "out" });
+  }, [out, signed.kind]);
+
+  if (signed.kind === "in" || !client) return <>{children}</>;
+  if (checking) return <Starting />;
+  const problem = signed.kind === "error" && (
+    <div className={`${alert} flex flex-wrap items-center gap-s2`} role="alert" data-testid="signin-gate-failed">
+      <span className="min-w-0 flex-1">Couldn't check your brindle account: {signed.error}</span>
+      <button type="button" className={button} onClick={ask}>
+        Retry
+      </button>
+    </div>
+  );
+  return (
+    <div className="h-full" data-testid="signin-gate">
+      {/* A first launch's step 1 of the flow that follows; on later launches, just the account. */}
+      <BrindleSignIn client={client} openUrl={openUrl} onSignedIn={ask} kicker={readOnboarded() ? "brindle account" : "Step 1 of 3"} problem={problem} />
+    </div>
+  );
+}
+
 export default function App(props: AppProps) {
   return (
     <StoreContext.Provider value={props.store}>
       <DaemonContext.Provider value={props.client}>
         <SessionsProvider client={props.client}>
           <UsageProvider client={props.client}>
-            <FirstLaunch {...props} />
+            <SignInGate client={props.client} openUrl={props.openUrl}>
+              <FirstLaunch {...props} />
+            </SignInGate>
           </UsageProvider>
         </SessionsProvider>
       </DaemonContext.Provider>
