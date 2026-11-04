@@ -654,19 +654,20 @@ def _next_needing(state: NavState, lines: list[Line]) -> None:
     state.follow = True
 
 
-# The website's colours as xterm-256 colours (closest matches), one set per
-# terminal background: a fawn accent, lavender for working, green for idle /
-# done, sap orange for needs you.
+# The desktop app's dark palette (app/src/styles.css) as xterm-256 colours
+# (closest matches), one set per terminal background: pass green for the
+# accent and idle / done, branch lavender for working, sap orange for needs
+# you, fail red for stopped.
 PALETTE_256 = {
-    "accent": 180,    # fawn
-    "busy": 140,      # lavender: working
-    "ok": 78,         # green: idle / done
-    "alert": 173,     # sap orange: needs you
-    "bad": 167,       # stopped
-    "dim": 245,
-    "strand_o": 173, "strand_p": 141, "strand_g": 72, "strand_b": 137,  # the text lens
-    "text": 254,
-    "select_bg": 234, # subtle row highlight
+    "accent": 78,     # --pass
+    "busy": 140,      # --branch: working
+    "ok": 78,         # --pass: idle / done
+    "alert": 173,     # --sap: needs you
+    "bad": 210,       # --fail: stopped
+    "dim": 245,       # --ink-3
+    "strand_o": 173, "strand_p": 140, "strand_g": 78, "strand_b": 180,  # the text lens: sap, branch, pass, fawn
+    "text": 255,      # --ink
+    "select_bg": 234, # --surface-2: subtle row highlight
 }
 PALETTE_256_LIGHT = {
     **PALETTE_256,

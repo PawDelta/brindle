@@ -49,9 +49,9 @@ done
 
 # Brindle palette (see THEME in src/brindle/tmux.py and PALETTE_256 in
 # src/brindle/watch.py): bg, fg, then ANSI 0-7 and 8-15.
-THEME=17130f,ece4d9
-THEME+=,17130f,c75c4a,87af87,d7af87,8a9bb0,afafff,8fb5a8,c4b8aa
-THEME+=,8f8173,ff875f,a3c98a,e8c9a3,a3b4c8,c9bfff,a3c8bc,ece4d9
+THEME=080a08,e8f0eb
+THEME+=,080a08,f08c88,34d399,e8875a,8fb0e8,a99be0,5fc9b8,afbfb6
+THEME+=,889a90,f5a9a6,6fe3b4,f0a07a,aec6f0,c4b8f0,86dccd,e8f0eb
 
 CAST="${OUT%.gif}.cast"
 mkdir -p "$(dirname "$OUT")"
