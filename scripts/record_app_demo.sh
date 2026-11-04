@@ -5,7 +5,7 @@
 #   scripts/record_app_demo.sh [--frames <dir>]   # --frames also keeps sample PNGs
 #
 # Builds app/demo/dist/index.html (npm run build:demo), drives it with
-# Playwright's video recording (light theme, the floating Demo switcher
+# Playwright's video recording (dark theme; THEME=light for light; the Demo switcher
 # hidden), then converts with ffmpeg using a palette pass. Needs node, npm,
 # ffmpeg and Playwright's Chromium (fetched on first run).
 set -euo pipefail
@@ -43,7 +43,7 @@ const SIZE = { width: 1440, height: 900 };
 const browser = await chromium.launch();
 const context = await browser.newContext({
   viewport: SIZE,
-  colorScheme: "light",
+  colorScheme: process.env.THEME === "light" ? "light" : "dark",
   recordVideo: { dir: videoDir, size: SIZE },
 });
 const page = await context.newPage();
