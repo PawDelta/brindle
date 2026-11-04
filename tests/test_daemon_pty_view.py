@@ -66,6 +66,10 @@ def _size(window: str) -> str:
     return tmux._tmux("display-message", "-p", "-t", window, "#{window_width}x#{window_height}").stdout.strip()
 
 
+def _pane(window: str) -> str:
+    return tmux._tmux("capture-pane", "-p", "-t", window).stdout
+
+
 def _views() -> list[str]:
     names = tmux._tmux("list-sessions", "-F", "#{session_name}").stdout.split()
     return [n for n in names if n.startswith(pv.VIEW_PREFIX)]
@@ -149,8 +153,11 @@ def test_a_view_shows_the_pane_types_into_it_and_goes_when_closed(db):
                     other = subprocess.Popen([*tmux._argv(tmux.current_server()), "attach", "-t", "=agent"],
                                              stdin=slave, stdout=slave, stderr=slave, env=env,
                                              start_new_session=True)
-                    os.write(master, b"x")
-                    _until(ws, lambda _: _size(window) == "100x29")     # its status line takes a row
+                    os.write(master, b"typed-in-the-terminal")
+                    # Attaching alone already sizes the window to it: wait for its keystrokes
+                    # to reach the pane too, or one handled after the focus takes the window back.
+                    _until(ws, lambda _: _size(window) == "100x29"      # its status line takes a row
+                           and "typed-in-the-terminal" in _pane(window))
                     ws.send_json({"type": "focus"})
                     _until(ws, lambda _: _size(window) == "60x20")
                     ws.send_json({"type": "resize", "cols": 70, "rows": 22})
