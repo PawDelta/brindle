@@ -268,7 +268,8 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, on
           }}
         />
       </div>
-      <div className="flex flex-wrap items-center gap-s1">
+      <div className="flex items-start gap-s1">
+        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-s1">
         {repos.length > 1 ? (
           <ProjectCombobox repos={repos} value={repo} onChange={onChoose} />
         ) : (
@@ -308,11 +309,13 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, on
         <button type="button" className={quiet} aria-expanded={options} onClick={() => setOptions((o) => !o)}>
           Options {options ? "▴" : "▾"}
         </button>
-        <span className="flex-1" />
-        <span className="text-xs text-ink-3">⌘↵</span>
-        <button type="submit" disabled={busy || !repo || usable === null || needsPick} className={main}>
-          Start
-        </button>
+        </div>
+        <div className="flex shrink-0 items-center gap-s1">
+          <span className="text-xs text-ink-3">⌘↵</span>
+          <button type="submit" disabled={busy || !repo || usable === null || needsPick} className={main}>
+            Start
+          </button>
+        </div>
       </div>
       {lookupFailed && (
         <p role="alert" className={`${alert} flex items-center gap-s2`}>
