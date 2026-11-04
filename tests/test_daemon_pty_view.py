@@ -162,9 +162,10 @@ def test_a_view_shows_the_pane_types_into_it_and_goes_when_closed(db):
                     import time
                     t0 = time.time()
                     def dump(tag):
-                        print("DBG", tag, round(time.time() - t0, 2), _size(window),
-                              tmux._tmux("list-clients", "-F", "#{client_tty} #{session_name} #{client_width}x#{client_height} #{client_activity}").stdout.split("\n"),
-                              tmux._tmux("show-options", "-gw", "window-size").stdout, flush=True)
+                        with open("/tmp/dbg.log", "a") as f:
+                            print("DBG", tag, round(time.time() - t0, 2), _size(window),
+                                  tmux._tmux("list-clients", "-F", "#{client_tty} #{session_name} #{client_width}x#{client_height} #{client_activity}").stdout.split("\n"),
+                                  tmux._tmux("show-options", "-gw", "window-size").stdout, file=f, flush=True)
                     dump("after-focus")
                     watchdog.cancel()
                     watchdog = threading.Timer(8, tmux._tmux, ("kill-session", "-t", f"={view}"))
