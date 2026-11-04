@@ -5,7 +5,7 @@
     scripts/bump_version.py --check
 
 The app bundles its engine, so they ship as one version. A bump sets it in
-pyproject.toml, the brindle entry of uv.lock, the README's status-bar example,
+pyproject.toml, the brindle entry of uv.lock, the guide's status-bar example,
 app/package.json and app/package-lock.json (two spots). --check (run by CI)
 fails when app/package.json and pyproject.toml disagree.
 """
@@ -24,7 +24,7 @@ SEMVER = re.compile(r"\d+\.\d+\.\d+(-[0-9A-Za-z.]+)?")
 EDITS = {
     "pyproject.toml": (r'(?m)^(version = ")([^"]+)(")', 1),
     "uv.lock": (r'(?m)(^name = "brindle"\nversion = ")([^"]+)(")', 1),
-    "README.md": (r"(`brindle )(\d+\.\d+\.\d+[^`\s]*)(`\))", 1),
+    "docs/guide.md": (r"(`brindle )(\d+\.\d+\.\d+[^`\s]*)(`\))", 1),
     "app/package.json": (r'(?m)^(  "version": ")([^"]+)(")', 1),
     "app/package-lock.json": (r'(?m)^(  "version": ")([^"]+)(")|^(    "": \{\n(?:      .*\n)*?      "version": ")([^"]+)(")', 2),
 }

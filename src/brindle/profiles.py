@@ -115,7 +115,7 @@ class Profile:
     model: str | None = None
     permission_mode: str | None = None
     allowed_tools: list[str] | None = None
-    # Claude Code only; all off by default (see README, "Cheap workers").
+    # Claude Code only; all off by default (see docs/guide.md, "Cheap workers").
     strict_mcp: bool = False                 # --strict-mcp-config: only brindle's MCP server
     setting_sources: list[str] | None = None  # --setting-sources, e.g. project,local
     effort: str | None = None                # --effort low|medium|high|xhigh|max
