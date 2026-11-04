@@ -3,6 +3,7 @@
 is in effect."""
 
 import json
+import os
 import time
 
 import pytest
@@ -86,6 +87,8 @@ def test_doctor_shows_signed_out(installed, monkeypatch):
     assert "codex login" in got["Codex sign-in"].detail
     assert got["Google Antigravity sign-in"].level == doctor.WARN
     assert "run `agy`" in got["Google Antigravity sign-in"].detail
+    # and no credential line says all is well
+    assert {c.name: c for c in doctor.credential_checks()}["claude"].level == doctor.WARN
 
 
 def test_doctor_shows_quota_usage_and_not_twice(installed):
@@ -126,8 +129,56 @@ def test_doctor_says_org_managed(installed, tmp_path, monkeypatch):
     assert (c.level, c.detail) == (doctor.OK, "org-managed (apiKeyHelper)")
 
 
-def test_signed_out_claude_has_no_credential_line_that_says_all_is_well(installed, monkeypatch):
-    replies = {"auth": (1, json.dumps({"loggedIn": False}))}
-    monkeypatch.setattr(providers, "_auth_probe", lambda argv, env=None: replies.get(argv[1]))
-    assert lines()["Claude Code sign-in"].level == doctor.FAIL
-    assert credentials()["claude"].level == doctor.WARN
+BLOCKED_DOCTOR = """
+import sys, threading
+import typer
+from brindle import cli, disk, doctor, git, spawn
+
+stuck = threading.Event()
+echoed = []
+real_echo = typer.echo
+typer.echo = lambda msg="", **k: (echoed.append(str(msg)), real_echo(msg, **k))[1]
+doctor.CHECK_SECONDS, doctor.GRACE_SECONDS = 0.3, 0.1
+ok = lambda n: (lambda: [doctor.Check(doctor.OK, n, "fine")])
+
+def hang(*a, **k):
+    stuck.wait()
+
+def inner_probe():
+    # a check whose own worker threads block, as a stuck git probe would
+    git.default_branch = lambda r: "main"
+    git.out = lambda a, c: "a\tsha\t0"
+    disk._in_use = lambda *a: set()
+    disk.ancestors = lambda *a: frozenset()
+    disk.merged = hang
+    print("EARLIER:" + ",".join(echoed), file=sys.stderr, flush=True)
+    disk.dead_branches(None, "r")
+    return []
+
+def deadline_hit(*a, **k):
+    raise spawn.Busy("the request deadline passed")
+
+spawn.read = deadline_hit   # the repo lookup, through the real git.main_repo_root
+doctor._steps = lambda r, db: [("python", ok("python"), 5), ("first", ok("first"), 5),
+                               ("stuck", inner_probe, 0.3), ("last", ok("last"), 5)]
+doctor.disk_checks = lambda r, db: []
+cli.doctor(fix=False)
+"""
+
+
+def test_doctor_prints_as_it_goes_and_exits_though_checks_and_discovery_block(tmp_path):
+    """Run the real `brindle doctor` command with the repo lookup and one check's
+    worker threads blocked forever: earlier results are already printed when
+    the stuck check starts, each blocked part is reported, the rest still
+    run, and the process exits."""
+    import sys
+
+    from brindle import spawn
+
+    LIMIT = 60
+    env = {**os.environ, "BRINDLE_HOME": str(tmp_path)}
+    proc = spawn.read([sys.executable, "-c", BLOCKED_DOCTOR], env=env, timeout=LIMIT)
+    assert proc.returncode == 0, proc.stderr
+    assert "EARLIER:" in proc.stderr and "python" in proc.stderr.split("EARLIER:")[1]
+    marks = [(line[0], line.split()[1]) for line in proc.stdout.splitlines() if line and line[0] in "✓!"]
+    assert marks == [("✓", "python"), ("!", "repository"), ("✓", "first"), ("!", "stuck"), ("✓", "last")]
