@@ -19,16 +19,17 @@ function setup(daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj"
   const store = createAppStore();
   const sync = startSync({ client, store, connect: daemon.connect });
   const onOpen = vi.fn();
+  const onSignIn = vi.fn();
   render(
     <DaemonContext.Provider value={client}>
       <StoreContext.Provider value={store}>
         <SessionsProvider client={client}>
-          <NewSession client={client} onOpen={onOpen} />
+          <NewSession client={client} onOpen={onOpen} onSignIn={onSignIn} />
         </SessionsProvider>
       </StoreContext.Provider>
     </DaemonContext.Provider>,
   );
-  return { daemon, onOpen, stop: () => sync.stop() };
+  return { daemon, onOpen, onSignIn, stop: () => sync.stop() };
 }
 
 const posts = (daemon: FakeDaemon) => daemon.requests.filter((r) => r.method === "POST");
@@ -370,5 +371,32 @@ describe("NewSession", () => {
     fireEvent.click(screen.getByRole("button", { name: "Start" }));
     await waitFor(() => expect(posts(daemon).at(-1)?.body).toMatchObject({ repo: "~/Projects/site" }));
     sync.stop();
+  });
+
+  it("lists only usable CLIs, makes a first session pick one, remembers it and links to sign in to more", async () => {
+    localStorage.clear();
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [], workspaces: [root], providers: freshProviders({ claude: { path: "/bin/claude", version: "2" }, codex: { path: "/bin/codex", version: "1" }, antigravity: { path: "/bin/agy", version: "1", signed_in: false } }) });
+    const { onSignIn, stop } = setup(daemon);
+    const select = (await screen.findByRole("combobox", { name: "Supervisor CLI" })) as HTMLSelectElement;
+    expect([...select.options].map((o) => o.textContent)).toEqual(["Pick a CLI", "Claude Code", "Codex"]);
+    expect((screen.getByRole("button", { name: "Start" }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "Sign in to more…" }));
+    expect(onSignIn).toHaveBeenCalled();
+    fireEvent.click(within(screen.getByText("Which CLI should run your sessions?").parentElement!).getByRole("button", { name: "Codex" }));
+    expect(select.value).toBe("codex");
+    expect(screen.queryByText("Which CLI should run your sessions?")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Start" }));
+    await waitFor(() => expect(posts(daemon).at(-1)?.body).toMatchObject({ provider: "codex" }));
+    expect(localStorage.getItem("brindle.supervisorCli")).toBe("codex");
+    stop();
+  });
+
+  it("with no usable CLI, shows Finish setting up in place of the composer", async () => {
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [], workspaces: [root], providers: freshProviders() });
+    const { onSignIn, stop } = setup(daemon);
+    fireEvent.click(await screen.findByRole("button", { name: "Sign in to a CLI" }));
+    expect(onSignIn).toHaveBeenCalled();
+    expect(screen.queryByRole("form", { name: "Start a session" })).toBeNull();
+    stop();
   });
 });
