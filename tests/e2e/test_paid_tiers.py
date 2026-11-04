@@ -256,19 +256,13 @@ def test_a_bad_license_is_refused_and_stores_nothing(run, acct, tmp_path, brindl
 # -- feature gating --------------------------------------------------------------------------------------
 
 
-def test_cost_report_is_a_pro_feature(run, acct):
-    code, out = run("cost", "report")
-    assert code == 1 and "Pro" in out
+def test_cost_report_and_estimate_are_pro_features(run, acct):
+    for sub in ("report", "estimate"):
+        code, out = run("cost", sub)
+        assert code == 1 and "Pro" in out
     acct.login("pro")
-    code, out = run("cost", "report")
-    assert code == 0, out
-
-
-def test_cost_estimate_needs_the_cost_feature(run, acct):
-    code, out = run("cost", "estimate")
-    assert code == 1 and "cost estimates are a brindle Pro feature" in out
-    acct.login("pro")
-    assert run("cost", "estimate")[0] == 0
+    for sub in ("report", "estimate"):
+        assert run("cost", sub)[0] == 0
 
 
 def test_enterprise_only_commands_refuse_lower_plans(run, acct, brindle_home):
@@ -370,6 +364,19 @@ def test_org_library_uses_the_cache_when_the_backend_is_down(run, acct, library,
     assert code == 0 and "(cached; couldn't refresh" in out and "org-reviewer" in out
 
 
+def test_org_profile_admin_commands_validate_before_calling(run, acct, library, tmp_path, net):
+    acct.login("team")
+    bad = tmp_path / "Bad Name.md"
+    bad.write_text("x")
+    code, out = run("account", "org", "profiles", "push", str(bad))
+    assert code == 1 and "not a valid org profile name" in out
+    code, out = run("account", "org", "profiles", "rm", "Not Valid")
+    assert code == 1 and "not a valid org profile name" in out
+    assert f"POST /orgs/{ORG}/profiles" not in net.calls
+    code, out = run("account", "org", "profiles", "bogus", "x", "y")
+    assert code == 2 and "usage: brindle account" in out
+
+
 def test_a_tampered_library_cache_is_worth_nothing(run, acct, library, net, brindle_home):
     acct.login("team")
     assert run("account", "org", "profiles")[0] == 0
@@ -383,19 +390,6 @@ def test_a_tampered_library_cache_is_worth_nothing(run, acct, library, net, brin
     assert code == 1 and "none is cached" in out
     org_profiles.clear_memo()
     assert org_profiles.items("profile") == {}
-
-
-def test_org_profile_admin_commands_validate_before_calling(run, acct, library, tmp_path, net):
-    acct.login("team")
-    bad = tmp_path / "Bad Name.md"
-    bad.write_text("x")
-    code, out = run("account", "org", "profiles", "push", str(bad))
-    assert code == 1 and "not a valid org profile name" in out
-    code, out = run("account", "org", "profiles", "rm", "Not Valid")
-    assert code == 1 and "not a valid org profile name" in out
-    assert f"POST /orgs/{ORG}/profiles" not in net.calls
-    code, out = run("account", "org", "profiles", "bogus", "x", "y")
-    assert code == 2 and "usage: brindle account" in out
 
 
 # -- team policy -----------------------------------------------------------------------------------------
@@ -719,20 +713,6 @@ def test_a_failing_sink_exits_1_and_is_retried_from_disk(run, acct, repo, brindl
     assert code == 0 and "sent 2" in out
 
 
-def test_audit_ship_says_when_another_process_is_already_sending(run, acct, repo, brindle_home, sinks,
-                                                                 monkeypatch):
-    monkeypatch.setenv("SIEM_SECRET", "s3cret")
-    acct.login("enterprise")
-    configure_sinks(brindle_home)
-    make_events(repo, 1)
-    with audit_export.AuditExporter()._sender() as mine:
-        assert mine
-        code, out = run("audit", "ship")
-    assert code == 1 and "another brindle process is sending" in out and sinks.posts == []
-    code, out = run("audit", "ship")
-    assert code == 0 and "sent 1" in out
-
-
 def test_audit_ship_reports_a_sink_that_cannot_be_set_up(run, acct, brindle_home, monkeypatch):
     monkeypatch.delenv("SIEM_SECRET", raising=False)
     acct.login("enterprise")
@@ -747,6 +727,20 @@ def test_audit_ship_reports_a_sink_that_cannot_be_set_up(run, acct, brindle_home
     (brindle_home / "config.json").write_text("{}")
     code, out = run("audit", "ship")
     assert code == 2 and "no sinks" in out
+
+
+def test_audit_ship_says_when_another_process_is_already_sending(run, acct, repo, brindle_home, sinks,
+                                                                 monkeypatch):
+    monkeypatch.setenv("SIEM_SECRET", "s3cret")
+    acct.login("enterprise")
+    configure_sinks(brindle_home)
+    make_events(repo, 1)
+    with audit_export.AuditExporter()._sender() as mine:
+        assert mine
+        code, out = run("audit", "ship")
+    assert code == 1 and "another brindle process is sending" in out and sinks.posts == []
+    code, out = run("audit", "ship")
+    assert code == 0 and "sent 1" in out
 
 
 def test_prune_keeps_the_chain_verifiable_and_never_drops_unsent_records(run, acct, repo, brindle_home,
@@ -829,36 +823,6 @@ def test_airgap_blocks_the_backend_and_uses_the_offline_license(run, acct, net, 
     assert net.calls == [], "air-gap mode must never reach the backend"
 
 
-def test_airgap_org_policy_shows_the_offline_file(run, acct, repo, net):
-    code, _ = run("account", "license", "install", str(acct.license_file("enterprise", role="member")))
-    assert code == 0
-    airgap_repo(repo)
-    code, out = run("account", "org", "policy")
-    assert code == 1 and "no usable offline policy" in out and ".brindle/policy.json" in out
-    offline_policy(repo, allowed_providers=["native"], require_human_review=True)
-    code, out = run("account", "org", "policy")
-    assert code == 0, out
-    assert "Policy for org org_acme, version 3 (offline:" in out
-    assert "providers              native" in out and "require human review   yes" in out
-    assert net.calls == []
-
-
-def test_airgap_without_the_license_feature_still_blocks_and_warns(run, acct, repo):
-    code, out = run("account", "license", "install", str(acct.license_file("team")))
-    assert code == 0
-    airgap_repo(repo)
-    code, out = run("account", "status")
-    assert "plan doesn't include it" in out and "feature 'airgap'" in out
-    assert not airgap.licensed() and airgap.enabled()
-    checks = {c.name: c for c in doctor.airgap_checks(str(repo))}
-    assert checks["air-gap"].level == doctor.WARN
-
-
-def test_airgap_from_the_environment_shows_in_the_license_status(run, repo):
-    code, out = run("account", "license", "status", env={airgap.ENV: "1"})
-    assert code == 1 and f"air-gap   on ({airgap.ENV}=1)" in out
-
-
 def test_a_repo_config_cannot_turn_airgap_back_off(repo, tmp_path):
     airgap_repo(repo)
     other = tmp_path / "other"
@@ -895,6 +859,25 @@ def test_the_kill_switch_also_stops_reviewers(acct, net, repo, db):
         agents.request_review(db, None, ws, cfg=load_repo_config(repo))
 
 
+def test_airgap_org_policy_shows_the_offline_file(run, acct, repo, net):
+    code, _ = run("account", "license", "install", str(acct.license_file("enterprise", role="member")))
+    assert code == 0
+    airgap_repo(repo)
+    code, out = run("account", "org", "policy")
+    assert code == 1 and "no usable offline policy" in out and ".brindle/policy.json" in out
+    offline_policy(repo, allowed_providers=["native"], require_human_review=True)
+    code, out = run("account", "org", "policy")
+    assert code == 0, out
+    assert "Policy for org org_acme, version 3 (offline:" in out
+    assert "providers              native" in out and "require human review   yes" in out
+    assert net.calls == []
+
+
+def test_airgap_from_the_environment_shows_in_the_license_status(run, repo):
+    code, out = run("account", "license", "status", env={airgap.ENV: "1"})
+    assert code == 1 and f"air-gap   on ({airgap.ENV}=1)" in out
+
+
 def test_airgap_denials_are_audited_locally(run, acct, repo):
     code, _ = run("account", "license", "install", str(acct.license_file("enterprise")))
     assert code == 0
@@ -906,6 +889,31 @@ def test_airgap_denials_are_audited_locally(run, acct, repo):
     assert recs and recs[-1]["event"]["kind"] == "deny_assign"
     assert "air-gap mode" in recs[-1]["event"]["reason"]
     assert run("audit", "verify")[0] == 0
+
+
+def test_doctor_reports_airgap_state(acct, repo):
+    assert [c.detail for c in doctor.airgap_checks(str(repo))] == ["off"]
+    license.install(acct.license_file("enterprise").read_bytes())
+    airgap_repo(repo)
+    checks = {c.name: c for c in doctor.airgap_checks(str(repo))}
+    assert checks["air-gap"].level == doctor.OK and "no outbound traffic" in checks["air-gap"].detail
+    assert checks["hosted profiles"].level == doctor.WARN and "cloudy" in checks["hosted profiles"].detail
+    assert checks["default agent"].level == doctor.OK
+    assert checks["offline license"].level == doctor.OK and "plan enterprise" in checks["offline license"].detail
+    assert checks["offline policy"].level == doctor.WARN
+    airgap_repo(repo, default_agent="developer")
+    assert {c.name: c for c in doctor.airgap_checks(str(repo))}["default agent"].level == doctor.FAIL
+
+
+def test_airgap_without_the_license_feature_still_blocks_and_warns(run, acct, repo):
+    code, out = run("account", "license", "install", str(acct.license_file("team")))
+    assert code == 0
+    airgap_repo(repo)
+    code, out = run("account", "status")
+    assert "plan doesn't include it" in out and "feature 'airgap'" in out
+    assert not airgap.licensed() and airgap.enabled()      # fail closed: unlicensed, still armed
+    checks = {c.name: c for c in doctor.airgap_checks(str(repo))}
+    assert checks["air-gap"].level == doctor.WARN
 
 
 def test_airgap_team_policy_comes_from_the_offline_file(run, acct, repo, net, db):
@@ -945,28 +953,6 @@ def test_airgap_never_ships_audit_records_or_fetches_the_org_library(run, acct, 
     org_profiles.clear_memo()
     assert org_profiles.items("profile") == {}                    # no cached copy, nothing fetched
     assert net.calls == []
-
-
-def test_doctor_reports_airgap_state(acct, repo):
-    assert [c.detail for c in doctor.airgap_checks(str(repo))] == ["off"]
-    license.install(acct.license_file("enterprise").read_bytes())
-    airgap_repo(repo)
-    checks = {c.name: c for c in doctor.airgap_checks(str(repo))}
-    assert checks["air-gap"].level == doctor.OK and "no outbound traffic" in checks["air-gap"].detail
-    assert checks["hosted profiles"].level == doctor.WARN and "cloudy" in checks["hosted profiles"].detail
-    assert checks["default agent"].level == doctor.OK
-    assert checks["offline license"].level == doctor.OK and "plan enterprise" in checks["offline license"].detail
-    assert checks["offline policy"].level == doctor.WARN
-    airgap_repo(repo, default_agent="developer")
-    assert {c.name: c for c in doctor.airgap_checks(str(repo))}["default agent"].level == doctor.FAIL
-
-
-def test_airgap_hosts():
-    for host in ("localhost", "foo.localhost", "127.0.0.1", "::1", "10.1.2.3", "172.16.0.1",
-                 "172.31.255.255", "192.168.0.9"):
-        assert airgap.is_local_host(host), host
-    for host in ("example.com", "8.8.8.8", "172.32.0.1", "0.0.0.0", "", None, "2001:db8::1"):
-        assert not airgap.is_local_host(host), host
 
 
 # -- several repos in one session (Pro) ----------------------------------------------------------------------

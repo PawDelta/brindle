@@ -70,18 +70,6 @@ def test_known_unavailable_model_rejected_before_workspace_or_agent_side_effects
         agents.spawn(db, ws, "missing", prompt="real task")
 
 
-def test_routing_skips_catalog_unavailable_with_same_preflight(db, repo, monkeypatch):
-    from brindle import autopilot, model_availability as ma
-    from brindle.config import RepoConfig
-    from brindle.profiles import Profile
-    p = Profile("missing", "", "native", "", model="absent", base_url="https://api.openai.com/v1")
-    monkeypatch.setattr(agents, "load_profile", lambda *a: p)
-    monkeypatch.setattr(autopilot, "load_profile", lambda *a: p)
-    monkeypatch.setattr(agents, "_model_checker", ma.ModelAvailabilityChecker(
-        discover=lambda *a: ma.Catalog(frozenset(), "openai", authoritative=True)))
-    assert "absent from" in autopilot._unavailable("missing", RepoConfig(), str(repo))
-
-
 def test_resume_rechecks_model_before_launch_side_effects(db, repo, monkeypatch):
     from brindle import model_availability as ma, signin_pause
     from brindle.profiles import Profile

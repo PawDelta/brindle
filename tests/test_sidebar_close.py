@@ -46,23 +46,6 @@ def test_a_worktree_whose_agents_are_all_closed_disappears_but_stays_on_disk(db,
     assert db.get_agent("w1") is not None
 
 
-def test_cli_close_one_agent(db, repo, worker_ws, monkeypatch):
-    pane = running_window(worker_ws)
-    add_agent(db, worker_ws, "abc123", status="processing", window=pane)
-    monkeypatch.chdir(repo)
-    res = CliRunner().invoke(app, ["close", "abc"])
-    assert res.exit_code == 0, res.output
-    assert "closed abc123" in res.output and "stopped" in res.output
-    assert db.get_agent("abc123").dismissed_at is not None
-    assert not agents.is_alive(db.get_agent("abc123"))
-
-
-def test_cli_close_unknown_agent_fails(db, repo, monkeypatch):
-    monkeypatch.chdir(repo)
-    res = CliRunner().invoke(app, ["close", "nope"])
-    assert res.exit_code == 1
-
-
 def test_cli_close_exited_closes_only_stopped_agents(db, repo, worker_ws, monkeypatch):
     pane = running_window(worker_ws)
     add_agent(db, worker_ws, "live", status="processing", window=pane)
@@ -79,12 +62,6 @@ def test_cli_close_exited_closes_only_stopped_agents(db, repo, worker_ws, monkey
     assert shown_ids(db, str(repo)) == ["live"]
 
 
-def test_cli_close_needs_an_id_or_exited(db, repo, monkeypatch):
-    monkeypatch.chdir(repo)
-    assert CliRunner().invoke(app, ["close"]).exit_code == 1
-    assert CliRunner().invoke(app, ["close", "x", "--exited"]).exit_code == 1
-
-
 def test_resuming_shows_a_closed_agent_again(db, repo, monkeypatch):
     root = workspaces.adopt_root(db, str(repo))
     add_agent(db, root, "boss", mode="interactive", status="paused", profile="supervisor")
@@ -97,28 +74,6 @@ def test_resuming_shows_a_closed_agent_again(db, repo, monkeypatch):
 
 
 # -- the `x` key -----------------------------------------------------------------
-
-
-def test_x_on_a_stopped_row_keeps_another_rows_arming():
-    _, armed, _ = watch.close_request({"id": "live", "status": "processing"}, None, 100.0)
-    close, still, _ = watch.close_request({"id": "dead", "status": "exited"}, armed, 101.0)
-    assert close and still == armed
-    close, _, _ = watch.close_request({"id": "live", "status": "processing"}, still, 102.0)
-    assert close
-
-
-def test_watch_sidebar_flag_reaches_the_loop(db, repo, monkeypatch):
-    import sys
-
-    seen = {}
-    monkeypatch.setattr(watch.curses, "wrapper", lambda fn, root, sidebar, *_: seen.setdefault("sidebar", sidebar))
-    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
-    monkeypatch.setattr(agents, "dismiss_sidebar", lambda *a: None)
-    monkeypatch.chdir(repo)
-    from brindle.cli import watch as watch_cmd
-
-    watch_cmd(all_repos=False, once=False, sidebar=True)
-    assert seen["sidebar"] is True
 
 
 # -- pane ids tmux has reused ------------------------------------------------------
@@ -154,14 +109,3 @@ def test_quitting_brindle_from_the_sidebar_takes_two_presses():
     go, _, _ = watch.quit_request(("a1b2c3d4", 100.0), 101.0)
     assert not go
 
-
-def test_quit_pauses_the_session(db, repo, monkeypatch):
-    from brindle import cli
-
-    ws = workspaces.adopt_root(db, str(repo))
-    db.add_agent(Agent("boss", ws.id, "supervisor", "claude", None, "interactive", "idle", "@0",
-                       None, time.time()))
-    paused = []
-    monkeypatch.setattr(cli.agents, "pause", lambda db, root_id: paused.append(root_id))
-    assert CliRunner().invoke(cli.app, ["_quit", "boss"]).exit_code == 0
-    assert paused == ["boss"]

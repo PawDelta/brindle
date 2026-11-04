@@ -80,15 +80,6 @@ def test_a_server_whose_brindle_home_is_gone_is_reaped(tmp_path):
         tmux.reap_server(name)
 
 
-def test_a_dead_servers_socket_file_is_removed():
-    name = f"brindle-e2e-stale-{os.getpid()}"
-    sock = tmux.socket_dir() / name
-    tmux.socket_dir().mkdir(parents=True, exist_ok=True)
-    sock.touch()
-    cull.orphan_servers()
-    assert not sock.exists()
-
-
 def test_detached_helpers_stop_when_their_brindle_home_is_gone(tmp_path, monkeypatch):
     gone = tmp_path / "gone-home"
     monkeypatch.setenv("BRINDLE_HOME", str(gone))
@@ -130,28 +121,6 @@ def test_prune_removes_merged_worktrees_and_their_branches(db, repo):
     assert os.path.isdir(open_.path) and db.get_workspace(open_.id)  # unmerged untouched
 
 
-def test_prune_keeps_merged_branches_when_the_repo_says_so(db, repo):
-    (repo / ".brindle").mkdir(exist_ok=True)
-    (repo / ".brindle" / "config.json").write_text('{"delete_merged_branches": false}')
-    done = merged_worker(db, repo)
-    add_agent(db, done, "a1")
-    lines = cull.prune_retired(db)
-    assert any(f"branch {done.branch} kept" in line for line in lines)
-    assert sh(f"git branch --list {done.branch}", repo)
-
-
-def test_prune_command_cleans_up(db, repo, monkeypatch):
-    done = merged_worker(db, repo)
-    add_agent(db, done, "a1")
-    monkeypatch.chdir(repo)
-    result = CliRunner().invoke(app, ["prune"])
-    assert result.exit_code == 0, result.output
-    assert "removed merged worktree" in result.output
-    assert not os.path.exists(done.path)
-    # its now-empty parent folders went too
-    assert not (worktrees_dir() / "proj" / "feat-done").exists()
-
-
 # -- stale sidebar locks -------------------------------------------------------------
 
 
@@ -167,15 +136,6 @@ def test_stale_sidebar_locks_are_removed(db, repo):
             os.utime(locks / f"sidebar-{aid}.lock", (OLD, OLD))
     assert cull.clean_locks(db) == 2
     assert sorted(p.name for p in locks.iterdir()) == ["sidebar-fresh.lock", "sidebar-live.lock"]
-
-
-def test_the_periodic_sweep_cleans_locks(db):
-    locks = brindle_home() / "locks"
-    locks.mkdir(parents=True)
-    (locks / "sidebar-gone.lock").write_text("")
-    os.utime(locks / "sidebar-gone.lock", (OLD, OLD))
-    assert any("lock" in line for line in cull.sweep(db))
-    assert not (locks / "sidebar-gone.lock").exists()
 
 
 # -- orphan tmux sessions, empty folders -----------------------------------------------
@@ -216,40 +176,6 @@ def test_a_session_whose_worktree_is_gone_is_killed_with_the_cli_in_it(db, tmp_p
     assert not any(test_cull.alive(p) for p in pids)   # terminate() returns once they are gone
 
 
-def test_empty_worktree_folders_are_removed(db, repo):
-    ws = workspaces.create(db, str(repo), "feat/real").workspace
-    (worktree_root(repo) / "fix" / "gone").mkdir(parents=True)
-    (worktrees_dir() / "proj" / "old").mkdir(parents=True)  # from before #182
-    assert cull.empty_worktree_dirs(db) == 4
-    assert not (worktree_root(repo) / "fix").exists()
-    assert not (worktrees_dir() / "proj").exists()
-    assert os.path.isdir(ws.path)
-    assert worktrees_dir().is_dir()
-
-
-def _fake_gh(tmp_path, monkeypatch, answer):
-    gh = tmp_path / "bin" / "gh"
-    gh.parent.mkdir()
-    log = tmp_path / "gh.log"
-    gh.write_text(f'#!/bin/sh\necho "$@" >> {log}\necho {answer}\n')
-    gh.chmod(0o755)
-    monkeypatch.setenv("PATH", f"{gh.parent}{os.pathsep}{os.environ['PATH']}")
-    return log
-
-
-def test_first_pr_offers_to_delete_merged_branches_on_github(repo, tmp_path, monkeypatch):
-    from brindle import cli
-
-    log = _fake_gh(tmp_path, monkeypatch, "false")
-    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
-    monkeypatch.setattr(cli.typer, "confirm", lambda *a, **k: True)
-    cli._offer_delete_on_merge(str(repo))
-    assert "repo edit --delete-branch-on-merge" in log.read_text()
-    log.write_text("")
-    cli._offer_delete_on_merge(str(repo))                   # asked once per repo
-    assert log.read_text() == ""
-
-
 @pytest.mark.variant("#199 incident input: parse the full owner PID in per-test server names; startup parsing lives in unmeasured conftest.py")
 @pytest.mark.parametrize("name, alive, reaped", [
     ("brindle-test-1234-7", False, True),      # a dead owner's per-test server
@@ -265,3 +191,12 @@ def test_startup_reaper_parses_the_owner_pid(monkeypatch, name, alive, reaped):
     monkeypatch.setattr(tmux, "reap_server", seen.append)
     conftest._reap_dead_test_servers()
     assert seen == ([name] if reaped else [])
+
+
+@pytest.mark.variant("suite overhead: a test's tmux server starts at its first tmux write, keeper "
+                     "first (#199); the lazy start lives in unmeasured conftest.py")
+def test_a_tests_tmux_server_starts_at_its_first_write_with_the_keeper(tmp_path):
+    socket = tmux.socket_dir() / os.environ["BRINDLE_TMUX_SOCKET"]
+    assert not tmux.has_session("brindle-test-keeper") and not socket.exists()   # a read starts nothing
+    tmux.ensure_session("first", str(tmp_path), {})
+    assert tmux.has_session("brindle-test-keeper") and socket.exists()

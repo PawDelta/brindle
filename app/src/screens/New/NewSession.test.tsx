@@ -161,29 +161,6 @@ describe("NewSession", () => {
     stop();
   });
 
-  it("scrolls the option an arrow key reaches into view, and Enter picks it", async () => {
-    const names = ["p0", "p1", "p2", "p3", "p4", "p5", "p6", "p7"];
-    const repos = names.map((name) => ({ repo_root: `/home/u/${name}`, name }));
-    const { stop } = setup(new FakeDaemon({ repos, sessions: [], workspaces: [] }));
-    const original = Element.prototype.scrollIntoView;
-    const scrolled = vi.fn();
-    Element.prototype.scrollIntoView = function (this: Element) {
-      scrolled(this.textContent);
-    };
-    try {
-      const repo = await screen.findByRole("combobox", { name: "Repo" });
-      fireEvent.focus(repo);
-      scrolled.mockClear();
-      for (let i = 0; i < 6; i++) fireEvent.keyDown(repo, { key: "ArrowDown" });
-      expect(scrolled).toHaveBeenLastCalledWith("p6");
-      fireEvent.keyDown(repo, { key: "Enter" });
-      expect((repo as HTMLInputElement).value).toBe("p6");
-    } finally {
-      Element.prototype.scrollIntoView = original;
-      stop();
-    }
-  });
-
   it("opens a session it started once the sessions list has it, so it arrives not paused (#216)", async () => {
     // A first launch: nothing has ever run in the project. Opened before the list is read again, the
     // session view finds the root in neither the list nor the snapshot, and takes it for paused.

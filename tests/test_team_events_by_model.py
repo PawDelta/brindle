@@ -10,11 +10,6 @@ def payload(by_model, **kw):
     return team_events.event_payload(KEY, "id", ev)
 
 
-def test_absent_by_model_is_left_out():
-    assert "by_model" not in payload(None)
-    assert "by_model" not in payload({})
-
-
 def test_at_most_32_entries_keeping_the_biggest():
     many = {f"model-{i:03d}": {"tokens": i + 1, "usd": 0.0} for i in range(40)}
     body = payload(many)

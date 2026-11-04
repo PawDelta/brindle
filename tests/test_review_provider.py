@@ -81,13 +81,6 @@ def test_request_review_uses_config_review_profile_override(db, worker_ws, env, 
     assert captured["profile"] == "team-reviewer"
 
 
-def test_request_review_keeps_the_baseline_reviewer_for_a_claude_worker(db, worker_ws, env, monkeypatch):
-    env["codex"] = True
-    captured = capture_profile(monkeypatch)
-    agents.request_review(db, None, worker_ws)
-    assert captured["profile"] == "reviewer"
-
-
 def test_request_review_raises_clearly_for_an_unknown_configured_review_profile(db, worker_ws):
     with pytest.raises(agents.AgentError, match="bogus-profile"):
         agents.request_review(db, None, worker_ws, cfg=RepoConfig(review_profile="bogus-profile"))

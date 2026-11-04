@@ -65,6 +65,18 @@ def test_only_workers_in_their_own_worktree_get_snapshots(db, repo, ws):
     assert refs(repo, "w2") == []
 
 
+def test_a_turn_without_a_transcript_is_summed_up_from_its_live_pane(monkeypatch):
+    from brindle import tmux
+
+    screens = {("%7", "own"): "  added the login page   \n\n   \n"}
+    monkeypatch.setattr(agents, "is_alive", lambda agent, panes=None: True)
+    monkeypatch.setattr(tmux, "capture", lambda target, lines=200, server=None, **kw:
+                        screens.get((target, server), ""))
+    a = Agent("w1", "ws-1", "developer", "claude", None, "assign", "processing", "%7", None,
+              time.time(), tmux_server="own")
+    assert rewind.turn_words(a) == "added the login page"
+
+
 def test_codex_turn_complete_snapshots_too(db, repo, ws):
     worker(db, ws, provider="codex")
     write(ws, "app.py", "print('login')\n")

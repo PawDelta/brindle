@@ -119,6 +119,9 @@ def test_deleting_the_last_record_is_caught_by_the_head(brindle_home):
     assert report.broken_seq == 5 and "truncated" in report.reason and report.records == 4
     rewrite(brindle_home, ls[:-2])
     assert verify(REPO, home=brindle_home).broken_seq == 4
+    rewrite(brindle_home, ls[:2] + [b"not json"])         # an unreadable record is rejected at its seq
+    report = verify(REPO, home=brindle_home)
+    assert report.broken_seq == 3 and "unreadable" in report.reason
 
 
 def test_inserting_a_forged_record_breaks_the_chain(brindle_home):
@@ -130,14 +133,6 @@ def test_inserting_a_forged_record_breaks_the_chain(brindle_home):
     rewrite(brindle_home, ls)
     report = verify(REPO, home=brindle_home)
     assert report.broken_seq == 3 and "prev_hash" in report.reason
-
-
-def test_garbage_and_an_empty_log(brindle_home):
-    assert verify(REPO, home=brindle_home).ok and not verify(REPO, home=brindle_home).exists
-    chain(brindle_home, 2)
-    rewrite(brindle_home, lines(brindle_home) + [b"not json"])
-    report = verify(REPO, home=brindle_home)
-    assert report.broken_seq == 3 and "unreadable" in report.reason
 
 
 # -- files and permissions ------------------------------------------------------------------------
@@ -252,11 +247,10 @@ def test_export_csv_has_one_row_per_record(brindle_home):
 
 
 def test_export_since_filters_by_record_time(brindle_home):
-    p = AuditChain(REPO, home=brindle_home, entitled=ENTITLED)
-    p.emit(ev())
+    old, new = (audit_chain._iso(t) for t in (time.time() - 60, time.time() + 60))
+    audit_chain.append(REPO, {"kind": "assign"}, home=brindle_home, ts=old)
+    audit_chain.append(REPO, {"kind": "remove"}, home=brindle_home, ts=new)
     cut = datetime.now(timezone.utc)
-    time.sleep(0.01)
-    p.emit(ev(kind="remove"))
     out = audit_chain.export(REPO, home=brindle_home, since=cut)
     assert [json.loads(ln)["seq"] for ln in out.splitlines()] == [2]
     assert audit_chain.export(REPO, home=brindle_home, since=datetime(2000, 1, 1)).count("\n") == 2

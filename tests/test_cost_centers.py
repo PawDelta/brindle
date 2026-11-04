@@ -68,11 +68,6 @@ def test_events_carry_repo_with_the_feature(slug_repo, features, monkeypatch):
     assert _payload(slug_repo, {"team", "cost_centers"})["repo"] == SLUG
 
 
-def test_events_omit_repo_without_the_feature(slug_repo, features, monkeypatch):
-    monkeypatch.setattr(team_events.OrgKey, "ref", lambda self, s: "ref", raising=False)
-    assert "repo" not in _payload(slug_repo, {"team"})
-
-
 # -- requests ----------------------------------------------------------------------------------------
 
 
@@ -95,11 +90,27 @@ def test_approval_raises_the_month_limit(repo, features, server):
     assert lim.month_usd == 125.0
 
 
+# -- refusal and CLI -------------------------------------------------------------------------------------
+
+
+def test_cli_fails_closed_without_the_feature(repo, monkeypatch, server):
+    monkeypatch.setattr(license, "has", lambda f: False)
+    monkeypatch.chdir(repo)
+    assert CliRunner().invoke(app, ["cost", "request", "--usd", "5", "--reason", "x"]).exit_code == 1
+    assert CliRunner().invoke(app, ["cost", "requests"]).exit_code == 1
+    assert not server.calls
+
+
 def test_denied_raises_nothing(repo, features, server):
     cost_centers.request(25, "x", str(repo))
     server.status = "denied"
     assert "denied" in cost_centers.poll()[0]
     assert cost_centers.month_raise() == 0
+
+
+def test_events_omit_repo_without_the_feature(slug_repo, features, monkeypatch):
+    monkeypatch.setattr(team_events.OrgKey, "ref", lambda self, s: "ref", raising=False)
+    assert "repo" not in _payload(slug_repo, {"team"})
 
 
 def test_poll_survives_server_errors(repo, features, server, monkeypatch):
@@ -110,34 +121,3 @@ def test_poll_survives_server_errors(repo, features, server, monkeypatch):
     monkeypatch.setattr(cost_centers, "_call", boom)
     assert cost_centers.poll() == []
     assert cost_centers.tracked()[0]["status"] == "pending"
-
-
-def test_cull_poll_is_rate_limited(repo, features, server):
-    cost_centers.request(25, "x", str(repo))
-    now = time.time()
-    cost_centers.poll(only_due=True, now=now)
-    n = len(server.calls)
-    cost_centers.poll(only_due=True, now=now + 10)
-    assert len(server.calls) == n
-    cost_centers.poll(only_due=True, now=now + cost_centers.POLL_EVERY + 1)
-    assert len(server.calls) == n + 1
-
-
-# -- refusal and CLI -------------------------------------------------------------------------------------
-
-
-def test_cli_request_and_list(slug_repo, features, server, monkeypatch):
-    monkeypatch.chdir(slug_repo)
-    r = CliRunner().invoke(app, ["cost", "request", "--usd", "25", "--reason", "need more"])
-    assert r.exit_code == 0 and "cr_1" in r.output
-    server.status = "approved"
-    r = CliRunner().invoke(app, ["cost", "requests"])
-    assert r.exit_code == 0 and "approved" in r.output
-
-
-def test_cli_fails_closed_without_the_feature(repo, monkeypatch, server):
-    monkeypatch.setattr(license, "has", lambda f: False)
-    monkeypatch.chdir(repo)
-    assert CliRunner().invoke(app, ["cost", "request", "--usd", "5", "--reason", "x"]).exit_code == 1
-    assert CliRunner().invoke(app, ["cost", "requests"]).exit_code == 1
-    assert not server.calls

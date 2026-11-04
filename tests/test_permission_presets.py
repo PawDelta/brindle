@@ -11,17 +11,18 @@ import time
 
 import pytest
 
-from brindle import permissions, workspaces
+from brindle import permissions
 from brindle.db import Agent
 from brindle.permissions import Request, decide
+from workspace_template import copy_workspace, workspace_template  # noqa: F401 (a fixture)
 
 TOKEN = "t" * 43
 
 
 @pytest.fixture
-def ws(db, repo, monkeypatch):
+def ws(db, workspace_template, tmp_path, monkeypatch):
     monkeypatch.setattr("brindle.permissions.PRESET_RULES", ())
-    return workspaces.create(db, str(repo), "feature").workspace
+    return copy_workspace(workspace_template, db, tmp_path)
 
 
 def bash(ws, command):

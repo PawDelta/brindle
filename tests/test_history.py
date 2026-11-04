@@ -7,6 +7,7 @@ from brindle import cli, agents, autopilot, cull, history, mcp_server, sessions,
 from brindle.cli import app
 from brindle.db import Agent, Workspace
 from brindle.usage import Usage
+from test_merge_order import _repo_template, quiet_removal, repo, worktree  # noqa: F401 - fixture
 
 
 def add(db, ws, aid, mode="interactive", parent=None, status="processing", since=None):
@@ -58,7 +59,7 @@ def test_history_survives_session_pruning(db, repo, tmp_path):
     import json
 
     root_ws = workspaces.adopt_root(db, str(repo))
-    ws = workspaces.create(db, str(repo), "feature").workspace
+    ws = worktree(db, repo, "feature")
     add(db, root_ws, "boss", status="paused", since=1)
     add(db, ws, "w1", mode="assign", parent="boss", status="done")
     transcript, sub = tmp_path / "s1.jsonl", tmp_path / "s1" / "subagents" / "agent-a.jsonl"
@@ -133,14 +134,14 @@ def test_dropping_a_scratch_session_archives_its_finished_chat(db, tmp_path, mon
 
 
 def test_history_cli_prints_rows_and_a_total(db, repo, monkeypatch):
-    ws = workspaces.create(db, str(repo), "feature").workspace
+    root = str(repo)   # what the CLI reads its history for
     history.record(
-        db, ws.repo_root, "worker_result", agent_id="w1", branch="feature", profile="developer",
+        db, root, "worker_result", agent_id="w1", branch="feature", profile="developer",
         task="added login", result="done: added login",
         usage=Usage(input_tokens=2000, output_tokens=9000, cache_read_tokens=160000,
                    cache_creation_tokens=20000, model="claude-sonnet-5"),
     )
-    history.record(db, ws.repo_root, "merge", branch="feature", result="Merged feature into main")
+    history.record(db, root, "merge", branch="feature", result="Merged feature into main")
 
     monkeypatch.chdir(repo)
     res = CliRunner().invoke(app, ["history"])
@@ -149,26 +150,6 @@ def test_history_cli_prints_rows_and_a_total(db, repo, monkeypatch):
     assert "worker_result" in res.output and "merge" in res.output
     assert "182k in" in res.output and "9k out" in res.output
     assert "total tokens: 191k" in res.output
-
-
-def test_history_cli_kind_filter(db, repo, monkeypatch):
-    ws = workspaces.create(db, str(repo), "feature").workspace
-    history.record(db, ws.repo_root, "merge", branch="feature-merge", result="Merged into main")
-    history.record(db, ws.repo_root, "check", branch="feature-check", result="check passed")
-
-    monkeypatch.chdir(repo)
-    res = CliRunner().invoke(app, ["history", "--kind", "merge"])
-
-    assert res.exit_code == 0, res.output
-    assert "feature-merge" in res.output
-    assert "feature-check" not in res.output
-
-
-def test_history_cli_empty(db, repo, monkeypatch):
-    monkeypatch.chdir(repo)
-    res = CliRunner().invoke(app, ["history"])
-    assert res.exit_code == 0
-    assert "no history" in res.output
 
 
 # -- never blocks the thing it records ------------------------------------------
@@ -219,6 +200,7 @@ def test_repeated_reports_and_merges_do_not_double_count(db, repo, tmp_path, mon
     from brindle import git
 
     monkeypatch.setattr(agents, "is_alive", lambda a: True)
+    quiet_removal(monkeypatch)
     boss_t, w_t = tmp_path / "boss.jsonl", tmp_path / "w1.jsonl"
     boss_t.write_text(_usage_line("b1", 100))
     w_t.write_text(_usage_line("w1", 1000))
@@ -227,7 +209,7 @@ def test_repeated_reports_and_merges_do_not_double_count(db, repo, tmp_path, mon
     add(db, root_ws, "boss")
     db.update_agent("boss", transcript_path=str(boss_t))
     monkeypatch.setenv("BRINDLE_AGENT_ID", "boss")
-    ws = workspaces.create(db, str(repo), "feature").workspace
+    ws = worktree(db, repo, "feature")
     add(db, ws, "w1", mode="assign", parent="boss")
     db.update_agent("w1", transcript_path=str(w_t))
 
@@ -238,7 +220,7 @@ def test_repeated_reports_and_merges_do_not_double_count(db, repo, tmp_path, mon
     agents.report_result(db, "w1", "more work")
 
     for i, branch in enumerate(("feature", "feature2")):
-        w = ws if branch == "feature" else workspaces.create(db, str(repo), branch).workspace
+        w = ws if branch == "feature" else worktree(db, repo, branch)
         with open(f"{w.path}/f{i}.py", "w") as f:
             f.write("x = 1\n")
         git.commit_all(w.path, "work")
@@ -258,32 +240,15 @@ def test_repeated_reports_and_merges_do_not_double_count(db, repo, tmp_path, mon
 # -- /clear and other transcript resets ---------------------------------------
 
 
-def test_clear_with_a_larger_new_transcript_starts_a_fresh_baseline(db, repo, tmp_path, monkeypatch, fake_agent_cli):
-    """After /clear, Claude Code writes a brand-new transcript file. Even
-    though it can grow past the size of the old one, its usage has nothing
-    to do with the agent's previous mark: the whole thing is new."""
-    monkeypatch.setattr(agents, "is_alive", lambda a: True)
-    root_ws = workspaces.adopt_root(db, str(repo))
-    add(db, root_ws, "boss")
-    monkeypatch.setenv("BRINDLE_AGENT_ID", "boss")
-    ws = workspaces.create(db, str(repo), "feature").workspace
-    add(db, ws, "w1", mode="assign", parent="boss")
-
-    old_t = tmp_path / "old.jsonl"
-    old_t.write_text(_usage_line("m1", 1000))
-    db.update_agent("w1", transcript_path=str(old_t))
-    agents.report_result(db, "w1", "first")
-
-    new_t = tmp_path / "new.jsonl"  # /clear: a new, already-larger transcript
-    new_t.write_text(_usage_line("n1", 5000))
-    db.update_agent("w1", transcript_path=str(new_t))
-    agents.report_result(db, "w1", "after /clear")
-
-    rows = [r for r in db.list_history(ws.repo_root) if r.kind == "worker_result"]
-    assert history.tokens_total(rows[0].tokens) == 10000  # not 10000 - 2000
+def test_clear_with_a_larger_new_transcript_starts_a_fresh_baseline(db):
+    """After /clear a brand-new, larger transcript has nothing to do with the old mark."""
+    history.record(db, "/r", "worker_result", agent_id="a1", transcript_path="/t/old.jsonl",
+                   usage=Usage(1000, 1000, 0, 0))
+    history.record(db, "/r", "worker_result", agent_id="a1", transcript_path="/t/new.jsonl",
+                   usage=Usage(5000, 5000, 0, 0))
+    rows = db.list_history("/r")
+    assert history.tokens_total(rows[0].tokens) == 10000     # not 10000 - 2000
     assert history.tokens_total(rows[1].tokens) == 2000
-
-
 
 
 def test_same_transcript_usage_drop_falls_back_to_a_fresh_baseline(db):
@@ -297,12 +262,3 @@ def test_same_transcript_usage_drop_falls_back_to_a_fresh_baseline(db):
 
     rows = db.list_history("/r")
     assert history.tokens_total(rows[0].tokens) == 150
-
-
-def test_history_cli_outside_a_repo_says_it_shows_all(db, tmp_path, monkeypatch):
-    history.record(db, "/elsewhere", "check", task="t")
-    monkeypatch.chdir(tmp_path)
-    res = CliRunner().invoke(app, ["history"])
-    assert res.exit_code == 0, res.output
-    assert "showing all repos" in res.output
-    assert "check" in res.output

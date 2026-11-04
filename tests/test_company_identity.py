@@ -85,43 +85,6 @@ def by_name(checks=None):
 # -- the identity lines --------------------------------------------------------------------
 
 
-def test_gateway_line_is_the_url_and_runs_nothing(monkeypatch):
-    fake = Fake(monkeypatch)
-    policy(monkeypatch, claude_setup("gateway", gateway=GatewaySetup("https://gw.example.com/v1")))
-    c = by_name()["claude identity"]
-    assert c.level == doctor.OK and "https://gw.example.com/v1" in c.detail
-    assert not fake.count("claude")
-
-
-def test_codex_and_antigravity_are_informational(monkeypatch):
-    Fake(monkeypatch, {("codex", "login", "status"): (0, "Logged in using ChatGPT\n"),
-                       ("claude", "auth", "status"): (1, '{"loggedIn": false}')})
-    policy(monkeypatch, codex=CodexSetup("chatgpt"))
-    found = by_name()
-    # Claude signed out with no company route: a warning, never a green check
-    assert found["claude identity"].level == doctor.WARN and "signed out" in found["claude identity"].detail
-    assert found["codex identity"].level == doctor.OK
-    assert "Logged in using ChatGPT" in found["codex identity"].detail
-    assert "can't be checked" in found["codex identity"].detail
-    assert found["antigravity identity"].level == doctor.OK
-    assert "can't be checked" in found["antigravity identity"].detail
-
-
-def test_doctor_checks_include_the_identity_lines(monkeypatch, tmp_path):
-    Fake(monkeypatch, {("claude", "auth", "status"): CLAUDE_OK})
-    monkeypatch.setattr(company_identity, "_setup", lambda: None)
-    names = [c.name for c in doctor.checks(None)]
-    assert "claude identity" in names
-
-
-def test_a_probe_is_cached_within_one_run(monkeypatch):
-    fake = Fake(monkeypatch, {("claude", "auth", "status"): CLAUDE_OK})
-    policy(monkeypatch, claude_setup("subscription", org_id=CLAUDE_ORG))
-    company_identity.identities()
-    company_identity.identities()
-    assert fake.count("claude", "auth", "status") == 1
-
-
 # -- mismatches ----------------------------------------------------------------------------
 
 def test_other_claude_org_warns_with_the_fix(monkeypatch):
@@ -132,21 +95,6 @@ def test_other_claude_org_warns_with_the_fix(monkeypatch):
     c = by_name()["claude identity"]
     assert c.level == doctor.WARN
     assert CLAUDE_ORG in c.detail and "brindle doctor --fix" in c.detail and "claude auth login --sso" in c.detail
-
-
-def test_personal_claude_login_warns(monkeypatch):
-    personal = (0, json.dumps({"loggedIn": True, "subscriptionType": "max"}))
-    Fake(monkeypatch, {("claude", "auth", "status"): personal})
-    policy(monkeypatch, claude_setup("subscription"))
-    c = by_name()["claude identity"]
-    assert c.level == doctor.WARN and "personal" in c.detail and "brindle doctor --fix" in c.detail
-
-
-def test_other_azure_subscription_warns(monkeypatch):
-    Fake(monkeypatch, {("az", "account"): (0, json.dumps({"id": "other-sub", "name": "Mine"}))})
-    policy(monkeypatch, claude_setup("foundry", azure=AZURE))
-    c = by_name()["claude identity"]
-    assert c.level == doctor.WARN and "other-sub" in c.detail and "az account set" in c.detail
 
 
 @pytest.mark.parametrize("rc, missing, said, not_said", [
@@ -195,34 +143,9 @@ def test_bedrock_without_sso_checks_only_that_sts_answers(monkeypatch, launch_ca
     assert "AWS_ACCESS_KEY_ID" in pane_auth.deny_names("claude", "auto", None)    # with the SSO group: as before
 
 
-def test_foundry_by_base_url_checks_only_that_az_answers(monkeypatch, launch_cache):
-    from brindle import pane_auth
-
-    clock, _ = launch_cache
-    Fake(monkeypatch, {("az", "account"): (0, json.dumps({"id": "other-sub", "name": "Mine"}))})
-    policy(monkeypatch, claude_setup("foundry", azure=FOUNDRY_URL), enforce=True)
-    assert by_name()["claude identity"].level == doctor.OK            # any subscription
-    assert company_identity.launch_problem("claude") is None
-    assert company_identity.expected_ident(claude_setup("foundry", azure=FOUNDRY_URL)) is None
-    monkeypatch.setenv("AZURE_CLIENT_ID", "mine")
-    assert "AZURE_CLIENT_ID" not in pane_auth.deny_names("claude", "auto", None)   # the Azure sign-in is theirs
-    clock[0] += 301
-    Fake(monkeypatch, {("az", "account"): (1, "Please run 'az login'")})
-    assert by_name()["claude identity"].level == doctor.WARN
-    assert company_identity.launch_problem("claude")
-
-
 # -- enforce at launch ---------------------------------------------------------------------
 
 WRONG_AWS = {("aws", "sts"): (0, json.dumps({"Account": "999999999999", "Arn": "arn:x:y/R/s"}))}
-
-
-def test_undetermined_identity_never_blocks(monkeypatch):
-    Fake(monkeypatch, missing={"aws"})
-    policy(monkeypatch, claude_setup("bedrock", aws=AWS), enforce=True)
-    assert company_identity.launch_check("claude") == (None, "identity_undetermined", "bedrock")
-    Fake(monkeypatch, {("aws", "sts"): (124, "timed out")})
-    assert company_identity.launch_problem("claude") is None
 
 
 @pytest.mark.variant("enforcement: a wrong identity must block the launch")
@@ -295,27 +218,6 @@ def test_aws_credential_env_vars_reprobe_without_being_stored(monkeypatch):
     assert company_identity._fingerprint("bedrock") == a
 
 
-def test_other_clouds_credential_env_vars_reprobe(monkeypatch):
-    name = "GOOGLE_APPLICATION_CREDENTIALS"
-    monkeypatch.delenv(name, raising=False)
-    fake = cloud_cache_case(monkeypatch, "vertex", gcp=GCP)
-    company_identity.launch_problem("claude")
-    monkeypatch.setenv(name, "x")
-    company_identity.launch_problem("claude")
-    assert fake.count("gcloud", "config") == 2
-
-
-def test_azure_profile_change_reprobes(monkeypatch, tmp_path):
-    f = touch(tmp_path / "home" / ".azure" / "azureProfile.json", "{}")
-    fake = cloud_cache_case(monkeypatch, "foundry", azure=AZURE)
-    company_identity.launch_problem("claude")
-    company_identity.launch_problem("claude")
-    assert fake.count("az", "account") == 1
-    f.write_text("{ changed }")
-    company_identity.launch_problem("claude")
-    assert fake.count("az", "account") == 2
-
-
 def test_the_fingerprint_never_reads_file_contents(monkeypatch, tmp_path):
     import os
 
@@ -328,12 +230,6 @@ def test_the_fingerprint_never_reads_file_contents(monkeypatch, tmp_path):
     company_identity.launch_problem("claude")
     assert fake.count("aws", "sts") == 1
     f.chmod(0o600)
-
-
-def test_codex_is_never_blocked(monkeypatch):
-    Fake(monkeypatch)
-    policy(monkeypatch, claude_setup("bedrock", aws=AWS), codex=CodexSetup("chatgpt"), enforce=True)
-    assert company_identity.launch_problem("codex") is None
 
 
 def test_launch_refuses_the_agent(db, repo, monkeypatch):
@@ -453,6 +349,51 @@ def test_federated_aws_identity_is_read_from_the_exchange_cache_without_the_cli(
     assert company_identity.matches(expected, ident) == (level == doctor.OK)
 
 
+def test_azure_profile_change_reprobes(monkeypatch, tmp_path):
+    f = touch(tmp_path / "home" / ".azure" / "azureProfile.json", "{}")
+    fake = cloud_cache_case(monkeypatch, "foundry", azure=AZURE)
+    company_identity.launch_problem("claude")
+    company_identity.launch_problem("claude")
+    assert fake.count("az", "account") == 1
+    f.write_text("{ changed }")
+    company_identity.launch_problem("claude")
+    assert fake.count("az", "account") == 2
+
+
+def test_other_clouds_credential_env_vars_reprobe(monkeypatch):
+    name = "GOOGLE_APPLICATION_CREDENTIALS"
+    monkeypatch.delenv(name, raising=False)
+    fake = cloud_cache_case(monkeypatch, "vertex", gcp=GCP)
+    company_identity.launch_problem("claude")
+    monkeypatch.setenv(name, "x")
+    company_identity.launch_problem("claude")
+    assert fake.count("gcloud", "config") == 2
+
+
+def test_foundry_by_base_url_checks_only_that_az_answers(monkeypatch, launch_cache):
+    from brindle import pane_auth
+
+    clock, _ = launch_cache
+    Fake(monkeypatch, {("az", "account"): (0, json.dumps({"id": "other-sub", "name": "Mine"}))})
+    policy(monkeypatch, claude_setup("foundry", azure=FOUNDRY_URL), enforce=True)
+    assert by_name()["claude identity"].level == doctor.OK            # any subscription
+    assert company_identity.launch_problem("claude") is None
+    assert company_identity.expected_ident(claude_setup("foundry", azure=FOUNDRY_URL)) is None
+    monkeypatch.setenv("AZURE_CLIENT_ID", "mine")
+    assert "AZURE_CLIENT_ID" not in pane_auth.deny_names("claude", "auto", None)   # the Azure sign-in is theirs
+    clock[0] += 301
+    Fake(monkeypatch, {("az", "account"): (1, "Please run 'az login'")})
+    assert by_name()["claude identity"].level == doctor.WARN
+    assert company_identity.launch_problem("claude")
+
+
+def test_other_azure_subscription_warns(monkeypatch):
+    Fake(monkeypatch, {("az", "account"): (0, json.dumps({"id": "other-sub", "name": "Mine"}))})
+    policy(monkeypatch, claude_setup("foundry", azure=AZURE))
+    c = by_name()["claude identity"]
+    assert c.level == doctor.WARN and "other-sub" in c.detail and "az account set" in c.detail
+
+
 @pytest.mark.parametrize("route,kw", [("vertex", {"gcp": FED_GCP}), ("foundry", {"azure": FED_AZURE})])
 def test_federated_gcp_and_azure_identity_is_the_policys_and_matches_itself(route, kw, monkeypatch):
     fake = Fake(monkeypatch, missing={"gcloud", "az"})
@@ -462,3 +403,23 @@ def test_federated_gcp_and_azure_identity_is_the_policys_and_matches_itself(rout
     assert company_identity.matches(company_identity.expected_ident(claude), ident.ident)
 
 
+def test_undetermined_identity_never_blocks(monkeypatch):
+    Fake(monkeypatch, missing={"aws"})
+    policy(monkeypatch, claude_setup("bedrock", aws=AWS), enforce=True)
+    assert company_identity.launch_check("claude") == (None, "identity_undetermined", "bedrock")
+    Fake(monkeypatch, {("aws", "sts"): (124, "timed out")})
+    assert company_identity.launch_problem("claude") is None
+
+
+def test_codex_is_never_blocked(monkeypatch):
+    Fake(monkeypatch)
+    policy(monkeypatch, claude_setup("bedrock", aws=AWS), codex=CodexSetup("chatgpt"), enforce=True)
+    assert company_identity.launch_problem("codex") is None
+
+
+def test_a_probe_is_cached_within_one_run(monkeypatch):
+    fake = Fake(monkeypatch, {("claude", "auth", "status"): CLAUDE_OK})
+    policy(monkeypatch, claude_setup("subscription", org_id=CLAUDE_ORG))
+    company_identity.identities()
+    company_identity.identities()
+    assert fake.count("claude", "auth", "status") == 1

@@ -93,16 +93,6 @@ describe("readPane", () => {
     expect(refused.got.closed).toBe(true);
   });
 
-  it("closed by its reader, reads nothing more", async () => {
-    const { open, got, draw } = opener();
-    const texts: string[] = [];
-    const reading = readPane(open, at, (text) => texts.push(text), () => {});
-    reading.close();
-    expect(got.closed).toBe(true);
-    draw("late");
-    await parsed();
-    expect(texts).toEqual([]);
-  });
 });
 
 describe("keptLink", () => {

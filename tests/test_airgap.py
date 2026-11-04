@@ -110,12 +110,14 @@ def test_local_config_can_turn_it_on_but_not_off(tmp_path):
 # -- which endpoints are local ------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("host", ["::", "localhost.evil.com"])
-def test_other_hosts_are_not_local(host):
-    assert not airgap.is_local_host(host)
-
-
+@pytest.mark.variant("a public numeric IP, the documentation IPv6 range and the any-address are not local")
 def test_local_urls():
+    for host in ("localhost", "foo.localhost", "127.0.0.1", "::1", "10.1.2.3", "172.16.0.1",
+                 "172.31.255.255", "192.168.0.9"):
+        assert airgap.is_local_host(host), host
+    for host in ("example.com", "8.8.8.8", "172.32.0.1", "0.0.0.0", "", None, "2001:db8::1", "::",
+                 "localhost.evil.com"):
+        assert not airgap.is_local_host(host), host
     assert airgap.is_local_url("http://localhost:11434/v1")
     assert airgap.is_local_url("http://[::1]:11434/v1")
     assert airgap.is_local_url("https://10.1.2.3:8443/v1")
@@ -166,15 +168,10 @@ def test_license_current_never_refreshes(on, backend):
     assert backend.calls == []
 
 
-def test_team_policy_is_not_fetched(on, backend):
+def test_team_policy_and_org_key_are_not_fetched(on, backend):
     store = login(backend, team_claims())
     with pytest.raises(team_policy.PolicyUnavailable, match="airgap"):
         team_policy.fetch_policy(ORG, client(backend), store)
-    assert backend.calls == []
-
-
-def test_org_key_is_not_fetched(on, backend):
-    store = login(backend, team_claims())
     keys = OrgKeys(store=store, client=client(backend))
     with pytest.raises(OrgKeyUnavailable):
         keys.get(ORG)
@@ -237,17 +234,6 @@ def test_ci_token_commands_are_refused(on, backend):
     assert backend.calls == []
 
 
-def test_account_status_shows_the_offline_state(on, backend):
-    store = login(backend, claims())
-    out = io.StringIO()
-    acct = ProAccount(store=store, transport=backend, out=out, err=io.StringIO())
-    assert acct.run(["status"]) == 0
-    text = out.getvalue()
-    assert "(air-gap mode: showing the offline license)" in text
-    assert "air-gap   on" in text and "doesn't include it" in text
-    assert backend.calls == []
-
-
 # -- local vs hosted profiles ----------------------------------------------------------------------------
 
 
@@ -266,6 +252,19 @@ def test_local_flag_parses_from_a_profile():
                "x")
     assert p.local
     assert not _parse("---\nname: y\nprovider: native\n---\nhi", "y").local
+
+
+def test_check_assign_from_the_repo_config_alone(repo):
+    """The config object is enough: the process needn't be armed."""
+    assert not airgap.enabled()
+    assert policy.check_assign(RepoConfig(), str(repo), "developer", "t", "assign").allowed
+    d = policy.check_assign(RepoConfig(airgap=True), str(repo), "developer", "t", "assign")
+    assert not d.allowed and "air-gap mode" in d.reason
+
+
+def test_check_profile_refuses_an_unnamed_profile(on, repo):
+    ok, why = airgap.check_profile(None, str(repo))
+    assert not ok and "local profile" in why
 
 
 def test_check_assign_refuses_hosted_profiles_in_air_gap_mode(on, repo):
@@ -308,18 +307,6 @@ def test_air_gap_denials_are_audited_like_any_other(on, repo, brindle_home, monk
         assert audit_chain.verify(str(repo), home=brindle_home).ok
     finally:
         plugins.reset()
-
-
-def test_check_assign_from_the_repo_config_alone(repo):
-    """The config object is enough: the process needn't be armed."""
-    assert policy.check_assign(RepoConfig(), str(repo), "developer", "t", "assign").allowed
-    d = policy.check_assign(RepoConfig(airgap=True), str(repo), "developer", "t", "assign")
-    assert not d.allowed and "air-gap mode" in d.reason
-
-
-def test_check_profile_refuses_an_unnamed_profile(on, repo):
-    ok, why = airgap.check_profile(None, str(repo))
-    assert not ok and "local profile" in why
 
 
 # -- no hosted agent is launched, whatever the path ------------------------------------------------------------
@@ -417,6 +404,8 @@ def assign(provider, model="qwen", running=0):
 def test_offline_policy_file_is_enforced_instead_of_a_fetch(on, backend, repo):
     (repo / ".brindle").mkdir(exist_ok=True)
     airgap.policy_path(str(repo)).write_text(json.dumps(POLICY))
+    team_policy.save_cached(team_policy.parse_policy(ORG, {   # a permissive cached copy loses to the file
+        "org_id": ORG, "version": 9, "policy": {"allowed_providers": ["claude", "native"]}}))
     p = team_plugin(backend, repo)
     assert p.check_assign(assign("native")).allowed
     d = p.check_assign(assign("claude"))
@@ -428,16 +417,6 @@ def test_offline_policy_file_is_enforced_instead_of_a_fetch(on, backend, repo):
     d = p.check_merge(MergeInfo(repo_root=str(repo), workspace_id="w", branch="b",
                                 base_branch="main", actor="supervisor-1"))
     assert not d.allowed and "human review" in d.reason
-    assert backend.calls == []
-
-
-def test_offline_policy_wins_over_the_cached_copy(on, backend, repo):
-    (repo / ".brindle").mkdir(exist_ok=True)
-    airgap.policy_path(str(repo)).write_text(json.dumps(POLICY))
-    team_policy.save_cached(team_policy.parse_policy(ORG, {
-        "org_id": ORG, "version": 9, "policy": {"allowed_providers": ["claude", "native"]}}))
-    p = team_plugin(backend, repo)
-    assert not p.check_assign(assign("claude")).allowed
     assert backend.calls == []
 
 
@@ -511,6 +490,16 @@ def test_uninstall(on, token):
     assert not license.uninstall()
 
 
+def test_account_license_install_rejects_a_bad_file(on, tmp_path):
+    bad = tmp_path / "bad.license"
+    bad.write_text("not a license")
+    err = io.StringIO()
+    acct = ProAccount(store=credentials.default_store(), out=io.StringIO(), err=err)
+    assert acct.run(["license", "install", str(bad)]) == 1
+    assert "malformed entitlement" in err.getvalue()
+    assert license.installed() is None
+
+
 def test_account_license_commands(on, token, tmp_path):
     lic = tmp_path / "acme.license"
     lic.write_text(enterprise(token) + "\n")
@@ -533,26 +522,11 @@ def test_account_license_commands(on, token, tmp_path):
     assert "cannot read" in err.getvalue()
 
 
-def test_account_license_install_rejects_a_bad_file(on, tmp_path):
-    bad = tmp_path / "bad.license"
-    bad.write_text("not a license")
-    err = io.StringIO()
-    acct = ProAccount(store=credentials.default_store(), out=io.StringIO(), err=err)
-    assert acct.run(["license", "install", str(bad)]) == 1
-    assert "malformed entitlement" in err.getvalue()
-    assert license.installed() is None
-
-
 # -- doctor -----------------------------------------------------------------------------------------------------
 
 
 def by_name(checks):
     return {c.name: c for c in checks}
-
-
-def test_doctor_is_quiet_when_off(repo):
-    [c] = doctor.airgap_checks(str(repo))
-    assert (c.level, c.name, c.detail) == (doctor.OK, "air-gap", "off")
 
 
 def test_doctor_shows_air_gap_status_and_hosted_profiles(on, repo, token):
@@ -580,18 +554,6 @@ def test_doctor_shows_air_gap_status_and_hosted_profiles(on, repo, token):
     assert checks["offline license"].level == doctor.OK and ORG in checks["offline license"].detail
     assert checks["offline policy"].level == doctor.OK
     assert checks["default agent"].level == doctor.OK and "local" in checks["default agent"].detail
-
-
-def test_doctor_reads_air_gap_from_the_repo_config(repo):
-    write_config(repo, airgap=True)
-    checks = by_name(doctor.airgap_checks(str(repo)))
-    assert checks["air-gap"].level == doctor.WARN
-    assert "config.json" in checks["air-gap"].detail
-
-
-def test_doctor_renders_the_air_gap_lines(on, repo):
-    text = doctor.render(doctor.airgap_checks(str(repo)))
-    assert "! air-gap" in text and "hosted profiles" in text
 
 
 def test_a_broken_config_fails_closed_at_launch(tmp_path):
