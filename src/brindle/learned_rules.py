@@ -540,17 +540,12 @@ PACK_DESCRIPTION = "Rules learned from repeated review findings (`brindle rules 
 
 
 def _frontmatter_item(item: str) -> str | None:
-    """``item`` as a frontmatter block-list entry that reads back as exactly
-    ``item`` (see ``profiles._frontmatter``), or None when it can't be
-    written so."""
-    if not item or "\n" in item or "---" in item or item != item.strip():
+    """An item in the reader's inline/block grammar, or None if not one line."""
+    if not item or "\n" in item or "\r" in item or "---" in item or item != item.strip():
         return None
-    from brindle.profiles import _value
-
-    for quoted in (item, f'"{item}"', f"'{item}'"):
-        if _value(quoted) == item:
-            return quoted
-    return None
+    if any(c in item for c in "[],#'\"\\"):
+        return '"' + item.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    return item
 
 
 def _one_line(text: str) -> str:
@@ -560,7 +555,7 @@ def _one_line(text: str) -> str:
 def write_rule(repo_root: str, r: LearnedRule) -> Path:
     """Add ``r`` to learned.md: its text as an entry of the pack's prose, its
     mechanical checks merged into the pack's frontmatter lists."""
-    from brindle.profiles import _frontmatter, _list, learned_pack_path
+    from brindle.profiles import _frontmatter, _list, _without_comment, learned_pack_path
 
     path = learned_pack_path(repo_root)
     old = path.read_bytes().decode("utf-8") if path.is_file() else ""
@@ -594,21 +589,16 @@ def write_rule(repo_root: str, r: LearnedRule) -> Path:
                 # an inline list (`k: [a, b]`): grow it in place, comment and spacing kept
                 body_line = lines[at].rstrip("\r\n")
                 le = lines[at][len(body_line):]
-                note = re.search(r"[ \t]+#.*$", body_line)
-                raw = body_line[:note.start()] if note else body_line
+                prefix, colon, value = body_line.partition(":")
+                raw = prefix + colon + _without_comment(value)
                 main = raw.rstrip()
-                gap = raw[len(main):] + (note.group(0) if note else "")
-                if any("," in i or "]" in i for i in items):
-                    pass                          # can't sit in an inline list: fall to a block
-                elif main.endswith("]"):
+                gap = body_line[len(main):]
+                if value.lstrip().startswith("[") and main.endswith("]"):
                     inner = main[:-1].rstrip()
-                    lines[at] = inner + ("" if inner.endswith("[") else ", ") + ", ".join(items) + "]" + gap + le
-                    continue
-                elif "[" not in main:
+                    padding = main[len(inner):-1]
+                    lines[at] = inner + ("" if inner.endswith("[") else ", ") + ", ".join(items) + padding + "]" + gap + le
+                else:
                     lines[at] = main + ", " + ", ".join(items) + gap + le
-                    continue
-                kept = [q for q in map(_frontmatter_item, _list(meta.get(k)) or []) if q]
-                lines[at:at + 1] = [f"{k}:{gap}{eol}", *(f"  - {i}{eol}" for i in kept + items)]
                 continue
             end = at + 1
             for i in range(at + 1, len(lines)):
