@@ -146,6 +146,28 @@ def test_a_second_accepted_rule_adds_to_the_pack(db, tmp_path, pro):
     assert "Catch specific exceptions" in pack.prompt and "Remove debug prints." in pack.prompt
 
 
+def test_accept_keeps_the_packs_comments(db, tmp_path, pro):
+    root = str(tmp_path)
+    s = suggest_one(db, root, lambda ids: bare_except(ids, deny_deps=["pickle"]))
+    path = learned_pack_path(root)
+    path.parent.mkdir(parents=True)
+    head = ("---\nname: learned\n# why this pack exists\n"
+            "description: mine   # trailing note\n"
+            "# processes we start on purpose\n"
+            "direct_spawn_allowed:\n  - src/spawn.py   # the spawner\n  # and the tmux wrapper\n"
+            "  - src/tmux.py\n"
+            "deny_patterns:\n  - 'print\\('   # no prints\n"
+            "---\n")
+    path.write_text(head + "Intro.\n- old rule\n")
+    learned_rules.accept(db, root, s.key)
+    text = path.read_text()
+    added = "  - except\\s*:\n", "deny_deps:\n  - pickle\n"
+    assert text.replace(added[0], "").replace(added[1], "").startswith(head)
+    assert "  - 'print\\('   # no prints\n" + added[0] in text
+    assert added[1] + "---\n" in text
+    assert text.endswith(f"rule {s.key})\n") and "Intro.\n- old rule\n- Catch" in text
+
+
 def test_a_rejected_rule_is_never_proposed_again(db, tmp_path, pro):
     root = str(tmp_path)
     s = suggest_one(db, root)

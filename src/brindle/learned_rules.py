@@ -563,29 +563,47 @@ def write_rule(repo_root: str, r: LearnedRule) -> Path:
     from brindle.profiles import _frontmatter, _list, learned_pack_path
 
     path = learned_pack_path(repo_root)
-    meta: dict[str, str] = {}
-    body = ""
-    if path.is_file():
-        meta, body = _frontmatter(path.read_text(encoding="utf-8"))
-    lists = {k: list(_list(meta.get(k)) or []) for k in (*CHECK_KEYS, *KEPT_KEYS)}
+    old = path.read_text(encoding="utf-8") if path.is_file() else ""
+    meta, body = _frontmatter(old)
+    lists = {k: list(_list(meta.get(k)) or []) for k in CHECK_KEYS}
+    new: dict[str, list[str]] = {}
     for k, items in checks_of(r).items():
         for item in items:
-            if item not in lists[k] and _frontmatter_item(item) is not None:
-                lists[k].append(item)
-    header = [f"name: {meta.get('name') or 'learned'}",
-              f"description: {meta.get('description') or PACK_DESCRIPTION}"]
-    for k in (*CHECK_KEYS, *KEPT_KEYS):
-        items = [i for i in (_frontmatter_item(x) for x in lists[k]) if i is not None]
-        if items:
-            header.append(f"{k}:")
-            header.extend(f"  - {i}" for i in items)
+            quoted = _frontmatter_item(item)
+            if item not in lists[k] and quoted is not None and quoted not in new.get(k, []):
+                new.setdefault(k, []).append(quoted)
     when = time.strftime("%Y-%m-%d", time.localtime())
     entry = (f"- {_one_line(r.rule)} (learned {when} from {task_count(r)} reviews of "
              f"{r.profile} work: {_one_line(r.title)}; rule {r.key})")
-    body = body.strip()
-    if not body:
-        body = "Rules brindle learned from review findings that kept recurring in this repo:"
-    text = "---\n" + "\n".join(header) + "\n---\n" + body + "\n" + entry + "\n"
+    if meta or old.startswith("---"):
+        # splice into the pack's own text: its comments and layout stay as written
+        m = re.match(r"(---[^\n]*\n)(.*?)(^---[ \t]*$)(.*)", old, re.S | re.M)
+        assert m is not None                      # _frontmatter would have raised
+        opening, header, fence, rest = m.groups()
+        lines = header.splitlines(keepends=True)
+        if lines and not lines[-1].endswith("\n"):
+            lines[-1] += "\n"
+        for k, items in new.items():
+            at = next((i for i, ln in enumerate(lines)
+                       if re.match(rf"{k}[ \t]*:[ \t]*(#.*)?$", ln.rstrip("\n"))), None)
+            if at is None:
+                lines.extend([f"{k}:\n", *(f"  - {i}\n" for i in items)])
+                continue
+            end = at + 1
+            for i in range(at + 1, len(lines)):
+                if re.match(r"\s+-", lines[i]):
+                    end = i + 1
+                elif lines[i].strip() and not lines[i].lstrip().startswith("#"):
+                    break
+            lines[end:end] = [f"  - {i}\n" for i in items]
+        text = opening + "".join(lines) + fence + rest.rstrip() + "\n" + entry + "\n"
+    else:
+        header_lines = ["name: learned",f"description: {PACK_DESCRIPTION}"]
+        for k, items in new.items():
+            header_lines.append(f"{k}:")
+            header_lines.extend(f"  - {i}" for i in items)
+        body = old.strip() or "Rules brindle learned from review findings that kept recurring in this repo:"
+        text = "---\n" + "\n".join(header_lines) + "\n---\n" + body + "\n" + entry + "\n"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
     return path
