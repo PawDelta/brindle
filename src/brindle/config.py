@@ -283,13 +283,45 @@ def _read_shared(root: Path, branch: str | None) -> dict:
     branch or it isn't committed there."""
     path = root / CONFIG_DIR / CONFIG_FILE
     if branch:
-        try:
-            proc = spawn.read(["git", "show", f"{branch}:{CONFIG_DIR}/{CONFIG_FILE}"], cwd=root)
-        except OSError:
-            proc = None
-        if proc is not None and proc.returncode == 0:
-            return _read_json(Path(f"{branch}:{CONFIG_DIR}/{CONFIG_FILE}"), proc.stdout)
+        spec = f"{branch}:{CONFIG_DIR}/{CONFIG_FILE}"
+        text = _committed_text(root, branch)
+        if text is not None:
+            return _read_json(Path(spec), text)
     return _read_json(path)
+
+
+# The committed config text per (repo, commit sha): a commit's content never
+# changes, so a new commit on the branch is simply a new key. Bounded LRU,
+# process-local, locked. None records "no config committed there".
+_COMMITTED: dict[tuple[str, str], str | None] = {}
+_COMMITTED_MAX = 256
+_COMMITTED_LOCK = threading.Lock()
+
+
+def _committed_text(root: Path, branch: str) -> str | None:
+    try:
+        rev = spawn.read(["git", "rev-parse", "--verify", "--quiet", f"{branch}^{{commit}}"], cwd=root)
+    except OSError:
+        return None
+    sha = rev.stdout.strip()
+    if rev.returncode != 0 or not sha:
+        return None
+    key = (str(root), sha)
+    with _COMMITTED_LOCK:
+        if key in _COMMITTED:
+            text = _COMMITTED.pop(key)
+            _COMMITTED[key] = text    # most recently used last
+            return text
+    try:
+        proc = spawn.read(["git", "show", f"{sha}:{CONFIG_DIR}/{CONFIG_FILE}"], cwd=root)
+    except OSError:
+        return None
+    text = proc.stdout if proc.returncode == 0 else None
+    with _COMMITTED_LOCK:
+        _COMMITTED[key] = text
+        while len(_COMMITTED) > _COMMITTED_MAX:
+            _COMMITTED.pop(next(iter(_COMMITTED)))
+    return text
 
 
 def workspace_config(ws, *, session: bool = False) -> RepoConfig:
