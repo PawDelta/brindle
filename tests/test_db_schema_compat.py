@@ -2,6 +2,7 @@ import time
 
 import pytest
 
+from brindle import db as db_module
 from brindle.db import DB, Task, Workspace, _columns
 
 # Columns of every table v0.5.12's schema and migrations declare (frozen from
@@ -140,7 +141,7 @@ def test_task_wait_noted_column_moves_to_task_notes_keeping_claims(tmp_path, mon
 
 
 @pytest.mark.variant("live incident 2026-10-30: an app update added columns and open sessions' inserts failed")
-def test_an_older_engine_writes_and_reads_rows_a_newer_engine_added_columns_to(tmp_path):
+def test_an_older_engine_writes_and_reads_rows_a_newer_engine_added_columns_to(tmp_path, monkeypatch):
     """A newer brindle migrates the shared database while an older one (a
     session's MCP server, say) keeps running against it: every write names its
     columns and every read goes by column name, so the extra columns are no
@@ -151,6 +152,8 @@ def test_an_older_engine_writes_and_reads_rows_a_newer_engine_added_columns_to(t
         newer.conn.execute(f"ALTER TABLE {table} ADD COLUMN from_a_newer_engine TEXT")
     newer.conn.close()
 
+    # Helpers launched from a development worktree use the released engine.
+    monkeypatch.setattr(db_module, "SCHEMA_VERSION", 1)
     db = DB(path)
     ws = Workspace("ws1", "/repo", "w", "worktree", "feat/x", "main", "/repo/w", None, "s", time.time())
     db.add_workspace(ws)
