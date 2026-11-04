@@ -141,6 +141,11 @@ setInterval(() => {
     const pick = a.choice === "deny" ? "No" : "Yes";
     daemon.print(a.agent, `\r\n  ❯ ${pick}\r\n\r\n${a.choice === "deny" ? "● Understood: I'll take screenshots another way." : "● Downloading Chromium 131…\r\n  ⎿  161 MB, ~40s"}\r\n`);
     daemon.publish("agent.status", { agent_id: a.agent, payload: { status: a.choice === "deny" ? "idle" : "processing" } });
+    if (a.choice !== "deny") {
+      // The allowed worker carries on: its download finishes and it goes back to its task, line by line.
+      const after = ["  ⎿  Chromium 131 installed\r\n", "⏺ Bash(node shots/shots.mjs --scene session,inbox)\r\n  ⎿  rendering session-light.png…\r\n", "  ⎿  rendering inbox-light.png…\r\n", "⏺ Update(desktop/shots/README.md)\r\n  ⎿  Updated desktop/shots/README.md with 6 additions\r\n"];
+      after.forEach((text, i) => setTimeout(() => daemon.print(a.agent, `\r\n${text}`), 2500 * (i + 1)));
+    }
   }
 }, 300);
 

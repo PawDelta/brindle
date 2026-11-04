@@ -87,11 +87,11 @@ await at(7);     await snap("worker");
 await click(button(/^Inbox/));                      // every decision in one place
 await at(8.5);   await snap("inbox");
 await click(button(/^Allow once$/));                // a permission answered
-await at(12);
-await click(button(/^Approve$/));                   // a plan approved
-await at(14);    await snap("inbox-answered");
-await click(button(/a7aaa807/));                    // the worker went on
-await at(17.5);
+await at(10.5);  await snap("inbox-answered");
+await click(button(/b31c9f02/));                    // the allowed worker carries on, printing
+await at(16.5);  await snap("second-worker");
+await click(button(/a7aaa807/));                    // while the first is still at work
+await at(19.7);
 await click(button(/sup-42 · supervisor/));
 await at(21.5);  await snap("milestones-green");    // every milestone passed at 20s
 await at(25.5);
