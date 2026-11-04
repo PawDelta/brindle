@@ -51,9 +51,11 @@ def test_a_server_upgraded_under_refuses_tools_once_the_new_engine_migrated_the_
     assert exit.value.exit_code == int(bool(incompatible))
 
 
-def _wire(monkeypatch):
+def _wire(monkeypatch, modern=False):
     """A client's pipes to a server, and the server's (faked) exec of the new
-    install: it records that the process was replaced, as execv would."""
+    install: it records that the process was replaced, as execv would. The
+    client opens as a 2025 one (initialize) or, ``modern``, as Claude Code
+    2.1.318 does (MCP 2026-07-28): discover, then a listen it keeps open."""
     monkeypatch.setattr(upgrade, "preload", lambda: None)
     update = SimpleNamespace(installed=False)
     monkeypatch.setattr(upgrade, "install", SimpleNamespace(changed=lambda: update.installed))
@@ -64,7 +66,10 @@ def _wire(monkeypatch):
     execs = []
     old = mcp_stdio.Connection(to_server, to_client, wants_reload=mcp_server._wants_reload,
                                replace=lambda: execs.append(1) or True)
-    _send(from_client, INIT, {"method": "notifications/initialized"})
+    if modern:
+        _send(from_client, _modern(0, "server/discover"), _modern(**LISTEN))
+    else:
+        _send(from_client, INIT, {"method": "notifications/initialized"})
     return old, update, (to_server, to_client), (from_client, from_server), execs
 
 
@@ -85,15 +90,32 @@ INIT = {"id": 0, "method": "initialize", "params": {
     "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "1"}}}
 
 
-@pytest.mark.parametrize("replacement_knows_the_column", [True, False])
-def test_after_a_schema_bump_the_next_call_goes_to_the_reloaded_server(monkeypatch, replacement_knows_the_column):
+def _modern(id, method, **params):
+    """A request as Claude Code 2.1.318 sends it (MCP 2026-07-28): there is
+    no initialize, every request carries its own envelope."""
+    meta = {"io.modelcontextprotocol/protocolVersion": "2026-07-28",
+            "io.modelcontextprotocol/clientInfo": {"name": "claude-code", "version": "2.1.318"},
+            "io.modelcontextprotocol/clientCapabilities": {}}
+    return {"id": id, "method": method, "params": {**params, "_meta": meta}}
+
+
+# The client's standing request for server events: answered only when the stream ends.
+LISTEN = {"id": "listen:0", "method": "subscriptions/listen", "notifications": {"toolsListChanged": True}}
+
+
+@pytest.mark.parametrize("replacement_knows_the_column, modern", [(True, False), (False, False), (True, True)])
+def test_after_a_schema_bump_the_next_call_goes_to_the_reloaded_server(monkeypatch, replacement_knows_the_column,
+                                                                       modern):
     """The update migrated the database under a session's `brindle mcp`: the
     server execs the installed brindle on the same stdio and that one answers
     the next call, already initialized. It serves the call only if its code
     declares the new schema; a replacement as old as the database's writer
-    refuses, as the old server would have."""
+    refuses, as the old server would have. A modern client's listen stream,
+    open throughout, isn't waited for: it goes on in the new server, which
+    doesn't acknowledge it a second time."""
     monkeypatch.setattr(mcp_server, "_caller", lambda db: (None, SimpleNamespace(repo_root="/repo")))
-    old, update, server_fds, (from_client, from_server), execs = _wire(monkeypatch)
+    old, update, server_fds, (from_client, from_server), execs = _wire(monkeypatch, modern)
+    call = {"id": 1, "method": "tools/call", "params": {"name": "list_repos", "arguments": {}}}
     declared = brindle_db._declared_columns()
     newer = {**declared, "workspaces": declared["workspaces"] | {"from_a_newer_engine"}}
 
@@ -103,8 +125,7 @@ def test_after_a_schema_bump_the_next_call_goes_to_the_reloaded_server(monkeypat
                 answers.extend(await _answers(from_server, 0))
                 update.installed = True
                 DB().conn.execute("ALTER TABLE workspaces ADD COLUMN from_a_newer_engine TEXT NOT NULL")
-                _send(from_client, {"id": 1, "method": "tools/call",
-                                    "params": {"name": "list_repos", "arguments": {}}})
+                _send(from_client, _modern(1, "tools/call", **call["params"]) if modern else call)
                 answers.extend(await _answers(from_server, 1))
                 os.close(from_client)
 
@@ -122,16 +143,27 @@ def test_after_a_schema_bump_the_next_call_goes_to_the_reloaded_server(monkeypat
 
     answers = []
     anyio.run(scenario)
-    assert [a["id"] for a in answers] == [0, 1]     # initialize answered once, by the old server
-    call = answers[1]["result"]
-    refused = bool(call.get("isError")) and "Reconnect" in json.dumps(call)
+    # initialize (or discover) answered once, by the old server; the listen never is
+    assert [a["id"] for a in answers if "id" in a] == [0, 1]
+    os.set_blocking(from_server, False)     # and whatever the new server wrote after
+    try:
+        answers.extend(json.loads(line) for line in os.read(from_server, 65536).splitlines() if line)
+    except BlockingIOError:
+        pass
+    result = next(a for a in answers if a.get("id") == 1)["result"]
+    refused = bool(result.get("isError")) and "Reconnect" in json.dumps(result)
     assert refused is not replacement_knows_the_column
+    acks = [a for a in answers if a.get("method") == "notifications/subscriptions/acknowledged"]
+    assert len(acks) == int(modern)
 
 
-def test_an_idle_server_reloads_once_its_install_changes(monkeypatch):
+@pytest.mark.parametrize("modern", [False, True])
+def test_an_idle_server_reloads_once_its_install_changes(monkeypatch, modern):
     """No call has to come in, and no daemon has to start: an idle server
-    that sees its install change on its next look execs the new one."""
-    old, update, _, (from_client, from_server), execs = _wire(monkeypatch)
+    that sees its install change on its next look execs the new one. A
+    modern client's open listen stream leaves it idle all the same (it never
+    ends), and is handed to the new process."""
+    old, update, _, (from_client, from_server), execs = _wire(monkeypatch, modern)
     next_look = anyio.Event()
     looks = [next_look]     # then none: the server waits for its next look forever
 
@@ -141,7 +173,8 @@ def test_an_idle_server_reloads_once_its_install_changes(monkeypatch):
     async def scenario():
         async with anyio.create_task_group() as tg:
             async def update_lands():
-                await _answers(from_server, 0)      # the session is up, and idle
+                # The session is up, and idle (a modern one: its listen acknowledged).
+                await _answers(from_server, None if modern else 0)
                 update.installed = True
                 next_look.set()
 
@@ -152,7 +185,11 @@ def test_an_idle_server_reloads_once_its_install_changes(monkeypatch):
     anyio.run(scenario)
     assert execs == [1]
     handover = mcp_stdio.take_handover()
-    assert json.loads(handover.initialize)["method"] == "initialize" and handover.initialized
+    if modern:
+        assert handover.initialize is None
+        assert [json.loads(line)["id"] for line in handover.listens] == ["listen:0"]
+    else:
+        assert json.loads(handover.initialize)["method"] == "initialize" and handover.initialized
 
 
 def test_an_update_that_completes_during_a_failed_reload_is_reloaded_onto(monkeypatch):
@@ -185,6 +222,147 @@ def test_an_update_that_completes_during_a_failed_reload_is_reloaded_onto(monkey
 
     anyio.run(scenario)
     assert attempts == ["half-written", "complete"] and old.replaced
+
+
+_WHICH_BUILD = '''
+
+@mcp.tool()
+def which_build(hold: str = "") -> str:
+    """Test only: the install answering. ``hold``: a pair of fifos; say it
+    started on ``hold.started``, then answer once ``hold`` is written."""
+    if hold:
+        started = os.open(hold + ".started", os.O_WRONLY)
+        os.write(started, b"x")
+        os.close(started)
+        with open(hold) as go:
+            go.read()
+    return {build!r}
+'''
+
+
+def _app_install(at, build):
+    """An app's engine at ``at``: its own python (a venv), brindle copied
+    into its site-packages with a ``which_build`` tool answering ``build``,
+    and brindle's dependencies from this environment."""
+    import shutil
+    import sysconfig
+    import venv
+
+    import brindle
+
+    venv.create(at, with_pip=False, symlinks=True)
+    site = next(at.glob("lib/python*/site-packages"))
+    shutil.copytree(os.path.dirname(brindle.__file__), site / "brindle",
+                    ignore=shutil.ignore_patterns("__pycache__"))
+    with open(site / "brindle" / "mcp_server.py", "a") as f:
+        f.write(_WHICH_BUILD.format(build=build))
+    (site / "deps.pth").write_text(sysconfig.get_path("purelib") + "\n")
+    return at
+
+
+class _Client:
+    """Claude Code's end of a stdio MCP server: one connection, never reopened,
+    speaking the 2026-07-28 protocol as Claude Code 2.1.318 does."""
+
+    def __init__(self, argv, cwd, log):
+        import subprocess
+
+        self.proc = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                     stderr=log)
+        self.buf, self.answers, self.frames = b"", {}, []
+
+    def send(self, id, method, **params):
+        _send(self.proc.stdin.fileno(), _modern(id, method, **params))
+        return id
+
+    def answer(self, id, within=90.0):
+        import select
+        import time
+
+        end = time.monotonic() + within
+        while id not in self.answers:
+            left = end - time.monotonic()
+            assert left > 0, f"no answer to {id} (server {'exited' if self.proc.poll() is not None else 'hung'})"
+            if select.select([self.proc.stdout], [], [], left)[0]:
+                chunk = os.read(self.proc.stdout.fileno(), 65536)
+                assert chunk, f"the server closed the connection before answering {id}"
+                *lines, self.buf = (self.buf + chunk).split(b"\n")
+                for line in filter(None, lines):
+                    message = json.loads(line)
+                    self.frames.append(message)
+                    self.answers.setdefault(message.get("id"), message)
+        return self.answers[id]
+
+    def build(self, id, **args):
+        self.send(id, "tools/call", name="which_build", arguments=args)
+        return self.text(id)
+
+    def text(self, id):
+        result = self.answer(id)["result"]
+        assert not result.get("isError"), result
+        return result["content"][0]["text"]
+
+
+@pytest.mark.variant("real incident: the app updater moved the running engine's bundle away mid-session")
+@pytest.mark.parametrize("mid_call, old_deleted", [(False, False), (True, False), (False, True)])
+def test_an_app_update_is_served_by_the_new_install_on_the_same_connection(tmp_path, mid_call, old_deleted):
+    """The app updater renames the running app away (to a tauri_updated_app
+    temp dir, later deleted) and puts the new one at its path. The server a
+    session started from the old app answers the session's next call from
+    the new install, on the same stdio: no reconnect, and no request lost,
+    even one that was being served while the update landed. Claude Code
+    keeps a subscriptions/listen request open for the whole connection: it
+    never ends, so it can't be waited for, and it carries on in the new
+    process (acknowledged once, as the client saw)."""
+    import shutil
+    import stat
+
+    app = tmp_path / "Applications" / "brindle.app"
+    _app_install(app, "old")
+    staged = _app_install(tmp_path / "download" / "brindle.app", "new")
+    moved = tmp_path / "T" / "tauri_updated_appXYZ" / "brindle.app"
+    moved.parent.mkdir(parents=True)
+    log = open(tmp_path / "server.log", "wb")
+    client = _Client([str(app / "bin" / "python"), "-P", "-m", "brindle", "mcp"], tmp_path, log)
+    try:
+        client.send(0, "server/discover")
+        client.answer(0)
+        client.send(**LISTEN)
+        client.send(1, "tools/list")
+        assert "which_build" in [t["name"] for t in client.answer(1)["result"]["tools"]]
+        assert client.build(2) == "old"
+        if mid_call:
+            hold = str(tmp_path / "hold")
+            os.mkfifo(hold)
+            os.mkfifo(hold + ".started")
+            started = os.open(hold + ".started", os.O_RDONLY | os.O_NONBLOCK)
+            os.open(hold + ".started", os.O_WRONLY)     # kept open: no EOF before the tool writes
+            client.send(3, "tools/call", name="which_build", arguments={"hold": hold})
+            import select
+            assert select.select([started], [], [], 60)[0], "the held call never started"
+
+        os.rename(app, moved)       # what the updater does
+        os.rename(staged, app)
+        if old_deleted:
+            shutil.rmtree(moved)
+        assert stat.S_ISDIR(os.stat(app).st_mode)
+
+        if mid_call:
+            client.send(4, "tools/call", name="which_build", arguments={})
+            with open(hold, "w"):
+                pass                # the held call may finish now
+            assert client.text(3) == "old"      # finished where it started
+            assert client.text(4) == "new"
+        else:
+            assert client.build(4) == "new"
+        assert client.build(5) == "new"
+        assert client.proc.poll() is None
+        acks = [f for f in client.frames if f.get("method") == "notifications/subscriptions/acknowledged"]
+        assert len(acks) == 1 and "listen:0" not in client.answers
+    finally:
+        client.proc.stdin.close()
+        client.proc.wait(30)
+        log.close()
 
 
 def test_a_reload_never_execs_an_install_whose_brindle_is_missing(monkeypatch):
