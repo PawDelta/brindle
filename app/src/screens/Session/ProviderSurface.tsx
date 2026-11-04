@@ -87,14 +87,10 @@ interface PaneCheck {
   attempt: number;
   alive: boolean | undefined;
   sessionStatus: string | null | undefined;
-  stopped: boolean;
+  found: AgentDTO;
 }
 
 export function ProviderSurface({ repo, agent: listedAgent, alive, sessionStatus, credentials, recovery }: ProviderSurfaceProps) {
-  // The session list can already know a root paused while its snapshot row still says idle.
-  const agent = listedAgent && sessionStatus && STOPPED.has(sessionStatus)
-    ? { ...listedAgent, status: sessionStatus }
-    : listedAgent;
   const [view, setView] = useState<TerminalView | null>(null);
   const client = useContext(DaemonContext);
   const attempt = recovery.attempt;
@@ -107,12 +103,20 @@ export function ProviderSurface({ repo, agent: listedAgent, alive, sessionStatus
     let current = true;
     const at = { agent: listedAgent, view, attempt, alive, sessionStatus };
     void client.agent(listedAgent.id).then((found) => {
-      if (current) setChecked({ ...at, stopped: STOPPED.has(found.status) });
+      if (current) setChecked({ ...at, found });
     }, () => {});
     return () => { current = false; };
   }, [client, listedAgent, view, attempt, alive, sessionStatus]);
-  const paneGone = checked?.agent === listedAgent && checked?.view === view && checked?.attempt === attempt
-    && checked?.alive === alive && checked?.sessionStatus === sessionStatus && checked.stopped;
+  const currentCheck = checked?.agent === listedAgent && checked?.attempt === attempt
+    && checked?.alive === alive && checked?.sessionStatus === sessionStatus ? checked : null;
+  // Keep the complete refreshed row: a resumed session can have a different pane
+  // even when its status is unchanged. A view failure must not pin the old target.
+  // Once applied, the row also belongs to the fresh view it opens; cleanup above
+  // still discards responses from requests superseded by another view or state.
+  const agent = currentCheck ? currentCheck.found
+    : listedAgent && sessionStatus && STOPPED.has(sessionStatus)
+      ? { ...listedAgent, status: sessionStatus }
+      : listedAgent;
   // What the view of a dead pane's last screen says: why it couldn't open, say.
   const [leftView, setLeftView] = useState<TerminalView | null>(null);
   const [reconnects, setReconnects] = useState(0);
@@ -130,7 +134,7 @@ export function ProviderSurface({ repo, agent: listedAgent, alive, sessionStatus
   const [seen, setSeen] = useState({ lifecycle, attempt });
   if (seen.lifecycle !== lifecycle) {
     setSeen({ lifecycle, attempt });
-    if (view?.kind === "error" || view?.kind === "closed" || checked?.stopped || attempt !== seen.attempt) setView(null);
+    if (view?.kind === "error" || view?.kind === "closed" || (checked && STOPPED.has(checked.found.status)) || attempt !== seen.attempt) setView(null);
     setLeftView(null);
     setShowLeft(finished);
   }
@@ -148,7 +152,7 @@ export function ProviderSurface({ repo, agent: listedAgent, alive, sessionStatus
     opened.current = true;
     if (unshowable) recheck?.();
   }, [unshowable, recheck]);
-  const card = surfaceCard(agent, paneGone ? false : alive, sessionStatus, view, credentials, unshowable);
+  const card = surfaceCard(agent, alive, sessionStatus, view, credentials, unshowable);
   const name = agent ? providerName(agent.provider) : "the session";
   const { resume, busy, notice, preflight, setPreflight } = recovery;
 
