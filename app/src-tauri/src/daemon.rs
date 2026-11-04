@@ -82,8 +82,9 @@ const STOP_GRACE: Duration = Duration::from_secs(2);
 /// How long in all a daemon being replaced has while it says it is pausing:
 /// the app's daemon pauses every session it runs on its way out
 /// (lifecycle.pause_for_exit: their windows closed, their work kept, for the
-/// next daemon to resume; it gives up after lifecycle.PAUSE_BUDGET). As long
-/// as launchd gives a job it stops (its ExitTimeOut).
+/// next daemon to resume; it gives up after lifecycle.PAUSE_BUDGET). This
+/// covers recovery winding down, the pause, and cleanup during replacement;
+/// it is not a wait for the app's exit to stop a healthy launchd daemon.
 #[cfg(not(windows))]
 const PAUSE_GRACE: Duration = Duration::from_secs(20);
 /// The file in brindle's home that names the daemon (its pid) while it
@@ -426,7 +427,8 @@ const APP_PID_ENV: &str = "BRINDLE_APP_PID";
 
 /// The daemons this app process started as its own children in place of
 /// launchd's job (`start_app_child`), by pid: the app stops the one serving
-/// its home when it exits (`stop_app_daemon`), as launchd stops its job.
+/// its home when it exits (`stop_app_daemon`). A launchd daemon is not owned
+/// by this list and survives the app's exit.
 #[cfg(target_os = "macos")]
 static APP_CHILDREN: Mutex<Vec<u32>> = Mutex::new(Vec::new());
 
@@ -845,7 +847,7 @@ fn start_in(
         if let Some(info) = listening {
             if child.owns(info.pid) || usable(&info) {
                 child.release();
-                return Ok(info);
+                return ready_in(home, info);
             }
             if child.adopted() {
                 // An adopted job's daemon, and not one to use: judged as ensure_in judges
@@ -867,7 +869,7 @@ fn start_in(
             // One started by someone else in the meantime makes this one exit: use that, if it may be.
             if let Some(info) = running_in(home) {
                 return match engine.map(|engine| reuse_running(engine, &info)) {
-                    None | Some(Reuse::Use) => Ok(info),
+                    None | Some(Reuse::Use) => ready_in(home, info),
                     Some(Reuse::Conflict(why)) => Err(why),
                     Some(Reuse::Replace) => Err(format!(
                         "another brindle daemon (pid {}) started while this app started its own",
@@ -893,6 +895,18 @@ fn start_in(
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+}
+
+/// A daemon found during startup may already be pausing even though it still
+/// listens and its build matches. Hand control back to normal discovery so
+/// `ensure_in` finishes that shutdown before starting its replacement.
+#[cfg(not(windows))]
+fn ready_in(home: &Path, info: DaemonInfo) -> Result<DaemonInfo, String> {
+    if pausing(home, info.pid) {
+        set_step(home, Some((StartStep::Stopping { pid: info.pid }, Instant::now())));
+        return Err(format!("{ENGINE_STARTING}: the previous daemon (pid {}) is pausing", info.pid));
+    }
+    Ok(info)
 }
 
 /// The running daemon, started first if none runs. An app that carries its
@@ -1960,6 +1974,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(&home).unwrap();
         let mut elapsed = Vec::new();
+        let mut usable = Vec::new();
         // No marker, a stale marker for another PID, and this daemon pausing.
         for marker in [None, Some(0), Some(pid)] {
             if let Some(marker) = marker {
@@ -1968,6 +1983,7 @@ mod tests {
             let began = Instant::now();
             wait_for_predecessor_job(&home, "predecessor", |_| Ok(Some(LaunchdJob { pid: Some(pid), runs: 1, exit: String::new() })));
             elapsed.push(began.elapsed());
+            usable.push(ready_in(&home, engines_own(pid)).is_ok());
         }
         let alive = daemon.try_wait().unwrap().is_none();
         // Once its pause completes, let it exit normally. Another SIGTERM
@@ -1978,6 +1994,7 @@ mod tests {
         }, || pausing(&home, pid)).unwrap();
         assert!(daemon.wait().unwrap().success(), "interrupted an existing pause");
         assert!(alive, "the predecessor daemon must remain available for adoption");
+        assert_eq!(usable, [true, true, false], "a start handed back a daemon still pausing");
         assert!(elapsed[..2].iter().all(|elapsed| *elapsed < STOP_GRACE), "live daemon delayed relaunch by {elapsed:?}");
         assert!(elapsed[2] >= STOP_GRACE && elapsed[2] < STOP_GRACE + STOP_GRACE, "pause wait was not bounded: {elapsed:?}");
         eprintln!("predecessor waits (healthy, stale marker, pausing): {elapsed:?}");

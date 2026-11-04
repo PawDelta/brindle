@@ -8,15 +8,16 @@ daemon exits on SIGTERM, after an upgrade of brindle's install (the app
 starts the new one), and with ``--idle-exit`` once nobody has used it for
 IDLE_SECONDS while no agent runs. It removes its files on the way out.
 
-The app's daemon (``--idle-exit``) is a job of the person's launchd that the
-app loaded, and launchd stops it when the app goes away (quit, force quit,
-restarted into an update); the app replacing an older build's daemon stops
-it the same way. With that job switched off the daemon is the app's own
-child: the app stops it when it exits, and it stops itself once the app has
-gone after a force quit (APP_PID_ENV). On its way out it pauses every session it runs
+The app's daemon (``--idle-exit``) is normally a launchd job that survives
+the app quitting, including a restart into an update. The next app reuses
+it when its build matches, or explicitly stops it before replacing it.
+With that job switched off the daemon is the app's own child: the app
+stops it when it exits, and it stops itself once the app has gone after a
+force quit (APP_PID_ENV). On an actual daemon shutdown it pauses the sessions it runs
 (``pause_for_exit``), as the person's Pause does, saying so meanwhile
 (``say_pausing``: only then does the app wait more than a moment for it to go),
-and the next daemon the app starts resumes them (``resume_after_start``).
+and the next daemon resumes them (``resume_after_start``). Reopening the
+app onto a surviving daemon neither pauses sessions nor consumes a resume record.
 Nothing else holds up its exit (``_run``, ``leave``)."""
 
 from __future__ import annotations
@@ -44,7 +45,7 @@ HOST = "127.0.0.1"
 IDLE_SECONDS = 600.0
 WATCH_INTERVAL = 5.0     # seconds between the idle / upgrade checks
 STOP_GRACE = 5.0         # seconds `daemon stop` waits before SIGKILL
-SHUTDOWN_GRACE = 1.0     # seconds a stopping daemon waits for requests still running (the app kills it at 2)
+SHUTDOWN_GRACE = 1.0     # seconds for requests on shutdown, within the app's replacement budget
 
 log = logging.getLogger(__name__)
 
@@ -230,7 +231,7 @@ def _agents_running() -> bool:
         return True     # can't tell: stay up rather than strand an app
 
 
-RESUME_FILE = "resume-on-start.json"    # the sessions the last app daemon paused on its way out
+RESUME_FILE = "resume-on-start.json"    # sessions from the last daemon shutdown, not the last app quit
 
 
 def _resume_path() -> Path:
@@ -283,8 +284,9 @@ def done_pausing() -> None:
 def pause_for_exit(recovery: Recovery | None = None) -> list[str]:
     """The app's daemon on its way out: every running session on this
     daemon's own tmux server is paused as the person's Pause does
-    (agents.pause: windows closed, work kept, so nothing keeps acting with
-    nobody watching), for the next daemon to bring back (resume_after_start).
+    (agents.pause: windows closed, work kept), for the next daemon to bring
+    back (resume_after_start). An app quitting while this daemon survives
+    does not enter this path.
     A session on another tmux server (a demo's, a test's, another home's
     daemon's) is not this daemon's to pause: its windows aren't reachable from
     here, and its workspace's session name may name some other session here.
@@ -437,7 +439,7 @@ class Recovery:
 
 
 def resume_after_start(recovery: Recovery | None = None) -> list[str]:
-    """Bring back the sessions the last app daemon paused on its way out
+    """Bring back the sessions the previous daemon paused on its way out
     (pause_for_exit), once: the record goes before any is resumed, so one
     that can't come back isn't tried at every start. Only roots still paused
     are resumed (the person may have closed one meanwhile), and only those on
@@ -655,8 +657,8 @@ def serve(*, unix: bool = True, tcp: bool = False, idle_exit: bool = False) -> d
     try:
         _run(run())
     finally:
-        # The app's daemon, once it served: the app has gone (or replaced it), and
-        # what it ran is paused for the next daemon. One that never served
+        # This daemon has stopped (replacement, idle exit, or a child losing
+        # its app): pause for the next daemon. One that never served
         # (its start failed) runs nothing to pause.
         try:
             if idle_exit and server.started:
