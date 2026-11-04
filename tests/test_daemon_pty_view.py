@@ -1,10 +1,12 @@
 import os
 import pty
 import shutil
+import signal
 import socket
 import subprocess
 import sys
 import threading
+import time
 
 import pytest
 from starlette.testclient import TestClient
@@ -63,22 +65,51 @@ def test_a_view_that_cant_open_says_why_and_closes(db):
 
 
 @pytest.mark.variant("the real-tmux test passes whenever something else sizes the window after the switch: this is the ordering it left to chance (a Linux CI flake)")
-def test_taking_the_window_makes_the_client_say_its_size_after_the_switch(monkeypatch):
-    # tmux sizes the window before it marks the switched client latest, so the switch alone
-    # leaves the window at the other client's size (a Linux CI flake): the client's own
-    # resize message, sent after the switch, is what sizes it.
-    steps = []
+@pytest.mark.skipif(not shutil.which("tmux"), reason="needs tmux")
+def test_taking_the_window_holds_when_the_terminal_speaks_right_after_the_switch(db, monkeypatch):
+    # The window is sized to tmux's latest client, and any message from a client (a resize, a
+    # key) makes it latest. The person's terminal sending one right after take()'s switch (the
+    # interleaving behind a Linux CI flake) took the window back, and nothing took it again:
+    # take() ends by making the view's client speak, so it is latest last. No websocket or
+    # crop looks here: nothing else sizes the window.
+    def wait(done):     # a deadline, not a poll count: a window that never resizes fails here
+        end = time.monotonic() + 10.0
+        while not done():
+            assert time.monotonic() < end, _size(window)
+
+    def switch_then_terminal_speaks(server, *args, **kw):
+        out = real(server, *args, **kw)
+        if args[:1] == ("switch-client",):
+            os.kill(other.pid, signal.SIGWINCH)     # its client tells tmux its size
+            wait(lambda: _size(window) == "100x29")
+        return out
+
+    real = pv._tmux
+    monkeypatch.setattr(pv, "_tmux", switch_then_terminal_speaks)
+
+    tmux._tmux("new-session", "-d", "-s", "agent", "-x", "80", "-y", "24", "cat")
+    window = tmux._tmux("display-message", "-p", "-t", "=agent:", "#{window_id}").stdout.strip()
+    view = pv.PtyView.open(tmux.current_server(), window, 60, 20)
+    view.start_reading(lambda data: None)       # drained, as the route does
     master, slave = pty.openpty()
-    proc = type("Live", (), {"pid": 4242, "poll": lambda self: None})()
-    view = pv.PtyView("tmux", ["-L", "x"], "v", proc, master, "/dev/pts/9", (60, 20), pv.Crop())
-    monkeypatch.setattr(pv, "_tmux", lambda *a, **kw: steps.append("switch") or subprocess.CompletedProcess(a, 0))
-    monkeypatch.setattr(pv.os, "kill", lambda pid, sig: steps.append((pid, sig)))
+    pv._set_size(slave, (100, 30), pv.Crop())
+    env = {k: v for k, v in os.environ.items() if k != "TMUX"} | {"TERM": "xterm-256color"}
+    other = None
     try:
+        wait(lambda: _size(window) == "60x20")
+        other = subprocess.Popen([*tmux._argv(tmux.current_server()), "attach", "-t", "=agent"],
+                                 stdin=slave, stdout=slave, stderr=slave, env=env, start_new_session=True)
+        os.write(master, b"typed-in-the-terminal")
+        wait(lambda: _size(window) == "100x29" and "typed-in-the-terminal" in _pane(window))
         view.take()
+        wait(lambda: _size(window) == "60x20")
     finally:
+        if other is not None:
+            other.kill()
+            other.wait()
+        view.close()
         os.close(master)
         os.close(slave)
-    assert steps == ["switch", (4242, pv.signal.SIGWINCH)]
 
 
 def _size(window: str) -> str:
