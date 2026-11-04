@@ -127,6 +127,13 @@ pub fn relaunch<R: Runtime>(app: &AppHandle<R>) {
 /// `EXIT_WAIT`: a kqueue's NOTE_EXIT, not a poll.
 #[cfg(target_os = "macos")]
 pub fn wait_for_exit(pid: u32) {
+    wait_for_exit_with_limit(pid, &EXIT_WAIT);
+}
+
+/// Wait on an exiting process with the caller's bound. Daemon handover uses
+/// a shorter bound than waiting for the old app to release its instance lock.
+#[cfg(target_os = "macos")]
+pub(crate) fn wait_for_exit_with_limit(pid: u32, limit: &libc::timespec) {
     // SAFETY: a kqueue of our own, given one change and one event buffer we own, closed after.
     unsafe {
         let kq = libc::kqueue();
@@ -140,7 +147,7 @@ pub fn wait_for_exit(pid: u32) {
         change.fflags = libc::NOTE_EXIT;
         let mut event: libc::kevent = std::mem::zeroed();
         // A pid already gone fails to register (ESRCH, as an EV_ERROR event or -1): done.
-        libc::kevent(kq, &change, 1, &mut event, 1, &EXIT_WAIT);
+        libc::kevent(kq, &change, 1, &mut event, 1, limit);
         libc::close(kq);
     }
 }

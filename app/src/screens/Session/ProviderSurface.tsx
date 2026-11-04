@@ -20,8 +20,9 @@
    (a tmux too old for the pty view, no window named for it, a browser tab
    with no shell) says so on the card instead. */
 
-import { useEffect, useRef, useState } from "react";
+import { useContext, useEffect, useRef, useState } from "react";
 import type { AgentDTO, InboxItemDTO } from "../../api/schema";
+import { DaemonContext } from "../../api/context";
 import { usePtyViews } from "../../api/ptyView";
 import { Preflight } from "../../components/Preflight";
 import { PtyTerminal, type TerminalView } from "../../components/PtyTerminal";
@@ -36,7 +37,7 @@ export interface ProviderSurfaceProps {
   agent: AgentDTO | null;
   /* Whether its process is alive, from the liveness sweep (undefined: not known yet). */
   alive?: boolean;
-  /* The session's listed state, for a session with no agents to show. */
+  /* The root's listed state; omitted when showing a worker. */
   sessionStatus?: string | null;
   /* A credentials item for this agent: its card says what lapsed. */
   credentials?: InboxItemDTO | null;
@@ -80,8 +81,42 @@ export const NO_SHELL = "Sessions show in the brindle app, through its own tmux:
 /* Why an agent's pane can't be shown when the engine names no window for it. */
 export const NO_WINDOW = "The engine names no tmux window for it.";
 
-export function ProviderSurface({ repo, agent, alive, sessionStatus, credentials, recovery }: ProviderSurfaceProps) {
+interface PaneCheck {
+  agent: AgentDTO;
+  view: TerminalView | null;
+  attempt: number;
+  alive: boolean | undefined;
+  sessionStatus: string | null | undefined;
+  found: AgentDTO;
+}
+
+export function ProviderSurface({ repo, agent: listedAgent, alive, sessionStatus, credentials, recovery }: ProviderSurfaceProps) {
   const [view, setView] = useState<TerminalView | null>(null);
+  const client = useContext(DaemonContext);
+  const attempt = recovery.attempt;
+  const [checked, setChecked] = useState<PaneCheck | null>(null);
+  useEffect(() => {
+    // Check on opening, on state changes, and after a view fails or exits:
+    // a view's exit/error alone cannot distinguish a lost client from a missing pane.
+    // GET agent checks the actual pane; the sessions list only carries the recorded status.
+    if (!client || !listedAgent) return;
+    let current = true;
+    const at = { agent: listedAgent, view, attempt, alive, sessionStatus };
+    void client.agent(listedAgent.id).then((found) => {
+      if (current) setChecked({ ...at, found });
+    }, () => {});
+    return () => { current = false; };
+  }, [client, listedAgent, view, attempt, alive, sessionStatus]);
+  const currentCheck = checked?.agent === listedAgent && checked?.attempt === attempt
+    && checked?.alive === alive && checked?.sessionStatus === sessionStatus ? checked : null;
+  // Keep the complete refreshed row: a resumed session can have a different pane
+  // even when its status is unchanged. A view failure must not pin the old target.
+  // Once applied, the row also belongs to the fresh view it opens; cleanup above
+  // still discards responses from requests superseded by another view or state.
+  const agent = currentCheck ? currentCheck.found
+    : listedAgent && sessionStatus && STOPPED.has(sessionStatus)
+      ? { ...listedAgent, status: sessionStatus }
+      : listedAgent;
   // What the view of a dead pane's last screen says: why it couldn't open, say.
   const [leftView, setLeftView] = useState<TerminalView | null>(null);
   const [reconnects, setReconnects] = useState(0);
@@ -92,10 +127,14 @@ export function ProviderSurface({ repo, agent, alive, sessionStatus, credentials
   /* The continue the surface has seen: a newer one (from either button) is a
      fresh view, and what the last one said is forgotten, so a closed view
      doesn't keep the card up over the chat that came back. */
-  const [seen, setSeen] = useState(recovery.attempt);
-  if (seen !== recovery.attempt) {
-    setSeen(recovery.attempt);
-    setView(null);
+  // A pane can return outside Continue too (another app window or the CLI).
+  // Forget an old stream's failure when its lifecycle changes, without reopening
+  // a healthy terminal on every snapshot refresh.
+  const lifecycle = JSON.stringify([agent?.id, agent?.status, agent?.window, agent?.tmux_server, alive, recovery.attempt]);
+  const [seen, setSeen] = useState({ lifecycle, attempt });
+  if (seen.lifecycle !== lifecycle) {
+    setSeen({ lifecycle, attempt });
+    if (view?.kind === "error" || view?.kind === "closed" || (checked && STOPPED.has(checked.found.status)) || attempt !== seen.attempt) setView(null);
     setLeftView(null);
     setShowLeft(finished);
   }
@@ -211,7 +250,9 @@ export function ProviderSurface({ repo, agent, alive, sessionStatus, credentials
               Nothing of it is left to show: {leftView.message}
             </p>
           )}
-          <PtyTerminal key={`${agent.id}:left:${reconnects}`} at={{ server: agent.tmux_server ?? null, target }} open={ready.open} copy={ready.copy} paste={ready.paste} onView={setLeftView} />
+          {leftView?.kind !== "error" && leftView?.kind !== "closed" && (
+            <PtyTerminal key={`${agent.id}:left:${reconnects}`} at={{ server: agent.tmux_server ?? null, target }} open={ready.open} copy={ready.copy} paste={ready.paste} onView={setLeftView} />
+          )}
         </>
       )}
     </div>
