@@ -34,6 +34,9 @@ function setup(daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj"
 
 const posts = (daemon: FakeDaemon) => daemon.requests.filter((r) => r.method === "POST");
 
+// Start stays disabled until the repo's usable CLIs are known; a click before then does nothing.
+const startButton = () => screen.findByRole("button", { name: "Start" }).then((b) => waitFor(() => expect(b).toHaveProperty("disabled", false)).then(() => b));
+
 describe("NewSession", () => {
   it.each([["claude", false, false], ["antigravity", false, false], ["antigravity", true, false], ["claude", false, true], ["claude", false, "manual"]] as const)("unblocks %s sign-in using unresolved preflight items (API key: %s, cloud: %s)", async (provider, key, cloud) => {
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], workspaces: [root], sessions: [] });
@@ -195,7 +198,7 @@ describe("NewSession", () => {
     // Branch, CLI and session name wait behind Options.
     fireEvent.click(screen.getByRole("button", { name: /Options/ }));
     expect(screen.queryByLabelText("Autopilot")).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Start" }));
+    fireEvent.click(await startButton());
     // sup1 is running here: the engine asks what to do with it first.
     const ask = await screen.findByRole("group", { name: "Session already running" });
     expect(ask.textContent).toContain("sup1");
@@ -214,7 +217,7 @@ describe("NewSession", () => {
     fireEvent.change(await screen.findByLabelText("What should brindle work on?"), { target: { value: "Add a cache" } });
     fireEvent.click(screen.getByRole("button", { name: /Options/ }));
     fireEvent.change(screen.getByLabelText("Session name"), { target: { value: "Cache" } });
-    fireEvent.click(screen.getByRole("button", { name: "Start" }));
+    fireEvent.click(await startButton());
     const ask = await screen.findByRole("group", { name: "Session already running" });
     expect(ask.textContent).toContain("Login fix");
     fireEvent.click(within(ask).getByRole("button", { name: "New session in its own worktree" }));
@@ -269,7 +272,7 @@ describe("NewSession", () => {
       listed.push(daemon.requests.some((r, i) => i > start && r.method === "GET" && r.path === "/sessions"));
     });
     fireEvent.change(await screen.findByLabelText("What should brindle work on?"), { target: { value: "Fix the flaky test" } });
-    fireEvent.click(screen.getByRole("button", { name: "Start" }));
+    fireEvent.click(await startButton());
     await waitFor(() => expect(onOpen).toHaveBeenCalledWith("new1", REPO));
     expect(listed).toEqual([true]);
     stop();
@@ -289,7 +292,7 @@ describe("NewSession", () => {
     });
     const { onOpen, stop } = setup(daemon);
     fireEvent.change(await screen.findByLabelText("What should brindle work on?"), { target: { value: "Add a cache" } });
-    fireEvent.click(screen.getByRole("button", { name: "Start" }));
+    fireEvent.click(await startButton());
     // Refused with 409 {preflight}: no launch, the items as a card, Start disabled until they are done.
     const card = await screen.findByTestId("preflight");
     expect(card.textContent).toContain("Claude Code asks for 2 things first");
