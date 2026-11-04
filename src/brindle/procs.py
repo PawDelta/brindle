@@ -24,6 +24,7 @@ its ancestors are never included.
 
 from __future__ import annotations
 
+import errno
 import logging
 import os
 import re
@@ -476,6 +477,50 @@ def alive(pid: int) -> bool:
     except OSError:   # no /proc (macOS), or it exited just now
         return True
     return stat.rpartition(")")[2].split()[:1] != ["Z"]
+
+
+def runs_replaced_executable(p: Proc) -> bool:
+    """Whether ``p`` runs an executable that is no longer the file at the
+    path its command line names: an update moved or deleted the one it
+    started from and put another there (the app updater moves the old .app
+    away, then deletes it). False when that can't be told."""
+    argv0 = command_line(p).split(" ", 1)[0]
+    try:
+        named = os.stat(argv0)
+    except OSError:
+        return False
+    running = _running_executable(p.pid)
+    if running is None:
+        return False
+    return running is _DELETED or (running.st_dev, running.st_ino) != (named.st_dev, named.st_ino)
+
+
+_DELETED = object()
+
+
+def _running_executable(pid: int):
+    """The identity (os.stat) of the file ``pid`` executes, _DELETED once
+    that file is gone, or None when it can't be told."""
+    if PROC.exists():
+        try:
+            return os.stat(PROC / str(pid) / "exe")     # the running inode, deleted or not
+        except OSError:
+            return None
+    try:
+        import ctypes
+
+        libproc = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+    except OSError:
+        return None
+    path = ctypes.create_string_buffer(4096)
+    ctypes.set_errno(0)
+    if libproc.proc_pidpath(pid, path, len(path)) <= 0:
+        # macOS can't name an executable whose file was deleted.
+        return _DELETED if ctypes.get_errno() == errno.ENOENT else None
+    try:
+        return os.stat(path.value.decode())     # where it is now: moved away, or still in place
+    except (OSError, UnicodeDecodeError):
+        return None
 
 
 def terminate(pids: set[int] | list[int], grace: float = 3.0) -> int:

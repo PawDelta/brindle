@@ -1828,6 +1828,7 @@ def main() -> None:
     from brindle import mcp_stdio
 
     handover = mcp_stdio.take_handover()    # before anything this process starts inherits it
+    unregister = upgrade.register_reloading()   # a newer daemon leaves it to reload itself
     refresher = start_azure_refresher()
     try:
         anyio.run(_serve_stdio, handover)
@@ -1837,5 +1838,6 @@ def main() -> None:
     else:
         _report_server_exit()
     finally:
+        unregister()
         if refresher is not None:
             refresher.stop()
