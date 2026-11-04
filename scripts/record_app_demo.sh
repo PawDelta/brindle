@@ -4,7 +4,8 @@
 #
 #   scripts/record_app_demo.sh [--frames <dir>]   # --frames also keeps sample PNGs
 #
-# Builds app/demo/dist/index.html (npm run build:demo), drives it with
+# Builds app/demo/dist/index.html (npm run build:demo), opens it in its
+# recording mode (?record: a calm inbox, see app/demo/recording.ts), drives it with
 # Playwright's video recording (dark theme; THEME=light for light; the Demo switcher
 # hidden), then converts with ffmpeg using a palette pass. Needs node, npm,
 # ffmpeg and Playwright's Chromium (fetched on first run).
@@ -47,7 +48,8 @@ const context = await browser.newContext({
   recordVideo: { dir: videoDir, size: SIZE },
 });
 const page = await context.newPage();
-await page.goto(pathToFileURL(join(appRoot, "demo/dist/index.html")).href);
+// ?record: the demo's recording mode (app/demo/recording.ts), a calm inbox and panes as the CLIs draw them.
+await page.goto(pathToFileURL(join(appRoot, "demo/dist/index.html")).href + "?record");
 const t0 = Date.now();
 // No Demo switcher, and a small cursor dot so viewers can follow the clicks.
 await page.addStyleTag({
@@ -84,16 +86,18 @@ await page.mouse.move(700, 300);
 await at(2.5);   await snap("session");
 await click(button(/a7aaa807/));                    // a worker, terminal printing
 await at(7);     await snap("worker");
-await click(button(/^Inbox/));                      // every decision in one place
+await click(button(/^Inbox/));                      // what waits on you: a permission and a plan
 await at(8.5);   await snap("inbox");
-await click(button(/^Allow once$/));                // a permission answered
-await at(10.5);  await snap("inbox-answered");
-await click(button(/b31c9f02/));                    // the allowed worker carries on, printing
-await at(16.5);  await snap("second-worker");
-await click(button(/a7aaa807/));                    // while the first is still at work
-await at(19.7);
-await click(button(/sup-42 · supervisor/));
-await at(21.5);  await snap("milestones-green");    // every milestone passed at 20s
+await click(button(/^Allow once$/));                // the permission answered
+await at(9.8);   await snap("inbox-answered");
+await click(button(/^Approve$/));                   // the plan approved: nothing left waiting
+await at(11);    await snap("inbox-empty");
+await click(button(/b31c9f02/));                    // the allowed worker carries on
+await at(15.5);  await snap("second-worker");
+await click(button(/e9a0b6c3/));                    // the plan-first worker starts on its plan
+await at(18.5);  await snap("planned-worker");
+await click(button(/sup-42 · supervisor/));         // the supervisor merges and checks at 20s
+await at(21.5);  await snap("milestones-green");
 await at(25.5);
 await click(button(/^Inbox/));                      // brindle says the branch is ready
 await at(26.5);  await snap("pr-ready");

@@ -149,6 +149,13 @@ export function cliStatus(a: AgentDTO, ws: ReviewFields, alive?: boolean): CliSt
   return { glyph, label, style, needs: false };
 }
 
+/* How many of a session's agents (`members`) are at work, as their rows read
+   (cliStatus busy): the sidebar's session row and the session's header count
+   the same ones, so a reported worker at rest isn't "working" in either. */
+export function workingCount(workspaces: WorkspaceDTO[], members: ReadonlySet<string>, alive: Record<string, boolean>): number {
+  return workspaces.flatMap((ws) => (ws.agents ?? []).filter((a) => members.has(a.id) && cliStatus(a, ws, alive[a.id]).style === "busy")).length;
+}
+
 /* The CLI's colours as the app's tokens: busy is the braid's purple, ok the
    green thread, alert sap orange, bad the fail red, dim the quiet ink. */
 export const CLI_INK: Record<CliStyle, string> = {
