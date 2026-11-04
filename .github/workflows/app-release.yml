@@ -100,10 +100,15 @@ on:
   push:
     tags: ["app-v*"]
     branches: [main]
-    # app.yml's paths: a main push builds staff only when it touches the app.
+    # A main push builds staff when it touches the app or the engine it
+    # bundles (build_engine.sh packs src/ and the engine's project files), so
+    # an engine-only change still reaches the staff channel.
     # GitHub never applies path filters to tag pushes.
     paths:
       - "app/**"
+      - "src/**"
+      - "pyproject.toml"
+      - "uv.lock"
       - "src/brindle/daemon/api-schema.json"
       - ".github/workflows/app*.yml"
       - ".githooks/pre-push"
