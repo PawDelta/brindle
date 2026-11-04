@@ -203,30 +203,40 @@ def _the_app_daemon_pauses_on_its_way_out_and_the_next_start_resumes(db, root, m
     assert lifecycle._read_resume() == [{"id": "chat", "server": here, "paused": True}]
     # It told the app to wait for its pause (daemon.rs stop_daemon), and not past it.
     assert saying == [f"{os.getpid()}\n"] and not lifecycle._pausing_path().exists()
-    # The next app's daemon is stopped while it brings the session back (stopping what the
-    # cull never did): nothing is launched past its pause, and the session is recorded again.
-    reached, recoveries = threading.Event(), []
+    # The next app's daemon is stopped while it brings the session back (having stopped what the
+    # cull never did), its resume held up in agents.resume past the way out's wait for it until
+    # the way out has recorded what is left: nothing is launched past its pause, and the session
+    # is recorded again.
+    reached, recorded, recoveries = threading.Event(), threading.Event(), []
 
     class Recovery(lifecycle.Recovery):
         def __init__(self):
             super().__init__()
             recoveries.append(self)
 
-    def stop_until_stopping(ids, *a, **kw):
-        reached.set()
-        recoveries[-1].stopping.wait(10)
-        events.append(("stop", sorted(ids)))
-        return 0
+    real_record, real_invalidate = lifecycle._record_resume, providers.invalidate_signed_in
 
-    counting_stop = procs.stop
+    def record(entries):
+        written = real_record(entries)
+        recorded.set()
+        return written
+
+    def held_in_flight():
+        if not recorded.is_set():
+            reached.set()
+            recorded.wait(10)
+        real_invalidate()
+
     monkeypatch.setattr(lifecycle, "Recovery", Recovery)
-    monkeypatch.setattr(procs, "stop", stop_until_stopping)
+    monkeypatch.setattr(lifecycle, "RESUME_WAIT", 0)
+    monkeypatch.setattr(lifecycle, "_record_resume", record)
+    monkeypatch.setattr(providers, "invalidate_signed_in", held_in_flight)
     serve(app_gone=False, after=reached)
+    assert recoveries[-1].idle.wait(10), "the held resume never ended"
     assert events == [("stop", ["chat", "helper"])] and db.get_agent("chat").status == "paused"
     assert lifecycle._read_resume() == [{"id": "chat", "server": here, "paused": True}]
     # The start after that brings it back, once, having stopped what the cull never did first.
     events.clear()
-    monkeypatch.setattr(procs, "stop", counting_stop)
     assert lifecycle.resume_after_start() == ["chat"]
     assert events == [("stop", ["chat", "helper"]), ("launch", "chat"), ("launch", "helper")]
 

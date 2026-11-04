@@ -33,6 +33,7 @@ import socket
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 import brindle
@@ -388,22 +389,43 @@ class Recovery:
     daemon may be stopped while it still brings sessions back. Once it is
     stopping, no further session is launched; the way out waits (up to
     RESUME_WAIT) for the one under way and records the rest for the next
-    start, as their record has already been taken."""
+    start, as their record has already been taken.
+
+    Every launch of a resume happens under ``launch_lock`` (launching, the
+    gate agents.resume enters), and stop takes it once ``stopping`` is set:
+    a launch under way finishes before stop returns, and none begins after,
+    however long that resume was held up, so the way out's pause sees every
+    session launched."""
 
     def __init__(self) -> None:
         self.lock = threading.Lock()
+        self.launch_lock = threading.Lock()
         self.stopping = threading.Event()
         self.idle = threading.Event()
         self.idle.set()
         self.pending: list[dict] = []   # the record's entries not yet brought back (or given up on)
 
+    @contextmanager
+    def launching(self):
+        """One launch of a resume: never once the daemon is stopping
+        (agents.Cancelled instead)."""
+        from brindle import agents
+
+        with self.launch_lock:
+            if self.stopping.is_set():
+                raise agents.Cancelled("the daemon is stopping")
+            yield
+
     def stop(self) -> list[dict]:
         """Stop resuming; once the one under way is done (or RESUME_WAIT has
-        passed), the entries still to resume."""
+        passed), the entries still to resume. Nothing is launched after it
+        returns."""
         self.stopping.set()
         if not self.idle.wait(RESUME_WAIT):
             log.warning("brindle: a session still being resumed after %gs on the way out; "
                         "the next start resumes it again", RESUME_WAIT)
+        with self.launch_lock:      # a launch under way ends first; any later one sees stopping
+            pass
         with self.lock:
             return list(self.pending)
 
@@ -454,10 +476,10 @@ def resume_after_start(recovery: Recovery | None = None) -> list[str]:
                             agents.pause(db, root.id, stop_procs=False)
                             entry["paused"] = True
                         procs.stop([a.id for a in agents.tree(db, root.id)], grace=2.0)
-                        if recovery.stopping.is_set():
-                            break       # launched now, it would run on past the way out's pause
-                        agents.resume(db, root.id)
+                        agents.resume(db, root.id, gate=recovery.launching)
                         resumed.append(root.id)
+                    except agents.Cancelled:
+                        break       # launched now, it would run on past the way out's pause: left pending
                     except Exception:  # noqa: BLE001 - the others still come back
                         log.warning("brindle: couldn't resume session %s", root.id, exc_info=True)
                 with recovery.lock:

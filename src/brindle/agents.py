@@ -20,7 +20,7 @@ import subprocess
 import sys
 import time
 import uuid
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 
@@ -120,6 +120,11 @@ class AgentError(RuntimeError):
 
 class StillRunning(AgentError):
     """The wait ended before the worker reported; it's still working."""
+
+
+class Cancelled(Exception):
+    """The caller of resume stopped it (its ``gate``): nothing more of the
+    session is launched."""
 
 
 # Modes whose workers must finish with report_result. A handoff whose caller
@@ -1646,13 +1651,23 @@ def latest_paused(db: DB, ws: Workspace) -> Agent | None:
 
 def resume(db: DB, root_id: str, *, watch_pane: bool = True,
            only: set[str] | list[str] | None = None,
-           recovery_env: dict[str, str] | None = None) -> list[Agent]:
+           recovery_env: dict[str, str] | None = None, gate=None) -> list[Agent]:
     """Bring a paused session back: the supervisor and its paused workers
     restart in their own workspaces. Claude Code picks up its previous
     conversation (--resume); other CLIs restart on their original task.
-    With ``only``, just those agents (if paused) restart."""
+    With ``only``, just those agents (if paused) restart.
+
+    ``gate``: a context manager factory the caller can stop this resume
+    with (lifecycle.Recovery.launching). It is entered before the preflight
+    and around every launch (and the queued tasks the resume starts), and
+    raises Cancelled once stopped: nothing more is launched past that."""
     from brindle import identity_lock, providers
 
+    def gated():
+        return gate() if gate is not None else nullcontext()
+
+    with gated():
+        pass
     providers.invalidate_signed_in()
     from brindle import keystore, secrets
 
@@ -1687,6 +1702,8 @@ def resume(db: DB, root_id: str, *, watch_pane: bool = True,
                   if a.status in ("paused", "failed") and (only is None or a.id in only)]
     for a in candidates:   # all or nothing: a session never half-resumes under another identity
         identity_lock.ensure(a)
+    with gated():
+        pass
     if any(a.id == root_id for a in candidates):
         from brindle import autopilot as pilot
 
@@ -1715,19 +1732,21 @@ def resume(db: DB, root_id: str, *, watch_pane: bool = True,
         if ref and not provider.can_resume(ref):
             ref = None  # nothing was ever said in it: start that agent fresh
         prompt = None if ref else _fresh_start_prompt(db, a, ws, provider, RESUME_NOTE)
-        if a.dismissed_at is not None:
-            db.update_agent(a.id, dismissed_at=None)  # running again: show it again
-        _launch(db, a, ws, prompt=prompt, resume=ref,
-                watch_pane=watch_pane and a.id == root_id, background_setup=True)
+        with gated():
+            if a.dismissed_at is not None:
+                db.update_agent(a.id, dismissed_at=None)  # running again: show it again
+            _launch(db, a, ws, prompt=prompt, resume=ref,
+                    watch_pane=watch_pane and a.id == root_id, background_setup=True)
         resumed.append(a)
     if any(a.id == root_id for a in resumed):
         knowledge.note(db, root_id, knowledge.RESUME)
         from brindle import tasks
 
-        try:
-            tasks.on_resumed(db, root_id)   # queued tasks the pause held back
-        except Exception:  # noqa: BLE001 - a queued task must never keep the session from resuming
-            log.exception("brindle: starting %s's queued tasks on resume failed", root_id)
+        with gated():
+            try:
+                tasks.on_resumed(db, root_id)   # queued tasks the pause held back
+            except Exception:  # noqa: BLE001 - a queued task must never keep the session from resuming
+                log.exception("brindle: starting %s's queued tasks on resume failed", root_id)
     ap = db.get_autopilot(root_id)
     failed_still = [a for a in candidates if db.get_agent(a.id) and db.get_agent(a.id).status == "failed"]
     if ap and ap.state == "blocked" and resumed and not failed_still:
