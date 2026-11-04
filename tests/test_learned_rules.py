@@ -2,6 +2,7 @@
 become suggested rules, accepted into .brindle/rules/learned.md or rejected
 for good. The grouping step's model call is faked throughout."""
 import json
+from itertools import product
 
 import pytest
 
@@ -87,7 +88,7 @@ def test_a_failed_call_leaves_the_findings_for_next_time(db, tmp_path, pro):
 
 def test_unusable_mechanical_checks_are_dropped(db, tmp_path, pro):
     checks = learned_rules.clean_checks({
-        "deny_patterns": ["eval\\(", "(unclosed", "a --- b", "x # y"],
+        "deny_patterns": ["eval\\(", "(unclosed", "a --- b", "x\ry", "x # y"],
         "deny_deps": ["pickle", "pickle"], "require_tests_for": ["src/**/*.py"]})
     assert checks == {"deny_patterns": ["eval\\(", "x # y"], "deny_deps": ["pickle"],
                       "require_tests_for": ["src/**/*.py"]}
@@ -144,6 +145,58 @@ def test_a_second_accepted_rule_adds_to_the_pack(db, tmp_path, pro):
     assert pack.deny_patterns == [r"except\s*:", r"^\s*print\("]
     assert pack.direct_spawn_allowed == ["src/spawn.py"]    # the pack's own list survives
     assert "Catch specific exceptions" in pack.prompt and "Remove debug prints." in pack.prompt
+
+
+PACK_HEAD = ("---\nname: learned\n# why this pack exists\n"
+             "description: mine   # trailing note\n"
+             "# processes we start on purpose\n"
+             "direct_spawn_allowed:\n  - src/spawn.py   # the spawner\n  # and the tmux wrapper\n"
+             "  - src/tmux.py\n"
+             "deny_patterns:\n  - 'print\\('   # no prints\n"
+             "deny_deps: [marshal]  # keep this annotation\n"
+             "\n# end of checks\n---\n")
+
+
+@pytest.mark.parametrize("item", ["x # y", "[a-z]", "a,b", "it's", '"q"', "exec"])
+@pytest.mark.variant("Review probes for quoting and layout preservation, including CRLF")
+def test_accept_keeps_the_packs_comments(db, tmp_path, pro, item):
+    layouts = product(["\n", "\r\n"], ["[eval]", "'eval'", "\n  # old check\n  - eval  # keep"])
+    for i, (eol, seed) in enumerate(layouts):
+        root = str(tmp_path / str(i))
+        s = suggest_one(db, root, lambda ids: bare_except(
+            ids, deny_patterns=[item], deny_deps=["pickle"], require_tests_for=["src/**/*.py"]))
+        path = learned_pack_path(root)
+        path.parent.mkdir(parents=True)
+        start = f"deny_patterns: {seed}" + ("  # keep" if not seed.startswith("\n") else "")
+        head = PACK_HEAD.replace("deny_patterns:\n  - 'print\\('   # no prints", start).replace("\n", eol)
+        path.write_bytes((head + f"Intro.{eol}- old rule{eol}").encode())
+        learned_rules.accept(db, root, s.key)
+        text = path.read_bytes().decode()
+        assert text.endswith(f"rule {s.key}){eol}") and f"Intro.{eol}- old rule{eol}- Catch" in text
+
+        # every original line survives in order; only the inline list line grew, in place
+        grown = f"deny_deps: [marshal, pickle]  # keep this annotation{eol}"
+        expected = [grown if ln.startswith("deny_deps:") else ln for ln in head.splitlines(keepends=True)]
+        if not seed.startswith("\n"):
+            line = next(ln for ln in text.splitlines(keepends=True) if ln.startswith("deny_patterns:"))
+            assert line.startswith(f"deny_patterns: {seed.removesuffix(']')}, ")
+            assert line.endswith(("]" if seed.startswith("[") else "") + f"  # keep{eol}")
+            expected = [line if ln.startswith("deny_patterns:") else ln for ln in expected]
+        got = iter(text.splitlines(keepends=True))
+        assert all(ln in got for ln in expected)
+        assert all(ln[ln.index("#"):] in text for ln in head.splitlines(keepends=True) if "#" in ln)
+        pack = [p for p in load_rule_packs(load_profile("reviewer", root), root) if p.name == "learned"][0]
+        assert pack.deny_deps == ["marshal", "pickle"] and pack.deny_patterns == ["eval", item]
+        assert pack.require_tests_for == ["src/**/*.py"]
+        assert pack.direct_spawn_allowed == ["src/spawn.py", "src/tmux.py"]
+        assert f"require_tests_for:{eol}  - src/**/*.py{eol}---{eol}" in text
+        # Grow the result again: quoted # and brackets must not hide the insertion point.
+        s.checks = json.dumps({"deny_patterns": [item, r'\b"next"']})
+        learned_rules.write_rule(root, s)
+        again = path.read_bytes().decode()
+        pack = [p for p in load_rule_packs(load_profile("reviewer", root), root) if p.name == "learned"][0]
+        assert pack.deny_patterns == ["eval", item, r'\b"next"']
+        assert all(ln[ln.index("#"):] in again for ln in head.splitlines(keepends=True) if "#" in ln)
 
 
 def test_a_rejected_rule_is_never_proposed_again(db, tmp_path, pro):

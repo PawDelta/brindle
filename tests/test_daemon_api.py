@@ -1217,6 +1217,7 @@ def test_daemon_start_raises_file_limit_before_binding(monkeypatch, soft, hard, 
 
 
 def test_account_identity_is_cached_with_orgs_and_fails_soft_offline(brindle_home, monkeypatch):
+    from brindle.daemon import routes_read
     from brindle.pro import auth
     from brindle.pro.account import ProAccount
 
@@ -1236,6 +1237,9 @@ def test_account_identity_is_cached_with_orgs_and_fails_soft_offline(brindle_hom
 
     monkeypatch.setattr(auth, "me", me)
     monkeypatch.setattr(ProAccount, "orgs", orgs)
+    # The cache is also keyed on the CACHE_SECONDS period of the monotonic clock: held
+    # inside one, so a period that ends between two requests can't add a read.
+    monkeypatch.setattr(routes_read, "time", SimpleNamespace(monotonic=lambda: 150.0))
     for _ in range(2):
         code, body = _get("/v1/account", AUTH)
         assert code == 200 and (body["name"], body["email"]) == ("Sam Rivera", "sam@example.com")

@@ -540,17 +540,12 @@ PACK_DESCRIPTION = "Rules learned from repeated review findings (`brindle rules 
 
 
 def _frontmatter_item(item: str) -> str | None:
-    """``item`` as a frontmatter block-list entry that reads back as exactly
-    ``item`` (see ``profiles._frontmatter``), or None when it can't be
-    written so."""
-    if not item or "\n" in item or "---" in item or item != item.strip():
+    """An item in the reader's inline/block grammar, or None if not one line."""
+    if not item or "\n" in item or "\r" in item or "---" in item or item != item.strip():
         return None
-    from brindle.profiles import _value
-
-    for quoted in (item, f'"{item}"', f"'{item}'"):
-        if _value(quoted) == item:
-            return quoted
-    return None
+    if any(c in item for c in "[],#'\"\\"):
+        return '"' + item.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    return item
 
 
 def _one_line(text: str) -> str:
@@ -560,34 +555,68 @@ def _one_line(text: str) -> str:
 def write_rule(repo_root: str, r: LearnedRule) -> Path:
     """Add ``r`` to learned.md: its text as an entry of the pack's prose, its
     mechanical checks merged into the pack's frontmatter lists."""
-    from brindle.profiles import _frontmatter, _list, learned_pack_path
+    from brindle.profiles import _frontmatter, _list, _without_comment, learned_pack_path
 
     path = learned_pack_path(repo_root)
-    meta: dict[str, str] = {}
-    body = ""
-    if path.is_file():
-        meta, body = _frontmatter(path.read_text(encoding="utf-8"))
-    lists = {k: list(_list(meta.get(k)) or []) for k in (*CHECK_KEYS, *KEPT_KEYS)}
+    old = path.read_bytes().decode("utf-8") if path.is_file() else ""
+    eol = "\r\n" if "\r\n" in old else "\n"
+    meta, body = _frontmatter(old.replace("\r\n", "\n"))
+    lists = {k: list(_list(meta.get(k)) or []) for k in CHECK_KEYS}
+    new: dict[str, list[str]] = {}
     for k, items in checks_of(r).items():
         for item in items:
-            if item not in lists[k] and _frontmatter_item(item) is not None:
-                lists[k].append(item)
-    header = [f"name: {meta.get('name') or 'learned'}",
-              f"description: {meta.get('description') or PACK_DESCRIPTION}"]
-    for k in (*CHECK_KEYS, *KEPT_KEYS):
-        items = [i for i in (_frontmatter_item(x) for x in lists[k]) if i is not None]
-        if items:
-            header.append(f"{k}:")
-            header.extend(f"  - {i}" for i in items)
+            quoted = _frontmatter_item(item)
+            if item not in lists[k] and quoted is not None and quoted not in new.get(k, []):
+                new.setdefault(k, []).append(quoted)
     when = time.strftime("%Y-%m-%d", time.localtime())
     entry = (f"- {_one_line(r.rule)} (learned {when} from {task_count(r)} reviews of "
              f"{r.profile} work: {_one_line(r.title)}; rule {r.key})")
-    body = body.strip()
-    if not body:
-        body = "Rules brindle learned from review findings that kept recurring in this repo:"
-    text = "---\n" + "\n".join(header) + "\n---\n" + body + "\n" + entry + "\n"
+    if meta or old.startswith("---"):
+        # splice into the pack's own text: its comments and layout stay as written
+        m = re.match(r"(---[^\n]*\n)(.*?)(^---[ \t\r]*$)(.*)", old, re.S | re.M)
+        assert m is not None                      # _frontmatter would have raised
+        opening, header, fence, rest = m.groups()
+        lines = header.splitlines(keepends=True)
+        if lines and not lines[-1].endswith("\n"):
+            lines[-1] += eol
+        for k, items in new.items():
+            at = next((i for i, ln in enumerate(lines)
+                       if re.match(rf"{k}[ \t]*:", ln)), None)
+            if at is None:
+                lines.extend([f"{k}:{eol}", *(f"  - {i}{eol}" for i in items)])
+                continue
+            if re.match(rf"{k}[ \t]*:[ \t]*(#.*)?\r?\n?$", lines[at]) is None:
+                # an inline list (`k: [a, b]`): grow it in place, comment and spacing kept
+                body_line = lines[at].rstrip("\r\n")
+                le = lines[at][len(body_line):]
+                prefix, colon, value = body_line.partition(":")
+                raw = prefix + colon + _without_comment(value)
+                main = raw.rstrip()
+                gap = body_line[len(main):]
+                if value.lstrip().startswith("[") and main.endswith("]"):
+                    inner = main[:-1].rstrip()
+                    padding = main[len(inner):-1]
+                    lines[at] = inner + ("" if inner.endswith("[") else ", ") + ", ".join(items) + padding + "]" + gap + le
+                else:
+                    lines[at] = main + ", " + ", ".join(items) + gap + le
+                continue
+            end = at + 1
+            for i in range(at + 1, len(lines)):
+                if re.match(r"\s+-", lines[i]):
+                    end = i + 1
+                elif lines[i].strip() and not lines[i].lstrip().startswith("#"):
+                    break
+            lines[end:end] = [f"  - {i}{eol}" for i in items]
+        text = opening + "".join(lines) + fence + rest.rstrip() + eol + entry + eol
+    else:
+        header_lines = ["name: learned", f"description: {PACK_DESCRIPTION}"]
+        for k, items in new.items():
+            header_lines.append(f"{k}:")
+            header_lines.extend(f"  - {i}" for i in items)
+        body = old.strip() or "Rules brindle learned from review findings that kept recurring in this repo:"
+        text = "---\n" + "\n".join(header_lines) + "\n---\n" + body + "\n" + entry + "\n"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
+    path.write_bytes(text.encode("utf-8"))
     return path
 
 
