@@ -1477,6 +1477,40 @@ export class FakeDaemon {
     return null;
   }
 
+  /* service/sessions.supervisor_problem: why a new supervisor chat can't run on
+     `cli` here (the org's policy, turned off, or not installed / signed in), or null. */
+  private supervisorProblem(cli: string): { kind: "policy" | "off" | "setup"; why: string } | null {
+    const refused = this.providerRefusal(cli);
+    if (refused) return { kind: "policy", why: refused };
+    const row = this.data.providers.find((r) => r.provider === cli);
+    if (row?.state === "off") return { kind: "off", why: `${CLI_NAMES[cli] ?? cli} is turned off in brindle` };
+    if (row?.state !== "installed") return { kind: "setup", why: `${CLI_NAMES[cli] ?? cli} isn't installed` };
+    if (row.signed_in === false) return { kind: "setup", why: `${CLI_NAMES[cli] ?? cli} isn't signed in` };
+    return null;
+  }
+
+  /* GET /providers/usable (service/sessions.usable_providers): every CLI a new
+     supervisor session could run on, Claude first. */
+  private usableProviders(): string[] {
+    return LOGIN_PROVIDERS.filter((p) => !this.supervisorProblem(p));
+  }
+
+  /* POST /sessions' choice of CLI (service/sessions.supervisor_provider): the
+     one asked for if usable, else the first usable one; a refusal otherwise,
+     listing the usable ones, and with none usable nothing starts. */
+  private supervisorRefusal(asked: string | null): { provider: string } | Response {
+    const usable = this.usableProviders();
+    const refuse = (code: string, message: string, status: number) => json({ error: { code, message, usable } }, status);
+    const setup = (cli: string, why: string) =>
+      json({ error: { code: "preflight", message: why }, preflight: { provider: cli, ok: false, items: [{ id: `${cli}.install`, kind: "signin", label: why, done: false }] }, usable }, 409);
+    if (!asked) return usable.length ? { provider: usable[0] } : setup("claude", "No CLI a supervisor runs on is usable here");
+    const problem = this.supervisorProblem(asked);
+    if (problem?.kind === "policy") return refuse("forbidden", `${CLI_NAMES[asked] ?? asked} isn't allowed by your organization's policy`, 403);
+    if (problem?.kind === "off") return refuse("turned_off", problem.why, 409);
+    if (problem) return setup(asked, problem.why);
+    return { provider: asked };
+  }
+
   /* service/routing.py RoutingPolicy.refusal: why a worker on `p` would be refused, or null. */
   private refusal(p: RoutingProfile): string | null {
     const policy = this.data.routingPolicy;
@@ -2557,6 +2591,10 @@ export class FakeDaemon {
       }
       return json(d.providers);
     }
+    if (path === "/providers/usable") {
+      const usable = this.usableProviders();
+      return json({ usable, default: usable[0] ?? null });
+    }
     if ((m = path.match(/^\/providers\/([^/]+)\/preflight$/))) return json(this.preflightOf(m[1]));
     if ((m = path.match(/^\/providers\/([^/]+)\/connection$/))) return this.connectionOf(m[1]);
     if ((m = path.match(/^\/sessions\/([^/]+)\/(pr\/readiness|pr\/draft|diff|tree|file)$/))) return this.sessionReviewRead(m[1], m[2], query);
@@ -2697,7 +2735,9 @@ export class FakeDaemon {
       if (typeof body.repo !== "string") return error("invalid", "repo is required", 400);
       const repo = d.repos.find((r) => r.repo_root === body.repo);
       if (!repo) return error("conflict", `${body.repo} is not a git repository`, 409);
-      const refused = this.preflightRefusal(typeof body.provider === "string" && body.provider ? body.provider : "claude");
+      const chosen = this.supervisorRefusal(typeof body.provider === "string" && body.provider ? body.provider : null);
+      if (chosen instanceof Response) return chosen;
+      const refused = this.preflightRefusal(chosen.provider);
       if (refused) return refused;
       const running = d.sessions.filter((s) => this.sessionInRepo(s, repo.repo_root) && !PAUSED.has(s.status) && s.status !== "done");
       let workspace = repo.name;
@@ -2750,7 +2790,7 @@ export class FakeDaemon {
       // (view.agent_entry); without one, the one event is "idle", once the chat is up (as a fresh
       // engine was seen to do for #216: workspace.created at the project's open, then only that).
       const status = prompt ? "processing" : "idle";
-      const agent: AgentDTO = { id: session.id, profile: "supervisor", provider: String(body.provider ?? "claude"), status, mode: "interactive", subagents: [] };
+      const agent: AgentDTO = { id: session.id, profile: "supervisor", provider: chosen.provider, status, mode: "interactive", subagents: [] };
       const place = (a: AgentDTO) => {
         d.workspaces = d.workspaces.map((ws) =>
           ws.id === workspace ? { ...ws, agents: [...(ws.agents ?? []).filter((x) => x.id !== a.id), a] } : ws,

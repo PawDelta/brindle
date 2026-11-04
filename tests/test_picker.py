@@ -6,7 +6,7 @@ import pytest
 import typer
 from typer.testing import CliRunner
 
-from brindle import cli, doctor, picker
+from brindle import cli, doctor, picker, providers
 from brindle.config import supervisor_pick, set_user
 from brindle.policy import allow, deny
 from brindle.pro import license, managed_models, team_policy
@@ -95,6 +95,7 @@ def _resolve(monkeypatch, *, provider=None, pick=None, tty=True, signed_in=(), a
         set_user("supervisor", pick)
     monkeypatch.setattr(cli, "sys", SimpleNamespace(stdin=SimpleNamespace(isatty=lambda: tty)))
     monkeypatch.setattr(doctor, "signed_in_providers", lambda: list(signed_in))
+    monkeypatch.setattr(providers, "unusable", lambda p, env=None: None if p in signed_in else f"{p} is signed out")
     monkeypatch.setattr(team_policy, "access", lambda root: team_policy.Access(org_id=ORG, allowed_providers=allowed))
     asked = []
     monkeypatch.setattr(picker, "pick_supervisor", lambda acc, cur: asked.append(cur) or "antigravity")
@@ -116,10 +117,11 @@ def _resolve(monkeypatch, *, provider=None, pick=None, tty=True, signed_in=(), a
     (dict(pick="codex"), "antigravity", ["codex"], "antigravity"),                  # pick not signed in: ask
     (dict(pick="codex", signed_in=["codex"], allowed=("antigravity",)), "antigravity", ["codex"], "antigravity"),
     (dict(), "antigravity", [None], "antigravity"),                                 # first launch: ask
-    (dict(tty=False), None, [], None),                                              # no terminal: never ask
-    (dict(ci=True), None, [], None),
-    (dict(pick="codex", tty=False, allowed=("codex",)), "codex", [], "codex"),
-    (dict(tty=False, allowed=("codex",)), "refused", [], None),                     # the profile's claude isn't allowed
+    # No terminal: never ask; the default CLI, and with none usable nothing (not the profile's Claude).
+    (dict(tty=False, signed_in=["codex"]), "codex", [], None),
+    (dict(ci=True), "refused", [], None),
+    (dict(pick="codex", tty=False, allowed=("codex",), signed_in=["codex"]), "codex", [], "codex"),
+    (dict(provider="codex", tty=False), "refused", [], None),                       # -s CLI unusable, can't sign in
 ])
 def test_supervisor_launch_resolution(monkeypatch, kw, got, asked, remembered):
     assert _resolve(monkeypatch, **kw) == (got, asked, remembered)

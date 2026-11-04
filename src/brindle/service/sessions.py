@@ -250,15 +250,100 @@ def pause_transferred(db: DB, ws: Workspace) -> list[Note]:
             for aid in scratch.pause_transferred_to(db, ws.repo_root)]
 
 
+# -- which CLI a new supervisor chat runs on ----------------------------------
+#
+# One rule, for the daemon's POST /sessions, its GET /providers/usable and the
+# CLI's `brindle -s`: a CLI is usable when the org's policy allows it, it isn't
+# turned off in brindle, and it is installed and signed in (supervisor_problem).
+# Asked for by name, it runs only if usable (else the start is refused, naming
+# why); asked for by nobody, the first usable one in preference order runs,
+# and with none usable nothing does: never the supervisor profile's own CLI
+# on the strength of nothing else being found.
+
+
+def supervisor_problem(provider: str, repo_root: str | None, acc=None) -> tuple[str, str] | None:
+    """Why a new supervisor chat can't run on ``provider`` here, as (kind,
+    why): "policy" (the org's policy doesn't allow it), "off" (turned off in
+    brindle) or "setup" (not installed or not signed in, which the preflight's
+    items fix); None when it is usable. ``acc``: the person's team_policy
+    access, when the caller has it already."""
+    from brindle import providers, providers_install
+    from brindle.pro import team_policy
+
+    acc = acc if acc is not None else team_policy.access(repo_root)
+    if why := acc.refusal(provider):
+        return "policy", why
+    if providers_install.turned_off(provider):
+        return "off", f"{cli_name(provider)} is turned off in brindle"
+    if why := providers.unusable(provider):
+        return "setup", why
+    return None
+
+
+def cli_name(provider: str) -> str:
+    from brindle.pro.team_policy import CLI_NAMES
+
+    return CLI_NAMES.get(provider, provider)
+
+
+def _usable(repo_root: str | None):
+    """The usable supervisor CLIs (see supervisor_problem), lazily, in
+    preference order: the owner's configured supervisor choice (in a repo),
+    the person's remembered pick, the supervisor profile's own, Claude, then
+    the rest."""
+    from brindle.config import supervisor_pick
+    from brindle.pro import team_policy
+    from brindle.profiles import ProfileError, load_profile
+
+    acc = team_policy.access(repo_root)
+    # The owner's choice is judged with its own profile's env (agents.supervisor_choice).
+    choice = agents.supervisor_choice(repo_root) if repo_root else None
+    chosen = choice.provider if choice is not None and acc.allows(choice.provider) else None
+    if chosen:
+        yield chosen
+    try:
+        own = load_profile(agents.SUPERVISOR, repo_root).provider
+    except (KeyError, ProfileError):
+        own = None
+    for p in dict.fromkeys((supervisor_pick(), own, "claude", *team_policy.CLI_NAMES)):
+        if p in team_policy.CLI_NAMES and p != chosen and supervisor_problem(p, repo_root, acc) is None:
+            yield p
+
+
+def usable_providers(repo_root: str | None) -> list[str]:
+    """Every CLI a new supervisor chat here could run on, in preference order."""
+    return list(_usable(repo_root))
+
+
+def default_provider(repo_root: str | None) -> str | None:
+    """The CLI a start with none asked for runs on; None when none is usable."""
+    return next(_usable(repo_root), None)
+
+
 def supervisor_provider(repo_root: str, provider: str | None = None) -> str | None:
-    """The provider a new supervisor chat runs on: ``provider`` if given, else
-    the owner's ``supervisor_profile`` (then ``supervisor_fallbacks``, in
-    order), the first that exists, the org's policy allows and can run here;
-    None when none is set or none can (the supervisor profile's own then)."""
-    if provider:
+    """The provider a new supervisor chat runs on: ``provider`` if given and
+    usable here (a ServiceError naming why when the org's policy doesn't allow
+    it or it's turned off; one only installing or signing in fixes is left to
+    the preflight, which lists what to do), else default_provider: None when
+    no CLI is usable here."""
+    if not provider:
+        return default_provider(repo_root)
+    problem = supervisor_problem(provider, repo_root)
+    if problem is None or problem[0] == "setup":
         return provider
-    choice = agents.supervisor_choice(repo_root)
-    return choice.provider if choice else None
+    kind, why = problem
+    usable = usable_providers(repo_root)
+    if kind == "policy":
+        raise ServiceError("forbidden", f"{cli_name(provider)} isn't allowed by your organization's policy",
+                           403, reason=why, usable=usable)
+    raise ServiceError("turned_off", why, 409, usable=usable)
+
+
+def no_usable_provider() -> ServiceError:
+    """The refusal of a start when no CLI is usable and nothing the person
+    could install or sign in to would make one so."""
+    return ServiceError("no_provider", "No CLI a supervisor runs on is installed, signed in, turned on "
+                        "and allowed by your organization's policy here", 409, usable=[])
 
 
 def launch(db: DB, ws: Workspace, *, provider: str | None = None, prompt: str | None = None,
@@ -287,6 +372,8 @@ def start(db: DB, repo_root: str, *, provider: str | None = None, prompt: str | 
         ws, more = tidy_branch(db, got.workspace)
         notes = got.notes + more
     provider = supervisor_provider(ws.repo_root, provider)
+    if provider is None:
+        raise no_usable_provider()
     problems = preflight(agents.SUPERVISOR, provider, ws.repo_root)
     if problems:
         raise ServiceError("unavailable", "; ".join(problems), 503)
