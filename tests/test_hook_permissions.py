@@ -213,6 +213,22 @@ def test_plan_first_agents_hook_edit_tools_too():
     assert launch_matcher(plan_first=True) == "Bash|Edit|Write|NotebookEdit"
 
 
+def test_worker_file_tools_are_denied_the_credential_stores():
+    """A worker's Read and Edit are denied every store its shell commands are
+    (the hook denies `cat ~/.ssh/x`; Read must not print it instead); an
+    interactive pane, a person's own chat, keeps Claude Code's own rules."""
+    from brindle.daemon import lifecycle
+
+    def settings(mode):
+        argv = ClaudeCode().command(LaunchContext("abc", load_profile("developer"), "go", mode=mode))
+        return json.loads(argv[argv.index("--settings") + 1])
+
+    denied = set(settings("assign")["permissions"]["deny"])
+    assert {"Read(~/.ssh)", "Read(~/.ssh/**)", "Edit(~/.aws/**)", "Read(~/.docker/config.json)",
+            f"Read(/{lifecycle.info_path()})", f"Edit(/{lifecycle.info_path().parent / 'pro'}/**)"} <= denied
+    assert "permissions" not in settings("interactive")
+
+
 def test_with_the_policy_on_the_hook_sees_every_tool_it_rules_on(db, ws):
     """The policy's deny or ask on a file, fetch or MCP tool reaches Claude
     Code only through the PreToolUse hook, so a launch with the policy on

@@ -75,6 +75,7 @@ rule on its own: a pattern approved at least SUGGEST_AFTER times is shown by
 from __future__ import annotations
 
 import fnmatch
+import functools
 import glob
 import hashlib
 import json
@@ -2315,32 +2316,113 @@ def _secret_name(name: str) -> bool:
 
 
 _HOME_REFERENCE = re.compile(r"\$\{HOME\}|\$HOME(?![A-Za-z0-9_])")
-# Key and token stores: a program reading under one prints credentials.
-_CREDENTIAL_DIRS = (".ssh", ".gnupg", ".config")
+# Key and token stores under a home: a command touching one (reading, copying,
+# archiving, uploading it) can leak credentials, whatever program does it; the
+# set Codex's sandbox denies (providers.CODEX_DENIED_READS) plus brindle's
+# own secrets (_brindle_secret_paths).
+_CREDENTIAL_DIRS = (".ssh", ".gnupg", ".aws", ".config")
+_CREDENTIAL_FILES = (".netrc", ".npmrc", ".git-credentials", ".docker/config.json")
+# Another account's home, whose stores are as secret as this one's.
+_OTHER_HOME = re.compile(r"^(?:/Users/[^/]+|/home/[^/]+|/var/root|/root)(?=/|$)")
+# What may touch a credential path: a listing, an existence or size test, metadata.
+_HARMLESS_CHECKS = frozenset({"ls", "test", "[", "[[", "stat"})
+# An option that makes a command print a secret it would otherwise keep
+# (gh auth status --show-token, aws ssm get-parameter --with-decryption).
+_SECRET_FLAG = re.compile(r"^--?(?:show|reveal|print|include|dump|export)-?"
+                          r"(?:tokens?|secrets?|passwords?|passwd|keys?|credentials?)(?:[-=]|$)"
+                          r"|^--with-decryption$", re.I)
+
+
+def _brindle_secret_paths() -> list[str]:
+    """brindle's own secrets on disk: the daemon's token, its key store, Pro's
+    credentials, and the Codex sign-in it keeps (the Codex sandbox's denies,
+    providers._codex_denied_reads)."""
+    from brindle import keystore, provider_homes
+    from brindle.daemon import lifecycle
+    from brindle.pro import credentials
+
+    paths = [lifecycle.info_path(), brindle_home() / keystore.KEYS_SERVICE, credentials.file_store_dir(),
+             provider_homes.source("codex") / "auth.json"]
+    if (own := provider_homes.home("codex")) is not None:
+        paths.append(own / "auth.json")
+    return [os.path.normpath(str(p)) for p in paths]
+
+
+def credential_paths() -> list[str]:
+    """Every credential store a worker may not touch, for a CLI's own file
+    rules (a Claude worker's Read/Edit denies): ``~/``-spelled stores and
+    brindle's own secrets' absolute paths."""
+    stores = ["~/.ssh", "~/.gnupg", "~/.aws", "~/.npmrc", "~/.netrc", "~/.git-credentials",
+              "~/.docker/config.json", "~/.config/gh", "~/.config/gcloud"]
+    return [*stores, *_brindle_secret_paths()]
+
+
+def _credential_store(rel: str) -> bool:
+    """Whether ``rel``, a path relative to a home, is or is under a credential store."""
+    rel = rel.rstrip("/")
+    return rel in _CREDENTIAL_FILES or any(rel == d or rel.startswith(d + "/") for d in _CREDENTIAL_DIRS)
 
 
 def _credential_file(req: Request, part: ShellPart, name: str) -> bool:
     """Recognizable credential stores, including patterns and uncertain cwd reads."""
     home = os.path.expanduser("~")
     # The credential scan keeps a word as written: quotes in place, $HOME unexpanded.
-    name = os.path.expanduser(_HOME_REFERENCE.sub(lambda _: home, name.replace('"', "").replace("'", "")))
+    written = _HOME_REFERENCE.sub(lambda _: home, name.replace('"', "").replace("'", ""))
+    name = os.path.expanduser(written)
+    if name.startswith("~"):    # ~user, for a user this host doesn't know: still a home
+        return _credential_store(name.partition("/")[2])
     path = os.path.normpath(os.path.join(part.cwd or "", name))
     if fnmatch.fnmatch(path, "/proc/*/environ") or part.cwd is None and name == "environ":
         return True
-    if (path in (f"{home}/.netrc", f"{home}/.npmrc", f"{home}/.git-credentials", f"{home}/.docker/config.json")
-            or any(path == f"{home}/{d}" or path.startswith(f"{home}/{d}/") for d in _CREDENTIAL_DIRS)):
+    if any(path == p or path.startswith(p + "/") for p in _brindle_secret_paths()):
         return True
-    if path.startswith(f"{home}/.aws/") and fnmatch.fnmatch("credentials", os.path.basename(path)):
-        return True
+    if path == home or path.startswith(home + "/"):
+        return _credential_store(path[len(home) + 1:])
+    if other := _OTHER_HOME.match(path):
+        return _credential_store(path[other.end() + 1:])
     return (os.path.basename(path) == ".env"
             and (part.cwd is None or not req.worktree or _inside(path, req.worktree) is None))
+
+
+def _argument_paths(word: str) -> list[str]:
+    """The paths an argument may name: itself, and what follows an ``@`` (curl
+    -d @file, -F name=@file) or an ``=`` (--upload-file=file, if=file)."""
+    paths = [word]
+    if "=" in word:
+        paths.append(word.partition("=")[2])
+    if "@" in word:
+        paths.append(word.partition("@")[2])
+    return paths
+
+
+def _touches_credentials(req: Request, part: ShellPart, words: list[str]) -> bool:
+    """Whether a command names a credential store in any argument or redirection."""
+    operands = [*words[1:], *part.written[1:], *part.reads, *part.writes]
+    return any(_credential_file(req, part, path) for word in operands for path in _argument_paths(word))
 
 
 _INTERPRETERS = frozenset({"python", "pypy", "node", "ruby", "perl", "php", "osascript", "deno", "bun", "lua",
                            "Rscript", "irb", "swift"})
 # A credential store named in an interpreter's inline code (_credential_file's, as text).
-_CREDENTIAL_TEXT = re.compile(r"\.aws\W+credentials|\.npmrc|\.netrc|\.git-credentials|\.docker\W+config\.json"
+_CREDENTIAL_TEXT = re.compile(r"\.aws\b|\.npmrc|\.netrc|\.git-credentials|\.docker\W+config\.json"
                               r"|\.ssh\b|\.gnupg\b|\.config\W+(?:gh|gcloud)\b|/environ\b")
+# A credential path as written anywhere in a command (a loop's word list, an
+# interpreter's string, a script the splitter can't read): under a home,
+# spelled with a tilde, $HOME or the home's path.
+_CREDENTIAL_PATH_TEXT = (
+    r"(?:~[A-Za-z0-9_.-]*|\$\{HOME\}|\$HOME|/Users/[^/\s'\"]+|/home/[^/\s'\"]+|/var/root|/root|%s)"
+    r"/(?:\.ssh|\.gnupg|\.aws|\.npmrc|\.netrc|\.git-credentials|\.docker/config\.json|\.config/gh|\.config/gcloud)"
+    r"(?![A-Za-z0-9_.-])|/proc/[^/\s]*/environ\b")
+
+
+@functools.lru_cache(maxsize=4)
+def _credential_path_text(home: str) -> re.Pattern:
+    return re.compile(_CREDENTIAL_PATH_TEXT % re.escape(home))
+
+
+def _mentions_credentials(command: str) -> bool:
+    return (bool(_credential_path_text(os.path.expanduser("~")).search(command))
+            or any(re.search(re.escape(p) + r"(?![A-Za-z0-9_.-])", command) for p in _brindle_secret_paths()))
 
 
 def _credential_options(args: list[str], valued: set[str]) -> tuple[list[str], set[str]]:
@@ -2371,16 +2453,17 @@ def _credential_options(args: list[str], valued: set[str]) -> tuple[list[str], s
 
 # Credential-printing command paths, with each CLI's options that take a value and those that don't.
 _CLI_CREDENTIALS = {
-    "gh": (("auth", "token"),
+    "gh": ((("auth", "token"),),
            {"-R", "--repo", "-h", "--hostname", "-u", "--user"},
-           {"--help", "--secure-storage", "--insecure-storage"}),
-    "gcloud": (("auth", "print-access-token"),
+           {"--help", "--secure-storage", "--insecure-storage", "-t", "--show-token", "-a", "--active"}),
+    "gcloud": ((("auth", "print-access-token"), ("auth", "print-identity-token"),
+                ("auth", "application-default", "print-access-token")),
                {"--project", "--account", "--configuration", "--billing-project", "--impersonate-service-account",
                 "--format", "--verbosity", "--flags-file", "--access-token-file", "--trace-token", "--lifetime",
                 "--filter", "--limit", "--page-size", "--sort-by", "--scopes", "--audiences"},
                {"-q", "--quiet", "--log-http", "--no-log-http", "--user-output-enabled",
                 "--no-user-output-enabled", "-h", "--help"}),
-    "aws": (("configure", "export-credentials"),
+    "aws": ((("configure", "export-credentials"),),
             {"--profile", "--region", "--endpoint-url", "--output", "--query", "--color", "--ca-bundle",
              "--cli-binary-format", "--format", "--cli-read-timeout",
              "--cli-connect-timeout"},
@@ -2495,8 +2578,12 @@ def _credential_words(req: Request, part: ShellPart, words: list[str], depth: in
                 break
         return (program == "env" and index >= len(args)
                 or _credential_words(req, part, args[index:], depth + 1, references[index + 1:]))
-    if program in ("sh", "bash", "zsh", "dash", "ksh"):
-        return _credential_shell(req, part, args, depth)
+    if program in ("sh", "bash", "zsh", "dash", "ksh") and _credential_shell(req, part, args, depth):
+        return True
+    if program in _HARMLESS_CHECKS:
+        return False    # a listing or a metadata check reveals no content
+    if any(_SECRET_FLAG.match(arg) for arg in args) or _touches_credentials(req, part, words):
+        return True
     if program == "printenv":
         if any(a in ("--help", "--version") for a in args):
             return False
@@ -2537,8 +2624,12 @@ def _credential_words(req: Request, part: ShellPart, words: list[str], depth: in
             index += 1
         return False
     if program in _CLI_CREDENTIALS:
-        target, valued, flags = _CLI_CREDENTIALS[program]
-        return _command_path(args, valued, flags, target)
+        targets, valued, flags = _CLI_CREDENTIALS[program]
+        if any(_command_path(args, valued, flags, target) for target in targets):
+            return True
+        # gh auth status -t is --show-token (the long form _SECRET_FLAG catches anywhere).
+        return (program == "gh" and "-t" in _credential_options(args, valued)[1]
+                and _command_path(args, valued, flags, ("auth", "status")))
     if program == "security":
         operands, options = _credential_options(args, {"-a", "-c", "-C", "-d", "-D", "-j", "-l", "-p", "-s", "-t"})
         return (bool(operands) and operands[0] in ("find-generic-password", "find-internet-password")
@@ -2566,10 +2657,18 @@ def prints_credentials(req: Request, depth: int = 0) -> bool:
     try:
         reader.read(req.command)
     except ValueError:
+        reader.unread = True
         fallback = _PartReader(req, credential_scan=True)
         fallback.scan(req.command)
         reader.parts.extend(fallback.parts)
-    return any(_credential_words(req, part, part.words, depth) for part in reader.parts)
+    if any(_credential_words(req, part, part.words, depth) for part in reader.parts):
+        return True
+    # A credential path written anywhere else (a loop's words, a script the
+    # splitter can't read) is touched by whatever runs: only a command made
+    # wholly of harmless checks (_HARMLESS_CHECKS) may name one.
+    return _mentions_credentials(req.command) and (
+        reader.unread or not reader.parts
+        or not all(part.words and os.path.basename(part.words[0]) in _HARMLESS_CHECKS for part in reader.parts))
 
 
 def decide(req: Request | None, *, checks: list[str] | None = None,
@@ -3876,6 +3975,7 @@ class _PartReader:
         self.cwd: str | None = req.cwd or req.worktree or None
         self.settled = self.cwd    # where the shell is once a cd's && chain ends, whether the cd ran or not
         self.parts: list[ShellPart] = []
+        self.unread = False   # the splitter couldn't read the whole command (parts are what scan() found)
         self.wrote = False    # an earlier part may have made files a later pattern would match
         self.expanded = self.tilde = False    # the part being read's ShellPart.expanded and .tilde
 
@@ -3926,6 +4026,7 @@ class _PartReader:
         except ValueError:
             if not self.credential_scan:
                 raise
+            self.unread = True
             self.scan(command)
             return
         for line, sure, (chained, leads) in zip(flattener.out, flattener.definite, flattener.chained):
