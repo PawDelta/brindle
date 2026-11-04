@@ -146,26 +146,44 @@ def test_a_second_accepted_rule_adds_to_the_pack(db, tmp_path, pro):
     assert "Catch specific exceptions" in pack.prompt and "Remove debug prints." in pack.prompt
 
 
-def test_accept_keeps_the_packs_comments(db, tmp_path, pro):
+PACK_HEAD = ("---\nname: learned\n# why this pack exists\n"
+             "description: mine   # trailing note\n"
+             "# processes we start on purpose\n"
+             "direct_spawn_allowed:\n  - src/spawn.py   # the spawner\n  # and the tmux wrapper\n"
+             "  - src/tmux.py\n"
+             "deny_patterns:\n  - 'print\\('   # no prints\n"
+             "deny_deps: [marshal]\n"
+             "---\n")
+
+
+@pytest.mark.parametrize("eol", ["\n", "\r\n"])
+def test_accept_keeps_the_packs_comments(db, tmp_path, pro, eol):
+    root = str(tmp_path)
+    s = suggest_one(db, root, lambda ids: bare_except(ids, deny_patterns=[]))   # nothing for the header
+    path = learned_pack_path(root)
+    path.parent.mkdir(parents=True)
+    head = PACK_HEAD.replace("\n", eol).encode()
+    path.write_bytes(head + f"Intro.{eol}- old rule{eol}".encode())
+    learned_rules.accept(db, root, s.key)
+    data = path.read_bytes()
+    assert data.startswith(head + f"Intro.{eol}- old rule{eol}- Catch".encode())
+    assert data.endswith(f"rule {s.key}){eol}".encode())
+
+
+def test_accept_merges_new_checks_beside_the_packs_text(db, tmp_path, pro):
     root = str(tmp_path)
     s = suggest_one(db, root, lambda ids: bare_except(ids, deny_deps=["pickle"]))
     path = learned_pack_path(root)
     path.parent.mkdir(parents=True)
-    head = ("---\nname: learned\n# why this pack exists\n"
-            "description: mine   # trailing note\n"
-            "# processes we start on purpose\n"
-            "direct_spawn_allowed:\n  - src/spawn.py   # the spawner\n  # and the tmux wrapper\n"
-            "  - src/tmux.py\n"
-            "deny_patterns:\n  - 'print\\('   # no prints\n"
-            "---\n")
-    path.write_text(head + "Intro.\n- old rule\n")
+    path.write_text(PACK_HEAD + "Intro.\n")
     learned_rules.accept(db, root, s.key)
     text = path.read_text()
-    added = "  - except\\s*:\n", "deny_deps:\n  - pickle\n"
-    assert text.replace(added[0], "").replace(added[1], "").startswith(head)
-    assert "  - 'print\\('   # no prints\n" + added[0] in text
-    assert added[1] + "---\n" in text
-    assert text.endswith(f"rule {s.key})\n") and "Intro.\n- old rule\n- Catch" in text
+    assert "  - 'print\\('   # no prints\n  - except\\s*:\n" in text
+    assert text.replace("  - except\\s*:\n", "").startswith(PACK_HEAD.replace(
+        "deny_deps: [marshal]\n", "deny_deps:\n  - marshal\n  - pickle\n"))
+    pack = [p for p in load_rule_packs(load_profile("reviewer", root), root) if p.name == "learned"][0]
+    assert pack.deny_deps == ["marshal", "pickle"] and pack.direct_spawn_allowed == [
+        "src/spawn.py", "src/tmux.py"]
 
 
 def test_a_rejected_rule_is_never_proposed_again(db, tmp_path, pro):
