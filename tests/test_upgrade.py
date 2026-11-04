@@ -191,6 +191,17 @@ def test_a_newer_daemon_stops_the_mcp_servers_an_update_left_on_old_code(monkeyp
     assert upgrade.stop_stale_mcp_servers() is True
     assert stopped == [{1}] and [m.name for m in marks.iterdir()] == ["2"]
 
+    # Right after an update the machine is busy and `ps` can time out: the
+    # daemon must look again on its next sweep, not give up (2026-11-04: it gave
+    # up once and every stranded server hung until reconnected by hand).
+    from brindle.daemon import lifecycle
+
+    def slow_ps():
+        raise subprocess.TimeoutExpired(["ps"], 30)
+
+    monkeypatch.setattr(procs, "table", slow_ps)
+    assert lifecycle._stop_stale_mcp_servers() is True
+
 
 def test_a_process_left_on_a_moved_or_deleted_executable_is_told_apart(tmp_path):
     """What the app updater does to a running engine: its .app is moved away

@@ -256,12 +256,15 @@ async def _watch(server, activity: Activity, idle_exit: bool, *,
 
 def _stop_stale_mcp_servers() -> bool:
     """upgrade.stop_stale_mcp_servers, off the daemon's way: whether to look
-    again. A failure is only logged, and not tried again."""
+    again. A failure (a slow ``ps`` while the machine is busy right after an
+    update) is logged and tried again on the next sweep: giving up would leave
+    every server the update stranded hanging until someone reconnects it."""
     try:
         return upgrade.stop_stale_mcp_servers()
     except Exception:
-        log.warning("brindle: couldn't look for MCP servers left on a replaced install", exc_info=True)
-        return False
+        log.warning("brindle: couldn't look for MCP servers left on a replaced install; trying again",
+                    exc_info=True)
+        return True
 
 
 def _reset_window_sizes() -> None:
