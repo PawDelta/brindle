@@ -368,6 +368,8 @@ describe("NewSession", () => {
     fireEvent.click(screen.getByRole("button", { name: "Add a project…" }));
     fireEvent.click(screen.getByRole("button", { name: "Open a folder…" }));
     await waitFor(() => expect((repo as HTMLInputElement).value).toBe("site"));
+    // Start waits for the new project's usable CLIs.
+    await waitFor(() => expect((screen.getByRole("button", { name: "Start" }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByRole("button", { name: "Start" }));
     await waitFor(() => expect(posts(daemon).at(-1)?.body).toMatchObject({ repo: "~/Projects/site" }));
     sync.stop();
@@ -380,6 +382,9 @@ describe("NewSession", () => {
     const select = (await screen.findByRole("combobox", { name: "Supervisor CLI" })) as HTMLSelectElement;
     expect([...select.options].map((o) => o.textContent)).toEqual(["Pick a CLI", "Claude Code", "Codex"]);
     expect((screen.getByRole("button", { name: "Start" }) as HTMLButtonElement).disabled).toBe(true);
+    // ⌘↵ in the prompt doesn't get past the pick either.
+    fireEvent.keyDown(screen.getByRole("textbox", { name: "What should brindle work on?" }), { key: "Enter", metaKey: true });
+    expect(posts(daemon)).toHaveLength(0);
     fireEvent.click(screen.getByRole("button", { name: "Sign in to more…" }));
     expect(onSignIn).toHaveBeenCalled();
     fireEvent.click(within(screen.getByText("Which CLI should run your sessions?").parentElement!).getByRole("button", { name: "Codex" }));
@@ -388,6 +393,21 @@ describe("NewSession", () => {
     fireEvent.click(screen.getByRole("button", { name: "Start" }));
     await waitFor(() => expect(posts(daemon).at(-1)?.body).toMatchObject({ provider: "codex" }));
     expect(localStorage.getItem("brindle.supervisorCli")).toBe("codex");
+    stop();
+  });
+
+  it("starts nothing until the usable CLIs are known, and offers to look again when they couldn't be read", async () => {
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [], workspaces: [root] });
+    const fetch = daemon.fetch;
+    let down = true;
+    daemon.fetch = async (input, init) => (down && new URL(String(input)).pathname.endsWith("/providers/usable") ? Response.json({ error: { code: "internal", message: "down" } }, { status: 500 }) : fetch(input, init));
+    const { stop } = setup(daemon);
+    await screen.findByText("Couldn't check which CLIs can run here.");
+    fireEvent.keyDown(screen.getByRole("textbox", { name: "What should brindle work on?" }), { key: "Enter", metaKey: true });
+    expect(posts(daemon)).toHaveLength(0);
+    down = false;
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect((screen.getByRole("button", { name: "Start" }) as HTMLButtonElement).disabled).toBe(false));
     stop();
   });
 

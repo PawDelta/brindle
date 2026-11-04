@@ -145,8 +145,12 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, on
   const [branch, setBranch] = useState("");
   const [sessionName, setSessionName] = useState("");
   const [provider, setProvider] = useState(readPick);
-  // The CLIs a new session here can run on; null while loading or if that couldn't be read.
-  const [usable, setUsable] = useState<string[] | null>(null);
+  // The CLIs a new session in a repo can run on, tied to the repo they were read for.
+  const [got, setGot] = useState<{ repo: string; usable: string[] | null } | null>(null);
+  const [lookups, setLookups] = useState(0);
+  // Null while this repo's list loads, and if it couldn't be read: nothing starts then.
+  const usable = got?.repo === repo ? got.usable : null;
+  const lookupFailed = got?.repo === repo && got.usable === null;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notes, setNotes] = useState<Note[]>([]);
@@ -162,12 +166,12 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, on
     let live = true;
     client
       .usableProviders(repo)
-      .then((r) => live && setUsable(r.usable))
-      .catch(() => undefined);
+      .then((r) => live && setGot({ repo, usable: r.usable }))
+      .catch(() => live && setGot({ repo, usable: null }));
     return () => {
       live = false;
     };
-  }, [client, repo]);
+  }, [client, repo, lookups]);
 
   // Several usable: the person's pick (none yet on a first session); one: that one, named; none: setup.
   const many = usable !== null && usable.length > 1;
@@ -213,6 +217,8 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, on
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
+    // The same guard as Start's: ⌘↵ in the prompt comes here too.
+    if (busy || !repo || usable === null || needsPick) return;
     const ok = await start({
       autopilot: true,
       prompt: prompt.trim() || undefined,
@@ -302,10 +308,18 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, on
         </button>
         <span className="flex-1" />
         <span className="text-xs text-ink-3">⌘↵</span>
-        <button type="submit" disabled={busy || !repo || needsPick} className={main}>
+        <button type="submit" disabled={busy || !repo || usable === null || needsPick} className={main}>
           Start
         </button>
       </div>
+      {lookupFailed && (
+        <p role="alert" className={`${alert} flex items-center gap-s2`}>
+          <span>Couldn't check which CLIs can run here.</span>
+          <button type="button" className={button} onClick={() => setLookups((n) => n + 1)}>
+            Try again
+          </button>
+        </p>
+      )}
       {needsPick && (
         <div className="mt-s1 flex flex-col gap-s1 border-t border-line pt-s2">
           <div className={h2}>Which CLI should run your sessions?</div>
