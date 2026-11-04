@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Repo } from "../api/client";
 import { createAppStore } from "../store/store";
@@ -69,17 +69,19 @@ describe("ProjectPicker", () => {
     expect(screen.queryByTestId("clone-failed")).toBeNull();
   });
 
-  it("onboarding's Pick a project opens a folder picked with the native picker, and says why one isn't a repo", async () => {
+  it("initializes a plain folder with one click after opening it", async () => {
     const daemon = new FakeDaemon();
-    daemon.notGitFolders = ["/home/u/Downloads"];
-    const answers = ["/home/u/Downloads", "/home/u/Projects/proj"];
+    daemon.notGitFolders = ["/home/u/Downloads", "/home/u/New"];
+    const answers = ["/home/u/Downloads", "/home/u/New"];
     const { picked, pickFolder } = setup(daemon, vi.fn(() => Promise.resolve(answers.shift() ?? null)));
     fireEvent.click(screen.getByRole("button", { name: "Open a folder…" }));
-    expect((await screen.findByRole("alert")).textContent).toContain("/home/u/Downloads is not a git repository");
+    await screen.findByRole("button", { name: "Set it up with git" });
     expect(picked).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("button", { name: "Open a folder…" }));
-    await waitFor(() => expect(picked).toHaveBeenCalledWith({ repo_root: "/home/u/Projects/proj", name: "proj" }));
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Pick another" })); });
+    expect(picked).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Set it up with git" }));
+    await waitFor(() => expect(picked).toHaveBeenCalledWith({ repo_root: "/home/u/New", name: "New" }));
     expect(pickFolder).toHaveBeenCalledWith("Open a folder");
-    expect(daemon.opened).toEqual(["/home/u/Projects/proj"]);
+    expect(daemon.opened).toEqual(["/home/u/New"]);
   });
 });

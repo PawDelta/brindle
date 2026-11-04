@@ -7,7 +7,7 @@
    session both use it. Nothing to type but the URL, no popup. */
 
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import type { DaemonClient, Repo } from "../api/client";
+import { DaemonError, type DaemonClient, type Repo } from "../api/client";
 import type { PickFolder } from "../api/open";
 import { plain } from "../api/wording";
 import { useJob } from "../screens/Branch/useJob";
@@ -31,24 +31,31 @@ const nameOf = (path: string) => path.replace(/\/+$/, "").split("/").at(-1) ?? p
 export function ProjectPicker({ client, pickFolder, onPicked }: ProjectPickerProps) {
   const [opening, setOpening] = useState(false);
   const [openError, setOpenError] = useState<string | null>(null);
+  const [plainFolder, setPlainFolder] = useState<string | null>(null);
   const [url, setUrl] = useState("");
   const [parent, setParent] = useState(DEFAULT_PARENT);
   const { job, busy, start, clear } = useJob();
   /* The clone's URL as it was pressed (Retry clones that again). */
   const cloning = useRef<{ url: string; parent: string } | null>(null);
 
-  const openFolder = async () => {
-    if (!pickFolder) return;
+  const open = async (path: string, init = false) => {
     setOpenError(null);
-    const path = await pickFolder("Open a folder").catch(() => null);
-    if (!path) return;
+    setPlainFolder(null);
     setOpening(true);
     try {
-      onPicked(await client.openRepo(path));
+      onPicked(await client.openRepo(path, init));
     } catch (e) {
-      setOpenError(message(e));
+      if (e instanceof DaemonError && e.code === "not_a_repo") setPlainFolder(path);
+      else setOpenError(message(e));
+    } finally {
       setOpening(false);
     }
+  };
+
+  const openFolder = async () => {
+    if (!pickFolder) return;
+    const path = await pickFolder("Open a folder").catch(() => null);
+    if (path) await open(path);
   };
 
   const changeParent = async () => {
@@ -79,16 +86,31 @@ export function ProjectPicker({ client, pickFolder, onPicked }: ProjectPickerPro
         <section className={`${card} flex flex-col gap-s1 p-s2`} aria-label="Open a folder">
           <p className="font-semibold">Open a folder</p>
           <p className="text-sm text-ink-2">A project already on this Mac: brindle works in it where it is.</p>
-          <div className="mt-auto pt-s1">
-            <button type="button" className={button} disabled={!pickFolder || opening || busy} onClick={() => void openFolder()}>
-              Open a folder…
-            </button>
-          </div>
+          {!plainFolder && (
+            <div className="mt-auto pt-s1">
+              <button type="button" className={button} disabled={!pickFolder || opening || busy} onClick={() => void openFolder()}>
+                Open a folder…
+              </button>
+            </div>
+          )}
           {!pickFolder && <p className="text-xs text-ink-3">The folder picker is the app's; this window has none.</p>}
           {openError && (
             <p className={alert} role="alert">
               {openError}
             </p>
+          )}
+          {plainFolder && (
+            <div className="flex flex-col items-start gap-s1" role="alert">
+              <p className="text-sm text-ink-2">{nameOf(plainFolder)} isn't a git repo yet. brindle needs git to give each agent its own branch.</p>
+              <div className="flex flex-wrap gap-s1">
+                <button type="button" className={button} disabled={opening || busy} onClick={() => void open(plainFolder, true)}>
+                  Set it up with git
+                </button>
+                <button type="button" className={button} disabled={opening || busy} onClick={() => void openFolder()}>
+                  Pick another
+                </button>
+              </div>
+            </div>
           )}
         </section>
         <form className={`${card} flex flex-col gap-s1 p-s2`} aria-label="Clone a repository" onSubmit={submit}>

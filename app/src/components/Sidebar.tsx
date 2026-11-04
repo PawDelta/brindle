@@ -743,7 +743,7 @@ export function Sidebar({ route, navigate, refresh, openUrl }: SidebarProps) {
         {repos === null ? (
           <p className={`px-s1 text-xs ${feedError ? "text-sap" : "text-ink-3"}`}>{feedError ? `Couldn't load the sessions: ${feedError}` : "Loading…"}</p>
         ) : repos.length === 0 ? (
-          <p className="px-s1 text-xs text-ink-3">No repo yet. Run brindle once in a git repository.</p>
+          <p className="px-s1 text-xs text-ink-3">No project yet. Open a folder or clone a repository to start.</p>
         ) : (
           repos.map((repo) => {
             const here = live.filter((r) => r.repo === repo.repo_root);

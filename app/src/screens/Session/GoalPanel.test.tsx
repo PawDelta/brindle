@@ -1,6 +1,6 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { ReactElement } from "react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import App from "../../App";
 import { DaemonClient, type AnalysisDoc } from "../../api/client";
 import { PtyViewsProvider } from "../../api/ptyView";
@@ -12,12 +12,10 @@ import { REPO, root } from "../../test/fixtures";
 import { standInViews } from "../../test/panes";
 import { GoalPanel, goalPhase } from "./GoalPanel";
 import { UNKNOWN, type Readiness } from "./review";
-import { DEMO_OFFERED_KEY } from "../Onboarding";
 
 vi.mock("../../components/PtyTerminal", () => import("../../test/panes"));
 
 afterEach(cleanup);
-beforeEach(() => localStorage.setItem(DEMO_OFFERED_KEY, "1"));     // past the first launch's demo offer
 
 const ROOT = "proj";
 /* The App-level test's session: the App routes to it by its root agent id. */

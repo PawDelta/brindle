@@ -14,15 +14,15 @@
    launch offers (screens/Onboarding/Demo). */
 
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { DaemonError, type DaemonClient, type Note, type PreflightDTO, type Repo, type SessionConflict, type StartSession } from "../../api/client";
+import { DaemonError, LOGIN_PROVIDERS, type DaemonClient, type Note, type PreflightDTO, type Repo, type SessionConflict, type StartSession } from "../../api/client";
 import type { PickFolder } from "../../api/open";
 import type { SessionDTO } from "../../api/schema";
 import Logo from "../../components/Logo";
 import { Preflight } from "../../components/Preflight";
 import { ProjectCombobox } from "../../components/ProjectCombobox";
 import { ProjectPicker } from "../../components/ProjectPicker";
-import { alert, button, card, field, main, mono, quiet } from "../../components/ui";
-import { isPaused } from "../../store/overview";
+import { alert, button, card, field, h2, lede, main, mono, quiet, title } from "../../components/ui";
+import { isPaused, providerName } from "../../store/overview";
 import { useSessions } from "../../store/sessions";
 import { WatchDemo } from "../Onboarding/Demo";
 
@@ -36,13 +36,32 @@ export interface NewSessionProps {
   pickFolder?: PickFolder;
   /* Fetch the snapshot and inbox again (Sync.refresh). */
   refresh?: () => Promise<void>;
+  /* To Settings › Providers, to sign in to a CLI. */
+  onSignIn?: () => void;
+}
+
+/* The CLI the person picked for their sessions, kept in this app between launches. */
+const PICK_KEY = "brindle.supervisorCli";
+function readPick(): string {
+  try {
+    return localStorage.getItem(PICK_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+function rememberPick(p: string) {
+  try {
+    localStorage.setItem(PICK_KEY, p);
+  } catch {
+    /* kept for this launch only */
+  }
 }
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 type StartFields = Omit<StartSession, "repo" | "choice" | "session_id">;
 
-export function NewSession({ client, onOpen, initialRepo, pickFolder, refresh }: NewSessionProps) {
+export function NewSession({ client, onOpen, initialRepo, pickFolder, refresh, onSignIn = () => undefined }: NewSessionProps) {
   const { repos, sessions, error: loadError, reload } = useSessions();
   const [attempt, setAttempt] = useState(0);
   /* The project to start in: as opened, or the one just added. */
@@ -80,7 +99,7 @@ export function NewSession({ client, onOpen, initialRepo, pickFolder, refresh }:
           {repos === null ? null : repos.length === 0 ? (
             <FirstRepo client={client} pickFolder={pickFolder} onPicked={added} />
           ) : (
-            <Composer client={client} repos={repos} sessions={sessions} reload={reload} refresh={refresh} onOpen={onOpen} chosen={chosen} pickFolder={pickFolder} onAdded={added} />
+            <Composer client={client} repos={repos} sessions={sessions} reload={reload} refresh={refresh} onOpen={onOpen} chosen={chosen} onChoose={setChosen} pickFolder={pickFolder} onAdded={added} onSignIn={onSignIn} />
           )}
           <WatchDemo client={client} refresh={refresh} onStarted={onOpen} />
         </div>
@@ -105,53 +124,68 @@ function FirstRepo({ client, pickFolder, onPicked }: { client: DaemonClient; pic
 /* One composer for every repo: the prompt, the repo, Start, and the rest
    behind Options. A start that conflicts, or that the engine's preflight
    refuses, asks here what to do. */
-function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, pickFolder, onAdded }: {
+function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, onChoose, pickFolder, onAdded, onSignIn }: {
   client: DaemonClient;
+  /* To Settings › Providers, where a CLI is signed in. */
+  onSignIn(): void;
   repos: Repo[];
   sessions: Record<string, SessionDTO[]>;
   reload(): Promise<void>;
   refresh?: () => Promise<void>;
   onOpen(root: string, repo: string): void;
   chosen?: string;
+  onChoose(repo: string): void;
   pickFolder?: PickFolder;
   onAdded(repo: Repo): void;
 }) {
-  const [repo, setRepo] = useState(repos.some((r) => r.repo_root === chosen) ? chosen! : (repos[0]?.repo_root ?? ""));
+  const repo = repos.some((r) => r.repo_root === chosen) ? chosen! : (repos[0]?.repo_root ?? "");
   const [adding, setAdding] = useState(false);
-  // A project just added is selected once it is listed.
-  const selected = useRef(repos.some((r) => r.repo_root === chosen) ? chosen : undefined);
-  useEffect(() => {
-    if (chosen && selected.current !== chosen && repos.some((r) => r.repo_root === chosen)) {
-      selected.current = chosen;
-      setRepo(chosen);
-    }
-  }, [chosen, repos]);
   const [prompt, setPrompt] = useState("");
   const [options, setOptions] = useState(false);
   const [branch, setBranch] = useState("");
   const [sessionName, setSessionName] = useState("");
-  const [provider, setProvider] = useState("");
-  const [providers, setProviders] = useState<string[]>([]);
+  const [provider, setProvider] = useState(readPick);
+  // The CLIs a new session in a repo can run on, tied to the repo they were read for.
+  const [got, setGot] = useState<{ repo: string; usable: string[] | null } | null>(null);
+  const [lookups, setLookups] = useState(0);
+  // Null while this repo's list loads, and if it couldn't be read: nothing starts then.
+  const usable = got?.repo === repo ? got.usable : null;
+  const lookupFailed = got?.repo === repo && got.usable === null;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notes, setNotes] = useState<Note[]>([]);
   // A start waiting on the person's choice: what they asked for, and the choices.
   const [pending, setPending] = useState<{ fields: StartFields; conflict: SessionConflict } | null>(null);
   // A start the engine refused until the CLI is set up: what they asked for, and the items.
-  const [preflight, setPreflight] = useState<{ fields: StartFields; items: PreflightDTO } | null>(null);
+  // `attempt`: the start it answers. A card's re-check that answers after a newer start (on
+  // another CLI, say) began is that older start's, and is dropped.
+  const [preflight, setPreflight] = useState<{ fields: StartFields; items: PreflightDTO; attempt: number } | null>(null);
+  const attempts = useRef(0);
 
   useEffect(() => {
-    if (!repos.some((r) => r.repo_root === repo)) setRepo(repos[0]?.repo_root ?? "");
-  }, [repos, repo]);
-
-  useEffect(() => {
+    let live = true;
+    // A lookup begins: whatever an earlier one answered (this repo's too) no longer holds.
+    setGot(null);
     client
-      .profiles()
-      .then((profiles) => setProviders([...new Set(profiles.map((p) => p.provider))].sort()))
-      .catch(() => setProviders([]));
-  }, [client]);
+      .usableProviders(repo)
+      .then((r) => live && setGot({ repo, usable: r.usable }))
+      .catch(() => live && setGot({ repo, usable: null }));
+    return () => {
+      live = false;
+    };
+  }, [client, repo, lookups]);
+
+  // Several usable: the person's pick (none yet on a first session); one: that one, named; none: setup.
+  const many = usable !== null && usable.length > 1;
+  const chosenCli = many && usable.includes(provider) ? provider : "";
+  const needsPick = many && !chosenCli;
+  const pickCli = (p: string) => {
+    setProvider(p);
+    rememberPick(p);
+  };
 
   const start = async (fields: StartFields, choice?: { key: string; session: string }): Promise<boolean> => {
+    const attempt = ++attempts.current;
     setBusy(true);
     setError(null);
     setNotes([]);
@@ -166,9 +200,12 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, pi
         opened = got.id;
       }
     } catch (e) {
+      if (e instanceof DaemonError && e.preflight) setPreflight({ fields, items: e.preflight, attempt });
+      // No card of its own: a card still showing stays usable, as this (now latest) start's,
+      // so its re-checks apply again; any asked before this start began are still dropped.
+      else setPreflight((cur) => cur && { ...cur, attempt });
       if (e instanceof DaemonError && e.conflict) setPending({ fields, conflict: e.conflict });
-      else if (e instanceof DaemonError && e.preflight) setPreflight({ fields, items: e.preflight });
-      else setError(message(e));
+      else if (!(e instanceof DaemonError && e.preflight)) setError(message(e));
     } finally {
       setBusy(false);
       // Started, the snapshot too: one read on the new chat's status event can predate its window
@@ -182,11 +219,13 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, pi
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
+    // The same guard as Start's: ⌘↵ in the prompt comes here too.
+    if (busy || !repo || usable === null || needsPick) return;
     const ok = await start({
       autopilot: true,
       prompt: prompt.trim() || undefined,
       branch: branch.trim() || undefined,
-      provider: provider || undefined,
+      provider: chosenCli || undefined,
       name: sessionName.trim() || undefined,
     });
     if (ok) {
@@ -197,6 +236,21 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, pi
   };
 
   const running = (sessions[repo] ?? []).filter((s) => !isPaused(s)).length;
+  if (usable?.length === 0) {
+    return (
+      <section className={`${card} flex flex-col gap-s2 px-s2 py-s3`} aria-label="Finish setting up">
+        <h1 className={title}>Finish setting up</h1>
+        <p className={`${lede} max-w-prose`}>
+          brindle runs your sessions on a coding CLI. Sign in to one (Claude Code, Codex, Antigravity or OpenCode) and you can start.
+        </p>
+        <div>
+          <button type="button" className={main} onClick={onSignIn}>
+            Sign in to a CLI
+          </button>
+        </div>
+      </section>
+    );
+  }
   return (
     <>
     <form aria-label="Start a session" onSubmit={submit} className={`${card} flex flex-col gap-s1 px-s2 py-s2`}>
@@ -214,13 +268,39 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, pi
           }}
         />
       </div>
-      <div className="flex flex-wrap items-center gap-s1">
+      <div className="flex items-start gap-s1">
+        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-s1">
         {repos.length > 1 ? (
-          <ProjectCombobox repos={repos} value={repo} onChange={setRepo} />
+          <ProjectCombobox repos={repos} value={repo} onChange={onChoose} />
         ) : (
           <span className="text-sm text-ink-2">
             in <span className="font-medium text-ink">{repos[0]?.name}</span>
           </span>
+        )}
+        {usable && usable.length === 1 && (
+          <span className="text-sm text-ink-2">
+            on <span className="font-medium text-ink">{providerName(usable[0])}</span>
+          </span>
+        )}
+        {many && (
+          <>
+            <span className="text-sm text-ink-2">on</span>
+            <select className={field} aria-label="Supervisor CLI" value={chosenCli} onChange={(e) => pickCli(e.target.value)}>
+              <option value="" disabled>
+                Pick a CLI
+              </option>
+              {usable.map((p) => (
+                <option key={p} value={p}>
+                  {providerName(p)}
+                </option>
+              ))}
+            </select>
+          </>
+        )}
+        {usable && !LOGIN_PROVIDERS.every((p) => usable.includes(p)) && (
+          <button type="button" className={quiet} onClick={onSignIn}>
+            Sign in to more…
+          </button>
         )}
         <button type="button" className={quiet} aria-expanded={adding} onClick={() => setAdding((a) => !a)}>
           Add a project…
@@ -229,26 +309,39 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, pi
         <button type="button" className={quiet} aria-expanded={options} onClick={() => setOptions((o) => !o)}>
           Options {options ? "▴" : "▾"}
         </button>
-        <span className="flex-1" />
-        <span className="text-xs text-ink-3">⌘↵</span>
-        <button type="submit" disabled={busy || !repo} className={main}>
-          Start
-        </button>
+        </div>
+        <div className="flex shrink-0 items-center gap-s1">
+          <span className="text-xs text-ink-3">⌘↵</span>
+          <button type="submit" disabled={busy || !repo || usable === null || needsPick} className={main}>
+            Start
+          </button>
+        </div>
       </div>
+      {lookupFailed && (
+        <p role="alert" className={`${alert} flex items-center gap-s2`}>
+          <span>Couldn't check which CLIs can run here.</span>
+          <button type="button" className={button} onClick={() => setLookups((n) => n + 1)}>
+            Try again
+          </button>
+        </p>
+      )}
+      {needsPick && (
+        <div className="mt-s1 flex flex-col gap-s1 border-t border-line pt-s2">
+          <div className={h2}>Which CLI should run your sessions?</div>
+          <p className={lede}>You're signed in to {usable.length === 2 ? "two" : usable.length}. brindle remembers the one you pick; change it here any time.</p>
+          <div className="flex gap-s1 pt-1">
+            {usable.map((p) => (
+              <button key={p} type="button" className={button} onClick={() => pickCli(p)}>
+                {providerName(p)}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
       {options && (
         <div className="flex flex-wrap items-center gap-s1 border-t border-line pt-s1">
           <input className={`${field} w-48`} placeholder="Session name (optional)" aria-label="Session name" value={sessionName} onChange={(e) => setSessionName(e.target.value)} />
           <input className={`${field} w-48 font-mono`} placeholder="Branch (its own worktree)" aria-label="Branch" value={branch} onChange={(e) => setBranch(e.target.value)} />
-          {providers.length > 0 && (
-            <select className={field} aria-label="Supervisor CLI" value={provider} onChange={(e) => setProvider(e.target.value)}>
-              <option value="">default CLI</option>
-              {providers.map((p) => (
-                <option key={p} value={p}>
-                  {p}
-                </option>
-              ))}
-            </select>
-          )}
         </div>
       )}
       {pending && <ConflictChoice conflict={pending.conflict} onChoose={(key, session) => start(pending.fields, { key, session })} onCancel={() => setPending(null)} />}
@@ -269,7 +362,25 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, pi
     </form>
     {/* Its own forms (a key's field) can't sit inside the composer's. */}
     {preflight && (
-      <Preflight preflight={preflight.items} onRefresh={(items) => setPreflight({ fields: preflight.fields, items })} onLaunch={() => void start(preflight.fields)} launchLabel="Start" repo={repo} />
+      <Preflight
+        preflight={preflight.items}
+        onRefresh={(items) => {
+          const mine = preflight.attempt;
+          // Only while this card's start is still the latest one, and its card still shows.
+          if (mine === attempts.current) setPreflight((cur) => (cur?.attempt === mine ? { ...cur, items } : cur));
+        }}
+        onLaunch={() => void start(preflight.fields)}
+        onUseInstead={(other) => {
+          // Only a CLI the current repo's lookup says can run.
+          if (!usable?.includes(other)) return;
+          if (many) setProvider(other);
+          void start({ ...preflight.fields, provider: other });
+        }}
+        usable={usable ?? []}
+        launchLabel="Start"
+        repo={repo}
+        launching={busy}
+      />
     )}
     {adding && (
       <section className={`${card} flex flex-col gap-s1 px-s2 py-s2`} aria-label="Add a project">

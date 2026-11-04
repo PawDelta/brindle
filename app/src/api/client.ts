@@ -140,8 +140,10 @@ export interface KeyStored {
    the folder, or a consent it asks for once. A start or continue that
    would launch a provider with an item still open is refused with 409
    {error: {code: "preflight"}, preflight: PreflightItemDTO[]}.
-   The client adapts those unresolved items to the card's PreflightDTO. */
-export type PreflightKind = "signin" | "key" | "trust" | "consent";
+   The client adapts those unresolved items to the card's PreflightDTO.
+   "setup" (the CLI, or tmux, to install) and "off" (the CLI turned off in
+   brindle) have no route: only the person settles them, outside the card. */
+export type PreflightKind = "signin" | "key" | "trust" | "consent" | "setup" | "off";
 
 export interface PreflightItem {
   id: string;
@@ -1167,8 +1169,8 @@ export class DaemonClient {
   }
 
   /* A folder on this machine, as a repo brindle works in. */
-  openRepo(path: string) {
-    return this.post<Repo>("/repos/open", { path });
+  openRepo(path: string, init = false) {
+    return this.post<Repo>("/repos/open", { path, ...(init ? { init: true } : {}) });
   }
 
   sessions(repo: string) {
@@ -1731,6 +1733,11 @@ export class DaemonClient {
      terminal handed back (Try again). */
   providerLogin(provider: string, method?: string, restart = false, context?: Record<string, unknown> | null) {
     return this.post<ActionTerminal>(`/providers/${encodeURIComponent(provider)}/login`, { ...context, ...(method ? { method } : {}), ...(restart ? { restart } : {}) });
+  }
+
+  /* The CLIs a new supervisor session in `repo` can run on, in preference order (engine: GET /providers/usable). */
+  usableProviders(repo: string) {
+    return this.get<{ usable: string[]; default: string | null }>("/providers/usable", { repo });
   }
 
   /* Each provider CLI as brindle detects it: where it is, its version, whether it's signed in. */

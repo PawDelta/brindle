@@ -6,7 +6,7 @@ import { SessionsProvider } from "../../store/sessions";
 import { createAppStore } from "../../store/store";
 import { startSync } from "../../store/sync";
 import { StoreContext } from "../../store/useStore";
-import { FakeDaemon, TOKEN } from "../../test/fakeDaemon";
+import { FakeDaemon, freshProviders, TOKEN } from "../../test/fakeDaemon";
 import { REPO, root, worker } from "../../test/fixtures";
 import { NewSession } from ".";
 
@@ -19,16 +19,17 @@ function setup(daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj"
   const store = createAppStore();
   const sync = startSync({ client, store, connect: daemon.connect });
   const onOpen = vi.fn();
+  const onSignIn = vi.fn();
   render(
     <DaemonContext.Provider value={client}>
       <StoreContext.Provider value={store}>
         <SessionsProvider client={client}>
-          <NewSession client={client} onOpen={onOpen} />
+          <NewSession client={client} onOpen={onOpen} onSignIn={onSignIn} />
         </SessionsProvider>
       </StoreContext.Provider>
     </DaemonContext.Provider>,
   );
-  return { daemon, onOpen, stop: () => sync.stop() };
+  return { daemon, onOpen, onSignIn, stop: () => sync.stop() };
 }
 
 const posts = (daemon: FakeDaemon) => daemon.requests.filter((r) => r.method === "POST");
@@ -64,6 +65,8 @@ describe("NewSession", () => {
     };
     const { onOpen, stop } = setup(daemon);
     fireEvent.change(await screen.findByLabelText("What should brindle work on?"), { target: { value: "Fix login" } });
+    // Start stays disabled until the usable CLIs are known.
+    await waitFor(() => expect(screen.getByRole("button", { name: "Start" })).toHaveProperty("disabled", false));
     fireEvent.click(screen.getByRole("button", { name: "Start" }));
     const card = await screen.findByTestId("preflight");
     expect(within(card).getByRole("button", { name: "Start" })).toHaveProperty("disabled", true);
@@ -88,6 +91,100 @@ describe("NewSession", () => {
     await waitFor(() => expect(within(card).getByRole("button", { name: "Start" })).toHaveProperty("disabled", false));
     fireEvent.click(within(card).getByRole("button", { name: "Start" }));
     await waitFor(() => expect(onOpen).toHaveBeenCalledWith("new1", REPO));
+    stop();
+  });
+
+  it.each([
+    ["installs Claude Code, checks again", undefined],
+    ["starts on Codex instead", "codex"],
+    // Codex's own preflight answers before the earlier check of Claude does: Codex's card stays.
+    ["checks again, starts on Codex before that check answers", "race"],
+    // The start on Codex fails outright: Claude Code's card stays, and its checks still count.
+    ["starts on Codex, which fails, then installs Claude Code", "fail"],
+    // Another project is picked and its usable-CLI lookup fails: the earlier project's alternatives don't carry over.
+    ["switches project, whose usable lookup fails, then starts on Codex once a later one answers", "switch"],
+  ] as const)("gets past a CLI that isn't installed: %s", async (_, instead) => {
+    // Claude Code neither installed nor signed in, Codex installed: the engine's own 409 for a start on Claude.
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }, { repo_root: OTHER, name: "other" }], workspaces: [root], sessions: [], providers: freshProviders({ codex: { path: "/opt/homebrew/bin/codex", version: "0.48.0" } }) });
+    let installed = false;
+    let answerCheck: (() => void) | null = null;
+    let usableLookup: "ok" | "hold" | "fail" = "ok";
+    let failLookup: (() => void) | null = null;
+    const started: (string | undefined)[] = [];
+    const missing = [{ kind: "setup", id: "claude.install", provider: "claude", title: "Install Claude Code", detail: "Claude Code (`claude`) isn't on PATH.", action: null, link: null }];
+    const codexSignIn = [{ kind: "signin", id: "codex.signin", provider: "codex", title: "Sign in to Codex", detail: "", action: { name: "check", method: "POST", path: "/v1/providers/codex/preflight" } }];
+    const fetch = daemon.fetch;
+    daemon.fetch = async (input, init) => {
+      const path = new URL(String(input)).pathname;
+      if (path.endsWith("/providers/usable") && usableLookup !== "ok") {
+        if (usableLookup === "hold") await new Promise<void>((r) => (failLookup = r));
+        return Response.json({ error: { code: "internal", message: "down" } }, { status: 500 });
+      }
+      if (path.endsWith("/providers/claude/preflight")) {
+        if (instead === "race") await new Promise<void>((r) => (answerCheck = r));
+        return Response.json(installed ? [] : missing);
+      }
+      if (path.endsWith("/sessions") && init?.method === "POST") {
+        const provider = JSON.parse(String(init.body)).provider as string | undefined;
+        started.push(provider);
+        if (!provider && !installed) return Response.json({ preflight: missing }, { status: 409 });
+        if (instead === "race") return Response.json({ preflight: codexSignIn }, { status: 409 });
+        if (instead === "fail" && provider) return Response.json({ error: { code: "internal", message: "Codex didn't start" } }, { status: 500 });
+      }
+      return fetch(input, init);
+    };
+    const { onOpen, stop } = setup(daemon);
+    fireEvent.change(await screen.findByLabelText("What should brindle work on?"), { target: { value: "Fix login" } });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Start" })).toHaveProperty("disabled", false));
+    fireEvent.click(screen.getByRole("button", { name: "Start" }));
+    const card = await screen.findByTestId("preflight");
+    expect(within(card).getByRole("button", { name: "Start" })).toHaveProperty("disabled", true);
+    if (instead === "race") {
+      installed = true;
+      fireEvent.click(within(card).getByRole("button", { name: "Check again" }));
+      await waitFor(() => expect(answerCheck).not.toBeNull());
+      fireEvent.click(await within(card).findByRole("button", { name: "Start on Codex instead" }));
+      await screen.findByRole("region", { name: "Before Codex can start" });
+      await act(async () => answerCheck?.());
+      // The late answer about Claude neither replaces Codex's card nor readies a start on Claude.
+      const now = screen.getByTestId("preflight");
+      expect(now.getAttribute("aria-label")).toBe("Before Codex can start");
+      expect(within(now).getByRole("button", { name: "Start" })).toHaveProperty("disabled", true);
+      expect(started).toEqual([undefined, "codex"]);
+      stop();
+      return;
+    }
+    if (instead === "switch") {
+      usableLookup = "hold";
+      fireEvent.focus(screen.getByRole("combobox", { name: "Repo" }));
+      fireEvent.mouseDown(screen.getByRole("option", { name: "other" }));
+      await waitFor(() => expect(failLookup).not.toBeNull());
+      expect(screen.queryByRole("button", { name: "Start on Codex instead" })).toBeNull();
+      usableLookup = "fail";
+      await act(async () => failLookup?.());
+      await screen.findByText("Couldn't check which CLIs can run here.");
+      expect(screen.queryByRole("button", { name: "Start on Codex instead" })).toBeNull();
+      expect(started).toEqual([undefined]);
+      // A later lookup answers: Codex is offered again, and starts explicitly.
+      usableLookup = "ok";
+      fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Start on Codex instead" }));
+    } else if (instead === "fail") {
+      fireEvent.click(await within(card).findByRole("button", { name: "Start on Codex instead" }));
+      expect((await screen.findByRole("alert")).textContent).toContain("Codex didn't start");
+    }
+    if (instead === "codex") {
+      // Without Claude Code: the same start on the CLI this Mac has.
+      fireEvent.click(await within(card).findByRole("button", { name: "Start on Codex instead" }));
+    } else if (instead !== "switch") {
+      // Installed meanwhile: asked again, the card lets the start go.
+      installed = true;
+      fireEvent.click(within(card).getByRole("button", { name: "Check again" }));
+      await waitFor(() => expect(within(card).getByRole("button", { name: "Start" })).toHaveProperty("disabled", false));
+      fireEvent.click(within(card).getByRole("button", { name: "Start" }));
+    }
+    await waitFor(() => expect(onOpen).toHaveBeenCalledWith("new1", instead === "switch" ? OTHER : REPO));
+    expect(started).toEqual(instead === "fail" ? [undefined, "codex", undefined] : [undefined, instead === "switch" ? "codex" : instead]);
     stop();
   });
 
@@ -288,6 +385,92 @@ describe("NewSession", () => {
     fireEvent.click(within(adding).getByRole("button", { name: "Clone" }));
     await waitFor(() => expect((screen.getByRole("combobox", { name: "Repo" }) as HTMLInputElement).value).toBe("site"));
     expect(screen.queryByRole("region", { name: "Add a project" })).toBeNull();
+    // Switch away, then reopen the same project: each pick is a fresh selection.
+    const repo = screen.getByRole("combobox", { name: "Repo" });
+    fireEvent.focus(repo);
+    fireEvent.mouseDown(screen.getByRole("option", { name: "proj" }));
+    expect((repo as HTMLInputElement).value).toBe("proj");
+    pickFolder.mockResolvedValue("~/Projects/site");
+    fireEvent.click(screen.getByRole("button", { name: "Add a project…" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open a folder…" }));
+    await waitFor(() => expect((repo as HTMLInputElement).value).toBe("site"));
+    // Start waits for the new project's usable CLIs.
+    await waitFor(() => expect((screen.getByRole("button", { name: "Start" }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByRole("button", { name: "Start" }));
+    await waitFor(() => expect(posts(daemon).at(-1)?.body).toMatchObject({ repo: "~/Projects/site" }));
     sync.stop();
+  });
+
+  it("lists only usable CLIs, makes a first session pick one, remembers it and links to sign in to more", async () => {
+    localStorage.clear();
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [], workspaces: [root], providers: freshProviders({ claude: { path: "/bin/claude", version: "2" }, codex: { path: "/bin/codex", version: "1" }, antigravity: { path: "/bin/agy", version: "1", signed_in: false } }) });
+    const { onSignIn, stop } = setup(daemon);
+    const select = (await screen.findByRole("combobox", { name: "Supervisor CLI" })) as HTMLSelectElement;
+    expect([...select.options].map((o) => o.textContent)).toEqual(["Pick a CLI", "Claude Code", "Codex"]);
+    expect((screen.getByRole("button", { name: "Start" }) as HTMLButtonElement).disabled).toBe(true);
+    // ⌘↵ in the prompt doesn't get past the pick either.
+    fireEvent.keyDown(screen.getByRole("textbox", { name: "What should brindle work on?" }), { key: "Enter", metaKey: true });
+    expect(posts(daemon)).toHaveLength(0);
+    fireEvent.click(screen.getByRole("button", { name: "Sign in to more…" }));
+    expect(onSignIn).toHaveBeenCalled();
+    fireEvent.click(within(screen.getByText("Which CLI should run your sessions?").parentElement!).getByRole("button", { name: "Codex" }));
+    expect(select.value).toBe("codex");
+    expect(screen.queryByText("Which CLI should run your sessions?")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Start" }));
+    await waitFor(() => expect(posts(daemon).at(-1)?.body).toMatchObject({ provider: "codex" }));
+    expect(localStorage.getItem("brindle.supervisorCli")).toBe("codex");
+    stop();
+  });
+
+  it("won't start on an earlier answer: a repo's usable CLIs are asked again each time it is selected", async () => {
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }, { repo_root: OTHER, name: "other" }], sessions: [], workspaces: [root] });
+    const fetch = daemon.fetch;
+    let hold = false;
+    const held: (() => void)[] = [];
+    daemon.fetch = async (input, init) => {
+      if (hold && new URL(String(input)).pathname.endsWith("/providers/usable")) await new Promise<void>((r) => held.push(r));
+      return fetch(input, init);
+    };
+    const { stop } = setup(daemon);
+    const start = () => screen.getByRole("button", { name: "Start" }) as HTMLButtonElement;
+    await waitFor(() => expect(start().disabled).toBe(false));
+    hold = true;
+    const repo = screen.getByRole("combobox", { name: "Repo" });
+    for (const name of ["other", "proj"]) {
+      fireEvent.focus(repo);
+      fireEvent.mouseDown(screen.getByRole("option", { name }));
+    }
+    // Back on the first repo, whose earlier answer is gone: nothing starts until it is asked again.
+    await waitFor(() => expect(held).toHaveLength(2));
+    expect(start().disabled).toBe(true);
+    fireEvent.keyDown(screen.getByRole("textbox", { name: "What should brindle work on?" }), { key: "Enter", metaKey: true });
+    expect(posts(daemon)).toHaveLength(0);
+    act(() => held.forEach((r) => r()));
+    await waitFor(() => expect(start().disabled).toBe(false));
+    stop();
+  });
+
+  it("starts nothing until the usable CLIs are known, and offers to look again when they couldn't be read", async () => {
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [], workspaces: [root] });
+    const fetch = daemon.fetch;
+    let down = true;
+    daemon.fetch = async (input, init) => (down && new URL(String(input)).pathname.endsWith("/providers/usable") ? Response.json({ error: { code: "internal", message: "down" } }, { status: 500 }) : fetch(input, init));
+    const { stop } = setup(daemon);
+    await screen.findByText("Couldn't check which CLIs can run here.");
+    fireEvent.keyDown(screen.getByRole("textbox", { name: "What should brindle work on?" }), { key: "Enter", metaKey: true });
+    expect(posts(daemon)).toHaveLength(0);
+    down = false;
+    fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+    await waitFor(() => expect((screen.getByRole("button", { name: "Start" }) as HTMLButtonElement).disabled).toBe(false));
+    stop();
+  });
+
+  it("with no usable CLI, shows Finish setting up in place of the composer", async () => {
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [], workspaces: [root], providers: freshProviders() });
+    const { onSignIn, stop } = setup(daemon);
+    fireEvent.click(await screen.findByRole("button", { name: "Sign in to a CLI" }));
+    expect(onSignIn).toHaveBeenCalled();
+    expect(screen.queryByRole("form", { name: "Start a session" })).toBeNull();
+    stop();
   });
 });

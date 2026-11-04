@@ -201,12 +201,19 @@ def _blocked(launches: list[tuple[Agent, Workspace]], keys_only: bool = False) -
     return preflight.Blocked(list(items.values())) if items else None
 
 
+def _chat(ws: Workspace, provider: str) -> Agent:
+    return Agent("", ws.id, agents.SUPERVISOR, provider, None, "interactive", "starting", "", None, 0.0)
+
+
 def session_blockers(db: DB, repo: str, provider: str | None, *, read_only: bool = False) -> preflight.Blocked | None:
     """What would stop a new supervisor chat in ``repo`` (on ``provider``, else
-    its profile's) before its first turn. ``read_only`` (a GET): the checkout
-    isn't registered, and the sign-in check sees only credentials (see
-    agents.launch_blockers)."""
-    from brindle.profiles import load_profile
+    the default one: svc.default_provider) before its first turn. With no
+    provider given and none usable, what installing or signing in to each one
+    the org allows and isn't turned off needs (a ServiceError when nothing
+    would do). ``read_only`` (a GET): the checkout isn't registered, and the
+    sign-in check sees only credentials (see agents.launch_blockers)."""
+    from brindle import providers_install
+    from brindle.pro import team_policy
 
     if read_only:
         top = git.toplevel(repo)
@@ -214,26 +221,58 @@ def session_blockers(db: DB, repo: str, provider: str | None, *, read_only: bool
                                                     "HEAD", None, top, None, "", 0.0)
     else:
         ws = workspaces.adopt_root(db, repo)
-    provider = (svc.supervisor_provider(ws.repo_root, provider)
-                or load_profile(agents.SUPERVISOR, ws.repo_root).provider)
-    chat = Agent("", ws.id, agents.SUPERVISOR, provider, None, "interactive", "starting", "", None, 0.0)
-    return _blocked([(chat, ws)], keys_only=read_only)
+    provider = provider or svc.default_provider(ws.repo_root)
+    if provider is not None:
+        return _blocked([(_chat(ws, provider), ws)], keys_only=read_only)
+    acc = team_policy.access(ws.repo_root)
+    fixable = [p for p in team_policy.CLI_NAMES if acc.allows(p) and not providers_install.turned_off(p)]
+    blocked = _blocked([(_chat(ws, p), ws) for p in fixable], keys_only=read_only)
+    if blocked is not None:
+        return blocked
+    # Nothing to install or sign in to would do: what stops each CLI instead.
+    items = []
+    for p in team_policy.CLI_NAMES:
+        name = svc.cli_name(p)
+        if why := acc.refusal(p):
+            items.append(preflight.Item("setup", f"{p}.policy", p, f"{name} isn't allowed by your organization's policy",
+                                        why))
+        elif off := preflight.turned_off(p):
+            items.append(off)
+    if not items:
+        raise svc.no_usable_provider()
+    return preflight.Blocked(items)
+
+
+@dataclass
+class SessionBlocked(preflight.Blocked):
+    """A start held by its preflight, with the CLIs that would start instead."""
+    usable: list[str] = dataclasses.field(default_factory=list)
+
+    def to_json(self) -> dict[str, Any]:
+        return {**super().to_json(), "usable": self.usable}
 
 
 def start_session(db: DB, params: dict, body: Body) -> Any:
-    """A 409 ``{"preflight": [...]}`` instead of a chat opening on its CLI's
-    sign-in or first-run screen (see brindle.preflight). Only opening a
-    session that is running now launches nothing, so only that isn't checked."""
+    """A 409 ``{"preflight": [...], "usable": [...]}`` instead of a chat
+    opening on its CLI's sign-in or first-run screen (see brindle.preflight).
+    The CLI is the one ``provider`` names, else the default one, by the one
+    rule of svc.supervisor_provider: one the org's policy refuses or that is
+    turned off is refused (403 / 409, with ``usable``), and with none usable
+    nothing starts. Only opening a session that is running now launches
+    nothing, so only that isn't checked."""
     repo, choice, session_id = _get(body, "repo", required=True), _get(body, "choice"), _get(body, "session_id")
     name = _session_name(_get(body, "name"))     # checked with the rest, before anything launches
+    repo_root = workspaces.adopt_root(db, repo).repo_root
     opening = (choice == "o" and not _get(body, "branch") and not _get(body, "worktree")
-               and any(s.root.id == session_id
-                       for s in sessions_mod.live(db, workspaces.adopt_root(db, repo).repo_root)))
+               and any(s.root.id == session_id for s in sessions_mod.live(db, repo_root)))
+    provider = _get(body, "provider")
     if not opening:
-        blocked = session_blockers(db, repo, _get(body, "provider"))
+        provider = svc.supervisor_provider(repo_root, provider)
+        blocked = session_blockers(db, repo, provider)
         if blocked:
-            return blocked
-    got = svc.start(db, repo, provider=_get(body, "provider"),
+            usable = svc.usable_providers(repo_root) if provider else []
+            return SessionBlocked(blocked.items, [p for p in usable if p != provider])
+    got = svc.start(db, repo, provider=provider,
                     prompt=_get(body, "prompt"), watch=_get(body, "watch", bool, True),
                     autopilot=_get(body, "autopilot", bool), branch=_get(body, "branch"),
                     worktree=_get(body, "worktree"), choice=_get(body, "choice"),
@@ -2445,7 +2484,9 @@ def clone_repo(db: DB, params: dict, body: Body) -> Any:
             bus.publish(db, "job.progress", job=job.id, text=text)
 
         try:
-            return {"path": clone.clone(url, dest, progress)}
+            path = clone.clone(url, dest, progress)
+            workspaces.adopt_root(db, path)
+            return {"path": path}
         finally:
             with _CLONE_LOCK:
                 _CLONING.pop(key, None)
@@ -2465,7 +2506,8 @@ _CLONING: dict[str, tuple[Job, str]] = {}      # destination -> (its clone job, 
 def open_repo(db: DB, params: dict, body: Body) -> Any:
     """Register the folder ``path`` as session start does (workspaces.adopt_root).
     A folder that isn't a git repo is refused (409 ``not_a_repo``) unless the
-    body says ``init``: then ``git init`` makes it one first."""
+    body says ``init``: then initialize it with an empty initial commit so
+    session worktrees have a starting point without committing the person's files."""
     path = Path(_get(body, "path", required=True)).expanduser()
     if not path.is_dir():
         raise ServiceError("invalid", f"not a folder: {path}")
@@ -2474,6 +2516,8 @@ def open_repo(db: DB, params: dict, body: Body) -> Any:
         if not _get(body, "init", bool, False):
             raise ServiceError("not_a_repo", f"{path} isn't a git repository", 409)
         git.run(["init", "-q"], path)
+        git.run(["-c", "user.name=brindle", "-c", "user.email=brindle@localhost",
+                 "-c", "commit.gpgSign=false", "commit", "--allow-empty", "-qm", "Initial commit"], path)
         initialized = True
     ws = workspaces.adopt_root(db, str(path))
     return {"workspace_id": ws.id, "repo_root": ws.repo_root, "path": ws.path, "branch": ws.branch,
