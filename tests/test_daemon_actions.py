@@ -2176,9 +2176,10 @@ def cloning(world, repo, monkeypatch):
     return f"file://{repo.parent / 'origin.git'}"
 
 
-def test_open_repo_initializes_a_plain_folder_only_when_confirmed(db, world, tmp_path):
+def test_a_clone_streams_git_progress_and_finishes_with_the_path(db, cloning, tmp_path):
     from brindle import git
 
+    # The picker's other path: opening a plain folder only initializes it after confirmation.
     folder = tmp_path / "new-project"
     folder.mkdir()
     (folder / "notes.txt").write_text("keep my files\n")
@@ -2194,9 +2195,6 @@ def test_open_repo_initializes_a_plain_folder_only_when_confirmed(db, world, tmp
     head = git.run(["rev-parse", "HEAD"], folder).stdout
     assert _send("POST", "/v1/repos/open", {"path": str(folder), "init": True})[0] == 200
     assert git.run(["rev-parse", "HEAD"], folder).stdout == head
-
-
-def test_a_clone_streams_git_progress_and_finishes_with_the_path(db, cloning, tmp_path):
     parent = tmp_path / "projects"
     parent.mkdir()
     code, reply = _send("POST", "/v1/repos/clone", {"url": cloning, "parent_dir": str(parent)})
