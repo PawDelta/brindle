@@ -54,6 +54,15 @@ describe("Sidebar", () => {
     sync.stop();
   });
 
+  it("counts the same agents as working in the session's header as in its row: a reported worker at rest isn't one", async () => {
+    const reported = { ...worker.agents![0], id: "w2", status: "idle", reported: true };
+    const { sync } = mount({ workspaces: [root, { ...worker, agents: [...worker.agents!, reported] }] }, { screen: "session", root: "sup1", repo: REPO });
+    await waitFor(() => expect(agentRow("w2")).toBeTruthy());
+    expect(sessionRow("sup1")!.textContent).toContain("3 agents · 1 working");
+    await waitFor(() => expect(screen.getByTestId("session-context").textContent).toContain("sup1 · proj · interactive · 1 working"));
+    sync.stop();
+  });
+
   it.each([
     { account: { signed_in: true, name: "Sam Rivera", email: "other@example.com" }, initials: "SR" },
     { account: { signed_in: true, name: "  ", email: "sam.rivera@example.com" }, initials: "S" },

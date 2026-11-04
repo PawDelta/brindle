@@ -8,7 +8,8 @@
    Demo switcher flips the account's plan, the org policy on and off, and
    the providers' usage (normal, near a limit, several near, a reset soon).
    Everything the screens do goes through the same client and routes as in
-   the app; only the daemon is pretend. */
+   the app; only the daemon is pretend. Opened with ?record it is the
+   README's recording instead (recording.ts): a calm inbox, three workers. */
 
 import { useState } from "react";
 import { createRoot } from "react-dom/client";
@@ -22,6 +23,7 @@ import { FakeDaemon } from "../src/test/fakeDaemon";
 import { usageScenario, type UsageScenario } from "../src/test/usage";
 import { BRINDLE_HOME, ORGS, README_BASE, README_DIFF, README_FILE, data } from "../shots/fixtures";
 import "./demo.css";
+import { RECORDING, mergedSession, mergedWorkers, recordingUsage, startRecording } from "./recording";
 
 const daemon = new FakeDaemon(structuredClone(data));
 // brindle's home is Sam's, so the scratch session under it reads as one (its ⋯ offers Move to a repo…).
@@ -46,7 +48,9 @@ const more: InboxItemDTO[] = [
     permission: { via: "prompt", request_id: "p-7c3e", wording: "exec (needs approval)\n$ uv run alembic upgrade head\nAllow this command?", terminal: "its prompt doesn't show which option is selected", choices: [] },
   },
 ];
-daemon.data.inbox = [...daemon.data.inbox, ...more];
+// The README's recording (?record) has its own calm afternoon instead (recording.ts).
+if (RECORDING) startRecording(daemon);
+else daemon.data.inbox = [...daemon.data.inbox, ...more];
 
 const store = createAppStore();
 const client = daemon.client();
@@ -61,9 +65,11 @@ const LINES = [
   "⏺ Update(desktop/src/screens/Session/SessionScreen.test.tsx)\r\n  ⎿  Updated desktop/src/screens/Session/SessionScreen.test.tsx with 22 additions\r\n",
 ];
 let line = 0;
-setInterval(() => {
-  daemon.print("a7aaa807", `\r\n${LINES[line++ % LINES.length]}`);
-}, 6000);
+if (!RECORDING) {
+  setInterval(() => {
+    daemon.print("a7aaa807", `\r\n${LINES[line++ % LINES.length]}`);
+  }, 6000);
+}
 
 /* A sign-in that completes on its own: a few seconds after the CLI "opened
    the browser" the provider reads signed in and the CLI exits. The Claude
@@ -113,17 +119,27 @@ setInterval(() => {
    still listed. */
 daemon.data.sessionFiles["sup-42"] = { "desktop/README.md": README_FILE };
 daemon.data.sessionBase["sup-42"] = { "desktop/README.md": README_BASE };
+// The recording's session holds what its workers' branches merged too, and its PR's diff all of it.
+let prDiff = README_DIFF;
+if (RECORDING) {
+  const merged = mergedSession(daemon.data.sessionFiles["sup-42"], daemon.data.sessionBase["sup-42"]);
+  daemon.data.sessionFiles["sup-42"] = merged.files;
+  daemon.data.sessionBase["sup-42"] = merged.base;
+  prDiff = merged.diff;
+}
 setTimeout(() => {
   if (daemon.data.goal) {
     daemon.data.goal = { ...daemon.data.goal, state: "done", goal_phase: "in_review", milestones: daemon.data.goal.milestones?.map((m) => ({ ...m, status: "passed", state: "passed", state_why: null, checked_at: Date.now() / 1000 })) };
     daemon.publish("autopilot.milestone", { root_id: "sup-42", payload: { status: "passed" } });
   }
-  daemon.data.workspaces = daemon.data.workspaces.map((ws) => ({ ...ws, agents: ws.agents?.map((a) => (a.parent_id === "sup-42" && a.status === "processing" ? { ...a, status: "idle", reported: true } : a)) }));
+  daemon.data.workspaces = daemon.data.workspaces.map((ws) => ({ ...ws, agents: ws.agents?.map((a) => (a.parent_id === "sup-42" && a.status === "processing" ? { ...a, status: "idle", status_since: Date.now() / 1000, reported: true } : a)) }));
+  if (RECORDING) mergedWorkers(daemon);
   daemon.publish("agent.status", { agent_id: "a7aaa807", payload: { status: "idle" } });
   setTimeout(() => {
-    daemon.readyForPr("sup-42", { branch: "dev/desktop-app", base: "main", diff: README_DIFF });
+    daemon.readyForPr("sup-42", { branch: "dev/desktop-app", base: "main", diff: prDiff });
     // The engine's inbox card for it: its Review & open PR opens the sheet over the session's diff.
-    daemon.data.inbox = [{ kind: "pr_ready", reason: "ready for a pull request", agent_id: "sup-42", workspace_id: "pawdelta", root_id: "sup-42" }, ...daemon.data.inbox];
+    // As service/inbox._pr_items words it: the PR's title as its detail.
+    daemon.data.inbox = [{ kind: "pr_ready", reason: "PR ready for your approval", detail: daemon.data.goal?.goal ?? "UX revamp of the brindle desktop app", agent_id: "sup-42", workspace_id: "pawdelta", root_id: "sup-42" }, ...daemon.data.inbox];
     void sync.refresh();
   }, 5000);
 }, 20_000);
@@ -136,6 +152,7 @@ const merged = setInterval(() => {
 /* A permission answered from the app: the worker's pane shows the pick and goes on (or stops). */
 let answered = 0;
 setInterval(() => {
+  if (RECORDING) return; // its panes redraw themselves (recording.ts)
   for (const a of daemon.permissionAnswers.slice(answered)) {
     answered++;
     const pick = a.choice === "deny" ? "No" : "Yes";
@@ -160,7 +177,7 @@ const PLAN_ACCOUNT: Record<Plan, () => typeof base> = {
 const policy = structuredClone(daemon.data.routingPolicy);
 
 /* Each provider's usage, as design/usage drew it: near a limit to start, so the sidebar's reading shows. */
-daemon.data.usage = usageScenario("near");
+daemon.data.usage = RECORDING ? recordingUsage() : usageScenario("near");
 
 function Demo() {
   const [plan, setPlan] = useState<Plan>("pro");

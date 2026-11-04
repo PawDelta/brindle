@@ -225,7 +225,7 @@ export function SessionDiffEditor({ client, root, state }: { client: DaemonClien
                       <span className="w-3 text-ink-3">{gone.includes(f.path) ? "·" : STATUS_MARK[f.status]}</span>
                       <span className="flex min-w-0 flex-1" title={f.path}>
                         {f.path.includes("/") && <span className="sr-only">{f.path.slice(0, f.path.lastIndexOf("/") + 1)}</span>}
-                        <span className="shrink-0">{f.path.slice(f.path.lastIndexOf("/") + 1)}</span>
+                        <span className="truncate">{f.path.slice(f.path.lastIndexOf("/") + 1)}</span>
                       </span>
                       {gone.includes(f.path) ? (
                         <span className="shrink-0 font-sans text-xs text-ink-3">{GONE}</span>

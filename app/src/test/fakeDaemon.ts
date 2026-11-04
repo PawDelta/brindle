@@ -1392,7 +1392,8 @@ export class FakeDaemon {
     this.permissionAnswers.push({ agent: id, request: p.request_id, choice: body.choice });
     d.inbox = d.inbox.filter((i) => i !== item);
     const status = body.choice === "deny" ? "idle" : "processing";
-    d.workspaces = d.workspaces.map((ws) => ({ ...ws, agents: ws.agents?.map((a) => (a.id === id ? { ...a, status } : a)) }));
+    // As db.set_status does: the new status is timed from now.
+    d.workspaces = d.workspaces.map((ws) => ({ ...ws, agents: ws.agents?.map((a) => (a.id === id ? { ...a, status, status_since: Date.now() / 1000 } : a)) }));
     this.publish("permission.answered", { agent_id: id, workspace_id: item.workspace_id ?? null, payload: { request_id: p.request_id, choice: body.choice, via: p.via, cleared: true } });
     return json({ choice: body.choice, via: p.via, cleared: true, rule: body.choice === "allow_always" ? (offered.rule ?? null) : null });
   }
