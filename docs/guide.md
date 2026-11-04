@@ -2301,7 +2301,7 @@ add rules to that file yourself, for example:
 
 ## How it works
 
-- **Look:** brindle's tmux sessions get their own dark purple theme and mouse
+- **Look:** brindle's tmux sessions get their own dark green theme (the desktop app's palette) and mouse
   scrolling. Your own tmux setup and other sessions are untouched (apart from
   tmux's `focus-events`, which Claude Code asks for).
 - **State** lives in `~/.brindle/brindle.db` (SQLite, WAL mode). The CLI, the hooks,
