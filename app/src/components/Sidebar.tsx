@@ -269,15 +269,26 @@ interface RowRef {
   route: Route;
 }
 
+/* A profile's role: its name without the model or tier it runs on
+   (developer-codex-heavy → developer, reviewer-gemini-low → reviewer). A name
+   with neither, such as test-writer, is its own role. */
+const PROFILE_VARIANT = /^(sonnet|opus|haiku|fable|codex|gemini|flash|pro|opencode|local|light|heavy|low|medium|high)$/;
+
+export function roleOf(profile: string): string {
+  const words = profile.replace(/-or-.*$/, "").split("-");
+  while (words.length > 1 && PROFILE_VARIANT.test(words[words.length - 1])) words.pop();
+  return words.join("-");
+}
+
 /* One agent in a session's tree, and its children under it: a dot, "id ·
-   role" (its profile; the branch is in the tooltip), its state at the right. */
+   role" (the profile and branch are in the tooltip), its state at the right. */
 function AgentRow({ node, depth, route, navigate, repo, root, cursor, setCursor }: { node: AgentNode; depth: number; repo: string; root: string; cursor: string | null; setCursor(key: string): void } & Pick<SidebarProps, "route" | "navigate">) {
   const a = node.agent;
   const alive = useAppState((s) => s.alive[a.id]);
   const active = route.screen === "session" && route.root === root && (route.agent ?? root) === a.id;
   const status = cliStatus(a, node.workspace, alive);
   const key = `agent:${a.id}`;
-  const label = a.id === root ? "supervisor" : a.profile || node.workspace.branch;
+  const label = a.id === root ? "supervisor" : a.profile ? roleOf(a.profile) : node.workspace.branch;
   return (
     <li>
       <button
@@ -287,7 +298,7 @@ function AgentRow({ node, depth, route, navigate, repo, root, cursor, setCursor 
         aria-current={active ? "page" : undefined}
         data-tree-agent={a.id}
         data-row={key}
-        title={`${a.id} · ${status.glyph} ${status.label} · ${node.workspace.branch}`}
+        title={`${a.id} · ${status.glyph} ${status.label} · ${a.profile} · ${node.workspace.branch}`}
         onClick={() => {
           setCursor(key);
           navigate({ screen: "session", root, repo, agent: a.id });

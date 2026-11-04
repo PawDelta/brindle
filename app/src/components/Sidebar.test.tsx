@@ -10,7 +10,7 @@ import { startSync } from "../store/sync";
 import { StoreContext } from "../store/useStore";
 import { BASE_URL, FakeDaemon, TOKEN, type DaemonData } from "../test/fakeDaemon";
 import { REPO, permission, permissionInTerminal, question, root, waiting, worker } from "../test/fixtures";
-import { PAUSED_KEY, SPLIT_KEY, Sidebar } from "./Sidebar";
+import { PAUSED_KEY, SPLIT_KEY, Sidebar, roleOf } from "./Sidebar";
 import { sidebarChanges } from "./SessionContext";
 
 beforeEach(() => localStorage.clear());
@@ -95,7 +95,7 @@ describe("Sidebar", () => {
     expect(agentRow("sup1")!.querySelector(".side-dot")!.getAttribute("data-tone")).toBe("idle");
     expect(agentRow("sup1")!.textContent).toContain("sup1 · supervisor");
     expect(agentRow("w1")!.querySelector(".side-dot")!.getAttribute("data-tone")).toBe("work");
-    expect(agentRow("w1")!.textContent).toContain(`w1 · ${worker.agents![0].profile}`);
+    expect(agentRow("w1")!.textContent).toContain(`w1 · ${roleOf(worker.agents![0].profile)}`);
     expect(agentRow("w1")!.title).toContain("feat/ls");
     expect(within(agentRow("w1")!).getByTestId("agent-status").textContent).toBe("working");
     expect(within(session).queryByTestId("needs-you")).toBeNull();
@@ -358,4 +358,14 @@ describe("Sidebar", () => {
     expect(failed).toBe(2);
     sync.stop();
   });
+});
+
+it.each([
+  ["developer-codex-heavy", "developer"],
+  ["reviewer-gemini-low", "reviewer"],
+  ["developer-or-kimi-k2", "developer"],
+  ["test-writer", "test-writer"],
+  ["coordinator", "coordinator"],
+])("%s reads as the role %s", (profile, role) => {
+  expect(roleOf(profile)).toBe(role);
 });
