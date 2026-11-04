@@ -120,7 +120,12 @@ setTimeout(() => {
   }
   daemon.data.workspaces = daemon.data.workspaces.map((ws) => ({ ...ws, agents: ws.agents?.map((a) => (a.parent_id === "sup-42" && a.status === "processing" ? { ...a, status: "idle", reported: true } : a)) }));
   daemon.publish("agent.status", { agent_id: "a7aaa807", payload: { status: "idle" } });
-  setTimeout(() => daemon.readyForPr("sup-42", { branch: "dev/desktop-app", base: "main", diff: README_DIFF }), 5000);
+  setTimeout(() => {
+    daemon.readyForPr("sup-42", { branch: "dev/desktop-app", base: "main", diff: README_DIFF });
+    // The engine's inbox card for it: its Review & open PR opens the sheet over the session's diff.
+    daemon.data.inbox = [{ kind: "pr_ready", reason: "ready for a pull request", agent_id: "sup-42", workspace_id: "pawdelta", root_id: "sup-42" }, ...daemon.data.inbox];
+    void sync.refresh();
+  }, 5000);
 }, 20_000);
 const merged = setInterval(() => {
   if (!daemon.prs.some((p) => p.root === "sup-42")) return;
@@ -136,6 +141,11 @@ setInterval(() => {
     const pick = a.choice === "deny" ? "No" : "Yes";
     daemon.print(a.agent, `\r\n  ❯ ${pick}\r\n\r\n${a.choice === "deny" ? "● Understood: I'll take screenshots another way." : "● Downloading Chromium 131…\r\n  ⎿  161 MB, ~40s"}\r\n`);
     daemon.publish("agent.status", { agent_id: a.agent, payload: { status: a.choice === "deny" ? "idle" : "processing" } });
+    if (a.choice !== "deny") {
+      // The allowed worker carries on: its download finishes and it goes back to its task, line by line.
+      const after = ["  ⎿  Chromium 131 installed\r\n", "⏺ Bash(node shots/shots.mjs --scene session,inbox)\r\n  ⎿  rendering session-light.png…\r\n", "  ⎿  rendering inbox-light.png…\r\n", "⏺ Update(desktop/shots/README.md)\r\n  ⎿  Updated desktop/shots/README.md with 6 additions\r\n"];
+      after.forEach((text, i) => setTimeout(() => daemon.print(a.agent, `\r\n${text}`), 2500 * (i + 1)));
+    }
   }
 }, 300);
 
