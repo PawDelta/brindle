@@ -118,6 +118,14 @@ def _file_lock(name: str, wait: bool = True, *, timeout: float | None = None):
             fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
 
+def fix_round_hold():
+    """Held from a verdict's look at whether its session is paused to the
+    fix round being left for its resume (_send_back), and for the resume's
+    look at what was left, once its chat is running (agents._resume): one of
+    the two always sees the other. Only ever around a few database calls."""
+    return _file_lock("fix-round-hold")
+
+
 @contextmanager
 def merge_lock(ws_id: str):
     """Hold workspace ``ws_id`` for a verdict or a merge, from the first look
@@ -1134,13 +1142,14 @@ def _send_back(db: DB, ws: Workspace, worker: Agent, cfg: RepoConfig, summary: s
                "Fix what's valid, commit, and call report_result "
                f"again; brindle will have it {'checked and ' if what == 'checks' else ''}"
                "reviewed again.")
-        current = db.get_agent(worker.id) or worker
-        if agents.session_paused(db, current) or (current.status == "paused" and current.dismissed_at is None):
-            # A check run or a verdict that outlived the pause: nothing starts
-            # now (its window may be closing). The resume starts this round.
-            db.enqueue(worker.id, agents.format_message(db, fix, sender_id), sender_id)
-            db.set_status(worker.id, "paused")
-            return
+        with fix_round_hold():
+            current = db.get_agent(worker.id) or worker
+            if agents.session_paused(db, current) or (current.status == "paused" and current.dismissed_at is None):
+                # A check run or a verdict that outlived the pause: nothing starts
+                # now (its window may be closing). The resume starts this round.
+                db.enqueue(worker.id, agents.format_message(db, fix, sender_id), sender_id)
+                db.set_status(worker.id, "paused")
+                return
         if agents.is_alive(worker):
             try:
                 agents.send_message(db, worker.id, fix, sender_id=sender_id)

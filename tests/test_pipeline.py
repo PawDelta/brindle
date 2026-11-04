@@ -399,28 +399,43 @@ def _reported_branch_in_a_paused_session(db, repo, monkeypatch):
     db.update_agent("w1", session_ref="sess-w1", reviewing_since=1000.0)
     monkeypatch.setattr(providers.ClaudeCode, "can_resume", staticmethod(lambda ref: True))
     launched = []
-
-    def launch(db_, a, ws_, *, prompt, resume, **kw):
-        db.set_status(a.id, "idle")
-        launched.append((a.id, prompt))
-
-    monkeypatch.setattr(agents, "_launch", launch)
+    monkeypatch.setattr(agents, "_launch", lambda db_, a, ws_, *, prompt, resume, **kw:
+                        (db.set_status(a.id, "idle"), launched.append((a.id, prompt))))
     return ws, launched
 
 
+BLOCKER = "- blocker: missing check for None.\nNeeds supervisor action: None."
+
+
+@pytest.mark.parametrize("locked, restarted", [(None, ["boss", "w1"]), ("someone-else", ["boss"])])
+def test_a_verdict_landing_as_the_session_resumes_still_starts_its_fix_round(db, repo, monkeypatch, locked, restarted):
+    """Held while the chat is still paused, for a resume that already looked past its
+    worker. One locked to another identity stays paused (note_stalled tells its supervisor)."""
+    from brindle import identity_lock
+
+    ws, launched = _reported_branch_in_a_paused_session(db, repo, monkeypatch)
+    add(db, ws, "rev", "review", "reviewer", parent="boss", status="done", result="no")
+    monkeypatch.setattr(identity_lock, "locked_by", lambda agent_id: locked if agent_id == "w1" else None)
+    launch = agents._launch
+    def verdict_first(db_, a, ws_, **kw):
+        if a.id == "boss":
+            assert pipeline.on_review(db, db.get_agent("rev"), ws, False, BLOCKER)
+        launch(db_, a, ws_, **kw)
+    monkeypatch.setattr(agents, "_launch", verdict_first)
+    agents.resume(db, "boss")
+    assert [a for a, _ in launched] == restarted
+    assert db.get_agent("w1").pipeline == "fixing" and db.pending_count("w1") == 1
+
+
 @pytest.mark.parametrize("summary, fix_round", [
-    ("- blocker: missing check for None.\nNeeds supervisor action: None.", True),
+    (BLOCKER, True),
     ("Needs supervisor action: ask the user about scope.", False),
 ])
 def test_a_verdict_that_outlives_the_pause_waits_for_the_resume(db, repo, monkeypatch, summary, fix_round):
-    """Check runs and _finish-review are nobody's children, so they can finish
-    during a pause: nothing starts in the paused session, and nothing they had
-    to say is lost."""
+    """Check runs and _finish-review outlive a pause: nothing starts, and nothing they say is lost."""
     ws, launched = _reported_branch_in_a_paused_session(db, repo, monkeypatch)
     add(db, ws, "rev", "review", "reviewer", parent="boss", status="done", result="no")
-
     assert pipeline.on_review(db, db.get_agent("rev"), ws, False, summary)
-
     assert launched == [] and db.get_agent("boss").status == "paused"
     if fix_round:
         assert (db.get_agent("w1").pipeline, db.get_agent("w1").status) == ("fixing", "paused")
@@ -433,12 +448,10 @@ def test_a_verdict_that_outlives_the_pause_waits_for_the_resume(db, repo, monkey
 
 
 def test_branches_in_the_pipeline_carry_on_after_the_resume(db, repo, monkeypatch):
-    """A check run that finished during the pause, or one or a merge run that
-    ended with the machine: the review starts again, and the merge is run."""
+    """A check or merge run that finished in the pause or ended with the machine starts again."""
     from typer.testing import CliRunner
 
     from brindle import cli
-
     ws, _launched = _reported_branch_in_a_paused_session(db, repo, monkeypatch)
     approved = workspaces.create(db, str(repo), "approved").workspace
     add(db, approved, "w2", "assign", parent="boss", status="done", result="reported", pipeline="ready")
@@ -451,16 +464,13 @@ def test_branches_in_the_pipeline_carry_on_after_the_resume(db, repo, monkeypatc
     monkeypatch.setattr(pipeline, "_start_review", lambda *a, **kw: restarts.append(a))
     monkeypatch.setattr(agents, "_detach_orphan", started.append)
     now = time.time()
-
     assert agents.review_after_checks(db, "boss", ws, cfg=RepoConfig(checks=["true"]), report=1000.0) is None
     cull.note_reported_stuck(db, now, {})
     assert reviewers == [] and restarts == []
-
     db.update_agent("w1", review_restarted=1000.0)     # the one restart this wait gets, used before the pause
     agents.resume(db, "boss")
     cull.note_reported_stuck(db, now, {})
     assert len(restarts) == 1
-
     [argv] = started
     argv = argv[argv.index("_drain-ready"):]
     assert CliRunner().invoke(cli.app, argv).exit_code == 0

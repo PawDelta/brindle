@@ -1756,12 +1756,14 @@ def _resume(db: DB, root_id: str, *, watch_pane: bool, only, recovery_env) -> li
             db.set_session_credential(root_id, k, val)
             os.environ[k] = val
 
-    # One back at work left done: paused by a daemon from before finished_reporting
-    # knew of it (the update itself), or its pane died during the round.
-    candidates = [a for a in tree(db, root_id)
-                  if (a.status in ("paused", "failed")
-                      or (a.status == "done" and a.pipeline in BACK_AT_WORK and not finished_reporting(a)))
-                  and (only is None or a.id in only)]
+    def restartable(a: Agent) -> bool:
+        # One back at work left done: paused by a daemon from before finished_reporting
+        # knew of it (the update itself), or its pane died during the round.
+        return ((a.status in ("paused", "failed")
+                 or (a.status == "done" and a.pipeline in BACK_AT_WORK and not finished_reporting(a)))
+                and (only is None or a.id in only))
+
+    candidates = [a for a in tree(db, root_id) if restartable(a)]
     for a in candidates:   # all or nothing: a session never half-resumes under another identity
         identity_lock.ensure(a)
     _gate_check()
@@ -1773,7 +1775,7 @@ def _resume(db: DB, root_id: str, *, watch_pane: bool, only, recovery_env) -> li
             db.add_autopilot(root_id)
         pilot.reload_goals_file(db, root_id)   # edits the person made to this session's goal file
     resumed = []
-    for a in candidates:
+    for a in candidates:    # the chat comes first, and may add to this as it starts
         if a.status != "paused":
             if a.tmux_window and same_server(a) and owns_pane(db, a):
                 try:
@@ -1808,6 +1810,17 @@ def _resume(db: DB, root_id: str, *, watch_pane: bool, only, recovery_env) -> li
         _launch(db, a, ws, prompt=prompt, resume=ref,
                 watch_pane=watch_pane and a.id == root_id, background_setup=True)
         resumed.append(a)
+        if a.id == root_id:
+            # A verdict held for this resume (pipeline._send_back) while the chat was still
+            # paused, past the look above. Once this look is over the chat is running, so
+            # nothing more is held. Another identity's worker stays paused: note_stalled tells.
+            from brindle import pipeline
+
+            with pipeline.fix_round_hold():
+                known = {c.id for c in candidates}
+                candidates.extend(w for w in tree(db, root_id)
+                                  if w.id not in known and w.pipeline in BACK_AT_WORK and restartable(w)
+                                  and not identity_lock.locked_by(w.id))
     if any(a.id == root_id for a in resumed):
         knowledge.note(db, root_id, knowledge.RESUME)
         from brindle import pipeline, tasks
