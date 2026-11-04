@@ -126,6 +126,15 @@ def test_after_a_schema_bump_the_next_call_goes_to_the_reloaded_server(monkeypat
     newer = {**declared, "workspaces": declared["workspaces"] | {"from_a_newer_engine"}}
 
     async def scenario():
+        if modern:      # the listen's acknowledgement is still being written when the reload is wanted
+            wanted, write = anyio.Event(), old._write
+
+            async def held_ack(data):
+                if b"acknowledged" in data:
+                    await wanted.wait()
+                await write(data)
+            old._write = held_ack
+            old._wants_reload = lambda reloaded: mcp_server._wants_reload(reloaded) and (wanted.set() or True)
         async with anyio.create_task_group() as tg:
             async def client():
                 answers.extend(await _answers(from_server, 0))
