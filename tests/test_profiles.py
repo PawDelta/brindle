@@ -1,4 +1,18 @@
-from brindle.profiles import load_profile
+import pytest
+
+from brindle.profiles import _frontmatter, _list, load_profile
+
+
+@pytest.mark.parametrize("raw, expected", [
+    (r'''['it\'s', "say \"q\" # x", "\\", "\s", a#b] # note''',
+     ["it's", 'say "q" # x', "\\", r"\s", "a#b"]),
+    ("'a,b' # note", ["a,b"]),
+    ('\n  - "a,b" # note\n', ["a,b"]),
+    ("[] # note", None),
+])
+def test_frontmatter_list_grammar(raw, expected):
+    meta, _ = _frontmatter(f"---\nrules: {raw}\n---\n")
+    assert _list(meta["rules"]) == expected
 
 
 def test_repo_add_dirs_expand_a_leading_tilde(tmp_path, monkeypatch):
