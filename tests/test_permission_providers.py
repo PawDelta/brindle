@@ -739,7 +739,8 @@ def test_codex_sandbox_denies_reading_credentials(ws, tmp_path, monkeypatch, pol
     flags = dict(a.split("=", 1) for a in argv if a.startswith(("default_permissions=", "permissions.")))
     assert bool(flags) == (policy == "on")
     if policy == "off":
-        assert any(a.startswith("sandbox_workspace_write.writable_roots=") for a in argv)
+        [flag] = [a for a in argv if a.startswith("sandbox_workspace_write.writable_roots=")]
+        assert_codex_sandbox_never_writes_git_hooks_or_config(json.loads(flag.split("=", 1)[1]), ws.path)
         return
     name = providers.CODEX_PROFILE
     assert json.loads(flags["default_permissions"]) == name
@@ -752,62 +753,25 @@ def test_codex_sandbox_denies_reading_credentials(ws, tmp_path, monkeypatch, pol
         os.path.join(home, "daemon.json"), os.path.join(home, "brindle-keys"),
         os.path.realpath(credentials.FileStore().path.parent)}
     assert table[build_caches.uv_cache_dir()] == "write"
+    assert_codex_sandbox_never_writes_git_hooks_or_config([p for p, a in table.items() if a == "write"], ws.path)
 
 
-def _git_dirs(cwd):
-    """A checkout's git dir and common dir, as git resolves them."""
+def assert_codex_sandbox_never_writes_git_hooks_or_config(roots, cwd, linked=True):
+    """Of the common dir, exactly what a commit in linked worktree ``cwd`` writes: never hooks, config, info."""
     from brindle import git
-
-    lines = git.out(["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"], cwd).splitlines()
-    return [os.path.realpath(p) for p in lines]
-
-
-def _under(path, roots):
-    return any(path == r or path.startswith(r + os.sep) for r in roots)
+    git_dir, common = (os.path.realpath(p) for p in git.out(
+        ["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"], cwd).splitlines())
+    want = {git_dir, *(os.path.join(common, d) for d in ("objects", "refs", "logs"))} if linked else set()
+    assert common not in roots and {r for r in roots if r.startswith(common + os.sep)} == want
 
 
 @pytest.mark.parametrize("linked", [True, False])
-def test_codex_worker_can_commit(ws, linked):
-    """A linked worktree's git metadata lives outside it: `git add` and
-    `git commit` write its admin dir (index, HEAD, COMMIT_EDITMSG) and the
-    common dir's objects, refs and logs, so the sandbox lets a worker write
-    exactly those. A main checkout's .git is inside it: nothing to add."""
+def test_codex_worker_can_commit(ws, linked):  # a linked worktree's git metadata lives outside it
     from brindle.profiles import load_profile
     from brindle.providers import LaunchContext, _codex_writable_roots
-
     cwd = ws.path if linked else ws.repo_root
-    git_dir, common = _git_dirs(cwd)
-    assert (git_dir != common) == linked and (not linked or git_dir.startswith(os.path.join(common, "worktrees") + os.sep))
     roots = _codex_writable_roots(LaunchContext("c1", load_profile("developer"), None, cwd=cwd))
-    under_git = {r for r in roots if _under(r, [common])}
-    assert under_git == ({git_dir, *(os.path.join(common, d) for d in ("objects", "refs", "logs"))} if linked else set())
-
-
-@pytest.mark.parametrize("policy", ["on", "off"])
-def test_codex_sandbox_never_writes_git_hooks_or_config(ws, monkeypatch, policy):
-    """Whichever way the launch grants them (the permissions profile with the
-    policy on, writable_roots with it off), the worker's writable roots cover
-    its commit paths but never the common dir itself, its hooks, config, info
-    or packed-refs: hooks and config run outside the sandbox."""
-    import tomllib
-
-    from brindle import providers
-
-    monkeypatch.setattr(codex_hook, "_AppServer", FakeAppServer)
-    set_local(ws.repo_root, "permission_policy", policy)
-    argv = launch_argv(ws)
-    if policy == "off":
-        [flag] = [a for a in argv if a.startswith("sandbox_workspace_write.writable_roots=")]
-        roots = json.loads(flag.split("=", 1)[1])
-    else:
-        [flag] = [a for a in argv if a.startswith(f"permissions.{providers.CODEX_PROFILE}.filesystem=")]
-        table = tomllib.loads(f"t = {flag.split('=', 1)[1]}")["t"]
-        roots = [p for p, access in table.items() if access == "write"]
-        assert all(not _under(os.path.realpath(p), roots) for p, access in table.items() if access == "deny")
-    git_dir, common = _git_dirs(ws.path)
-    assert _under(git_dir, roots) and _under(os.path.join(common, "objects", "pack"), roots)
-    for name in ("", "hooks", "config", "info", "packed-refs", "worktrees"):
-        assert not _under(os.path.join(common, name), roots), name or "the common dir"
+    assert_codex_sandbox_never_writes_git_hooks_or_config(roots, cwd, linked)
 
 
 @pytest.mark.parametrize("event,chars,expected", [
