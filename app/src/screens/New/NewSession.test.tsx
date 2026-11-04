@@ -65,6 +65,8 @@ describe("NewSession", () => {
     };
     const { onOpen, stop } = setup(daemon);
     fireEvent.change(await screen.findByLabelText("What should brindle work on?"), { target: { value: "Fix login" } });
+    // Start stays disabled until the usable CLIs are known.
+    await waitFor(() => expect(screen.getByRole("button", { name: "Start" })).toHaveProperty("disabled", false));
     fireEvent.click(screen.getByRole("button", { name: "Start" }));
     const card = await screen.findByTestId("preflight");
     expect(within(card).getByRole("button", { name: "Start" })).toHaveProperty("disabled", true);
@@ -133,6 +135,7 @@ describe("NewSession", () => {
     };
     const { onOpen, stop } = setup(daemon);
     fireEvent.change(await screen.findByLabelText("What should brindle work on?"), { target: { value: "Fix login" } });
+    await waitFor(() => expect(screen.getByRole("button", { name: "Start" })).toHaveProperty("disabled", false));
     fireEvent.click(screen.getByRole("button", { name: "Start" }));
     const card = await screen.findByTestId("preflight");
     expect(within(card).getByRole("button", { name: "Start" })).toHaveProperty("disabled", true);
