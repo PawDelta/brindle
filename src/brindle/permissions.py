@@ -2376,10 +2376,10 @@ def _credential_file(req: Request, part: ShellPart, name: str) -> bool:
         return True
     if any(path == p or path.startswith(p + "/") for p in _brindle_secret_paths()):
         return True
-    if path == home or path.startswith(home + "/"):
-        return _credential_store(path[len(home) + 1:])
-    if other := _OTHER_HOME.match(path):
-        return _credential_store(path[other.end() + 1:])
+    if path.startswith(home + "/") and _credential_store(path[len(home) + 1:]):
+        return True
+    if (other := _OTHER_HOME.match(path)) and _credential_store(path[other.end() + 1:]):
+        return True
     return (os.path.basename(path) == ".env"
             and (part.cwd is None or not req.worktree or _inside(path, req.worktree) is None))
 
@@ -2399,6 +2399,13 @@ def _touches_credentials(req: Request, part: ShellPart, words: list[str]) -> boo
     """Whether a command names a credential store in any argument or redirection."""
     operands = [*words[1:], *part.written[1:], *part.reads, *part.writes]
     return any(_credential_file(req, part, path) for word in operands for path in _argument_paths(word))
+
+
+def _harmless_check(req: Request, part: ShellPart, words: list[str]) -> bool:
+    """A listing or metadata check (_HARMLESS_CHECKS) whose redirections touch
+    no store: ``ls > ~/.ssh/authorized_keys`` truncates one."""
+    return (bool(words) and os.path.basename(words[0]) in _HARMLESS_CHECKS
+            and not any(_credential_file(req, part, path) for path in [*part.reads, *part.writes]))
 
 
 _INTERPRETERS = frozenset({"python", "pypy", "node", "ruby", "perl", "php", "osascript", "deno", "bun", "lua",
@@ -2421,8 +2428,19 @@ def _credential_path_text(home: str) -> re.Pattern:
 
 
 def _mentions_credentials(command: str) -> bool:
-    return (bool(_credential_path_text(os.path.expanduser("~")).search(command))
-            or any(re.search(re.escape(p) + r"(?![A-Za-z0-9_.-])", command) for p in _brindle_secret_paths()))
+    """Whether ``command``'s text names a store: a home store in any spelling,
+    or one of brindle's own by its path or, under the home, by ``~/``, ``$HOME/``
+    or ``${HOME}/`` (as an interpreter's expanduser would read it)."""
+    home = os.path.expanduser("~")
+    if _credential_path_text(home).search(command):
+        return True
+    for path in _brindle_secret_paths():
+        spellings = [re.escape(path)]
+        if path.startswith(home + "/"):
+            spellings.append(r"(?:~|\$HOME|\$\{HOME\})/" + re.escape(path[len(home) + 1:]))
+        if any(re.search(s + r"(?![A-Za-z0-9_.-])", command) for s in spellings):
+            return True
+    return False
 
 
 def _credential_options(args: list[str], valued: set[str]) -> tuple[list[str], set[str]]:
@@ -2581,7 +2599,7 @@ def _credential_words(req: Request, part: ShellPart, words: list[str], depth: in
     if program in ("sh", "bash", "zsh", "dash", "ksh") and _credential_shell(req, part, args, depth):
         return True
     if program in _HARMLESS_CHECKS:
-        return False    # a listing or a metadata check reveals no content
+        return not _harmless_check(req, part, words)    # reveals no content, unless redirected into a store
     if any(_SECRET_FLAG.match(arg) for arg in args) or _touches_credentials(req, part, words):
         return True
     if program == "printenv":
@@ -2668,7 +2686,7 @@ def prints_credentials(req: Request, depth: int = 0) -> bool:
     # wholly of harmless checks (_HARMLESS_CHECKS) may name one.
     return _mentions_credentials(req.command) and (
         reader.unread or not reader.parts
-        or not all(part.words and os.path.basename(part.words[0]) in _HARMLESS_CHECKS for part in reader.parts))
+        or not all(_harmless_check(req, part, part.words) for part in reader.parts))
 
 
 def decide(req: Request | None, *, checks: list[str] | None = None,
