@@ -11,8 +11,10 @@ import venv
 from types import SimpleNamespace
 
 import anyio
+import mcp_types as types
 import pytest
 from mcp.server.mcpserver.exceptions import ToolError
+from mcp.shared.message import SessionMessage
 
 from brindle import db as brindle_db
 from brindle import mcp_server, mcp_stdio, upgrade
@@ -226,6 +228,49 @@ def test_an_update_that_completes_during_a_failed_reload_is_reloaded_onto(monkey
 
     anyio.run(scenario)
     assert attempts == ["half-written", "complete"] and old.replaced
+
+
+def test_a_call_after_an_update_is_not_held_behind_a_long_call_in_flight(monkeypatch):
+    """A handoff blocks for minutes; a call made after the install changed
+    is answered here once the short hold runs out, not after the handoff.
+    The reload then happens at the next idle moment, with nothing lost."""
+    old, update, _, (from_client, from_server), execs = _wire(monkeypatch)
+    old._max_hold = 0       # the hold runs out at once: no clock to wait on
+    started, release = anyio.Event(), anyio.Event()
+    answers = []
+
+    async def run(read, write):     # answers each request; id 1 (the handoff) only once released
+        async def answer(request):
+            if request.id == 1:
+                started.set()
+                await release.wait()
+            await write.send(SessionMessage(types.JSONRPCResponse(jsonrpc="2.0", id=request.id, result={})))
+
+        async with anyio.create_task_group() as tg:
+            async for message in read:
+                if isinstance(message.message, types.JSONRPCRequest):
+                    tg.start_soon(answer, message.message)
+
+    async def scenario():
+        async with anyio.create_task_group() as tg:
+            async def client():
+                answers.extend(await _answers(from_server, 0))
+                _send(from_client, {"id": 1, "method": "tools/call", "params": {"name": "handoff"}})
+                await started.wait()
+                update.installed = True
+                _send(from_client, {"id": 2, "method": "ping"})
+                answers.extend(await _answers(from_server, 2))
+                assert execs == []      # not reloaded under the handoff
+                release.set()
+                answers.extend(await _answers(from_server, 1))
+
+            tg.start_soon(client)
+            with anyio.fail_after(30):
+                await old.serve(run)
+
+    anyio.run(scenario)
+    assert [a["id"] for a in answers] == [0, 2, 1]
+    assert execs == [1] and mcp_stdio.take_handover().unread == b""
 
 
 _WHICH_BUILD = '''

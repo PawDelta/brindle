@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import select
 import sys
@@ -51,6 +52,10 @@ _LISTEN_ACK = "notifications/subscriptions/acknowledged"
 _SUBSCRIPTION_ID = "io.modelcontextprotocol/subscriptionId"     # a listen stream's frames carry its request id
 _CHUNK = 65536
 _NEVER = object()
+# Seconds a request is held for a reload that waits on the connection going
+# idle: past that it's served here (a handoff or wait_for_worker in flight can
+# take many minutes), and the reload waits for the next idle moment instead.
+_MAX_HOLD = 3.0
 
 
 # -- replies a tool waits on --------------------------------------------------
@@ -158,6 +163,9 @@ class Connection:
         self._wrote.set()
         self._wake = anyio.Event()
         self._failed_on = _NEVER     # the install's stamp when an exec of it last failed
+        self._max_hold = _MAX_HOLD
+        self._hold_until = 0.0          # when held requests stop waiting for the hand over
+        self._deferred = False          # held requests outwaited the hold: reload once idle
         self.replaced = False
 
     def wake(self) -> None:
@@ -202,8 +210,12 @@ class Connection:
         while True:
             if self._wake.is_set():
                 self._wake = anyio.Event()
-                if held is None and self._should_reload():
-                    held = []
+                if held is None and not self._deferred and self._should_reload():
+                    held = self._hold([])
+            if self._deferred and self._idle.is_set():
+                self._deferred = False      # idle, nothing held: the moment the hold gave up waiting for
+                if self._should_reload():
+                    held = self._hold([])
             if held is not None and self._idle.is_set():
                 if not self._wrote.is_set():
                     await self._wrote.wait()    # finish the frame being written first
@@ -219,7 +231,16 @@ class Connection:
                     await self._dispatch(send, line)
                 held = None
                 continue
-            line = await self._next_line(waiting=held is not None)
+            if held is not None and anyio.current_time() >= self._hold_until:
+                # Still busy (a long call in flight): serve what waited here,
+                # and hold nothing more until the connection is next idle.
+                self._deferred = True
+                for line in held:
+                    await self._dispatch(send, line)
+                held = None
+                continue
+            line = await self._next_line(waiting=held is not None or self._deferred,
+                                         until=self._hold_until if held is not None else math.inf)
             if line is None:
                 continue        # idle, or woken: look again
             if line == b"":
@@ -232,10 +253,15 @@ class Connection:
                 else:
                     held.append(line)
                 continue
-            if isinstance(message, types.JSONRPCRequest) and self._should_reload():
-                held = [line]
+            if isinstance(message, types.JSONRPCRequest) and not self._deferred and self._should_reload():
+                held = self._hold([line])
                 continue
             await self._dispatch(send, line)
+
+    def _hold(self, held: list[bytes]) -> list[bytes]:
+        """Start holding requests for a hand over, for at most ``_max_hold`` seconds."""
+        self._hold_until = anyio.current_time() + self._max_hold
+        return held
 
     def _should_reload(self) -> bool:
         """After an exec failed, only once the install changed again (it was
@@ -245,9 +271,10 @@ class Connection:
             return False
         return self._wants_reload(self.reloaded)
 
-    async def _next_line(self, *, waiting: bool) -> bytes | None:
+    async def _next_line(self, *, waiting: bool, until: float = math.inf) -> bytes | None:
         """The next line from the client (b"" at EOF), or None once this
-        connection became idle (``waiting``) or was woken first."""
+        connection became idle (``waiting``), was woken, or ``until`` (an
+        anyio clock time) passed first."""
         while (nl := self._buffer.find(b"\n")) < 0:
             chunk = None
 
@@ -262,6 +289,7 @@ class Connection:
                 scope.cancel()
 
             async with anyio.create_task_group() as tg:
+                tg.cancel_scope.deadline = until    # cancels only the waits: no await after the read
                 tg.start_soon(read, tg.cancel_scope)
                 tg.start_soon(interrupt, self._wake, tg.cancel_scope)
                 if waiting:
