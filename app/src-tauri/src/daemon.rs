@@ -580,7 +580,12 @@ fn launchd_label(home: &Path, app: u32) -> String {
         .as_bytes()
         .iter()
         .fold(0xcbf2_9ce4_8422_2325_u64, |h, b| (h ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3));
-    format!("com.pawdelta.brindle.daemon.{hash:016x}.{app}")
+    // Unit-test jobs must never be mistaken for a person's daemon.
+    #[cfg(test)]
+    let prefix = "com.pawdelta.brindle.daemon.test";
+    #[cfg(not(test))]
+    let prefix = "com.pawdelta.brindle.daemon";
+    format!("{prefix}.{hash:016x}.{app}")
 }
 
 /// Relaunched into an update (instance::relaunch), after the app process
@@ -1765,6 +1770,7 @@ mod tests {
         // brindle 0.4.1, as click answers a command it doesn't have.
         let dir = std::env::current_dir().unwrap().join("target/engine-too-old");
         let home = dir.join("home");
+        let _job = TestDaemonJob::new(&home);
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&home).unwrap();
         let bin = dir.join("brindle");
@@ -1831,8 +1837,41 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_slow_first_start_is_waited_out_and_only_an_exit_fails() {
+        #[cfg(target_os = "macos")]
+        let labels = || {
+            let homes = ["slow-engine", "crashing-engine"].map(|name| {
+                let home = std::env::current_dir().unwrap().join("target").join(name).join("home");
+                launchd_label(&home, std::process::id())
+            });
+            launchctl(&["print", &launchd_domain()]).unwrap().lines()
+                .filter_map(|line| {
+                    let label = line.split_whitespace().last()?;
+                    homes.iter().any(|home| home == label).then(|| label.to_owned())
+                })
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        #[cfg(target_os = "macos")]
+        let before = labels();
+        for unwind in [false, true] {
+            let result = std::panic::catch_unwind(|| slow_first_start(unwind));
+            #[cfg(target_os = "macos")]
+            assert_eq!(labels(), before, "the run left its launchd jobs loaded");
+            if unwind {
+                assert!(result.unwrap_err().is::<CleanupUnwind>(), "unexpected panic");
+            } else {
+                result.unwrap();
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    struct CleanupUnwind;
+
+    #[cfg(unix)]
+    fn slow_first_start(unwind: bool) {
         let dir = std::env::current_dir().unwrap().join("target/slow-engine");
         let home = dir.join("home");
+        let _job = TestDaemonJob::new(&home);
         let bin = slow_engine(&dir, "slow-engine", "1.5", true);
         let path = std::env::var_os("PATH").unwrap_or_default();
         let patience = Duration::from_millis(300);
@@ -1867,6 +1906,7 @@ mod tests {
         // An engine that crashes while starting is a failure, with what it said.
         let dir = std::env::current_dir().unwrap().join("target/crashing-engine");
         let home = dir.join("home");
+        let _crashing_job = TestDaemonJob::new(&home);
         let bin = slow_engine(&dir, "crashing-engine", "0.8", false);
         let err = start_in(&bin, &path, &home, None, patience).unwrap_err();
         assert!(err.starts_with(ENGINE_STARTING), "{err}");
@@ -1879,6 +1919,10 @@ mod tests {
         assert!(err.starts_with("`brindle daemon` exited") && err.contains("the engine crashed"), "{err}");
         assert!(!starting_in(&home));
         let _ = std::fs::remove_dir_all(&dir);
+        if !unwind {
+            return;
+        }
+        std::panic::panic_any(CleanupUnwind);
     }
 
     #[cfg(unix)]
@@ -1950,15 +1994,30 @@ mod tests {
         child
     }
 
-    /// Unloads the daemon job `label` when dropped: a test's fake daemon
-    /// doesn't stay under launchd, however the test ends.
-    #[cfg(target_os = "macos")]
-    struct Unload(String);
+    /// Claim cleanup before any start can load a job, including a start that
+    /// returns an error after bootstrap. Lexical ownership also covers unwinding
+    /// and jobs kept in STARTING after the local Daemon handle is gone.
+    #[cfg(unix)]
+    struct TestDaemonJob {
+        #[cfg(target_os = "macos")]
+        label: String,
+    }
 
-    #[cfg(target_os = "macos")]
-    impl Drop for Unload {
+    #[cfg(unix)]
+    impl TestDaemonJob {
+        fn new(_home: &Path) -> Self {
+            Self {
+                #[cfg(target_os = "macos")]
+                label: launchd_label(_home, std::process::id()),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for TestDaemonJob {
         fn drop(&mut self) {
-            let _ = launchctl(&["bootout", &launchd_service(&self.0)]);
+            #[cfg(target_os = "macos")]
+            let _ = launchctl(&["bootout", &launchd_service(&self.label)]);
         }
     }
 
@@ -2012,6 +2071,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let dir = std::env::current_dir().unwrap().join("target/adopted-daemon");
         let home = dir.join("home");
+        let _job = TestDaemonJob::new(&home);
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&home).unwrap();
         let engine = engine_of_build(&dir, Some("00b2"));
@@ -2050,7 +2110,6 @@ mod tests {
 
         // An earlier app process loaded the old build's daemon; it doesn't listen yet.
         let earlier = start_daemon(daemon_command(&old, &path), &home, &log).unwrap();
-        let _unload = Unload(launchd_label(&home, std::process::id()));
         assert!(!earlier.adopted());
         // This start finds launchd's job and waits on it: nothing is started over it.
         let err = start_in(&new, &path, &home, Some(&engine), patience).unwrap_err();
@@ -2109,6 +2168,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let dir = std::env::current_dir().unwrap().join("target/launchd-daemon");
         let home = dir.join("home");
+        let _job = TestDaemonJob::new(&home);
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&home).unwrap();
         let bin = dir.join("brindle");
@@ -2137,7 +2197,6 @@ mod tests {
         let mut daemon = start_daemon(daemon_command(&bin, &path), &home, &log).unwrap();
         let Daemon::Launchd { label, adopted: false, .. } = &daemon else { panic!("not launchd's job, or adopted") };
         let label = label.clone();
-        let _unload = Unload(label.clone());
         let deadline = Instant::now() + Duration::from_secs(5);
         // launchd may spawn the job a moment after loading it: its pid comes with that.
         while daemon.id() == 0 {
