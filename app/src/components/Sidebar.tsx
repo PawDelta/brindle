@@ -269,13 +269,15 @@ interface RowRef {
   route: Route;
 }
 
-/* A profile's role: its name without the model or tier it runs on
-   (developer-codex-heavy → developer, reviewer-gemini-low → reviewer). A name
-   with neither, such as test-writer, is its own role. */
+/* A profile's role: developer-* and reviewer-* are those roles whatever model
+   or tier they run on; any other name keeps its words, minus a model or tier
+   at its end (backend-auditor, qa, test-writer stay as they are). */
 const PROFILE_VARIANT = /^(sonnet|opus|haiku|fable|codex|gemini|flash|pro|opencode|local|light|heavy|low|medium|high)$/;
 
 export function roleOf(profile: string): string {
-  const words = profile.replace(/-or-.*$/, "").split("-");
+  const family = /^(developer|reviewer)(-|$)/.exec(profile);
+  if (family) return family[1];
+  const words = profile.split("-");
   while (words.length > 1 && PROFILE_VARIANT.test(words[words.length - 1])) words.pop();
   return words.join("-");
 }

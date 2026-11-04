@@ -361,11 +361,14 @@ describe("Sidebar", () => {
 });
 
 it.each([
+  ["developer", "developer"],
   ["developer-codex-heavy", "developer"],
+  ["developer-or-qwen3-coder", "developer"],
+  ["developer-some-new-model", "developer"],
   ["reviewer-gemini-low", "reviewer"],
-  ["developer-or-kimi-k2", "developer"],
-  ["test-writer", "test-writer"],
-  ["coordinator", "coordinator"],
+  ["backend-auditor", "backend-auditor"],
+  ["test-writer-sonnet", "test-writer"],
+  ["qa", "qa"],
 ])("%s reads as the role %s", (profile, role) => {
   expect(roleOf(profile)).toBe(role);
 });
