@@ -86,6 +86,8 @@ def test_doctor_shows_signed_out(installed, monkeypatch):
     assert "codex login" in got["Codex sign-in"].detail
     assert got["Google Antigravity sign-in"].level == doctor.WARN
     assert "run `agy`" in got["Google Antigravity sign-in"].detail
+    # and no credential line says all is well
+    assert {c.name: c for c in doctor.credential_checks()}["claude"].level == doctor.WARN
 
 
 def test_doctor_shows_quota_usage_and_not_twice(installed):
@@ -124,13 +126,6 @@ def test_doctor_says_org_managed(installed, tmp_path, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", FAKE_KEY)   # the org's settings win over it
     c = credentials()["claude"]
     assert (c.level, c.detail) == (doctor.OK, "org-managed (apiKeyHelper)")
-
-
-def test_signed_out_claude_has_no_credential_line_that_says_all_is_well(installed, monkeypatch):
-    replies = {"auth": (1, json.dumps({"loggedIn": False}))}
-    monkeypatch.setattr(providers, "_auth_probe", lambda argv, env=None: replies.get(argv[1]))
-    assert lines()["Claude Code sign-in"].level == doctor.FAIL
-    assert credentials()["claude"].level == doctor.WARN
 
 
 def test_a_check_that_blocks_is_reported_and_doctor_moves_on(monkeypatch):
