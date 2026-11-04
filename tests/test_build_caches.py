@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from conftest import sh
 
-from brindle import agents, build_caches, gates, workspaces
+from brindle import agents, build_caches, gates, providers, workspaces
 from brindle.config import RepoConfig
 from brindle.profiles import load_profile
 from brindle.providers import ClaudeCode, Codex, LaunchContext
@@ -37,7 +37,8 @@ def test_worker_and_check_env_share_build_caches(db, repo, tmp_path, monkeypatch
                     if a.startswith("shell_environment_policy.set."))
         env = {**agents.agent_env(ws, "w1"), **{k: json.loads(v) for k, v in sets.items()}}
         [roots] = [a.split("=", 1)[1] for a in argv if a.startswith("sandbox_workspace_write.writable_roots=")]
-        assert set(json.loads(roots)) == {env["UV_CACHE_DIR"], env["CARGO_TARGET_DIR"]}
+        git_dirs = set(providers._worktree_git_dirs(ws.path))   # so the worker can commit
+        assert set(json.loads(roots)) == {env["UV_CACHE_DIR"], env["CARGO_TARGET_DIR"]} | git_dirs
     else:
         seen = []
         monkeypatch.setattr(gates, "_run_queued", lambda db, ws, cmd, env, *a, **kw: (seen.append(env), (True, "ok"))[1])

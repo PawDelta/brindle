@@ -582,8 +582,6 @@ def test_a_new_worker_waits_for_room_visibly_and_starts_when_load_falls(db, repo
     assert sum("did A" in m for m in told) == 1, told
 
 
-
-
 @pytest.mark.parametrize("merged, edit, shared, want_edited, want_both", [
     ("main", None, None, None, []),                      # a clean merge of the base, then a fix
     ("main", "a.txt", None, ["a.txt"], []),              # the merge commit was edited by hand
@@ -628,3 +626,4 @@ def test_review_base_after_merge(tmp_path, merged, edit, shared, want_edited, wa
     else:
         assert rb.sha is None
         assert rb.edited == want_edited
+

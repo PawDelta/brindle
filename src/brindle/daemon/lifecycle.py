@@ -234,6 +234,7 @@ async def _watch(server, activity: Activity, idle_exit: bool, *,
     install = InstallWatch()
     ready = ReadinessWatch()
     monitor = health.Monitor(clock)
+    stale_servers = True    # until none is left (upgrade.stop_stale_mcp_servers)
     while not server.should_exit:
         due = clock() + WATCH_INTERVAL      # the wait's deadline, before any maintenance below
         await wait(WATCH_INTERVAL)
@@ -243,12 +244,24 @@ async def _watch(server, activity: Activity, idle_exit: bool, *,
             log.debug("brindle: couldn't record the daemon's health", exc_info=True)
         with spawn.waits_for_room():                    # background work: it waits for room
             await asyncio.to_thread(ready.sweep_safely)     # session.pr_ready when a session becomes ready
+            if stale_servers:
+                stale_servers = await asyncio.to_thread(_stop_stale_mcp_servers)
         if install.changed():
             server.should_exit = True
         elif (idle_exit and activity.open == 0
               and time.monotonic() - activity.last >= IDLE_SECONDS
               and not await asyncio.to_thread(_agents_running)):
             server.should_exit = True
+
+
+def _stop_stale_mcp_servers() -> bool:
+    """upgrade.stop_stale_mcp_servers, off the daemon's way: whether to look
+    again. A failure is only logged, and not tried again."""
+    try:
+        return upgrade.stop_stale_mcp_servers()
+    except Exception:
+        log.warning("brindle: couldn't look for MCP servers left on a replaced install", exc_info=True)
+        return False
 
 
 def _reset_window_sizes() -> None:

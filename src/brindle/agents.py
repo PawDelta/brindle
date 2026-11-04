@@ -2926,6 +2926,15 @@ def workspace_worker(db: DB, ws: Workspace) -> Agent | None:
     return workers[0] if workers else None
 
 
+# A re-review judges only the new changes: code an earlier round already reviewed
+# and that hasn't changed isn't reopened, so each round converges instead of
+# finding the next layer elsewhere in the branch.
+DELTA_SCOPE = ("First check each earlier finding is fixed. Then look for problems the new "
+               "changes introduce, including in code they call or that calls them. Don't raise "
+               "new findings about code an earlier round already reviewed and these changes "
+               "don't touch.")
+
+
 def review_base_ref(ws_id: str) -> str:
     return f"refs/brindle/review-base/{ws_id}"
 
@@ -3590,14 +3599,12 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
         prior = f"\n\nA previous review at {prev.sha[:8]} found:\n{(prev.summary or '').strip()}\n\n"
         rb = review_base(ws, prev.sha)
         if rb.sha == prev.sha:
-            task += (prior + f"Focus on what changed since then (`git diff {prev.sha}..HEAD`), "
-                     "plus a final sanity pass over the rest; you don't need to re-review it "
-                     "from scratch.")
+            task += (prior + f"Review only what changed since then (`git diff {prev.sha}..HEAD`). "
+                     + DELTA_SCOPE)
         elif rb.sha:
             task += (prior + f"Since then {base} was merged in cleanly (up to {rb.merged[:8]}); "
                      "those changes were reviewed on their own branches. Focus on the worker's "
-                     f"own changes since your last review: `git diff {rb.sha}..HEAD`. First check "
-                     "each earlier finding is fixed, then a final sanity pass over the rest.")
+                     f"own changes since your last review: `git diff {rb.sha}..HEAD`. " + DELTA_SCOPE)
             both = rb.both
             if both:
                 task += ("\n\nFiles changed on both sides (by the merged base commits and by the "

@@ -12,6 +12,13 @@ same stdin and stdout. The client never sees a restart:
   byte read past it, goes to the new process unread;
 - the client's ``initialize`` is replayed there (its answer dropped, the
   client already has one), so the new process serves an initialized session;
+- so are its open ``subscriptions/listen`` requests (MCP 2026-07-28: a
+  request whose response is a stream of server events, open for as long as
+  the client is connected, and Claude Code keeps one open from the start).
+  They are never waited for, as they never end; the new process carries
+  them on, and drops its acknowledgement of each the client was already
+  sent in full (one never sent, it sends);
+- no frame is cut: the exec waits for the one being written to finish;
 - environment and argv are the same, so the caller's identity is too.
 
 The SDK's own stdio transport can't do this: it reads ahead into buffers that
@@ -39,6 +46,9 @@ from brindle.config import brindle_home
 HANDOVER_ENV = "BRINDLE_MCP_HANDOVER"
 _INIT_ID = "brindle-reload-initialize"   # the replayed initialize's id; its answer isn't written
 _INITIALIZED = '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+_LISTEN = "subscriptions/listen"
+_LISTEN_ACK = "notifications/subscriptions/acknowledged"
+_SUBSCRIPTION_ID = "io.modelcontextprotocol/subscriptionId"     # a listen stream's frames carry its request id
 _CHUNK = 65536
 _NEVER = object()
 
@@ -77,11 +87,15 @@ def _settle_all() -> None:
 @dataclass
 class Handover:
     """What the new process needs of the connection: the client's
-    ``initialize`` request as sent, whether it sent ``initialized``, and
-    the bytes read from stdin but not served."""
+    ``initialize`` request as sent, whether it sent ``initialized``, its
+    open ``subscriptions/listen`` requests as sent, the ids of those whose
+    acknowledgement the client was sent in full, and the bytes read from
+    stdin but not served."""
     initialize: str | None = None
     initialized: bool = False
     unread: bytes = b""
+    listens: tuple[str, ...] = ()
+    acked: tuple = ()
 
 
 def take_handover() -> Handover | None:
@@ -97,7 +111,8 @@ def take_handover() -> Handover | None:
         state = json.loads(head)
     except (OSError, ValueError):
         return None
-    return Handover(state.get("initialize"), bool(state.get("initialized")), unread)
+    return Handover(state.get("initialize"), bool(state.get("initialized")), unread,
+                    tuple(state.get("listens") or ()), tuple(state.get("acked") or ()))
 
 
 def _write_handover(handover: Handover) -> int:
@@ -105,7 +120,8 @@ def _write_handover(handover: Handover) -> int:
     home = brindle_home()
     home.mkdir(parents=True, exist_ok=True)
     f = tempfile.TemporaryFile(dir=home)
-    head = json.dumps({"initialize": handover.initialize, "initialized": handover.initialized})
+    head = json.dumps({"initialize": handover.initialize, "initialized": handover.initialized,
+                       "listens": list(handover.listens), "acked": list(handover.acked)})
     f.write(head.encode() + b"\n" + handover.unread)
     f.flush()
     fd = os.dup(f.fileno())
@@ -131,9 +147,15 @@ class Connection:
         self._initialized = handover.initialized if handover else False
         self._buffer = handover.unread if handover else b""
         self._wants_reload, self._replace = wants_reload, replace
-        self._in_flight: set = set()
+        self._in_flight: set = set()    # requests to answer before a hand over
+        self._listens: dict = {}        # open listen streams: request id -> the request as sent
+        self._acked: set = set()        # listens whose acknowledgement the client was sent in full
+        # Replayed listens whose acknowledgement the client already has (from the replaced process).
+        self._client_has_ack: set = set(handover.acked) if handover else set()
         self._idle = anyio.Event()
         self._idle.set()
+        self._wrote = anyio.Event()     # set while no frame is part-written: an exec would cut it
+        self._wrote.set()
         self._wake = anyio.Event()
         self._failed_on = _NEVER     # the install's stamp when an exec of it last failed
         self.replaced = False
@@ -166,13 +188,14 @@ class Connection:
     # -- reading ---------------------------------------------------------------
 
     async def _replay(self, send) -> None:
-        if self._initialize is None:
-            return
-        init = json.loads(self._initialize)
-        init["id"] = _INIT_ID
-        await self._dispatch(send, json.dumps(init).encode())
-        if self._initialized:
-            await self._dispatch(send, _INITIALIZED.encode())
+        if self._initialize is not None:
+            init = json.loads(self._initialize)
+            init["id"] = _INIT_ID
+            await self._dispatch(send, json.dumps(init).encode())
+            if self._initialized:
+                await self._dispatch(send, _INITIALIZED.encode())
+        for line in self._handover.listens if self._handover else ():
+            await self._dispatch(send, line.encode())
 
     async def _read_all(self, send) -> None:
         held: list[bytes] | None = None     # lines read while waiting to hand over
@@ -182,6 +205,9 @@ class Connection:
                 if held is None and self._should_reload():
                     held = []
             if held is not None and self._idle.is_set():
+                if not self._wrote.is_set():
+                    await self._wrote.wait()    # finish the frame being written first
+                    continue
                 attempted = upgrade.stamp()     # what the readiness check is about to look at
                 if self._hand_over(b"".join(held)):
                     return
@@ -201,7 +227,7 @@ class Connection:
                 return
             message = _parse(line)
             if held is not None:
-                if _answers_old_work(message, self._in_flight):
+                if _answers_old_work(message, self._in_flight | self._listens.keys()):
                     await self._dispatch(send, line)
                 else:
                     held.append(line)
@@ -261,8 +287,11 @@ class Connection:
         if isinstance(message, types.JSONRPCRequest):
             if message.method == "initialize" and self._initialize is None:
                 self._initialize = line.decode("utf-8", "replace")
-            self._in_flight.add(message.id)
-            self._idle = anyio.Event()
+            if message.method == _LISTEN:
+                self._listens[message.id] = line.decode("utf-8", "replace").strip()
+            else:
+                self._in_flight.add(message.id)
+                self._idle = anyio.Event()
             # A request the client cancelled is never answered: it ends here.
             metadata = ServerMessageMetadata(on_request_unanswered=lambda rid=message.id: self._unanswered(rid))
         elif isinstance(message, types.JSONRPCNotification) and message.method == "notifications/initialized":
@@ -281,13 +310,22 @@ class Connection:
                 message = session_message.message
                 answered = getattr(message, "id", None) if isinstance(
                     message, types.JSONRPCResponse | types.JSONRPCError) else None
-                if answered != _INIT_ID:
+                ack = _acknowledges(message)
+                if ack in self._client_has_ack:
+                    self._client_has_ack.discard(ack)   # the replaced process sent it
+                    self._acked.add(ack)
+                elif answered != _INIT_ID:
                     data = (message.model_dump_json(by_alias=True, exclude_unset=True) + "\n").encode()
+                    self._wrote = anyio.Event()
                     try:
                         await self._write(data)
                     except BaseException:
                         _settle_all()   # the client is gone: nothing more reaches it
                         raise
+                    finally:
+                        self._wrote.set()
+                    if ack is not None:
+                        self._acked.add(ack)    # only now does the client have it
                 if answered is not None:
                     _settle(answered, True)
                     await self._settled(answered)
@@ -310,6 +348,8 @@ class Connection:
 
     async def _settled(self, request_id) -> None:
         self._in_flight.discard(request_id)
+        self._listens.pop(request_id, None)     # a stream that ended isn't handed over
+        self._acked.discard(request_id)
         if not self._in_flight:
             self._idle.set()
 
@@ -318,7 +358,8 @@ class Connection:
     def _hand_over(self, held: bytes) -> bool:
         """Exec the new install with ``held`` and the unread buffer as its
         input. False, with nothing lost, when it couldn't."""
-        handover = Handover(self._initialize, self._initialized, held + self._buffer)
+        handover = Handover(self._initialize, self._initialized, held + self._buffer,
+                            tuple(self._listens.values()), tuple(i for i in self._listens if i in self._acked))
         try:
             fd = _write_handover(handover)
         except OSError:
@@ -350,6 +391,13 @@ def _parse(line: bytes):
         return types.jsonrpc_message_adapter.validate_json(line, by_name=False)
     except Exception:  # noqa: BLE001 - _dispatch reports it
         return None
+
+
+def _acknowledges(message):
+    """The listen stream ``message`` acknowledges (its request id), or None."""
+    if isinstance(message, types.JSONRPCNotification) and message.method == _LISTEN_ACK:
+        return ((message.params or {}).get("_meta") or {}).get(_SUBSCRIPTION_ID)
+    return None
 
 
 def _answers_old_work(message, in_flight: set) -> bool:
