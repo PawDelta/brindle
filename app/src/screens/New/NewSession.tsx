@@ -13,7 +13,7 @@
    project…" beside the repo after. Under it, the way to the demo the first
    launch offers (screens/Onboarding/Demo). */
 
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { DaemonError, type DaemonClient, type Note, type PreflightDTO, type Repo, type SessionConflict, type StartSession } from "../../api/client";
 import type { PickFolder } from "../../api/open";
 import type { SessionDTO } from "../../api/schema";
@@ -131,7 +131,10 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, on
   // A start waiting on the person's choice: what they asked for, and the choices.
   const [pending, setPending] = useState<{ fields: StartFields; conflict: SessionConflict } | null>(null);
   // A start the engine refused until the CLI is set up: what they asked for, and the items.
-  const [preflight, setPreflight] = useState<{ fields: StartFields; items: PreflightDTO } | null>(null);
+  // `attempt`: the start it answers. A card's re-check that answers after a newer start (on
+  // another CLI, say) began is that older start's, and is dropped.
+  const [preflight, setPreflight] = useState<{ fields: StartFields; items: PreflightDTO; attempt: number } | null>(null);
+  const attempts = useRef(0);
 
   useEffect(() => {
     client
@@ -141,6 +144,7 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, on
   }, [client]);
 
   const start = async (fields: StartFields, choice?: { key: string; session: string }): Promise<boolean> => {
+    const attempt = ++attempts.current;
     setBusy(true);
     setError(null);
     setNotes([]);
@@ -156,7 +160,7 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, on
       }
     } catch (e) {
       if (e instanceof DaemonError && e.conflict) setPending({ fields, conflict: e.conflict });
-      else if (e instanceof DaemonError && e.preflight) setPreflight({ fields, items: e.preflight });
+      else if (e instanceof DaemonError && e.preflight) setPreflight({ fields, items: e.preflight, attempt });
       else setError(message(e));
     } finally {
       setBusy(false);
@@ -260,7 +264,11 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, on
     {preflight && (
       <Preflight
         preflight={preflight.items}
-        onRefresh={(items) => setPreflight({ fields: preflight.fields, items })}
+        onRefresh={(items) => {
+          const mine = preflight.attempt;
+          // Only while this card's start is still the latest one, and its card still shows.
+          if (mine === attempts.current) setPreflight((cur) => (cur?.attempt === mine ? { ...cur, items } : cur));
+        }}
         onLaunch={() => void start(preflight.fields)}
         onUseInstead={(other) => {
           setProvider(other);
