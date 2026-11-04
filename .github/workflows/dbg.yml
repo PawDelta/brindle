@@ -12,5 +12,5 @@ jobs:
         with:
           python-version: "3.12"
       - run: uv sync
-      - run: uv run pytest -q -s -n auto -m 'not serial' -p no:cacheprovider 2>&1 | grep -E "DBG|passed|failed|FAILED"
+      - run: uv run pytest -q -s -n auto -m 'not serial' -p no:cacheprovider --cov=brindle --cov=scripts --cov-branch --cov-context=test --cov-report= 2>&1 | grep -E "DBG|passed|failed|FAILED"
         continue-on-error: true
