@@ -91,11 +91,12 @@ describe("Sidebar", () => {
     expect(session.contains(agentRow("sup1"))).toBe(true);
     expect(session.contains(agentRow("w1"))).toBe(true);
     expect(agentRow("w1")!.closest("li")!.contains(agentRow("c1"))).toBe(true);
-    // The rows read as the mockup's: a dot for the CLI's status, "id · branch" (the supervisor by its role), the label.
+    // The rows read: a dot for the CLI's status, "id · role", the label; the branch is in the tooltip.
     expect(agentRow("sup1")!.querySelector(".side-dot")!.getAttribute("data-tone")).toBe("idle");
     expect(agentRow("sup1")!.textContent).toContain("sup1 · supervisor");
     expect(agentRow("w1")!.querySelector(".side-dot")!.getAttribute("data-tone")).toBe("work");
-    expect(agentRow("w1")!.textContent).toContain("w1 · feat/ls");
+    expect(agentRow("w1")!.textContent).toContain(`w1 · ${worker.agents![0].profile}`);
+    expect(agentRow("w1")!.title).toContain("feat/ls");
     expect(within(agentRow("w1")!).getByTestId("agent-status").textContent).toBe("working");
     expect(within(session).queryByTestId("needs-you")).toBeNull();
     expect(screen.queryByTestId("summary")).toBeNull();

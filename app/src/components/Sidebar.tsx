@@ -270,14 +270,14 @@ interface RowRef {
 }
 
 /* One agent in a session's tree, and its children under it: a dot, "id ·
-   branch" (the supervisor by its role), its state at the right. */
+   role" (its profile; the branch is in the tooltip), its state at the right. */
 function AgentRow({ node, depth, route, navigate, repo, root, cursor, setCursor }: { node: AgentNode; depth: number; repo: string; root: string; cursor: string | null; setCursor(key: string): void } & Pick<SidebarProps, "route" | "navigate">) {
   const a = node.agent;
   const alive = useAppState((s) => s.alive[a.id]);
   const active = route.screen === "session" && route.root === root && (route.agent ?? root) === a.id;
   const status = cliStatus(a, node.workspace, alive);
   const key = `agent:${a.id}`;
-  const label = a.id === root ? "supervisor" : node.workspace.branch;
+  const label = a.id === root ? "supervisor" : a.profile || node.workspace.branch;
   return (
     <li>
       <button
