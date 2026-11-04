@@ -159,9 +159,12 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, on
         opened = got.id;
       }
     } catch (e) {
+      if (e instanceof DaemonError && e.preflight) setPreflight({ fields, items: e.preflight, attempt });
+      // No card of its own: a card still showing stays usable, as this (now latest) start's,
+      // so its re-checks apply again; any asked before this start began are still dropped.
+      else setPreflight((cur) => cur && { ...cur, attempt });
       if (e instanceof DaemonError && e.conflict) setPending({ fields, conflict: e.conflict });
-      else if (e instanceof DaemonError && e.preflight) setPreflight({ fields, items: e.preflight, attempt });
-      else setError(message(e));
+      else if (!(e instanceof DaemonError && e.preflight)) setError(message(e));
     } finally {
       setBusy(false);
       // Started, the snapshot too: one read on the new chat's status event can predate its window

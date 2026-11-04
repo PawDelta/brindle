@@ -96,6 +96,8 @@ describe("NewSession", () => {
     ["starts on Codex instead", "codex"],
     // Codex's own preflight answers before the earlier check of Claude does: Codex's card stays.
     ["checks again, starts on Codex before that check answers", "race"],
+    // The start on Codex fails outright: Claude Code's card stays, and its checks still count.
+    ["starts on Codex, which fails, then installs Claude Code", "fail"],
   ] as const)("gets past a CLI that isn't installed: %s", async (_, instead) => {
     // Claude Code neither installed nor signed in, Codex installed: the engine's own 409 for a start on Claude.
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], workspaces: [root], sessions: [], providers: freshProviders({ codex: { path: "/opt/homebrew/bin/codex", version: "0.48.0" } }) });
@@ -116,6 +118,7 @@ describe("NewSession", () => {
         started.push(provider);
         if (!provider && !installed) return Response.json({ preflight: missing }, { status: 409 });
         if (instead === "race") return Response.json({ preflight: codexSignIn }, { status: 409 });
+        if (instead === "fail" && provider) return Response.json({ error: { code: "internal", message: "Codex didn't start" } }, { status: 500 });
       }
       return fetch(input, init);
     };
@@ -139,7 +142,11 @@ describe("NewSession", () => {
       stop();
       return;
     }
-    if (instead) {
+    if (instead === "fail") {
+      fireEvent.click(await within(card).findByRole("button", { name: "Start on Codex instead" }));
+      expect((await screen.findByRole("alert")).textContent).toContain("Codex didn't start");
+    }
+    if (instead === "codex") {
       // Without Claude Code: the same start on the CLI this Mac has.
       fireEvent.click(await within(card).findByRole("button", { name: "Start on Codex instead" }));
     } else {
@@ -150,7 +157,7 @@ describe("NewSession", () => {
       fireEvent.click(within(card).getByRole("button", { name: "Start" }));
     }
     await waitFor(() => expect(onOpen).toHaveBeenCalledWith("new1", REPO));
-    expect(started).toEqual([undefined, instead]);
+    expect(started).toEqual(instead === "fail" ? [undefined, "codex", undefined] : [undefined, instead]);
     stop();
   });
 
