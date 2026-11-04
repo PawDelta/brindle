@@ -11,7 +11,9 @@ IDLE_SECONDS while no agent runs. It removes its files on the way out.
 The app's daemon (``--idle-exit``) is a job of the person's launchd that the
 app loaded, and launchd stops it when the app goes away (quit, force quit,
 restarted into an update); the app replacing an older build's daemon stops
-it the same way. On its way out it pauses every session it runs
+it the same way. With that job switched off the daemon is the app's own
+child: the app stops it when it exits, and it stops itself once the app has
+gone after a force quit (APP_PID_ENV). On its way out it pauses every session it runs
 (``pause_for_exit``), as the person's Pause does, and the next daemon the app
 starts resumes them (``resume_after_start``)."""
 

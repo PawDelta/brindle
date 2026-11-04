@@ -280,6 +280,10 @@ pub fn run() {
             // takes them too: their clients die with their ptys).
             if let tauri::RunEvent::Exit = event {
                 app.state::<pty_view::PtyViews>().close_all();
+                // A daemon the app runs as its own child (Allow in the Background
+                // switched off) stops with it, pausing its sessions, as launchd's job does.
+                #[cfg(target_os = "macos")]
+                daemon::stop_app_daemon();
             }
         });
 }

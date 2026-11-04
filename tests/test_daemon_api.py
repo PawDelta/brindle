@@ -244,6 +244,32 @@ def _heavy_lane(db, monkeypatch):
     asyncio.run(exercise())
 
 
+def _watch_stops_the_app_child_daemon_once_the_app_is_gone(monkeypatch):
+    """The app's own child daemon (launchd's job switched off) is told the
+    app's pid, which nothing it starts inherits; once that app has gone (a
+    force quit: it never stopped its daemon) the watch shuts the daemon down,
+    gracefully, so serve's way out pauses what it runs."""
+    from brindle.daemon import session_review
+
+    monkeypatch.setenv(lifecycle.APP_PID_ENV, "4242")
+    assert lifecycle._app_parent() == 4242 and lifecycle.APP_PID_ENV not in os.environ
+    assert lifecycle._app_parent() is None
+    app_alive = [True, True, False]
+    waits = [0]
+    server = SimpleNamespace(should_exit=False)
+
+    async def elapse(seconds):
+        waits[0] += 1
+        assert waits[0] <= 3, "the watch didn't notice the app had gone"
+
+    monkeypatch.setattr(procs, "alive", lambda pid: pid == 4242 and app_alive.pop(0))
+    monkeypatch.setattr(session_review.ReadinessWatch, "sweep_safely", lambda self: None)
+    monkeypatch.setattr(lifecycle, "_stop_stale_mcp_servers", lambda: False)
+    activity = lifecycle.Activity(build_app(TOKEN, port=8123))
+    asyncio.run(lifecycle._watch(server, activity, True, wait=elapse, parent=4242))
+    assert server.should_exit and waits[0] == 3
+
+
 def _health_log_watch_warns_only_when_the_loop_itself_is_late(monkeypatch, stalled):
     """On virtual time: a 2s maintenance sweep the watch awaits is not lag; a
     wait that ends 3s late is, and its warning carries the lag."""
@@ -1321,3 +1347,5 @@ def test_the_app_daemon_pauses_what_runs_on_its_way_out_and_the_next_one_resumes
     # Nothing of this server's running: nothing recorded, and nothing to resume.
     assert lifecycle.pause_for_exit() == [] and not lifecycle._resume_path().exists()
     assert db.get_agent("foreign").status == "idle"
+    # The app's own child daemon also gets to this way out after a force quit.
+    _watch_stops_the_app_child_daemon_once_the_app_is_gone(monkeypatch)

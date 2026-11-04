@@ -373,6 +373,49 @@ fn start_child(mut cmd: Command, log: &Path) -> Result<Daemon, String> {
     Ok(Daemon::Child(child))
 }
 
+/// What the app's child daemon is told the app's pid is, so it shuts down
+/// (gracefully, pausing what it runs) once the app has gone without stopping
+/// it: a force quit (brindle.daemon.lifecycle's APP_PID_ENV).
+#[cfg(target_os = "macos")]
+const APP_PID_ENV: &str = "BRINDLE_APP_PID";
+
+/// The daemons this app process started as its own children in place of
+/// launchd's job (`start_app_child`), by pid: the app stops the one serving
+/// its home when it exits (`stop_app_daemon`), as launchd stops its job.
+#[cfg(target_os = "macos")]
+static APP_CHILDREN: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+
+/// Start the daemon `cmd` as the app's own child, when launchd won't run its
+/// job: told the app's pid (APP_PID_ENV) to watch for a force quit, and
+/// recorded as this app's (APP_CHILDREN) for a normal exit to stop.
+#[cfg(target_os = "macos")]
+fn start_app_child(mut cmd: Command, log: &Path) -> Result<Daemon, String> {
+    cmd.env(APP_PID_ENV, std::process::id().to_string());
+    let daemon = start_child(cmd, log)?;
+    if let Ok(mut own) = APP_CHILDREN.lock() {
+        own.push(daemon.id());
+    }
+    Ok(daemon)
+}
+
+/// The app exits normally: the daemon serving brindle's home is stopped as a
+/// replaced one is (`stop_daemon`: SIGTERM, so it shuts down gracefully and
+/// pauses the sessions it runs, for the next app's daemon to resume), if this
+/// app started it as its own child (`start_app_child`). launchd's job, and a
+/// daemon some other app or person started, are left alone.
+#[cfg(target_os = "macos")]
+pub(crate) fn stop_app_daemon() {
+    stop_app_daemon_in(&brindle_home());
+}
+
+#[cfg(target_os = "macos")]
+fn stop_app_daemon_in(home: &Path) {
+    let own = APP_CHILDREN.lock().map(|own| own.clone()).unwrap_or_default();
+    if let Some(info) = running_in(home).filter(|info| own.contains(&info.pid)) {
+        let _ = stop_daemon(info.pid, STOP_GRACE);
+    }
+}
+
 /// Start the daemon `cmd` (`daemon_command`) with brindle's home `home`, its
 /// stderr appended to `log`: a child of the app.
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -405,12 +448,14 @@ fn start_daemon(cmd: Command, _home: &Path, log: &Path) -> Result<Daemon, String
 ///
 /// Switched off under Login Items → Allow in the Background
 /// (`launchd_disabled`), launchd won't run it: the daemon is then the app's
-/// child, as on Linux, and stops with the app the same way.
+/// own child (`start_app_child`), which the app stops when it exits
+/// (`stop_app_daemon`) and which stops itself once the app is gone after a
+/// force quit, pausing what it runs either way.
 #[cfg(target_os = "macos")]
 fn start_daemon(cmd: Command, home: &Path, log: &Path) -> Result<Daemon, String> {
     let label = launchd_label(home, std::process::id());
     if launchd_disabled(&label)? {
-        return start_child(cmd, log);
+        return start_app_child(cmd, log);
     }
     match launchd_plan(launchd_job(&label)?.as_ref()) {
         Plan::Adopt(pid) => return Ok(Daemon::Launchd { label, pid: Some(pid), adopted: true }),
@@ -2025,6 +2070,58 @@ mod tests {
         };
         assert_eq!(ended, "last exit code = 0");
         assert!(launchd_job(&label).unwrap().is_none(), "still loaded");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// With launchd's job switched off, the daemon is the app's own child: told
+    /// the app's pid (to stop itself after a force quit), and stopped with SIGTERM,
+    /// which it shuts down gracefully on, when the app exits. A daemon serving the
+    /// home that this app didn't start that way is left alone.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_apps_own_child_daemon_knows_the_app_and_stops_gracefully_when_it_exits() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::current_dir().unwrap().join("target/app-child-daemon");
+        let home = dir.join("home");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&home).unwrap();
+        // Not the app's: another's daemon serving the home is never stopped here.
+        let mut foreign = daemon_process(&home, "brindle", &[]);
+        stop_app_daemon_in(&home);
+        assert!(is_daemon(foreign.id()), "stopped a daemon the app didn't start");
+        foreign.kill().unwrap();
+        foreign.wait().unwrap();
+
+        // A daemon that records the app pid it was told, publishes its daemon.json and
+        // records a graceful stop on SIGTERM.
+        let bin = dir.join("brindle");
+        std::fs::write(
+            &bin,
+            format!(
+                "#!/bin/bash\necho \"${APP_PID_ENV}\" > '{dir}/app'\n\
+                 printf '{{\"socket\": \"/nonexistent.sock\", \"token\": \"t\", \"pid\": %s}}' $$ > '{home}/daemon.json'\n\
+                 tail -f /dev/null & p=$!; trap 'kill $p; echo stopped > \"{dir}/graceful\"; exit 0' TERM; wait $p\n",
+                dir = dir.display(),
+                home = home.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let log = home.join(START_LOG);
+        File::create(&log).unwrap();
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let mut daemon = start_app_child(daemon_command(&bin, &path), &log).unwrap();
+        let pid = daemon.id();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while running_in(&home).map(|info| info.pid) != Some(pid) {
+            assert!(Instant::now() < deadline, "the child daemon never published its daemon.json");
+        }
+        assert_eq!(std::fs::read_to_string(dir.join("app")).unwrap().trim(), std::process::id().to_string());
+
+        stop_app_daemon_in(&home);
+        assert!(!is_daemon(pid), "still running after the app exited");
+        assert!(matches!(daemon.try_wait(), Ok(Some(_))));
+        assert!(dir.join("graceful").exists(), "killed, not stopped gracefully");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
