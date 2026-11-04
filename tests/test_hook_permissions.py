@@ -208,6 +208,7 @@ def launch_matcher(**ctx):
     return entry["matcher"]
 
 
+@pytest.mark.variant("security boundary: asserts the deny entries themselves, which other tests only execute")
 def test_worker_file_tools_are_denied_the_credential_stores():
     """A worker's Read and Edit are denied every store its shell commands are
     (the hook denies `cat ~/.ssh/x`; Read must not print it instead); an

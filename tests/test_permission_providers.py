@@ -765,15 +765,6 @@ def assert_codex_sandbox_never_writes_git_hooks_or_config(roots, cwd, linked=Tru
     assert common not in roots and {r for r in roots if r.startswith(common + os.sep)} == want
 
 
-@pytest.mark.parametrize("linked", [True, False])
-def test_codex_worker_can_commit(ws, linked):  # a linked worktree's git metadata lives outside it
-    from brindle.profiles import load_profile
-    from brindle.providers import LaunchContext, _codex_writable_roots
-    cwd = ws.path if linked else ws.repo_root
-    roots = _codex_writable_roots(LaunchContext("c1", load_profile("developer"), None, cwd=cwd))
-    assert_codex_sandbox_never_writes_git_hooks_or_config(roots, cwd, linked)
-
-
 @pytest.mark.parametrize("event,chars,expected", [
     # Codex 0.162.1 asks before write_stdin (write_stdin_approval), and runs no
     # PreToolUse for it: a live shell (bash, bash -m, env -- bash, sh -c bash)

@@ -196,6 +196,10 @@ def test_a_process_left_on_a_moved_or_deleted_executable_is_told_apart(tmp_path)
     """What the app updater does to a running engine: its .app is moved away
     (then deleted) and a new one put at its path."""
     real = os.path.realpath(sys.executable)
+    me = procs._running_executable(os.getpid())
+    if me is None or me is procs._DELETED or (me.st_dev, me.st_ino) != (os.stat(real).st_dev, os.stat(real).st_ino):
+        pytest.skip("this Python runs through a launcher that execs another file (a framework build), "
+                    "so a copy of it can't stand in for the app's engine")
     python = tmp_path / "bin" / "python"
     python.parent.mkdir()
     shutil.copy(real, python)
