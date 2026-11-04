@@ -44,7 +44,7 @@ def piped(db, repo, monkeypatch):
 
 @pytest.fixture
 def heavy(db, piped, repo, monkeypatch):
-    """A piped branch whose task was sized heavy, no review rounds left, and a
+    """A piped branch whose heavy worker cannot reopen for a fix round, and a
     ``delegate`` that records the retry instead of starting a process."""
     root, ws, started = piped
     for name in pipeline.CLOUD_ENV:
@@ -60,13 +60,14 @@ def heavy(db, piped, repo, monkeypatch):
         return db_.get_agent("retry1"), ws_
 
     monkeypatch.setattr(agents, "delegate", fake_delegate)
+    monkeypatch.setattr(agents, "reopen_worker", lambda *a: False)
     is_alive = agents.is_alive
     monkeypatch.setattr(agents, "is_alive",
                         lambda agent, panes=None: False if agent.id == "w1" else is_alive(agent, panes))
 
     def configure(**kw):
         (repo / ".brindle" / "config.json").write_text(json.dumps(
-            {"review": True, "auto_merge_default_branch": True, "review_rounds": 0, **kw}))
+            {"review": True, "auto_merge_default_branch": True, **kw}))
 
     return ws, retries, configure
 
@@ -83,6 +84,14 @@ def test_no_retry_when_the_original_worker_cannot_be_stopped(db, heavy, monkeypa
     monkeypatch.setattr(agents, "is_alive",
                         lambda agent, panes=None: True if agent.id == "w1" else other(agent, panes))
     monkeypatch.setattr(agents, "close", lambda db_, agent_id, panes=None: db_.get_agent(agent_id))
+    send = agents.send_message
+
+    def cannot_deliver(db_, to, body, **kw):
+        if to == "w1":
+            raise agents.AgentError("worker unavailable")
+        return send(db_, to, body, **kw)
+
+    monkeypatch.setattr(agents, "send_message", cannot_deliver)
     reject(db, ws)
     assert retries == []                       # two agents never share the worktree
     msg = db.pop_pending("boss")
