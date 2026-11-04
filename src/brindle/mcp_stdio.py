@@ -9,7 +9,9 @@ was serving has been answered, then execs the installed ``brindle mcp`` on the
 same stdin and stdout. The client never sees a restart:
 
 - the request that found the new install isn't served here: it, and every
-  byte read past it, goes to the new process unread;
+  byte read past it, goes to the new process unread; unless a long call
+  (a handoff, say) keeps the server busy past ``_MAX_HOLD``: then what was
+  held is served here, and the reload waits for the next idle moment;
 - the client's ``initialize`` is replayed there (its answer dropped, the
   client already has one), so the new process serves an initialized session;
 - so are its open ``subscriptions/listen`` requests (MCP 2026-07-28: a
