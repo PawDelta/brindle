@@ -53,7 +53,8 @@ flowchart LR
 The supervisor delegates through brindle's own MCP tools: `assign` a task with the files it
 will touch and the tasks it depends on, and brindle refuses overlapping work, queues dependent
 tasks until their prerequisites merge, and starts them from the updated base. Large or risky
-tasks can run plan-first: the worker proposes a plan and can't edit a file until it's approved.
+tasks can run plan-first: the worker proposes a plan and waits for approval before editing
+(enforced by a hook for Claude Code workers; other CLIs are told to wait).
 Every worker's worktree is snapshotted after each turn that changed files, so a worker that
 went down the wrong path can be rewound to a good turn and restarted with a note, instead of
 starting over.
@@ -84,7 +85,7 @@ recorded by `brindle history`:
 | Milestone checks passed | 642 |
 | Pull requests merged into brindle itself | 252 |
 
-Nearly half of all reviewed branches needed another round. That is the review gate doing its
+Nearly half of all reviews requested changes. That is the review gate doing its
 job, and it's the number to look at when deciding whether unreviewed agent output belongs on
 your main branch.
 
@@ -99,8 +100,10 @@ supervisor, workers and reviewer (`npm install -g @anthropic-ai/claude-code`, th
 it, and under **New session** choose **Watch brindle work on a practice repo** to see a full
 run before pointing it at your own code.
 
-**The terminal** (macOS, Linux, or Windows through WSL2). The install script installs uv and
-tmux if they're missing, then brindle, then runs `brindle doctor`:
+**The terminal** (macOS, Linux, or Windows through WSL2). The install script installs uv if
+it's missing, then brindle, then runs `brindle doctor`. brindle needs tmux: on macOS the
+script installs it with Homebrew; on Linux and WSL2 it prints the command to run, so install
+tmux first (`sudo apt install tmux` on Debian and Ubuntu):
 
 ```sh
 curl -fsSL pawdelta.com/brindle/install | sh
