@@ -628,3 +628,31 @@ def test_review_base_after_merge(tmp_path, merged, edit, shared, want_edited, wa
     else:
         assert rb.sha is None
         assert rb.edited == want_edited
+
+
+def test_a_re_review_is_scoped_to_the_changes_since_the_last_review(db, tmp_path, monkeypatch):
+    from brindle.db import Workspace
+
+    sh("git init -q -b main && git config user.name t && git config user.email t@t", tmp_path)
+    (tmp_path / "a.txt").write_text("1\n")
+    sh("git add -A && git commit -qm init && git checkout -qb feat", tmp_path)
+    (tmp_path / "a.txt").write_text("2\n")
+    sh("git commit -qam w1", tmp_path)
+    prev = sh("git rev-parse HEAD", tmp_path)
+    ws = Workspace("ws-rr", str(tmp_path), "feat", "branch", "feat", "main", str(tmp_path), None, "t", 0.0)
+    db.add_workspace(ws)
+    db.add_agent(Agent("w1", ws.id, "developer", "claude", None, "assign", "idle", "@0", None, time.time()))
+    db.add_review(ws.id, prev, None, False, "blocker: a.txt is wrong")
+    (tmp_path / "a.txt").write_text("3\n")
+    sh("git commit -qam fix", tmp_path)
+    prompts = []
+
+    def spawn(db_, ws_, profile, **kw):
+        prompts.append(kw["prompt"])
+        db.add_agent(Agent("rev2", ws.id, "reviewer", "claude", None, "review", "idle", "@0", None, time.time()))
+        return db.get_agent("rev2")
+
+    monkeypatch.setattr(agents, "spawn", spawn)
+    agents.request_review(db, None, ws)
+    [prompt] = prompts
+    assert f"git diff {prev}..HEAD" in prompt and "blocker: a.txt is wrong" in prompt
