@@ -31,8 +31,9 @@ NATIVE_SUBAGENT_STALE = 2 * 3600
 NATIVE_SUBAGENT_PRUNE_AFTER = 3600
 
 # SQLite user_version: 0 identifies databases written before version tracking.
-# Bump this when changing SCHEMA or _migrate so older engines refuse the result.
-SCHEMA_VERSION = 2
+# Bump for incompatible SCHEMA or _migrate changes so older engines refuse the result.
+# Additive tables stay compatible with installed helpers launched from worktrees.
+SCHEMA_VERSION = 1
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS workspaces (
