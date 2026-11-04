@@ -148,10 +148,11 @@ def _exec(argv: list[str], ready: Callable[[list[str]], bool] | None) -> bool:
 #
 # Servers from before this one (0.5.x, and 0.6.0, whose reload waited forever
 # on Claude Code's open subscriptions/listen) never leave the code they
-# started with. Claude Code starts a stdio server again when it exits (seen
-# with Claude Code 2.1.318), so the daemon of a newer install stops them, and
-# they come back on the new code. A server that can reload itself says so
-# (`register_reloading`) and is left to do it: it finishes its requests first.
+# started with, so the daemon of a newer install stops them. Claude Code
+# (2.1.318) does NOT start a stopped server again: its session needs a
+# `/mcp` reconnect (2026-11-04). So a server that can reload itself says so
+# (`register_reloading`) and is never stopped: it finishes its requests and
+# reloads; its mark is dropped only once the process is gone.
 
 _MCP_COMMAND = re.compile(r"(?:-m brindle|/brindle) mcp(?:\s|$)")
 
@@ -199,11 +200,17 @@ def stop_stale_mcp_servers() -> bool:
         import logging
 
         logging.getLogger(__name__).warning(
-            "brindle: stopping %d MCP server(s) left on a replaced install; their clients start them again",
+            "brindle: stopping %d MCP server(s) left on a replaced install that can't reload themselves",
             len(stale))
         procs.terminate(stale)
+    # Only a server that is gone loses its mark: the table is a snapshot, and
+    # a server that started after it (the sessions an app restart resumes,
+    # while `ps` crawls under load) has marked itself but isn't in it. Its
+    # mark dropped, the next update would stop it instead of letting it
+    # reload (2026-11-04: a daemon started at 02:27:5x, the resumed sessions'
+    # servers at 02:28:04; at 03:46 the 64->68 update stopped two of them).
     for mark in marks.glob("*") if marks.is_dir() else ():
-        if mark.name.isdigit() and int(mark.name) not in table:
+        if mark.name.isdigit() and not procs.alive(int(mark.name)):
             mark.unlink(missing_ok=True)     # a server that died without unmarking itself
     return left
 

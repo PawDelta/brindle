@@ -169,10 +169,10 @@ def test_a_brindle_package_in_the_cwd_is_not_what_brindle_runs_again(monkeypatch
 
 
 def test_a_newer_daemon_stops_the_mcp_servers_an_update_left_on_old_code(monkeypatch, tmp_path):
-    """Claude Code starts a stdio server that exited again, on the install as
-    it is now. Stopped: one on a replaced executable. Left: one that reloads
-    itself, one busy with a process of its own (to look at again), one on
-    the install as it is, another brindle home's."""
+    """Stopped: one on a replaced executable that can't reload. Left: one that
+    reloads itself (even one the snapshot missed), one busy with a process of
+    its own (to look at again), one on the install as it is, another brindle
+    home's."""
     python = tmp_path / "python3"
     python.write_text("")
     monkeypatch.setattr(upgrade.sys, "executable", str(python))
@@ -185,11 +185,17 @@ def test_a_newer_daemon_stops_the_mcp_servers_an_update_left_on_old_code(monkeyp
     marks.mkdir(parents=True)
     (marks / "2").touch()
     (marks / "99").touch()      # a server that died without unmarking itself
+    # 2026-11-04: a server that started after the snapshot (the sessions an
+    # app restart resumed while `ps` crawled at load 200) is alive and marked
+    # but not in the table. Its mark was dropped, and the next update
+    # stopped it although it could reload.
+    (marks / "6").touch()
+    monkeypatch.setattr(procs, "alive", lambda pid: pid in table or pid == 6)
     stopped = []
     monkeypatch.setattr(procs, "terminate", stopped.append)
 
     assert upgrade.stop_stale_mcp_servers() is True
-    assert stopped == [{1}] and [m.name for m in marks.iterdir()] == ["2"]
+    assert stopped == [{1}] and sorted(m.name for m in marks.iterdir()) == ["2", "6"]
 
     # Right after an update the machine is busy and `ps` can time out: the
     # daemon looks again, less and less often, and gives up after 30 minutes
