@@ -143,31 +143,41 @@ _BRANCHES_TTL = 2.0
 _BRANCHES_MAX = 64
 _BRANCHES: dict[str, tuple[float, frozenset[str]]] = {}
 _BRANCHES_LOCK = threading.Lock()
+# Bumped by every invalidation. A listing read while one landed is discarded
+# (never published), so a slow read can't re-cache refs from before a change.
+_BRANCHES_GEN = 0
 
 
 def invalidate_branches() -> None:
     """Forget every cached branch listing (brindle changed refs)."""
+    global _BRANCHES_GEN
     with _BRANCHES_LOCK:
+        _BRANCHES_GEN += 1
         _BRANCHES.clear()
 
 
 def branch_exists(root: str | Path, branch: str) -> bool:
     key = str(root)
-    now = time.monotonic()
-    with _BRANCHES_LOCK:
-        hit = _BRANCHES.get(key)
-    if hit is not None and now - hit[0] < _BRANCHES_TTL:
-        return branch in hit[1]
-    proc = run(["for-each-ref", "--format=%(refname)", "refs/heads"], root, check=False)
-    if proc.returncode != 0:
-        return False
-    prefix = "refs/heads/"
-    names = frozenset(r[len(prefix):] for r in proc.stdout.splitlines() if r.startswith(prefix))
-    with _BRANCHES_LOCK:
-        if len(_BRANCHES) >= _BRANCHES_MAX and key not in _BRANCHES:
-            _BRANCHES.pop(next(iter(_BRANCHES)))
-        _BRANCHES[key] = (now, names)
-    return branch in names
+    names: frozenset[str] = frozenset()
+    for _ in range(2):    # one re-read if an invalidation raced the first
+        now = time.monotonic()
+        with _BRANCHES_LOCK:
+            hit = _BRANCHES.get(key)
+            gen = _BRANCHES_GEN
+        if hit is not None and now - hit[0] < _BRANCHES_TTL:
+            return branch in hit[1]
+        proc = run(["for-each-ref", "--format=%(refname)", "refs/heads"], root, check=False)
+        if proc.returncode != 0:
+            return False
+        prefix = "refs/heads/"
+        names = frozenset(r[len(prefix):] for r in proc.stdout.splitlines() if r.startswith(prefix))
+        with _BRANCHES_LOCK:
+            if gen == _BRANCHES_GEN:
+                if len(_BRANCHES) >= _BRANCHES_MAX and key not in _BRANCHES:
+                    _BRANCHES.pop(next(iter(_BRANCHES)))
+                _BRANCHES[key] = (now, names)
+                return branch in names
+    return branch in names    # raced twice: answer from the last read, uncached
 
 
 def remote_branch_exists(root: str | Path, branch: str, remote: str = "origin") -> bool:
