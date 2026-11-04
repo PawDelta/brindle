@@ -14,12 +14,15 @@ restarted into an update); the app replacing an older build's daemon stops
 it the same way. With that job switched off the daemon is the app's own
 child: the app stops it when it exits, and it stops itself once the app has
 gone after a force quit (APP_PID_ENV). On its way out it pauses every session it runs
-(``pause_for_exit``), as the person's Pause does, and the next daemon the app
-starts resumes them (``resume_after_start``)."""
+(``pause_for_exit``), as the person's Pause does, saying so meanwhile
+(``say_pausing``: only then does the app wait more than a moment for it to go),
+and the next daemon the app starts resumes them (``resume_after_start``).
+Nothing else holds up its exit (``_run``, ``leave``)."""
 
 from __future__ import annotations
 
 import asyncio
+import atexit
 import ipaddress
 import json
 import logging
@@ -27,6 +30,8 @@ import os
 import resource
 import signal
 import socket
+import sys
+import threading
 import time
 from pathlib import Path
 
@@ -137,6 +142,7 @@ def prepare(token: str, *, unix: bool = True, tcp: bool = False,
     if (other := running()):
         raise DaemonError(f"a brindle daemon is already running (pid {other['pid']})")
     _private_dir(brindle_home())
+    _pausing_path().unlink(missing_ok=True)     # a daemon killed while it paused said so last
     socks: list[socket.socket] = []
     info: dict = {"socket": None, "port": None, "token": token,
                   "version": brindle.__version__, "pid": os.getpid()}
@@ -246,6 +252,33 @@ def _record_resume(entries: list[dict]) -> bool:
     return True
 
 
+PAUSING_FILE = "daemon-pausing"     # the pid of the app daemon pausing on its way out (daemon.rs PAUSING_FILE)
+PAUSE_BUDGET = 10.0     # seconds pause_for_exit may take (the app waits up to 20 while it says it's pausing)
+
+
+def _pausing_path() -> Path:
+    return brindle_home() / PAUSING_FILE
+
+
+def say_pausing() -> None:
+    """Tell the app that stops this daemon to give it time: it is on its
+    way to pausing its sessions (pause_for_exit). Without this the app kills
+    it after a short wait (daemon.rs stop_daemon)."""
+    try:
+        _write_private(_pausing_path(), f"{os.getpid()}\n")
+    except OSError:
+        log.warning("brindle: couldn't say the daemon is pausing", exc_info=True)
+
+
+def done_pausing() -> None:
+    """The pause is over: the app's short wait applies again."""
+    try:
+        if _pausing_path().read_text().strip() == str(os.getpid()):
+            _pausing_path().unlink()
+    except OSError:
+        pass
+
+
 def pause_for_exit() -> list[str]:
     """The app's daemon on its way out: every running session on this
     daemon's own tmux server is paused as the person's Pause does
@@ -256,20 +289,25 @@ def pause_for_exit() -> list[str]:
     here, and its workspace's session name may name some other session here.
 
     The record of what is paused, with the server each session is on, is
-    written before the first pause, so a pause cut short (a tmux failure,
-    the daemon killed mid-way) still leaves its session to recover; each
-    entry is marked paused once its pause has finished (a later write that
-    fails leaves it unfinished, which recovery treats the safe way). No
-    record, no pause: a session paused with nothing to bring it back would
-    stay paused, so one that can't be recorded is left running. Processes
-    the panes hosted are left to a detached cull: the time to go is short
-    (the next start stops what the cull left, resume_after_start). A
-    session that can't be paused is only logged. Returns the roots paused."""
+    written before the pause, so a pause cut short (a tmux failure, the
+    daemon killed mid-way) still leaves its sessions to recover; the entries
+    are marked paused once the pause has finished (a later write that fails
+    leaves them unfinished, which recovery treats the safe way). No record,
+    no pause: a session paused with nothing to bring it back would stay
+    paused, so one that can't be recorded is left running. Processes the
+    panes hosted are left to a detached cull: the time to go is short (the
+    next start stops what the cull left, resume_after_start). A pause that
+    fails is only logged. Returns the roots paused.
+
+    The app waits for this (daemon.rs PAUSE_GRACE), so it is quick and has
+    an end: the sessions are paused all at once (agents.record_pauses, then
+    agents.close_paused: a few tmux commands in all, not a few per
+    session), and what isn't closed after PAUSE_BUDGET seconds (a tmux
+    server that stopped answering) is left as a pause cut short."""
     from brindle import agents, tmux
     from brindle.db import DB
     from brindle.service import sessions as svc
 
-    paused: list[str] = []
     try:
         db = DB()
         try:
@@ -277,27 +315,43 @@ def pause_for_exit() -> list[str]:
                      and a.status not in ("done", "paused") and agents.same_server(a)]
             if not roots:
                 _resume_path().unlink(missing_ok=True)
-                return paused
+                return []
             server = tmux.current_server()
             entries = [{"id": root.id, "server": server, "paused": False} for root in roots]
             if not _record_resume(entries):
-                return paused
-            for entry in entries:
-                try:
-                    agents.pause(db, entry["id"], stop_procs=False)
-                except Exception:  # noqa: BLE001 - the others still get paused
-                    log.warning("brindle: couldn't pause session %s on the way out", entry["id"], exc_info=True)
-                    continue
-                entry["paused"] = True
-                paused.append(entry["id"])
-                _record_resume(entries)
+                return []
+            closings = agents.record_pauses(db, [entry["id"] for entry in entries])
         finally:
             db.conn.close()
-        if paused:
-            svc.cull_detached()
+        finished = threading.Event()
+
+        def close() -> None:
+            try:
+                db = DB()       # its own: SQLite connections stay on their thread
+                try:
+                    agents.close_paused(db, closings)
+                finally:
+                    db.conn.close()
+                finished.set()
+            except Exception:  # noqa: BLE001 - the next start finishes it
+                log.warning("brindle: couldn't pause the running sessions on the way out", exc_info=True)
+
+        worker = threading.Thread(target=close, name="brindle-pause-for-exit", daemon=True)
+        worker.start()
+        worker.join(PAUSE_BUDGET)
+        if not finished.is_set():
+            if worker.is_alive():
+                log.warning("brindle: the sessions weren't paused within %gs; the next start finishes it",
+                            PAUSE_BUDGET)
+            return []
+        for entry in entries:
+            entry["paused"] = True
+        _record_resume(entries)
+        svc.cull_detached()
+        return [entry["id"] for entry in entries]
     except Exception:  # noqa: BLE001 - leaving must not fail over this
         log.warning("brindle: couldn't pause the running sessions on the way out", exc_info=True)
-    return paused
+        return []
 
 
 def _read_resume() -> list[dict] | None:
@@ -493,8 +547,16 @@ def make_server(app):
 
     from brindle.daemon.peer import with_peer
 
+    class Server(uvicorn.Server):
+        stopping = None     # called as it starts to shut down, however it was told to
+
+        async def shutdown(self, sockets=None) -> None:
+            if self.stopping is not None:
+                self.stopping()
+            await super().shutdown(sockets)
+
     # with_peer: the guard learns who calls on the Unix socket (see brindle.daemon.peer).
-    return uvicorn.Server(uvicorn.Config(
+    return Server(uvicorn.Config(
         app, lifespan="off", log_level="warning", access_log=False,
         timeout_graceful_shutdown=SHUTDOWN_GRACE,
         http=with_peer(AutoHTTPProtocol),
@@ -521,6 +583,8 @@ def serve(*, unix: bool = True, tcp: bool = False, idle_exit: bool = False) -> d
     debuglog.Uploader().start()
     activity = Activity(build_app(token, port=info["port"], poller=poller))
     server = make_server(activity)
+    if idle_exit:       # the app's daemon pauses what it runs on its way out: the app gives it time
+        server.stopping = say_pausing
     upgrade.on_stale_launch = lambda: setattr(server, "should_exit", True)
 
     async def run() -> None:
@@ -542,17 +606,70 @@ def serve(*, unix: bool = True, tcp: bool = False, idle_exit: bool = False) -> d
     # handler it found: make that an exit that still runs the cleanup below.
     signal.signal(signal.SIGTERM, _exit)
     try:
-        asyncio.run(run())
+        _run(run())
     finally:
         # The app's daemon, once it served: the app has gone (or replaced it), and
         # what it ran is paused for the next daemon. One that never served
         # (its start failed) runs nothing to pause.
-        if idle_exit and server.started:
-            pause_for_exit()
+        try:
+            if idle_exit and server.started:
+                pause_for_exit()
+        finally:
+            done_pausing()
         for s in socks:
             s.close()
         cleanup(info)
     return info
+
+
+def _run(main) -> None:
+    """asyncio.run(``main``) without its last step, which waits for every
+    thread asyncio.to_thread started to finish: a sweep or a request's git
+    still at work would hold up a stopping daemon (and the pause the app is
+    waiting for) for as long as it runs. The request that wanted it has
+    gone, and a sweep runs again at the next start."""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(main)
+    finally:
+        try:
+            tasks = asyncio.all_tasks(loop)
+            for task in tasks:
+                task.cancel()
+            loop.run_until_complete(asyncio.gather(*tasks, return_exceptions=True))
+            loop.run_until_complete(loop.shutdown_asyncgens())
+        finally:
+            asyncio.set_event_loop(None)
+            loop.close()     # its threads are left to finish, or to end with the process (leave)
+
+
+EXIT_GRACE = 1.0    # seconds the at-exit hooks get once the daemon has stopped (leave)
+
+
+def leave(code: int = 0) -> None:
+    """End the process of a daemon that has stopped (serve has returned: its
+    pause and cleanup are done) at once. Threads still at work for requests
+    or sweeps aren't waited for; the reads brindle started are stopped; the
+    at-exit hooks (Pro's queued events onto their spools, which the next
+    daemon sends) get EXIT_GRACE seconds between them."""
+    spawn._stop_reads_at_exit()
+    finished = threading.Event()
+
+    def at_exit() -> None:
+        try:
+            atexit._run_exitfuncs()
+        finally:
+            finished.set()
+
+    threading.Thread(target=at_exit, name="brindle-at-exit", daemon=True).start()
+    finished.wait(EXIT_GRACE)
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except Exception:  # noqa: BLE001 - a closed stream: nothing left to say
+            pass
+    os._exit(code)
 
 
 def stop() -> dict | None:

@@ -1483,23 +1483,9 @@ def pause(db: DB, root_id: str, *, stop_procs: bool = True,
 
     Records every status first and closes windows last: this can run inside
     one of the windows it closes (see _pause_when_done)."""
-    paused, sessions, windows = [], set(), []
-    owners = pane_owners(db)
-    for a in tree(db, root_id):
-        ws = db.get_workspace(a.workspace_id)
-        if ws:
-            sessions.add(ws.tmux_session)
-        # A window on another tmux server isn't reachable from here, and its
-        # pane id would name some other pane on this one (see same_server).
-        if a.tmux_window and same_server(a) and owns_pane(db, a, owners):
-            windows.append(a.tmux_window)
-        # Its own SubagentStop hooks will never fire once its process stops.
-        db.end_native_subagents(a.id)
-        if a.mode != "interactive" and a.result is not None:
-            db.set_status(a.id, "done")
-        else:
-            db.set_status(a.id, "paused")
-            paused.append(a)
+    owners = pane_owners(db)    # first: a tmux server that doesn't answer stops the pause before anything changes
+    closing = _record_pause(db, root_id)
+    windows = closing.windows(db, owners)
     # The sidebar follows the person around, so it may not be sitting in any
     # of the windows about to close: find it wherever it is and stop it too,
     # rather than leaving it running with nothing left to show it. Status was
@@ -1526,19 +1512,118 @@ def pause(db: DB, root_id: str, *, stop_procs: bool = True,
         from brindle import procs
 
         procs.stop([a.id for a in tree(db, root_id)], grace=2.0)
-    root = db.get_agent(root_id)
-    root_ws = db.get_workspace(root.workspace_id) if root else None
-    for session in sessions:
-        # The chat's own session always closes, so an attached terminal gets
-        # its prompt back every time. Workers' sessions close once they hold
-        # nothing but the idle starter shell.
-        if (root_ws and session == root_ws.tmux_session) or set(tmux.windows(session)) <= {"shell"}:
+    for session in closing.sessions:
+        if closing.closes(session, tmux.windows(session)):
             tmux.kill_session(session)
     if stop_local_models:
         _stop_local_models(db)
-    knowledge.note(db, root_id, knowledge.PAUSE)
-    bus.publish_agent(db, "session.paused", root_id, agents=[a.id for a in paused])
-    return paused
+    _paused(db, closing)
+    return closing.paused
+
+
+@dataclass
+class Closing:
+    """A pause whose statuses are recorded (_record_pause, record_pauses),
+    and what it closes next."""
+    root_id: str
+    agents: list[Agent]         # the root and everything it started
+    paused: list[Agent]         # those now paused (the rest had reported: done)
+    sessions: set[str]          # their workspaces' tmux sessions
+    root_session: str | None    # the chat's own
+    repo_root: str | None
+
+    def windows(self, db: DB, owners: dict[str, str]) -> list[str]:
+        """The agents' panes to close, each with its window: only those on
+        this tmux server (a pane id on another names some other pane here,
+        see same_server) and still theirs (owns_pane, by ``owners``)."""
+        return [a.tmux_window for a in self.agents
+                if a.tmux_window and same_server(a) and owns_pane(db, a, owners)]
+
+    def closes(self, session: str, names: list[str]) -> bool:
+        """Whether ``session``, holding windows named ``names`` once the
+        agents' are closed, closes too. The chat's own session always does,
+        so an attached terminal gets its prompt back every time. Workers'
+        sessions close once they hold nothing but the idle starter shell."""
+        return session == self.root_session or set(names) <= {"shell"}
+
+
+def _record_pause(db: DB, root_id: str) -> Closing:
+    """A pause's first step: ``root_id`` and everything it started marked
+    paused (done, for a worker that had reported), nothing closed yet."""
+    agents, paused, sessions = tree(db, root_id), [], set()
+    for a in agents:
+        ws = db.get_workspace(a.workspace_id)
+        if ws:
+            sessions.add(ws.tmux_session)
+        # Its own SubagentStop hooks will never fire once its process stops.
+        db.end_native_subagents(a.id)
+        if a.mode != "interactive" and a.result is not None:
+            db.set_status(a.id, "done")
+        else:
+            db.set_status(a.id, "paused")
+            paused.append(a)
+    root = db.get_agent(root_id)
+    root_ws = db.get_workspace(root.workspace_id) if root else None
+    return Closing(root_id, agents, paused, sessions, root_ws.tmux_session if root_ws else None,
+                   root_ws.repo_root if root_ws else None)
+
+
+def _paused(db: DB, closing: Closing, key: str | None = None) -> None:
+    """A pause's last step, once everything is closed: noted and announced."""
+    knowledge.note(db, closing.root_id, knowledge.PAUSE, key=key)
+    bus.publish_agent(db, "session.paused", closing.root_id, agents=[a.id for a in closing.paused])
+
+
+def record_pauses(db: DB, root_ids: list[str]) -> list[Closing]:
+    """The first step of pausing the sessions ``root_ids`` all at once (the
+    app's daemon on its way out, lifecycle.pause_for_exit): every status
+    recorded, nothing closed yet. ``close_paused`` does the rest."""
+    return [_record_pause(db, root_id) for root_id in root_ids]
+
+
+def close_paused(db: DB, closings: list[Closing]) -> None:
+    """The rest of pausing sessions all at once, as ``pause(stop_procs=False)``
+    would one by one, with as few tmux commands as there can be: from one
+    look at the tmux server, every window, sidebar and session they close
+    goes in one tmux command; then each is noted and announced (their repos
+    looked up side by side). Raises if tmux can't be reached: some windows
+    may still be open then."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ExitStack() as locks:
+        # As pause holds each one's sidebar lock around its closes.
+        for root_id in sorted({c.root_id for c in closings}):
+            locks.enter_context(_sidebar_lock(root_id))
+        panes, where = tmux.list_panes(), tmux.pane_places()
+        owners = pane_owners(db, panes)
+        session_of = {p.window: p.session for p in where.values()}
+        window_of = {pane: p.window for pane, p in where.items()} | {w: w for w in session_of}  # or a window id
+        windows = {window_of[w] for c in closings for w in c.windows(db, owners) if w in window_of}
+        left: dict[str, set[str]] = {}      # each session's window names once those windows close
+        for p in where.values():
+            if p.window not in windows:
+                left.setdefault(p.session, set()).add(p.name)
+        # A session with no window left has closed already.
+        sessions = {s for c in closings for s in c.sessions if s in left and c.closes(s, list(left[s]))}
+        sidebars = []
+        for c in closings:
+            pane = db.get_sidebar_pane(c.root_id)
+            # Ours, as _valid_sidebar tells (dead or alive), from the same look.
+            if pane in where and (panes.tags.get(pane) or {}).get(SIDEBAR_TAG) == c.root_id:
+                sidebars.append((c.root_id, pane))
+        # What a session or window closing takes along isn't closed again (tmux would refuse it).
+        tmux.close(panes=[p for _, p in sidebars if where[p].window not in windows
+                          and where[p].session not in sessions],
+                   windows=sorted(w for w in windows if session_of[w] not in sessions),
+                   sessions=sorted(sessions))
+        for root_id, _ in sidebars:
+            db.clear_sidebar_pane(root_id)
+    repos = {c.repo_root for c in closings if c.repo_root}
+    with ThreadPoolExecutor(max_workers=max(1, len(repos))) as pool:
+        keys = dict(zip(repos, pool.map(knowledge.repo_key, repos)))
+    _stop_local_models(db)
+    for c in closings:
+        _paused(db, c, keys.get(c.repo_root) if c.repo_root else None)
 
 
 def _stop_local_models(db: DB) -> None:
