@@ -2176,6 +2176,26 @@ def cloning(world, repo, monkeypatch):
     return f"file://{repo.parent / 'origin.git'}"
 
 
+def test_open_repo_initializes_a_plain_folder_only_when_confirmed(db, world, tmp_path):
+    from brindle import git
+
+    folder = tmp_path / "new-project"
+    folder.mkdir()
+    (folder / "notes.txt").write_text("keep my files\n")
+    code, reply = _send("POST", "/v1/repos/open", {"path": str(folder)})
+    assert (code, reply["error"]["code"]) == (409, "not_a_repo")
+    assert not (folder / ".git").exists()
+    code, reply = _send("POST", "/v1/repos/open", {"path": str(folder), "init": True})
+    assert code == 200, reply
+    assert reply["initialized"] and reply["repo_root"] == str(folder)
+    assert git.run(["rev-parse", "--verify", "HEAD"], folder, check=False).returncode == 0
+    assert (folder / "notes.txt").read_text() == "keep my files\n"
+    assert git.run(["ls-tree", "--name-only", "HEAD"], folder).stdout == ""
+    head = git.run(["rev-parse", "HEAD"], folder).stdout
+    assert _send("POST", "/v1/repos/open", {"path": str(folder), "init": True})[0] == 200
+    assert git.run(["rev-parse", "HEAD"], folder).stdout == head
+
+
 def test_a_clone_streams_git_progress_and_finishes_with_the_path(db, cloning, tmp_path):
     parent = tmp_path / "projects"
     parent.mkdir()
@@ -2185,6 +2205,7 @@ def test_a_clone_streams_git_progress_and_finishes_with_the_path(db, cloning, tm
     assert [(e["kind"], e["payload"]["result"]) for e in done] == [
         ("job.done", {"path": str(parent / "origin")})]
     assert (parent / "origin" / "app.py").is_file()
+    assert {"repo_root": str(parent / "origin"), "name": "origin"} in _send("GET", "/v1/repos")[1]
     assert any(e["payload"]["job"] == reply["job"] for e in bus.tail(db, kinds=("job.progress",)))
     again, err = _send("POST", "/v1/repos/clone", {"url": cloning, "parent_dir": str(parent)})
     assert (again, err["error"]["code"]) == (409, "exists")

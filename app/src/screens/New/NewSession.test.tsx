@@ -288,6 +288,17 @@ describe("NewSession", () => {
     fireEvent.click(within(adding).getByRole("button", { name: "Clone" }));
     await waitFor(() => expect((screen.getByRole("combobox", { name: "Repo" }) as HTMLInputElement).value).toBe("site"));
     expect(screen.queryByRole("region", { name: "Add a project" })).toBeNull();
+    // Switch away, then reopen the same project: each pick is a fresh selection.
+    const repo = screen.getByRole("combobox", { name: "Repo" });
+    fireEvent.focus(repo);
+    fireEvent.mouseDown(screen.getByRole("option", { name: "proj" }));
+    expect((repo as HTMLInputElement).value).toBe("proj");
+    pickFolder.mockResolvedValue("~/Projects/site");
+    fireEvent.click(screen.getByRole("button", { name: "Add a project…" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open a folder…" }));
+    await waitFor(() => expect((repo as HTMLInputElement).value).toBe("site"));
+    fireEvent.click(screen.getByRole("button", { name: "Start" }));
+    await waitFor(() => expect(posts(daemon).at(-1)?.body).toMatchObject({ repo: "~/Projects/site" }));
     sync.stop();
   });
 });

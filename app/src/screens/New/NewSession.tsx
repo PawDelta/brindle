@@ -13,7 +13,7 @@
    project…" beside the repo after. Under it, the way to the demo the first
    launch offers (screens/Onboarding/Demo). */
 
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { DaemonError, type DaemonClient, type Note, type PreflightDTO, type Repo, type SessionConflict, type StartSession } from "../../api/client";
 import type { PickFolder } from "../../api/open";
 import type { SessionDTO } from "../../api/schema";
@@ -80,7 +80,7 @@ export function NewSession({ client, onOpen, initialRepo, pickFolder, refresh }:
           {repos === null ? null : repos.length === 0 ? (
             <FirstRepo client={client} pickFolder={pickFolder} onPicked={added} />
           ) : (
-            <Composer client={client} repos={repos} sessions={sessions} reload={reload} refresh={refresh} onOpen={onOpen} chosen={chosen} pickFolder={pickFolder} onAdded={added} />
+            <Composer client={client} repos={repos} sessions={sessions} reload={reload} refresh={refresh} onOpen={onOpen} chosen={chosen} onChoose={setChosen} pickFolder={pickFolder} onAdded={added} />
           )}
           <WatchDemo client={client} refresh={refresh} onStarted={onOpen} />
         </div>
@@ -105,7 +105,7 @@ function FirstRepo({ client, pickFolder, onPicked }: { client: DaemonClient; pic
 /* One composer for every repo: the prompt, the repo, Start, and the rest
    behind Options. A start that conflicts, or that the engine's preflight
    refuses, asks here what to do. */
-function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, pickFolder, onAdded }: {
+function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, onChoose, pickFolder, onAdded }: {
   client: DaemonClient;
   repos: Repo[];
   sessions: Record<string, SessionDTO[]>;
@@ -113,19 +113,12 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, pi
   refresh?: () => Promise<void>;
   onOpen(root: string, repo: string): void;
   chosen?: string;
+  onChoose(repo: string): void;
   pickFolder?: PickFolder;
   onAdded(repo: Repo): void;
 }) {
-  const [repo, setRepo] = useState(repos.some((r) => r.repo_root === chosen) ? chosen! : (repos[0]?.repo_root ?? ""));
+  const repo = repos.some((r) => r.repo_root === chosen) ? chosen! : (repos[0]?.repo_root ?? "");
   const [adding, setAdding] = useState(false);
-  // A project just added is selected once it is listed.
-  const selected = useRef(repos.some((r) => r.repo_root === chosen) ? chosen : undefined);
-  useEffect(() => {
-    if (chosen && selected.current !== chosen && repos.some((r) => r.repo_root === chosen)) {
-      selected.current = chosen;
-      setRepo(chosen);
-    }
-  }, [chosen, repos]);
   const [prompt, setPrompt] = useState("");
   const [options, setOptions] = useState(false);
   const [branch, setBranch] = useState("");
@@ -139,10 +132,6 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, pi
   const [pending, setPending] = useState<{ fields: StartFields; conflict: SessionConflict } | null>(null);
   // A start the engine refused until the CLI is set up: what they asked for, and the items.
   const [preflight, setPreflight] = useState<{ fields: StartFields; items: PreflightDTO } | null>(null);
-
-  useEffect(() => {
-    if (!repos.some((r) => r.repo_root === repo)) setRepo(repos[0]?.repo_root ?? "");
-  }, [repos, repo]);
 
   useEffect(() => {
     client
@@ -216,7 +205,7 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, pi
       </div>
       <div className="flex flex-wrap items-center gap-s1">
         {repos.length > 1 ? (
-          <ProjectCombobox repos={repos} value={repo} onChange={setRepo} />
+          <ProjectCombobox repos={repos} value={repo} onChange={onChoose} />
         ) : (
           <span className="text-sm text-ink-2">
             in <span className="font-medium text-ink">{repos[0]?.name}</span>
