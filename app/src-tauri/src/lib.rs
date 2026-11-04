@@ -175,11 +175,13 @@ pub fn run() {
             return;
         }
         Some("--headless-check") => std::process::exit(headless_check()),
-        // Relaunched into an update (instance::relaunch): the instance that was runs out first.
+        // Relaunched into an update (instance::relaunch): the instance that was runs out
+        // first, and so does its daemon (daemon::wait_for_predecessor).
         #[cfg(target_os = "macos")]
         Some(instance::AFTER_EXIT_FLAG) => {
             if let Some(pid) = std::env::args().nth(2).and_then(|pid| pid.parse().ok()) {
                 instance::wait_for_exit(pid);
+                daemon::wait_for_predecessor(pid);
             }
         }
         _ => {}

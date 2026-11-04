@@ -6,7 +6,14 @@ server's defaults), makes a fresh token and writes ``~/.brindle/daemon.json``
 ``daemon status`` / ``daemon stop`` find it. TCP binds 127.0.0.1 only. The
 daemon exits on SIGTERM, after an upgrade of brindle's install (the app
 starts the new one), and with ``--idle-exit`` once nobody has used it for
-IDLE_SECONDS while no agent runs. It removes its files on the way out."""
+IDLE_SECONDS while no agent runs. It removes its files on the way out.
+
+The app's daemon (``--idle-exit``) is a job of the person's launchd that the
+app loaded, and launchd stops it when the app goes away (quit, force quit,
+restarted into an update); the app replacing an older build's daemon stops
+it the same way. On its way out it pauses every session it runs
+(``pause_for_exit``), as the person's Pause does, and the next daemon the app
+starts resumes them (``resume_after_start``)."""
 
 from __future__ import annotations
 
@@ -214,6 +221,87 @@ def _agents_running() -> bool:
         return True     # can't tell: stay up rather than strand an app
 
 
+RESUME_FILE = "resume-on-start.json"    # the sessions the last app daemon paused on its way out
+
+
+def _resume_path() -> Path:
+    return brindle_home() / RESUME_FILE
+
+
+def pause_for_exit() -> list[str]:
+    """The app's daemon on its way out: every running session is paused as
+    the person's Pause does (agents.pause: windows closed, work kept, so
+    nothing keeps acting with nobody watching), and the roots are recorded
+    for the next daemon to bring back (resume_after_start). Processes the
+    panes hosted are left to a detached cull: the time to go is short. A
+    session that can't be paused is only logged. Returns the roots paused."""
+    from brindle import agents
+    from brindle.db import DB
+    from brindle.service import sessions as svc
+
+    paused: list[str] = []
+    try:
+        db = DB()
+        try:
+            roots = [a for a in db.list_agents() if a.parent_id is None and a.mode == "interactive"
+                     and a.status not in ("done", "paused")]
+            for root in roots:
+                try:
+                    agents.pause(db, root.id, stop_procs=False)
+                    paused.append(root.id)
+                except Exception:  # noqa: BLE001 - the others still get paused
+                    log.warning("brindle: couldn't pause session %s on the way out", root.id, exc_info=True)
+        finally:
+            db.conn.close()
+        if paused:
+            svc.cull_detached()
+    except Exception:  # noqa: BLE001 - leaving must not fail over this
+        log.warning("brindle: couldn't pause the running sessions on the way out", exc_info=True)
+    path = _resume_path()
+    if not paused:
+        path.unlink(missing_ok=True)
+        return paused
+    staged = path.with_name(f"{path.name}.{os.getpid()}")
+    try:
+        staged.write_text(json.dumps(paused))
+        os.replace(staged, path)
+    except OSError:
+        staged.unlink(missing_ok=True)
+        log.warning("brindle: couldn't record the paused sessions for the next daemon", exc_info=True)
+    return paused
+
+
+def resume_after_start() -> list[str]:
+    """Bring back the sessions the last app daemon paused on its way out
+    (pause_for_exit), once: the record goes before any is resumed, so one
+    that can't come back isn't tried at every start. Only roots still paused
+    are resumed (the person may have closed one meanwhile)."""
+    from brindle import agents
+    from brindle.db import DB
+
+    path = _resume_path()
+    try:
+        ids = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return []
+    path.unlink(missing_ok=True)
+    resumed: list[str] = []
+    db = DB()
+    try:
+        for root_id in ids:
+            root = db.get_agent(root_id)
+            if root is None or root.status != "paused":
+                continue
+            try:
+                agents.resume(db, root_id)
+                resumed.append(root_id)
+            except Exception:  # noqa: BLE001 - the others still come back
+                log.warning("brindle: couldn't resume session %s", root_id, exc_info=True)
+    finally:
+        db.conn.close()
+    return resumed
+
+
 async def _elapse(seconds: float) -> None:
     """Return once ``seconds`` have passed on the event loop's timer."""
     loop = asyncio.get_running_loop()
@@ -335,12 +423,16 @@ def serve(*, unix: bool = True, tcp: bool = False, idle_exit: bool = False) -> d
         watcher = asyncio.create_task(_watch(server, activity, idle_exit))
         resizer = asyncio.create_task(asyncio.to_thread(_reset_window_sizes))
         sweeper = asyncio.create_task(asyncio.to_thread(_upgrade_sweep))
+        # The app's daemon brings back what the last one paused on its way out.
+        resumer = asyncio.create_task(asyncio.to_thread(resume_after_start)) if idle_exit else None
         try:
             await server.serve(sockets=socks)
         finally:
             watcher.cancel()
             resizer.cancel()
             sweeper.cancel()
+            if resumer:
+                resumer.cancel()
 
     # uvicorn shuts down gracefully on SIGTERM, then raises it again with the
     # handler it found: make that an exit that still runs the cleanup below.
@@ -348,6 +440,11 @@ def serve(*, unix: bool = True, tcp: bool = False, idle_exit: bool = False) -> d
     try:
         asyncio.run(run())
     finally:
+        # The app's daemon, once it served: the app has gone (or replaced it), and
+        # what it ran is paused for the next daemon. One that never served
+        # (its start failed) runs nothing to pause.
+        if idle_exit and server.started:
+            pause_for_exit()
         for s in socks:
             s.close()
         cleanup(info)
