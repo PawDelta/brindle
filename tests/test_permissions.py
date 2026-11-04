@@ -215,6 +215,7 @@ def _bypass(command):
     _bypass("bash -c 'cat ~/.ssh/id_rsa"),    # unreadable by the splitter: fail closed
     _bypass("ls > ~/.ssh/authorized_keys"),    # a harmless check redirected into a store truncates it
     _bypass("test -e README.md > ~/.aws/credentials"),
+    _bypass('for f in ~/.aws/credentials; do test -e README.md > "$f"; done'),    # a store bound by a loop
     ("ls ~/.ssh", "allow"),
     ("test -e ~/.aws/credentials", "allow"),
     ("stat ~/.ssh/id_rsa", "allow"),

@@ -2401,11 +2401,17 @@ def _touches_credentials(req: Request, part: ShellPart, words: list[str]) -> boo
     return any(_credential_file(req, part, path) for word in operands for path in _argument_paths(word))
 
 
+# A redirection target only the run knows: a variable, a substitution, a pattern.
+_UNRESOLVED_TARGET = re.compile(r"[$`*?\[]")
+
+
 def _harmless_check(req: Request, part: ShellPart, words: list[str]) -> bool:
-    """A listing or metadata check (_HARMLESS_CHECKS) whose redirections touch
-    no store: ``ls > ~/.ssh/authorized_keys`` truncates one."""
+    """A listing or metadata check (_HARMLESS_CHECKS) whose every redirection
+    is a literal path that is no store: ``ls > ~/.ssh/authorized_keys``
+    truncates one, and so may ``ls > "$f"`` with f bound to it by a loop."""
     return (bool(words) and os.path.basename(words[0]) in _HARMLESS_CHECKS
-            and not any(_credential_file(req, part, path) for path in [*part.reads, *part.writes]))
+            and not any(_UNRESOLVED_TARGET.search(path) or _credential_file(req, part, path)
+                        for path in [*part.reads, *part.writes]))
 
 
 _INTERPRETERS = frozenset({"python", "pypy", "node", "ruby", "perl", "php", "osascript", "deno", "bun", "lua",
