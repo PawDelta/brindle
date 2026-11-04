@@ -267,6 +267,7 @@ def _health_log_watch_warns_only_when_the_loop_itself_is_late(monkeypatch, stall
         now[0] += 2.0                   # maintenance the watch awaits: slow, loop free
 
     monkeypatch.setattr(session_review.ReadinessWatch, "sweep_safely", slow_sweep)
+    monkeypatch.setattr(lifecycle, "_stop_stale_mcp_servers", lambda: False)
     activity = lifecycle.Activity(build_app(TOKEN, port=8123))
     asyncio.run(lifecycle._watch(server, activity, False, wait=elapse, clock=lambda: now[0]))
 
@@ -1216,6 +1217,7 @@ def test_daemon_start_raises_file_limit_before_binding(monkeypatch, soft, hard, 
 
 
 def test_account_identity_is_cached_with_orgs_and_fails_soft_offline(brindle_home, monkeypatch):
+    from brindle.daemon import routes_read
     from brindle.pro import auth
     from brindle.pro.account import ProAccount
 
@@ -1235,6 +1237,9 @@ def test_account_identity_is_cached_with_orgs_and_fails_soft_offline(brindle_hom
 
     monkeypatch.setattr(auth, "me", me)
     monkeypatch.setattr(ProAccount, "orgs", orgs)
+    # The cache is also keyed on the CACHE_SECONDS period of the monotonic clock: held
+    # inside one, so a period that ends between two requests can't add a read.
+    monkeypatch.setattr(routes_read, "time", SimpleNamespace(monotonic=lambda: 150.0))
     for _ in range(2):
         code, body = _get("/v1/account", AUTH)
         assert code == 200 and (body["name"], body["email"]) == ("Sam Rivera", "sam@example.com")
