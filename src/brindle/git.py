@@ -11,6 +11,7 @@ import fcntl
 import os
 import re
 import subprocess
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -76,9 +77,14 @@ def run_env(args: list[str], cwd: str | Path, env: dict[str, str] | None,
     """``run`` with its own environment (e.g. ``GIT_INDEX_FILE`` for a scratch
     index that leaves the checkout's real index alone; see brindle.rewind)."""
     to = TIMEOUT if timeout is None else timeout
-    start = spawn.read if is_read(args) else spawn.action
+    reading = is_read(args)
+    start = spawn.read if reading else spawn.action
+    if not reading:
+        invalidate_branches()
     try:
         proc = start(["git", *args], cwd=cwd, env=env, input=input, timeout=to)
+        if not reading:
+            invalidate_branches()    # and after, so a lookup during the action can't re-cache old refs
     except spawn.Busy as e:
         raise GitBusy(f"git {' '.join(args)}: {e}") from e
     except (OSError, subprocess.TimeoutExpired) as e:
@@ -128,8 +134,50 @@ def default_branch(root: str | Path) -> str:
     return current_branch(root) or "main"
 
 
+# Local branch names per repo root, from one ``for-each-ref`` that answers every
+# lookup. Correctness choice: the snapshot is dropped whenever brindle runs any
+# git action (branch create/delete/rename, commit, fetch ...: see run_env) and
+# otherwise lives at most _BRANCHES_TTL seconds, so a branch created or deleted
+# outside brindle is seen within that window. Bounded, process-local, locked.
+_BRANCHES_TTL = 2.0
+_BRANCHES_MAX = 64
+_BRANCHES: dict[str, tuple[float, frozenset[str]]] = {}
+_BRANCHES_LOCK = threading.Lock()
+# Bumped by every invalidation. A listing read while one landed is discarded
+# (never published), so a slow read can't re-cache refs from before a change.
+_BRANCHES_GEN = 0
+
+
+def invalidate_branches() -> None:
+    """Forget every cached branch listing (brindle changed refs)."""
+    global _BRANCHES_GEN
+    with _BRANCHES_LOCK:
+        _BRANCHES_GEN += 1
+        _BRANCHES.clear()
+
+
 def branch_exists(root: str | Path, branch: str) -> bool:
-    return ok(["show-ref", "--verify", "--quiet", f"refs/heads/{branch}"], root)
+    key = str(root)
+    names: frozenset[str] = frozenset()
+    for _ in range(2):    # one re-read if an invalidation raced the first
+        now = time.monotonic()
+        with _BRANCHES_LOCK:
+            hit = _BRANCHES.get(key)
+            gen = _BRANCHES_GEN
+        if hit is not None and now - hit[0] < _BRANCHES_TTL:
+            return branch in hit[1]
+        proc = run(["for-each-ref", "--format=%(refname)", "refs/heads"], root, check=False)
+        if proc.returncode != 0:
+            return False
+        prefix = "refs/heads/"
+        names = frozenset(r[len(prefix):] for r in proc.stdout.splitlines() if r.startswith(prefix))
+        with _BRANCHES_LOCK:
+            if gen == _BRANCHES_GEN:
+                if len(_BRANCHES) >= _BRANCHES_MAX and key not in _BRANCHES:
+                    _BRANCHES.pop(next(iter(_BRANCHES)))
+                _BRANCHES[key] = (now, names)
+                return branch in names
+    return branch in names    # raced twice: answer from the last read, uncached
 
 
 def remote_branch_exists(root: str | Path, branch: str, remote: str = "origin") -> bool:
