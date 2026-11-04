@@ -980,13 +980,18 @@ trusted_hash = "sha256:..."`, to Codex's `config.toml` (`~/.codex`, or
 `$CODEX_HOME`), written by Codex itself. brindle passes the hook on the command
 line of the Codex workers it starts (only while `permission_policy` is on), with
 the same command for every worker, so that one trust covers every worktree, and
-it trusts it again after a reinstall moves brindle. Nothing else in `~/.codex`
-changes. If you remove the entry, brindle leaves it removed (Codex workers then
-prompt as usual, and `brindle doctor` says so); `brindle permissions
-install-codex-hook --yes` puts it back.
+the app's daemon keeps it trusted by itself: after an update changes the hook,
+after another brindle install takes the slot, or if a config rewrite loses the
+entry, with nothing for you to do. Nothing else in `~/.codex` changes. To stop
+it, turn `permission_policy` off, or turn the hook off in Codex (`enabled = false`
+on that entry): brindle can tell that apart and leaves it off (Codex workers then
+prompt as usual, the Inbox and `brindle doctor` say so), and `brindle permissions
+install-codex-hook --yes` turns it back on. Deleting the entry isn't enough while
+the policy is on: brindle can't tell a deleted entry from a lost one, so it trusts
+the hook again.
 Codex patches are checked file by file: allowed only if every file is. Codex
 doesn't say which tool run followed which prompt, so brindle doesn't learn from
-Codex approvals. To undo, delete that entry (or untrust it in Codex's `/hooks`).
+Codex approvals.
 
 Codex also uses the profile's `allowed_tools` shell entries: `Bash(just lint)`
 allows that exact command, and `Bash(task test:*)` allows it with arguments.

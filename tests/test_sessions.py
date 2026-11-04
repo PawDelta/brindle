@@ -166,6 +166,8 @@ def _the_app_daemon_pauses_on_its_way_out_and_the_next_start_resumes(db, root, m
     held, swept = threading.Event(), threading.Event()
     monkeypatch.setattr(lifecycle, "_upgrade_sweep", lambda: held.wait(5) or swept.set())
     monkeypatch.setattr(lifecycle, "_reset_window_sizes", lambda: None)
+    hook_kept = threading.Event()
+    monkeypatch.setattr(lifecycle, "_keep_codex_hook", lambda settle=0.0: hook_kept.set())
     monkeypatch.setattr(lifecycle, "WATCH_INTERVAL", 0.05)
     servers = []
     real_make = lifecycle.make_server
@@ -226,6 +228,7 @@ def _the_app_daemon_pauses_on_its_way_out_and_the_next_start_resumes(db, root, m
     serve(app_gone=False)
     assert stopped_again and lifecycle.read_info() is None, "a second stop cut the way out short"
     assert not swept.is_set(), "the daemon waited for the sweep before it paused and exited"
+    assert hook_kept.wait(5), "the Codex hook's trust wasn't looked at when the daemon started"
     held.set()
     assert [db.get_agent(a).status for a in ("chat", "helper", "foreign")] == ["paused", "paused", "idle"]
     assert not tmux.has_session(root.tmux_session) and tmux.has_session("shared-name")

@@ -511,8 +511,8 @@ def _resolve_supervisor(repo_root: str | None, provider: Optional[str], *,
 def _trust_codex_hook(repo_root: str) -> None:
     """With the permission policy on and Codex installed, trust brindle's Codex
     hook if it isn't yet (or brindle moved), and say so in one line, so Codex
-    workers follow the policy from their first launch. A trust the person
-    removed stays removed; `brindle doctor` points at it."""
+    workers follow the policy from their first launch. A hook the person
+    turned off in Codex stays off; `brindle doctor` points at it."""
     from brindle import codex_hook
     from brindle.providers import codex_binary, which_cli
 
@@ -1802,8 +1802,8 @@ def permissions_install_codex_hook(
     Codex runs a hook only once it's trusted. brindle passes its hook to the
     Codex agents it starts (only when permission_policy is on), with the same
     command for every agent, and trusts it itself the first time it's needed;
-    this does it now, or gives back a trust removed from Codex's config. It's
-    recorded in Codex's config.toml (hooks.state), through Codex itself."""
+    this does it now, or turns the hook back on after it was turned off in
+    Codex. It's recorded in Codex's config.toml (hooks.state), through Codex itself."""
     from brindle import codex_hook
     from brindle.providers import codex_binary
 

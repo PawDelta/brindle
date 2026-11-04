@@ -2,6 +2,7 @@
 payloads as brindle Requests, their answers, the one-time Codex hook trust, and
 the copy of brindle's rules kept in agy's own settings."""
 
+import asyncio
 import hashlib
 import json
 import os
@@ -13,7 +14,7 @@ from typer.testing import CliRunner
 
 from brindle import agents, antigravity, codex_hook, permissions
 from brindle.cli import app
-from brindle.config import set_local
+from brindle.config import brindle_home, set_local
 from brindle.db import Agent
 from brindle.permissions import Rule, decide_all, from_codex
 from workspace_template import copy_workspace, workspace_template  # noqa: F401 (a fixture)
@@ -838,7 +839,7 @@ def test_reviewer_launch_retrusts_a_hook_trusted_by_another_build(ws, monkeypatc
     flag = codex_hook.config_flags()[1]
     assert flag in launch_argv(ws, mode="review")
     assert codex_hook.inspect("codex").status == "trusted"  # what Codex launches with
-    (codex_hook.codex_home() / "config.toml").write_text("")  # the person takes the trust out
+    turn_off_in_codex()
     FakeAppServer.calls = []
     assert flag not in launch_argv(ws, mode="review")
     # Not asked to trust it again (config/read is the sandbox check's).
@@ -897,8 +898,6 @@ def test_trust_written_but_not_verified_is_pending_not_removed(db, ws, monkeypat
     monkeypatch.setattr(codex_hook, "_AppServer", FakeAppServer)  # Codex answers again
     assert codex_hook.config_flags(codex_hook.hook_command())[1] in codex_hook.launch_flags(ws.path)
     assert codex_hook.status() == codex_hook.TRUSTED
-    (codex_hook.codex_home() / "config.toml").write_text("")  # a real removal is still one
-    assert codex_hook.status() == codex_hook.REMOVED
 
 
 def test_every_brindle_process_names_the_hook_the_same(tmp_path, monkeypatch):
@@ -961,7 +960,7 @@ def test_codex_hook_trust_is_per_codex_home(ws, monkeypatch, tmp_path):
     assert codex_hook.status() == codex_hook.TRUSTED
     assert "trusted_hash" in (mine / "config.toml").read_text()
     assert permissions.load_store().codex_hook[os.path.realpath(os.environ["CODEX_HOME"])] == own
-    (mine / "config.toml").write_text("")   # the person takes it out of brindle's home
+    turn_off_in_codex()   # in brindle's home
     FakeAppServer.calls = []
     assert codex_hook.ensure("codex") == codex_hook.REMOVED and FakeAppServer.calls == []
 
@@ -987,12 +986,178 @@ def test_unreadable_codex_trust_never_gets_reinstalled(ws, monkeypatch):
     assert codex_hook.launch_flags(ws.path) == []
     assert FakeAppServer.calls == []
     assert (codex_hook.codex_home() / "config.toml").read_text() == config
+    # Not a removal, and nothing the Inbox's fix could repair: the warning and doctor say what it is.
+    from brindle import doctor
+    from brindle.service import inbox
+
+    monkeypatch.setattr("brindle.providers.codex_binary", lambda: "/bin/sh")
+    assert codex_hook.status() == codex_hook.UNREADABLE and inbox._setup_items() == []
+    assert "doesn't parse" in codex_hook.launch_warning("codex", ws.path)
+    assert "doesn't parse" in doctor.codex_hook_checks(ws.repo_root)[0].detail
 
 
 def move_brindle(monkeypatch):
     """A reinstall: brindle's interpreter elsewhere, so a new hook command."""
     monkeypatch.setattr(codex_hook, "_stable_invocation",
                         lambda: ["/new/venv/bin/python", "-m", "brindle"])
+
+
+def turn_off_in_codex():
+    """What Codex's own switch writes: ``enabled = false`` on the hook's entry."""
+    config = codex_hook.codex_home() / "config.toml"
+    config.write_text(config.read_text() + "enabled = false\n")
+
+
+def _update_changes_the_hook(monkeypatch):
+    monkeypatch.setattr(codex_hook, "TIMEOUT", codex_hook.TIMEOUT + 1)
+
+
+def _another_install_took_the_slot(monkeypatch):
+    config = codex_hook.codex_home() / "config.toml"
+    rec = next(iter(permissions.load_store().codex_hook.values()))
+    config.write_text(config.read_text().replace(rec["hash"], "sha256:another-install"))
+
+
+def _a_rewrite_lost_the_entries(monkeypatch):
+    (codex_hook.codex_home() / "config.toml").write_text('model = "x"\n')
+
+
+def _a_launchs_check_failed_on_a_busy_machine(monkeypatch):
+    codex_hook._forget_definition()
+
+
+def _forget_the_trust():
+    with permissions.editing() as store:
+        store.codex_hook = {}
+
+
+def _never_trusted_with_the_persons_policy_on(monkeypatch):
+    _forget_the_trust()
+    (brindle_home() / "config.json").write_text(json.dumps({"permission_policy": "on"}))
+
+
+@pytest.fixture
+def hook_daemon(ws, monkeypatch):
+    """This process as the daemon of this brindle home, with Codex installed and its hook trusted."""
+    from brindle.daemon import lifecycle
+
+    monkeypatch.setattr("brindle.providers.codex_binary", lambda: "/bin/sh")
+    monkeypatch.setattr(codex_hook, "_AppServer", FakeAppServer)
+    monkeypatch.setattr(codex_hook, "_failed_at", {}, raising=False)
+    lifecycle.info_path().parent.mkdir(parents=True, exist_ok=True)
+    lifecycle.info_path().write_text(json.dumps({"pid": os.getpid()}))
+    codex_hook.trust("codex", codex_hook.inspect("codex"))
+    FakeAppServer.calls = []
+    return lifecycle
+
+
+def _setup_items(db, ws):
+    from brindle.service import inbox
+
+    return [i for i in inbox.items(db, str(ws.repo_root), panes={}) if i.kind == "setup"]
+
+
+@pytest.mark.parametrize("left_trusted", [
+    _update_changes_the_hook,
+    _another_install_took_the_slot,
+    _never_trusted_with_the_persons_policy_on,
+    pytest.param(_a_rewrite_lost_the_entries, marks=pytest.mark.variant("a lost entry used to read as a person's removal")),
+    pytest.param(_a_launchs_check_failed_on_a_busy_machine, marks=pytest.mark.variant("live: a launch under load read as a changed config")),
+])
+def test_the_daemon_keeps_the_hook_trusted_and_the_inbox_never_asks(db, ws, hook_daemon, monkeypatch, left_trusted):
+    """Live, 0.6.0: the Inbox asked to fix the trust at 18:26 and again at 18:39,
+    with no change a person made. Whatever took it out of TRUSTED is brindle's
+    to put right, with no Codex launch and nothing shown."""
+    left_trusted(monkeypatch)
+    assert codex_hook.status() != codex_hook.TRUSTED
+    assert _setup_items(db, ws) == []
+    hook_daemon._keep_codex_hook()
+    assert codex_hook.status() == codex_hook.TRUSTED
+    assert codex_hook.inspect("codex").status == "trusted"   # what the next Codex launch sees
+    assert _setup_items(db, ws) == []
+
+
+def test_the_daemons_watch_puts_back_a_trust_lost_while_it_runs(ws, hook_daemon, monkeypatch):
+    from types import SimpleNamespace
+
+    from brindle.daemon import session_review
+    from brindle.upgrade import InstallWatch
+
+    monkeypatch.setattr(session_review.ReadinessWatch, "sweep_safely", lambda self: None)
+    monkeypatch.setattr(InstallWatch, "changed", lambda self: False)
+    _a_rewrite_lost_the_entries(monkeypatch)
+    old = time.time() - hook_daemon.CODEX_HOOK_SETTLE - 1
+    os.utime(codex_hook.codex_home() / "config.toml", (old, old))
+    now = [0.0]
+    server = SimpleNamespace(should_exit=False)
+
+    async def elapse(seconds):
+        now[0] += hook_daemon.CODEX_HOOK_EVERY
+        server.should_exit = True
+
+    asyncio.run(hook_daemon._watch(server, None, False, wait=elapse, clock=lambda: now[0]))
+    assert codex_hook.status() == codex_hook.TRUSTED
+
+
+def _codex_just_refused_it(mp, lifecycle):
+    class Refusing(FakeAppServer):
+        def call(self, method, params):
+            raise codex_hook.CodexHookError("too old")
+
+    mp.setattr(codex_hook, "_AppServer", Refusing)
+    lifecycle._keep_codex_hook()
+    mp.setattr(codex_hook, "_AppServer", FakeAppServer)
+
+
+@pytest.mark.parametrize("why_left_alone", [
+    pytest.param(lambda mp, lc: lc.info_path().write_text(json.dumps({"pid": os.getpid() + 1})), id="not this home's daemon"),
+    pytest.param(lambda mp, lc: mp.delenv("BRINDLE_CODEX_CONFIG_HOME"), id="throwaway brindle home"),
+    pytest.param(lambda mp, lc: mp.setattr("brindle.providers.codex_binary", lambda: "/nonexistent/codex"), id="no Codex"),
+    pytest.param(lambda mp, lc: _forget_the_trust(), id="new, the person's policy off"),
+    pytest.param(lambda mp, lc: _another_install_took_the_slot(mp) or lc.CODEX_HOOK_SETTLE, id="another install's Codex may be starting"),
+    pytest.param(_codex_just_refused_it, id="Codex just refused it"),
+    pytest.param(lambda mp, lc: turn_off_in_codex(), id="the person turned it off"),
+])
+def test_the_daemon_doesnt_take_the_hooks_slot_when_its_not_its_to_take(ws, hook_daemon, monkeypatch, why_left_alone):
+    """Two installs' daemons, or a throwaway home's, would each read the other's
+    trust as MOVED and write over it for ever; this machine had two running."""
+    _update_changes_the_hook(monkeypatch)
+    settle = why_left_alone(monkeypatch, hook_daemon)
+    settle = settle if isinstance(settle, float) else 0.0
+    before = codex_hook.status()
+    FakeAppServer.calls = []
+    hook_daemon._keep_codex_hook(settle)
+    assert FakeAppServer.calls == [] and codex_hook.status() == before != codex_hook.TRUSTED
+
+
+def test_a_hook_the_person_turned_off_is_asked_about_and_comes_back_only_when_they_ask(db, ws, hook_daemon):
+    turn_off_in_codex()
+    assert codex_hook.status() == codex_hook.REMOVED
+    [item] = _setup_items(db, ws)
+    assert item.fix == "codex_hook_trust" and "turned off" in item.reason
+    codex_hook.trust("codex", codex_hook.inspect("codex"))   # the item's fix
+    written = next(p for m, p in FakeAppServer.calls if m == "config/batchWrite")["edits"][0]["value"]
+    assert any(entry.get("enabled") is True for entry in written.values())
+    assert codex_hook.status() == codex_hook.TRUSTED
+
+
+def test_a_hook_trust_cant_land_inside_a_project_trusts_rewrite(ws, monkeypatch):
+    """trust_codex_project rewrites config.toml from text it read under this lock:
+    a hook trust written in between was lost, and read as a person removing it."""
+    import fcntl
+
+    (brindle_home() / "locks").mkdir(parents=True, exist_ok=True)
+
+    class Checking(FakeAppServer):
+        def call(self, method, params):
+            if method == "config/batchWrite":
+                with open(brindle_home() / "locks" / "codex-trust.lock", "a+") as lock:
+                    with pytest.raises(BlockingIOError):
+                        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return super().call(method, params)
+
+    monkeypatch.setattr(codex_hook, "_AppServer", Checking)
+    assert codex_hook.trust("codex", codex_hook.inspect("codex")).status == "trusted"
 
 
 def test_launch_warning_only_when_codex_runs_without_the_hook(ws, monkeypatch):
@@ -1017,7 +1182,7 @@ def test_doctor_reports_the_codex_hook(ws, monkeypatch):
     codex_hook.ensure("codex")
     [c] = doctor.codex_hook_checks(ws.repo_root)
     assert c.level == doctor.OK and c.detail.startswith("trusted")
-    (codex_hook.codex_home() / "config.toml").write_text("")
+    turn_off_in_codex()
     [c] = doctor.codex_hook_checks(ws.repo_root)
     assert c.level == doctor.WARN and codex_hook.INSTALL in c.detail
 
