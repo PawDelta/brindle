@@ -8,10 +8,12 @@ halfway through a launch.
 
 from __future__ import annotations
 
+import contextvars
 import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from contextlib import closing, nullcontext
 from dataclasses import dataclass
@@ -376,62 +378,114 @@ def _fix_claude(confirm, done: list[str]) -> list[str]:
     return ["ANTHROPIC_API_KEY: approved for Claude Code"]
 
 
-def checks(repo_root: str | None, db: DB | None = None) -> list[Check]:
-    """Run diagnostics, borrowing ``db`` or closing each connection we open."""
-    from brindle import config, detect, procs, tmux, updates
+CHECK_SECONDS = 20     # what one check may take before doctor reports it and moves on
+DISK_SECONDS = 90      # the disk report measures every worktree: legitimately slower
+GRACE_SECONDS = 2      # past a check's deadline, for its own reads to stop and report
 
-    out: list[Check] = []
+
+def _python_check() -> list[Check]:
     v = sys.version_info
-    out.append(Check(OK if v >= (3, 11) else FAIL, "python",
-                     f"{v.major}.{v.minor}.{v.micro}" + ("" if v >= (3, 11) else " (brindle needs 3.11 or newer)")))
-    out.append(_tool("tmux", True, "brindle runs every agent in a tmux window", ["-V"],
-                     tmux_install()))
-    out.append(_tool("claude", True, "the supervisor and the built-in profiles use Claude Code",
-                     install=CLI_INSTALL["claude"][1]))
-    out.append(_tool("codex", False, "only needed for Codex agents (reviewer-codex)",
-                     install=CLI_INSTALL["codex"][1]))
-    out.append(_tool("agy", False, "only needed for Google Antigravity agents"))
-    out.append(_tool("opencode", False, "only needed for OpenCode agents (developer-opencode, reviewer-opencode)",
-                     install=CLI_INSTALL["opencode"][1]))
-    out.extend(signin_checks(repo_root))
-    out.extend(credential_checks())
-    out.extend(cloud_checks(repo_root))
-    from brindle import company_identity, self_serve
+    return [Check(OK if v >= (3, 11) else FAIL, "python",
+                  f"{v.major}.{v.minor}.{v.micro}" + ("" if v >= (3, 11) else " (brindle needs 3.11 or newer)"))]
 
-    out.extend(company_identity.checks())
-    out.extend(self_serve.checks())
 
-    from brindle import signin_pause
-
-    out.extend(signin_pause.checks())
-    out.append(_tool("gh", False, "only needed for `brindle pr` and `brindle new --pr`"))
-    out.append(_tool("pre-commit", False, "only needed if the repo uses pre-commit hooks"))
-    out.append(_tool("graphify", False, "only needed for the code map agents can query"))
+def _clipboard_check() -> list[Check]:
+    from brindle import tmux
 
     clip = tmux.clipboard_command()
-    out.append(Check(OK if clip else WARN, "clipboard",
-                     f"{clip.split()[0]}: dragging in the chat copies to the clipboard" if clip else
-                     "no pbcopy, wl-copy or xclip: mouse selection copies only within tmux"))
+    return [Check(OK if clip else WARN, "clipboard",
+                  f"{clip.split()[0]}: dragging in the chat copies to the clipboard" if clip else
+                  "no pbcopy, wl-copy or xclip: mouse selection copies only within tmux")]
 
-    out.append(Check(OK, "sidebar",
-                     "`brindle sidebar` (or prefix S in tmux) brings a lost sidebar back to the session you're in"))
 
-    out.extend(daemon_checks())
-    out.extend(native_checks(repo_root))
-    out.extend(override_checks())
-    out.extend(quota_checks(repo_root))
-    out.extend(airgap_checks(repo_root))
-    out.extend(agent_env_checks(repo_root))
-    out.extend(tmux_cwd_checks())
+def _sidebar_check() -> list[Check]:
+    return [Check(OK, "sidebar",
+                  "`brindle sidebar` (or prefix S in tmux) brings a lost sidebar back to the session you're in")]
+
+
+def _update_check() -> list[Check]:
+    from brindle import updates
+
     update = updates.notice(refresh=True)
-    if update:
-        out.append(Check(OK, "brindle update", update))
-    out.extend(pro_checks())
-    out.extend(managed_checks(repo_root))
+    return [Check(OK, "brindle update", update)] if update else []
 
+
+def _company_identity_checks() -> list[Check]:
+    from brindle import company_identity
+
+    return company_identity.checks()
+
+
+def _self_serve_checks() -> list[Check]:
+    from brindle import self_serve
+
+    return self_serve.checks()
+
+
+def _signin_pause_checks() -> list[Check]:
+    from brindle import signin_pause
+
+    return signin_pause.checks()
+
+
+def _legacy_checks(repo_root: str | None) -> list[Check]:
     from brindle import legacy
 
-    out.extend(Check(WARN, "previous name", line) for line in legacy.findings(repo_root))
+    return [Check(WARN, "previous name", line) for line in legacy.findings(repo_root)]
+
+
+def _steps(repo_root: str | None, db: DB | None) -> list[tuple[str, object, float]]:
+    """Every check, in the order doctor shows them: (name, function, seconds)."""
+    tool = lambda *a, **k: (lambda: [_tool(*a, **k)])   # noqa: E731
+    steps: list[tuple[str, object, float]] = [
+        ("python", _python_check, CHECK_SECONDS),
+        ("tmux", tool("tmux", True, "brindle runs every agent in a tmux window", ["-V"], tmux_install()),
+         CHECK_SECONDS),
+        ("claude", tool("claude", True, "the supervisor and the built-in profiles use Claude Code",
+                        install=CLI_INSTALL["claude"][1]), CHECK_SECONDS),
+        ("codex", tool("codex", False, "only needed for Codex agents (reviewer-codex)",
+                       install=CLI_INSTALL["codex"][1]), CHECK_SECONDS),
+        ("agy", tool("agy", False, "only needed for Google Antigravity agents"), CHECK_SECONDS),
+        ("opencode", tool("opencode", False,
+                          "only needed for OpenCode agents (developer-opencode, reviewer-opencode)",
+                          install=CLI_INSTALL["opencode"][1]), CHECK_SECONDS),
+        ("sign-in", lambda: signin_checks(repo_root), CHECK_SECONDS),
+        ("credentials", credential_checks, CHECK_SECONDS),
+        ("cloud", lambda: cloud_checks(repo_root), CHECK_SECONDS),
+        ("company identity", _company_identity_checks, CHECK_SECONDS),
+        ("self-serve", _self_serve_checks, CHECK_SECONDS),
+        ("sign-in pause", _signin_pause_checks, CHECK_SECONDS),
+        ("gh", tool("gh", False, "only needed for `brindle pr` and `brindle new --pr`"), CHECK_SECONDS),
+        ("pre-commit", tool("pre-commit", False, "only needed if the repo uses pre-commit hooks"),
+         CHECK_SECONDS),
+        ("graphify", tool("graphify", False, "only needed for the code map agents can query"),
+         CHECK_SECONDS),
+        ("clipboard", _clipboard_check, CHECK_SECONDS),
+        ("sidebar", _sidebar_check, CHECK_SECONDS),
+        ("daemon", daemon_checks, CHECK_SECONDS),
+        ("native models", lambda: native_checks(repo_root), CHECK_SECONDS),
+        ("overrides", override_checks, CHECK_SECONDS),
+        ("quota", lambda: quota_checks(repo_root), CHECK_SECONDS),
+        ("airgap", lambda: airgap_checks(repo_root), CHECK_SECONDS),
+        ("agent environment", lambda: agent_env_checks(repo_root), CHECK_SECONDS),
+        ("tmux server directory", tmux_cwd_checks, CHECK_SECONDS),
+        ("brindle update", _update_check, CHECK_SECONDS),
+        ("brindle Pro", pro_checks, CHECK_SECONDS),
+        ("managed models", lambda: managed_checks(repo_root), CHECK_SECONDS),
+        ("previous name", lambda: _legacy_checks(repo_root), CHECK_SECONDS),
+        ("brindle home", lambda: _home_check(db), CHECK_SECONDS),
+        ("tmux focus-events", _tmux_server_check, CHECK_SECONDS),
+        ("leftover processes", lambda: _process_check(db), CHECK_SECONDS),
+        ("reaped", lambda: reap_checks(db), CHECK_SECONDS),
+    ]
+    if repo_root:
+        steps.append(("repo", lambda: _repo_checks(repo_root), CHECK_SECONDS))
+        steps.append(("working tree", lambda: _working_tree_check(repo_root), CHECK_SECONDS))
+    return steps
+
+
+def _home_check(db: DB | None) -> list[Check]:
+    from brindle import config
 
     home = config.brindle_home()
     try:
@@ -442,10 +496,15 @@ def checks(repo_root: str | None, db: DB | None = None) -> list[Check]:
         probe_db = db if db is not None else DB()
         with closing(probe_db.conn) if db is None else nullcontext():
             probe_db.conn.execute("SELECT 1")
-        out.append(Check(OK, "brindle home", f"{home} (writable, database opens)"))
+        return [Check(OK, "brindle home", f"{home} (writable, database opens)")]
     except Exception as e:  # noqa: BLE001
-        out.append(Check(FAIL, "brindle home", f"{home}: {e}"))
+        return [Check(FAIL, "brindle home", f"{home}: {e}")]
 
+
+def _tmux_server_check() -> list[Check]:
+    from brindle import tmux
+
+    out: list[Check] = []
     if shutil.which("tmux"):
         try:
             sock = os.environ.get("BRINDLE_TMUX_SOCKET")
@@ -459,7 +518,13 @@ def checks(repo_root: str | None, db: DB | None = None) -> list[Check]:
             out.append(Check(FAIL, "tmux server", str(e)))
         except Exception as e:  # noqa: BLE001
             out.append(Check(WARN, "tmux focus-events", str(e)))
+    return out
 
+
+def _process_check(db: DB | None) -> list[Check]:
+    from brindle import procs
+
+    out: list[Check] = []
     try:
         process_db = db if db is not None else DB()
         with closing(process_db.conn) if db is None else nullcontext():
@@ -477,8 +542,13 @@ def checks(repo_root: str | None, db: DB | None = None) -> list[Check]:
             out.append(Check(OK, "leftover processes", "none"))
     except Exception as e:  # noqa: BLE001
         out.append(Check(WARN, "leftover processes", f"couldn't check: {e}"))
-    out.extend(reap_checks(db))
+    return out
 
+
+def _repo_checks(repo_root: str) -> list[Check]:
+    from brindle import config, detect
+
+    out: list[Check] = []
     if repo_root:
         try:
             cfg = config.load_repo_config(repo_root)
@@ -522,13 +592,97 @@ def checks(repo_root: str | None, db: DB | None = None) -> list[Check]:
                                  "no graphify graph: agents find code by grepping. Run /graphify once."))
         except ValueError as e:
             out.append(Check(FAIL, "repo config", str(e)))
-        dirty = spawn.read(["git", "status", "--porcelain"], cwd=repo_root).stdout.strip()
-        if dirty:
-            out.append(Check(WARN, "working tree",
-                             "uncommitted changes: workers branch from committed work only"))
-        else:
-            out.append(Check(OK, "working tree", "clean"))
     return out
+
+
+def _working_tree_check(repo_root: str) -> list[Check]:
+    dirty = spawn.read(["git", "status", "--porcelain"], cwd=repo_root).stdout.strip()
+    if dirty:
+        return [Check(WARN, "working tree", "uncommitted changes: workers branch from committed work only")]
+    return [Check(OK, "working tree", "clean")]
+
+
+class _Stuck(Exception):
+    """A check that ran past its bound."""
+
+
+def _run_step(name: str, fn, seconds: float, bounded: bool) -> list[Check]:
+    """``fn``'s checks, or one warning saying why it couldn't run. Bounded: it
+    runs on a thread under a spawn deadline (stopping its git, tmux and other
+    reads) and is abandoned if still stuck a moment after (a directory walk,
+    the daemon, the network), so one check never holds doctor up."""
+    def call() -> list[Check]:
+        with spawn.deadline(seconds):
+            return list(fn())
+
+    def failed(e: BaseException) -> list[Check]:
+        from brindle import git
+
+        if isinstance(e, (spawn.Busy, git.GitBusy, subprocess.TimeoutExpired, _Stuck)):
+            return [Check(WARN, name, f"couldn't check: took too long (over {seconds:g}s)")]
+        return [Check(WARN, name, f"couldn't check: {e}")]
+
+    if not bounded:
+        try:
+            return call()
+        except Exception as e:  # noqa: BLE001 - a report, never a reason doctor fails
+            return failed(e)
+    box: dict[str, object] = {}
+    ctx = contextvars.copy_context()
+
+    def target() -> None:
+        try:
+            box["ok"] = ctx.run(call)
+        except BaseException as e:  # noqa: BLE001 - handed back to the caller's thread
+            box["err"] = e
+
+    thread = threading.Thread(target=target, name=f"doctor-{name}", daemon=True)
+    thread.start()
+    thread.join(seconds + GRACE_SECONDS)
+    if thread.is_alive():
+        return failed(_Stuck())
+    if "err" in box:
+        return failed(box["err"])  # type: ignore[arg-type]
+    return box["ok"]  # type: ignore[return-value]
+
+
+def stream(repo_root: str | None, db: DB | None = None, disk: bool = False, cwd: str | None = None):
+    """Run every check in turn, yielding each one's Checks as it finishes.
+    ``disk``: also the disk report (only `brindle doctor` asks, as it is slow).
+    ``cwd``: find the repo root from there, after the first check and as
+    bounded as any (no repo is no repo checks, not an error).
+    Without ``db`` each check is bounded (see _run_step); a borrowed ``db``
+    belongs to the caller's thread, so those run on it, unbounded."""
+    bounded = db is None
+    skip = 0
+    if cwd is not None:
+        yield _run_step("python", _python_check, CHECK_SECONDS, bounded)
+        skip = 1
+        found: list[str] = []
+
+        def discover() -> list[Check]:
+            from brindle import git
+
+            try:
+                found.append(git.main_repo_root(cwd))
+            except git.GitBusy:
+                raise      # the deadline stopped it: report that, not "no repo"
+            except git.GitError:
+                pass
+            return []
+
+        yield _run_step("repository", discover, CHECK_SECONDS, bounded)
+        repo_root = found[0] if found else None
+    steps = _steps(repo_root, db)[skip:]
+    if disk:
+        steps.append(("disk", lambda: disk_checks(repo_root, db), DISK_SECONDS))
+    for name, fn, seconds in steps:
+        yield _run_step(name, fn, seconds, bounded)
+
+
+def checks(repo_root: str | None, db: DB | None = None) -> list[Check]:
+    """Run diagnostics, borrowing ``db`` or closing each connection we open."""
+    return [c for group in stream(repo_root, db) for c in group]
 
 
 def disk_checks(repo_root: str | None, db: DB | None = None) -> list[Check]:
@@ -920,12 +1074,24 @@ def render(results: list[Check]) -> str:
     if optional:
         lines.append("\nOptional, not set up (brindle works without them):")
         lines.extend(f"- {c.name.ljust(width)}  {c.detail}" for c in optional)
+    lines.append(summary(results))
+    return "\n".join(lines)
+
+
+def summary(results: list[Check]) -> str:
+    """The closing line: how many problems and warnings (optional tools aside)."""
+    main = [c for c in results if not is_optional(c)]
     fails = sum(c.level == FAIL for c in main)
     warns = sum(c.level == WARN for c in main)
     if fails:
-        lines.append(f"\n{fails} problem(s) will stop brindle from working; {warns} warning(s).")
-    elif warns:
-        lines.append(f"\nbrindle can run; {warns} warning(s) worth a look.")
-    else:
-        lines.append("\nAll good.")
-    return "\n".join(lines)
+        return f"\n{fails} problem(s) will stop brindle from working; {warns} warning(s)."
+    if warns:
+        return f"\nbrindle can run; {warns} warning(s) worth a look."
+    return "\nAll good."
+
+
+def render_line(c: Check, width: int = 22) -> str:
+    """One check as `brindle doctor` prints it the moment it finishes."""
+    if is_optional(c):
+        return f"- {c.name.ljust(width)}  {c.detail}  (optional)"
+    return f"{MARK[c.level]} {c.name.ljust(width)}  {c.detail}"

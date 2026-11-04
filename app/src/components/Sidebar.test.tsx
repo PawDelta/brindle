@@ -10,7 +10,7 @@ import { startSync } from "../store/sync";
 import { StoreContext } from "../store/useStore";
 import { BASE_URL, FakeDaemon, TOKEN, type DaemonData } from "../test/fakeDaemon";
 import { REPO, permission, permissionInTerminal, question, root, waiting, worker } from "../test/fixtures";
-import { PAUSED_KEY, SPLIT_KEY, Sidebar } from "./Sidebar";
+import { PAUSED_KEY, SPLIT_KEY, Sidebar, roleOf } from "./Sidebar";
 import { sidebarChanges } from "./SessionContext";
 
 beforeEach(() => localStorage.clear());
@@ -100,11 +100,12 @@ describe("Sidebar", () => {
     expect(session.contains(agentRow("sup1"))).toBe(true);
     expect(session.contains(agentRow("w1"))).toBe(true);
     expect(agentRow("w1")!.closest("li")!.contains(agentRow("c1"))).toBe(true);
-    // The rows read as the mockup's: a dot for the CLI's status, "id · branch" (the supervisor by its role), the label.
+    // The rows read: a dot for the CLI's status, "id · role", the label; the branch is in the tooltip.
     expect(agentRow("sup1")!.querySelector(".side-dot")!.getAttribute("data-tone")).toBe("idle");
     expect(agentRow("sup1")!.textContent).toContain("sup1 · supervisor");
     expect(agentRow("w1")!.querySelector(".side-dot")!.getAttribute("data-tone")).toBe("work");
-    expect(agentRow("w1")!.textContent).toContain("w1 · feat/ls");
+    expect(agentRow("w1")!.textContent).toContain(`w1 · ${roleOf(worker.agents![0].profile)}`);
+    expect(agentRow("w1")!.title).toContain("feat/ls");
     expect(within(agentRow("w1")!).getByTestId("agent-status").textContent).toBe("working");
     expect(within(session).queryByTestId("needs-you")).toBeNull();
     expect(screen.queryByTestId("summary")).toBeNull();
@@ -366,4 +367,17 @@ describe("Sidebar", () => {
     expect(failed).toBe(2);
     sync.stop();
   });
+});
+
+it.each([
+  ["developer", "developer"],
+  ["developer-codex-heavy", "developer"],
+  ["developer-or-qwen3-coder", "developer"],
+  ["developer-some-new-model", "developer"],
+  ["reviewer-gemini-low", "reviewer"],
+  ["backend-auditor", "backend-auditor"],
+  ["test-writer-sonnet", "test-writer"],
+  ["qa", "qa"],
+])("%s reads as the role %s", (profile, role) => {
+  expect(roleOf(profile)).toBe(role);
 });

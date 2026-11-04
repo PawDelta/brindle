@@ -212,7 +212,7 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
               repo={repo}
               agent={node?.agent ?? null}
               alive={node ? alive[node.agent.id] : undefined}
-              sessionStatus={session?.status ?? null}
+              sessionStatus={!node || node.agent.id === root ? session?.status ?? null : null}
               credentials={credentials}
               recovery={recovery}
             />

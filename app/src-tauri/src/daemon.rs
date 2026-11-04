@@ -82,8 +82,9 @@ const STOP_GRACE: Duration = Duration::from_secs(2);
 /// How long in all a daemon being replaced has while it says it is pausing:
 /// the app's daemon pauses every session it runs on its way out
 /// (lifecycle.pause_for_exit: their windows closed, their work kept, for the
-/// next daemon to resume; it gives up after lifecycle.PAUSE_BUDGET). As long
-/// as launchd gives a job it stops (its ExitTimeOut).
+/// next daemon to resume; it gives up after lifecycle.PAUSE_BUDGET). This
+/// covers recovery winding down, the pause, and cleanup during replacement;
+/// it is not a wait for the app's exit to stop a healthy launchd daemon.
 #[cfg(not(windows))]
 const PAUSE_GRACE: Duration = Duration::from_secs(20);
 /// The file in brindle's home that names the daemon (its pid) while it
@@ -196,9 +197,9 @@ fn reuse_running(engine: &Path, info: &DaemonInfo) -> Reuse {
     reuse(engine, build.as_deref().map_err(String::as_str), &command)
 }
 
-/// SIGTERM the daemon `pid` of brindle's home `home` (it shuts down and
-/// removes its files) and wait until it's gone; still there `grace` after
-/// SIGTERM, SIGKILL it (the next daemon takes over the files it left). While
+/// Stop the daemon `pid` of brindle's home `home`, sending SIGTERM unless it
+/// is already pausing, and wait until it's gone. Still there after `grace`,
+/// SIGKILL it (the next daemon takes over the files it left). While
 /// it says it is pausing its sessions (`pausing`), the wait goes on, up to
 /// PAUSE_GRACE in all, and ends `grace` after it stops saying so.
 #[cfg(not(windows))]
@@ -216,11 +217,16 @@ fn stop_daemon_while(
     mut says_pausing: impl FnMut() -> bool,
 ) -> Result<(), String> {
     let pid_t = libc::pid_t::try_from(pid).map_err(|_| format!("bad daemon pid {pid}"))?;
-    // SAFETY: kill(2) only sends a signal; is_daemon has just said pid is a daemon's.
-    unsafe { libc::kill(pid_t, libc::SIGTERM) };
+    let already_pausing = says_pausing();
+    if !already_pausing {
+        // SAFETY: kill(2) only sends a signal; is_daemon has just said pid is a daemon's.
+        unsafe { libc::kill(pid_t, libc::SIGTERM) };
+    }
+    // A second SIGTERM during the daemon's pause cleanup can interrupt it.
+    // One already pausing gets the same budget without another signal.
     let stopped = Instant::now();
     let mut deadline = stopped + grace;
-    let (mut killed, mut said_pausing) = (false, false);
+    let (mut killed, mut said_pausing) = (false, already_pausing);
     while running() {
         if !killed {
             let says = says_pausing();
@@ -421,7 +427,8 @@ const APP_PID_ENV: &str = "BRINDLE_APP_PID";
 
 /// The daemons this app process started as its own children in place of
 /// launchd's job (`start_app_child`), by pid: the app stops the one serving
-/// its home when it exits (`stop_app_daemon`), as launchd stops its job.
+/// its home when it exits (`stop_app_daemon`). A launchd daemon is not owned
+/// by this list and survives the app's exit.
 #[cfg(target_os = "macos")]
 static APP_CHILDREN: Mutex<Vec<u32>> = Mutex::new(Vec::new());
 
@@ -472,19 +479,17 @@ fn start_daemon(cmd: Command, _home: &Path, log: &Path) -> Result<Daemon, String
 /// agent's pane), whatever its process group. LaunchServices counts the
 /// coalition's members as the app's subordinates: an updated app's old Dock
 /// icon stayed as "exited-with-subordinates" while they ran, and quitting
-/// that icon killed them all. A job the app loads is the app's: launchd
-/// stops it (SIGTERM) when the app goes away, quit, force quit or restarted
-/// into an update, and the daemon pauses the sessions it runs on its way
-/// out, for the next daemon to resume (brindle.daemon.lifecycle).
+/// that icon killed them all. A launchd daemon can outlive the app and be
+/// reused by the next instance. When replaced, it pauses its sessions for
+/// the next daemon to resume (brindle.daemon.lifecycle).
 ///
 /// One job per home and app process (`launchd_label`): a job still running
 /// under it is a daemon an earlier start of this process made, and is
 /// adopted and waited on instead of starting a second, which would find its
 /// lock and exit; `start_in` judges the daemon it turns out to be
 /// (`launchd_plan`). An earlier app process's job keeps its own label, so
-/// launchd's teardown of it (by label, moments after that app exits) never
-/// takes this process's job: the relaunched app waits for it instead
-/// (`wait_for_predecessor`).
+/// unloading it never takes this process's job. A relaunch briefly waits
+/// for a predecessor that is already pausing (`wait_for_predecessor`).
 ///
 /// Switched off under Login Items → Allow in the Background
 /// (`launchd_disabled`), launchd won't run it: the daemon is then the app's
@@ -575,25 +580,35 @@ fn launchd_label(home: &Path, app: u32) -> String {
         .as_bytes()
         .iter()
         .fold(0xcbf2_9ce4_8422_2325_u64, |h, b| (h ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3));
-    format!("com.pawdelta.brindle.daemon.{hash:016x}.{app}")
+    // Unit-test jobs must never be mistaken for a person's daemon.
+    #[cfg(test)]
+    let prefix = "com.pawdelta.brindle.daemon.test";
+    #[cfg(not(test))]
+    let prefix = "com.pawdelta.brindle.daemon";
+    format!("{prefix}.{hash:016x}.{app}")
 }
 
 /// Relaunched into an update (instance::relaunch), after the app process
-/// `predecessor` has exited: wait until its daemon is gone too. launchd
-/// stops that job moments after the app exits (the daemon pauses what it
-/// ran on the way out, for this app's daemon to resume); started before
-/// that, this app's daemon would find the old one's lock, or the app would
-/// connect to the old one and lose it. Waited on by its pid (`wait_for_exit`),
-/// and unloaded if launchd has left it, idle, by then.
+/// `predecessor` has exited: a healthy daemon survives and is judged by the
+/// normal start path (`reuse_running`). Only one already pausing needs a
+/// brief exit wait here. If still pausing afterwards, `ensure_in` finishes
+/// its shutdown before starting a replacement. Unload an idle job left behind.
 #[cfg(target_os = "macos")]
 pub(crate) fn wait_for_predecessor(predecessor: u32) {
-    let label = launchd_label(&brindle_home(), predecessor);
-    let Ok(Some(job)) = launchd_job(&label) else { return };
-    if let Some(pid) = job.pid {
-        crate::instance::wait_for_exit(pid);
+    let home = brindle_home();
+    let label = launchd_label(&home, predecessor);
+    wait_for_predecessor_job(&home, &label, launchd_job);
+}
+
+#[cfg(target_os = "macos")]
+fn wait_for_predecessor_job(home: &Path, label: &str, job: impl Fn(&str) -> Result<Option<LaunchdJob>, String>) {
+    let Ok(Some(found)) = job(label) else { return };
+    if let Some(pid) = found.pid.filter(|pid| pausing(home, *pid)) {
+        let limit = libc::timespec { tv_sec: STOP_GRACE.as_secs() as _, tv_nsec: 0 };
+        crate::instance::wait_for_exit_with_limit(pid, &limit);
     }
-    if matches!(launchd_job(&label), Ok(Some(job)) if job.pid.is_none()) {
-        let _ = launchctl(&["bootout", &launchd_service(&label)]);
+    if matches!(job(label), Ok(Some(job)) if job.pid.is_none()) {
+        let _ = launchctl(&["bootout", &launchd_service(label)]);
     }
 }
 
@@ -660,8 +675,8 @@ fn parse_launchd_job(text: &str) -> LaunchdJob {
 /// appended to `log`. It runs only when the app kickstarts it, never when
 /// loaded, and is never restarted: a second daemon would only find the first
 /// one's lock. What it starts (the tmux server, a hook) is left running when
-/// it exits, as a child's would be; launchd's SIGTERM when the app goes away
-/// is what makes the daemon pause the sessions it runs.
+/// it exits, as a child's would be. SIGTERM on replacement makes the daemon
+/// pause the sessions it runs.
 #[cfg(target_os = "macos")]
 fn daemon_plist(label: &str, cmd: &Command, log: &Path) -> String {
     let escape = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
@@ -837,7 +852,7 @@ fn start_in(
         if let Some(info) = listening {
             if child.owns(info.pid) || usable(&info) {
                 child.release();
-                return Ok(info);
+                return ready_in(home, info);
             }
             if child.adopted() {
                 // An adopted job's daemon, and not one to use: judged as ensure_in judges
@@ -859,7 +874,7 @@ fn start_in(
             // One started by someone else in the meantime makes this one exit: use that, if it may be.
             if let Some(info) = running_in(home) {
                 return match engine.map(|engine| reuse_running(engine, &info)) {
-                    None | Some(Reuse::Use) => Ok(info),
+                    None | Some(Reuse::Use) => ready_in(home, info),
                     Some(Reuse::Conflict(why)) => Err(why),
                     Some(Reuse::Replace) => Err(format!(
                         "another brindle daemon (pid {}) started while this app started its own",
@@ -885,6 +900,18 @@ fn start_in(
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+}
+
+/// A daemon found during startup may already be pausing even though it still
+/// listens and its build matches. Hand control back to normal discovery so
+/// `ensure_in` finishes that shutdown before starting its replacement.
+#[cfg(not(windows))]
+fn ready_in(home: &Path, info: DaemonInfo) -> Result<DaemonInfo, String> {
+    if pausing(home, info.pid) {
+        set_step(home, Some((StartStep::Stopping { pid: info.pid }, Instant::now())));
+        return Err(format!("{ENGINE_STARTING}: the previous daemon (pid {}) is pausing", info.pid));
+    }
+    Ok(info)
 }
 
 /// The running daemon, started first if none runs. An app that carries its
@@ -930,10 +957,13 @@ fn ensure_in(
         return start();
     }
     let Some(info) = running_in(home) else { return start() };
-    let Some(engine) = engine else { return Ok(info) };
-    match judge(engine, &info) {
-        Reuse::Use => Ok(info),
-        Reuse::Replace => {
+    let reuse = engine.map_or(Reuse::Use, |engine| judge(engine, &info));
+    match reuse {
+        Reuse::Use if !pausing(home, info.pid) => Ok(info),
+        // A daemon already pausing cannot serve this instance, even when its
+        // build matches. Preserve its pause budget and wait for it to release
+        // the home before starting another daemon, just as replacement does.
+        Reuse::Use | Reuse::Replace => {
             set_step(home, Some((StartStep::Stopping { pid: info.pid }, Instant::now())));
             stop_daemon(home, info.pid, STOP_GRACE)?;
             start()
@@ -1740,6 +1770,7 @@ mod tests {
         // brindle 0.4.1, as click answers a command it doesn't have.
         let dir = std::env::current_dir().unwrap().join("target/engine-too-old");
         let home = dir.join("home");
+        let _job = TestDaemonJob::new(&home);
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&home).unwrap();
         let bin = dir.join("brindle");
@@ -1806,8 +1837,41 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_slow_first_start_is_waited_out_and_only_an_exit_fails() {
+        #[cfg(target_os = "macos")]
+        let labels = || {
+            let homes = ["slow-engine", "crashing-engine"].map(|name| {
+                let home = std::env::current_dir().unwrap().join("target").join(name).join("home");
+                launchd_label(&home, std::process::id())
+            });
+            launchctl(&["print", &launchd_domain()]).unwrap().lines()
+                .filter_map(|line| {
+                    let label = line.split_whitespace().last()?;
+                    homes.iter().any(|home| home == label).then(|| label.to_owned())
+                })
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        #[cfg(target_os = "macos")]
+        let before = labels();
+        for unwind in [false, true] {
+            let result = std::panic::catch_unwind(|| slow_first_start(unwind));
+            #[cfg(target_os = "macos")]
+            assert_eq!(labels(), before, "the run left its launchd jobs loaded");
+            if unwind {
+                assert!(result.unwrap_err().is::<CleanupUnwind>(), "unexpected panic");
+            } else {
+                result.unwrap();
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    struct CleanupUnwind;
+
+    #[cfg(unix)]
+    fn slow_first_start(unwind: bool) {
         let dir = std::env::current_dir().unwrap().join("target/slow-engine");
         let home = dir.join("home");
+        let _job = TestDaemonJob::new(&home);
         let bin = slow_engine(&dir, "slow-engine", "1.5", true);
         let path = std::env::var_os("PATH").unwrap_or_default();
         let patience = Duration::from_millis(300);
@@ -1842,6 +1906,7 @@ mod tests {
         // An engine that crashes while starting is a failure, with what it said.
         let dir = std::env::current_dir().unwrap().join("target/crashing-engine");
         let home = dir.join("home");
+        let _crashing_job = TestDaemonJob::new(&home);
         let bin = slow_engine(&dir, "crashing-engine", "0.8", false);
         let err = start_in(&bin, &path, &home, None, patience).unwrap_err();
         assert!(err.starts_with(ENGINE_STARTING), "{err}");
@@ -1854,6 +1919,10 @@ mod tests {
         assert!(err.starts_with("`brindle daemon` exited") && err.contains("the engine crashed"), "{err}");
         assert!(!starting_in(&home));
         let _ = std::fs::remove_dir_all(&dir);
+        if !unwind {
+            return;
+        }
+        std::panic::panic_any(CleanupUnwind);
     }
 
     #[cfg(unix)]
@@ -1925,16 +1994,71 @@ mod tests {
         child
     }
 
-    /// Unloads the daemon job `label` when dropped: a test's fake daemon
-    /// doesn't stay under launchd, however the test ends.
-    #[cfg(target_os = "macos")]
-    struct Unload(String);
+    /// Claim cleanup before any start can load a job, including a start that
+    /// returns an error after bootstrap. Lexical ownership also covers unwinding
+    /// and jobs kept in STARTING after the local Daemon handle is gone.
+    #[cfg(unix)]
+    struct TestDaemonJob {
+        #[cfg(target_os = "macos")]
+        label: String,
+    }
+
+    #[cfg(unix)]
+    impl TestDaemonJob {
+        fn new(_home: &Path) -> Self {
+            Self {
+                #[cfg(target_os = "macos")]
+                label: launchd_label(_home, std::process::id()),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for TestDaemonJob {
+        fn drop(&mut self) {
+            #[cfg(target_os = "macos")]
+            let _ = launchctl(&["bootout", &launchd_service(&self.label)]);
+        }
+    }
 
     #[cfg(target_os = "macos")]
-    impl Drop for Unload {
-        fn drop(&mut self) {
-            let _ = launchctl(&["bootout", &launchd_service(&self.0)]);
+    #[test]
+    fn a_live_predecessor_daemon_does_not_hold_up_relaunch() {
+        // launchd reports a daemon that remains alive until its input closes.
+        // Only the job lookup is faked: the process and kqueue wait are real.
+        let mut cmd = Command::new("/bin/cat");
+        let mut daemon = cmd.stdin(Stdio::piped()).stdout(Stdio::null()).spawn().unwrap();
+        let pid = daemon.id();
+        // Concurrent test binaries must not overwrite each other's pause marker.
+        let home = std::env::current_dir().unwrap().join(format!("target/predecessor-daemon-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let mut elapsed = Vec::new();
+        let mut usable = Vec::new();
+        // No marker, a stale marker for another PID, and this daemon pausing.
+        for marker in [None, Some(0), Some(pid)] {
+            if let Some(marker) = marker {
+                std::fs::write(home.join(PAUSING_FILE), marker.to_string()).unwrap();
+            }
+            let began = Instant::now();
+            wait_for_predecessor_job(&home, "predecessor", |_| Ok(Some(LaunchdJob { pid: Some(pid), runs: 1, exit: String::new() })));
+            elapsed.push(began.elapsed());
+            usable.push(ready_in(&home, engines_own(pid)).is_ok());
         }
+        let alive = daemon.try_wait().unwrap().is_none();
+        // Once its pause completes, let it exit normally. Another SIGTERM
+        // from stop_daemon_while would kill it during cleanup instead.
+        stop_daemon_while(pid, STOP_GRACE, || {
+            drop(daemon.stdin.take());
+            daemon.try_wait().unwrap().is_none()
+        }, || pausing(&home, pid)).unwrap();
+        assert!(daemon.wait().unwrap().success(), "interrupted an existing pause");
+        assert!(alive, "the predecessor daemon must remain available for adoption");
+        assert_eq!(usable, [true, true, false], "a start handed back a daemon still pausing");
+        assert!(elapsed[..2].iter().all(|elapsed| *elapsed < STOP_GRACE), "live daemon delayed relaunch by {elapsed:?}");
+        assert!(elapsed[2] >= STOP_GRACE && elapsed[2] < STOP_GRACE + STOP_GRACE, "pause wait was not bounded: {elapsed:?}");
+        eprintln!("predecessor waits (healthy, stale marker, pausing): {elapsed:?}");
+        std::fs::remove_dir_all(home).unwrap();
     }
 
     /// A daemon loaded under the home's label by an earlier start (another
@@ -1947,6 +2071,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let dir = std::env::current_dir().unwrap().join("target/adopted-daemon");
         let home = dir.join("home");
+        let _job = TestDaemonJob::new(&home);
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&home).unwrap();
         let engine = engine_of_build(&dir, Some("00b2"));
@@ -1985,7 +2110,6 @@ mod tests {
 
         // An earlier app process loaded the old build's daemon; it doesn't listen yet.
         let earlier = start_daemon(daemon_command(&old, &path), &home, &log).unwrap();
-        let _unload = Unload(launchd_label(&home, std::process::id()));
         assert!(!earlier.adopted());
         // This start finds launchd's job and waits on it: nothing is started over it.
         let err = start_in(&new, &path, &home, Some(&engine), patience).unwrap_err();
@@ -2044,6 +2168,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let dir = std::env::current_dir().unwrap().join("target/launchd-daemon");
         let home = dir.join("home");
+        let _job = TestDaemonJob::new(&home);
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&home).unwrap();
         let bin = dir.join("brindle");
@@ -2072,7 +2197,6 @@ mod tests {
         let mut daemon = start_daemon(daemon_command(&bin, &path), &home, &log).unwrap();
         let Daemon::Launchd { label, adopted: false, .. } = &daemon else { panic!("not launchd's job, or adopted") };
         let label = label.clone();
-        let _unload = Unload(label.clone());
         let deadline = Instant::now() + Duration::from_secs(5);
         // launchd may spawn the job a moment after loading it: its pid comes with that.
         while daemon.id() == 0 {
@@ -2212,6 +2336,29 @@ mod tests {
         let got = ensure_in(&home, Some(&installed), false, reuse_running, start).unwrap();
         assert_eq!(got, engines_own(7));
         assert!(old.wait().unwrap().success(), "stopped by SIGTERM");
+
+        // This build's daemon is already pausing and completes that pause as
+        // the app judges its build. It must be replaced, not adopted mid-exit.
+        use std::os::unix::process::CommandExt;
+        let mut pausing_daemon = Command::new("/bin/bash")
+            .arg0(&python)
+            .args(["-c", "read", "daemon", "-X", "brindle-build=00b2", "brindle", "daemon"])
+            .stdin(Stdio::piped()).spawn().unwrap();
+        let pid = pausing_daemon.id();
+        std::fs::write(home.join("daemon.json"), format!(r#"{{"socket":"/unused.sock","token":"t","pid":{pid}}}"#)).unwrap();
+        std::fs::write(home.join(PAUSING_FILE), pid.to_string()).unwrap();
+        let judge = |engine: &Path, info: &DaemonInfo| {
+            let reuse = reuse_running(engine, info);
+            // A completed pause releases the process; no second TERM is needed.
+            drop(pausing_daemon.stdin.take());
+            reuse
+        };
+        let got = ensure_in(&home, Some(&installed), false, judge, || {
+            assert!(!is_daemon(pid), "started a second daemon before the first exited");
+            Ok(engines_own(7))
+        }).unwrap();
+        pausing_daemon.wait().unwrap();
+        assert_eq!(got, engines_own(7));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
