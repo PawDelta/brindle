@@ -152,9 +152,10 @@ def _the_app_daemon_pauses_on_its_way_out_and_the_next_start_resumes(db, root, m
     real_make = lifecycle.make_server
     monkeypatch.setattr(lifecycle, "make_server", lambda app: servers.append(real_make(app)) or servers[-1])
 
-    def serve(app_gone):
+    def serve(app_gone, after=None):
         """Run the app's daemon until the app stops it (SIGTERM, as daemon.rs
-        stop_daemon does) or, the app gone, the daemon notices by itself."""
+        stop_daemon does; once ``after`` is set) or, the app gone, the daemon
+        notices by itself."""
         servers.clear()
         done, noticed = threading.Event(), [True]
         if app_gone:
@@ -163,6 +164,8 @@ def _the_app_daemon_pauses_on_its_way_out_and_the_next_start_resumes(db, root, m
         def the_app():
             while not done.is_set() and not (servers and servers[0].started):
                 done.wait(0.01)
+            if after is not None:
+                after.wait(10)
             if app_gone and done.wait(10):
                 return
             noticed[0] = not app_gone       # a daemon that never noticed is stopped, and fails below
@@ -201,7 +204,30 @@ def _the_app_daemon_pauses_on_its_way_out_and_the_next_start_resumes(db, root, m
     assert lifecycle._read_resume() == [{"id": "chat", "server": here, "paused": True}]
     # It told the app to wait for its pause (daemon.rs stop_daemon), and not past it.
     assert saying == [f"{os.getpid()}\n"] and not lifecycle._pausing_path().exists()
-    # The next start stops what the cull never did before anything is launched again.
+    # The next app's daemon is stopped while it brings the session back (stopping what the
+    # cull never did): nothing is launched past its pause, and the session is recorded again.
+    reached, recoveries = threading.Event(), []
+
+    class Recovery(lifecycle.Recovery):
+        def __init__(self):
+            super().__init__()
+            recoveries.append(self)
+
+    def stop_until_stopping(ids, *a, **kw):
+        reached.set()
+        recoveries[-1].stopping.wait(10)
+        events.append(("stop", sorted(ids)))
+        return 0
+
+    counting_stop = procs.stop
+    monkeypatch.setattr(lifecycle, "Recovery", Recovery)
+    monkeypatch.setattr(procs, "stop", stop_until_stopping)
+    serve(app_gone=False, after=reached)
+    assert events == [("stop", ["chat", "helper"])] and db.get_agent("chat").status == "paused"
+    assert lifecycle._read_resume() == [{"id": "chat", "server": here, "paused": True}]
+    # The start after that brings it back, once, having stopped what the cull never did first.
+    events.clear()
+    monkeypatch.setattr(procs, "stop", counting_stop)
     assert lifecycle.resume_after_start() == ["chat"]
     assert events == [("stop", ["chat", "helper"]), ("launch", "chat"), ("launch", "helper")]
 
