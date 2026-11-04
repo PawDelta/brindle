@@ -391,3 +391,5 @@ def test_a_subagent_profile_with_rules_gets_them_in_the_brief(db, repo, agents_d
     agent = agents.spawn(db, ws, "sub", prompt="Write tests", mode="assign")
     brief = agent.task
     assert "Rules: tests/only" in brief and "Write scope" in brief and "Write tests" in brief
+
+

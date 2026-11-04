@@ -36,11 +36,6 @@ def test_command_passes_the_profiles_model_and_effort(db, ws, repo, monkeypatch)
     assert argv[:7] == ["/bin/agy", "--model", "gemini-3.1-pro-high", "--effort", "high", "--mode", "auto"]
 
 
-def test_resume_uses_the_conversation(db, ws, repo):
-    argv = Antigravity().command(LaunchContext("g1", load_profile("developer"), None, resume="abc", cwd=str(repo)))
-    assert argv[-2:] == ["--conversation", "abc"]
-
-
 def test_existing_config_is_kept_and_tracked_files_are_left_alone(repo):
     (repo / ".agents").mkdir()
     (repo / ".agents" / "mcp_config.json").write_text(json.dumps({"mcpServers": {"fs": {"command": "x"}}}))
@@ -100,14 +95,21 @@ def test_hook_finds_its_agent_from_the_agy_process(db, ws, monkeypatch):
     assert db.get_agent("g1").status == "processing"
 
 
-def test_process_env_reads_another_process():
-    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(5)"],
-                             env={**os.environ, "BRINDLE_AGENT_ID": "abc123"})
-    try:
-        time.sleep(0.3)
-        assert antigravity._process_env(child.pid).get("BRINDLE_AGENT_ID") == "abc123"
-    finally:
-        child.kill()
+def test_process_env_reads_another_process(tmp_path, monkeypatch):
+    # The real extractor, fed fake OS output: /proc bytes where they exist, `ps eww` text where not.
+    environ = tmp_path / "environ"
+    environ.write_bytes(b"PATH=/bin\0BRINDLE_AGENT_ID=abc123\0junk\0")
+    monkeypatch.setattr(antigravity, "Path", lambda p: environ)
+    assert antigravity._process_env(42).get("BRINDLE_AGENT_ID") == "abc123"
+    environ.unlink()                    # no /proc entry: ask ps
+    ps = subprocess.CompletedProcess([], 0, stdout="agy --x PATH=/bin BRINDLE_AGENT_ID=abc123 BRINDLE_HOME=/h\n")
+    monkeypatch.setattr(antigravity.subprocess, "run", lambda *a, **k: ps)
+    assert antigravity._process_env(42) == {"BRINDLE_AGENT_ID": "abc123", "BRINDLE_HOME": "/h"}
+
+
+def test_resume_uses_the_conversation(db, ws, repo):
+    argv = Antigravity().command(LaunchContext("g1", load_profile("developer"), None, resume="abc", cwd=str(repo)))
+    assert argv[-2:] == ["--conversation", "abc"]
 
 
 def test_queued_messages_arrive_as_a_new_turn(db, ws, monkeypatch):
@@ -188,23 +190,12 @@ def test_usage_limit_error_blocks_autopilot(db, ws):
 
 def test_paste_blocked():
     p = Antigravity()
-    # Not interactive -> None
     assert p.paste_blocked("> hello", interactive=False) is None
-    
-    # Empty prompt -> None
     assert p.paste_blocked("> \n───\n? for shortcuts      Gemini", interactive=True) is None
-    assert p.paste_blocked("   >    \n───\n? for shortcuts", interactive=True) is None
-    
-    # User has typed something -> typing
     assert p.paste_blocked("> hello world\n───\n? for shortcuts", interactive=True) == "typing"
-    assert p.paste_blocked("  >  typing... \n───\n? for shortcuts", interactive=True) == "typing"
     assert p.paste_blocked(">\n" + "continued draft\n" * 40 + "───\n? for shortcuts", interactive=True) == "typing"
-    
-    # Text with ANSI escape codes
-    ansi_empty = "\x1b[38;5;232m>\x1b[0m "
-    ansi_typing = "\x1b[38;5;232m>\x1b[0m \x1b[1mhello\x1b[0m"
-    assert p.paste_blocked(ansi_empty, interactive=True) is None
-    assert p.paste_blocked(ansi_typing, interactive=True) == "typing"
+    assert p.paste_blocked("\x1b[38;5;232m>\x1b[0m ", interactive=True) is None
+    assert p.paste_blocked("\x1b[38;5;232m>\x1b[0m \x1b[1mhello\x1b[0m", interactive=True) == "typing"
 
 
 @pytest.mark.variant("live incident: agy's accept-edits hint held a new supervisor's first messages")

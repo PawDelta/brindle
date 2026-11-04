@@ -1,3 +1,4 @@
+import functools
 import time
 import pytest
 
@@ -5,6 +6,21 @@ from brindle import agents, autopilot, prompt_answer
 from brindle.db import DB, Workspace
 
 pytestmark = pytest.mark.usefixtures("fake_agent_cli")
+
+
+@pytest.fixture(autouse=True)
+def back_to_back_screen_reads(monkeypatch):
+    """send_message reconciles its target's status from two screen reads
+    0.7s apart; here they're taken back to back (still two, still compared)."""
+    monkeypatch.setattr(agents, "reconcile", functools.partial(agents.reconcile, gap=0))
+
+
+@pytest.fixture
+def no_pane(monkeypatch):
+    """agents.spawn records the agent (profile, autopilot, config home) but
+    opens no tmux pane, for tests of what happens to an agent once it runs.
+    The tests that resume or relaunch agents keep the real launch."""
+    monkeypatch.setattr(agents, "_launch", lambda db_, a, ws, **kw: db_.set_status(a.id, "processing"))
 
 
 @pytest.mark.variant("#199: close the first session before adding a window on the test server")
@@ -36,7 +52,7 @@ def test_rate_limit_with_session_id_401_not_treated_as_auth_failure(db, repo):
     assert w.status != "failed"
 
 
-def test_selected_model_stop_failure_fails_the_worker_and_tells_its_parent(db, repo, monkeypatch):
+def test_selected_model_stop_failure_fails_the_worker_and_tells_its_parent(db, repo, monkeypatch, no_pane):
     ws = Workspace("ws-model", str(repo), "main", "main", "main", "main", str(repo), 20000, "tmux-model", 0)
     db.add_workspace(ws)
     supervisor = agents.spawn(db, ws, "developer", mode="interactive")
@@ -75,7 +91,7 @@ def test_fresh_exported_key_included_in_agent_env(db, repo, monkeypatch):
     assert agents.agent_env(ws, "a", a, m=None)["PYTEST_XDIST_AUTO_NUM_WORKERS"] == "8"
 
 
-def test_resume_failed_agent_does_not_kill_foreign_server_or_unowned_pane(db, repo, monkeypatch):
+def test_resume_failed_agent_does_not_kill_foreign_server_or_unowned_pane(db, repo, monkeypatch, no_pane):
     from brindle.db import Workspace
     ws = Workspace("ws-foreign", str(repo), "main", "main", "main", "main", str(repo), 20000, "tmux-foreign", 0)
     db.add_workspace(ws)
@@ -92,7 +108,7 @@ def test_resume_failed_agent_does_not_kill_foreign_server_or_unowned_pane(db, re
     assert "%7" not in killed
 
 
-def test_dead_failed_agent_preserves_failed_status_in_view_and_watch(db, repo):
+def test_dead_failed_agent_preserves_failed_status_in_view_and_watch(db, repo, no_pane):
     from brindle.db import Workspace
     from brindle import view, watch
     ws = Workspace("ws-dead", str(repo), "main", "main", "main", "main", str(repo), 20000, "tmux-dead", 0)
@@ -108,7 +124,7 @@ def test_dead_failed_agent_preserves_failed_status_in_view_and_watch(db, repo):
     assert watch.needs_you(entry, {"autopilot": False}) == "credentials need attention"
 
 
-def test_continue_cmd_reloads_fresh_window_for_failed_root_with_attach(db, repo, monkeypatch):
+def test_continue_cmd_reloads_fresh_window_for_failed_root_with_attach(db, repo, monkeypatch, no_pane):
     from brindle import cli, workspaces
     ws = Workspace("ws-failed-root", str(repo), "main", "main", "main", "main", str(repo), 20000, "tmux-failed-root", 0)
     db.add_workspace(ws)
@@ -170,7 +186,7 @@ def test_stop_failure_payloads_with_enums_and_last_assistant_message(db, repo):
     assert ap.state == "blocked"
 
 
-def test_paused_session_continue_clears_credential_block_and_resumes_autopilot_drive(db, repo, monkeypatch):
+def test_paused_session_continue_clears_credential_block_and_resumes_autopilot_drive(db, repo, monkeypatch, no_pane):
     from brindle import cli, workspaces, sessions
     ws = Workspace("ws-paused-rec", str(repo), "main", "main", "main", "main", str(repo), 20000, "tmux-pr", 0)
     db.add_workspace(ws)
@@ -226,7 +242,7 @@ def test_set_session_credential_enforces_0600_permissions(tmp_path):
     assert (db_file.stat().st_mode & 0o777) == 0o600
 
 
-def test_fresher_keystore_takes_precedence_over_older_session_credential(db, repo, monkeypatch):
+def test_fresher_keystore_takes_precedence_over_older_session_credential(db, repo, monkeypatch, no_pane):
     from brindle import keystore, agents
     from brindle.db import Workspace
 
@@ -327,7 +343,7 @@ def test_continue_cmd_does_not_clear_blocked_state_when_resume_fails_or_owner_bl
     assert "Need user decision on database migration" in (ap2.note or "")
 
 
-def test_resume_fresh_exported_key_wins_over_stale_keystore_key(db, repo, monkeypatch):
+def test_resume_fresh_exported_key_wins_over_stale_keystore_key(db, repo, monkeypatch, no_pane):
     from brindle.keystore import _key_store
     from brindle.db import Workspace
     ws = Workspace("ws-stale-ks", str(repo), "main", "main", "main", "main", str(repo), 20000, "tmux-sks", 0)
@@ -361,7 +377,7 @@ def test_resume_fresh_exported_key_wins_over_stale_keystore_key(db, repo, monkey
     assert delegated_env.get("ANTHROPIC_API_KEY") == "fresh-replacement-key-999"
 
 
-def test_resume_store_rotation_wins_over_stale_inherited_shell_env(db, repo, monkeypatch):
+def test_resume_store_rotation_wins_over_stale_inherited_shell_env(db, repo, monkeypatch, no_pane):
     from brindle.db import Workspace
     from brindle import keystore, identity_lock
     ws = Workspace("ws-rot", str(repo), "main", "main", "main", "main", str(repo), 20000, "tmux-rot", 0)
@@ -382,7 +398,7 @@ def test_resume_store_rotation_wins_over_stale_inherited_shell_env(db, repo, mon
     assert resolved.get("ANTHROPIC_API_KEY") == "fresh-store-value"
 
 
-def test_unavailable_keystore_does_not_abort_launch_or_resume(db, repo, monkeypatch):
+def test_unavailable_keystore_does_not_abort_launch_or_resume(db, repo, monkeypatch, no_pane):
     from brindle.db import Workspace
     from brindle import keystore, identity_lock
     ws = Workspace("ws-unavail", str(repo), "main", "main", "main", "main", str(repo), 20000, "tmux-unavail", 0)

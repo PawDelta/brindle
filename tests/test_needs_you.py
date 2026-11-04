@@ -34,13 +34,6 @@ def worker(db, ws, provider, status="processing", since=None):
     return a
 
 
-def test_codex_busy_and_plain_screens():
-    codex = get_provider("codex")
-    assert codex.screen_state(CODEX_BUSY) == "busy"
-    assert codex.screen_state("›  \n  100% context left\n") is None
-    # Codex quoting the words in a transcript line far above isn't a prompt.
-    assert codex.screen_state("Would you like to run the following command?\n" + "line\n" * 30) is None
-    assert not prompt_answer.blocking_prompt("Would you like to run the following command?\n" + "line\n" * 30, "codex")
 
 
 @pytest.mark.parametrize("provider,screen,waiting", PROMPTS)

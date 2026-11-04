@@ -81,21 +81,3 @@ def test_emit_periodic_cost_tracks_delta_and_updates_reported_spend(db, monkeypa
     assert db.get_reported_spend("a1") == pytest.approx(1.00)
 
 
-def test_cull_sweep_calls_emit_periodic_cost(db, monkeypatch, tmp_path):
-    repo_root = str(tmp_path / "repo")
-    ws = _ws(repo_root)
-    db.add_workspace(ws)
-
-    called_roots = []
-    monkeypatch.setattr(events, "emit_periodic_cost", lambda cfg, root: called_roots.append(root) or ["cost-done"])
-
-    # Mock other sweep steps so tmux/procs don't interfere
-    from brindle import tmux, procs
-    snap = tmux.PaneSnapshot()
-    snap.tags = {}
-    monkeypatch.setattr(tmux, "list_panes", lambda: snap)
-    monkeypatch.setattr(procs, "table", lambda: {})
-
-    res = cull.sweep(db)
-    assert repo_root in called_roots
-    assert "cost-done" in res

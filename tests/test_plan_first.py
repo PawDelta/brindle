@@ -72,9 +72,7 @@ def test_assign_defaults_to_the_repo_config(db, repo, boss):
     off = worker_id(asyncio.run(mcp_server.assign("developer", "job two", plan_first=False)))
     assert db.get_agent(on).plan_first == 1
     assert not db.get_agent(off).plan_first
-
-
-def test_queued_task_keeps_plan_first(db, repo, boss):
+    # a queued task keeps plan_first
     out = asyncio.run(mcp_server.assign("developer", "later", depends_on=["nothing-yet"],
                                          plan_first=True))
     assert "Queued" in out
@@ -119,10 +117,8 @@ def test_only_the_parent_may_approve(db, repo, boss, sent):
         agents.approve_plan(db, None, "w1")
     assert db.get_agent("w1").plan_state == "proposed"
     assert not sent
-
-
-def test_approve_needs_a_proposed_plan(db, repo, boss, sent):
-    planner(db, boss)
+    # and there must be a proposed plan to approve
+    db.update_agent("w1", plan_state=None)
     with pytest.raises(agents.AgentError, match="no plan awaiting"):
         agents.approve_plan(db, "boss", "w1")
 

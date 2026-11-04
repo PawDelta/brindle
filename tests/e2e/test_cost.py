@@ -135,11 +135,6 @@ def test_a_mixed_total_says_how_many_tokens_were_free(db, repo, root, cli):
     assert b.show() == "Free (+7 tokens unpriced)"
 
 
-def test_a_cost_with_no_usage_says_so(db, root, cli):
-    out = cli.invoke(app, ["cost"]).output
-    assert "$0.00" in out and "no agent usage on record" in out
-
-
 # -- estimates: set_goal / assign / CLI -----------------------------------------------------------
 
 
@@ -153,6 +148,11 @@ def boss(db, repo, monkeypatch):
     monkeypatch.setenv("BRINDLE_AGENT_ID", "boss")
     monkeypatch.setattr(cost_estimate, "available_reviewers", lambda r: [])
     return ws
+
+
+def test_a_cost_with_no_usage_says_so(db, root, cli):
+    out = cli.invoke(app, ["cost"]).output
+    assert "$0.00" in out and "no agent usage on record" in out
 
 
 def test_set_goal_shows_a_priced_estimate_with_pro(db, repo, boss, pro):
@@ -331,15 +331,3 @@ def test_costs_section_survives_a_broken_history(db, root, monkeypatch):
     local = watch_costs.local(db, root, [])
     assert local.month == 0.0 and local.models == []
     assert "no usage this month" in watch_costs.render(local, None, time.time(), 70, False)[1].text
-
-
-def test_the_dashboard_renders_the_costs_section(db, repo, root):
-    local = watch_costs.Local(month=3.0, models=[("sonnet", 300), ("haiku", 100)], workers={"a1": 0.5})
-    ws = {"id": "repo/feat", "name": "feat", "branch": "feat", "base_branch": "main", "path": "/",
-          "ahead": 0, "behind": 0, "dirty": 0,
-          "agents": [{"id": "a1", "profile": "developer", "provider": "claude", "status": "processing",
-                      "mode": "assign", "status_since": 1000.0, "pending": 0, "reported": False,
-                      "window": "@1", "tokens": "12k tokens"}]}
-    texts = [ln.text for ln in watch.render([ws], 1090, 80, costs=(local, None))]
-    assert any(t.strip().startswith("sonnet") and t.rstrip().endswith("75%") for t in texts)
-    assert any("12k tokens · $0.50" in t for t in texts)

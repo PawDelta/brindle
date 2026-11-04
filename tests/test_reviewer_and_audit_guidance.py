@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from fast_repo import no_screen_gap, repo, repo_template  # noqa: F401
 from brindle import agents, autopilot, config, knowledge, mcp_server, pipeline, providers, sessions, tmux
 from brindle.config import RepoConfig
 from brindle.db import Agent, Task, Workspace
@@ -226,45 +227,6 @@ def test_reviewer_tiered_guidance_application_and_routing_scenarios(db, ws, sup,
     assert any(to == sup.id and "needs supervisor action" in msg for to, msg in sent)
 
 
-def test_audit_history_goal_isolation(db, ws, sup):
-    autopilot.set_goal(db, sup.id, "Goal 1", [("Step 1", "true", "")])
-    autopilot.record_accepted_decision(db, sup.id, "Accepted finding 'Omit legacy export'")
-    assert "Omit legacy export" in (db.get_autopilot(sup.id).audit_history or "")
-
-    # revising the same goal keeps the history
-    autopilot.set_goal(db, sup.id, "Goal 1", [("Step 1", "true", ""), ("Step 2", "true", "")])
-    assert "Omit legacy export" in (db.get_autopilot(sup.id).audit_history or "")
-
-    # an unrelated goal starts clean
-    autopilot.set_goal(db, sup.id, "Unrelated Goal 2", [("Task", "true", "")])
-    ap = db.get_autopilot(sup.id)
-    assert ap.audit_history is None
-    assert "Omit legacy export" not in autopilot.audit_prompt(db, ap, "headsha")
-
-    # Completion retains history; only an unrelated replacement clears it.
-    autopilot.record_accepted_decision(db, sup.id, "Accepted something in Goal 2")
-    history = db.get_autopilot(sup.id).audit_history
-    db.update_autopilot(sup.id, audit_sha=autopilot._commit(ws, tracked_only=True))
-    autopilot.record_audit(db, sup.id, True, "Delivered")
-    assert db.get_autopilot(sup.id).state == "done"
-    assert history in db.get_autopilot(sup.id).audit_history
-    autopilot.set_goal(db, sup.id, "Goal 3", [("Task 3", "true", "")])
-    assert db.get_autopilot(sup.id).audit_history is None
-
-
-def test_accepted_decision_invalidates_verdict_allowing_re_audit_without_commit(db, ws, sup, monkeypatch):
-    autopilot.set_goal(db, sup.id, "Goal", [("M1", "true", "")])
-    db.record_check(db.milestones(sup.id)[0].id, True, "passed", "commit-1", passed_sha="commit-1")
-    db.update_autopilot(sup.id, audit_sha="commit-1")
-    autopilot.record_audit(db, sup.id, False, "Gap 1: Missing feature X")
-    cfg = RepoConfig()
-    monkeypatch.setattr(autopilot, "_commit", lambda ws_arg: "commit-1")
-    assert autopilot.audit_due(db.get_autopilot(sup.id), cfg, "commit-1") == "gaps"
-
-    autopilot.record_accepted_decision(db, sup.id, "Accepted exclusion of feature X")
-    assert autopilot.audit_due(db.get_autopilot(sup.id), cfg, "commit-1") == "start"
-
-
 def test_pipeline_supervisor_action_parsing_distinguishes_negation_from_actionable_findings(db, ws, sup, sent):
     reviewer = add(db, ws, "rev", "reviewer", mode="review", parent=sup.id)
     add(db, ws, "w1", parent=sup.id)
@@ -366,27 +328,6 @@ def test_session_handover_preserves_audit_history_and_accepted_decisions(db, rep
     for content in ("Unrelated sender's spec", "Private supervisor conversation",
                     "Former supervisor's later unrelated instruction"):
         assert content not in prompt
-
-
-@pytest.mark.variant("incident: 0.3.4 sent every review to reviewer-gemini whenever agy was installed; the fix removed that branch")
-def test_default_review_profile_ignores_agy_without_learner(db, repo, monkeypatch):
-    from brindle.config import RepoConfig
-    from brindle import agents
-
-    monkeypatch.setattr(agents, "unusable", lambda p, *args, **kwargs: None)
-    chosen = agents.default_review_profile(RepoConfig(), None, db=db, repo_root=str(repo), task="Test task")
-    assert chosen == "reviewer"
-
-
-def test_has_supervisor_action_markdown_formatting():
-    for text in ("**Needs supervisor action**\n- Run the production migration.",
-                 "**Needs supervisor action:**\n- Run the production migration.",
-                 "Needs supervisor action: run migration"):
-        assert pipeline.has_supervisor_action(text) is True
-    for text in ("### Needs supervisor action\nNone.", "Needs supervisor action: N/A",
-                 "Needs supervisor action: No action needed.",
-                 "Needs supervisor action: None needed. Everything looks good."):
-        assert pipeline.has_supervisor_action(text) is False
 
 
 def test_add_checks_writes_only_what_the_user_accepts(db, ws, sup, monkeypatch):

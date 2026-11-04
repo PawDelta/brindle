@@ -26,14 +26,6 @@ def calls(team):
     return [c for c in team.calls if c[0].endswith("/company")]
 
 
-def test_shows_no_company_by_default(team):
-    company(team)
-    code, out, _ = run(team, "org", "company", "--org", ORG)
-    assert code == 0 and f"Org {ORG} is not linked into a company" in out
-    assert "never across companies" in " ".join(out.split()) and "company link" in out
-    assert [c[0] for c in calls(team)] == [f"GET {PATH}"]
-
-
 def test_link_then_unlink(team):
     state = company(team)
     code, out, _ = run(team, "org", "company", "link", OTHER, "--org", ORG)

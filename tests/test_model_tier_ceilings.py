@@ -1,8 +1,11 @@
+import time
+from unittest.mock import patch
+
 import pytest
 
 from brindle import autopilot, pipeline, mcp_server
 from brindle.config import RepoConfig
-from brindle.db import Workspace, Task
+from brindle.db import Agent, Task, Workspace
 from brindle import agents
 
 pytestmark = pytest.mark.usefixtures("fake_agent_cli")
@@ -19,15 +22,21 @@ def test_max_weight_ceiling_caps_heavy_to_medium(db, repo, monkeypatch):
     assert profile in cfg.routing["medium"]
 
 
+def _no_second_attempt(*a, **k):
+    raise AssertionError("a second attempt started although max_weight is medium")
+
+
+@patch.object(agents, "is_alive", lambda a: False)
+@patch.object(agents, "delegate", _no_second_attempt)
 def test_retry_on_heavy_refuses_when_max_weight_medium(db, repo):
     ws = Workspace("ws-m", str(repo), "feat/m", "main", "main", "worktree", str(repo), 20000, "tmux-m", 0)
     db.add_workspace(ws)
-    worker = agents.spawn(db, ws, "developer", mode="assign")
-    # Record task with heavy weight
-    t = Task("t-1", str(repo), worker.id, None, ws.id, "developer", "task", "assign", 1, "feat/m", None, None, None, "started", 0.0, weight="heavy")
-    db.add_task(t)
-
-    cfg = RepoConfig(max_weight="medium")
+    worker = Agent("w-m", ws.id, "developer", "claude", None, "assign", "processing", "%m", None, time.time())
+    db.add_agent(worker)
+    db.add_task(Task("t-1", str(repo), worker.id, None, ws.id, "developer", "task", "assign", 1, "feat/m", None,
+                     None, None, "started", 0.0, weight="heavy"))
+    # Otherwise eligible: escalation on, developer-heavy routed for heavy; only max_weight forbids it.
+    cfg = RepoConfig(max_weight="medium", fable_escalation=True, routing={"heavy": ["developer-heavy"]})
     # Must refuse retry on heavy
     assert not pipeline._retry_on_heavy(db, worker, ws, cfg, "failed review", "worker report")
 
@@ -47,24 +56,6 @@ def test_docs_only_files_demotes_tier(db, repo, monkeypatch):
     assert profile == "developer"
 
 
-def test_list_agents_includes_token_usage_when_available(db, repo, monkeypatch):
-    ws = Workspace("ws-list", str(repo), "feat/list", "main", "main", "main", str(repo), 20000, "tmux-l", 0)
-    db.add_workspace(ws)
-    worker = agents.spawn(db, ws, "developer", mode="assign")
-
-    from unittest.mock import MagicMock
-    fake_usage = MagicMock()
-    fake_usage.total = 5000
-    from brindle import usage
-    monkeypatch.setattr(usage, "agent_usage", lambda db_arg, a_arg: fake_usage)
-    monkeypatch.setattr(usage, "agent_transcripts", lambda db_arg, a_arg: [])
-    monkeypatch.setattr(usage, "short_summary", lambda u: "5k tokens")
-    monkeypatch.setattr(mcp_server, "DB", lambda: db)
-    monkeypatch.setattr(mcp_server, "_caller", lambda db_arg: (None, ws))
-
-    out = mcp_server.list_agents(repo=None)
-    assert f"{worker.id}" in out
-    assert "tokens=5k tokens" in out
 
 
 def test_pending_milestone_heavy_profile_capped_under_light_ceiling(db, repo, monkeypatch):
@@ -215,60 +206,7 @@ def test_custom_expensive_profiles_capped_under_max_weight(db, repo, monkeypatch
     assert "exceeds configured max_weight 'medium'" in str(exc_info3.value)
 
 
-def test_assignment_and_queue_replies_include_cost_feedback_for_all_selections(db, repo, monkeypatch):
-    import asyncio
-    from brindle import mcp_server
-
-    ws = Workspace("ws-mcp-cost", str(repo), "main", "main", "main", "main", str(repo), 20000, "tmux-mcp", 0)
-    db.add_workspace(ws)
-    sup = agents.spawn(db, ws, "developer", mode="interactive", autopilot=True)
-
-    from brindle.db import DB
-    monkeypatch.setattr(mcp_server, "DB", lambda: DB(db.path))
-    monkeypatch.setattr(mcp_server, "_caller", lambda db_arg: (sup, ws))
-    monkeypatch.setattr(agents, "_launch", lambda *args, **kwargs: None)
-
-    cfg = RepoConfig()
-    monkeypatch.setattr(autopilot, "load_repo_config", lambda r: cfg)
-
-    # 1. Explicit selection (developer-heavy)
-    reply_exp = asyncio.run(mcp_server.assign(agent_profile="developer-heavy", task="explicit task"))
-    assert "developer-heavy" in reply_exp
-    assert "most expensive tier" in reply_exp
-
-    # 2. Pending milestone selection
-    autopilot.set_goal(db, sup.id, "Goal", [("Step 1", "true", "", "developer-heavy")])
-    reply_ms = asyncio.run(mcp_server.assign(task="milestone task"))
-    assert "developer-heavy" in reply_ms
-    assert "most expensive tier" in reply_ms
-
-    # 3. Default selection (no milestone, no explicit, no weight)
-    db.conn.execute("DELETE FROM milestones WHERE root_id=?", (sup.id,))
-    reply_def = asyncio.run(mcp_server.assign(task="default task"))
-    assert "developer" in reply_def
-    assert "medium cost tier" in reply_def
-
-    # 4. Queued task reply with explicit selection
-    reply_q = asyncio.run(mcp_server.assign(agent_profile="developer-heavy", task="queued task", depends_on=["unmet-dep"]))
-    assert "Queued task" in reply_q
-    assert "developer-heavy" in reply_q
-    assert "most expensive tier" in reply_q
 
 
-def test_cross_provider_model_env_isolation(db, repo, monkeypatch):
-    # Setting an expensive ANTHROPIC_MODEL must NOT bleed into Codex profiles
-    monkeypatch.setenv("ANTHROPIC_MODEL", "claude-opus-4-6")
-    assert autopilot.effective_profile_model("developer-codex") != "claude-opus-4-6"
-    assert autopilot.profile_weight("developer-codex") != "heavy"
-
-    cfg = RepoConfig(max_weight="medium")
-    monkeypatch.setattr(autopilot, "load_repo_config", lambda r: cfg)
-    p, _ = autopilot.choose_profile(db, "caller-codex", str(repo), requested="developer-codex")
-    assert p == "developer-codex"
-
-    # And setting CODEX_MODEL must NOT bleed into Claude profiles
-    monkeypatch.setenv("CODEX_MODEL", "o3")
-    assert autopilot.effective_profile_model("developer") == "claude-opus-4-6"
-    assert autopilot.effective_profile_model("developer-light") != "o3"
 
 

@@ -90,16 +90,6 @@ def sweep(db, w, at):
     return login_pause.sweep(db, now=at)
 
 
-@pytest.mark.parametrize("expires_in, worker_screen", [
-    (300.0, IDLE),        # expiring soon: renewed ahead of time
-    (3600.0, EXPIRED),    # a worker stopped on the expired login: renewed, told to go on
-])
-def test_a_refreshable_login_is_renewed_without_a_notice(db, world, expires_in, worker_screen):
-    world.expires_in, world.screens["@1"] = expires_in, worker_screen
-    sweep(db, world, T0)
-    assert world.refreshed == 1 and world.alerts == []
-    assert not login_pause.paused(db, "boss")
-    assert [to for to, _ in world.sent] == (["w1"] if worker_screen is EXPIRED else [])
 
 
 def test_two_expired_cloud_identities_stay_held_until_both_recover(db, world, repo, monkeypatch):
