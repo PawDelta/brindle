@@ -131,3 +131,30 @@ def test_signed_out_claude_has_no_credential_line_that_says_all_is_well(installe
     monkeypatch.setattr(providers, "_auth_probe", lambda argv, env=None: replies.get(argv[1]))
     assert lines()["Claude Code sign-in"].level == doctor.FAIL
     assert credentials()["claude"].level == doctor.WARN
+
+
+def test_a_check_that_blocks_is_reported_and_doctor_moves_on(monkeypatch):
+    """One stuck check ends as "took too long"; the checks before it are
+    already out when it starts, and the ones after it still run."""
+    import threading
+
+    release = threading.Event()
+    done = []
+    ok = lambda name: lambda: [doctor.Check(doctor.OK, name, "fine")]   # noqa: E731
+
+    def stuck():
+        assert [c.name for g in done for c in g] == ["first"]   # delivered before this began
+        release.wait()
+        return []
+
+    steps = [("first", ok("first"), 5), ("stuck", stuck, 0.05), ("last", ok("last"), 5)]
+    monkeypatch.setattr(doctor, "_steps", lambda root, db: steps)
+    monkeypatch.setattr(doctor, "GRACE_SECONDS", 0.05)
+    try:
+        for group in doctor.stream(None):
+            done.append(group)
+    finally:
+        release.set()
+    flat = [(c.name, c.level) for g in done for c in g]
+    assert flat == [("first", doctor.OK), ("stuck", doctor.WARN), ("last", doctor.OK)]
+    assert "took too long" in done[1][0].detail

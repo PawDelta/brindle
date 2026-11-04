@@ -1082,8 +1082,12 @@ def doctor(
         root = git.main_repo_root(os.getcwd())
     except git.GitError:
         pass
-    results = doctor_mod.checks(root) + doctor_mod.disk_checks(root)
-    typer.echo(doctor_mod.render(results))
+    results = []
+    for group in doctor_mod.stream(root, disk=True):
+        for c in group:
+            typer.echo(doctor_mod.render_line(c))   # as each check finishes: never silent
+            results.append(c)
+    typer.echo(doctor_mod.summary(results))
     if any(c.level == doctor_mod.FAIL for c in results):
         raise typer.Exit(1)
 
