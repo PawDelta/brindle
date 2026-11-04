@@ -593,7 +593,8 @@ def write_rule(repo_root: str, r: LearnedRule) -> Path:
             if re.match(rf"{k}[ \t]*:[ \t]*(#.*)?\r?\n?$", lines[at]) is None:
                 # an inline list (`k: [a, b]`): turn that one line into a block holding both
                 kept = [q for q in map(_frontmatter_item, _list(meta.get(k)) or []) if q]
-                lines[at:at + 1] = [f"{k}:{eol}", *(f"  - {i}{eol}" for i in kept + items)]
+                note = re.search(r"[ \t]+#.*?(?=\r?\n?$)", lines[at])
+                lines[at:at + 1] = [f"{k}:{note.group(0) if note else ''}{eol}", *(f"  - {i}{eol}" for i in kept + items)]
                 continue
             end = at + 1
             for i in range(at + 1, len(lines)):

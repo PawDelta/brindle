@@ -152,7 +152,7 @@ PACK_HEAD = ("---\nname: learned\n# why this pack exists\n"
              "direct_spawn_allowed:\n  - src/spawn.py   # the spawner\n  # and the tmux wrapper\n"
              "  - src/tmux.py\n"
              "deny_patterns:\n  - 'print\\('   # no prints\n"
-             "deny_deps: [marshal]\n"
+             "deny_deps: [marshal]  # keep this annotation\n"
              "---\n")
 
 
@@ -180,7 +180,8 @@ def test_accept_merges_new_checks_beside_the_packs_text(db, tmp_path, pro):
     text = path.read_text()
     assert "  - 'print\\('   # no prints\n  - except\\s*:\n" in text
     assert text.replace("  - except\\s*:\n", "").startswith(PACK_HEAD.replace(
-        "deny_deps: [marshal]\n", "deny_deps:\n  - marshal\n  - pickle\n"))
+        "deny_deps: [marshal]  # keep this annotation\n",
+        "deny_deps:  # keep this annotation\n  - marshal\n  - pickle\n"))
     pack = [p for p in load_rule_packs(load_profile("reviewer", root), root) if p.name == "learned"][0]
     assert pack.deny_deps == ["marshal", "pickle"] and pack.direct_spawn_allowed == [
         "src/spawn.py", "src/tmux.py"]
