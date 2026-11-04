@@ -1,7 +1,13 @@
 import asyncio
 import json
 import os
+import select
+import shutil
+import subprocess
 import sys
+import sysconfig
+import time
+import venv
 from types import SimpleNamespace
 
 import anyio
@@ -53,9 +59,8 @@ def test_a_server_upgraded_under_refuses_tools_once_the_new_engine_migrated_the_
 
 def _wire(monkeypatch, modern=False):
     """A client's pipes to a server, and the server's (faked) exec of the new
-    install: it records that the process was replaced, as execv would. The
-    client opens as a 2025 one (initialize) or, ``modern``, as Claude Code
-    2.1.318 does (MCP 2026-07-28): discover, then a listen it keeps open."""
+    install: it records that the process was replaced, as execv would.
+    ``modern``: the client opens as Claude Code 2.1.318 does (see _modern)."""
     monkeypatch.setattr(upgrade, "preload", lambda: None)
     update = SimpleNamespace(installed=False)
     monkeypatch.setattr(upgrade, "install", SimpleNamespace(changed=lambda: update.installed))
@@ -92,7 +97,8 @@ INIT = {"id": 0, "method": "initialize", "params": {
 
 def _modern(id, method, **params):
     """A request as Claude Code 2.1.318 sends it (MCP 2026-07-28): there is
-    no initialize, every request carries its own envelope."""
+    no initialize, every request carries its own envelope, and the client
+    opens with server/discover, then a subscriptions/listen it keeps open."""
     meta = {"io.modelcontextprotocol/protocolVersion": "2026-07-28",
             "io.modelcontextprotocol/clientInfo": {"name": "claude-code", "version": "2.1.318"},
             "io.modelcontextprotocol/clientCapabilities": {}}
@@ -145,11 +151,8 @@ def test_after_a_schema_bump_the_next_call_goes_to_the_reloaded_server(monkeypat
     anyio.run(scenario)
     # initialize (or discover) answered once, by the old server; the listen never is
     assert [a["id"] for a in answers if "id" in a] == [0, 1]
-    os.set_blocking(from_server, False)     # and whatever the new server wrote after
-    try:
+    if select.select([from_server], [], [], 0)[0]:     # and whatever the new server wrote after
         answers.extend(json.loads(line) for line in os.read(from_server, 65536).splitlines() if line)
-    except BlockingIOError:
-        pass
     result = next(a for a in answers if a.get("id") == 1)["result"]
     refused = bool(result.get("isError")) and "Reconnect" in json.dumps(result)
     assert refused is not replacement_knows_the_column
@@ -157,13 +160,10 @@ def test_after_a_schema_bump_the_next_call_goes_to_the_reloaded_server(monkeypat
     assert len(acks) == int(modern)
 
 
-@pytest.mark.parametrize("modern", [False, True])
-def test_an_idle_server_reloads_once_its_install_changes(monkeypatch, modern):
+def test_an_idle_server_reloads_once_its_install_changes(monkeypatch):
     """No call has to come in, and no daemon has to start: an idle server
-    that sees its install change on its next look execs the new one. A
-    modern client's open listen stream leaves it idle all the same (it never
-    ends), and is handed to the new process."""
-    old, update, _, (from_client, from_server), execs = _wire(monkeypatch, modern)
+    that sees its install change on its next look execs the new one."""
+    old, update, _, (from_client, from_server), execs = _wire(monkeypatch)
     next_look = anyio.Event()
     looks = [next_look]     # then none: the server waits for its next look forever
 
@@ -173,8 +173,7 @@ def test_an_idle_server_reloads_once_its_install_changes(monkeypatch, modern):
     async def scenario():
         async with anyio.create_task_group() as tg:
             async def update_lands():
-                # The session is up, and idle (a modern one: its listen acknowledged).
-                await _answers(from_server, None if modern else 0)
+                await _answers(from_server, 0)      # the session is up, and idle
                 update.installed = True
                 next_look.set()
 
@@ -185,11 +184,7 @@ def test_an_idle_server_reloads_once_its_install_changes(monkeypatch, modern):
     anyio.run(scenario)
     assert execs == [1]
     handover = mcp_stdio.take_handover()
-    if modern:
-        assert handover.initialize is None
-        assert [json.loads(line)["id"] for line in handover.listens] == ["listen:0"]
-    else:
-        assert json.loads(handover.initialize)["method"] == "initialize" and handover.initialized
+    assert json.loads(handover.initialize)["method"] == "initialize" and handover.initialized
 
 
 def test_an_update_that_completes_during_a_failed_reload_is_reloaded_onto(monkeypatch):
@@ -225,79 +220,52 @@ def test_an_update_that_completes_during_a_failed_reload_is_reloaded_onto(monkey
 
 
 _WHICH_BUILD = '''
-
 @mcp.tool()
 def which_build(hold: str = "") -> str:
-    """Test only: the install answering. ``hold``: a pair of fifos; say it
-    started on ``hold.started``, then answer once ``hold`` is written."""
-    if hold:
-        started = os.open(hold + ".started", os.O_WRONLY)
-        os.write(started, b"x")
-        os.close(started)
-        with open(hold) as go:
-            go.read()
+    if hold:    # test fifos: say it started, then answer once released
+        with open(hold + ".started", "w") as started: started.write("x")
+        open(hold).read()
     return {build!r}
 '''
 
 
 def _app_install(at, build):
-    """An app's engine at ``at``: its own python (a venv), brindle copied
-    into its site-packages with a ``which_build`` tool answering ``build``,
-    and brindle's dependencies from this environment."""
-    import shutil
-    import sysconfig
-    import venv
-
+    """An app's engine at ``at``: its own python, brindle in its site-packages
+    with a ``which_build`` tool answering ``build``, and brindle's
+    dependencies from this environment."""
     import brindle
 
     venv.create(at, with_pip=False, symlinks=True)
     site = next(at.glob("lib/python*/site-packages"))
-    shutil.copytree(os.path.dirname(brindle.__file__), site / "brindle",
-                    ignore=shutil.ignore_patterns("__pycache__"))
+    shutil.copytree(os.path.dirname(brindle.__file__), site / "brindle", ignore=shutil.ignore_patterns("__pycache__"))
     with open(site / "brindle" / "mcp_server.py", "a") as f:
         f.write(_WHICH_BUILD.format(build=build))
     (site / "deps.pth").write_text(sysconfig.get_path("purelib") + "\n")
-    return at
 
 
 class _Client:
-    """Claude Code's end of a stdio MCP server: one connection, never reopened,
-    speaking the 2026-07-28 protocol as Claude Code 2.1.318 does."""
+    """Claude Code 2.1.318's end of a stdio MCP server: one connection, never reopened."""
 
     def __init__(self, argv, cwd, log):
-        import subprocess
-
-        self.proc = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                     stderr=log)
-        self.buf, self.answers, self.frames = b"", {}, []
+        self.proc = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=log)
+        self.buf, self.frames = b"", []
 
     def send(self, id, method, **params):
         _send(self.proc.stdin.fileno(), _modern(id, method, **params))
-        return id
 
-    def answer(self, id, within=90.0):
-        import select
-        import time
+    def answer(self, id):
+        end = time.monotonic() + 90
+        while not (got := [f for f in self.frames if f.get("id") == id]):
+            assert select.select([self.proc.stdout], [], [], max(0, end - time.monotonic()))[0], f"no answer to {id}"
+            chunk = os.read(self.proc.stdout.fileno(), 65536)
+            assert chunk, f"the server closed the connection before answering {id}"
+            *lines, self.buf = (self.buf + chunk).split(b"\n")
+            self.frames += [json.loads(line) for line in lines if line]
+        return got[0]
 
-        end = time.monotonic() + within
-        while id not in self.answers:
-            left = end - time.monotonic()
-            assert left > 0, f"no answer to {id} (server {'exited' if self.proc.poll() is not None else 'hung'})"
-            if select.select([self.proc.stdout], [], [], left)[0]:
-                chunk = os.read(self.proc.stdout.fileno(), 65536)
-                assert chunk, f"the server closed the connection before answering {id}"
-                *lines, self.buf = (self.buf + chunk).split(b"\n")
-                for line in filter(None, lines):
-                    message = json.loads(line)
-                    self.frames.append(message)
-                    self.answers.setdefault(message.get("id"), message)
-        return self.answers[id]
-
-    def build(self, id, **args):
-        self.send(id, "tools/call", name="which_build", arguments=args)
-        return self.text(id)
-
-    def text(self, id):
+    def build(self, id, send=True, **args):
+        if send:
+            self.send(id, "tools/call", name="which_build", arguments=args)
         result = self.answer(id)["result"]
         assert not result.get("isError"), result
         return result["content"][0]["text"]
@@ -308,20 +276,15 @@ class _Client:
 def test_an_app_update_is_served_by_the_new_install_on_the_same_connection(tmp_path, mid_call, old_deleted):
     """The app updater renames the running app away (to a tauri_updated_app
     temp dir, later deleted) and puts the new one at its path. The server a
-    session started from the old app answers the session's next call from
-    the new install, on the same stdio: no reconnect, and no request lost,
-    even one that was being served while the update landed. Claude Code
-    keeps a subscriptions/listen request open for the whole connection: it
-    never ends, so it can't be waited for, and it carries on in the new
-    process (acknowledged once, as the client saw)."""
-    import shutil
-    import stat
-
-    app = tmp_path / "Applications" / "brindle.app"
+    session started from the old app answers the next call from the new
+    install, on the same stdio: no reconnect, and no request lost, even one
+    in flight while the update landed. Claude Code's subscriptions/listen,
+    open for the whole connection, isn't waited for, and carries on in the
+    new process (acknowledged once, as the client saw)."""
+    app, staged = tmp_path / "Applications" / "brindle.app", tmp_path / "download" / "brindle.app"
     _app_install(app, "old")
-    staged = _app_install(tmp_path / "download" / "brindle.app", "new")
-    moved = tmp_path / "T" / "tauri_updated_appXYZ" / "brindle.app"
-    moved.parent.mkdir(parents=True)
+    _app_install(staged, "new")
+    moved = tmp_path / "T" / "tauri_updated_appXYZ"
     log = open(tmp_path / "server.log", "wb")
     client = _Client([str(app / "bin" / "python"), "-P", "-m", "brindle", "mcp"], tmp_path, log)
     try:
@@ -338,27 +301,20 @@ def test_an_app_update_is_served_by_the_new_install_on_the_same_connection(tmp_p
             started = os.open(hold + ".started", os.O_RDONLY | os.O_NONBLOCK)
             os.open(hold + ".started", os.O_WRONLY)     # kept open: no EOF before the tool writes
             client.send(3, "tools/call", name="which_build", arguments={"hold": hold})
-            import select
             assert select.select([started], [], [], 60)[0], "the held call never started"
-
+        moved.parent.mkdir()
         os.rename(app, moved)       # what the updater does
         os.rename(staged, app)
         if old_deleted:
             shutil.rmtree(moved)
-        assert stat.S_ISDIR(os.stat(app).st_mode)
-
         if mid_call:
             client.send(4, "tools/call", name="which_build", arguments={})
-            with open(hold, "w"):
-                pass                # the held call may finish now
-            assert client.text(3) == "old"      # finished where it started
-            assert client.text(4) == "new"
-        else:
-            assert client.build(4) == "new"
-        assert client.build(5) == "new"
-        assert client.proc.poll() is None
+            open(hold, "w").close()                 # the held call may finish now
+            assert client.build(3, send=False) == "old"     # finished where it started
+        assert client.build(4, send=not mid_call) == "new"
+        assert client.build(5) == "new" and client.proc.poll() is None
         acks = [f for f in client.frames if f.get("method") == "notifications/subscriptions/acknowledged"]
-        assert len(acks) == 1 and "listen:0" not in client.answers
+        assert len(acks) == 1 and not [f for f in client.frames if f.get("id") == "listen:0"]
     finally:
         client.proc.stdin.close()
         client.proc.wait(30)

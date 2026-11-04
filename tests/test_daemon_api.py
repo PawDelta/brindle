@@ -241,6 +241,7 @@ def _health_log_watch_warns_only_when_the_loop_itself_is_late(monkeypatch, stall
         now[0] += 2.0                   # maintenance the watch awaits: slow, loop free
 
     monkeypatch.setattr(session_review.ReadinessWatch, "sweep_safely", slow_sweep)
+    monkeypatch.setattr(lifecycle, "_stop_stale_mcp_servers", lambda: False)
     activity = lifecycle.Activity(build_app(TOKEN, port=8123))
     asyncio.run(lifecycle._watch(server, activity, False, wait=elapse, clock=lambda: now[0]))
 

@@ -6,8 +6,9 @@ processes that keep running: each session's `brindle mcp` server and its
 profiles, say) would then see a half-replaced tree, or a newer one than the
 code they already loaded.
 
-The MCP server never exits for that: its client doesn't reconnect a stdio
-server that exits, so every agent would lose brindle's tools. It loads
+The MCP server doesn't exit for that: Claude Code (2.1.318) starts an exited
+stdio server again, but loses the calls it was serving, and other clients may
+not start it again at all. It loads
 everything it will ever read from the install when it starts (`preload`), so
 it serves one version consistently, and once the install changed or the
 database moved past it, it execs the new install in place on the same stdio,
@@ -23,6 +24,7 @@ from __future__ import annotations
 import importlib
 import os
 import pkgutil
+import re
 import shutil
 import sys
 import time
@@ -138,6 +140,77 @@ def _exec(argv: list[str], ready: Callable[[list[str]], bool] | None) -> bool:
     try:
         os.execv(argv[0], argv)
         return True     # only a fake returns
+    except OSError:
+        return False
+
+
+# -- MCP servers that can't reload themselves -------------------------------
+#
+# Servers from before this one (0.5.x, and 0.6.0, whose reload waited forever
+# on Claude Code's open subscriptions/listen) never leave the code they
+# started with. Claude Code starts a stdio server again when it exits (seen
+# with Claude Code 2.1.318), so the daemon of a newer install stops them, and
+# they come back on the new code. A server that can reload itself says so
+# (`register_reloading`) and is left to do it: it finishes its requests first.
+
+_MCP_COMMAND = re.compile(r"(?:-m brindle|/brindle) mcp(?:\s|$)")
+
+
+def _reloading_dir():
+    from brindle.config import brindle_home
+
+    return brindle_home() / "mcp-reloads"
+
+
+def register_reloading() -> Callable[[], None]:
+    """Mark this process as a ``brindle mcp`` that reloads itself after an
+    update. Returns what unmarks it, for its exit (an exec keeps the mark)."""
+    mark = _reloading_dir() / str(os.getpid())
+    try:
+        mark.parent.mkdir(parents=True, exist_ok=True)
+        mark.touch()
+    except OSError:
+        pass
+    return lambda: mark.unlink(missing_ok=True)
+
+
+def stop_stale_mcp_servers() -> bool:
+    """Stop this brindle's ``brindle mcp`` servers (this BRINDLE_HOME, this
+    install's interpreter) that run a replaced executable and can't reload
+    themselves. One with processes of its own (a merge's git, a check) is
+    busy and left for now. Returns whether any was left, to look again."""
+    from brindle import procs
+
+    table = procs.table()
+    parents = {p.ppid for p in table.values()}
+    marks = _reloading_dir()
+    stale, left = set(), False
+    for p in table.values():
+        command = procs.command_line(p)
+        if not (_MCP_COMMAND.search(command) and procs._home_matches(p) and _same_interpreter(command)):
+            continue
+        if (marks / str(p.pid)).exists() or not procs.runs_replaced_executable(p):
+            continue
+        if p.pid in parents:
+            left = True
+        else:
+            stale.add(p.pid)
+    if stale:
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "brindle: stopping %d MCP server(s) left on a replaced install; their clients start them again",
+            len(stale))
+        procs.terminate(stale)
+    for mark in marks.glob("*") if marks.is_dir() else ():
+        if mark.name.isdigit() and int(mark.name) not in table:
+            mark.unlink(missing_ok=True)     # a server that died without unmarking itself
+    return left
+
+
+def _same_interpreter(command: str) -> bool:
+    try:
+        return os.path.samefile(command.split(" ", 1)[0], sys.executable)
     except OSError:
         return False
 
