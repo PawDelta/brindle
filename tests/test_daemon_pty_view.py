@@ -135,6 +135,21 @@ def test_a_view_shows_the_pane_types_into_it_and_goes_when_closed(db):
     pv._set_size(slave, (100, 30), pv.Crop())
     env = {k: v for k, v in os.environ.items() if k != "TMUX"} | {"TERM": "xterm-256color"}
     other = None
+    import time
+    events = []
+    real_take, real_run = pv.PtyView.take, pv._tmux
+
+    def take(self):
+        events.append(("take-start", time.time()))
+        try:
+            return real_take(self)
+        except Exception as e:
+            events.append(("take-error", repr(e)))
+            raise
+        finally:
+            events.append(("take-end", time.time(), self.tty))
+
+    pv.PtyView.take = take
     try:
         with TestClient(build_app(TOKEN)) as client:
             with client.websocket_connect("/v1/pty_view") as ws:
@@ -170,13 +185,14 @@ def test_a_view_shows_the_pane_types_into_it_and_goes_when_closed(db):
                             t("show-options", "-w", "-t", window).stdout,
                             t("list-windows", "-a", "-F", "#{session_name} #{window_id} #{window_width}x#{window_height} #{window_flags}").stdout,
                             t("list-sessions", "-F", "#{session_name} #{session_attached}").stdout,
-                            _size(window)])) from e
+                            _size(window), events, time.time()])) from e
                     ws.send_json({"type": "resize", "cols": 70, "rows": 22})
                     _until(ws, lambda _: _size(window) == "70x22")
                 finally:
                     watchdog.cancel()
             tmux._tmux("wait-for", "view-closed")
     finally:
+        pv.PtyView.take = real_take
         if other is not None:
             other.kill()
             other.wait()
