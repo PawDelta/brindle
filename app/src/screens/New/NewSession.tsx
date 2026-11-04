@@ -164,6 +164,8 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, on
 
   useEffect(() => {
     let live = true;
+    // A lookup begins: whatever an earlier one answered (this repo's too) no longer holds.
+    setGot(null);
     client
       .usableProviders(repo)
       .then((r) => live && setGot({ repo, usable: r.usable }))
@@ -366,10 +368,12 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, on
         }}
         onLaunch={() => void start(preflight.fields)}
         onUseInstead={(other) => {
+          // Only a CLI the current repo's lookup says can run.
+          if (!usable?.includes(other)) return;
           if (many) setProvider(other);
           void start({ ...preflight.fields, provider: other });
         }}
-        usable={usable}
+        usable={usable ?? []}
         launchLabel="Start"
         repo={repo}
         launching={busy}

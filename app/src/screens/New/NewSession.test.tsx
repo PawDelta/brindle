@@ -396,6 +396,34 @@ describe("NewSession", () => {
     stop();
   });
 
+  it("won't start on an earlier answer: a repo's usable CLIs are asked again each time it is selected", async () => {
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }, { repo_root: OTHER, name: "other" }], sessions: [], workspaces: [root] });
+    const fetch = daemon.fetch;
+    let hold = false;
+    const held: (() => void)[] = [];
+    daemon.fetch = async (input, init) => {
+      if (hold && new URL(String(input)).pathname.endsWith("/providers/usable")) await new Promise<void>((r) => held.push(r));
+      return fetch(input, init);
+    };
+    const { stop } = setup(daemon);
+    const start = () => screen.getByRole("button", { name: "Start" }) as HTMLButtonElement;
+    await waitFor(() => expect(start().disabled).toBe(false));
+    hold = true;
+    const repo = screen.getByRole("combobox", { name: "Repo" });
+    for (const name of ["other", "proj"]) {
+      fireEvent.focus(repo);
+      fireEvent.mouseDown(screen.getByRole("option", { name }));
+    }
+    // Back on the first repo, whose earlier answer is gone: nothing starts until it is asked again.
+    await waitFor(() => expect(held).toHaveLength(2));
+    expect(start().disabled).toBe(true);
+    fireEvent.keyDown(screen.getByRole("textbox", { name: "What should brindle work on?" }), { key: "Enter", metaKey: true });
+    expect(posts(daemon)).toHaveLength(0);
+    act(() => held.forEach((r) => r()));
+    await waitFor(() => expect(start().disabled).toBe(false));
+    stop();
+  });
+
   it("starts nothing until the usable CLIs are known, and offers to look again when they couldn't be read", async () => {
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [], workspaces: [root] });
     const fetch = daemon.fetch;
