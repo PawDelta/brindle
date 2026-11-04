@@ -49,6 +49,7 @@ if (params.get("renderer") === "dom") {
 const SCENES: Record<string, Route> = {
   new: { screen: "new" },
   "new-first": { screen: "new" },
+  flow: { screen: "new" },
   "new-composer": { screen: "new" },
   "new-codex-only": { screen: "new" },
   inbox: { screen: "inbox" },
@@ -114,6 +115,12 @@ if (scene === "new-first" || scene === "new-composer" || scene === "new-codex-on
 if (scene === "new-first") daemon.data.repos = [];
 // Only Codex on this Mac: Claude Code neither installed nor signed in.
 if (scene === "new-codex-only") daemon.data.providers = freshProviders({ codex: { path: "/opt/homebrew/bin/codex", version: "0.48.0" } });
+// The first-run walk-through: no project yet, only Codex on this Mac, and the folder the picker returns isn't a git repository.
+if (scene === "flow") {
+  daemon.data.repos = [];
+  daemon.data.providers = freshProviders({ codex: { path: "/opt/homebrew/bin/codex", version: "0.48.0" } });
+  daemon.notGitFolders = ["/home/sam/Notes/runbooks"];
+}
 if (scene === "session-review") {
   daemon.data.sessionReview["sup-42"] = { ready: true, reasons: [], branch: "desktop/ux-revamp", base: "main", diff: "" };
   daemon.data.sessionBase["sup-42"] = { "src/session.ts": "export const ready = false;\n" };
