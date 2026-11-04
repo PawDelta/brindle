@@ -273,13 +273,14 @@ export function PtyTerminal({ at, open, copy, paste, openUrl, onView, onSize }: 
     };
     layout();
     const pty = open({ server, target }, { cols: term.cols, rows: term.rows }, {
-      onData: (bytes) => term.write(bytes),
+      onData: (bytes) => { if (!gone) term.write(bytes); },
       onCrop: (c) => {
+        if (gone) return;
         crop = c;
         layout();
       },
-      onExit: () => setView({ kind: "closed" }),
-      onError: (message) => setView({ kind: "error", message }),
+      onExit: () => { if (!gone) setView({ kind: "closed" }); },
+      onError: (message) => { if (!gone) setView({ kind: "error", message }); },
     });
     setView({ kind: "live" });
     sized.current?.(term.cols, term.rows);
