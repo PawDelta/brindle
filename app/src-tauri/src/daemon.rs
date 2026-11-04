@@ -75,13 +75,21 @@ pub(crate) const ENGINE_TOO_OLD: &str = "engine too old";
 /// another install's `brindle daemon`, one a person started, using brindle's home.
 pub(crate) const ENGINE_CONFLICT: &str = "engine conflict";
 /// How long a daemon being replaced has to shut down after SIGTERM before it
-/// is killed. The app's daemon pauses every session it runs on its way out
-/// (lifecycle.pause_for_exit: their windows closed, their work kept, for the
-/// next daemon to resume), which takes a few tmux commands per session; as
-/// long as launchd gives a job it stops (its ExitTimeOut). What it still
-/// ran gets lifecycle.SHUTDOWN_GRACE before that.
+/// is killed, unless it says it is pausing (PAUSING_FILE). What it still
+/// ran gets lifecycle.SHUTDOWN_GRACE of that.
 #[cfg(not(windows))]
-const STOP_GRACE: Duration = Duration::from_secs(20);
+const STOP_GRACE: Duration = Duration::from_secs(2);
+/// How long in all a daemon being replaced has while it says it is pausing:
+/// the app's daemon pauses every session it runs on its way out
+/// (lifecycle.pause_for_exit: their windows closed, their work kept, for the
+/// next daemon to resume; it gives up after lifecycle.PAUSE_BUDGET). As long
+/// as launchd gives a job it stops (its ExitTimeOut).
+#[cfg(not(windows))]
+const PAUSE_GRACE: Duration = Duration::from_secs(20);
+/// The file in brindle's home that names the daemon (its pid) while it
+/// pauses on its way out (lifecycle.PAUSING_FILE).
+#[cfg(not(windows))]
+const PAUSING_FILE: &str = "daemon-pausing";
 /// How long a killed daemon has to be gone.
 #[cfg(not(windows))]
 const KILL_GRACE: Duration = Duration::from_secs(2);
@@ -188,17 +196,42 @@ fn reuse_running(engine: &Path, info: &DaemonInfo) -> Reuse {
     reuse(engine, build.as_deref().map_err(String::as_str), &command)
 }
 
-/// SIGTERM the daemon `pid` (it shuts down and removes its files) and wait
-/// until it's gone; still there after `grace`, SIGKILL it (the next daemon
-/// takes over the files it left).
+/// SIGTERM the daemon `pid` of brindle's home `home` (it shuts down and
+/// removes its files) and wait until it's gone; still there `grace` after
+/// SIGTERM, SIGKILL it (the next daemon takes over the files it left). While
+/// it says it is pausing its sessions (`pausing`), the wait goes on, up to
+/// PAUSE_GRACE in all, and ends `grace` after it stops saying so.
 #[cfg(not(windows))]
-fn stop_daemon(pid: u32, grace: Duration) -> Result<(), String> {
+fn stop_daemon(home: &Path, pid: u32, grace: Duration) -> Result<(), String> {
+    stop_daemon_while(pid, grace, || is_daemon(pid), || pausing(home, pid))
+}
+
+/// `stop_daemon`, told by `running` whether `pid` is still the daemon and by
+/// `says_pausing` whether it still says it is pausing.
+#[cfg(not(windows))]
+fn stop_daemon_while(
+    pid: u32,
+    grace: Duration,
+    mut running: impl FnMut() -> bool,
+    mut says_pausing: impl FnMut() -> bool,
+) -> Result<(), String> {
     let pid_t = libc::pid_t::try_from(pid).map_err(|_| format!("bad daemon pid {pid}"))?;
     // SAFETY: kill(2) only sends a signal; is_daemon has just said pid is a daemon's.
     unsafe { libc::kill(pid_t, libc::SIGTERM) };
-    let mut deadline = Instant::now() + grace;
-    let mut killed = false;
-    while is_daemon(pid) {
+    let stopped = Instant::now();
+    let mut deadline = stopped + grace;
+    let (mut killed, mut said_pausing) = (false, false);
+    while running() {
+        if !killed {
+            let says = says_pausing();
+            if says {
+                deadline = stopped + PAUSE_GRACE;
+            } else if said_pausing {
+                // Its pause is over: what it still does on its way out gets the short wait.
+                deadline = (Instant::now() + grace).min(stopped + PAUSE_GRACE);
+            }
+            said_pausing = says;
+        }
         if Instant::now() >= deadline {
             if killed {
                 return Err(format!("the previous brindle daemon (pid {pid}) didn't stop, even killed"));
@@ -211,6 +244,13 @@ fn stop_daemon(pid: u32, grace: Duration) -> Result<(), String> {
         std::thread::sleep(Duration::from_millis(100));
     }
     Ok(())
+}
+
+/// Whether the daemon `pid` says it is pausing the sessions it runs on its
+/// way out: PAUSING_FILE in brindle's home `home` names it.
+#[cfg(not(windows))]
+fn pausing(home: &Path, pid: u32) -> bool {
+    std::fs::read_to_string(home.join(PAUSING_FILE)).is_ok_and(|text| text.trim() == pid.to_string())
 }
 
 /// Whether a daemon answers an authenticated `GET /v1/meta` on 127.0.0.1:`port`
@@ -412,7 +452,7 @@ pub(crate) fn stop_app_daemon() {
 fn stop_app_daemon_in(home: &Path) {
     let own = APP_CHILDREN.lock().map(|own| own.clone()).unwrap_or_default();
     if let Some(info) = running_in(home).filter(|info| own.contains(&info.pid)) {
-        let _ = stop_daemon(info.pid, STOP_GRACE);
+        let _ = stop_daemon(home, info.pid, STOP_GRACE);
     }
 }
 
@@ -807,7 +847,7 @@ fn start_in(
                     Some(Reuse::Conflict(why)) => return Err(why),
                     _ => {
                         set_step(home, Some((StartStep::Stopping { pid: info.pid }, since)));
-                        stop_daemon(info.pid, STOP_GRACE)?;
+                        stop_daemon(home, info.pid, STOP_GRACE)?;
                         child = start_daemon(daemon_command(bin, path), home, &log_path)?;
                         set_step(home, Some((StartStep::Starting { pid: child.id() }, since)));
                         continue;
@@ -895,7 +935,7 @@ fn ensure_in(
         Reuse::Use => Ok(info),
         Reuse::Replace => {
             set_step(home, Some((StartStep::Stopping { pid: info.pid }, Instant::now())));
-            stop_daemon(info.pid, STOP_GRACE)?;
+            stop_daemon(home, info.pid, STOP_GRACE)?;
             start()
         }
         Reuse::Conflict(why) => Err(why),
@@ -2061,7 +2101,7 @@ mod tests {
         assert!(matches!(daemon.try_wait(), Ok(None)));
 
         // Stopped as an old build's daemon is (stop_daemon): seen as ended, and unloaded.
-        stop_daemon(pid, Duration::from_secs(5)).unwrap();
+        stop_daemon(&home, pid, Duration::from_secs(5)).unwrap();
         let ended = loop {
             if let Some(how) = daemon.try_wait().unwrap() {
                 break how;
@@ -2177,23 +2217,48 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn a_daemon_still_busy_past_its_grace_is_killed_not_waited_on() {
+    fn a_daemon_still_busy_past_its_grace_is_killed_unless_it_says_it_is_pausing() {
         use std::io::BufRead;
         use std::os::unix::process::{CommandExt, ExitStatusExt};
         // An older daemon finishing what an app that quit for its update asked of it
         // (a provider's sign-in probe) stays past SIGTERM: this one ignores it outright.
-        let mut busy = Command::new("/bin/bash")
-            .arg0("/opt/uv/tools/brindle/bin/python")
-            .args(["-c", "trap '' TERM; echo ready; read", "daemon", "-m", "brindle", "daemon", "--idle-exit"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .spawn()
-            .unwrap();
-        let mut ready = String::new();
-        io::BufReader::new(busy.stdout.take().unwrap()).read_line(&mut ready).unwrap();
-        assert!(is_daemon(busy.id()), "ps doesn't show it as a daemon");
-        stop_daemon(busy.id(), Duration::ZERO).unwrap();
+        let busy_daemon = || {
+            let mut busy = Command::new("/bin/bash")
+                .arg0("/opt/uv/tools/brindle/bin/python")
+                .args(["-c", "trap '' TERM; echo ready; read", "daemon", "-m", "brindle", "daemon", "--idle-exit"])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let mut ready = String::new();
+            io::BufReader::new(busy.stdout.take().unwrap()).read_line(&mut ready).unwrap();
+            assert!(is_daemon(busy.id()), "ps doesn't show it as a daemon");
+            busy
+        };
+        let home = std::env::current_dir().unwrap().join("target/daemon-pausing");
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let mut busy = busy_daemon();
+        stop_daemon(&home, busy.id(), Duration::ZERO).unwrap();
         assert_eq!(busy.wait().unwrap().signal(), Some(libc::SIGKILL));
+
+        // The app's daemon pausing its sessions on its way out says so (lifecycle.say_pausing):
+        // it is waited on past the short grace while it does, then gets the short grace.
+        let mut busy = busy_daemon();
+        let pid = busy.id();
+        std::fs::write(home.join(PAUSING_FILE), format!("{pid}\n")).unwrap();
+        let looks = std::cell::Cell::new(0);
+        let running = || {
+            looks.set(looks.get() + 1);
+            if looks.get() == 3 {
+                std::fs::remove_file(home.join(PAUSING_FILE)).unwrap();   // its pause is over
+            }
+            is_daemon(pid)
+        };
+        stop_daemon_while(pid, Duration::ZERO, running, || pausing(&home, pid)).unwrap();
+        assert_eq!(busy.wait().unwrap().signal(), Some(libc::SIGKILL));
+        assert_eq!(looks.get(), 4, "killed while it said it was pausing, or not once it stopped");
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[cfg(unix)]
