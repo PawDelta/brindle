@@ -91,6 +91,131 @@ def test_pause_then_resume_uses_the_saved_claude_session(db, root, monkeypatch, 
     assert [a for a, _ in launched] == ["boss", "w1"]  # finished workers stay done
     assert launched[0][1]["resume"] == "sess-boss" and launched[0][1]["prompt"] is None
     assert launched[0][1]["watch_pane"] and not launched[1][1]["watch_pane"]
+    # The app's daemon pauses what it runs as the app goes, and the next one resumes it.
+    _the_app_daemon_pauses_on_its_way_out_and_the_next_start_resumes(db, root, monkeypatch)
+
+
+DEAD_PID = 2**22 + 1    # above any pid_max: no process has it (an app that has gone)
+
+
+def _the_app_daemon_pauses_on_its_way_out_and_the_next_start_resumes(db, root, monkeypatch):
+    """The app's daemon (lifecycle.serve, --idle-exit) on the suite's private
+    tmux server, stopped as the app stops it (SIGTERM) and left behind by an
+    app that was force quit, pausing through the real agents.pause; then the
+    next start (resume_after_start)."""
+    import dataclasses
+    import signal
+    import threading
+
+    from brindle import debuglog, procs, spawn, upgrade
+    from brindle.daemon import lifecycle
+    from brindle.service import sessions as svc
+
+    here = tmux.current_server()
+
+    def window(session):
+        return tmux._tmux("new-session", "-d", "-s", session, "-P", "-F", "#{window_id}", "cat").stdout.strip()
+
+    def session(aid, ws, status, server=here, parent=None, win=""):
+        db.add_agent(Agent(aid, ws.id, "supervisor", "claude", parent, "assign" if parent else "interactive",
+                           status, win, None, 1000.0, task="t", tmux_server=server))
+
+    session("chat", root, "idle", win=window(root.tmux_session))
+    session("helper", root, "running", parent="chat")
+    # Another server's session (a demo's, another home's daemon's): its pane id names ours
+    # here, and its workspace's tmux session name is a session on this server too.
+    other = dataclasses.replace(root, id="ws-other", name="other", tmux_session="shared-name")
+    db.add_workspace(other)
+    window("shared-name")
+    session("foreign", other, "idle", server="elsewhere", win=db.get_agent("chat").tmux_window)
+    events = []
+    monkeypatch.setattr(svc, "cull_detached", lambda repo_root=None: None)     # the cull never runs
+    monkeypatch.setattr(procs, "stop", lambda ids, *a, **kw: events.append(("stop", sorted(ids))) or 0)
+    monkeypatch.setattr(agents, "_launch", lambda db_, a, ws, **kw: events.append(("launch", a.id)))
+    # What serve starts beside its watch, unrelated here; and its process-wide settings, restored after.
+    monkeypatch.setattr(spawn, "_gated", spawn._gated)
+    monkeypatch.setattr(upgrade, "on_stale_launch", upgrade.on_stale_launch)
+    monkeypatch.setattr(debuglog.Uploader, "start", lambda self: None)
+    monkeypatch.setattr(lifecycle, "_upgrade_sweep", lambda: None)
+    monkeypatch.setattr(lifecycle, "_reset_window_sizes", lambda: None)
+    monkeypatch.setattr(lifecycle, "_stop_stale_mcp_servers", lambda: False)
+    monkeypatch.setattr(lifecycle, "WATCH_INTERVAL", 0.05)
+    servers = []
+    real_make = lifecycle.make_server
+    monkeypatch.setattr(lifecycle, "make_server", lambda app: servers.append(real_make(app)) or servers[-1])
+
+    def serve(app_gone):
+        """Run the app's daemon until the app stops it (SIGTERM, as daemon.rs
+        stop_daemon does) or, the app gone, the daemon notices by itself."""
+        servers.clear()
+        done, noticed = threading.Event(), [True]
+        if app_gone:
+            monkeypatch.setenv(lifecycle.APP_PID_ENV, str(DEAD_PID))
+
+        def the_app():
+            while not done.is_set() and not (servers and servers[0].started):
+                done.wait(0.01)
+            if app_gone and done.wait(10):
+                return
+            noticed[0] = not app_gone       # a daemon that never noticed is stopped, and fails below
+            if not done.is_set():
+                os.kill(os.getpid(), signal.SIGTERM)
+
+        prev = signal.getsignal(signal.SIGTERM)
+        app = threading.Thread(target=the_app)
+        app.start()
+        try:
+            try:
+                lifecycle.serve(unix=False, tcp=True, idle_exit=True)
+            except SystemExit:      # serve's way out of a SIGTERM
+                pass
+        finally:
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)   # a SIGTERM sent late lands nowhere
+            done.set()
+            app.join()
+            signal.signal(signal.SIGTERM, prev)
+        assert noticed[0], "the daemon didn't notice the app had gone"
+
+    # No record, no pause: sessions that couldn't be recorded for the next start keep running.
+    lifecycle._resume_path().mkdir()
+    assert lifecycle.pause_for_exit() == []
+    assert db.get_agent("chat").status == "idle" and tmux.has_session(root.tmux_session)
+    lifecycle._resume_path().rmdir()
+
+    # The app quits: its daemon pauses this server's session and records it; the other's is left.
+    serve(app_gone=False)
+    assert [db.get_agent(a).status for a in ("chat", "helper", "foreign")] == ["paused", "paused", "idle"]
+    assert not tmux.has_session(root.tmux_session) and tmux.has_session("shared-name")
+    assert lifecycle._read_resume() == [{"id": "chat", "server": here, "paused": True}]
+    # The next start stops what the cull never did before anything is launched again.
+    assert lifecycle.resume_after_start() == ["chat"]
+    assert events == [("stop", ["chat", "helper"]), ("launch", "chat"), ("launch", "helper")]
+
+    # The app is force quit, and a tmux failure cuts the pause short.
+    events.clear()
+    for aid in ("chat", "helper"):
+        db.set_status(aid, "idle")
+    db.update_agent("chat", tmux_window=window(root.tmux_session))
+    real_kill, fails = tmux.kill_window, [True]
+
+    def kill_window(target):
+        if fails and fails.pop():
+            raise tmux.TmuxError("tmux kill-window: server busy")
+        real_kill(target)
+
+    monkeypatch.setattr(tmux, "kill_window", kill_window)
+    serve(app_gone=True)
+    assert [db.get_agent(a).status for a in ("chat", "helper", "foreign")] == ["paused", "paused", "idle"]
+    assert tmux.has_session(root.tmux_session) and tmux.has_session("shared-name")
+    assert lifecycle._read_resume() == [{"id": "chat", "server": here, "paused": False}]
+    # The next start finishes that pause (its session closed) and stops what is left first.
+    assert lifecycle.resume_after_start() == ["chat"]
+    assert not tmux.has_session(root.tmux_session)
+    assert events == [("stop", ["chat", "helper"]), ("launch", "chat"), ("launch", "helper")]
+
+    # A record made on another tmux server isn't resumed here.
+    lifecycle._record_resume([{"id": "chat", "server": "elsewhere", "paused": True}])
+    assert lifecycle.resume_after_start() == [] and len(events) == 3
 
 
 def test_a_resumed_chat_is_shown_with_its_conversation_and_sidebar(db, root, monkeypatch, tmp_path):
