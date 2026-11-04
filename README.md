@@ -7,9 +7,9 @@ them to several agents (Claude Code, Codex, or a local model), each working on i
 branch. Another agent reviews every branch, your tests run, and only then does it merge.
 You get the result, not a pile of half-finished branches.
 
-![The brindle app running its practice demo: a supervisor splits a goal between two workers, each branch is reviewed and merged, and both milestones turn green once their checks pass](https://raw.githubusercontent.com/PawDelta/brindle/main/assets/brindle-demo.gif)
+![brindle running its practice demo: a supervisor splits a goal between two workers, each branch is reviewed and merged, and both milestones turn green once their checks pass](https://raw.githubusercontent.com/PawDelta/brindle/main/assets/brindle-demo.gif)
 
-*The demo you can run yourself from the app in a few minutes: two workers in parallel,
+*The practice demo you can run yourself in a few minutes: two workers in parallel,
 each branch reviewed and merged, both milestones verified by their tests.*
 
 ## Why brindle
