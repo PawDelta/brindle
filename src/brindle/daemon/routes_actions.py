@@ -2445,7 +2445,9 @@ def clone_repo(db: DB, params: dict, body: Body) -> Any:
             bus.publish(db, "job.progress", job=job.id, text=text)
 
         try:
-            return {"path": clone.clone(url, dest, progress)}
+            path = clone.clone(url, dest, progress)
+            workspaces.adopt_root(db, path)
+            return {"path": path}
         finally:
             with _CLONE_LOCK:
                 _CLONING.pop(key, None)
@@ -2465,7 +2467,8 @@ _CLONING: dict[str, tuple[Job, str]] = {}      # destination -> (its clone job, 
 def open_repo(db: DB, params: dict, body: Body) -> Any:
     """Register the folder ``path`` as session start does (workspaces.adopt_root).
     A folder that isn't a git repo is refused (409 ``not_a_repo``) unless the
-    body says ``init``: then ``git init`` makes it one first."""
+    body says ``init``: then initialize it with an empty initial commit so
+    session worktrees have a starting point without committing the person's files."""
     path = Path(_get(body, "path", required=True)).expanduser()
     if not path.is_dir():
         raise ServiceError("invalid", f"not a folder: {path}")
@@ -2474,6 +2477,8 @@ def open_repo(db: DB, params: dict, body: Body) -> Any:
         if not _get(body, "init", bool, False):
             raise ServiceError("not_a_repo", f"{path} isn't a git repository", 409)
         git.run(["init", "-q"], path)
+        git.run(["-c", "user.name=brindle", "-c", "user.email=brindle@localhost",
+                 "-c", "commit.gpgSign=false", "commit", "--allow-empty", "-qm", "Initial commit"], path)
         initialized = True
     ws = workspaces.adopt_root(db, str(path))
     return {"workspace_id": ws.id, "repo_root": ws.repo_root, "path": ws.path, "branch": ws.branch,

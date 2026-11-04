@@ -1167,8 +1167,8 @@ export class DaemonClient {
   }
 
   /* A folder on this machine, as a repo brindle works in. */
-  openRepo(path: string) {
-    return this.post<Repo>("/repos/open", { path });
+  openRepo(path: string, init = false) {
+    return this.post<Repo>("/repos/open", { path, ...(init ? { init: true } : {}) });
   }
 
   sessions(repo: string) {

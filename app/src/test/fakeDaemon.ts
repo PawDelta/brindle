@@ -1299,7 +1299,7 @@ export class FakeDaemon {
   private openRepo(body: Record<string, unknown>): Response {
     const path = typeof body.path === "string" ? body.path.replace(/\/+$/, "") : "";
     if (!path) return error("invalid", "path is required", 400);
-    if (this.notGitFolders.includes(path)) return error("conflict", `${path} is not a git repository`, 409);
+    if (this.notGitFolders.includes(path) && !body.init) return error("not_a_repo", `${path} is not a git repository`, 409);
     this.opened.push(path);
     const repo = this.data.repos.find((r) => r.repo_root === path) ?? { repo_root: path, name: path.split("/").at(-1) ?? path };
     if (!this.data.repos.includes(repo)) this.data.repos = [...this.data.repos, repo];
