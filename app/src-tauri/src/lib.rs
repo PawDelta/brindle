@@ -176,7 +176,7 @@ pub fn run() {
         }
         Some("--headless-check") => std::process::exit(headless_check()),
         // Relaunched into an update (instance::relaunch): the instance that was runs out
-        // first, and so does its daemon (daemon::wait_for_predecessor).
+        // first. A surviving daemon is reused unless it is already pausing.
         #[cfg(target_os = "macos")]
         Some(instance::AFTER_EXIT_FLAG) => {
             if let Some(pid) = std::env::args().nth(2).and_then(|pid| pid.parse().ok()) {
@@ -281,7 +281,7 @@ pub fn run() {
             if let tauri::RunEvent::Exit = event {
                 app.state::<pty_view::PtyViews>().close_all();
                 // A daemon the app runs as its own child (Allow in the Background
-                // switched off) stops with it, pausing its sessions, as launchd's job does.
+                // switched off) stops with it, pausing its sessions.
                 #[cfg(target_os = "macos")]
                 daemon::stop_app_daemon();
             }

@@ -21,8 +21,10 @@
 //! person's "Update now" (`app_update_now`) downloads and installs it, then
 //! restarts the app into it, and "Later" (`app_update_later`) sets the offer
 //! aside until the next look. The app never restarts unasked. Restarting
-//! loses no work: agents run in tmux and the daemon in a process of its own,
-//! neither the app's; the app's exit closes only its own pane views. None at
+//! keeps agents' work in tmux. A launchd daemon survives the app's exit;
+//! the new app reuses it or replaces it through the daemon's pause/resume
+//! handover when its build changed. The app closes its own pane views and
+//! stops only a daemon it started as a child (the launchd fallback). None at
 //! all when brindle is air-gapped or the person turned
 //! them off: `"app_updates": false` or `"airgap": true` in
 //! `~/.brindle/config.json`, `BRINDLE_AIRGAP` in the environment, or the
