@@ -201,19 +201,54 @@ class RulePack:
                     or self.direct_spawn_allowed)
 
 
-_COMMENT = re.compile(r"(?:^|\s)#.*$")
+_QUOTED = re.compile(r"""(?:'(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*")""")
+
+
+class _QuotedScalar(str):
+    """A decoded scalar: commas/brackets in it are data even for ``_list``."""
+
+
+def _unquoted(raw: str):
+    """Yield syntax outside quotes, stopping at a whitespace-prefixed comment.
+
+    Quotes open at a token boundary, so apostrophes in bare words stay literal.
+    Within either quote style, a backslash protects the next character.
+    """
+    quote = ""
+    escaped = False
+    for i, char in enumerate(raw):
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = ""
+        elif char in "'\"" and (i == 0 or raw[i - 1].isspace() or raw[i - 1] in "[,:{"):
+            quote = char
+        else:
+            yield i, char
+            if char == "#" and (i == 0 or raw[i - 1].isspace()):
+                return
+
+
+def _without_comment(raw: str) -> str:
+    for i, char in _unquoted(raw):
+        if char == "#" and (i == 0 or raw[i - 1].isspace()):
+            return raw[:i]
+    return raw
+
+
+def _scalar(raw: str) -> str:
+    if _QUOTED.fullmatch(raw):
+        # Only the enclosing quote and backslash are escapes. Keep regex \s etc.
+        return _QuotedScalar(re.sub(r"\\([\\" + raw[0] + r"])", r"\1", raw[1:-1]))
+    return raw
 
 
 def _value(raw: str) -> str:
-    """A frontmatter value without its trailing ``# comment``. As in YAML, a
-    ``#`` only starts a comment at the start or after whitespace, and a quoted
-    value is taken as is."""
-    raw = raw.strip()
-    if raw[:1] in ("'", '"'):
-        end = raw.find(raw[0], 1)
-        if end > 0:
-            return raw[1:end]
-    return _COMMENT.sub("", raw).strip()
+    """Strip an unquoted comment and decode a scalar without losing its type."""
+    return _scalar(_without_comment(raw.strip()).strip())
 
 
 def _flag(value: str | None) -> bool:
@@ -221,16 +256,31 @@ def _flag(value: str | None) -> bool:
 
 
 def _list(value: str | None) -> list[str] | None:
-    """A comma-separated list; YAML's ``[a, b]`` form works too, and so does
-    a block list (one ``- item`` per line, which ``_frontmatter`` joins with
-    newlines), where an item may itself contain a comma."""
-    value = (value or "").strip()
+    """Small list grammar: optional outer brackets, comma-separated items.
+
+    An item is bare text or a single/double-quoted scalar. Inside quotes,
+    backslash escapes that quote or another backslash; other escapes stay
+    literal (for regexes). Commas, brackets and # inside quotes are data.
+    Outside quotes, # starts a comment only at the start or after whitespace.
+    A scalar is a one-item list. Block items arrive decoded and newline-joined.
+    """
+    if isinstance(value, _QuotedScalar):
+        return [str(value)]
+    value = value or ""
     if "\n" in value:
         items = [t.strip() for t in value.split("\n") if t.strip()]
         return items or None
+    value = _without_comment(value).strip()
     if value.startswith("[") and value.endswith("]"):
         value = value[1:-1]
-    items = [t.strip().strip("'\"") for t in value.split(",") if t.strip()]
+    ends = [i for i, char in _unquoted(value) if char == ","] + [len(value)]
+    items = []
+    start = 0
+    for end in ends:
+        item = value[start:end].strip()
+        if item:
+            items.append(str(_scalar(item)))
+        start = end + 1
     return items or None
 
 

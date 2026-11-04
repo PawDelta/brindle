@@ -178,7 +178,20 @@ def test_session_start_records_the_inbox(db, repo, monkeypatch):
 
 # -- 7. brindle doctor ------------------------------------------------------------------
 
+def _without_machine_probes(monkeypatch):
+    """doctor.checks without the probes these tests don't assert on: the
+    sign-in, credential, cloud, native, routing and reap lines and the process
+    table read the whole machine, which a loaded host makes take seconds."""
+    from brindle import procs
+
+    for name in ("signin_checks", "credential_checks", "cloud_checks", "native_checks",
+                 "routing_checks", "reap_checks"):
+        monkeypatch.setattr(doctor, name, lambda *a, **kw: [])
+    monkeypatch.setattr(procs, "table", lambda *a, **kw: {})
+
+
 def test_doctor_reports_what_is_missing(repo, monkeypatch):
+    _without_machine_probes(monkeypatch)
     monkeypatch.setattr(doctor.shutil, "which", lambda name: None if name == "tmux" else f"/bin/{name}")
     results = doctor.checks(str(repo))
     by_name = {c.name: c for c in results}
@@ -187,7 +200,8 @@ def test_doctor_reports_what_is_missing(repo, monkeypatch):
     assert by_name["tmux"].detail in doctor.render(results)
 
 
-def test_doctor_reports_a_missing_add_dir(repo):
+def test_doctor_reports_a_missing_add_dir(repo, monkeypatch):
+    _without_machine_probes(monkeypatch)
     (repo / ".brindle").mkdir(exist_ok=True)
     (repo / ".brindle" / "config.json").write_text('{"add_dirs": ["/no/such/cache", "."]}')
     by_name = {c.name: c for c in doctor.checks(str(repo))}
