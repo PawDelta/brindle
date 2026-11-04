@@ -10,6 +10,7 @@ from brindle.profiles import _frontmatter, _list, load_profile
     ('\n  - "a,b" # note\n', ["a,b"]),
     ("[] # note", None),
 ])
+@pytest.mark.variant("the reader's inline-list grammar read directly, from the learned.md comment-stripping incident; the accept test reaches these lines only through the writer")
 def test_frontmatter_list_grammar(raw, expected):
     meta, _ = _frontmatter(f"---\nrules: {raw}\n---\n")
     assert _list(meta["rules"]) == expected
