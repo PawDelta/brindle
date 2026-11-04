@@ -74,6 +74,11 @@ MOUSE_BINDINGS = (
 COPY_BINDING = r'C-M-S-F12 if-shell -F "#{selection_present}" "send-keys -X copy-selection-no-clear"'
 COPY_OR_INTERRUPT_BINDING = (r'C-M-S-F11 if-shell -F "#{selection_present}" '
                              r'"send-keys -X copy-selection-and-cancel" "send-keys C-c"')
+# A paste is written behind this key: a pane scrolled back (copy mode) leaves it, where
+# tmux would swallow the whole bracketed paste (pty_view.rs's LEAVE_COPY_MODE_BINDING).
+LEAVE_COPY_MODE_BINDING = r'C-M-S-F10 if-shell -F "#{pane_in_mode}" "send-keys -X cancel"'
+LEAVE_COPY_MODE_KEY = b"\x1b[21;8~"
+PASTE_START = b"\x1b[200~"
 MAX_SIZE = 1000                 # the largest pty a view asks for
 
 # What crop_of reads, a line a pane, and what crop_now reads of the view's client.
@@ -146,7 +151,8 @@ def valid_target(target: str) -> bool:
 
 def view_bindings(version: tuple[int, int]) -> str:
     """The view's key table for a server of ``version``, as ``source-file`` reads it."""
-    lines = [b for since, b in MOUSE_BINDINGS if version >= since] + [COPY_BINDING, COPY_OR_INTERRUPT_BINDING]
+    lines = [b for since, b in MOUSE_BINDINGS if version >= since] + [COPY_BINDING, COPY_OR_INTERRUPT_BINDING,
+                                                                      LEAVE_COPY_MODE_BINDING]
     return "".join(f"bind-key -T {KEY_TABLE} {b}\n" for b in lines)
 
 
@@ -654,8 +660,11 @@ def _set_size(fd: int, size: tuple[int, int], crop: Crop) -> None:
 async def _type(view: PtyView, data: bytes) -> None:
     """What the person typed, to the client: as it comes, but each mouse
     release RELEASE_GAP after the write before it, so tmux reads it apart
-    from a drag's last motion (whose copy it would otherwise lose)."""
+    from a drag's last motion (whose copy it would otherwise lose), and a
+    paste behind the key that leaves copy mode."""
     loop = asyncio.get_running_loop()
+    if data.startswith(PASTE_START):
+        data = LEAVE_COPY_MODE_KEY + data
 
     async def write(part: bytes) -> None:
         await asyncio.to_thread(view.write, part)

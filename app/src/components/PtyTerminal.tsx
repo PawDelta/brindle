@@ -35,8 +35,12 @@
    text reads the app's clipboard, `paste`); elsewhere ⌘V reads the app's
    clipboard, the webview's paste prevented. What's pasted goes to
    the pane as xterm.js pastes (bracketed, where the program asked), and
-   nothing else does. A press anywhere in the view, its margin too, gives
-   xterm.js the keyboard, so the ⌘V after it reaches the pane.
+   nothing else does, once the view has drawn (DRAWN_WAIT). A press anywhere in
+   the view, its margin too, gives xterm.js the keyboard, so the ⌘V after it
+   reaches the pane; so does a view replacing one that had it, and a ⌘V with
+   the keyboard on nothing goes to the view last used. A pane scrolled back
+   leaves copy mode for a paste (the shell's writer, LEAVE_COPY_MODE_BINDING).
+   Each paste dropped says why in the debug log, by size, never its text.
 
    Links: a URL the pane prints (xterm's web-links addon) or a program's OSC
    8 hyperlink, ⌘-clicked (Ctrl-clicked elsewhere), opens in the system
@@ -154,6 +158,10 @@ export function selectionIn(term: XTerm, from: number, to: number): string {
    that runs it). */
 export const unbracketed = (text: string): string => text.replace(/[\x1b\x9b]/g, "");
 
+/* What's pasted, with half an emoji (a lone surrogate, as a truncated copy leaves) made U+FFFD: the shell's JSON refuses
+   one, and the whole paste with it. With the u flag, this matches only surrogates that aren't half of a pair. */
+const wellFormed = (text: string): string => text.replace(/[\ud800-\udfff]/gu, "�");
+
 /* ⌘C with nothing selected in xterm.js: Ctrl+Option+Shift+F12, which the view's key table binds to copy tmux's
    copy-mode selection (pty_view.rs COPY_BINDING); tmux keeps it from the pane. */
 export const COPY_KEY = "\x1b[24;8~";
@@ -163,8 +171,21 @@ export const COPY_KEY = "\x1b[24;8~";
 export const COPY_OR_INTERRUPT = "\x1b[23;8~";
 
 /* How long a Mac's ⌘V holds what's typed after it for the webview's own paste; none by then, it is given up (and its
-   paste, coming later, pasted then). */
-export const PASTE_WAIT = 1000;
+   paste, coming later, pasted then). Long: a webview slowed by load answers late, and what's typed meanwhile would
+   go ahead of the paste; only a ⌘V the webview never answers waits this long. */
+export const PASTE_WAIT = 3000;
+
+/* How long a paste waits for the view's first bytes (a resume, a reconnect, the client still attaching). Until tmux has
+   drawn, xterm.js doesn't know bracketed paste is on: sent unbracketed, each line of it would be an Enter that runs. */
+export const DRAWN_WAIT = 5000;
+
+/* What a ⌘V with the keyboard elsewhere is meant for, and what a view leaves the keyboard on. */
+const TEXT_FIELD = "input, textarea, select, [contenteditable]";
+const DIALOG = '[role="dialog"], [role="alertdialog"], dialog[open]';
+
+/* The view last given the keyboard: a ⌘V with the keyboard on nothing is its, while it's on screen. */
+let lastFocused: HTMLElement | null = null;
+const onScreen = (el: HTMLElement) => document.visibilityState !== "hidden" && el.isConnected && el.getClientRects().length > 0;
 
 /* How long "Copied" shows over the view after a copy reaches the app's clipboard, in ms. */
 export const COPIED_SHOWN = 1500;
@@ -252,6 +273,11 @@ export function PtyTerminal({ at, open, copy, paste, openUrl, onView, onSize }: 
     term.loadAddon(new ClipboardAddon(undefined, clipboard));
     term.open(inner);
     setRenderer(loadRenderer(term, setRenderer));
+    // A resume or reconnect replaces the view (its key), and the keyboard goes with the textarea it had, to nothing:
+    // the next ⌘V and keys would reach no pane. Nothing is taken from a field or dialog in use.
+    const noteFocus = () => void (lastFocused = el);
+    term.textarea?.addEventListener("focus", noteFocus);
+    if ((!document.activeElement || document.activeElement === document.body) && !document.querySelector(DIALOG)) term.textarea?.focus({ preventScroll: true });
     let crop: Crop = { cols: 0, left: 0 };
     // The client's columns shown, from the crop's left on: the view's, or fewer where the agent's pane is narrower.
     const shownCols = () => Math.min(term.cols - crop.cols, crop.width ?? Infinity);
@@ -272,15 +298,38 @@ export function PtyTerminal({ at, open, copy, paste, openUrl, onView, onSize }: 
       el.dataset.shown = String(shownCols());
     };
     layout();
+    // The client's first bytes parsed: they turn bracketed paste on (a paste waits for them, toPane). Also woken by
+    // the view ending, whose paste waits no more.
+    let drawn = false;
+    let ended: string | null = null;
+    let wake = () => {};
+    const woken = new Promise<void>((ok) => (wake = ok));
     const pty = open({ server, target }, { cols: term.cols, rows: term.rows }, {
-      onData: (bytes) => { if (!gone) term.write(bytes); },
+      onData: (bytes) => {
+        if (gone) return;
+        if (drawn) term.write(bytes);
+        else term.write(bytes, () => {
+          drawn = true;
+          wake();
+        });
+      },
       onCrop: (c) => {
         if (gone) return;
         crop = c;
         layout();
       },
-      onExit: () => { if (!gone) setView({ kind: "closed" }); },
-      onError: (message) => { if (!gone) setView({ kind: "error", message }); },
+      onExit: () => {
+        if (gone) return;
+        ended = "the view's client has exited";
+        wake();
+        setView({ kind: "closed" });
+      },
+      onError: (message) => {
+        if (gone) return;
+        ended = "the view couldn't open";
+        wake();
+        setView({ kind: "error", message });
+      },
     });
     setView({ kind: "live" });
     sized.current?.(term.cols, term.rows);
@@ -349,13 +398,47 @@ export function PtyTerminal({ at, open, copy, paste, openUrl, onView, onSize }: 
       e.stopPropagation();
     };
     el.addEventListener("copy", copying, true);
+    // A paste that won't reach the pane, to the debug log while it's on: why, and its size, never its text.
+    const dropPaste = (why: string, bytes: number) => logDebug("pty_view", "warning", `paste dropped: ${why}`, { bytes, target });
     // What's pasted goes as xterm.js's paste would (its line ends a terminal's, bracketed where the program asked), but
-    // in its place in the line, not through term.paste (which would put it behind what was typed after).
-    const toPane = (pasting: string) => {
-      const text = unbracketed(pasting).replace(/\r?\n/g, "\r");
-      if (gone || !text) return;
-      pty.write(term.modes.bracketedPasteMode ? `\x1b[200~${text}\x1b[201~` : text);
+    // in its place in the line, not through term.paste (which would put it behind what was typed after). Once the view
+    // has drawn: before, it isn't known to be bracketed, and a client not yet attached has a cooked pty. What's typed
+    // waits behind it, in the line.
+    const toPane = async (pasting: string) => {
+      const bytes = pasting.length;
+      const text = wellFormed(unbracketed(pasting)).replace(/\r?\n/g, "\r");
+      if (!text) return dropPaste("the clipboard holds no text", bytes);
+      if (!drawn && !gone && !ended) {
+        await new Promise<void>((ok) => {
+          const patience = setTimeout(ok, DRAWN_WAIT);
+          void woken.then(() => {
+            clearTimeout(patience);
+            ok();
+          });
+        });
+      }
+      if (gone) return dropPaste("the view closed first", bytes);
+      if (ended) return dropPaste(ended, bytes);
+      if (!drawn) return dropPaste(`the view drew nothing within ${DRAWN_WAIT} ms`, bytes);
+      const bracketed = term.modes.bracketedPasteMode;
+      pty.write(bracketed ? `\x1b[200~${text}\x1b[201~` : text);
+      logDebug("pty_view", "info", "pasted", { bytes, bracketed, target });
     };
+    // The app's clipboard, for a paste with no webview paste to go by. Null: nothing to paste, and why is said.
+    const fromApp = (): Promise<string | null> => {
+      const pasteFrom = pasted.current;
+      if (gone || !pasteFrom) return Promise.resolve(null);
+      return pasteFrom().catch((err) => {
+        dropPaste(`couldn't read the app's clipboard: ${String(err)}`, 0);
+        return null;
+      });
+    };
+    // Its place in the line kept from now, however long the text takes to come.
+    const pasteInLine = (reading: Promise<string | null>) =>
+      queued(async () => {
+        const text = await reading;
+        if (text !== null) await toPane(text);
+      });
     // The webview's own pastes, taken from xterm.js: each fills the ⌘V waiting longest for it, or (Edit > Paste
     // clicked, or a ⌘V's that came late) is pasted as it comes. Every paste the webview sends is pasted once.
     const awaiting: ((text: string) => void)[] = [];
@@ -435,39 +518,54 @@ export function PtyTerminal({ at, open, copy, paste, openUrl, onView, onSize }: 
         e.preventDefault();
         return false;
       }
-      const pasteFrom = pasted.current;
-      if (key === "v" && pasteFrom) {
-        const fromApp = () => (gone ? "" : pasteFrom().catch(() => ""));
+      if (key === "v" && pasted.current) {
         if (!mac) {
           e.preventDefault();
-          const reading = fromApp();
-          queued(async () => toPane(await reading));
+          pasteInLine(fromApp());
           return false;
         }
         // The webview's paste (its Edit menu's): its text, or the app's clipboard where it has none. None in a
         // moment: this ⌘V given up, nothing pasted for it; its paste coming later is pasted then, once.
-        const reading = new Promise<string>((ok) => {
+        pasteInLine(new Promise<string | null>((ok) => {
           const waiter = (text: string) => {
             clearTimeout(timer);
             ok(text || fromApp());
           };
           const timer = setTimeout(() => {
             awaiting.splice(awaiting.indexOf(waiter), 1);
-            ok("");
+            if (!gone) logDebug("pty_view", "warning", `⌘V: the webview's paste didn't come within ${PASTE_WAIT} ms`, { target });
+            ok(null);
           }, PASTE_WAIT);
           awaiting.push(waiter);
-        });
-        queued(async () => toPane(await reading));
+        }));
         return false;
       }
       return true;
     });
+    // ⌘V with the keyboard on nothing (a click on the app's own chrome, a row of the sidebar): xterm.js doesn't hear
+    // it, and the webview has nowhere to paste. Taken for the view last used, once: not for a text field or dialog,
+    // which have their own use for it. Its default prevented, no webview paste follows; the app's clipboard is read.
+    const offView = (e: KeyboardEvent) => {
+      if (e.defaultPrevented || !e.metaKey || e.ctrlKey || e.altKey || e.shiftKey || e.key.toLowerCase() !== "v") return;
+      if (!pasted.current || el.contains(e.target as Node) || !onScreen(el)) return;
+      if (lastFocused && lastFocused !== el && onScreen(lastFocused)) return;
+      if (document.activeElement?.closest(TEXT_FIELD) || document.querySelector(DIALOG)) return;
+      e.preventDefault();
+      logDebug("pty_view", "info", "⌘V with the keyboard off the view: taken for it", { target });
+      term.focus();
+      pasteInLine(fromApp());
+    };
+    window.addEventListener("keydown", offView);
     const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(layout);
     observer?.observe(el);
     return () => {
       gone = true;
+      wake();
+      if (lastFocused === el) lastFocused = null;
       clearTimeout(hide);
       setCopiedShown(false);
+      window.removeEventListener("keydown", offView);
+      term.textarea?.removeEventListener("focus", noteFocus);
       term.textarea?.removeEventListener("focus", focused);
       term.textarea?.removeEventListener("input", completedInput);
       el.removeEventListener("mousedown", focused, true);

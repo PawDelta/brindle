@@ -101,6 +101,15 @@ pub const COPY_BINDING: &str = r##"C-M-S-F12 if-shell -F "#{selection_present}" 
 /// copy-mode selection copied (OSC 52) and copy mode left, as a terminal's
 /// Ctrl+C clears what it copied; with none, C-c to the pane, as typed.
 pub const COPY_OR_INTERRUPT_BINDING: &str = r##"C-M-S-F11 if-shell -F "#{selection_present}" "send-keys -X copy-selection-and-cancel" "send-keys C-c""##;
+/// A paste is written behind this key (Ctrl+Option+Shift+F10, `PASTE_START`):
+/// a pane scrolled back (copy mode) leaves it, as a terminal scrolls to the
+/// bottom for a paste. tmux hands a bracketed paste to the pane's mode, and copy
+/// mode reads no such keys: the whole paste would be lost. tmux runs a client's
+/// keys in order, so the paste goes to the pane. Out of copy mode, nothing.
+pub const LEAVE_COPY_MODE_BINDING: &str = r##"C-M-S-F10 if-shell -F "#{pane_in_mode}" "send-keys -X cancel""##;
+const LEAVE_COPY_MODE_KEY: &[u8] = b"\x1b[21;8~";
+/// How a bracketed paste starts: what PtyTerminal sends a paste with.
+const PASTE_START: &[u8] = b"\x1b[200~";
 /// The largest pty a view asks for.
 const MAX_SIZE: u16 = 1000;
 
@@ -186,14 +195,15 @@ pub fn valid_target(target: &str) -> bool {
 }
 
 /// The view's key table for a server of `version`, as `source-file` reads
-/// it: every `MOUSE_BINDINGS` line that server has, in order, then ⌘C's
-/// and Ctrl+C's (`COPY_BINDING`, `COPY_OR_INTERRUPT_BINDING`).
+/// it: every `MOUSE_BINDINGS` line that server has, in order, then ⌘C's,
+/// Ctrl+C's and a paste's (`COPY_BINDING`, `COPY_OR_INTERRUPT_BINDING`,
+/// `LEAVE_COPY_MODE_BINDING`).
 pub fn view_bindings(version: (u32, u32)) -> String {
     MOUSE_BINDINGS
         .iter()
         .filter(|(since, _)| version >= *since)
         .map(|(_, binding)| *binding)
-        .chain([COPY_BINDING, COPY_OR_INTERRUPT_BINDING])
+        .chain([COPY_BINDING, COPY_OR_INTERRUPT_BINDING, LEAVE_COPY_MODE_BINDING])
         .map(|binding| format!("bind-key -T {KEY_TABLE} {binding}\n"))
         .collect()
 }
@@ -614,6 +624,9 @@ fn sgr_releases(data: &[u8]) -> Vec<usize> {
 /// release `RELEASE_GAP` after the write before it, so tmux reads it apart.
 /// `last`: when the last write went.
 fn write_input(writer: &mut impl Write, data: &[u8], last: &mut Option<std::time::Instant>) -> io::Result<()> {
+    if data.starts_with(PASTE_START) {
+        writer.write_all(LEAVE_COPY_MODE_KEY)?;
+    }
     // What's before each release goes, then the release (and what follows it) once the gap has passed.
     let mut from = 0;
     for at in sgr_releases(data) {
@@ -1391,14 +1404,14 @@ mod tests {
         let baseline = ["MouseDown1Pane", "MouseDown2Pane", "MouseDrag1Pane", "WheelUpPane", "DoubleClick1Pane", "TripleClick1Pane"];
         // A 3.2 server: tmux 3.2a's own six, no key it doesn't have (the scrollbar's), and ⌘C's.
         for old in [(3, 2), (3, 4), (3, 6)] {
-            assert_eq!(keys(old), [&baseline[..], &["C-M-S-F12", "C-M-S-F11"]].concat(), "{old:?}");
+            assert_eq!(keys(old), [&baseline[..], &["C-M-S-F12", "C-M-S-F11", "C-M-S-F10"]].concat(), "{old:?}");
             assert!(!view_bindings(old).contains("alternate_on") && !view_bindings(old).contains("Scrollbar"));
         }
         // 3.7 on: the wheel for a full-screen program without the mouse, and the scrollbar.
         for new in [(3, 7), (3, 8), (4, 0)] {
             let all = keys(new);
             assert_eq!(&all[..6], baseline);
-            assert_eq!(&all[6..], ["WheelUpPane", "MouseDown1ScrollbarUp", "MouseDown1ScrollbarDown", "MouseDrag1ScrollbarSlider", "C-M-S-F12", "C-M-S-F11"]);
+            assert_eq!(&all[6..], ["WheelUpPane", "MouseDown1ScrollbarUp", "MouseDown1ScrollbarDown", "MouseDrag1ScrollbarSlider", "C-M-S-F12", "C-M-S-F11", "C-M-S-F10"]);
         }
         // All in the view's table, none reaching beyond the pane.
         for line in view_bindings((4, 0)).lines() {
@@ -1543,6 +1556,43 @@ mod tests {
         assert!(!sessions.contains(&name), "{sessions}");
         assert!(!sessions.contains(VIEW_PREFIX), "{sessions}");
         assert_eq!(server.run(&["list-windows", "-t", "=agents", "-F", "#{window_name}"]), "a1");
+    }
+
+    /// A pane scrolled back is in copy mode, where tmux swallows a bracketed
+    /// paste whole (window_pane_key: the mode's, which reads no such keys): it
+    /// reaches the pane, and copy mode is left. Out of copy mode the key before
+    /// it is nothing to the pane; nor is a paste's Enter a line run.
+    #[cfg(unix)]
+    #[test]
+    fn a_paste_reaches_a_pane_scrolled_back_in_copy_mode() {
+        let dir = std::env::temp_dir().join(format!("pty-view-paste-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let input = dir.join("input");
+        // Every byte the pane is sent, as it comes; bracketed paste asked for, as Claude Code and shells do.
+        let cmd = format!("stty raw -echo; printf '\\033[?2004h'; exec cat > '{}'", input.display());
+        let Some(server) = Server::start("paste", "/dev/null", &cmd, (100, 30)) else {
+            std::fs::remove_dir_all(&dir).unwrap();
+            return;
+        };
+        let view = server.open(90, 25);
+        server.wait("the view's client attached", |s| s.run(&["list-clients", "-F", "#{session_name}"]).contains(view.name()));
+        server.wait("the pane's command started", |_| input.exists());
+        let received = || std::fs::read(&input).unwrap_or_default();
+        let in_mode = || server.run(&["display-message", "-p", "-t", "agents:a1", "#{pane_in_mode}"]);
+        let first: &[u8] = b"\x1b[200~line one\rline two\x1b[201~";
+        view.write(first);
+        server.wait("a paste reached the pane", |_| received().len() >= first.len());
+        assert_eq!(received(), first);
+        server.run(&["copy-mode", "-t", "agents:a1"]);
+        assert_eq!(in_mode(), "1");
+        let second: &[u8] = b"\x1b[200~scrolled back\x1b[201~";
+        view.write(second);
+        server.wait("the paste in copy mode reached the pane", |_| received().len() >= first.len() + second.len());
+        assert_eq!(received(), [first, second].concat());
+        assert_eq!(in_mode(), "0");
+        drop(view);
+        drop(server);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// ⌘C's key (COPY_BINDING): tmux's copy-mode selection goes to the view as

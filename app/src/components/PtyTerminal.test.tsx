@@ -2,7 +2,11 @@ import { act, cleanup, render } from "@testing-library/react";
 import type { ILink, ILinkProvider } from "@xterm/xterm";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { PtyViewHandlers, PtyViewOpener } from "../api/ptyView";
-import { COPIED_SHOWN, COPY_OR_INTERRUPT, PASTE_WAIT, PtyTerminal, selectionIn } from "./PtyTerminal";
+import { COPIED_SHOWN, COPY_OR_INTERRUPT, DRAWN_WAIT, PASTE_WAIT, PtyTerminal, selectionIn } from "./PtyTerminal";
+
+/* What goes to the debug log. */
+const logs = vi.hoisted(() => [] as unknown[][]);
+vi.mock("../api/debug", () => ({ logDebug: (...args: unknown[]) => void logs.push(args) }));
 
 /* The real xterm.js, recorded to read its buffer (as Terminal.test.tsx). */
 const xterms = vi.hoisted(() => [] as import("@xterm/xterm").Terminal[]);
@@ -23,6 +27,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   xterms.length = 0;
+  logs.length = 0;
   vi.unstubAllGlobals();
 });
 
@@ -142,6 +147,11 @@ it("off a Mac, ⌘V pastes the app's clipboard (bracketed where asked), and ⌘C
   press("v");
   await settled();
   expect(written.at(-1)).toBe("\x1b[200~ls[201~a[20[201~1~b201~rm -rf ~\r\x1b[201~");
+  // Half an emoji can't be sent: the shell's JSON refuses a lone surrogate, and the whole paste with it.
+  clipboard.text = "half \ud83d of 😀 and \ude00";
+  press("v");
+  await settled();
+  expect(written.at(-1)).toBe("\x1b[200~half � of 😀 and �\x1b[201~");
   written.length = 1;
   // An empty clipboard pastes nothing.
   clipboard.text = "";
@@ -185,6 +195,143 @@ it("keeps what's typed after ⌘V behind the paste while the clipboard is read, 
   reads[3].ok("late");
   await settled();
   expect(written.at(-1)).toBe("y");
+});
+
+const commandV = (target: EventTarget) => {
+  const e = new KeyboardEvent("keydown", { key: "v", metaKey: true, bubbles: true, cancelable: true });
+  act(() => void target.dispatchEvent(e));
+  return e;
+};
+
+it("holds a paste until the view's first bytes say how to send it: unbracketed, a two-liner's Enter would run its first line", async () => {
+  const { written, clipboard, opened, term } = mount();
+  clipboard.text = "!echo one\necho two";
+  commandV(term().textarea!);
+  act(() => term().input("x", true));
+  await settled();
+  expect(written).toEqual([]);
+  // tmux's first bytes turn bracketed paste on (tty_start_tty), whatever the pane asked.
+  act(() => opened.handlers!.onData(new TextEncoder().encode("\x1b[?2004h")));
+  await parsed(term());
+  await settled();
+  expect(written).toEqual(["\x1b[200~!echo one\recho two\x1b[201~", "x"]);
+});
+
+it("gives the new view the keyboard when a resume or reconnect replaces the one that had it, and takes nothing from a field in use", () => {
+  const open: PtyViewOpener = () => ({ write() {}, resize() {}, focus() {}, close() {} });
+  const at = { server: "brindle", target: "s:@1" };
+  const view = render(<PtyTerminal key="attempt-1" at={at} open={open} />);
+  xterms.at(-1)!.textarea!.focus();
+  view.rerender(<PtyTerminal key="attempt-2" at={at} open={open} />);
+  expect(xterms).toHaveLength(2);
+  expect(document.activeElement).toBe(xterms.at(-1)!.textarea);
+
+  const field = document.body.appendChild(document.createElement("input"));
+  field.focus();
+  view.rerender(<PtyTerminal key="attempt-3" at={at} open={open} />);
+  expect(document.activeElement).toBe(field);
+  field.remove();
+});
+
+it("takes a ⌘V pressed with the keyboard on nothing for the view last used, once; never one meant for a text field or a dialog", async (ctx) => {
+  const rects = vi.spyOn(HTMLElement.prototype, "getClientRects").mockReturnValue([{}] as unknown as DOMRectList);
+  ctx.onTestFinished(() => rects.mockRestore());
+  const first = mount();
+  const second = mount();
+  for (const { opened, term, clipboard } of [first, second]) {
+    clipboard.text = "pasted";
+    act(() => opened.handlers!.onData(new TextEncoder().encode("\x1b[?2004h")));
+    await parsed(term());
+  }
+  // A click on the app's own chrome leaves the keyboard on nothing; xterm.js hears no ⌘V.
+  act(() => second.term().textarea!.focus());
+  act(() => second.term().textarea!.blur());
+  expect(document.activeElement).toBe(document.body);
+  expect(commandV(document.body).defaultPrevented, "no webview paste follows to double it").toBe(true);
+  await settled();
+  expect(second.written).toEqual(["\x1b[200~pasted\x1b[201~"]);
+  expect(first.written).toEqual([]);
+  expect(document.activeElement).toBe(second.term().textarea);
+
+  const field = document.body.appendChild(document.createElement("input"));
+  field.focus();
+  expect(commandV(field).defaultPrevented).toBe(false);
+  field.remove();
+  const dialog = document.body.appendChild(document.createElement("div"));
+  dialog.setAttribute("role", "dialog");
+  act(() => second.term().textarea!.blur());
+  expect(commandV(document.body).defaultPrevented).toBe(false);
+  dialog.remove();
+  await settled();
+  expect(second.written).toHaveLength(1);
+  // The view last used, still mounted but off screen: the one on screen takes it.
+  const hidden = second.view.container.querySelector('[data-testid="terminal"]');
+  rects.mockImplementation(function (this: HTMLElement) {
+    return (this === hidden ? [] : [{}]) as unknown as DOMRectList;
+  });
+  expect(commandV(document.body).defaultPrevented).toBe(true);
+  await settled();
+  expect(first.written).toEqual(["\x1b[200~pasted\x1b[201~"]);
+  expect(second.written).toHaveLength(1);
+});
+
+it("logs every paste it drops, why and its size, never its text, and lets what's typed behind it go on", async (ctx) => {
+  const platform = vi.spyOn(navigator, "platform", "get").mockReturnValue("MacIntel");
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  ctx.onTestFinished(() => {
+    vi.useRealTimers();
+    platform.mockRestore();
+  });
+  const said = () => logs.filter((l) => l[1] !== "info").map((l) => [l[2], (l[3] as { bytes?: number } | undefined)?.bytes]);
+  const waited = (ms: number) => act(() => vi.advanceTimersByTimeAsync(ms));
+  const SECRET = "secret text";
+
+  // The view never draws: not sent blind, each Enter in it a line run.
+  const silent = mount();
+  commandV(silent.term().textarea!);
+  webviewPaste(silent.term().textarea!, SECRET);
+  act(() => silent.term().input("x", true));
+  await waited(DRAWN_WAIT);
+  expect(silent.written).toEqual(["x"]);
+  expect(said().at(-1)).toEqual([`paste dropped: the view drew nothing within ${DRAWN_WAIT} ms`, SECRET.length]);
+  silent.view.unmount();
+
+  // The client has gone.
+  const ended = mount();
+  act(() => ended.opened.handlers!.onData(new TextEncoder().encode("\x1b[?2004h")));
+  await parsed(ended.term());
+  act(() => ended.opened.handlers!.onExit(0));
+  webviewPaste(ended.term().textarea!, SECRET);
+  await waited(0);
+  expect(ended.written).toEqual([]);
+  expect(said().at(-1)).toEqual(["paste dropped: the view's client has exited", SECRET.length]);
+  // The view closes with a paste held for it.
+  const closing = mount();
+  webviewPaste(closing.term().textarea!, SECRET);
+  closing.view.unmount();
+  await waited(0);
+  expect(said().at(-1)).toEqual(["paste dropped: the view closed first", SECRET.length]);
+  ended.view.unmount();
+
+  // A ⌘V the webview never answers; a webview paste with no text, and an app's clipboard that has none or can't be read.
+  let read: () => Promise<string> = () => Promise.resolve("");
+  const live = mount(() => read());
+  act(() => live.opened.handlers!.onData(new TextEncoder().encode("\x1b[?2004h")));
+  await parsed(live.term());
+  commandV(live.term().textarea!);
+  await waited(PASTE_WAIT);
+  expect(said().at(-1)).toEqual([`⌘V: the webview's paste didn't come within ${PASTE_WAIT} ms`, undefined]);
+  commandV(live.term().textarea!);
+  webviewPaste(live.term().textarea!, null);
+  await waited(0);
+  expect(said().at(-1)).toEqual(["paste dropped: the clipboard holds no text", 0]);
+  read = () => Promise.reject(new Error("no clipboard"));
+  commandV(live.term().textarea!);
+  webviewPaste(live.term().textarea!, null);
+  await waited(0);
+  expect(said().at(-1)).toEqual(["paste dropped: couldn't read the app's clipboard: Error: no clipboard", 0]);
+  expect(live.written).toEqual([]);
+  expect(JSON.stringify(logs)).not.toContain(SECRET);
 });
 
 it("says \"Copied\" over the view for a moment whenever a copy reaches the app's clipboard: the program's (Claude Code's, through tmux, as OSC 52 with the mouse reported), tmux's, or xterm.js's selection let go", async () => {
@@ -310,7 +457,12 @@ it("Ctrl+C on Windows and Linux copies xterm.js's selection or tmux's, else is ^
 
 it("on a Mac, ⌘V pastes what the webview's own paste holds, in the ⌘V's place, once, without reading the app's clipboard", async (ctx) => {
   const platform = vi.spyOn(navigator, "platform", "get").mockReturnValue("MacIntel");
-  ctx.onTestFinished(() => platform.mockRestore());
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  ctx.onTestFinished(() => {
+    vi.useRealTimers();
+    platform.mockRestore();
+  });
+  const waited = (ms: number) => act(() => vi.advanceTimersByTimeAsync(ms));
   let reads = 0;
   const { written, opened, view, term } = mount(() => {
     reads++;
@@ -324,9 +476,18 @@ it("on a Mac, ⌘V pastes what the webview's own paste holds, in the ⌘V's plac
     act(() => void textarea.dispatchEvent(e));
     return e;
   };
+  // A webview slowed by load: its paste a second and a half behind the ⌘V still goes ahead of what's typed after.
+  press();
+  act(() => term().input("k", true));
+  await waited(1500);
+  expect(written).toEqual([]);
+  webviewPaste(textarea, "slow");
+  await settled();
+  expect(written).toEqual(["\x1b[200~slow\x1b[201~", "k"]);
+  written.length = 0;
   // The first ⌘V's paste comes late, after the wait: pasted once, then; the app's clipboard never read for it.
   expect(press().defaultPrevented).toBe(false);
-  await settled(PASTE_WAIT + 50);
+  await waited(PASTE_WAIT + 50);
   expect(written).toEqual([]);
   webviewPaste(textarea, "delayed");
   await settled();
@@ -342,7 +503,7 @@ it("on a Mac, ⌘V pastes what the webview's own paste holds, in the ⌘V's plac
   expect(e.defaultPrevented, "nothing goes into the textarea for xterm.js to paste again").toBe(true);
   await settled();
   expect(written).toEqual(["\x1b[200~pasted ✓\rline two\x1b[201~", "x"]);
-  await settled(PASTE_WAIT + 50);
+  await waited(PASTE_WAIT + 50);
   expect(reads).toBe(0);
 
   // Edit > Paste clicked (no ⌘V): pasted as it comes.
@@ -360,7 +521,7 @@ it("on a Mac, ⌘V pastes what the webview's own paste holds, in the ⌘V's plac
   const count = written.length;
   press();
   act(() => term().input("y", true));
-  await settled(PASTE_WAIT + 50);
+  await waited(PASTE_WAIT + 50);
   expect(written.slice(count)).toEqual(["y"]);
   expect(reads).toBe(1);
   webviewPaste(textarea, "late");
@@ -369,7 +530,7 @@ it("on a Mac, ⌘V pastes what the webview's own paste holds, in the ⌘V's plac
   // Unmounted while a ⌘V waits: nothing read for it.
   press();
   view.unmount();
-  await settled(PASTE_WAIT + 50);
+  await waited(PASTE_WAIT + 50);
   expect(reads).toBe(1);
 });
 
@@ -393,7 +554,7 @@ it("off a Mac, ⌘V pastes the app's clipboard, and an Edit > Paste after it pas
   await settled();
   expect(written).toEqual(["\x1b[200~fallback\x1b[201~", "\x1b[200~menu paste\x1b[201~"]);
   // And nothing more, however long on.
-  await settled(PASTE_WAIT + 50);
+  await settled(50);
   expect(written).toHaveLength(2);
 });
 

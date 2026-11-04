@@ -187,6 +187,45 @@ both failing without the label:
 To check by hand: drag in each pane and watch for "Copied" at the view's
 top right.
 
+## Paste reliability (branch `fix/terminal-paste-reliable`)
+
+Reports from staff builds 74 to 76 said paste was flaky, without exact symptoms.
+Probed on real tmux 3.8 and Claude Code 2.1.318, with a client on a pty as the
+view's. A paste that is dropped now says why in the debug log, by size.
+
+Causes found and fixed:
+
+- **A pane scrolled back loses the paste.** In copy mode tmux hands a bracketed
+  paste to the mode, which reads no such keys: the pane got nothing, and stayed
+  scrolled back. Unbracketed it was worse: `echo hello\rquit now\r` reached the
+  pane as `uit now\r`, its `q` having left copy mode. A paste now goes behind a
+  key that leaves copy mode (`LEAVE_COPY_MODE_BINDING`).
+- **A paste before the view's first bytes went unbracketed.** tmux's very first
+  bytes turn bracketed paste on (tmux then strips the markers for a pane that
+  didn't ask). Before them xterm.js says it's off, so each line was an Enter: in
+  Claude Code, `!echo one\recho two` ran the first line and left the second in
+  the prompt. Written before the client set its pty raw, `\r` also became `\n`.
+  A paste now waits for those bytes (`DRAWN_WAIT`).
+- **A resume or reconnect left the keyboard on nothing.** The new view's key
+  changes, its textarea goes with the focus, and SessionScreen focuses only on
+  navigation. ⌘V then reached nothing; so did any ⌘V after a click on the app's
+  own chrome. The new view now takes the keyboard, and a ⌘V with it on nothing
+  goes to the view last used.
+- **Typed keys overtook a late webview paste**, past `PASTE_WAIT` (1 s, now 3 s).
+- **A lone surrogate lost the whole paste.** `serde_json` refuses one, and the
+  error was swallowed. It is now U+FFFD, and a refused write is logged.
+
+Checked and not the cause, on real tmux: pastes up to 1 MiB (no partial write,
+truncation or doubling), multibyte text, and bracket markers split across writes
+up to 100 ms apart. Bracketed `!` two-liners in Claude Code kept both lines
+(`\r`, `\n`, U+2028, with extended keys on, and with `!` typed first). The
+"ran as one line" report was not reproduced.
+
+Not run in the real app: a debug build started from an agent session is refused
+by the daemon, so `PASTE_WAIT` under load and the ⌘V-off-the-view path have
+been checked in jsdom only. That path reads the app's clipboard, as a webview
+paste with no text does, and macOS may ask the person's leave to.
+
 ## Checks in the real app
 
 Build the branch: `cd app && npx tauri build --debug --no-bundle`. Then

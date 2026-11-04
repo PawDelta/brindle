@@ -135,7 +135,13 @@ export const tauriPtyView: PtyViewOpener = (at, size, given) => {
   // In order: two invokes in flight could land either way round.
   let sends: Promise<unknown> = opened;
   const after = (command: string, args: Record<string, unknown>) => {
-    sends = sends.then((id) => invoke(command, { id, ...args }).then(() => id)).catch(() => opened);
+    sends = sends
+      .then((id) => invoke(command, { id, ...args }).then(() => id))
+      .catch((e) => {
+        // What was typed or pasted is gone: said (its size, never its text). What follows it still goes.
+        if (typeof args.data === "string") logDebug("pty_view", "error", `input didn't reach the view: ${String(e)}`, { bytes: args.data.length, target: at.target });
+        return opened;
+      });
   };
   return {
     write: (data) => closed || after("pty_view_write", { data }),

@@ -71,7 +71,10 @@ view can run (`pty_view_status`: ready, or unusable with why).
   - and at every version, ⌘C's key (`COPY_BINDING`, C-M-S-F12): tmux copies
     its copy-mode selection, if any, without clearing it; and Ctrl+C's on
     Windows and Linux (`COPY_OR_INTERRUPT_BINDING`, C-M-S-F11): tmux copies
-    its selection and leaves copy mode, or with none sends C-c to the pane.
+    its selection and leaves copy mode, or with none sends C-c to the pane;
+    and the key a paste is written behind (`LEAVE_COPY_MODE_BINDING`,
+    C-M-S-F10): a pane scrolled back leaves copy mode, which would otherwise
+    swallow the whole bracketed paste.
 - **Copy and paste.** The client declares the `clipboard` feature, so tmux
   hands its copies to xterm.js as OSC 52. xterm's clipboard addon passes them
   to `pty_view_copy`, which writes through Tauri's clipboard plugin. The

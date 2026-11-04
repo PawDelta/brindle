@@ -198,6 +198,10 @@ def test_a_view_shows_the_pane_types_into_it_and_goes_when_closed(db):
                 try:
                     ws.send_json({"type": "input", "data": "typed-in-the-view\r"})
                     _until(ws, lambda seen: b"typed-in-the-view" in seen)
+                    # A pane scrolled back (copy mode) swallows a bracketed paste whole unless it is left first.
+                    tmux._tmux("copy-mode", "-t", window)
+                    ws.send_json({"type": "input", "data": "\x1b[200~pasted-scrolled-back\x1b[201~"})
+                    _until(ws, lambda seen: b"pasted-scrolled-back" in seen)
 
                     # The person's terminal typed in takes the window; the view focused takes it back.
                     other = subprocess.Popen([*tmux._argv(tmux.current_server()), "attach", "-t", "=agent"],
