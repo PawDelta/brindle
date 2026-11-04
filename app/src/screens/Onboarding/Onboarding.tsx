@@ -12,7 +12,8 @@
    its card with Retry and Skip for now) → each provider's own sign-in in
    the browser (components/ProviderSignIn's workings; brindle never sees the
    credentials). Both sign-ins, while the browser is waited on and after a
-   failure, offer Try again and Skip for now → You're ready → Pick a project (open a folder or clone a
+   failure, offer Try again (a provider's also Skip for now; brindle's own
+   is required: App's sign-in gate shows it before anything) → You're ready → Pick a project (open a folder or clone a
    repository: components/ProjectPicker) → the normal app, on New session
    in that project.
 
@@ -76,24 +77,31 @@ function Tick({ on = true }: { on?: boolean }) {
 }
 
 /* A browser sign-in's way out, while it waits and after it fails: start it
-   afresh, or go on and sign in later (Account, Settings › Providers). */
-function Escape({ onRetry, onSkip }: { onRetry(): void; onSkip(): void }) {
+   afresh, or (a provider's, not brindle's own, which is required) go on and
+   sign in later (Settings › Providers). */
+function Escape({ onRetry, onSkip }: { onRetry(): void; onSkip?(): void }) {
   return (
     <>
       <button type="button" className={button} data-testid="onb-signin-retry" onClick={onRetry}>
         Try again
       </button>
-      <button type="button" className={quiet} data-testid="onb-signin-skip" onClick={onSkip}>
-        Skip for now
-      </button>
+      {onSkip && (
+        <button type="button" className={quiet} data-testid="onb-signin-skip" onClick={onSkip}>
+          Skip for now
+        </button>
+      )}
     </>
   );
 }
 
 /* ---- Step 1: sign in to brindle, in the browser. ---- */
 
-function BrindleSignIn({ client, openUrl, onSignedIn, onSkip }: { client: DaemonClient; openUrl: OpenUrl; onSignedIn(): void; onSkip(): void }) {
-  const { job, busy, start, clear } = useJob();
+/* The app needs a brindle account: App's sign-in gate shows this before
+   anything else, and the flow's own step 1 is the same screen. No way past
+   it but signing in; `problem` (the account couldn't be read) sits above
+   the button with its own Retry. */
+export function BrindleSignIn({ client, openUrl, onSignedIn, kicker = "Step 1 of 3", problem }: { client: DaemonClient; openUrl: OpenUrl; onSignedIn(): void; kicker?: string; problem?: ReactNode }) {
+  const { job, busy, start } = useJob();
   const opened = useRef<string | null>(null);
   const url = job?.status === "running" ? (job.progress.find((line) => /^https?:\/\//.test(line)) ?? null) : null;
   // The authorize URL arrives on the bus: open it once.
@@ -111,13 +119,13 @@ function BrindleSignIn({ client, openUrl, onSignedIn, onSkip }: { client: Daemon
     opened.current = null;
     void start("Sign in to brindle", () => client.accountLogin(false, restart));
   };
-  const skip = () => {
-    clear();
-    onSkip();
-  };
   const failed = job?.status === "failed";
   return (
-    <Frame step="signin" narrow kicker="Step 1 of 3" title="Sign in to brindle" lede="Your account keeps your sessions, repos and usage together on every Mac you use.">
+    <Frame step="signin" narrow kicker={kicker} title="Sign in to brindle" lede="Your account keeps your sessions, repos and usage together on every Mac you use.">
+      <p className="text-sm text-ink-2" data-testid="signin-free">
+        brindle needs a free account to run. No payment details are asked for.
+      </p>
+      {problem}
       <div className="mt-s1 flex flex-wrap items-center gap-s2">
         {busy ? (
           <>
@@ -130,10 +138,10 @@ function BrindleSignIn({ client, openUrl, onSignedIn, onSkip }: { client: Daemon
                 Open the tab again
               </button>
             )}
-            <Escape onRetry={() => begin(true)} onSkip={skip} />
+            <Escape onRetry={() => begin(true)} />
           </>
         ) : failed ? (
-          <Escape onRetry={() => begin(true)} onSkip={skip} />
+          <Escape onRetry={() => begin(true)} />
         ) : (
           <button type="button" className={big} onClick={() => begin()}>
             Sign in with your browser
@@ -147,7 +155,6 @@ function BrindleSignIn({ client, openUrl, onSignedIn, onSkip }: { client: Daemon
       )}
       <p className={fine}>
         {busy ? "A tab opened in your browser. Finish there; this screen moves on by itself." : "A tab opens in your browser. Come back here when it's done; nothing to type here."}
-        {(busy || failed) && " You can also sign in later, from Account."}
       </p>
     </Frame>
   );
@@ -795,7 +802,8 @@ export function Onboarding({ client, providers, openUrl, pickFolder, onDone }: O
   // After brindle's sign-in, the cards: a CLI already on this Mac shows there as found.
   const afterSignIn = useCallback(() => setStep("connect"), []);
 
-  // Where the person is: signed in to brindle already, or not (an engine without accounts goes on).
+  // Where the person is: signed in to brindle already (App's sign-in gate saw to it), or not.
+  // A failed read goes on: the gate read the account a moment ago.
   useEffect(() => {
     let live = true;
     client.account().then(
@@ -925,7 +933,7 @@ export function Onboarding({ client, providers, openUrl, pickFolder, onDone }: O
       // The gate's Starting screen, a moment longer.
       return <Starting />;
     case "signin":
-      return <BrindleSignIn client={client} openUrl={openUrl} onSignedIn={afterSignIn} onSkip={afterSignIn} />;
+      return <BrindleSignIn client={client} openUrl={openUrl} onSignedIn={afterSignIn} />;
     case "connect": {
       const found = rows.filter(connected);
       return (

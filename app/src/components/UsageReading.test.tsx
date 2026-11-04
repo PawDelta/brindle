@@ -62,12 +62,17 @@ describe("the sidebar's weekly usage reading", () => {
     fireEvent.click(account);
     expect(await screen.findByRole("region", { name: "Account" })).toBeTruthy();
     expect(screen.queryByRole("dialog")).toBeNull();
+    // Signing out returns to the sign-in gate: nothing else, the sidebar gone.
     fireEvent.click(await screen.findByRole("button", { name: "Sign out" }));
-    await screen.findByTestId("sign-in");
-    await waitFor(() => {
-      expect(account.textContent).toBe("");
-      expect(account.querySelector("svg")).not.toBeNull();
-    });
+    await screen.findByTestId("signin-gate");
+    expect(screen.queryByRole("complementary", { name: "Sidebar" })).toBeNull();
+    // Signed in again (another account): back in the app, its initials in the sidebar.
+    daemon.deferLogin = true;
+    daemon.data.accountAfterLogin = { signed_in: true, name: "Sam Rivera", plan: "pro" };
+    fireEvent.click(screen.getByRole("button", { name: "Sign in with your browser" }));
+    await screen.findByText("Waiting for the browser…");
+    daemon.completeLogin();
+    await waitFor(() => expect(screen.getByRole("button", { name: "Open Account" }).textContent).toBe("SR"));
     fireEvent.click(within(screen.getByTestId("pages")).getByRole("button", { name: "Settings" }));
     const settings = await screen.findByRole("region", { name: "Settings" });
     const theme = within(settings).getByRole("group", { name: "Theme" });
@@ -84,17 +89,8 @@ describe("the sidebar's weekly usage reading", () => {
     expect(pages.className).toContain("flex-nowrap");
     expect(pages.className).toContain("whitespace-nowrap");
     expect(within(pages).getByRole("button", { name: "Agents" }).querySelector("[data-testid*='badge']")).toBeNull();
-    fireEvent.click(account);
-    await screen.findByTestId("sign-in");
-    expect(account.textContent).toBe("");
-    expect(account.querySelector("svg")).not.toBeNull();
-    daemon.deferLogin = true;
-    daemon.data.accountAfterLogin = { signed_in: true, name: "Sam Rivera", plan: "pro" };
-    fireEvent.click(screen.getByRole("button", { name: "Use a device code instead" }));
-    await screen.findByTestId("sign-in-state");
-    daemon.completeLogin();
+    fireEvent.click(screen.getByRole("button", { name: "Open Account" }));
     await screen.findByTestId("plan");
-    await waitFor(() => expect(account.textContent).toBe("SR"));
     stop();
   });
 
@@ -129,7 +125,7 @@ describe("the sidebar's weekly usage reading", () => {
     fireEvent.click(await screen.findByTestId("usage-reading"));
     const usage = await screen.findByTestId("usage");
     // Once the plan's cards have loaded above it, the scrolls settle.
-    await screen.findByTestId("sign-in");
+    await screen.findByTestId("plan");
     await waitFor(() => expect(scrolled.mock.contexts).toContain(usage));
     const before = scrolled.mock.calls.length;
     fireEvent.click(screen.getByTestId("usage-reading"));

@@ -551,6 +551,8 @@ describe("review", () => {
       sessionReview: { sup1: { ...READY, pr: { url: "https://github.com/example/proj/pull/7", unpushed: 0 } } },
       goal: { ...goal, goal_phase: "pr_open", pr_url: "https://github.com/example/proj/pull/7" },
     });
+    // Past the sign-in gate's account read: the app.
+    await screen.findByRole("complementary", { name: "Sidebar" });
     const back = await within(nav()).findByTestId("goal-pr-review");
     expect(back.textContent).not.toContain("not on the PR");
     later.daemon.data.sessionReview.sup1.pr = { url: "https://github.com/example/proj/pull/7", unpushed: 2 };
