@@ -24,7 +24,6 @@ from __future__ import annotations
 import importlib
 import os
 import pkgutil
-import re
 import shutil
 import sys
 import time
@@ -144,16 +143,21 @@ def _exec(argv: list[str], ready: Callable[[list[str]], bool] | None) -> bool:
         return False
 
 
-# -- MCP servers that can't reload themselves -------------------------------
+# -- MCP servers an update leaves on old code -------------------------------
 #
-# Servers from before this one (0.5.x, and 0.6.0, whose reload waited forever
-# on Claude Code's open subscriptions/listen) never leave the code they
-# started with. Claude Code starts a stdio server again when it exits (seen
-# with Claude Code 2.1.318), so the daemon of a newer install stops them, and
-# they come back on the new code. A server that can reload itself says so
-# (`register_reloading`) and is left to do it: it finishes its requests first.
-
-_MCP_COMMAND = re.compile(r"(?:-m brindle|/brindle) mcp(?:\s|$)")
+# No daemon stops a ``brindle mcp`` server. Claude Code (2.1.318) doesn't
+# start a stopped stdio server again: its session needs a `/mcp` reconnect,
+# with nothing saying why. And nothing proves a server can't reload: builds
+# 64-68 stopped every server on a replaced install that hadn't marked itself
+# as reloading, and their sweep dropped the marks of live servers it hadn't
+# seen in its `ps` snapshot (2026-11-04: a daemon started at 02:27:5x at load
+# ~200, the resumed sessions' servers at 02:28:04, and the 64->68 update
+# stopped both). Left running, a server that can reload does; one that can't
+# carries on with STALE_NOTICE on its results (and refuses every tool once a
+# newer brindle migrated the database).
+#
+# A server still marks itself, for a 64-68 daemon (a downgrade), which stops
+# unmarked ones; it drops only the marks of servers that are gone.
 
 
 def _reloading_dir():
@@ -164,55 +168,21 @@ def _reloading_dir():
 
 def register_reloading() -> Callable[[], None]:
     """Mark this process as a ``brindle mcp`` that reloads itself after an
-    update. Returns what unmarks it, for its exit (an exec keeps the mark)."""
-    mark = _reloading_dir() / str(os.getpid())
+    update, and drop the marks of servers that died without unmarking
+    themselves. Returns what unmarks it, for its exit (an exec keeps the mark)."""
+    from brindle import procs
+
+    marks = _reloading_dir()
+    mark = marks / str(os.getpid())
     try:
-        mark.parent.mkdir(parents=True, exist_ok=True)
+        marks.mkdir(parents=True, exist_ok=True)
         mark.touch()
+        for other in marks.iterdir():
+            if other.name.isdigit() and not procs.alive(int(other.name)):
+                other.unlink(missing_ok=True)
     except OSError:
         pass
     return lambda: mark.unlink(missing_ok=True)
-
-
-def stop_stale_mcp_servers() -> bool:
-    """Stop this brindle's ``brindle mcp`` servers (this BRINDLE_HOME, this
-    install's interpreter) that run a replaced executable and can't reload
-    themselves. One with processes of its own (a merge's git, a check) is
-    busy and left for now. Returns whether any was left, to look again."""
-    from brindle import procs
-
-    table = procs.table()
-    parents = {p.ppid for p in table.values()}
-    marks = _reloading_dir()
-    stale, left = set(), False
-    for p in table.values():
-        command = procs.command_line(p)
-        if not (_MCP_COMMAND.search(command) and procs._home_matches(p) and _same_interpreter(command)):
-            continue
-        if (marks / str(p.pid)).exists() or not procs.runs_replaced_executable(p):
-            continue
-        if p.pid in parents:
-            left = True
-        else:
-            stale.add(p.pid)
-    if stale:
-        import logging
-
-        logging.getLogger(__name__).warning(
-            "brindle: stopping %d MCP server(s) left on a replaced install; their clients start them again",
-            len(stale))
-        procs.terminate(stale)
-    for mark in marks.glob("*") if marks.is_dir() else ():
-        if mark.name.isdigit() and int(mark.name) not in table:
-            mark.unlink(missing_ok=True)     # a server that died without unmarking itself
-    return left
-
-
-def _same_interpreter(command: str) -> bool:
-    try:
-        return os.path.samefile(command.split(" ", 1)[0], sys.executable)
-    except OSError:
-        return False
 
 
 def reexec() -> None:

@@ -138,7 +138,6 @@ def _the_app_daemon_pauses_on_its_way_out_and_the_next_start_resumes(db, root, m
     monkeypatch.setattr(debuglog.Uploader, "start", lambda self: None)
     monkeypatch.setattr(lifecycle, "_upgrade_sweep", lambda: None)
     monkeypatch.setattr(lifecycle, "_reset_window_sizes", lambda: None)
-    monkeypatch.setattr(lifecycle, "_stop_stale_mcp_servers", lambda: False)
     monkeypatch.setattr(lifecycle, "WATCH_INTERVAL", 0.05)
     servers = []
     real_make = lifecycle.make_server
