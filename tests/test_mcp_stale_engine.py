@@ -326,6 +326,7 @@ class _Client:
 
 
 @pytest.mark.variant("real incident: the app updater moved the running engine's bundle away mid-session")
+@pytest.mark.slow("execs a real brindle mcp reload through a moved install; about 10 s on CI's macOS runners")
 @pytest.mark.parametrize("mid_call, old_deleted", [(False, False), (True, False), (False, True)])
 def test_an_app_update_is_served_by_the_new_install_on_the_same_connection(tmp_path, mid_call, old_deleted):
     """The app updater renames the running app away (to a tauri_updated_app
