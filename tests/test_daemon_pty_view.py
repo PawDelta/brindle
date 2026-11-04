@@ -62,6 +62,7 @@ def test_a_view_that_cant_open_says_why_and_closes(db):
         assert ws.receive()["type"] == "websocket.close"
 
 
+@pytest.mark.variant("the real-tmux test passes whenever something else sizes the window after the switch: this is the ordering it left to chance (a Linux CI flake)")
 def test_taking_the_window_makes_the_client_say_its_size_after_the_switch(monkeypatch):
     # tmux sizes the window before it marks the switched client latest, so the switch alone
     # leaves the window at the other client's size (a Linux CI flake): the client's own
