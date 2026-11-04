@@ -166,6 +166,7 @@ cli.doctor(fix=False)
 """
 
 
+@pytest.mark.variant("real incident: a user's brindle doctor hung; this runs the real command in its own process, which coverage can't credit")
 def test_doctor_prints_as_it_goes_and_exits_though_checks_and_discovery_block(tmp_path):
     """Run the real `brindle doctor` command with the repo lookup and one check's
     worker threads blocked forever: earlier results are already printed when
