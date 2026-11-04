@@ -950,7 +950,7 @@ pub async fn app_update_now<R: Runtime>(
     let gate = || may_check(&app, &home);
     let restart = || {
         announce(&app);
-        app.request_restart();
+        crate::instance::relaunch(&app);
     };
     let got = update_now(&installs, gate, &current, &mut feed, report, restart).await;
     announce(&app);
@@ -994,10 +994,10 @@ pub async fn app_update_install<R: Runtime>(app: AppHandle<R>) -> Result<Option<
 }
 
 /// Restart the app into the update `app_update_install` or
-/// `app_release_build_install` installed.
+/// `app_release_build_install` installed (see `instance::relaunch`).
 #[tauri::command]
 pub fn app_restart<R: Runtime>(app: AppHandle<R>) {
-    app.restart();
+    crate::instance::relaunch(&app);
 }
 
 /// Whether this machine lets staff install an update from Settings now (the

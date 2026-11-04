@@ -6,7 +6,16 @@ server's defaults), makes a fresh token and writes ``~/.brindle/daemon.json``
 ``daemon status`` / ``daemon stop`` find it. TCP binds 127.0.0.1 only. The
 daemon exits on SIGTERM, after an upgrade of brindle's install (the app
 starts the new one), and with ``--idle-exit`` once nobody has used it for
-IDLE_SECONDS while no agent runs. It removes its files on the way out."""
+IDLE_SECONDS while no agent runs. It removes its files on the way out.
+
+The app's daemon (``--idle-exit``) is a job of the person's launchd that the
+app loaded, and launchd stops it when the app goes away (quit, force quit,
+restarted into an update); the app replacing an older build's daemon stops
+it the same way. With that job switched off the daemon is the app's own
+child: the app stops it when it exits, and it stops itself once the app has
+gone after a force quit (APP_PID_ENV). On its way out it pauses every session it runs
+(``pause_for_exit``), as the person's Pause does, and the next daemon the app
+starts resumes them (``resume_after_start``)."""
 
 from __future__ import annotations
 
@@ -214,6 +223,135 @@ def _agents_running() -> bool:
         return True     # can't tell: stay up rather than strand an app
 
 
+RESUME_FILE = "resume-on-start.json"    # the sessions the last app daemon paused on its way out
+
+
+def _resume_path() -> Path:
+    return brindle_home() / RESUME_FILE
+
+
+def _record_resume(entries: list[dict]) -> bool:
+    """Replace the resume record with ``entries`` in one step: a reader sees
+    the old record or the new one, never half of one. False when it couldn't
+    be written: the old record, if any, is left as it was."""
+    path = _resume_path()
+    staged = path.with_name(f"{path.name}.{os.getpid()}")
+    try:
+        staged.write_text(json.dumps(entries))
+        os.replace(staged, path)
+    except OSError:
+        staged.unlink(missing_ok=True)
+        log.warning("brindle: couldn't record the paused sessions for the next daemon", exc_info=True)
+        return False
+    return True
+
+
+def pause_for_exit() -> list[str]:
+    """The app's daemon on its way out: every running session on this
+    daemon's own tmux server is paused as the person's Pause does
+    (agents.pause: windows closed, work kept, so nothing keeps acting with
+    nobody watching), for the next daemon to bring back (resume_after_start).
+    A session on another tmux server (a demo's, a test's, another home's
+    daemon's) is not this daemon's to pause: its windows aren't reachable from
+    here, and its workspace's session name may name some other session here.
+
+    The record of what is paused, with the server each session is on, is
+    written before the first pause, so a pause cut short (a tmux failure,
+    the daemon killed mid-way) still leaves its session to recover; each
+    entry is marked paused once its pause has finished (a later write that
+    fails leaves it unfinished, which recovery treats the safe way). No
+    record, no pause: a session paused with nothing to bring it back would
+    stay paused, so one that can't be recorded is left running. Processes
+    the panes hosted are left to a detached cull: the time to go is short
+    (the next start stops what the cull left, resume_after_start). A
+    session that can't be paused is only logged. Returns the roots paused."""
+    from brindle import agents, tmux
+    from brindle.db import DB
+    from brindle.service import sessions as svc
+
+    paused: list[str] = []
+    try:
+        db = DB()
+        try:
+            roots = [a for a in db.list_agents() if a.parent_id is None and a.mode == "interactive"
+                     and a.status not in ("done", "paused") and agents.same_server(a)]
+            if not roots:
+                _resume_path().unlink(missing_ok=True)
+                return paused
+            server = tmux.current_server()
+            entries = [{"id": root.id, "server": server, "paused": False} for root in roots]
+            if not _record_resume(entries):
+                return paused
+            for entry in entries:
+                try:
+                    agents.pause(db, entry["id"], stop_procs=False)
+                except Exception:  # noqa: BLE001 - the others still get paused
+                    log.warning("brindle: couldn't pause session %s on the way out", entry["id"], exc_info=True)
+                    continue
+                entry["paused"] = True
+                paused.append(entry["id"])
+                _record_resume(entries)
+        finally:
+            db.conn.close()
+        if paused:
+            svc.cull_detached()
+    except Exception:  # noqa: BLE001 - leaving must not fail over this
+        log.warning("brindle: couldn't pause the running sessions on the way out", exc_info=True)
+    return paused
+
+
+def _read_resume() -> list[dict] | None:
+    """The resume record's entries, or None when there is none to read."""
+    try:
+        entries = json.loads(_resume_path().read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(entries, list):
+        return []
+    return [e for e in entries if isinstance(e, dict) and isinstance(e.get("id"), str)]
+
+
+def resume_after_start() -> list[str]:
+    """Bring back the sessions the last app daemon paused on its way out
+    (pause_for_exit), once: the record goes before any is resumed, so one
+    that can't come back isn't tried at every start. Only roots still paused
+    are resumed (the person may have closed one meanwhile), and only those on
+    this daemon's own tmux server, recorded there and still there. One whose
+    pause never finished is paused again first (its windows and session
+    closed). Then, for every one, what still runs of it is stopped: the
+    detached cull pause_for_exit left that to may not have run, and once its
+    agents run again the cull would leave the old processes be."""
+    from brindle import agents, procs, tmux
+    from brindle.db import DB
+
+    entries = _read_resume()
+    if entries is None:
+        return []
+    _resume_path().unlink(missing_ok=True)
+    server = tmux.current_server()
+    resumed: list[str] = []
+    db = DB()
+    try:
+        for entry in entries:
+            root = db.get_agent(entry["id"])
+            if root is None or root.status != "paused":
+                continue
+            if entry.get("server") != server or not agents.same_server(root):
+                log.info("brindle: session %s is on another tmux server; not resumed here", root.id)
+                continue
+            try:
+                if not entry.get("paused"):
+                    agents.pause(db, root.id, stop_procs=False)
+                procs.stop([a.id for a in agents.tree(db, root.id)], grace=2.0)
+                agents.resume(db, root.id)
+                resumed.append(root.id)
+            except Exception:  # noqa: BLE001 - the others still come back
+                log.warning("brindle: couldn't resume session %s", root.id, exc_info=True)
+    finally:
+        db.conn.close()
+    return resumed
+
+
 async def _elapse(seconds: float) -> None:
     """Return once ``seconds`` have passed on the event loop's timer."""
     loop = asyncio.get_running_loop()
@@ -225,8 +363,22 @@ async def _elapse(seconds: float) -> None:
         handle.cancel()
 
 
+APP_PID_ENV = "BRINDLE_APP_PID"     # the app that started this daemon as its child (daemon.rs start_child)
+
+
+def _app_parent() -> int | None:
+    """The pid of the app this daemon is a child of, from APP_PID_ENV, which
+    is taken out of the environment so nothing the daemon starts inherits it."""
+    value = os.environ.pop(APP_PID_ENV, "")
+    return int(value) if value.isdigit() else None
+
+
 async def _watch(server, activity: Activity, idle_exit: bool, *,
-                 wait=_elapse, clock=time.monotonic) -> None:
+                 wait=_elapse, clock=time.monotonic, parent: int | None = None) -> None:
+    """The daemon's periodic checks. ``parent``: the app whose child this
+    daemon is (``_app_parent``); once it has gone (force quit: it had no
+    chance to stop its daemon) the daemon shuts down, gracefully, so the
+    sessions it ran are paused on its way out (``serve``)."""
     from brindle.daemon import health
     from brindle.daemon.session_review import ReadinessWatch
     from brindle.upgrade import InstallWatch
@@ -238,6 +390,9 @@ async def _watch(server, activity: Activity, idle_exit: bool, *,
     while not server.should_exit:
         due = clock() + WATCH_INTERVAL      # the wait's deadline, before any maintenance below
         await wait(WATCH_INTERVAL)
+        if parent is not None and not procs.alive(parent):
+            server.should_exit = True
+            break
         try:
             monitor.tick(activity, due)     # the daemon's own health, into debuglog
         except Exception:  # noqa: BLE001 - health logging must never stop the watch
@@ -351,6 +506,7 @@ def serve(*, unix: bool = True, tcp: bool = False, idle_exit: bool = False) -> d
     from brindle.daemon.app import build_app
     from brindle.daemon.auth import new_token
 
+    parent = _app_parent()      # before anything is started that would inherit it
     _raise_file_limit()
     token = new_token()
     socks, info = prepare(token, unix=unix, tcp=tcp)
@@ -368,15 +524,19 @@ def serve(*, unix: bool = True, tcp: bool = False, idle_exit: bool = False) -> d
     upgrade.on_stale_launch = lambda: setattr(server, "should_exit", True)
 
     async def run() -> None:
-        watcher = asyncio.create_task(_watch(server, activity, idle_exit))
+        watcher = asyncio.create_task(_watch(server, activity, idle_exit, parent=parent))
         resizer = asyncio.create_task(asyncio.to_thread(_reset_window_sizes))
         sweeper = asyncio.create_task(asyncio.to_thread(_upgrade_sweep))
+        # The app's daemon brings back what the last one paused on its way out.
+        resumer = asyncio.create_task(asyncio.to_thread(resume_after_start)) if idle_exit else None
         try:
             await server.serve(sockets=socks)
         finally:
             watcher.cancel()
             resizer.cancel()
             sweeper.cancel()
+            if resumer:
+                resumer.cancel()
 
     # uvicorn shuts down gracefully on SIGTERM, then raises it again with the
     # handler it found: make that an exit that still runs the cleanup below.
@@ -384,6 +544,11 @@ def serve(*, unix: bool = True, tcp: bool = False, idle_exit: bool = False) -> d
     try:
         asyncio.run(run())
     finally:
+        # The app's daemon, once it served: the app has gone (or replaced it), and
+        # what it ran is paused for the next daemon. One that never served
+        # (its start failed) runs nothing to pause.
+        if idle_exit and server.started:
+            pause_for_exit()
         for s in socks:
             s.close()
         cleanup(info)
