@@ -12,20 +12,26 @@
    - The panes as Claude Code 2.x draws them (its logo header and model,
      transcript, spinner, input box between rules, its own permission
      dialog), redrawn whole as the CLI does, and the tool results in the
-     engine's own words (assign's, report_result's, merge_workspace's). */
+     engine's own words (assign's, report_result's, merge_workspace's).
+   - The files the workers read, write and edit are recordingFiles.ts's: the
+     panes' counts and the PR's diff are both made from them. */
 
 import type { InboxItemDTO } from "../src/api/schema";
 import { unifiedDiff, type FakeDaemon } from "../src/test/fakeDaemon";
 import { usageScenario } from "../src/test/usage";
+import { CHANGES } from "./recordingFiles";
 
 export const RECORDING = new URLSearchParams(location.search).has("record");
 
 const WT = "~/Projects/pawdelta/.brindle/worktrees";
+const SESSION = "desktop/src/screens/Session/SessionScreen.tsx";
+const SESSION_TEST = "desktop/src/screens/Session/SessionScreen.test.tsx";
+const INBOX = "desktop/src/screens/Inbox";
 const PLAN = [
-  "1. Group the Inbox's cards by session, newest first (src/screens/Inbox/InboxScreen.tsx).",
+  "1. Group the Inbox's cards by session, newest first (new src/screens/Inbox/group.ts, used by InboxScreen.tsx).",
   "2. Each card links to its agent in the session view.",
   "3. The tray badge counts the same items the Inbox lists (src/screens/Inbox/notify.ts).",
-  "Tests: src/screens/Inbox.",
+  "Tests: src/screens/Inbox/notify.test.ts.",
 ].join("\n");
 
 /* A pane as Claude Code 2.x draws it. */
@@ -38,6 +44,49 @@ interface Claude {
   /* Its permission dialog, in the input box's place. */
   dialog: string[] | null;
 }
+
+/* Claude Code's tool lines for the files the workers change (recordingFiles.ts), every count made from them. */
+const lineCount = (text: string) => text.split("\n").length - (text.endsWith("\n") ? 1 : 0);
+const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
+const hunkLines = (path: string) => {
+  const diff = unifiedDiff(path, CHANGES[path].before, CHANGES[path].after).split("\n");
+  return diff.slice(diff.findIndex((l) => l.startsWith("@@")));
+};
+function stat(paths: string[]): { added: number; removed: number } {
+  const lines = paths.flatMap(hunkLines).filter((l) => !l.startsWith("@@"));
+  return { added: lines.filter((l) => l.startsWith("+")).length, removed: lines.filter((l) => l.startsWith("-")).length };
+}
+const read = (path: string) => [`⏺ Read(${path})`, `  ⎿  Read ${lineCount(CHANGES[path].before ?? CHANGES[path].after)} lines (ctrl+o to expand)`];
+const write = (path: string) => [`⏺ Write(${path})`, `  ⎿  Wrote ${lineCount(CHANGES[path].after)} lines to ${path}`];
+/* An edit as Claude Code shows it: its counts, then the first hunk with its line numbers (`shown` lines of it). */
+function update(path: string, shown = 0): string[] {
+  const { added, removed } = stat([path]);
+  const out = [`⏺ Update(${path})`, `  ⎿  Updated ${path} with ${plural(added, "addition")}${removed ? ` and ${plural(removed, "removal")}` : ""}`];
+  const lines = hunkLines(path);
+  const end = lines.findIndex((l, i) => i > 0 && l.startsWith("@@"));
+  // Each run of changed lines with its removals first, as Claude Code (and git) shows them.
+  const hunk = lines
+    .slice(1, end < 0 ? undefined : end)
+    .filter((l) => l !== "")
+    .reduce<string[][]>((runs, l) => {
+      const last = runs.at(-1);
+      if (last && (l[0] === " ") === (last[0][0] === " ")) last.push(l);
+      else runs.push([l]);
+      return runs;
+    }, [])
+    .flatMap((run) => (run[0][0] === " " ? run : [...run.filter((l) => l[0] === "-"), ...run.filter((l) => l[0] === "+")]));
+  const head = lines[0].match(/^@@ -(\d+),\d+ \+(\d+),\d+ @@/)!;
+  let [old, now] = [Number(head[1]), Number(head[2])];
+  for (const l of hunk.slice(0, shown)) {
+    const n = l[0] === "-" ? old++ : now++;
+    if (l[0] === " ") old++;
+    out.push(`${String(n).padStart(9)} ${l[0]}  ${l.slice(1)}`);
+  }
+  if (shown && hunk.length > shown) out.push(`       … +${plural(hunk.length - shown, "line")} (ctrl+o to expand)`);
+  return out;
+}
+const testsIn = (path: string) => (CHANGES[path].after.match(/^\s+it\(/gm) ?? []).length;
+const BRANCH_FILES = (branch: string) => Object.keys(CHANGES).filter((p) => CHANGES[p].branch === branch);
 
 const SPIN = ["·", "✢", "✳", "✶", "✻", "✽"];
 const age = (s: number) => (s < 60 ? `${Math.floor(s)}s` : `${Math.floor(s / 60)}m ${Math.floor(s % 60)}s`);
@@ -133,17 +182,8 @@ export function startRecording(daemon: FakeDaemon): void {
       blocks: [
         ["> Session view: goal panel above the tree, terminal | diff per agent. Keep the store the one place state", "  lives (decision 7c1d9e2a). Tests: src/screens/Session."],
         ["⏺ I'll read the current session screen first, then put the goal panel above the tree and key the diff by the", "  selected worker."],
-        ["⏺ Read(desktop/src/screens/Session/SessionScreen.tsx)", "  ⎿  Read 278 lines (ctrl+o to expand)"],
-        [
-          "⏺ Update(desktop/src/screens/Session/SessionScreen.tsx)",
-          "  ⎿  Updated desktop/src/screens/Session/SessionScreen.tsx with 61 additions and 14 removals",
-          "       38    import { Terminal } from \"../../components/Terminal\";",
-          "       39 +  import { GoalPanel } from \"../../components/GoalPanel\";",
-          "       40 +  import { BranchPanel } from \"../../components/BranchPanel\";",
-          "       96 -      <AgentList agents={agents} />",
-          "       97 +      <GoalPanel goal={goal} />",
-          "       98 +      <AgentTree nodes={sessionTree(agents)} selected={selected} onSelect={setSelected} />",
-        ],
+        read(SESSION),
+        update(SESSION, 10),
       ],
     },
     b31c9f02: {
@@ -152,8 +192,8 @@ export function startRecording(daemon: FakeDaemon): void {
       busy: null,
       blocks: [
         ["> Renderings of every screen, light and dark: a preview entry over the fake daemon, screenshotted with", "  Playwright into desktop/shots/out/."],
-        ["⏺ Write(desktop/shots/shots.mjs)", "  ⎿  Wrote 74 lines to desktop/shots/shots.mjs"],
-        ["⏺ Write(desktop/shots/preview.tsx)", "  ⎿  Wrote 58 lines to desktop/shots/preview.tsx"],
+        write("desktop/shots/shots.mjs"),
+        write("desktop/shots/preview.tsx"),
       ],
       dialog: [
         " Bash command",
@@ -175,8 +215,8 @@ export function startRecording(daemon: FakeDaemon): void {
       dialog: null,
       blocks: [
         ["> Inbox by session: group the cards by session, each linking to its agent. Plan first: send the plan with", "  submit_plan and wait for the decision before editing."],
-        ["⏺ Read(desktop/src/screens/Inbox/InboxScreen.tsx)", "  ⎿  Read 412 lines (ctrl+o to expand)"],
-        ["⏺ Read(desktop/src/screens/Inbox/notify.ts)", "  ⎿  Read 66 lines (ctrl+o to expand)"],
+        read(`${INBOX}/InboxScreen.tsx`),
+        read(`${INBOX}/notify.ts`),
         [
           "⏺ brindle - submit_plan (MCP)(plan: \"1. Group the Inbox's cards by session, newest first…\")",
           "  ⎿  Plan sent. Stop now and wait for your supervisor's decision; don't edit files until it's approved.",
@@ -213,10 +253,13 @@ export function startRecording(daemon: FakeDaemon): void {
   /* The session-view worker goes on: a tool call every few seconds. */
   const ux = panes.a7aaa807;
   at(4_000, () => ux.blocks.push(["⏺ Read(desktop/src/screens/Branch/DiffView.tsx)", "  ⎿  Read 246 lines (ctrl+o to expand)"]));
-  at(9_000, () => ux.blocks.push(["⏺ Update(desktop/src/screens/Session/SessionScreen.test.tsx)", "  ⎿  Updated desktop/src/screens/Session/SessionScreen.test.tsx with 22 additions"]));
-  at(14_000, () => ux.blocks.push(["⏺ Bash(npm --prefix desktop test -- --run src/screens/Session)", "  ⎿   ✓ src/screens/Session/SessionScreen.test.tsx (7 tests) 1.1s", "      Tests  7 passed (7)"]));
+  at(9_000, () => ux.blocks.push(update(SESSION_TEST)));
+  const tests = testsIn(SESSION_TEST);
+  at(14_000, () => ux.blocks.push(["⏺ Bash(npm --prefix desktop test -- --run src/screens/Session)", `  ⎿   ✓ src/screens/Session/SessionScreen.test.tsx (${plural(tests, "test")}) 1.1s`, `      Tests  ${tests} passed (${tests})`]));
   at(17_500, () => {
-    ux.blocks.push(["⏺ Bash(git commit -am \"Session view: goal panel above the tree, terminal | diff per agent\")", "  ⎿  [desktop/ux-revamp 4f2a9c1] Session view: goal panel above the tree, terminal | diff per agent", "      3 files changed, 97 insertions(+), 17 deletions(-)"]);
+    const files = BRANCH_FILES("desktop/ux-revamp");
+    const { added, removed } = stat(files);
+    ux.blocks.push(["⏺ Bash(git commit -am \"Session view: goal panel above the tree, terminal | diff per agent\")", "  ⎿  [desktop/ux-revamp 4f2a9c1] Session view: goal panel above the tree, terminal | diff per agent", `      ${files.length} files changed, ${added} insertions(+), ${removed} deletions(-)`]);
   });
 
   /* The shots worker: allowed, its download runs and it goes back to its task. */
@@ -240,8 +283,10 @@ export function startRecording(daemon: FakeDaemon): void {
     after(2_500, () => {
       run.splice(1, 1, "  ⎿  Downloading Chromium 131.0.6778.33 (playwright build v1148)", "     161.3 MiB [====================] 100% 0.0s", "     Chromium 131.0.6778.33 (playwright build v1148) downloaded to ~/Library/Caches/ms-playwright/chromium-1148");
     });
-    after(4_500, () => shots.blocks.push(["⏺ Bash(node desktop/shots/shots.mjs --scene session,inbox)", "  ⎿  session-light.png  session-dark.png", "     inbox-light.png  inbox-dark.png"]));
-    after(7_000, () => shots.blocks.push(["⏺ Update(desktop/shots/README.md)", "  ⎿  Updated desktop/shots/README.md with 6 additions"]));
+    // shots.mjs prints each file it writes: every scene asked for, light then dark.
+    after(4_500, () => shots.blocks.push(["⏺ Bash(node desktop/shots/shots.mjs --scene session,inbox)", "  ⎿  desktop/shots/out/session-light.png", "     desktop/shots/out/inbox-light.png", "     desktop/shots/out/session-dark.png", "     desktop/shots/out/inbox-dark.png"]));
+    after(6_000, () => shots.blocks.push(write("desktop/shots/README.md")));
+    after(7_000, () => shots.blocks.push(update("desktop/README.md")));
   }, 200);
 
   /* The inbox worker: its plan approved, the message brindle types into its chat, and it starts. */
@@ -253,7 +298,10 @@ export function startRecording(daemon: FakeDaemon): void {
     inbox.busy = { verb: "Grouping", since: Date.now(), tokens: 0.2 };
     status("e9a0b6c3", "processing");
     redrawAll();
-    after(3_000, () => inbox.blocks.push(["⏺ Update(desktop/src/screens/Inbox/InboxScreen.tsx)", "  ⎿  Updated desktop/src/screens/Inbox/InboxScreen.tsx with 38 additions and 11 removals"]));
+    after(2_000, () => inbox.blocks.push(write(`${INBOX}/group.ts`)));
+    after(3_500, () => inbox.blocks.push(update(`${INBOX}/InboxScreen.tsx`)));
+    after(5_000, () => inbox.blocks.push(update(`${INBOX}/notify.ts`)));
+    after(6_500, () => inbox.blocks.push(update(`${INBOX}/notify.test.ts`)));
   }, 200);
 
   /* At twenty seconds (the demo's lifecycle): each worker reports, the supervisor merges their branches and checks the milestones. */
@@ -277,30 +325,15 @@ export function startRecording(daemon: FakeDaemon): void {
   });
 }
 
-/* What the three merged branches changed on dev/desktop-app (the README's lines are the demo's own),
-   so the PR's diff holds the work the session just merged: [main's file or null, the session's]. */
-const MERGED: Record<string, [string | null, string]> = {
-  "desktop/shots/README.md": [
-    null,
-    "# Renderings\n\nEvery screen, light and dark, rendered from a preview entry over the fake daemon:\n\n```sh\nnode desktop/shots/shots.mjs              # every scene into desktop/shots/out/\nnode desktop/shots/shots.mjs --scene inbox\n```\n\nPlaywright's Chromium is fetched by npx on the first run.\n",
-  ],
-  "desktop/src/screens/Inbox/InboxScreen.tsx": [
-    'import { InboxCard } from "./InboxCard";\n\nexport function InboxScreen({ items }: { items: InboxItem[] }) {\n  return (\n    <main className="inbox">\n      {items.map((item) => <InboxCard key={item.id} item={item} />)}\n    </main>\n  );\n}\n',
-    'import { InboxCard } from "./InboxCard";\nimport { bySession } from "./group";\n\nexport function InboxScreen({ items }: { items: InboxItem[] }) {\n  return (\n    <main className="inbox">\n      {bySession(items).map(({ session, items }) => (\n        <section key={session.root} aria-label={session.goal}>\n          <h2>{session.goal}</h2>\n          {items.map((item) => <InboxCard key={item.id} item={item} linkTo={item.agent_id} />)}\n        </section>\n      ))}\n    </main>\n  );\n}\n',
-  ],
-  "desktop/src/screens/Session/SessionScreen.tsx": [
-    'import { Terminal } from "../../components/Terminal";\nimport { AgentList } from "../../components/AgentList";\n\nexport function SessionScreen({ agents, goal }: SessionScreenProps) {\n  const [selected, setSelected] = useState<string | null>(null);\n  return (\n    <main className="session">\n      <AgentList agents={agents} />\n      <Terminal agent={selected} />\n    </main>\n  );\n}\n',
-    'import { Terminal } from "../../components/Terminal";\nimport { GoalPanel } from "../../components/GoalPanel";\nimport { BranchPanel } from "../../components/BranchPanel";\nimport { AgentTree } from "./AgentTree";\nimport { sessionTree } from "./tree";\n\nexport function SessionScreen({ agents, goal }: SessionScreenProps) {\n  const [selected, setSelected] = useState<string | null>(null);\n  const [tab, setTab] = useState<"terminal" | "diff">("terminal");\n  return (\n    <main className="session">\n      <GoalPanel goal={goal} />\n      <AgentTree nodes={sessionTree(agents)} selected={selected} onSelect={setSelected} />\n      {tab === "terminal" ? <Terminal agent={selected} /> : <BranchPanel agent={selected} />}\n    </main>\n  );\n}\n',
-  ],
-};
-
-/* The session's files with the merged work in them (sessionFiles, sessionBase), and its diff against main as git would print it. */
+/* The session's files with its three workers' merged work in them (sessionFiles, sessionBase:
+   recordingFiles.ts, which the panes' counts come from too), and its diff against main as git would print it. */
 export function mergedSession(files: Record<string, string>, base: Record<string, string>): { files: Record<string, string>; base: Record<string, string>; diff: string } {
   const now = { ...files };
   const was = { ...base };
-  for (const [path, [before, after]] of Object.entries(MERGED)) {
+  for (const [path, { before, after }] of Object.entries(CHANGES)) {
     now[path] = after;
     if (before !== null) was[path] = before;
+    else delete was[path];
   }
   const diff = [...new Set([...Object.keys(was), ...Object.keys(now)])].sort().map((p) => unifiedDiff(p, was[p] ?? null, now[p] ?? null)).join("");
   return { files: now, base: was, diff };
