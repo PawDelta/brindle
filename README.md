@@ -7,10 +7,10 @@ side, each in its own git worktree. A supervisor agent splits the goal into mile
 hands the work out. Every branch merges only after a reviewer approves that exact commit and
 your checks pass. A milestone counts as done only when its check command exits 0.
 
-![The brindle desktop app running its built-in demo: a supervisor splits a goal between two workers, each branch is reviewed and merged, and both milestones turn green once their checks pass](https://raw.githubusercontent.com/PawDelta/brindle/main/assets/brindle-app-demo.gif)
+![The brindle desktop app: a supervisor runs a five-milestone goal, workers make progress in parallel, decisions wait in one inbox, every milestone turns green, and the result opens as a reviewed PR](https://raw.githubusercontent.com/PawDelta/brindle/main/assets/brindle-app-demo.gif)
 
-*The app's built-in demo on sample data: two workers in parallel, each branch reviewed and
-merged, both milestones verified by their tests.*
+*The desktop app on sample data: a supervisor and its workers in parallel, one inbox for
+every decision, milestones verified one by one, then a reviewed PR.*
 
 ## Why
 
