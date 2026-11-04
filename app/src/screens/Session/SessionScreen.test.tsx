@@ -746,6 +746,57 @@ describe("SessionScreen", () => {
 
 /* The app's pane view: a real tmux client on a pty, opened through PtyViews (the shell's in the app). */
 describe("SessionScreen, the pty view", () => {
+  it("replaces a missing pane at launch and follows recovery without applying an old pane check", async () => {
+    const v = views({ kind: "ready", tmux: "tmux 3.8" });
+    let pane = "%96";
+    let status = "idle";
+    let release: (() => void) | undefined;
+    let hold = false;
+    const { daemon, sync } = mount({}, { workspaces: [{ ...root, agents: [{ ...root.agents![0], window: pane }] }] }, (daemon) => async (input, init) => {
+      if (String(input).endsWith("/agents/sup1")) {
+        const response = new Response(JSON.stringify({ ...root.agents![0], window: pane, status, tmux_server: "brindle" }));
+        if (hold) {
+          hold = false;
+          await new Promise<void>((resolve) => { release = resolve; });
+        }
+        return response;
+      }
+      return daemon.fetch(input, init);
+    }, "sup1", ["sup1"], REPO, v.value);
+    await waitFor(() => expect(screen.getByTestId("terminal").dataset.target).toBe("%96"));
+    pane = "%102";
+    act(() => v.opened[0].handlers.onError("tmux couldn't make the view: can't find pane: %96"));
+    await waitFor(() => expect(screen.getByTestId("terminal").dataset.target).toBe("%102"));
+    expect(screen.queryByTestId("state-card")).toBeNull();
+    status = "paused";
+    act(() => v.opened.at(-1)!.handlers.onError("tmux couldn't make the view: can't find pane: %102"));
+    await waitFor(() => expect(screen.getByTestId("state-card").dataset.kind).toBe("ended"));
+    expect(screen.queryByTestId("terminal")).toBeNull();
+    expect(within(screen.getByTestId("state-card")).getByRole("button", { name: "Continue" })).toBeTruthy();
+    hold = true;
+    daemon.data.workspaces[0].agents![0].status = "waiting";
+    act(() => daemon.publish("agent.status", { agent_id: "sup1", payload: { status: "waiting" } }));
+    await waitFor(() => expect(release).toBeTruthy());
+    await act(() => sync.idle());
+    const oldView = v.opened.at(-1)!;
+    status = "idle";
+    pane = "%103";
+    daemon.data.workspaces[0].agents![0].status = "idle";
+    act(() => daemon.publish("agent.status", { agent_id: "sup1", payload: { status: "idle" } }));
+    await act(() => sync.refresh());
+    await waitFor(() => expect(screen.getByTestId("terminal").dataset.target).toBe("%103"));
+    await act(async () => release?.());
+    act(() => oldView.handlers.onError("old view closed"));
+    expect(screen.queryByTestId("state-card")).toBeNull();
+    status = "done";
+    daemon.data.workspaces[0].agents![0].status = "done";
+    act(() => daemon.publish("agent.status", { agent_id: "sup1", payload: { status: "done" } }));
+    await act(() => sync.refresh());
+    act(() => v.opened.at(-1)!.handlers.onError("can't find pane: %103"));
+    expect(screen.queryByTestId("terminal")).toBeNull();
+    sync.stop();
+  });
+
   /* PtyViews recording each view the surface opens. */
   function views(status: PtyStatus) {
     const opened: { at: PtyViewTarget; size: { cols: number; rows: number }; handlers: PtyViewHandlers; written: string[]; closed: boolean }[] = [];
