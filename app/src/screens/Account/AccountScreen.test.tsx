@@ -52,7 +52,7 @@ describe("account screen", () => {
     const { daemon, openUrl, onNavigate, stop } = setup();
     // Signed out: the free tier's features locked, cost reports locked by the engine, the plans a click away.
     await screen.findByTestId("sign-in");
-    expect(screen.getByText("Sign in to see your plan and what brindle is spending; brindle works without one.")).toBeTruthy();
+    expect(screen.getByText("Sign in to see your plan and what brindle is spending.")).toBeTruthy();
     // The plans as the pricing page has them: the free one in a sentence, the four cards as columns
     // over their lists with Free as the person's column, and the site's own upgrade.
     const features = screen.getByTestId("features");

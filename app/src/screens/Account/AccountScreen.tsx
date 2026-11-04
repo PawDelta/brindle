@@ -75,7 +75,7 @@ function SignIn({ client, openUrl, onDone }: { client: DaemonClient; openUrl: Op
   return (
     <section className={`${card} flex flex-col gap-s1 px-s2 py-s2`} aria-label="Sign in" data-testid="sign-in">
       <h2 className={h2}>Not signed in</h2>
-      <p className="text-sm text-ink-2">brindle is complete without an account. A brindle Pro plan adds hosted learning, cost reports, Docker services per worktree and more, listed below.</p>
+      <p className="text-sm text-ink-2">The free plan runs the whole workflow. A brindle Pro plan adds hosted learning, cost reports, Docker services per worktree and more, listed below.</p>
       {!busy && (
         <div className="flex flex-wrap items-center gap-s1">
           <button type="button" className={main} onClick={() => begin(false)}>
@@ -561,7 +561,7 @@ export function AccountScreen({ client, openUrl, onNavigate, section, ask }: Acc
   const lede = !account
     ? "Your plan and what brindle is spending."
     : !account.signed_in
-      ? "Sign in to see your plan and what brindle is spending; brindle works without one."
+      ? "Sign in to see your plan and what brindle is spending."
       : paying
         ? `Your brindle ${PLAN_LABEL[plan]} plan: what it includes, and what brindle is spending.`
         : "You're on the free plan: what it includes, what the paid plans add, and what brindle is spending.";
