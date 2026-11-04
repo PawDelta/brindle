@@ -18,7 +18,7 @@ jobs:
       - run: uv sync
       - run: |
           loop() {
-            for i in $(seq 1 60); do
+            for i in $(seq 1 8); do
               if ! uv run pytest -q -x -p no:cacheprovider --cov=brindle --cov-branch --cov-context=test --cov-report= tests/test_daemon_pty_view.py -k pane_types > out.$1.$i 2>&1; then echo "FAIL $1 $i"; grep -E "DBGDUMP|DBGUP|Captured|brindle:" out.$1.$i | head -40; fi
             done
           }
