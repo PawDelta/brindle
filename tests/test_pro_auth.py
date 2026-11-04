@@ -379,27 +379,22 @@ def test_binary_response_is_returned_without_decoding(server):
         200, {auth.BINARY_KEY: raw, auth.CONTENT_TYPE_KEY: "application/vnd.test+octet-stream"})
 
 
-@pytest.mark.parametrize("status,location,error", [
-    (307, "http://localhost:{port}/ok", "redirect"),   # another host
-    (302, "/ok", "302"),                               # method-changing
-    (307, "/ok", None),                                # same origin: followed
+@pytest.mark.parametrize("status,location,body,error", [
+    (502, None, b"<html>bad gateway</html>", "non-JSON"),
+    (307, "http://localhost:{port}/ok", b"", "redirect"),   # a redirect to another host
+    (302, "/ok", b"", "302"),                               # method-changing
+    (307, "/ok", b"", None),                                # same origin: followed
 ])
-def test_redirects(server, status, location, error):
+def test_non_json_response(server, status, location, body, error):
     routes, port = server
-    routes[("POST", "/r")] = (status, {"Location": location.format(port=port)}, b"")
+    headers = {"Location": location.format(port=port)} if location else {}
+    routes[("POST", "/r")] = (status, headers, body)
     routes[("POST", "/ok")] = (200, {}, b'{"ok": true}')
     if error is None:
         assert post(f"http://127.0.0.1:{port}/r") == (200, {"ok": True})
     else:
         with pytest.raises(TransportError, match=error):
             post(f"http://127.0.0.1:{port}/r")
-
-
-def test_non_json_response(server):
-    routes, port = server
-    routes[("POST", "/html")] = (502, {}, b"<html>bad gateway</html>")
-    with pytest.raises(TransportError, match="non-JSON"):
-        post(f"http://127.0.0.1:{port}/html")
 
 
 # -- the account plugin ---------------------------------------------------------------------------
