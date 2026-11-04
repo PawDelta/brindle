@@ -168,84 +168,43 @@ def test_a_brindle_package_in_the_cwd_is_not_what_brindle_runs_again(monkeypatch
     assert run.returncode == 0
 
 
-def test_a_newer_daemon_stops_the_mcp_servers_an_update_left_on_old_code(monkeypatch, tmp_path):
-    """Stopped: one on a replaced executable that can't reload. Left: one that
-    reloads itself (even one the snapshot missed), one busy with a process of
-    its own (to look at again), one on the install as it is, another brindle
-    home's."""
-    python = tmp_path / "python3"
+def test_no_daemon_stops_an_mcp_server_an_update_left_on_old_code(monkeypatch, tmp_path):
+    """2026-11-04: builds 64-68's daemon stopped every server on a replaced
+    install with no reload mark, and had dropped the marks of live servers
+    its `ps` snapshot missed, so the 64->68 update stopped two that could
+    reload. Claude Code doesn't start a stopped server again: each session
+    needed a /mcp reconnect. The daemon's watch now leaves such a server (here
+    unmarked, its executable replaced) running. A server's own mark survives
+    other servers starting; only the marks of dead servers go."""
+    from brindle.daemon import lifecycle, session_review
+
+    python = tmp_path / "python3"       # the install's interpreter now; this process runs another file
     python.write_text("")
     monkeypatch.setattr(upgrade.sys, "executable", str(python))
-    monkeypatch.setattr(procs, "_running_executable", lambda pid: os.stat(python) if pid == 4 else procs._DELETED)
     cmd = f"{python} -P -m brindle mcp"
-    table = {pid: procs.Proc(pid, 0, f"{cmd} BRINDLE_HOME={os.environ['BRINDLE_HOME']}", cmd) for pid in (1, 2, 3, 4)}
-    table |= {30: procs.Proc(30, 3, "git", "git"), 5: procs.Proc(5, 0, f"{cmd} BRINDLE_HOME={tmp_path}", cmd)}
+    me = os.getpid()
+    table = {me: procs.Proc(me, 0, f"{cmd} BRINDLE_HOME={os.environ['BRINDLE_HOME']}", cmd)}
     monkeypatch.setattr(procs, "table", lambda: table)
-    marks = upgrade._reloading_dir()
-    marks.mkdir(parents=True)
-    (marks / "2").touch()
-    (marks / "99").touch()      # a server that died without unmarking itself
-    # 2026-11-04: a server that started after the snapshot (the sessions an
-    # app restart resumed while `ps` crawled at load 200) is alive and marked
-    # but not in the table. Its mark was dropped, and the next update
-    # stopped it although it could reload.
-    (marks / "6").touch()
-    monkeypatch.setattr(procs, "alive", lambda pid: pid in table or pid == 6)
     stopped = []
     monkeypatch.setattr(procs, "terminate", stopped.append)
+    monkeypatch.setattr(session_review.ReadinessWatch, "sweep_safely", lambda self: None)
+    server = SimpleNamespace(should_exit=False)
 
-    assert upgrade.stop_stale_mcp_servers() is True
-    assert stopped == [{1}] and sorted(m.name for m in marks.iterdir()) == ["2", "6"]
+    async def one_tick(seconds):
+        server.should_exit = True
 
-    # Right after an update the machine is busy and `ps` can time out: the
-    # daemon looks again, less and less often, and gives up after 30 minutes
-    # (2026-11-04: it gave up at once and every stranded server hung until
-    # reconnected by hand).
-    from brindle.daemon import lifecycle
+    asyncio.run(lifecycle._watch(server, None, False, wait=one_tick))
+    assert stopped == []
 
-    def slow_ps():
-        raise subprocess.TimeoutExpired(["ps"], 30)
-
-    monkeypatch.setattr(procs, "table", slow_ps)
-    now = [0.0]
-    sweep = lifecycle._StaleServerSweep(clock=lambda: now[0])
-    sweep.run()
-    assert sweep.pending and not sweep.due()
-    now[0] = 5.0
-    assert sweep.due()
-    sweep.run()
-    now[0] = 10.0
-    assert not sweep.due()          # the gap grew
-    now[0] = lifecycle.STALE_SWEEP_GIVE_UP
-    sweep.run()
-    assert not sweep.pending
-
-
-def test_a_process_left_on_a_moved_or_deleted_executable_is_told_apart(tmp_path):
-    """What the app updater does to a running engine: its .app is moved away
-    (then deleted) and a new one put at its path."""
-    real = os.path.realpath(sys.executable)
-    me = procs._running_executable(os.getpid())
-    if me is None or me is procs._DELETED or (me.st_dev, me.st_ino) != (os.stat(real).st_dev, os.stat(real).st_ino):
-        pytest.skip("this Python runs through a launcher that execs another file (a framework build), "
-                    "so a copy of it can't stand in for the app's engine")
-    python = tmp_path / "bin" / "python"
-    python.parent.mkdir()
-    shutil.copy(real, python)
-    (tmp_path / "lib").symlink_to(os.path.join(os.path.dirname(os.path.dirname(real)), "lib"))
-    engine = subprocess.Popen([python, "-c", "print(flush=True); input()"], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
-    try:
-        engine.stdout.readline()        # it runs
-        running = procs.Proc(engine.pid, 0, str(python), str(python))
-        assert not procs.runs_replaced_executable(running)
-        python.rename(tmp_path / "moved")
-        shutil.copy(real, python)
-        assert procs.runs_replaced_executable(running)
-        (tmp_path / "moved").unlink()
-        assert procs.runs_replaced_executable(running)
-    finally:
-        engine.stdin.close()
-        engine.wait()
+    marks = upgrade._reloading_dir()
+    marks.mkdir(parents=True)
+    (marks / "6").touch()       # another live server's
+    (marks / "99").touch()      # a server that died without unmarking itself
+    monkeypatch.setattr(procs, "alive", lambda pid: pid in (me, 6))
+    unregister = upgrade.register_reloading()
+    assert sorted(m.name for m in marks.iterdir()) == sorted(["6", str(me)])
+    unregister()
+    assert [m.name for m in marks.iterdir()] == ["6"]
 
 
 def test_a_stale_install_is_told_to_clients_and_stops_the_daemon_before_a_launch(monkeypatch):
