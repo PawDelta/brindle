@@ -48,6 +48,9 @@ if (params.get("renderer") === "dom") {
 
 const SCENES: Record<string, Route> = {
   new: { screen: "new" },
+  "new-first": { screen: "new" },
+  "new-composer": { screen: "new" },
+  "new-codex-only": { screen: "new" },
   inbox: { screen: "inbox" },
   "session-failed": { screen: "session", root: "sup-42", repo: REPO, agent: "e9a0b6c3" },
   "settings-key": { screen: "settings" },
@@ -106,6 +109,11 @@ if (scene === "knowledge-map") {
   ];
   daemon.data.decisions.push({ ...daemon.data.decisions[0], id: "daemon-reads", topic: "Read-only daemon access", scope: ["docs/**", "src/brindle/daemon/**"] });
 }
+// First run: no project yet, the demo already offered.
+if (scene === "new-first" || scene === "new-composer" || scene === "new-codex-only") localStorage.setItem(DEMO_OFFERED_KEY, "1");
+if (scene === "new-first") daemon.data.repos = [];
+// Only Codex on this Mac: Claude Code neither installed nor signed in.
+if (scene === "new-codex-only") daemon.data.providers = freshProviders({ codex: { path: "/opt/homebrew/bin/codex", version: "0.48.0" } });
 if (scene === "session-review") {
   daemon.data.sessionReview["sup-42"] = { ready: true, reasons: [], branch: "desktop/ux-revamp", base: "main", diff: "" };
   daemon.data.sessionBase["sup-42"] = { "src/session.ts": "export const ready = false;\n" };
@@ -223,6 +231,8 @@ const OPENS: Record<string, string> = {
   "settings-signin": "Sign in to Codex",
   "agents-make": 'css:button[aria-label="Medium runs on"]',
   "knowledge-record": "Record a decision",
+  "new-composer": "Options ▾",
+  "new-codex-only": "Options ▾",
   "knowledge-add": "Add folder",
   "update-downloading": 'css:[data-testid="app-update-now"]',
 };
