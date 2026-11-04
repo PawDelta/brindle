@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from conftest import sh
 
 from brindle import config, spawn
@@ -18,6 +20,7 @@ def _count_shows(monkeypatch) -> list[list[str]]:
     return shows
 
 
+@pytest.mark.variant("the only assertion that repeated reads of one commit run `git show` once; other tests run these lines without counting git calls")
 def test_branch_config_read_is_cached(tmp_path, monkeypatch):
     sh("git init -q -b main && git config user.email a@b.c && git config user.name n", tmp_path)
     (tmp_path / ".brindle").mkdir()
