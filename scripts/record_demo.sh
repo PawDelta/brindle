@@ -14,7 +14,7 @@
 #
 #   DEMO_COLS / DEMO_ROWS   terminal size recorded (default 150x45)
 #   DEMO_TIMEOUT            hard stop, seconds (default 1200)
-#   DEMO_PROJECT            brindle checkout to run the demo from (default: this one)
+#   DEMO_PROJECT            brindle checkout to run the demo from (default: an export of HEAD)
 #   DEMO_SECONDS            target GIF length in seconds (default 20); sets the speed
 #   DEMO_RENDERER           vhs (default) or agg; agg garbles Claude Code's redraws
 #   DEMO_SPEED              playback speed (default: whatever gives DEMO_SECONDS)
@@ -71,6 +71,14 @@ rm -f "$CAST"
 # goes at the end.
 export BRINDLE_HOME
 BRINDLE_HOME=$(mktemp -d -t brindle-demo-rec)
+# Record a clean export of HEAD, not this checkout. Run from a git worktree,
+# brindle sends its sidebar, hooks and MCP servers to the installed brindle
+# (providers.brindle_invocation), so the demo would mix two builds.
+if [[ -z ${DEMO_PROJECT:-} ]]; then
+    PROJECT="$BRINDLE_HOME/engine"
+    mkdir -p "$PROJECT"
+    git -C "$ROOT" archive HEAD | tar -x -C "$PROJECT"
+fi
 mkdir -p "$BRINDLE_HOME/quota.json"
 # Not signed in: Pro credentials are read from this home only, never from
 # your keychain.
@@ -197,13 +205,19 @@ fi  # DEMO_RENDER_ONLY
 # prints after the session closes: drop everything after tmux leaves the
 # alternate screen (its client detaching), and the checkout's path from the
 # header, which agg never draws but which has no place in a published file.
-python3 - "$CAST" <<'EOF'
+python3 - "$CAST" "$PROJECT/pyproject.toml" <<'EOF'
 import json, os, re, sys
 path = sys.argv[1]
 lines = open(path, encoding="utf-8").read().splitlines()
 header = json.loads(lines[0])
 header.pop("command", None)
 events = [json.loads(l) for l in lines[1:] if l.strip()]
+# No version number on screen, so the GIF doesn't date itself: spaces of the
+# same width, in the status bar and the sidebar's header.
+version = re.search(r'(?m)^version = "([^"]+)"', open(sys.argv[2], encoding="utf-8").read()).group(1)
+for e in events:
+    if e[1] == "o":
+        e[2] = e[2].replace(f"v{version}", " " * (len(version) + 1)).replace(version, " " * len(version))
 last = max((i for i, e in enumerate(events) if e[1] == "o" and "\x1b[?1049l" in e[2]), default=None)
 if last is not None:
     events = events[:last]
