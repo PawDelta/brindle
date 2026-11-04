@@ -111,10 +111,29 @@ def _codex_config() -> dict:
         return {}
 
 
+def _worktree_git_dirs(cwd: str) -> list[str]:
+    """The git metadata a commit in the linked worktree ``cwd`` writes outside
+    it: the worktree's admin dir (its index, HEAD, COMMIT_EDITMSG and reflog)
+    and the common dir's objects, refs and logs. Never the common dir itself,
+    nor its hooks, config or info: hooks and config run outside the sandbox,
+    so a worker that could write them could escape it. Nothing for a main
+    checkout, whose .git is inside it."""
+    from brindle import git
+
+    git_dir, common = git.out(["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"],
+                              cwd).splitlines()
+    git_dir, common = os.path.realpath(git_dir), os.path.realpath(common)
+    if git_dir == common:
+        return []
+    return [git_dir, *(os.path.join(common, sub) for sub in ("objects", "refs", "logs"))]
+
+
 def _codex_writable_roots(ctx: LaunchContext) -> list[str]:
     """The shared build caches (uv's, the repo's cargo target dir) outside the
     worktree, so a worker under Codex's workspace-write sandbox can still
-    build, after the person's own ``sandbox_workspace_write.writable_roots``."""
+    build, and the git metadata a linked worktree keeps outside it, so it
+    can commit (_worktree_git_dirs), after the person's own
+    ``sandbox_workspace_write.writable_roots``."""
     if not ctx.cwd:
         return []
     from brindle import build_caches, git
@@ -122,7 +141,7 @@ def _codex_writable_roots(ctx: LaunchContext) -> list[str]:
 
     try:
         repo_root = git.main_repo_root(ctx.cwd)
-        roots = build_caches.writable_dirs(repo_root, load_repo_config(repo_root))
+        roots = build_caches.writable_dirs(repo_root, load_repo_config(repo_root)) + _worktree_git_dirs(ctx.cwd)
     except (git.GitError, ValueError, OSError):
         return []
     own = _codex_config().get("sandbox_workspace_write", {})

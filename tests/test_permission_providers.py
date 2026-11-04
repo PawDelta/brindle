@@ -739,7 +739,8 @@ def test_codex_sandbox_denies_reading_credentials(ws, tmp_path, monkeypatch, pol
     flags = dict(a.split("=", 1) for a in argv if a.startswith(("default_permissions=", "permissions.")))
     assert bool(flags) == (policy == "on")
     if policy == "off":
-        assert any(a.startswith("sandbox_workspace_write.writable_roots=") for a in argv)
+        [flag] = [a for a in argv if a.startswith("sandbox_workspace_write.writable_roots=")]
+        assert_codex_sandbox_never_writes_git_hooks_or_config(json.loads(flag.split("=", 1)[1]), ws.path)
         return
     name = providers.CODEX_PROFILE
     assert json.loads(flags["default_permissions"]) == name
@@ -752,6 +753,25 @@ def test_codex_sandbox_denies_reading_credentials(ws, tmp_path, monkeypatch, pol
         os.path.join(home, "daemon.json"), os.path.join(home, "brindle-keys"),
         os.path.realpath(credentials.FileStore().path.parent)}
     assert table[build_caches.uv_cache_dir()] == "write"
+    assert_codex_sandbox_never_writes_git_hooks_or_config([p for p, a in table.items() if a == "write"], ws.path)
+
+
+def assert_codex_sandbox_never_writes_git_hooks_or_config(roots, cwd, linked=True):
+    """Of the common dir, exactly what a commit in linked worktree ``cwd`` writes: never hooks, config, info."""
+    from brindle import git
+    git_dir, common = (os.path.realpath(p) for p in git.out(
+        ["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"], cwd).splitlines())
+    want = {git_dir, *(os.path.join(common, d) for d in ("objects", "refs", "logs"))} if linked else set()
+    assert common not in roots and {r for r in roots if r.startswith(common + os.sep)} == want
+
+
+@pytest.mark.parametrize("linked", [True, False])
+def test_codex_worker_can_commit(ws, linked):  # a linked worktree's git metadata lives outside it
+    from brindle.profiles import load_profile
+    from brindle.providers import LaunchContext, _codex_writable_roots
+    cwd = ws.path if linked else ws.repo_root
+    roots = _codex_writable_roots(LaunchContext("c1", load_profile("developer"), None, cwd=cwd))
+    assert_codex_sandbox_never_writes_git_hooks_or_config(roots, cwd, linked)
 
 
 @pytest.mark.parametrize("event,chars,expected", [
