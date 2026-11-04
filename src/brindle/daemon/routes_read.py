@@ -655,6 +655,20 @@ def providers_installed(db: DB, request: Request) -> Any:
 
 
 @_json
+def providers_usable(db: DB, request: Request) -> Any:
+    """What a new supervisor session in ``repo`` can run on, by the rule POST
+    /sessions starts by (service.sessions.supervisor_provider): ``usable``,
+    each CLI that is installed, signed in, turned on and allowed by the org's
+    policy, in preference order, and ``default``, the one a start with no
+    provider runs on (null when none is usable: such a start is refused)."""
+    from brindle.service import sessions as svc
+
+    root = git.main_repo_root(_need_repo(request))
+    usable = svc.usable_providers(root)
+    return {"usable": usable, "default": usable[0] if usable else None}
+
+
+@_json
 def provider_connection(db: DB, request: Request) -> Any:
     """How the provider connects (brindle.connections): sign-in, API key or a
     cloud, and for a cloud its settings and login (valid, expiry, the command
@@ -1000,6 +1014,7 @@ ROUTES = [
     Route("/v1/storage", get_storage),
     # Before the action routes' DELETE /v1/providers/{provider}.
     Route("/v1/providers/installed", providers_installed),
+    Route("/v1/providers/usable", providers_usable),
     Route("/v1/providers/{provider}/preflight", provider_preflight),
     Route("/v1/providers/{provider}/connection", provider_connection),
     Route("/v1/cloud/options", cloud_options),

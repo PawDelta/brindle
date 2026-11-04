@@ -1925,8 +1925,7 @@ def _codex_trust(codex, repo, level):
 
 
 @pytest.mark.parametrize("how,provider,setup,blocked", [
-    ("/v1/sessions", "claude", "signed-out", ["signin"]),
-    ("/v1/sessions", "codex", None, []),            # Codex's trust is recorded silently, then it launches
+    # (A start signed out, or with nothing to answer: test_a_new_session_runs_on_a_usable_cli_or_starts_nothing.)
     ("/v1/sessions", "codex", "untrusted", ["trust"]),   # the person's own answer to Codex is never overridden
     # Signed in by the key brindle stores for it, which Claude Code then asks about.
     ("/v1/sessions", "claude", "stored-key", ["consent"]),
@@ -1941,7 +1940,7 @@ def _codex_trust(codex, repo, level):
     ("assign", "claude", "session-key", ["consent"]),
     ("attached", "claude", "session-key", ["consent"]),   # the same, for a worker in a repo attached to it
     ("interactive", "claude", "fresh", []),         # a chat in a terminal: the person answers it there
-], ids=["start", "start-trusts-silently", "start-untrusted", "start-stored-key", "stale-open", "continue",
+], ids=["start-untrusted", "start-stored-key", "stale-open", "continue",
         "rewind", "worker-consent", "worker-untrusted", "worker-session-key", "worker-session-key-attached",
         "terminal-chat"])
 def test_preflight_holds_a_launch_its_cli_would_stop_on(db, world, tmp_path, monkeypatch, how, provider, setup,
@@ -2388,18 +2387,61 @@ def test_session_diff_before_ready(db, repo, lead):
     assert code == 200 and d["files"] == []
 
 
-def test_starting_a_session_with_a_name_keeps_it_on_the_new_root(db, world, monkeypatch):
+EVERY_CLI = ["claude", "codex", "antigravity", "opencode"]
+
+
+@pytest.mark.parametrize("asked,state,answer,usable", [
+    ("codex", {}, "codex", EVERY_CLI),
+    # Fixable by the person: the preflight's items; else the reason. Both list what else would run.
+    ("codex", {"missing": "codex"}, (409, "preflight"), ["claude", "antigravity", "opencode"]),
+    ("codex", {"signed_out": ("codex",)}, (409, "preflight"), ["claude", "antigravity", "opencode"]),
+    ("codex", {"allowed": ("claude", "opencode")}, (403, "forbidden"), ["claude", "opencode"]),
+    ("codex", {"off": "codex"}, (409, "turned_off"), ["claude", "antigravity", "opencode"]),
+    # No provider asked for: the remembered pick, else Claude, else the first usable one.
+    (None, {"pick": "antigravity"}, "antigravity", ["antigravity", "claude", "codex", "opencode"]),
+    (None, {"signed_out": ("claude", "antigravity", "opencode")}, "codex", ["codex"]),
+    # The policy allows only a CLI that isn't installed: nothing starts, not the profile's Claude.
+    (None, {"allowed": ("opencode",), "missing": "opencode"}, (409, "preflight"), []),
+    # The policy allows no CLI at all: still a preflight, naming what stops each one.
+    (None, {"allowed": ()}, (409, "preflight"), []),
+], ids=["explicit-usable", "explicit-missing", "explicit-signed-out", "explicit-policy", "explicit-off",
+        "default-pick", "default-only-codex", "default-none-by-policy", "default-none-allowed"])
+def test_a_new_session_runs_on_a_usable_cli_or_starts_nothing(db, world, tmp_path, monkeypatch, asked, state,
+                                                             answer, usable):
+    from brindle import providers_install
+    from brindle.pro import managed_models, team_policy
     from brindle.service import sessions as svc
 
-    root = db.get_agent("sup")
-    launched = []
-    monkeypatch.setattr(routes_actions, "session_blockers", lambda *a, **k: None)
-    monkeypatch.setattr(svc, "start", lambda *a, **k: launched.append(1) or svc.Started(root, world, False))
-    code, _ = _send("POST", "/v1/sessions", {"repo": world.repo_root, "name": 7})
-    assert code == 400 and launched == [] and db.get_agent("sup").name is None     # refused before any launch
-    code, reply = _send("POST", "/v1/sessions", {"repo": world.repo_root, "name": " Cache   work "})
-    assert code == 200 and reply["name"] == "Cache work"
-    assert db.get_agent("sup").name == "Cache work"
+    _provider_setup(tmp_path, monkeypatch)
+    bins = {"codex": "BRINDLE_CODEX_BIN", "opencode": "BRINDLE_OPENCODE_BIN"}
+    if "missing" in state:
+        monkeypatch.setenv(bins[state["missing"]], str(tmp_path / "not-installed"))
+    monkeypatch.setattr(providers, "signed_out", lambda p, env=None: (
+        f"{p} isn't signed in" if p in state.get("signed_out", ()) else None))
+    monkeypatch.setattr(team_policy, "access", lambda repo: Access(org_id="acme", allowed_providers=state.get(
+        "allowed")))
+    monkeypatch.setattr(managed_models, "current", lambda repo: None)
+    monkeypatch.setattr(providers_install, "turned_off", lambda p: p == state.get("off"))
+    if "pick" in state:
+        config.set_user(config.SUPERVISOR_KEY, state["pick"])
+    started = []
+    # Only the final launch (and the detached cull after it) is stubbed.
+    monkeypatch.setattr(svc, "launch", lambda db_, ws, provider=None, **k: started.append(provider) or svc.Started(
+        db_.get_agent("sup"), ws, True))
+    monkeypatch.setattr(svc, "cull_detached", lambda root: None)
+    body = {"repo": world.repo_root, **({"provider": asked} if asked else {})}
+    assert _send("POST", "/v1/sessions", {**body, "name": 7})[0] == 400 and started == []  # before any launch
+    got, reply = _send("POST", "/v1/sessions", {**body, "name": " Cache   work "})
+    if isinstance(answer, str):
+        assert (got, started, reply["name"], db.get_agent("sup").name) == (200, [answer], "Cache work", "Cache work")
+    else:
+        assert (got, started) == (answer[0], []), reply
+        if answer[1] == "preflight":
+            assert reply["preflight"] and reply["usable"] == usable, reply
+        else:
+            assert (reply["error"]["code"], reply["error"]["usable"]) == (answer[1], usable), reply
+    _, choice = _send("GET", f"/v1/providers/usable?repo={world.repo_root}")
+    assert choice == {"usable": usable, "default": usable[0] if usable else None}
 
 
 def test_supervisor_and_reviewer_choices_and_ordered_fallbacks_are_used(db, repo, world, monkeypatch):
