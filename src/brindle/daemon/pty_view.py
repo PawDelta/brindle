@@ -620,6 +620,11 @@ class PtyView:
         out = _tmux(self.server, "switch-client", "-E", "-c", self.tty, "-t", f"={self.view}", binary=self.binary)
         if out.returncode:
             raise ViewError(f"tmux couldn't give the view the window: {out.stderr.strip()}")
+        # tmux sizes the window before it marks the client latest (server_client_set_session),
+        # so the switch alone leaves the window at the other client's size until something
+        # else sizes it again. The client's resize message does: the window is sized to the
+        # latest client, which the switch has just made this one.
+        self.fit()
 
     def close(self) -> None:
         """The view session goes, which detaches its client; the agent's window

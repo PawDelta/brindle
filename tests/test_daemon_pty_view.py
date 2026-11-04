@@ -62,6 +62,24 @@ def test_a_view_that_cant_open_says_why_and_closes(db):
         assert ws.receive()["type"] == "websocket.close"
 
 
+def test_taking_the_window_makes_the_client_say_its_size_after_the_switch(monkeypatch):
+    # tmux sizes the window before it marks the switched client latest, so the switch alone
+    # leaves the window at the other client's size (a Linux CI flake): the client's own
+    # resize message, sent after the switch, is what sizes it.
+    steps = []
+    master, slave = pty.openpty()
+    proc = type("Live", (), {"pid": 4242, "poll": lambda self: None})()
+    view = pv.PtyView("tmux", ["-L", "x"], "v", proc, master, "/dev/pts/9", (60, 20), pv.Crop())
+    monkeypatch.setattr(pv, "_tmux", lambda *a, **kw: steps.append("switch") or subprocess.CompletedProcess(a, 0))
+    monkeypatch.setattr(pv.os, "kill", lambda pid, sig: steps.append((pid, sig)))
+    try:
+        view.take()
+    finally:
+        os.close(master)
+        os.close(slave)
+    assert steps == ["switch", (4242, pv.signal.SIGWINCH)]
+
+
 def _size(window: str) -> str:
     return tmux._tmux("display-message", "-p", "-t", window, "#{window_width}x#{window_height}").stdout.strip()
 
