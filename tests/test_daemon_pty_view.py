@@ -159,7 +159,21 @@ def test_a_view_shows_the_pane_types_into_it_and_goes_when_closed(db):
                     _until(ws, lambda _: _size(window) == "100x29"      # its status line takes a row
                            and "typed-in-the-terminal" in _pane(window))
                     ws.send_json({"type": "focus"})
-                    _until(ws, lambda _: _size(window) == "60x20")
+                    import time
+                    t0 = time.time()
+                    def dump(tag):
+                        print("DBG", tag, round(time.time() - t0, 2), _size(window),
+                              tmux._tmux("list-clients", "-F", "#{client_tty} #{session_name} #{client_width}x#{client_height} #{client_activity}").stdout.split("\n"),
+                              tmux._tmux("show-options", "-gw", "window-size").stdout, flush=True)
+                    dump("after-focus")
+                    watchdog.cancel()
+                    watchdog = threading.Timer(8, tmux._tmux, ("kill-session", "-t", f"={view}"))
+                    watchdog.start()
+                    try:
+                        _until(ws, lambda _: (dump("poll"), _size(window) == "60x20")[1])
+                    except AssertionError:
+                        dump("failed")
+                        raise
                     ws.send_json({"type": "resize", "cols": 70, "rows": 22})
                     _until(ws, lambda _: _size(window) == "70x22")
                 finally:

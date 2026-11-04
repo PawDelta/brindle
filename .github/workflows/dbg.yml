@@ -1,0 +1,19 @@
+name: dbg
+on:
+  push:
+    branches: [dbg/pty-view-linux]
+jobs:
+  dbg:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: sudo apt-get update -q && sudo apt-get install -yq tmux
+      - run: tmux -V
+      - uses: astral-sh/setup-uv@v10.2.0
+        with:
+          python-version: "3.12"
+      - run: uv sync
+      - run: uv run pytest -q -s tests/test_daemon_pty_view.py -k "pane_types" -p no:cacheprovider -x
+        continue-on-error: true
+      - run: uv run pytest -q -s tests/test_daemon_pty_view.py -k "pane_types" -p no:cacheprovider -x
+        continue-on-error: true
