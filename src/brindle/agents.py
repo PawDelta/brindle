@@ -20,7 +20,8 @@ import subprocess
 import sys
 import time
 import uuid
-from contextlib import ExitStack, contextmanager, nullcontext
+from contextlib import ExitStack, contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 
@@ -1118,7 +1119,11 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
     The CLI's config home is the one stored on the agent at spawn
     (provider_homes.decide): its identity check, preflight, pane and every
     resume use it, even after a sign-in inside brindle. An agent recorded by
-    an older brindle has none yet: it is decided and stored here, once."""
+    an older brindle has none yet: it is decided and stored here, once.
+
+    Within a gated resume (resume's ``gate``), the preflight checks the gate
+    and the launch itself holds it (_gate_commit)."""
+    _gate_check()
     try:
         upgrade.check_launch()
     except upgrade.StaleInstall as e:
@@ -1134,14 +1139,14 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
         agent.config_home = provider_homes.decide(agent.provider)
         if agent.config_home is not None:
             db.update_agent(agent.id, config_home=agent.config_home)
-    with provider_homes.using(agent.provider, agent.config_home):
+    with provider_homes.using(agent.provider, agent.config_home), ExitStack() as hold:
         _launch_resolved(db, agent, ws, prompt=prompt, resume=resume, watch_pane=watch_pane,
-                         background_setup=background_setup, model_checked=model_checked)
+                         background_setup=background_setup, model_checked=model_checked, hold=hold)
 
 
 def _launch_resolved(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
                      resume: str | None, watch_pane: bool, background_setup: bool = False,
-                     model_checked: bool = False) -> None:
+                     model_checked: bool = False, hold: ExitStack | None = None) -> None:
     m = managed(ws.repo_root)   # read once for this launch
     profile = _profile_for(db, agent, ws, m)
     _airgap_check(profile, ws.repo_root)
@@ -1152,6 +1157,7 @@ def _launch_resolved(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
             raise AgentError(why)
     if not provider.launches_process:
         # Nothing to start: the caller's own subagent does the work.
+        _gate_commit(hold)
         status = "done" if agent.result is not None else "processing"
         db.set_status(agent.id, status)
         agent.status = status
@@ -1160,6 +1166,7 @@ def _launch_resolved(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
     # different identity; one that can't be told never blocks.
     from brindle import provider_homes
 
+    _gate_check()
     why, outcome, route = company_identity.launch_check(
         provider.name, home=provider_homes.env_for(agent.provider, agent.config_home))
     if outcome:
@@ -1192,6 +1199,7 @@ def _launch_resolved(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
     warning = _add_dirs_warning(profile, provider.name)
     if warning:
         print(f"brindle: {warning}", file=sys.stderr)
+    _gate_commit(hold)     # what follows changes what runs
     if agent.headless:
         _launch_headless(db, agent, ws, prompt=prompt, resume=resume, watch_pane=watch_pane, m=m)
         return
@@ -1658,16 +1666,44 @@ def resume(db: DB, root_id: str, *, watch_pane: bool = True,
     With ``only``, just those agents (if paused) restart.
 
     ``gate``: a context manager factory the caller can stop this resume
-    with (lifecycle.Recovery.launching). It is entered before the preflight
-    and around every launch (and the queued tasks the resume starts), and
-    raises Cancelled once stopped: nothing more is launched past that."""
+    with (lifecycle.Recovery.launching), which raises Cancelled once
+    stopped. Every launch this resume makes (its agents', and the workers of
+    the queued tasks it starts) goes through it: checked during the preflight
+    and held only from the launch's first change of what runs (_gate_commit),
+    so a slow preflight (an identity probe) never holds the caller's stop up."""
+    if gate is None:
+        return _resume(db, root_id, watch_pane=watch_pane, only=only, recovery_env=recovery_env)
+    token = _launch_gate.set(gate)
+    try:
+        return _resume(db, root_id, watch_pane=watch_pane, only=only, recovery_env=recovery_env)
+    finally:
+        _launch_gate.reset(token)
+
+
+_launch_gate: ContextVar = ContextVar("brindle_launch_gate", default=None)   # resume's gate, for every launch it makes
+
+
+def _gate_check() -> None:
+    """Raise Cancelled if the resume under way has been stopped (its gate)."""
+    gate = _launch_gate.get()
+    if gate is not None:
+        with gate():
+            pass
+
+
+def _gate_commit(hold: ExitStack | None) -> None:
+    """A launch is about to change what runs: from here to its end it holds
+    the resume's gate (or is refused, Cancelled), so a stop waiting on that
+    gate sees it launched or not at all."""
+    gate = _launch_gate.get()
+    if gate is not None and hold is not None:
+        hold.enter_context(gate())
+
+
+def _resume(db: DB, root_id: str, *, watch_pane: bool, only, recovery_env) -> list[Agent]:
     from brindle import identity_lock, providers
 
-    def gated():
-        return gate() if gate is not None else nullcontext()
-
-    with gated():
-        pass
+    _gate_check()
     providers.invalidate_signed_in()
     from brindle import keystore, secrets
 
@@ -1702,8 +1738,7 @@ def resume(db: DB, root_id: str, *, watch_pane: bool = True,
                   if a.status in ("paused", "failed") and (only is None or a.id in only)]
     for a in candidates:   # all or nothing: a session never half-resumes under another identity
         identity_lock.ensure(a)
-    with gated():
-        pass
+    _gate_check()
     if any(a.id == root_id for a in candidates):
         from brindle import autopilot as pilot
 
@@ -1732,21 +1767,22 @@ def resume(db: DB, root_id: str, *, watch_pane: bool = True,
         if ref and not provider.can_resume(ref):
             ref = None  # nothing was ever said in it: start that agent fresh
         prompt = None if ref else _fresh_start_prompt(db, a, ws, provider, RESUME_NOTE)
-        with gated():
-            if a.dismissed_at is not None:
-                db.update_agent(a.id, dismissed_at=None)  # running again: show it again
-            _launch(db, a, ws, prompt=prompt, resume=ref,
-                    watch_pane=watch_pane and a.id == root_id, background_setup=True)
+        _gate_check()
+        if a.dismissed_at is not None:
+            db.update_agent(a.id, dismissed_at=None)  # running again: show it again
+        _launch(db, a, ws, prompt=prompt, resume=ref,
+                watch_pane=watch_pane and a.id == root_id, background_setup=True)
         resumed.append(a)
     if any(a.id == root_id for a in resumed):
         knowledge.note(db, root_id, knowledge.RESUME)
         from brindle import tasks
 
-        with gated():
-            try:
-                tasks.on_resumed(db, root_id)   # queued tasks the pause held back
-            except Exception:  # noqa: BLE001 - a queued task must never keep the session from resuming
-                log.exception("brindle: starting %s's queued tasks on resume failed", root_id)
+        try:
+            tasks.on_resumed(db, root_id)   # queued tasks the pause held back (their launches gated too)
+        except Cancelled:
+            raise
+        except Exception:  # noqa: BLE001 - a queued task must never keep the session from resuming
+            log.exception("brindle: starting %s's queued tasks on resume failed", root_id)
     ap = db.get_autopilot(root_id)
     failed_still = [a for a in candidates if db.get_agent(a.id) and db.get_agent(a.id).status == "failed"]
     if ap and ap.state == "blocked" and resumed and not failed_still:

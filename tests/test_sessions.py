@@ -81,7 +81,7 @@ def test_pause_then_resume_uses_the_saved_claude_session(db, root, monkeypatch, 
     saved.mkdir(parents=True)
     (saved / "sess-boss.jsonl").write_text("{}")
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
-    launched = []
+    launched, real_launch = [], agents._launch
     monkeypatch.setattr(agents, "_launch", lambda db, a, ws, **kw: launched.append((a.id, kw)))
     add(db, root, "boss")
     add(db, root, "w1", mode="assign", parent="boss")
@@ -92,6 +92,7 @@ def test_pause_then_resume_uses_the_saved_claude_session(db, root, monkeypatch, 
     assert launched[0][1]["resume"] == "sess-boss" and launched[0][1]["prompt"] is None
     assert launched[0][1]["watch_pane"] and not launched[1][1]["watch_pane"]
     # The app's daemon pauses what it runs as the app goes, and the next one resumes it.
+    monkeypatch.setattr(agents, "_launch", real_launch)
     _the_app_daemon_pauses_on_its_way_out_and_the_next_start_resumes(db, root, monkeypatch)
 
 
@@ -107,7 +108,7 @@ def _the_app_daemon_pauses_on_its_way_out_and_the_next_start_resumes(db, root, m
     import signal
     import threading
 
-    from brindle import debuglog, procs, spawn, upgrade
+    from brindle import company_identity, debuglog, procs, spawn, upgrade
     from brindle.daemon import lifecycle
     from brindle.service import sessions as svc
 
@@ -137,7 +138,26 @@ def _the_app_daemon_pauses_on_its_way_out_and_the_next_start_resumes(db, root, m
     monkeypatch.setattr(svc, "cull_detached", lambda repo_root=None: saying.append(
         lifecycle._pausing_path().read_text()))
     monkeypatch.setattr(procs, "stop", lambda ids, *a, **kw: events.append(("stop", sorted(ids))) or 0)
-    monkeypatch.setattr(agents, "_launch", lambda db_, a, ws, **kw: events.append(("launch", a.id)))
+    # Launches run for real up to their window, which is only counted (and their identity probe,
+    # which can be held up below).
+    probing, holding, go = [], [], threading.Event()
+
+    def hold(reached):
+        """Held in flight until the way out has written its record, or has to wait for this."""
+        reached.set()
+        go.wait(10)
+
+    monkeypatch.setattr(agents, "_open_window", lambda db_, a, *args, **kw: events.append(("launch", a.id)) or "%0")
+    monkeypatch.setattr(agents, "_detach", lambda args: None)
+    real_start = spawn.start
+    monkeypatch.setattr(spawn, "start", lambda argv, **kw: None if "_after-launch" in argv else real_start(argv, **kw))
+
+    def launch_check(provider, home=None):
+        if probing:
+            hold(probing.pop())
+        return None, None, None
+
+    monkeypatch.setattr(company_identity, "launch_check", launch_check)
     # What serve starts beside its watch, unrelated here; and its process-wide settings, restored after.
     monkeypatch.setattr(spawn, "_gated", spawn._gated)
     monkeypatch.setattr(upgrade, "on_stale_launch", upgrade.on_stale_launch)
@@ -203,35 +223,59 @@ def _the_app_daemon_pauses_on_its_way_out_and_the_next_start_resumes(db, root, m
     assert lifecycle._read_resume() == [{"id": "chat", "server": here, "paused": True}]
     # It told the app to wait for its pause (daemon.rs stop_daemon), and not past it.
     assert saying == [f"{os.getpid()}\n"] and not lifecycle._pausing_path().exists()
-    # The next app's daemon is stopped while it brings the session back (having stopped what the
-    # cull never did), its resume held up in agents.resume past the way out's wait for it until
-    # the way out has recorded what is left: nothing is launched past its pause, and the session
-    # is recorded again.
-    reached, recorded, recoveries = threading.Event(), threading.Event(), []
+    # The next app's daemon is stopped as its start takes that record, past the way out's wait
+    # for it (RESUME_WAIT 0): the record the way out writes again isn't taken after it.
+    recoveries = []
+
+    class Watched:
+        """A Recovery's lock, saying when the way out has to wait for it."""
+
+        def __init__(self):
+            self.inner = threading.Lock()
+
+        def __enter__(self):
+            if not self.inner.acquire(blocking=False):
+                go.set()
+                self.inner.acquire()
+
+        def __exit__(self, *exc):
+            self.inner.release()
 
     class Recovery(lifecycle.Recovery):
         def __init__(self):
             super().__init__()
+            self.lock = Watched()
             recoveries.append(self)
 
-    real_record, real_invalidate = lifecycle._record_resume, providers.invalidate_signed_in
+    real_record, real_path = lifecycle._record_resume, lifecycle._resume_path
 
     def record(entries):
         written = real_record(entries)
-        recorded.set()
+        go.set()
         return written
 
-    def held_in_flight():
-        if not recorded.is_set():
-            reached.set()
-            recorded.wait(10)
-        real_invalidate()
+    class Held(type(real_path())):
+        def unlink(self, missing_ok=False):
+            if holding:
+                hold(holding.pop())
+            super().unlink(missing_ok=missing_ok)
 
+    taken = threading.Event()
+    holding.append(taken)
     monkeypatch.setattr(lifecycle, "Recovery", Recovery)
     monkeypatch.setattr(lifecycle, "RESUME_WAIT", 0)
     monkeypatch.setattr(lifecycle, "_record_resume", record)
-    monkeypatch.setattr(providers, "invalidate_signed_in", held_in_flight)
-    serve(app_gone=False, after=reached)
+    monkeypatch.setattr(lifecycle, "_resume_path", lambda: Held(real_path()))
+    serve(app_gone=False, after=taken)
+    assert recoveries[-1].idle.wait(10), "the start never ended"
+    assert events == [] and lifecycle._read_resume() == [{"id": "chat", "server": here, "paused": True}]
+    # The next is stopped while it brings the session back (having stopped what the cull never
+    # did), its launch held up in its identity probe: the way out records and pauses without
+    # waiting for that probe, nothing is launched past its pause, and the session is recorded again.
+    go.clear()
+    probed = threading.Event()
+    probing.append(probed)
+    serve(app_gone=False, after=probed)
     assert recoveries[-1].idle.wait(10), "the held resume never ended"
     assert events == [("stop", ["chat", "helper"])] and db.get_agent("chat").status == "paused"
     assert lifecycle._read_resume() == [{"id": "chat", "server": here, "paused": True}]

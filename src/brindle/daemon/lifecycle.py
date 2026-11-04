@@ -392,10 +392,16 @@ class Recovery:
     start, as their record has already been taken.
 
     Every launch of a resume happens under ``launch_lock`` (launching, the
-    gate agents.resume enters), and stop takes it once ``stopping`` is set:
+    gate agents.resume holds from a launch's first change of what runs to its
+    end, not over its preflight), and stop takes it once ``stopping`` is set:
     a launch under way finishes before stop returns, and none begins after,
     however long that resume was held up, so the way out's pause sees every
-    session launched."""
+    session launched.
+
+    The start takes the record and registers it as ``pending`` in one step
+    under ``lock``, so the way out (which reads ``pending`` under it) sees
+    the record either still there or taken and pending, never neither, and a
+    record it writes is never taken by a start that was stopped."""
 
     def __init__(self) -> None:
         self.lock = threading.Lock()
@@ -448,17 +454,17 @@ def resume_after_start(recovery: Recovery | None = None) -> list[str]:
     from brindle.db import DB
 
     recovery = recovery or Recovery()
-    entries = _read_resume()
-    if entries is None:
-        return []
-    with recovery.lock:
+    with recovery.lock:     # the record taken and pending at once (Recovery)
         if recovery.stopping.is_set():
             return []       # stopped before it began: the record stays as it is
+        entries = _read_resume()
+        if entries is None:
+            return []
         recovery.pending = list(entries)
+        _resume_path().unlink(missing_ok=True)
         recovery.idle.clear()
     resumed: list[str] = []
     try:
-        _resume_path().unlink(missing_ok=True)
         server = tmux.current_server()
         db = DB()
         try:

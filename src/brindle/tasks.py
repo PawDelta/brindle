@@ -1280,6 +1280,10 @@ def _start_if_ready(db: DB, t: Task, dep_ref: str, check_room: bool = True) -> b
         return False
     try:
         new_worker = start_queued(db, t)
+    except agents.Cancelled:
+        # A resume stopped on the daemon's way out (agents.resume's gate): still queued, for the next resume.
+        db.update_task(t.id, state="pending", started_at=None)
+        raise
     except Exception as e:  # noqa: BLE001 - from a detached helper: its caller must hear why
         db.update_task(t.id, state="pending", started_at=None)
         reason = str(e).strip()
