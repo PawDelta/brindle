@@ -347,14 +347,19 @@ def _an_edit_whose_client_leaves_as_it_commits_keeps_the_commit(repo, monkeypatc
 
 class _FakePs:
     """The ``ps`` child procs.table starts through spawn.read: the agent's
-    pane (5001) and the tree that outlived its window."""
+    pane (5001) and the tree that outlived its window, listed only after a
+    first poll interval (spawn.read keeps waiting)."""
     started: list[list[str]] = []
     pid, returncode = 0, 0
 
     def __init__(self, argv, **kw):
         self.started.append(argv)
+        self.polled = False
 
     def communicate(self, input=None, timeout=None):
+        if not self.polled:
+            self.polled = True
+            raise subprocess.TimeoutExpired("ps", timeout)
         return "5001 1 cat\n5002 5001 node dev-server\n5003 5002 python -m pytest\n", ""
 
 

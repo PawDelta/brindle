@@ -42,6 +42,22 @@ This agreement is governed by the laws of the State of New York, without regard 
 
 ---
 
+## Writing tests
+
+Write the fewest tests that would fail without your change, and keep them fast.
+`.brindle/rules/learned.md` has the full rules. In short:
+
+- Each test must finish within 10 seconds, and should take well under one. The
+  suite fails any test over that duration limit (`BRINDLE_TEST_DURATION_LIMIT`
+  changes it) unless it is marked `@pytest.mark.slow("why")`.
+- Call functions and seed database rows. Don't start the brindle CLI, git
+  repos, tmux or subprocesses unless spawning is what the test is about.
+- One end-to-end test per feature at most. Share expensive setup through
+  module-scoped fixtures, use a fake clock instead of waiting, and never touch
+  the network.
+- Don't test wording, constants or defaults. Extend a parametrize table (one row
+  per branch) before adding a new test.
+
 ## The desktop app (`app/`)
 
 The desktop app lives in `app/` beside the engine, and this agreement covers

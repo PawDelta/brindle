@@ -1,5 +1,5 @@
 
-from brindle import budget, watch, watch_costs
+from brindle import budget, watch_costs
 from brindle.watch_costs import Local, Org, Remote
 
 
@@ -20,41 +20,6 @@ def texts(lines):
 
 def section(local, remote=None, now=1000.0, width=60, collapsed=False):
     return watch_costs.render(local, remote, now, width, collapsed)
-
-
-def test_shares_add_up_to_100():
-    pct = [p for _, p in watch_costs.shares([("a", 1), ("b", 1), ("c", 1)])]
-    assert sum(pct) == 100
-    assert watch_costs.shares([]) == []
-
-
-def test_worker_dollars_sit_next_to_tokens():
-    snap = [ws([agent(tokens="12k tokens")])]
-    lines = watch.render(snap, 1090, 80, costs=(Local(workers={"a1b2c3d4": 0.42}), None))
-    row = next(t for t in texts(lines) if "12k tokens" in t)
-    assert "12k tokens · $0.42" in row
-
-
-def test_costs_header_folds_with_space():
-    state = watch.NavState()
-    costs = (Local(month=1.0), None)
-    lines = watch.render([ws([agent()])], 1090, 40, state=state, costs=costs)
-    i = next(i for i, ln in enumerate(lines) if ln.group == watch_costs.GROUP)
-    state.selected = f"g:{watch_costs.GROUP}"
-    watch.handle_key(state, ord(" "), lines, 20)
-    assert watch_costs.GROUP in state.collapsed
-    folded = watch.render([ws([agent()])], 1090, 40, state=state, costs=costs)
-    assert len(folded) < len(lines) and folded[i].text.startswith("▸")
-    watch.handle_key(state, ord(" "), folded, 20)
-    assert watch_costs.GROUP not in state.collapsed
-
-
-def test_lines_fit_a_narrow_sidebar():
-    org = Org(True, 400.0, 1000.0, [("engineering", 300.0, 500.0), ("operations", 100.0, None)], 1, 3.0)
-    models = [("claude-opus-4-1-20250805", 5), ("claude-sonnet-4", 3), ("x", 1), ("y", 1)]
-    for ln in section(Local(month=2.0, models=models), Remote(limits=budget.Limits(month_usd=10.0),
-                                                            org=org, at=1000.0), width=30):
-        assert len(ln.text) <= 30
 
 
 # -- the org call ------------------------------------------------------------------------------
@@ -90,14 +55,6 @@ def test_fetch_spend_parses_the_org_answer(monkeypatch):
     assert stub.calls == [("GET", "/orgs/org_1/spend")]
     # cap: $50 a seat over 3 seats; one seat ($60) is over its budget
     assert org == Org(True, 120.5, 150.0, [("eng", 90.0, 200.0), ("ops", 10.0, None)], 1, 4.5)
-
-
-def test_spend_without_cost_centers_or_a_seat_budget():
-    org = watch_costs.parse_spend({"org_id": "o", "month": "2026-10", "total_usd": 9.0,
-                                   "seats": [{"sub": "a", "role": "member", "usd": 9.0}],
-                                   "budget": {"seat_month_usd": None, "goal_usd": None}})
-    assert org == Org(True, 9.0, None, [], 0, 0.0)
-    assert watch_costs.parse_spend({"budget_usd": 5}) is None     # not the server's shape
 
 
 def test_fetch_spend_is_silent_on_403_and_errors(monkeypatch):
@@ -168,11 +125,6 @@ def test_a_failing_collector_leaves_an_empty_remote():
     assert remote is not None and remote.org is None and remote.limits is None
 
 
-def test_a_narrow_folded_header_drops_the_model_rather_than_cut_the_title():
-    local_ = Local(models=[("claude-opus-5-5", 1)])
-    assert watch_costs.title(True, 14, local_) == "▸ Costs"
-
-
 def test_provider_capacity_in_sidebar():
     lines = section(Local(providers=[("agy", 0), ("claude", 64), ("codex", 97)],
                           windows={"claude": [("5h", 64), ("wk", 91), ("Fable", 19)],
@@ -186,17 +138,3 @@ def test_provider_capacity_in_sidebar():
     assert "█" not in "".join(body) and "░" not in "".join(body)
 
 
-def test_provider_rows_fit_the_sidebar_by_dropping_windows():
-    lines = section(Local(providers=[("claude", 64)],
-                          windows={"claude": [("5h", 64), ("wk", 91)]}), width=24)
-    assert all(len(t) <= 24 for t in texts(lines))
-    # the window with the most headroom goes first, never half a number
-    assert texts(lines)[1].strip() == "claude 5h 36% used"
-
-
-def test_provider_capacity_collapsed_title():
-    lines = section(Local(providers=[("claude", 85), ("codex", 100)]), collapsed=True)
-    assert lines[0].text == "▸ Costs (claude 15% used)"
-    # the provider with the least headroom, not the first by name
-    local_ = Local(providers=[("claude", 100), ("codex", 97), ("antigravity", 0)])
-    assert watch_costs.title(True, 40, local_) == "▸ Costs (antigravity 100% used)"

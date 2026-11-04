@@ -63,6 +63,13 @@ def test_seed_ci_config_still_seeds_onboarding_trust_and_the_key(tmp_path, repo)
 # -- the opt-in question -------------------------------------------------------------------------
 
 def test_keys_set_yes_approves(tmp_path):
+    # Only the Anthropic key is ever offered for approval: another provider's key, even with a yes, is not.
+    r = runner.invoke(app, ["keys", "set", "OPENAI_API_KEY"], input="sk-test-openai-0000\ny\n")
+    assert r.exit_code == 0, r.output
+    assert not _config(tmp_path).exists()
+    r = runner.invoke(app, ["keys", "set", "ANTHROPIC_API_KEY"], input=f"{KEY}\n")   # no answer: declined
+    assert r.exit_code == 0, r.output
+    assert not _config(tmp_path).exists()
     r = runner.invoke(app, ["keys", "set", "ANTHROPIC_API_KEY"], input=f"{KEY}\ny\n")
     assert r.exit_code == 0, r.output
     assert keystore.get_key("ANTHROPIC_API_KEY") == KEY
@@ -70,31 +77,18 @@ def test_keys_set_yes_approves(tmp_path):
     assert KEY not in r.output
 
 
-def test_keys_set_without_an_answer_declines(tmp_path):
-    r = runner.invoke(app, ["keys", "set", "ANTHROPIC_API_KEY"], input=f"{KEY}\n")
-    assert r.exit_code == 0, r.output
-    assert not _config(tmp_path).exists()
-
-
-def test_keys_set_asks_only_about_the_anthropic_key(tmp_path):
-    r = runner.invoke(app, ["keys", "set", "OPENAI_API_KEY"], input="sk-test-openai-0000\ny\n")
-    assert r.exit_code == 0, r.output
-    assert not _config(tmp_path).exists()
-
-
 def test_doctor_fix_accepted_approves_and_then_stops_asking(tmp_path, monkeypatch):
+    monkeypatch.setattr(doctor, "disk_checks", lambda *a, **k: [])      # it walks every worktree on the machine
     monkeypatch.setenv("ANTHROPIC_API_KEY", KEY)
+    doctor.fix(lambda p: False)   # declined: nothing is approved
+    assert not _config(tmp_path).exists()
+    monkeypatch.setattr(doctor, "checks", lambda root: [])
+    r = runner.invoke(app, ["doctor", "--fix"], input="\n")   # the CLI's own prompt: an empty answer declines
+    assert r.exit_code == 0, r.output
+    assert not _config(tmp_path).exists()
     doctor.fix(lambda p: True)
     assert json.loads(_config(tmp_path).read_text())["customApiKeyResponses"]["approved"] == [KEY[-20:]]
     assert doctor.fix(lambda p: 1 / 0) == ["ANTHROPIC_API_KEY: already approved in Claude Code"]
-
-
-def test_doctor_fix_cli_declines_by_default(tmp_path, monkeypatch):
-    monkeypatch.setenv("ANTHROPIC_API_KEY", KEY)
-    monkeypatch.setattr(doctor, "checks", lambda root: [])
-    r = runner.invoke(app, ["doctor", "--fix"], input="\n")
-    assert r.exit_code == 0, r.output
-    assert not _config(tmp_path).exists()
 
 
 # -- org-managed settings --------------------------------------------------------------------------
@@ -177,11 +171,3 @@ def test_quota_says_pay_per_token_for_a_key(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", KEY)
     assert "pay per token" in quota.note("claude") and "%" not in quota.note("claude")
     assert quota.headroom("claude") == 100.0
-
-
-def test_cost_footer_drops_the_subscription_caveat_for_a_key(monkeypatch):
-    from brindle import cost
-
-    assert "subscription" in "".join(cost._footer())
-    monkeypatch.setenv("ANTHROPIC_API_KEY", KEY)
-    assert "subscription" not in "".join(cost._footer())

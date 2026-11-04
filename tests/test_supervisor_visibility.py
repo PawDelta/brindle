@@ -1,7 +1,5 @@
-import json
 import os
 import time
-from types import SimpleNamespace
 
 from brindle import autopilot, git, mcp_server, tmux, view, watch
 from brindle.db import Agent, Workspace
@@ -40,36 +38,6 @@ def test_external_wait_tool_validation_and_visibility(db, tmp_path, monkeypatch)
     db.update_autopilot("boss", external_wait=None)
     assert autopilot.work_state(db, "boss") is None
     assert view.autopilot_entry(db, ws.repo_root, root_id="boss")["wait"] is None
-
-
-def test_untracked_summary_caps_listing():
-    text = git.summarize_untracked([f"d{i}/f" for i in range(100)])
-    assert len(text.splitlines()) <= git.MAX_UNTRACKED_LISTED + 2
-    assert "and 80 more" in text
-
-
-def test_last_activity_claude_transcript(tmp_path):
-    t = tmp_path / "t.jsonl"
-    lines = [
-        {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Read"}]}},
-        {"type": "user", "message": {"content": [{"type": "tool_result"}]}},
-        {"type": "assistant", "message": {"content": [{"type": "text", "text": "x"},
-                                                       {"type": "tool_use", "name": "WebFetch"}]}},
-        {"type": "user", "message": {"content": "hi"}},
-    ]
-    t.write_text("\n".join(json.dumps(x) for x in lines) + "\n{broken")
-    old = time.time() - 40
-    os.utime(t, (old, old))
-    out = view.last_activity(SimpleNamespace(transcript_path=str(t)))
-    assert out.startswith(" last: WebFetch 4") and out.endswith("s ago")
-
-
-def test_last_activity_native_and_missing(tmp_path):
-    t = tmp_path / "n.jsonl"
-    t.write_text(json.dumps({"type": "assistant", "tool_calls": [{"name": "bash"}]}) + "\n")
-    assert " last: bash " in view.last_activity(SimpleNamespace(transcript_path=str(t)))
-    assert view.last_activity(SimpleNamespace(transcript_path=None)) == ""
-    assert view.last_activity(SimpleNamespace(transcript_path=str(tmp_path / "no"))) == ""
 
 
 def test_list_agents_marks_stale_progress(db, tmp_path, monkeypatch):

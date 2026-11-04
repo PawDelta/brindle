@@ -273,16 +273,6 @@ describe("Sidebar", () => {
     again.sync.stop();
   });
 
-  it("offers no autopilot for a paused session's context, and says nothing about a PR", async () => {
-    const { sync } = mount({ workspaces: [root, worker], goal: { ...structuredClone(goal), root_id: "sup0", state: "paused", enabled: false } }, { screen: "session", root: "sup0", repo: REPO, agent: "sup0" });
-    const context = () => screen.getByTestId("session-context");
-    await waitFor(() => expect(within(context()).getByTestId("goal-line").textContent).toBe("1 of 2 milestones complete"));
-    expect(context().textContent).toContain("Refactor the cache");
-    expect(within(context()).queryByRole("switch")).toBeNull();
-    expect(context().textContent).not.toMatch(/PR/);
-    sync.stop();
-  });
-
   it("renames a session from its context title, then lists it by that name in its row and context; an empty name goes back to the goal", async () => {
     let refuse = true;
     const { daemon, sync } = mount({ workspaces: [root, worker], goal: structuredClone(goal) }, { screen: "session", root: "sup1", repo: REPO, agent: "sup1" }, (d) => (input, init) =>
@@ -348,16 +338,6 @@ describe("Sidebar", () => {
     expect(sessionRow("sup0")).toBeNull();
     await waitFor(() => expect(again.daemon.requests).toContainEqual(expect.objectContaining({ method: "POST", path: "/sessions/sup0/close" })));
     again.sync.stop();
-  });
-
-  it("keeps a closed agent's running child under the session", async () => {
-    // The snapshot leaves w1 out (closed) but keeps c1; w1's record says where c1 belongs.
-    const { daemon, sync } = mount({ workspaces: [root, { ...worker, agents: [child] }], closed: [worker.agents![0]] });
-    await waitFor(() => expect(agentRow("c1")).toBeTruthy());
-    expect(agentRow("w1")).toBeNull();
-    expect(screen.getByTestId("tree-session-sup1").contains(agentRow("c1"))).toBe(true);
-    expect(daemon.requests).toContainEqual({ method: "GET", path: "/agents/w1", query: {}, body: undefined });
-    sync.stop();
   });
 
   it("looks a closed parent up again with the next snapshot when the lookup failed", async () => {

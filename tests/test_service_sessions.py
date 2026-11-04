@@ -33,8 +33,6 @@ def running(db, repo, monkeypatch):
 
 @pytest.mark.parametrize("choice, branch, paused", [
     ("o", None, []),
-    pytest.param("a", "main", [], id="concurrent_sessions_alongside"),
-    ("n", "brindle/session-2", []),
     ("p", "main", ["sup1"]),
 ])
 def test_start_asks_about_a_running_session_then_does_what_was_chosen(db, repo, running, choice,

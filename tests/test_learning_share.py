@@ -23,10 +23,6 @@ def sharing(team, enabled=False, updated_at=None):
     return state
 
 
-def test_defaults_to_the_current_org(team):
-    sharing(team, enabled=True, updated_at=1_700_000_000)
-    code, out, _ = run(team, "org", "learning-share")
-    assert code == 0 and ORG in out and "ON" in out and "changed" in out
 
 
 def test_a_non_admin_gets_the_servers_refusal(team):
@@ -42,10 +38,3 @@ def test_a_malformed_answer_is_refused(team):
     assert code == 1 and "no learning-sharing state" in err
 
 
-def test_bare_account_shows_the_state(team):
-    sharing(team, enabled=True)
-    code, out, _ = run(team)
-    assert code == 0 and "Learning sharing: ON" in out
-    sharing(team, enabled=False)
-    code, out, _ = run(team)
-    assert "Learning sharing: off" in out

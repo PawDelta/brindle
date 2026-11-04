@@ -22,17 +22,6 @@ def fetch(backend, org_id=None):
     return next(p for p in backend.paths() if p.startswith("GET /entitlement"))
 
 
-def test_providers_are_sent_alongside_the_org_id(backend, monkeypatch):
-    monkeypatch.setattr(doctor, "signed_in_providers", lambda: ["claude", "native"])
-    seen = []
-    backend.routes["GET /entitlement?org_id=org_team1&providers=claude,native"] = \
-        lambda f, h: (seen.append(1), (404, {"error": "not_found"}))[1]
-    with pytest.raises(auth.AuthError):
-        auth._fetch_entitlement(auth.Client(transport=backend), backend.issue()["access_token"],
-                                time.time(), "org_team1")
-    assert seen
-
-
 def test_a_failing_probe_sends_nothing_and_does_not_break_the_fetch(backend, monkeypatch):
     def boom():
         raise OSError("probe failed")

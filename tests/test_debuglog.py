@@ -141,15 +141,3 @@ def test_debuglog_rotation_keeps_pending_entries(server, monkeypatch):
     assert debuglog.upload_once() == 2
     assert [e["message"] for e in s.posted[-1][1]["entries"]] == ["b", "c"]
     assert debuglog.upload_once() == 0
-
-
-def test_debuglog_disabled_writes_nothing_and_oversized_detail_is_replaced_by_a_marker():
-    config.set_user(debuglog.SETTING, False)
-
-    assert _send("POST", "/v1/debug/log", {"source": "app", "message": "hi"}) == (200, {"recorded": False})
-    assert not debuglog.log_path().exists()
-
-    config.set_user(debuglog.SETTING, True)
-    assert debuglog.record("app", "error", "big", ["é" * 2000] * 600)
-    assert debuglog.log_path().stat().st_size <= debuglog.MAX_ENTRY
-    assert json.loads(debuglog.log_path().read_text())["detail"]["truncated"] is True

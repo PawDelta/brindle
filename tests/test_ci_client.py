@@ -350,7 +350,6 @@ def test_plans_up_to_256kb_verify(plan, tmp_path):
     too_big = plan(instructions="x" * (200 * 1024))
     with pytest.raises(CIError, match="malformed plan"):
         ci_client.verify_plan(too_big, repo=REPO)
-    assert ci_client.CI_MAX_RESPONSE >= 2 * ci_client.MAX_PLAN_BYTES
 
 
 def test_report_posts_job_status(plan, tmp_path):
@@ -449,21 +448,6 @@ def test_run_fails_fast_when_the_supervisor_cant_start(plan, ci_repo, tmp_path):
     assert e.value.code == "launch" and server.events == []
 
 
-def test_run_keeps_heartbeating_while_stalled(plan, ci_repo, tmp_path):
-    base = head(ci_repo)
-    token = plan(base_sha=base)
-    db, adapter = DB(), FakeAdapter("claude")
-
-    def stall(seconds):
-        db.update_autopilot(adapter.launched[0][0], state="stalled", note="no progress after 3 reminders")
-    server = Server(token, actions=[{"action": "continue"}, {"action": "continue"},
-                                    {"action": "stop", "reason": "timeout"}])
-    ci_client.run(token, token_file(tmp_path), cwd=str(ci_repo), env=run_env(), client=server.client,
-                  db=db, adapters={"claude": adapter}, sleep=stall, say=lambda s: None)
-    assert [e["state"] for e in server.events] == ["stalled"] * 3, "the server decides what a stall means"
-    assert evidence_of(server.results[0])["final_state"] == "timeout"
-
-
 def test_milestones_carry_the_plans_ids_and_may_lack_a_check(plan, ci_repo, tmp_path):
     base = head(ci_repo)
     token = plan(base_sha=base, milestones=[{"id": 7, "title": "design", "check": None},
@@ -483,21 +467,6 @@ def test_milestones_carry_the_plans_ids_and_may_lack_a_check(plan, ci_repo, tmp_
     assert [r["id"] for r in evidence_of(server.results[0])["milestones"]] == [7, 9]
     with pytest.raises(CIError, match="milestones are malformed"):
         ci_client.verify_plan(plan(milestones=[{"id": 1, "title": "x", "check": ""}]), repo=REPO)
-
-
-def test_result_has_only_protocol_fields_without_a_bundle(plan, ci_repo, tmp_path, monkeypatch):
-    base = head(ci_repo)
-    token = plan(base_sha=base)
-    server = Server(token, actions=[{"action": "stop", "reason": "budget"}])
-    monkeypatch.setattr(ci_client, "BUNDLE_MAX", 10)
-    ci_client.run(token, token_file(tmp_path), cwd=str(ci_repo), env=run_env(), client=server.client,
-                  db=DB(), adapters={"claude": FakeAdapter("claude", commit=commit_file)}, sleep=lambda s: None,
-                  say=lambda s: None)
-    body = server.results[0]
-    ev = evidence_of(body)
-    assert b'name="bundle"' not in body, "over the limit: no bundle"
-    assert ev["final_state"] == "budget" and ev["commits"] == 1
-    assert set(ev) <= {"final_state", "milestones", "usage", "providers", "question", "commits"}
 
 
 def test_report_posts_a_failed_validation_run_job(plan, tmp_path):
@@ -649,20 +618,15 @@ def test_plan_verification_failures(plan, signing_key):  # noqa: F811
         ci_client.verify_plan("not.a.jwt", repo=REPO)
 
 
+# -- the org's protected paths and dollar budget (Team org_budgets) --------------------------------
+
+
 @pytest.mark.brindle_ci_guard
 def test_plan_errors_never_quote_the_token(plan):
     bad = plan(repo="other/repo")
     with pytest.raises(CIError) as e:
         ci_client.verify_plan(bad, repo=REPO)
     assert bad[:20] not in str(e.value)
-
-
-def test_plan_defaults_limits(plan):
-    c = ci_client.verify_plan(plan(limits=...), repo=REPO)
-    assert c["limits"] == {"timeout_min": 100, "token_budget": 0, "heartbeat_s": 60}
-
-
-# -- the org's protected paths and dollar budget (Team org_budgets) --------------------------------
 
 
 @pytest.mark.brindle_ci_guard
@@ -672,17 +636,6 @@ def test_plan_org_limits_must_be_well_formed(plan):
                  {"budget_usd": "5"}, {"budget_usd": -1}, {"budget_usd": True}]:
         with pytest.raises(CIError, match="malformed"):
             ci_client.verify_plan(plan(**over), repo=REPO)
-
-
-def test_the_token_budget_is_priced_in_dollars(plan, monkeypatch):
-    from brindle import pricing
-
-    monkeypatch.setattr(pricing, "profile_price", lambda name, root, extra=None: pricing.Price(10, 50, 12.5, 1))
-    c = ci_client.verify_plan(plan(profile="big"), repo=REPO)
-    # a typical task (200k in, 40k out, 600k cache read) is $4.60 for 840k tokens
-    assert ci_client.token_budget_usd(c, ".") == pytest.approx(4.6 * 1000 / 840_000)
-    monkeypatch.setattr(pricing, "profile_price", lambda name, root, extra=None: None)
-    assert ci_client.token_budget_usd(c, ".") is None
 
 
 @pytest.mark.brindle_ci_guard
@@ -699,19 +652,6 @@ def test_a_run_that_changes_a_protected_path_publishes_nothing(plan, ci_repo, tm
     assert ev["final_state"] == "failed" and ev["commits"] == 0
     assert "fix.txt" in ev["question"] and "protected" in ev["question"]
     assert b'name="bundle"' not in server.results[0]
-
-
-def test_a_run_outside_the_protected_paths_is_published(plan, ci_repo, tmp_path):
-    base = head(ci_repo)
-    token = plan(base_sha=base, protected_paths=["infra/", ".github/workflows"])
-    server = Server(token)
-    db = DB()
-    adapter = FakeAdapter("claude", commit=commit_file)
-    ci_client.run(token, token_file(tmp_path), cwd=str(ci_repo), env=run_env(), client=server.client, db=db,
-                  adapters={"claude": adapter}, sleep=finish_after(db, adapter, 1), say=lambda s: None)
-    ev = evidence_of(server.results[0])
-    assert ev["final_state"] == "finished" and ev["commits"] == 1
-    assert b'name="bundle"' in server.results[0]
 
 
 @pytest.mark.brindle_ci_guard

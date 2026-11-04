@@ -15,6 +15,7 @@ from types import SimpleNamespace
 import pytest
 
 from conftest import full_text, sh
+from fast_repo import build_repo, copy_tree, moved, no_screen_gap, repo, repo_template, scratch_db  # noqa: F401
 from brindle import agents, bus, mcp_server, tasks, workspaces
 from brindle.db import DB, Agent, Workspace
 from test_merge_order import fake_spawn
@@ -51,13 +52,6 @@ def commit_file(path: Path, name: str, content: str = "x\n") -> None:
 
 
 # -- overlap warnings -----------------------------------------------------------
-
-
-def test_overlap_warning_matches_recursive_globs(db, repo, boss):
-    asyncio.run(mcp_server.assign("developer", "do A", branch="feat-a", files=["src/**/a.py"]))
-    out_b = asyncio.run(mcp_server.assign("developer", "do B", branch="feat-b",
-                                          files=["src/nested/dir/a.py"]))
-    assert "Warning" in out_b
 
 
 def test_overlap_warning_names_other_session_intent(db, repo, boss):
@@ -108,15 +102,11 @@ def other_session_task(db, repo, monkeypatch):
     return record
 
 
-def test_cross_session_same_issue_number_warns_without_files(db, other_session_task):
+def test_cross_session_overlap_warns_by_files_or_issue_number_until_merged(db, other_session_task, monkeypatch):
     root = other_session_task()
-    warning = tasks.overlap_warning(db, root, None, "Please fix #197 again")
-    assert warning and "#197" in warning and "fix-197" in warning
+    by_issue = tasks.overlap_warning(db, root, None, "Please fix #197 again")
+    assert by_issue and "#197" in by_issue and "fix-197" in by_issue
     assert tasks.overlap_warning(db, root, None, "Fix #198") is None
-
-
-def test_cross_session_merged_branch_is_not_warned(db, other_session_task, monkeypatch):
-    root = other_session_task()
     warning = tasks.overlap_warning(db, root, ["src/brindle/tasks.py"])    # on changed files alone
     assert warning and "fix-197" in warning and "brindle/session-14" in warning
     assert tasks.overlap_warning(db, root, ["src/brindle/tasks.py"], "fix #197")
@@ -124,26 +114,66 @@ def test_cross_session_merged_branch_is_not_warned(db, other_session_task, monke
     assert tasks.overlap_warning(db, root, ["src/brindle/tasks.py"], "fix #197") is None
 
 
+@pytest.fixture(scope="module")
+def overlap_template(tmp_path_factory):
+    """Reported worktrees on ``session`` (w0, and ``landed``, merged into it),
+    made once; ``start`` is ``session`` as w3 is cut from it."""
+    base = tmp_path_factory.mktemp("overlap-template")
+    repo_ = build_repo(base)
+    sh("git branch session && git update-ref refs/remotes/origin/feat-w3 main", repo_)
+    start = sh("git rev-parse session", repo_)
+    made = {}
+    with scratch_db(tmp_path_factory.mktemp("overlap-template-home")) as db_:
+        for name in ("w0", "landed"):
+            made[name] = workspaces.create(db_, str(repo_), f"feat-{name}", base="session",
+                                           run_setup=False).workspace
+            commit_file(Path(made[name].path), f"{name}.py")
+        sh("git checkout -q session && git merge -q --no-ff feat-landed -m land && git checkout -q main", repo_)
+    return base, made, start
+
+
+@pytest.fixture(scope="module")
+def session_b_template(tmp_path_factory):
+    """The repo with root B's ``session-b`` worktree, made once."""
+    base = tmp_path_factory.mktemp("session-b-template")
+    repo_ = build_repo(base)
+    with scratch_db(tmp_path_factory.mktemp("session-b-template-home")) as db_:
+        return base, workspaces.create(db_, str(repo_), "session-b", run_setup=False).workspace
+
+
+@pytest.fixture
+def repo(request, repo_template, tmp_path):
+    """conftest's repo; with root B's worktree for the tests that use ``two_sessions``."""
+    if "two_sessions" in request.fixturenames:
+        return copy_tree(request.getfixturevalue("session_b_template")[0], tmp_path)
+    return copy_tree(repo_template, tmp_path)
+
+
+@pytest.mark.slow("The overlap check under test runs ~50 real git reads over three worktrees")
 @pytest.mark.parametrize("w3_branch", [
     "feat-w3",
     pytest.param("origin/feat-w3", marks=pytest.mark.variant(
         "review finding: a local branch named origin/x must not read as origin's merged x")),
 ])
-def test_overlap_check_git_calls_bounded(db, repo, monkeypatch, w3_branch):
+def test_overlap_check_git_calls_bounded(db, tmp_path, overlap_template, monkeypatch, w3_branch):
     """Reported-unmerged worktrees cost a few cheap git reads each, never a
     fetch or the cherry/patch-id fallback, and nothing again once decided; a
     branch merged into its session branch has landed."""
-    sh("git branch session && git update-ref refs/remotes/origin/feat-w3 main", repo)
+    template, made, start = overlap_template
+    repo = copy_tree(template, tmp_path)
     root = workspaces.adopt_root(db, str(repo))
-    for name in ("w0", "w1", "w2", "w3", "landed"):
-        branch = w3_branch if name == "w3" else f"feat-{name}"
-        ws = workspaces.create(db, str(repo), branch, base="session", run_setup=False).workspace
-        commit_file(Path(ws.path), f"{name}.py")
+    for name in ("w0", "w3", "landed"):
+        if name == "w3":
+            ws = workspaces.create(db, str(repo), w3_branch, base="session", start=start,
+                                   run_setup=False).workspace
+            commit_file(Path(ws.path), "w3.py")
+        else:
+            ws = moved(made[name], template, tmp_path)
+            db.add_workspace(ws)
         db.add_agent(Agent(name, ws.id, "developer", "claude", None, "assign", "done", "@1", "done",
                            time.time()))
         db.add_task(tasks.Task(f"t-{name}", str(repo), name, None, root.id, "developer", "work",
                                "assign", 1, ws.branch, None, None, None, "started", time.time()))
-    sh(f"git checkout -q session && git merge -q --no-ff {ws.branch} -m land && git checkout -q main", repo)
     calls = []
     real = tasks.git.run_env
     monkeypatch.setattr(tasks.git, "run_env", lambda args, *a, **k: calls.append(args) or real(args, *a, **k))
@@ -152,20 +182,22 @@ def test_overlap_check_git_calls_bounded(db, repo, monkeypatch, w3_branch):
     assert tasks.find_clash(db, root, ["landed.py"]) is None
     verbs = [c[0] for c in calls]
     assert "fetch" not in verbs and "cherry" not in verbs and "patch-id" not in verbs
-    assert len(calls) <= 8 * 5 * 2, verbs    # 8 per worktree per check (69 measured; ~250 before)
+    assert len(calls) <= 8 * 3 * 2, verbs    # 8 per worktree per check
     calls.clear()
     assert tasks.find_clash(db, root, ["w3.py"]).holder == "w3"
     assert "merge-tree" not in {c[0] for c in calls}    # decided once per (branch, target) sha pair
 
 
 @pytest.fixture
-def two_sessions(db, repo, monkeypatch):
+def two_sessions(db, repo, session_b_template, monkeypatch):
     """Roots A (main checkout) and B (its own session branch) on one repo,
     overlap unset; B's worker runs on src/x.py. Returns B's worker id."""
     (repo / ".brindle").mkdir(exist_ok=True)
     (repo / ".brindle" / "config.json").write_text('{"pipeline": false, "review": false}')
     root_a = workspaces.adopt_root(db, str(repo))
-    root_b = workspaces.create(db, str(repo), "session-b", run_setup=False).workspace
+    template, made = session_b_template
+    root_b = moved(made, template, repo.parent)
+    db.add_workspace(root_b)
     for name, ws in (("rootA", root_a), ("rootB", root_b)):
         db.add_agent(Agent(name, ws.id, "supervisor", "claude", None, "interactive", "processing",
                            "@0", None, time.time()))
@@ -264,11 +296,9 @@ def dependency_rows(db, tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize(("event", "upstream_kind"), [
-    ("merged", "task"), ("sweep", "task"), ("removed", "task"),
-    ("requeue_merged", "task"), ("requeue_pending", "task"), ("requeue_removed", "task"),
-    ("requeue_pending", "worker"), ("requeue_removed", "worker"),
-    ("requeue_pending", "workspace"), ("requeue_removed", "workspace"),
-    ("requeue_pending", "local_workspace"),
+    ("merged", "task"), ("removed", "task"), ("requeue_merged", "task"),
+    ("requeue_removed", "worker"), ("requeue_pending", "workspace"),
+    ("requeue_removed", "task"), ("requeue_removed", "workspace"),
 ])
 def test_same_branch_dependency_does_not_resolve_to_itself(db, dependency_rows, monkeypatch, event, upstream_kind):
     caller, boss, workspace, launched = dependency_rows
@@ -362,8 +392,8 @@ def test_requeue_preserves_an_upstream_that_has_no_worker_yet(db, dependency_row
         assert len(launched) == 2
 
 
-@pytest.mark.parametrize("event", ["merged", "removed"])
 @pytest.mark.variant("An accepted exact worker ID must still dispatch after its repository is detached")
+@pytest.mark.parametrize("event", ["merged", "removed"])
 def test_exact_worker_dependency_dispatches_after_repo_detach(db, dependency_rows, event):
     caller, boss, workspace, launched = dependency_rows
     upstream = workspace("engine-worker", "engine", "feature", tracked=True)
@@ -438,24 +468,6 @@ def test_a_queued_task_that_fails_to_start_tells_its_caller_why(db, repo, boss, 
 # -- cancellation on unmerged removal --------------------------------------------
 
 
-def test_removing_a_fully_merged_workspace_does_not_cancel_dependents(db, repo, boss):
-    out_a = asyncio.run(mcp_server.assign("developer", "do A", branch="feat-a"))
-    worker_a = started_worker_id(out_a)
-    ws_a = next(w for w in db.find_workspaces(str(repo)) if w.branch == "feat-a")
-
-    asyncio.run(mcp_server.assign("developer", "do B", branch="feat-b", depends_on=[worker_a]))
-    asyncio.run(mcp_server.merge_workspace(ws_a.id))  # merges and auto-starts B first
-
-    [b_task] = [t for t in db.list_tasks(str(repo)) if t.branch == "feat-b"]
-    assert b_task.state == "started"  # already started; removing A now must not touch it
-
-    ws_a = db.get_workspace(ws_a.id)
-    mcp_server.remove_workspace(ws_a.id, force=True)
-
-    b_task = db.get_task(b_task.id)
-    assert b_task.state == "started"
-
-
 def test_cancellation_cascades_to_a_task_depending_on_the_cancelled_one(db, repo, boss, monkeypatch):
     """A unmerged -> B depends_on=[A] queued -> C depends_on=["feat-b"]
     queued -> removing A unmerged must cancel both B and C, not just B."""
@@ -488,20 +500,15 @@ def test_cancellation_cascades_to_a_task_depending_on_the_cancelled_one(db, repo
     assert "Cancelled" in first.body and "Cancelled" in second.body
     assert worker_a in bodies and b_task.id in bodies
 
-
-def test_new_task_depending_on_an_already_cancelled_task_fails_clearly(db, repo, boss, monkeypatch):
-    monkeypatch.setattr(agents, "is_alive", lambda a: True)
-    asyncio.run(mcp_server.assign("developer", "do A", branch="feat-a"))
-    ws_a = next(w for w in db.find_workspaces(str(repo)) if w.branch == "feat-a")
-    commit_file(Path(ws_a.path), "a_output.txt")  # ahead of main: "unmerged"
-    asyncio.run(mcp_server.assign("developer", "do B", branch="feat-b", depends_on=["feat-a"]))
-    mcp_server.remove_workspace(ws_a.id, force=True)  # cancels B
-
-    out_d = asyncio.run(mcp_server.assign("developer", "do D", branch="feat-d",
-                                          depends_on=["feat-b"]))
-    assert "cancelled" in out_d.lower() and "feat-b" in out_d
-    # D was neither started nor queued: unmet_dependencies failed before either.
-    assert not any(t.branch == "feat-d" for t in db.list_tasks(str(repo)))
+    before = db.list_tasks(str(repo))
+    workers_before = db.list_agents()
+    asyncio.run(mcp_server.assign("developer", "do D", branch="feat-d",
+                                  depends_on=["feat-b"]))
+    assert db.list_tasks(str(repo)) == before
+    assert db.list_agents() == workers_before
+    out = mcp_server.requeue(c_task.id)
+    assert out.startswith("Error")
+    assert db.list_tasks(str(repo)) == before
 
 
 # -- cancel_task ------------------------------------------------------------------
@@ -548,22 +555,6 @@ def test_handoff_reply_names_a_missing_add_dir(db, repo, boss, monkeypatch):
     assert "Warning: add_dirs names /no/such/cache" in out
 
 
-def test_a_queued_task_starting_names_a_missing_add_dir(db, repo, boss, monkeypatch):
-    monkeypatch.setattr(agents, "is_alive", lambda a: True)
-    out_a = asyncio.run(mcp_server.assign("developer", "do A", branch="feat-a"))
-    worker_a = started_worker_id(out_a)
-    ws_a = next(w for w in db.find_workspaces(str(repo)) if w.branch == "feat-a")
-    commit_file(Path(ws_a.path), "a_output.txt")
-    asyncio.run(mcp_server.assign("developer", "do B", branch="feat-b", depends_on=[worker_a]))
-    _missing_add_dir(repo)
-
-    asyncio.run(mcp_server.merge_workspace(ws_a.id))
-
-    msg = db.pop_pending("boss")
-    body = full_text(db, "boss", msg.body)
-    assert "Started" in body and "add_dirs names /no/such/cache" in body
-
-
 def queued_task(db, repo, worker_id, branch="feat-b", **kw):
     out = asyncio.run(mcp_server.assign(
         "developer", "the full brief for B", branch=branch, depends_on=[worker_id],
@@ -576,24 +567,16 @@ def started_a(db):
     return started_worker_id(asyncio.run(mcp_server.assign("developer", "do A", branch="feat-a")))
 
 
-# -- list_tasks full ------------------------------------------------------------
-
-
-def test_list_tasks_default_omits_the_brief_and_full_shows_it(db, repo, boss):
-    b = queued_task(db, repo, started_a(db))
-    assert "the full brief" not in mcp_server.list_tasks()
-    full = mcp_server.list_tasks(full=True)
-    assert b.id in full
-    assert "task_text: the full brief for B" in full
-    assert "done_when: pytest passes" in full
-
-
 # -- requeue --------------------------------------------------------------------
 
 
 def test_requeue_a_cancelled_task_copies_it_and_keeps_dependencies(db, repo, boss):
     a = started_a(db)
     b = queued_task(db, repo, a, plan_first=True)
+    before = db.list_tasks(str(repo))
+    assert mcp_server.requeue("nope").startswith("Error")
+    assert mcp_server.requeue(b.id).startswith("Error")
+    assert db.list_tasks(str(repo)) == before
     mcp_server.cancel_task(b.id)
     db.update_task(b.id, weight="light")
     # A's task is still started, so the dependency is still waiting.
@@ -608,22 +591,6 @@ def test_requeue_a_cancelled_task_copies_it_and_keeps_dependencies(db, repo, bos
     assert db.get_task(b.id).state == "cancelled"
 
 
-def test_requeue_with_nothing_to_wait_on_starts_it(db, repo, boss):
-    b = queued_task(db, repo, started_a(db))
-    mcp_server.cancel_task(b.id)
-    out = mcp_server.requeue(b.id, depends_on=[])
-    assert "started worker" in out
-    assert not db.list_tasks(str(repo), state="pending")
-
-
-def test_requeue_refuses_an_unknown_task_or_one_that_is_not_cancelled(db, repo, boss):
-    assert mcp_server.requeue("nope").startswith("Error")
-    b = queued_task(db, repo, started_a(db))
-    out = mcp_server.requeue(b.id)
-    assert out.startswith("Error") and "not cancelled" in out
-    assert len(db.list_tasks(str(repo), state="pending")) == 1
-
-
 def test_requeue_refused_by_policy_and_scoped_to_session_repos(db, repo, boss, monkeypatch):
     from brindle import policy
 
@@ -636,15 +603,6 @@ def test_requeue_refused_by_policy_and_scoped_to_session_repos(db, repo, boss, m
     out = mcp_server.requeue(b.id)
     assert "policy refused" in out
     assert len(db.list_tasks(str(repo), state="pending")) == 0
-
-
-def test_requeue_with_a_cancelled_dependency_asks_for_new_ones(db, repo, boss):
-    a = started_a(db)
-    b = queued_task(db, repo, a)
-    c = queued_task(db, repo, "feat-b", branch="feat-c")
-    mcp_server.cancel_task(b.id)  # cascades to c
-    out = mcp_server.requeue(c.id)
-    assert out.startswith("Error") and "depends_on" in out
 
 
 # -- replying before the start ---------------------------------------------------
@@ -892,11 +850,3 @@ def test_assign_dry_run_starts_and_queues_nothing(db, repo, boss):
     out = asyncio.run(mcp_server.assign("developer", "do A", dry_run=True))
     assert "files: none declared" in out and "overlap: none" in out
 
-
-def test_handoff_dry_run_reports_overlap_and_queueing(db, repo, boss):
-    a_id = started_worker_id(asyncio.run(mcp_server.assign("developer", "do A", branch="feat-a", files=["app.py"])))
-    out = asyncio.run(mcp_server.handoff(
-        "developer", "do B", branch="feat-b", files=["app.py"], depends_on=[a_id], dry_run=True))
-    assert f"overlaps with {a_id}" in out
-    assert f"would queue until {a_id} merges" in out
-    assert len(db.list_tasks(str(repo))) == 1

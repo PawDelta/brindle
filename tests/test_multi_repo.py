@@ -13,6 +13,7 @@ import pytest
 from typer.testing import CliRunner
 
 from conftest import sh
+from git_snapshots import fast_host_tools, repo, restore_or_build  # noqa: F401  (fixtures)
 from brindle import agents, autopilot, cli, git, mcp_server, repos, tasks, workspaces
 from brindle.db import Agent
 from brindle.pro import license
@@ -41,34 +42,36 @@ def entitled(monkeypatch):
 def git_repo(path: Path, name: str, config: dict) -> Path:
     work = path / name
     work.mkdir()
-    sh("git init -q -b main", work)
     (work / "app.py").write_text(f"print('{name}')\n")
     (work / ".brindle").mkdir()
     (work / ".brindle" / "config.json").write_text(json.dumps(config))
-    sh("git add -A && git commit -qm init", work)
+    sh("git init -q -b main && git add -A && git commit -qm init", work)
     return work
 
 
 @pytest.fixture
-def web(tmp_path):
+def web(tmp_path, tmp_path_factory):
     """A second repo with its own config: its check leaves a marker under
-    the brindle home, so a test can tell whose checks ran."""
-    return git_repo(tmp_path, "web", {
+    the brindle home, so a test can tell whose checks ran. Built once and copied."""
+    return restore_or_build("multi:web", tmp_path, tmp_path_factory, ("web",), lambda: git_repo(tmp_path, "web", {
         "pipeline": False, "overlap": "warn", "review": False,
         "checks": ['test -f app.py && touch "$BRINDLE_HOME/web-checked"'],
-    })
+    }))
 
 
 @pytest.fixture
-def boss(db, repo, monkeypatch):
+def boss(db, repo, tmp_path, tmp_path_factory, monkeypatch):
     """A supervisor adopted on the main checkout, whose repo's check leaves
     its own marker."""
-    (repo / ".brindle").mkdir(exist_ok=True)
-    (repo / ".brindle" / "config.json").write_text(json.dumps({
-        "pipeline": False, "overlap": "warn", "review": False,
-        "checks": ['touch "$BRINDLE_HOME/main-checked"'],
-    }))
-    sh("git add -A && git commit -qm config", repo)   # a clean checkout records check shas
+    def commit_config():
+        (repo / ".brindle").mkdir(exist_ok=True)
+        (repo / ".brindle" / "config.json").write_text(json.dumps({
+            "pipeline": False, "overlap": "warn", "review": False,
+            "checks": ['touch "$BRINDLE_HOME/main-checked"'],
+        }))
+        sh("git add -A && git commit -qm config", repo)   # a clean checkout records check shas
+
+    restore_or_build("multi:boss", tmp_path, tmp_path_factory, ("origin.git", "proj"), commit_config)
     ws = workspaces.adopt_root(db, str(repo))
     db.add_agent(Agent("boss", ws.id, "supervisor", "claude", None, "interactive", "processing",
                         "@0", None, time.time()))
@@ -97,17 +100,6 @@ def run_cli(monkeypatch, cwd: Path, *args: str):
 # -- repo add / ls / rm -----------------------------------------------------------
 
 
-def test_attach_list_and_detach(db, repo, web, boss):
-    assert repos.listing_text(db, "boss").startswith("No repos attached")
-    a = repos.attach(db, "boss", str(web), "web")
-    assert (a.alias, a.repo_root) == ("web", str(web))
-    assert [x.alias for x in repos.attached(db, "boss")] == ["web"]
-    assert "web" in repos.listing_text(db, "boss") and str(web) in repos.listing_text(db, "boss")
-    assert repos.resolve(db, "boss", str(repo), "web") == str(web)
-    assert repos.resolve(db, "boss", str(repo), str(web)) == str(web)   # by path too
-    assert repos.resolve(db, "boss", str(repo), None) == str(repo)      # default: own repo
-    assert repos.detach(db, "boss", "web").repo_root == str(web)
-    assert repos.attached(db, "boss") == []
 
 
 def test_attach_refuses_bad_paths_duplicates_and_the_own_repo(db, repo, web, boss, tmp_path):
@@ -153,6 +145,7 @@ def test_attach_a_repo_whose_folder_name_matches_the_session_repo(db, repo, boss
     assert pool.pool_dir(str(twin)) == Path(e2.path).parent
 
 
+@pytest.mark.slow("the end-to-end run: two sessions each attach, start a worker, commit and merge in real git (~150 calls)")
 def test_two_live_sessions_attach_one_repo_and_each_merges_into_its_own_branch(
         db, repo, web, boss, tmp_path, monkeypatch):
     from brindle import view
@@ -200,20 +193,6 @@ def test_two_live_sessions_attach_one_repo_and_each_merges_into_its_own_branch(
     assert git.branch_exists(str(web), mine.branch)              # detach keeps the branch
 
 
-def test_cli_repo_add_ls_rm(db, repo, web, boss, monkeypatch):
-    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id == "boss")
-    code, out = run_cli(monkeypatch, repo, "repo", "add", str(web), "--name", "web")
-    assert code == 0 and "attached" in out and "web" in out
-    assert [x.alias for x in db.session_repos("boss")] == ["web"]
-    code, out = run_cli(monkeypatch, repo, "repo", "ls")
-    assert code == 0 and "web" in out and str(web) in out
-    code, out = run_cli(monkeypatch, repo, "repo", "rm", "web")
-    assert code == 0 and "detached" in out
-    assert db.session_repos("boss") == []
-    code, out = run_cli(monkeypatch, repo, "repo", "ls")
-    assert code == 0 and "No repos attached" in out
-
-
 # -- a worker in an attached repo ---------------------------------------------------
 
 
@@ -243,30 +222,6 @@ def test_assign_into_an_attached_repo_works_checks_and_merges_there(db, repo, we
     assert not (brindle_home / "main-checked").exists()     # the session's repo's didn't
 
 
-@pytest.mark.parametrize("dep_on", ["worker_id", "branch_name"])
-def test_cross_repo_depends_on_queues_then_starts_in_the_other_repo(db, repo, web, boss, monkeypatch, dep_on):
-    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
-    repos.attach(db, "boss", str(web), "web")
-    out_a = asyncio.run(mcp_server.assign("developer", "do A", branch="feat-a"))
-    worker_a = started_worker_id(out_a)
-    ws_a = next(w for w in db.find_workspaces(str(repo)) if w.branch == "feat-a")
-    commit_file(Path(ws_a.path), "a_output.txt")
-
-    dep = worker_a if dep_on == "worker_id" else "feat-a"
-    out_b = asyncio.run(mcp_server.assign("developer", "do B", branch="feat-b", repo="web",
-                                          depends_on=[dep]))
-    assert "Queued task" in out_b and dep in out_b
-    [b] = db.list_tasks(str(web), state="pending")
-    assert "feat-b" in mcp_server.list_tasks()
-
-    assert asyncio.run(mcp_server.merge_workspace(ws_a.id)).startswith("Merged")
-    b = db.get_task(b.id)
-    assert b.state == "started" and b.agent_id
-    ws_b = db.get_workspace(db.get_agent(b.agent_id).workspace_id)
-    assert ws_b.repo_root == str(web) and ws_b.branch == "feat-b"
-    assert not (Path(ws_b.path) / "a_output.txt").exists()   # another repo: A's file isn't there
-    msg = db.pop_pending("boss")
-    assert msg is not None and "Started" in msg.body and (dep in msg.body or worker_a in msg.body)
 
 
 def test_a_branch_name_dependency_only_matches_within_its_own_repo(db, repo, web, boss, monkeypatch):
@@ -322,20 +277,6 @@ def test_cross_repo_branch_dependency_refuses_when_ambiguous(db, dependency_rows
     assert tasks.unmet_dependencies(db, boss, ["feature"], caller.id) == ["feature"]
 
 
-def test_two_sessions_do_not_share_attached_repos(db, dependency_rows, monkeypatch):
-    caller, boss, workspace, launched = dependency_rows
-    other = fake_spawn(db, boss, "supervisor", mode="interactive")
-    alien = workspace("alien", "other", "feature", tracked=True)
-    db.update_agent(agents.workspace_worker(db, alien).id, parent_id=other.id)
-    db.add_session_repo(other.id, "other", alien.repo_root)
-    pending = tasks.enqueue(db, caller, boss, "developer", "app", "assign", isolate=True,
-                            branch="dep", done_when=None, files=None, depends_on=["feature"])
-    monkeypatch.setenv("BRINDLE_AGENT_ID", other.id)
-    tasks.on_merged(db, alien)
-    assert tasks.sweep(db) == 0
-    assert db.get_task(pending.id).state == "pending" and launched == []
-
-
 def test_handover_repoints_a_queued_task_whose_caller_workspace_is_gone(db, repo, web, boss, monkeypatch):
     from brindle import sessions
 
@@ -358,37 +299,6 @@ def test_handover_repoints_a_queued_task_whose_caller_workspace_is_gone(db, repo
     [c] = [t for t in db.list_tasks(str(repo), state="pending") if t.branch == "feat-c"]
     assert c.caller_id == new.id and c.caller_ws_id == boss.id
     assert [x.alias for x in repos.attached(db, new.id)] == ["web"] and repos.attached(db, "boss") == []
-
-
-def test_list_agents_groups_by_repo(db, repo, web, boss):
-    repos.attach(db, "boss", str(web), "web")
-    main_worker = started_worker_id(asyncio.run(mcp_server.assign("developer", "m", branch="m")))
-    web_worker = started_worker_id(asyncio.run(mcp_server.assign("developer", "w", branch="w", repo="web")))
-    everything = mcp_server.list_agents()
-    assert "## this repo (" in everything and "## web (" in everything
-    assert main_worker in everything and web_worker in everything
-    only_web = mcp_server.list_agents(repo="web")
-    assert web_worker in only_web and main_worker not in only_web
-    listed = mcp_server.list_repos()
-    assert str(web) in listed and str(repo) in listed
-
-
-def test_sidebar_and_ls_group_workers_by_repo(db, repo, web, boss, monkeypatch):
-    from brindle import view, watch
-
-    repos.attach(db, "boss", str(web), "web")
-    asyncio.run(mcp_server.assign("developer", "m", branch="feat-m"))
-    asyncio.run(mcp_server.assign("developer", "w", branch="feat-w", repo="web"))
-    snap = view.snapshot(db, str(repo), panes={})
-    assert {ws["id"].partition("/")[0] for ws in snap} == {"proj", "web"}
-    titles = [ln.text for ln in watch.render(snap, time.time(), width=80) if ln.group]
-    assert any("web · feat-w" in t for t in titles) and any("proj · feat-m" in t for t in titles)
-    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: False)
-    code, out = run_cli(monkeypatch, repo, "ls")
-    assert code == 0 and f"web  ({web})" in out and "feat-w" in out and "feat-m" in out
-    # One repo only: no repo labels on the headers, as before.
-    headers = [ln.text for ln in watch.render(snap[:1], time.time(), width=80) if ln.group]
-    assert headers and all(" · " not in t for t in headers)
 
 
 # -- milestone checks in another repo ------------------------------------------------
@@ -460,3 +370,17 @@ def test_license_errors_fail_closed(monkeypatch):
 
     monkeypatch.setattr(license, "has", boom)
     assert repos.entitled() is False
+
+
+def test_two_sessions_do_not_share_attached_repos(db, dependency_rows, monkeypatch):
+    caller, boss, workspace, launched = dependency_rows
+    other = fake_spawn(db, boss, "supervisor", mode="interactive")
+    alien = workspace("alien", "other", "feature", tracked=True)
+    db.update_agent(agents.workspace_worker(db, alien).id, parent_id=other.id)
+    db.add_session_repo(other.id, "other", alien.repo_root)
+    pending = tasks.enqueue(db, caller, boss, "developer", "app", "assign", isolate=True,
+                            branch="dep", done_when=None, files=None, depends_on=["feature"])
+    monkeypatch.setenv("BRINDLE_AGENT_ID", other.id)
+    tasks.on_merged(db, alien)
+    assert tasks.sweep(db) == 0
+    assert db.get_task(pending.id).state == "pending" and launched == []

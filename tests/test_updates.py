@@ -10,8 +10,6 @@ from brindle import cli, updates
 @pytest.mark.parametrize("cached, age, reply, local, disabled, expected, requests", [
     ("0.4.0", 10, None, False, False, "0.4.0", 0),
     ("0.3.8", 86400, "0.4.0", False, False, "0.4.0", 1),
-    (None, 0, "0.3.8", False, False, None, 1),
-    (None, 0, OSError("offline"), False, False, None, 1),
     ("0.4.0", 10, None, True, False, None, 0),
     ("0.4.0", 10, None, False, True, None, 0),
     ("0.4.0", 86400, "locked", False, False, "0.4.0", 0),

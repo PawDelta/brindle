@@ -27,13 +27,8 @@ def test_attach_target_prefers_the_waiting_agent(db, repo, monkeypatch):
     assert agents.attach_target(db, ws) == "%1"        # then the busiest
     db.update_agent("old", status="idle")
     assert agents.attach_target(db, ws) == "%3"        # then the newest
-
-
-def test_attach_target_none_without_live_agents(db, repo, monkeypatch):
-    ws = workspaces.create(db, str(repo), "feat/x").workspace
-    add(db, ws, "a", "idle", "%1", time.time())
     monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: False)
-    assert agents.attach_target(db, ws) is None
+    assert agents.attach_target(db, ws) is None        # no live pane to attach to
 
 
 def test_attach_without_a_terminal_explains(db, repo, monkeypatch):
@@ -49,5 +44,7 @@ def test_send_message_to_a_paused_agent_says_why(db, repo, monkeypatch):
     monkeypatch.delenv("BRINDLE_AGENT_ID", raising=False)
     out = mcp_server.send_message("p1", "hello")
     assert out.startswith("Not sent: agent p1 is paused") and "brindle continue" in out
+    assert db.pending_count("p1") == 0
+
 
 

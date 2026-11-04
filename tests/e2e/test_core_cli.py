@@ -101,6 +101,13 @@ def test_commands_resolve_the_workspace_from_inside_it(proj, ws_path, monkeypatc
     assert ws_path.id in run("status").output
 
 
+def test_history_sessions_and_prune_on_a_quiet_repo(proj, db):
+    assert run("history").output.strip() == "no history"
+    assert run("sessions").output.strip() == "no paused sessions"
+    out = run("prune").output
+    assert "dropped 0 paused session(s), removed 0 old scratch session(s)" in out
+
+
 def test_unknown_workspaces_and_bad_arguments_are_clean_errors(proj):
     res = run("status", "nope", ok=False)
     assert res.exit_code == 1 and "Traceback" not in res.output
@@ -152,28 +159,9 @@ def test_squash_merge(proj, ws_path):
     assert (proj / "f0.txt").exists() and (proj / "f1.txt").exists()
 
 
-def test_rm_keeps_an_unmerged_branch_and_needs_force_for_dirty(proj, ws_path):
-    ws = ws_path
-    open(os.path.join(ws.path, "a.txt"), "w").write("a")
-    run("commit", ws.name, "-m", "unmerged work")
-    open(os.path.join(ws.path, "dirty.txt"), "w").write("d")
-    refused = run("rm", ws.name, ok=False)
-    assert refused.exit_code == 1 and os.path.isdir(ws.path)
-    out = run("rm", ws.name, "--force").output
-    assert "removed" in out and not os.path.isdir(ws.path)
-    assert "feat/e2e" in sh("git branch --list", proj)  # unmerged: kept
-
-
 def test_new_reports_when_the_branch_is_taken(proj, ws_path):
     res = run("new", "feat/e2e", "--no-agent", "--no-setup", ok=False)
     assert res.exit_code == 1 and "Traceback" not in res.output
-
-
-def test_history_sessions_and_prune_on_a_quiet_repo(proj, db):
-    assert run("history").output.strip() == "no history"
-    assert run("sessions").output.strip() == "no paused sessions"
-    out = run("prune").output
-    assert "dropped 0 paused session(s), removed 0 old scratch session(s)" in out
 
 
 def test_history_lists_rows_and_filters_by_kind(proj, db):
@@ -185,6 +173,18 @@ def test_history_lists_rows_and_filters_by_kind(proj, db):
     only = run("history", "--kind", "merge").output
     assert "feat/a" in only and "feat/b" not in only
     assert "feat/a" in run("history", "--limit", "5").output
+
+
+def test_rm_keeps_an_unmerged_branch_and_needs_force_for_dirty(proj, ws_path):
+    ws = ws_path
+    open(os.path.join(ws.path, "a.txt"), "w").write("a")
+    run("commit", ws.name, "-m", "unmerged work")
+    open(os.path.join(ws.path, "dirty.txt"), "w").write("d")
+    refused = run("rm", ws.name, ok=False)
+    assert refused.exit_code == 1 and os.path.isdir(ws.path)
+    out = run("rm", ws.name, "--force").output
+    assert "removed" in out and not os.path.isdir(ws.path)
+    assert "feat/e2e" in sh("git branch --list", proj)  # unmerged: kept
 
 
 def test_prune_removes_a_finished_merged_worktree(proj, ws_path):
@@ -254,3 +254,4 @@ def test_transfer_into_a_plain_folder_fails_cleanly(db, tmp_path, monkeypatch):
     assert res.exit_code == 1 and "isn't inside a git repository" in res.output
     res = run("transfer", s.path, ok=False)
     assert res.exit_code == 1 and "real repository" in res.output
+

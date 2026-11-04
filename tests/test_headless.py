@@ -53,6 +53,38 @@ def fake_claude(tmp_path, monkeypatch):
 
 
 @pytest.fixture
+def claude_turns(fake_claude, monkeypatch):
+    """FAKE_CLAUDE in-process: each ``claude -p`` argv (past the binary) is
+    recorded and its hooks run as handle_hook calls, without a process per
+    turn and three more per hook. Starting the real script is
+    test_headless_worker_lifecycle_in_tmux's job."""
+    import os
+
+    from brindle.db import DB
+
+    binary = os.environ["BRINDLE_CLAUDE_BIN"]
+    calls: list[list[str]] = []
+
+    def call(argv, **kw):
+        args = list(argv[argv.index(binary) + 1:])
+        calls.append(args)
+        sid = next((args[i + 1] for i, a in enumerate(args[:-1]) if a in ("--session-id", "--resume")), "")
+        hook_db, agent_id = DB(), os.environ["BRINDLE_AGENT_ID"]
+        agents.handle_hook(hook_db, agent_id, "session-start", {"session_id": sid})
+        agents.handle_hook(hook_db, agent_id, "prompt-submit", {"session_id": sid})
+        if "FAIL" in args[-1]:
+            return 3
+        agents.handle_hook(hook_db, agent_id, "stop", {"session_id": sid})
+        return 0
+
+    monkeypatch.setattr(agents.subprocess, "call", call)
+    # Git work a turn's hooks do that the runner tests don't look at.
+    monkeypatch.setattr(agents, "mark_baseline", lambda db_, a: None)
+    monkeypatch.setattr(agents, "snapshot_turn", lambda db_, a: None)
+    return lambda: calls
+
+
+@pytest.fixture
 def cheap_profile(repo):
     d = repo / ".brindle" / "agents"
     d.mkdir(parents=True)
@@ -71,7 +103,7 @@ def headless_agent(db, ws, *, status="idle", mode="assign", agent_id="h1", windo
     return a
 
 
-def test_runner_starts_a_session_then_resumes_it(db, ws, fake_claude, monkeypatch):
+def test_runner_starts_a_session_then_resumes_it(db, ws, claude_turns, monkeypatch):
     headless_agent(db, ws, status="processing")
     monkeypatch.setenv("BRINDLE_AGENT_ID", "h1")
     db.enqueue("h1", "first task", None)
@@ -80,7 +112,7 @@ def test_runner_starts_a_session_then_resumes_it(db, ws, fake_claude, monkeypatc
     db.enqueue("h1", "and the tests", None)
     assert agents.run_headless(db, "h1", resume=sid, exit_when_idle=True) == 0
 
-    first, second = fake_claude()
+    first, second = claude_turns()
     assert first[0] == "-p" and first[-1] == "first task"
     sid = first[first.index("--session-id") + 1]
     assert second[-3:] == ["--resume", sid, "and the tests"]
@@ -93,7 +125,7 @@ def test_runner_starts_a_session_then_resumes_it(db, ws, fake_claude, monkeypatc
     False,      # any failure: the worker stops
     True,       # its cloud login lapsed: it waits for the sign-in, then retries the turn
 ])
-def test_runner_stops_when_claude_fails(db, ws, fake_claude, monkeypatch, capfd, lapsed):
+def test_runner_stops_when_claude_fails(db, ws, claude_turns, monkeypatch, capfd, lapsed):
     headless_agent(db, ws)
     monkeypatch.setenv("BRINDLE_AGENT_ID", "h1")
     monkeypatch.setenv("CLAUDE_CODE_USE_VERTEX", "1")
@@ -107,7 +139,7 @@ def test_runner_stops_when_claude_fails(db, ws, fake_claude, monkeypatch, capfd,
     db.enqueue("h1", "please FAIL", None)
     db.enqueue("h1", "next", None)
     assert agents.run_headless(db, "h1", exit_when_idle=True) == (0 if lapsed else 3)
-    calls = fake_claude()
+    calls = claude_turns()
     assert len(calls) == (2 if lapsed else 1)
     if lapsed:
         assert calls[1][-1] == agents.HEADLESS_CONTINUE    # the failed turn, resumed first
@@ -161,6 +193,8 @@ def test_resumed_headless_worker_gets_a_turn_to_continue(db, ws, monkeypatch):
 
 
 @pytest.mark.skipif(not shutil.which("tmux"), reason="tmux not installed")
+@pytest.mark.slow("the one end-to-end run of a headless worker: its runner in a real tmux pane, "
+                  "two claude -p turns, and the hook processes each turn starts")
 def test_headless_worker_lifecycle_in_tmux(db, ws, fake_claude, cheap_profile):
     a = agents.spawn(db, ws, cheap_profile, prompt="build it", mode="assign")
     try:
@@ -174,19 +208,17 @@ def test_headless_worker_lifecycle_in_tmux(db, ws, fake_claude, cheap_profile):
         assert "build it" in first[-1]
         assert agents.is_alive(db.get_agent(a.id))  # the runner waits between turns
 
-        assert agents.send_message(db, a.id, "now the docs") == "delivered"
+        # The next turn resumes the session, and fails (one turn, not a
+        # resume and then a failure: each turn starts several processes).
+        assert agents.send_message(db, a.id, "now the docs, then FAIL") == "delivered"
         deadline = time.time() + 20
         while time.time() < deadline and len(fake_claude()) < 2:
             time.sleep(0.2)
         second = fake_claude()[1]
-        assert "--resume" in second and second[-1] == "now the docs"
+        assert "--resume" in second and second[-1] == "now the docs, then FAIL"
         assert second[second.index("--resume") + 1] == db.get_agent(a.id).session_ref
 
         # A turn that fails ends the worker, and waiting on it says why.
-        deadline = time.time() + 20
-        while time.time() < deadline and db.get_agent(a.id).status != "idle":
-            time.sleep(0.2)
-        agents.send_message(db, a.id, "FAIL now")
         with pytest.raises(agents.AgentError) as err:
             agents.wait_for_result(db, a.id, timeout=20, poll=0.2)
         assert "exited without reporting" in str(err.value)

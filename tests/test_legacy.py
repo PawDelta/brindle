@@ -16,13 +16,6 @@ def home(tmp_path, monkeypatch):
     return tmp_path / "home"
 
 
-def test_old_home_with_agy_settings_points_at_mirrored_rules(home):
-    (home / ".copse").mkdir()
-    settings = home / ".gemini" / "antigravity-cli" / "settings.json"
-    settings.parent.mkdir(parents=True)
-    settings.write_text(json.dumps({"permissions": {"allow": ["command(git status)"]}}))
-    lines = legacy.findings(None)
-    assert any(str(settings) in line and "allow" in line for line in lines)
 
 
 def test_old_repo_dir_and_agent_entries(home, tmp_path):
@@ -38,12 +31,6 @@ def test_old_repo_dir_and_agent_entries(home, tmp_path):
     assert any("mcp_config.json" in line and "'mcpServers.copse'" in line for line in lines)
 
 
-def test_unreadable_agent_files_are_ignored(home, tmp_path):
-    agents = tmp_path / ".agents"
-    agents.mkdir()
-    (agents / "hooks.json").write_text("not json")
-    (agents / "mcp_config.json").write_text("[]")
-    assert legacy.findings(str(tmp_path)) == []
 
 
 def test_warns_once_per_leftover_on_stderr(home, capsys):

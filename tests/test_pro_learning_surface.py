@@ -122,10 +122,7 @@ def test_assign_carries_the_brief_warning(db, repo, boss, monkeypatch):
                                           files=["a.py"], weight="medium"))
     assert f"Warning: {WARNING}" in reply
     assert calls == [("do A", "tests pass", ["a.py"], "medium")]
-
-
-def test_handoff_carries_the_brief_warning(db, repo, boss, monkeypatch):
-    monkeypatch.setattr(brief_learning, "warning", lambda *a, **k: WARNING)
+    # handoff carries it too
     monkeypatch.setattr(mcp_server, "_await_worker", lambda db, agent_id, wait: "still running")
     reply = asyncio.run(mcp_server.handoff(task="do A", branch="feat-a", weight="medium"))
     assert f"Warning: {WARNING}" in reply
