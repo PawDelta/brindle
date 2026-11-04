@@ -17,6 +17,9 @@ on:
     branches: [main]
     paths:
       - "app/**"
+      - "src/**"            # the app bundles the engine: app-release.yml's gate needs this run
+      - "pyproject.toml"
+      - "uv.lock"
       - "src/brindle/daemon/api-schema.json"
       - ".github/workflows/app*.yml"
       - ".githooks/pre-push"
