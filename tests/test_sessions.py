@@ -212,9 +212,19 @@ def _the_app_daemon_pauses_on_its_way_out_and_the_next_start_resumes(db, root, m
     assert db.get_agent("chat").status == "idle" and tmux.has_session(root.tmux_session)
     lifecycle._resume_path().rmdir()
 
-    # The app quits: its daemon pauses this server's session and records it; the other's is left.
-    # Nothing else holds up its exit: not the sweep still running.
+    # The app's daemon is stopped: it pauses this server's session and records it; the other's is left.
+    # Nothing else holds up its exit: not the sweep still running, and not a second stop while it
+    # pauses (it outlives the app: the next app, `brindle daemon stop` or a logout can each stop it).
+    real_close, stopped_again = agents.close_paused, []
+
+    def close_paused(db_, closings):
+        if not stopped_again:
+            stopped_again.append(os.kill(os.getpid(), signal.SIGTERM))
+        real_close(db_, closings)
+
+    monkeypatch.setattr(agents, "close_paused", close_paused)
     serve(app_gone=False)
+    assert stopped_again and lifecycle.read_info() is None, "a second stop cut the way out short"
     assert not swept.is_set(), "the daemon waited for the sweep before it paused and exited"
     held.set()
     assert [db.get_agent(a).status for a in ("chat", "helper", "foreign")] == ["paused", "paused", "idle"]

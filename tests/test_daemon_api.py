@@ -4,6 +4,7 @@ import json
 import os
 import resource
 import shutil
+import signal
 import socket
 import sqlite3
 import stat
@@ -148,6 +149,39 @@ def test_tcp_start_binds_loopback_only_and_keeps_its_files_private(monkeypatch):
     monkeypatch.setattr(lifecycle, "HOST", "0.0.0.0")
     with pytest.raises(lifecycle.DaemonError, match="loopback only"):
         lifecycle.bind_tcp()
+    # Its stop: SIGTERM, and the wait for its pause.
+    _daemon_stop_waits_for_the_pause_on_the_way_out(monkeypatch)
+
+
+def _daemon_stop_waits_for_the_pause_on_the_way_out(monkeypatch):
+    """The app's daemon outlives the app, so `brindle daemon stop` is how it is
+    stopped with no app about: it gives the daemon the pause the app's stop
+    gives it (daemon.rs PAUSE_GRACE), on virtual time."""
+    for pausing_until, gone_at, signals in [
+        (7.0, 8.0, ["TERM@0.0"]),                   # pausing past STOP_GRACE: waited for, not killed
+        (None, 8.0, ["TERM@0.0", "KILL@5.0"]),      # not pausing: killed at STOP_GRACE
+        (30.0, 40.0, ["TERM@0.0", "KILL@20.0"]),    # pausing for ever: killed at PAUSE_GRACE
+    ]:
+        now, sent = [0.0], []
+        info = {"pid": 4242, "socket": None, "port": 1, "token": TOKEN}
+
+        def wait(seconds, now=now):
+            now[0] = round(now[0] + seconds, 3)
+
+        def kill(pid, sig, now=now, sent=sent):
+            assert pid == 4242
+            sent.append(f"{signal.Signals(sig).name[3:]}@{now[0]:.1f}")
+
+        with monkeypatch.context() as m:
+            m.setattr(lifecycle, "read_info", lambda info=info: info)
+            m.setattr(lifecycle, "_is_daemon", lambda pid: True)
+            m.setattr(lifecycle, "_says_pausing",
+                      lambda pid, until=pausing_until, now=now: until is not None and now[0] < until)
+            m.setattr(procs, "alive", lambda pid, gone=gone_at, now=now, sent=sent:
+                      now[0] < gone and "KILL" not in "".join(sent))
+            m.setattr(os, "kill", kill)
+            assert lifecycle.stop(clock=lambda now=now: now[0], wait=wait) == info
+        assert sent == signals, pausing_until
 
 
 def _ws_over_tcp(port: int, first: str) -> object:
