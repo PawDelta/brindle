@@ -1251,39 +1251,73 @@ def test_account_identity_is_cached_with_orgs_and_fails_soft_offline(brindle_hom
     assert reads == ["me", "orgs", "me", "orgs"]
 
 
+@pytest.mark.skipif(not shutil.which("tmux"), reason="needs tmux")
 def test_the_app_daemon_pauses_what_runs_on_its_way_out_and_the_next_one_resumes_it(db, repo, monkeypatch):
+    """Through the real agents.pause, on the suite's private tmux server."""
     from brindle import agents
     from brindle.service import sessions as svc
 
     ws = workspaces.create(db, str(repo), "feat/exit").workspace
-    now = 1000.0
-    # A running session (its worker too), one already done, one the person paused.
-    db.add_agent(Agent("live", ws.id, "supervisor", "claude", None, "interactive", "idle", "@1", None, now))
-    db.add_agent(Agent("w1", ws.id, "developer", "claude", "live", "assign", "running", "@2", None, now))
-    db.add_agent(Agent("gone", ws.id, "supervisor", "claude", None, "interactive", "done", "@3", "ok", now))
-    db.add_agent(Agent("rest", ws.id, "supervisor", "claude", None, "interactive", "paused", "@4", None, now))
-    calls = []
+    # Another server's session (a demo's, another home's daemon's), in a workspace whose
+    # tmux session name is also a session on this server: neither is this daemon's.
+    other = dataclasses.replace(ws, id="ws-other", name="other", tmux_session="shared-name")
+    db.add_workspace(other)
+    here = tmux.current_server()
 
-    def pause(db_, root_id, **kw):
-        calls.append(("pause", root_id, kw.get("stop_procs")))
-        db_.set_status(root_id, "paused")
-        return []
+    def window(session):
+        made = tmux._tmux("new-session", "-d", "-s", session, "-P", "-F", "#{window_id}", "cat")
+        return made.stdout.strip()
 
-    monkeypatch.setattr(agents, "pause", pause)
-    monkeypatch.setattr(svc, "cull_detached", lambda repo_root=None: calls.append(("cull", None, None)))
-    monkeypatch.setattr(agents, "resume", lambda db_, root_id, **kw: calls.append(("resume", root_id, None)) or [])
-    # On the way out: only the running session is paused (its processes left to the cull), and recorded.
-    assert lifecycle.pause_for_exit() == ["live"]
-    assert calls == [("pause", "live", False), ("cull", None, None)]
-    assert db.get_agent("live").status == "paused"
-    # The next daemon brings back exactly that one, once.
+    def session(aid, ws_, status, server=here, mode="interactive", parent=None, result=None, win=""):
+        db.add_agent(Agent(aid, ws_.id, "supervisor", "claude", parent, mode, status, win, result, 1000.0,
+                           task="t", tmux_server=server))
+
+    live_window = window(ws.tmux_session)
+    window("shared-name")
+    session("live", ws, "idle", win=live_window)
+    session("w1", ws, "running", mode="assign", parent="live")
+    session("gone", ws, "done", result="ok")
+    session("rest", ws, "paused")
+    session("foreign", other, "idle", server="elsewhere", win=live_window)   # its pane id names ours here
+    launched, stopped = [], []
+    monkeypatch.setattr(svc, "cull_detached", lambda repo_root=None: None)
+    monkeypatch.setattr(agents, "_launch", lambda db_, a, ws_, **kw: launched.append(a.id))
+    monkeypatch.setattr(procs, "stop", lambda ids, *a, **kw: stopped.append(sorted(ids)) or 0)
+
+    # A tmux failure cuts the first pause short, after its statuses were recorded.
+    real_kill = tmux.kill_window
+    fails = [True]
+
+    def kill_window(target):
+        if fails.pop() if fails else False:
+            raise tmux.TmuxError("tmux kill-window: server busy")
+        real_kill(target)
+
+    monkeypatch.setattr(tmux, "kill_window", kill_window)
+    assert lifecycle.pause_for_exit() == []
+    assert db.get_agent("live").status == "paused" and tmux.has_session(ws.tmux_session)
+    # The other server's session keeps its status, and this server's session of that name runs on.
+    assert db.get_agent("foreign").status == "idle" and tmux.has_session("shared-name")
+    # The next start recovers it: what is left of it is stopped, then it is resumed.
     assert lifecycle.resume_after_start() == ["live"]
+    assert stopped == [["live", "w1"]] and launched == ["live", "w1"]
+    assert not tmux.has_session(ws.tmux_session) and tmux.has_session("shared-name")
     assert lifecycle.resume_after_start() == []
-    assert calls[2:] == [("resume", "live", None)]
+
+    # A pause that finishes is recorded as such: the next start only resumes it.
+    for aid in ("live", "w1"):
+        db.set_status(aid, "idle")
+    assert lifecycle.pause_for_exit() == ["live"]
+    launched.clear()
+    assert lifecycle.resume_after_start() == ["live"] and launched == ["live", "w1"] and len(stopped) == 1
     # One the person closed meanwhile isn't resumed: the record names it, its status doesn't.
     db.set_status("live", "idle")
     assert lifecycle.pause_for_exit() == ["live"]
     db.set_status("live", "done")
     assert lifecycle.resume_after_start() == []
-    # Nothing running: nothing recorded, and nothing to resume.
+    # A record made on another tmux server isn't resumed here.
+    lifecycle._record_resume([{"id": "rest", "server": "elsewhere", "paused": True}])
+    assert lifecycle.resume_after_start() == [] and db.get_agent("rest").status == "paused"
+    # Nothing of this server's running: nothing recorded, and nothing to resume.
     assert lifecycle.pause_for_exit() == [] and not lifecycle._resume_path().exists()
+    assert db.get_agent("foreign").status == "idle"

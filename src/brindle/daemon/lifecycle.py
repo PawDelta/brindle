@@ -228,14 +228,35 @@ def _resume_path() -> Path:
     return brindle_home() / RESUME_FILE
 
 
+def _record_resume(entries: list[dict]) -> None:
+    """Replace the resume record with ``entries`` in one step: a reader sees
+    the old record or the new one, never half of one."""
+    path = _resume_path()
+    staged = path.with_name(f"{path.name}.{os.getpid()}")
+    try:
+        staged.write_text(json.dumps(entries))
+        os.replace(staged, path)
+    except OSError:
+        staged.unlink(missing_ok=True)
+        log.warning("brindle: couldn't record the paused sessions for the next daemon", exc_info=True)
+
+
 def pause_for_exit() -> list[str]:
-    """The app's daemon on its way out: every running session is paused as
-    the person's Pause does (agents.pause: windows closed, work kept, so
-    nothing keeps acting with nobody watching), and the roots are recorded
-    for the next daemon to bring back (resume_after_start). Processes the
-    panes hosted are left to a detached cull: the time to go is short. A
-    session that can't be paused is only logged. Returns the roots paused."""
-    from brindle import agents
+    """The app's daemon on its way out: every running session on this
+    daemon's own tmux server is paused as the person's Pause does
+    (agents.pause: windows closed, work kept, so nothing keeps acting with
+    nobody watching), for the next daemon to bring back (resume_after_start).
+    A session on another tmux server (a demo's, a test's, another home's
+    daemon's) is not this daemon's to pause: its windows aren't reachable from
+    here, and its workspace's session name may name some other session here.
+
+    The record of what is paused, with the server each session is on, is
+    written before the first pause, so a pause cut short (a tmux failure,
+    the daemon killed mid-way) still leaves its session to recover; each
+    entry is marked paused once its pause has finished. Processes the panes
+    hosted are left to a detached cull: the time to go is short. A session
+    that can't be paused is only logged. Returns the roots paused."""
+    from brindle import agents, tmux
     from brindle.db import DB
     from brindle.service import sessions as svc
 
@@ -244,59 +265,75 @@ def pause_for_exit() -> list[str]:
         db = DB()
         try:
             roots = [a for a in db.list_agents() if a.parent_id is None and a.mode == "interactive"
-                     and a.status not in ("done", "paused")]
-            for root in roots:
+                     and a.status not in ("done", "paused") and agents.same_server(a)]
+            if not roots:
+                _resume_path().unlink(missing_ok=True)
+                return paused
+            server = tmux.current_server()
+            entries = [{"id": root.id, "server": server, "paused": False} for root in roots]
+            _record_resume(entries)
+            for entry in entries:
                 try:
-                    agents.pause(db, root.id, stop_procs=False)
-                    paused.append(root.id)
+                    agents.pause(db, entry["id"], stop_procs=False)
                 except Exception:  # noqa: BLE001 - the others still get paused
-                    log.warning("brindle: couldn't pause session %s on the way out", root.id, exc_info=True)
+                    log.warning("brindle: couldn't pause session %s on the way out", entry["id"], exc_info=True)
+                    continue
+                entry["paused"] = True
+                paused.append(entry["id"])
+                _record_resume(entries)
         finally:
             db.conn.close()
         if paused:
             svc.cull_detached()
     except Exception:  # noqa: BLE001 - leaving must not fail over this
         log.warning("brindle: couldn't pause the running sessions on the way out", exc_info=True)
-    path = _resume_path()
-    if not paused:
-        path.unlink(missing_ok=True)
-        return paused
-    staged = path.with_name(f"{path.name}.{os.getpid()}")
-    try:
-        staged.write_text(json.dumps(paused))
-        os.replace(staged, path)
-    except OSError:
-        staged.unlink(missing_ok=True)
-        log.warning("brindle: couldn't record the paused sessions for the next daemon", exc_info=True)
     return paused
+
+
+def _read_resume() -> list[dict] | None:
+    """The resume record's entries, or None when there is none to read."""
+    try:
+        entries = json.loads(_resume_path().read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(entries, list):
+        return []
+    return [e for e in entries if isinstance(e, dict) and isinstance(e.get("id"), str)]
 
 
 def resume_after_start() -> list[str]:
     """Bring back the sessions the last app daemon paused on its way out
     (pause_for_exit), once: the record goes before any is resumed, so one
     that can't come back isn't tried at every start. Only roots still paused
-    are resumed (the person may have closed one meanwhile)."""
-    from brindle import agents
+    are resumed (the person may have closed one meanwhile), and only those on
+    this daemon's own tmux server, recorded there and still there. One whose
+    pause never finished is paused again first, its processes stopped, so
+    what still runs of it isn't left beside the restarted session."""
+    from brindle import agents, tmux
     from brindle.db import DB
 
-    path = _resume_path()
-    try:
-        ids = json.loads(path.read_text())
-    except (OSError, ValueError):
+    entries = _read_resume()
+    if entries is None:
         return []
-    path.unlink(missing_ok=True)
+    _resume_path().unlink(missing_ok=True)
+    server = tmux.current_server()
     resumed: list[str] = []
     db = DB()
     try:
-        for root_id in ids:
-            root = db.get_agent(root_id)
+        for entry in entries:
+            root = db.get_agent(entry["id"])
             if root is None or root.status != "paused":
                 continue
+            if entry.get("server") != server or not agents.same_server(root):
+                log.info("brindle: session %s is on another tmux server; not resumed here", root.id)
+                continue
             try:
-                agents.resume(db, root_id)
-                resumed.append(root_id)
+                if not entry.get("paused"):
+                    agents.pause(db, root.id, stop_procs=True)
+                agents.resume(db, root.id)
+                resumed.append(root.id)
             except Exception:  # noqa: BLE001 - the others still come back
-                log.warning("brindle: couldn't resume session %s", root_id, exc_info=True)
+                log.warning("brindle: couldn't resume session %s", root.id, exc_info=True)
     finally:
         db.conn.close()
     return resumed
@@ -313,8 +350,22 @@ async def _elapse(seconds: float) -> None:
         handle.cancel()
 
 
+APP_PID_ENV = "BRINDLE_APP_PID"     # the app that started this daemon as its child (daemon.rs start_child)
+
+
+def _app_parent() -> int | None:
+    """The pid of the app this daemon is a child of, from APP_PID_ENV, which
+    is taken out of the environment so nothing the daemon starts inherits it."""
+    value = os.environ.pop(APP_PID_ENV, "")
+    return int(value) if value.isdigit() else None
+
+
 async def _watch(server, activity: Activity, idle_exit: bool, *,
-                 wait=_elapse, clock=time.monotonic) -> None:
+                 wait=_elapse, clock=time.monotonic, parent: int | None = None) -> None:
+    """The daemon's periodic checks. ``parent``: the app whose child this
+    daemon is (``_app_parent``); once it has gone (force quit: it had no
+    chance to stop its daemon) the daemon shuts down, gracefully, so the
+    sessions it ran are paused on its way out (``serve``)."""
     from brindle.daemon import health
     from brindle.daemon.session_review import ReadinessWatch
     from brindle.upgrade import InstallWatch
@@ -326,6 +377,9 @@ async def _watch(server, activity: Activity, idle_exit: bool, *,
     while not server.should_exit:
         due = clock() + WATCH_INTERVAL      # the wait's deadline, before any maintenance below
         await wait(WATCH_INTERVAL)
+        if parent is not None and not procs.alive(parent):
+            server.should_exit = True
+            break
         try:
             monitor.tick(activity, due)     # the daemon's own health, into debuglog
         except Exception:  # noqa: BLE001 - health logging must never stop the watch
@@ -439,6 +493,7 @@ def serve(*, unix: bool = True, tcp: bool = False, idle_exit: bool = False) -> d
     from brindle.daemon.app import build_app
     from brindle.daemon.auth import new_token
 
+    parent = _app_parent()      # before anything is started that would inherit it
     _raise_file_limit()
     token = new_token()
     socks, info = prepare(token, unix=unix, tcp=tcp)
@@ -456,7 +511,7 @@ def serve(*, unix: bool = True, tcp: bool = False, idle_exit: bool = False) -> d
     upgrade.on_stale_launch = lambda: setattr(server, "should_exit", True)
 
     async def run() -> None:
-        watcher = asyncio.create_task(_watch(server, activity, idle_exit))
+        watcher = asyncio.create_task(_watch(server, activity, idle_exit, parent=parent))
         resizer = asyncio.create_task(asyncio.to_thread(_reset_window_sizes))
         sweeper = asyncio.create_task(asyncio.to_thread(_upgrade_sweep))
         # The app's daemon brings back what the last one paused on its way out.
