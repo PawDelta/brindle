@@ -227,9 +227,20 @@ def session_blockers(db: DB, repo: str, provider: str | None, *, read_only: bool
     acc = team_policy.access(ws.repo_root)
     fixable = [p for p in team_policy.CLI_NAMES if acc.allows(p) and not providers_install.turned_off(p)]
     blocked = _blocked([(_chat(ws, p), ws) for p in fixable], keys_only=read_only)
-    if blocked is None:
+    if blocked is not None:
+        return blocked
+    # Nothing to install or sign in to would do: what stops each CLI instead.
+    items = []
+    for p in team_policy.CLI_NAMES:
+        name = svc.cli_name(p)
+        if why := acc.refusal(p):
+            items.append(preflight.Item("setup", f"{p}.policy", p, f"{name} isn't allowed by your organization's policy",
+                                        why))
+        elif off := preflight.turned_off(p):
+            items.append(off)
+    if not items:
         raise svc.no_usable_provider()
-    return blocked
+    return preflight.Blocked(items)
 
 
 @dataclass

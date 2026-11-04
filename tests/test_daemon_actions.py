@@ -2402,8 +2402,10 @@ EVERY_CLI = ["claude", "codex", "antigravity", "opencode"]
     (None, {"signed_out": ("claude", "antigravity", "opencode")}, "codex", ["codex"]),
     # The policy allows only a CLI that isn't installed: nothing starts, not the profile's Claude.
     (None, {"allowed": ("opencode",), "missing": "opencode"}, (409, "preflight"), []),
+    # The policy allows no CLI at all: still a preflight, naming what stops each one.
+    (None, {"allowed": ()}, (409, "preflight"), []),
 ], ids=["explicit-usable", "explicit-missing", "explicit-signed-out", "explicit-policy", "explicit-off",
-        "default-pick", "default-only-codex", "default-none-by-policy"])
+        "default-pick", "default-only-codex", "default-none-by-policy", "default-none-allowed"])
 def test_a_new_session_runs_on_a_usable_cli_or_starts_nothing(db, world, tmp_path, monkeypatch, asked, state,
                                                              answer, usable):
     from brindle import providers_install

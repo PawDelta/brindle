@@ -86,7 +86,12 @@ def test_wsl_browser_sign_in_points_the_login_at_the_windows_browser(monkeypatch
     assert ({"BROWSER": seen[0]["BROWSER"]} if "BROWSER" in (seen[0] or {}) else None) == shown
 
 
-def _resolve(monkeypatch, *, provider=None, pick=None, tty=True, signed_in=(), allowed=None, ci=False):
+def _resolve(monkeypatch, *, provider=None, pick=None, tty=True, signed_in=(), allowed=None, ci=False, off=None,
+             typed=None):
+    """``typed``: the real picker runs, answered with that; else a stand-in picks
+    antigravity, set up as the real one sets up its choice."""
+    from brindle import providers_install
+
     for var in ("CI", "GITHUB_ACTIONS", "GITLAB_CI", "BUILDKITE", "CIRCLECI", "TF_BUILD", "JENKINS_URL", "BRINDLE_CI"):
         monkeypatch.delenv(var, raising=False)
     if ci:
@@ -94,12 +99,19 @@ def _resolve(monkeypatch, *, provider=None, pick=None, tty=True, signed_in=(), a
     if pick:
         set_user("supervisor", pick)
     monkeypatch.setattr(cli, "sys", SimpleNamespace(stdin=SimpleNamespace(isatty=lambda: tty)))
-    monkeypatch.setattr(doctor, "signed_in_providers", lambda: list(signed_in))
-    monkeypatch.setattr(providers, "unusable", lambda p, env=None: None if p in signed_in else f"{p} is signed out")
+    signed = list(signed_in)
+    monkeypatch.setattr(doctor, "signed_in_providers", lambda: list(signed))
+    monkeypatch.setattr(doctor, "signin_providers", lambda: ["claude", "codex", "antigravity", "opencode"])
+    monkeypatch.setattr(providers, "unusable", lambda p, env=None: None if p in signed else f"{p} is signed out")
+    monkeypatch.setattr(providers_install, "turned_off", lambda p: p == off)
     monkeypatch.setattr(team_policy, "access", lambda root: team_policy.Access(org_id=ORG, allowed_providers=allowed))
     asked = []
-    monkeypatch.setattr(picker, "pick_supervisor", lambda acc, cur: asked.append(cur) or "antigravity")
-    monkeypatch.setattr(picker, "sign_in", lambda p: asked.append(f"sign_in:{p}") or True)
+    if typed is None:
+        monkeypatch.setattr(picker, "pick_supervisor", lambda acc, cur: asked.append(cur) or signed.append(
+            "antigravity") or "antigravity")
+    else:
+        monkeypatch.setattr(typer, "prompt", lambda *a, **k: typed)
+    monkeypatch.setattr(picker, "sign_in", lambda p: asked.append(f"sign_in:{p}") or signed.append(p) or True)
     try:
         got = cli._resolve_supervisor(None, provider)
     except (typer.Exit, SystemExit):
@@ -122,6 +134,10 @@ def _resolve(monkeypatch, *, provider=None, pick=None, tty=True, signed_in=(), a
     (dict(ci=True), "refused", [], None),
     (dict(pick="codex", tty=False, allowed=("codex",), signed_in=["codex"]), "codex", [], "codex"),
     (dict(provider="codex", tty=False), "refused", [], None),                       # -s CLI unusable, can't sign in
+    # The real picker never offers a CLI turned off in brindle (its second row is then Antigravity) ...
+    (dict(off="codex", typed="2"), "antigravity", ["sign_in:antigravity"], "antigravity"),
+    # ... and whatever a pick returns runs only if usable: never remembered otherwise.
+    (dict(off="antigravity"), "refused", [None], None),
 ])
 def test_supervisor_launch_resolution(monkeypatch, kw, got, asked, remembered):
     assert _resolve(monkeypatch, **kw) == (got, asked, remembered)

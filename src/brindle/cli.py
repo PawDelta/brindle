@@ -497,6 +497,10 @@ def _resolve_supervisor(repo_root: str | None, provider: Optional[str], *,
         if provider is None:
             refuse("any CLI", "none is installed, signed in, turned on and allowed by your organization's "
                    "policy here; set one up with `brindle -s`")
+    # Whichever way it came (the picker, a sign-in just done), it runs only if usable now.
+    problem = svc.supervisor_problem(provider, repo_root, acc)
+    if problem:
+        refuse(provider, problem[1])
     # only the interactive picker saves a choice; a -s flag is this session's override
     if from_picker and provider != pick:
         set_user(SUPERVISOR_KEY, provider)

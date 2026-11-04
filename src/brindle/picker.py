@@ -44,14 +44,15 @@ class Row:
 
 
 def supervisor_rows(acc, current: str | None, signed_in: list[str], installed: list[str]) -> list[Row]:
-    """One row per supervisor CLI ``acc`` allows, tagged ``current``, ``not
-    installed`` or ``needs sign-in``."""
+    """One row per supervisor CLI ``acc`` allows and that isn't turned off in
+    brindle, tagged ``current``, ``not installed`` or ``needs sign-in``."""
+    from brindle import providers_install
     from brindle.pro.team_policy import CLI_NAMES
     from brindle.providers import SUPERVISOR_PROVIDERS
 
     rows = []
     for p in acc.clis():
-        if p not in SUPERVISOR_PROVIDERS:
+        if p not in SUPERVISOR_PROVIDERS or providers_install.turned_off(p):
             continue
         tags = ["current"] if p == current else []
         if p not in installed:
