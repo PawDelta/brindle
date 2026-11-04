@@ -1,93 +1,170 @@
 # brindle
 
-**A team of coding agents that only calls work done once it's proven.**
+**A supervisor for your coding agents that won't call work done until it's proven.**
 
-Tell brindle what you want built. A supervisor agent breaks it into pieces and hands
-them to several agents (Claude Code, Codex, or a local model), each working on its own
-branch. Another agent reviews every branch, your tests run, and only then does it merge.
-You get the result, not a pile of half-finished branches.
+brindle runs Claude Code, Codex, Google Antigravity, OpenCode and open-weight models side by
+side, each in its own git worktree. A supervisor agent splits the goal into milestones and
+hands the work out. Every branch merges only after a reviewer approves that exact commit and
+your checks pass. A milestone counts as done only when its check command exits 0.
 
-![brindle running its practice demo: a supervisor splits a goal between two workers, each branch is reviewed and merged, and both milestones turn green once their checks pass](https://raw.githubusercontent.com/PawDelta/brindle/main/assets/brindle-demo.gif)
+![The brindle desktop app running its built-in demo: a supervisor splits a goal between two workers, each branch is reviewed and merged, and both milestones turn green once their checks pass](https://raw.githubusercontent.com/PawDelta/brindle/main/assets/brindle-app-demo.gif)
 
-*The practice demo you can run yourself in a few minutes: two workers in parallel,
-each branch reviewed and merged, both milestones verified by their tests.*
+*The app's built-in demo on sample data: two workers in parallel, each branch reviewed and
+merged, both milestones verified by their tests.*
 
-## Why brindle
+## Why
 
-**One agent is fast. Several are faster, if they don't trip over each other.**
-Every agent gets its own copy of your repo and its own branch, so five of them can work
-at once without overwriting each other's files or fighting over ports.
+You already have a good coding agent. The ceiling isn't the model, it's everything around it:
+one agent in one terminal, working serially on one checkout, with you as the test runner, the
+reviewer, the permission prompt and the person who notices when it quietly stopped. brindle
+is that missing layer.
 
-**"Done" means a test passed, not that a model said so.**
-Each goal is split into milestones, and each milestone has a command that must succeed.
-brindle runs it itself, and re-runs it after later merges to catch regressions.
+| | One agent CLI, run by hand | brindle |
+|---|---|---|
+| Parallel work | One agent, one checkout. A second one fights over files and ports. | Each worker gets its own worktree and branch, cut from a freshly fetched base, with its own block of ports. Up to `max_agents` at once, five by default. |
+| "Done" | The model says it's done. | A milestone's check command exits 0. brindle runs it itself and re-runs it after later merges to catch regressions. |
+| Review | You read the diff, or you don't. | A reviewer agent approves the exact commit before it can merge. Have Codex review Claude's work, or a local model review both. |
+| Tests | You remember to run them. | Pre-commit hooks and your `checks` gate every merge. Nothing merges red. |
+| Walking away | The agent stops at the first question, usage limit or crash. | The session keeps going until every milestone passes, pauses at your usage limit and resumes after the reset. Quit and `brindle continue` later; workers resume too. |
+| Interruptions | Every agent prompts in its own terminal. | Decisions, permission requests and finished work land in one inbox. The supervisor can answer routine permission asks itself. |
+| Status | You read the terminal. | Each agent's state comes from its lifecycle hooks, not from scraping its screen. |
 
-**Nothing reaches your branch unreviewed.**
-A reviewer approves the exact commit, then your checks run. Want a second opinion? Have
-Codex review Claude's work, or the other way round.
+For a one-line fix, plain `claude` is quicker, and the supervisor will do small things itself
+rather than start workers. brindle pays off when work splits into parallel pieces, or runs
+long enough that you'd rather not babysit it.
 
-**You can walk away.**
-brindle keeps going until every milestone passes. It pauses when you hit your usage
-limit and picks up after the reset. Close the app and the session resumes later,
-workers included.
+## How a goal gets done
 
-**It asks you only when it matters.**
-Decisions, permission requests and finished work land in one inbox. You don't need to
-watch every agent's terminal.
+```mermaid
+flowchart LR
+    G[Goal with milestones,<br>each with a check command] --> S[Supervisor agent]
+    S --> W1[Worker 1<br>own worktree + branch]
+    S --> W2[Worker 2<br>own worktree + branch]
+    S --> W3[Worker N<br>own worktree + branch]
+    W1 & W2 & W3 --> R[Reviewer approves<br>the exact commit]
+    R -- changes requested --> S
+    R --> C[Pre-commit hooks<br>and your checks pass]
+    C --> M[Merge into the<br>session branch]
+    M --> V{Milestone check<br>exits 0?}
+    V -- no --> S
+    V -- yes --> D[Milestone verified]
+```
 
-**Use the agents you already pay for.**
-brindle drives the Claude Code, Codex and Google Antigravity CLIs you're already signed
-in to, or open-weight models through Ollama or any OpenAI- or Anthropic-style endpoint.
+The supervisor delegates through brindle's own MCP tools: `assign` a task with the files it
+will touch and the tasks it depends on, and brindle refuses overlapping work, queues dependent
+tasks until their prerequisites merge, and starts them from the updated base. Large or risky
+tasks can run plan-first: the worker proposes a plan and can't edit a file until it's approved.
+Every worker's worktree is snapshotted after each turn that changed files, so a worker that
+went down the wrong path can be rewound to a good turn and restarted with a note, instead of
+starting over.
 
-## How it feels
+Tell the supervisor what "done" means in commands, or write it yourself:
 
-1. **Open a project.** Pick any folder with a git repo in it.
-2. **Say what you want.** "Add CSV export to the reports page, with tests." The
-   supervisor writes the milestones and the checks that prove each one.
-3. **Watch it, or don't.** See every agent's progress, read the diff of any branch, and
-   step in from the inbox when something needs you.
-4. **Get a reviewed, tested result** merged into your session's branch, ready for a PR.
+```markdown
+<!-- .brindle/goals.md -->
+# Settings page
 
-For a one-line fix, plain `claude` is quicker. brindle pays off when work splits into
-parallel pieces, or runs long enough that you'd rather not babysit it.
+## Settings API
+check: uv run pytest tests/test_settings_api.py -q
+
+## Settings UI
+check: npm test -- settings
+```
+
+## Built with brindle
+
+brindle is built with brindle. One developer's own history, 2026-10-05 to 2026-11-04, as
+recorded by `brindle history`:
+
+| | |
+|---|---|
+| Worker tasks completed | 1,609 across 24 repos |
+| Reviews | 1,567, of which 729 (47%) sent the branch back with changes requested before it could merge |
+| Branches merged | 529, each only after approval and passing checks |
+| Milestone checks passed | 642 |
+| Pull requests merged into brindle itself | 252 |
+
+Nearly half of all reviewed branches needed another round. That is the review gate doing its
+job, and it's the number to look at when deciding whether unreviewed agent output belongs on
+your main branch.
 
 ## Get started
 
-**The app** (macOS and Linux): download it from
-[pawdelta.com/brindle](https://pawdelta.com/brindle/getting-started/), open it, and
-under **New session** choose **Watch brindle work on a practice repo** to see a full run on a practice repo before pointing it at
-your own code.
+You need at least one agent CLI installed and signed in. Claude Code is the default for the
+supervisor, workers and reviewer (`npm install -g @anthropic-ai/claude-code`, then
+`claude auth login`). The core workflow is free and needs no account.
 
-**The terminal**, if you'd rather stay there (macOS, Linux, or Windows through WSL2):
+**The app** (macOS and Linux). Download it from
+[pawdelta.com/brindle/getting-started](https://pawdelta.com/brindle/getting-started/), open
+it, and under **New session** choose **Watch brindle work on a practice repo** to see a full
+run before pointing it at your own code.
+
+**The terminal** (macOS, Linux, or Windows through WSL2). The install script installs uv and
+tmux if they're missing, then brindle, then runs `brindle doctor`:
 
 ```sh
 curl -fsSL pawdelta.com/brindle/install | sh
-brindle demo      # the same practice run, in tmux
-cd ~/code/myapp && brindle
+brindle demo              # the same practice run, in tmux
+cd ~/code/myapp
+brindle init              # once per repo: detects setup and test commands
+brindle                   # a supervisor chat here, with the live sidebar
 ```
 
-Either way you need at least one agent CLI installed and signed in, such as Claude Code
-(`npm install -g @anthropic-ai/claude-code`, then `claude auth login`). The app and the
-CLI run on the same engine, so you can use both.
+![brindle demo in the terminal: a supervisor splits a goal between two workers, each branch is reviewed and merged, and both milestones turn green once their checks pass](https://raw.githubusercontent.com/PawDelta/brindle/main/assets/brindle-demo.gif)
 
-## Pricing
+*The same demo from `brindle demo`, in tmux.*
 
-The core workflow is free, with no limit on agents, workers or sessions, and no account
-needed. brindle Pro ($20/month) and Team ($40/seat/month) add things like budgets,
-several repos in one session and shared rules
-([compare plans](https://pawdelta.com/brindle/pricing/)).
+The app and the CLI run on the same engine, so you can use both on the same sessions.
+
+## Commands
+
+| | |
+|---|---|
+| `brindle` | a fresh supervisor chat here, dashboard alongside; `-s codex` runs the supervisor on another CLI |
+| `brindle init` | detect setup and test commands, write `.brindle/config.json`, check the tools |
+| `brindle demo [--local]` | watch brindle finish a tiny practice repo; `--local` keeps workers and reviewers on Ollama |
+| `brindle doctor` | check tmux, the agent CLIs and how each is signed in, and the repo's config and checks |
+| `brindle continue [ID]` | resume a paused session, workers included (default: the most recent) |
+| `brindle goal [check]` | the goal's progress; `check` runs the milestone checks now |
+| `brindle history [--share]` | durable log of worker results, reviews, merges and milestone checks; `--share` summarizes the session in a few lines |
+| `brindle ls` | workspaces and their agents |
+| `brindle new BRANCH -p PROMPT` | a worktree, a branch and a supervisor in it, with its first message |
+| `brindle pr [WS]` | push a workspace branch and open a pull request against its base |
+| `brindle app` | open the desktop app, or print where to download it |
+| `brindle web` | this session in your browser, on 127.0.0.1 only |
+
+With no `WS` argument, commands act on the workspace you're in. The
+[guide](https://github.com/PawDelta/brindle/blob/main/docs/guide.md#commands) lists the rest.
+
+## Agents and models
+
+| Provider | Supervisor | Worker / reviewer | Signs in with |
+|---|---|---|---|
+| Claude Code (`claude`) | yes, the default | yes | its own login, or `ANTHROPIC_API_KEY`; also Bedrock, Vertex and Foundry |
+| Codex (`codex`) | yes | yes | its own login, or `OPENAI_API_KEY` |
+| Google Antigravity (`agy`) | yes | yes | its own login, or `GEMINI_API_KEY` |
+| OpenCode (`opencode`) | yes | yes | whatever the model's provider takes |
+| Open-weight models, through brindle's own agent loop | no | yes | any OpenAI- or Anthropic-style endpoint: Ollama, LM Studio, llama.cpp or a hosted API |
+
+brindle only offers a profile whose CLI is installed and signed in. The built-in
+`developer-local` and `reviewer-local` profiles run Qwen3-Coder on Ollama; GLM, DeepSeek, Kimi
+and gpt-oss work the same way, and Claude Code itself can be pointed at another
+Anthropic-compatible backend from a profile. Profiles are Markdown files with frontmatter:
+pick a provider, a model and a permission mode, write the prompt, and the supervisor routes
+tasks to them by weight.
 
 ## Learn more
 
-- [The full guide](https://github.com/PawDelta/brindle/blob/main/docs/guide.md): every command, config option, provider and plan
-  feature.
+- [The full guide](https://github.com/PawDelta/brindle/blob/main/docs/guide.md): every
+  command, config option, provider, permission policy and paid feature.
 - [Website and docs](https://pawdelta.com/brindle/)
 
 ## License
 
 Source-available, not open source. brindle is free to use, including at work, under the
-[brindle License 1.0](https://github.com/PawDelta/brindle/blob/main/LICENSE): you may install and run it, but not modify it (beyond
-the changes the license permits), redistribute it, or use it to build a competing
-service. Details in the [guide](https://github.com/PawDelta/brindle/blob/main/docs/guide.md#license).
+[brindle License 1.0](https://github.com/PawDelta/brindle/blob/main/LICENSE): you may install
+and run it, but not modify it (beyond the changes the license permits), redistribute it, or
+use it to build a competing service. Details in the
+[guide](https://github.com/PawDelta/brindle/blob/main/docs/guide.md#license).
 
 This project is unrelated to the Brindle desktop app at brindle.dev.
