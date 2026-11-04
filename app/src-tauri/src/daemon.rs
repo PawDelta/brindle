@@ -290,9 +290,10 @@ enum Daemon {
     #[cfg(not(target_os = "macos"))]
     Child(std::process::Child),
     /// A job of the person's launchd (macOS), see `start_daemon`: `pid` once
-    /// launchd has spawned it.
+    /// launchd has spawned it. `adopted`: another start's job (an earlier app
+    /// process's), found loaded and waited on rather than started here.
     #[cfg(target_os = "macos")]
-    Launchd { label: String, pid: Option<u32> },
+    Launchd { label: String, pid: Option<u32>, adopted: bool },
 }
 
 #[cfg(not(windows))]
@@ -307,6 +308,27 @@ impl Daemon {
         }
     }
 
+    /// Whether the daemon `pid` is the one this start made. An adopted job's
+    /// isn't: its daemon.json is judged as any daemon found running is.
+    fn owns(&self, pid: u32) -> bool {
+        match self {
+            #[cfg(not(target_os = "macos"))]
+            Daemon::Child(child) => child.id() == pid,
+            #[cfg(target_os = "macos")]
+            Daemon::Launchd { pid: own, adopted, .. } => !adopted && *own == Some(pid),
+        }
+    }
+
+    /// Whether this is another start's job, adopted (see `Launchd`).
+    fn adopted(&self) -> bool {
+        match self {
+            #[cfg(not(target_os = "macos"))]
+            Daemon::Child(_) => false,
+            #[cfg(target_os = "macos")]
+            Daemon::Launchd { adopted, .. } => *adopted,
+        }
+    }
+
     /// None while it runs; how it ended once it has (an exit status's words,
     /// or launchd's `last exit code = 1`). A launchd job that has ended is
     /// unloaded, so the next start loads its job afresh.
@@ -315,7 +337,7 @@ impl Daemon {
             #[cfg(not(target_os = "macos"))]
             Daemon::Child(child) => Ok(child.try_wait().map_err(|e| e.to_string())?.map(|status| status.to_string())),
             #[cfg(target_os = "macos")]
-            Daemon::Launchd { label, pid } => match launchd_job(label)? {
+            Daemon::Launchd { label, pid, .. } => match launchd_job(label)? {
                 Some(job) if job.pid.is_some() => {
                     *pid = job.pid;
                     Ok(None)
@@ -366,18 +388,20 @@ fn start_daemon(mut cmd: Command, _home: &Path, log: &Path) -> Result<Daemon, St
 /// icon killed them all. launchd's job outlives the app, quit or force-quit,
 /// as the daemon is meant to; it runs once per load (`daemon_plist`).
 ///
-/// One job per home (`launchd_label`): a job still running under it is a
-/// daemon another start of this app's made moments ago, and is waited on
-/// instead of starting a second, which would find its lock and exit.
+/// One job per home (`launchd_label`): a job still running under it (or
+/// loaded and about to run) is a daemon another start made, an earlier app
+/// process's, and is adopted and waited on instead of starting a second,
+/// which would find its lock and exit; `start_in` judges the daemon it turns
+/// out to be. Only a job whose run is over is unloaded (`launchd_plan`).
 #[cfg(target_os = "macos")]
 fn start_daemon(cmd: Command, home: &Path, log: &Path) -> Result<Daemon, String> {
     let label = launchd_label(home);
-    if let Some(job) = launchd_job(&label)? {
-        if job.pid.is_some() {
-            return Ok(Daemon::Launchd { label, pid: job.pid });
+    match launchd_plan(launchd_job(&label)?.as_ref()) {
+        Plan::Adopt(pid) => return Ok(Daemon::Launchd { label, pid, adopted: true }),
+        Plan::Unload => {
+            launchctl(&["bootout", &launchd_service(&label)])?;
         }
-        // Its last run is over: unloaded, so that this plist is the one read.
-        launchctl(&["bootout", &launchd_service(&label)])?;
+        Plan::Load => {}
     }
     let plist = home.join(LAUNCHD_PLIST);
     let staged = home.join(format!("{LAUNCHD_PLIST}.{}", std::process::id()));
@@ -397,7 +421,29 @@ fn start_daemon(cmd: Command, home: &Path, log: &Path) -> Result<Daemon, String>
         })?;
     launchctl(&["bootstrap", &launchd_domain(), &plist.to_string_lossy()])?;
     let pid = launchd_job(&label)?.and_then(|job| job.pid);
-    Ok(Daemon::Launchd { label, pid })
+    Ok(Daemon::Launchd { label, pid, adopted: false })
+}
+
+/// What `start_daemon` does about the job launchd has under the daemon's label.
+#[cfg(target_os = "macos")]
+#[derive(Debug, PartialEq)]
+enum Plan {
+    /// None is loaded: load this start's.
+    Load,
+    /// It runs (its pid), or is loaded and about to be spawned (no pid, no
+    /// run yet): another start's, adopted.
+    Adopt(Option<u32>),
+    /// Its one run is over: unloaded, then this start's is loaded.
+    Unload,
+}
+
+#[cfg(target_os = "macos")]
+fn launchd_plan(job: Option<&LaunchdJob>) -> Plan {
+    match job {
+        None => Plan::Load,
+        Some(job) if job.pid.is_some() || job.runs == 0 => Plan::Adopt(job.pid),
+        Some(_) => Plan::Unload,
+    }
 }
 
 /// The daemon's launchd label for brindle's home `home`: one per home, so an
@@ -649,9 +695,26 @@ fn start_in(
     loop {
         // daemon.json is written once the sockets are bound, a moment before they listen.
         let listening = running_in(home).filter(|info| Conn::open(info).is_ok());
-        if let Some(info) = listening.filter(|info| info.pid == child.id() || usable(info)) {
-            child.release();
-            return Ok(info);
+        if let Some(info) = listening {
+            if child.owns(info.pid) || usable(&info) {
+                child.release();
+                return Ok(info);
+            }
+            if child.adopted() {
+                // An adopted job's daemon, and not one to use: judged as ensure_in judges
+                // one found running. Another build's is stopped, and this start's own
+                // takes its place.
+                match engine.map(|engine| reuse_running(engine, &info)) {
+                    Some(Reuse::Conflict(why)) => return Err(why),
+                    _ => {
+                        set_step(home, Some((StartStep::Stopping { pid: info.pid }, since)));
+                        stop_daemon(info.pid, STOP_GRACE)?;
+                        child = start_daemon(daemon_command(bin, path), home, &log_path)?;
+                        set_step(home, Some((StartStep::Starting { pid: child.id() }, since)));
+                        continue;
+                    }
+                }
+            }
         }
         if let Some(status) = child.try_wait()? {
             // One started by someone else in the meantime makes this one exit: use that, if it may be.
@@ -1723,6 +1786,97 @@ mod tests {
         child
     }
 
+    /// Unloads the daemon job `label` when dropped: a test's fake daemon
+    /// doesn't stay under launchd, however the test ends.
+    #[cfg(target_os = "macos")]
+    struct Unload(String);
+
+    #[cfg(target_os = "macos")]
+    impl Drop for Unload {
+        fn drop(&mut self) {
+            let _ = launchctl(&["bootout", &launchd_service(&self.0)]);
+        }
+    }
+
+    /// A daemon loaded under the home's label by an earlier start (another
+    /// app process's) is adopted and waited on, not started over; once it
+    /// listens it is judged as a daemon found running is, and another
+    /// build's is stopped and replaced by this start's own.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_adopted_jobs_daemon_of_another_build_is_replaced_once_it_listens() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::current_dir().unwrap().join("target/adopted-daemon");
+        let home = dir.join("home");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&home).unwrap();
+        let engine = engine_of_build(&dir, Some("00b2"));
+        // A daemon that, once `gate` (a fifo) is written to, records its pid, writes
+        // the home's daemon.json and listens on its socket. It exits on SIGTERM.
+        let fake = |name: &str, gate: Option<&Path>| -> PathBuf {
+            let bin = dir.join(name).join("brindle");
+            std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+            let sock = format!("target/adopted-{name}.sock");
+            let _ = std::fs::remove_file(&sock);
+            let wait = gate.map_or(String::new(), |gate| format!("read < '{}'\n", gate.display()));
+            std::fs::write(
+                &bin,
+                format!(
+                    "#!/bin/bash\n{wait}echo $$ > '{dir}/{name}.started'\n\
+                     printf '{{\"socket\": \"{sock}\", \"token\": \"t\", \"pid\": %s}}' $$ > '{home}/daemon.json'\n\
+                     /usr/bin/nc -lkU {sock} & trap 'kill $!; exit 0' TERM; wait\n",
+                    dir = dir.display(),
+                    home = home.display()
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+            bin
+        };
+        let gate = dir.join("gate");
+        let c_gate = std::ffi::CString::new(gate.to_str().unwrap()).unwrap();
+        // SAFETY: mkfifo only reads the path it is given.
+        assert_eq!(unsafe { libc::mkfifo(c_gate.as_ptr(), 0o600) }, 0);
+        let old = fake("old", Some(&gate));
+        let new = fake("new", None);
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let log = home.join(START_LOG);
+        File::create(&log).unwrap();
+        let patience = Duration::from_millis(300);
+
+        // An earlier app process loaded the old build's daemon; it doesn't listen yet.
+        let earlier = start_daemon(daemon_command(&old, &path), &home, &log).unwrap();
+        let _unload = Unload(launchd_label(&home));
+        assert!(!earlier.adopted());
+        // This start finds launchd's job and waits on it: nothing is started over it.
+        let err = start_in(&new, &path, &home, Some(&engine), patience).unwrap_err();
+        assert!(err.starts_with(ENGINE_STARTING), "{err}");
+        assert!(!dir.join("new.started").exists(), "started a daemon over the loaded job");
+        assert!(STARTING.lock().unwrap().as_ref().unwrap()[&home].child.adopted());
+
+        // The old one publishes its daemon.json and listens. It isn't this engine's build
+        // (no brindle-build on its command line; `--idle-exit`: Replace), so it is stopped
+        // and this start's own daemon takes its place.
+        std::fs::write(&gate, "go\n").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let info = loop {
+            match start_in(&new, &path, &home, Some(&engine), patience) {
+                Ok(info) => break info,
+                Err(err) => assert!(err.starts_with(ENGINE_STARTING), "{err}"),
+            }
+            assert!(Instant::now() < deadline, "never replaced");
+        };
+        let started = |name: &str| std::fs::read_to_string(dir.join(format!("{name}.started"))).unwrap().trim().parse::<u32>().unwrap();
+        let (old_pid, new_pid) = (started("old"), started("new"));
+        assert_eq!(info.pid, new_pid);
+        assert_ne!(new_pid, old_pid);
+        assert!(!is_daemon(old_pid), "the other build's daemon still runs");
+        assert!(Conn::open(&info).is_ok());
+        assert!(!starting_in(&home));
+        // SAFETY: kill(2) only sends a signal, to the fake daemon's own process group (launchd's job leads one).
+        unsafe { libc::kill(-(new_pid as libc::pid_t), libc::SIGKILL) };
+    }
+
     /// The jetsam coalition `pid` is in: what `lsappinfo` lists as an app's
     /// "coalition", and whose members LaunchServices counts as the app's subordinates.
     #[cfg(target_os = "macos")]
@@ -1765,10 +1919,25 @@ mod tests {
         let log = home.join(START_LOG);
         File::create(&log).unwrap();
 
+        // Nothing loaded: this start's job is loaded. A loaded job is adopted while it runs,
+        // and while launchd has yet to spawn it; only one whose run is over is unloaded.
+        assert_eq!(launchd_plan(None), Plan::Load);
+        assert_eq!(launchd_plan(Some(&LaunchdJob { pid: Some(7), runs: 1, exit: String::new() })), Plan::Adopt(Some(7)));
+        assert_eq!(launchd_plan(Some(&LaunchdJob { pid: None, runs: 0, exit: String::new() })), Plan::Adopt(None));
+        assert_eq!(launchd_plan(Some(&LaunchdJob { pid: None, runs: 1, exit: String::new() })), Plan::Unload);
+
         let mut daemon = start_daemon(daemon_command(&bin, &path), &home, &log).unwrap();
-        let Daemon::Launchd { label, pid: Some(pid) } = &daemon else { panic!("not launchd's job, or not spawned") };
-        let (label, pid) = (label.clone(), *pid);
+        let Daemon::Launchd { label, adopted: false, .. } = &daemon else { panic!("not launchd's job, or adopted") };
+        let label = label.clone();
+        let _unload = Unload(label.clone());
         let deadline = Instant::now() + Duration::from_secs(5);
+        // launchd may spawn the job a moment after loading it: its pid comes with that.
+        while daemon.id() == 0 {
+            assert!(matches!(daemon.try_wait(), Ok(None)), "ended before it ran");
+            assert!(Instant::now() < deadline, "launchd didn't spawn {}", bin.display());
+        }
+        let pid = daemon.id();
+        assert!(daemon.owns(pid) && !daemon.adopted());
         let recorded = loop {
             let recorded = std::fs::read_to_string(dir.join("path")).unwrap_or_default();
             if is_daemon(pid) && recorded.ends_with('\n') {
