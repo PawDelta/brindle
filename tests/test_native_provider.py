@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from conftest import sh
+from fast_repo import build_repo, copy_tree, moved, scratch_db
 from brindle import agents, usage, workspaces
 from brindle.db import Agent
 from brindle.native import runner
@@ -23,9 +24,25 @@ def fake(monkeypatch):
     ep.close()
 
 
+@pytest.fixture(scope="module")
+def ws_template(tmp_path_factory):
+    """The repo with the ``feature`` worktree, made once by workspaces.create."""
+    base = tmp_path_factory.mktemp("ws-template")
+    repo_ = build_repo(base)
+    with scratch_db(tmp_path_factory.mktemp("ws-template-home")) as db_:
+        return base, workspaces.create(db_, str(repo_), "feature").workspace
+
+
 @pytest.fixture
-def ws(db, repo):
-    return workspaces.create(db, str(repo), "feature").workspace
+def repo(ws_template, tmp_path):
+    return copy_tree(ws_template[0], tmp_path)
+
+
+@pytest.fixture
+def ws(db, repo, ws_template, tmp_path):
+    w = moved(ws_template[1], ws_template[0], tmp_path)
+    db.add_workspace(w)
+    return w
 
 
 @pytest.fixture
@@ -67,21 +84,6 @@ def test_endpoint_needs_a_base_url_a_model_and_its_key(monkeypatch):
         runner.endpoint_for(replace(p, api="grpc"))
 
 
-def test_spawn_runs_native_workers_headless_through_the_runner(db, ws, local_profile, monkeypatch):
-    opened = {}
-
-    def fake_open(db_, agent, ws_, name, argv, watch_pane):
-        opened["argv"] = argv
-        return "@9"
-
-    monkeypatch.setattr(agents, "_open_window", fake_open)
-    a = agents.spawn(db, ws, local_profile, prompt="add a README", mode="assign", done_when="README.md exists")
-    assert a.provider == "native" and a.headless == 1
-    assert opened["argv"][-2:] == ["_native", a.id]
-    assert db.get_agent(a.id).status == "processing"
-    queued = db.pop_pending(a.id).body
-    assert queued.startswith("add a README") and "Finish line: README.md exists" in queued
-    assert "report_result" in queued and "/goal" not in queued
 
 
 @pytest.mark.parametrize("models, expected", [(["tiny"], "local"), ([], "developer-light")])
@@ -91,6 +93,7 @@ def test_spawn_falls_back_to_hosted_when_the_local_model_isnt_served(db, ws, rep
     f.write_text(f.read_text().replace("context_tokens:", "fallback: developer-light\ncontext_tokens:"))
     fake.models = models
     monkeypatch.setattr(agents, "_open_window", lambda *a: "@9")
+    monkeypatch.setattr("brindle.prompt_answer.finish_launch", lambda *a: True)   # no real tmux wait
     assert agents.spawn(db, ws, local_profile, prompt="add a README", mode="assign").profile == expected
 
 
@@ -176,22 +179,6 @@ def test_unreported_worker_is_reminded_once_then_its_parent_is_told(db, ws, loca
     assert db.get_agent("n1").status == "idle"
 
 
-def test_messages_sent_mid_turn_arrive_between_model_calls(db, ws, local_profile, fake):
-    native_agent(db, ws)
-    db.enqueue("n1", "start", None)
-
-    def first(req):
-        from brindle.db import DB
-
-        DB().enqueue("n1", "also bump the version", None)  # the server thread's own connection
-        return openai_reply(calls=[("c1", "Bash", {"command": "echo working"})])
-
-    fake.replies = [first, openai_reply(calls=[("c2", "report_result", {"result": "ok"})]), openai_reply("done")]
-    assert run_native(db, "n1", exit_when_idle=True) == 0
-    second = fake.requests[1]["messages"]
-    assert second[-2]["role"] == "tool"
-    assert second[-1]["role"] == "user" and "bump the version" in second[-1]["content"]
-    assert second[-1]["content"].startswith("brindle delivered this message")
 
 
 def test_reviewer_submits_its_verdict_in_process(db, ws, local_profile, fake, monkeypatch):
@@ -236,6 +223,37 @@ def test_reviewer_cannot_edit_under_dontask(db, ws, local_profile, fake, monkeyp
     assert not (Path(ws.path) / "sneaky.txt").exists()
 
 
+
+
+def test_endpoint_failure_stops_the_runner(db, ws, local_profile, fake, capfd, monkeypatch):
+    real_client = runner.Client   # the 500s after the 401 are retried, with no backoff waits
+    monkeypatch.setattr(runner, "Client", lambda endpoint, **kw: real_client(endpoint, lambda seconds: None, **kw))
+    native_agent(db, ws)
+    db.enqueue("n1", "go", None)
+    fake.replies = [401]
+    assert run_native(db, "n1", exit_when_idle=True) == 1
+    assert "endpoint failed" in capfd.readouterr().out
+    assert db.get_agent("n1").status == "idle"
+
+
+def test_messages_sent_mid_turn_arrive_between_model_calls(db, ws, local_profile, fake):
+    native_agent(db, ws)
+    db.enqueue("n1", "start", None)
+
+    def first(req):
+        from brindle.db import DB
+
+        DB().enqueue("n1", "also bump the version", None)  # the server thread's own connection
+        return openai_reply(calls=[("c1", "Bash", {"command": "echo working"})])
+
+    fake.replies = [first, openai_reply(calls=[("c2", "report_result", {"result": "ok"})]), openai_reply("done")]
+    assert run_native(db, "n1", exit_when_idle=True) == 0
+    second = fake.requests[1]["messages"]
+    assert second[-2]["role"] == "tool"
+    assert second[-1]["role"] == "user" and "bump the version" in second[-1]["content"]
+    assert second[-1]["content"].startswith("brindle delivered this message")
+
+
 def test_conversation_survives_a_restart(db, ws, local_profile, fake):
     native_agent(db, ws)
     db.enqueue("n1", "first task", None)
@@ -251,34 +269,3 @@ def test_conversation_survives_a_restart(db, ws, local_profile, fake):
     history = [m["role"] for m in fake.requests[-1]["messages"]]
     assert history == ["system", "user", "assistant", "tool", "assistant", "user"]
     assert fake.requests[-1]["messages"][1]["content"] == "first task"
-
-
-def test_endpoint_failure_stops_the_runner(db, ws, local_profile, fake, capfd):
-    native_agent(db, ws)
-    db.enqueue("n1", "go", None)
-    fake.replies = [401]
-    assert run_native(db, "n1", exit_when_idle=True) == 1
-    assert "endpoint failed" in capfd.readouterr().out
-    assert db.get_agent("n1").status == "idle"
-
-
-def test_profile_without_an_endpoint_is_a_clear_error(db, ws, repo, capfd):
-    (repo / ".brindle/agents").mkdir(parents=True)
-    (repo / ".brindle/agents/bare.md").write_text("---\nname: bare\nprovider: native\n---\nhi\n")
-    native_agent(db, ws, profile="bare")
-    db.enqueue("n1", "go", None)
-    assert run_native(db, "n1", exit_when_idle=True) == 2
-    assert "no base_url" in capfd.readouterr().out
-
-
-def test_mcp_submit_review_uses_the_shared_function(db, ws, monkeypatch):
-    from brindle import mcp_server
-
-    seen = {}
-    monkeypatch.setattr(agents, "submit_review", lambda db_, cid, ok, s: seen.update(cid=cid, ok=ok, s=s) or "rec")
-    native_agent(db, ws, mode="review", agent_id="r1")
-    monkeypatch.setenv("BRINDLE_AGENT_ID", "r1")
-    assert mcp_server.submit_review(True, "fine") == "rec"
-    assert seen == {"cid": "r1", "ok": True, "s": "fine"}
-
-

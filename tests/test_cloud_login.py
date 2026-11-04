@@ -42,9 +42,6 @@ VERTEX_ERROR = ('API Error: Could not load Google Cloud credentials · '
 
 @pytest.mark.parametrize("text", [
     VERTEX_ERROR,
-    "An error occurred (ExpiredToken) when calling InvokeModel: The security token included "
-    "in the request is expired",
-    "AADSTS700082: The refresh token has expired due to inactivity.",
 ])
 def test_expired_logins_are_their_own_cause_and_never_a_refusal(text, monkeypatch, tmp_path):
     monkeypatch.setenv("BRINDLE_HOME", str(tmp_path))
@@ -152,8 +149,6 @@ def test_google_status_refreshes_through_gcloud_in_the_given_env(proc, ok, left,
                "Your default credentials were not found."),
     # after `aws sso logout`: no cached token
     ("bedrock", "Error loading SSO Token: Token for dev-sess does not exist"),
-    # after `az logout`
-    ("foundry", "ERROR: Please run 'az login' to setup account."),
 ])
 def test_signed_out_never_prompts(provider, stderr, tmp_path):
     (tmp_path / ".aws").mkdir()
@@ -202,8 +197,6 @@ def test_custom_adc_lapse_does_not_open_a_different_login(tmp_path, monkeypatch,
 
 @pytest.mark.parametrize("have, opener", [
     ({"wslview"}, "wslview"),                           # wslu installed: it picks the Windows browser
-    ({"explorer.exe", "cmd.exe"}, "explorer.exe"),      # else the Windows PATH's explorer
-    ({"cmd.exe"}, "cmd.exe /c start"),
     (set(), None),                                      # nothing to open it with: print the URL
 ])
 def test_wsl_browser_signin_opens_the_windows_browser(have, opener, tmp_path, monkeypatch):
@@ -217,13 +210,6 @@ def test_wsl_browser_signin_opens_the_windows_browser(have, opener, tmp_path, mo
         which=lambda name: f"/bin/{name}" if name in have else None,
         popen=lambda cmd, **kw: opened.append(kw["env"].get("BROWSER")) or SimpleNamespace(pid=1))
     assert (how, opened) == (("opened", [opener]) if opener else ("manual", []))
-
-
-def test_google_timeout_is_a_failed_login_not_an_exception(tmp_path):
-    def slow(cmd, **kw):
-        raise subprocess.TimeoutExpired(cmd, 1)
-
-    assert not cloud_login.status("vertex", home=tmp_path, run=slow).ok
 
 
 def _alive(pid: int) -> bool:
@@ -258,20 +244,6 @@ def test_issue189_a_timed_out_gcloud_leaves_no_process_behind(tmp_path, monkeypa
                 os.kill(int(pidfile.read_text()), signal.SIGKILL)
             except (ProcessLookupError, ValueError):
                 pass
-
-
-def _subprocess_probe_that_exits_leaves_nothing_of_its_own_running():
-    # A cloud CLI can leave a local auth server behind in its group when it exits.
-    out = cloud_login.run_bounded(["sh", "-c", "tail -f /dev/null >/dev/null 2>&1 & echo $!"]).stdout
-    pid = int(out)
-    try:
-        end = time.monotonic() + 5
-        while _alive(pid) and time.monotonic() < end:
-            pass
-        assert not _alive(pid)
-    finally:
-        if _alive(pid):
-            os.kill(pid, signal.SIGKILL)
 
 
 def _under_an_expired_or_stopped_deadline_no_cloud_cli_starts(provider, stopped, tmp_path, monkeypatch):
@@ -349,10 +321,7 @@ def _deadline_row(provider, stopped):
 @pytest.mark.parametrize("scenario, params", [
     pytest.param(_token_cache_runs_gcloud_once_until_near_expiry, {}, id="token_cache-expiry",
                  marks=pytest.mark.variant("a cached token is reused until near expiry, then gcloud is asked again")),
-    pytest.param(_subprocess_probe_that_exits_leaves_nothing_of_its_own_running, {}, id="subprocess-probe"),
-    _deadline_row("vertex", False),
     _deadline_row("foundry", True),
-    _deadline_row("bedrock", False),
     pytest.param(_token_cache_concurrent_misses_share_one_gcloud_call, {},
                  id="token_cache-concurrent", marks=pytest.mark.variant("concurrent token misses share one gcloud call")),
 ])

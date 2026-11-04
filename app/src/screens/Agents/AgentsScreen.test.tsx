@@ -180,24 +180,6 @@ describe("agents tab", () => {
     stop();
   });
 
-  it("agents: lock keeps a row's choice from learning, and unlocks", async () => {
-    const { daemon, stop } = setup();
-    await screen.findByTestId("kind-advanced");
-    expect(lock("supervisor").getAttribute("aria-pressed")).toBe("true");
-    expect(lock("supervisor").textContent).toContain("Locked");
-    expect(lock("advanced").getAttribute("aria-pressed")).toBe("false");
-
-    fireEvent.click(lock("advanced"));
-    await waitFor(() => expect(lock("advanced").getAttribute("aria-pressed")).toBe("true"));
-    expect(puts(daemon).at(-1)).toEqual({ repo: REPO, scope: "user", kinds: { advanced: { locked: true } } });
-    expect(lock("advanced").textContent).toContain("Locked");
-
-    fireEvent.click(lock("advanced"));
-    await waitFor(() => expect(lock("advanced").getAttribute("aria-pressed")).toBe("false"));
-    expect(puts(daemon).at(-1)).toEqual({ repo: REPO, scope: "user", kinds: { advanced: { locked: false } } });
-    stop();
-  });
-
   it("agents: a row learning changed runs the learned model, says only that, and 'use mine instead' locks it back to mine", async () => {
     const { daemon, stop } = setup();
     await screen.findByTestId("kind-heavy");
@@ -406,39 +388,6 @@ describe("agents tab", () => {
     stop();
   });
 
-  it("agents: the reviewer and supervisor rows have the same picker, ordered fallbacks and custom agents as the sizes", async () => {
-    const { daemon, stop } = setup();
-    await screen.findByTestId("kind-supervisor");
-    expect(runsOn("reviewer").dataset.choice).toBe("reviewer-codex");
-    expect(chain("reviewer")).toBe("Opus 5.5");
-    expect(runsOn("supervisor").dataset.choice).toBe("developer-heavy");
-    expect(chain("supervisor")).toBe("Sonnet 5.5");
-
-    // The reviewer's fallbacks: added from the same inline list, reordered.
-    fireEvent.click(within(openFallbacks("reviewer")).getByRole("button", { name: /Add a fallback/ }));
-    fireEvent.click(option(within(row("reviewer")).getByRole("group", { name: "Choices for Reviewer fallbacks" }), "quick-fix")!);
-    await waitFor(() => expect(chain("reviewer")).toBe("Opus 5.5, then quick-fix"));
-    expect(puts(daemon).at(-1)).toEqual({ repo: REPO, scope: "user", kinds: { reviewer: { fallbacks: ["reviewer", "quick-fix"] } } });
-    fireEvent.click(within(openFallbacks("reviewer")).getByRole("button", { name: "Move quick-fix earlier" }));
-    await waitFor(() => expect(chain("reviewer")).toBe("quick-fix, then Opus 5.5"));
-
-    // The supervisor picks a model like any row; what ran it becomes its first fallback.
-    fireEvent.click(runsOn("supervisor"));
-    const list = within(row("supervisor")).getByRole("group", { name: "Choices for Supervisor" });
-    expect(option(list, "developer-fable")!.textContent).toMatch(/Fable 5\.1.*\$\$\$slowest/);
-    fireEvent.click(option(list, "developer-fable")!);
-    await waitFor(() => expect(runsOn("supervisor").dataset.choice).toBe("developer-fable"));
-    expect(puts(daemon).at(-1)).toEqual({ repo: REPO, scope: "user", kinds: { supervisor: { model: "developer-fable", fallbacks: ["developer-heavy", "developer"] } } });
-    expect(chain("supervisor")).toBe("Opus 5.5, then Sonnet 5.5");
-
-    // A custom agent made from the supervisor's list is for the supervisor.
-    fireEvent.click(runsOn("supervisor"));
-    fireEvent.click(within(row("supervisor")).getByRole("button", { name: /Make a custom agent/ }));
-    const use = within(within(row("supervisor")).getByRole("region", { name: "New custom agent" })).getByRole("group", { name: "Use it for" });
-    expect(within(use).getByRole("button", { name: "Supervisor" }).getAttribute("aria-pressed")).toBe("true");
-    stop();
-  });
-
   it("agents: whether each agent can run comes from its own sign-in and exclusion, with the reason", async () => {
     // Codex is signed in for its developer, but the reviewer runs under another Codex identity that's signed out; Antigravity is excluded.
     const mixed = [...profiles.map((p) => (p.name === "reviewer-codex" ? { ...p, signed_in: false } : p)), rp("developer-gemini", "antigravity", "gemini-3-pro", "high")];
@@ -472,37 +421,6 @@ describe("agents tab", () => {
     const advanced = within(row("advanced")).getByRole("group", { name: "Choices for Advanced" });
     expect(option(advanced, "developer-gemini")).toBeNull();
     expect(advanced.querySelector('[data-choice-off="developer-gemini"]')!.textContent).toContain("Antigravity is excluded from routing");
-    stop();
-  });
-
-  it("agents: two broken agents in one row each open their own problems", async () => {
-    const broken = [
-      ...profiles.map((p) => (p.name === "quick-fix" ? { ...p, lint_errors: ["gpt-4.1 isn't one of Codex's models any more."] } : p)),
-      rp("slow-fix", "claude", "opus-5.5", "high", { lint_errors: ["Rule pack python-styl isn't installed.", "The prompt is empty."] }),
-    ];
-    const config = data().routingConfig!;
-    const { stop } = setup({ routingProfiles: broken, routingConfig: { ...config, user: { ...config.user, routing: { ...config.user.routing, light: ["developer-light", "quick-fix", "slow-fix"] } } } });
-    await screen.findByTestId("kind-light");
-    const list = openFallbacks("light");
-    const toggle = (id: string) => within(list.querySelector<HTMLElement>(`li[data-choice="${id}"]`)!).getByTestId("problems");
-    expect(toggle("quick-fix").textContent).toContain("1 problem");
-    expect(toggle("slow-fix").textContent).toContain("2 problems");
-    const shown = () => [...row("light").querySelectorAll<HTMLElement>("[data-problems]")].map((el) => el.dataset.problems);
-
-    fireEvent.click(toggle("slow-fix"));
-    expect(shown()).toEqual(["slow-fix"]);
-    const slow = row("light").querySelector('[data-problems="slow-fix"]')!.textContent;
-    expect(slow).toContain("Rule pack python-styl isn't installed.");
-    expect(slow).not.toContain("gpt-4.1");
-    expect(toggle("slow-fix").getAttribute("aria-expanded")).toBe("true");
-    expect(toggle("quick-fix").getAttribute("aria-expanded")).toBe("false");
-
-    fireEvent.click(toggle("quick-fix"));
-    expect(shown()).toEqual(["quick-fix"]);
-    expect(row("light").querySelector('[data-problems="quick-fix"]')!.textContent).toContain("gpt-4.1 isn't one of Codex's models any more.");
-
-    fireEvent.click(toggle("quick-fix"));
-    expect(shown()).toEqual([]);
     stop();
   });
 

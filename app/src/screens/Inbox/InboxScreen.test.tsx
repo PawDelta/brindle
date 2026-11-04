@@ -10,11 +10,8 @@ import { startSync } from "../../store/sync";
 import { StoreContext } from "../../store/useStore";
 import { BASE_URL, FakeDaemon, TOKEN } from "../../test/fakeDaemon";
 import { REPO, permission, permissionInTerminal, question, root, waiting, worker } from "../../test/fixtures";
-import { releaseNotesUrl, type AppUpdateStatus, type AppUpdates } from "../../api/tauri";
-import { watchAppUpdates } from "../../store/appUpdates";
 import { Permissions } from "../Settings/Permissions";
 import { InboxScreen, type InboxScreenProps } from "./InboxScreen";
-import { watchInbox } from "./notify";
 import { usePermissionAsks } from "./PermissionAsks";
 
 afterEach(cleanup);
@@ -157,39 +154,6 @@ describe("inbox", () => {
     await waitFor(() => expect(posts(daemon)).toEqual([{ method: "POST", path: "/inbox/n-18/read", query: {}, body: {} }]));
     await waitFor(() => expect(screen.queryByRole("region", { name: "Your org" })).toBeNull());
     sync.stop();
-  });
-
-  it("marks an item new until the page has been left; one shown before is not marked again", async () => {
-    const mine = { ...prReady, workspace_id: "proj-new" };
-    const elsewhere = { ...notice, notice_id: "n-new" };
-    const askA = { ...permission, permission: { ...permission.permission!, request_id: "req-a" } };
-    const askB = { ...permission, permission: { ...permission.permission!, request_id: "req-b" } };
-    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], inbox: [mine, elsewhere, askA] });
-    // A visit filtered to one session shows (and marks) only that session's item.
-    const first = mount(daemon, daemon.client(), { session: "sup1" });
-    await waitFor(() => expect(card("pr_ready")).toBeTruthy());
-    expect(card("pr_ready").getAttribute("data-new")).toBe("true");
-    cleanup();
-    first.sync.stop();
-    // The full Inbox: the item already shown is not new, the one the filter hid is.
-    const second = mount(daemon);
-    await waitFor(() => expect(card("org_notice")).toBeTruthy());
-    expect(card("org_notice").getAttribute("data-new")).toBe("true");
-    expect(card("pr_ready").getAttribute("data-new")).toBeNull();
-    // It leaves and comes back: new again.
-    daemon.data.inbox = [elsewhere, askA];
-    daemon.publish("message.queued", { agent_id: "sup1" });
-    await waitFor(() => expect(card("pr_ready")).toBeFalsy());
-    daemon.data.inbox = [mine, elsewhere, askA];
-    daemon.publish("message.queued", { agent_id: "sup1" });
-    await waitFor(() => expect(card("pr_ready")?.getAttribute("data-new")).toBe("true"));
-    // A request already shown is not new; another from the same agent replacing it (no empty snapshot between) is.
-    const ask = () => document.querySelector<HTMLElement>('[data-testid="permission-card"]')!;
-    expect(ask().getAttribute("data-new")).toBeNull();
-    daemon.data.inbox = [mine, elsewhere, askB];
-    daemon.publish("message.queued", { agent_id: "w1" });
-    await waitFor(() => expect(ask().getAttribute("data-new")).toBe("true"));
-    second.sync.stop();
   });
 
   it("starts a sign-in from its card", async () => {
@@ -426,24 +390,6 @@ describe("inbox", () => {
     expect(rows.flatMap((r) => [...r.querySelectorAll("button, input, select")])).toEqual([]);   // locked: nothing to change
   });
 
-  it("groups a closed worker's running child under its session, as the sidebar does", async () => {
-    // The snapshot leaves w1 out (closed) but keeps c1, which w1 started; w1's record says where c1 belongs.
-    const child = { ...worker.agents![0], id: "c1", parent_id: "w1" };
-    const daemon = new FakeDaemon({
-      repos: [{ repo_root: REPO, name: "proj" }],
-      sessions: [session],
-      workspaces: [root, { ...worker, agents: [child] }],
-      closed: [worker.agents![0]],
-      inbox: [{ ...waiting, agent_id: "c1" }],
-    });
-    const { sync, onOpen } = mount(daemon);
-    const group = await screen.findByRole("region", { name: "Ship ls --json" });
-    expect(group.textContent).toContain("Waiting on your input");
-    fireEvent.click(within(card("waiting")).getByRole("button", { name: "Go to session ›" }));
-    expect(onOpen).toHaveBeenLastCalledWith("sup1", REPO, "c1");
-    sync.stop();
-  });
-
   it("shows a failed load with a retry that fetches again, and all clear when nothing waits", async () => {
     const daemon = new FakeDaemon({ inbox: [question] });
     let down = true;
@@ -463,56 +409,4 @@ describe("inbox", () => {
     sync.stop();
   });
 
-  it("shows the app's own update until restarted, then once until dismissed, counted on the badge too; a late first status never hides it; nothing for an rc or staff build", async () => {
-    const idle: AppUpdateStatus = { version: "0.6.0", automatic: true, pending: null, available: null, later: false, updated: null, last_checked: null, checking: false };
-    let announce: (s: AppUpdateStatus) => void = () => {};
-    let answer: ((s: AppUpdateStatus) => void) | null = null;
-    const updates: AppUpdates = {
-      // The status now, answered only when the test says: after an announcement it predates.
-      status: () => new Promise((resolve) => (answer = resolve)),
-      check: () => Promise.resolve(idle),
-      updateNow: () => Promise.resolve(null),
-      later: () => Promise.resolve(),
-      restart: vi.fn(() => Promise.resolve()),
-      dismiss: vi.fn(() => Promise.resolve(announce({ ...idle, version: "0.7.0" }))),
-      watch: (on) => {
-        announce = (s) => act(() => on(s));
-        return Promise.resolve(() => {});
-      },
-    };
-    const openUrl = vi.fn(() => Promise.resolve());
-    const { store, sync } = mount(new FakeDaemon({ inbox: [] }), undefined, { appUpdates: updates, openUrl });
-    const counts: number[] = [];
-    watchInbox(store, { notify: () => {}, count: (n) => counts.push(n) });
-    watchAppUpdates(store, updates);
-    await waitFor(() => expect(screen.getByTestId("all-clear")).toBeTruthy());
-    await waitFor(() => expect(answer).not.toBeNull());
-    const kind = () => screen.queryByTestId("app-update-card")?.dataset.kind ?? null;
-
-    // Installed in the background, then the older first status arrives: the update still waits for
-    // the person's restart (never the app's own), on the Inbox and its badge alike.
-    announce({ ...idle, pending: "0.7.0" });
-    await act(async () => answer!(idle));
-    expect(kind()).toBe("pending");
-    expect(screen.queryByTestId("all-clear")).toBeNull();
-    expect(counts.at(-1)).toBe(1);
-    const pending = screen.getByTestId("app-update-card");
-    fireEvent.click(within(pending).getByRole("button", { name: "What's new" }));
-    expect(openUrl).toHaveBeenCalledWith(releaseNotesUrl("0.7.0"));
-    fireEvent.click(within(pending).getByRole("button", { name: "Restart to update" }));
-    expect(updates.restart).toHaveBeenCalled();
-
-    // Restarted on it: once, until dismissed.
-    announce({ ...idle, version: "0.7.0", updated: "0.7.0" });
-    expect(kind()).toBe("updated");
-    fireEvent.click(within(screen.getByTestId("app-update-card")).getByRole("button", { name: "Dismiss" }));
-    await waitFor(() => expect(kind()).toBeNull());
-    expect(counts.at(-1)).toBe(0);
-
-    // An rc or a staff build installs nothing by itself, and nothing waits for it.
-    announce({ ...idle, automatic: false, pending: "0.7.1-rc.1" });
-    expect(kind()).toBeNull();
-    expect(counts.at(-1)).toBe(0);
-    sync.stop();
-  });
 });

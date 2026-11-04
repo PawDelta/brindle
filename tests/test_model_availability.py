@@ -32,23 +32,6 @@ def test_native_subscription_credentials_follow_existing_auth_guard():
     discover.assert_not_called()
 
 
-def test_cache_expires_is_bounded_and_can_be_cleared():
-    now = [10.0]
-    check, discover = checker(ma.Catalog(frozenset({"wanted"}), "openai"), clock=lambda: now[0])
-    for _ in range(2):
-        check.check(profile(), effective_env={"KEY": "secret"})
-    assert discover.call_count == 1
-    now[0] += ma.CACHE_TTL
-    check.check(profile(), effective_env={"KEY": "secret"})
-    assert discover.call_count == 2
-    check.clear()
-    check.check(profile(), effective_env={"KEY": "secret"})
-    assert discover.call_count == 3
-    for i in range(140):
-        check.check(profile(), effective_env={"KEY": str(i)})
-    assert len(check._cache) == 128
-    assert all(isinstance(k, bytes) and len(k) == 32 for k in check._cache)
-    assert "secret" not in repr(check._cache)
 
 
 @pytest.mark.parametrize("error", [ValueError("secret-token"), subprocess.TimeoutExpired(["secret-token"], 1)])
@@ -59,12 +42,9 @@ def test_errors_are_unverified_and_do_not_disclose_details(error):
     assert "secret" not in repr(result)
     if isinstance(error, (TimeoutError, subprocess.TimeoutExpired)):
         assert "timed out" in result.explanation
-
-
-@pytest.mark.parametrize("kw", [{"timeout": 31}, {"ttl": float("inf")}])
-def test_budget_validation(kw):
-    with pytest.raises(ValueError):
-        ma.ModelAvailabilityChecker(**kw)
+    for kw in ({"timeout": 31}, {"ttl": float("inf")}):
+        with pytest.raises(ValueError):
+            ma.ModelAvailabilityChecker(**kw)
 
 
 class FakeProcess:
@@ -161,34 +141,17 @@ def test_codex_repeated_cursor_and_oversized_output_are_not_trusted(monkeypatch)
     assert proc.killed
 
 
-@pytest.mark.parametrize("output,models", [
-    ('[{"id": "gemini-test"}]', {"gemini-test"}),
-])
-def test_antigravity_formats_are_advisory(output, models):
-    catalog = ma._parse_antigravity(output)
-    assert catalog.models == models
-    assert not catalog.authoritative
+def test_antigravity_formats_are_advisory():
+    catalog = ma._parse_antigravity('[{"id": "gemini-test"}]')
+    assert catalog.models == {"gemini-test"} and not catalog.authoritative
+    with pytest.raises(ma._DiscoveryError):                      # unrecognized output is not an empty catalog
+        ma._parse_antigravity("Please sign in")
 
 
-@pytest.mark.parametrize("output", ["Please sign in"])
-def test_antigravity_unrecognized_output_is_not_empty_catalog(output):
-    with pytest.raises(ma._DiscoveryError):
-        ma._parse_antigravity(output)
 
 
-def test_antigravity_invokes_only_models(monkeypatch):
-    from brindle import antigravity
-
-    monkeypatch.setattr(antigravity, "binary", lambda: "/mock/agy")
-    popen = Mock(return_value=FakeProcess(b"gemini-test  Gemini\n"))
-    monkeypatch.setattr(ma.subprocess, "Popen", popen)
-    assert ma._antigravity_catalog().models == {"gemini-test"}
-    assert popen.call_args.args[0] == ["/mock/agy", "models"]
-    assert popen.call_args.kwargs["stdin"] == subprocess.DEVNULL
-
-
-@pytest.mark.parametrize("code,limit", [(1, 100)])
-def test_antigravity_nonzero_exit_or_large_output_is_not_trusted(monkeypatch, code, limit):
+def test_antigravity_nonzero_exit_or_large_output_is_not_trusted(monkeypatch):
+    code, limit = 1, 100
     from brindle import antigravity
 
     monkeypatch.setattr(antigravity, "binary", lambda: "/mock/agy")
@@ -207,10 +170,8 @@ def test_ollama_native_tags_uses_configured_server_and_never_pulls():
     assert ma._selected("wanted", catalog).status == "available"
 
 
-@pytest.mark.parametrize("api,base,url,source", [
-    ("openai", "https://api.openai.com/v1", "https://api.openai.com/v1/models", "openai"),
-])
-def test_native_api_catalogs_and_credentials_are_mocked(api, base, url, source):
+def test_native_api_catalogs_and_credentials_are_mocked():
+    api, base, url, source = "openai", "https://api.openai.com/v1", "https://api.openai.com/v1/models", "openai"
     get = Mock(return_value={"data": [{"id": "wanted"}]})
     catalog = ma._native_catalog(ma.Request("native", base, api, "KEY", {"KEY": "secret"}), 1, get=get)
     assert catalog.models == {"wanted"}
@@ -227,15 +188,12 @@ def test_native_api_catalogs_and_credentials_are_mocked(api, base, url, source):
         assert "x-api-key" not in headers
 
 
-@pytest.mark.parametrize("api,port,host", [
-    ("openai", 1234, "gateway.example.com"),
-    ("anthropic", 11434, "0.0.0.0"),
-])
-def test_external_plain_http_catalog_never_sends_credentials(api, port, host):
+def test_external_plain_http_catalog_never_sends_credentials():
     get = Mock(return_value={"data": []})
-    request = ma.Request("native", f"http://{host}:{port}/v1", api, "KEY", {"KEY": "secret"})
-    with pytest.raises(ma._DiscoveryError, match="^unsupported$"):
-        ma._native_catalog(request, 1, get=get)
+    for api, port, host in [("openai", 1234, "gateway.example.com"), ("anthropic", 11434, "0.0.0.0")]:
+        request = ma.Request("native", f"http://{host}:{port}/v1", api, "KEY", {"KEY": "secret"})
+        with pytest.raises(ma._DiscoveryError, match="^unsupported$"):
+            ma._native_catalog(request, 1, get=get)
     get.assert_not_called()
 
 
@@ -254,28 +212,21 @@ def test_mocked_anthropic_pagination_is_bounded_and_cursor_is_encoded(monkeypatc
     assert get.call_count == 1
 
 
-@pytest.mark.parametrize("data", [{"data": None}, {"data": [{"id": 123}]}, {"data": [], "has_more": "yes"}])
-def test_malformed_catalog_does_not_imply_absence(data):
-    get = Mock(return_value=data)
-    with pytest.raises(ma._DiscoveryError):
-        ma._native_catalog(ma.Request("native", "https://api.openai.com/v1"), 1, get=get)
-
-
-@pytest.mark.parametrize("pagination", [{"has_more": True}])
-def test_unknown_pagination_does_not_imply_absence(pagination):
-    get = Mock(return_value={"data": [], **pagination})
+def test_malformed_catalog_does_not_imply_absence():
+    for data in ({"data": None}, {"data": [{"id": 123}]}, {"data": [], "has_more": "yes"}):
+        with pytest.raises(ma._DiscoveryError):
+            ma._native_catalog(ma.Request("native", "https://api.openai.com/v1"), 1, get=Mock(return_value=data))
+    get = Mock(return_value={"data": [], "has_more": True})        # unknown pagination
     catalog = ma._native_catalog(ma.Request("native", "https://api.openai.com/v1"), 1, get=get)
     assert ma._selected("wanted", catalog).status == "unverified"
 
 
-@pytest.mark.parametrize("base,api,key_env", [
-    ("file:///secret", None, None), ("https://u:p@example.com", None, None),
-    ("https://example.com", "bedrock", None), ("https://example.com", None, "MISSING_KEY"),
-])
-def test_unsupported_or_missing_native_configuration_never_sends(base, api, key_env):
+def test_unsupported_or_missing_native_configuration_never_sends():
     get = Mock()
-    with pytest.raises(ma._DiscoveryError):
-        ma._native_catalog(ma.Request("native", base, api, key_env), 1, get=get)
+    for base, api, key_env in [("file:///secret", None, None), ("https://u:p@example.com", None, None),
+                               ("https://example.com", "bedrock", None), ("https://example.com", None, "MISSING_KEY")]:
+        with pytest.raises(ma._DiscoveryError):
+            ma._native_catalog(ma.Request("native", base, api, key_env), 1, get=get)
     get.assert_not_called()
 
 
@@ -297,16 +248,12 @@ def test_http_is_get_only_and_refuses_redirects(monkeypatch, code, target):
     assert redirects.redirect_request(request, None, code, "", {}, target) is None
 
 
-@pytest.mark.parametrize("code,reason", [(500, "failed")])
-def test_http_failure_does_not_prove_model_absence(monkeypatch, code, reason):
+def test_http_failure_does_not_prove_model_absence_and_output_is_limited(monkeypatch):
     opener = Mock()
-    opener.open.side_effect = urllib.error.HTTPError("https://secret", code, "secret", {}, None)
+    opener.open.side_effect = urllib.error.HTTPError("https://secret", 500, "secret", {}, None)
     monkeypatch.setattr(ma.urllib.request, "build_opener", lambda *args: opener)
-    with pytest.raises(ma._DiscoveryError, match=f"^{reason}$"):
+    with pytest.raises(ma._DiscoveryError, match="^failed$"):
         ma._get_json("https://example.com", {}, 1)
-
-
-def test_http_output_limit(monkeypatch):
     monkeypatch.setattr(ma, "MAX_BYTES", 4)
     opener = Mock()
     opener.open.return_value = io.BytesIO(b"12345")
@@ -623,3 +570,22 @@ def test_launch_gates_count_toward_route_health(db, repo, monkeypatch, status, e
     assert agents.model_problem("test", ws, m=managed_models.Managed("org", None, False))
     assert route_health.pending() == {(ws.repo_root, "claude", route, "claude-opus-5-5", outcome): 1}
     route_health.reset()
+
+
+def test_cache_expires_is_bounded_and_can_be_cleared():
+    now = [10.0]
+    check, discover = checker(ma.Catalog(frozenset({"wanted"}), "openai"), clock=lambda: now[0])
+    for _ in range(2):
+        check.check(profile(), effective_env={"KEY": "secret"})
+    assert discover.call_count == 1
+    now[0] += ma.CACHE_TTL
+    check.check(profile(), effective_env={"KEY": "secret"})
+    assert discover.call_count == 2
+    check.clear()
+    check.check(profile(), effective_env={"KEY": "secret"})
+    assert discover.call_count == 3
+    for i in range(140):
+        check.check(profile(), effective_env={"KEY": str(i)})
+    assert len(check._cache) == 128
+    assert all(isinstance(k, bytes) and len(k) == 32 for k in check._cache)
+    assert "secret" not in repr(check._cache)

@@ -65,6 +65,9 @@ def test_doctor_fix_has_nothing_to_do_without_a_key(agy_installed, settings):
 
 def test_doctor_fix_via_the_cli(agy_installed, settings, monkeypatch):
     monkeypatch.setenv("GEMINI_API_KEY", KEY)
+    # Only the agy key line runs; the rest of doctor probes the whole machine.
+    monkeypatch.setattr(doctor, "checks", lambda root: doctor.credential_checks())
+    monkeypatch.setattr(doctor, "disk_checks", lambda root: [])
     r = runner.invoke(app, ["doctor", "--fix"], input="y\n")
     assert json.loads(settings.read_text()) == {"modelProvider": "gemini"}
     assert KEY not in r.output

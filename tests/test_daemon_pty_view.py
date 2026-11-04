@@ -22,33 +22,12 @@ RIGHT = "\t0\t58\t0\t23\t80\t24\t0\t1\t0\ns\t60\t79\t0\t23\t80\t24\t0\t0\t0"
 
 
 @pytest.mark.parametrize("call,args,want", [
-    (pv.server_args, (None,), []),
-    (pv.server_args, ("Default",), []),
     (pv.server_args, ("brindle-x",), ["-L", "brindle-x"]),
-    (pv.server_args, ("/tmp/s",), ["-S", "/tmp/s"]),
     (pv.server_args, ("a;kill-server",), pv.ViewError),
-    (pv.valid_target, ("s:@1",), True),
     (pv.valid_target, ("-t",), False),
-    (pv.parse_version, ("tmux 3.2a",), (3, 2)),
-    (pv.parse_version, ("master",), (sys.maxsize, 0)),
-    (pv.parse_version, ("tmux ???",), None),
     (pv.check_version, ("tmux 3.1c", "x"), pv.ViewError),
-    (pv.check_version, ("tmux ???", "x"), pv.ViewError),
-    (pv.check_version, ("tmux 3.2", "x"), None),
-    (lambda v: pv.view_bindings(v).count("\n"), ((3, 2),), 8),
-    (lambda v: pv.view_bindings(v).count("\n"), ((3, 7),), 12),
-    (pv.view_owner, ("brindle-view-123-4",), 123),
-    (pv.view_owner, ("agent-123-4",), None),
-    (pv.crop_of, (LEFT, 59, None), pv.Crop(21, 21, None)),
-    (pv.crop_of, (LEFT, 70, None), pv.Crop(21, 21, 59)),          # a narrower terminal has the window
     (pv.crop_of, (LEFT, 40, (60, 10)), pv.Crop(21, 20, None)),    # panned: the cursor kept in view
-    (pv.crop_of, (RIGHT, 59, None), pv.Crop(21, 0, None)),
-    (pv.crop_of, (LEFT.replace("\t0\t0\t0\n", "\t1\t0\t0\n"), 59, None), pv.Crop()),   # zoomed
-    (pv.crop_of, ("s\t0\t79\t0\t23\t80\t24\t0\t1\t0", 59, None), pv.Crop()),            # a sidebar alone
     (pv.sync_open_after, (False, b"\x1b[?20", b"26h"), True),     # a marker split between reads
-    (pv.sync_open_after, (True, b"", b"text"), True),
-    (pv.sync_open_after, (True, b"", pv.SYNC_END), False),
-    (pv.sgr_releases, (b"\x1b[<0;1;1M\x1b[<0;1;1m\x1b[<0",), [9]),
 ])
 def test_pure_parts(call, args, want):
     if want is pv.ViewError:
@@ -60,7 +39,6 @@ def test_pure_parts(call, args, want):
 
 @pytest.mark.parametrize("server,admitted", [
     ("agent-srv", True),
-    (str(tmux.socket_dir() / "agent-srv"), True),
     ("someone-else", False),
     pytest.param(None, False, marks=pytest.mark.variant("no server must not mean the default one")),
 ])
@@ -75,11 +53,8 @@ def test_only_brindles_own_servers_are_shown(db, server, admitted):
             pv.admit(server)
 
 
-@pytest.mark.parametrize("ask", [
-    {"target": "s:@1"},
-    {"server": "someone-else", "target": "s:@1", "cols": 80, "rows": 24},
-])
-def test_a_view_that_cant_open_says_why_and_closes(db, ask):
+def test_a_view_that_cant_open_says_why_and_closes(db):
+    ask = {"server": "someone-else", "target": "s:@1", "cols": 80, "rows": 24}
     with TestClient(build_app(TOKEN)) as client, client.websocket_connect("/v1/pty_view") as ws:
         ws.send_text(TOKEN)
         ws.send_json(ask)

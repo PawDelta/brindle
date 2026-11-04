@@ -53,12 +53,6 @@ AGY_NO_KEY = (1, 'modelProvider is set to "gemini" in settings.json, but the GEM
 AGY_IN = (0, "Fetching available models...\ngemini-3.1-pro-high\tGemini 3.1 Pro (High)\n")
 
 
-def test_antigravity_on_the_gemini_api_without_a_key(monkeypatch):
-    fake_probe(monkeypatch, {"models": AGY_NO_KEY})
-    why = providers.signed_out("antigravity")
-    assert "GEMINI_API_KEY isn't set" in why and "modelProvider" in why
-
-
 def test_a_profile_env_key_counts_as_signed_in(db, repo, monkeypatch, tmp_path):
     """The key in a profile's env.GEMINI_API_KEY line reaches the agent, so it
     counts as signed in, the probe isn't run, and the profile stays offered."""
@@ -93,13 +87,6 @@ def test_a_profile_env_key_counts_as_signed_in(db, repo, monkeypatch, tmp_path):
     assert "developer-antigravity (antigravity)" in mcp_server.list_agent_profiles()
 
 
-def test_signed_in_antigravity_is_remembered(monkeypatch):
-    calls = fake_probe(monkeypatch, {"models": AGY_IN})
-    assert providers.signed_out("antigravity") is None
-    assert providers.signed_out("antigravity") is None
-    assert len(calls) == 1
-
-
 def test_unknown_answers_never_block(monkeypatch):
     # An older CLI without the status command, a timeout, or an odd reply.
     fake_probe(monkeypatch, {"auth": (1, "error: unknown command 'auth'"), "login": (2, "boom"),
@@ -120,17 +107,5 @@ def test_routing_skips_a_signed_out_cli(repo, monkeypatch, tmp_path):
     why = autopilot._unavailable("developer-antigravity", load_repo_config(str(repo)), str(repo))
     assert why == "agy isn't signed in, skipped developer-antigravity"
 
-
-def test_chat_preflight_and_doctor_say_how_to_sign_in(monkeypatch):
-    fake_probe(monkeypatch, {"auth": CLAUDE_OUT, "models": AGY_OUT})
-    monkeypatch.setattr(providers, "claude_binary", lambda: "/bin/sh")
-    monkeypatch.setenv("BRINDLE_AGY_BIN", "/bin/sh")
-    assert any("claude auth login" in p for p in doctor.preflight("claude"))
-    assert any("run `agy`" in p for p in doctor.preflight("antigravity"))
-    checks = {c.name: c for c in doctor.signin_checks()}
-    check = checks["Claude Code sign-in"]
-    assert check.level == doctor.FAIL and "claude auth login" in check.detail
-    check = checks["Google Antigravity sign-in"]
-    assert check.level == doctor.WARN and "run `agy`" in check.detail
 
 

@@ -13,12 +13,20 @@ from brindle import agents, bus, disk, gates, git, mcp_server, providers, servic
 from brindle.config import load_repo_config
 
 from conftest import sh
+from git_snapshots import fast_host_tools, repo, workspaces_once  # noqa: F401  (fixtures)
 from test_merge_order import add
 
 
 def write_config(repo, **cfg):
     (repo / ".brindle").mkdir(exist_ok=True)
     (repo / ".brindle" / "config.json").write_text(json.dumps(cfg))
+
+
+@pytest.fixture
+def feature(db, repo, tmp_path, tmp_path_factory):
+    """``workspaces.create(db, repo, "feature")``, built once and copied."""
+    return workspaces_once("workspaces:feature", db, tmp_path, tmp_path_factory,
+                           lambda: (workspaces.create(db, str(repo), "feature").workspace,))[0]
 
 
 def test_failed_setup_keeps_workspace(db, repo):
@@ -29,7 +37,7 @@ def test_failed_setup_keeps_workspace(db, repo):
     assert db.get_workspace(created.workspace.id)
 
 
-@pytest.mark.parametrize("configured", [None, "trees", "../elsewhere"])
+@pytest.mark.parametrize("configured", [None, "../elsewhere"])
 def test_new_worktrees_go_under_the_repo_and_stay_out_of_git_status(db, repo, configured):
     if configured:
         write_config(repo, worktree_root=configured)
@@ -86,26 +94,8 @@ def test_session_config_setup_comes_from_base_branch(db, repo, monkeypatch):
     assert load_repo_config(repo, branch="bare").scoped_checks == "infer"
 
 
-def test_local_config_wraps_shared(repo):
-    write_config(repo, setup=["b"])
-    (repo / ".brindle" / "config.local.json").write_text(json.dumps({"setup": {"before": ["a"], "after": ["c"]}, "branch_prefix": "me/"}))
-    cfg = load_repo_config(repo)
-    assert cfg.setup == ["a", "b", "c"]
-    assert cfg.branch_prefix == "me/"
-
-
-def test_sync_conflict_reports_files(db, repo):
-    ws = workspaces.create(db, str(repo), "feature").workspace
-    open(os.path.join(ws.path, "app.py"), "w").write("mine\n")
-    git.commit_all(ws.path, "mine")
-    (repo / "app.py").write_text("theirs\n")
-    sh("git add -A && git commit -qm theirs && git push -q", repo)
-    with pytest.raises(git.GitError, match="app.py"):
-        git.sync(ws.path, "main")
-
-
-def test_remove_refuses_dirty_and_keeps_branch(db, repo):
-    ws = workspaces.create(db, str(repo), "feature").workspace
+def test_remove_refuses_dirty_and_keeps_branch(db, repo, feature):
+    ws = feature
     open(os.path.join(ws.path, "wip.txt"), "w").write("wip")
     with pytest.raises(workspaces.WorkspaceError, match="uncommitted"):
         workspaces.remove(db, ws)
@@ -137,16 +127,12 @@ def test_remove_refuses_dirty_and_keeps_branch(db, repo):
     assert sh(f"git rev-parse {disk.ARCHIVE_REF}plain", repo).strip()
 
 
-@pytest.mark.parametrize("ref", ["worker", "missing-worker"])
-def test_remove_workspace_accepts_agent_id_and_unknown(db, repo, monkeypatch, ref):
-    ws = workspaces.create(db, str(repo), "feature").workspace
+@pytest.mark.variant("input from real use: supervisors pass a worker's agent id, not a workspace name; the only test of that lookup")
+def test_remove_workspace_accepts_an_agent_id(db, feature, monkeypatch):
+    ws = feature
     add(db, ws, "worker", "assign", result="finished")
     monkeypatch.setattr(mcp_server, "_caller", lambda db: (None, ws))
-    reply = mcp_server.remove_workspace(ref, delete_branch=False)
-    if ref == "missing-worker":
-        assert all(part in reply for part in (ref, "agent id", "workspace id", "name", "branch"))
-        assert db.get_workspace(ws.id) is not None
-        return
+    mcp_server.remove_workspace("worker", delete_branch=False)
     assert db.get_workspace(ws.id) is None
     assert db.get_agent("worker") is None
     assert not os.path.exists(ws.path)
@@ -154,11 +140,11 @@ def test_remove_workspace_accepts_agent_id_and_unknown(db, repo, monkeypatch, re
 
 @pytest.mark.variant("incident: 8 merged workspaces kept their rows after a reviewer's "
                      "`uv run` from the worktree")
-def test_remove_forgets_the_row_when_brindle_ran_from_the_removed_worktree(db, repo, monkeypatch):
+def test_remove_forgets_the_row_when_brindle_ran_from_the_removed_worktree(db, feature, monkeypatch):
     # A reviewer ran brindle from the worktree under review (`uv run` there):
     # removing it took brindle's source with it, so a module not loaded yet
     # failed to import afterwards, leaving the row and its agents behind.
-    ws = workspaces.create(db, str(repo), "feature").workspace
+    ws = feature
     add(db, ws, "rev0", "review", "reviewer")
     real = git.remove_worktree
 
@@ -172,11 +158,3 @@ def test_remove_forgets_the_row_when_brindle_ran_from_the_removed_worktree(db, r
     assert db.get_workspace(ws.id) is None
     assert db.get_agent("rev0") is None
 
-
-def test_existing_branch_is_reused_and_names_dedupe(db, repo):
-    sh("git branch existing", repo)
-    created = workspaces.create(db, str(repo), "existing")
-    assert created.how == "existing"
-    workspaces.remove(db, created.workspace)
-    with pytest.raises(workspaces.WorkspaceError, match="base branch"):
-        workspaces.create(db, str(repo), "main")

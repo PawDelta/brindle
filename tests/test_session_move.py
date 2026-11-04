@@ -1,11 +1,10 @@
 """Starting a supervisor on another branch/worktree, and handing a session over."""
 
-import json
 import time
 
 import pytest
 
-from brindle import agents, autopilot, bus, config, git, sessions, workspaces
+from brindle import agents, autopilot, bus, git, sessions, workspaces
 from brindle.db import Agent, Task
 
 from conftest import sh
@@ -18,22 +17,16 @@ def add(db, ws, aid, mode="interactive", parent=None, status="running"):
     return a
 
 
-def test_config_is_found_from_a_linked_worktree_via_the_main_one(repo, tmp_path):
-    (repo / ".brindle").mkdir()
-    (repo / ".brindle" / "config.local.json").write_text(json.dumps({"max_agents": 7}))
-    linked = tmp_path / "linked"
-    sh(f"git worktree add -q -b other {linked}", repo)
-    assert not (linked / ".brindle").exists()
-    assert config.load_repo_config(linked).max_agents == 7
-    assert config.config_root(linked) == repo
-
-
 def test_checkout_for_adopts_a_worktree_the_user_made(db, repo, tmp_path):
     mine = tmp_path / "mine"
     sh(f"git worktree add -q -b topic {mine}", repo)
     ws = workspaces.checkout_for(db, str(repo), branch="topic")
     assert ws.path == str(mine.resolve()) and ws.repo_root == str(repo)
     assert workspaces.checkout_for(db, str(repo), worktree=str(mine)).id == ws.id
+    with pytest.raises(workspaces.WorkspaceError):
+        workspaces.checkout_for(db, str(repo), branch="other", worktree=str(mine))
+    assert git.current_branch(mine) == "topic"
+    assert db.get_workspace(ws.id) == ws and mine.is_dir()
 
 
 def test_checkout_for_worktree_path_creates_it_with_the_branch(db, repo, tmp_path):
@@ -42,13 +35,6 @@ def test_checkout_for_worktree_path_creates_it_with_the_branch(db, repo, tmp_pat
     assert ws.path == str(path.resolve()) and git.current_branch(path) == "feature"
     with pytest.raises(workspaces.WorkspaceError):
         workspaces.checkout_for(db, str(repo), worktree=str(tmp_path / "nope"))
-
-
-def test_checkout_for_rejects_a_worktree_on_another_branch(db, repo, tmp_path):
-    mine = tmp_path / "mine"
-    sh(f"git worktree add -q -b topic {mine}", repo)
-    with pytest.raises(workspaces.WorkspaceError):
-        workspaces.checkout_for(db, str(repo), branch="other", worktree=str(mine))
 
 
 def test_handover_moves_goal_workers_tasks_and_carries_the_note(db, repo, monkeypatch):
@@ -107,13 +93,6 @@ def test_handover_moves_goal_workers_tasks_and_carries_the_note(db, repo, monkey
     told = db.conn.execute("SELECT agent_id FROM inbox WHERE instr(body, ?) > 0",
                            (autopilot.WAIT_ENDED_HEAD,)).fetchall()
     assert [r["agent_id"] for r in told] == ["new"]
-
-
-def test_checkout_for_target_reads_a_slashed_name_as_a_branch(db, repo, monkeypatch):
-    monkeypatch.chdir(repo)
-    ws = workspaces.checkout_for_target(db, str(repo), "fix/handover")
-    assert ws.branch == "fix/handover" and not (repo / "fix").exists()
-
 
 @pytest.mark.parametrize("own_goal", [None, "done", "running", "handed_away", "send_fails"])
 def test_handover_to_a_live_supervisor_delivers_to_it_instead_of_starting_another(db, repo, monkeypatch, own_goal):

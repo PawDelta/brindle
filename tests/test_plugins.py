@@ -151,6 +151,13 @@ def test_a_broken_factory_or_listing_never_raises(repo, monkeypatch):
     plugins.reset()
     assert plugins.installed(plugins.EVENTS) == []
     assert plugins.select(plugins.EVENTS, cfg, str(repo)) is None
+    # a configured policy that won't load refuses
+    install(monkeypatch, {})
+    cfg.plugins["policy"] = "pro"
+    d = policy.check_assign(cfg, str(repo), "dev", "do A", "assign")
+    assert not d.allowed and "'pro'" in d.reason
+    cfg.plugins["policy"] = "off"
+    assert policy.check_assign(cfg, str(repo), "dev", "do A", "assign").allowed
 
 
 # -- events at each call site -----------------------------------------------------------
@@ -291,19 +298,6 @@ def test_a_broken_policy_plugin_refuses(db, repo, boss, monkeypatch):
     monkeypatch.setattr(agents, "spawn", fake_spawn)
     out = asyncio.run(mcp_server.assign(task="do A", branch="feat-a"))
     assert "Not started" in out and "failed" in out, out
-
-
-def test_a_configured_policy_that_wont_load_refuses(repo, monkeypatch):
-    from brindle import policy
-    from brindle.config import RepoConfig
-
-    install(monkeypatch, {})
-    cfg = RepoConfig()
-    cfg.plugins["policy"] = "pro"
-    d = policy.check_assign(cfg, str(repo), "dev", "do A", "assign")
-    assert not d.allowed and "'pro'" in d.reason
-    cfg.plugins["policy"] = "off"
-    assert policy.check_assign(cfg, str(repo), "dev", "do A", "assign").allowed
 
 
 # -- brindle account ----------------------------------------------------------------------

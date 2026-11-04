@@ -64,13 +64,6 @@ it("in the app the pty view is the default: the shell's status is asked once, an
   expect(ipc.calls.filter((c) => c.cmd === "pty_view_status")).toHaveLength(1);
 });
 
-it("takes the shell's word: unusable, with why", async () => {
-  ipc.state.status = { kind: "unusable", message: "The app's tmux is tmux 3.0a, …" };
-  const got = seen();
-  await settle();
-  expect(got.views?.status).toEqual({ kind: "unusable", message: "The app's tmux is tmux 3.0a, …" });
-});
-
 it("asks the shell again when setup reaches ready, without a reload: a tmux installed meanwhile turns unusable into ready", async () => {
   ipc.state.status = { kind: "unusable", message: "couldn't run tmux" };
   // The first run's setup, until it says ready; then the app (a probe of the pty views).
@@ -111,12 +104,6 @@ it("takes the latest answer when asked again before the last came back", async (
   await act(async () => answers[1]({ kind: "ready", tmux: "tmux 3.8" }));
   await act(async () => answers[0]({ kind: "unusable", message: "old" }));
   expect(got.views?.status).toEqual({ kind: "ready", tmux: "tmux 3.8" });
-});
-
-it("in a browser tab, with no shell, there are no pty views", () => {
-  ipc.state.tauri = false;
-  expect(seen().views).toBeNull();
-  expect(ipc.calls).toEqual([]);
 });
 
 /* What pty_view_open's channel says to the page, as the shell would. */

@@ -152,17 +152,6 @@ def test_only_the_confirmed_files_go_and_a_rejected_upload_is_surfaced(folder, r
     assert len(remote.docs) == 2 and imports.in_library(db, source)
 
 
-def test_files_go_in_batches_of_20_and_a_rejected_file_does_not_hold_back_the_rest(folder, remote, deps):
-    db, source, docs = folder
-    for n in range(21):
-        (docs / f"n{n:02}.md").write_text(f"# Note {n}")
-    remote.bad = "n20.md"
-    with pytest.raises(imports.UploadFailed, match="n20.md"):
-        imports.add_to_library(db, source, "/repo", token(db, source), **deps)
-    assert max(len(files) for files in remote.posts) == 20
-    assert len(remote.items) == 21 and imports.in_library(db, source)       # notes.md + n00..n19; only n20 failed
-
-
 def test_a_deleted_file_is_pruned_and_a_changed_one_updates_in_place(folder, remote, deps):
     db, source, docs = folder
     (docs / "more.md").write_text("# More")

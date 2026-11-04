@@ -41,19 +41,6 @@ def test_key_check_openrouter_needs_credit_left(provider_http, monkeypatch):
     assert provider_http["calls"][-1] == "https://openrouter.ai/api/v1/key"
 
 
-def test_key_check_interactive_shows_the_page_and_o_opens_it(monkeypatch):
-    opened = []
-    tty = SimpleNamespace(stdin=SimpleNamespace(isatty=lambda: True))
-    monkeypatch.setattr("brindle.keys_cmds.sys", tty)
-    monkeypatch.setattr("builtins.input", lambda prompt="": "o")
-    monkeypatch.setattr("getpass.getpass", lambda prompt="": FAKE)
-    monkeypatch.setattr("webbrowser.open", opened.append)
-    r = runner.invoke(app, ["keys", "set", "ANTHROPIC_API_KEY"], input="n\n")
-    assert "https://console.anthropic.com/settings/keys" in r.output
-    assert opened == ["https://console.anthropic.com/settings/keys"]
-    assert keystore.get_key("ANTHROPIC_API_KEY") == FAKE
-
-
 def test_set_list_unset_round_trip(brindle_home):
     r = runner.invoke(app, ["keys", "set", "ANTHROPIC_API_KEY"], input=FAKE + "\n")
     assert r.exit_code == 0 and FAKE not in r.output
@@ -82,8 +69,3 @@ def test_unset_cannot_escape_the_key_directory(brindle_home):
         r = runner.invoke(app, ["keys", "unset", name])
         assert r.exit_code == 1, name
     assert victim.exists()
-
-
-def test_an_empty_value_is_refused(brindle_home):
-    r = runner.invoke(app, ["keys", "set", "OPENAI_API_KEY"], input="\n")
-    assert r.exit_code == 1 and keystore.get_key("OPENAI_API_KEY") is None

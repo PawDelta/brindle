@@ -86,17 +86,17 @@ def test_below_used_says_deactivate_someone_first(team):
     assert "deactivate someone first" in err
 
 
-def test_over_max_without_a_message_still_reads(team):
-    answer(team, 409, {"error": "over_max"})
-    code, _, err = run(team, "seats", "99", "--org", ORG)
-    assert code == 1 and "seat cap for this plan" in err
-
-
 def test_no_subscription_points_at_upgrade(team):
     answer(team, 409, {"error": "no_subscription"})
     code, _, err = run(team, "seats", "5", "--org", ORG)
     assert code == 1 and "no Team or Enterprise subscription" in err
     assert "brindle account upgrade" in err
+
+
+def test_over_max_without_a_message_still_reads(team):
+    answer(team, 409, {"error": "over_max"})
+    code, _, err = run(team, "seats", "99", "--org", ORG)
+    assert code == 1 and "seat cap for this plan" in err
 
 
 def test_400_says_seats_must_be_a_whole_number(team):

@@ -9,19 +9,20 @@ import time
 import pytest
 from typer.testing import CliRunner
 
-from brindle import agents, cull, permissions, workspaces
+from brindle import agents, cull, permissions
 from brindle.cli import app
 from brindle.config import set_local
 from brindle.db import Agent
 from brindle.permissions import Request, Rule, decide
 
 from conftest import sh
+from workspace_template import copy_workspace, workspace_template  # noqa: F401 (a fixture)
 
 
 @pytest.fixture
-def ws(db, repo, monkeypatch):
+def ws(db, workspace_template, tmp_path, monkeypatch):
     monkeypatch.setattr("brindle.permissions.PRESET_RULES", ())
-    return workspaces.create(db, str(repo), "feature").workspace
+    return copy_workspace(workspace_template, db, tmp_path)
 
 
 def read(ws, path):

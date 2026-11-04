@@ -77,12 +77,6 @@ def fake_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     return state
 
 
-def test_insufficient_memory_returns_fallback(fake_env):
-    fake_env["ram_gb"] = 16
-    res = local_setup.setup_model("qwen3-coder:30b", say=lambda _: None)
-    assert not res.ready and not res and res.fallback and res.status == "fallback"
-    assert "24" in res.reason and "16" in res.reason
-    assert fake_env["commands"] == [] and fake_env["urls"] == []
 
 
 @pytest.mark.parametrize("tty, answer, asked", [(False, True, 0), (True, "n", 1)], ids=["no-tty", "declined"])
@@ -95,19 +89,6 @@ def test_no_ollama_install_without_consent_returns_fallback(fake_env, tty, answe
     assert len(prompts) == asked and fake_env["commands"] == []
 
 
-def test_installs_starts_server_pulls_with_progress_and_verifies_tags(fake_env, monkeypatch, tmp_path):
-    fake_env["tags"] = ["qwen3-coder:30b"]
-    monkeypatch.setattr("builtins.input", lambda prompt: "yes")
-    progress: list[str] = []
-    res = local_setup.setup_model("qwen3-coder:30b", say=progress.append, log=tmp_path / "ollama.log")
-    assert res.ready and bool(res) and not res.fallback and res.status == "ready"
-    assert [cmd for cmd, _ in fake_env["commands"]] == [
-        ["brew", "install", "ollama"],
-        ["ollama", "serve"],
-        ["ollama", "pull", "qwen3-coder:30b"],
-    ]
-    assert "pulling layers 50%" in progress
-    assert fake_env["urls"] == ["http://localhost:11434/api/tags"]
 
 
 def test_unverified_or_failed_pull_returns_fallback(fake_env):

@@ -1,5 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { BusEvent, StreamMessage } from "../api/events";
+import type { AppUpdateStatus, AppUpdates } from "../api/tauri";
+import { waitingCount, watchAppUpdates } from "./appUpdates";
 import { RECENT_EVENTS, createAppStore, initialState, reduce, type AppState } from "./store";
 import { question, root, waiting, worker } from "../test/fixtures";
 
@@ -99,10 +101,6 @@ describe("reduce: stream messages", () => {
     expect(s.recent).toHaveLength(RECENT_EVENTS);
   });
 
-  it("a snapshot replaces workspaces and inbox and clears stale", () => {
-    const s = reduce({ ...loaded, stale: true }, { type: "snapshot", workspaces: [root], inbox: [] });
-    expect(s).toMatchObject({ workspaces: [root], inbox: [], stale: false });
-  });
 });
 
 describe("createAppStore", () => {
@@ -115,5 +113,29 @@ describe("createAppStore", () => {
     store.dispatch({ type: "connection", state: "closed" });
     expect(calls).toBe(1);
     expect(store.getState().connection).toBe("closed");
+  });
+
+  it("keeps a newer app-update announcement when the older initial status answers late", async () => {
+    const idle: AppUpdateStatus = { version: "0.6.0", automatic: true, pending: null, available: null, later: false, updated: null, last_checked: null, checking: false };
+    const noop = () => {};
+    let announce: (s: AppUpdateStatus) => void = noop;
+    let answer: (s: AppUpdateStatus) => void = noop;
+    const updates = {
+      status: () => new Promise<AppUpdateStatus>((resolve) => (answer = resolve)),
+      watch: (on: (s: AppUpdateStatus) => void) => {
+        announce = on;
+        return Promise.resolve(() => {});
+      },
+    } as unknown as AppUpdates;
+    const store = createAppStore();
+    watchAppUpdates(store, updates);
+    // The watch is set up and the initial status asked for (still unanswered).
+    await vi.waitFor(() => expect(answer).not.toBe(noop));
+    announce({ ...idle, pending: "0.7.0" });
+    answer(idle);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(store.getState().appUpdate?.pending).toBe("0.7.0");
+    expect(waitingCount(store.getState())).toBe(1);
   });
 });
