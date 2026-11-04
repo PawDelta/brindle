@@ -15,7 +15,7 @@ from brindle.daemon.app import build_app
 from brindle.db import Agent, Workspace
 
 TOKEN = "t" * 43
-WATCHDOG_SECONDS = 60.0
+WATCHDOG_SECONDS = 10.0
 # list-panes rows (LAYOUT_FORMAT): sidebar, left, right, top, bottom, width, height, zoomed, active, cursor_x
 LEFT = "s\t0\t19\t0\t23\t80\t24\t0\t0\t0\n\t21\t79\t0\t23\t80\t24\t0\t1\t50"
 RIGHT = "\t0\t58\t0\t23\t80\t24\t0\t1\t0\ns\t60\t79\t0\t23\t80\t24\t0\t0\t0"
@@ -159,22 +159,18 @@ def test_a_view_shows_the_pane_types_into_it_and_goes_when_closed(db):
                     _until(ws, lambda _: _size(window) == "100x29"      # its status line takes a row
                            and "typed-in-the-terminal" in _pane(window))
                     ws.send_json({"type": "focus"})
-                    import time
-                    t0 = time.time()
-                    def dump(tag):
-                        with open("/tmp/dbg.log", "a") as f:
-                            print("DBG", tag, round(time.time() - t0, 2), _size(window),
-                                  tmux._tmux("list-clients", "-F", "#{client_tty} #{session_name} #{client_width}x#{client_height} #{client_activity}").stdout.split("\n"),
-                                  tmux._tmux("show-options", "-gw", "window-size").stdout, file=f, flush=True)
-                    dump("after-focus")
-                    watchdog.cancel()
-                    watchdog = threading.Timer(8, tmux._tmux, ("kill-session", "-t", f"={view}"))
-                    watchdog.start()
                     try:
-                        _until(ws, lambda _: (dump("poll"), _size(window) == "60x20")[1])
-                    except AssertionError:
-                        dump("failed")
-                        raise
+                        _until(ws, lambda _: _size(window) == "60x20")
+                    except AssertionError as e:
+                        t = tmux._tmux
+                        raise AssertionError("DBGDUMP " + repr([
+                            t("-V").stdout if False else "",
+                            t("list-clients", "-F", "#{client_tty} #{session_name} #{client_width}x#{client_height} #{client_activity} #{client_flags}").stdout,
+                            t("show-options", "-gw", "window-size").stdout,
+                            t("show-options", "-w", "-t", window).stdout,
+                            t("list-windows", "-a", "-F", "#{session_name} #{window_id} #{window_width}x#{window_height} #{window_flags}").stdout,
+                            t("list-sessions", "-F", "#{session_name} #{session_attached}").stdout,
+                            _size(window)])) from e
                     ws.send_json({"type": "resize", "cols": 70, "rows": 22})
                     _until(ws, lambda _: _size(window) == "70x22")
                 finally:
