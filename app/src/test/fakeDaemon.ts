@@ -750,7 +750,8 @@ export class FakeDaemon {
       goal: null,
       decisions: [],
       profiles: [],
-      account: { signed_in: false },
+      // Signed in: the app needs a brindle account (App's sign-in gate); a test of the gate or the sign-in sets { signed_in: false }.
+      account: { signed_in: true, name: "sam@example.com", plan: "free" },
       terminals: {},
       closed: [],
       turns: {},

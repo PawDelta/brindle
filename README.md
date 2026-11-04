@@ -1,6 +1,25 @@
-# brindle
+<p align="center">
+  <img src="https://raw.githubusercontent.com/PawDelta/brindle/main/assets/brindle-mark.svg" width="120" alt="brindle logo">
+</p>
 
-**A supervisor for your coding agents that won't call work done until it's proven.**
+<h1 align="center">brindle</h1>
+
+<p align="center"><strong>A supervisor for your coding agents that won't call work done until it's proven.</strong></p>
+
+<p align="center">
+  <a href="https://pypi.org/project/brindle/"><img alt="PyPI" src="https://img.shields.io/pypi/v/brindle?style=flat-square"></a>
+  <a href="https://github.com/PawDelta/brindle/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/PawDelta/brindle/ci.yml?branch=main&style=flat-square&label=CI"></a>
+  <a href="https://pypi.org/project/brindle/"><img alt="Python" src="https://img.shields.io/pypi/pyversions/brindle?style=flat-square"></a>
+  <img alt="Platforms: macOS, Linux, WSL2" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20WSL2-555?style=flat-square">
+  <a href="https://github.com/PawDelta/brindle/blob/main/LICENSE"><img alt="License: source-available" src="https://img.shields.io/badge/license-source--available-7c6bd6?style=flat-square"></a>
+</p>
+
+<p align="center">
+  <a href="https://pawdelta.com/brindle/">Website</a> ·
+  <a href="https://pawdelta.com/brindle/docs/">Docs</a> ·
+  <a href="https://pawdelta.com/brindle/getting-started/">Download the app</a> ·
+  <a href="https://pawdelta.com/brindle/changelog/">Changelog</a>
+</p>
 
 brindle runs Claude Code, Codex, Google Antigravity, OpenCode and open-weight models side by
 side, each in its own git worktree. A supervisor agent splits the goal into milestones and
@@ -32,6 +51,9 @@ is that missing layer.
 For a one-line fix, plain `claude` is quicker, and the supervisor will do small things itself
 rather than start workers. brindle pays off when work splits into parallel pieces, or runs
 long enough that you'd rather not babysit it.
+
+Compared with: [Claude Squad](https://pawdelta.com/brindle/compare/claude-squad.html) · [Conductor](https://pawdelta.com/brindle/compare/conductor.html) ·
+[Superset](https://pawdelta.com/brindle/compare/superset.html) · [Claude Code subagents](https://pawdelta.com/brindle/compare/claude-code-subagents.html)
 
 ## How a goal gets done
 
@@ -156,11 +178,36 @@ Anthropic-compatible backend from a profile. Profiles are Markdown files with fr
 pick a provider, a model and a permission mode, write the prompt, and the supervisor routes
 tasks to them by weight.
 
+## FAQ
+
+**Does it cost extra on top of my Claude or Codex plan?** No. brindle drives the CLIs you
+already pay for, and the core workflow is free with no account.
+
+**Where does my code go?** Nowhere new. Agents run locally through your own CLIs, and brindle
+keeps its state in `~/.brindle`. brindle sends no telemetry. It checks PyPI for updates
+(`BRINDLE_NO_UPDATE_CHECK` turns that off) and otherwise talks only to what you set up: model
+endpoints you configure, CI hosts, and your brindle account if you sign in.
+
+**Windows?** The CLI runs in WSL2. The app is macOS and Linux for now.
+
+**Can I use it on an existing repo?** Yes. Open the folder in the app, or run `brindle init`
+in it once.
+
+**What if a worker goes the wrong way?** Its branch can't merge without review and passing
+checks, and its worktree is snapshotted after every turn that changed files, so you can
+rewind it to a good turn instead of starting over.
+
 ## Learn more
 
 - [The full guide](https://github.com/PawDelta/brindle/blob/main/docs/guide.md): every
   command, config option, provider, permission policy and paid feature.
 - [Website and docs](https://pawdelta.com/brindle/)
+
+## Contributing
+
+Bug reports and pull requests are welcome. Contributions are covered by the
+[Contributor License Agreement](https://github.com/PawDelta/brindle/blob/main/CONTRIBUTING.md);
+the CLA bot asks you to sign it on your first pull request.
 
 ## License
 
