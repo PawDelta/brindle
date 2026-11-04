@@ -117,6 +117,11 @@ if (scene === "flow") {
   daemon.data.repos = [];
   daemon.data.providers = freshProviders({ codex: { path: "/opt/homebrew/bin/codex", version: "0.48.0" } });
   daemon.notGitFolders = ["/home/sam/Notes/runbooks"];
+  // As the engine's preflight answers (brindle/preflight.py): Claude Code not on PATH; Antigravity installed, not signed in.
+  daemon.data.preflight = {
+    claude: [{ id: "claude.install", kind: "setup" as never, label: "Install Claude Code", detail: "Claude Code (`claude`) isn't on PATH. Install: curl -fsSL https://claude.ai/install.sh | bash", done: false }],
+    antigravity: [{ id: "antigravity.signin", kind: "signin", label: "Sign in to Antigravity", detail: "Antigravity isn't signed in on this Mac.", done: false }],
+  };
 }
 if (scene === "session-review") {
   daemon.data.sessionReview["sup-42"] = { ready: true, reasons: [], branch: "desktop/ux-revamp", base: "main", diff: "" };
