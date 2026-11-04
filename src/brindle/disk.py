@@ -379,6 +379,7 @@ def trees(db, repo_root: str, now: float | None = None, *, sizes: bool = True,
         rows.setdefault(os.path.realpath(ws.path), []).append(ws)
     out = []
     cwds: list[str] | None | bool = False   # taken once, at the first worktree that needs it
+    known: dict[str, frozenset[str]] = {}   # per base: its ancestor branches, one git call each
     for wt in git.list_worktrees(repo_root)[1:]:   # the first is the main checkout
         path, ref = wt.get("worktree", ""), wt.get("branch", "")
         if not path or not ref.startswith("refs/heads/") or not os.path.isdir(path):
@@ -397,8 +398,11 @@ def trees(db, repo_root: str, now: float | None = None, *, sizes: bool = True,
             continue
         last = _last_activity(repo_root, path, branch, here)
         recorded = any(db.merged_sha(w.id) == sha for w in here)   # a merge of this very tip
-        is_merged = (recorded or merged(repo_root, branch, base)
-                     or (base != default and merged(repo_root, branch, default))
+        for b in {base, default}:
+            if b not in known:
+                known[b] = ancestors(repo_root, b)
+        is_merged = (recorded or merged(repo_root, branch, base, known[base])
+                     or (base != default and merged(repo_root, branch, default, known[default]))
                      or any(merged_pr(db, w) for w in here))
         if is_merged and (recorded or now - last >= FRESH):
             state = MERGED   # (a branch made a moment ago looks merged too: it has nothing of its own yet)
@@ -544,14 +548,28 @@ def upgrade_sweep(db, now: float | None = None) -> list[dict] | None:
 # -- branches ---------------------------------------------------------------------------
 
 
-def merged(repo_root: str, branch: str, base: str) -> bool:
+MERGE_CHECKS = 4   # branches whose squash-merge test runs at once
+
+
+def ancestors(repo_root: str, base: str) -> frozenset[str]:
+    """The local branches already reachable from ``base``, in one git call
+    (``merged`` would ask once per branch)."""
+    proc = git.run(["for-each-ref", "--merged", f"refs/heads/{base}", "--format=%(refname:short)",
+                    "refs/heads/"], repo_root, check=False)
+    return frozenset(proc.stdout.split()) if proc.returncode == 0 else frozenset()
+
+
+def merged(repo_root: str, branch: str, base: str, known: frozenset[str] | None = None) -> bool:
     """Whether every change on ``branch`` is in ``base``: an ancestor, or
     (a squash merge) merging it into ``base`` would change nothing, or
-    ``git cherry`` finds each of its commits there."""
+    ``git cherry`` finds each of its commits there. ``known``: ``ancestors``
+    of ``base``, to skip the per-branch ancestor test."""
     if not base or branch == base:
         return False
     b, h = f"refs/heads/{branch}", f"refs/heads/{base}"
-    if git.ok(["merge-base", "--is-ancestor", b, h], repo_root):
+    if known is not None and branch in known:
+        return True
+    if known is None and git.ok(["merge-base", "--is-ancestor", b, h], repo_root):
         return True
     proc = git.run(["merge-tree", "--write-tree", h, b], repo_root, check=False)
     if proc.returncode == 0:
@@ -619,12 +637,48 @@ def dead_branches(db, repo_root: str, now: float | None = None) -> list[Branch]:
     rows = git.out(["for-each-ref", "--format=%(refname:short)\t%(objectname)\t%(committerdate:unix)",
                     "refs/heads/"], repo_root)
     out = []
+    known = ancestors(repo_root, base)
+    cands = []
     for line in rows.splitlines():
         name, sha, when = (line.split("\t") + ["", ""])[:3]
-        if not name or name in used:
-            continue
-        last = float(when or 0)
-        is_merged = merged(repo_root, name, base)
+        if name and name not in used:
+            cands.append((name, sha, float(when or 0)))
+    # The squash-merge test (merge-tree, cherry) is slow and independent per
+    # branch, so a few at once, under the caller's deadline.
+    # Plain daemon threads, not an executor: an executor's exit hook joins its
+    # workers, so one stuck probe would keep the process alive after doctor
+    # gave up on it.
+    import queue
+    import threading
+
+    from brindle import spawn
+
+    todo: queue.SimpleQueue = queue.SimpleQueue()
+    for i, c in enumerate(cands):
+        todo.put(i)
+    results = [False] * len(cands)
+    errors: list[BaseException] = []
+
+    def work() -> None:
+        while True:
+            try:
+                i = todo.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                results[i] = merged(repo_root, cands[i][0], base, known)
+            except BaseException as e:  # noqa: BLE001 - re-raised on the caller's thread
+                errors.append(e)
+                return
+
+    threads = [threading.Thread(target=spawn.carry(work), daemon=True) for _ in range(min(MERGE_CHECKS, len(cands)))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    if errors:
+        raise errors[0]
+    for (name, sha, last), is_merged in zip(cands, results):
         if is_merged or now - last >= days * DAY:
             out.append(Branch(name, sha, last, is_merged))
     return out
