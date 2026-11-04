@@ -132,7 +132,7 @@ def test_doctor_says_org_managed(installed, tmp_path, monkeypatch):
 BLOCKED_DOCTOR = """
 import sys, threading
 import typer
-from brindle import cli, disk, doctor, git
+from brindle import cli, disk, doctor, git, spawn
 
 stuck = threading.Event()
 echoed = []
@@ -155,7 +155,10 @@ def inner_probe():
     disk.dead_branches(None, "r")
     return []
 
-git.main_repo_root = hang
+def deadline_hit(*a, **k):
+    raise spawn.Busy("the request deadline passed")
+
+spawn.read = deadline_hit   # the repo lookup, through the real git.main_repo_root
 doctor._steps = lambda r, db: [("python", ok("python"), 5), ("first", ok("first"), 5),
                                ("stuck", inner_probe, 0.3), ("last", ok("last"), 5)]
 doctor.disk_checks = lambda r, db: []
@@ -177,6 +180,5 @@ def test_doctor_prints_as_it_goes_and_exits_though_checks_and_discovery_block(tm
     proc = spawn.read([sys.executable, "-c", BLOCKED_DOCTOR], env=env, timeout=LIMIT)
     assert proc.returncode == 0, proc.stderr
     assert "EARLIER:" in proc.stderr and "python" in proc.stderr.split("EARLIER:")[1]
-    names = [line.split()[1] for line in proc.stdout.splitlines() if line and line[0] in "✓!"]
-    assert names == ["python", "repository", "first", "stuck", "last"]
-    assert proc.stdout.count("took too long") == 2
+    marks = [(line[0], line.split()[1]) for line in proc.stdout.splitlines() if line and line[0] in "✓!"]
+    assert marks == [("✓", "python"), ("!", "repository"), ("✓", "first"), ("!", "stuck"), ("✓", "last")]

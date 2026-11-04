@@ -616,7 +616,9 @@ def _run_step(name: str, fn, seconds: float, bounded: bool) -> list[Check]:
             return list(fn())
 
     def failed(e: BaseException) -> list[Check]:
-        if isinstance(e, (spawn.Busy, subprocess.TimeoutExpired, _Stuck)):
+        from brindle import git
+
+        if isinstance(e, (spawn.Busy, git.GitBusy, subprocess.TimeoutExpired, _Stuck)):
             return [Check(WARN, name, f"couldn't check: took too long (over {seconds:g}s)")]
         return [Check(WARN, name, f"couldn't check: {e}")]
 
@@ -663,6 +665,8 @@ def stream(repo_root: str | None, db: DB | None = None, disk: bool = False, cwd:
 
             try:
                 found.append(git.main_repo_root(cwd))
+            except git.GitBusy:
+                raise      # the deadline stopped it: report that, not "no repo"
             except git.GitError:
                 pass
             return []
