@@ -8,7 +8,7 @@
    open; this card shows that answer, settles the items, and offers the
    launch again once every item reads done. */
 
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { useDaemon } from "../api/context";
 import type { PreflightDTO, PreflightItem } from "../api/client";
 import { providerName } from "../store/overview";
@@ -27,6 +27,12 @@ export interface PreflightProps {
   repo?: string | null;
   /* The launch is under way: its button waits. */
   launching?: boolean;
+  /* The launch on another CLI, offered (one per CLI installed here) when
+     this one's CLI is missing or turned off: nothing in the card settles that. */
+  onUseInstead?(provider: string): void;
+  /* The CLIs that can run here (GET /providers/usable): offered instead of
+     whatever is merely installed. */
+  usable?: string[] | null;
 }
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
@@ -93,14 +99,36 @@ function Settle({ item, provider, onDone, label, repo }: { item: PreflightItem; 
   );
 }
 
-const KIND_LABEL: Record<PreflightItem["kind"], string> = { signin: "Sign in", key: "API key", trust: "Trust", consent: "Consent" };
+const KIND_LABEL: Record<PreflightItem["kind"], string> = { signin: "Sign in", key: "API key", trust: "Trust", consent: "Consent", setup: "Install", off: "Turned off" };
 
-export function Preflight({ preflight, onRefresh, onLaunch, launchLabel = "Start", repo, launching = false }: PreflightProps) {
+/* The other CLIs brindle finds installed and in use here, for a launch whose own CLI is missing or off. */
+function useInstalledElsewhere(provider: string, wanted: boolean): string[] {
+  const client = useDaemon();
+  const [found, setFound] = useState<string[]>([]);
+  useEffect(() => {
+    if (!wanted) return;
+    let live = true;
+    client
+      .providersInstalled()
+      .then((rows) => live && setFound(rows.filter((r) => r.state === "installed" && r.provider !== provider).map((r) => r.provider)))
+      .catch(() => undefined);
+    return () => {
+      live = false;
+    };
+  }, [client, provider, wanted]);
+  return wanted ? found : [];
+}
+
+export function Preflight({ preflight, onRefresh, onLaunch, launchLabel = "Start", repo, launching = false, onUseInstead, usable }: PreflightProps) {
   const client = useDaemon();
   const { provider, items } = preflight;
   const name = providerName(provider);
   const open = items.filter((i) => !i.done);
   const refresh = () => void client.preflight(provider, repo).then(onRefresh).catch(() => undefined);
+  // The CLI itself isn't there (not installed, or turned off in brindle): the card can't settle that.
+  const absent = open.some((i) => i.kind === "off" || (i.kind === "setup" && i.id === `${provider}.install`));
+  const installed = useInstalledElsewhere(provider, absent && !!onUseInstead && !usable);
+  const instead = usable ? (absent && onUseInstead ? usable.filter((p) => p !== provider) : []) : installed;
   return (
     <section className={`${card} flex w-full max-w-xl flex-col gap-s2 px-s3 py-s2`} aria-label={`Before ${name} can start`} data-testid="preflight">
       <div>
@@ -141,6 +169,12 @@ export function Preflight({ preflight, onRefresh, onLaunch, launchLabel = "Start
                 {item.kind === "key" && <KeyField item={item} provider={provider} onDone={refresh} />}
                 {item.kind === "trust" && <Settle item={item} provider={provider} onDone={onRefresh} label="Trust this folder" repo={repo} />}
                 {item.kind === "consent" && <Settle item={item} provider={provider} onDone={onRefresh} label="Agree" repo={repo} />}
+                {/* Settled outside the card (installed, turned back on): asked again, it reads done. */}
+                {(item.kind === "setup" || item.kind === "off") && (
+                  <button type="button" className={button} onClick={refresh}>
+                    Check again
+                  </button>
+                )}
               </div>
             )}
           </li>
@@ -150,6 +184,11 @@ export function Preflight({ preflight, onRefresh, onLaunch, launchLabel = "Start
         <button type="button" className={main} disabled={open.length > 0 || launching} onClick={onLaunch}>
           {launchLabel}
         </button>
+        {instead.map((p) => (
+          <button key={p} type="button" className={button} disabled={launching} onClick={() => onUseInstead?.(p)}>
+            {launchLabel} on {providerName(p)} instead
+          </button>
+        ))}
         {open.length > 0 && <span className="text-xs text-ink-3">{repo ? `in ${repo}` : ""}</span>}
       </div>
     </section>

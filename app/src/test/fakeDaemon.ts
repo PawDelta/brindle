@@ -143,6 +143,9 @@ export interface DaemonData {
      person's own settings that are not a repo's. A PATCH with a value the
      engine doesn't know is refused (400). */
   userSettings: UserSettings;
+  /* The supervisor CLI the person last picked (config.supervisor_pick, ~/.brindle/config.json
+     `supervisor`): a provider-less start prefers it after the routing's supervisor choice. */
+  supervisorPick?: string | null;
   /* GET and PUT /debug (staff-only debug logging): whether the account is
      staff and whether logging is on. A PUT from someone not staff is
      refused (403). POST /debug/log's entries land in `debugLog`. */
@@ -1299,7 +1302,7 @@ export class FakeDaemon {
   private openRepo(body: Record<string, unknown>): Response {
     const path = typeof body.path === "string" ? body.path.replace(/\/+$/, "") : "";
     if (!path) return error("invalid", "path is required", 400);
-    if (this.notGitFolders.includes(path)) return error("conflict", `${path} is not a git repository`, 409);
+    if (this.notGitFolders.includes(path) && !body.init) return error("not_a_repo", `${path} is not a git repository`, 409);
     this.opened.push(path);
     const repo = this.data.repos.find((r) => r.repo_root === path) ?? { repo_root: path, name: path.split("/").at(-1) ?? path };
     if (!this.data.repos.includes(repo)) this.data.repos = [...this.data.repos, repo];
@@ -1475,6 +1478,59 @@ export class FakeDaemon {
       return `org ${policy.org_id} manages its agents' routes and gives ${CLI_NAMES[cli]} none`;
     }
     return null;
+  }
+
+  /* service/sessions.supervisor_problem: why a new supervisor chat can't run on
+     `cli` here (the org's policy, turned off, or not installed / signed in), or null. */
+  private supervisorProblem(cli: string): { kind: "policy" | "off" | "setup"; why: string } | null {
+    const refused = this.data.routingPolicy?.error ?? this.providerRefusal(cli);
+    if (refused) return { kind: "policy", why: refused };
+    const row = this.data.providers.find((r) => r.provider === cli);
+    if (row?.state === "off") return { kind: "off", why: `${CLI_NAMES[cli] ?? cli} is turned off in brindle` };
+    if (row?.state !== "installed") return { kind: "setup", why: `${CLI_NAMES[cli] ?? cli} isn't installed` };
+    if (row.signed_in === false) return { kind: "setup", why: `${CLI_NAMES[cli] ?? cli} isn't signed in` };
+    return null;
+  }
+
+  /* GET /providers/usable (service/sessions.usable_providers): every CLI a new
+     supervisor session in `repo` could run on, in the service's preference
+     order: the routing's supervisor choice (then its fallbacks) whose profile
+     the org allows and whose CLI is usable, the remembered pick, the
+     supervisor profile's own CLI, Claude, then the rest. The choice and its
+     fallbacks are each resolved local over repo over user on their own, as
+     load_repo_config reads supervisor_profile and supervisor_fallbacks. */
+  private usableProviders(repo: string): string[] {
+    const files = this.routingFiles(repo);
+    const precedence: RoutingScope[] = ["local", "repo", "user"];
+    const primary = precedence.map((s) => files[s].supervisor).find((v) => v);
+    const fallbacks = precedence.map((s) => files[s].kind_fallbacks?.supervisor).find((v) => v) ?? [];
+    const byName = new Map(this.data.routingProfiles.map((p) => [p.name, p]));
+    const choice = [...(primary ? [primary] : []), ...fallbacks]
+      .map((name) => byName.get(name))
+      .find((p) => p && !this.refusal(p) && !this.supervisorProblem(p.provider));
+    const order = [choice?.provider, this.data.supervisorPick, byName.get("supervisor")?.provider, ...LOGIN_PROVIDERS];
+    return [...new Set(order)].filter((p): p is string => !!p && (LOGIN_PROVIDERS as readonly string[]).includes(p) && !this.supervisorProblem(p));
+  }
+
+  /* POST /sessions' choice of CLI (service/sessions.supervisor_provider): the
+     one asked for if usable, else the first usable one; a refusal otherwise,
+     listing the usable ones, and with none usable nothing starts (a 409
+     preflight naming what stops each CLI, policy and turned off included). */
+  private supervisorRefusal(repo: string, asked: string | null): { provider: string } | Response {
+    const usable = this.usableProviders(repo);
+    const refuse = (code: string, message: string, status: number) => json({ error: { code, message, usable } }, status);
+    const setup = (cli: string, why: string) =>
+      json({ error: { code: "preflight", message: why }, preflight: { provider: cli, ok: false, items: [{ id: `${cli}.install`, kind: "signin", label: why, done: false }] }, usable }, 409);
+    if (!asked) {
+      if (usable.length) return { provider: usable[0] };
+      const items = LOGIN_PROVIDERS.map((p) => ({ id: `${p}.unusable`, kind: "signin" as const, label: this.supervisorProblem(p)!.why, done: false }));
+      return json({ error: { code: "preflight", message: "No CLI a supervisor runs on is usable here" }, preflight: { provider: "claude", ok: false, items }, usable }, 409);
+    }
+    const problem = this.supervisorProblem(asked);
+    if (problem?.kind === "policy") return refuse("forbidden", `${CLI_NAMES[asked] ?? asked} isn't allowed by your organization's policy`, 403);
+    if (problem?.kind === "off") return refuse("turned_off", problem.why, 409);
+    if (problem) return setup(asked, problem.why);
+    return { provider: asked };
   }
 
   /* service/routing.py RoutingPolicy.refusal: why a worker on `p` would be refused, or null. */
@@ -2557,6 +2613,11 @@ export class FakeDaemon {
       }
       return json(d.providers);
     }
+    if (path === "/providers/usable") {
+      if (!query.repo) return error("invalid", "repo is required", 400);
+      const usable = this.usableProviders(query.repo);
+      return json({ usable, default: usable[0] ?? null });
+    }
     if ((m = path.match(/^\/providers\/([^/]+)\/preflight$/))) return json(this.preflightOf(m[1]));
     if ((m = path.match(/^\/providers\/([^/]+)\/connection$/))) return this.connectionOf(m[1]);
     if ((m = path.match(/^\/sessions\/([^/]+)\/(pr\/readiness|pr\/draft|diff|tree|file)$/))) return this.sessionReviewRead(m[1], m[2], query);
@@ -2697,7 +2758,9 @@ export class FakeDaemon {
       if (typeof body.repo !== "string") return error("invalid", "repo is required", 400);
       const repo = d.repos.find((r) => r.repo_root === body.repo);
       if (!repo) return error("conflict", `${body.repo} is not a git repository`, 409);
-      const refused = this.preflightRefusal(typeof body.provider === "string" && body.provider ? body.provider : "claude");
+      const chosen = this.supervisorRefusal(repo.repo_root, typeof body.provider === "string" && body.provider ? body.provider : null);
+      if (chosen instanceof Response) return chosen;
+      const refused = this.preflightRefusal(chosen.provider);
       if (refused) return refused;
       const running = d.sessions.filter((s) => this.sessionInRepo(s, repo.repo_root) && !PAUSED.has(s.status) && s.status !== "done");
       let workspace = repo.name;
@@ -2750,7 +2813,7 @@ export class FakeDaemon {
       // (view.agent_entry); without one, the one event is "idle", once the chat is up (as a fresh
       // engine was seen to do for #216: workspace.created at the project's open, then only that).
       const status = prompt ? "processing" : "idle";
-      const agent: AgentDTO = { id: session.id, profile: "supervisor", provider: String(body.provider ?? "claude"), status, mode: "interactive", subagents: [] };
+      const agent: AgentDTO = { id: session.id, profile: "supervisor", provider: chosen.provider, status, mode: "interactive", subagents: [] };
       const place = (a: AgentDTO) => {
         d.workspaces = d.workspaces.map((ws) =>
           ws.id === workspace ? { ...ws, agents: [...(ws.agents ?? []).filter((x) => x.id !== a.id), a] } : ws,

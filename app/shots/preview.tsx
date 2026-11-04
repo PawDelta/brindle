@@ -13,7 +13,6 @@ import { PtyViewsProvider, wsPtyView, type PtyViews } from "../src/api/ptyView";
 import type { AppUpdateStatus, AppUpdates } from "../src/api/tauri";
 import { THEME_KEY, applyTheme } from "../src/components/ThemeToggle";
 import type { Route } from "../src/routes";
-import { DEMO_OFFERED_KEY } from "../src/screens/Onboarding";
 import { createAppStore } from "../src/store/store";
 import { startSync } from "../src/store/sync";
 import { FakeDaemon, freshProviders } from "../src/test/fakeDaemon";
@@ -48,6 +47,10 @@ if (params.get("renderer") === "dom") {
 
 const SCENES: Record<string, Route> = {
   new: { screen: "new" },
+  "new-first": { screen: "new" },
+  flow: { screen: "new" },
+  "new-composer": { screen: "new" },
+  "new-codex-only": { screen: "new" },
   inbox: { screen: "inbox" },
   "session-failed": { screen: "session", root: "sup-42", repo: REPO, agent: "e9a0b6c3" },
   "settings-key": { screen: "settings" },
@@ -91,7 +94,6 @@ const SCENES: Record<string, Route> = {
 
 const daemon = new FakeDaemon(structuredClone(data));
 if (scene === "knowledge-map") {
-  localStorage.setItem(DEMO_OFFERED_KEY, "1");
   // The reported 0.5.12 account has no hosted docs in any of its scopes.
   daemon.data.docScopes = [
     { kind: "user", id: "personal", name: "Personal" },
@@ -105,6 +107,21 @@ if (scene === "knowledge-map") {
     { id: "local:kb:3", kind: "doc", title: "Credential storage", local_path: "/home/sam/Notes/pawdelta-design/storage.md", paths: ["/home/sam/Notes/pawdelta-design/storage.md"], topics: ["secrets"], updated_at: 1793610000 },
   ];
   daemon.data.decisions.push({ ...daemon.data.decisions[0], id: "daemon-reads", topic: "Read-only daemon access", scope: ["docs/**", "src/brindle/daemon/**"] });
+}
+// First run: no project yet.
+if (scene === "new-first") daemon.data.repos = [];
+// Only Codex on this Mac: Claude Code neither installed nor signed in.
+if (scene === "new-codex-only") daemon.data.providers = freshProviders({ codex: { path: "/opt/homebrew/bin/codex", version: "0.48.0" } });
+// The first-run walk-through: no project yet, only Codex on this Mac, and the folder the picker returns isn't a git repository.
+if (scene === "flow") {
+  daemon.data.repos = [];
+  daemon.data.providers = freshProviders({ codex: { path: "/opt/homebrew/bin/codex", version: "0.48.0" } });
+  daemon.notGitFolders = ["/home/sam/Notes/runbooks"];
+  // As the engine's preflight answers (brindle/preflight.py): Claude Code not on PATH; Antigravity installed, not signed in.
+  daemon.data.preflight = {
+    claude: [{ id: "claude.install", kind: "setup" as never, label: "Install Claude Code", detail: "Claude Code (`claude`) isn't on PATH. Install: curl -fsSL https://claude.ai/install.sh | bash", done: false }],
+    antigravity: [{ id: "antigravity.signin", kind: "signin", label: "Sign in to Antigravity", detail: "Antigravity isn't signed in on this Mac.", done: false }],
+  };
 }
 if (scene === "session-review") {
   daemon.data.sessionReview["sup-42"] = { ready: true, reasons: [], branch: "desktop/ux-revamp", base: "main", diff: "" };
@@ -223,6 +240,8 @@ const OPENS: Record<string, string> = {
   "settings-signin": "Sign in to Codex",
   "agents-make": 'css:button[aria-label="Medium runs on"]',
   "knowledge-record": "Record a decision",
+  "new-composer": "Options ▾",
+  "new-codex-only": "Options ▾",
   "knowledge-add": "Add folder",
   "update-downloading": 'css:[data-testid="app-update-now"]',
 };

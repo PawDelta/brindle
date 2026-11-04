@@ -447,19 +447,27 @@ def _can_prompt(yes: bool = False, demo: bool = False) -> bool:
 
 
 def _resolve_supervisor(repo_root: str | None, provider: Optional[str], *,
-                        yes: bool = False, demo: bool = False) -> Optional[str]:
-    """The CLI the supervisor runs on (None: its profile's). ``-s CLI`` picks
-    it for this run only; a bare ``-s`` opens the picker, whose choice is
-    remembered. Otherwise the
-    person's last pick, asked again in the picker only on the first launch or
-    when that pick isn't signed in or allowed, and only where brindle may ask.
-    A CLI the org doesn't allow this person is refused, whichever way it came."""
-    from brindle import doctor as doctor_mod, picker
+                        yes: bool = False, demo: bool = False) -> str:
+    """The CLI the supervisor runs on, by the rule a start from the app uses
+    (service.sessions.supervisor_provider). ``-s CLI`` picks it for this run
+    only (signed in or installed first where brindle may ask); a bare ``-s``
+    opens the picker, whose choice is remembered. Otherwise the default one
+    (the person's last pick first), asked in the picker instead on the first
+    launch or when that pick isn't usable, and only where brindle may ask.
+    A CLI that isn't usable is refused, whichever way it came, and with none
+    usable nothing starts."""
+    from brindle import picker
     from brindle.config import SUPERVISOR_KEY, set_user, supervisor_pick
     from brindle.pro import team_policy
+    from brindle.service import sessions as svc
 
     acc = team_policy.access(repo_root)
     pick = supervisor_pick()
+
+    def refuse(what: str, why: str) -> None:
+        usable = svc.usable_providers(repo_root)
+        _fail(f"can't run the supervisor on {what}: {why}"
+              + (f" (usable here: {', '.join(usable)}; `brindle -s` to pick)" if usable else ""))
 
     def ask() -> str:
         chosen = picker.pick_supervisor(acc, pick)
@@ -476,27 +484,27 @@ def _resolve_supervisor(repo_root: str | None, provider: Optional[str], *,
         provider = ask()
         from_picker = True
     elif provider:
-        why = acc.refusal(provider)
-        if why:
-            _fail(f"can't run the supervisor on {provider}: {why}")
-        if _can_prompt(yes, demo) and provider not in doctor_mod.signed_in_providers():
-            if not picker.sign_in(provider):
-                raise typer.Exit(1)
-    elif _can_prompt(yes, demo) and not (pick and acc.allows(pick)
-                                         and pick in doctor_mod.signed_in_providers()):
+        problem = svc.supervisor_problem(provider, repo_root, acc)
+        if problem and (problem[0] != "setup" or not _can_prompt(yes, demo)):
+            refuse(provider, problem[1])
+        if problem and not picker.sign_in(provider):
+            raise typer.Exit(1)
+    elif _can_prompt(yes, demo) and not (pick and svc.supervisor_problem(pick, repo_root, acc) is None):
         provider = ask()
         from_picker = True
-    elif pick and acc.allows(pick):
-        provider = pick
-    final = provider or _run(load_profile, agents.SUPERVISOR, repo_root).provider
-    why = acc.refusal(final)
-    if why:
-        _fail(f"can't run the supervisor on {final}: {why}. Pick another with `brindle -s`.")
-    if provider:
-        # only the interactive picker saves a choice; a -s flag is this session's override
-        if from_picker and provider != pick:
-            set_user(SUPERVISOR_KEY, provider)
-        typer.echo(f"Supervisor: {provider} ({'your pick' if from_picker else 'this run'}) · brindle -s to change")
+    else:
+        provider = svc.default_provider(repo_root)
+        if provider is None:
+            refuse("any CLI", "none is installed, signed in, turned on and allowed by your organization's "
+                   "policy here; set one up with `brindle -s`")
+    # Whichever way it came (the picker, a sign-in just done), it runs only if usable now.
+    problem = svc.supervisor_problem(provider, repo_root, acc)
+    if problem:
+        refuse(provider, problem[1])
+    # only the interactive picker saves a choice; a -s flag is this session's override
+    if from_picker and provider != pick:
+        set_user(SUPERVISOR_KEY, provider)
+    typer.echo(f"Supervisor: {provider} ({'your pick' if from_picker else 'this run'}) · brindle -s to change")
     return provider
 
 

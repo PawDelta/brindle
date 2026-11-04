@@ -78,7 +78,10 @@ def add_agy(db, ws, agent_id="g1", status="idle", window="@9"):
 def test_promptless_interactive_start_keeps_profile_tools_and_autopilot_context(
         db, ws, repo, launcher_inbox, fake_tmux, helpers, monkeypatch):
     from brindle import autopilot, cli, model_access
+    from brindle.service import sessions as svc
     monkeypatch.chdir(repo)
+    # Antigravity counts as usable here whatever this machine has installed (CI has no agy).
+    monkeypatch.setattr(svc, "supervisor_problem", lambda *a, **k: None)
     monkeypatch.setattr(Antigravity, "command", lambda self, ctx: ["agy"])
     monkeypatch.setattr(Antigravity, "after_launch", lambda *a: True)
     monkeypatch.setattr(model_access, "probe", lambda *a, **k: pytest.fail("availability generation probe"))
