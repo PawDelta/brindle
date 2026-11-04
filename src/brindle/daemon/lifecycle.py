@@ -234,7 +234,7 @@ async def _watch(server, activity: Activity, idle_exit: bool, *,
     install = InstallWatch()
     ready = ReadinessWatch()
     monitor = health.Monitor(clock)
-    stale_servers = True    # until none is left (upgrade.stop_stale_mcp_servers)
+    stale_servers = _StaleServerSweep()
     while not server.should_exit:
         due = clock() + WATCH_INTERVAL      # the wait's deadline, before any maintenance below
         await wait(WATCH_INTERVAL)
@@ -244,8 +244,8 @@ async def _watch(server, activity: Activity, idle_exit: bool, *,
             log.debug("brindle: couldn't record the daemon's health", exc_info=True)
         with spawn.waits_for_room():                    # background work: it waits for room
             await asyncio.to_thread(ready.sweep_safely)     # session.pr_ready when a session becomes ready
-            if stale_servers:
-                stale_servers = await asyncio.to_thread(_stop_stale_mcp_servers)
+            if stale_servers.due():
+                await asyncio.to_thread(stale_servers.run)
         if install.changed():
             server.should_exit = True
         elif (idle_exit and activity.open == 0
@@ -255,16 +255,49 @@ async def _watch(server, activity: Activity, idle_exit: bool, *,
 
 
 def _stop_stale_mcp_servers() -> bool:
-    """upgrade.stop_stale_mcp_servers, off the daemon's way: whether to look
-    again. A failure (a slow ``ps`` while the machine is busy right after an
-    update) is logged and tried again on the next sweep: giving up would leave
-    every server the update stranded hanging until someone reconnects it."""
-    try:
-        return upgrade.stop_stale_mcp_servers()
-    except Exception:
-        log.warning("brindle: couldn't look for MCP servers left on a replaced install; trying again",
-                    exc_info=True)
-        return True
+    """upgrade.stop_stale_mcp_servers: whether to look again."""
+    return upgrade.stop_stale_mcp_servers()
+
+
+STALE_SWEEP_BACKOFF = (5.0, 15.0, 30.0, 60.0, 120.0, 300.0)  # seconds to the next look after each failed one
+STALE_SWEEP_GIVE_UP = 30 * 60.0     # seconds after the first failure to stop looking
+
+
+class _StaleServerSweep:
+    """Stops the MCP servers an update left on a replaced install, until none
+    is left. A failed look (a slow ``ps`` while the machine is busy right after
+    an update) is tried again with a growing gap, and given up 30 minutes after
+    the first failure: giving up at once would leave every server the update
+    stranded hanging until someone reconnects it. Only the first failure and
+    the giving up are logged as warnings."""
+
+    def __init__(self, clock=time.monotonic):
+        self.clock = clock
+        self.pending = True
+        self.failures = 0
+        self.first_failure: float | None = None
+        self.next_at = 0.0
+
+    def due(self) -> bool:
+        return self.pending and self.clock() >= self.next_at
+
+    def run(self) -> None:
+        try:
+            self.pending = _stop_stale_mcp_servers()
+        except Exception:
+            now = self.clock()
+            if self.first_failure is None:
+                self.first_failure = now
+                log.warning("brindle: couldn't look for MCP servers left on a replaced install; trying again",
+                            exc_info=True)
+            else:
+                log.debug("brindle: still couldn't look for MCP servers left on a replaced install", exc_info=True)
+            if now - self.first_failure >= STALE_SWEEP_GIVE_UP:
+                self.pending = False
+                log.warning("brindle: gave up looking for MCP servers left on a replaced install")
+                return
+            self.next_at = now + STALE_SWEEP_BACKOFF[min(self.failures, len(STALE_SWEEP_BACKOFF) - 1)]
+            self.failures += 1
 
 
 def _reset_window_sizes() -> None:

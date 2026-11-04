@@ -192,15 +192,27 @@ def test_a_newer_daemon_stops_the_mcp_servers_an_update_left_on_old_code(monkeyp
     assert stopped == [{1}] and [m.name for m in marks.iterdir()] == ["2"]
 
     # Right after an update the machine is busy and `ps` can time out: the
-    # daemon must look again on its next sweep, not give up (2026-11-04: it gave
-    # up once and every stranded server hung until reconnected by hand).
+    # daemon looks again, less and less often, and gives up after 30 minutes
+    # (2026-11-04: it gave up at once and every stranded server hung until
+    # reconnected by hand).
     from brindle.daemon import lifecycle
 
     def slow_ps():
         raise subprocess.TimeoutExpired(["ps"], 30)
 
     monkeypatch.setattr(procs, "table", slow_ps)
-    assert lifecycle._stop_stale_mcp_servers() is True
+    now = [0.0]
+    sweep = lifecycle._StaleServerSweep(clock=lambda: now[0])
+    sweep.run()
+    assert sweep.pending and not sweep.due()
+    now[0] = 5.0
+    assert sweep.due()
+    sweep.run()
+    now[0] = 10.0
+    assert not sweep.due()          # the gap grew
+    now[0] = lifecycle.STALE_SWEEP_GIVE_UP
+    sweep.run()
+    assert not sweep.pending
 
 
 def test_a_process_left_on_a_moved_or_deleted_executable_is_told_apart(tmp_path):
