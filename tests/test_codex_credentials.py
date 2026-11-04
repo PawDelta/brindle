@@ -57,11 +57,8 @@ def test_tokens_in_auth_json_are_never_read_beyond_auth_mode(codex, monkeypatch)
     monkeypatch.setenv("OPENAI_API_KEY", KEY)
     text = doctor.render(doctor.credential_checks())
     assert TOKEN not in text and KEY not in text
-
-
-def test_doctor_warns_codex_key_ignored_under_chatgpt_without_echoing_it(codex, monkeypatch):
-    chatgpt(codex)
-    monkeypatch.setenv("CODEX_API_KEY", KEY)
+    monkeypatch.delenv("OPENAI_API_KEY")       # alone, so its own warning can't stand in for this one
+    monkeypatch.setenv("CODEX_API_KEY", KEY)   # a Codex key, ignored under ChatGPT: warned of, never echoed
     c = codex_check()
     assert c.level == doctor.WARN and KEY not in c.detail
 

@@ -211,7 +211,7 @@ def _live_pane(root, tag=None):
     ((agents.AGENT_TAG, "launching"), True),   # its row isn't recorded yet
     ((agents.AGENT_TAG, "old"), False),        # its own leftover window
 ])
-def test_dropping_a_session_only_closes_its_own_window(db, root, tag, survives):
+def test_dropping_a_session_spares_a_pane_that_now_belongs_to_a_launching_chat(db, root, tag, survives):
     pane = _live_pane(root, tag=tag)
     for i in range(3):
         add(db, root, f"s{i}", since=2000 + i)

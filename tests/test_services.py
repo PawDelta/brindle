@@ -3,6 +3,7 @@
 import json
 import os
 import stat
+from types import SimpleNamespace
 
 import pytest
 
@@ -50,24 +51,19 @@ def test_started_on_create_and_in_workspace_env(db, repo, fake_docker, entitled)
     assert env["BRINDLE_SVC_DB_PORT"] == str(ws.port_base + 1)
 
 
-def test_removed_on_remove(db, repo, fake_docker, entitled):
+def test_removed_on_remove(db, repo, fake_docker, entitled, monkeypatch):
     configure(repo, [{"name": "db", "preset": "postgres"}])
     ws = workspaces.create(db, str(repo), "feat-a").workspace
     configure(repo, [])  # removal goes by label, even after the config changed
     workspaces.remove(db, ws)
     assert fake_docker()[-2:] == [f"ps -aq --filter label=brindle.workspace={ws.id}", "rm -f c0ffee"]
 
-
-def test_no_containers_means_nothing_to_remove(monkeypatch):
-    from types import SimpleNamespace
-
     def docker(args):
         assert args[0] == "ps", f"nothing to remove, yet ran docker {args}"
         return SimpleNamespace(returncode=0, stdout="", stderr="")     # lists no containers
 
-    monkeypatch.setattr(services, "docker_path", lambda: "/fake/docker")
     monkeypatch.setattr(services, "_docker", docker)
-    assert services.down(SimpleNamespace(id="ws-1")) == []
+    assert services.down(ws) == []
 
 
 def test_not_entitled_runs_nothing(db, repo, fake_docker, monkeypatch, capsys):

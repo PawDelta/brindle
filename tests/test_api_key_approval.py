@@ -165,7 +165,7 @@ def test_org_managed_settings_mean_no_provider_config_env(db, repo, tmp_path, mo
 
 # -- quota and cost ------------------------------------------------------------------------------
 
-def test_a_key_billed_session_is_not_throttled_by_subscription_usage(monkeypatch):
+def test_quota_says_pay_per_token_for_a_key(monkeypatch):
     quota.record("claude", [quota.Window(95.0, time.time() + 3600, 300)], source="status line")
     assert "95%" in quota.note("claude")
     monkeypatch.setenv("ANTHROPIC_API_KEY", KEY)
