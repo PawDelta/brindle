@@ -12,6 +12,7 @@ vi.mock("../../components/PtyTerminal", () => import("../../test/panes"));
 
 const PROJECT = "/home/u/Projects/proj";
 const SIGNED_IN = { signed_in: true, name: "sam@example.com", plan: "pro" };
+const SIGNED_OUT = { signed_in: false };
 
 let syncs: Sync[] = [];
 beforeEach(() => localStorage.clear());
@@ -43,13 +44,15 @@ const posts = (daemon: FakeDaemon) => daemon.requests.filter((r) => r.method ===
 
 describe("Onboarding", () => {
   it("onboarding: a first launch signs in, installs Claude Code with its own installer, signs in to it and picks a project, all without a sidebar", async () => {
-    const daemon = new FakeDaemon({ providers: freshProviders() });
+    const daemon = new FakeDaemon({ account: SIGNED_OUT, providers: freshProviders() });
     daemon.deferInstall = true;
     daemon.deferLogin = true;
     const { openUrl } = launch(daemon);
 
-    // Starting brindle, then sign in to brindle: one button, the browser does it.
+    // Starting brindle, then sign in to brindle (the app's sign-in gate, the flow's step 1): one button, the browser does it.
     await step("signin");
+    expect(screen.getByTestId("signin-gate")).toBeTruthy();
+    expect(screen.getByText("Step 1 of 3")).toBeTruthy();
     expect(sidebar()).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Sign in with your browser" }));
     await waitFor(() => expect(openUrl).toHaveBeenCalledWith(daemon.data.loginUrl));
@@ -385,11 +388,11 @@ describe("Onboarding", () => {
     expect(daemon.requests.filter((r) => r.path === "/providers/installed").length).toBe(asked + 1);
   });
 
-  /* The way out of a sign-in step: Try again and Skip for now, both there. */
+  /* The way out of a sign-in step: Try again, and on a provider's, Skip for now. */
   const escape = (scope: HTMLElement) => ({ retry: within(scope).getByTestId("onb-signin-retry"), skip: within(scope).getByTestId("onb-signin-skip") });
 
-  it("onboarding's brindle sign-in never hangs: a failed or abandoned browser login offers Try again and Skip for now", async () => {
-    const daemon = new FakeDaemon({ providers: freshProviders() });
+  it("onboarding's brindle sign-in never hangs and can't be skipped: a failed or abandoned browser login offers Try again, never Skip for now", async () => {
+    const daemon = new FakeDaemon({ account: SIGNED_OUT, providers: freshProviders() });
     daemon.deferLogin = true;
     let refuse = true;
     const store = createAppStore();
@@ -407,23 +410,34 @@ describe("Onboarding", () => {
     );
     await step("signin");
     const logins = () => posts(daemon).filter((p) => p === "/account/login").length;
+    // An account is required: no way past the step but signing in, and the screen says it's free.
+    const noSkip = () => {
+      expect(screen.queryByTestId("onb-signin-skip")).toBeNull();
+      expect(screen.queryByRole("button", { name: "Skip for now" })).toBeNull();
+      expect(screen.queryByText(/sign in later/)).toBeNull();
+    };
+    noSkip();
+    expect(screen.getByTestId("signin-free").textContent).toBe("brindle needs a free account to run. No payment details are asked for.");
 
     // The login fails: Try again starts it afresh.
     fireEvent.click(screen.getByRole("button", { name: "Sign in with your browser" }));
     await screen.findByRole("alert");
+    noSkip();
     refuse = false;
-    fireEvent.click(escape(screen.getByTestId("onboarding")).retry);
+    fireEvent.click(screen.getByTestId("onb-signin-retry"));
     await waitFor(() => expect(logins()).toBe(1));
 
-    // The browser never comes back: Try again ends that sign-in and starts a fresh one (the old one's end isn't a failure here),
-    // or Skip for now on to the cards.
-    fireEvent.click(escape(screen.getByTestId("onboarding")).retry);
+    // The browser never comes back: Try again ends that sign-in and starts a fresh one (the old one's end isn't a failure here).
+    fireEvent.click(screen.getByTestId("onb-signin-retry"));
     await waitFor(() => expect(logins()).toBe(2));
     expect(daemon.requests.filter((r) => r.method === "POST" && r.path === "/account/login").at(-1)?.body).toEqual({ device: false, restart: true });
     await flush();
     expect(screen.queryByRole("alert")).toBeNull();
     expect(screen.getByRole("status")).toBeTruthy();
-    fireEvent.click(escape(screen.getByTestId("onboarding")).skip);
+    noSkip();
+    // Only finishing it goes on, to the cards.
+    expect(sidebar()).toBeNull();
+    daemon.completeLogin();
     await step("connect");
   });
 

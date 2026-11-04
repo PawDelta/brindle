@@ -5,6 +5,7 @@ import App, { landing } from "./App";
 import type { WebSocketFactory } from "./api/events";
 import type { GoalDTO, SessionDTO } from "./api/schema";
 import { LAST_SESSION_KEY } from "./routes";
+import { ONBOARDED_KEY } from "./api/providers";
 import { createAppStore } from "./store/store";
 import { startSync } from "./store/sync";
 import { DaemonClient } from "./api/client";
@@ -455,12 +456,12 @@ describe("App", () => {
     daemon.token = "rotated";
     const sync = startSync({ client, store, connect: stuck });
     renderApp(<App store={store} client={client} refresh={sync.refresh} />);
-    // The first-launch gate asks the engine first, without the stream either: it says what's wrong, with Retry,
-    // rather than opening an app it can't know is set up.
-    await waitFor(() => expect(screen.getByTestId("starting-failed").textContent).toContain("missing or wrong token"));
+    // The sign-in gate asks the engine first, without the stream either: it says what's wrong, with Retry,
+    // rather than opening an app it can't know is signed in.
+    await waitFor(() => expect(screen.getByTestId("signin-gate-failed").textContent).toContain("missing or wrong token"));
     // Back with the right token: the app, whose check didn't wait on the stream either.
     daemon.token = TOKEN;
-    fireEvent.click(within(screen.getByTestId("starting-failed")).getByRole("button", { name: "Retry" }));
+    fireEvent.click(within(screen.getByTestId("signin-gate-failed")).getByRole("button", { name: "Retry" }));
     await screen.findByRole("complementary", { name: "Sidebar" });
     expect(store.getState().connection).not.toBe("open");
     expect(screen.queryByTestId("engine-banner")).toBeNull();
@@ -639,6 +640,125 @@ describe("closing a session", () => {
     await waitFor(() => expect(within(nav()).getByTestId("close-error").textContent).toContain("Couldn't close sup1"));
     expect(sessionRow("sup1")).toBeTruthy();
     expect(screen.queryByRole("dialog")).toBeNull();
+    sync.stop();
+  });
+});
+
+/* The sign-in gate: the app needs a brindle account, before onboarding and before the app. */
+describe("the sign-in gate", () => {
+  const SIGNED_OUT = { signed_in: false };
+  const start = (daemon: FakeDaemon, fetch?: typeof globalThis.fetch) => {
+    const store = createAppStore();
+    const client = fetch ? new DaemonClient({ baseUrl: BASE_URL, token: TOKEN, fetch }) : daemon.client();
+    const sync = startSync({ client, store, connect: daemon.connect });
+    const openUrl = vi.fn(() => Promise.resolve());
+    renderApp(<App store={store} client={client} refresh={sync.refresh} openUrl={openUrl} />);
+    return { sync, openUrl };
+  };
+  const gate = () => screen.findByTestId("signin-gate");
+  const sidebar = () => screen.queryByRole("complementary", { name: "Sidebar" });
+  const providersAsked = (daemon: FakeDaemon) => daemon.requests.filter((r) => r.path === "/providers/installed").length;
+  /* Nothing but brindle's sign-in: no sidebar, no onboarding step, no way past it. */
+  const onlySignIn = () => {
+    expect(screen.getByTestId("onboarding").getAttribute("data-step")).toBe("signin");
+    expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Sign in to brindle");
+    expect(sidebar()).toBeNull();
+    expect(screen.queryByRole("form", { name: "Start a session" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Skip for now" })).toBeNull();
+    expect(screen.getByTestId("signin-free").textContent).toContain("free account");
+  };
+
+  it("signed out: only the sign-in screen, and the providers aren't asked about until it's done", async () => {
+    const daemon = new FakeDaemon({ account: SIGNED_OUT, providers: freshProviders() });
+    const { sync } = start(daemon);
+    await gate();
+    onlySignIn();
+    await flush();
+    expect(providersAsked(daemon)).toBe(0);
+    sync.stop();
+  });
+
+  it("onboarded on this Mac with a CLI signed in, but signed out of brindle: still the gate, then the app once signed in", async () => {
+    localStorage.setItem(ONBOARDED_KEY, "1");
+    const daemon = new FakeDaemon({ account: SIGNED_OUT, repos: [{ repo_root: REPO, name: "proj" }], providers: freshProviders({ claude: { path: "/home/u/.local/bin/claude", version: "2.1.47", signed_in: true }, opencode: { path: "/usr/local/bin/opencode", version: "0.9.0" } }) });
+    daemon.deferLogin = true;
+    const { sync, openUrl } = start(daemon);
+    await gate();
+    onlySignIn();
+    // Not the first launch: no step count.
+    expect(screen.queryByText("Step 1 of 3")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Sign in with your browser" }));
+    await waitFor(() => expect(openUrl).toHaveBeenCalledWith(daemon.data.loginUrl));
+    onlySignIn();
+    daemon.completeLogin();
+    expect(await screen.findByRole("form", { name: "Start a session" })).toBeTruthy();
+    expect(sidebar()).toBeTruthy();
+    expect(screen.queryByTestId("signin-gate")).toBeNull();
+    sync.stop();
+  });
+
+  it("signed in: straight to the app when onboarded, to onboarding when not", async () => {
+    localStorage.setItem(ONBOARDED_KEY, "1");
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }] });
+    const first = start(daemon);
+    expect(await screen.findByRole("form", { name: "Start a session" })).toBeTruthy();
+    expect(screen.queryByTestId("signin-gate")).toBeNull();
+    first.sync.stop();
+    cleanup();
+
+    localStorage.clear();
+    const fresh = new FakeDaemon({ providers: freshProviders() });
+    const second = start(fresh);
+    await waitFor(() => expect(screen.getByTestId("onboarding").getAttribute("data-step")).toBe("connect"), { timeout: 3000 });
+    expect(screen.queryByTestId("signin-gate")).toBeNull();
+    expect(sidebar()).toBeNull();
+    second.sync.stop();
+  });
+
+  it("an account read that fails shows the sign-in screen with Retry, never the app; Retry reads it again", async () => {
+    localStorage.setItem(ONBOARDED_KEY, "1");
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }] });
+    let failing = true;
+    const { sync } = start(daemon, (input, init) =>
+      failing && String(input).endsWith("/v1/account")
+        ? Promise.resolve(new Response(JSON.stringify({ error: { code: "not_found", message: "no such route" } }), { status: 404, headers: { "Content-Type": "application/json" } }))
+        : daemon.fetch(input, init),
+    );
+    const failed = await screen.findByTestId("signin-gate-failed");
+    expect(failed.textContent).toContain("Couldn't check your brindle account");
+    onlySignIn();
+    await flush();
+    expect(sidebar()).toBeNull();
+    failing = false;
+    fireEvent.click(within(failed).getByRole("button", { name: "Retry" }));
+    expect(await screen.findByRole("form", { name: "Start a session" })).toBeTruthy();
+    expect(screen.queryByTestId("signin-gate")).toBeNull();
+    sync.stop();
+  });
+
+  it("signing out from Account returns to the gate", async () => {
+    localStorage.setItem(ONBOARDED_KEY, "1");
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }] });
+    const { sync } = start(daemon);
+    fireEvent.click(await screen.findByRole("button", { name: "Open Account" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Sign out" }));
+    await gate();
+    onlySignIn();
+    sync.stop();
+  });
+
+  it("a first launch: sign in, then New session with its demo offer, as before", async () => {
+    // The CLI used before this app: a repo registered already, Claude Code signed in; brindle not yet.
+    const daemon = new FakeDaemon({ account: SIGNED_OUT, repos: [{ repo_root: REPO, name: "proj" }] });
+    const { sync } = start(daemon);
+    await gate();
+    expect(screen.getByText("Step 1 of 3")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Watch brindle work on a practice repo" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Sign in with your browser" }));
+    expect(await screen.findByRole("form", { name: "Start a session" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Watch brindle work on a practice repo" })).toBeTruthy();
+    expect(localStorage.getItem(ONBOARDED_KEY)).toBe("1");
+    expect(daemon.demos).toEqual([]);
     sync.stop();
   });
 });
