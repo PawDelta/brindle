@@ -673,12 +673,12 @@ def note_reported_stuck(db: DB, now: float, panes: dict[str, bool]) -> list[str]
 PIPED = ("reviewing", "fixing", "ready")
 
 
-def _send_note(db: DB, a: Agent, since: float, body: str) -> bool:
+def _send_note(db: DB, a: Agent, since: float, body: str, near: float = 0.0) -> bool:
     """Send ``a``'s supervisor ``body``, once per ``since`` (kept in
     stuck_noted). Every brindle process sweeps from its own read of the
     workers, so the note is claimed in the database before it is sent: only
     one of them sends it, and the claim is let go if the send fails."""
-    won, previous = db.claim_note(a.id, since)
+    won, previous = db.claim_note(a.id, since, near)
     if not won:
         return False
     sent = False
@@ -792,8 +792,13 @@ def note_long_commands(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
     limits: dict[str, float] = {}
     for a in db.list_agents():
         if (a.mode not in agents.REPORTING_MODES or not a.parent_id or a.dismissed_at is not None
-                or a.status != "processing" or not agents.runs_process(a) or not agents.same_server(a, panes)
+                or a.status not in ("processing", "waiting") or not agents.runs_process(a)
+                or not agents.same_server(a, panes)
                 or not agents.is_alive(a, panes) or not agents.owns_pane(db, a, owners)):
+            continue
+        # 'waiting' also lingers after a prompt was answered in the terminal,
+        # until the command finishes; only a held request is a real wait.
+        if a.status == "waiting" and db.hook_permission_request(a.id) is not None:
             continue
         ws = db.get_workspace(a.workspace_id)
         if ws is None:
@@ -814,13 +819,11 @@ def note_long_commands(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
             continue
         command, elapsed = running
         since = float(int((now - elapsed) // 60 * 60))   # the command's start, to the minute
-        if a.stuck_noted is not None and abs(a.stuck_noted - since) < SAME_COMMAND_WITHIN:
-            continue
         first = redact.mask(command.splitlines()[0]) if command else "(unknown)"
         body = (f"[brindle] Worker {a.id} on branch `{ws.branch}` has been inside one command for "
                 f"{int(elapsed // 60)} min: {first}\n\nNothing was stopped. Check what it is doing "
                 f"(`brindle attach {ws.name}`) or send_message the worker.")
-        if _send_note(db, a, since, body):
+        if _send_note(db, a, since, body, near=SAME_COMMAND_WITHIN):
             done.append(f"told {a.parent_id} that worker {a.id} has run one command for {int(elapsed // 60)} min")
     return done
 

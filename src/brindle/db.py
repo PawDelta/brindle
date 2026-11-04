@@ -1675,15 +1675,17 @@ class DB:
             bus.publish_agent(self, "agent.pipeline", agent_id, pipeline=fields["pipeline"],
                               merge_failed=bool(fields.get("merge_failed")))
 
-    def claim_note(self, agent_id: str, since: float) -> tuple[bool, float | None]:
-        """Atomically set stuck_noted to ``since`` unless it already is. Every
+    def claim_note(self, agent_id: str, since: float, near: float = 0.0) -> tuple[bool, float | None]:
+        """Atomically set stuck_noted to ``since`` unless it already is (or,
+        with ``near``, is within that many seconds of it). Every
         brindle process sweeps (the daemon, each session's MCP server), so only
         the one that wins may send that note. Returns whether it won, and
         the value it replaced (for ``release_note``)."""
         with self.tx() as c:
             row = c.execute("SELECT stuck_noted FROM agents WHERE id=?", (agent_id,)).fetchone()
-            cur = c.execute("UPDATE agents SET stuck_noted=? WHERE id=? AND stuck_noted IS NOT ?",
-                            (since, agent_id, since))
+            cur = c.execute("UPDATE agents SET stuck_noted=? WHERE id=? AND stuck_noted IS NOT ?"
+                            " AND (stuck_noted IS NULL OR ABS(stuck_noted - ?) >= ?)",
+                            (since, agent_id, since, since, near))
         return cur.rowcount == 1, row["stuck_noted"] if row else None
 
     def claim_unreported(self, agent_id: str, since: float, previous: float | None,
