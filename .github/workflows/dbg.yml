@@ -5,6 +5,10 @@ on:
 jobs:
   dbg:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        n: [1, 2]
     steps:
       - uses: actions/checkout@v7
       - run: sudo apt-get update -q && sudo apt-get install -yq tmux
@@ -13,11 +17,12 @@ jobs:
           python-version: "3.12"
       - run: uv sync
       - run: |
-          for i in 1 2 3 4 5 6 7 8; do (while :; do :; done) & done
-          pass=0; fail=0
-          for i in $(seq 1 120); do
-            if uv run pytest -q -x -p no:cacheprovider tests/test_daemon_pty_view.py -k pane_types > out.$i 2>&1; then pass=$((pass+1)); else fail=$((fail+1)); grep -E "DBGDUMP" out.$i | head -3; fi
-          done
-          echo "pass=$pass fail=$fail"
-          kill $(jobs -p) || true
+          loop() {
+            for i in $(seq 1 60); do
+              if ! uv run pytest -q -x -p no:cacheprovider --cov=brindle --cov-branch --cov-context=test --cov-report= tests/test_daemon_pty_view.py -k pane_types > out.$1.$i 2>&1; then echo "FAIL $1 $i"; grep -E "DBGDUMP" out.$1.$i | head -2; fi
+            done
+          }
+          for w in 1 2 3 4 5 6; do COVERAGE_FILE=.cov.$w loop $w & done
+          wait
+          echo finished
         continue-on-error: true
