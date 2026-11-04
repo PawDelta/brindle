@@ -644,16 +644,36 @@ def _run_step(name: str, fn, seconds: float, bounded: bool) -> list[Check]:
     return box["ok"]  # type: ignore[return-value]
 
 
-def stream(repo_root: str | None, db: DB | None = None, disk: bool = False):
+def stream(repo_root: str | None, db: DB | None = None, disk: bool = False, cwd: str | None = None):
     """Run every check in turn, yielding each one's Checks as it finishes.
     ``disk``: also the disk report (only `brindle doctor` asks, as it is slow).
+    ``cwd``: find the repo root from there, after the first check and as
+    bounded as any (no repo is no repo checks, not an error).
     Without ``db`` each check is bounded (see _run_step); a borrowed ``db``
     belongs to the caller's thread, so those run on it, unbounded."""
-    steps = _steps(repo_root, db)
+    bounded = db is None
+    skip = 0
+    if cwd is not None:
+        yield _run_step("python", _python_check, CHECK_SECONDS, bounded)
+        skip = 1
+        found: list[str] = []
+
+        def discover() -> list[Check]:
+            from brindle import git
+
+            try:
+                found.append(git.main_repo_root(cwd))
+            except git.GitError:
+                pass
+            return []
+
+        yield _run_step("repository", discover, CHECK_SECONDS, bounded)
+        repo_root = found[0] if found else None
+    steps = _steps(repo_root, db)[skip:]
     if disk:
         steps.append(("disk", lambda: disk_checks(repo_root, db), DISK_SECONDS))
     for name, fn, seconds in steps:
-        yield _run_step(name, fn, seconds, bounded=db is None)
+        yield _run_step(name, fn, seconds, bounded)
 
 
 def checks(repo_root: str | None, db: DB | None = None) -> list[Check]:

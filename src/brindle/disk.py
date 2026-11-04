@@ -645,13 +645,39 @@ def dead_branches(db, repo_root: str, now: float | None = None) -> list[Branch]:
             cands.append((name, sha, float(when or 0)))
     # The squash-merge test (merge-tree, cherry) is slow and independent per
     # branch, so a few at once, under the caller's deadline.
-    from concurrent.futures import ThreadPoolExecutor
+    # Plain daemon threads, not an executor: an executor's exit hook joins its
+    # workers, so one stuck probe would keep the process alive after doctor
+    # gave up on it.
+    import queue
+    import threading
 
     from brindle import spawn
 
-    check = spawn.carry(lambda name: merged(repo_root, name, base, known))
-    with ThreadPoolExecutor(max_workers=MERGE_CHECKS) as pool:
-        results = list(pool.map(check, [c[0] for c in cands]))
+    todo: queue.SimpleQueue = queue.SimpleQueue()
+    for i, c in enumerate(cands):
+        todo.put(i)
+    results = [False] * len(cands)
+    errors: list[BaseException] = []
+
+    def work() -> None:
+        while True:
+            try:
+                i = todo.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                results[i] = merged(repo_root, cands[i][0], base, known)
+            except BaseException as e:  # noqa: BLE001 - re-raised on the caller's thread
+                errors.append(e)
+                return
+
+    threads = [threading.Thread(target=spawn.carry(work), daemon=True) for _ in range(min(MERGE_CHECKS, len(cands)))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    if errors:
+        raise errors[0]
     for (name, sha, last), is_merged in zip(cands, results):
         if is_merged or now - last >= days * DAY:
             out.append(Branch(name, sha, last, is_merged))

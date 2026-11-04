@@ -3,6 +3,7 @@
 is in effect."""
 
 import json
+import os
 import time
 
 import pytest
@@ -128,28 +129,54 @@ def test_doctor_says_org_managed(installed, tmp_path, monkeypatch):
     assert (c.level, c.detail) == (doctor.OK, "org-managed (apiKeyHelper)")
 
 
-def test_a_check_that_blocks_is_reported_and_doctor_moves_on(monkeypatch):
-    """One stuck check ends as "took too long"; the checks before it are
-    already out when it starts, and the ones after it still run."""
-    import threading
+BLOCKED_DOCTOR = """
+import sys, threading
+import typer
+from brindle import cli, disk, doctor, git
 
-    release = threading.Event()
-    done = []
-    ok = lambda name: lambda: [doctor.Check(doctor.OK, name, "fine")]   # noqa: E731
+stuck = threading.Event()
+echoed = []
+real_echo = typer.echo
+typer.echo = lambda msg="", **k: (echoed.append(str(msg)), real_echo(msg, **k))[1]
+doctor.CHECK_SECONDS, doctor.GRACE_SECONDS = 0.3, 0.1
+ok = lambda n: (lambda: [doctor.Check(doctor.OK, n, "fine")])
 
-    def stuck():
-        assert [c.name for g in done for c in g] == ["first"]   # delivered before this began
-        release.wait()
-        return []
+def hang(*a, **k):
+    stuck.wait()
 
-    steps = [("first", ok("first"), 5), ("stuck", stuck, 0.05), ("last", ok("last"), 5)]
-    monkeypatch.setattr(doctor, "_steps", lambda root, db: steps)
-    monkeypatch.setattr(doctor, "GRACE_SECONDS", 0.05)
-    try:
-        for group in doctor.stream(None):
-            done.append(group)
-    finally:
-        release.set()
-    flat = [(c.name, c.level) for g in done for c in g]
-    assert flat == [("first", doctor.OK), ("stuck", doctor.WARN), ("last", doctor.OK)]
-    assert "took too long" in done[1][0].detail
+def inner_probe():
+    # a check whose own worker threads block, as a stuck git probe would
+    git.default_branch = lambda r: "main"
+    git.out = lambda a, c: "a\tsha\t0"
+    disk._in_use = lambda *a: set()
+    disk.ancestors = lambda *a: frozenset()
+    disk.merged = hang
+    print("EARLIER:" + ",".join(echoed), file=sys.stderr, flush=True)
+    disk.dead_branches(None, "r")
+    return []
+
+git.main_repo_root = hang
+doctor._steps = lambda r, db: [("python", ok("python"), 5), ("first", ok("first"), 5),
+                               ("stuck", inner_probe, 0.3), ("last", ok("last"), 5)]
+doctor.disk_checks = lambda r, db: []
+cli.doctor(fix=False)
+"""
+
+
+def test_doctor_prints_as_it_goes_and_exits_though_checks_and_discovery_block(tmp_path):
+    """Run the real `brindle doctor` command with the repo lookup and one check's
+    worker threads blocked forever: earlier results are already printed when
+    the stuck check starts, each blocked part is reported, the rest still
+    run, and the process exits."""
+    import sys
+
+    from brindle import spawn
+
+    LIMIT = 60
+    env = {**os.environ, "BRINDLE_HOME": str(tmp_path)}
+    proc = spawn.read([sys.executable, "-c", BLOCKED_DOCTOR], env=env, timeout=LIMIT)
+    assert proc.returncode == 0, proc.stderr
+    assert "EARLIER:" in proc.stderr and "python" in proc.stderr.split("EARLIER:")[1]
+    names = [line.split()[1] for line in proc.stdout.splitlines() if line and line[0] in "✓!"]
+    assert names == ["python", "repository", "first", "stuck", "last"]
+    assert proc.stdout.count("took too long") == 2

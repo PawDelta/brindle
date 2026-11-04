@@ -1077,13 +1077,8 @@ def doctor(
         for line in doctor_mod.fix(ask):
             typer.echo(line)
 
-    root = None
-    try:
-        root = git.main_repo_root(os.getcwd())
-    except git.GitError:
-        pass
     results = []
-    for group in doctor_mod.stream(root, disk=True):
+    for group in doctor_mod.stream(None, disk=True, cwd=os.getcwd()):
         for c in group:
             typer.echo(doctor_mod.render_line(c))   # as each check finishes: never silent
             results.append(c)
