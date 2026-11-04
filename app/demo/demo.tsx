@@ -120,7 +120,12 @@ setTimeout(() => {
   }
   daemon.data.workspaces = daemon.data.workspaces.map((ws) => ({ ...ws, agents: ws.agents?.map((a) => (a.parent_id === "sup-42" && a.status === "processing" ? { ...a, status: "idle", reported: true } : a)) }));
   daemon.publish("agent.status", { agent_id: "a7aaa807", payload: { status: "idle" } });
-  setTimeout(() => daemon.readyForPr("sup-42", { branch: "dev/desktop-app", base: "main", diff: README_DIFF }), 5000);
+  setTimeout(() => {
+    daemon.readyForPr("sup-42", { branch: "dev/desktop-app", base: "main", diff: README_DIFF });
+    // The engine's inbox card for it: its Review & open PR opens the sheet over the session's diff.
+    daemon.data.inbox = [{ kind: "pr_ready", reason: "ready for a pull request", agent_id: "sup-42", workspace_id: "pawdelta", root_id: "sup-42" }, ...daemon.data.inbox];
+    void sync.refresh();
+  }, 5000);
 }, 20_000);
 const merged = setInterval(() => {
   if (!daemon.prs.some((p) => p.root === "sup-42")) return;
