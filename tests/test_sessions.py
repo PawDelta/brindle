@@ -86,9 +86,14 @@ def test_pause_then_resume_uses_the_saved_claude_session(db, root, monkeypatch, 
     add(db, root, "boss")
     add(db, root, "w1", mode="assign", parent="boss")
     add(db, root, "w2", mode="assign", parent="boss", status="done", result="ok")
+    # A fix round the update's own pause left done (the old daemon's code) comes back; one someone closed doesn't.
+    add(db, root, "w3", mode="assign", parent="boss", status="done", result="ok")
+    add(db, root, "w4", mode="assign", parent="boss", status="done", result="ok")
+    db.update_agent("w3", pipeline="fixing")
+    db.update_agent("w4", pipeline="fixing", dismissed_at=time.time())
     agents.resume(db, "boss")
     assert db.get_autopilot("boss").enabled
-    assert [a for a, _ in launched] == ["boss", "w1"]  # finished workers stay done
+    assert [a for a, _ in launched] == ["boss", "w1", "w3"]  # finished workers stay done
     assert launched[0][1]["resume"] == "sess-boss" and launched[0][1]["prompt"] is None
     assert launched[0][1]["watch_pane"] and not launched[1][1]["watch_pane"]
     # The app's daemon pauses what it runs as the app goes, and the next one resumes it.
@@ -289,8 +294,10 @@ def _the_app_daemon_pauses_on_its_way_out_and_the_next_start_resumes(db, root, m
     assert recoveries[-1].idle.wait(10), "the held resume never ended"
     assert events == [("stop", ["chat", "helper"])] and db.get_agent("chat").status == "paused"
     assert lifecycle._read_resume() == [{"id": "chat", "server": here, "paused": True}]
-    # The start after that brings it back, once, having stopped what the cull never did first.
+    # The start after that brings it back, once, having stopped what the cull never did first:
+    # what was launched past the pause too (a queued task's helper), or it would stay stopped.
     events.clear()
+    db.set_status("helper", "processing")
     assert lifecycle.resume_after_start() == ["chat"]
     assert events == [("stop", ["chat", "helper"]), ("launch", "chat"), ("launch", "helper")]
 
@@ -321,6 +328,61 @@ def _the_app_daemon_pauses_on_its_way_out_and_the_next_start_resumes(db, root, m
     # A record made on another tmux server isn't resumed here.
     lifecycle._record_resume([{"id": "chat", "server": "elsewhere", "paused": True}])
     assert lifecycle.resume_after_start() == [] and len(events) == 3
+
+
+@pytest.mark.parametrize("mode, result, stage, session, plan, queued, status, says", [
+    # Live incident: agent 44196488 went `done` in a fix round as the old daemon paused, and nothing brought it back.
+    ("assign", "reported", "fixing", True, None, False, "processing", "continue your task"),
+    ("assign", "reported", "fixing", False, None, False, "processing", "missing check for None"),
+    ("assign", "reported", "resolving", False, None, False, "processing", "conflicts with its base"),
+    ("review", None, None, True, None, False, "processing", "continue your task"),
+    # Nothing to tell these: its plan waits on its supervisor; a queued message starts its turn.
+    ("assign", None, None, True, "proposed", False, "starting", None),
+    ("assign", None, None, True, None, True, "starting", None),
+    # Its report stands: the pipeline has its branch. And a fix round's branch merged by hand during the pause.
+    ("assign", "reported", "reviewing", True, None, False, "done", None),
+    ("assign", "reported", "fixing", True, "merged", False, "done", None),
+])
+def test_what_was_at_work_carries_on_after_a_pause_and_resume(
+        db, root, monkeypatch, tmp_path, mode, result, stage, session, plan, queued, status, says):
+    from brindle import company_identity, spawn
+
+    (tmp_path / "claude" / "projects" / "p").mkdir(parents=True)
+    (tmp_path / "claude" / "projects" / "p" / "sess-w1.jsonl").write_text("{}")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
+    # Launches run for real up to their window, whose command is only recorded.
+    opened = {}
+    monkeypatch.setattr(agents, "_open_window",
+                        lambda db_, a, ws, name, argv, *args, **kw: opened.update({a.id: " ".join(argv)}) or "%0")
+    monkeypatch.setattr(agents, "_detach", lambda args: None)
+    real_start = spawn.start
+    monkeypatch.setattr(spawn, "start", lambda argv, **kw: None if "_after-launch" in argv else real_start(argv, **kw))
+    monkeypatch.setattr(company_identity, "launch_check", lambda provider, home=None: (None, None, None))
+    here = tmux.current_server()
+    add(db, root, "boss", status="idle")
+    add(db, root, "w1", mode=mode, parent="boss", status="processing", result=result)
+    pane = tmux._tmux("new-session", "-d", "-s", "w1-pane", "-P", "-F", "#{pane_id}", "cat").stdout.strip()
+    chat = tmux._tmux("new-session", "-d", "-s", root.tmux_session, "-P", "-F", "#{pane_id}", "cat").stdout.strip()
+    db.update_agent("boss", tmux_window=chat, tmux_server=here)
+    db.update_agent("w1", tmux_window=pane, tmux_server=here, pipeline=stage,
+                    plan_state=plan if plan != "merged" else None, session_ref="sess-w1" if session else None)
+    head = git.out(["rev-parse", "HEAD"], root.path)
+    if stage == "fixing":
+        db.add_review(root.id, head, "rev", False, "missing check for None")
+    if queued:
+        db.enqueue("w1", "the supervisor's follow-up", "boss")
+    assert agents.is_alive(db.get_agent("w1"))
+
+    agents.pause(db, "boss", stop_procs=False, stop_local_models=False)
+    if plan == "merged":
+        db.set_merged(root.id, head)
+    agents.resume(db, "boss")
+
+    assert db.get_agent("w1").status == status
+    assert ("w1" in opened) == (status != "done")
+    if "w1" in opened:
+        assert ("--resume" in opened["w1"]) == session
+        assert says in opened["w1"] if says else agents.HEADLESS_CONTINUE not in opened["w1"]
 
 
 def test_a_resumed_chat_is_shown_with_its_conversation_and_sidebar(db, root, monkeypatch, tmp_path):

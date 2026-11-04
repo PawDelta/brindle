@@ -3252,6 +3252,14 @@ def finish_review_cmd(reviewer_id: str, workspace_id: str) -> None:
     agents.finish_review(_helper_db(), reviewer_id, workspace_id)
 
 
+@app.command("_drain-ready", hidden=True)
+def drain_ready_cmd(repo_root: str, base: Annotated[Optional[str], typer.Option("--base")] = None) -> None:
+    """Merge a repo's approved branches. Started detached by a session's resume."""
+    from brindle import pipeline
+
+    pipeline.drain(_helper_db(), repo_root, base)
+
+
 @app.command("_start-when-room", hidden=True)
 def start_when_room_cmd(task_id: str) -> None:
     """Start a task queued for room on the machine once there is (detached)."""

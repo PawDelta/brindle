@@ -391,6 +391,82 @@ def test_fix_round_resumes_exited_worker(db, repo, monkeypatch, session, exits_m
     assert [e["agent_id"] for e in bus.tail(db, kinds=("pipeline.escalated",))] == ["w1"]
 
 
+def _reported_branch_in_a_paused_session(db, repo, monkeypatch):
+    root = workspaces.adopt_root(db, str(repo))
+    add(db, root, "boss", "interactive", "supervisor", status="paused")
+    ws = workspaces.create(db, str(repo), "feat").workspace
+    add(db, ws, "w1", "assign", parent="boss", status="done", result="reported", pipeline="reviewing")
+    db.update_agent("w1", session_ref="sess-w1", reviewing_since=1000.0)
+    monkeypatch.setattr(providers.ClaudeCode, "can_resume", staticmethod(lambda ref: True))
+    launched = []
+
+    def launch(db_, a, ws_, *, prompt, resume, **kw):
+        db.set_status(a.id, "idle")
+        launched.append((a.id, prompt))
+
+    monkeypatch.setattr(agents, "_launch", launch)
+    return ws, launched
+
+
+@pytest.mark.parametrize("summary, fix_round", [
+    ("- blocker: missing check for None.\nNeeds supervisor action: None.", True),
+    ("Needs supervisor action: ask the user about scope.", False),
+])
+def test_a_verdict_that_outlives_the_pause_waits_for_the_resume(db, repo, monkeypatch, summary, fix_round):
+    """Check runs and _finish-review are nobody's children, so they can finish
+    during a pause: nothing starts in the paused session, and nothing they had
+    to say is lost."""
+    ws, launched = _reported_branch_in_a_paused_session(db, repo, monkeypatch)
+    add(db, ws, "rev", "review", "reviewer", parent="boss", status="done", result="no")
+
+    assert pipeline.on_review(db, db.get_agent("rev"), ws, False, summary)
+
+    assert launched == [] and db.get_agent("boss").status == "paused"
+    if fix_round:
+        assert (db.get_agent("w1").pipeline, db.get_agent("w1").status) == ("fixing", "paused")
+        agents.resume(db, "boss")
+        assert ("w1", None) in launched   # its queued findings start the turn
+        assert "missing check for None" in db.pop_pending("w1").body
+    else:
+        assert db.get_agent("w1").pipeline is None
+        assert "ask the user about scope" in db.pop_pending("boss").body
+
+
+def test_branches_in_the_pipeline_carry_on_after_the_resume(db, repo, monkeypatch):
+    """A check run that finished during the pause, or one or a merge run that
+    ended with the machine: the review starts again, and the merge is run."""
+    from typer.testing import CliRunner
+
+    from brindle import cli
+
+    ws, _launched = _reported_branch_in_a_paused_session(db, repo, monkeypatch)
+    approved = workspaces.create(db, str(repo), "approved").workspace
+    add(db, approved, "w2", "assign", parent="boss", status="done", result="reported", pipeline="ready")
+    (Path(approved.path) / "feature.py").write_text("x = 1\n")
+    sh("git add feature.py && git commit -qm feature", approved.path)
+    db.add_review(approved.id, gates.head(approved), "rev", True, "lgtm")
+    monkeypatch.setattr(gates, "check_summary", lambda *a, **kw: "PASS `true`")
+    reviewers, restarts, started = [], [], []
+    monkeypatch.setattr(agents, "request_review", lambda *a, **kw: reviewers.append(a))
+    monkeypatch.setattr(pipeline, "_start_review", lambda *a, **kw: restarts.append(a))
+    monkeypatch.setattr(agents, "_detach_orphan", started.append)
+    now = time.time()
+
+    assert agents.review_after_checks(db, "boss", ws, cfg=RepoConfig(checks=["true"]), report=1000.0) is None
+    cull.note_reported_stuck(db, now, {})
+    assert reviewers == [] and restarts == []
+
+    db.update_agent("w1", review_restarted=1000.0)     # the one restart this wait gets, used before the pause
+    agents.resume(db, "boss")
+    cull.note_reported_stuck(db, now, {})
+    assert len(restarts) == 1
+
+    [argv] = started
+    argv = argv[argv.index("_drain-ready"):]
+    assert CliRunner().invoke(cli.app, argv).exit_code == 0
+    assert "feature.py" in sh("git ls-tree --name-only main", repo)
+
+
 @pytest.mark.parametrize("outcomes", [
     ("PASS", "PASS"),
     ("FAIL", "FAIL"),

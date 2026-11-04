@@ -1480,13 +1480,33 @@ def tree(db: DB, root_id: str) -> list[Agent]:
     return out
 
 
+# The pipeline's stages that put a worker back to work on its branch after it reported.
+BACK_AT_WORK = ("fixing", "resolving")
+
+
+def finished_reporting(a: Agent) -> bool:
+    """Whether a worker or reviewer has reported and has nothing left to do,
+    so a pause leaves it done. A worker the pipeline sent back (BACK_AT_WORK)
+    keeps its first report's result but is at work again, unless someone
+    closed it."""
+    return a.mode != "interactive" and a.result is not None and (
+        a.pipeline not in BACK_AT_WORK or a.dismissed_at is not None)
+
+
+def session_paused(db: DB, a: Agent) -> bool:
+    """Whether ``a``'s session is paused: it starts nothing until its resume."""
+    root = db.get_agent(root_of(db, a.id))
+    return root is not None and root.status == "paused"
+
+
 def pause(db: DB, root_id: str, *, stop_procs: bool = True,
           stop_local_models: bool = True) -> list[Agent]:
     """Stop a supervisor and everything it started, keeping their work.
 
     Worktrees, branches, queued messages and each CLI's own session stay; the
     processes stop, so nothing keeps acting while nobody's watching. Agents
-    that already reported are left marked done. Returns the agents paused.
+    that have finished (finished_reporting) are left marked done. Returns the
+    agents paused.
     Without ``stop_procs``, processes Claude Code's daemon hosts are left for
     a detached cull (see brindle.cull), which stops those of paused agents,
     rather than waiting here for them to exit. The Ollama server brindle
@@ -1540,7 +1560,7 @@ class Closing:
     and what it closes next."""
     root_id: str
     agents: list[Agent]         # the root and everything it started
-    paused: list[Agent]         # those now paused (the rest had reported: done)
+    paused: list[Agent]         # those now paused (the rest had finished: done)
     sessions: set[str]          # their workspaces' tmux sessions
     root_session: str | None    # the chat's own
     repo_root: str | None
@@ -1562,7 +1582,7 @@ class Closing:
 
 def _record_pause(db: DB, root_id: str) -> Closing:
     """A pause's first step: ``root_id`` and everything it started marked
-    paused (done, for a worker that had reported), nothing closed yet."""
+    paused (done, for a worker that had finished), nothing closed yet."""
     agents, paused, sessions = tree(db, root_id), [], set()
     for a in agents:
         ws = db.get_workspace(a.workspace_id)
@@ -1570,7 +1590,7 @@ def _record_pause(db: DB, root_id: str) -> Closing:
             sessions.add(ws.tmux_session)
         # Its own SubagentStop hooks will never fire once its process stops.
         db.end_native_subagents(a.id)
-        if a.mode != "interactive" and a.result is not None:
+        if finished_reporting(a):
             db.set_status(a.id, "done")
         else:
             db.set_status(a.id, "paused")
@@ -1662,7 +1682,9 @@ def resume(db: DB, root_id: str, *, watch_pane: bool = True,
            recovery_env: dict[str, str] | None = None, gate=None) -> list[Agent]:
     """Bring a paused session back: the supervisor and its paused workers
     restart in their own workspaces. Claude Code picks up its previous
-    conversation (--resume); other CLIs restart on their original task.
+    conversation (--resume); other CLIs restart on their original task. A
+    worker or reviewer is told to carry on (``_needs_a_turn``): resumed
+    conversations otherwise sit at their input box.
     With ``only``, just those agents (if paused) restart.
 
     ``gate``: a context manager factory the caller can stop this resume
@@ -1734,8 +1756,12 @@ def _resume(db: DB, root_id: str, *, watch_pane: bool, only, recovery_env) -> li
             db.set_session_credential(root_id, k, val)
             os.environ[k] = val
 
+    # One back at work left done: paused by a daemon from before finished_reporting
+    # knew of it (the update itself), or its pane died during the round.
     candidates = [a for a in tree(db, root_id)
-                  if a.status in ("paused", "failed") and (only is None or a.id in only)]
+                  if (a.status in ("paused", "failed")
+                      or (a.status == "done" and a.pipeline in BACK_AT_WORK and not finished_reporting(a)))
+                  and (only is None or a.id in only)]
     for a in candidates:   # all or nothing: a session never half-resumes under another identity
         identity_lock.ensure(a)
     _gate_check()
@@ -1748,7 +1774,7 @@ def _resume(db: DB, root_id: str, *, watch_pane: bool, only, recovery_env) -> li
         pilot.reload_goals_file(db, root_id)   # edits the person made to this session's goal file
     resumed = []
     for a in candidates:
-        if a.status == "failed":
+        if a.status != "paused":
             if a.tmux_window and same_server(a) and owns_pane(db, a):
                 try:
                     tmux.kill_window(a.tmux_window)
@@ -1762,11 +1788,20 @@ def _resume(db: DB, root_id: str, *, watch_pane: bool, only, recovery_env) -> li
         ws = db.get_workspace(a.workspace_id)
         if ws is None or not os.path.isdir(ws.path):
             continue
+        if a.pipeline in BACK_AT_WORK and a.result is not None:
+            from brindle import pipeline
+
+            if pipeline._settled(db, ws):   # merged by hand meanwhile: the round is over
+                db.set_status(a.id, "done")
+                continue
         provider = get_provider(a.provider)
         ref = a.session_ref if provider.name in ("claude", "antigravity", "opencode", "native") and a.session_ref else None
         if ref and not provider.can_resume(ref):
             ref = None  # nothing was ever said in it: start that agent fresh
-        prompt = None if ref else _fresh_start_prompt(db, a, ws, provider, RESUME_NOTE)
+        note = _fix_round_note(db, a)
+        prompt = None if ref else _fresh_start_prompt(db, a, ws, provider, RESUME_NOTE + note)
+        if ref and _needs_a_turn(db, a):
+            prompt = HEADLESS_CONTINUE + note   # the same words, for any worker resumed at its input box
         _gate_check()
         if a.dismissed_at is not None:
             db.update_agent(a.id, dismissed_at=None)  # running again: show it again
@@ -1775,8 +1810,12 @@ def _resume(db: DB, root_id: str, *, watch_pane: bool, only, recovery_env) -> li
         resumed.append(a)
     if any(a.id == root_id for a in resumed):
         knowledge.note(db, root_id, knowledge.RESUME)
-        from brindle import tasks
+        from brindle import pipeline, tasks
 
+        try:
+            pipeline.on_resumed(db, root_id)
+        except Exception:  # noqa: BLE001 - nor may a branch: the sweep and its stall notice still see it
+            log.exception("brindle: picking %s's branches back up on resume failed", root_id)
         try:
             tasks.on_resumed(db, root_id)   # queued tasks the pause held back (their launches gated too)
         except Cancelled:
@@ -1793,6 +1832,29 @@ def _resume(db: DB, root_id: str, *, watch_pane: bool, only, recovery_env) -> li
     if resumed:
         bus.publish_agent(db, "session.resumed", root_id, agents=[a.id for a in resumed])
     return resumed
+
+
+def _needs_a_turn(db: DB, a: Agent) -> bool:
+    """Whether a worker or reviewer resumed onto its conversation must be told
+    to carry on: nothing else starts its next turn. Not one that has finished,
+    one whose queued message starts that turn, or one whose plan waits on its
+    supervisor."""
+    return (a.mode in REPORTING_MODES and not finished_reporting(a)
+            and not db.pending_count(a.id) and a.plan_state != "proposed")
+
+
+def _fix_round_note(db: DB, a: Agent) -> str:
+    """What a worker the pipeline sent back is told besides carrying on,
+    including the findings, which a fresh start would otherwise have lost."""
+    if a.pipeline not in BACK_AT_WORK or a.result is None:
+        return ""
+    if a.pipeline == "resolving":
+        return ("\n\nYour branch conflicts with its base branch: merge the base in, resolve the "
+                "conflict, commit, and call report_result again.")
+    review = db.last_review(a.workspace_id)
+    findings = f"\n\nThe last review said:\n{review.summary}" if review and not review.approved and review.summary else ""
+    return ("\n\nYour branch is in a fix round: fix what the last review or check run asked for, "
+            "commit, and call report_result again." + findings)
 
 
 def _fresh_start_prompt(db: DB, a: Agent, ws: Workspace, provider, note: str) -> str | None:
@@ -2708,6 +2770,14 @@ def _review_text(ws: Workspace, sha: str, approved: bool, summary: str) -> str:
     return f"Review of {ws.branch} (workspace {ws.id}) at {sha[:8]}: {verdict}\n\n{summary}"
 
 
+def drain_later(repo_root: str, base: str | None) -> None:
+    """Merge ``base``'s ready branches (``pipeline.drain``) from a process of
+    its own: a merge runs the repo's checks, which can take minutes."""
+    from brindle.providers import brindle_invocation
+
+    _detach_orphan([*brindle_invocation(), "_drain-ready", repo_root, *(["--base", base] if base else [])])
+
+
 def finish_review_later(reviewer_id: str, ws_id: str) -> None:
     """Act on a recorded verdict (``finish_review``) from a process of its
     own. Not in the reviewer's MCP server: a merge runs the repo's checks,
@@ -3515,6 +3585,9 @@ def review_after_checks(db: DB, caller_id: str | None, ws: Workspace, profile: s
                 if summary and gates.summary_failed(summary):
                     pipeline.on_checks_failed(db, ws, sha, since, text, caller)
                     return None
+                piped = caller or pipeline.piped_worker(db, ws)
+                if since is not None and piped is not None and session_paused(db, piped):
+                    return None   # its result is cached by commit: the sweep starts this review again after the resume
                 try:
                     return request_review(db, caller, ws, profile, focus, cfg, check_summary=text,
                                           second=second, slot=slot, expected_sha=sha)

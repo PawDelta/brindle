@@ -483,7 +483,10 @@ def resume_after_start(recovery: Recovery | None = None) -> list[str]:
                     log.info("brindle: session %s is on another tmux server; not resumed here", root.id)
                 else:
                     try:
-                        if not entry.get("paused"):
+                        # Paused again as well if something got launched past the pause (a task's
+                        # helper, an assign under way): stopped below, it must come back too.
+                        if not entry.get("paused") or any(
+                                a.status not in ("paused", "done", "failed") for a in agents.tree(db, root.id)):
                             agents.pause(db, root.id, stop_procs=False)
                             entry["paused"] = True
                         procs.stop([a.id for a in agents.tree(db, root.id)], grace=2.0)
