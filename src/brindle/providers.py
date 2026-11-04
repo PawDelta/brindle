@@ -665,6 +665,19 @@ def _policy_on(cwd: str | None) -> bool:
         return False
 
 
+def _credential_file_denies() -> list[str]:
+    """Claude Code permission rules denying its file tools the credential
+    stores brindle's hook denies shell commands (permissions.credential_paths):
+    each store itself and everything under it; ``//`` makes a path absolute."""
+    from brindle import permissions
+
+    rules = []
+    for path in permissions.credential_paths():
+        spelled = path if path.startswith("~") else "/" + path
+        rules += [f"{tool}({spelled}{suffix})" for tool in ("Read", "Edit") for suffix in ("", "/**")]
+    return rules
+
+
 def _pre_tool_matcher(ctx: "LaunchContext") -> str:
     """Which tools Claude Code's PreToolUse hook sees: Bash always, the edit
     tools for a plan_first worker, every tool the permission policy rules on
@@ -884,6 +897,12 @@ class ClaudeCode(Provider):
             # sign-in a real lapse needs (cloud_login.sign_in) instead.
             "gcpAuthRefresh": "",
         }
+        if ctx.mode != "interactive":
+            # A worker's file tools may not touch the credential stores its
+            # shell commands are denied (permissions.prints_credentials):
+            # Read would print a key the hook denies `cat`, Edit would plant
+            # one. An interactive pane is a person's own chat.
+            settings["permissions"] = {"deny": _credential_file_denies()}
         mcp = {"mcpServers": {"brindle": mcp_server_spec(ctx.agent_id)}}
         p = ctx.profile
         argv = [claude_binary()]
