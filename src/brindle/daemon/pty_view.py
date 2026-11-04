@@ -671,7 +671,9 @@ async def _type(view: PtyView, data: bytes) -> None:
 async def _up(ws: WebSocket, view: PtyView) -> None:
     """The app's frames, until it closes."""
     while True:
+        log.warning("DBGUP waiting")
         message = await ws.receive()
+        log.warning("DBGUP got %s", str(message)[:80])
         if message["type"] == "websocket.disconnect":
             return
         try:

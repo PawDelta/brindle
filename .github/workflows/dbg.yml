@@ -19,7 +19,7 @@ jobs:
       - run: |
           loop() {
             for i in $(seq 1 60); do
-              if ! uv run pytest -q -x -p no:cacheprovider --cov=brindle --cov-branch --cov-context=test --cov-report= tests/test_daemon_pty_view.py -k pane_types > out.$1.$i 2>&1; then echo "FAIL $1 $i"; grep -E "DBGDUMP" out.$1.$i | head -2; fi
+              if ! uv run pytest -q -x -p no:cacheprovider --cov=brindle --cov-branch --cov-context=test --cov-report= tests/test_daemon_pty_view.py -k pane_types > out.$1.$i 2>&1; then echo "FAIL $1 $i"; grep -E "DBGDUMP|DBGUP|Captured|brindle:" out.$1.$i | head -40; fi
             done
           }
           for w in 1 2 3 4 5 6; do COVERAGE_FILE=.cov.$w loop $w & done
