@@ -6,7 +6,7 @@ import { SessionsProvider } from "../../store/sessions";
 import { createAppStore } from "../../store/store";
 import { startSync } from "../../store/sync";
 import { StoreContext } from "../../store/useStore";
-import { FakeDaemon, TOKEN } from "../../test/fakeDaemon";
+import { FakeDaemon, freshProviders, TOKEN } from "../../test/fakeDaemon";
 import { REPO, root, worker } from "../../test/fixtures";
 import { NewSession } from ".";
 
@@ -88,6 +88,43 @@ describe("NewSession", () => {
     await waitFor(() => expect(within(card).getByRole("button", { name: "Start" })).toHaveProperty("disabled", false));
     fireEvent.click(within(card).getByRole("button", { name: "Start" }));
     await waitFor(() => expect(onOpen).toHaveBeenCalledWith("new1", REPO));
+    stop();
+  });
+
+  it.each([["installs Claude Code, checks again", undefined], ["starts on Codex instead", "codex"]] as const)("gets past a CLI that isn't installed: %s", async (_, instead) => {
+    // Claude Code neither installed nor signed in, Codex installed: the engine's own 409 for a start on Claude.
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], workspaces: [root], sessions: [], providers: freshProviders({ codex: { path: "/opt/homebrew/bin/codex", version: "0.48.0" } }) });
+    let installed = false;
+    const started: (string | undefined)[] = [];
+    const missing = [{ kind: "setup", id: "claude.install", provider: "claude", title: "Install Claude Code", detail: "Claude Code (`claude`) isn't on PATH.", action: null, link: null }];
+    const fetch = daemon.fetch;
+    daemon.fetch = async (input, init) => {
+      const path = new URL(String(input)).pathname;
+      if (path.endsWith("/providers/claude/preflight")) return Response.json(installed ? [] : missing);
+      if (path.endsWith("/sessions") && init?.method === "POST") {
+        const provider = JSON.parse(String(init.body)).provider as string | undefined;
+        started.push(provider);
+        if (!provider && !installed) return Response.json({ preflight: missing }, { status: 409 });
+      }
+      return fetch(input, init);
+    };
+    const { onOpen, stop } = setup(daemon);
+    fireEvent.change(await screen.findByLabelText("What should brindle work on?"), { target: { value: "Fix login" } });
+    fireEvent.click(screen.getByRole("button", { name: "Start" }));
+    const card = await screen.findByTestId("preflight");
+    expect(within(card).getByRole("button", { name: "Start" })).toHaveProperty("disabled", true);
+    if (instead) {
+      // Without Claude Code: the same start on the CLI this Mac has.
+      fireEvent.click(await within(card).findByRole("button", { name: "Start on Codex instead" }));
+    } else {
+      // Installed meanwhile: asked again, the card lets the start go.
+      installed = true;
+      fireEvent.click(within(card).getByRole("button", { name: "Check again" }));
+      await waitFor(() => expect(within(card).getByRole("button", { name: "Start" })).toHaveProperty("disabled", false));
+      fireEvent.click(within(card).getByRole("button", { name: "Start" }));
+    }
+    await waitFor(() => expect(onOpen).toHaveBeenCalledWith("new1", REPO));
+    expect(started).toEqual([undefined, instead]);
     stop();
   });
 

@@ -258,7 +258,18 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, on
     </form>
     {/* Its own forms (a key's field) can't sit inside the composer's. */}
     {preflight && (
-      <Preflight preflight={preflight.items} onRefresh={(items) => setPreflight({ fields: preflight.fields, items })} onLaunch={() => void start(preflight.fields)} launchLabel="Start" repo={repo} />
+      <Preflight
+        preflight={preflight.items}
+        onRefresh={(items) => setPreflight({ fields: preflight.fields, items })}
+        onLaunch={() => void start(preflight.fields)}
+        onUseInstead={(other) => {
+          setProvider(other);
+          void start({ ...preflight.fields, provider: other });
+        }}
+        launchLabel="Start"
+        repo={repo}
+        launching={busy}
+      />
     )}
     {adding && (
       <section className={`${card} flex flex-col gap-s1 px-s2 py-s2`} aria-label="Add a project">
