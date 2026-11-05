@@ -511,8 +511,8 @@ def _resolve_supervisor(repo_root: str | None, provider: Optional[str], *,
 def _trust_codex_hook(repo_root: str) -> None:
     """With the permission policy on and Codex installed, trust brindle's Codex
     hook if it isn't yet (or brindle moved), and say so in one line, so Codex
-    workers follow the policy from their first launch. A trust the person
-    removed stays removed; `brindle doctor` points at it."""
+    workers follow the policy from their first launch. A hook the person
+    turned off in Codex stays off; `brindle doctor` points at it."""
     from brindle import codex_hook
     from brindle.providers import codex_binary, which_cli
 
@@ -1802,8 +1802,8 @@ def permissions_install_codex_hook(
     Codex runs a hook only once it's trusted. brindle passes its hook to the
     Codex agents it starts (only when permission_policy is on), with the same
     command for every agent, and trusts it itself the first time it's needed;
-    this does it now, or gives back a trust removed from Codex's config. It's
-    recorded in Codex's config.toml (hooks.state), through Codex itself."""
+    this does it now, or turns the hook back on after it was turned off in
+    Codex. It's recorded in Codex's config.toml (hooks.state), through Codex itself."""
     from brindle import codex_hook
     from brindle.providers import codex_binary
 
@@ -1827,7 +1827,7 @@ def permissions_install_codex_hook(
         typer.echo("nothing changed; run again with --yes to trust it")
         return
     try:
-        codex_hook.trust(binary, state)
+        codex_hook.trust(binary, state, turn_on=True)
     except codex_hook.CodexHookError as e:
         typer.echo(f"couldn't record the trust: {e}")
         raise typer.Exit(1)
@@ -3250,6 +3250,14 @@ def finish_review_cmd(reviewer_id: str, workspace_id: str) -> None:
     # Started by the reviewer's submit_review, and must outlive its close.
     signal.signal(signal.SIGHUP, signal.SIG_IGN)
     agents.finish_review(_helper_db(), reviewer_id, workspace_id)
+
+
+@app.command("_drain-ready", hidden=True)
+def drain_ready_cmd(repo_root: str, base: Annotated[Optional[str], typer.Option("--base")] = None) -> None:
+    """Merge a repo's approved branches. Started detached by a session's resume."""
+    from brindle import pipeline
+
+    pipeline.drain(_helper_db(), repo_root, base)
 
 
 @app.command("_start-when-room", hidden=True)

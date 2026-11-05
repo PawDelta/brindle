@@ -26,8 +26,16 @@ or timeout (another build of brindle) is a new hook to Codex, so brindle
 records the whole definition it trusted, not just the command.
 
 brindle trusts its own hook the first time a Codex agent needs it (``ensure``),
-and again after it moves, so there's no setup step; it says so once at
-``brindle start``. A trust the person removes from Codex's config stays removed.
+so there's no setup step; it says so once at ``brindle start``. Codex keeps one
+trusted hash per key, so every brindle install on the machine shares that slot:
+another install's trust (a terminal's ``brindle``, an app run from its disk
+image) replaces this one's, as does an update that changes the hook, and a
+config rewrite can lose it. None of that is for a person to deal with: the
+daemon trusts the hook again by itself (``keep_trusted``), without waiting for
+a Codex launch. Reading the config can't tell an entry a person deleted from
+one a rewrite lost, so a missing entry is trusted again too. What a person can
+do on purpose, and brindle can see, is turn the hook off in Codex
+(``enabled = false``): that stays off (REMOVED) until they ask for it back.
 
 Trusting (``ensure``, or ``brindle permissions install-codex-hook --yes``)
 asks Codex itself (its app-server's ``hooks/list``) for the key and hash, writes the trust through
@@ -80,6 +88,10 @@ SOURCE = "sessionFlags"
 
 class CodexHookError(RuntimeError):
     pass
+
+
+class HookTurnedOff(CodexHookError):
+    """A person turned the hook off in Codex, and nobody asked to turn it back on."""
 
 
 def codex_home() -> Path:
@@ -164,36 +176,57 @@ def definition(command: str | None = None) -> str:
     return "\n".join(config_flags(command)[1::2])
 
 
-TRUSTED, MOVED, NEW, REMOVED = "trusted", "moved", "new", "removed"
+TRUSTED, MOVED, NEW, REMOVED, UNREADABLE = "trusted", "moved", "new", "removed", "unreadable"
+
+
+def _hook_entries(home: Path) -> dict:
+    """``[hooks.state]`` of ``home``'s Codex config; {} without a config. A
+    config that doesn't parse raises ValueError."""
+    import tomllib
+
+    try:
+        with open(home / "config.toml", "rb") as f:
+            cfg = tomllib.load(f)
+    except OSError:
+        return {}
+    hooks = cfg.get("hooks")
+    state = hooks.get("state") if isinstance(hooks, dict) else None
+    return state if isinstance(state, dict) else {}
+
+
+def _turned_off(entry: object) -> bool:
+    return isinstance(entry, dict) and entry.get("enabled") is False
+
+
+# The keys Codex gives brindle's hooks (see above): a hook turned off there is
+# off whatever brindle's own record says, or if it has none (a reset store,
+# another BRINDLE_HOME sharing this Codex home).
+SLOTS = ("/<session-flags>/config.toml:permission_request:0:0", "/<session-flags>/config.toml:pre_tool_use:0:0")
 
 
 def status(command: str | None = None) -> str:
-    """Where brindle's hook stands with Codex: TRUSTED (this exact hook, and
-    Codex's config still says so), MOVED (trusted, but brindle's hook has
-    changed since: a reinstall, another BRINDLE_HOME, another timeout), NEW
-    (never trusted) or REMOVED (trusted once, then the trust was taken out of
-    Codex's config). All of it in the Codex home brindle runs Codex with now."""
-    import tomllib
-
+    """Where brindle's hook stands with Codex, in the Codex home brindle runs
+    Codex with now: TRUSTED (this exact hook, and Codex's config still says so),
+    NEW (never trusted), MOVED (trusted once, but not this hook any more: a
+    reinstall, another build's definition, another install's trust in the slot,
+    an entry a config rewrite lost), REMOVED (a person turned it off in Codex) or
+    UNREADABLE (a config Codex can't read either, so nothing is written into it)."""
     from brindle import permissions
 
     command = command or hook_command()
     home = codex_home()
     rec = permissions.load_store().codex_hook.get(_home_key(home), {})
+    try:
+        state = _hook_entries(home)
+    except ValueError:
+        return UNREADABLE
+    if any(_turned_off(state.get(key)) for key in (*SLOTS, rec.get("key"), rec.get("pre_key"))):
+        return REMOVED
     if not rec.get("command") or not rec.get("key") or not rec.get("hash"):
         return NEW
-    try:
-        with open(home / "config.toml", "rb") as f:
-            cfg = tomllib.load(f)
-    except OSError:
-        cfg = {}
-    except ValueError:
-        return REMOVED  # can't tell; don't write into a config Codex can't read either
-    state = cfg.get("hooks", {}).get("state", {}) if isinstance(cfg.get("hooks"), dict) else {}
-    for key, hash_ in ((rec["key"], rec["hash"]), (rec.get("pre_key"), rec.get("pre_hash"))):
-        entry = state.get(key) if key and isinstance(state, dict) else None
-        if key and not (isinstance(entry, dict) and entry.get("trusted_hash") == hash_):
-            return REMOVED
+    pairs = [(key, hash_) for key, hash_ in ((rec["key"], rec["hash"]), (rec.get("pre_key"), rec.get("pre_hash"))) if key]
+    if not all(isinstance(state.get(key), dict) and state[key].get("trusted_hash") == hash_ for key, hash_ in pairs):
+        return MOVED
     # Codex's hash covers the whole definition, not just the command: a trust
     # recorded for another timeout (another build of brindle) is for another
     # hook, and so is one recorded before brindle kept the definition (it can't
@@ -210,9 +243,9 @@ def trusted(command: str | None = None) -> bool:
 def ensure(binary: str | None = None, command: str | None = None) -> str:
     """``status``, after trusting brindle's hook when it's NEW or MOVED: brindle
     trusts its own hook the first time it's needed, so Codex workers follow
-    the permission policy without a setup step. A trust the person removed
-    from Codex's config stays removed (``brindle permissions install-codex-hook
-    --yes`` gives it back). Never raises."""
+    the permission policy without a setup step. A hook the person turned off
+    in Codex stays off (``brindle permissions install-codex-hook --yes`` turns
+    it back on). Never raises."""
     from brindle.providers import codex_binary
 
     command = command or hook_command()
@@ -229,6 +262,8 @@ def ensure(binary: str | None = None, command: str | None = None) -> str:
         # (an upgrade, or a wrapper's own executable) may hash or key the
         # hook differently, which is "Hooks need review" at its startup: ask it.
         trust(binary, state)
+    except HookTurnedOff:
+        return REMOVED
     except Exception:  # noqa: BLE001 - Codex missing, too old, or not answering
         if not was_trusted:
             return now
@@ -249,6 +284,68 @@ def _forget_definition() -> None:
             rec.pop("definition", None)
 
 
+# How long a hook Codex wouldn't take is left before keep_trusted asks again:
+# a Codex too old for hooks must not mean an app-server on every check.
+AFTER_FAILURE = 900.0
+_failed_at: dict[tuple[str, str, str], float] = {}
+
+
+def keep_trusted(settle: float = 0.0) -> str:
+    """Trust brindle's hook again, unasked, whenever it's MOVED, and when it's
+    NEW with the policy on for this person (with it off, brindle has no use
+    for the hook and adds nothing to Codex's config). Returns ``status``; never
+    raises. The daemon calls this, so nobody waits for a Codex launch and the
+    Inbox never asks. A trust another install just wrote (its config younger
+    than ``settle`` seconds) is left a while: the Codex it was written for may
+    still be starting, and replacing it now stops that Codex at "Hooks need review"."""
+    from brindle.providers import codex_binary, which_cli
+
+    now = NEW
+    try:
+        command = hook_command()
+        now = status(command)
+        # A throwaway BRINDLE_HOME that shares the person's Codex home (a
+        # feature branch's CLI) has its own record: it must not fight over the slot.
+        if "BRINDLE_HOME" in os.environ and "BRINDLE_CODEX_CONFIG_HOME" not in os.environ:
+            return now
+        if now not in (NEW, MOVED) or (now == NEW and not _policy_on_for_the_person()):
+            return now
+        binary = codex_binary()
+        if not (which_cli(binary) or os.path.isfile(binary)):
+            return now
+        home = codex_home()
+        if settle and time.time() - _config_changed_at(home) < settle:
+            return now
+        wanted = (_home_key(home), definition(command), binary)
+        tried = _failed_at.get(wanted)
+        if tried is not None and time.monotonic() - tried < AFTER_FAILURE:
+            return now
+        after = ensure(binary, command)
+        if after == TRUSTED:
+            _failed_at.pop(wanted, None)
+        else:
+            _failed_at[wanted] = time.monotonic()
+        return after
+    except Exception:  # noqa: BLE001 - upkeep; ensure() at the next launch still has its say
+        return now
+
+
+def _policy_on_for_the_person() -> bool:
+    """The policy in the person's own settings, whatever a repo says (the
+    daemon has no repo; a repo that alone turns it on gets it at its first launch)."""
+    from brindle.config import brindle_home, load_repo_config
+
+    return load_repo_config(brindle_home(), user_only=True).permission_policy == "on"
+
+
+def _config_changed_at(home: Path) -> float:
+    """When ``home``'s Codex config last changed (0 without one)."""
+    try:
+        return (home / "config.toml").stat().st_mtime
+    except OSError:
+        return 0.0
+
+
 def policy_on(cwd: str | None) -> bool:
     from brindle.config import load_repo_config
 
@@ -264,7 +361,7 @@ def launch_flags(cwd: str | None, review: bool = False) -> list[str]:
     gets it with the policy off too (nobody watches its prompts; the hook only
     allows what its allowed_tools cover, #241), but only a hook trusted
     already: with the policy off brindle never trusts a NEW one itself, and a
-    REMOVED trust stays removed."""
+    hook the person turned off stays off."""
     try:
         if not policy_on(cwd):
             if not review:
@@ -293,8 +390,9 @@ def launch_warning(provider: str, cwd: str | None) -> str | None:
     state = status()
     if state == TRUSTED:
         return None   # a config Codex would ignore brindle's sandbox profile under is refused at launch
-    why = ("its trust was removed from Codex's config" if state == REMOVED
-           else "Codex didn't accept it (is Codex too old for hooks?)")
+    why = {REMOVED: "it's turned off in Codex",
+           UNREADABLE: "Codex's config.toml doesn't parse"}.get(
+        state, "Codex didn't accept it (is Codex too old for hooks?)")
     return ("permission_policy is on, but this Codex worker runs without brindle's permission hook "
             f"({why}), so Codex asks for approvals itself. Ask the user to run `{INSTALL}`")
 
@@ -307,8 +405,8 @@ UNTRUSTED = ("brindle couldn't trust its own Codex permission hook (new, or chan
 def tell_untrusted(db, agent, cwd: str | None) -> bool:
     """Tell ``agent``'s supervisor, once, that brindle couldn't trust its hook,
     so this Codex agent started without it: nobody may watch a reviewer's pane
-    to find out otherwise. A trust the person removed stays theirs to give
-    back (launch_warning, doctor), not news."""
+    to find out otherwise. A hook the person turned off stays theirs to turn
+    back on (launch_warning, doctor), not news."""
     if agent.provider != "codex" or not agent.parent_id or not policy_on(cwd) \
             or status() not in (NEW, MOVED):
         return False
@@ -447,16 +545,30 @@ def inspect(binary: str, command: str | None = None) -> HookState:
                      str(pre["key"]), str(pre["currentHash"]))
 
 
-def trust(binary: str, state: HookState) -> HookState:
+def trust(binary: str, state: HookState, *, turn_on: bool = False) -> HookState:
     """Record the person's trust of the hooks in Codex's config (through Codex's
-    own writer), check Codex now sees them as trusted, and remember it."""
+    own writer), check Codex now sees them as trusted, and remember it. A hook
+    turned off in Codex stays off (HookTurnedOff) unless ``turn_on``: only the
+    person asking for it back sets that, never brindle's own upkeep."""
     from brindle import permissions
+    from brindle.providers import _config_lock
 
     server = _AppServer(binary, config_flags(state.command))
     try:
-        server.call("config/batchWrite", {"edits": [{
-            "keyPath": "hooks.state", "mergeStrategy": "upsert",
-            "value": {key: {"trusted_hash": hash_} for key, hash_ in state.keys().items()}}]})
+        # The lock trust_codex_project rewrites config.toml under: its text from
+        # before this write would otherwise put the old trust back, or none.
+        with _config_lock("codex-trust.lock"):
+            try:
+                entries = _hook_entries(codex_home())
+            except ValueError:
+                entries = {}
+            off = {key for key in state.keys() if _turned_off(entries.get(key))}
+            if off and not turn_on:
+                raise HookTurnedOff("the hook is turned off in Codex")
+            server.call("config/batchWrite", {"edits": [{
+                "keyPath": "hooks.state", "mergeStrategy": "upsert",
+                "value": {key: {"trusted_hash": hash_, **({"enabled": True} if key in off else {})}
+                          for key, hash_ in state.keys().items()}}]})
     finally:
         server.close()
     # Written but not yet verified: on record without its definition, which

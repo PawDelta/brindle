@@ -46,6 +46,8 @@ from brindle.config import brindle_home
 HOST = "127.0.0.1"
 IDLE_SECONDS = 600.0
 WATCH_INTERVAL = 5.0     # seconds between the idle / upgrade checks
+CODEX_HOOK_EVERY = 60.0  # seconds between looks at the Codex hook's trust (codex_hook.keep_trusted)
+CODEX_HOOK_SETTLE = 120.0    # and how long another install's fresh trust is left alone
 STOP_GRACE = 5.0         # seconds `daemon stop` waits before SIGKILL
 SHUTDOWN_GRACE = 1.0     # seconds for requests on shutdown, within the app's replacement budget
 
@@ -483,7 +485,10 @@ def resume_after_start(recovery: Recovery | None = None) -> list[str]:
                     log.info("brindle: session %s is on another tmux server; not resumed here", root.id)
                 else:
                     try:
-                        if not entry.get("paused"):
+                        # Paused again as well if something got launched past the pause (a task's
+                        # helper, an assign under way): stopped below, it must come back too.
+                        if not entry.get("paused") or any(
+                                a.status not in ("paused", "done", "failed") for a in agents.tree(db, root.id)):
                             agents.pause(db, root.id, stop_procs=False)
                             entry["paused"] = True
                         procs.stop([a.id for a in agents.tree(db, root.id)], grace=2.0)
@@ -536,6 +541,7 @@ async def _watch(server, activity: Activity, idle_exit: bool, *,
     install = InstallWatch()
     ready = ReadinessWatch()
     monitor = health.Monitor(clock)
+    hook_due = clock() + CODEX_HOOK_EVERY
     while not server.should_exit:
         due = clock() + WATCH_INTERVAL      # the wait's deadline, before any maintenance below
         await wait(WATCH_INTERVAL)
@@ -548,6 +554,9 @@ async def _watch(server, activity: Activity, idle_exit: bool, *,
             log.debug("brindle: couldn't record the daemon's health", exc_info=True)
         with spawn.waits_for_room():                    # background work: it waits for room
             await asyncio.to_thread(ready.sweep_safely)     # session.pr_ready when a session becomes ready
+        if clock() >= hook_due:
+            hook_due = clock() + CODEX_HOOK_EVERY
+            await asyncio.to_thread(_keep_codex_hook, CODEX_HOOK_SETTLE)
         if install.changed():
             server.should_exit = True
         elif (idle_exit and activity.open == 0
@@ -564,6 +573,19 @@ def _reset_window_sizes() -> None:
         terminal.reset_window_sizes()
     except Exception:
         log.warning("brindle: couldn't reset the old daemon's window sizes", exc_info=True)
+
+
+def _keep_codex_hook(settle: float = 0.0) -> None:
+    """codex_hook.keep_trusted, off the daemon's way, by the one daemon this
+    brindle home answers to: one left running from another install (an app on
+    its disk image) would otherwise take the hook's one slot back and forth with it."""
+    from brindle import codex_hook
+
+    info = read_info()
+    if info is None or info["pid"] != os.getpid():
+        return
+    with spawn.waits_for_room():    # background work: it waits for room
+        codex_hook.keep_trusted(settle)
 
 
 def _upgrade_sweep() -> None:
@@ -643,6 +665,7 @@ def serve(*, unix: bool = True, tcp: bool = False, idle_exit: bool = False) -> d
         watcher = asyncio.create_task(_watch(server, activity, idle_exit, parent=parent))
         resizer = asyncio.create_task(asyncio.to_thread(_reset_window_sizes))
         sweeper = asyncio.create_task(asyncio.to_thread(_upgrade_sweep))
+        hook = asyncio.create_task(asyncio.to_thread(_keep_codex_hook))   # an update may have changed it
         # The app's daemon brings back what the last one paused on its way out.
         resumer = asyncio.create_task(asyncio.to_thread(resume_after_start, recovery)) if idle_exit else None
         try:
@@ -651,6 +674,7 @@ def serve(*, unix: bool = True, tcp: bool = False, idle_exit: bool = False) -> d
             watcher.cancel()
             resizer.cancel()
             sweeper.cancel()
+            hook.cancel()
             if resumer:
                 resumer.cancel()
 
