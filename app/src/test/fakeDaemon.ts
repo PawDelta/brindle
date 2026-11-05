@@ -1281,7 +1281,7 @@ export class FakeDaemon {
     if (this.data.meta.airgap) return error("airgap", "The demo runs hosted agents, and air-gap mode is on on this Mac.", 403);
     const name = `textkit-${this.demos.length + 1}`;
     const root = `/home/u/.brindle/demo/${name}`;
-    if (this.heldDemo !== root) this.data.repos = [...this.data.repos, { repo_root: root, name }];
+    if (this.heldDemo !== root) this.data.repos = [...this.data.repos, { repo_root: root, name, demo: true }];
     const started = await this.write("/sessions", { repo: root });
     if (!started.ok) {
       this.heldDemo = root;

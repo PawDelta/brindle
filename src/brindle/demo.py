@@ -127,6 +127,12 @@ def _config_path(root: Path) -> Path:
     return root / ".brindle" / "config.json"
 
 
+def is_demo_repo(path: str | Path) -> bool:
+    """True when ``path`` is inside the demo folder (symlinks resolved); a repo
+    merely named textkit-* elsewhere is not a demo."""
+    return (brindle_home() / "demo").resolve() in Path(path).resolve().parents
+
+
 def unused(db: DB) -> list[Path]:
     """The practice repos no session has run in yet (one a launch's preflight
     held while the person settled it), newest first."""

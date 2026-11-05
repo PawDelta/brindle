@@ -25,6 +25,7 @@ import type {
   PreflightItemDTO,
   ProfileDTO,
   ProviderConnectionDTO,
+  RepoDTO,
   RoutingDTO,
   SavedActionDTO,
   SessionDTO,
@@ -329,10 +330,7 @@ export interface Meta {
   airgap: boolean;
 }
 
-export interface Repo {
-  repo_root: string;
-  name: string;
-}
+export type Repo = RepoDTO;
 
 export interface Diff {
   workspace_id: string;

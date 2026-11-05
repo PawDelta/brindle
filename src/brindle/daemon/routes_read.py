@@ -56,6 +56,7 @@ from brindle.service.dto import (
     PreflightItemDTO,
     ProfileDTO,
     ProviderConnectionDTO,
+    RepoDTO,
     RoutingDTO,
     RoutingKindDTO,
     RoutingProfileDTO,
@@ -152,7 +153,10 @@ def _last4(value: str) -> str:
 @_json
 def repos(db: DB, request: Request) -> Any:
     roots = sorted({ws.repo_root for ws in db.find_workspaces(None)})
-    return [{"repo_root": r, "name": r.rstrip("/").rsplit("/", 1)[-1]} for r in roots]
+    from brindle.demo import is_demo_repo
+
+    return [RepoDTO(repo_root=r, name=r.rstrip("/").rsplit("/", 1)[-1], demo=is_demo_repo(r)).to_json()
+            for r in roots]
 
 
 @_json

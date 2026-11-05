@@ -5485,6 +5485,30 @@
       "title": "ProviderConnectionDTO",
       "type": "object"
     },
+    "RepoDTO": {
+      "description": "A repo brindle has worked in. ``demo``: brindle's practice repo (under the\ndemo folder), which the app does not offer as a project to start in.",
+      "properties": {
+        "demo": {
+          "default": false,
+          "title": "Demo",
+          "type": "boolean"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "repo_root": {
+          "title": "Repo Root",
+          "type": "string"
+        }
+      },
+      "required": [
+        "repo_root",
+        "name"
+      ],
+      "title": "RepoDTO",
+      "type": "object"
+    },
     "RoutingDTO": {
       "$defs": {
         "RoutingKindDTO": {

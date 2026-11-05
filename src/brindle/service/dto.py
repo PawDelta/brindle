@@ -20,6 +20,15 @@ class _DTO(BaseModel):
         return self.model_dump(mode="json")
 
 
+class RepoDTO(_DTO):
+    """A repo brindle has worked in. ``demo``: brindle's practice repo (under the
+    demo folder), which the app does not offer as a project to start in."""
+
+    repo_root: str
+    name: str
+    demo: bool = False
+
+
 class OrgIdentityDTO(_DTO):
     sub: str
     org_id: str

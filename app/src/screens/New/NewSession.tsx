@@ -13,7 +13,7 @@
    project…" beside the repo after. Under it, the way to the demo the first
    launch offers (screens/Onboarding/Demo). */
 
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { DaemonError, LOGIN_PROVIDERS, type DaemonClient, type Note, type PreflightDTO, type Repo, type SessionConflict, type StartSession } from "../../api/client";
 import type { PickFolder } from "../../api/open";
 import type { SessionDTO } from "../../api/schema";
@@ -62,7 +62,9 @@ const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
 type StartFields = Omit<StartSession, "repo" | "choice" | "session_id">;
 
 export function NewSession({ client, onOpen, initialRepo, pickFolder, refresh, onSignIn = () => undefined }: NewSessionProps) {
-  const { repos, sessions, error: loadError, reload } = useSessions();
+  const { repos: allRepos, sessions, error: loadError, reload } = useSessions();
+  /* The practice repo is for the demo flow only: never a project to start in. */
+  const repos = useMemo(() => allRepos && allRepos.filter((r) => !r.demo), [allRepos]);
   const [attempt, setAttempt] = useState(0);
   /* The project to start in: as opened, or the one just added. */
   const [chosen, setChosen] = useState(initialRepo);
