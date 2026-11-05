@@ -114,7 +114,7 @@ def test_shell_forms(tmp_path, command, expected):
 
 @pytest.mark.parametrize("command", [
     "timeout 5 blocked",
-    "timeout -k 1 --signal=KILL 5 blocked now",
+    "timeout -k 1 -s KILL 5 blocked now",
     "nice -n 5 blocked",
     "nice -10 blocked",
     "nohup blocked",
@@ -124,7 +124,7 @@ def test_shell_forms(tmp_path, command, expected):
     "caffeinate -t 5 -i blocked",
     "command -p blocked",
     "exec -a name blocked",
-    "git status && nohup nice -n 5 timeout 5 env A=1 blocked",
+    "git status && nohup env A=1 nice -n 5 timeout 5 blocked",
 ])
 def test_a_deny_sees_the_command_behind_a_wrapper(tmp_path, command):
     from brindle import permissions
