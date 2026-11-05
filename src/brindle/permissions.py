@@ -1912,7 +1912,7 @@ def _awk_readonly(args: list[str]) -> bool:
     # awk joins continued source lines before recognizing identifiers.
     script = args[i].replace("\\\n", "")
     return not (any(c in script for c in "|>@")
-                or re.search(r"\b(system|getline|ARGV|ARGC)\b", script))
+                or re.search(r"\b(system|getline|ARGV|ARGC|ENVIRON|PROCINFO)\b", script))
 
 
 _LINES_OR_BYTES = re.compile(r"-\d+|-[nc]\+?\d*|\+?\d+|-[qv]")
@@ -4654,72 +4654,283 @@ _PLAIN_PROGRAMS = frozenset({
     "ls", "cat", "head", "tail", "wc", "cut", "tr", "uniq", "grep", "egrep", "fgrep", "basename", "dirname", "pwd",
     "date", "stat", "du", "df", "which", "type", "realpath", "readlink", "seq", "nl", "rev", "fold", "paste", "join",
     "comm", "cmp", "diff", "file", "uptime", "whoami", "hostname", "uname", "ps", "lsof", "pgrep", "who", "id", "tree",
-    "base64", "shasum", "md5", "strings", "vm_stat", "mdls", "lsappinfo", "memory_pressure", "dig",
+    "base64", "shasum", "md5", "strings", "vm_stat", "mdls", "memory_pressure", "dig",
     # change files or processes, as the rules and baselines decide
     "mkdir", "touch", "cp", "mv", "ln", "rm", "rmdir", "tee", "mktemp", "chmod", "kill", "pkill",
     # media, and the project's own tools, which run its code by design
-    "ffmpeg", "ffprobe", "sips", "screencapture", "aws", "brindle", "pytest", "ruff", "mypy", "tsc", "vitest", "eslint",
+    "ffmpeg", "ffprobe", "screencapture", "aws", "pytest", "ruff", "mypy", "tsc", "vitest", "eslint",
 })
 # Leading assignments that change nothing about what a program runs (GIT_SSH_COMMAND, PAGER and their kin do).
 _PLAIN_ASSIGNMENTS = frozenset({"AWS_PROFILE", "AWS_REGION", "AWS_DEFAULT_REGION", "BRINDLE_HOME", "CI", "NO_COLOR",
                                 "FORCE_COLOR", "TERM", "LANG", "LC_ALL", "TZ", "TMPDIR", "COLUMNS", "IFS",
                                 "PYTHONUNBUFFERED", "PYTHONDONTWRITEBYTECODE"})
-_GIT_PLAIN = frozenset({"log", "diff", "show", "status", "worktree", "fetch", "commit", "merge", "push", "merge-base",
-                        "grep", "rev-list", "rev-parse", "add", "branch", "ls-remote", "stash", "switch", "tag", "pull",
-                        "checkout", "merge-tree", "for-each-ref", "cherry", "ls-files", "cat-file", "check-ignore",
-                        "ls-tree", "cherry-pick", "bundle", "rm", "remote", "mv", "restore", "reset", "revert", "blame",
-                        "describe", "shortlog", "show-ref", "rebase", "clean"})
-_GIT_RUNS_OPTIONS = ("--upload-pack", "--receive-pack", "--exec", "--ext-diff", "--open-files-in-pager", "--config-env",
-                     "--output")
-# Those whose options can run something, so a word only the run knows may be one.
-_GIT_OPTIONS_MATTER = frozenset({"fetch", "pull", "push", "rebase", "log", "diff", "show", "grep", "ls-remote"})
-_GH_PLAIN = frozenset({"pr", "run", "api", "release", "workflow", "repo", "issue", "label", "search", "auth"})
-_SQLITE_OPTIONS = frozenset({"-readonly", "-header", "-noheader", "-json", "-csv", "-column", "-line", "-list",
-                             "-separator", "-batch"})
-_SQLITE_DOT = re.compile(r"\.(?:schema|tables|indexes|mode|headers|dbinfo)\b")
-_SED_RUNS = re.compile(r"(?:^|[;{}\n\d$/!,])\s*e(?:\s|$|[;}])|(?<![A-Za-z0-9\\])[A-Za-z0-9]*e[A-Za-z0-9]*\s*(?:[;}\n]|$)")
+# Every git subcommand on the list, by each option it may have: letters that take no value, letters
+# that take one (attached, or the next word), and whole long names. An option not named, including
+# an abbreviation git would accept, isn't understood. None of these names a program to run.
+_GIT_PATCH_LONGS = ("--stat", "--name-only", "--name-status", "--diff-filter", "--shortstat", "--numstat", "--no-color",
+                    "--format", "--pretty", "--oneline", "--date", "--abbrev-commit", "--no-patch")
+_GIT_FORMS: dict[str, tuple[str, str, tuple[str, ...]]] = {
+    "log": ("ipq", "GSn", (*_GIT_PATCH_LONGS, "--merges", "--no-merges", "--first-parent", "--all", "--grep", "--since",
+                           "--until", "--author", "--follow", "--tags", "--simplify-by-decoration", "--reverse",
+                           "--max-count", "--graph", "--decorate", "--branches", "--remotes")),
+    "diff": ("pq", "UGS", (*_GIT_PATCH_LONGS, "--cached", "--staged", "--quiet", "--exit-code", "--check")),
+    "show": ("sp", "U", _GIT_PATCH_LONGS),
+    "status": ("sb", "", ("--short", "--branch", "--porcelain")),
+    "worktree": ("qf", "b", ("--detach", "--force", "--porcelain", "--quiet")),
+    "commit": ("qa", "mF", ("--no-verify", "--no-edit", "--amend", "--message", "--file", "--all", "--quiet",
+                            "--allow-empty")),
+    "fetch": ("q", "", ("--tags", "--all", "--prune", "--quiet")),
+    "merge": ("q", "m", ("--no-edit", "--no-ff", "--ff-only", "--abort", "--continue", "--no-commit", "--squash",
+                         "--message", "--quiet")),
+    "push": ("qud", "", ("--quiet", "--set-upstream", "--delete", "--tags")),
+    "pull": ("q", "", ("--ff-only", "--quiet", "--no-rebase", "--no-edit")),
+    "merge-base": ("a", "", ("--is-ancestor", "--all")),
+    "branch": ("rdDavlq", "", ("--show-current", "--list", "--contains", "--merged", "--no-merged", "--format", "--all",
+                               "--remotes", "--sort")),
+    "rev-parse": ("q", "", ("--short", "--verify", "--git-common-dir", "--git-dir", "--abbrev-ref", "--show-toplevel",
+                            "--symbolic-full-name")),
+    "rev-list": ("", "n", ("--count", "--left-right", "--no-merges", "--merges", "--max-count", "--all",
+                           "--first-parent", "--reverse")),
+    "grep": ("nclEiqwvFIhH", "ABCe", ("--cached",)),
+    "add": ("Aufqnv", "", ("--all", "--update", "--quiet")),
+    "ls-remote": ("q", "", ("--tags", "--heads", "--refs", "--quiet", "--exit-code")),
+    "switch": ("q", "cC", ("--detach", "--create", "--quiet")),
+    "stash": ("qku", "m", ("--format", "--stat", "--quiet", "--keep-index", "--include-untracked", "--message")),
+    "checkout": ("q", "bB", ("--theirs", "--ours", "--detach", "--quiet")),
+    "tag": ("lad", "m", ("--sort", "--list", "--format", "--contains", "--points-at", "--message")),
+    "merge-tree": ("", "", ("--write-tree", "--name-only")),
+    "for-each-ref": ("", "", ("--format", "--sort", "--count", "--contains", "--merged")),
+    "ls-files": ("scmodv", "", ("--cached", "--others", "--modified", "--exclude-standard", "--error-unmatch")),
+    "cherry": ("v", "", ()),
+    "cherry-pick": ("n", "", ("--skip", "--abort", "--continue", "--no-commit")),
+    "cat-file": ("etsp", "", ()),
+    "check-ignore": ("vqn", "", ()),
+    "ls-tree": ("rdtl", "", ("--name-only", "--full-name")),
+    "bundle": ("", "", ("--branches", "--remotes", "--all")),
+    "remote": ("v", "", ()),
+    "rm": ("qrfn", "", ("--cached", "--quiet")),
+    "mv": ("fknv", "", ()),
+    "restore": ("q", "s", ("--staged", "--worktree", "--source", "--quiet")),
+    "reset": ("q", "", ("--soft", "--mixed", "--hard", "--quiet")),
+    "revert": ("n", "", ("--no-edit", "--abort", "--continue", "--no-commit")),
+    "rebase": ("q", "", ("--abort", "--continue", "--skip", "--quiet")),
+    "clean": ("fdnxq", "", ("--dry-run", "--force", "--quiet")),
+    "blame": ("", "L", ()),
+    "describe": ("", "", ("--tags", "--always", "--abbrev")),
+    "shortlog": ("sne", "", ("--all",)),
+    "show-ref": ("", "", ("--heads", "--tags", "--verify")),
+}
+# Where the first operand is an action, the only ones understood.
+_GIT_ACTIONS = {"worktree": ("add", "list", "remove", "prune", "move"), "bundle": ("create", "list-heads", "verify"),
+                "stash": ("list", "push", "pop", "apply", "drop", "show"), "remote": ("show", "get-url")}
+# Those with no option that could run anything, so a word only the run knows may stand as an operand.
+_GIT_ANY_OPERAND = frozenset({"cherry", "merge-base", "rev-parse", "rev-list", "status", "ls-files", "ls-tree",
+                              "for-each-ref", "show-ref", "check-ignore"})
+# gh's commands, and the actions of each: none hands a word on to another program (repo clone gives git its).
+_GH_ACTIONS = {"pr": ("view", "list", "checks", "diff", "create", "edit", "comment", "merge", "status", "review", "ready",
+                      "close", "reopen"),
+               "run": ("view", "list", "watch", "rerun", "download", "cancel"),
+               "release": ("view", "list", "create", "upload", "edit"), "workflow": ("view", "list", "run"),
+               "repo": ("view", "list"), "issue": ("view", "list", "create", "comment", "close", "edit"),
+               "label": ("list", "create"), "search": ("prs", "issues", "code", "commits", "repos"), "auth": ("status",)}
+_SQLITE_FLAGS = frozenset({"-readonly", "-header", "-noheader", "-json", "-csv", "-column", "-line", "-list", "-batch"})
+_SQLITE_DOT = re.compile(r"\.(?:schema|tables|indexes)(?: \w+)?")
+_SQLITE_PRAGMA = re.compile(r"pragma\s+(?:table_info|table_list|index_list|database_list|integrity_check)\b[^=]*")
+# Every SQL function, and word that may stand before a parenthesis, a statement may use.
+_SQL_CALLS = frozenset({"count", "sum", "avg", "min", "max", "total", "group_concat", "substr", "substring", "length",
+                        "lower", "upper", "trim", "ltrim", "rtrim", "replace", "instr", "coalesce", "ifnull", "nullif",
+                        "round", "abs", "cast", "char", "typeof", "date", "time", "datetime", "julianday", "strftime",
+                        "unixepoch", "json_extract", "json_array", "json_object", "json_each", "json_group_array", "iif",
+                        "table_info", "pragma_table_info", "in", "and", "or", "not", "where", "on", "from", "as",
+                        "exists", "over", "values", "select", "when", "then", "else", "case", "between", "like"})
+_SED_COMMANDS = "dpP=nNDgGhHxlq"
+_FIND_VALUED = frozenset({"-name", "-iname", "-path", "-ipath", "-type", "-maxdepth", "-mindepth", "-mmin", "-mtime",
+                          "-newer", "-newermt", "-size"})
+_FIND_FLAGS = frozenset({"-not", "-o", "-or", "-a", "-and", "-prune", "-print", "-print0", "-empty", "-L", "-H", "-P",
+                         "-depth", "(", ")", "!"})
+_CARGO_LONGS = ("--release", "--lib", "--bins", "--tests", "--no-run", "--workspace", "--all", "--all-features", "--quiet",
+                "--locked", "--package", "--test", "--bin", "--features", "--check")
+_CURL_LONGS = ("--silent", "--location", "--head", "--fail", "--show-error", "--output", "--write-out", "--max-time",
+               "--unix-socket", "--user-agent", "--request", "--header")
+_RG_LONGS = ("--line-number", "--ignore-case", "--files-with-matches", "--count", "--fixed-strings", "--hidden",
+             "--no-ignore", "--no-heading", "--heading", "--only-matching", "--json", "--glob", "--type", "--max-count")
+_SORT_LONGS = ("--unique", "--reverse", "--numeric-sort", "--version-sort", "--field-separator", "--key")
+_SIPS_LONGS = ("--getProperty", "--out", "--resampleWidth", "--resampleHeight", "--resampleHeightWidthMax", "--setProperty")
+_NPM_LONGS = ("--silent", "--ignore-scripts", "--no-audit", "--no-fund")
+# awk's own: an upper-case name that isn't one of these (ENVIRON, ARGV, PROCINFO) may read what it shouldn't.
+_AWK_NAMES = frozenset({"NR", "NF", "FS", "OFS", "RS", "ORS", "FNR", "FILENAME", "SUBSEP", "RSTART", "RLENGTH", "BEGIN", "END"})
+_AWK_CALLS = frozenset({"length", "substr", "index", "split", "sub", "gsub", "match", "sprintf", "tolower", "toupper",
+                        "int", "sqrt", "log", "exp", "sin", "cos", "rand", "srand", "atan2", "print", "printf", "if",
+                        "while", "for"})
 
 
-def _option_like(part: ShellPart) -> bool:
-    """Whether a word only the run knows starts with its value, so it may be an option."""
-    return any(re.match(r'"?\$', word) for word in part.unresolved)
+def _plain_options(args: list[str], flags: str = "", valued: str = "", longs: tuple[str, ...] = (),
+                   stop: int | None = None) -> list[str] | None:
+    """A program's operands, or None when any option isn't one named: letters that take no value
+    (clustered as they may be), letters that take one (attached, or the next word), whole long names
+    (a long option's value, the next word, reads as an operand: if it looks like an option, it isn't
+    understood either). ``stop``: options end at that operand, for what hands the rest on."""
+    operands: list[str] = []
+    at = 0
+    while at < len(args):
+        arg = args[at]
+        at += 1
+        if arg == "--":
+            return [*operands, *args[at:]]
+        if stop is not None and len(operands) == stop and not arg.startswith("-"):
+            return [*operands, *args[at - 1:]]
+        if arg.startswith("--"):
+            if arg.partition("=")[0] not in longs:
+                return None
+        elif re.fullmatch(r"-\d+", arg):
+            continue
+        elif arg.startswith("-") and arg != "-":
+            for n, letter in enumerate(arg[1:], 2):
+                if letter in valued:
+                    at += n == len(arg)
+                    break
+                if letter not in flags:
+                    return None
+        else:
+            operands.append(arg)
+    return operands
+
+
+def _sed_text_end(script: str, i: int, delimiter: str, *, regex: bool) -> int | None:
+    """The index of the ``delimiter`` closing the text at ``i``. In a regex, a bracket expression
+    holding the delimiter is refused: seds differ on whether it closes there."""
+    n = len(script)
+    while i < n:
+        c = script[i]
+        if c == "\n" or c == "\\" and script[i + 1:i + 2] == "\n":
+            return None
+        if c == "\\":
+            i += 2
+        elif regex and c == "[":
+            j = i + 1 + (script[i + 1:i + 2] == "^")
+            j += script[j:j + 1] == "]"
+            while j < n and script[j] != "]":
+                if script[j] == "[" and script[j + 1:j + 2] in (":", ".", "="):
+                    close = script.find(script[j + 1] + "]", j + 2)
+                    if close < 0:
+                        return None
+                    j = close + 1
+                j += 1
+            if j >= n or delimiter in script[i:j + 1]:
+                return None
+            i = j + 1
+        elif c == delimiter:
+            return i
+        else:
+            i += 1
+    return None
+
+
+def _sed_script_plain(script: str) -> bool:
+    """Whether a sed script is only commands read whole and known to run nothing: each with an
+    optional line, $ or /regex/ address or range, then s or y with no w or e flag, or one of
+    _SED_COMMANDS. A block, a label, an address with flags, or any other command isn't understood."""
+    i, n = 0, len(script)
+
+    def address(i: int) -> int | None:
+        found = re.compile(r"\d+|\$").match(script, i)
+        if found:
+            return found.end()
+        if script[i:i + 1] == "/":
+            end = _sed_text_end(script, i + 1, "/", regex=True)
+            return None if end is None else end + 1
+        return i
+
+    while True:
+        while i < n and script[i] in " \t\n;":
+            i += 1
+        if i >= n:
+            return True
+        i = address(i)
+        if i is None:
+            return False
+        if script[i:i + 1] == ",":
+            start = i + 1
+            i = address(start)
+            if i is None or i == start:
+                return False
+        while script[i:i + 1] in (" ", "!"):
+            i += 1
+        command = script[i:i + 1]
+        i += 1
+        if command in ("s", "y"):
+            delimiter = script[i:i + 1]
+            if not delimiter or delimiter in "\\\n ;":
+                return False
+            first = _sed_text_end(script, i + 1, delimiter, regex=command == "s")
+            second = None if first is None else _sed_text_end(script, first + 1, delimiter, regex=False)
+            if second is None:
+                return False
+            i = second + 1
+            if command == "s":
+                i = re.compile(r"[gpiImM0-9]*").match(script, i).end()
+        elif not command or command not in _SED_COMMANDS:
+            return False
+        while script[i:i + 1] in (" ", "\t"):
+            i += 1
+        if i < n and script[i] not in ";\n":
+            return False
 
 
 def _sed_plain(part: ShellPart) -> bool:
-    """A sed whose every word is known and whose script, as text, has no e command or s///e flag."""
-    scripts, operands, at, args = [], [], 0, part.words[1:]
+    """A sed whose every word is known, with options it knows. A bare -i is refused: one sed takes the next
+    word as a suffix, another as the script, so which word is the script isn't known."""
     if part.unknown:
         return False
+    args, scripts, operands, at = part.words[1:], [], [], 0
     while at < len(args):
         arg = args[at]
-        if arg in SED_SCRIPT_OPTIONS:
+        at += 1
+        if arg == "--":
+            operands += args[at:]
+            break
+        if arg == "-i":
+            if args[at:at + 1] != [""]:
+                return False
             at += 1
+        elif arg.startswith("-i"):
+            continue    # an attached suffix
+        elif arg == "-e" or arg == "--expression":
             scripts += args[at:at + 1]
+            at += 1
         elif arg.startswith("--expression="):
             scripts.append(arg.partition("=")[2])
-        elif arg.startswith(("-f", "--file")):
-            return False
         elif arg.startswith("-e"):
             scripts.append(arg[2:])
-        elif not arg.startswith("-") or arg == "-":
+        elif arg.startswith("-") and arg != "-":
+            if not re.fullmatch(r"-[nEruzs]+", arg):
+                return False
+        else:
             operands.append(arg)
-        at += 1
-    return not any(_SED_RUNS.search(script) for script in scripts or operands[:1])
+    scripts = scripts or operands[:1]
+    return bool(scripts) and all(_sed_script_plain(script) for script in scripts)
 
 
 def _awk_plain(part: ShellPart) -> bool:
-    """An awk whose every word is known, a program in a word and not a file, that runs nothing:
-    a string's or a regex's | isn't a pipe; one after print or printf is, and so is getline."""
-    args = part.words[1:]
-    if part.unknown or any(a.startswith("-") and not a.startswith(("-F", "-v")) and a != "--" for a in args):
+    """An awk whose every word is known, its program in a word, using only calls it knows and no
+    getline, function or @. A string's | is text and, with no print, a regex's is too. A program with
+    both a / and a " is refused: which is a string and which a regex (/"/) can't be told here."""
+    operands = None if part.unknown else _plain_options(part.words[1:], valued="Fv")
+    if not operands or "/" in operands[0] and '"' in operands[0]:
         return False
-    text = re.sub(r'"(?:[^"\\]|\\.)*"', '""', " ".join(args), flags=re.S)
-    return not re.search(r"\bprintf?\b[^;}\n]*\||\b(?:system|getline|ARGV|ARGC)\b|@", text)
+    text = re.sub(r'"(?:[^"\\]|\\.)*"', '""', operands[0], flags=re.S)
+    if "@" in text or "\\" in text or re.search(r"\b(?:getline|function|func)\b", text):
+        return False
+    if re.search(r"\bprintf?\b", text) and re.search(r"(?<!\|)\|(?!\|)|>", text):
+        return False
+    if any(name not in _AWK_NAMES for name in re.findall(r"\b[A-Z][A-Z_]+\b", text)):
+        return False
+    return all(name in _AWK_CALLS for name in re.findall(r"([A-Za-z_]\w*)\s*\(", text))
 
 
 def _git_plain(part: ShellPart) -> bool:
-    """A git subcommand that does what it says: no -c (which can set an alias or a pager that
-    runs anything), and none of the options that take a program."""
+    """A git subcommand on the list, every option of it named there. Only -C and --no-pager may come
+    before it: -c can set an alias or a pager that runs anything."""
     args = part.words[1:]
     while args:
         if args[0] == "-C" and len(args) > 1:
@@ -4728,25 +4939,78 @@ def _git_plain(part: ShellPart) -> bool:
             args = args[1:]
         else:
             break
-    if not args or args[0] not in _GIT_PLAIN:
+    form = _GIT_FORMS.get(args[0]) if args else None
+    operands = _plain_options(args[1:], *form) if form else None
+    if operands is None:
         return False
-    sub, rest = args[0], args[1:]
-    if any(word.startswith(_GIT_RUNS_OPTIONS) for word in rest):
+    actions = _GIT_ACTIONS.get(args[0])
+    if actions and operands and operands[0] not in actions:
         return False
-    if sub == "rebase" and "-x" in rest or sub == "grep" and any(word.startswith("-O") for word in rest):
+    # A word only the run knows, standing alone, may be an option no one has read.
+    return args[0] in _GIT_ANY_OPERAND or not any(
+        word in part.unresolved and re.match(r"""["']?[$`]""", word) for word in operands)
+
+
+def _gh_plain(part: ShellPart) -> bool:
+    """A gh command and action on the list; gh api has no actions, and passes nothing on."""
+    words = part.words
+    if len(words) < 2 or words[1] != "api" and words[2:3] and words[2] not in _GH_ACTIONS.get(words[1], ()):
         return False
-    return not (sub in _GIT_OPTIONS_MATTER and _option_like(part))
+    return words[1] == "api" or words[1] in _GH_ACTIONS and len(words) > 2
+
+
+def _sql_plain(sql: str) -> bool:
+    """Whether SQL is only SELECT and known PRAGMA statements calling known functions, whatever its
+    case. A comment may hide a name from a call, and a quoted name may be a function's, so neither is read."""
+    text = re.sub(r"'[^']*'", "''", sql).lower()
+    if "/*" in text or "--" in text or re.search(r"""["\]`]\s*\(""", text):
+        return False
+    for statement in text.split(";"):
+        statement = statement.strip()
+        if statement and not (statement.startswith("select") and re.match(r"select\b", statement)
+                              or _SQLITE_PRAGMA.fullmatch(statement)):
+            return False
+    return all(name in _SQL_CALLS for name in re.findall(r"([a-z_]\w*)\s*\(", text))
 
 
 def _sqlite_plain(part: ShellPart) -> bool:
-    """sqlite3 given its SQL as a word (its input may hold .shell): known options, safe dot commands."""
-    args = part.words[1:]
-    options = [word for word in args if word.startswith("-")]
-    operands = [word for word in args if not word.startswith("-")]
-    if any(word not in _SQLITE_OPTIONS for word in options) or len(operands) < 2 or _option_like(part):
+    """sqlite3 given a database and its SQL as known words (its input may hold .shell), with options
+    it knows and only safe dot commands. The database may be partly known ("file:$HOME/x"), not bare."""
+    args, operands, at = part.words[1:], [], 0
+    while at < len(args):
+        arg = args[at]
+        at += 1
+        if arg == "-separator":
+            at += 1
+        elif arg.startswith("-"):
+            if arg not in _SQLITE_FLAGS:
+                return False
+        else:
+            operands.append(arg)
+    if len(operands) < 2 or re.match(r"""["']?[$`]""", operands[0]) and operands[0] in part.unresolved:
         return False
-    return not any(word.lstrip().startswith(".") and not _SQLITE_DOT.match(word.lstrip()) or "load_extension" in word
-                   for word in operands[1:])
+    return all(word not in part.unresolved and (_SQLITE_DOT.fullmatch(word) or _sql_plain(word))
+               for word in operands[1:])
+
+
+def _find_plain(part: ShellPart) -> bool:
+    """A find of known words using only tests and operators named: none acts, writes or runs."""
+    if part.unknown:
+        return False
+    args, at = part.words[1:], 0
+    while at < len(args):
+        arg = args[at]
+        at += 1
+        if arg in _FIND_VALUED:
+            at += 1
+        elif arg not in _FIND_FLAGS and arg.startswith("-"):
+            return False
+    return True
+
+
+def _options_known(part: ShellPart, *form, **named) -> bool:
+    """Every word known, and every option one named."""
+    return not part.unknown and _plain_options(part.words[1:], *form, **named) is not None
 
 
 def _first_in(*allowed: str):
@@ -4754,25 +5018,41 @@ def _first_in(*allowed: str):
     return lambda part: len(part.words) > 1 and part.words[1] in allowed
 
 
+def _npm_plain(part: ShellPart) -> bool:
+    """npm's project scripts and a locked or bare install: naming a package runs its install scripts."""
+    operands = None if part.unknown else _plain_options(part.words[2:], longs=_NPM_LONGS)
+    action = part.words[1] if len(part.words) > 1 else ""
+    return operands is not None and (action in ("test", "ci", "ls", "run")
+                                     or action in ("install", "i") and not operands)
+
+
+def _cargo_plain(part: ShellPart) -> bool:
+    """A cargo action on the list, every option before -- named (--config can name a runner)."""
+    return (_first_in("test", "build", "check", "clippy", "fmt", "tree", "metadata")(part)
+            and _plain_options(part.words[2:], "q", "pj", _CARGO_LONGS) is not None)
+
+
 # Programs that are plain only in some forms.
 _PLAIN_WHEN = {
     "git": _git_plain,
-    "gh": lambda part: len(part.words) > 1 and part.words[1] in _GH_PLAIN,
+    "gh": _gh_plain,
     "sed": _sed_plain,
     "awk": _awk_plain,
     "sqlite3": _sqlite_plain,
-    "find": lambda part: not part.unknown and not any(word in FIND_WRITING for word in part.words),
-    "sort": lambda part: not part.unknown and not _has_option(part.words[1:], "", ("--compress-program",)),
-    "rg": lambda part: not part.unknown and not _has_option(part.words[1:], "", ("--pre", "--hostname-bin")),
-    "curl": lambda part: not part.unknown and not _has_option(part.words[1:], "K", ("--config",)),
+    "find": _find_plain,
+    "sort": lambda part: _options_known(part, "urnVbfdhMgscz", "tk", _SORT_LONGS),
+    "rg": lambda part: _options_known(part, "nilcwvoFsSHNu", "gtmABCe", _RG_LONGS),
+    "curl": lambda part: _options_known(part, "sSLfIiv", "owmArXH", _CURL_LONGS),
+    "sips": lambda part: _options_known(part, "", "gsZzo", _SIPS_LONGS),
     "export": lambda part: all(word.partition("=")[0] in _PLAIN_ASSIGNMENTS for word in part.words[1:]),
-    "make": lambda part: not part.unknown and not any("=" in word or word.startswith(("-f", "--eval", "--file"))
-                                                      for word in part.words[1:]),
-    "cargo": lambda part: (not any(word.startswith("--config") for word in part.words)
-                           and _first_in("test", "build", "check", "clippy", "fmt", "tree", "metadata")(part)),
-    "npm": _first_in("test", "ci", "install", "i", "ls", "run"),
+    "make": lambda part: (_options_known(part, "sk", "j")
+                          and not any("=" in word for word in part.words[1:])),
+    "cargo": _cargo_plain,
+    "npm": _npm_plain,
     "graphify": _first_in("query", "explain", "affected"),
     "launchctl": _first_in("list", "print", "getenv"),
+    "lsappinfo": _first_in("front", "info", "list", "find", "metainfo", "visibleProcessList"),
+    "brindle": _first_in("rules", "inbox", "close", "--version", "doctor", "status", "ls"),
     "uv": lambda part: (_first_in("sync", "lock", "version", "tree")(part)
                         or part.words[1:3] in (["run", "pytest"], ["run", "ruff"], ["run", "mypy"], ["run", "brindle"])),
 }
