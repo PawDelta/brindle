@@ -6,8 +6,8 @@ import time
 
 import pytest
 
-from brindle import agents, permission_grants, permission_routing, permissions
-from brindle.config import set_local
+from brindle import agents, cull, permission_grants, permission_routing, permissions
+from brindle.config import load_repo_config, set_local
 from brindle.daemon import holds, peer
 from brindle.daemon.app import build_app
 from brindle.db import Agent, Workspace
@@ -37,6 +37,7 @@ class Team:
     def __init__(self, db, ws):
         self.db, self.ws, self.app = db, ws, build_app(TOKEN)
         self.caller, self.sent, self.clock = "w1", [], Clock()
+        self.cfg_supervisor_seconds = load_repo_config(ws.repo_root).permission_supervisor_hold_seconds
 
     def post(self, path, body, timeout):
         raw, out = json.dumps(body).encode(), []
@@ -107,9 +108,11 @@ def waiting(monkeypatch, *steps):
     monkeypatch.setattr(holds.Holder, "wait", wait)
 
 
-def ask(db, command, agent_id="w1"):
+def ask(db, command, agent_id="w1", inside=None):
+    """``inside``: the id of the Agent-tool subagent making the request, as Claude Code's payload names it."""
     out = agents.permission_request_decision(db, db.get_agent(agent_id), {
-        "tool_name": "Bash", "tool_input": {"command": command}, "hook_event_name": "PermissionRequest"})
+        "tool_name": "Bash", "tool_input": {"command": command}, "hook_event_name": "PermissionRequest",
+        **({"agent_id": inside, "agent_type": "general-purpose"} if inside else {})})
     return out["hookSpecificOutput"]["decision"]["behavior"] if out else None
 
 
@@ -181,6 +184,51 @@ def test_under_autonomous_a_supervisor_is_prompted_for_nothing_every_part_of_whi
     assert ask(db, "make build", agent_id="boss") == "allow"
     assert team.sent == []
     assert history(db) == [("policy", "allow"), ("person", "allow")]
+
+
+def test_allowed_request_does_not_prompt_again(db, team, monkeypatch):
+    """A worker's subagent asks. Claude Code waits for the hook before it draws
+    its prompt (seen in 2.1.318: the pane stays busy, the dialog comes only
+    once the hook returns nothing), so a pane showing none says nothing about
+    the request. The hold outlasts those looks, and the supervisor's allow,
+    inside its window, is what the CLI gets: not a prompt in the worker's pane."""
+    monkeypatch.setattr(agents, "_pane_state", lambda agent: "busy")
+
+    def boss_allows(holder):
+        assert team.says("boss", holder.request_id, "allow")[0] == 200
+    looks = agents.UNSEEN_LOOK_EVERY * agents.ANSWERED_LOOKS
+    waiting(monkeypatch, *[lambda holder: None] * looks, boss_allows)
+    assert ask(db, "make build", agent_id="w1", inside="a47d9298166766162") == "allow"
+    assert history(db) == [("supervisor", "allow")]
+
+
+@pytest.mark.parametrize("mode, answer", [
+    ("default", "allow"),       # the CLI would prompt: the policy's allow goes in first, so no dialog flashes
+    ("dontAsk", None),          # the CLI would refuse: an allow here would widen what the profile may run
+])
+def test_what_the_policy_allows_never_reaches_the_clis_prompt(db, team, mode, answer):
+    permissions.apply_preset("autonomous")
+    out = agents.handle_hook(db, "w1", "pre-tool", {
+        "tool_name": "Bash", "tool_input": {"command": "terraform plan"}, "permission_mode": mode})
+    assert (out and out["hookSpecificOutput"]["permissionDecision"]) == answer
+
+
+def test_no_stuck_notice_while_the_request_is_still_the_supervisors(db, team, monkeypatch):
+    """The supervisor was asked and may answer it: a second message saying only
+    the user can would send it to the person. Once its window is over, it would."""
+    monkeypatch.setattr(agents, "pane_owners", lambda db, panes: {})
+    monkeypatch.setattr(agents, "owns_pane", lambda db, a, owners: True)
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
+    monkeypatch.setattr(agents, "send_message", lambda db, to, body, sender_id=None: team.sent.append(body))
+    monkeypatch.setattr(cull.tmux, "capture", lambda *a, **k: "Bash command\nmake build\nDo you want to proceed?")
+    db.add_permission_request("w1", "r1", json.dumps({"tool": "Bash", "kind": "bash", "provider": "claude",
+                                                      "command": "make build"}), "why", None, "supervisor",
+                              hold_until=time.time() + 3600)
+    db.set_status("w1", "waiting")
+    assert cull.note_stuck(db, time.time(), {}) == [] and team.sent == []
+    db.conn.execute("UPDATE permission_requests SET created_at=created_at-?",
+                    (team.cfg_supervisor_seconds + 1,))
+    assert cull.note_stuck(db, time.time(), {}) != [] and len(team.sent) == 1
 
 
 def test_a_person_only_ask_skips_the_supervisor(db, team, monkeypatch):

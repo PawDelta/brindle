@@ -4010,14 +4010,17 @@ def pre_tool_decision(db: DB, agent: Agent, payload: dict) -> dict | None:
                     "permissionDecisionReason": why,
                 }}
     ruled = _pre_tool_policy(db, agent, ws, payload, load)
-    if ruled is not None:
+    allowed = ruled is not None and ruled["hookSpecificOutput"]["permissionDecision"] == "allow"
+    if ruled is not None and not allowed:
         return ruled
     if tool != "Bash":
-        return None
+        return ruled
     command = str((payload.get("tool_input") or {}).get("command", ""))
     from brindle import codemap
 
     codemap.record_query(db, agent, ws, command)
+    if allowed:
+        return ruled
     try:
         profile = load()
     except Exception:
@@ -4039,14 +4042,26 @@ def pre_tool_decision(db: DB, agent: Agent, payload: dict) -> dict | None:
     }}
 
 
+# Claude Code's modes that would prompt for what no rule of its own allows. In
+# these an allow at PreToolUse only saves the prompt; in any other mode (dontAsk
+# refuses, auto has its classifier, plan its own floor) it would change the outcome.
+PROMPTING_MODES = ("default", "acceptEdits")
+# What it answers there. Reads run unasked inside the worktree (nothing to save),
+# and the MCP and other tools stay with the PermissionRequest hook.
+PRE_TOOL_ALLOW_KINDS = ("bash", "write", "edit", "fetch")
+
+
 def _pre_tool_policy(db: DB, agent: Agent, ws: Workspace | None, payload: dict, load) -> dict | None:
     """With ``permission_policy`` on, the policy's word on a PreToolUse call
     before any approval of brindle's own: a deny denies it, and an ask a rule
     makes explicitly forces Claude Code's prompt (``permissionDecision``
     "ask"), so the PermissionRequest hook then holds it for the person,
     whatever the profile's allowed_tools or Claude Code's own mode would have
-    run without asking. None otherwise (an allow, or an ask no rule made,
-    leaves the rest of the hook to decide). ``load`` loads the agent's
+    run without asking. An allow goes in here too where Claude Code would
+    otherwise prompt, so the prompt the PermissionRequest hook would only close
+    never shows; its deny rules, ask rules and safety checks still apply. Left
+    to that hook: an allow a saved action settles, which spends a use there.
+    None otherwise (the rest of the hook decides). ``load`` loads the agent's
     profile. Never raises."""
     try:
         if ws is None:
@@ -4072,6 +4087,15 @@ def _pre_tool_policy(db: DB, agent: Agent, ws: Workspace | None, payload: dict, 
             return {"hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
                 "permissionDecision": decision.decision,
+                "permissionDecisionReason": f"brindle: {decision.reason}",
+            }}
+        if (decision.decision == "allow" and decision.saved is None and req.kind in PRE_TOOL_ALLOW_KINDS
+                and payload.get("permission_mode") in PROMPTING_MODES):
+            _record_permission(db, agent, ws, req.summary(), f"allow: {decision.reason}")
+            _note_decision(db, agent, ws, req.kind, req.summary(), decision)
+            return {"hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "allow",
                 "permissionDecisionReason": f"brindle: {decision.reason}",
             }}
         return None
@@ -4316,7 +4340,7 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
             suggestions = permissions.persistent_suggestions(suggestions)
             # Recorded either way: its PostToolUse counts as the person's approval.
             answer = _hold_for_app(db, agent, req, decision.reason, suggestions, keep=True,
-                                   hold=cfg.permission_hold_seconds,
+                                   hold=cfg.permission_hold_seconds, pane_tells=_pane_tells(agent, payload),
                                    **(_supervising(db, agent, cfg, decision, payload) if policy else {}))
             if answer:
                 return permissions.claude_answer(answer, suggestions)
@@ -4336,6 +4360,17 @@ def _supervising(db: DB, agent: Agent, cfg, decision, payload: dict) -> dict:
         return {}
     return {"supervisor": supervisor, "supervise": cfg.permission_supervisor_hold_seconds,
             "tool_input": payload.get("tool_input")}
+
+
+def _pane_tells(agent: Agent, payload: dict) -> bool:
+    """Whether ``agent``'s pane can say what became of this Claude Code request
+    (_await_app_answer). A request from one of its Agent-tool subagents (the
+    payload's ``agent_id``) has no prompt on screen while the hook holds it:
+    Claude Code draws it only once the hook returns nothing (seen in 2.1.318).
+    So a worker's pane says nothing about it, and looking would hand it to that
+    prompt with its supervisor's window still open. A person's own chat is the
+    exception: they watch the pane, so it still gets there."""
+    return not payload.get("agent_id") or agent.mode == "interactive"
 
 
 def _session_of(db: DB, agent: Agent) -> str | None:
@@ -4370,7 +4405,7 @@ ANSWERS = ("allow_once", "allow_always", "deny")
 
 def _hold_for_app(db: DB, agent: Agent, req, reason: str, suggestions: list | None, keep: bool,
                   hold: float, supervisor: Agent | None = None, supervise: float = 0,
-                  tool_input: object = None) -> str | None:
+                  tool_input: object = None, pane_tells: bool = True) -> str | None:
     """Record a request the policy left to the person and, while the app's
     daemon runs, hold it there for the person's answer for ``hold`` seconds
     (_await_app_answer; the row's ``hold_until`` says till when, for the
@@ -4383,7 +4418,8 @@ def _hold_for_app(db: DB, agent: Agent, req, reason: str, suggestions: list | No
     and keep it once the hold ends (for that pairing). ``supervisor``: the
     worker's supervisor answers it first, for ``supervise`` seconds of the
     hold (brindle.permission_routing), and the person after; it is shown the
-    CLI's complete ``tool_input``, which also tells identical requests apart."""
+    CLI's complete ``tool_input``, which also tells identical requests apart.
+    ``pane_tells``: _pane_tells."""
     from brindle import permission_asks, permission_routing, permissions
     from brindle.daemon.holds import Holder
 
@@ -4419,7 +4455,8 @@ def _hold_for_app(db: DB, agent: Agent, req, reason: str, suggestions: list | No
     if held:
         try:
             ended = _await_app_answer(db, agent, holder, req, hold_until,
-                                      *([supervise_until] if supervise_until else []))
+                                      *([supervise_until] if supervise_until else []),
+                                      **({} if pane_tells else {"pane_tells": False}))
             ended_at = time.time()     # the wait's end, before the cleanup below
             answer = ended if ended in ANSWERS or ended in permission_routing.AS_ANSWER else None
         finally:
@@ -4443,7 +4480,7 @@ def _closed(agent: Agent | None) -> bool:
 
 
 def _await_app_answer(db: DB, agent: Agent, holder, req, hold_until: float,
-                      supervise_until: float | None = None) -> str:
+                      supervise_until: float | None = None, pane_tells: bool = True) -> str:
     """The person's answer from the app's inbox (one of ANSWERS), or the
     supervisor's (permission_routing.AS_ANSWER) while the request is its,
     until ``supervise_until``, as the daemon hands it to ``holder``
@@ -4480,10 +4517,11 @@ def _await_app_answer(db: DB, agent: Agent, holder, req, hold_until: float,
             supervise_until = None
             db.update_permission_request(agent.id, holder.request_id, channel="hook")
             bus.publish_agent(db, "permission.pending", agent.id, tool=req.tool, target=req.target())
-        # Its CLI shows its own prompt for as long as this hook holds the request: a pane
-        # past it was answered there, whether or not a look caught the prompt. An allow
-        # runs the tool (its PostToolUse comes once it is done), a deny or a dismissal none.
-        if seen or waits % UNSEEN_LOOK_EVERY == 0:
+        # On the main thread its CLI shows its own prompt for as long as this hook holds the
+        # request: a pane past it was answered there, whether or not a look caught the prompt.
+        # An allow runs the tool (its PostToolUse comes once it is done), a deny or a dismissal
+        # none. A subagent's request shows nothing until the hook lets go (_pane_tells).
+        if pane_tells and (seen or waits % UNSEEN_LOOK_EVERY == 0):
             state = _pane_state(now)
             past = past + 1 if state in ("idle", "busy") else 0     # the prompt, or a read it can't tell
             seen = seen or state == "prompt"

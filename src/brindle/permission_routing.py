@@ -23,6 +23,7 @@ import hashlib
 import json
 import logging
 import re
+import time
 
 from brindle.db import DB, Agent
 
@@ -64,6 +65,20 @@ def supervisor_for(db: DB, agent: Agent, decision) -> Agent | None:
     if supervisor is None or agents._closed(supervisor) or not agents.runs_process(supervisor):
         return None
     return supervisor
+
+
+def waits_on_supervisor(db: DB, agent: Agent) -> bool:
+    """Whether the request ``agent``'s hook holds is still its supervisor's to
+    answer. Bounded by the window itself, not only the row: a hook killed while
+    holding leaves its row behind, and the worker must not go unreported for it."""
+    from brindle.config import load_repo_config
+
+    row = db.hook_permission_request(agent.id)
+    if row is None or row["channel"] != "supervisor":
+        return False
+    ws = db.get_workspace(agent.workspace_id)
+    seconds = load_repo_config(ws.repo_root).permission_supervisor_hold_seconds if ws else 0
+    return time.time() < row["created_at"] + seconds
 
 
 def _fenced(text: str) -> str:
