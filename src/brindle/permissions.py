@@ -1918,7 +1918,20 @@ def _awk_readonly(args: list[str]) -> bool:
                 or re.search(r"\b(system|getline|ARGV|ARGC|ENVIRON|PROCINFO)\b", script))
 
 
-_LINES_OR_BYTES = re.compile(r"-\d+|-[nc]\+?\d*|\+?\d+|-[qv]")
+def _head_tail_names_no_file(args: list[str]) -> bool:
+    """Every word a head's or tail's option, a number only as the value of -n or -c: a
+    bare 5 is a file's name. (tail +5 is an offset to one tail, a file to another.)"""
+    at = 0
+    while at < len(args):
+        arg = args[at]
+        at += 1
+        if arg in ("-n", "-c"):
+            if at >= len(args) or not re.fullmatch(r"[+-]?\d+", args[at]):
+                return False
+            at += 1
+        elif not re.fullmatch(r"-\d+|-[nc]\+?\d+|-[qv]", arg):
+            return False
+    return True
 
 
 def _reads_only_stdin(words: list[str]) -> bool:
@@ -1930,7 +1943,7 @@ def _reads_only_stdin(words: list[str]) -> bool:
     if program == "cat":
         return not args
     if program in ("head", "tail"):
-        return all(_LINES_OR_BYTES.fullmatch(arg) for arg in args)
+        return _head_tail_names_no_file(args)
     if program == "wc":
         return all(_WC.fullmatch(arg) for arg in args)
     if program == "grep":
@@ -3937,6 +3950,23 @@ def _heredoc_readers(tokens: list[tuple]) -> set[str]:
     return readers
 
 
+def _gives_input(token: tuple) -> bool:
+    """Whether a token gives a command something to read: a heredoc, a here-string or a file."""
+    return token[0] == "heredoc" or token[0] == "op" and token[1] in ("<", "<<<", "<>", "<&")
+
+
+def _structure_fed(tokens: list[tuple]) -> bool:
+    """Whether a loop, an if or a group is given input (done < file, } <<EOF): all of it reads that."""
+    for at, token in enumerate(tokens):
+        if token[0] == "word" and token[1].raw in ("done", "fi", "}"):
+            rest = tokens[at + 1:at + 3]
+            if rest and rest[0][0] == "word" and rest[0][1].raw.isdigit():
+                rest = rest[1:]    # done 0< file
+            if rest and _gives_input(rest[0]):
+                return True
+    return False
+
+
 def _dq_escaped(text: str) -> str:
     return re.sub(r'([\\"$`])', r"\\\1", text)
 
@@ -3988,10 +4018,7 @@ class _Flattener:
             # The shell's $HOME is known before the run: a credential scan resolves it (and ~) to the
             # real home in every word, so "$HOME"/.aws or d="$HOME"; cat "$d/.npmrc" names the store.
             env.setdefault("HOME", ("lit", os.path.expanduser("~")))
-        # done < file, } < file: everything in the structure reads it.
-        fed = any(t[0] == "word" and t[1].raw in ("done", "fi", "}") and after[:2] in (("op", "<"), ("op", "<<<"))
-                  for t, after in zip(tokens, tokens[1:]))
-        self.walk(nodes, env, True, fed=fed)
+        self.walk(nodes, env, True, fed=_structure_fed(tokens))
 
     def walk(self, nodes: list[tuple], env: dict, definite: bool, chains: bool = True, fed: bool = False) -> None:
         for node in nodes:
@@ -4199,7 +4226,8 @@ class _Flattener:
             spaced, text = (token[1].spaced, self.text(token[1], seen)) if token[0] == "word" else (token[2], token[1])
             pieces.append((" " if spaced and pieces else "") + text)
         if pieces:
-            self.emit("".join(pieces), definite, chained, fed)
+            # Its own input goes with the command that's resolved (S=sh; $S <<<x): the raw words can't tell.
+            self.emit("".join(pieces), definite, chained, fed or any(_gives_input(token) for token in tokens))
 
 
 def _flat_script(command: str, cwd: str) -> str | None:
@@ -4396,6 +4424,7 @@ class _PartReader:
         self.req = req
         self.credential_scan = credential_scan
         self.fed = False    # what's being read inherits a pipe's input
+        self.input_stays = False    # an exec gave the shell input: everything after it reads that
         self.cwd: str | None = req.cwd or req.worktree or None
         self.settled = self.cwd    # where the shell is once a cd's && chain ends, whether the cd ran or not
         # Every folder the shell may be in, whichever of its cds ran (None: anywhere). It only
@@ -4472,7 +4501,7 @@ class _PartReader:
         self.named += flattener.named
         outer = self.fed
         for line, sure, (chained, leads), fed in zip(flattener.out, flattener.definite, flattener.chained, flattener.fed):
-            self.fed = outer or fed
+            self.fed = outer or fed or self.input_stays
             self.part(line, definite and sure, chains and chained, chains and leads)
         self.fed = outer
 
@@ -4592,6 +4621,8 @@ class _PartReader:
         if program in ("source", ".") or program in _WRAPPERS and runner_unknown and not self.credential_scan:
             raise ValueError(f"{program} runs what only the run knows")
         self.parts.append(part)
+        if program == "exec" and (self.fed or part.reads):
+            self.input_stays = True
         if not self.credential_scan:
             self.handed_code(part, program)
         if program in ("cd", "pushd"):

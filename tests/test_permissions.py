@@ -397,6 +397,20 @@ LOOP = "until s=$(gh run view 1 --json status --jq .status); [[ $s == completed*
     _split("echo a | perl -I -e x"),                  # -e is -I's value
     _split("echo a | node -r -e x"),
     _split("echo ls | bash -c -- 'sh'"),
+    _split("S=sh; $S <<'EOF'\necho hi\nEOF"),         # its input goes with the program it resolves to
+    _split("S=python3; $S <<'EOF'\nprint(1)\nEOF"),
+    _split("S=sh; $S <<<'echo hi'"),
+    _split("for S in sh; do $S <<<'echo hi'; done"),
+    _split("S=sh; { $S; } <<'EOF'\necho hi\nEOF"),
+    _split("S=sh; for i in a; do $S; done <<'EOF'\necho hi\nEOF"),
+    _split("S=sh; x=$($S <<<'echo hi')"),
+    _split("bash -c 'S=sh; $S <<<ls'"),
+    _split("S=sqlite3; $S db <<<'.shell ls'"),
+    _split("S=sh; $S 0<<<ls"),
+    _split("sh <> x.sh"),
+    _split("exec < x.sh; sh"),                        # all that follows reads it
+    _split("E=exec; $E 0< x.sh; sh"),
+    _split("eval 'exec < x.sh'; sh"),
     _split("echo a | zsh -f -o SHIN_STDIN ignored"),  # the option makes it run its input, and ignored an argument
     _split("true; echo a | zsh -f -o stdin ignored"),
     _split("echo a | zsh --shinstdin ignored"),
@@ -438,6 +452,9 @@ LOOP = "until s=$(gh run view 1 --json status --jq .status); [[ $s == completed*
     ("cat x.json | perl -ne 'print'", "allow"),
     ("bash -euo pipefail -c 'git status'", "allow"),
     ("echo a | zsh -f script.zsh", "allow"),
+    ("S=cat; $S <<<'safe'", "allow"),
+    ("S=git; $S commit -F - <<'EOF'\nmessage\nEOF", "allow"),
+    ("exec 2>/dev/null; ls", "allow"),
     # A shell's and a trap's literal code is read as if written out.
     ("trap 'rm -f tmp' EXIT", "allow"),
     _bypass("bash -lc 'git status; git reset --hard'"),
@@ -482,6 +499,15 @@ LOOP = "until s=$(gh run view 1 --json status --jq .status); [[ $s == completed*
     _split("mkdir q; cd q; awk '{print}' id_rsa"),
     _split('mkdir q; cd q; grep "$X"'),
     _split("mkdir q; cd q; grep x*"),
+    _split("cd $X; head id_rsa"),
+    _split("cd $X; head 5"),                          # a file named 5: a number only follows -n or -c
+    _split("cd $X; tail 5"),
+    _split("cd $X; head -n 5 6"),
+    _split("cd $X; head 5 6"),
+    _split("cd $X; tail -5 6"),
+    _split("cd $X; tail +5"),
+    ("cd $X; head -n 5", "allow"),
+    ("cd $X; tail -5", "allow"),
     # An rm a word could make recursive, or a pattern that may reach the daemon's token.
     _split("rm -f $X"),
     _split("rm -f *"),
