@@ -120,3 +120,32 @@ jobs:
           [ -f app/dist/index.html ] || echo '<!doctype html>' > app/dist/index.html
       - name: Test
         run: cargo test --manifest-path app/src-tauri/Cargo.toml
+
+  windows-compile:
+    # The shell has Windows-only and Unix-only code, and only a stable release
+    # built it for Windows: 0.6.0's Windows build failed on a libc constant
+    # no pull request had compiled.
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            app/src-tauri/target
+          key: cargo-check-${{ runner.os }}-${{ hashFiles('app/src-tauri/Cargo.lock') }}
+          restore-keys: |
+            cargo-check-${{ runner.os }}-
+      # The shell embeds the front end's dist/ at compile time.
+      - name: Front end for the shell
+        shell: bash
+        run: |
+          mkdir -p app/dist
+          [ -f app/dist/index.html ] || echo '<!doctype html>' > app/dist/index.html
+      - name: Compile, tests included
+        run: cargo check --manifest-path app/src-tauri/Cargo.toml --all-targets
