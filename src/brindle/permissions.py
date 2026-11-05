@@ -1178,7 +1178,8 @@ def _part_decision(req: Request, words: list[str], checks: list[str] | None,
     denied = _matching_restriction([replace(req, command=_joined(words))], checks, rules, [words])
     if denied is not None:
         return denied
-    if all(SIMPLE_COMMAND.fullmatch(word) and " " not in word for word in words):
+    # (Not one that hands over code: deciding it reads it part by part, which brought us here.)
+    if all(SIMPLE_COMMAND.fullmatch(word) and " " not in word for word in words) and not _hands_code(words):
         return decide(replace(req, command=" ".join(words)), checks=checks, rules=rules, unmatched="ask", saved=[])
     for rule in rules:
         head = rule.match.split()
@@ -2899,7 +2900,8 @@ def _decide(req: Request, *, checks: list[str] | None, rules: list[Rule], unmatc
     # The parts of a command no rule covers: a capability group answers for
     # them even beside a part an ask rule covers (None: the whole command).
     open_parts = None
-    compound = req.kind == "bash" and req.command and simple_argv(req.command) is None
+    argv = simple_argv(req.command) if req.kind == "bash" else None
+    compound = req.kind == "bash" and req.command and (argv is None or _hands_code(argv))
     syntax = ruled is not None and ruled.rule is not None and ruled.rule.id == SHELL_SYNTAX_RULE
     # A command no rule covers as a whole, read part by part (read_parts), a cd's folder followed.
     unread: list[ValueError] = []
@@ -3219,6 +3221,10 @@ def _restriction_in_parts(req: Request, *, checks: list[str] | None,
              and (not r.repo_root or bool(req.repo_root) and os.path.realpath(req.repo_root) == r.repo_root)]
     if not rules:
         return None
+    argv = simple_argv(req.command)
+    if argv is not None and _hands_code(argv):    # bash -c x, as bash -c 'x' is: no allow rule stands in for reading it
+        read = read_parts(req, rules, checks)
+        return _syntax_ask(req) if read is None else read[1]
     flat = _flat_script(req.command, req.cwd or req.worktree)
     if flat is not None:
         if not flat.strip():
@@ -3899,6 +3905,14 @@ def _runner_name(word: str) -> str:
     return re.sub(r"^(python3?|ruby|node|perl|php|lua)[\d.]+$", r"\1", os.path.basename(word))
 
 
+def _hands_code(words: list[str]) -> bool:
+    """Whether a simple command's words run as a shell's code: bash -c x has no
+    quotes, but x is a command as much as in bash -c 'x'."""
+    names = [_runner_name(word) for word in words]
+    return names[0] in _SHELLS or names[0] in ("eval", "trap") or (
+        names[0] in _TOOL_RUNNERS - _RUNS_ITS_INPUT and any(name in _SHELLS for name in names))
+
+
 def _heredoc_readers(tokens: list[tuple]) -> set[str]:
     """Each program that may read a heredoc or here-string in ``tokens``: the
     words of its own pipeline, or anywhere in the script when it feeds a
@@ -4226,10 +4240,14 @@ _SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "fish"})
 # the store answers for what no rule covers. (The other _STDIN_RUNNERS only pass it on.)
 _SOURCES = frozenset({"source", ".", "eval"})
 _RUNS_ITS_INPUT = _SHELLS | _SOURCES | {"xargs", "parallel", "ssh", "at", "batch"}
-# The options by which an interpreter is given its code (or module) in the next word, so what it
-# reads is only data; any other's: -e.
-_SOURCE_OPTIONS = {"python": r"-[a-zA-Z]*[cm]", "python3": r"-[a-zA-Z]*[cm]", "node": r"-e|-p|--eval|--print",
-                   "php": r"-r|-f", **dict.fromkeys(_SHELLS, r"-[a-zA-Z]*c")}
+# The options by which an interpreter is given its code in the next word, so what it reads is only
+# data; any other's: -e.
+_SOURCE_OPTIONS = {"node": r"-e|-p|--eval|--print", "php": r"-r|-f"}
+_STDIN_NAMES = ("-", "/dev/stdin", "/dev/fd/0")
+# A shell's options, read in full: which of them take a value decides which word is the code.
+_SHELL_FLAGS = frozenset("aBCeEfhHiklmnpPrtTuvx")
+_SHELL_VALUED = ("--rcfile", "--init-file")
+_SHELL_LONGS = ("--norc", "--noprofile", "--login", "--posix", "--noediting", "--verbose", "--restricted")
 # These change what a later word of the script runs.
 _CHANGES_WHAT_RUNS = frozenset({"alias", "enable", "hash"})
 # What may join the words of a [[ ... ]]: comparisons and a regex's alternatives, none of them run.
@@ -4293,19 +4311,72 @@ class _DenyMayCover(_Unverifiable):
     run it, and neither does the opt-in that runs what brindle can't read."""
 
 
+def _shell_source(program: str, args: list[str]) -> tuple[bool, str | None]:
+    """Whether a shell's ``args`` give it code to run (-c) rather than a script, and
+    that word; None: it runs what it reads. -c takes no value of its own: the code is
+    the first operand once options end, wherever -c stood. Raises for an option it
+    doesn't know, since what that option consumes decides which word runs."""
+    if program == "fish":    # its -c does take the next word
+        if args[:1] == ["-c"] and len(args) > 1:
+            return True, args[1]
+        if args and args[0].startswith("-"):
+            raise _Unverifiable("an option that may change which word runs")
+        return False, args[0] if args else None
+    code, at = False, 0
+    while at < len(args):
+        arg = args[at]
+        if arg in ("--", "-"):
+            at += 1
+            break
+        if not arg.startswith(("-", "+")):
+            break
+        at += 1
+        if arg in _SHELL_VALUED:
+            at += 1
+        elif arg not in _SHELL_LONGS:
+            letters = arg[1:]
+            if not letters or not set(letters) <= _SHELL_FLAGS | {"c", "o", "O"}:
+                raise _Unverifiable("an option that may change which word runs")
+            code |= arg[0] == "-" and "c" in letters
+            at += letters.count("o") + letters.count("O")
+    source = args[at] if at < len(args) else None
+    if code and source is None:
+        raise _Unverifiable("a -c with no code")
+    return code, None if not code and source in _STDIN_NAMES else source
+
+
 def _source_word(program: str, args: list[str]) -> str | None:
-    """The word holding what an interpreter or shell runs, its code or its
-    script; None when it runs what it reads (nothing names one, or it's -)."""
+    """The word holding what an interpreter runs, its code or its script; None when
+    it runs what it reads, or brindle can't determine which word it is."""
+    if program in ("deno", "bun"):
+        return None    # a subcommand first, then its own options
+    if program in ("python", "python3"):
+        at, inspects = 0, False
+        while at < len(args):
+            arg = args[at]
+            at += 1
+            if arg in _STDIN_NAMES:
+                return None
+            if not arg.startswith("-"):
+                return None if inspects else arg
+            if arg in ("-W", "-X"):
+                at += 1    # its value, whatever that looks like
+            elif not re.fullmatch(r"-[WX].+", arg):
+                found = re.fullmatch(r"-([bBdEiIOPqsSuvx]*)([cm]?)", arg)
+                if found is None:
+                    return None
+                inspects |= "i" in found.group(1)    # it goes on to run what it reads
+                if found.group(2):
+                    return None if inspects or at >= len(args) else args[at]
+        return None
     first = args[0] if args else None
-    if first is None or first in ("-", "/dev/stdin", "/dev/fd/0"):
+    if first is None or first in _STDIN_NAMES:
         return None
     if not first.startswith("-"):
         return first
-    if program.startswith("python") and any(re.fullmatch(r"-[a-zA-Z]*i[a-zA-Z]*", arg) for arg in args):
-        return None    # -i goes on to run what it reads
-    pattern = _SOURCE_OPTIONS.get(program, r"-[a-zA-Z0-9]*[eE]")
-    at = next((n for n, arg in enumerate(args) if re.fullmatch(pattern, arg)), None)    # bash --norc -c ...
-    return args[at + 1] if at is not None and at + 1 < len(args) else None
+    # Only as its first word: before it, an option may take any word as its value (perl -I -e).
+    code = len(args) > 1 and re.fullmatch(_SOURCE_OPTIONS.get(program, r"-[a-zA-Z0-9]*[eE]"), first)
+    return args[1] if code else None
 
 
 class _PartReader:
@@ -4502,7 +4573,7 @@ class _PartReader:
             raise _Unverifiable(f"{program} evaluates its words, which may run what they hold")
         if program == "eval" and not (part.unknown or part.expanded or part.writes or part.reads):
             # The command its literal words make, run where the eval runs (if it surely does).
-            self.read(" ".join(part.words[1:]), definite, chains=False)
+            self.read(" ".join(part.words[2 if part.words[1:2] == ["--"] else 1:]), definite, chains=False)
             return
         if program == "eval":
             raise _Unverifiable("eval runs what only the run knows")
@@ -4534,6 +4605,8 @@ class _PartReader:
             if args and args[0] in part.unresolved:
                 raise _Unverifiable("trap runs what only the run knows")
             if args and args[0] not in ("-", "-l", "-p", ""):
+                if part.words[1] != "--" and args[0].startswith("-"):
+                    raise _Unverifiable("an option that may change which word runs")
                 self.inner(args[0])
             return
         names = [_runner_name(word) for word in part.words]
@@ -4547,12 +4620,12 @@ class _PartReader:
         name, args = names[at], part.words[at + 1:]
         fed = self.fed or bool(part.reads)
         if name in _INTERPRETERS or name in _SHELLS:
-            source = _source_word(name, args)
+            code, source = _shell_source(name, args) if name in _SHELLS else (False, _source_word(name, args))
             if source in part.unresolved or source is None and any(arg in part.unresolved for arg in args):
                 raise _Unverifiable(f"{name} runs what only the run knows")
             if source is None and fed:
                 raise _Unverifiable(f"{name} runs what it is fed")
-            if name in _SHELLS and source is not None and args[0].startswith("-"):
+            if code:
                 self.inner(source)
         elif name == "sqlite3" and len(args) > 1 and not any(arg.startswith("-") for arg in args):
             return    # a database and its SQL: it reads nothing it's fed
