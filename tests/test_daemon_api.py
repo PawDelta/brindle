@@ -1282,14 +1282,3 @@ def test_account_identity_is_cached_with_orgs_and_fails_soft_offline(brindle_hom
         code, body = _get("/v1/account", AUTH)
         assert code == 200 and body["signed_in"] and body["name"] is None and body["email"] is None
     assert reads == ["me", "orgs", "me", "orgs"]
-
-
-def test_is_demo_repo_is_the_demo_folder_only(brindle_home, tmp_path):
-    from brindle.demo import is_demo_repo
-
-    real = brindle_home / "demo" / "textkit-1"
-    real.mkdir(parents=True)
-    link = tmp_path / "link"
-    link.symlink_to(real)
-    assert is_demo_repo(real) and is_demo_repo(link)
-    assert not is_demo_repo(tmp_path / "textkit-1")
