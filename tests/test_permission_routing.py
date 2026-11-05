@@ -186,20 +186,72 @@ def test_under_autonomous_a_supervisor_is_prompted_for_nothing_every_part_of_whi
     assert history(db) == [("policy", "allow"), ("person", "allow")]
 
 
-def test_allowed_request_does_not_prompt_again(db, team, monkeypatch):
-    """A worker's subagent asks. Claude Code waits for the hook before it draws
-    its prompt (seen in 2.1.318: the pane stays busy, the dialog comes only
-    once the hook returns nothing), so a pane showing none says nothing about
-    the request. The hold outlasts those looks, and the supervisor's allow,
-    inside its window, is what the CLI gets: not a prompt in the worker's pane."""
+SUBAGENT = "a47d9298166766162"
+MAKE_BUILD = {"tool_name": "Bash", "tool_input": {"command": "make build"}}
+
+
+@pytest.mark.parametrize("who, inside, resolved_by", [
+    ("w1", SUBAGENT, "supervisor"),     # a worker's subagent, answered by its supervisor
+    ("boss", SUBAGENT, "person"),       # a person's own chat, answered from the Inbox
+    ("w1", None, "supervisor"),         # the main thread, before any look has caught its prompt
+])
+def test_allowed_request_does_not_prompt_again(db, team, monkeypatch, who, inside, resolved_by):
+    """A pane that has shown no prompt says nothing about the request. Claude
+    Code waits for the hook before it draws a subagent's (seen in 2.1.318: the
+    pane stays busy, the dialog comes only once the hook returns nothing). The
+    hold outlasts any number of looks, and the answer given in the end is what
+    the CLI gets: not a prompt in the pane."""
     monkeypatch.setattr(agents, "_pane_state", lambda agent: "busy")
+    team.caller = who
+
+    def answered(holder):
+        if who == "boss":
+            [shown] = inbox.pending_permissions(db, db.get_agent(who))
+            assert shown.dto.request_id == holder.request_id
+            assert shown.dto.terminal_prompt_visible is False      # nothing on screen to answer
+            person_answers("allow_once")(holder)
+        else:
+            assert team.says("boss", holder.request_id, "allow")[0] == 200
+    waiting(monkeypatch, *[lambda holder: None] * (agents.ANSWERED_LOOKS * 5), answered)
+    assert ask(db, "make build", agent_id=who, inside=inside) == "allow"
+    assert history(db) == [(resolved_by, "allow")]
+
+
+def test_a_held_subagent_request_outlives_its_workers_turn_and_other_threads(db, team, monkeypatch):
+    """The row going is how a hold learns its CLI's prompt took the request. A
+    subagent's has no prompt to take it, so neither the worker's turn ending
+    around it nor the same command run on another thread may remove it. Its own
+    tool, once allowed, still pairs with it."""
+    for bookkeeping in ("snapshot_turn", "analysis_docs_turn", "_stop_decision"):     # git and tmux: not what's tested
+        monkeypatch.setattr(agents, bookkeeping, lambda *a, **k: None)
 
     def boss_allows(holder):
         assert team.says("boss", holder.request_id, "allow")[0] == 200
-    looks = agents.UNSEEN_LOOK_EVERY * agents.ANSWERED_LOOKS
-    waiting(monkeypatch, *[lambda holder: None] * looks, boss_allows)
-    assert ask(db, "make build", agent_id="w1", inside="a47d9298166766162") == "allow"
-    assert history(db) == [("supervisor", "allow")]
+    waiting(monkeypatch,
+            lambda holder: agents.handle_hook(db, "w1", "stop", {"stop_hook_active": True}),
+            lambda holder: agents.handle_hook(db, "w1", "tool-done", MAKE_BUILD),
+            lambda holder: agents.handle_hook(db, "w1", "tool-done", {**MAKE_BUILD, "agent_id": SUBAGENT}),
+            boss_allows)
+    assert ask(db, "make build", inside=SUBAGENT) == "allow"
+    agents.handle_hook(db, "w1", "tool-done", {**MAKE_BUILD, "agent_id": SUBAGENT})
+    assert db.permission_requests_of("w1") == []
+
+
+@pytest.mark.variant("nobody waits on nothing: every way a subagent's request still reaches the pane's dialog")
+def test_a_held_subagent_request_goes_to_the_pane_when_the_app_cannot_answer_it(db, team, monkeypatch):
+    team.caller = "boss"
+    daemons_wait = holds.Holder.wait
+    waiting(monkeypatch, person_answers("terminal"))        # the person's explicit choice
+    assert ask(db, "make build", agent_id="boss", inside=SUBAGENT) is None
+
+    def app_closes(self, seconds):                          # the daemon's own route lets go of the hold
+        monkeypatch.setattr("brindle.daemon.events.connected", 0)
+        return daemons_wait(self, seconds)
+    monkeypatch.setattr(holds.Holder, "wait", app_closes)
+    assert ask(db, "make build", agent_id="boss", inside=SUBAGENT) is None
+
+    waiting(monkeypatch)                                    # no app from the start: never held at all
+    assert ask(db, "make build", agent_id="boss", inside=SUBAGENT) is None
 
 
 @pytest.mark.parametrize("mode, answer", [

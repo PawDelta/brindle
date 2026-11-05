@@ -1585,7 +1585,7 @@ def test_a_permission_request_at_the_clis_own_prompt_gets_no_keys(db, repo, worl
     ([CLAUDE_PROMPT, CLAUDE_IDLE, CLAUDE_IDLE, "", CLAUDE_IDLE, CLAUDE_IDLE, CLAUDE_IDLE], list(range(7)), False),
     pytest.param([CLAUDE_PROMPT, CLAUDE_BUSY, CLAUDE_BUSY, "", CLAUDE_BUSY, CLAUDE_BUSY, CLAUDE_BUSY], list(range(7)),
                  False, marks=pytest.mark.variant("review: allowed in the pane, its tool still running, so no PostToolUse yet")),
-    ([""] + [CLAUDE_BUSY] * 11 + [CLAUDE_PROMPT] * 5 + [CLAUDE_IDLE], [0, 5, 10, 15, 16], True)], ids=["denied", "allowed", "prompt-drawn-late"])
+    ([""] + [CLAUDE_BUSY] * 11 + [CLAUDE_PROMPT] * 5 + [CLAUDE_IDLE], list(range(17)), True)], ids=["denied", "allowed", "prompt-drawn-late"])
 def test_inbox_resolved_in_pane_when_the_clis_own_prompt_is_answered(db, repo, answering, monkeypatch, reads, looks, deny):
     from brindle import tmux
     from brindle.db import DB
