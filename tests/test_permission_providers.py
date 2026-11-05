@@ -1070,6 +1070,7 @@ def _setup_items(db, ws):
     pytest.param(_a_rewrite_lost_the_entries, marks=pytest.mark.variant("a lost entry used to read as a person's removal")),
     pytest.param(_a_launchs_check_failed_on_a_busy_machine, marks=pytest.mark.variant("live: a launch under load read as a changed config")),
 ])
+@pytest.mark.variant("real incident: the Inbox asked to fix the hook's trust twice on one daemon, with no change a person made")
 def test_the_daemon_keeps_the_hook_trusted_and_the_inbox_never_asks(db, ws, hook_daemon, monkeypatch, left_trusted):
     """Live, 0.6.0: the Inbox asked to fix the trust at 18:26 and again at 18:39,
     with no change a person made. Whatever took it out of TRUSTED is brindle's
@@ -1162,6 +1163,7 @@ def test_a_hook_the_person_turned_off_is_asked_about_and_comes_back_only_when_th
     assert enabled() == [True] and codex_hook.status() == codex_hook.TRUSTED
 
 
+@pytest.mark.variant("a race: a hook trust written during a project trust's rewrite of config.toml was lost")
 def test_a_hook_trust_cant_land_inside_a_project_trusts_rewrite(ws, monkeypatch):
     """trust_codex_project rewrites config.toml from text it read under this lock:
     a hook trust written in between was lost, and read as a person removing it."""
