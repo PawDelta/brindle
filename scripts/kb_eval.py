@@ -32,6 +32,7 @@ EVAL_DIR = ROOT / "tests" / "kb_eval"
 K = 5
 SOURCES = (
     "README.md",
+    "docs/guide.md",
     "deploy/**/*.md",
     "src/brindle/builtin_rules/**/*.md",
     "src/brindle/builtin_agents/*.md",
