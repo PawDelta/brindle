@@ -44,7 +44,7 @@ import { agentIds, sessionTree, type AgentNode } from "../screens/Session/tree";
 import { useContinue } from "../screens/Session/useContinue";
 import { waitingCount } from "../store/appUpdates";
 import { AppUpdatePill } from "./AppUpdateBanner";
-import { cliStatus, formatAge, isPaused, type CliStatus } from "../store/overview";
+import { cliStatus, formatAge, isPaused, workingCount, type CliStatus } from "../store/overview";
 import { planWindows, providerName, WARN } from "../screens/Account/usage";
 import { useSessions } from "../store/sessions";
 import { providerProblems, type ProviderProblem } from "../api/providers";
@@ -382,7 +382,7 @@ function SessionRows({ session, repo, index, route, navigate, cursor, setCursor,
   const open = route.screen === "session" && route.root === root;
   const key = `session:${root}`;
   const agents = members.size;
-  const busy = workspaces.flatMap((ws) => (ws.agents ?? []).filter((a) => members.has(a.id) && cliStatus(a, ws, alive[a.id]).style === "busy")).length;
+  const busy = workingCount(workspaces, members, alive);
   // Through: its goal Done, or no goal and every agent in it at rest (the supervisor among them).
   const mine = workspaces.flatMap((ws) => ws.agents ?? []).filter((a) => members.has(a.id));
   const idle = mine.some((a) => a.id === root) && mine.every((a) => AT_REST.has(a.status) || alive[a.id] === false);

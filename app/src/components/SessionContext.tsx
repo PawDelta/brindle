@@ -21,7 +21,7 @@ import { useGoal } from "../screens/Session/GoalPanel";
 import { useSessionDiff } from "../screens/Session/review";
 import { GoalPanel } from "../screens/Session/GoalPanel";
 import { agentIds, sessionTree } from "../screens/Session/tree";
-import { isPaused, liveWorkers, sessionAge } from "../store/overview";
+import { isPaused, sessionAge, workingCount } from "../store/overview";
 import { useCloseSession, useSessions } from "../store/sessions";
 import { useAppState, useStore } from "../store/useStore";
 import { useMemo, useRef, useState } from "react";
@@ -60,7 +60,8 @@ function Context({ client, session, route, navigate, openUrl, style }: Pick<Sess
   const row = feed.find(root);
   const tree = useMemo(() => sessionTree(workspaces, root, feed.hidden), [workspaces, root, feed.hidden]);
   const members = useMemo(() => agentIds(tree), [tree]);
-  const agents = useMemo(() => workspaces.flatMap((ws) => ws.agents ?? []).filter((a) => members.has(a.id)), [workspaces, members]);
+  // At work as the sidebar's session row counts it (a reported worker at rest isn't).
+  const working = workingCount(workspaces, members, alive);
   const goal = useGoal(client, repo, root, store);
   const paused = row ? isPaused(row) : false;
   const repoName = feed.repos?.find((r) => r.repo_root === repo)?.name ?? repo;
@@ -127,7 +128,7 @@ function Context({ client, session, route, navigate, openUrl, style }: Pick<Sess
           </p>
         )}
         <div className="truncate text-[11px] text-ink-3">
-          <span className="font-mono text-[11px]">{root}</span> · {repoName} · {row ? (paused ? sessionAge(row) : `${row.mode} · ${liveWorkers(agents, alive)} working`) : "…"}
+          <span className="font-mono text-[11px]">{root}</span> · {repoName} · {row ? (paused ? sessionAge(row) : `${row.mode}${working > 0 ? ` · ${working} working` : ""}`) : "…"}
         </div>
       </div>
       <GoalPanel
