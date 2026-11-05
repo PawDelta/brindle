@@ -92,7 +92,11 @@ export function PtyViewsProvider({ value, children }: { value: PtyViews | null; 
 export const usePtyViews = (): PtyViews | null => useContext(PtyViewContext);
 
 /* What pty_view_open's channel says (PtyViewEvent): opened, the window's crop, the client's bytes, its exit, or why it couldn't open. */
-type PtyViewEvent = { kind: "open" } | ({ kind: "crop" } & Crop) | { kind: "data"; data: string } | { kind: "exit"; code: number } | { kind: "error"; message: string };
+type PtyViewEvent = { kind: "open" } | ({ kind: "crop" } & Crop) | { kind: "data"; data: string } | { kind: "exit"; code: number } | { kind: "error"; message: string } | { kind: "input_lost"; bytes: number; reason: string };
+
+/* Input written that the client didn't take (a paste, partly or whole), to the debug log: its size and why, never its text. */
+const logInputLost = (at: PtyViewTarget, bytes: number, reason: string) =>
+  logDebug("pty_view", "error", `input lost on its way to the view's client: ${reason}`, { bytes, target: at.target });
 
 /* The handlers with a view's error (it couldn't open, attach or crop) also
    sent to the debug log, while staff have it on (api/debug.ts). */
@@ -120,6 +124,7 @@ export const tauriPtyView: PtyViewOpener = (at, size, given) => {
       isOpen = true;
       ready();
     }
+    if (event.kind === "input_lost") return logInputLost(at, event.bytes, event.reason);
     if (closed) return;
     if (event.kind === "crop") handlers.onCrop?.({ cols: event.cols, left: event.left, width: event.width });
     else if (event.kind === "data") handlers.onData(new Uint8Array(decodeBinary(event.data)));
@@ -135,7 +140,13 @@ export const tauriPtyView: PtyViewOpener = (at, size, given) => {
   // In order: two invokes in flight could land either way round.
   let sends: Promise<unknown> = opened;
   const after = (command: string, args: Record<string, unknown>) => {
-    sends = sends.then((id) => invoke(command, { id, ...args }).then(() => id)).catch(() => opened);
+    sends = sends
+      .then((id) => invoke(command, { id, ...args }).then(() => id))
+      .catch((e) => {
+        // What was typed or pasted is gone: said (its size, never its text). What follows it still goes.
+        if (typeof args.data === "string") logDebug("pty_view", "error", `input didn't reach the view: ${String(e)}`, { bytes: args.data.length, target: at.target });
+        return opened;
+      });
   };
   return {
     write: (data) => closed || after("pty_view_write", { data }),
@@ -237,8 +248,9 @@ export function wsPtyView(url: string, token: string, connect?: WebSocketFactory
       if (closed) return;
       const data = ev.data;
       if (typeof data === "string") {
-        const said = JSON.parse(data) as { exit?: number; error?: string; crop?: Crop };
-        if (said.crop !== undefined) handlers.onCrop?.(said.crop);
+        const said = JSON.parse(data) as { exit?: number; error?: string; crop?: Crop; input_lost?: { bytes: number; reason: string } };
+        if (said.input_lost !== undefined) logInputLost(at, said.input_lost.bytes, said.input_lost.reason);
+        else if (said.crop !== undefined) handlers.onCrop?.(said.crop);
         else if (said.error !== undefined) handlers.onError(said.error);
         else if (said.exit !== undefined) handlers.onExit(said.exit);
       } else handlers.onData(new Uint8Array(data as ArrayBuffer));

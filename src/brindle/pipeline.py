@@ -118,6 +118,14 @@ def _file_lock(name: str, wait: bool = True, *, timeout: float | None = None):
             fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
 
+def fix_round_hold():
+    """Held from a verdict's look at whether its session is paused to the
+    fix round being left for its resume (_send_back), and for the resume's
+    look at what was left, once its chat is running (agents._resume): one of
+    the two always sees the other. Only ever around a few database calls."""
+    return _file_lock("fix-round-hold")
+
+
 @contextmanager
 def merge_lock(ws_id: str):
     """Hold workspace ``ws_id`` for a verdict or a merge, from the first look
@@ -307,7 +315,7 @@ def _tell(db: DB, parent_id: str | None, text: str, sender_id: str | None) -> No
         try:
             agents.send_message(db, parent_id, text, sender_id=sender_id)
         except agents.AgentError:
-            pass
+            db.enqueue(parent_id, text, sender_id)   # paused, say: it hears this once it's back
 
 
 def _note(db: DB, ws: Workspace, worker: Agent | None = None, *,
@@ -1134,6 +1142,14 @@ def _send_back(db: DB, ws: Workspace, worker: Agent, cfg: RepoConfig, summary: s
                "Fix what's valid, commit, and call report_result "
                f"again; brindle will have it {'checked and ' if what == 'checks' else ''}"
                "reviewed again.")
+        with fix_round_hold():
+            current = db.get_agent(worker.id) or worker
+            if agents.session_paused(db, current) or (current.status == "paused" and current.dismissed_at is None):
+                # A check run or a verdict that outlived the pause: nothing starts
+                # now (its window may be closing). The resume starts this round.
+                db.enqueue(worker.id, agents.format_message(db, fix, sender_id), sender_id)
+                db.set_status(worker.id, "paused")
+                return
         if agents.is_alive(worker):
             try:
                 agents.send_message(db, worker.id, fix, sender_id=sender_id)
@@ -1161,6 +1177,26 @@ def _send_back(db: DB, ws: Workspace, worker: Agent, cfg: RepoConfig, summary: s
               f"Worker: {agents.first_line(report)}",
               f"Latest {what}{f' ({sender_id})' if sender_id else ''}:\n{summary}",
               f"Worker's last report:\n{report}"), worker.id)
+
+
+def on_resumed(db: DB, root_id: str) -> None:
+    """Session ``root_id`` was resumed: its branches carry on. One waiting in
+    review gets its one restart back, as the pause may have stopped what used
+    it (the sweep restarts it: cull.note_reported_stuck). An approved one is
+    merged, in case its merge run ended with the machine; a run still at work
+    keeps the branch, and the new one finds nothing left to do."""
+    bases = set()
+    for a in agents.tree(db, root_id):
+        if a.mode not in WORKER_MODES:
+            continue
+        if a.pipeline == "reviewing":
+            db.update_agent(a.id, review_restarted=None)
+        elif a.pipeline == "ready":
+            ws = db.get_workspace(a.workspace_id)
+            if ws is not None:
+                bases.add((ws.repo_root, ws.base_branch))
+    for repo_root, base in bases:
+        agents.drain_later(repo_root, base)
 
 
 # -- stage 3: merging the ready branches, in order ----------------------------------

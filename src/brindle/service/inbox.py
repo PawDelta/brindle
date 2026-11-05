@@ -141,18 +141,19 @@ def _org_blocks(db: DB, repo_root: str | None, now: float | None = None) -> list
 
 
 def _setup_items() -> list[InboxItemDTO]:
-    """Setup problems the app can repair itself (a ``fix`` names the repair)."""
+    """Setup problems the app can repair itself (a ``fix`` names the repair).
+    The hook's trust only when a person turned the hook off: the rest of what
+    happens to that trust is brindle's to put right (codex_hook.keep_trusted)."""
     from brindle import codex_hook
 
     try:
         state = codex_hook.status()
     except Exception:  # noqa: BLE001 - an extra: never break the inbox
         return []
-    if state not in (codex_hook.REMOVED, codex_hook.MOVED):
+    if state != codex_hook.REMOVED:
         return []
-    why = "was removed from" if state == codex_hook.REMOVED else "changed in"
     return [InboxItemDTO(kind="setup", fix="codex_hook_trust",
-                         reason=f"Codex's trust of brindle's permission hook {why} Codex's config",
+                         reason="brindle's permission hook is turned off in Codex",
                          action=InboxActionDTO(method="POST", path="/v1/setup/codex-hook"))]
 
 

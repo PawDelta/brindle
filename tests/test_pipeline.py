@@ -7,13 +7,15 @@ import os
 import shutil
 import signal
 import sys
+import threading
 import time
 from pathlib import Path
 
 import pytest
+from typer.testing import CliRunner
 
 from conftest import sh
-from brindle import agents, autopilot, bus, cull, gates, pipeline, procs, providers, workspaces
+from brindle import agents, autopilot, bus, cli, cull, gates, pipeline, procs, providers, workspaces
 from brindle.config import RepoConfig
 from test_merge_order import add
 from test_pipeline_idempotent import drain
@@ -389,6 +391,105 @@ def test_fix_round_resumes_exited_worker(db, repo, monkeypatch, session, exits_m
                               "Needs supervisor action: ask the user about scope.")
     assert len(launched) == 4 and db.get_agent("w1").pipeline is None
     assert [e["agent_id"] for e in bus.tail(db, kinds=("pipeline.escalated",))] == ["w1"]
+
+
+def _reported_branch_in_a_paused_session(db, repo, monkeypatch):
+    root = workspaces.adopt_root(db, str(repo))
+    add(db, root, "boss", "interactive", "supervisor", status="paused")
+    ws = workspaces.create(db, str(repo), "feat").workspace
+    add(db, ws, "w1", "assign", parent="boss", status="done", result="reported", pipeline="reviewing")
+    add(db, ws, "rev", "review", "reviewer", parent="boss", status="done", result="no")
+    db.update_agent("w1", session_ref="sess-w1", reviewing_since=1000.0)
+    monkeypatch.setattr(providers.ClaudeCode, "can_resume", staticmethod(lambda ref: True))
+    launched = []
+    monkeypatch.setattr(agents, "_launch", lambda db_, a, ws_, *, prompt, resume, **kw:
+                        (db_.set_status(a.id, "idle"), launched.append((a.id, prompt))))
+    return ws, launched
+
+
+BLOCKER = "- blocker: missing check for None.\nNeeds supervisor action: None."
+
+
+@pytest.mark.parametrize("summary, landing, locked, restarted", [
+    (BLOCKER, "before the resume", None, ["boss", "w1"]),
+    (BLOCKER, "as the chat starts", None, ["boss", "w1"]),      # past the resume's first look
+    (BLOCKER, "as the chat starts", "someone-else", ["boss"]),      # stays paused: note_stalled tells its supervisor
+    ("Needs supervisor action: ask about scope.", "before the resume", None, ["boss"]),
+])
+def test_a_verdict_that_outlives_the_pause_waits_for_the_resume(db, repo, monkeypatch, summary, landing, locked, restarted):
+    """Check runs and _finish-review outlive a pause: nothing starts, and nothing they say is lost."""
+    from brindle import identity_lock
+    ws, launched = _reported_branch_in_a_paused_session(db, repo, monkeypatch)
+    monkeypatch.setattr(identity_lock, "locked_by", lambda agent_id: locked if agent_id == "w1" else None)
+    launch, verdict = agents._launch, lambda: pipeline.on_review(db, db.get_agent("rev"), ws, False, summary)
+    monkeypatch.setattr(agents, "_launch", lambda db_, a, ws_, **kw: (
+        a.id == "boss" and landing == "as the chat starts" and verdict(), launch(db_, a, ws_, **kw)))
+    if landing == "before the resume":
+        assert verdict() and launched == [] and db.get_agent("boss").status == "paused"
+    agents.resume(db, "boss")
+    assert [a for a, _ in launched] == restarted    # queued findings, not a prompt, start its turn
+    if summary == BLOCKER:
+        assert (db.get_agent("w1").pipeline, dict(launched).get("w1")) == ("fixing", None)
+        assert "missing check for None" in db.pop_pending("w1").body
+    else:
+        assert db.get_agent("w1").pipeline is None and "ask about scope" in db.pop_pending("boss").body
+
+
+@pytest.mark.parametrize("read_by_first_look", [False, True])
+def test_a_verdict_reopening_its_worker_keeps_that_launch_from_the_resume(db, repo, monkeypatch, read_by_first_look):
+    """The verdict is past pipeline=fixing, under the merge lock, as the resume reads that row and the chat starts."""
+    from brindle.db import DB
+    ws, launched = _reported_branch_in_a_paused_session(db, repo, monkeypatch)
+    published, scanned, stopped, outcome = threading.Event(), threading.Event(), [], []
+    monkeypatch.setattr(procs, "stop", lambda ids, *a, **kw: stopped.extend(ids) or 0)
+    real_hold, launch = pipeline.fix_round_hold, agents._launch
+    thread = threading.Thread(daemon=True, target=lambda: outcome.append(
+        pipeline.on_review(own := DB(), own.get_agent("rev"), ws, False, BLOCKER)))
+    @contextlib.contextmanager
+    def hold():
+        if threading.current_thread() is thread:
+            published.set()     # suspended here until the resume's later look is over
+            assert scanned.wait(30)
+        with real_hold():
+            yield
+        scanned.set()
+    def start_verdict():
+        thread.start()
+        assert published.wait(30)
+    monkeypatch.setattr(pipeline, "fix_round_hold", hold)
+    monkeypatch.setattr(agents, "_launch", lambda db_, a, ws_, **kw: (
+        a.id == "boss" and not read_by_first_look and start_verdict(), launch(db_, a, ws_, **kw)))
+    if read_by_first_look:
+        start_verdict()
+    agents.resume(db, "boss")
+    thread.join(30)
+    assert outcome == [True] and stopped == [] and [a for a, _ in launched] == ["boss", "w1"]
+    assert "missing check for None" in launched[1][1] and (db.get_agent("w1").status, db.get_agent("w1").pipeline) == ("idle", "fixing")
+
+
+def test_branches_in_the_pipeline_carry_on_after_the_resume(db, repo, monkeypatch):
+    """A check or merge run that finished in the pause or ended with the machine starts again."""
+    ws, _launched = _reported_branch_in_a_paused_session(db, repo, monkeypatch)
+    approved = workspaces.create(db, str(repo), "approved").workspace
+    add(db, approved, "w2", "assign", parent="boss", status="done", result="reported", pipeline="ready")
+    (Path(approved.path) / "feature.py").write_text("x = 1\n")
+    sh("git add feature.py && git commit -qm feature", approved.path)
+    db.add_review(approved.id, gates.head(approved), "rev", True, "lgtm")
+    monkeypatch.setattr(gates, "check_summary", lambda *a, **kw: "PASS `true`")
+    reviewers, restarts, started = [], [], []
+    monkeypatch.setattr(agents, "request_review", lambda *a, **kw: reviewers.append(a))
+    monkeypatch.setattr(pipeline, "_start_review", lambda *a, **kw: restarts.append(a))
+    monkeypatch.setattr(agents, "_detach_orphan", started.append)
+    now = time.time() + 600     # past the wait since the reviewer before it started
+    assert agents.review_after_checks(db, "boss", ws, cfg=RepoConfig(checks=["true"]), report=1000.0) is None
+    cull.note_reported_stuck(db, now, {})
+    assert reviewers == [] and restarts == []
+    db.update_agent("w1", review_restarted=1000.0)     # the one restart this wait gets, used before the pause
+    agents.resume(db, "boss")
+    cull.note_reported_stuck(db, now, {})
+    assert len(restarts) == 1
+    assert CliRunner().invoke(cli.app, started[0][started[0].index("_drain-ready"):]).exit_code == 0
+    assert "feature.py" in sh("git ls-tree --name-only main", repo)
 
 
 @pytest.mark.parametrize("outcomes", [

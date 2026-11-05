@@ -28,6 +28,7 @@ pub const AFTER_EXIT_FLAG: &str = "--after-exit-of";
 /// The claim's lock file, in brindle's home.
 const LOCK: &str = "app.lock";
 /// How long `wait_for_exit` waits at most: an instance that doesn't exit by then is dealt with by `claim`.
+#[cfg(target_os = "macos")]
 const EXIT_WAIT: libc::timespec = libc::timespec { tv_sec: 30, tv_nsec: 0 };
 
 /// The .app bundle whose `Contents/MacOS/<exe>` is `exe`, or None outside a bundle (a dev build).

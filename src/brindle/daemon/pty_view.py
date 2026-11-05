@@ -20,6 +20,7 @@ Frames, after the token the guard takes:
 - down: the client's bytes as binary frames, a redraw at a time (:func:`forward`);
   ``{"crop": {"cols", "left", "width"}}`` before the first bytes and on each change;
   ``{"exit": code}`` last; ``{"error": message}`` when the view can't open;
+  ``{"input_lost": {"bytes", "reason"}}`` for input the client didn't take;
 - up, after: ``{"type": "input", "data"}``, ``{"type": "resize", "cols", "rows"}``
   and ``{"type": "focus"}``, as app/src-tauri/examples/pty_ws.rs takes them."""
 
@@ -74,6 +75,11 @@ MOUSE_BINDINGS = (
 COPY_BINDING = r'C-M-S-F12 if-shell -F "#{selection_present}" "send-keys -X copy-selection-no-clear"'
 COPY_OR_INTERRUPT_BINDING = (r'C-M-S-F11 if-shell -F "#{selection_present}" '
                              r'"send-keys -X copy-selection-and-cancel" "send-keys C-c"')
+# A paste is written behind this key: a pane scrolled back (copy mode) leaves it, where
+# tmux would swallow the whole bracketed paste (pty_view.rs's LEAVE_COPY_MODE_BINDING).
+LEAVE_COPY_MODE_BINDING = r'C-M-S-F10 if-shell -F "#{pane_in_mode}" "send-keys -X cancel"'
+LEAVE_COPY_MODE_KEY = b"\x1b[21;8~"
+PASTE_START = b"\x1b[200~"
 MAX_SIZE = 1000                 # the largest pty a view asks for
 
 # What crop_of reads, a line a pane, and what crop_now reads of the view's client.
@@ -99,6 +105,14 @@ _views = itertools.count(1)
 
 class ViewError(Exception):
     """Why a view can't open, or a command on it failed, in words the app shows."""
+
+
+class InputLost(Exception):
+    """Input written that the client didn't take: how many bytes, and why (never what)."""
+
+    def __init__(self, data_bytes: int, reason: str) -> None:
+        super().__init__(reason)
+        self.bytes, self.reason = data_bytes, reason
 
 
 def parse_version(version: str) -> tuple[int, int] | None:
@@ -146,7 +160,8 @@ def valid_target(target: str) -> bool:
 
 def view_bindings(version: tuple[int, int]) -> str:
     """The view's key table for a server of ``version``, as ``source-file`` reads it."""
-    lines = [b for since, b in MOUSE_BINDINGS if version >= since] + [COPY_BINDING, COPY_OR_INTERRUPT_BINDING]
+    lines = [b for since, b in MOUSE_BINDINGS if version >= since] + [COPY_BINDING, COPY_OR_INTERRUPT_BINDING,
+                                                                      LEAVE_COPY_MODE_BINDING]
     return "".join(f"bind-key -T {KEY_TABLE} {b}\n" for b in lines)
 
 
@@ -581,10 +596,15 @@ class PtyView:
         self._reader.start()
 
     def write(self, data: bytes) -> None:
-        """What the person typed, to the client, all of it."""
+        """What the person typed, to the client, all of it; else InputLost, with what wasn't."""
         with self._lock:
-            while data and not self._closed:
-                data = data[os.write(self._master, data):]
+            while data:
+                if self._closed:
+                    raise InputLost(len(data), "the view has closed")
+                try:
+                    data = data[os.write(self._master, data):]
+                except OSError as e:
+                    raise InputLost(len(data), str(e)) from e
 
     def resize(self, cols: int, rows: int) -> None:
         """The view is ``cols`` x ``rows``: its client's pty is that and the crop's columns."""
@@ -654,8 +674,11 @@ def _set_size(fd: int, size: tuple[int, int], crop: Crop) -> None:
 async def _type(view: PtyView, data: bytes) -> None:
     """What the person typed, to the client: as it comes, but each mouse
     release RELEASE_GAP after the write before it, so tmux reads it apart
-    from a drag's last motion (whose copy it would otherwise lose)."""
+    from a drag's last motion (whose copy it would otherwise lose), and a
+    paste behind the key that leaves copy mode."""
     loop = asyncio.get_running_loop()
+    if data.startswith(PASTE_START):
+        data = LEAVE_COPY_MODE_KEY + data
 
     async def write(part: bytes) -> None:
         await asyncio.to_thread(view.write, part)
@@ -688,6 +711,9 @@ async def _up(ws: WebSocket, view: PtyView) -> None:
                 view.resize(int(up["cols"]), int(up["rows"]))
             elif kind == "focus":
                 await asyncio.to_thread(view.take)
+        except InputLost as e:
+            log.info("brindle: pty view %s: %d bytes of input lost: %s", view.view, e.bytes, e.reason)
+            await ws.send_json({"input_lost": {"bytes": e.bytes, "reason": e.reason}})
         except (ValueError, KeyError, TypeError, AttributeError, ViewError, OSError) as e:
             log.info("brindle: pty view %s: %s", view.view, e)
 

@@ -41,11 +41,6 @@ def _login(db, root, worker, mp):
     db.set_login_state(root, state="auth_paused", refresh_cmd="aws sso login")
 
 
-def _hook_trust_removed(db, root, worker, mp):
-    from brindle import codex_hook
-    mp.setattr(codex_hook, "status", lambda command=None: codex_hook.REMOVED)
-
-
 def _notice(db, root, worker, mp):
     org_status.save(org_status.Saved(org_id="org1", status=org_status.Status(
         notices=[{"id": "n1", "text": "maintenance tonight", "from_role": "admin",

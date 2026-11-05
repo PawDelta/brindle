@@ -980,8 +980,11 @@ def codex_hook_checks(repo_root: str) -> list[Check]:
     if state == codex_hook.TRUSTED:
         return [Check(OK, "codex hook", "trusted: Codex workers follow the permission policy")]
     if state == codex_hook.REMOVED:
-        return [Check(WARN, "codex hook", "its trust was removed from Codex's config, so Codex "
-                      f"workers ask for approvals themselves. `{codex_hook.INSTALL}` restores it")]
+        return [Check(WARN, "codex hook", "it's turned off in Codex, so Codex workers ask for "
+                      f"approvals themselves. `{codex_hook.INSTALL}` turns it back on")]
+    if state == codex_hook.UNREADABLE:
+        return [Check(WARN, "codex hook", "Codex's config.toml doesn't parse, so brindle can't "
+                      "trust its hook there until that's fixed")]
     return [Check(OK, "codex hook", "brindle trusts it on the next Codex launch"
                   + (" (brindle moved since the last trust)" if state == codex_hook.MOVED else ""))]
 
