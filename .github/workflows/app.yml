@@ -147,5 +147,6 @@ jobs:
         run: |
           mkdir -p app/dist
           [ -f app/dist/index.html ] || echo '<!doctype html>' > app/dist/index.html
+      # What a Windows release builds, and its tests; not examples/pty_ws.rs, a Unix-only developer tool.
       - name: Compile, tests included
-        run: cargo check --manifest-path app/src-tauri/Cargo.toml --all-targets
+        run: cargo check --manifest-path app/src-tauri/Cargo.toml --lib --bins --tests
