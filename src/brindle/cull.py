@@ -623,6 +623,8 @@ def note_reported_stuck(db: DB, now: float, panes: dict[str, bool]) -> list[str]
                     f"with send_message, or replace the worker.")
         elif (a.pipeline == "reviewing" and a.reviewing_since is not None
                 and pipeline._settled(db, ws) is None):
+            if agents.session_paused(db, a):
+                continue   # it starts nothing: this sweep picks the branch up after the resume
             try:
                 head = gates.head(ws)
                 cfg = load_repo_config(ws.repo_root)
