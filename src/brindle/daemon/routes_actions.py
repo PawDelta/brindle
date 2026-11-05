@@ -2443,7 +2443,7 @@ def setup_codex_hook(db: DB, params: dict, body: Body) -> Any:
 
         try:
             binary = codex_binary()
-            codex_hook.trust(binary, codex_hook.inspect(binary))
+            codex_hook.trust(binary, codex_hook.inspect(binary), turn_on=True)
         except codex_hook.CodexHookError as e:
             raise ServiceError("codex_hook_failed", f"couldn't trust brindle's Codex hook: {e}", 422) from e
         finally:
