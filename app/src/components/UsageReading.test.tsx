@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../App";
+import { ONBOARDED_KEY } from "../api/providers";
 import { DaemonContext } from "../api/context";
 import type { SessionDTO } from "../api/schema";
 import type { Route } from "../routes";
@@ -22,6 +23,7 @@ const session: SessionDTO = { id: "sup1", workspace_id: "proj", profile: "superv
 
 beforeEach(() => {
   localStorage.clear();
+  localStorage.setItem(ONBOARDED_KEY, "1");
   // The design's clock, so the readings say what it says; timers stay real.
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(DESIGN_NOW);

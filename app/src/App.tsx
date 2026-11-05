@@ -49,7 +49,7 @@ import { AccountScreen } from "./screens/Account";
 import { InboxScreen } from "./screens/Inbox";
 import { KnowledgeScreen } from "./screens/Knowledge";
 import { NewSession } from "./screens/New";
-import { BrindleSignIn, Onboarding, Starting, markOnboarded, onboarded, readOnboarded } from "./screens/Onboarding";
+import { BrindleSignIn, Onboarding, Permissions, Starting, markOnboarded, onboarded, readOnboarded } from "./screens/Onboarding";
 import { AgentsScreen } from "./screens/Agents";
 import { SessionScreen } from "./screens/Session";
 import { SettingsScreen } from "./screens/Settings";
@@ -299,6 +299,7 @@ function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, p
 type Gate =
   | { kind: "checking"; error?: string }
   | { kind: "onboarding"; providers: ProviderInstalled[] }
+  | { kind: "permissions" }
   | { kind: "app"; route?: Route };
 
 function FirstLaunch(props: AppProps) {
@@ -315,9 +316,8 @@ function FirstLaunch(props: AppProps) {
       (rows) => {
         if (!live) return;
         if (!onboarded(rows)) return setGate({ kind: "onboarding", providers: rows });
-        // A first launch on this Mac with a CLI signed in already: nothing to set up, straight in.
-        markOnboarded();
-        setGate({ kind: "app" });
+        // The CLI is ready, but this Mac's first app launch still offers permissions.
+        setGate({ kind: "permissions" });
       },
       (e: unknown) => {
         if (!live) return;
@@ -331,6 +331,10 @@ function FirstLaunch(props: AppProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [client, asked]);
   const done = useCallback((route?: Route) => setGate({ kind: "app", route }), []);
+  const permissionsDone = useCallback(() => {
+    markOnboarded();
+    done();
+  }, [done]);
   if (gate.kind === "checking") {
     const retry = () => {
       setGate({ kind: "checking" });
@@ -340,6 +344,9 @@ function FirstLaunch(props: AppProps) {
   }
   if (gate.kind === "onboarding" && client) {
     return <Onboarding client={client} providers={gate.providers} openUrl={openUrl} pickFolder={pickFolder} onDone={done} />;
+  }
+  if (gate.kind === "permissions" && client) {
+    return <Permissions client={client} onNext={permissionsDone} />;
   }
   // The providers feed starts with the app itself: the first launch reads its own rows.
   return (
