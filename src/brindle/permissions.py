@@ -5411,6 +5411,25 @@ def apply_preset(name: str) -> Store:
     return store
 
 
+def choose_preset(name: str) -> Store:
+    """The person picks preset ``name`` (the app, ``brindle permissions preset``):
+    apply_preset, and the policy goes on with it, since a preset does nothing
+    otherwise. A ``permission_policy`` the person set stays: their "off" is theirs
+    to turn on. A repo's own setting still wins in that repo (load_repo_config),
+    and an org's controls still come first wherever the policy is on. Taking the
+    recommended default isn't choosing the switch itself, so it only sets the
+    default (see config.POLICY_DEFAULT_KEY); another preset is."""
+    from brindle import config
+
+    store = apply_preset(name)
+    if "permission_policy" not in config.user_settings():
+        if name == DEFAULT_PRESET:
+            config.set_user(config.POLICY_DEFAULT_KEY, "on")
+        else:
+            config.set_user("permission_policy", "on")
+    return store
+
+
 def set_unmatched(value: str) -> None:
     """What no rule covers does: every capability group's baseline too
     (their subcategories' own answers stay)."""

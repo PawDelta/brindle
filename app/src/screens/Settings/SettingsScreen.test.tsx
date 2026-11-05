@@ -153,6 +153,31 @@ describe("settings screen", () => {
     stop();
   });
 
+  it("permissions: with the rules off nothing claims a preset is in force, one button turns them on, and a repo's or the person's own off isn't overridden by a preset", async () => {
+    const policy = { preset: "autonomous", unmatched: "allow", rules: FAKE_PRESETS.autonomous.rules(), saved: [], prompts: {}, policy_on: false };
+    const { daemon, stop } = setup({ policy: { ...policy, policy_source: "default" } });
+    const banner = await screen.findByTestId("policy-off");
+    const perms = screen.getByTestId("permissions-settings");
+    expect(within(perms).getByTestId("preset-name").textContent).toBe("Not in force");
+    expect(within(perms).queryByRole("button", { name: "Current" })).toBeNull();
+    fireEvent.click(within(banner).getByRole("button", { name: "Turn on with Autonomous" }));
+    await waitFor(() => expect(within(perms).getByTestId("preset-name").textContent).toBe("Autonomous"));
+    expect(within(perms).queryByTestId("policy-off")).toBeNull();
+    expect(daemon.requests.find((r) => r.method === "PATCH" && r.path === "/config")?.body).toEqual({ scope: "user", values: { permission_policy: "on" } });
+    expect(within(perms).getByRole("button", { name: "Current" })).toBeTruthy();
+    stop();
+    cleanup();
+
+    // A repo's off: nothing here can change it, so no button, and a preset says it isn't in force.
+    const repoOff = setup({ policy: { ...policy, policy_source: "repo" } });
+    const held = await screen.findByTestId("policy-off");
+    expect(within(held).queryByRole("button")).toBeNull();
+    fireEvent.click(within(screen.getByTestId("permissions-settings")).getByRole("button", { name: "Use Standard" }));
+    await waitFor(() => expect(screen.getByTestId("permissions-feedback").textContent).toContain("isn't in force"));
+    expect(screen.getByTestId("preset-name").textContent).toBe("Not in force");
+    repoOff.stop();
+  });
+
   it("permissions: unchecked commands opt-in is off, turns on only after an in-page confirmation, turns off in one click, and is locked when an org forces it", async () => {
     const { daemon, stop } = setup({ policy: { preset: "autonomous", unmatched: "allow", rules: FAKE_PRESETS.autonomous.rules(), saved: [], prompts: {} } });
     const row = await screen.findByTestId("dangerous");

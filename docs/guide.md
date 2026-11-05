@@ -694,7 +694,7 @@ Goal driving, merge gates and cleanup:
 | `goal_audit` | `true` | once every milestone passes, an adversarial reviewer checks the work against the original goal before the goal counts as reached |
 | `merge_into` | none | branch that worker branches are cut from and merge into, whatever branch the supervisor is on |
 | `auto_merge_default_branch` | `false` | let the pipeline merge into the repo's default branch (origin HEAD, else `main`/`master`) on its own; by default it sends a "needs you" message instead, and you run `merge_workspace` yourself (manual merges are never gated) |
-| `permission_policy` | `"on"` with a Pro license, else `"off"` | `"on"`: brindle answers workers' permission requests from its rules (see "Permission policy" below); `"off"`: the provider's own prompts and permission mode decide, except Antigravity workers under `agy_approvals: "brindle"`, whose hook still enforces the rules. The only permission switch: a leftover `permission_essentials` key is ignored |
+| `permission_policy` | `"on"` on a new install or with a Pro license, else `"off"` | `"on"`: brindle answers agents' permission requests from its rules, on every plan (see "Permission policy" below); `"off"`: the provider's own prompts and permission mode decide, except Antigravity workers under `agy_approvals: "brindle"`, whose hook still enforces the rules. A value you set always wins over the default. A Free install from before this default stays off until you turn it on. The only permission switch: a leftover `permission_essentials` key is ignored |
 | `permission_supervisor_hold_seconds` | `120` | with `permission_policy` on, how long a Claude Code or Codex worker's ask waits on its supervisor (`answer_permission`) before you see it; asks a person-only rule makes (pushes into the default or a release branch) come straight to you |
 | `agy_approvals` | unset | `"brindle"`: Antigravity agents run without approval prompts and brindle's hook allows or denies every call, applying the profile's `allowed_tools` (see "Antigravity" under "Permission policy"); `"prompt"`: agy asks as usual. Unset, workers get `"brindle"` and interactive agy sessions `"prompt"` |
 | `rules` | `[]` | standing rules for the supervisor, e.g. `["Fix review findings without asking", "Validate options before offering them"]`; added to every supervisor's brief. Rules in `~/.brindle/config.json`, the repo's config and `config.local.json` are all kept, so a team's rules and your own add up |
@@ -879,11 +879,22 @@ plan that includes them.
 ### Permission policy
 
 With `"permission_policy": "on"` (repo config or `~/.brindle/config.json`), when
-a Claude Code worker (Codex and Antigravity: see below) is about to show a permission prompt, its
+a Claude Code agent, supervisors included (Codex and Antigravity: see below), is about to show a permission prompt, its
 `PermissionRequest` hook hands brindle the structured request (the tool and its
 command, path or URL; brindle never reads the screen) and brindle answers
 **allow**, **deny**, or **ask**, which leaves the prompt to you as usual. Any
 error is ask.
+
+**Who it's on for.** A new install, on any plan, starts with it on and the
+Autonomous preset. A Free install from before that keeps what it had:
+Settings → Permissions says the rules are off and has one button to turn them on,
+as does `brindle permissions policy on`. Picking a preset turns the policy on too,
+unless you set `"permission_policy": "off"` yourself (that stays until you change
+it). A repo's own `permission_policy` still wins in that repo, and your
+organization's controls come before your rules wherever the policy is on. With it
+on, brindle keeps what it decides on your machine (`~/.brindle`): the ask rate in
+Settings, and how many times you approved a request, for `brindle permissions
+suggestions`. None of that leaves the machine because of this setting.
 
 Nothing is built in. Every rule lives in `~/.brindle/permissions.json`, and
 you can edit or remove any of them, including the ones a **preset** seeded.
@@ -991,7 +1002,15 @@ allow may do. It is read again on every request:
 - A policy without the block, one that can't be read, or a paused or shut-down member: no saved allow applies.
 - Org admins edit the block in Settings → Organization approvals. It is enforced from the cached policy, or in air-gap mode from `.brindle/policy.json`.
 
-**Codex.** Codex runs a hook only once it's trusted, so with
+**Codex.** A `sandbox_mode` in your Codex config (or a Codex that can't report
+its config) makes Codex ignore the sandbox profile brindle's rules rely on. If you
+or the repo set `permission_policy` on, brindle then refuses to start Codex and
+says what to change. If it's only on by default, or you took the recommended
+Autonomous preset, Codex starts on its own approvals and sandbox instead, without
+brindle's hook, and the supervisor is told once. Picking another preset or
+`brindle permissions policy on` counts as setting it.
+
+Codex runs a hook only once it's trusted, so with
 `permission_policy` on, brindle trusts its own hook the first time a Codex worker
 needs it (and says so at `brindle start`). It adds one entry,
 `[hooks.state."/<session-flags>/config.toml:permission_request:0:0"]

@@ -9,11 +9,13 @@ import time
 import pytest
 from typer.testing import CliRunner
 
-from brindle import agents, cull, permissions
+from brindle import agents, codex_hook, cull, permissions, workspaces
 from brindle.cli import app
-from brindle.config import set_local
-from brindle.db import Agent
+from brindle.config import load_repo_config, set_local, set_user
+from brindle.daemon import routes_actions
+from brindle.db import DB, Agent
 from brindle.permissions import Request, Rule, decide
+from brindle.service import permissions as svc
 
 from conftest import sh
 from workspace_template import copy_workspace, workspace_template  # noqa: F401 (a fixture)
@@ -46,6 +48,76 @@ def turn_on(ws):
 def claude_payload(tool, tool_input, cwd=None):
     """Claude Code's PermissionRequest input, which has no tool_use_id."""
     return {"tool_name": tool, "tool_input": tool_input, "cwd": cwd, "hook_event_name": "PermissionRequest"}
+
+
+# -- who the policy is on for -----------------------------------------------------------------
+
+
+@pytest.mark.parametrize("first_run", ["cli", "daemon"])
+def test_new_free_user_gets_the_policy(repo, monkeypatch, first_run):
+    """Nothing of brindle's on this machine and no plan, from a first CLI command
+    or the app's daemon: the policy is on with Autonomous, and it answers a
+    supervisor on Claude and on Codex, which no mode or parent_id gate drops."""
+    monkeypatch.delenv("BRINDLE_NO_FIRST_RUN", raising=False)
+    monkeypatch.setattr("brindle.permissions.DEFAULT_PRESET", "autonomous")
+    if first_run == "cli":
+        assert CliRunner().invoke(app, ["--version"]).exit_code == 0
+    db = DB()
+    assert load_repo_config(repo).permission_policy == "on"
+    assert permissions.load_store().preset == "autonomous"
+
+    ws = workspaces.create(db, str(repo), "feature").workspace
+    ask = {"tool_name": "Bash", "tool_input": {"command": "some-tool --go"}, "cwd": ws.path}
+    claude = Agent("s1", ws.id, "developer", "claude", None, "interactive", "processing", "%1", None, time.time())
+    db.add_agent(claude)
+    answer = agents.permission_request_decision(db, claude, {**ask, "hook_event_name": "PermissionRequest"})
+    assert answer["hookSpecificOutput"]["decision"]["behavior"] == "allow"
+    codex = Agent("s2", ws.id, "developer", "codex", None, "interactive", "processing", "%2", None, time.time())
+    db.add_agent(codex)
+    answer = agents.permission_request_decision(
+        db, codex, {"tool_name": "Bash", "tool_input": {"command": "some-tool --go"}, "cwd": ws.path}, provider="codex")
+    assert answer["hookSpecificOutput"]["decision"]["behavior"] == "allow"
+    monkeypatch.setattr(codex_hook, "ensure", lambda **_: codex_hook.TRUSTED)
+    assert codex_hook.launch_flags(ws.path)   # a supervisor launches with the hook too
+
+
+def test_existing_free_user_keeps_what_they_have(db, repo, monkeypatch):
+    """Upgraded from before the default: nobody chose, so it stays off, the app
+    says so rather than show a preset as active, and they can turn it on."""
+    monkeypatch.delenv("BRINDLE_NO_FIRST_RUN")
+    assert CliRunner().invoke(app, ["--version"]).exit_code == 0
+    DB()
+    assert load_repo_config(repo).permission_policy == "off"
+    policy = svc.policy_dto()
+    assert (policy.policy_on, policy.policy_source) == (False, "default")
+    assert not [p.name for p in policy.presets if p.current]
+    routes_actions.patch_config(db, {}, {"scope": "user", "values": {"permission_policy": "on"}})
+    policy = svc.policy_dto()
+    assert (policy.policy_on, policy.policy_source) == (True, "user")
+    assert [p.name for p in policy.presets if p.current] == [policy.preset]
+
+
+@pytest.mark.parametrize("before,repo_says,preset,policy,source", [
+    (None, None, "secure", "on", "user"),
+    # The default preset (the suite's is Standard) isn't choosing the switch: Codex can still fall back.
+    (None, None, "standard", "on", "default"),
+    ("off", None, "secure", "off", "user"),
+    (None, "off", "secure", "off", "repo"),
+])
+def test_a_preset_turns_the_policy_on(repo, db, monkeypatch, before, repo_says, preset, policy, source):
+    """In the app and with `brindle permissions preset`, unless the person's own
+    "off" or the repo's setting says otherwise."""
+    monkeypatch.chdir(repo)
+    if before:
+        set_user("permission_policy", before)
+    if repo_says:
+        set_local(repo, "permission_policy", repo_says)
+    res = CliRunner().invoke(app, ["permissions", "preset", preset])
+    assert res.exit_code == 0 and f"permission policy: {policy}" in res.output, res.output
+    cfg = load_repo_config(repo)
+    assert (cfg.permission_policy, cfg.permission_policy_source) == (policy, source)
+    assert ("aren't in force" in res.output) == (policy == "off")
+    assert routes_actions.set_permission_preset(db, {}, {"preset": preset})["preset"] == preset
 
 
 # -- the engine -------------------------------------------------------------------------------
