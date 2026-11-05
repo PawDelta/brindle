@@ -1591,8 +1591,13 @@ def _branch_name(ref: str) -> str:
 
 def push_calls(command: str) -> list[Push]:
     """Every ``git push`` in ``command``, one per refspec."""
+    return [push for _, push in _pushes_with_folders(command)]
+
+
+def _pushes_with_folders(command: str) -> list[tuple[list[str], Push]]:
+    """push_calls, each with the -C folders of its git invocation."""
     out = []
-    for sub, args in _git_calls(command):
+    for folders, sub, args in _git_invocations(command):
         if sub != "push":
             continue
         positional, delete, force, everything, i = [], False, False, False, 0
@@ -1626,7 +1631,7 @@ def push_calls(command: str) -> list[Push]:
                 delete = delete or not left
             else:
                 src = dst = _branch_name(spec)
-            out.append(Push(remote, src, dst, forced, delete or src == "(delete)"))
+            out.append((folders, Push(remote, src, dst, forced, delete or src == "(delete)")))
     return out
 
 
@@ -1684,17 +1689,12 @@ def push_matches(match: str, req: Request, loose: bool) -> bool:
     """Whether any git push in ``req``'s command fits push pattern ``match``."""
     if not req.command:
         return False
-    pushes = push_calls(req.command)
-    if not pushes:
-        return False
-    # A deny or ask holds in any repo the command pushes from; an allow only if in all.
-    return (any if loose else all)(any(push_fits(match, push, repo, loose) for push in pushes)
-                                   for repo in push_repos(req))
+    return any(push_fits(match, push, repo, loose) for push, repo in pushes_in_repos(req))
 
 
-def push_repos(req: Request) -> list[str]:
-    """The repos the pushes in ``req``'s command run in, where a push pattern's
-    default branch is read: each one's folder's (its Cwd, then git -C), not
+def pushes_in_repos(req: Request) -> list[tuple[Push, str]]:
+    """Each push in ``req``'s command with the repo it runs in, where a push
+    pattern's default branch is read: its folder's (its Cwd, then git -C), not
     only the session's. The session's when git can't tell."""
     from brindle import git
 
@@ -1705,8 +1705,7 @@ def push_repos(req: Request) -> list[str]:
         except Exception:  # noqa: BLE001 - not a repo, or a folder only the run knows
             return req.repo_root
 
-    return list(dict.fromkeys(repo_of(folders) for folders, sub, _ in _git_invocations(req.command or "")
-                              if sub == "push"))
+    return [(push, repo_of(folders)) for folders, push in _pushes_with_folders(req.command or "")]
 
 
 # -- read-only commands ---------------------------------------------------------------------------

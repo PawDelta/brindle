@@ -365,6 +365,14 @@ def test_interactive_supervisor_on_autonomous_needs_no_grants(db, ws, monkeypatc
     assert answer("run_command", {"CommandLine": f"cd {trunk} && git push origin trunk"})["decision"] == "deny"
     assert answer("run_command", {"CommandLine": f"git -C {trunk} push origin trunk"})["decision"] == "deny"
     assert answer("run_command", {"CommandLine": "git push origin feat", "Cwd": str(trunk)})["decision"] == "allow"
+    # Each push is judged in its own repo: joined, they get what they get alone.
+    develop = tmp_path / "develop-repo"
+    develop.mkdir()
+    sh("git init -q -b develop && git -c user.name=t -c user.email=t@example.com commit -q --allow-empty -m one", develop)
+    each = f"git -C {trunk} push origin develop && git -C {develop} push origin trunk"
+    assert answer("run_command", {"CommandLine": each})["decision"] == "allow"
+    held_back = f"git -C {trunk} push origin develop && git -C {develop} push origin develop"
+    assert answer("run_command", {"CommandLine": held_back})["decision"] == "deny"
     permissions.forget("d-push-default")    # the preset's git/push-protected group still asks there
     assert answer("run_command", {"CommandLine": "git push origin trunk", "Cwd": str(trunk)})["decision"] == "deny"
     permissions.apply_preset("autonomous")
