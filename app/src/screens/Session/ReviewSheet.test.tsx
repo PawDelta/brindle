@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../../App";
+import { ONBOARDED_KEY } from "../../api/providers";
 import type { GoalDTO, SessionDTO } from "../../api/schema";
 import type { Route } from "../../routes";
 import { createAppStore } from "../../store/store";
@@ -14,7 +15,10 @@ import { READY_TITLE, watchInbox } from "../Inbox/notify";
 
 vi.mock("../../components/PtyTerminal", () => import("../../test/panes"));
 
-beforeEach(() => localStorage.clear());
+beforeEach(() => {
+  localStorage.clear();
+  localStorage.setItem(ONBOARDED_KEY, "1");
+});
 let sync: Sync | null = null;
 afterEach(() => {
   sync?.stop();

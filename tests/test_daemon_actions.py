@@ -330,6 +330,11 @@ def test_the_demo_runs_in_a_practice_repo_on_the_cli_signed_in(db, world, brindl
     # the supervisor, workers and reviewers all run on it.
     assert len(made) == 1 and reply["repo"] == db.workspace_by_path(str(made[0])).repo_root
     assert demo_launches == [(reply["repo"], "codex")]
+    # The flag /repos sends (the app hides it from New session's projects); a lookalike elsewhere is no demo.
+    look = str(brindle_home / "textkit-1")
+    db.add_workspace(Workspace("look/root", look, "root", "main", "main", "main", look, None, "brindle-look", time.time()))
+    flagged = {r["repo_root"]: r["demo"] for r in _send("GET", "/v1/repos")[1]}
+    assert flagged[reply["repo"]] is True and flagged[look] is False
     cfg = config.load_repo_config(reply["repo"])
     assert (cfg.routing["light"], cfg.review_profile) == (["developer-codex"], "reviewer-codex")
 
@@ -2202,7 +2207,7 @@ def test_a_clone_streams_git_progress_and_finishes_with_the_path(db, cloning, tm
     assert [(e["kind"], e["payload"]["result"]) for e in done] == [
         ("job.done", {"path": str(parent / "origin")})]
     assert (parent / "origin" / "app.py").is_file()
-    assert {"repo_root": str(parent / "origin"), "name": "origin"} in _send("GET", "/v1/repos")[1]
+    assert {"repo_root": str(parent / "origin"), "name": "origin", "demo": False} in _send("GET", "/v1/repos")[1]
     assert any(e["payload"]["job"] == reply["job"] for e in bus.tail(db, kinds=("job.progress",)))
     again, err = _send("POST", "/v1/repos/clone", {"url": cloning, "parent_dir": str(parent)})
     assert (again, err["error"]["code"]) == (409, "exists")

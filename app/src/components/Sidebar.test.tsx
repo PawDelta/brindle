@@ -7,6 +7,7 @@ import type { Route } from "../routes";
 import { SessionsProvider } from "../store/sessions";
 import { createAppStore } from "../store/store";
 import { startSync } from "../store/sync";
+import { UsageProvider } from "../store/usage";
 import { StoreContext } from "../store/useStore";
 import { BASE_URL, FakeDaemon, TOKEN, type DaemonData } from "../test/fakeDaemon";
 import { REPO, permission, permissionInTerminal, question, root, waiting, worker } from "../test/fixtures";
@@ -31,7 +32,9 @@ function mount(data: Partial<DaemonData>, route: Route = { screen: "new" }, fetc
     <DaemonContext.Provider value={client}>
       <StoreContext.Provider value={store}>
         <SessionsProvider client={client}>
-          <Sidebar route={route} navigate={navigate} refresh={sync.refresh} />
+          <UsageProvider client={client}>
+            <Sidebar route={route} navigate={navigate} refresh={sync.refresh} />
+          </UsageProvider>
         </SessionsProvider>
       </StoreContext.Provider>
     </DaemonContext.Provider>,
@@ -51,6 +54,21 @@ describe("Sidebar", () => {
     await waitFor(() => expect(agentRow("fresh")).toBeTruthy());
     expect(agentRow("w1")).toBeNull();
     expect(sessionRow("sup1")!.textContent).toContain("2 agents");
+    sync.stop();
+  });
+
+  it("new user sees no usage failure", async () => {
+    const { daemon, sync } = mount({});
+    const reading = await screen.findByTestId("usage-reading");
+    await waitFor(() => expect(daemon.requests.some((r) => r.path === "/usage")).toBe(true));
+    expect(reading.textContent).not.toContain("unavailable");
+    sync.stop();
+  });
+
+  it("marks the usage reading failed when the load really failed", async () => {
+    const { sync } = mount({}, { screen: "new" }, (daemon) => (input, init) =>
+      String(input).endsWith("/usage") ? Promise.resolve(new Response("{}", { status: 500 })) : daemon.fetch(input, init));
+    await waitFor(() => expect(screen.getByTestId("usage-reading").dataset.state).toBe("failed"));
     sync.stop();
   });
 
