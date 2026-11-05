@@ -48,6 +48,7 @@ const treeAgent = (id: string) => nav().querySelector<HTMLButtonElement>(`button
 const surfaceTitle = () => screen.getByTestId("surface-title").textContent;
 
 describe("App", () => {
+  beforeEach(() => localStorage.setItem(ONBOARDED_KEY, "1"));
   it.each([false, true])("resume paused: lists the goal and resumes into the session's chat pane (already selected: %s)", async (selected) => {
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session, paused], workspaces: [root] });
     const store = createAppStore();
@@ -434,17 +435,33 @@ describe("App", () => {
     sync.stop();
   });
 
-  it("a first launch with a CLI signed in already goes straight to New session, with no demo offer", async () => {
-    // The CLI used before this app: a repo registered already.
-    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }] });
-    const store = createAppStore();
-    const client = daemon.client();
-    const sync = startSync({ client, store, connect: daemon.connect });
-    renderApp(<App store={store} client={client} refresh={sync.refresh} />);
-    expect(await screen.findByRole("form", { name: "Start a session" })).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Start the demo" })).toBeNull();
-    expect(daemon.demos).toEqual([]);
-    sync.stop();
+  it("first launch with a signed-in CLI offers the permission presets", async () => {
+    for (const action of ["skip", "continue", "read-failed"]) {
+      localStorage.clear();
+      const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }] });
+      daemon.data.policy.preset = "secure";
+      const original = structuredClone(daemon.data.policy);
+      const store = createAppStore();
+      const client = daemon.client();
+      if (action === "read-failed") vi.spyOn(client, "permissions").mockRejectedValue(new Error("unavailable"));
+      const sync = startSync({ client, store, connect: daemon.connect });
+      renderApp(<App store={store} client={client} refresh={sync.refresh} />);
+      if (action !== "read-failed") {
+        await screen.findByRole("radiogroup", { name: "Permission preset" });
+        expect(screen.getByTestId("onb-preset-secure").getAttribute("aria-checked")).toBe("true");
+        expect(screen.queryByRole("complementary", { name: "Sidebar" })).toBeNull();
+        fireEvent.click(screen.getByTestId("onb-preset-standard"));
+        fireEvent.click(screen.getByRole("button", { name: action === "skip" ? "Skip for now" : "Continue with Standard" }));
+      }
+      expect(await screen.findByRole("form", { name: "Start a session" })).toBeTruthy();
+      if (action === "continue") expect(daemon.data.policy.preset).toBe("standard");
+      else {
+        expect(daemon.data.policy).toEqual(original);
+      }
+      expect(localStorage.getItem(ONBOARDED_KEY)).toBe("1");
+      sync.stop();
+      cleanup();
+    }
   });
 
   it("checks the engine on start even when its event stream never opens, and shows a dropped stream", async () => {
@@ -483,6 +500,7 @@ describe("App", () => {
 });
 
 describe("providers in the sidebar", () => {
+  beforeEach(() => localStorage.setItem(ONBOARDED_KEY, "1"));
   const statusLine = () => within(nav()).getByTestId("status-line");
   const start = (providers = freshProviders({ claude: { path: "/home/u/.local/bin/claude", version: "2.1.47" } })) => {
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], providers });
@@ -555,6 +573,7 @@ describe("providers in the sidebar", () => {
 });
 
 describe("closing a session", () => {
+  beforeEach(() => localStorage.setItem(ONBOARDED_KEY, "1"));
   /* A second live session in the same repo, on its own worktree. */
   const other: SessionDTO = { ...session, id: "sup2", workspace_id: "proj/other", goal: "Fix the cache" };
   const otherWs = { ...root, id: "proj/other", name: "other", branch: "other", path: `${REPO}/.brindle/worktrees/other`, agents: [{ ...root.agents![0], id: "sup2", window: windowOf("sup2") }] };
@@ -755,6 +774,8 @@ describe("the sign-in gate", () => {
     expect(screen.getByText("Step 1 of 3")).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Watch brindle work on a practice repo" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Sign in with your browser" }));
+    expect(await screen.findByRole("radiogroup", { name: "Permission preset" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Skip for now" }));
     expect(await screen.findByRole("form", { name: "Start a session" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Watch brindle work on a practice repo" })).toBeTruthy();
     expect(localStorage.getItem(ONBOARDED_KEY)).toBe("1");
