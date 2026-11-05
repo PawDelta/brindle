@@ -37,7 +37,7 @@ build a competing service ([details](#license)).
 
 **Free and paid:** the core workflow is free, with no plan limit on agents, workers or
 sessions (by default up to 5 workers at once per session, set by `max_agents`), and
-Free needs no account. brindle Pro is $20/month; brindle Team is $40/seat/month,
+On the CLI, Free needs no account; the desktop app needs a free account. brindle Pro is $20/month; brindle Team is $40/seat/month,
 up to 20 seats ([what each adds](#brindle-pro-and-team),
 [pricing](https://pawdelta.com/brindle/pricing/)).
 
@@ -1071,7 +1071,7 @@ brindle is complete on its own. brindle Pro adds hosted learning (which profile
 to use for which kind of task; per person on Pro, per organization on Team,
 and kept private) and brindle Team adds org policies (allowed providers
 and models, human review before merges) and an audit feed of what brindle did.
-Free needs no account. brindle Pro is $20/month and brindle Team $40/seat/month, up
+On the CLI, Free needs no account; the desktop app needs a free account. brindle Pro is $20/month and brindle Team $40/seat/month, up
 to 20 seats; brindle Enterprise is by contact. Plans and prices:
 https://pawdelta.com/brindle/pricing/.
 

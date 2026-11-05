@@ -52,8 +52,8 @@ For a one-line fix, plain `claude` is quicker, and the supervisor will do small 
 rather than start workers. brindle pays off when work splits into parallel pieces, or runs
 long enough that you'd rather not babysit it.
 
-Compared with: [Claude Squad](https://pawdelta.com/brindle/compare/claude-squad.html) · [Conductor](https://pawdelta.com/brindle/compare/conductor.html) ·
-[Superset](https://pawdelta.com/brindle/compare/superset.html) · [Claude Code subagents](https://pawdelta.com/brindle/compare/claude-code-subagents.html)
+Compared with: [Claude Squad](https://pawdelta.com/brindle/compare/claude-squad/) · [Conductor](https://pawdelta.com/brindle/compare/conductor/) ·
+[Superset](https://pawdelta.com/brindle/compare/superset/) · [Claude Code subagents](https://pawdelta.com/brindle/compare/claude-code-subagents/)
 
 ## How a goal gets done
 
@@ -115,7 +115,8 @@ your main branch.
 
 You need at least one agent CLI installed and signed in. Claude Code is the default for the
 supervisor, workers and reviewer (`npm install -g @anthropic-ai/claude-code`, then
-`claude auth login`). The core workflow is free and needs no account.
+`claude auth login`). The core workflow is free. The desktop app needs a free brindle account, with no payment
+details; the CLI needs no account.
 
 **The app** (macOS and Linux). Download it from
 [pawdelta.com/brindle/getting-started](https://pawdelta.com/brindle/getting-started/), open
@@ -181,12 +182,13 @@ tasks to them by weight.
 ## FAQ
 
 **Does it cost extra on top of my Claude or Codex plan?** No. brindle drives the CLIs you
-already pay for, and the core workflow is free with no account.
+already pay for, and the core workflow is free. The app needs a free brindle account, with no payment
+details; the CLI needs none.
 
 **Where does my code go?** Nowhere new. Agents run locally through your own CLIs, and brindle
 keeps its state in `~/.brindle`. brindle sends no telemetry. It checks PyPI for updates
 (`BRINDLE_NO_UPDATE_CHECK` turns that off) and otherwise talks only to what you set up: model
-endpoints you configure, CI hosts, and your brindle account if you sign in.
+endpoints you configure, CI hosts, and your brindle account, which the app requires and the CLI only uses if you sign in.
 
 **Windows?** The CLI runs in WSL2. The app is macOS and Linux for now.
 
