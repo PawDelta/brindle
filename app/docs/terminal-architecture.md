@@ -71,7 +71,10 @@ view can run (`pty_view_status`: ready, or unusable with why).
   - and at every version, ⌘C's key (`COPY_BINDING`, C-M-S-F12): tmux copies
     its copy-mode selection, if any, without clearing it; and Ctrl+C's on
     Windows and Linux (`COPY_OR_INTERRUPT_BINDING`, C-M-S-F11): tmux copies
-    its selection and leaves copy mode, or with none sends C-c to the pane.
+    its selection and leaves copy mode, or with none sends C-c to the pane;
+    and the key a paste is written behind (`LEAVE_COPY_MODE_BINDING`,
+    C-M-S-F10): a pane scrolled back leaves copy mode, which would otherwise
+    swallow the whole bracketed paste.
 - **Copy and paste.** The client declares the `clipboard` feature, so tmux
   hands its copies to xterm.js as OSC 52. xterm's clipboard addon passes them
   to `pty_view_copy`, which writes through Tauri's clipboard plugin. The
@@ -88,8 +91,11 @@ view can run (`pty_view_status`: ready, or unusable with why).
   Each ⌘V has one way to paste, chosen before the key does anything: on a
   Mac, the webview's own paste (Tauri's default Edit menu, which macOS
   doesn't prompt for; one with no text reads `pty_view_paste`); elsewhere
-  the key is taken and `pty_view_paste` read. Every webview paste is pasted
-  once, a late one when it comes. `set-clipboard` is left as the server has it, so a
+  the key is taken and `pty_view_paste` read. A paste is always sent bracketed
+  (tmux passes the markers on only to a pane that asked), once tmux has taken
+  the client's terminal. A ⌘V whose webview paste hasn't come by `PASTE_WAIT`
+  reads `pty_view_paste` in its place, and its late paste with that text isn't
+  pasted again. `set-clipboard` is left as the server has it, so a
   program's own OSC 52 reaches the app only if the server allows it.
 - **Cleanup.**
   - The view session goes when the view closes, the page reloads, or the app
