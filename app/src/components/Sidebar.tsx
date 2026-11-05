@@ -82,7 +82,9 @@ function WeeklyMeter({ provider }: { provider: ProviderUsage }) {
 
 /* Each click is its own request, so a second one with Account open scrolls back to Usage. */
 let usageAsks = 0;
-function UsageReading({ provider, warning, navigate }: { provider?: ProviderUsage; warning: boolean } & Pick<SidebarProps, "navigate">) {
+/* No reading is not a fault: a new user has none yet, and the first load may still be out.
+   Only a failed load says "unavailable"; otherwise a neutral "Usage" opens the same page. */
+function UsageReading({ provider, warning, failed, navigate }: { provider?: ProviderUsage; warning: boolean; failed: boolean } & Pick<SidebarProps, "navigate">) {
   const window = provider && weeklyWindow(provider);
   return (
     <button
@@ -99,7 +101,7 @@ function UsageReading({ provider, warning, navigate }: { provider?: ProviderUsag
           <WeeklyMeter provider={provider} />
           {window?.resets_at != null && <span className="truncate">· resets {new Date(window.resets_at * 1000).toLocaleDateString("en-US", { weekday: "short" })}</span>}
         </>
-      ) : "Usage unavailable"}
+      ) : failed ? "Usage unavailable" : "Usage"}
     </button>
   );
 }
@@ -607,7 +609,7 @@ export function Sidebar({ route, navigate, refresh, openUrl }: SidebarProps) {
   const [pausedOpen, setPausedOpen] = useState(readPausedOpen);
   const list = useRef<HTMLElement>(null);
   const noRefresh = useCallback(() => Promise.resolve(), []);
-  const { usage } = useUsage();
+  const { usage, error: usageError } = useUsage();
   const mostUsed = usage?.providers.filter((provider) => weeklyWindow(provider)).sort((a, b) => weeklyWindow(b)!.used - weeklyWindow(a)!.used)[0];
   const warning = !!mostUsed && (mostUsed.limited || planWindows(mostUsed).some((window) => window.used >= WARN));
   const { rows: providerRows, installs } = useProviders();
@@ -820,7 +822,7 @@ export function Sidebar({ route, navigate, refresh, openUrl }: SidebarProps) {
         {repos && repos.length > 0 && live.length === 0 && <p className="px-s1 text-xs text-ink-3">Nothing running. Start a session, or continue a recent one.</p>}
       </nav>
       <div className="flex min-h-4 items-center justify-between gap-2 whitespace-nowrap border-t border-line px-s1 pt-s1" data-testid="status-line">
-        <UsageReading provider={mostUsed} warning={warning} navigate={navigate} />
+        <UsageReading provider={mostUsed} warning={warning} failed={usageError != null} navigate={navigate} />
         <ProviderProblemLine problems={problems} navigate={navigate} />
         <AppUpdatePill />
       </div>
