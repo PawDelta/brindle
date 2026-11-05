@@ -2,7 +2,7 @@ import { act, cleanup, render } from "@testing-library/react";
 import type { ILink, ILinkProvider } from "@xterm/xterm";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { PtyViewHandlers, PtyViewOpener } from "../api/ptyView";
-import { COPIED_SHOWN, COPY_OR_INTERRUPT, DRAWN_WAIT, LATE_PASTE_WINDOW, PASTE_WAIT, PtyTerminal, selectionIn } from "./PtyTerminal";
+import { ATTACH_WAIT, COPIED_SHOWN, COPY_OR_INTERRUPT, LATE_PASTE_WINDOW, PASTE_WAIT, PtyTerminal, selectionIn } from "./PtyTerminal";
 
 /* What goes to the debug log. */
 const logs = vi.hoisted(() => [] as unknown[][]);
@@ -129,8 +129,8 @@ it("off a Mac, ⌘V pastes the app's clipboard (bracketed where asked), and ⌘C
     act(() => void textarea.dispatchEvent(e));
     return e;
   };
-  // A program that asked for bracketed paste.
-  act(() => opened.handlers!.onData(new TextEncoder().encode("\x1b[?2004hhello pty")));
+  // tmux has the view's terminal.
+  act(() => opened.handlers!.onData(new TextEncoder().encode("\x1b[?1049hhello pty")));
   await parsed(term());
   clipboard.text = "from the clipboard ✓";
   // jsdom's platform is no Mac's: ⌘V taken (no webview paste follows), the app's clipboard read.
@@ -163,7 +163,7 @@ it("off a Mac, ⌘V pastes the app's clipboard (bracketed where asked), and ⌘C
 it("keeps what's typed after ⌘V behind the paste while the clipboard is read, pastes in the order pressed, and drops a paste that can't be read", async () => {
   const reads: { ok(text: string): void; fail(): void }[] = [];
   const { written, opened, view, term } = mount(() => new Promise<string>((ok, fail) => reads.push({ ok, fail: () => fail(new Error("no clipboard")) })));
-  act(() => opened.handlers!.onData(new TextEncoder().encode("\x1b[?2004h")));
+  act(() => opened.handlers!.onData(new TextEncoder().encode("\x1b[?1049h")));
   await parsed(term());
   const textarea = term().textarea!;
   const press = () => act(() => void textarea.dispatchEvent(new KeyboardEvent("keydown", { key: "v", metaKey: true, bubbles: true, cancelable: true })));
@@ -203,72 +203,43 @@ const commandV = (target: EventTarget) => {
   return e;
 };
 
-it("holds a paste until the view's first bytes say how to send it: unbracketed, a two-liner's Enter would run its first line", async () => {
+it("holds a paste until tmux has the view's terminal, however its bytes split, and sends it bracketed: a two-liner's Enter never runs its first line", async () => {
   const { written, clipboard, opened, term } = mount();
   clipboard.text = "!echo one\necho two";
   commandV(term().textarea!);
   act(() => term().input("x", true));
   await settled();
   expect(written).toEqual([]);
-  // A pty read can end anywhere: the first bytes alone don't say, even with the enable half read.
-  act(() => opened.handlers!.onData(new TextEncoder().encode("\x1b[?1049h\x1b[?200")));
+  // Bytes alone don't say (a key's echo on a pty still cooked, a read ending inside a sequence).
+  act(() => opened.handlers!.onData(new TextEncoder().encode("x\x1b[?104")));
   await parsed(term());
   await settled();
-  expect(term().modes.bracketedPasteMode).toBe(false);
   expect(written).toEqual([]);
-  // tmux's first bytes turn bracketed paste on (tty_start_tty), whatever the pane asked.
-  act(() => opened.handlers!.onData(new TextEncoder().encode("4h")));
+  act(() => opened.handlers!.onData(new TextEncoder().encode("9h")));
   await parsed(term());
   await settled();
+  // Bracketed though xterm.js was never told to: tmux reads the markers, and keeps them from a pane that didn't ask.
+  expect(term().modes.bracketedPasteMode).toBe(false);
   expect(written).toEqual(["\x1b[200~!echo one\recho two\x1b[201~", "x"]);
 });
 
-it("sends a paste unbracketed only once the view has shown bracketed paste is off: its first redraw done, or its time up with bytes come", async (ctx) => {
+it("drops a paste, said, when tmux stalls partway through taking the terminal past the wait, rather than guess; the next one goes once it has", async (ctx) => {
   vi.useFakeTimers({ shouldAdvanceTime: true });
   ctx.onTestFinished(() => void vi.useRealTimers());
-  const redrawn = mount();
-  redrawn.clipboard.text = "a\nb";
-  commandV(redrawn.term().textarea!);
+  const { written, clipboard, opened, term } = mount();
+  clipboard.text = "a\nb";
+  act(() => opened.handlers!.onData(new TextEncoder().encode("\x1b[?104")));
+  await parsed(term());
+  commandV(term().textarea!);
+  act(() => term().input("x", true));
+  await act(() => vi.advanceTimersByTimeAsync(ATTACH_WAIT));
+  expect(written).toEqual(["x"]);
+  expect(logs.at(-1)?.[2]).toBe(`paste dropped: tmux hadn't taken the view's terminal within ${ATTACH_WAIT} ms`);
+  act(() => opened.handlers!.onData(new TextEncoder().encode("9h")));
+  await parsed(term());
+  commandV(term().textarea!);
   await settled();
-  // An older tmux, which turns it on only for a pane that asks: its redraw ends with it off.
-  act(() => redrawn.opened.handlers!.onData(new TextEncoder().encode("\x1b[?2026hdrawn\x1b[?202")));
-  await parsed(redrawn.term());
-  await settled();
-  expect(redrawn.written).toEqual([]);
-  act(() => redrawn.opened.handlers!.onData(new TextEncoder().encode("6l")));
-  await parsed(redrawn.term());
-  await settled();
-  expect(redrawn.written).toEqual(["a\rb"]);
-  redrawn.view.unmount();
-
-  const unsynced = mount();
-  unsynced.clipboard.text = "a\nb";
-  commandV(unsynced.term().textarea!);
-  act(() => unsynced.opened.handlers!.onData(new TextEncoder().encode("drawn")));
-  await parsed(unsynced.term());
-  await settled();
-  expect(unsynced.written).toEqual([]);
-  await act(() => vi.advanceTimersByTimeAsync(DRAWN_WAIT));
-  expect(unsynced.written).toEqual(["a\rb"]);
-  // Settled for the view: the next paste doesn't wait again.
-  commandV(unsynced.term().textarea!);
-  await settled();
-  expect(unsynced.written).toEqual(["a\rb", "a\rb"]);
-  unsynced.view.unmount();
-
-  // Bytes beginning just as a paste's own wait runs out: the enable half read still holds it.
-  const slow = mount();
-  slow.clipboard.text = "a\nb";
-  commandV(slow.term().textarea!);
-  await act(() => vi.advanceTimersByTimeAsync(DRAWN_WAIT - 100));
-  act(() => slow.opened.handlers!.onData(new TextEncoder().encode("\x1b[?200")));
-  await parsed(slow.term());
-  await act(() => vi.advanceTimersByTimeAsync(200));
-  expect(slow.written).toEqual([]);
-  act(() => slow.opened.handlers!.onData(new TextEncoder().encode("4h")));
-  await parsed(slow.term());
-  await settled();
-  expect(slow.written).toEqual(["\x1b[200~a\rb\x1b[201~"]);
+  expect(written).toEqual(["x", "\x1b[200~a\rb\x1b[201~"]);
 });
 
 it("gives the new view the keyboard when a resume or reconnect replaces the one that had it, and takes nothing from a field in use", () => {
@@ -294,7 +265,7 @@ it("takes a ⌘V pressed with the keyboard on nothing for the view last used, on
   const second = mount();
   for (const { opened, term, clipboard } of [first, second]) {
     clipboard.text = "pasted";
-    act(() => opened.handlers!.onData(new TextEncoder().encode("\x1b[?2004h")));
+    act(() => opened.handlers!.onData(new TextEncoder().encode("\x1b[?1049h")));
     await parsed(term());
   }
   // A click on the app's own chrome leaves the keyboard on nothing; xterm.js hears no ⌘V.
@@ -345,14 +316,14 @@ it("logs every paste it drops, why and its size, never its text, and lets what's
   commandV(silent.term().textarea!);
   webviewPaste(silent.term().textarea!, SECRET);
   act(() => silent.term().input("x", true));
-  await waited(DRAWN_WAIT);
+  await waited(ATTACH_WAIT);
   expect(silent.written).toEqual(["x"]);
-  expect(said().at(-1)).toEqual([`paste dropped: the view drew nothing within ${DRAWN_WAIT} ms`, SECRET.length]);
+  expect(said().at(-1)).toEqual([`paste dropped: tmux hadn't taken the view's terminal within ${ATTACH_WAIT} ms`, SECRET.length]);
   silent.view.unmount();
 
   // The client has gone.
   const ended = mount();
-  act(() => ended.opened.handlers!.onData(new TextEncoder().encode("\x1b[?2004h")));
+  act(() => ended.opened.handlers!.onData(new TextEncoder().encode("\x1b[?1049h")));
   await parsed(ended.term());
   act(() => ended.opened.handlers!.onExit(0));
   webviewPaste(ended.term().textarea!, SECRET);
@@ -370,7 +341,7 @@ it("logs every paste it drops, why and its size, never its text, and lets what's
   // A ⌘V the webview never answers; a webview paste with no text, and an app's clipboard that has none or can't be read.
   let read: () => Promise<string> = () => Promise.resolve("");
   const live = mount(() => read());
-  act(() => live.opened.handlers!.onData(new TextEncoder().encode("\x1b[?2004h")));
+  act(() => live.opened.handlers!.onData(new TextEncoder().encode("\x1b[?1049h")));
   await parsed(live.term());
   commandV(live.term().textarea!);
   await waited(PASTE_WAIT);
@@ -523,7 +494,7 @@ it("on a Mac, ⌘V pastes what the webview's own paste holds, in the ⌘V's plac
     reads++;
     return reading;
   });
-  act(() => opened.handlers!.onData(new TextEncoder().encode("\x1b[?2004h")));
+  act(() => opened.handlers!.onData(new TextEncoder().encode("\x1b[?1049h")));
   await parsed(term());
   const textarea = term().textarea!;
   const press = () => {
@@ -612,7 +583,7 @@ it("on a Mac, ⌘V pastes what the webview's own paste holds, in the ⌘V's plac
 
 it("off a Mac, ⌘V pastes the app's clipboard, and an Edit > Paste after it pastes too, never dropped or doubled", async () => {
   const { written, clipboard, opened, term } = mount();
-  act(() => opened.handlers!.onData(new TextEncoder().encode("\x1b[?2004h")));
+  act(() => opened.handlers!.onData(new TextEncoder().encode("\x1b[?1049h")));
   await parsed(term());
   const textarea = term().textarea!;
   const press = () => {

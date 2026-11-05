@@ -20,7 +20,6 @@
 
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpStream};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
@@ -68,6 +67,9 @@ enum Up {
     Input { data: String },
     Resize { cols: u16, rows: u16 },
     Focus,
+    /// Not a frame: the reader has ended, and everything accepted before it (`Intake`) has been handled.
+    #[serde(skip)]
+    ReaderEnded,
 }
 
 impl Up {
@@ -76,11 +78,39 @@ impl Up {
     }
 }
 
-/// Frames up, to `send`, until the view goes. A send that fails ends them all
-/// (the socket has gone): `on_lost` is told the bytes of each input that didn't go.
+/// What goes up to the writer. Once the reader has ended nothing more is
+/// accepted, and the writer is told after all that was: every input accepted
+/// is sent, or told lost, before the writer lets go of who it tells.
+struct Intake {
+    up: mpsc::Sender<Up>,
+    reading: Mutex<bool>,
+}
+
+impl Intake {
+    fn send(&self, frame: Up) -> bool {
+        let reading = self.reading.lock().unwrap_or_else(|e| e.into_inner());
+        *reading && self.up.send(frame).is_ok()
+    }
+
+    fn reading(&self) -> bool {
+        *self.reading.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn reader_ended(&self) {
+        let mut reading = self.reading.lock().unwrap_or_else(|e| e.into_inner());
+        *reading = false;
+        let _ = self.up.send(Up::ReaderEnded);
+    }
+}
+
+/// Frames up, to `send`, until the reader has ended. A send that fails ends them
+/// all (the socket has gone): `on_lost` is told the bytes of each input that didn't go.
 fn send_frames(frames: mpsc::Receiver<Up>, mut send: impl FnMut(Message) -> Result<(), String>, on_lost: impl Fn(usize, String)) {
     let mut failed: Option<String> = None;
     for frame in frames {
+        if matches!(frame, Up::ReaderEnded) {
+            return;
+        }
         if failed.is_none() {
             let Err(reason) = send(frame.frame()) else { continue };
             failed = Some(reason);
@@ -153,14 +183,12 @@ impl Write for Half {
 /// One open view: a socket to the daemon, which runs its tmux client.
 pub struct PtyView {
     stream: TcpStream,
-    up: mpsc::Sender<Up>,
-    /// Whether the socket is still being read: once it isn't, nothing written can arrive.
-    reading: Arc<AtomicBool>,
+    intake: Arc<Intake>,
 }
 
 /// What giving the view the window takes (`PtyView::take_window`): a focus frame up.
 pub struct WindowTaker {
-    up: mpsc::Sender<Up>,
+    intake: Arc<Intake>,
 }
 
 impl PtyView {
@@ -192,19 +220,24 @@ impl PtyView {
         // Frames up on a thread of their own: a write to a daemon that isn't reading blocks.
         let mut writer = WebSocket::from_raw_socket(half()?, Role::Client, None);
         let (up, frames) = mpsc::channel::<Up>();
-        // The reader holds `on_event`: its end ends the events, whatever the writer is doing. The
-        // writer tells of input lost while they last; after, `write` says it can't be sent.
+        let intake = Arc::new(Intake { up, reading: Mutex::new(true) });
+        // Both hold `on_event`, until the reader has ended and the writer has handled all it accepted before that.
         let on_event = Arc::new(Mutex::new(on_event));
-        let told = Arc::downgrade(&on_event);
-        std::thread::spawn(move || {
-            send_frames(frames, |frame| writer.send(frame).map_err(|e| e.to_string()), |bytes, reason| {
-                if let Some(tell) = told.upgrade() {
-                    (tell.lock().unwrap_or_else(|e| e.into_inner()))(PtyViewEvent::InputLost { bytes, reason });
-                }
+        {
+            let (told, intake) = (on_event.clone(), intake.clone());
+            std::thread::spawn(move || {
+                let send = |frame| {
+                    if !intake.reading() {
+                        return Err("the socket has gone".to_string());
+                    }
+                    writer.send(frame).map_err(|e| e.to_string())
+                };
+                send_frames(frames, send, |bytes, reason| {
+                    (told.lock().unwrap_or_else(|e| e.into_inner()))(PtyViewEvent::InputLost { bytes, reason });
+                });
             });
-        });
-        let reading = Arc::new(AtomicBool::new(true));
-        let still_reading = reading.clone();
+        }
+        let ending = intake.clone();
         std::thread::spawn(move || {
             let tell = |event| (on_event.lock().unwrap_or_else(|e| e.into_inner()))(event);
             let mut ended = false;
@@ -219,23 +252,23 @@ impl PtyView {
                     }
                 }
             }
-            still_reading.store(false, Ordering::SeqCst);
             if !ended {
                 tell(PtyViewEvent::Exit { code: -1 });
             }
+            ending.reader_ended();
         });
-        Ok(PtyView { stream, up, reading })
+        Ok(PtyView { stream, intake })
     }
 
     /// What the person typed (keys, a paste, mouse reports), as xterm.js says it.
     /// False: it can't be sent, the socket having gone.
     pub fn write(&self, data: &[u8]) -> bool {
-        self.reading.load(Ordering::SeqCst) && self.up.send(Up::Input { data: String::from_utf8_lossy(data).into_owned() }).is_ok()
+        self.intake.send(Up::Input { data: String::from_utf8_lossy(data).into_owned() })
     }
 
     /// The view is `cols` x `rows` cells; the daemon adds the crop's columns.
     pub fn resize(&self, cols: u16, rows: u16) -> Result<(), String> {
-        let _ = self.up.send(Up::Resize { cols, rows });
+        self.intake.send(Up::Resize { cols, rows });
         Ok(())
     }
 
@@ -246,14 +279,14 @@ impl PtyView {
     }
 
     pub fn window_taker(&self) -> WindowTaker {
-        WindowTaker { up: self.up.clone() }
+        WindowTaker { intake: self.intake.clone() }
     }
 }
 
 impl WindowTaker {
     /// `PtyView::take_window`.
     pub fn take(&self) -> Result<(), String> {
-        let _ = self.up.send(Up::Focus);
+        self.intake.send(Up::Focus);
         Ok(())
     }
 }
@@ -399,19 +432,23 @@ mod tests {
     #[test]
     fn input_lost_on_the_way_to_the_engine_is_told_by_size() {
         let (up, frames) = mpsc::channel();
+        let intake = Intake { up, reading: Mutex::new(true) };
         for frame in [Up::Input { data: "sent".into() }, Up::Input { data: "pasted".into() }, Up::Focus, Up::Input { data: "typed".into() }] {
-            up.send(frame).unwrap();
+            assert!(intake.send(frame));
         }
-        drop(up);
+        // The reader ends with all that queued and the writer yet to fail it: nothing more is taken,
+        // what was is still told, and only then does the writer let go of who it tells.
+        intake.reader_ended();
+        assert!(!intake.send(Up::Input { data: "too late".into() }));
+        let (told, lost) = mpsc::channel();
         let mut room = 1;
-        let lost = Mutex::new(Vec::new());
         send_frames(
             frames,
             |_| if std::mem::take(&mut room) == 1 { Ok(()) } else { Err("the socket has gone".to_string()) },
-            |bytes, reason| lost.lock().unwrap().push((bytes, reason)),
+            move |bytes, reason| told.send((bytes, reason)).unwrap(),
         );
         let gone = || "the socket has gone".to_string();
-        assert_eq!(lost.into_inner().unwrap(), [(6, gone()), (5, gone())]);
+        assert_eq!(lost.iter().collect::<Vec<_>>(), [(6, gone()), (5, gone())]);
         assert_eq!(
             event_of(Message::text(r#"{"input_lost": {"bytes": 8, "reason": "the view has closed"}}"#)),
             Some(PtyViewEvent::InputLost { bytes: 8, reason: "the view has closed".into() })

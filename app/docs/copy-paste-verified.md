@@ -205,10 +205,12 @@ Causes found and fixed:
   didn't ask). Before them xterm.js says it's off, so each line was an Enter: in
   Claude Code, `!echo one\recho two` ran the first line and left the second in
   the prompt. Written before the client set its pty raw, `\r` also became `\n`.
-  A paste now waits until xterm.js has parsed bracketed paste on, or the first
-  redraw's end (an older tmux turns it on only for a pane that asked), however
-  the bytes were split (`DRAWN_WAIT`). No real tmux 3.2 was on hand: that path
-  has run in jsdom only.
+  A paste is now always sent bracketed: every view's stream ends at tmux, which
+  strips the markers for a pane that didn't ask (checked on real tmux 3.8; no
+  real tmux 3.2 was on hand). It waits until xterm.js has parsed tmux's switch to
+  the alternate screen, however the bytes were split, which tmux does first
+  thing with the pty already raw (`ATTACH_WAIT`). Not by then: dropped and logged,
+  never sent on a guess.
 - **A resume or reconnect left the keyboard on nothing.** The new view's key
   changes, its textarea goes with the focus, and SessionScreen focuses only on
   navigation. ⌘V then reached nothing; so did any ⌘V after a click on the app's
@@ -217,9 +219,13 @@ Causes found and fixed:
 - **Typed keys overtook a late webview paste.** Past `PASTE_WAIT` (1 s, now 3 s)
   the keys were let go and the paste came behind them. A ⌘V now keeps its place:
   past the wait the app's clipboard is read there, and its late paste with that
-  text isn't pasted again (for `LATE_PASTE_WINDOW`). So a person's own Edit >
-  Paste of the same text, just after a ⌘V the webview never answered, is dropped
-  and logged. That read isn't the system's "person pasting", so macOS may ask.
+  text isn't pasted again (for `LATE_PASTE_WINDOW`). That match is by content and
+  time, so it can be wrong both ways: a person's own Edit > Paste of the same
+  text, just after a ⌘V the webview never answered, is dropped and logged; and a
+  webview paste later than the window is pasted again. Neither has been seen. An
+  exact fix is to give every Mac ⌘V one source, the app's clipboard, but that
+  read isn't the system's "person pasting", so macOS may ask on each paste,
+  which the webview paste exists to avoid. An open decision, not settled here.
 - **A lone surrogate lost the whole paste.** `serde_json` refuses one, and the
   error was swallowed. It is now U+FFFD, and a refused write is logged.
 - **Input lost on the way to the client said nothing.** `pty_view_write` answered

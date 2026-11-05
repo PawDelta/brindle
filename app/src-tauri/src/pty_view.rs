@@ -1663,6 +1663,22 @@ mod tests {
         assert_eq!(in_mode(), "0");
         drop(view);
         drop(server);
+
+        // A pane that didn't ask gets the same paste without the markers, its Enter a character of it: tmux's call,
+        // so the view always sends them. Scrolled back too.
+        let plain = dir.join("plain");
+        let cmd = format!("stty raw -echo; exec cat > '{}'", plain.display());
+        let Some(server) = Server::start("paste-plain", "/dev/null", &cmd, (100, 30)) else { return };
+        let view = server.open(90, 25);
+        server.wait("the view's client attached", |s| s.run(&["list-clients", "-F", "#{session_name}"]).contains(view.name()));
+        server.wait("the pane's command started", |_| plain.exists());
+        server.run(&["copy-mode", "-t", "agents:a1"]);
+        view.write(first);
+        let want: &[u8] = b"line one\rline two";
+        server.wait("the paste reached the pane that didn't ask", |_| std::fs::read(&plain).unwrap_or_default().len() >= want.len());
+        assert_eq!(std::fs::read(&plain).unwrap(), want);
+        drop(view);
+        drop(server);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

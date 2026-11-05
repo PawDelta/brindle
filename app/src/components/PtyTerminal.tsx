@@ -34,8 +34,8 @@
    counts as the person's: no prompt to read the clipboard; one with no
    text reads the app's clipboard, `paste`); elsewhere ⌘V reads the app's
    clipboard, the webview's paste prevented. What's pasted goes to
-   the pane as xterm.js pastes (bracketed, where the program asked), and
-   nothing else does, once the view has drawn (DRAWN_WAIT). A press anywhere in
+   the pane bracketed (tmux passes the markers on only to a program that asked),
+   and nothing else does, once tmux has the terminal (ATTACH_WAIT). A press anywhere in
    the view, its margin too, gives xterm.js the keyboard, so the ⌘V after it
    reaches the pane; so does a view replacing one that had it, and a ⌘V with
    the keyboard on nothing goes to the view last used. A pane scrolled back
@@ -177,11 +177,9 @@ export const PASTE_WAIT = 3000;
 /* How long after that a webview paste of the same text is the late answer to that ⌘V, not pasted again. */
 export const LATE_PASTE_WINDOW = 10000;
 
-/* How long a paste waits for the view to show whether bracketed paste is on (a resume, a reconnect, the client still
-   attaching). tmux turns it on first thing, or (an older tmux) only for a pane that asked, so its first redraw ending
-   also says; a read can end anywhere, so the first bytes alone don't. Until then xterm.js says off: sent so, each line
-   would be an Enter that runs. With bytes come and neither by now, xterm.js's word is taken; with none, it's dropped. */
-export const DRAWN_WAIT = 5000;
+/* How long a paste waits for tmux to take the view's terminal (a resume, a reconnect, the client still attaching). A
+   read can end anywhere, so it's what xterm.js has parsed that says, not the first bytes. Not by now: dropped, and said. */
+export const ATTACH_WAIT = 5000;
 
 /* What a ⌘V with the keyboard elsewhere is meant for, and what a view leaves the keyboard on. */
 const TEXT_FIELD = "input, textarea, select, [contenteditable]";
@@ -302,37 +300,23 @@ export function PtyTerminal({ at, open, copy, paste, openUrl, onView, onSize }: 
       el.dataset.shown = String(shownCols());
     };
     layout();
-    // Whether bracketed paste is known (a paste waits for it, toPane): it's on, or the first redraw has ended (a
-    // synchronized update's end, parsed however its bytes were split). Also woken by the view ending, whose paste
-    // waits no more.
-    let drawn = false;
-    let bytesCame = false;
-    let redrawn = false;
+    // Whether tmux has taken the client's terminal (a paste waits for it, toPane): it switches to the alternate screen
+    // first thing, its pty raw by then, however the bytes were split. Also woken by the view ending, whose paste waits
+    // no more.
+    let attached = false;
     let ended: string | null = null;
     let wake = () => {};
     const woken = new Promise<void>((ok) => (wake = ok));
-    const redraws = term.parser?.registerCsiHandler({ prefix: "?", final: "l" }, (params) => {
-      if (params.includes(2026)) redrawn = true;
-      return false;
-    });
-    // Bytes come and neither by DRAWN_WAIT after the first: xterm.js's word is taken, by this paste and any after.
-    let settling: ReturnType<typeof setTimeout> | undefined;
-    const settled = () => {
-      drawn = true;
-      clearTimeout(settling);
-      redraws?.dispose();
+    const lookAttached = () => {
+      if (gone || attached || term.buffer.active.type !== "alternate") return;
+      attached = true;
       wake();
-    };
-    const lookDrawn = () => {
-      if (!gone && !drawn && (redrawn || term.modes.bracketedPasteMode)) settled();
     };
     const pty = open({ server, target }, { cols: term.cols, rows: term.rows }, {
       onData: (bytes) => {
         if (gone) return;
-        if (!bytesCame) settling = setTimeout(settled, DRAWN_WAIT);
-        bytesCame = true;
-        if (drawn) term.write(bytes);
-        else term.write(bytes, lookDrawn);
+        if (attached) term.write(bytes);
+        else term.write(bytes, lookAttached);
       },
       onCrop: (c) => {
         if (gone) return;
@@ -421,31 +405,29 @@ export function PtyTerminal({ at, open, copy, paste, openUrl, onView, onSize }: 
     el.addEventListener("copy", copying, true);
     // A paste that won't reach the pane, to the debug log while it's on: why, and its size, never its text.
     const dropPaste = (why: string, bytes: number) => logDebug("pty_view", "warning", `paste dropped: ${why}`, { bytes, target });
-    // What's pasted goes as xterm.js's paste would (its line ends a terminal's, bracketed where the program asked), but
-    // in its place in the line, not through term.paste (which would put it behind what was typed after). Once bracketed
-    // paste is known (DRAWN_WAIT): a client not yet attached also has a cooked pty. What's typed waits behind it, in the
-    // line.
+    // What's pasted goes as xterm.js's paste would (its line ends a terminal's), but in its place in the line, not
+    // through term.paste (which would put it behind what was typed after). Always bracketed, whatever xterm.js has
+    // parsed so far: tmux reads the markers, and passes them on only to a pane that asked (a_paste_reaches_...), so its
+    // Enters are never keys at the client. Once tmux has taken the client's terminal (ATTACH_WAIT), or a cooked pty
+    // would change them. What's typed waits behind it, in the line.
     const toPane = async (pasting: string) => {
       const bytes = pasting.length;
       const text = wellFormed(unbracketed(pasting)).replace(/\r?\n/g, "\r");
       if (!text) return dropPaste("the clipboard holds no text", bytes);
-      if (!drawn && !gone && !ended) {
+      if (!attached && !gone && !ended) {
         await new Promise<void>((ok) => {
-          const patience = setTimeout(ok, DRAWN_WAIT);
+          const patience = setTimeout(ok, ATTACH_WAIT);
           void woken.then(() => {
             clearTimeout(patience);
             ok();
           });
         });
-        // Bytes have begun, the enable perhaps half read: `settling` bounds this.
-        if (bytesCame) await woken;
       }
       if (gone) return dropPaste("the view closed first", bytes);
       if (ended) return dropPaste(ended, bytes);
-      if (!drawn) return dropPaste(`the view drew nothing within ${DRAWN_WAIT} ms`, bytes);
-      const bracketed = term.modes.bracketedPasteMode;
-      pty.write(bracketed ? `\x1b[200~${text}\x1b[201~` : text);
-      logDebug("pty_view", "info", "paste sent to the view", { bytes, bracketed, target });
+      if (!attached) return dropPaste(`tmux hadn't taken the view's terminal within ${ATTACH_WAIT} ms`, bytes);
+      pty.write(`\x1b[200~${text}\x1b[201~`);
+      logDebug("pty_view", "info", "paste sent to the view", { bytes, target });
     };
     // The app's clipboard, for a paste with no webview paste to go by. Null: nothing to paste, and why is said.
     const fromApp = (): Promise<string | null> => {
@@ -598,7 +580,6 @@ export function PtyTerminal({ at, open, copy, paste, openUrl, onView, onSize }: 
     observer?.observe(el);
     return () => {
       gone = true;
-      clearTimeout(settling);
       wake();
       if (lastFocused === el) lastFocused = null;
       clearTimeout(hide);
