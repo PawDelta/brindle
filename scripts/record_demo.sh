@@ -165,15 +165,27 @@ progress() {
     (cd "$DEMO" && uv run --project "$PROJECT" brindle autopilot 2>/dev/null) || true
 }
 
+# Nobody is at the keyboard: a Claude Code permission prompt would hold the run
+# until the timeout, so take its first choice (Yes, this once).
+answer_prompts() {
+    local pane
+    for pane in $("${TMUX_CMD[@]}" list-panes -a -F '#{pane_id}' 2>/dev/null); do
+        if "${TMUX_CMD[@]}" capture-pane -p -t "$pane" 2>/dev/null | grep -q 'Do you want to proceed?'; then
+            "${TMUX_CMD[@]}" send-keys -t "$pane" 1 2>/dev/null || true
+        fi
+    done
+}
+
 # Poll the goal until every milestone is verified, or the hard timeout hits.
 start=$(date +%s)
 done_at=""
 while kill -0 "$REC_PID" 2>/dev/null; do
     now=$(date +%s)
     if (( now - start > TIMEOUT )); then
-        echo "record_demo: timeout after ${TIMEOUT}s; closing the demo session" >&2
-        break
+        echo "record_demo: timeout after ${TIMEOUT}s; closing the demo session, keeping the old GIF" >&2
+        exit 1
     fi
+    answer_prompts
     p=$(progress)
     if [[ -z $done_at ]]; then
         total=$(printf '%s\n' "$p" | sed -n 's/^\([0-9]*\) of \([0-9]*\) milestones verified\./\1 \2/p')
