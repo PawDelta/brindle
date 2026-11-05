@@ -397,6 +397,16 @@ LOOP = "until s=$(gh run view 1 --json status --jq .status); [[ $s == completed*
     _split("echo a | perl -I -e x"),                  # -e is -I's value
     _split("echo a | node -r -e x"),
     _split("echo ls | bash -c -- 'sh'"),
+    _split("echo a | zsh -f -o SHIN_STDIN ignored"),  # the option makes it run its input, and ignored an argument
+    _split("true; echo a | zsh -f -o stdin ignored"),
+    _split("echo a | zsh --shinstdin ignored"),
+    _split("echo a | sh -eo stdin ignored"),
+    _split("echo a | lua -e x -"),
+    _split("echo a | PYTHONINSPECT=1 python3 -c 'pass'"),
+    _split("echo a | env PYTHONINSPECT=1 python3 -c 'pass'"),
+    _split("export PYTHONINSPECT=1; echo a | python3 -c 'pass'"),
+    _split("echo a | bash /dev/./stdin"),
+    _split("echo a | python3 //dev/stdin"),
     _split("echo a | bash -s"),
     _split("bash --unknown -c 'ls'"),                 # what it consumes decides which word runs
     _split("trap -Z 'ls' EXIT"),
@@ -427,6 +437,7 @@ LOOP = "until s=$(gh run view 1 --json status --jq .status); [[ $s == completed*
     ("cat x.json | python3 -W ignore -uc 'print(1)'", "allow"),
     ("cat x.json | perl -ne 'print'", "allow"),
     ("bash -euo pipefail -c 'git status'", "allow"),
+    ("echo a | zsh -f script.zsh", "allow"),
     # A shell's and a trap's literal code is read as if written out.
     ("trap 'rm -f tmp' EXIT", "allow"),
     _bypass("bash -lc 'git status; git reset --hard'"),

@@ -4243,9 +4243,12 @@ _RUNS_ITS_INPUT = _SHELLS | _SOURCES | {"xargs", "parallel", "ssh", "at", "batch
 # The options by which an interpreter is given its code in the next word, so what it reads is only
 # data; any other's: -e.
 _SOURCE_OPTIONS = {"node": r"-e|-p|--eval|--print", "php": r"-r|-f"}
-_STDIN_NAMES = ("-", "/dev/stdin", "/dev/fd/0")
-# A shell's options, read in full: which of them take a value decides which word is the code.
-_SHELL_FLAGS = frozenset("aBCeEfhHiklmnpPrtTuvx")
+_STDIN_NAMES = ("-", "/dev/stdin", "/dev/fd/0", "/proc/self/fd/0")
+# A shell's options, read in full: which of them take a value decides which word is the code, and
+# some choose it (-s; zsh's -o SHIN_STDIN). Only what's known to do neither, in any shell.
+_SHELL_FLAGS = frozenset("efilnuvx")
+_SHELL_OPTION_NAMES = frozenset({"pipefail", "errexit", "nounset", "xtrace", "verbose", "noglob", "noclobber", "posix",
+                                 "extglob", "globstar", "nullglob"})
 _SHELL_VALUED = ("--rcfile", "--init-file")
 _SHELL_LONGS = ("--norc", "--noprofile", "--login", "--posix", "--noediting", "--verbose", "--restricted")
 # These change what a later word of the script runs.
@@ -4261,7 +4264,7 @@ _SUBSCRIPT = re.compile(r"\[[^\]]*[$`]")
 _EVALUATES_NAMES = frozenset({"declare", "typeset", "local", "readonly", "export", "read", "unset", "mapfile",
                               "readarray", "getopts", "test", "[", "let"})
 # Variables that change which program runs or what it loads.
-_PROGRAM_VARIABLES = re.compile(r"(PATH|LD_\w+|DYLD_\w+|BASH_ENV|ENV|IFS|CDPATH)=")
+_PROGRAM_VARIABLES = re.compile(r"(PATH|LD_\w+|DYLD_\w+|BASH_ENV|ENV|IFS|CDPATH|ZDOTDIR|PYTHONINSPECT)=")
 _OUTPUT_REDIRECTS = (">", ">>", ">|", "&>", "&>>", "<>")
 _REDIRECTS = (*_OUTPUT_REDIRECTS, "<", "<<<", ">&", "<&")
 
@@ -4311,6 +4314,11 @@ class _DenyMayCover(_Unverifiable):
     run it, and neither does the opt-in that runs what brindle can't read."""
 
 
+def _is_stdin(word: str | None) -> bool:
+    """Whether a script name is the program's own input, however it's spelled (/dev/./stdin)."""
+    return word is not None and os.path.normpath(re.sub(r"/+", "/", word)) in _STDIN_NAMES
+
+
 def _shell_source(program: str, args: list[str]) -> tuple[bool, str | None]:
     """Whether a shell's ``args`` give it code to run (-c) rather than a script, and
     that word; None: it runs what it reads. -c takes no value of its own: the code is
@@ -4338,11 +4346,14 @@ def _shell_source(program: str, args: list[str]) -> tuple[bool, str | None]:
             if not letters or not set(letters) <= _SHELL_FLAGS | {"c", "o", "O"}:
                 raise _Unverifiable("an option that may change which word runs")
             code |= arg[0] == "-" and "c" in letters
-            at += letters.count("o") + letters.count("O")
+            named = letters.count("o") + letters.count("O")
+            if not set(args[at:at + named]) <= _SHELL_OPTION_NAMES:
+                raise _Unverifiable("an option that may change which word runs")
+            at += named
     source = args[at] if at < len(args) else None
     if code and source is None:
         raise _Unverifiable("a -c with no code")
-    return code, None if not code and source in _STDIN_NAMES else source
+    return code, None if not code and _is_stdin(source) else source
 
 
 def _source_word(program: str, args: list[str]) -> str | None:
@@ -4355,7 +4366,7 @@ def _source_word(program: str, args: list[str]) -> str | None:
         while at < len(args):
             arg = args[at]
             at += 1
-            if arg in _STDIN_NAMES:
+            if _is_stdin(arg):
                 return None
             if not arg.startswith("-"):
                 return None if inspects else arg
@@ -4370,13 +4381,14 @@ def _source_word(program: str, args: list[str]) -> str | None:
                     return None if inspects or at >= len(args) else args[at]
         return None
     first = args[0] if args else None
-    if first is None or first in _STDIN_NAMES:
+    if first is None or _is_stdin(first):
         return None
     if not first.startswith("-"):
         return first
-    # Only as its first word: before it, an option may take any word as its value (perl -I -e).
+    # Only as its first word: before it, an option may take any word as its value (perl -I -e);
+    # and with nothing after it that goes on to run what it reads (lua -e x -).
     code = len(args) > 1 and re.fullmatch(_SOURCE_OPTIONS.get(program, r"-[a-zA-Z0-9]*[eE]"), first)
-    return args[1] if code else None
+    return args[1] if code and not any(arg in ("-", "-i") for arg in args[2:]) else None
 
 
 class _PartReader:
@@ -4621,6 +4633,8 @@ class _PartReader:
         fed = self.fed or bool(part.reads)
         if name in _INTERPRETERS or name in _SHELLS:
             code, source = _shell_source(name, args) if name in _SHELLS else (False, _source_word(name, args))
+            if name.startswith("python") and "PYTHONINSPECT=" in part.line:    # env PYTHONINSPECT=1 python3 -c x
+                source = None
             if source in part.unresolved or source is None and any(arg in part.unresolved for arg in args):
                 raise _Unverifiable(f"{name} runs what only the run knows")
             if source is None and fed:
