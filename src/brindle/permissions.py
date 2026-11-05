@@ -3956,14 +3956,15 @@ def _gives_input(token: tuple) -> bool:
 
 
 def _structure_fed(tokens: list[tuple]) -> bool:
-    """Whether a loop, an if or a group is given input (done < file, } <<EOF): all of it reads that."""
+    """Whether a loop, an if or a group is given input (done < file, } >out <<EOF): all of it
+    reads that, wherever in its redirections it comes."""
     for at, token in enumerate(tokens):
         if token[0] == "word" and token[1].raw in ("done", "fi", "}"):
-            rest = tokens[at + 1:at + 3]
-            if rest and rest[0][0] == "word" and rest[0][1].raw.isdigit():
-                rest = rest[1:]    # done 0< file
-            if rest and _gives_input(rest[0]):
-                return True
+            for after in tokens[at + 1:]:
+                if after[0] == "op" and after[1] in _SCRIPT_SEPARATORS:
+                    break
+                if _gives_input(after):
+                    return True
     return False
 
 

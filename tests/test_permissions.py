@@ -403,6 +403,11 @@ LOOP = "until s=$(gh run view 1 --json status --jq .status); [[ $s == completed*
     _split("for S in sh; do $S <<<'echo hi'; done"),
     _split("S=sh; { $S; } <<'EOF'\necho hi\nEOF"),
     _split("S=sh; for i in a; do $S; done <<'EOF'\necho hi\nEOF"),
+    _split("S=sh; { $S; } >/dev/null <<'EOF'\necho hi\nEOF"),     # wherever in its redirections it comes
+    _split("S=sh; for i in a; do $S; done >/dev/null <<<'echo hi'"),
+    _split("S=sh; while true; do $S; done 2>&1 3>x 0< x.sh"),
+    _split("S=sh; if true; then $S; fi 2>/dev/null < x.sh"),
+    _split("{ sh; } >/dev/null <<<'ls'"),
     _split("S=sh; x=$($S <<<'echo hi')"),
     _split("bash -c 'S=sh; $S <<<ls'"),
     _split("S=sqlite3; $S db <<<'.shell ls'"),
@@ -453,6 +458,8 @@ LOOP = "until s=$(gh run view 1 --json status --jq .status); [[ $s == completed*
     ("bash -euo pipefail -c 'git status'", "allow"),
     ("echo a | zsh -f script.zsh", "allow"),
     ("S=cat; $S <<<'safe'", "allow"),
+    ("{ git status; } >/dev/null; cat <<<'safe'", "allow"),      # another command's input is its own
+    ("for i in a; do git status; done 2>&1 | cat", "allow"),
     ("S=git; $S commit -F - <<'EOF'\nmessage\nEOF", "allow"),
     ("exec 2>/dev/null; ls", "allow"),
     # A shell's and a trap's literal code is read as if written out.
