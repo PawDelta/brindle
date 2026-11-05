@@ -314,7 +314,15 @@ LOOP = "until s=$(gh run view 1 --json status --jq .status); [[ $s == completed*
     ("cat <<'EOF' | grep x\nbash and python are only text here\nEOF", "allow"),     # a heredoc to a program as data
     ("git status; bash build.sh; cat > notes.md <<'EOF'\nprintenv\nEOF", "allow"),  # the shell reads another command's
     ("bash -c 'git status; ls'", "allow"),                                          # content it can check
-    ("trap 'echo done' EXIT", "allow"),
+    ("trap 'echo done' EXIT; trap -- 'echo done' INT; trap - INT; trap -p", "allow"),
+    ("git log | bash scripts/filter.sh; command -v eval; watch -n1 'git status'", "allow"),
+    ("(git status) 2>&1", "allow"),                                             # a descriptor alone is no program
+    # Python is read from its syntax: what it edits or prints is only a string.
+    ("python3 - <<'EOF'\np='a.py'\ns=open(p).read().replace('subprocess.run(a) `x`', 'os.system(b)')\nEOF", "allow"),
+    ("gh pr checks 1 | awk -F'\\t' '{print $2\" | \"$1}' | awk '/^a|^b/,/c/' | sort", "allow"),   # a | that runs nothing
+    ("python3 -c 'import importlib.metadata as m, json; print(m.version(json.__name__), json.__version__)'", "allow"),
+    ("python3 -c 'print(1)'; grep -n 'subprocess.run(' notes.md", "allow"),     # another command's quoted word
+    ("sed -i '' s/a/b/ notes.md; sed -n 1,5p notes.md; awk '$1 > 5 || /a/' notes.md", "allow"),
     ("x=$(git log -1); [[ $x == a* ]] && eval 'git status'", "allow"),
     # A cd that may not run: it leads there or stays, and what's read must be clear in both.
     ("cd sub; git log -1 | head -5", "allow"),
@@ -349,6 +357,17 @@ LOOP = "until s=$(gh run view 1 --json status --jq .status); [[ $s == completed*
     _bypass("x='git reset --hard'; bash -c \"$x\""),
     _bypass("trap 'git push --force origin x' EXIT"),
     _bypass("trap 'printenv' EXIT"),
+    _bypass("trap -- 'git push --force origin x' EXIT"),
+    _bypass("trap -- 'rm -rf /' EXIT"),
+    _bypass("builtin trap -- 'git push --force origin x' EXIT"),
+    _bypass("command eval 'git push --force origin x'"),
+    _bypass("env -S 'git push --force origin x'"),
+    _bypass("watch 'git push --force origin x'"),
+    _bypass("su root -c 'git reset --hard'"),
+    _bypass("su -c'git reset --hard'"),
+    _bypass("script -qc 'rm -rf /' /dev/null"),
+    _bypass("tmux new-session -d 'git push --force origin x'"),
+    _bypass("tmux new 'printenv'"),
     _bypass("eval 'git push --force origin x'"),
     _bypass("sudo rm -rf /"),
     _bypass("timeout 5 rm -rf ~"),
@@ -376,6 +395,47 @@ LOOP = "until s=$(gh run view 1 --json status --jq .status); [[ $s == completed*
     _held("python3 - <<'EOF'\nimport os\nos.system('git push --force origin x')\nEOF"),
     _held("python3 - <<'EOF'\nimport subprocess\nsubprocess.run(\n    ['git', 'reset', '--hard'])\nEOF"),
     _held("python3 -c 'import os; os.system(\"rm -rf /\")'"),
+    # However the source is laid out or spelled: a call's arguments far below it, a variable above it, an alias.
+    _held("python3 - <<'EOF'\nimport subprocess\nsubprocess.run(\n\n\n\n\n\n['git','push','--force','origin','x'])\nEOF"),
+    _held("python3 - <<'EOF'\ncmd = 'rm -rf /'\nprint(1)\nprint(2)\nprint(3)\nprint(4)\nimport os\nos.system(cmd)\nEOF"),
+    _held("python3 -c 'from subprocess import run; run(\"git reset --hard\", shell=True)'"),
+    _held("python3 -c '__import__(\"os\").system(\"rm -rf /\")'"),
+    _held("python3 -c 'import os,sys; os.system(sys.argv[1])' 'git push --force origin x'"),
+    _held("python3 -c 'import os; os.system(\"git push origin main\")'"),    # an ask rule's too
+    _held("python3 -c 'import os; os.system(\"printenv\")'"),                # no rule, a credential dump
+    _held("python3 -c 'import os; os.system(\"gi\" + \"t reset --hard\")'"),   # no rule's text anywhere
+    _held("python3 -c'import os; os.system(\"rm -rf /\")'"),                 # attached to its flag
+    _held("python3 -c import\\ os\\;os.system\\(\\\"ls\\\"\\)"),             # escaped, not quoted
+    _held("python3 - <<'EOF'\nimport asyncio\nasyncio.create_subprocess_shell('ls')\nEOF"),
+    _held("python3 - <<'EOF'\nfrom os import posix_spawn\nEOF"),
+    _held("python3 - <<'EOF'\nf = eval\nf('1')\nEOF"),
+    _held("python3 - <<'EOF'\nimport os\ngetattr(os, 'sys' + 'tem')('ls')\nEOF"),
+    _held("python3 - <<'EOF'\nprint(().__class__.__base__.__subclasses__())\nEOF"),
+    _held("python3 - <<'EOF'\nimport pty as p\np.spawn('sh')\nEOF"),
+    _held("python3 - <<'EOF'\nimport importlib.metadata\nimportlib.import_module('os')\nEOF"),
+    _held("python3 - <<'EOF'\nnot python ( os.system('ls')\nEOF"),                # doesn't parse: read as text
+    _held("node -e 'const c = `x`; require(\"child_process\").execSync(\"ls\")'"),
+    _held("echo 'import os; os.system(\"ls\")' | python3"),
+    _held("x='import os; os.system(\"ls\")'; python3 -c \"$x\""),
+    _held("bash -c \"python3 -c 'import os; os.system(\\\"ls\\\")'\""),      # inside what a shell runs
+    _held("eval \"python3 -c 'import os; os.system(\\\"ls\\\")'\""),
+    _held("awk 'BEGIN{system(\"printenv\")}'"),
+    _held("awk 'BEGIN{print | \"sh\"}'"),
+    _held("sed 's/a/printenv/e' notes.md"),
+    _held("sed 's#a#b#ge;p' notes.md"),
+    _held("sed -n -e '1e date' notes.md"),
+    _bypass("(git push --force origin x) 2>&1"),
+    _held("perl -e '`git push --force origin x`'"),
+    _held("ruby -e 'system(\"git reset --hard\")'"),
+    _held("awk 'BEGIN{system(\"git push --force origin x\")}'"),
+    _held("sed 's/a/git reset --hard/e' notes.md"),
+    # A shell running what a pipe feeds it.
+    _held("echo 'git push --force origin x' | sh"),
+    _held("printf x | bash -s"),
+    _held("cat x.sh | bash"),
+    _held("git log | while read x; do sh; done"),
+    _held("trap -x 'rm -rf /' EXIT"),
+    _held('trap -- "$X" EXIT'),
     _held("""trap "git status; $X" EXIT"""),
     # A [[ whose operands are arithmetic runs what's in them, however it's quoted.
     _held("[[ 'a[$(git push --force origin x)]' -eq 0 ]]"),

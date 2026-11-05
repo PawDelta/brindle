@@ -78,6 +78,7 @@ rule on its own: a pattern approved at least SUGGEST_AFTER times is shown by
 
 from __future__ import annotations
 
+import ast
 import fnmatch
 import functools
 import glob
@@ -3444,7 +3445,7 @@ def _heredoc_data(body: str) -> bool:
     return bool(ends) and ends[0] == len(lines) - 1
 
 
-def _may_restrict(rule: Rule, command: str, *, code: bool = False) -> bool:
+def _may_restrict(rule: Rule, command: str) -> bool:
     """Whether ``rule`` could match ``command`` once the shell expands it:
     the text the rule needs appears in the command, as written or with its
     quotes and escapes removed (``r''m -r\\f`` is ``rm -rf``). Expansions
@@ -3452,9 +3453,8 @@ def _may_restrict(rule: Rule, command: str, *, code: bool = False) -> bool:
     ``{r,}m``) could produce any text, so they always could. A pathname
     pattern (``[p]ush``, ``--f*``) could be any word it matches; heredoc
     bodies are never expanded into names. Single-quoted text is never
-    expanded either (``awk '{print $1}'``). ``code``: ``command`` is an
-    interpreter's source, which no shell expands, so only its text counts."""
-    if not code and re.search(r"\$['\"{\w@*#?!$-]|\{[^}\s]*,", _unquoted(command)):
+    expanded either (``awk '{print $1}'``)."""
+    if re.search(r"\$['\"{\w@*#?!$-]|\{[^}\s]*,", _unquoted(command)):
         return True
     # The shell deletes \<newline> before anything else: r\<newline>m is rm.
     text = command + "\n" + re.sub(r"[\"'\\]", "", command.replace("\\\n", ""))
@@ -3942,6 +3942,56 @@ def _heredoc_readers(tokens: list[tuple]) -> set[str]:
     return readers
 
 
+def _pipes_into_shell(tokens: list[tuple]) -> bool:
+    """Whether a shell in ``tokens`` runs what a pipe feeds it: to the right of
+    a pipe, with neither a script file nor -c (or with -s). A compound command
+    to the right of one passes the pipe to everything inside it."""
+    segment: list[str] = []
+    piped = False
+    for token in [*tokens, ("op", ";", False)]:
+        if token[0] == "word":
+            segment.append(token[1].raw)
+            continue
+        if token[0] != "op" or token[1] not in ("|", "|&", *_SCRIPT_SEPARATORS):
+            continue
+        at = next((n for n, word in enumerate(segment) if os.path.basename(word.strip("\"'")) in _SHELLS), None)
+        if piped and at is not None:
+            rest = segment[at + 1:]
+            if any(re.fullmatch(r"-[A-Za-z]*s[A-Za-z]*", word) for word in rest) or (
+                    _shell_script(rest) is None and not any(word != "-" and word[:1] not in "-+" for word in rest)):
+                return True
+        compound = piped and segment[:1] and segment[0] in ("while", "until", "for", "if", "{")
+        piped = token[1] in ("|", "|&") or bool(compound) or (piped and token[1] not in ("|", "|&") and not segment)
+        segment = []
+    return False
+
+
+def _behind_builtins(words: list[str]) -> list[str]:
+    """``words`` without what leaves a builtin the builtin in front of it, as
+    written when it only looks a name up (command -v eval)."""
+    at = 0
+    while at < len(words) and os.path.basename(words[at]) in _BUILTIN_PREFIXES:
+        at += 1
+        while at < len(words) and words[at].startswith("-"):
+            if re.fullmatch(r"-[A-Za-z]*[vV][A-Za-z]*", words[at]):
+                return words
+            at += 1
+    return words[at:] or words
+
+
+def _string_operands(args: list[str]) -> list[str]:
+    """The words of a program in _RUNS_A_STRING that may be a command string:
+    its operands, and a value attached to an option (-c'x y', --command=x)."""
+    out = []
+    for arg in args:
+        attached = re.fullmatch(r"--[\w-]+=(.+)|-[A-Za-z]*c(.+)", arg, re.DOTALL)
+        if not arg.startswith("-"):
+            out.append(arg)
+        elif attached:
+            out.append(attached.group(1) or attached.group(2))
+    return out
+
+
 def _dq_escaped(text: str) -> str:
     return re.sub(r'([\\"$`])', r"\\\1", text)
 
@@ -4189,15 +4239,42 @@ def _flat_script(command: str, cwd: str) -> str | None:
 _CODE_RUNNERS = _STDIN_RUNNERS | {"python", "python3", "node", "ruby", "perl", "php", "osascript", "deno", "bun",
                                   "lua", "Rscript", "irb", "swift"}
 # Programs that run another program named among their arguments.
-_WRAPPERS = _STDIN_RUNNERS | {"builtin", "stdbuf", "caffeinate", "flock", "unbuffer", "chroot"}
+_WRAPPERS = _STDIN_RUNNERS | {"builtin", "stdbuf", "caffeinate", "flock", "unbuffer", "chroot", "script", "runuser",
+                              "sg", "setsid", "ionice", "taskset", "nsenter", "dtach", "screen"}
 _SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "fish"})
 # Fed a heredoc, these run its lines as commands: brindle doesn't take that for data, whatever
 # the store answers for what no rule covers. (The other _STDIN_RUNNERS only pass it on.)
+# In source given to an interpreter, whatever may start a process or build code to run, however it
+# is laid out: no rule's text is looked for, so no spelling or concatenation of a command hides one.
+_RUNS_A_PROCESS = re.compile(r"\w*subprocess\w*|\w*spawn\w*|\w*[Pp]open\w*|child_process|\bsystem\s*[(\"']|\.system\b"
+                             r"|\w*exec(?:[lv]\w*|Sync|File\w*|ute)?\s*[(\"']|\.exec\w*"
+                             r"|\bimport\b[^\n]*\b(?:system|exec\w*)\b|\bqx\b|%x|passthru|proc_open|Open3|Deno\.|Bun\."
+                             r"|do shell script|\bopen\b[^\n]*\||__import__|importlib|\beval\b|\bgetattr\b|ctypes"
+                             r"|pickle|marshal|process\.binding")
+_BACKTICK_RUNNERS = frozenset({"perl", "ruby", "php"})    # elsewhere a backtick is text, or a template string
+# In Python's syntax: modules that run things, names that do (os.system, posix_spawn,
+# create_subprocess_exec, __class__ and its kin), and builtins that build code or reach an attribute by name.
+_PYTHON_RUNNERS = frozenset({"subprocess", "pty", "multiprocessing", "ctypes", "cffi", "importlib", "runpy", "pickle",
+                             "marshal", "shelve", "dill", "code", "codeop", "pexpect", "sh", "plumbum", "fabric",
+                             "invoke", "commands", "popen2", "pipes", "webbrowser", "pydoc"})
+_PYTHON_CALLS = re.compile(r"system|exec|spawn|[Pp]open|subprocess|fork|startfile|\bmodules\b|attrgetter|methodcaller"
+                           r"|import_module|__(?!(?:name|file|doc|init|version)__\b)\w+__")
+_PYTHON_BUILTINS = frozenset({"eval", "compile", "getattr", "setattr", "globals", "locals", "vars", "breakpoint",
+                              "__import__"})
 _SOURCES = frozenset({"source", ".", "eval"})
-_RUNS_ITS_INPUT = _SHELLS | _SOURCES | {"xargs", "parallel", "ssh"}
+_RUNS_ITS_INPUT = _SHELLS | _SOURCES | {"xargs", "parallel", "ssh", "at", "batch"}
 # Wrappers whose own options _credential_words doesn't read.
 _RUNS_ITS_ARGUMENTS = frozenset({"timeout", "nice", "time", "xargs", "parallel", "stdbuf", "caffeinate", "flock",
-                                 "unbuffer", "chroot", "watch"})
+                                 "unbuffer", "chroot", "watch", "runuser", "sg", "setsid", "ionice", "taskset",
+                                 "nsenter", "dtach"})
+# Programs that hand a string of theirs to a shell (watch 'x', su -c 'x', script -c 'x'):
+# any operand may be one. tmux only in the subcommands that do.
+_RUNS_A_STRING = frozenset({"watch", "su", "runuser", "sg", "script", "flock", "parallel", "ssh", "screen", "tmux"})
+_TMUX_RUNNERS = frozenset({"new", "new-session", "new-window", "neww", "split-window", "splitw", "run-shell", "run",
+                           "send-keys", "send", "respawn-pane", "respawnp", "respawn-window", "respawnw",
+                           "display-popup", "popup", "if-shell", "if"})
+# Words in front of a builtin that leave it the builtin (command eval, builtin trap, time eval).
+_BUILTIN_PREFIXES = ("command", "builtin", "time")
 # What may join the words of a [[ ... ]]: comparisons and a regex's alternatives, none of them run.
 _TEST_OPERATORS = ("&&", "||", "<", ">", "|")
 # [[ evaluates these operands as arithmetic, which runs any $(...) in them, single-quoted or
@@ -4316,6 +4393,10 @@ class _PartReader:
         tokens = _script_tokens(command, credential_scan=True)
         if tokens is None:
             raise _Malformed("unclosed syntax")
+        # Here, so what eval, sh -c or trap runs is held to it too. What a credential scan
+        # finds in such source it decides itself (it reads the text for stores).
+        if not self.credential_scan and _source_may_run(tokens):
+            raise _DenyMayCover("an interpreter's source can start a process, and brindle can't read what it runs")
         try:
             _script_tree(_script_items(tokens))
         except _Malformed:
@@ -4323,8 +4404,8 @@ class _PartReader:
         except ValueError:
             pass    # syntax that's fine but isn't read (a case, a function): the flattener's to refuse
         readers = _heredoc_readers(tokens)
-        if readers & _RUNS_ITS_INPUT:
-            raise _Unverifiable("a heredoc a program runs as commands")
+        if readers & _RUNS_ITS_INPUT or _pipes_into_shell(tokens):
+            raise _Unverifiable("a shell runs its input as commands")
         if readers & _CODE_RUNNERS:
             raise ValueError("a heredoc a program may run as code")
         flattener = _Flattener(self.cwd or "", credential_scan=self.credential_scan)
@@ -4349,15 +4430,50 @@ class _PartReader:
 
     def run_script(self, script: str | None, known: bool) -> None:
         """Commands a part hands a shell of their own to run (bash -c '...',
-        trap '...' EXIT): read as if written out, or unverifiable."""
-        if script is None or not known:
-            raise _Unverifiable("a program runs commands only the run knows")
+        trap '...' EXIT): read as if written out, or unverifiable. A credential
+        scan keeps what it can find and goes on."""
         try:
+            if script is None or not known:
+                raise _Unverifiable("a program runs commands only the run knows")
             self.inner(script)
-        except _Unverifiable:
-            raise
         except ValueError as e:
-            raise _Unverifiable(f"a program runs commands brindle can't read: {e}") from e
+            if self.credential_scan:
+                self.unread = True
+                if script is not None:
+                    self.scan(script)
+            elif isinstance(e, _Unverifiable):
+                raise
+            else:
+                raise _Unverifiable(f"a program runs commands brindle can't read: {e}") from e
+
+    def strings(self, part: ShellPart, program: str, run: list[str]) -> None:
+        """What ``part`` hands a shell as a string, read as if written out. ``run``:
+        its words without what leaves a builtin the builtin (command trap '...')."""
+        known = not part.unknown
+        if os.path.basename(run[0]) == "trap":
+            args = run[1:]
+            if args[:1] == ["--"]:
+                args = args[1:]
+            elif args and args[0].startswith("-") and args[0] != "-":
+                if not re.fullmatch(r"-[lpP]+", args[0]):
+                    self.run_script(None, known)    # an option it doesn't know: anything may follow
+                return    # lists what's set, sets nothing
+            if args and args[0] not in ("-", ""):    # - resets it; "" ignores the signal
+                self.run_script(args[0], known)
+            return
+        if program in _WRAPPERS or program == "find":
+            at = next((n for n, w in enumerate(part.words) if os.path.basename(w) in _SHELLS), None)
+            script = _shell_script(part.words[at + 1:]) if at is not None else None
+            if script is not None:
+                self.run_script(script, known)
+        if program == "env":
+            for n, word in enumerate(part.words):
+                found = re.fullmatch(r"(?:--split-string=|-[A-Za-z]*S)(.+)", word, re.DOTALL)
+                if found or word in ("--split-string", "-S") and n + 1 < len(part.words):
+                    self.run_script(found.group(1) if found else part.words[n + 1], known)
+        if program in _RUNS_A_STRING and (program != "tmux" or _TMUX_RUNNERS & set(part.words)):
+            for operand in _string_operands(part.words[1:]):
+                self.run_script(operand, known)
 
     def part(self, line: str, definite: bool, chained: bool = False, leads: bool = False) -> None:
         """One simple command; ``chained``: it runs only if the one before it
@@ -4399,6 +4515,8 @@ class _PartReader:
                     part.written.pop()
                     part.patterned.pop()
                     part.references.pop()
+                    if not part.words:
+                        program = None    # (...) 2>&1: it was no program either
                 self.redirect(part, token[1], tokens[i + 1][1])
                 i += 2
                 continue
@@ -4457,23 +4575,18 @@ class _PartReader:
         evaluating = program in _EVALUATES_NAMES or program == "printf" and "-v" in part.words
         if program == "let" or evaluating and any(_SUBSCRIPT.search(word) for word in part.written):
             raise _Unverifiable(f"{program} evaluates its words, which may run what they hold")
-        if program == "eval" and not (part.unknown or part.expanded or part.writes or part.reads):
+        run = _behind_builtins(part.words)
+        runs = os.path.basename(run[0])
+        if runs == "eval" and not (part.unknown or part.expanded or part.writes or part.reads):
             # The command its literal words make, run where the eval runs (if it surely does).
-            self.read(" ".join(part.words[1:]), definite, chains=False)
+            self.read(" ".join(run[1:]), definite, chains=False)
             return
-        if program == "eval":
+        if runs == "eval":
             raise _Unverifiable("eval runs what only the run knows")
-        if program in ("source", ".") or program in _WRAPPERS and runner_unknown and not self.credential_scan:
+        if runs in ("source", ".") or program in _WRAPPERS and runner_unknown and not self.credential_scan:
             raise ValueError(f"{program} runs what only the run knows")
         self.parts.append(part)
-        if not self.credential_scan:    # prints_credentials follows a shell's command string itself
-            if program in _WRAPPERS or program == "find":
-                at = next((n for n, w in enumerate(part.words) if os.path.basename(w) in _SHELLS), None)
-                script = _shell_script(part.words[at + 1:]) if at is not None else None
-                if script is not None:
-                    self.run_script(script, not part.unknown)
-        if program == "trap" and part.words[1:] and not part.words[1].startswith("-"):
-            self.run_script(part.words[1], not part.unknown)
+        self.strings(part, program, run)
         if program in ("cd", "pushd"):
             # What runs only if the cd succeeded (cd x && ...) runs where it leads; anything else
             # after it (after ; or ||, past an if or a pipeline) runs where it may or may not have
@@ -4669,28 +4782,114 @@ def _without_pattern(part: ShellPart, *, scripts: bool = False) -> list[str]:
     return [*words[:at], "pattern", *words[at + 1:]]
 
 
-_RUNS_A_PROCESS = re.compile(r"\b(?:os\.system|system\(|popen|Popen|subprocess\.\w+|exec[lv]\w*|execSync|spawn\w*"
-                             r"|child_process|shell_exec|passthru|proc_open|do shell script)\b")
-_CALL_LINES = 4    # how far past a process call its arguments may run in source
+def _interpreter(word: str) -> bool:
+    return re.sub(r"[\d.]+$", "", os.path.basename(word)) in _INTERPRETERS
 
 
-def _interpreter_calls(command: str) -> list[str]:
-    """Where an interpreter in ``command`` is given source as text (heredoc
-    bodies, quoted words: python3 -c '...') the text at each call that starts
-    a process, its arguments on the lines after it: a script that only edits
-    a file mentions git without running it. Best effort, and text only: what
-    a program computes at run time is beyond it, as for a script in a file."""
-    tokens: list[tuple] = []
-    _script_tokens(command, credential_scan=True, partial=tokens)
-    words = [t[1].raw for t in tokens if t[0] == "word"]
-    if not any(re.sub(r"[\d.]+$", "", os.path.basename(w)) in _INTERPRETERS for w in words):
-        return []
-    sources = ["\n".join(t[1]) for t in tokens if t[0] == "heredoc"] + [w for w in words if w[:1] in ("'", '"')]
-    calls = []
-    for source in sources:
-        lines = source.split("\n")
-        calls += ["\n".join(lines[n:n + _CALL_LINES]) for n, line in enumerate(lines) if _RUNS_A_PROCESS.search(line)]
-    return calls
+def _interpreter_source(tokens: list[tuple]) -> tuple[list[str], list[str], set[str]]:
+    """The source an interpreter in ``tokens`` is given as text: the heredocs
+    it reads; the words beside it in its pipeline or any assignment's ("$x"
+    may be that), as written (python3 -c '...', -c'...', echo '...' | node);
+    and which interpreters. A word with no quote in it can't hold a call, and
+    a script in a file isn't here to read."""
+    words: list[str] = []
+    found: set[str] = set()
+    segment: list[str] = []
+    for token in [*tokens, ("op", ";", False)]:
+        if token[0] == "word":
+            segment.append(token[1].raw)
+        elif token[0] == "op" and token[1] in (";", "\n", "&&", "||", "&"):
+            here = {re.sub(r"[\d.]+$", "", os.path.basename(word)) for word in segment if _interpreter(word)}
+            found |= here
+            words += [w for w in segment if (here or _ASSIGNMENT.match(w)) and re.search(r"['\"\\]", w)]
+            segment = []
+    if not found:
+        return [], [], found
+    bodies = ["\n".join(t[1]) for t in tokens if t[0] == "heredoc"] if any(
+        _interpreter(word) for word in _heredoc_readers(tokens)) else []
+    return bodies, words, found
+
+
+def _word_source(word: str) -> str | None:
+    """What a word holds once the shell has read it, without a leading
+    ``name=`` or ``-c``: the text its code would be. None when it can't be read."""
+    try:
+        pieces = shlex.split(word)
+    except ValueError:
+        return None
+    if len(pieces) != 1:
+        return None
+    return re.sub(r"^(?:[A-Za-z_]\w*=|-[A-Za-z]+(?=\S)|--[\w-]+=)", "", pieces[0])
+
+
+def _python_may_run(source: str) -> bool | None:
+    """Whether Python ``source`` names what may start a process or build code
+    to run, read from its syntax: a string it edits or prints is only a string.
+    None when it doesn't parse as Python. Names only: a third-party module this
+    doesn't list, or a script in a file, isn't read."""
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        return None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            names, called = [alias.name for alias in node.names], ""
+        elif isinstance(node, ast.ImportFrom):
+            names, called = [node.module or ""], " ".join(alias.name for alias in node.names)
+        elif isinstance(node, ast.Name):
+            names, called = [], node.id
+        elif isinstance(node, ast.Attribute):
+            names, called = [], node.attr
+        else:
+            continue
+        if any(name != "importlib.metadata" and name.partition(".")[0] in _PYTHON_RUNNERS for name in names):
+            return True
+        if _PYTHON_CALLS.search(called) or isinstance(node, ast.Name) and node.id in _PYTHON_BUILTINS:
+            return True
+    return False
+
+
+def _source_may_run(tokens: list[tuple]) -> bool:
+    """Whether what ``tokens`` give an interpreter as text may start a process.
+    Python is read from its syntax; anything else, and what doesn't parse, as text."""
+    bodies, words, interpreters = _interpreter_source(tokens)
+    python = interpreters <= {"python", "pypy"}
+    for raw, text in [*((body, body) for body in bodies), *((word, _word_source(word)) for word in words)]:
+        answer = _python_may_run(text) if python and text is not None else None
+        if answer or answer is None and _RUNS_A_PROCESS.search(raw):
+            return True
+        if interpreters & _BACKTICK_RUNNERS and "`" in raw:
+            return True
+    return False
+
+
+_SED_RUNS = re.compile(r"(?:^|[;{}\n\d$/!,])\s*e(?:\s|$|[;}])|(?<![A-Za-z0-9\\])[A-Za-z0-9]*e[A-Za-z0-9]*\s*(?:[;}\n]|$)")
+
+
+def _program_may_run(program: str, args: list[str]) -> bool:
+    """Whether a sed or awk program given as text may start a process or load
+    code: sed's e command or s///e flag (any word ending a command that has an
+    e in it, whatever its delimiter), awk's system(), a pipe, getline or @load.
+    A program in a file (-f) isn't read, like any script in a file."""
+    if program == "sed":
+        scripts, operands, at = [], [], 0
+        while at < len(args):
+            arg = args[at]
+            if arg in SED_SCRIPT_OPTIONS:
+                at += 1
+                scripts += args[at:at + 1]
+            elif arg.startswith("--expression="):
+                scripts.append(arg.partition("=")[2])
+            elif arg.startswith("-e"):
+                scripts.append(arg[2:])
+            elif not arg.startswith("-") or arg == "-":
+                operands.append(arg)
+            at += 1
+        return any(_SED_RUNS.search(script) for script in scripts or operands[:1])
+    # A string or a regex's | runs nothing: only one after print or printf does, or a getline.
+    text = re.sub(r'"(?:[^"\\]|\\.)*"', '""', " ".join(args), flags=re.S)
+    return not _awk_readonly(args) and bool(
+        re.search(r"\bprintf?\b[^;}\n]*\||\b(?:system|getline|ARGV|ARGC)\b|@", text))
 
 
 def read_parts(req: Request, rules: list[Rule], checks: list[str] | None = None,
@@ -4707,11 +4906,6 @@ def read_parts(req: Request, rules: list[Rule], checks: list[str] | None = None,
 
     restrictions = [r for r in rules if r.kind == "bash" and r.decision in ("deny", "ask") and not r.expired()
                     and (not r.repo_root or bool(req.repo_root) and os.path.realpath(req.repo_root) == r.repo_root)]
-    if req.kind == "bash" and req.command and any(
-            rule.decision == "deny" and _may_restrict(rule, code, code=True)
-            for rule in restrictions for code in _interpreter_calls(req.command)):
-        covered("an interpreter's source starts a process a deny rule may cover")
-        return None
     parts = shell_parts(req, why)
     if parts is None:
         return None
@@ -4723,6 +4917,12 @@ def read_parts(req: Request, rules: list[Rule], checks: list[str] | None = None,
         # Every folder it may run in: a proof about what it names must hold in each.
         places = [at] if part.cwd is not None else [replace(req, cwd=place) for place in part.places]
         named, operands = _without_pattern(part), _without_pattern(part, scripts=True)
+        # A sed or awk program that isn't plainly a filter may run anything (system(), s///e): asked
+        # once at a time, unless a part's own subcategory denies it.
+        program = os.path.basename(part.words[0])
+        if restrictions and program in ("sed", "awk", "gawk", "mawk") and _program_may_run(
+                "sed" if program == "sed" else "awk", part.words[1:]):
+            found = found or _syntax_ask(req)
         if write_denies and any(not os.path.isabs(path) for path in part.writes):
             return None    # a file only the run names: a deny may cover it
         if path_denies and any(not os.path.isabs(path) for path in part.reads):

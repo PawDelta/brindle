@@ -902,9 +902,11 @@ Under Autonomous a command whose every part is allowed never prompts, and an
 ask from a supervisor, with nobody above it, goes straight to you. A deny on
 any part denies the whole command, however deep it sits. Whatever brindle can't
 check still asks: a heredoc fed to a shell, a command string only the run
-knows, syntax the shell itself would refuse, or an interpreter's source that
-starts a process a deny could cover. That last check reads the source as text,
-so what a program computes at run time is beyond it, as it is for any script.
+knows, syntax the shell itself would refuse, or source given to an interpreter
+(or a sed or awk program) that can start a process. Python is read from its
+syntax, so a script that only edits a file doesn't ask for the strings in it;
+other languages are read as text. A script in a file isn't read, as it never
+was, nor is what a third-party Python module does.
 
 Every preset also denies reading `~/.ssh`, `~/.aws`, `~/.gnupg`, `.env*` and
 the daemon's token, and asks before every push into a `release` or
