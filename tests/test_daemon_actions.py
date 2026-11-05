@@ -2124,7 +2124,7 @@ def test_a_background_setup_job_is_shared_while_it_runs_and_reports_on_the_bus(
         monkeypatch.setattr(routes_actions, "_run_upgrade", work)
     else:
         monkeypatch.setattr(codex_hook, "inspect", lambda binary, command=None: SimpleNamespace(command="hook"))
-        monkeypatch.setattr(codex_hook, "trust", lambda binary, st: work())
+        monkeypatch.setattr(codex_hook, "trust", lambda binary, st, *, turn_on: work())   # the person's own press
     code, reply = _send("POST", path)
     assert code == 202 and runs == [1] and again == [(202, reply)]
     events = bus.tail(db, kinds=("job.done", "job.failed"))

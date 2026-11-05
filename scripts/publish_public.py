@@ -26,7 +26,7 @@ import tarfile
 from pathlib import Path
 
 PUBLIC_REPO = "pawdelta/brindle"
-PUBLIC_PATHS = ["src", "README.md", "LICENSE", "SCHEDULE-A", "pyproject.toml"]
+PUBLIC_PATHS = ["src", "README.md", "docs/guide.md", "assets", "LICENSE", "SCHEDULE-A", "pyproject.toml"]
 ROOT = Path(__file__).resolve().parent.parent
 
 
