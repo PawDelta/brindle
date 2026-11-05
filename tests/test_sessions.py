@@ -294,10 +294,9 @@ def _the_app_daemon_pauses_on_its_way_out_and_the_next_start_resumes(db, root, m
     assert recoveries[-1].idle.wait(10), "the held resume never ended"
     assert events == [("stop", ["chat", "helper"])] and db.get_agent("chat").status == "paused"
     assert lifecycle._read_resume() == [{"id": "chat", "server": here, "paused": True}]
-    # The start after that brings it back, once, having stopped what the cull never did first:
-    # what was launched past the pause too (a queued task's helper), or it would stay stopped.
+    # The start after that brings it back, once, having stopped what the cull never did first.
     events.clear()
-    db.set_status("helper", "processing")
+    db.set_status("helper", "processing")   # launched past the pause (a queued task's helper): comes back too
     assert lifecycle.resume_after_start() == ["chat"]
     assert events == [("stop", ["chat", "helper"]), ("launch", "chat"), ("launch", "helper")]
 
@@ -336,12 +335,10 @@ def _the_app_daemon_pauses_on_its_way_out_and_the_next_start_resumes(db, root, m
     ("assign", "reported", "fixing", False, None, False, "processing", "missing check for None"),
     ("assign", "reported", "resolving", False, None, False, "processing", "conflicts with its base"),
     ("review", None, None, True, None, False, "processing", "continue your task"),
-    # Nothing to tell these: its plan waits on its supervisor; a queued message starts its turn.
-    ("assign", None, None, True, "proposed", False, "starting", None),
-    ("assign", None, None, True, None, True, "starting", None),
-    # Its report stands: the pipeline has its branch. And a fix round's branch merged by hand during the pause.
-    ("assign", "reported", "reviewing", True, None, False, "done", None),
-    ("assign", "reported", "fixing", True, "merged", False, "done", None),
+    ("assign", None, None, True, "proposed", False, "starting", None),      # its plan waits on its supervisor
+    ("assign", None, None, True, None, True, "starting", None),     # a queued message starts its turn
+    ("assign", "reported", "reviewing", True, None, False, "done", None),   # its report stands
+    ("assign", "reported", "fixing", True, "merged", False, "done", None),  # merged by hand during the pause
 ])
 def test_what_was_at_work_carries_on_after_a_pause_and_resume(
         db, root, monkeypatch, tmp_path, mode, result, stage, session, plan, queued, status, says):

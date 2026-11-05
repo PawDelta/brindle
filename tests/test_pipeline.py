@@ -407,30 +407,35 @@ def _reported_branch_in_a_paused_session(db, repo, monkeypatch):
 BLOCKER = "- blocker: missing check for None.\nNeeds supervisor action: None."
 
 
-@pytest.mark.parametrize("locked, restarted", [(None, ["boss", "w1"]), ("someone-else", ["boss"])])
-def test_a_verdict_landing_as_the_session_resumes_still_starts_its_fix_round(db, repo, monkeypatch, locked, restarted):
-    """Held while the chat is still paused, for a resume that already looked past its
-    worker. One locked to another identity stays paused (note_stalled tells its supervisor)."""
+@pytest.mark.parametrize("locked, race, restarted", [
+    (None, "held", ["boss", "w1"]),     # held while the chat is paused, past the resume's first look
+    ("someone-else", "held", ["boss"]),     # stays paused: note_stalled tells its supervisor
+    (None, "reopening", ["boss"]),      # past pipeline=fixing, about to reopen it itself: its launch, not ours
+    (None, "reopened", ["boss", "w1"]),     # reopened it after the first look: one launch, no stop
+])
+def test_a_verdict_landing_as_the_session_resumes_gets_one_fix_round(db, repo, monkeypatch, locked, race, restarted):
     from brindle import identity_lock
 
     ws, launched = _reported_branch_in_a_paused_session(db, repo, monkeypatch)
     add(db, ws, "rev", "review", "reviewer", parent="boss", status="done", result="no")
     monkeypatch.setattr(identity_lock, "locked_by", lambda agent_id: locked if agent_id == "w1" else None)
+    db.update_agent("w1", pipeline="fixing" if race == "reopened" else "reviewing")
     launch = agents._launch
-    def verdict_first(db_, a, ws_, **kw):
-        if a.id == "boss":
+    def racing(db_, a, ws_, **kw):
+        if a.id == "boss" and race == "held":
             assert pipeline.on_review(db, db.get_agent("rev"), ws, False, BLOCKER)
         launch(db_, a, ws_, **kw)
-    monkeypatch.setattr(agents, "_launch", verdict_first)
+        if a.id == "boss" and race != "held":
+            db.update_agent("w1", pipeline="fixing")
+            if race == "reopened":
+                agents.reopen_worker(db, db.get_agent("w1"), ws, BLOCKER)
+    monkeypatch.setattr(agents, "_launch", racing)
     agents.resume(db, "boss")
     assert [a for a, _ in launched] == restarted
-    assert db.get_agent("w1").pipeline == "fixing" and db.pending_count("w1") == 1
+    assert db.get_agent("w1").pipeline == "fixing" and db.pending_count("w1") == (race == "held")
 
 
-@pytest.mark.parametrize("summary, fix_round", [
-    (BLOCKER, True),
-    ("Needs supervisor action: ask the user about scope.", False),
-])
+@pytest.mark.parametrize("summary, fix_round", [(BLOCKER, True), ("Needs supervisor action: ask about scope.", False)])
 def test_a_verdict_that_outlives_the_pause_waits_for_the_resume(db, repo, monkeypatch, summary, fix_round):
     """Check runs and _finish-review outlive a pause: nothing starts, and nothing they say is lost."""
     ws, launched = _reported_branch_in_a_paused_session(db, repo, monkeypatch)
@@ -444,7 +449,7 @@ def test_a_verdict_that_outlives_the_pause_waits_for_the_resume(db, repo, monkey
         assert "missing check for None" in db.pop_pending("w1").body
     else:
         assert db.get_agent("w1").pipeline is None
-        assert "ask the user about scope" in db.pop_pending("boss").body
+        assert "ask about scope" in db.pop_pending("boss").body
 
 
 def test_branches_in_the_pipeline_carry_on_after_the_resume(db, repo, monkeypatch):

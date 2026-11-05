@@ -1776,6 +1776,16 @@ def _resume(db: DB, root_id: str, *, watch_pane: bool, only, recovery_env) -> li
         pilot.reload_goals_file(db, root_id)   # edits the person made to this session's goal file
     resumed = []
     for a in candidates:    # the chat comes first, and may add to this as it starts
+        if a.status == "done":
+            # Read when a verdict may have been reopening it (_send_back, under this lock, from
+            # pipeline=fixing to its launch): then the launch is the verdict's. Ours from here.
+            from brindle import pipeline
+
+            with pipeline.merge_lock(a.workspace_id):
+                current = db.get_agent(a.id)
+                if current is None or not restartable(current):
+                    continue
+                db.set_status(a.id, "paused")
         if a.status != "paused":
             if a.tmux_window and same_server(a) and owns_pane(db, a):
                 try:
@@ -1813,14 +1823,15 @@ def _resume(db: DB, root_id: str, *, watch_pane: bool, only, recovery_env) -> li
         if a.id == root_id:
             # A verdict held for this resume (pipeline._send_back) while the chat was still
             # paused, past the look above. Once this look is over the chat is running, so
-            # nothing more is held. Another identity's worker stays paused: note_stalled tells.
+            # nothing more is held. Only a held one: a done row may be a verdict's on its way
+            # to reopening it. Another identity's worker stays paused: note_stalled tells.
             from brindle import pipeline
 
             with pipeline.fix_round_hold():
                 known = {c.id for c in candidates}
                 candidates.extend(w for w in tree(db, root_id)
-                                  if w.id not in known and w.pipeline in BACK_AT_WORK and restartable(w)
-                                  and not identity_lock.locked_by(w.id))
+                                  if w.id not in known and w.status == "paused" and w.pipeline in BACK_AT_WORK
+                                  and restartable(w) and not identity_lock.locked_by(w.id))
     if any(a.id == root_id for a in resumed):
         knowledge.note(db, root_id, knowledge.RESUME)
         from brindle import pipeline, tasks
