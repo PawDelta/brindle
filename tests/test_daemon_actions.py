@@ -15,7 +15,7 @@ from conftest import run_scenario, sh
 from test_daemon_api import _repo_template, repo  # noqa: F401 - a copied template repo, not conftest's rebuild
 from test_reliability import CLAUDE_BUSY, CLAUDE_IDLE
 
-from brindle import agents, autopilot, bus, config, coordinator, demo, pipeline, preflight, providers, workspaces
+from brindle import agents, autopilot, bus, config, coordinator, pipeline, preflight, providers, workspaces
 from brindle.daemon import holds, peer, routes_actions
 from brindle.daemon.app import build_app
 from brindle.db import Agent, Workspace
@@ -331,7 +331,10 @@ def test_the_demo_runs_in_a_practice_repo_on_the_cli_signed_in(db, world, brindl
     assert len(made) == 1 and reply["repo"] == db.workspace_by_path(str(made[0])).repo_root
     assert demo_launches == [(reply["repo"], "codex")]
     # The flag /repos sends (the app hides it from New session's projects); a lookalike elsewhere is no demo.
-    assert demo.is_demo_repo(reply["repo"]) and not demo.is_demo_repo(brindle_home / "textkit-1")
+    look = str(brindle_home / "textkit-1")
+    db.add_workspace(Workspace("look/root", look, "root", "main", "main", "main", look, None, "brindle-look", time.time()))
+    flagged = {r["repo_root"]: r["demo"] for r in _send("GET", "/v1/repos")[1]}
+    assert flagged[reply["repo"]] is True and flagged[look] is False
     cfg = config.load_repo_config(reply["repo"])
     assert (cfg.routing["light"], cfg.review_profile) == (["developer-codex"], "reviewer-codex")
 

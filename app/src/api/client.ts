@@ -25,6 +25,7 @@ import type {
   PreflightItemDTO,
   ProfileDTO,
   ProviderConnectionDTO,
+  RepoDTO,
   RoutingDTO,
   SavedActionDTO,
   SessionDTO,
@@ -329,12 +330,7 @@ export interface Meta {
   airgap: boolean;
 }
 
-export interface Repo {
-  repo_root: string;
-  name: string;
-  /** brindle's practice repo (under the demo folder): not offered as a project. */
-  demo?: boolean;
-}
+export type Repo = RepoDTO;
 
 export interface Diff {
   workspace_id: string;
