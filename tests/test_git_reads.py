@@ -53,7 +53,7 @@ def asks(tmp_path, monkeypatch):
     return SimpleNamespace(seen=seen, config=home_config, asker=asker)
 
 
-def test_background_fetch_never_asks_for_credentials(tmp_path, asks):
+def test_background_fetch_never_asks_for_credentials(tmp_path, asks, monkeypatch):
     public = tmp_path / "public"
     repo = tmp_path / "repo"
     sh(f"git init -q --bare -b main {public} && git init -q -b main {repo}", tmp_path)
@@ -87,19 +87,28 @@ def test_background_fetch_never_asks_for_credentials(tmp_path, asks):
         git.fetch_remote_branch(repo, "main")
     assert "get" in asks.seen.read_text()
 
-    # Public HTTP and SSH refresh without any helper. The person's own ssh command is kept.
-    for origin in (f"{url}/public", f"ssh://example.invalid{public}"):
+    # Public HTTP and SSH refresh without any helper. The person's own ssh command is kept,
+    # and BatchMode comes first: ssh keeps the first value of an option.
+    ssh_log = tmp_path / "ssh-log"
+    fake_ssh = _script(tmp_path / "fake-ssh", f'echo "$@" >> "{ssh_log}"\nfor last; do :; done\neval "$last"')
+    ssh_url = f"ssh://example.invalid{public}"
+    for origin, ssh_command, bare_ssh in ((f"{url}/public", None, None), (ssh_url, f"{fake_ssh} -o BatchMode=no", None),
+                                          (ssh_url, None, str(fake_ssh))):
         sh(f"git remote set-url origin {origin}", repo)
         new = sh(f"git commit -q --allow-empty -m next && git push -q {public} HEAD:refs/heads/main"
                  " && git rev-parse HEAD", repo)
         sh("git update-server-info", public)
-        ssh_log = tmp_path / "ssh-log"
-        fake_ssh = _script(tmp_path / "fake-ssh", f'echo "$@" >> "{ssh_log}"\nfor last; do :; done\neval "$last"')
-        sh(f"git config core.sshCommand {fake_ssh}", repo)
+        sh("git config --unset-all core.sshCommand || true", repo)
+        if ssh_command:
+            git.run(["config", "core.sshCommand", ssh_command], repo)
+        if bare_ssh:
+            monkeypatch.setenv("GIT_SSH", bare_ssh)
+        ssh_log.write_text("")
         assert session_sync.fetch(str(repo), "main")
         assert sh("git rev-parse origin/main", repo) == new
         assert not git.fetch_refused(repo)
-    assert "BatchMode=yes" in ssh_log.read_text()
+        if origin == ssh_url:
+            assert ssh_log.read_text().startswith("-o BatchMode=yes")
     server.shutdown()
 
 
@@ -129,9 +138,9 @@ def test_agent_panes_sign_in_to_github_through_gh_without_the_keychain_helper(db
     git.run_env(["credential", "fill"], repo, env, input="protocol=https\nhost=example.com\n\n", check=False)
     assert "get" in asks.seen.read_text()   # another host keeps the person's own helpers
 
-    # A background fetch signs in the same way, so a repo that gh already serves keeps refreshing.
+    # gh signed in says nothing of a locked keychain behind its token: a background call has no helper at all.
     effective = git.background(["config", "--get-urlmatch", "credential.helper", "https://github.com"], repo)
-    assert effective.stdout.strip().endswith("auth git-credential")
+    assert effective.stdout.strip() == ""
 
 
 def test_branch_exists_is_cached(tmp_path, monkeypatch):

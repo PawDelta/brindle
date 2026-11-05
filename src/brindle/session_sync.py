@@ -188,9 +188,9 @@ def tell_refused_fetches(db: DB) -> None:
                 agents.send_message(db, row["root_id"], (
                     f"brindle can't refresh origin in {row['repo_root']} on its own: origin wants credentials, "
                     "and background fetches never ask for them (no keychain dialogs). New branches and syncs "
-                    "use origin as last fetched, so they may be behind it. `git fetch origin` in a terminal "
-                    "refreshes it now. An SSH remote with its key in ssh-agent, or for GitHub `gh auth login`, "
-                    "lets brindle refresh it itself."))
+                    "use origin as last fetched, so they may be behind it. `git fetch origin` refreshes it now "
+                    "(run by hand or in a pane, it may ask for credentials). An SSH remote with its key in "
+                    "ssh-agent lets brindle refresh it itself."))
             except agents.AgentError:
                 continue
             db.conn.execute("INSERT INTO fetch_refused_notices (root_id, repo_root, told_at) VALUES (?, ?, ?)",

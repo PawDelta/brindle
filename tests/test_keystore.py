@@ -3,8 +3,9 @@ import os
 from subprocess import CompletedProcess, TimeoutExpired
 
 import pytest
+from typer.testing import CliRunner
 
-from brindle import keystore
+from brindle import keys_cmds, keystore
 from brindle.keystore import CredentialError
 
 FAKE = "sk-ant-test-0123456789abcd"
@@ -64,29 +65,37 @@ def test_keychain_read_cached(monkeypatch, record, external):
     assert keystore.KeychainStore(service, account).load() is None
     assert store.load() is None
     assert calls.count("find-generic-password") == 7
-    now[0] += keystore.KEYCHAIN_READ_TTL
-    monkeypatch.setattr(keystore.KeychainStore, "_run", lambda self, args, stdin=None:
-                        calls.append(args[0]) or CompletedProcess(args, 1, FAKE, FAKE))
-    for _ in range(2):      # a cancelled dialog (or a locked keychain) is asked once, not at each poll
-        with pytest.raises(CredentialError) as exc:
-            keystore.KeychainStore(service, account).load()
-        assert FAKE not in str(exc.value)
-    assert calls.count("find-generic-password") == 8
-    monkeypatch.setattr(keystore.KeychainStore, "_run", run)
-    keystore.KeychainStore(service, account).save({"value": "replacement"})     # the person acted: ask again
-    assert keystore.KeychainStore(service, account).load() == {"value": "replacement"}
-    assert calls.count("find-generic-password") == 9
+
+    def fails_twice(fake_run, reads: int) -> None:
+        now[0] += keystore.KEYCHAIN_READ_TTL
+        monkeypatch.setattr(keystore.KeychainStore, "_run", fake_run)
+        before = calls.count("find-generic-password")
+        for _ in range(2):
+            with pytest.raises(CredentialError) as exc:
+                keystore.KeychainStore(service, account).load()
+            assert FAKE not in str(exc.value)
+        assert calls.count("find-generic-password") == before + reads
+
+    def exits(code):
+        return lambda self, args, stdin=None: calls.append(args[0]) or CompletedProcess(args, code, FAKE, FAKE)
 
     def unanswered(self, args, stdin=None):     # the dialog sat there until the read gave up
         calls.append(args[0])
         raise TimeoutExpired(args, 1)
 
-    now[0] += keystore.KEYCHAIN_READ_TTL
-    monkeypatch.setattr(keystore.KeychainStore, "_run", unanswered)
-    for _ in range(2):
-        with pytest.raises(CredentialError):
-            store.load()
-    assert calls.count("find-generic-password") == 10
+    fails_twice(exits(1), 2)                    # no dialog came of it: nothing to hold back
+    fails_twice(exits(128), 1)                  # a cancelled dialog is asked once, not at each poll...
+    os.utime(keystore._refused_marker(), (0, 0))
+    fails_twice(exits(128), 0)                  # ...however long the app stays open
+    assert CliRunner().invoke(keys_cmds.app, ["unblock"]).exit_code == 0
+    monkeypatch.setattr(keystore.KeychainStore, "_run", run)
+    before = calls.count("find-generic-password")
+    keystore.KeychainStore(service, account).load()
+    assert calls.count("find-generic-password") == before + 1
+    fails_twice(unanswered, 1)
+    monkeypatch.setattr(keystore.KeychainStore, "_run", run)
+    keystore.KeychainStore(service, account).save({"value": "replacement"})     # saving a key asks too
+    assert keystore.KeychainStore(service, account).load() == {"value": "replacement"}
 
 
 def test_file_backend_refuses_loose_permissions(brindle_home):

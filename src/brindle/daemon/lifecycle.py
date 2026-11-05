@@ -644,9 +644,6 @@ def serve(*, unix: bool = True, tcp: bool = False, idle_exit: bool = False) -> d
     from brindle import spawn
 
     spawn.enable()      # every process the daemon starts waits for room (brindle.spawn)
-    from brindle import keystore
-
-    keystore.forget_refused()
     from brindle.daemon.events import start_poller
 
     poller = start_poller()

@@ -644,8 +644,8 @@ def finish_review_inline(monkeypatch):
 @pytest.fixture(autouse=True)
 def gh_sign_in_unknown(monkeypatch):
     """No test asks the machine's real gh whether it's signed in: a pane's
-    environment and a background fetch would depend on who runs the suite.
-    tests/test_git_reads.py puts the real lookup back, with a fake gh."""
+    environment would depend on who runs the suite. tests/test_git_reads.py
+    puts the real lookup back, with a fake gh."""
     from brindle import git
 
     monkeypatch.setattr(git, "gh_credential_helper", lambda: None)

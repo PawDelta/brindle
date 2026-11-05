@@ -110,9 +110,11 @@ def ok(args: list[str], cwd: str | Path) -> bool:
 # What brindle fetches on its own (a session starting, a sync, a poll) must not
 # raise a dialog nobody can explain: on macOS git's keychain helper asks for the
 # login password whenever the git running here isn't the one approved in the
-# person's terminal. So these calls clear every credential helper and can't
-# prompt in any other way. What the person asked for (`git push`, `brindle pr`, a
-# named PR's branch) goes through ``run``, with their normal credentials.
+# person's terminal. So these calls clear every credential helper, gh's too (its
+# token read goes through `security`, which a locked keychain answers with a
+# dialog), and can't prompt in any other way. What the person asked for (`git
+# push`, `brindle pr`, a named PR's branch) goes through ``run``, with their
+# normal credentials.
 
 _GITHUB_HELPER = "credential.https://github.com.helper"
 GH_LOOKUP_SECONDS = 5.0
@@ -123,6 +125,8 @@ _FETCH_REFUSED = "brindle-fetch-refused"
 # as opposed to offline or no such repo.
 _REFUSED = re.compile(r"terminal prompts disabled|could not read (username|password)|authentication failed"
                       r"|permission denied|host key verification failed|returned error: 40[13]", re.IGNORECASE)
+# The program of an ssh command: past any NAME=value in front of it.
+_SSH_PROGRAM = re.compile(r"""\s*(?:\w+=\S*\s+)*('[^']*'|"[^"]*"|\S+)""")
 
 
 def gh_credential_helper() -> str | None:
@@ -153,7 +157,10 @@ def pane_git_config() -> str | None:
 
     Not GIT_CONFIG_COUNT and its GIT_CONFIG_KEY_<n>: a name with KEY in it is
     what environment filters drop (brindle's own, Codex's), and git refuses to
-    run at all with a count whose key went missing."""
+    run at all with a count whose key went missing.
+
+    gh reads its token through `security`, so a locked keychain can still ask
+    here: an agent's push is one at a time, not a poll."""
     helper = gh_credential_helper()
     if helper is None:
         return None
@@ -170,27 +177,34 @@ def _background_env(cwd: str | Path) -> dict[str, str]:
     about a host key), still with an agent's keys and the person's own command."""
     env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "", "SSH_ASKPASS": "",
            "SSH_ASKPASS_REQUIRE": "never", "LC_ALL": "C"}
+    if ssh := _batch_ssh(cwd):
+        env["GIT_SSH_COMMAND"] = ssh
+    return env
+
+
+def _batch_ssh(cwd: str | Path) -> str | None:
+    """The ssh command git would run, in BatchMode: right after the program,
+    as ssh keeps the first value of an option and the command may set its own.
+    None for PuTTY's, which takes no ``-o`` (and has no terminal to ask at here)."""
     try:
         ssh = os.environ.get("GIT_SSH_COMMAND") or run(["config", "--get", "core.sshCommand"], cwd,
                                                        check=False).stdout.strip()
     except GitError:
         ssh = ""
-    if ssh or "GIT_SSH" not in os.environ:      # GIT_SSH names a bare program: nowhere to put an option
-        env["GIT_SSH_COMMAND"] = f"{ssh or 'ssh'} -o BatchMode=yes"
-    return env
+    ssh = ssh or shlex.quote(os.environ.get("GIT_SSH") or "ssh")     # GIT_SSH: a bare program, no options
+    program = _SSH_PROGRAM.match(ssh)
+    if program is None or "plink" in os.path.basename(program.group(1).strip("'\"")).lower():
+        return None
+    return f"{ssh[:program.end()]} -o BatchMode=yes{ssh[program.end():]}"
 
 
 def background(args: list[str], cwd: str | Path,
                timeout: int | float | None = None) -> subprocess.CompletedProcess | None:
     """``git <args>``, a network call brindle starts on its own: it can't raise a
-    credential dialog. Only gh's helper stays (see pane_git_config), for github.com:
-    it doesn't prompt, and a repo that signs in through it keeps refreshing. None
-    when git couldn't run or finish; a failure is the caller's to read."""
-    helpers = ["-c", "credential.helper="]
-    if helper := gh_credential_helper():
-        helpers += ["-c", f"{_GITHUB_HELPER}={helper}"]
+    credential dialog. None when git couldn't run or finish; a failure is the
+    caller's to read."""
     try:
-        return run_env([*helpers, *args], cwd, _background_env(cwd), check=False, timeout=timeout)
+        return run_env(["-c", "credential.helper=", *args], cwd, _background_env(cwd), check=False, timeout=timeout)
     except GitError:
         return None
 
