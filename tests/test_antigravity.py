@@ -353,12 +353,21 @@ def test_interactive_supervisor_on_autonomous_needs_no_grants(db, ws, monkeypatc
         ("view_file", {"AbsolutePath": os.path.join(ws.path, ".env")}),
     ]:
         assert answer(tool, args)["decision"] == "deny", (tool, args)
-    # An ask has no prompt to wait at here. With no app to hold it for it's
-    # refused, never pointing at an allow rule, which can't lift an ask ...
+    # An ask has no prompt to wait at here. With no app to hold it for it's refused ...
     pushes = ["git push origin main", "git push origin HEAD:release/1.0"]
     for push in pushes:
-        refused = answer("run_command", {"CommandLine": push})
-        assert refused["decision"] == "deny" and "brindle permissions allow" not in refused["reason"]
+        assert answer("run_command", {"CommandLine": push})["decision"] == "deny"
+    # The default branch a push rule means is that of the repo it runs in, however it gets there.
+    trunk = tmp_path / "trunk-repo"
+    trunk.mkdir()
+    sh("git init -q -b trunk && git -c user.name=t -c user.email=t@example.com commit -q --allow-empty -m one", trunk)
+    assert answer("run_command", {"CommandLine": "git push origin trunk", "Cwd": str(trunk)})["decision"] == "deny"
+    assert answer("run_command", {"CommandLine": f"cd {trunk} && git push origin trunk"})["decision"] == "deny"
+    assert answer("run_command", {"CommandLine": f"git -C {trunk} push origin trunk"})["decision"] == "deny"
+    assert answer("run_command", {"CommandLine": "git push origin feat", "Cwd": str(trunk)})["decision"] == "allow"
+    permissions.forget("d-push-default")    # the preset's git/push-protected group still asks there
+    assert answer("run_command", {"CommandLine": "git push origin trunk", "Cwd": str(trunk)})["decision"] == "deny"
+    permissions.apply_preset("autonomous")
     # ... and with one, the person's answer in its Inbox decides.
     held = []
     monkeypatch.setattr(agents, "_hold_for_app", lambda db, agent, req, *a, **k: (held.append(req.command), "allow_once")[1])

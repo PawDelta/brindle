@@ -1093,7 +1093,8 @@ what Autonomous runs needs no grant, as on Claude Code: brindle's tools, other
 MCP servers, shell commands, and files or commands outside the worktree. Its
 denies still refuse the call. agy can't prompt in this mode, so an ask (a push
 into the default branch or `release/*`) waits in the app's Inbox while the app's
-daemon runs, and the session shows as waiting. With no daemon it's refused, and
+daemon runs, and the session shows as waiting. The default branch is that of the
+repo the push runs in (its folder, a `cd` or `git -C`). With no daemon it's refused, and
 the agent is told to say what it needs: you run it yourself in a terminal, or
 open the app and have it try again. `brindle permissions allow` doesn't lift an ask.
 A call brindle might read differently from agy (a relative or `~` path, a `..`,

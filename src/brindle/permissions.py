@@ -1511,16 +1511,23 @@ def _segments(command: str) -> list[list[str]]:
 
 def _git_calls(command: str) -> list[tuple[str, list[str]]]:
     """(subcommand, its arguments) for every git invocation in ``command``."""
+    return [(sub, args) for _, sub, args in _git_invocations(command)]
+
+
+def _git_invocations(command: str) -> list[tuple[list[str], str, list[str]]]:
+    """(its -C folders, subcommand, its arguments) for every git invocation in ``command``."""
     calls = []
     for words in _segments(command):
         for i, w in enumerate(words):
             if os.path.basename(w) != "git":
                 continue
-            rest, j = words[i + 1:], 0
+            rest, j, folders = words[i + 1:], 0, []
             while j < len(rest) and rest[j].startswith("-"):
+                if rest[j] == "-C" and j + 1 < len(rest):
+                    folders.append(rest[j + 1])
                 j += 2 if rest[j] in ("-C", "-c") else 1  # global options
             if j < len(rest):
-                calls.append((rest[j], rest[j + 1:]))
+                calls.append((folders, rest[j], rest[j + 1:]))
             break
     return calls
 
@@ -1677,7 +1684,29 @@ def push_matches(match: str, req: Request, loose: bool) -> bool:
     """Whether any git push in ``req``'s command fits push pattern ``match``."""
     if not req.command:
         return False
-    return any(push_fits(match, push, req.repo_root, loose) for push in push_calls(req.command))
+    pushes = push_calls(req.command)
+    if not pushes:
+        return False
+    # A deny or ask holds in any repo the command pushes from; an allow only if in all.
+    return (any if loose else all)(any(push_fits(match, push, repo, loose) for push in pushes)
+                                   for repo in push_repos(req))
+
+
+def push_repos(req: Request) -> list[str]:
+    """The repos the pushes in ``req``'s command run in, where a push pattern's
+    default branch is read: each one's folder's (its Cwd, then git -C), not
+    only the session's. The session's when git can't tell."""
+    from brindle import git
+
+    def repo_of(folders: list[str]) -> str:
+        folder = os.path.join(req.cwd or req.worktree or "", *map(os.path.expanduser, folders))
+        try:
+            return git.main_repo_root(folder) if folder else req.repo_root
+        except Exception:  # noqa: BLE001 - not a repo, or a folder only the run knows
+            return req.repo_root
+
+    return list(dict.fromkeys(repo_of(folders) for folders, sub, _ in _git_invocations(req.command or "")
+                              if sub == "push"))
 
 
 # -- read-only commands ---------------------------------------------------------------------------
