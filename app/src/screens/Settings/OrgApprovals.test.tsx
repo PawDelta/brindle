@@ -82,7 +82,7 @@ it("edits and clears a constructor role without reading inherited object propert
   refusal = { code: "scoped_save_unsupported", message: "The account server does not support saving approval limits alone yet." };
   click("Save approval limits");
   await waitFor(() => expect(screen.getByRole("button", { name: "Save approval limits" })).toHaveProperty("disabled", true));
-  expect(screen.getByRole("alert")).toBeTruthy();
+  await screen.findByRole("alert"); // the button is also disabled while the save is in flight, before the refusal shows
   expect(screen.getByLabelText("Maximum uses")).toHaveProperty("value", "11");
   expect(state.policy.permission_grants.max_uses).toBe(9);
 });
