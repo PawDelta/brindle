@@ -332,6 +332,8 @@ export interface Meta {
 export interface Repo {
   repo_root: string;
   name: string;
+  /** brindle's practice repo (under the demo folder): not offered as a project. */
+  demo?: boolean;
 }
 
 export interface Diff {
