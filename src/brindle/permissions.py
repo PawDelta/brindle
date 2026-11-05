@@ -2728,9 +2728,16 @@ def _credential_words(req: Request, part: ShellPart, words: list[str], depth: in
                 break
         return (program == "env" and index >= len(args)
                 or _credential_words(req, part, args[index:], depth + 1, references[index + 1:]))
-    if program in _RUNS_ITS_ARGUMENTS:
-        # Its options aren't read here: any word of it may start what it runs.
-        return any(_credential_words(req, part, words[i:], depth + 1, references[i:]) for i in range(1, len(words)))
+    if program == "find" or program in _WRAPPER_OPTIONS:
+        # What it really runs; if its options can't be read, any word of it may start that.
+        inner = _inner_commands(words)
+        if inner is None:
+            return any(_credential_words(req, part, words[i:], depth + 1, references[i:])
+                       for i in range(1, len(words)))
+        if inner != [words]:
+            return any(_credential_words(req, part, command, depth + 1, references[len(words) - len(command):])
+                       for command in inner)
+        return False
     if program in ("sh", "bash", "zsh", "dash", "ksh") and _credential_shell(req, part, args, depth):
         return True
     if program in _HARMLESS_CHECKS:
@@ -2902,6 +2909,18 @@ def _decide(req: Request, *, checks: list[str] | None, rules: list[Rule], unmatc
         return restricted
     if restricted is not None and (ruled is None or ruled.decision == "allow"):
         ruled = restricted
+    # With no quotes in it, what runs other commands still needs reading (sed s/a/date/e x,
+    # sudo -Z x): for what it finds only, as read_parts never comes back here.
+    argv = simple_argv(req.command) if req.kind == "bash" and req.command else None
+    if argv and os.path.basename(argv[0]) in _READ_WHEN_SIMPLE:
+        problems: list[ValueError] = []
+        reading = read_parts(req, rules, checks, problems)
+        found = (reading[1] if reading is not None
+                 else _syntax_ask(req) if any(isinstance(e, _Unverifiable) for e in problems) else None)
+        if found is not None and found.decision == "deny":
+            return found
+        if found is not None and (ruled is None or ruled.decision == "allow"):
+            ruled = found
     if saved:
         from brindle import permission_grants
 
@@ -3979,17 +3998,202 @@ def _behind_builtins(words: list[str]) -> list[str]:
     return words[at:] or words
 
 
-def _string_operands(args: list[str]) -> list[str]:
-    """The words of a program in _RUNS_A_STRING that may be a command string:
-    its operands, and a value attached to an option (-c'x y', --command=x)."""
-    out = []
-    for arg in args:
-        attached = re.fullmatch(r"--[\w-]+=(.+)|-[A-Za-z]*c(.+)", arg, re.DOTALL)
-        if not arg.startswith("-"):
-            out.append(arg)
-        elif attached:
-            out.append(attached.group(1) or attached.group(2))
-    return out
+def _options(args: list[str], valued: str, flags: str, long_valued: tuple[str, ...] = (),
+             until: int | None = None) -> tuple[list[str], dict[str, str]] | None:
+    """A program's operands and option values, read by its own option table
+    (``valued``: short options taking a value; ``flags``: those that don't).
+    ``until``: options end after that many operands, as they do for what runs
+    a command (timeout 5 grep -n x). None for an option it can't read: what
+    that option takes is unknown, so nothing after it can be told apart."""
+    operands: list[str] = []
+    values: dict[str, str] = {}
+    at = 0
+    while at < len(args):
+        arg = args[at]
+        at += 1
+        if until is not None and len(operands) >= until and (not arg.startswith("-") or arg == "-"):
+            return [*operands, *args[at - 1:]], values
+        if arg == "--":
+            return [*operands, *args[at:]], values
+        if arg.startswith("--"):
+            name, equals, value = arg.partition("=")
+            if not equals and name in long_valued:
+                if at >= len(args):
+                    return None
+                value = args[at]
+                at += 1
+            elif not equals and name not in _KNOWN_LONG_FLAGS:
+                return None
+            values[name] = value
+        elif re.fullmatch(r"-\d+", arg):
+            continue    # nice -5
+        elif arg.startswith("-") and arg != "-":
+            for n, letter in enumerate(arg[1:], 2):
+                if letter in valued:
+                    value = arg[n:]
+                    if not value:
+                        if at >= len(args):
+                            return None
+                        value = args[at]
+                        at += 1
+                    values[letter] = value
+                    break
+                if letter not in flags:
+                    return None
+        else:
+            operands.append(arg)
+    return operands, values
+
+
+def _inner_commands(words: list[str], depth: int = 0) -> list[list[str]] | None:
+    """The command ``words`` really runs, behind whatever only starts it
+    (command watch, sudo -u x timeout 5 sed, find . -exec sed): usually one, a
+    find's every -exec, and ``words`` themselves when nothing is in front. A
+    lookup (command -v x) runs nothing. None when a wrapper's options can't be
+    read, so what it runs is unknown."""
+    if not words or depth > 16:
+        return [words]
+    program, args = os.path.basename(words[0]), words[1:]
+    if program == "find":
+        found: list[list[str]] = []
+        for n, word in enumerate(args):
+            if word in ("-exec", "-execdir", "-ok", "-okdir"):
+                rest = args[n + 1:]
+                end = next((i for i, w in enumerate(rest) if w in (";", "+")), len(rest))
+                inner = _inner_commands(rest[:end], depth + 1) if rest[:end] else []
+                if inner is None:
+                    return None
+                found += inner
+        return found or [words]
+    spec = _WRAPPER_OPTIONS.get(program)
+    if spec is None:
+        return [words]
+    if program == "command" and any(re.fullmatch(r"-[A-Za-z]*[vV][A-Za-z]*", word) for word in args[:2]):
+        return [words]
+    valued, flags, skip, long_valued = spec
+    parsed = _options(args, valued, flags, long_valued, until=skip)
+    if parsed is None:
+        return None
+    operands, values = parsed
+    if program == "env":
+        split = values.get("S", values.get("--split-string"))
+        if split is not None:    # what it splits runs: read as a shell would read it
+            return [["sh", "-c", " ".join([split, *operands])]]
+        while operands and _ASSIGNMENT.match(operands[0]):
+            operands = operands[1:]
+    inner = operands[skip:]
+    return _inner_commands(inner, depth + 1) if inner else [words]
+
+
+def _command_string(words: list[str], *, execs: bool = False) -> str:
+    """The command a program's words make: one word is a command string; several are
+    joined with spaces for what hands them to a shell, or are argv for what ``execs`` them."""
+    if len(words) == 1:
+        return words[0]
+    return shlex.join(words) if execs else " ".join(words)
+
+
+def _after_target(rest: list[str]) -> list[str]:
+    """What flock or script runs, given the words after its file: -c's string, or them."""
+    if rest[:1] in (["-c"], ["--command"]):
+        return rest[1:2]
+    return [_command_string(rest, execs=True)] if rest else []
+
+
+def _tmux_scripts(args: list[str]) -> list[str] | None:
+    """The shell commands a tmux call runs: -c's, and each ;-separated
+    subcommand's in the position that takes one (never -s name, -c dir and
+    their kin). None for a subcommand that holds tmux commands of its own."""
+    parsed = _options(args, "cfLST", "2CDlNuVv", until=0)
+    if parsed is None:
+        return None
+    rest, values = parsed
+    scripts = [values["c"]] if "c" in values else []
+    pieces: list[list[str]] = [[]]
+    for word in rest:
+        if word == ";":
+            pieces.append([])
+        else:
+            pieces[-1].append(word.removesuffix(";") if word.endswith(";") else word)
+    for piece in pieces:
+        if not piece:
+            continue
+        # tmux takes any unique prefix of a subcommand's name.
+        name = next((n for n in (*_TMUX_RUNS, *_TMUX_CARRIES) if n == piece[0]), None) or next(
+            (n for n in (*_TMUX_RUNS, *_TMUX_CARRIES) if n.startswith(piece[0])), piece[0])
+        if name in _TMUX_CARRIES or name in ("set", "set-option", "setw", "set-window-option") and (
+                {"default-command", "default-shell"} & set(piece)):
+            return None
+        spec = _TMUX_RUNS.get(name)
+        if spec is None:
+            continue
+        parsed = _options(piece[1:], *spec)
+        if parsed is None:
+            return None
+        operands, _ = parsed
+        if name in ("if-shell", "if"):
+            if operands[1:]:
+                return None    # what follows the condition is tmux commands
+        elif name in ("send-keys", "send"):
+            operands = [" ".join(k for k in operands if not re.fullmatch(r"Enter|Space|Tab|Escape|[CM]-.", k))]
+        if operands and operands[0]:
+            scripts.append(_command_string(operands, execs=name not in ("send-keys", "send")))
+    return scripts
+
+
+def _runner_scripts(program: str, args: list[str]) -> list[str] | None:
+    """The command strings ``program`` hands a shell, from the positions that
+    hold one and no other: its option values and metadata are never read as
+    commands. Empty when it runs none, None when that can't be told."""
+    if program in _UNREAD_WRAPPERS:
+        return None
+    if program == "tmux":
+        return _tmux_scripts(args)
+    if program == "watch":
+        parsed = _options(args, "nq", "bcdeghptwxv", ("--interval", "--equexit", "--qdiff"), until=0)
+        return None if parsed is None else [_command_string(parsed[0])] if parsed[0] else []
+    if program in ("su", "runuser", "sg"):
+        parsed = _options(args, "cgGsuw", "flmpPT-" if program != "sg" else "",
+                          ("--command", "--session-command", "--group", "--supp-group", "--shell", "--user"))
+        if parsed is None:
+            return None
+        operands, values = parsed
+        command = values.get("c", values.get("--command", values.get("--session-command")))
+        if command is None and "-c" in operands[:-1]:    # su user -- -c '...': the shell's own -c
+            command = operands[operands.index("-c") + 1]
+        if command is not None:
+            return [command]
+        if program == "runuser" and ("u" in values or "--user" in values):
+            return [_command_string(operands, execs=True)] if operands else []
+        return [_command_string(operands[1:])] if program == "sg" and operands[1:] else []
+    if program in ("script", "flock"):
+        parsed = (_options(args, "BcEIOmoTt", "adefFhkpqQrV", ("--command", "--log-io", "--log-in", "--log-out"), until=1)
+                  if program == "script" else
+                  _options(args, "cEw", "enosuFhV", ("--command", "--timeout", "--conflict-exit-code"), until=1))
+        if parsed is None:
+            return None
+        operands, values = parsed
+        command = values.get("c", values.get("--command"))
+        return [command] if command is not None else _after_target(operands[1:])
+    if program == "ssh":
+        first = _options(args, _SSH_VALUED, _SSH_FLAGS, until=1)
+        second = _options(first[0][1:], _SSH_VALUED, _SSH_FLAGS, until=0) if first and first[0] else None
+        if first is not None and not first[0]:
+            return []
+        return None if second is None else [_command_string(second[0])] if second[0] else []
+    if program == "screen":
+        parsed = _options(args, "cdDehpRrSTtX", "aAfFiLlmOqUvWx", until=0)
+        if parsed is None or "X" in parsed[1] or "Q" in parsed[1]:
+            return None    # -X sends a screen command to a running session
+        return [_command_string(parsed[0], execs=True)] if parsed[0] else []
+    if program == "parallel":
+        parsed = _options(args, "ajJnNPs", "0kqtuv", ("--jobs", "--max-args", "--arg-file"), until=0)
+        if parsed is None or ":::" not in parsed[0] or "a" in parsed[1]:
+            return None    # its commands come from a file or its input
+        at = parsed[0].index(":::")
+        template, values = parsed[0][:at], [v for v in parsed[0][at + 1:] if v not in (":::", ":::+")]
+        return [_command_string([*template, value]) for value in values]
+    return []
 
 
 def _dq_escaped(text: str) -> str:
@@ -4252,27 +4456,77 @@ _RUNS_A_PROCESS = re.compile(r"\w*subprocess\w*|\w*spawn\w*|\w*[Pp]open\w*|child
                              r"|do shell script|\bopen\b[^\n]*\||__import__|importlib|\beval\b|\bgetattr\b|ctypes"
                              r"|pickle|marshal|process\.binding")
 _BACKTICK_RUNNERS = frozenset({"perl", "ruby", "php"})    # elsewhere a backtick is text, or a template string
-# In Python's syntax: modules that run things, names that do (os.system, posix_spawn,
-# create_subprocess_exec, __class__ and its kin), and builtins that build code or reach an attribute by name.
-_PYTHON_RUNNERS = frozenset({"subprocess", "pty", "multiprocessing", "ctypes", "cffi", "importlib", "runpy", "pickle",
-                             "marshal", "shelve", "dill", "code", "codeop", "pexpect", "sh", "plumbum", "fabric",
-                             "invoke", "commands", "popen2", "pipes", "webbrowser", "pydoc"})
+# In Python's syntax: every standard module that runs what it's given, builds code or reaches an
+# attribute by name, and the third-party ones made to run commands; names that run things (os.system,
+# posix_spawn, create_subprocess_exec, __class__ and its kin); and builtins that build code or reach an
+# attribute by name. A project's own modules are like a script in a file: not read.
+_PYTHON_RUNNERS = frozenset({"builtins", "subprocess", "pty", "multiprocessing", "concurrent", "ctypes", "cffi",
+                             "importlib", "imp", "pkgutil", "zipimport", "runpy", "site", "pickle", "marshal", "shelve",
+                             "copyreg", "code", "codeop", "pydoc", "pipes", "webbrowser", "timeit", "trace", "cProfile",
+                             "profile", "pdb", "bdb", "doctest", "unittest", "test", "inspect", "gc", "operator", "types",
+                             "typing", "dataclasses", "string", "logging", "distutils", "setuptools", "cgi", "tkinter",
+                             "idlelib", "rlcompleter", "commands", "popen2", "sh", "plumbum", "fabric", "invoke",
+                             "pexpect", "paramiko", "dill", "cloudpickle", "jsonpickle", "yaml"})
 _PYTHON_CALLS = re.compile(r"system|exec|spawn|[Pp]open|subprocess|fork|startfile|\bmodules\b|attrgetter|methodcaller"
                            r"|import_module|__(?!(?:name|file|doc|init|version)__\b)\w+__")
-_PYTHON_BUILTINS = frozenset({"eval", "compile", "getattr", "setattr", "globals", "locals", "vars", "breakpoint",
-                              "__import__"})
+_PYTHON_BUILTINS = frozenset({"eval", "compile", "getattr", "setattr", "delattr", "globals", "locals", "vars",
+                              "breakpoint", "__import__"})
 _SOURCES = frozenset({"source", ".", "eval"})
 _RUNS_ITS_INPUT = _SHELLS | _SOURCES | {"xargs", "parallel", "ssh", "at", "batch"}
-# Wrappers whose own options _credential_words doesn't read.
-_RUNS_ITS_ARGUMENTS = frozenset({"timeout", "nice", "time", "xargs", "parallel", "stdbuf", "caffeinate", "flock",
-                                 "unbuffer", "chroot", "watch", "runuser", "sg", "setsid", "ionice", "taskset",
-                                 "nsenter", "dtach"})
-# Programs that hand a string of theirs to a shell (watch 'x', su -c 'x', script -c 'x'):
-# any operand may be one. tmux only in the subcommands that do.
-_RUNS_A_STRING = frozenset({"watch", "su", "runuser", "sg", "script", "flock", "parallel", "ssh", "screen", "tmux"})
-_TMUX_RUNNERS = frozenset({"new", "new-session", "new-window", "neww", "split-window", "splitw", "run-shell", "run",
-                           "send-keys", "send", "respawn-pane", "respawnp", "respawn-window", "respawnw",
-                           "display-popup", "popup", "if-shell", "if"})
+# What only starts another command: program -> (short options taking a value, those that don't,
+# operands before the command, long options taking a value). _inner_commands reads them.
+_WRAPPER_OPTIONS: dict[str, tuple[str, str, int, tuple[str, ...]]] = {
+    "command": ("", "p", 0, ()), "builtin": ("", "", 0, ()), "time": ("", "p", 0, ()), "nohup": ("", "", 0, ()),
+    "exec": ("a", "cl", 0, ()),
+    "sudo": ("CDgGhpRrTtUu", "AbEHiKklnPSsVv", 0, ("--user", "--group", "--host", "--prompt", "--chdir", "--role",
+                                                   "--type", "--other-user", "--close-from", "--chroot",
+                                                   "--command-timeout")),
+    "doas": ("uC", "Lns", 0, ()),
+    "env": ("uCS", "i0v", 0, ("--unset", "--chdir", "--split-string")),
+    "nice": ("n", "", 0, ("--adjustment",)),
+    "timeout": ("ks", "fv", 1, ("--kill-after", "--signal")),
+    "stdbuf": ("ioe", "", 0, ("--input", "--output", "--error")),
+    "xargs": ("adEIJLnPRSs", "0oprtx", 0, ("--arg-file", "--delimiter", "--max-args", "--max-chars", "--max-lines",
+                                           "--max-procs", "--replace", "--eof", "--process-slot-var")),
+    "caffeinate": ("tw", "dimsu", 0, ()),
+    "chroot": ("", "", 1, ("--groups", "--userspec")),
+    "setsid": ("", "cfw", 0, ()),
+    "ionice": ("cn", "t", 0, ("--class", "--classdata")),
+    "taskset": ("", "ac", 1, ()),
+    "unbuffer": ("", "p", 0, ()),
+}
+_KNOWN_LONG_FLAGS = frozenset({"--help", "--version", "--verbose", "--quiet", "--login", "--preserve-status",
+                               "--foreground", "--null", "--no-run-if-empty", "--exit", "--ignore-environment",
+                               "--preserve-environment", "--pty", "--append", "--return", "--flush", "--beep",
+                               "--color", "--differences", "--errexit", "--exec", "--no-title", "--precise",
+                               "--no-fork", "--nonblock", "--exclusive", "--shared", "--unlock", "--non-interactive",
+                               "--close-file", "--interactive", "--open-tty", "--show-limits", "--all-tasks",
+                               "--cpu-list", "--ctty", "--wait", "--preserve-env", "--set-home", "--background",
+                               "--stdin", "--list", "--edit", "--remove-timestamp", "--reset-timestamp", "--validate",
+                               "--ignored", "--keep-going", "--ungroup", "--tag", "--will-cite"})
+# What runs what it's given, in a way no table here reads.
+_UNREAD_WRAPPERS = frozenset({"nsenter", "dtach"})
+# Each of tmux's subcommands that runs a shell command: its options, as _options takes them.
+_TMUX_RUNS: dict[str, tuple[str, str]] = {
+    "new-session": ("cefFnstxy", "AdDEPX"), "new": ("cefFnstxy", "AdDEPX"),
+    "new-window": ("ceFnt", "abdkPS"), "neww": ("ceFnt", "abdkPS"),
+    "split-window": ("ceFlpt", "bdfhIPvZ"), "splitw": ("ceFlpt", "bdfhIPvZ"),
+    "respawn-pane": ("cet", "k"), "respawnp": ("cet", "k"), "respawn-window": ("cet", "k"), "respawnw": ("cet", "k"),
+    "run-shell": ("cdt", "bCE"), "run": ("cdt", "bCE"),
+    "display-popup": ("bcdehsStTwxy", "BCEk"), "popup": ("bcdehsStTwxy", "BCEk"),
+    "pipe-pane": ("t", "IOo"), "pipep": ("t", "IOo"),
+    "if-shell": ("t", "bF"), "if": ("t", "bF"),
+    "send-keys": ("cNt", "FHKlMRX"), "send": ("cNt", "FHKlMRX"),
+}
+# Those that hold tmux commands of their own, to run later or now.
+_TMUX_CARRIES = frozenset({"bind-key", "bind", "set-hook", "source-file", "source", "confirm-before", "confirm",
+                           "command-prompt", "display-menu", "menu", "wait-for", "choose-tree", "choose-client",
+                           "choose-buffer", "find-window"})
+_READ_WHEN_SIMPLE = frozenset({*_WRAPPER_OPTIONS, *_UNREAD_WRAPPERS, "find", "sed", "awk", "gawk", "mawk", "watch",
+                               "su", "runuser", "sg", "script", "flock", "ssh", "screen", "parallel", "tmux", "trap",
+                               *_SHELLS})
+_SSH_VALUED = "BbcDEeFIiJLlmOoPpQRSWw"
+_SSH_FLAGS = "46AaCfGgKkMNnqsTtVvXxYy"
 # Words in front of a builtin that leave it the builtin (command eval, builtin trap, time eval).
 _BUILTIN_PREFIXES = ("command", "builtin", "time")
 # What may join the words of a [[ ... ]]: comparisons and a regex's alternatives, none of them run.
@@ -4461,19 +4715,21 @@ class _PartReader:
             if args and args[0] not in ("-", ""):    # - resets it; "" ignores the signal
                 self.run_script(args[0], known)
             return
-        if program in _WRAPPERS or program == "find":
-            at = next((n for n, w in enumerate(part.words) if os.path.basename(w) in _SHELLS), None)
-            script = _shell_script(part.words[at + 1:]) if at is not None else None
-            if script is not None:
+        commands = _inner_commands(part.words)
+        if commands is None:
+            self.run_script(None, known)
+            return
+        for words in commands:
+            runs, args = os.path.basename(words[0]), words[1:]
+            if runs in _SHELLS:
+                script = _shell_script(args)
+                scripts = [script] if script is not None else []
+            else:
+                scripts = _runner_scripts(runs, args)
+            if scripts is None:
+                self.run_script(None, known)
+            for script in scripts or ():
                 self.run_script(script, known)
-        if program == "env":
-            for n, word in enumerate(part.words):
-                found = re.fullmatch(r"(?:--split-string=|-[A-Za-z]*S)(.+)", word, re.DOTALL)
-                if found or word in ("--split-string", "-S") and n + 1 < len(part.words):
-                    self.run_script(found.group(1) if found else part.words[n + 1], known)
-        if program in _RUNS_A_STRING and (program != "tmux" or _TMUX_RUNNERS & set(part.words)):
-            for operand in _string_operands(part.words[1:]):
-                self.run_script(operand, known)
 
     def part(self, line: str, definite: bool, chained: bool = False, leads: bool = False) -> None:
         """One simple command; ``chained``: it runs only if the one before it
@@ -4823,29 +5079,36 @@ def _word_source(word: str) -> str | None:
 
 
 def _python_may_run(source: str) -> bool | None:
-    """Whether Python ``source`` names what may start a process or build code
-    to run, read from its syntax: a string it edits or prints is only a string.
-    None when it doesn't parse as Python. Names only: a third-party module this
-    doesn't list, or a script in a file, isn't read."""
+    """Whether Python ``source`` may start a process or build code to run, read
+    from its syntax: a string it edits or prints is only a string. It may if it
+    imports a module that can (_PYTHON_RUNNERS: an alias of an import is the same
+    import) or uses a name that does, imported or an attribute as much as bare.
+    None when it doesn't parse as Python. Neither a script in a file nor a project's
+    own module is read."""
     try:
         tree = ast.parse(source)
     except (SyntaxError, ValueError, RecursionError, MemoryError):
         return None
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
-            names, called = [alias.name for alias in node.names], ""
+            modules, used = [alias.name for alias in node.names], []
         elif isinstance(node, ast.ImportFrom):
-            names, called = [node.module or ""], " ".join(alias.name for alias in node.names)
+            modules, used = [node.module or ""], [alias.name for alias in node.names]
         elif isinstance(node, ast.Name):
-            names, called = [], node.id
+            modules, used = [], [node.id]
         elif isinstance(node, ast.Attribute):
-            names, called = [], node.attr
+            modules, used = [], [node.attr]
+        elif isinstance(node, ast.MatchClass):
+            modules, used = [], list(node.kwd_attrs)    # case object(system=f) reaches an attribute by name
         else:
             continue
-        if any(name != "importlib.metadata" and name.partition(".")[0] in _PYTHON_RUNNERS for name in names):
+        if any(name != "importlib.metadata" and name.partition(".")[0] in _PYTHON_RUNNERS for name in modules):
             return True
-        if _PYTHON_CALLS.search(called) or isinstance(node, ast.Name) and node.id in _PYTHON_BUILTINS:
-            return True
+        for name in used:
+            # compile is re.compile too, so only the bare name counts.
+            if _PYTHON_CALLS.search(name) or name in _PYTHON_BUILTINS and (
+                    name != "compile" or isinstance(node, ast.Name)):
+                return True
     return False
 
 
@@ -4919,10 +5182,12 @@ def read_parts(req: Request, rules: list[Rule], checks: list[str] | None = None,
         named, operands = _without_pattern(part), _without_pattern(part, scripts=True)
         # A sed or awk program that isn't plainly a filter may run anything (system(), s///e): asked
         # once at a time, unless a part's own subcategory denies it.
-        program = os.path.basename(part.words[0])
-        if restrictions and program in ("sed", "awk", "gawk", "mawk") and _program_may_run(
-                "sed" if program == "sed" else "awk", part.words[1:]):
-            found = found or _syntax_ask(req)
+        # What really runs, behind command, timeout, xargs or find -exec.
+        for words in _inner_commands(part.words) or ():
+            program = os.path.basename(words[0])
+            if restrictions and program in ("sed", "awk", "gawk", "mawk") and _program_may_run(
+                    "sed" if program == "sed" else "awk", words[1:]):
+                found = found or _syntax_ask(req)
         if write_denies and any(not os.path.isabs(path) for path in part.writes):
             return None    # a file only the run names: a deny may cover it
         if path_denies and any(not os.path.isabs(path) for path in part.reads):

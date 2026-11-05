@@ -321,6 +321,16 @@ LOOP = "until s=$(gh run view 1 --json status --jq .status); [[ $s == completed*
     ("python3 - <<'EOF'\np='a.py'\ns=open(p).read().replace('subprocess.run(a) `x`', 'os.system(b)')\nEOF", "allow"),
     ("gh pr checks 1 | awk -F'\\t' '{print $2\" | \"$1}' | awk '/^a|^b/,/c/' | sort", "allow"),   # a | that runs nothing
     ("python3 -c 'import importlib.metadata as m, json; print(m.version(json.__name__), json.__version__)'", "allow"),
+    ("python3 -c 'import re, markdown; print(re.compile(\"a\").pattern, markdown.__version__)'", "allow"),
+    # An option's value or a name is metadata, however much it looks like a command.
+    ("tmux new-session -s printenv 'git status'", "allow"),
+    ("tmux new-window -n env -c /tmp git status", "allow"),
+    ("tmux ls; tmux capture-pane -t printenv -p", "allow"),
+    ("ssh -l printenv host 'git status'", "allow"),
+    ("watch -n 1 'git status'", "allow"),
+    ("su printenv -c 'git status'", "allow"),
+    ("timeout 5 echo env; nice -n 5 echo printenv; xargs grep printenv", "allow"),
+    ("command -v watch; time git status", "allow"),
     ("python3 -c 'print(1)'; grep -n 'subprocess.run(' notes.md", "allow"),     # another command's quoted word
     ("sed -i '' s/a/b/ notes.md; sed -n 1,5p notes.md; awk '$1 > 5 || /a/' notes.md", "allow"),
     ("x=$(git log -1); [[ $x == a* ]] && eval 'git status'", "allow"),
@@ -412,7 +422,45 @@ LOOP = "until s=$(gh run view 1 --json status --jq .status); [[ $s == completed*
     _held("python3 - <<'EOF'\nimport os\ngetattr(os, 'sys' + 'tem')('ls')\nEOF"),
     _held("python3 - <<'EOF'\nprint(().__class__.__base__.__subclasses__())\nEOF"),
     _held("python3 - <<'EOF'\nimport pty as p\np.spawn('sh')\nEOF"),
+    _held("python3 -c 'from builtins import getattr as g; import os; g(os, \"sys\" + \"tem\")(\"ls\")'"),
+    _held("python3 -c 'from builtins import eval as e; e(\"1\")'"),
+    _held("python3 -c 'import builtins; builtins.eval(\"1\")'"),
+    _held("python3 -c 'import timeit; timeit.timeit(\"1\")'"),                 # a standard module that runs a string
+    _held("python3 -c 'from operator import attrgetter as a; import os; a(\"sys\" + \"tem\")(os)(\"ls\")'"),
+    _held("python3 - <<'EOF'\nimport os\nmatch os:\n    case object(system=f):\n        f('ls')\nEOF"),
     _held("python3 - <<'EOF'\nimport importlib.metadata\nimportlib.import_module('os')\nEOF"),
+    # Behind what only starts it, a program's own checks still apply.
+    _bypass("command watch 'git push --force origin x'"),
+    _bypass("sudo -u root watch -n 1 'printenv'"),
+    _bypass("timeout 5 su -c 'git reset --hard'"),
+    _bypass("find . -exec sh -c 'git reset --hard' ;"),
+    _bypass("env -i bash -c 'git reset --hard'"),
+    _held("command sed 'e date' notes.md"),
+    _held("timeout 5 sed 'e date' notes.md"),
+    _held("find . -exec sed 'e date' {} ;"),
+    _held("command awk 'BEGIN{system(\"date\")}'"),
+    _held("xargs awk 'BEGIN{system(\"date\")}'"),
+    _held("sudo -Z sed s/a/b/ x"),                      # an option it can't read: what follows is unknown
+    _held("sed s/a/date/e notes.md"),                   # no quotes in it: still read
+    # Each runner's command position, in each of its forms.
+    _bypass("watch -n 1 git push --force origin x"),
+    _bypass("tmux new-session -d -s w git push --force origin x"),    # several words: argv
+    _bypass("tmux new-s 'git reset --hard'"),           # a prefix of its name
+    _bypass("tmux -c 'printenv'"),
+    _bypass("tmux run-shell 'git reset --hard'"),
+    _bypass("tmux ls \\; new-window 'printenv'"),
+    _bypass("tmux send-keys -t w 'git reset --hard' Enter"),
+    _bypass("ssh -l u host git reset --hard"),
+    _bypass("ssh host -l u 'git reset --hard'"),        # options after the host
+    _bypass("su root -- -c 'git reset --hard'"),
+    _bypass("runuser -u u -- git reset --hard"),
+    _bypass("flock f git reset --hard"),
+    _bypass("parallel git ::: 'reset --hard'"),
+    _held("tmux set-hook -g x 'run-shell ls'"),
+    _held("tmux if-shell true 'run-shell ls'"),
+    _held("tmux set -g default-command 'ls'"),
+    _held("screen -X stuff 'ls'"),
+    _held('tmux new-session "$X"'),
     _held("python3 - <<'EOF'\nnot python ( os.system('ls')\nEOF"),                # doesn't parse: read as text
     _held("node -e 'const c = `x`; require(\"child_process\").execSync(\"ls\")'"),
     _held("echo 'import os; os.system(\"ls\")' | python3"),

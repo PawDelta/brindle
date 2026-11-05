@@ -905,8 +905,10 @@ check still asks: a heredoc fed to a shell, a command string only the run
 knows, syntax the shell itself would refuse, or source given to an interpreter
 (or a sed or awk program) that can start a process. Python is read from its
 syntax, so a script that only edits a file doesn't ask for the strings in it;
-other languages are read as text. A script in a file isn't read, as it never
-was, nor is what a third-party Python module does.
+importing a module that can run code asks too. Other languages are read as text.
+A script in a file or a project's own module isn't read, as it never was, so this
+catches what's written inline, and doesn't stop an agent that writes a script and
+runs it.
 
 Every preset also denies reading `~/.ssh`, `~/.aws`, `~/.gnupg`, `.env*` and
 the daemon's token, and asks before every push into a `release` or
