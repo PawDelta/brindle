@@ -3818,7 +3818,8 @@ def _script_items(tokens: list[tuple]) -> list[tuple]:
             items.append(("for", words[1].raw, words[3:] if len(words) > 2 else None, before in ("|", "|&")))
             continue
         if first in ("done", "fi", "}"):
-            items.append(("kw", first, after in ("|", "|&")) if first == "}" else ("kw", first))
+            # Piped, and given input in its redirections (done < file, } >out <<EOF): all of it reads that.
+            items.append(("kw", first, after in ("|", "|&"), any(_gives_input(token) for token in toks[1:])))
             toks = toks[1:]
             if not toks:
                 continue
@@ -3839,8 +3840,8 @@ def _script_tree(items: list[tuple], i: int = 0, stops: tuple[str, ...] = ()) ->
     ``("cmd", ...)``, ``("for", name, values, body, fed)``, ``("maybe", body,
     fed)`` for what may run any number of times (if, while, until) and
     ``("group", body, piped, fed)`` (piped: a pipeline's part, in a subshell of
-    its own). ``fed``: a pipe runs into it. Raises ValueError for a structure
-    left open."""
+    its own). ``fed``: a pipe runs into it, or its closing word's redirections
+    give it input. Raises ValueError for a structure left open."""
     def expect(i: int, word: str) -> int:
         if i >= len(items) or items[i][:2] != ("kw", word):
             raise _Malformed(f"no {word}")
@@ -3856,15 +3857,14 @@ def _script_tree(items: list[tuple], i: int = 0, stops: tuple[str, ...] = ()) ->
             i += 1
         elif item[0] == "for":
             body, i = _script_tree(items, expect(i + 1, "do"), ("done",))
-            nodes.append(("for", item[1], item[2], body, item[3]))
             i = expect(i, "done")
+            nodes.append(("for", item[1], item[2], body, item[3] or items[i - 1][3]))
         elif item[1] in ("while", "until"):
             cond, i = _script_tree(items, i + 1, ("do",))
             body, i = _script_tree(items, expect(i, "do"), ("done",))
-            nodes.append(("maybe", cond + body, item[2]))
             i = expect(i, "done")
+            nodes.append(("maybe", cond + body, item[2] or items[i - 1][3]))
         elif item[1] == "if":
-            fed = item[2]
             body: list[tuple] = []
             while True:
                 cond, i = _script_tree(items, i + 1, ("then",))
@@ -3875,12 +3875,12 @@ def _script_tree(items: list[tuple], i: int = 0, stops: tuple[str, ...] = ()) ->
             if items[i][:2] == ("kw", "else"):
                 branch, i = _script_tree(items, i + 1, ("fi",))
                 body += branch
-            nodes.append(("maybe", body, fed))
             i = expect(i, "fi")
+            nodes.append(("maybe", body, item[2] or items[i - 1][3]))
         elif item[1] == "{":
             body, i = _script_tree(items, i + 1, ("}",))
             i = expect(i, "}")
-            nodes.append(("group", body, item[2] or items[i - 1][2], item[2]))
+            nodes.append(("group", body, item[2] or items[i - 1][2], item[2] or items[i - 1][3]))
         else:
             raise _Malformed(f"a stray {item[1]}")
     if stops:
@@ -3955,19 +3955,6 @@ def _gives_input(token: tuple) -> bool:
     return token[0] == "heredoc" or token[0] == "op" and token[1] in ("<", "<<<", "<>", "<&")
 
 
-def _structure_fed(tokens: list[tuple]) -> bool:
-    """Whether a loop, an if or a group is given input (done < file, } >out <<EOF): all of it
-    reads that, wherever in its redirections it comes."""
-    for at, token in enumerate(tokens):
-        if token[0] == "word" and token[1].raw in ("done", "fi", "}"):
-            for after in tokens[at + 1:]:
-                if after[0] == "op" and after[1] in _SCRIPT_SEPARATORS:
-                    break
-                if _gives_input(after):
-                    return True
-    return False
-
-
 def _dq_escaped(text: str) -> str:
     return re.sub(r'([\\"$`])', r"\\\1", text)
 
@@ -4019,7 +4006,7 @@ class _Flattener:
             # The shell's $HOME is known before the run: a credential scan resolves it (and ~) to the
             # real home in every word, so "$HOME"/.aws or d="$HOME"; cat "$d/.npmrc" names the store.
             env.setdefault("HOME", ("lit", os.path.expanduser("~")))
-        self.walk(nodes, env, True, fed=_structure_fed(tokens))
+        self.walk(nodes, env, True)
 
     def walk(self, nodes: list[tuple], env: dict, definite: bool, chains: bool = True, fed: bool = False) -> None:
         for node in nodes:

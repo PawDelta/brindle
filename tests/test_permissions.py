@@ -459,6 +459,9 @@ LOOP = "until s=$(gh run view 1 --json status --jq .status); [[ $s == completed*
     ("echo a | zsh -f script.zsh", "allow"),
     ("S=cat; $S <<<'safe'", "allow"),
     ("{ git status; } >/dev/null; cat <<<'safe'", "allow"),      # another command's input is its own
+    ("printf '%s' done x < data; sh", "allow"),                  # a word spelled done closes nothing
+    ("{ git status; } < data; sh", "allow"),                     # a structure's input is its own
+    ("for i in a; do git status; done < data; sh", "allow"),
     ("for i in a; do git status; done 2>&1 | cat", "allow"),
     ("S=git; $S commit -F - <<'EOF'\nmessage\nEOF", "allow"),
     ("exec 2>/dev/null; ls", "allow"),
