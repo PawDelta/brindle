@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import App from "../../App";
+import { ONBOARDED_KEY } from "../../api/providers";
 import { DaemonClient } from "../../api/client";
 import { PtyViewsProvider } from "../../api/ptyView";
 import { SessionsProvider } from "../../store/sessions";
@@ -315,6 +316,7 @@ describe("agents tab", () => {
     const store = createAppStore();
     const client = daemon.client();
     const sync = startSync({ client, store, connect: daemon.connect });
+    localStorage.setItem(ONBOARDED_KEY, "1");
     render(
       <PtyViewsProvider value={standInViews}>
         <App store={store} client={client} refresh={sync.refresh} />
