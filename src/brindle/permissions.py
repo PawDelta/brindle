@@ -3182,14 +3182,79 @@ def _may_name_token(req: Request, word: str) -> bool:
 # that mentions one), so they see the words quoted as written, not re-joined.
 _WORD_MATCHERS = ("git-force",)
 
+# Wrappers that only run their arguments: per program, the options that take a
+# value in the next word, the flags that take none, and the options with a value
+# attached (a prefix), and how many operands come before the command.
+# An option not listed here leaves the wrapper unrecognised.
+_PLAIN_WRAPPERS: dict[str, tuple[frozenset[str], frozenset[str], tuple[str, ...], int]] = {
+    "timeout": (frozenset({"-k", "--kill-after", "-s", "--signal"}),
+                frozenset({"--foreground", "--preserve-status", "-v", "--verbose"}),
+                ("--kill-after=", "--signal=", "-k", "-s"), 1),
+    "nice": (frozenset({"-n", "--adjustment"}), frozenset(), ("--adjustment=", "-n"), 0),
+    "nohup": (frozenset(), frozenset(), (), 0),
+    "time": (frozenset({"-o", "-f"}), frozenset({"-p", "-l", "-h", "-v", "-a"}), (), 0),
+    "env": (frozenset({"-u", "--unset", "-C", "--chdir"}), frozenset({"-i", "--ignore-environment", "-0"}),
+            ("--unset=", "--chdir=", "-u"), 0),
+    "stdbuf": (frozenset({"-i", "-o", "-e", "--input", "--output", "--error"}), frozenset(),
+               ("--input=", "--output=", "--error=", "-i", "-o", "-e"), 0),
+    "caffeinate": (frozenset({"-t", "-w"}), frozenset({"-d", "-i", "-m", "-s", "-u"}), (), 0),
+    "command": (frozenset(), frozenset({"-p"}), (), 0),
+    "exec": (frozenset({"-a"}), frozenset({"-c", "-l"}), (), 0),
+}
+
+
+def _unwrapped(words: list[str]) -> list[str] | None:
+    """The command a plain wrapper (_PLAIN_WRAPPERS) runs, or None when ``words``
+    isn't one, an option isn't known, or nothing is left to run."""
+    spec = _PLAIN_WRAPPERS.get(os.path.basename(words[0])) if words else None
+    if spec is None:
+        return None
+    valued, flags, attached, operands = spec
+    program, i = os.path.basename(words[0]), 1
+    while i < len(words):
+        word = words[i]
+        if word == "--":
+            i += 1
+            break
+        if program == "env" and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", word):
+            i += 1
+        elif program == "nice" and re.fullmatch(r"-\+?\d+", word):
+            i += 1
+        elif word in valued:
+            i += 2
+        elif word in flags or any(word.startswith(a) and len(word) > len(a) for a in attached):
+            i += 1
+        elif word.startswith("-") and len(word) > 1:
+            return None
+        else:
+            break
+    i += operands
+    return words[i:] or None if i <= len(words) else None
+
+
+def _wrapped_forms(words: list[str]) -> list[list[str]]:
+    """``words`` and the command behind each plain wrapper around it, nested ones included."""
+    forms = [words]
+    while (inner := _unwrapped(forms[-1])) is not None:
+        while inner and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", inner[0]):
+            inner = inner[1:]
+        if not inner:
+            break
+        forms.append(inner)
+    return forms
+
 
 def _matching_restriction(parts: list[Request], checks: list[str] | None,
                           rules: list[Rule], words: list[list[str]] | None = None) -> Decision | None:
     """The first deny (else ask) in ``rules`` a part matches; with ``words``
     (each part's words), a _WORD_MATCHERS rule matches them shell-quoted."""
     quoted = [replace(part, command=shlex.join(w)) for part, w in zip(parts, words)] if words else parts
+    behind: list[tuple[Request, Request]] = []    # what a plain wrapper runs: only a deny looks there
+    for part, w in zip(parts, words or [part.command.split() for part in parts]):
+        for inner in _wrapped_forms(w)[1:]:
+            behind.append((replace(part, command=" ".join(inner)), replace(part, command=shlex.join(inner))))
     for wanted in ("deny", "ask"):
-        for part, exact in zip(parts, quoted):
+        for part, exact in [*zip(parts, quoted), *(behind if wanted == "deny" else [])]:
             for rule in rules:
                 if rule.decision == wanted and rule_matches(
                         rule, exact if rule.match_type in _WORD_MATCHERS else part, checks):
