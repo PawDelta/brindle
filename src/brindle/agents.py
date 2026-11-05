@@ -212,6 +212,9 @@ def managed(repo_root: str):
 _UNREAD = object()   # a ``managed`` argument not passed: read the org's settings now
 
 
+_KEYCHAIN_HELPER_PLATFORM = sys.platform == "darwin"     # where git's default credential helper can raise a dialog
+
+
 def agent_env(ws: Workspace, agent_id: str, agent: Agent | None = None,
               m=_UNREAD) -> dict[str, str]:
     env = {**workspaces.workspace_env(ws), "BRINDLE_AGENT_ID": agent_id}
@@ -315,6 +318,10 @@ def agent_env(ws: Workspace, agent_id: str, agent: Agent | None = None,
     # so a few of them don't each start one per core. Passed explicitly, since
     # a pane can inherit an older tmux environment; a profile's value still wins.
     env.setdefault("PYTEST_XDIST_AUTO_NUM_WORKERS", os.environ.get("PYTEST_XDIST_AUTO_NUM_WORKERS", "2"))
+    # An agent's own `git push` to GitHub signs in through gh, not git's keychain
+    # helper, whose dialog nobody in a pane can answer (see git.pane_git_config).
+    if _KEYCHAIN_HELPER_PLATFORM and (config := git.pane_git_config()):
+        env.setdefault("GIT_CONFIG_PARAMETERS", config)
     return env
 
 

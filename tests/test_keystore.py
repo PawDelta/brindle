@@ -1,6 +1,6 @@
 """The shared secret store (backends) and the model-key layer on top of it."""
 import os
-from subprocess import CompletedProcess
+from subprocess import CompletedProcess, TimeoutExpired
 
 import pytest
 
@@ -67,11 +67,26 @@ def test_keychain_read_cached(monkeypatch, record, external):
     now[0] += keystore.KEYCHAIN_READ_TTL
     monkeypatch.setattr(keystore.KeychainStore, "_run", lambda self, args, stdin=None:
                         calls.append(args[0]) or CompletedProcess(args, 1, FAKE, FAKE))
-    for _ in range(2):
+    for _ in range(2):      # a cancelled dialog (or a locked keychain) is asked once, not at each poll
         with pytest.raises(CredentialError) as exc:
-            store.load()
+            keystore.KeychainStore(service, account).load()
         assert FAKE not in str(exc.value)
+    assert calls.count("find-generic-password") == 8
+    monkeypatch.setattr(keystore.KeychainStore, "_run", run)
+    keystore.KeychainStore(service, account).save({"value": "replacement"})     # the person acted: ask again
+    assert keystore.KeychainStore(service, account).load() == {"value": "replacement"}
     assert calls.count("find-generic-password") == 9
+
+    def unanswered(self, args, stdin=None):     # the dialog sat there until the read gave up
+        calls.append(args[0])
+        raise TimeoutExpired(args, 1)
+
+    now[0] += keystore.KEYCHAIN_READ_TTL
+    monkeypatch.setattr(keystore.KeychainStore, "_run", unanswered)
+    for _ in range(2):
+        with pytest.raises(CredentialError):
+            store.load()
+    assert calls.count("find-generic-password") == 10
 
 
 def test_file_backend_refuses_loose_permissions(brindle_home):

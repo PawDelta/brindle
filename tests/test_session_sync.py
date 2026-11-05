@@ -166,6 +166,26 @@ def test_a_squashed_session_pr_syncs_back_once_its_landing_is_known(db, repo, se
     assert contains(path, main) and (path / "app.py").read_text() == "v2\n"
 
 
+def test_a_refused_fetch_tells_the_supervisor_once_until_origin_answers_again(db, repo, sess, told, tmp_path):
+    origin = sh("git remote get-url origin", repo)
+    fake_ssh = tmp_path / "fake-ssh"
+    fake_ssh.write_text('#!/bin/sh\necho "Permission denied (publickey)." >&2\nexit 255\n')
+    fake_ssh.chmod(0o755)
+    sh(f"git config core.sshCommand {fake_ssh}", repo)
+
+    def fetch_from(url: str) -> list:
+        sh(f"git remote set-url origin {url}", repo)
+        session_sync.fetch(str(repo), "main")
+        for _ in range(2):      # the daemon's sweep, round after round
+            session_sync.tell_refused_fetches(db)
+        return [text for to, text in told if to == "lead"]
+
+    [first] = fetch_from("ssh://example.invalid/x")
+    assert str(repo) in first
+    assert len(fetch_from(origin)) == 1
+    assert len(fetch_from("ssh://example.invalid/x")) == 2
+
+
 @pytest.mark.parametrize("reachable", [True, False], ids=["local-main-ahead", "origin-unreachable"])
 def test_a_new_session_branch_starts_only_at_origin_main_as_just_fetched(db, repo, reachable):
     origin = sh("git rev-parse origin/main", repo)

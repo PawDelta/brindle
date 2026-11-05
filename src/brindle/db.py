@@ -561,6 +561,14 @@ CREATE TABLE IF NOT EXISTS session_sync (
     updated_at REAL NOT NULL,
     PRIMARY KEY (repo_root, branch)
 );
+-- The supervisors told that a repo no longer refreshes on its own: origin wants
+-- credentials (session_sync.tell_refused_fetches). Goes once origin answers again.
+CREATE TABLE IF NOT EXISTS fetch_refused_notices (
+    root_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    repo_root TEXT NOT NULL,
+    told_at REAL NOT NULL,
+    PRIMARY KEY (root_id, repo_root)
+);
 -- A session PR that landed on the default branch as a squash (or rebase):
 -- squash_sha is that commit, covers_sha the session commit the PR carried,
 -- so a later sync records it as merged instead of re-applying it.

@@ -1818,7 +1818,7 @@ def test_session_review_pr_opens_only_once_the_session_is_ready(db, lead, tmp_pa
     sess, called = Path(lead.path), tmp_path / "gh-called"
     fake = tmp_path / "bin" / "gh"
     fake.parent.mkdir()
-    fake.write_text(f"#!/bin/sh\necho \"$@\" >> {called}\necho https://github.com/o/r/pull/7\n")
+    fake.write_text(f"#!/bin/sh\n[ \"$1\" = config ] && exit 1\necho \"$@\" >> {called}\necho https://github.com/o/r/pull/7\n")
     fake.chmod(0o755)
     monkeypatch.setenv("PATH", f"{fake.parent}:{os.environ['PATH']}")
     code, reply = _send("POST", "/v1/sessions/lead/pr", {"title": "Ship it"})
@@ -1860,7 +1860,7 @@ def test_pr_waits_for_approval(db, lead, tmp_path, monkeypatch, passed):
     sess, called, runs, told = Path(lead.path), tmp_path / "gh-called", [], []
     fake = tmp_path / "bin" / "gh"
     fake.parent.mkdir()
-    fake.write_text(f"#!/bin/sh\necho \"$@\" >> {called}\necho https://github.com/o/r/pull/7\n")
+    fake.write_text(f"#!/bin/sh\n[ \"$1\" = config ] && exit 1\necho \"$@\" >> {called}\necho https://github.com/o/r/pull/7\n")
     fake.chmod(0o755)
     monkeypatch.setenv("PATH", f"{fake.parent}:{os.environ['PATH']}")
     config.set_local(lead.repo_root, "checks", ["validate"])

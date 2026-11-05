@@ -91,27 +91,28 @@ def keeps_up(db: DB, ws: Workspace) -> bool:
 
 def fetch(repo_root: str, default: str) -> bool:
     """Bring ``origin/<default>`` up to date. False when that failed
-    (offline, no auth): it stays as it was."""
-    try:
-        proc = git.run(["fetch", "--quiet", "--no-tags", "origin",
-                        f"+refs/heads/{default}:refs/remotes/origin/{default}"],
-                       repo_root, check=False, timeout=FETCH_SECONDS)
-    except git.GitError:
-        return False
-    return proc.returncode == 0
+    (offline, no credentials a background fetch may use): it stays as it was."""
+    return git.background_fetch(repo_root, ["--quiet", "--no-tags", "origin",
+                                            f"+refs/heads/{default}:refs/remotes/origin/{default}"], FETCH_SECONDS)
 
 
 def fresh_start(repo_root: str) -> str:
     """Where a new session branch starts: ``origin/<default>`` as just
     fetched, never the local default branch (stale, or with commits of its
     own) nor a stale fetch. WorkspaceError when origin exists but can't be
-    fetched; a repo without origin starts from its local default branch."""
+    fetched; a repo without origin starts from its local default branch.
+
+    A fetch origin refused for want of credentials is the exception: those are
+    never asked for here (git.background), so refusing would close the repo to
+    every new session. It starts from ``origin/<default>`` as last fetched, and
+    the supervisor hears that it may be behind (tell_refused_fetches)."""
     from brindle import workspaces
 
     default = default_branch(repo_root)
     if not git.has_remote(repo_root):
         return git.out(["rev-parse", default if git.branch_exists(repo_root, default) else "HEAD"], repo_root)
-    if not fetch(repo_root, default) or not git.remote_branch_exists(repo_root, default):
+    fetched = fetch(repo_root, default) or git.fetch_refused(repo_root)
+    if not fetched or not git.remote_branch_exists(repo_root, default):
         raise workspaces.WorkspaceError(
             f"couldn't fetch origin/{default}, and a new session branch starts only from it as just "
             "fetched: check the network and your git access to origin, then start the session again")
@@ -164,6 +165,36 @@ def _record(db: DB, ws: Workspace, sha: str, state: str, files: list[str] | None
         " upstream_sha = excluded.upstream_sha, state = excluded.state, files = excluded.files,"
         " told_sha = excluded.told_sha, updated_at = excluded.updated_at",
         (ws.repo_root, ws.branch, sha, state, json.dumps(files) if files else None, told, time.time()))
+
+
+def tell_refused_fetches(db: DB) -> None:
+    """Each live session's supervisor hears once that a repo it works in no
+    longer refreshes on its own (git.fetch_refused), and again only if that
+    starts over after origin answered: a poll's refusals add nothing."""
+    rows = db.conn.execute(
+        "SELECT a.id AS root_id, w.repo_root AS repo_root FROM agents a JOIN workspaces w ON w.id = a.workspace_id"
+        " WHERE a.parent_id IS NULL AND a.status != 'done' AND a.dismissed_at IS NULL"
+        " UNION SELECT r.root_id, r.repo_root FROM session_repos r JOIN agents a ON a.id = r.root_id"
+        " WHERE a.status != 'done' AND a.dismissed_at IS NULL").fetchall()
+    told = {(r["root_id"], r["repo_root"]) for r in db.conn.execute(
+        "SELECT root_id, repo_root FROM fetch_refused_notices")}
+    for row in rows:
+        key = (row["root_id"], row["repo_root"])
+        if not git.fetch_refused(row["repo_root"]):
+            if key in told:
+                db.conn.execute("DELETE FROM fetch_refused_notices WHERE root_id = ? AND repo_root = ?", key)
+        elif key not in told:
+            try:
+                agents.send_message(db, row["root_id"], (
+                    f"brindle can't refresh origin in {row['repo_root']} on its own: origin wants credentials, "
+                    "and background fetches never ask for them (no keychain dialogs). New branches and syncs "
+                    "use origin as last fetched, so they may be behind it. `git fetch origin` in a terminal "
+                    "refreshes it now. An SSH remote with its key in ssh-agent, or for GitHub `gh auth login`, "
+                    "lets brindle refresh it itself."))
+            except agents.AgentError:
+                continue
+            db.conn.execute("INSERT INTO fetch_refused_notices (root_id, repo_root, told_at) VALUES (?, ?, ?)",
+                            (*key, time.time()))
 
 
 def session_checkout(db: DB, ws: Workspace) -> Workspace | None:
