@@ -895,6 +895,17 @@ Pick a preset in Settings → Permissions or at setup:
 - **Standard**: routine reads and everyday commands run, changes ask;
 - **Secure**: short approvals, and a deny for anything no rule covers.
 
+A shell command is read part by part: `$(...)`, assignments, loops, `if`,
+`[[ ... ]]`, `;`, `&&`, `||`, pipes, heredocs as data, and what `sh -c`,
+`eval` or `trap` is given to run. Each part goes through the rules on its own.
+Under Autonomous a command whose every part is allowed never prompts, and an
+ask from a supervisor, with nobody above it, goes straight to you. A deny on
+any part denies the whole command, however deep it sits. Whatever brindle can't
+check still asks: a heredoc fed to a shell, a command string only the run
+knows, syntax the shell itself would refuse, or an interpreter's source that
+starts a process a deny could cover. That last check reads the source as text,
+so what a program computes at run time is beyond it, as it is for any script.
+
 Every preset also denies reading `~/.ssh`, `~/.aws`, `~/.gnupg`, `.env*` and
 the daemon's token, and asks before every push into a `release` or
 `release/*` branch, which starts a signed build (an approval there is never

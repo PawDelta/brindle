@@ -294,6 +294,151 @@ def test_credential_dumps_are_denied(tmp_path, command, expected):
     assert (decision.rule is None) == (expected == "deny") or expected == "allow"
 
 
+def _held(command):
+    """Nothing can say it's safe, and no part is denied outright: the person is asked."""
+    return pytest.param(command, "ask", marks=pytest.mark.variant("bypass attempt"))
+
+
+LOOP = "until s=$(gh run view 1 --json status --jq .status); [[ $s == completed* ]]; do echo w; done"
+
+
+@pytest.mark.parametrize("command, expected", [
+    # Each form read part by part, every part allowed: no prompt under Autonomous.
+    (f'{LOOP}; echo "$s"', "allow"),                                                # substitution, until, [[ pattern
+    ("r=$(gh run list --jq '.[0].id'); s=$r; gh run view \"$s\" | head -1", "allow"),   # assignments
+    ("if [[ $s == *ok && -n $t || $u < v ]]; then echo y; else echo n; fi", "allow"),   # && and || are the test's
+    ('for t in a b; do printf "$t: "; git status; done', "allow"),                  # a loop
+    ("git status; git diff && git log || git show | wc -l", "allow"),               # ; && || |
+    ('while IFS= read -r b; do echo "$b"; done', "allow"),                          # read's own IFS
+    ("git add . && git commit -F - <<'EOF'\nmessage\nEOF", "allow"),                # . is a folder, not source
+    ("cat <<'EOF' | grep x\nbash and python are only text here\nEOF", "allow"),     # a heredoc to a program as data
+    ("git status; bash build.sh; cat > notes.md <<'EOF'\nprintenv\nEOF", "allow"),  # the shell reads another command's
+    ("bash -c 'git status; ls'", "allow"),                                          # content it can check
+    ("trap 'echo done' EXIT", "allow"),
+    ("x=$(git log -1); [[ $x == a* ]] && eval 'git status'", "allow"),
+    # A cd that may not run: it leads there or stays, and what's read must be clear in both.
+    ("cd sub; git log -1 | head -5", "allow"),
+    ('cd sub && a=$(git status | grep -c x); make 2>&1 | grep -E "passed|failed" | head -4; echo "$a"', "allow"),
+    ("cd ~/Projects; grep x notes.md", "allow"),
+    ('cd sub; grep -rn "[[:space:]]x" *.md | sed -E "s/.*[:=] *//" | cut -c1-80', "allow"),    # a quoted pattern
+    # Where it runs is unknown, but a reader that names no file reads only its pipe.
+    ("git worktree add q && cd q && git log | grep -v x | sed 's/a/b/' | awk '{print $1}' | head -3 | wc -l", "allow"),
+    # An rm no pattern can make recursive; git cherry only reads.
+    ("rm -f d*.png frames/*", "allow"),
+    ("touch x; rm -f d*.png", "allow"),
+    ("git cherry main $b", "allow"),
+    # A process in an interpreter's source is checked; text in one that starts none isn't a command.
+    pytest.param("python3 - <<'EOF'\nprint('git push --force origin x')\nEOF", "allow",
+                 marks=pytest.mark.variant("replayed traffic: a script that edits a file mentions git")),
+    # Every deny still fires, however deep.
+    _bypass("[[ $(git push --force origin x) == y ]]"),
+    _bypass("if [[ a == b && `git reset --hard` == c ]]; then :; fi"),
+    _bypass("until s=$(rm -rf /); [[ $s == x* ]]; do echo w; done"),
+    _bypass("for x in 1; do while true; do git branch -D x; done; done"),
+    _bypass("x=$(cat ~/.ssh/id_rsa)"),
+    _bypass("[[ $(cat ~/.aws/credentials) == x ]]"),
+    _bypass("cat <<'EOF' | grep x\nsafe\nEOF\ngit push --force origin x"),
+    _bypass("cat <<EOF\n$(git push --force origin x)\nEOF"),
+    _bypass("[[ a ]]\\\n&& git push --force origin x && [[ b ]]"),    # ]]\<newline> closes it, for bash
+    _bypass("[[ a ]\\] && git push --force origin x ]]"),
+    _bypass("cat ~/.brindle/daemon.json | head -1; [[ a ]]"),
+    # Commands a program runs for the shell: read as if written out.
+    _bypass("bash -c 'git push --force origin x'"),
+    _bypass("sh -c 'cd /tmp && rm -rf /'"),
+    _bypass("sudo bash -c 'git reset --hard'"),
+    _bypass("x='git reset --hard'; bash -c \"$x\""),
+    _bypass("trap 'git push --force origin x' EXIT"),
+    _bypass("trap 'printenv' EXIT"),
+    _bypass("eval 'git push --force origin x'"),
+    _bypass("sudo rm -rf /"),
+    _bypass("timeout 5 rm -rf ~"),
+    _bypass("xargs rm -rf /"),
+    _bypass("find . -exec rm -rf / ;"),
+    _bypass("time printenv"),
+    _bypass("xargs gh auth token"),
+    _bypass('x="gh auth token"; $x'),
+    _bypass("x='cat /proc/self/environ'; bash -c \"$x\""),
+    _bypass("bash <<'EOF'\nprintenv\nEOF"),
+    _bypass("bash <<< printenv"),
+    _bypass("while read x; do sh; done <<'EOF'\nprintenv\nEOF"),    # a compound command's parts inherit its input
+    _bypass("{ sh; } <<'EOF'\nprintenv\nEOF"),
+    # Wherever a command may run.
+    _bypass("cd ~; cat .aws/credentials"),
+    _bypass("cd ~/.ssh; grep x id_rsa"),
+    _bypass("cd ~; grep -r x .aws"),
+    _bypass("if true; then cd ~/.ssh; fi; grep x id_rsa"),
+    # What can't be checked stays the person's.
+    _held('bash -c "$X"'),
+    _held("sh -c 'case x in x) ls;; esac'"),
+    _held("bash <<'EOF'\necho hi\nEOF"),
+    _held("cat <<'EOF' | sh\necho hi\nEOF"),
+    _held("{ sh; } <<'EOF'\necho hi\nEOF"),
+    _held("python3 - <<'EOF'\nimport os\nos.system('git push --force origin x')\nEOF"),
+    _held("python3 - <<'EOF'\nimport subprocess\nsubprocess.run(\n    ['git', 'reset', '--hard'])\nEOF"),
+    _held("python3 -c 'import os; os.system(\"rm -rf /\")'"),
+    _held("""trap "git status; $X" EXIT"""),
+    # A [[ whose operands are arithmetic runs what's in them, however it's quoted.
+    _held("[[ 'a[$(git push --force origin x)]' -eq 0 ]]"),
+    _held("[[ a -lt 'b[$(printenv)]' ]]"),
+    _held("[[ -v 'a[$(git reset --hard)]' ]]"),
+    _held("x='a[$(printenv)]'; [[ $x -eq 0 ]]"),
+    _held("let 'a[$(git push --force origin x)]=1'"),
+    _held("declare -i n='a[$(printenv)]'"),
+    _held("printf -v 'a[$(printenv)]' x"),
+    # A cd brindle can't follow, with a file named after it.
+    _held("cd $X; grep x id_rsa"),
+    _held("CDPATH=~; cd .aws; grep x credentials"),
+    _held("export CDPATH=~; cd .ssh; head id_rsa"),
+    _held("for i in 1 2 3; do cd ..; grep x .aws/credentials; done"),
+    _held("while true; do cd ..; grep x .aws/credentials; done"),
+    _held("mkdir q; cd q; grep x id_rsa"),
+    _held("ln -s $X q; cd q; head id_rsa"),
+    _held("shopt -s cdable_vars; x=~/.aws; cd x; grep x credentials"),
+    _held("cd -; grep x id_rsa"),
+    _held("cd $X; wc -l < id_rsa"),
+    # Those readers name a file after all.
+    _held("mkdir q; cd q; grep -f id_rsa x"),
+    _held("mkdir q; cd q; grep --fi id_rsa x"),
+    _held("mkdir q; cd q; sed -n 1p id_rsa"),
+    _held("mkdir q; cd q; awk '{print}' id_rsa"),
+    _held('mkdir q; cd q; grep "$X"'),
+    _held("mkdir q; cd q; grep x*"),
+    # An rm a word could make recursive, or a pattern that may reach the daemon's token.
+    _held("rm -f $X"),
+    _held("rm -f *"),
+    _held("touch x; rm -f -*"),
+    _bypass("touch x; rm -rf /t*"),
+    _held("touch x; rm --rec a* /"),
+    _held("rm -f {a,-rf} b*"),
+    _held("touch x; rm -f `echo -rf` a*"),
+    _held("touch x; rm -f ~/.brindle/d*"),
+    _bypass("touch x; rm -f */daemon.json"),
+    # Syntax the shell itself won't take fails closed, where it would otherwise run.
+    ("echo 'a", "ask"),
+    ("for i in a; do", "ask"),
+    _held("if true; then"),
+    _held("cat <<EOF\nnever closed"),
+    _held("(echo"),
+    ("[[ a", "ask"),
+    ("[[ a ]] b", "ask"),
+    ("[[ a ; b ]]", "ask"),
+])
+def test_autonomous_decides_a_script_part_by_part(tmp_path, monkeypatch, command, expected):
+    """A command whose every part is allowed never prompts; a deny on any part denies,
+    at any depth; and what brindle can't check asks, as it always has."""
+    from brindle import permissions
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    for folder in ("wt/sub", "Projects", ".ssh", ".aws", ".brindle"):
+        (tmp_path / folder).mkdir(parents=True)
+    (tmp_path / "wt/sub/notes.md").write_text("x")
+    (tmp_path / "Projects/notes.md").write_text("x")
+    permissions.apply_preset("autonomous")
+    here = str(tmp_path / "wt")
+    decision = permissions.decide(permissions.Request("claude", "bash", "Bash", here, here, here, command=command))
+    assert decision.decision == expected, decision.reason
+
+
 def test_stores_resolved_at_run_time(tmp_path, monkeypatch):
     """The daemon's token, the key store and the Codex sign-in brindle keeps
     are stores too, wherever BRINDLE_HOME and CODEX_HOME put them, in their

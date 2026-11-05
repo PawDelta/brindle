@@ -55,7 +55,11 @@ commands joined only by ``&&``, ``;`` or ``|`` is allowed when an allow rule
 covers every part (word by word, as the shell will run it, with quoted or
 escaped characters treated literally) and nothing else can run or write
 (see compound_parts); a deny on any part denies it. Anything unknown or
-unparseable is ask.
+unparseable is ask. Anything longer (substitutions, assignments, loops,
+conditionals, [[ ]], heredocs as data, what sh -c and trap run) is read as the
+simple commands it runs (read_parts), each decided alone: under Autonomous a
+command whose every part is allowed never prompts, and a part that's denied
+denies it at any depth.
 
 Where rules come from (``source``): ``preset`` (seeded by the chosen preset),
 ``repo`` (``<repo>/.brindle/permissions.json``: only its deny rules are used,
@@ -1704,7 +1708,7 @@ NAME_ONLY = frozenset({"ls", "tree", "find", "du", "df", "stat", "pwd", "echo", 
                        "whoami", "uname", "seq", "locate", "fd", "fdfind", "hostname"})
 # Programs whose arguments are only text they print or compare: a word only the run
 # knows ("behind: $(git rev-list ...)", [ "$s" = done ]) leaves them read-only.
-TEXT_ONLY = frozenset({"echo", "test", "[", "true", "false"})
+TEXT_ONLY = frozenset({"echo", "test", "[", "[[", "true", "false"})
 
 # The options _reads_only_named accepts, written out in full: GNU tools
 # also take any unambiguous abbreviation of a long option (--recur is
@@ -1911,6 +1915,40 @@ def _awk_readonly(args: list[str]) -> bool:
                 or re.search(r"\b(system|getline|ARGV|ARGC)\b", script))
 
 
+_LINES_OR_BYTES = re.compile(r"-\d+|-[nc]\+?\d*|\+?\d+|-[qv]")
+
+
+def _reads_only_stdin(words: list[str]) -> bool:
+    """Whether a reader with these literal words (the caller knows no word is
+    one only the run knows, nor a pattern the shell expands: "$x" may be
+    --file=...) names no file at all (grep -v x, head -5, wc -l), so it reads
+    only its pipe wherever it runs. Every option is one this knows takes no file."""
+    program, args = words[0], words[1:]
+    if program == "cat":
+        return not args
+    if program in ("head", "tail"):
+        return all(_LINES_OR_BYTES.fullmatch(arg) for arg in args)
+    if program == "wc":
+        return all(_WC.fullmatch(arg) for arg in args)
+    if program == "grep":
+        if _recurses(words) or _search_paths(words):
+            return False
+        for arg in args:
+            if arg.startswith("--"):
+                name = arg.partition("=")[0]
+                if name == "--file" or name not in (*_GREP_FLAGS, *_GREP_VALUES):
+                    return False
+            elif arg.startswith("-") and (not _GREP_SHORT.fullmatch(arg) or "f" in arg[1:]):
+                return False
+        return True
+    if program == "sed":
+        return (_sed_readonly(args) and not any(a.startswith(("-e", "--expression")) for a in args)
+                and sum(1 for a in args if not a.startswith("-")) == 1)
+    if program == "awk":
+        return _awk_readonly(args) and sum(1 for a in args if not a.startswith("-")) == 1
+    return False
+
+
 def _readonly_part(req: Request, words: list[str]) -> bool:
     """Whether the simple command ``words`` only reads (see the section above).
     A program named by a path (``./cat``) could be anything."""
@@ -2081,19 +2119,44 @@ DESTRUCTIVE_TARGETS = re.compile(r"^(/|/\*|/[^/]+/?|~|~/|~/\*|\$HOME|\$\{HOME\}|
 def destructive_rm(command: str) -> bool:
     """Whether ``command`` runs ``rm`` recursively (``-r``/``-R``/``--recursive``,
     in any flag cluster or spelling) at the root, a top-level folder, the home
-    directory or the working directory itself, or with ``--no-preserve-root``."""
+    directory or the working directory itself, or with ``--no-preserve-root``,
+    itself or through a program that runs what it's given (sudo rm, xargs rm)."""
     for words in _segments(command):
-        if not words or os.path.basename(words[0]) != "rm":
+        if not words:
             continue
-        flags = [w for w in words[1:] if w.startswith("-")]
-        targets = [w for w in words[1:] if not w.startswith("-")]
-        if any(f == "--no-preserve-root" for f in flags):
-            return True
-        recursive = any(f in ("--recursive",) or (not f.startswith("--") and any(c in f for c in "rR")) for f in flags)
-        home = os.path.expanduser("~")
-        if recursive and any(DESTRUCTIVE_TARGETS.fullmatch(t) or t.rstrip("/") == home for t in targets):
-            return True
+        runs = [words]
+        if os.path.basename(words[0]) in (*_WRAPPERS, "find"):
+            runs = [words[i:] for i, word in enumerate(words) if os.path.basename(word) == "rm"]
+        for run in runs:
+            if os.path.basename(run[0]) != "rm":
+                continue
+            flags = [w for w in run[1:] if w.startswith("-")]
+            targets = [w for w in run[1:] if not w.startswith("-")]
+            if any(f == "--no-preserve-root" for f in flags):
+                return True
+            recursive = any(f in ("--recursive",) or (not f.startswith("--") and any(c in f for c in "rR"))
+                            for f in flags)
+            home = os.path.expanduser("~")
+            if recursive and any(DESTRUCTIVE_TARGETS.fullmatch(t) or t.rstrip("/") == home for t in targets):
+                return True
     return False
+
+
+def _plain_rm(words: list[str]) -> bool:
+    """An rm that can't be ``destructive_rm``'s whatever its patterns match:
+    none of its flags recurses, and no word can become one. A pattern's first
+    character is literal and no dash, so what it expands to is never a flag; a
+    word only the run knows could be anything. Long options are refused, not
+    read (GNU rm takes abbreviations: --rec)."""
+    if not words or os.path.basename(words[0]) != "rm":
+        return False
+    for word in words[1:]:
+        if word.startswith("-"):
+            if not re.fullmatch(r"-[A-Za-z]+", word) or re.search("[rR]", word):
+                return False
+        elif not word or word[0] in "*?[" or re.search(r"`|\$|\{[^}\s]*,", word):
+            return False
+    return True
 
 
 def forced_push(command: str) -> bool:
@@ -2107,7 +2170,7 @@ def forced_push(command: str) -> bool:
 # rm -f, mv -f, tag -f ...), so the list names the safe ones.
 _GIT_UNFORCED = frozenset({*READONLY_GIT, "rev-parse", "merge-base", "rev-list", "ls-files", "ls-tree", "cat-file",
                            "describe", "shortlog", "blame", "grep", "for-each-ref", "name-rev", "show-ref", "add",
-                           "config", "rebase", "gc"})
+                           "config", "rebase", "gc", "cherry"})
 # The git commands whose -m/-F (--message/--file) take a message or its file: their value is never an option.
 _GIT_MESSAGES = frozenset({"commit", "tag", "merge", "notes", "stash"})
 
@@ -2379,6 +2442,9 @@ def _credential_store(rel: str) -> bool:
 
 def _credential_file(req: Request, part: ShellPart, name: str) -> bool:
     """Recognizable credential stores, including patterns and uncertain cwd reads."""
+    if part.cwd is None and any(_credential_file(req, replace(part, cwd=place, places=[]), name)
+                                for place in part.places):
+        return True    # cd ~; cat .aws/credentials: wherever it may run
     home = os.path.expanduser("~")
     # The credential scan keeps a word as written: quotes in place, $HOME unexpanded.
     written = _HOME_REFERENCE.sub(lambda _: home, name.replace('"', "").replace("'", ""))
@@ -2576,8 +2642,9 @@ def _command_path(args: list[str], valued: set[str], flags: set[str], target: tu
     return match(0, 0)
 
 
-def _credential_shell(req: Request, part: ShellPart, args: list[str], depth: int) -> bool:
-    """Find a shell's command string after actual options, never inside --norc."""
+def _shell_script(args: list[str]) -> str | None:
+    """The command string a shell with arguments ``args`` runs (its -c
+    operand), found after actual options, never inside --norc; else None."""
     index, command_string = 0, False
     while index < len(args):
         arg = args[index]
@@ -2596,8 +2663,29 @@ def _credential_shell(req: Request, part: ShellPart, args: list[str], depth: int
             index += 1
         else:
             break
-    return (command_string and index < len(args)
-            and prints_credentials(replace(req, command=args[index], cwd=part.cwd or ""), depth + 1))
+    return args[index] if command_string and index < len(args) else None
+
+
+def _credential_shell(req: Request, part: ShellPart, args: list[str], depth: int) -> bool:
+    script = _shell_script(args)
+    return script is not None and prints_credentials(replace(req, command=script, cwd=part.cwd or ""), depth + 1)
+
+
+def _fed_scripts(command: str) -> list[str]:
+    """What a shell in ``command`` reads from a heredoc or here-string: its
+    input is commands, not data. Best effort: only used to find a deny."""
+    tokens: list[tuple] = []
+    _script_tokens(command, credential_scan=True, partial=tokens)
+    if not _heredoc_readers(tokens) & _SHELLS:
+        return []
+    scripts = ["\n".join(t[1]) for t in tokens if t[0] == "heredoc"]
+    for token, after in zip(tokens, tokens[1:]):
+        if token[:2] == ("op", "<<<") and after[0] == "word":
+            try:
+                scripts += shlex.split(after[1].raw)
+            except ValueError:
+                scripts.append(after[1].raw)
+    return scripts
 
 
 def _credential_words(req: Request, part: ShellPart, words: list[str], depth: int,
@@ -2639,6 +2727,9 @@ def _credential_words(req: Request, part: ShellPart, words: list[str], depth: in
                 break
         return (program == "env" and index >= len(args)
                 or _credential_words(req, part, args[index:], depth + 1, references[index + 1:]))
+    if program in _RUNS_ITS_ARGUMENTS:
+        # Its options aren't read here: any word of it may start what it runs.
+        return any(_credential_words(req, part, words[i:], depth + 1, references[i:]) for i in range(1, len(words)))
     if program in ("sh", "bash", "zsh", "dash", "ksh") and _credential_shell(req, part, args, depth):
         return True
     if program in _HARMLESS_CHECKS:
@@ -2716,6 +2807,8 @@ def prints_credentials(req: Request, depth: int = 0) -> bool:
     """
     if req.kind != "bash" or not req.command or depth > 30:
         return False
+    if any(prints_credentials(replace(req, command=script), depth + 1) for script in _fed_scripts(req.command)):
+        return True
     reader = _PartReader(req, credential_scan=True)
     try:
         reader.read(req.command)
@@ -2839,7 +2932,7 @@ def _decide(req: Request, *, checks: list[str] | None, rules: list[Rule], unmatc
     # What brindle can't verify, where it would ask anyway or (an eval of what only the run knows) wherever.
     unverified = compound and (syntax or ruled is None) and read is None
     if unverified and ruled is None and any(isinstance(e, _Unverifiable) for e in unread):
-        ruled = _syntax_ask(req)
+        ruled = _syntax_ask(req)    # however this store answers what no rule covers
     if read is not None:
         answer = permission_groups.parts_decision(req, *read, groups, unmatched, rules, checks)
         if answer.decision != "ask":
@@ -2914,7 +3007,7 @@ def _decide(req: Request, *, checks: list[str] | None, rules: list[Rule], unmatc
     # The opt-in runs what brindle can't read; never what it could read but a deny rule may
     # cover a word of (read_parts: no reason in ``unread``), nor what another rule asks for.
     alone = ruled is None or ruled.rule is not None and ruled.rule.id == SHELL_SYNTAX_RULE and not asks[1:]
-    if syntax and alone and unchecked == "allow" and unread:
+    if syntax and alone and unchecked == "allow" and unread and not any(isinstance(e, _DenyMayCover) for e in unread):
         return Decision("allow", f"brindle can't check it, and the {permission_groups.UNVERIFIABLE} setting runs "
                                  f"such commands", ruled.rule if ruled else None)
     if ruled is not None:
@@ -3047,11 +3140,15 @@ def _globs_excluded(req: Request, parts: list[list[str]], rules: list[Rule],
         if words[0] in READERS:
             readers = True
             continue
-        if words[0] != "ls":
+        removal = _plain_rm(words)
+        if words[0] != "ls" and not removal:
             return False
         prefix = " ".join(" ".join(words[:first]).split()) + " "
         for rule in rules:
-            if rule.match_type in _LISTING_SAFE or rule.source == "preset" and rule.id == "d-daemon-sh":
+            token = rule.source == "preset" and rule.id == "d-daemon-sh"
+            if token and removal and any(_may_name_token(req, word) for word in words[1:]):
+                return False
+            if rule.match_type in _LISTING_SAFE or token:
                 continue
             if (rule.match_type in ("exact", "prefix")
                     and not prefix.startswith(rule.match) and not rule.match.startswith(prefix)):
@@ -3075,6 +3172,18 @@ def _globs_excluded(req: Request, parts: list[list[str]], rules: list[Rule],
         if _matching_restriction([replace(req, command=" ".join(argv))], None, rules) is not None:
             return False
     return True
+
+
+def _may_name_token(req: Request, word: str) -> bool:
+    """Whether a pattern may select the daemon's token file (d-daemon-sh):
+    its last piece matches the name, in a folder that may be the token's."""
+    folder, _, name = word.rpartition("/")
+    if not any(c in word for c in "*?[") or not fnmatch.fnmatchcase("daemon.json", name):
+        return False
+    if any(c in folder for c in "*?["):
+        return True
+    place = os.path.realpath(os.path.join(req.cwd or req.worktree or "", folder))
+    return place == os.path.realpath(brindle_home()) or os.path.basename(place) == ".brindle"
 
 
 # Matchers that must tell a word from its neighbours (an option from a message
@@ -3335,7 +3444,7 @@ def _heredoc_data(body: str) -> bool:
     return bool(ends) and ends[0] == len(lines) - 1
 
 
-def _may_restrict(rule: Rule, command: str) -> bool:
+def _may_restrict(rule: Rule, command: str, *, code: bool = False) -> bool:
     """Whether ``rule`` could match ``command`` once the shell expands it:
     the text the rule needs appears in the command, as written or with its
     quotes and escapes removed (``r''m -r\\f`` is ``rm -rf``). Expansions
@@ -3343,8 +3452,9 @@ def _may_restrict(rule: Rule, command: str) -> bool:
     ``{r,}m``) could produce any text, so they always could. A pathname
     pattern (``[p]ush``, ``--f*``) could be any word it matches; heredoc
     bodies are never expanded into names. Single-quoted text is never
-    expanded either (``awk '{print $1}'``)."""
-    if re.search(r"\$['\"{\w@*#?!$-]|\{[^}\s]*,", _unquoted(command)):
+    expanded either (``awk '{print $1}'``). ``code``: ``command`` is an
+    interpreter's source, which no shell expands, so only its text counts."""
+    if not code and re.search(r"\$['\"{\w@*#?!$-]|\{[^}\s]*,", _unquoted(command)):
         return True
     # The shell deletes \<newline> before anything else: r\<newline>m is rm.
     text = command + "\n" + re.sub(r"[\"'\\]", "", command.replace("\\\n", ""))
@@ -3358,7 +3468,9 @@ def _may_restrict(rule: Rule, command: str) -> bool:
         return seen("git") and seen("push")
     if rule.match_type == "git-force":
         return seen("git") and (any(_is_force(w.strip("`$(){};|&<>")) for w in text.split())
-                                or any(seen(flag) for flag in ("-f", *FORCE_OPTIONS)))
+                                or any(seen(flag) for flag in ("-f", *FORCE_OPTIONS))
+                                or seen("reset") and seen("--hard") or seen("branch") and seen("-D")
+                                or seen("--delete") or seen("--discard-changes"))
     if rule.match_type == "rm-destructive":
         return (bool(re.search(r"(?<![\w.-])rm(?![\w.-])", text))
                 or any(fnmatch.fnmatchcase("rm", p) for p in patterns))
@@ -3653,7 +3765,26 @@ def _script_items(tokens: list[tuple]) -> list[tuple]:
     current: list[tuple] = []
     before = ""
     after_subshell = False
+    in_test = False    # inside [[ ... ]]: its && and || are the test's, and nothing they join runs
     for token in [*tokens, ("op", "", False)]:
+        if in_test:
+            if token[0] == "word":
+                # A backslash-newline ends a word for bash but not here (]]\<newline> closes the test),
+                # a second [[ can only be text once this test is open, and a ]] with quotes in it
+                # (]\]) reads as nothing a person would mean: none of them is taken for a test.
+                raw = token[1].raw
+                if "\\\n" in raw or raw == "[[" or raw != "]]" and re.sub(r"[\"'\\]", "", raw) == "]]":
+                    raise _Malformed("a [[ test it can't read")
+                in_test = raw != "]]"
+            elif token[0] != "op" or token[1] not in _TEST_OPERATORS:
+                raise _Malformed("a [[ test left open")
+            current.append(token)
+            continue
+        if (token[0] == "word" and token[1].raw == "[["
+                and all(t[0] == "word" and t[1].plain() in (*_SCRIPT_OPENERS, "!") for t in current)):
+            in_test = True
+            current.append(token)
+            continue
         if token[:2] == ("op", "("):
             if current:
                 raise ValueError("a subshell after words")
@@ -3718,7 +3849,7 @@ def _script_tree(items: list[tuple], i: int = 0, stops: tuple[str, ...] = ()) ->
     own). Raises ValueError for a structure left open."""
     def expect(i: int, word: str) -> int:
         if i >= len(items) or items[i][:2] != ("kw", word):
-            raise ValueError(f"no {word}")
+            raise _Malformed(f"no {word}")
         return i + 1
 
     nodes: list[tuple] = []
@@ -3756,9 +3887,9 @@ def _script_tree(items: list[tuple], i: int = 0, stops: tuple[str, ...] = ()) ->
             i = expect(i, "}")
             nodes.append(("group", body, item[2] or items[i - 1][2]))
         else:
-            raise ValueError(f"a stray {item[1]}")
+            raise _Malformed(f"a stray {item[1]}")
     if stops:
-        raise ValueError(f"no {stops[-1]}")
+        raise _Malformed(f"no {stops[-1]}")
     return nodes, i
 
 
@@ -3785,6 +3916,30 @@ def _assigned_in(nodes: list[tuple]) -> set[str] | None:
             if program in _VARIABLE_SETTERS:
                 names |= {m.group(0) for w in words if (m := re.match(r"[A-Za-z_]\w*", w.raw))}
     return names
+
+
+def _heredoc_readers(tokens: list[tuple]) -> set[str]:
+    """Each program that may read a heredoc or here-string in ``tokens``: the
+    words of its own pipeline, or anywhere in the script when it feeds a
+    compound command (done <<EOF, } <<EOF), whose every part inherits it. Its
+    text is the input, never a program; and ``.`` is only source where a
+    command starts (git add . names a folder)."""
+    groups: list[list[tuple]] = [[]]
+    for token in tokens:
+        if token[0] == "op" and token[1] in (";", "\n", "&&", "||", "&"):
+            groups.append([])
+        else:
+            groups[-1].append(token)
+    readers: set[str] = set()
+    for group in groups:
+        if not any(t[0] == "heredoc" or t[:2] == ("op", "<<<") for t in group):
+            continue
+        if group[0][0] != "word" or group[0][1].raw in ("done", "fi", "}", "esac"):
+            group = tokens
+        readers |= {os.path.basename(t[1].raw.strip("\"'")) for t in group if t[0] == "word"} - _SOURCES
+        readers |= _SOURCES & {t[1].raw for t, before in zip(group, [("op", ";", False), *group])
+                               if t[0] == "word" and before[0] == "op" and before[1] in _SCRIPT_SEPARATORS}
+    return readers
 
 
 def _dq_escaped(text: str) -> str:
@@ -3826,8 +3981,7 @@ class _Flattener:
         tokens = _script_tokens(command, credential_scan=self.credential_scan)
         if tokens is None:
             raise ValueError("unreadable syntax")
-        if any(t[0] == "heredoc" for t in tokens) and any(
-                t[0] == "word" and os.path.basename(t[1].raw) in _STDIN_RUNNERS for t in tokens):
+        if _heredoc_readers(tokens) & _STDIN_RUNNERS:
             raise ValueError("a heredoc may be run as commands")
         nodes, _ = _script_tree(_script_items(tokens))
         if self.credential_scan:
@@ -3965,14 +4119,18 @@ class _Flattener:
             self.changed = True
             for word in words[exported:]:
                 name = _ASSIGNMENT.match(word.raw).group(1)
+                if name == "CDPATH":
+                    raise _Unverifiable("CDPATH changes where a cd leads")
                 if _PROGRAM_VARIABLES.fullmatch(f"{name}="):
                     raise ValueError(f"{name} changes which program runs or how words split")
                 for inner in word.substitutions:
                     self.substitution(inner, seen)
-                text = self.resolved(self.text(word, seen, assignment=True)[len(name) + 1:])
+                value = self.text(word, seen, assignment=True)[len(name) + 1:]
+                text = self.resolved(value)
                 if self.credential_scan:
                     self.named.append(text)
-                found = _tokens(text) if text else [(False, "")]
+                # Read as written: its quotes make one value of x="gh auth token".
+                found = _tokens(value) if value else [(False, "")]
                 known = (definite and not word.substitutions and "~" not in text and found is not None
                          and len(found) == 1 and not found[0][0])
                 if known:
@@ -4032,8 +4190,26 @@ _CODE_RUNNERS = _STDIN_RUNNERS | {"python", "python3", "node", "ruby", "perl", "
                                   "lua", "Rscript", "irb", "swift"}
 # Programs that run another program named among their arguments.
 _WRAPPERS = _STDIN_RUNNERS | {"builtin", "stdbuf", "caffeinate", "flock", "unbuffer", "chroot"}
+_SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "fish"})
+# Fed a heredoc, these run its lines as commands: brindle doesn't take that for data, whatever
+# the store answers for what no rule covers. (The other _STDIN_RUNNERS only pass it on.)
+_SOURCES = frozenset({"source", ".", "eval"})
+_RUNS_ITS_INPUT = _SHELLS | _SOURCES | {"xargs", "parallel", "ssh"}
+# Wrappers whose own options _credential_words doesn't read.
+_RUNS_ITS_ARGUMENTS = frozenset({"timeout", "nice", "time", "xargs", "parallel", "stdbuf", "caffeinate", "flock",
+                                 "unbuffer", "chroot", "watch"})
+# What may join the words of a [[ ... ]]: comparisons and a regex's alternatives, none of them run.
+_TEST_OPERATORS = ("&&", "||", "<", ">", "|")
+# [[ evaluates these operands as arithmetic, which runs any $(...) in them, single-quoted or
+# held in a variable (a[$(cmd)]). It parses its operators before expanding, so one can't hide in $x.
+_TEST_ARITHMETIC = frozenset({"-eq", "-ne", "-lt", "-le", "-gt", "-ge", "-v", "-R"})
+# Builtins that evaluate a word as a variable name or arithmetic, running a subscript's
+# $(...) however it is quoted; ``let`` evaluates every word, so it is never read.
+_SUBSCRIPT = re.compile(r"\[[^\]]*[$`]")
+_EVALUATES_NAMES = frozenset({"declare", "typeset", "local", "readonly", "export", "read", "unset", "mapfile",
+                              "readarray", "getopts", "test", "["})
 # Variables that change which program runs or what it loads.
-_PROGRAM_VARIABLES = re.compile(r"(PATH|LD_\w+|DYLD_\w+|BASH_ENV|ENV|IFS)=")
+_PROGRAM_VARIABLES = re.compile(r"(PATH|LD_\w+|DYLD_\w+|BASH_ENV|ENV|IFS|CDPATH)=")
 _OUTPUT_REDIRECTS = (">", ">>", ">|", "&>", "&>>", "<>")
 _REDIRECTS = (*_OUTPUT_REDIRECTS, "<", "<<<", ">&", "<&")
 
@@ -4062,11 +4238,25 @@ class ShellPart:
     # Words and redirection targets only the run knows, as written (prints_credentials fails
     # closed on them when the command names a credential store).
     unresolved: list[str] = field(default_factory=list)
+    # With ``cwd`` None: every folder it may run in, when brindle knows them all (after
+    # cd x; ... it is x, or where the shell was if that cd failed). Empty: anywhere.
+    places: list[str] = field(default_factory=list)
+    # Per word of ``written``: whether the shell expands it as a pattern of names.
+    patterned: list[bool] = field(default_factory=list)
 
 
 class _Unverifiable(ValueError):
     """What brindle can't verify wherever it is (an eval of what only the run
     knows): the unverifiable answer even where nothing would have asked."""
+
+
+class _Malformed(_Unverifiable):
+    """Syntax the shell itself won't accept: an unclosed quote or structure."""
+
+
+class _DenyMayCover(_Unverifiable):
+    """A deny rule may cover what a part does: what no rule covers doesn't
+    run it, and neither does the opt-in that runs what brindle can't read."""
 
 
 class _PartReader:
@@ -4075,6 +4265,9 @@ class _PartReader:
         self.credential_scan = credential_scan
         self.cwd: str | None = req.cwd or req.worktree or None
         self.settled = self.cwd    # where the shell is once a cd's && chain ends, whether the cd ran or not
+        # Every folder the shell may be in, whichever of its cds ran (None: anywhere). It only
+        # grows: a cd may fail, and a subshell's cd may not last.
+        self.places: set[str] | None = {self.cwd} if self.cwd else None
         self.parts: list[ShellPart] = []
         self.unread = False   # the splitter couldn't read the whole command (parts are what scan() found)
         self.named: list[str] = []    # assignment values and loop lists, resolved (_Flattener.named)
@@ -4119,8 +4312,20 @@ class _PartReader:
         """``command``'s parts; ``definite``: whether it surely runs in this
         shell (an eval's words inside an if or a pipeline may not); ``chains``:
         whether a cd's && chain is followed in it (not in an eval's words)."""
-        if "<<" in command and any(os.path.basename(w) in _CODE_RUNNERS
-                                   for w in re.split(r"[\s;&|()<>`\"'$=]+", command)):
+        # Read with the scan's tolerance: what even that can't is no shell syntax at all.
+        tokens = _script_tokens(command, credential_scan=True)
+        if tokens is None:
+            raise _Malformed("unclosed syntax")
+        try:
+            _script_tree(_script_items(tokens))
+        except _Malformed:
+            raise
+        except ValueError:
+            pass    # syntax that's fine but isn't read (a case, a function): the flattener's to refuse
+        readers = _heredoc_readers(tokens)
+        if readers & _RUNS_ITS_INPUT:
+            raise _Unverifiable("a heredoc a program runs as commands")
+        if readers & _CODE_RUNNERS:
             raise ValueError("a heredoc a program may run as code")
         flattener = _Flattener(self.cwd or "", credential_scan=self.credential_scan)
         try:
@@ -4137,10 +4342,22 @@ class _PartReader:
 
     def inner(self, command: str) -> None:
         """A substitution's commands: they run in a subshell of their own."""
-        kept = self.cwd, self.settled, self.expanded, self.tilde
+        kept = self.cwd, self.settled, self.expanded, self.tilde, self.places
         self.settled = self.cwd
         self.read(command)
-        self.cwd, self.settled, self.expanded, self.tilde = kept
+        self.cwd, self.settled, self.expanded, self.tilde, self.places = kept
+
+    def run_script(self, script: str | None, known: bool) -> None:
+        """Commands a part hands a shell of their own to run (bash -c '...',
+        trap '...' EXIT): read as if written out, or unverifiable."""
+        if script is None or not known:
+            raise _Unverifiable("a program runs commands only the run knows")
+        try:
+            self.inner(script)
+        except _Unverifiable:
+            raise
+        except ValueError as e:
+            raise _Unverifiable(f"a program runs commands brindle can't read: {e}") from e
 
     def part(self, line: str, definite: bool, chained: bool = False, leads: bool = False) -> None:
         """One simple command; ``chained``: it runs only if the one before it
@@ -4155,9 +4372,24 @@ class _PartReader:
         self.expanded = self.tilde = False
         program: str | None = None
         runner_unknown, env_assignments = False, False
+        # A [[ ... ]] until its ]]: bash parses it before expanding, so its words are neither
+        # split nor taken as patterns of names, and its operators join no commands.
+        testing = bool(tokens) and tokens[0][0] == "word" and tokens[0][1].raw == "[["
+        tested = False
         i = 0
         while i < len(tokens):
             token = tokens[i]
+            if testing and token[0] == "op":
+                if token[1] not in _TEST_OPERATORS:
+                    raise _Malformed("a [[ test it can't read")
+                i += 1
+                continue
+            if testing and token[1].raw == "]]":
+                testing, tested = False, True
+            elif tested and token[0] == "word":
+                raise _Malformed("words after a [[ test")
+            elif testing and re.sub(r"[\"'\\]", "", token[1].raw) in _TEST_ARITHMETIC:
+                raise _Unverifiable("a [[ test that evaluates arithmetic may run what it reads")
             if token[0] == "op":
                 if token[1] not in _REDIRECTS or i + 1 >= len(tokens) or tokens[i + 1][0] != "word":
                     raise ValueError("unreadable syntax")
@@ -4165,13 +4397,19 @@ class _PartReader:
                 if previous is not None and previous[0] == "word" and previous[1].raw.isdigit() and not token[2]:
                     part.words.pop()    # the 2 of 2>&1 names a descriptor
                     part.written.pop()
+                    part.patterned.pop()
                     part.references.pop()
                 self.redirect(part, token[1], tokens[i + 1][1])
                 i += 2
                 continue
             word = token[1]
             if program is None and _ASSIGNMENT.match(word.raw):
-                if _PROGRAM_VARIABLES.match(word.raw):
+                # IFS= read is the usual way to read a line, and reaches nothing else.
+                reading = word.raw == "IFS=" and i + 1 < len(tokens) and tokens[i + 1][0] == "word" and (
+                    tokens[i + 1][1].raw == "read")
+                if word.raw.startswith("CDPATH="):
+                    raise _Unverifiable("CDPATH changes where a cd leads")
+                if _PROGRAM_VARIABLES.match(word.raw) and not reading:
                     raise ValueError("an assignment that changes the program")
                 for inner in word.substitutions:
                     self.inner(inner)
@@ -4182,7 +4420,7 @@ class _PartReader:
                     and (word.raw.startswith('"$(') and word.raw.endswith(')"')
                          or word.raw.startswith('"`') and word.raw.endswith('`"')) and not word.refs
                     and part.words[-1] in SUBSTITUTION_DATA_OPTIONS.get((part.words[0], part.words[1]), ()))
-            names, known, written = self.word(word)
+            names, known, written = self.word(word, names=not testing)
             if data:
                 names, known, written = [_SUBSTITUTED], True, None
                 part.data = True
@@ -4202,16 +4440,23 @@ class _PartReader:
             part.words += names
             part.references.extend([tuple(ref[2] for ref in word.refs)] * len(names))
             part.written.append(written or (names[0] if known else word.raw))
+            part.patterned.append(written is not None)
             if not known:
                 part.unresolved.append(word.raw)
             part.globs |= written is not None
             part.unknown |= not known
             i += 1
+        if testing:
+            raise _Malformed("a [[ test left open")
         part.expanded, part.tilde = self.expanded, self.tilde
+        part.places = sorted(self.places) if part.cwd is None and self.places else []
         if program is None:
             if part.writes or part.reads:
                 raise ValueError("a redirection without a command")
             return
+        evaluating = program in _EVALUATES_NAMES or program == "printf" and "-v" in part.words
+        if program == "let" or evaluating and any(_SUBSCRIPT.search(word) for word in part.written):
+            raise _Unverifiable(f"{program} evaluates its words, which may run what they hold")
         if program == "eval" and not (part.unknown or part.expanded or part.writes or part.reads):
             # The command its literal words make, run where the eval runs (if it surely does).
             self.read(" ".join(part.words[1:]), definite, chains=False)
@@ -4221,20 +4466,48 @@ class _PartReader:
         if program in ("source", ".") or program in _WRAPPERS and runner_unknown and not self.credential_scan:
             raise ValueError(f"{program} runs what only the run knows")
         self.parts.append(part)
+        if not self.credential_scan:    # prints_credentials follows a shell's command string itself
+            if program in _WRAPPERS or program == "find":
+                at = next((n for n, w in enumerate(part.words) if os.path.basename(w) in _SHELLS), None)
+                script = _shell_script(part.words[at + 1:]) if at is not None else None
+                if script is not None:
+                    self.run_script(script, not part.unknown)
+        if program == "trap" and part.words[1:] and not part.words[1].startswith("-"):
+            self.run_script(part.words[1], not part.unknown)
         if program in ("cd", "pushd"):
             # What runs only if the cd succeeded (cd x && ...) runs where it leads; anything else
             # after it (after ; or ||, past an if or a pipeline) runs where it may or may not have
             # led: somewhere unknown, unless that is where the shell already is.
             target = self.directory(part.words[1:], part.unknown)
+            self.move(part.words[1:], part.unknown, definite)
             if target != self.cwd:
                 self.settled = self.settled if target == self.settled else None
                 self.cwd = target if leads else self.settled
         elif part.writes or not _readonly_part(replace(self.req, cwd=self.cwd), part.words):
             self.wrote = True
 
-    def word(self, word: _Word) -> tuple[list[str], bool, str | None]:
+    def move(self, args: list[str], unknown: bool, definite: bool) -> None:
+        """A cd's mark on ``places``: where it may lead joins them. A folder
+        that isn't there now may be anything by the time it runs (a link an
+        earlier part makes, a cdable_vars name), and a relative cd that may
+        run many times may walk anywhere, so either means anywhere."""
+        args = [a for a in args if a != "--"]
+        if self.places is None:
+            return
+        if unknown or len(args) > 1 or args and args[0].startswith("-"):
+            self.places = None
+            return
+        target = os.path.expanduser(args[0] if args else "~")
+        reached = {os.path.normpath(os.path.join(place, target)) for place in self.places}
+        if not os.path.isabs(target) and not definite or not all(os.path.isdir(place) for place in reached):
+            self.places = None
+            return
+        self.places |= reached
+
+    def word(self, word: _Word, *, names: bool = True) -> tuple[list[str], bool, str | None]:
         """What ``word`` stands for, whether brindle knows it before it runs,
-        and the pattern it is (a leading ~ expanded), if it is one."""
+        and the pattern it is (a leading ~ expanded), if it is one; ``names``
+        False: the shell doesn't expand a pattern here (in a [[ test)."""
         for inner in word.substitutions:
             self.inner(inner)
         raw = word.raw
@@ -4255,7 +4528,7 @@ class _PartReader:
             self.expanded = self.tilde = True
         elif re.search(r"[=:]~", bare):
             self.expanded = self.tilde = True    # bash may expand it (path=~/x) or not
-        if re.search(r"[*?]|\[.+\]", bare):    # an unclosed [ (test's) is literal
+        if names and re.search(r"[*?]|\[.+\]", bare):    # an unclosed [ (test's) is literal
             names = self.expand(value)
             # One that matches nothing stays as written (--include=*.py): the program gets it as is.
             self.expanded |= names != []
@@ -4345,7 +4618,7 @@ def _wild_match(rule: Rule, part: ShellPart) -> bool:
             return sub not in _GIT_UNFORCED    # a force flag discards nothing in these
         return sub in (None, "push")
     if rule.match_type == "rm-destructive":
-        return program == "rm"
+        return program == "rm" and not _plain_rm(part.written)
     if rule.match_type not in MATCH_TYPES:
         return True
     fixed = re.split(r"[*?\[]", rule.match, maxsplit=1)[0] if rule.match_type == "glob" else rule.match
@@ -4369,6 +4642,57 @@ def _pathspecs(part: ShellPart) -> bool:
     return not any(re.search(r"[*?]|\[.+\]", word) for word in part.written[:part.written.index("--")])
 
 
+def _without_pattern(part: ShellPart, *, scripts: bool = False) -> list[str]:
+    """A part's words as written, a grep's search pattern (quoted: it names no
+    file, and its [:alpha:] reads like one brindle can't expand) replaced by
+    plain text. Its pattern is its first operand when no option gives one; it
+    may instead be a word an option takes (-m 1), which leaves the pattern
+    among the names. Options it doesn't know (--fi is --file) leave it all.
+    ``scripts``: a sed's or awk's program too, for asking only what files
+    they name: what a program does is _readonly_part's to read in the words."""
+    words = part.written
+    program = os.path.basename(words[0])
+    if scripts and program in ("sed", "awk"):
+        if any(re.match(r"-[^-]*[ef]|--(expression|file)", word) for word in words[1:]):
+            return words
+    elif program not in ("grep", "egrep", "fgrep"):
+        return words
+    else:
+        for word in words[1:]:
+            if re.match(r"-[^-]*[ef]", word) or word.startswith("--") and (
+                    word.partition("=")[0] not in (*_GREP_FLAGS, *_GREP_VALUES)
+                    or word.startswith(("--regexp", "--file"))):
+                return words
+    at = next((n for n, word in enumerate(words) if n and not word.startswith("-")), None)
+    if at is None or part.patterned[at]:
+        return words
+    return [*words[:at], "pattern", *words[at + 1:]]
+
+
+_RUNS_A_PROCESS = re.compile(r"\b(?:os\.system|system\(|popen|Popen|subprocess\.\w+|exec[lv]\w*|execSync|spawn\w*"
+                             r"|child_process|shell_exec|passthru|proc_open|do shell script)\b")
+_CALL_LINES = 4    # how far past a process call its arguments may run in source
+
+
+def _interpreter_calls(command: str) -> list[str]:
+    """Where an interpreter in ``command`` is given source as text (heredoc
+    bodies, quoted words: python3 -c '...') the text at each call that starts
+    a process, its arguments on the lines after it: a script that only edits
+    a file mentions git without running it. Best effort, and text only: what
+    a program computes at run time is beyond it, as for a script in a file."""
+    tokens: list[tuple] = []
+    _script_tokens(command, credential_scan=True, partial=tokens)
+    words = [t[1].raw for t in tokens if t[0] == "word"]
+    if not any(re.sub(r"[\d.]+$", "", os.path.basename(w)) in _INTERPRETERS for w in words):
+        return []
+    sources = ["\n".join(t[1]) for t in tokens if t[0] == "heredoc"] + [w for w in words if w[:1] in ("'", '"')]
+    calls = []
+    for source in sources:
+        lines = source.split("\n")
+        calls += ["\n".join(lines[n:n + _CALL_LINES]) for n, line in enumerate(lines) if _RUNS_A_PROCESS.search(line)]
+    return calls
+
+
 def read_parts(req: Request, rules: list[Rule], checks: list[str] | None = None,
                why: list[ValueError] | None = None) -> tuple[list[ShellPart], Decision | None] | None:
     """``req``'s shell command as ShellParts with the deny (else ask) a rule
@@ -4377,30 +4701,52 @@ def read_parts(req: Request, rules: list[Rule], checks: list[str] | None = None,
     only the run knows."""
     from brindle.native.permissions import _joined
 
+    def covered(reason: str) -> None:
+        if why is not None:
+            why.append(_DenyMayCover(reason))
+
+    restrictions = [r for r in rules if r.kind == "bash" and r.decision in ("deny", "ask") and not r.expired()
+                    and (not r.repo_root or bool(req.repo_root) and os.path.realpath(req.repo_root) == r.repo_root)]
+    if req.kind == "bash" and req.command and any(
+            rule.decision == "deny" and _may_restrict(rule, code, code=True)
+            for rule in restrictions for code in _interpreter_calls(req.command)):
+        covered("an interpreter's source starts a process a deny rule may cover")
+        return None
     parts = shell_parts(req, why)
     if parts is None:
         return None
-    restrictions = [r for r in rules if r.kind == "bash" and r.decision in ("deny", "ask") and not r.expired()
-                    and (not r.repo_root or bool(req.repo_root) and os.path.realpath(req.repo_root) == r.repo_root)]
     path_denies = [r for r in rules if r.kind == "read" and r.decision == "deny" and r.match_type != "tracked"]
     write_denies = any(r.kind in ("write", "edit") and r.decision == "deny" for r in rules)
     found = None
     for part in parts:
         at = replace(req, cwd=part.cwd or req.cwd)
-        if (write_denies and any(not os.path.isabs(path) for path in part.writes)
-                or path_denies and any(not os.path.isabs(path) for path in part.reads)):
+        # Every folder it may run in: a proof about what it names must hold in each.
+        places = [at] if part.cwd is not None else [replace(req, cwd=place) for place in part.places]
+        named, operands = _without_pattern(part), _without_pattern(part, scripts=True)
+        if write_denies and any(not os.path.isabs(path) for path in part.writes):
             return None    # a file only the run names: a deny may cover it
+        if path_denies and any(not os.path.isabs(path) for path in part.reads):
+            covered("a file only the run names")
+            return None
         if part.data and any(_could_cover(rule, " ".join(part.words[:2])) for rule in restrictions):
             return None    # the message may be one a rule names
-        if restrictions and (part.redirect_glob or part.globs and not (part.cwd is not None and (
-                _pathspecs(part) or _globs_excluded(at, [part.written], restrictions, path_denies, [part.assigned],
-                                                    [("<", path) for path in part.reads])))):
+        if restrictions and (part.redirect_glob or part.globs and not (places and (
+                _pathspecs(part) or all(_globs_excluded(place, [named], restrictions, path_denies,
+                                                        [part.assigned], [("<", path) for path in part.reads])
+                                        for place in places)))):
             return None    # a pattern a program may take as an option or a subcommand, or a protected file
         # awk reads operands too, but is not a READERS glob proof: a pattern
         # in its program position could expand to executable awk source.
-        if path_denies and os.path.basename(part.words[0]) in (*READERS, "awk") and (
-                part.cwd is None or not _reads_clear(at, part.written, path_denies)):
-            return None    # it may read a file a deny covers, or where brindle can't tell
+        if path_denies and os.path.basename(part.words[0]) in (*READERS, "awk") and not (
+                not part.unknown and not part.globs and _reads_only_stdin(part.written)
+                or places and all(_reads_clear(place, operands, path_denies) for place in places)):
+            # Where brindle can't tell, or a deny of the person's covers a file it names, it isn't
+            # run for want of a rule. A project's .env the agent is working in is another matter
+            # (cat .env), and the stores are prints_credentials'.
+            kept = [r for r in path_denies if r.source != "preset"]
+            if not places or not all(_reads_clear(place, operands, kept) for place in places):
+                covered("it may read a file a deny covers, or where brindle can't tell")
+            return None
         # With the files it redirects to too: a deny on a name sees them.
         spans = [part.words, [*part.words, *part.writes, *part.reads]]
         texts = [replace(at, command=_joined(words)) for words in spans]
@@ -4417,6 +4763,7 @@ def read_parts(req: Request, rules: list[Rule], checks: list[str] | None = None,
             for rule in restrictions:
                 if _wild_match(rule, part):
                     if rule.decision == "deny":
+                        covered("a deny rule could match a word only the run knows")
                         return None
                     matched = matched or Decision("ask", f"{VERBS['ask']} by {rule.source} rule {rule.id} "
                                                          f"({rule.describe()})", rule)
