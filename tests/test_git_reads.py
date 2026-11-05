@@ -13,6 +13,8 @@ from conftest import sh
 
 from brindle import agents, config, disk, git, session_sync, spawn, workspaces
 
+_real_gh_lookup = git.gh_credential_helper     # conftest's gh_sign_in_unknown replaces it for each test
+
 
 def _script(path: Path, body: str) -> Path:
     path.write_text(f"#!/bin/sh\n{body}\n")
@@ -112,6 +114,7 @@ def test_agent_panes_sign_in_to_github_through_gh_without_the_keychain_helper(db
                             '"auth git-credential") [ "$3" = get ] && printf "username=me\\npassword=from-gh\\n" ;;\nesac')
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
     monkeypatch.setattr(agents, "_KEYCHAIN_HELPER_PLATFORM", True)
+    monkeypatch.setattr(git, "gh_credential_helper", _real_gh_lookup)
     monkeypatch.setattr(git, "_gh_seen", {})
     monkeypatch.delenv("GIT_CONFIG_PARAMETERS", raising=False)
     assert "GIT_CONFIG_PARAMETERS" not in agents.agent_env(ws, "a")    # gh there, not signed in: today's helpers
