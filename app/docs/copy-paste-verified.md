@@ -222,10 +222,11 @@ Causes found and fixed:
   text isn't pasted again (for `LATE_PASTE_WINDOW`). That match is by content and
   time, so it can be wrong both ways: a person's own Edit > Paste of the same
   text, just after a ⌘V the webview never answered, is dropped and logged; and a
-  webview paste later than the window is pasted again. Neither has been seen. An
-  exact fix is to give every Mac ⌘V one source, the app's clipboard, but that
-  read isn't the system's "person pasting", so macOS may ask on each paste,
-  which the webview paste exists to avoid. An open decision, not settled here.
+  webview paste later than the window is pasted again. Neither has been seen in
+  the real app. An exact fix is to give every Mac ⌘V one source, the app's
+  clipboard, but that read isn't the system's "person pasting", so macOS may ask
+  on each paste, which the webview paste exists to avoid. The owner chose to keep
+  this on 2026-11-04, accepting those cases.
 - **A lone surrogate lost the whole paste.** `serde_json` refuses one, and the
   error was swallowed. It is now U+FFFD, and a refused write is logged.
 - **Input lost on the way to the client said nothing.** `pty_view_write` answered
