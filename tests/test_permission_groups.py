@@ -51,14 +51,15 @@ DESTRUCTIVE_DENIED = {"shell": {"baseline": "allow", "subcategories": {"destruct
      [("shell", "readonly"), ("files", "write-worktree")]),
     ("permissive", {}, lambda ws: bash(ws, "mkdir -p src/x && curl -sS https://example.com"), "ask",
      [("files", "write-worktree"), ("network", "fetch")]),                # the strictest part
-    # Escapes inside backticks remain unverified: every preset asks (shell/unchecked).
-    ("autonomous", {}, lambda ws: bash(ws, "echo `\\whoami`"), "ask",
+    # Escapes inside backticks remain unverified (shell/unchecked): it asks, but where commands
+    # run unasked, the agent is told to split it.
+    ("autonomous", {}, lambda ws: bash(ws, "echo `\\whoami`"), "deny",
      [("shell", "other"), ("shell", "readonly"), ("shell", "readonly")]),   # unreadable: other, and its parts
-    ("autonomous", {"shell": {"subcategories": {"unchecked": "deny"}}}, lambda ws: bash(ws, "echo `\\whoami`"), "deny",
-     [("shell", "other"), ("shell", "readonly"), ("shell", "readonly")]),
     ("standard", {}, lambda ws: bash(ws, "echo `\\whoami`"), "ask",
      [("shell", "other"), ("shell", "readonly"), ("shell", "readonly")]),
-    ("autonomous", {}, lambda ws: bash(ws, "rm -rf $DIR"), "ask", [("shell", "destructive")]),   # $DIR may be ~
+    ("standard", {"shell": {"subcategories": {"unchecked": "deny"}}}, lambda ws: bash(ws, "echo `\\whoami`"), "deny",
+     [("shell", "other"), ("shell", "readonly"), ("shell", "readonly")]),
+    ("autonomous", {}, lambda ws: bash(ws, "rm -rf $DIR"), "deny", [("shell", "destructive")]),   # $DIR may be ~
     ("permissive", {}, lambda ws: bash(ws, "python3 - <<'EOF'\nprint(1)\nEOF"), "ask", [("shell", "other")] * 5),
     # eval of literal words is the command they make.
     ("autonomous", {}, lambda ws: bash(ws, "eval 'git push --force origin x'"), "deny", [("git", "push-protected")]),
@@ -121,15 +122,17 @@ def test_a_table_stored_before_unverifiable_existed_gets_its_presets_answer_and_
     permissions.apply_preset("autonomous")
     path = permissions.store_path()
     data = json.loads(path.read_text())
-    # The old seeded deny of what brindle can't verify, under its old name: unchecked asks now.
+    # The old seeded deny of what brindle can't verify, under its old name: unchecked is left to inherit.
     data["groups"]["shell"]["subcategories"]["unverifiable"] = "deny"
     del data["groups"]["shell"]["subcategories"]["unchecked"]
     path.write_text(json.dumps(data))
     unverifiable = bash(ws, "echo `\\whoami`")
-    assert decide(unverifiable).decision == "ask"
+    assert decide(unverifiable).decision == "deny"
     # With no table at all, where unmatched actions run; an eval of what only the run knows
     # is unverifiable even with no rule that could have asked.
-    assert decide(bash(ws, 'eval "$X"'), rules=[], unmatched="allow", saved=[]).decision == "ask"
+    assert decide(bash(ws, 'eval "$X"'), rules=[], unmatched="allow", saved=[]).decision == "deny"
+    # Where a command would ask anyway, it still asks.
+    assert decide(bash(ws, 'eval "$X"'), rules=[], unmatched="ask", saved=[]).decision == "ask"
 
 
 def test_a_pattern_whose_listing_runs_past_the_budget_is_unknown(monkeypatch, tmp_path):

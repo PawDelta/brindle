@@ -677,6 +677,7 @@ def _sandboxed(command):
     pytest.param("cat $HOME/.npmrc", "deny", marks=pytest.mark.variant("bypass attempt")),
     pytest.param("python3 -c \"print(open(__import__('os').path.expanduser('~/.aws/credentials')).read())\"",
                  "deny", marks=pytest.mark.variant("bypass attempt")),
+    pytest.param("git status; git reset --hard", "deny", marks=pytest.mark.variant("a part of a compound")),
     ("git status", None),
 ])
 def test_codex_pre_tool_hook_denies_what_codex_runs_without_asking(db, ws, monkeypatch, command, expected):
@@ -696,6 +697,23 @@ def test_codex_pre_tool_hook_denies_what_codex_runs_without_asking(db, ws, monke
     assert codex_hook.status() == codex_hook.TRUSTED   # trusted with the PermissionRequest hook
     payload = {**codex_payload("Bash", {"command": command}, ws.path), "hook_event_name": "PreToolUse"}
     out = agents.hook_main(db, a.id, hook.rsplit(" ", 1)[1], json.dumps(payload), trusted=False)
+    assert (json.loads(out)["hookSpecificOutput"]["permissionDecision"] if out else None) == expected
+
+
+@pytest.mark.parametrize("command, expected", [
+    ("echo 'git reset --hard' | sh", "deny"),
+    ('python3 -c "$X"', "deny"),
+    pytest.param("git status; git log | head -1", None, marks=pytest.mark.variant("every part allowed: no answer")),
+])
+def test_codex_pre_tool_hook_gives_autonomous_the_same_answer(db, ws, monkeypatch, command, expected):
+    """It shares the checker: what can't be told is refused before Codex's sandbox runs it."""
+    monkeypatch.setattr(codex_hook, "_AppServer", FakeAppServer)
+    turn_on(ws)
+    permissions.apply_preset("autonomous")
+    a = worker(db, ws)
+    [flag] = [arg for arg in launch_argv(ws) if arg.startswith("hooks.PreToolUse=")]
+    payload = {**codex_payload("Bash", {"command": command}, ws.path), "hook_event_name": "PreToolUse"}
+    out = agents.hook_main(db, a.id, hook_command_of(flag).rsplit(" ", 1)[1], json.dumps(payload), trusted=False)
     assert (json.loads(out)["hookSpecificOutput"]["permissionDecision"] if out else None) == expected
 
 

@@ -897,6 +897,23 @@ Pick a preset in Settings → Permissions or at setup:
 - **Standard**: routine reads and everyday commands run, changes ask;
 - **Secure**: short approvals, and a deny for anything no rule covers.
 
+A shell command of several parts is read part by part: `$(...)`, assignments,
+loops, `if`, `[[ ... ]]`, `;`, `&&`, `||`, pipes and heredocs as data. Each part
+is decided as if it ran alone, so a command gets no more power than its parts run
+one by one, and no stricter standard either: a deny or an ask on any part holds
+however deep it sits, and what would run alone runs.
+
+Where brindle can't tell what will run, it doesn't guess: a program or code only
+the run knows (`$X`, `eval "$X"`, `python3 -c "$X"`), a program fed what it will
+run (`... | sh`, `... | xargs`, `python3 - <<EOF`), or syntax it doesn't read. Under
+Autonomous the agent is told to run the parts as separate commands, and you get no
+prompt; under other presets it asks. The `shell/unchecked` setting overrides this:
+deny always refuses, and allow runs them, the dangerous opt-in.
+
+This reads what's written; it isn't a sandbox. A program allowed alone can do what
+it can do alone: under Autonomous `make test` runs, so does a script an agent wrote
+and `python3 -c` with any code it's given, at any depth.
+
 Every preset also denies reading `~/.ssh`, `~/.aws`, `~/.gnupg`, `.env*` and
 the daemon's token, and asks before every push into a `release` or
 `release/*` branch, which starts a signed build (an approval there is never

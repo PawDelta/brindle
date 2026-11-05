@@ -161,6 +161,28 @@ def test_the_person_gets_what_the_supervisor_escalates_or_leaves(db, team, monke
     assert history(db) == [("person", "deny")]
 
 
+def test_under_autonomous_a_supervisor_is_prompted_for_nothing_every_part_of_which_is_allowed(db, team, monkeypatch):
+    """No hold and no history for what's allowed; and with nobody above it, what
+    a supervisor is asked goes straight to the person, with no window to wait out."""
+    permissions.apply_preset("autonomous")
+    permissions.add_rule("bash", "make", "ask", "prefix")
+    waiting(monkeypatch)                # any wait on an answer fails the test
+    until = 'until s=$(gh run view 1 --json status --jq .status); [[ $s == completed* ]]; do echo w; done; echo "$s"'
+    assert ask(db, until, agent_id="boss") == "allow"
+    assert history(db) == [("policy", "allow")]
+
+    def person_sees_it_first(holder):
+        [shown] = inbox.pending_permissions(db, db.get_agent("boss"))
+        assert shown.dto.request_id == holder.request_id
+        assert team.clock.now == 1000.0     # no time passed: it waited on nobody
+        person_answers("allow_once")(holder)
+    waiting(monkeypatch, person_sees_it_first)
+    team.caller = "boss"
+    assert ask(db, "make build", agent_id="boss") == "allow"
+    assert team.sent == []
+    assert history(db) == [("policy", "allow"), ("person", "allow")]
+
+
 def test_a_person_only_ask_skips_the_supervisor(db, team, monkeypatch):
     def boss_cannot(holder):
         assert team.says("boss", holder.request_id, "allow")[0] == 409
