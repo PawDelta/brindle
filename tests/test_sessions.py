@@ -87,10 +87,9 @@ def test_pause_then_resume_uses_the_saved_claude_session(db, root, monkeypatch, 
     add(db, root, "w1", mode="assign", parent="boss")
     add(db, root, "w2", mode="assign", parent="boss", status="done", result="ok")
     # A fix round the update's own pause left done (the old daemon's code) comes back; one someone closed doesn't.
-    add(db, root, "w3", mode="assign", parent="boss", status="done", result="ok")
-    add(db, root, "w4", mode="assign", parent="boss", status="done", result="ok")
-    db.update_agent("w3", pipeline="fixing")
-    db.update_agent("w4", pipeline="fixing", dismissed_at=time.time())
+    for aid, closed in (("w3", None), ("w4", time.time())):
+        add(db, root, aid, mode="assign", parent="boss", status="done", result="ok")
+        db.update_agent(aid, pipeline="fixing", dismissed_at=closed)
     agents.resume(db, "boss")
     assert db.get_autopilot("boss").enabled
     assert [a for a, _ in launched] == ["boss", "w1", "w3"]  # finished workers stay done
@@ -330,8 +329,7 @@ def _the_app_daemon_pauses_on_its_way_out_and_the_next_start_resumes(db, root, m
 
 
 @pytest.mark.parametrize("mode, result, stage, session, plan, queued, status, says", [
-    # Live incident: agent 44196488 went `done` in a fix round as the old daemon paused, and nothing brought it back.
-    ("assign", "reported", "fixing", True, None, False, "processing", "continue your task"),
+    ("assign", "reported", "fixing", True, None, False, "processing", "continue your task"),    # agent 44196488's incident
     ("assign", "reported", "fixing", False, None, False, "processing", "missing check for None"),
     ("assign", "reported", "resolving", False, None, False, "processing", "conflicts with its base"),
     ("review", None, None, True, None, False, "processing", "continue your task"),
@@ -341,19 +339,14 @@ def _the_app_daemon_pauses_on_its_way_out_and_the_next_start_resumes(db, root, m
     ("assign", "reported", "fixing", True, "merged", False, "done", None),  # merged by hand during the pause
 ])
 def test_what_was_at_work_carries_on_after_a_pause_and_resume(
-        db, root, monkeypatch, tmp_path, mode, result, stage, session, plan, queued, status, says):
+        db, root, monkeypatch, mode, result, stage, session, plan, queued, status, says):
     from brindle import company_identity, spawn
-
-    (tmp_path / "claude" / "projects" / "p").mkdir(parents=True)
-    (tmp_path / "claude" / "projects" / "p" / "sess-w1.jsonl").write_text("{}")
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
-    # Launches run for real up to their window, whose command is only recorded.
-    opened = {}
+    monkeypatch.setattr(providers.ClaudeCode, "can_resume", staticmethod(lambda ref: True))
+    opened = {}     # launches run for real up to their window, whose command is only recorded
     monkeypatch.setattr(agents, "_open_window",
                         lambda db_, a, ws, name, argv, *args, **kw: opened.update({a.id: " ".join(argv)}) or "%0")
     monkeypatch.setattr(agents, "_detach", lambda args: None)
-    real_start = spawn.start
-    monkeypatch.setattr(spawn, "start", lambda argv, **kw: None if "_after-launch" in argv else real_start(argv, **kw))
+    monkeypatch.setattr(spawn, "start", lambda argv, **kw: None)
     monkeypatch.setattr(company_identity, "launch_check", lambda provider, home=None: (None, None, None))
     here = tmux.current_server()
     add(db, root, "boss", status="idle")
@@ -369,14 +362,11 @@ def test_what_was_at_work_carries_on_after_a_pause_and_resume(
     if queued:
         db.enqueue("w1", "the supervisor's follow-up", "boss")
     assert agents.is_alive(db.get_agent("w1"))
-
     agents.pause(db, "boss", stop_procs=False, stop_local_models=False)
     if plan == "merged":
         db.set_merged(root.id, head)
     agents.resume(db, "boss")
-
-    assert db.get_agent("w1").status == status
-    assert ("w1" in opened) == (status != "done")
+    assert db.get_agent("w1").status == status and ("w1" in opened) == (status != "done")
     if "w1" in opened:
         assert ("--resume" in opened["w1"]) == session
         assert says in opened["w1"] if says else agents.HEADLESS_CONTINUE not in opened["w1"]
