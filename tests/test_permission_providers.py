@@ -560,10 +560,16 @@ class FakeAppServer:
         if method == "config/batchWrite":
             [edit] = params["edits"]
             config.parent.mkdir(parents=True, exist_ok=True)
-            # An upsert: the person's own settings above stay.
-            own = config.read_text().split("[hooks.state.", 1)[0] if config.exists() else ""
-            config.write_text(own + "".join(f'[hooks.state."{key}"]\ntrusted_hash = "{value["trusted_hash"]}"\n'
-                                            for key, value in edit["value"].items()))
+            # An upsert: the person's own settings above stay, and so does what an entry already says (enabled).
+            import tomllib
+
+            text = config.read_text() if config.exists() else ""
+            entries = tomllib.loads(text).get("hooks", {}).get("state", {})
+            for key, value in edit["value"].items():
+                entries[key] = {**entries.get(key, {}), **value}
+            config.write_text(text.split("[hooks.state.", 1)[0] + "".join(
+                f'[hooks.state."{key}"]\n' + "".join(f"{k} = {json.dumps(v)}\n" for k, v in entry.items())
+                for key, entry in entries.items()))
             return {"status": "ok"}
         if method == "config/read":
             # Like Codex's: every layer, highest precedence first, a project
@@ -992,8 +998,8 @@ def test_unreadable_codex_trust_never_gets_reinstalled(ws, monkeypatch):
 
     monkeypatch.setattr("brindle.providers.codex_binary", lambda: "/bin/sh")
     assert codex_hook.status() == codex_hook.UNREADABLE and inbox._setup_items() == []
-    assert "doesn't parse" in codex_hook.launch_warning("codex", ws.path)
-    assert "doesn't parse" in doctor.codex_hook_checks(ws.repo_root)[0].detail
+    assert codex_hook.launch_warning("codex", ws.path)
+    assert doctor.codex_hook_checks(ws.repo_root)[0].level == doctor.WARN
 
 
 def move_brindle(monkeypatch):
@@ -1130,15 +1136,30 @@ def test_the_daemon_doesnt_take_the_hooks_slot_when_its_not_its_to_take(ws, hook
     assert FakeAppServer.calls == [] and codex_hook.status() == before != codex_hook.TRUSTED
 
 
-def test_a_hook_the_person_turned_off_is_asked_about_and_comes_back_only_when_they_ask(db, ws, hook_daemon):
+def test_a_hook_the_person_turned_off_is_asked_about_and_comes_back_only_when_they_ask(db, ws, hook_daemon, monkeypatch):
+    import tomllib
+
+    def enabled():
+        state = tomllib.loads((codex_hook.codex_home() / "config.toml").read_text())["hooks"]["state"]
+        return [entry.get("enabled") for entry in state.values() if "enabled" in entry]
+
     turn_off_in_codex()
-    assert codex_hook.status() == codex_hook.REMOVED
     [item] = _setup_items(db, ws)
-    assert item.fix == "codex_hook_trust" and "turned off" in item.reason
-    codex_hook.trust("codex", codex_hook.inspect("codex"))   # the item's fix
-    written = next(p for m, p in FakeAppServer.calls if m == "config/batchWrite")["edits"][0]["value"]
-    assert any(entry.get("enabled") is True for entry in written.values())
-    assert codex_hook.status() == codex_hook.TRUSTED
+    assert item.fix == "codex_hook_trust" and item.action.path == "/v1/setup/codex-hook"
+    # brindle's record gone (a reset store, another BRINDLE_HOME on this Codex home), the policy on:
+    # nothing automatic may read that as a new hook and turn it back on.
+    _never_trusted_with_the_persons_policy_on(monkeypatch)
+    assert codex_hook.status() == codex_hook.REMOVED
+    FakeAppServer.calls = []
+    hook_daemon._keep_codex_hook()
+    assert codex_hook.ensure("codex") == codex_hook.REMOVED
+    assert FakeAppServer.calls == [] and enabled() == [False]
+    # Nor a trust() started before it was turned off, which reads the keys Codex listed under the lock.
+    with pytest.raises(codex_hook.HookTurnedOff):
+        codex_hook.trust("codex", codex_hook.inspect("codex"))
+    assert enabled() == [False]
+    assert CliRunner().invoke(app, ["permissions", "install-codex-hook", "--yes"]).exit_code == 0   # they ask
+    assert enabled() == [True] and codex_hook.status() == codex_hook.TRUSTED
 
 
 def test_a_hook_trust_cant_land_inside_a_project_trusts_rewrite(ws, monkeypatch):

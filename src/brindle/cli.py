@@ -1827,7 +1827,7 @@ def permissions_install_codex_hook(
         typer.echo("nothing changed; run again with --yes to trust it")
         return
     try:
-        codex_hook.trust(binary, state)
+        codex_hook.trust(binary, state, turn_on=True)
     except codex_hook.CodexHookError as e:
         typer.echo(f"couldn't record the trust: {e}")
         raise typer.Exit(1)

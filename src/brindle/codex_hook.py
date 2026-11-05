@@ -90,6 +90,10 @@ class CodexHookError(RuntimeError):
     pass
 
 
+class HookTurnedOff(CodexHookError):
+    """A person turned the hook off in Codex, and nobody asked to turn it back on."""
+
+
 def codex_home() -> Path:
     from brindle import providers
 
@@ -194,6 +198,12 @@ def _turned_off(entry: object) -> bool:
     return isinstance(entry, dict) and entry.get("enabled") is False
 
 
+# The keys Codex gives brindle's hooks (see above): a hook turned off there is
+# off whatever brindle's own record says, or if it has none (a reset store,
+# another BRINDLE_HOME sharing this Codex home).
+SLOTS = ("/<session-flags>/config.toml:permission_request:0:0", "/<session-flags>/config.toml:pre_tool_use:0:0")
+
+
 def status(command: str | None = None) -> str:
     """Where brindle's hook stands with Codex, in the Codex home brindle runs
     Codex with now: TRUSTED (this exact hook, and Codex's config still says so),
@@ -206,15 +216,15 @@ def status(command: str | None = None) -> str:
     command = command or hook_command()
     home = codex_home()
     rec = permissions.load_store().codex_hook.get(_home_key(home), {})
-    if not rec.get("command") or not rec.get("key") or not rec.get("hash"):
-        return NEW
     try:
         state = _hook_entries(home)
     except ValueError:
         return UNREADABLE
-    pairs = [(key, hash_) for key, hash_ in ((rec["key"], rec["hash"]), (rec.get("pre_key"), rec.get("pre_hash"))) if key]
-    if any(_turned_off(state.get(key)) for key, _ in pairs):
+    if any(_turned_off(state.get(key)) for key in (*SLOTS, rec.get("key"), rec.get("pre_key"))):
         return REMOVED
+    if not rec.get("command") or not rec.get("key") or not rec.get("hash"):
+        return NEW
+    pairs = [(key, hash_) for key, hash_ in ((rec["key"], rec["hash"]), (rec.get("pre_key"), rec.get("pre_hash"))) if key]
     if not all(isinstance(state.get(key), dict) and state[key].get("trusted_hash") == hash_ for key, hash_ in pairs):
         return MOVED
     # Codex's hash covers the whole definition, not just the command: a trust
@@ -252,6 +262,8 @@ def ensure(binary: str | None = None, command: str | None = None) -> str:
         # (an upgrade, or a wrapper's own executable) may hash or key the
         # hook differently, which is "Hooks need review" at its startup: ask it.
         trust(binary, state)
+    except HookTurnedOff:
+        return REMOVED
     except Exception:  # noqa: BLE001 - Codex missing, too old, or not answering
         if not was_trusted:
             return now
@@ -533,26 +545,29 @@ def inspect(binary: str, command: str | None = None) -> HookState:
                      str(pre["key"]), str(pre["currentHash"]))
 
 
-def trust(binary: str, state: HookState) -> HookState:
+def trust(binary: str, state: HookState, *, turn_on: bool = False) -> HookState:
     """Record the person's trust of the hooks in Codex's config (through Codex's
     own writer), check Codex now sees them as trusted, and remember it. A hook
-    turned off in Codex is turned back on: only a person asking gets here for
-    one (ensure and keep_trusted leave it alone)."""
+    turned off in Codex stays off (HookTurnedOff) unless ``turn_on``: only the
+    person asking for it back sets that, never brindle's own upkeep."""
     from brindle import permissions
     from brindle.providers import _config_lock
 
-    try:
-        entries = _hook_entries(codex_home())
-    except ValueError:
-        entries = {}
     server = _AppServer(binary, config_flags(state.command))
     try:
         # The lock trust_codex_project rewrites config.toml under: its text from
         # before this write would otherwise put the old trust back, or none.
         with _config_lock("codex-trust.lock"):
+            try:
+                entries = _hook_entries(codex_home())
+            except ValueError:
+                entries = {}
+            off = {key for key in state.keys() if _turned_off(entries.get(key))}
+            if off and not turn_on:
+                raise HookTurnedOff("the hook is turned off in Codex")
             server.call("config/batchWrite", {"edits": [{
                 "keyPath": "hooks.state", "mergeStrategy": "upsert",
-                "value": {key: {"trusted_hash": hash_, **({"enabled": True} if _turned_off(entries.get(key)) else {})}
+                "value": {key: {"trusted_hash": hash_, **({"enabled": True} if key in off else {})}
                           for key, hash_ in state.keys().items()}}]})
     finally:
         server.close()
