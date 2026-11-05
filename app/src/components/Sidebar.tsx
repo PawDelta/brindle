@@ -93,6 +93,7 @@ function UsageReading({ provider, warning, failed, navigate }: { provider?: Prov
       aria-label="Open Account › Usage"
       data-testid="usage-reading"
       data-provider={provider?.provider}
+      data-state={provider ? "reading" : failed ? "failed" : "none"}
       onClick={() => navigate({ screen: "account", section: "usage", ask: ++usageAsks })}
     >
       {provider ? (

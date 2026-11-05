@@ -65,10 +65,10 @@ describe("Sidebar", () => {
     sync.stop();
   });
 
-  it("says usage is unavailable when the load really failed", async () => {
+  it("marks the usage reading failed when the load really failed", async () => {
     const { sync } = mount({}, { screen: "new" }, (daemon) => (input, init) =>
       String(input).endsWith("/usage") ? Promise.resolve(new Response("{}", { status: 500 })) : daemon.fetch(input, init));
-    await waitFor(() => expect(screen.getByTestId("usage-reading").textContent).toBe("Usage unavailable"));
+    await waitFor(() => expect(screen.getByTestId("usage-reading").dataset.state).toBe("failed"));
     sync.stop();
   });
 
