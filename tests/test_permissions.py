@@ -139,7 +139,7 @@ def _bypass(command):
     ("python3 -c \"print(open(__import__('os').path.expanduser('~/.aws/credentials')).read())\"", "deny"),
     _bypass('cat "${HOME}/.aws/credentials"'),
     _bypass("node -e \"console.log(require('fs').readFileSync(require('os').homedir() + '/.npmrc', 'utf8'))\""),
-    ("python3 -c 'print(1)'", "allow"),
+    ("python3 -c 'print(1)'", "ask"),    # not a dump; of several words, an interpreter isn't on the allow-list
     ("echo $GH_TOKEN2", "deny"),
     ("printenv DB_PASS", "deny"),
     ("printenv MYSQL_PWD", "deny"),
@@ -228,7 +228,7 @@ def _bypass(command):
     _bypass('ls ~/.ssh > "$OUTPUT"'),    # a store named, a target only the run knows
     pytest.param('ls > "$OUTPUT"', "allow",
                  marks=pytest.mark.variant("no store named: an unresolved target is the policy's question")),
-    pytest.param("du -sh ~/*", "allow",
+    pytest.param("du -sh ~/*", "ask",
                  marks=pytest.mark.variant("replayed traffic: a shell glob never selects a dot store")),
     pytest.param("d=$(pwd); du -sh $d/*", "allow",
                  marks=pytest.mark.variant("replayed traffic: an unknown prefix before a bare pattern names nothing")),
@@ -247,16 +247,16 @@ def _bypass(command):
     pytest.param("for f in ~/.ssh/*; do ls $f; done", "allow",
                  marks=pytest.mark.variant("a command made only of harmless checks may name a store")),
     pytest.param("dd if=README.md", "allow", marks=pytest.mark.variant("non-credential input is safe")),
-    pytest.param('TOKEN="$TOKEN" echo ready', "allow",
+    pytest.param('TOKEN="$TOKEN" echo ready', "ask",
                  marks=pytest.mark.variant("assignment value does not print")),
-    pytest.param('env API_TOKEN="$API_TOKEN" echo ready', "allow",
+    pytest.param('env API_TOKEN="$API_TOKEN" echo ready', "ask",
                  marks=pytest.mark.variant("assignment through env does not print its value")),
-    pytest.param("case x in (env) echo ready;; esac", "allow",
+    pytest.param("case x in (env) echo ready;; esac", "ask",
                  marks=pytest.mark.variant("a case pattern names a command without running it")),
     ("env -u FOO git status", "allow"),
     ("env VAR=1 git status", "allow"),
     ("printenv PATH", "allow"),
-    ("bash -c 'printenv HOME'", "allow"),
+    ("bash -c 'printenv HOME'", "ask"),
     ("printenv --help", "allow"),
     ("env --help", "allow"),
     ("echo $HOME", "allow"),
@@ -291,7 +291,7 @@ def test_credential_dumps_are_denied(tmp_path, command, expected):
     saved = permissions.SavedAction("grant", "bash", command, "allow")
     decision = permissions.decide(req, saved=[saved])
     assert decision.decision == expected, decision.reason
-    assert (decision.rule is None) == (expected == "deny") or expected == "allow"
+    assert decision.rule is None or expected != "deny"    # a hard deny, no rule's
 
 
 def _held(command):
@@ -312,27 +312,11 @@ LOOP = "until s=$(gh run view 1 --json status --jq .status); [[ $s == completed*
     ('while IFS= read -r b; do echo "$b"; done', "allow"),                          # read's own IFS
     ("git add . && git commit -F - <<'EOF'\nmessage\nEOF", "allow"),                # . is a folder, not source
     ("cat <<'EOF' | grep x\nbash and python are only text here\nEOF", "allow"),     # a heredoc to a program as data
-    ("git status; bash build.sh; cat > notes.md <<'EOF'\nprintenv\nEOF", "allow"),  # the shell reads another command's
-    ("bash -c 'git status; ls'", "allow"),                                          # content it can check
-    ("trap 'echo done' EXIT; trap -- 'echo done' INT; trap - INT; trap -p", "allow"),
-    ("git log | bash scripts/filter.sh; command -v eval; watch -n1 'git status'", "allow"),
-    ("(git status) 2>&1", "allow"),                                             # a descriptor alone is no program
-    # Python is read from its syntax: what it edits or prints is only a string.
-    ("python3 - <<'EOF'\np='a.py'\ns=open(p).read().replace('subprocess.run(a) `x`', 'os.system(b)')\nEOF", "allow"),
     ("gh pr checks 1 | awk -F'\\t' '{print $2\" | \"$1}' | awk '/^a|^b/,/c/' | sort", "allow"),   # a | that runs nothing
-    ("python3 -c 'import importlib.metadata as m, json; print(m.version(json.__name__), json.__version__)'", "allow"),
-    ("python3 -c 'import re, markdown; print(re.compile(\"a\").pattern, markdown.__version__)'", "allow"),
-    # An option's value or a name is metadata, however much it looks like a command.
-    ("tmux new-session -s printenv 'git status'", "allow"),
-    ("tmux new-window -n env -c /tmp git status", "allow"),
-    ("tmux ls; tmux capture-pane -t printenv -p", "allow"),
-    ("ssh -l printenv host 'git status'", "allow"),
-    ("watch -n 1 'git status'", "allow"),
-    ("su printenv -c 'git status'", "allow"),
-    ("timeout 5 echo env; nice -n 5 echo printenv; xargs grep printenv", "allow"),
-    ("command -v watch; time git status", "allow"),
-    ("python3 -c 'print(1)'; grep -n 'subprocess.run(' notes.md", "allow"),     # another command's quoted word
     ("sed -i '' s/a/b/ notes.md; sed -n 1,5p notes.md; awk '$1 > 5 || /a/' notes.md", "allow"),
+    ("sqlite3 -readonly db 'select 1' '.schema x'; launchctl list | grep y; cargo test 2>&1 | tail -1", "allow"),
+    ("AWS_PROFILE=p aws s3 ls | head -1; uv run pytest -q | tail -1", "allow"),
+    ("sl" "eep 1; git status", "allow"),
     ("x=$(git log -1); [[ $x == a* ]] && eval 'git status'", "allow"),
     # A cd that may not run: it leads there or stays, and what's read must be clear in both.
     ("cd sub; git log -1 | head -5", "allow"),
@@ -345,9 +329,6 @@ LOOP = "until s=$(gh run view 1 --json status --jq .status); [[ $s == completed*
     ("rm -f d*.png frames/*", "allow"),
     ("touch x; rm -f d*.png", "allow"),
     ("git cherry main $b", "allow"),
-    # A process in an interpreter's source is checked; text in one that starts none isn't a command.
-    pytest.param("python3 - <<'EOF'\nprint('git push --force origin x')\nEOF", "allow",
-                 marks=pytest.mark.variant("replayed traffic: a script that edits a file mentions git")),
     # Every deny still fires, however deep.
     _bypass("[[ $(git push --force origin x) == y ]]"),
     _bypass("if [[ a == b && `git reset --hard` == c ]]; then :; fi"),
@@ -360,131 +341,74 @@ LOOP = "until s=$(gh run view 1 --json status --jq .status); [[ $s == completed*
     _bypass("[[ a ]]\\\n&& git push --force origin x && [[ b ]]"),    # ]]\<newline> closes it, for bash
     _bypass("[[ a ]\\] && git push --force origin x ]]"),
     _bypass("cat ~/.brindle/daemon.json | head -1; [[ a ]]"),
-    # Commands a program runs for the shell: read as if written out.
-    _bypass("bash -c 'git push --force origin x'"),
-    _bypass("sh -c 'cd /tmp && rm -rf /'"),
-    _bypass("sudo bash -c 'git reset --hard'"),
-    _bypass("x='git reset --hard'; bash -c \"$x\""),
-    _bypass("trap 'git push --force origin x' EXIT"),
-    _bypass("trap 'printenv' EXIT"),
-    _bypass("trap -- 'git push --force origin x' EXIT"),
-    _bypass("trap -- 'rm -rf /' EXIT"),
-    _bypass("builtin trap -- 'git push --force origin x' EXIT"),
-    _bypass("command eval 'git push --force origin x'"),
-    _bypass("env -S 'git push --force origin x'"),
-    _bypass("watch 'git push --force origin x'"),
-    _bypass("su root -c 'git reset --hard'"),
-    _bypass("su -c'git reset --hard'"),
-    _bypass("script -qc 'rm -rf /' /dev/null"),
-    _bypass("tmux new-session -d 'git push --force origin x'"),
-    _bypass("tmux new 'printenv'"),
     _bypass("eval 'git push --force origin x'"),
     _bypass("sudo rm -rf /"),
     _bypass("timeout 5 rm -rf ~"),
     _bypass("xargs rm -rf /"),
     _bypass("find . -exec rm -rf / ;"),
-    _bypass("time printenv"),
-    _bypass("xargs gh auth token"),
     _bypass('x="gh auth token"; $x'),
-    _bypass("x='cat /proc/self/environ'; bash -c \"$x\""),
-    _bypass("bash <<'EOF'\nprintenv\nEOF"),
-    _bypass("bash <<< printenv"),
-    _bypass("while read x; do sh; done <<'EOF'\nprintenv\nEOF"),    # a compound command's parts inherit its input
-    _bypass("{ sh; } <<'EOF'\nprintenv\nEOF"),
     # Wherever a command may run.
     _bypass("cd ~; cat .aws/credentials"),
     _bypass("cd ~/.ssh; grep x id_rsa"),
     _bypass("cd ~; grep -r x .aws"),
     _bypass("if true; then cd ~/.ssh; fi; grep x id_rsa"),
-    # What can't be checked stays the person's.
-    _held('bash -c "$X"'),
-    _held("sh -c 'case x in x) ls;; esac'"),
+    # The allow-list: of several parts, anything not on it asks, however harmless its words.
+    # A shell or an interpreter: what it runs isn't read.
+    _held("bash -c 'git status'"),
+    _held("git log | bash scripts/filter.sh"),
+    _held("echo ls | sh"),
     _held("bash <<'EOF'\necho hi\nEOF"),
-    _held("cat <<'EOF' | sh\necho hi\nEOF"),
-    _held("{ sh; } <<'EOF'\necho hi\nEOF"),
-    _held("python3 - <<'EOF'\nimport os\nos.system('git push --force origin x')\nEOF"),
-    _held("python3 - <<'EOF'\nimport subprocess\nsubprocess.run(\n    ['git', 'reset', '--hard'])\nEOF"),
-    _held("python3 -c 'import os; os.system(\"rm -rf /\")'"),
-    # However the source is laid out or spelled: a call's arguments far below it, a variable above it, an alias.
-    _held("python3 - <<'EOF'\nimport subprocess\nsubprocess.run(\n\n\n\n\n\n['git','push','--force','origin','x'])\nEOF"),
-    _held("python3 - <<'EOF'\ncmd = 'rm -rf /'\nprint(1)\nprint(2)\nprint(3)\nprint(4)\nimport os\nos.system(cmd)\nEOF"),
-    _held("python3 -c 'from subprocess import run; run(\"git reset --hard\", shell=True)'"),
-    _held("python3 -c '__import__(\"os\").system(\"rm -rf /\")'"),
-    _held("python3 -c 'import os,sys; os.system(sys.argv[1])' 'git push --force origin x'"),
-    _held("python3 -c 'import os; os.system(\"git push origin main\")'"),    # an ask rule's too
-    _held("python3 -c 'import os; os.system(\"printenv\")'"),                # no rule, a credential dump
-    _held("python3 -c 'import os; os.system(\"gi\" + \"t reset --hard\")'"),   # no rule's text anywhere
-    _held("python3 -c'import os; os.system(\"rm -rf /\")'"),                 # attached to its flag
-    _held("python3 -c import\\ os\\;os.system\\(\\\"ls\\\"\\)"),             # escaped, not quoted
-    _held("python3 - <<'EOF'\nimport asyncio\nasyncio.create_subprocess_shell('ls')\nEOF"),
-    _held("python3 - <<'EOF'\nfrom os import posix_spawn\nEOF"),
-    _held("python3 - <<'EOF'\nf = eval\nf('1')\nEOF"),
-    _held("python3 - <<'EOF'\nimport os\ngetattr(os, 'sys' + 'tem')('ls')\nEOF"),
-    _held("python3 - <<'EOF'\nprint(().__class__.__base__.__subclasses__())\nEOF"),
-    _held("python3 - <<'EOF'\nimport pty as p\np.spawn('sh')\nEOF"),
-    _held("python3 -c 'from builtins import getattr as g; import os; g(os, \"sys\" + \"tem\")(\"ls\")'"),
-    _held("python3 -c 'from builtins import eval as e; e(\"1\")'"),
-    _held("python3 -c 'import builtins; builtins.eval(\"1\")'"),
-    _held("python3 -c 'import timeit; timeit.timeit(\"1\")'"),                 # a standard module that runs a string
-    _held("python3 -c 'from operator import attrgetter as a; import os; a(\"sys\" + \"tem\")(os)(\"ls\")'"),
-    _held("python3 - <<'EOF'\nimport os\nmatch os:\n    case object(system=f):\n        f('ls')\nEOF"),
-    _held("python3 - <<'EOF'\nimport importlib.metadata\nimportlib.import_module('os')\nEOF"),
-    # Behind what only starts it, a program's own checks still apply.
-    _bypass("command watch 'git push --force origin x'"),
-    _bypass("sudo -u root watch -n 1 'printenv'"),
-    _bypass("timeout 5 su -c 'git reset --hard'"),
-    _bypass("find . -exec sh -c 'git reset --hard' ;"),
-    _bypass("env -i bash -c 'git reset --hard'"),
-    _held("command sed 'e date' notes.md"),
-    _held("timeout 5 sed 'e date' notes.md"),
-    _held("find . -exec sed 'e date' {} ;"),
-    _held("command awk 'BEGIN{system(\"date\")}'"),
-    _held("xargs awk 'BEGIN{system(\"date\")}'"),
-    _held("sudo -Z sed s/a/b/ x"),                      # an option it can't read: what follows is unknown
-    _held("sed s/a/date/e notes.md"),                   # no quotes in it: still read
-    # Each runner's command position, in each of its forms.
-    _bypass("watch -n 1 git push --force origin x"),
-    _bypass("tmux new-session -d -s w git push --force origin x"),    # several words: argv
-    _bypass("tmux new-s 'git reset --hard'"),           # a prefix of its name
-    _bypass("tmux -c 'printenv'"),
-    _bypass("tmux run-shell 'git reset --hard'"),
-    _bypass("tmux ls \\; new-window 'printenv'"),
-    _bypass("tmux send-keys -t w 'git reset --hard' Enter"),
-    _bypass("ssh -l u host git reset --hard"),
-    _bypass("ssh host -l u 'git reset --hard'"),        # options after the host
-    _bypass("su root -- -c 'git reset --hard'"),
-    _bypass("runuser -u u -- git reset --hard"),
-    _bypass("flock f git reset --hard"),
-    _bypass("parallel git ::: 'reset --hard'"),
-    _held("tmux set-hook -g x 'run-shell ls'"),
-    _held("tmux if-shell true 'run-shell ls'"),
-    _held("tmux set -g default-command 'ls'"),
-    _held("screen -X stuff 'ls'"),
-    _held('tmux new-session "$X"'),
-    _held("python3 - <<'EOF'\nnot python ( os.system('ls')\nEOF"),                # doesn't parse: read as text
-    _held("node -e 'const c = `x`; require(\"child_process\").execSync(\"ls\")'"),
-    _held("echo 'import os; os.system(\"ls\")' | python3"),
-    _held("x='import os; os.system(\"ls\")'; python3 -c \"$x\""),
-    _held("bash -c \"python3 -c 'import os; os.system(\\\"ls\\\")'\""),      # inside what a shell runs
-    _held("eval \"python3 -c 'import os; os.system(\\\"ls\\\")'\""),
-    _held("awk 'BEGIN{system(\"printenv\")}'"),
+    _held("python3 -c 'print(1)'"),
+    _held("python3 - <<'EOF'\nprint(1)\nEOF"),
+    _held("node -e '1'"),
+    # What only starts another command.
+    _held("sudo ls; ls"),
+    _held("xargs grep x; ls"),
+    _held("timeout 5 git status; ls"),
+    _held("command git status; ls"),
+    _held("time git status; ls"),
+    _held("env -i git status; ls"),
+    _held("find . -exec ls ';'"),
+    # What runs a string, a program by path, a program it has never heard of.
+    _held("trap 'echo done' EXIT"),
+    _held("watch 'git status'"),
+    _held("tmux ls; ls"),
+    _held("ssh host ls; ls"),
+    _held("./x.sh; ls"),
+    _held("some-tool; ls"),
+    # An understood program in a form that isn't: an assignment or an option that runs something.
+    _held("GIT_SSH_COMMAND=x git fetch; ls"),
+    _held("export GIT_SSH_COMMAND=x; git fetch"),
+    _held("git -c core.pager=x log; ls"),
+    _held("git log --ext-diff; ls"),
+    _held("git fetch --upload-pack=x; ls"),
+    _held("git rebase -x y main; ls"),
+    _held("git grep -Oy x; ls"),
+    _held("git bisect run x; ls"),
+    _held('git log "$X"; ls'),
+    _held("gh extension exec x; ls"),
+    _held("sed 's/a/date/e' notes.md"),
+    _held("sed -f x notes.md; ls"),
+    _held('X=$(ls); sed "$X" notes.md'),
+    _held("awk 'BEGIN{system(\"date\")}'"),
     _held("awk 'BEGIN{print | \"sh\"}'"),
-    _held("sed 's/a/printenv/e' notes.md"),
-    _held("sed 's#a#b#ge;p' notes.md"),
-    _held("sed -n -e '1e date' notes.md"),
+    _held("awk -f x notes.md; ls"),
+    _held("sort --compress-program=x notes.md; ls"),
+    _held("rg --pre x y; ls"),
+    _held("curl -K x; ls"),
+    _held("make SHELL=x; ls"),
+    _held("uv run python x.py; ls"),
+    _held("cargo --config x test; ls"),
+    _held("launchctl submit x; ls"),
+    _held("sqlite3 db '.shell ls'"),
+    _held("sqlite3 db <<'EOF'\n.shell ls\nEOF"),
+    _held("sqlite3 -cmd x db y; ls"),
+    # What it can't read, and a subshell: nothing to allow.
+    _held("(git status) 2>&1"),                         # a descriptor alone is no program, nor a crash
+    _held("case x in x) ls;; esac"),
+    # Past the list, a deny it can see still denies.
     _bypass("(git push --force origin x) 2>&1"),
-    _held("perl -e '`git push --force origin x`'"),
-    _held("ruby -e 'system(\"git reset --hard\")'"),
-    _held("awk 'BEGIN{system(\"git push --force origin x\")}'"),
-    _held("sed 's/a/git reset --hard/e' notes.md"),
-    # A shell running what a pipe feeds it.
-    _held("echo 'git push --force origin x' | sh"),
-    _held("printf x | bash -s"),
-    _held("cat x.sh | bash"),
-    _held("git log | while read x; do sh; done"),
-    _held("trap -x 'rm -rf /' EXIT"),
-    _held('trap -- "$X" EXIT'),
-    _held("""trap "git status; $X" EXIT"""),
+    _bypass("some-tool; git push --force origin x"),
     # A [[ whose operands are arithmetic runs what's in them, however it's quoted.
     _held("[[ 'a[$(git push --force origin x)]' -eq 0 ]]"),
     _held("[[ a -lt 'b[$(printenv)]' ]]"),
@@ -532,8 +456,8 @@ LOOP = "until s=$(gh run view 1 --json status --jq .status); [[ $s == completed*
     ("[[ a ; b ]]", "ask"),
 ])
 def test_autonomous_decides_a_script_part_by_part(tmp_path, monkeypatch, command, expected):
-    """A command whose every part is allowed never prompts; a deny on any part denies,
-    at any depth; and what brindle can't check asks, as it always has."""
+    """A command runs unasked if every part is allowed and a form brindle fully understands;
+    a deny on any part denies, at any depth; and anything else asks."""
     from brindle import permissions
 
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -545,6 +469,19 @@ def test_autonomous_decides_a_script_part_by_part(tmp_path, monkeypatch, command
     here = str(tmp_path / "wt")
     decision = permissions.decide(permissions.Request("claude", "bash", "Bash", here, here, here, command=command))
     assert decision.decision == expected, decision.reason
+
+
+def test_only_a_rule_a_person_wrote_naming_the_command_stands_in_for_the_allow_list(tmp_path):
+    from brindle import permissions
+
+    permissions.apply_preset("autonomous")
+    permissions.add_rule("bash", "*", "allow", "glob", source="learned")     # a pattern has decided nothing
+    here = str(tmp_path)
+    answer = lambda command: permissions.decide(permissions.Request("claude", "bash", "Bash", here, here, here,
+                                                                    command=command)).decision
+    assert answer("some-tool; git status") == "ask"
+    permissions.add_rule("bash", "some-tool", "allow", "prefix")
+    assert answer("some-tool; git status") == "allow"
 
 
 def test_stores_resolved_at_run_time(tmp_path, monkeypatch):

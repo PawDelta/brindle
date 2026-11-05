@@ -895,20 +895,18 @@ Pick a preset in Settings → Permissions or at setup:
 - **Standard**: routine reads and everyday commands run, changes ask;
 - **Secure**: short approvals, and a deny for anything no rule covers.
 
-A shell command is read part by part: `$(...)`, assignments, loops, `if`,
-`[[ ... ]]`, `;`, `&&`, `||`, pipes, heredocs as data, and what `sh -c`,
-`eval` or `trap` is given to run. Each part goes through the rules on its own.
-Under Autonomous a command whose every part is allowed never prompts, and an
-ask from a supervisor, with nobody above it, goes straight to you. A deny on
-any part denies the whole command, however deep it sits. Whatever brindle can't
-check still asks: a heredoc fed to a shell, a command string only the run
-knows, syntax the shell itself would refuse, or source given to an interpreter
-(or a sed or awk program) that can start a process. Python is read from its
-syntax, so a script that only edits a file doesn't ask for the strings in it;
-importing a module that can run code asks too. Other languages are read as text.
-A script in a file or a project's own module isn't read, as it never was, so this
-catches what's written inline, and doesn't stop an agent that writes a script and
-runs it.
+A shell command of several parts is read part by part: `$(...)`, assignments,
+loops, `if`, `[[ ... ]]`, `;`, `&&`, `||`, pipes and heredocs as data. A deny on
+any part denies the whole command, however deep it sits. It runs unasked only if
+the rules allow every part and every part is a form brindle fully understands: a
+short allow-list of programs (git, gh, grep, sed, cargo and the like) used in
+ways that can't run something they were given. Anything else in it asks: a
+wrapper (`sudo`, `xargs`, `timeout`), a runner (`bash -c`, `tmux`, `watch`, `ssh`),
+an interpreter (`python3`, `node`), `trap`, a script by path, or a program not on
+the list. An ask from a supervisor, with nobody above it, goes straight to you.
+A single simple command isn't gated: the rules answer it as before, so under
+Autonomous `make test` runs, and so does a script an agent wrote and runs by
+itself. The list is a guard on what's written inline, not a sandbox.
 
 Every preset also denies reading `~/.ssh`, `~/.aws`, `~/.gnupg`, `.env*` and
 the daemon's token, and asks before every push into a `release` or

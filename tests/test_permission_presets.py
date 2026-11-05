@@ -125,7 +125,7 @@ def test_a_new_store_is_autonomous_and_an_old_one_migrates_to_standard_keeping_i
 
 @pytest.mark.parametrize("request_of, decision, rule", [
     (lambda ws: bash(ws, "terraform apply"), "allow", None),                  # nothing covers it: it runs
-    (lambda ws: bash(ws, "python build.py > out.txt"), "allow", None),
+    (lambda ws: bash(ws, "python build.py > out.txt"), "ask", None),          # not a simple command: off the list
     (lambda ws: write(ws, "src/new.py"), "allow", None),
     (lambda ws: bash(ws, "git push origin feature"), "allow", None),
     (lambda ws: bash(ws, "git push origin main"), "ask", "d-push-default"),
@@ -215,7 +215,7 @@ def test_a_new_store_is_autonomous_and_an_old_one_migrates_to_standard_keeping_i
                          " -q '.[0].databaseId')"), "allow", None),
     (lambda ws: bash(ws, "d=/tmp/x; git -C $d status --short | head"), "allow", None),
     (lambda ws: bash(ws, "for f in *.md; do head -3 $f; done"), "allow", None),
-    (lambda ws: bash(ws, "F=path; python3 - \"$F\" <<'EOF'\nimport sys\nprint(sys.argv[1])\nEOF"), "allow", None),
+    (lambda ws: bash(ws, "F=path; python3 - \"$F\" <<'EOF'\nimport sys\nprint(sys.argv[1])\nEOF"), "ask", None),
     (lambda ws: bash(ws, "for b in x; do git push --force origin $b; done"), "deny", "d-git-force"),
     pytest.param(lambda ws: bash(ws, "for b in x main; do git push origin $b; done"), "ask", "d-push-default",
                  marks=pytest.mark.variant("an ask on one pass of a loop")),
@@ -237,7 +237,8 @@ UNCHECKED = "P=$(curl -s https://example.com/p); $P"    # a program only the run
 
 @pytest.mark.parametrize("preset, unchecked, command, decision, found", [
     # A variable set to a literal earlier in the command: the literal is what runs.
-    ("autonomous", None, "export D={ws}; rm -f $D/build/x", "allow", None),
+    ("autonomous", None, "export AWS_PROFILE={ws}; rm -f $AWS_PROFILE/build/x", "allow", None),
+    ("autonomous", None, "export D={ws}; rm -f $D/build/x", "ask", None),    # a name not on the list may change a program
     ("autonomous", None, "D={ws}; [ -d $D/build ] && rm -f $D/build/x", "allow", ["files/write-worktree"]),
     # A $(...) whose command reads: its family applies; its output is text, not a program.
     ("standard", None, 'echo "behind: $(git rev-list --count HEAD..origin/main)"', "allow", ["git/readonly"]),
@@ -268,7 +269,8 @@ UNCHECKED = "P=$(curl -s https://example.com/p); $P"    # a program only the run
     ("autonomous", "allow", 'git push --force origin "$(git branch --show-current)"; echo ${{x:-y}}', "deny", None),
     ("autonomous", "allow", "b=$(git branch --show-current); git push origin $b", "ask", None),   # $b may be main
     ("autonomous", "allow", "cd $X; grep x id_rsa", "ask", None),                      # a deny may cover what it reads
-    ("autonomous", "allow", 'python3 -c \'import os; os.system("rm -rf /")\'', "ask", None),
+    ("autonomous", "allow", "some-tool; git status", "allow", None),                   # off the list: the opt-in runs it
+    ("autonomous", None, "some-tool; git status", "ask", None),
 ])
 def test_reader_understands_common_shell(ws, tmp_path, monkeypatch, preset, unchecked, command, decision, found):
     """The commands agents run every day are read part by part, each in its
