@@ -2204,7 +2204,7 @@ def test_a_clone_streams_git_progress_and_finishes_with_the_path(db, cloning, tm
     assert [(e["kind"], e["payload"]["result"]) for e in done] == [
         ("job.done", {"path": str(parent / "origin")})]
     assert (parent / "origin" / "app.py").is_file()
-    assert {"repo_root": str(parent / "origin"), "name": "origin"} in _send("GET", "/v1/repos")[1]
+    assert {"repo_root": str(parent / "origin"), "name": "origin", "demo": False} in _send("GET", "/v1/repos")[1]
     assert any(e["payload"]["job"] == reply["job"] for e in bus.tail(db, kinds=("job.progress",)))
     again, err = _send("POST", "/v1/repos/clone", {"url": cloning, "parent_dir": str(parent)})
     assert (again, err["error"]["code"]) == (409, "exists")
