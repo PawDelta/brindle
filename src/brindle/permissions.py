@@ -908,6 +908,12 @@ NEEDS_APPROVAL = ("brindle runs this agent without approval prompts, and no rule
                   "can allow it with `brindle permissions allow`.")
 ASK_SUPERVISOR = "tell your supervisor with send_message what you need and why"
 ASK_PERSON = "say what you need and why in your reply to the person running brindle"
+# An ask a rule makes, for an agent with no supervisor: no allow rule lifts it
+# (an ask beats an allow), and with the skip flag agy can't prompt.
+PERSON_DECIDES = ("this is the person's own call ({why}), and brindle runs this agent without approval "
+                  "prompts, so it can't ask them here and refused it. Don't look for another way to do it. "
+                  "Tell them what you need and why: they can run it themselves in a terminal, or open "
+                  "the brindle app and have you try it again, and it then waits in the app's Inbox for their answer.")
 TOLD_SUPERVISOR = ("carry on with other work and retry it once your supervisor says it's allowed: "
                    "brindle has told your supervisor")
 
@@ -986,12 +992,14 @@ def _brindle_tools() -> set[str]:
     return {f"mcp_brindle_{n}" for n in names} | {f"mcp__brindle__{n}" for n in names}
 
 
-def agy_strict_ambiguity(payload: dict, worktree: str) -> str | None:
+def agy_strict_ambiguity(payload: dict, worktree: str, anywhere: bool = False) -> str | None:
     """Why brindle can't be sure it reads an agy call the way agy will, or
     None. Under agy_approvals "brindle" such a call is denied rather than
     guessed at: a JSON-encoded value (brindle decodes it, agy may not), a
     relative or ~ path (agy may resolve it against something other than
-    Cwd), more than one path, or a command run outside the worktree."""
+    Cwd), more than one path, or a command run outside the worktree
+    (``anywhere``: only a Cwd that isn't absolute, for an agent that may work
+    elsewhere)."""
     call = payload.get("toolCall") if isinstance(payload, dict) else None
     args = call.get("args") if isinstance(call, dict) and isinstance(call.get("args"), dict) else {}
     for name in (*AGY_PATH_ARGS, "Cwd", "CommandLine"):
@@ -1008,7 +1016,7 @@ def agy_strict_ambiguity(payload: dict, worktree: str) -> str | None:
     cwd = args.get("Cwd")
     if call.get("name") == "run_command" and isinstance(cwd, str) and cwd:
         real, root = os.path.realpath(cwd), os.path.realpath(worktree)
-        if not os.path.isabs(cwd) or (real != root and not _inside(real, worktree)):
+        if not os.path.isabs(cwd) or (not anywhere and real != root and not _inside(real, worktree)):
             return "the command runs outside the worktree"
     return None
 
@@ -1058,6 +1066,8 @@ def agy_strict_output(decision: Decision | None, req: Request | None = None,
             return {"decision": "allow", "reason": "brindle: acts only on the conversation"}
     why = decision.reason if decision is not None else "brindle couldn't read the request"
     why = why.removesuffix("; asking the user")  # nobody is asked here
+    if explicit and not has_supervisor:
+        return {"decision": "deny", "reason": "brindle: " + PERSON_DECIDES.format(why=why)}
     ask = TOLD_SUPERVISOR if escalated else ASK_SUPERVISOR if has_supervisor else ASK_PERSON
     return {"decision": "deny", "reason": "brindle: " + NEEDS_APPROVAL.format(why=why, ask=ask)}
 

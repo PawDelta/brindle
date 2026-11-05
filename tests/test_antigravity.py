@@ -10,7 +10,7 @@ from typer.testing import CliRunner
 
 from conftest import sh
 
-from brindle import antigravity, autopilot, permissions, workspaces
+from brindle import agents, antigravity, autopilot, permissions, workspaces
 from brindle.cli import app
 from brindle.config import set_local
 from brindle.db import Agent
@@ -105,11 +105,6 @@ def test_process_env_reads_another_process(tmp_path, monkeypatch):
     ps = subprocess.CompletedProcess([], 0, stdout="agy --x PATH=/bin BRINDLE_AGENT_ID=abc123 BRINDLE_HOME=/h\n")
     monkeypatch.setattr(antigravity.subprocess, "run", lambda *a, **k: ps)
     assert antigravity._process_env(42) == {"BRINDLE_AGENT_ID": "abc123", "BRINDLE_HOME": "/h"}
-
-
-def test_resume_uses_the_conversation(db, ws, repo):
-    argv = Antigravity().command(LaunchContext("g1", load_profile("developer"), None, resume="abc", cwd=str(repo)))
-    assert argv[-2:] == ["--conversation", "abc"]
 
 
 def test_queued_messages_arrive_as_a_new_turn(db, ws, monkeypatch):
@@ -305,6 +300,85 @@ def test_dont_ask_refuses_an_uncovered_command_instead_of_prompting(db, ws, monk
     assert antigravity.SKIP_FLAG not in argv and antigravity.STRICT_EVENT in hook
     monkeypatch.setattr(antigravity, "_launched_with_skip_flag", lambda: False)
     assert answer("w1", "touch should_not_exist.txt") == "ask"
+
+
+def test_interactive_supervisor_on_autonomous_needs_no_grants(db, ws, monkeypatch, tmp_path):
+    # A new person: the policy on and a fresh store on the default preset. agy
+    # prompted for everything its settings.json didn't allow, and reads no
+    # hook's allow, so the first run was a flood of grants.
+    set_local(ws.repo_root, "permission_policy", "on")
+    monkeypatch.setenv("BRINDLE_AGY_BIN", "/bin/agy")
+    monkeypatch.setenv("BRINDLE_AGENT_ID", "sup")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(antigravity, "tool_names", lambda: ["assign"])
+    monkeypatch.setattr(permissions, "DEFAULT_PRESET", "autonomous")
+    permissions.store_path().unlink(missing_ok=True)
+    add_agent(db, ws, agent_id="sup", window="")
+
+    def launch(**ctx):
+        argv = Antigravity().command(LaunchContext("sup", load_profile("supervisor"), None, cwd=ws.path,
+                                                   mode="interactive", **ctx))
+        hooks = json.loads(open(os.path.join(ws.path, ".agents", "hooks.json")).read())["brindle"]
+        return argv, hooks["PreToolUse"][0]["hooks"][0]["command"] if "PreToolUse" in hooks else ""
+
+    def answer(tool, args):
+        stdin = json.dumps({"toolCall": {"name": tool, "args": args}, "workspacePaths": [ws.path]})
+        return json.loads(antigravity.pre_tool_main(stdin, db_factory=lambda: db, strict=True))
+
+    argv, hook = launch()
+    assert antigravity.SKIP_FLAG in argv and antigravity.STRICT_EVENT in hook
+    # Resuming keeps the gate, so a supervisor comes back as it left.
+    argv, hook = launch(resume="abc")
+    assert antigravity.SKIP_FLAG in argv and antigravity.STRICT_EVENT in hook and argv[-2:] == ["--conversation", "abc"]
+
+    outside = str(tmp_path / "elsewhere" / "notes.md")
+    for tool, args in [
+        ("mcp_brindle_assign", {}),
+        ("call_mcp_tool", {"ServerName": "brindle", "ToolName": "assign"}),
+        ("call_mcp_tool", {"ServerName": "github", "ToolName": "list_issues"}),
+        ("run_command", {"CommandLine": "npm install left-pad"}),
+        ("run_command", {"CommandLine": "touch one.txt && curl https://example.com > two.txt"}),
+        ("run_command", {"CommandLine": "ls", "Cwd": str(tmp_path)}),
+        ("view_file", {"AbsolutePath": outside}),
+        ("write_to_file", {"TargetFile": outside}),
+        ("read_url_content", {"Url": "https://example.com"}),
+    ]:
+        assert answer(tool, args)["decision"] == "allow", (tool, args)
+
+    # What Autonomous stops stays stopped.
+    for tool, args in [
+        ("run_command", {"CommandLine": "git push --force origin feat"}),
+        ("run_command", {"CommandLine": "git push --force origin feat", "Cwd": str(tmp_path)}),
+        ("view_file", {"AbsolutePath": str(tmp_path / ".ssh" / "id_rsa")}),
+        ("view_file", {"AbsolutePath": os.path.join(ws.path, ".env")}),
+    ]:
+        assert answer(tool, args)["decision"] == "deny", (tool, args)
+    # An ask has no prompt to wait at here. With no app to hold it for it's
+    # refused, never pointing at an allow rule, which can't lift an ask ...
+    pushes = ["git push origin main", "git push origin HEAD:release/1.0"]
+    for push in pushes:
+        refused = answer("run_command", {"CommandLine": push})
+        assert refused["decision"] == "deny" and "brindle permissions allow" not in refused["reason"]
+    # ... and with one, the person's answer in its Inbox decides.
+    held = []
+    monkeypatch.setattr(agents, "_hold_for_app", lambda db, agent, req, *a, **k: (held.append(req.command), "allow_once")[1])
+    assert [answer("run_command", {"CommandLine": push})["decision"] for push in pushes] == ["allow", "allow"]
+    assert held == pushes
+
+    # One started before the person chose Autonomous still has agy's own prompt to ask at.
+    monkeypatch.setattr(antigravity, "_launched_with_skip_flag", lambda: False)
+    assert answer("run_command", {"CommandLine": pushes[0]})["decision"] == "ask"
+
+    # The policy off, another preset, or "prompt" leaves agy asking.
+    set_local(ws.repo_root, "permission_policy", "off")
+    assert antigravity.SKIP_FLAG not in launch()[0]
+    set_local(ws.repo_root, "permission_policy", "on")
+    permissions.apply_preset("standard")
+    assert antigravity.SKIP_FLAG not in launch()[0]
+    permissions.apply_preset("autonomous")
+    assert antigravity.SKIP_FLAG in launch()[0]
+    set_local(ws.repo_root, "agy_approvals", "prompt")
+    assert antigravity.SKIP_FLAG not in launch()[0]
 
 
 def test_strict_allows_reading_agy_instructions(db, ws, monkeypatch, tmp_path):
