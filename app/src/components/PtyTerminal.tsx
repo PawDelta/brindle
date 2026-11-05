@@ -170,13 +170,17 @@ export const COPY_KEY = "\x1b[24;8~";
    binds to copy tmux's copy-mode selection, or with none to send C-c to the pane (COPY_OR_INTERRUPT_BINDING). */
 export const COPY_OR_INTERRUPT = "\x1b[23;8~";
 
-/* How long a Mac's ⌘V holds what's typed after it for the webview's own paste; none by then, it is given up (and its
-   paste, coming later, pasted then). Long: a webview slowed by load answers late, and what's typed meanwhile would
-   go ahead of the paste; only a ⌘V the webview never answers waits this long. */
+/* How long a Mac's ⌘V holds what's typed after it for the webview's own paste. None by then, the app's clipboard is
+   read in its place, typing still behind it. Long, as that read isn't the system's "person pasting": macOS may ask. */
 export const PASTE_WAIT = 3000;
 
-/* How long a paste waits for the view's first bytes (a resume, a reconnect, the client still attaching). Until tmux has
-   drawn, xterm.js doesn't know bracketed paste is on: sent unbracketed, each line of it would be an Enter that runs. */
+/* How long after that a webview paste of the same text is the late answer to that ⌘V, not pasted again. */
+export const LATE_PASTE_WINDOW = 10000;
+
+/* How long a paste waits for the view to show whether bracketed paste is on (a resume, a reconnect, the client still
+   attaching). tmux turns it on first thing, or (an older tmux) only for a pane that asked, so its first redraw ending
+   also says; a read can end anywhere, so the first bytes alone don't. Until then xterm.js says off: sent so, each line
+   would be an Enter that runs. With bytes come and neither by now, xterm.js's word is taken; with none, it's dropped. */
 export const DRAWN_WAIT = 5000;
 
 /* What a ⌘V with the keyboard elsewhere is meant for, and what a view leaves the keyboard on. */
@@ -298,20 +302,37 @@ export function PtyTerminal({ at, open, copy, paste, openUrl, onView, onSize }: 
       el.dataset.shown = String(shownCols());
     };
     layout();
-    // The client's first bytes parsed: they turn bracketed paste on (a paste waits for them, toPane). Also woken by
-    // the view ending, whose paste waits no more.
+    // Whether bracketed paste is known (a paste waits for it, toPane): it's on, or the first redraw has ended (a
+    // synchronized update's end, parsed however its bytes were split). Also woken by the view ending, whose paste
+    // waits no more.
     let drawn = false;
+    let bytesCame = false;
+    let redrawn = false;
     let ended: string | null = null;
     let wake = () => {};
     const woken = new Promise<void>((ok) => (wake = ok));
+    const redraws = term.parser?.registerCsiHandler({ prefix: "?", final: "l" }, (params) => {
+      if (params.includes(2026)) redrawn = true;
+      return false;
+    });
+    // Bytes come and neither by DRAWN_WAIT after the first: xterm.js's word is taken, by this paste and any after.
+    let settling: ReturnType<typeof setTimeout> | undefined;
+    const settled = () => {
+      drawn = true;
+      clearTimeout(settling);
+      redraws?.dispose();
+      wake();
+    };
+    const lookDrawn = () => {
+      if (!gone && !drawn && (redrawn || term.modes.bracketedPasteMode)) settled();
+    };
     const pty = open({ server, target }, { cols: term.cols, rows: term.rows }, {
       onData: (bytes) => {
         if (gone) return;
+        if (!bytesCame) settling = setTimeout(settled, DRAWN_WAIT);
+        bytesCame = true;
         if (drawn) term.write(bytes);
-        else term.write(bytes, () => {
-          drawn = true;
-          wake();
-        });
+        else term.write(bytes, lookDrawn);
       },
       onCrop: (c) => {
         if (gone) return;
@@ -401,9 +422,9 @@ export function PtyTerminal({ at, open, copy, paste, openUrl, onView, onSize }: 
     // A paste that won't reach the pane, to the debug log while it's on: why, and its size, never its text.
     const dropPaste = (why: string, bytes: number) => logDebug("pty_view", "warning", `paste dropped: ${why}`, { bytes, target });
     // What's pasted goes as xterm.js's paste would (its line ends a terminal's, bracketed where the program asked), but
-    // in its place in the line, not through term.paste (which would put it behind what was typed after). Once the view
-    // has drawn: before, it isn't known to be bracketed, and a client not yet attached has a cooked pty. What's typed
-    // waits behind it, in the line.
+    // in its place in the line, not through term.paste (which would put it behind what was typed after). Once bracketed
+    // paste is known (DRAWN_WAIT): a client not yet attached also has a cooked pty. What's typed waits behind it, in the
+    // line.
     const toPane = async (pasting: string) => {
       const bytes = pasting.length;
       const text = wellFormed(unbracketed(pasting)).replace(/\r?\n/g, "\r");
@@ -416,13 +437,15 @@ export function PtyTerminal({ at, open, copy, paste, openUrl, onView, onSize }: 
             ok();
           });
         });
+        // Bytes have begun, the enable perhaps half read: `settling` bounds this.
+        if (bytesCame) await woken;
       }
       if (gone) return dropPaste("the view closed first", bytes);
       if (ended) return dropPaste(ended, bytes);
       if (!drawn) return dropPaste(`the view drew nothing within ${DRAWN_WAIT} ms`, bytes);
       const bracketed = term.modes.bracketedPasteMode;
       pty.write(bracketed ? `\x1b[200~${text}\x1b[201~` : text);
-      logDebug("pty_view", "info", "pasted", { bytes, bracketed, target });
+      logDebug("pty_view", "info", "paste sent to the view", { bytes, bracketed, target });
     };
     // The app's clipboard, for a paste with no webview paste to go by. Null: nothing to paste, and why is said.
     const fromApp = (): Promise<string | null> => {
@@ -442,10 +465,19 @@ export function PtyTerminal({ at, open, copy, paste, openUrl, onView, onSize }: 
     // The webview's own pastes, taken from xterm.js: each fills the ⌘V waiting longest for it, or (Edit > Paste
     // clicked, or a ⌘V's that came late) is pasted as it comes. Every paste the webview sends is pasted once.
     const awaiting: ((text: string) => void)[] = [];
+    // ⌘Vs past their wait, the app's clipboard pasted in their place: the text each pasted, as its late answer will
+    // hold it, and until when that answer is looked for.
+    const owed: { text: string; until: number }[] = [];
+    const sameLines = (text: string) => text.replace(/\r\n?/g, "\n");
     const pasting = (e: ClipboardEvent) => {
       e.preventDefault();
       e.stopPropagation();
       const text = e.clipboardData?.getData("text/plain") ?? "";
+      const lateAnswer = owed.findIndex((o) => o.until > Date.now() && o.text === sameLines(text));
+      if (lateAnswer >= 0) {
+        owed.splice(lateAnswer, 1);
+        return dropPaste("a late webview paste of what the app's clipboard already pasted", text.length);
+      }
       const waiter = awaiting.shift();
       if (waiter) return waiter(text);
       queued(() => toPane(text));
@@ -525,16 +557,22 @@ export function PtyTerminal({ at, open, copy, paste, openUrl, onView, onSize }: 
           return false;
         }
         // The webview's paste (its Edit menu's): its text, or the app's clipboard where it has none. None in a
-        // moment: this ⌘V given up, nothing pasted for it; its paste coming later is pasted then, once.
+        // moment: the app's clipboard in this ⌘V's place, so what's typed behind it stays behind it, and its paste,
+        // coming later with that text, isn't pasted again (`owed`). One coming during that read still answers it.
         pasteInLine(new Promise<string | null>((ok) => {
           const waiter = (text: string) => {
             clearTimeout(timer);
             ok(text || fromApp());
           };
           const timer = setTimeout(() => {
-            awaiting.splice(awaiting.indexOf(waiter), 1);
-            if (!gone) logDebug("pty_view", "warning", `⌘V: the webview's paste didn't come within ${PASTE_WAIT} ms`, { target });
-            ok(null);
+            if (!gone) logDebug("pty_view", "warning", `⌘V: the webview's paste didn't come within ${PASTE_WAIT} ms: reading the app's clipboard`, { target });
+            void fromApp().then((text) => {
+              const unanswered = awaiting.indexOf(waiter);
+              if (unanswered < 0) return;
+              awaiting.splice(unanswered, 1);
+              if (text) owed.push({ text: sameLines(text), until: Date.now() + LATE_PASTE_WINDOW });
+              ok(text);
+            });
           }, PASTE_WAIT);
           awaiting.push(waiter);
         }));
@@ -560,6 +598,7 @@ export function PtyTerminal({ at, open, copy, paste, openUrl, onView, onSize }: 
     observer?.observe(el);
     return () => {
       gone = true;
+      clearTimeout(settling);
       wake();
       if (lastFocused === el) lastFocused = null;
       clearTimeout(hide);

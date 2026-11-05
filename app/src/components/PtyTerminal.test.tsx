@@ -2,7 +2,7 @@ import { act, cleanup, render } from "@testing-library/react";
 import type { ILink, ILinkProvider } from "@xterm/xterm";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { PtyViewHandlers, PtyViewOpener } from "../api/ptyView";
-import { COPIED_SHOWN, COPY_OR_INTERRUPT, DRAWN_WAIT, PASTE_WAIT, PtyTerminal, selectionIn } from "./PtyTerminal";
+import { COPIED_SHOWN, COPY_OR_INTERRUPT, DRAWN_WAIT, LATE_PASTE_WINDOW, PASTE_WAIT, PtyTerminal, selectionIn } from "./PtyTerminal";
 
 /* What goes to the debug log. */
 const logs = vi.hoisted(() => [] as unknown[][]);
@@ -210,11 +210,65 @@ it("holds a paste until the view's first bytes say how to send it: unbracketed, 
   act(() => term().input("x", true));
   await settled();
   expect(written).toEqual([]);
+  // A pty read can end anywhere: the first bytes alone don't say, even with the enable half read.
+  act(() => opened.handlers!.onData(new TextEncoder().encode("\x1b[?1049h\x1b[?200")));
+  await parsed(term());
+  await settled();
+  expect(term().modes.bracketedPasteMode).toBe(false);
+  expect(written).toEqual([]);
   // tmux's first bytes turn bracketed paste on (tty_start_tty), whatever the pane asked.
-  act(() => opened.handlers!.onData(new TextEncoder().encode("\x1b[?2004h")));
+  act(() => opened.handlers!.onData(new TextEncoder().encode("4h")));
   await parsed(term());
   await settled();
   expect(written).toEqual(["\x1b[200~!echo one\recho two\x1b[201~", "x"]);
+});
+
+it("sends a paste unbracketed only once the view has shown bracketed paste is off: its first redraw done, or its time up with bytes come", async (ctx) => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  ctx.onTestFinished(() => void vi.useRealTimers());
+  const redrawn = mount();
+  redrawn.clipboard.text = "a\nb";
+  commandV(redrawn.term().textarea!);
+  await settled();
+  // An older tmux, which turns it on only for a pane that asks: its redraw ends with it off.
+  act(() => redrawn.opened.handlers!.onData(new TextEncoder().encode("\x1b[?2026hdrawn\x1b[?202")));
+  await parsed(redrawn.term());
+  await settled();
+  expect(redrawn.written).toEqual([]);
+  act(() => redrawn.opened.handlers!.onData(new TextEncoder().encode("6l")));
+  await parsed(redrawn.term());
+  await settled();
+  expect(redrawn.written).toEqual(["a\rb"]);
+  redrawn.view.unmount();
+
+  const unsynced = mount();
+  unsynced.clipboard.text = "a\nb";
+  commandV(unsynced.term().textarea!);
+  act(() => unsynced.opened.handlers!.onData(new TextEncoder().encode("drawn")));
+  await parsed(unsynced.term());
+  await settled();
+  expect(unsynced.written).toEqual([]);
+  await act(() => vi.advanceTimersByTimeAsync(DRAWN_WAIT));
+  expect(unsynced.written).toEqual(["a\rb"]);
+  // Settled for the view: the next paste doesn't wait again.
+  commandV(unsynced.term().textarea!);
+  await settled();
+  expect(unsynced.written).toEqual(["a\rb", "a\rb"]);
+  unsynced.view.unmount();
+
+  // Bytes beginning just as a paste's own wait runs out: the enable half read still holds it.
+  const slow = mount();
+  slow.clipboard.text = "a\nb";
+  commandV(slow.term().textarea!);
+  await act(() => vi.advanceTimersByTimeAsync(DRAWN_WAIT - 100));
+  act(() => slow.opened.handlers!.onData(new TextEncoder().encode("\x1b[?200")));
+  await parsed(slow.term());
+  await act(() => vi.advanceTimersByTimeAsync(200));
+  expect(slow.written).toEqual([]);
+  act(() => slow.opened.handlers!.onData(new TextEncoder().encode("4h")));
+  await parsed(slow.term());
+  await settled();
+  expect(slow.written).toEqual(["\x1b[200~a\rb\x1b[201~"]);
 });
 
 it("gives the new view the keyboard when a resume or reconnect replaces the one that had it, and takes nothing from a field in use", () => {
@@ -320,7 +374,7 @@ it("logs every paste it drops, why and its size, never its text, and lets what's
   await parsed(live.term());
   commandV(live.term().textarea!);
   await waited(PASTE_WAIT);
-  expect(said().at(-1)).toEqual([`⌘V: the webview's paste didn't come within ${PASTE_WAIT} ms`, undefined]);
+  expect(said()).toContainEqual([`⌘V: the webview's paste didn't come within ${PASTE_WAIT} ms: reading the app's clipboard`, undefined]);
   commandV(live.term().textarea!);
   webviewPaste(live.term().textarea!, null);
   await waited(0);
@@ -455,7 +509,7 @@ it("Ctrl+C on Windows and Linux copies xterm.js's selection or tmux's, else is ^
   }
 });
 
-it("on a Mac, ⌘V pastes what the webview's own paste holds, in the ⌘V's place, once, without reading the app's clipboard", async (ctx) => {
+it("on a Mac, ⌘V pastes what the webview's own paste holds, in the ⌘V's place, once; past the wait the app's clipboard in that place, and its late paste isn't doubled", async (ctx) => {
   const platform = vi.spyOn(navigator, "platform", "get").mockReturnValue("MacIntel");
   vi.useFakeTimers({ shouldAdvanceTime: true });
   ctx.onTestFinished(() => {
@@ -464,9 +518,10 @@ it("on a Mac, ⌘V pastes what the webview's own paste holds, in the ⌘V's plac
   });
   const waited = (ms: number) => act(() => vi.advanceTimersByTimeAsync(ms));
   let reads = 0;
+  let reading: Promise<string> = Promise.resolve("the app's clipboard");
   const { written, opened, view, term } = mount(() => {
     reads++;
-    return Promise.resolve("the app's clipboard");
+    return reading;
   });
   act(() => opened.handlers!.onData(new TextEncoder().encode("\x1b[?2004h")));
   await parsed(term());
@@ -484,15 +539,6 @@ it("on a Mac, ⌘V pastes what the webview's own paste holds, in the ⌘V's plac
   webviewPaste(textarea, "slow");
   await settled();
   expect(written).toEqual(["\x1b[200~slow\x1b[201~", "k"]);
-  written.length = 0;
-  // The first ⌘V's paste comes late, after the wait: pasted once, then; the app's clipboard never read for it.
-  expect(press().defaultPrevented).toBe(false);
-  await waited(PASTE_WAIT + 50);
-  expect(written).toEqual([]);
-  webviewPaste(textarea, "delayed");
-  await settled();
-  expect(written).toEqual(["\x1b[200~delayed\x1b[201~"]);
-  expect(reads).toBe(0);
   written.length = 0;
 
   // ⌘V's default goes on: the webview's paste (its Edit menu's), taken from xterm.js, typing behind it.
@@ -516,22 +562,52 @@ it("on a Mac, ⌘V pastes what the webview's own paste holds, in the ⌘V's plac
   await settled();
   expect(reads).toBe(1);
   expect(written.at(-1)).toBe("\x1b[200~the app's clipboard\x1b[201~");
-  // A ⌘V whose paste hasn't come is given up (typing behind it let go), the app's clipboard not read in its place;
-  // its paste, coming later, is pasted then, once.
-  const count = written.length;
+  // A ⌘V whose paste hasn't come keeps its place past the wait: the app's clipboard goes there, typing still behind.
+  // Its paste, coming later with the same text, isn't pasted again.
+  written.length = 0;
   press();
   act(() => term().input("y", true));
   await waited(PASTE_WAIT + 50);
-  expect(written.slice(count)).toEqual(["y"]);
-  expect(reads).toBe(1);
-  webviewPaste(textarea, "late");
+  expect(written).toEqual(["\x1b[200~the app's clipboard\x1b[201~", "y"]);
+  expect(reads).toBe(2);
+  webviewPaste(textarea, "the app's clipboard");
   await settled();
-  expect(written.slice(count)).toEqual(["y", "\x1b[200~late\x1b[201~"]);
+  expect(written).toHaveLength(2);
+  // That was the one late paste it was owed: the same text pasted again is a paste of its own.
+  webviewPaste(textarea, "the app's clipboard");
+  await settled();
+  expect(written).toHaveLength(3);
+  // What the person copied since is theirs, and so is the same text long after.
+  written.length = 0;
+  press();
+  await waited(PASTE_WAIT + 50);
+  expect(written).toEqual(["\x1b[200~the app's clipboard\x1b[201~"]);
+  webviewPaste(textarea, "copied since");
+  await settled();
+  expect(written.at(-1)).toBe("\x1b[200~copied since\x1b[201~");
+  await waited(LATE_PASTE_WINDOW);
+  webviewPaste(textarea, "the app's clipboard");
+  await settled();
+  expect(written).toHaveLength(3);
+  // Its paste coming while the app's clipboard is being read: that goes, the read's text doesn't, nor is it owed.
+  written.length = 0;
+  let answer: (text: string) => void = () => {};
+  reading = new Promise((ok) => (answer = ok));
+  press();
+  await waited(PASTE_WAIT + 50);
+  webviewPaste(textarea, "just in time");
+  answer("just in time");
+  await settled();
+  expect(written).toEqual(["\x1b[200~just in time\x1b[201~"]);
+  webviewPaste(textarea, "just in time");
+  await settled();
+  expect(written).toHaveLength(2);
   // Unmounted while a ⌘V waits: nothing read for it.
+  const before = reads;
   press();
   view.unmount();
   await waited(PASTE_WAIT + 50);
-  expect(reads).toBe(1);
+  expect(reads).toBe(before);
 });
 
 it("off a Mac, ⌘V pastes the app's clipboard, and an Edit > Paste after it pastes too, never dropped or doubled", async () => {

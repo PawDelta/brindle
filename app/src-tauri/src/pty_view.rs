@@ -646,9 +646,55 @@ fn write_input(writer: &mut impl Write, data: &[u8], last: &mut Option<std::time
     Ok(())
 }
 
+/// A writer that counts what it took, so a failed write can say what was lost.
+struct Counted<W: Write> {
+    inner: W,
+    sent: usize,
+}
+
+impl<W: Write> Write for Counted<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let n = self.inner.write(buf)?;
+        self.sent += n;
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// What's typed and pasted, to the view's client, until the view goes. A write
+/// that fails ends them all (the client has gone): `on_lost` is told the bytes
+/// of each that didn't get through, the first's rest included, and why.
+#[cfg(unix)]
+fn write_keys(keys: mpsc::Receiver<Vec<u8>>, writer: impl Write, on_lost: impl Fn(usize, String)) {
+    let mut writer = Counted { inner: writer, sent: 0 };
+    let mut last = None;
+    let mut failed: Option<String> = None;
+    for data in keys {
+        if let Some(reason) = &failed {
+            on_lost(data.len(), reason.clone());
+            continue;
+        }
+        writer.sent = 0;
+        if let Err(e) = write_input(&mut writer, &data, &mut last) {
+            let key = if data.starts_with(PASTE_START) { LEAVE_COPY_MODE_KEY.len() } else { 0 };
+            let sent = writer.sent.saturating_sub(key).min(data.len());
+            let reason = e.to_string();
+            on_lost(data.len() - sent, reason.clone());
+            failed = Some(reason);
+        }
+    }
+}
+
 /// On Windows a view is the engine's, in WSL, over its daemon's WebSocket.
 #[cfg(windows)]
 pub use crate::pty_bridge::{PtyView, WindowTaker};
+
+/// Who hears of input the view's client didn't take (`PtyView::on_input_lost`).
+#[cfg(unix)]
+type InputLostTo = Arc<Mutex<Option<Box<dyn Fn(usize, String) + Send>>>>;
 
 /// One open view: a tmux client on a pty of its own.
 #[cfg(unix)]
@@ -661,6 +707,7 @@ pub struct PtyView {
     /// the client's pty is the two together.
     size: Arc<Mutex<((u16, u16), Crop)>>,
     input: mpsc::Sender<Vec<u8>>,
+    input_lost: InputLostTo,
     /// The client's pid, and its tty (tmux's name for it) once looked up.
     client: u32,
     client_tty: Arc<OnceLock<String>>,
@@ -751,7 +798,7 @@ impl PtyView {
         let crop = crop_now(tmux_bin, &server, &view, cols, None).unwrap_or_default();
         let mut cmd = Command::new(tmux_bin);
         cmd.args(&server).args(attach_args(&view)).env("TERM", "xterm-256color").env_remove("TMUX");
-        let crate::setup::Term { output: mut reader, input: mut writer, master, mut child } =
+        let crate::setup::Term { output: mut reader, input: writer, master, mut child } =
             crate::setup::spawn_terminal_sized(cmd, clamp(cols.saturating_add(crop.cols)), rows).map_err(|e| format!("couldn't attach: {e}"))?;
         let master = Arc::new(master.ok_or("no pty")?);
         let size = Arc::new(Mutex::new(((cols, rows), crop)));
@@ -790,14 +837,17 @@ impl PtyView {
         let (input, keys) = mpsc::channel::<Vec<u8>>();
         // Keys on a thread of their own: a write to a client that isn't reading blocks, and a mouse release waits
         // its gap behind the motion before it (`write_input`).
-        std::thread::spawn(move || {
-            let mut last = None;
-            for data in keys {
-                if write_input(&mut writer, &data, &mut last).is_err() {
-                    break;
-                }
-            }
-        });
+        let input_lost = InputLostTo::default();
+        {
+            let told = input_lost.clone();
+            std::thread::spawn(move || {
+                write_keys(keys, writer, move |bytes, reason| {
+                    if let Some(tell) = &*told.lock().unwrap_or_else(|e| e.into_inner()) {
+                        tell(bytes, reason);
+                    }
+                });
+            });
+        }
         // The client's bytes as the pty gives them (a macOS pty a kilobyte a read), gathered (`forward`) on a thread
         // of their own, so the reader goes straight back to reading.
         let (read, gathered) = mpsc::channel::<Out>();
@@ -824,12 +874,18 @@ impl PtyView {
                 let _ = redrawn.try_send(());
             }, on_exit)
         });
-        Ok(PtyView { tmux: tmux_bin.to_path_buf(), server, view, master, size, input, client, client_tty: Arc::default() })
+        Ok(PtyView { tmux: tmux_bin.to_path_buf(), server, view, master, size, input, input_lost, client, client_tty: Arc::default() })
     }
 
     /// What the person typed (keys, a paste, mouse reports), as xterm.js says it.
-    pub fn write(&self, data: &[u8]) {
-        let _ = self.input.send(data.to_vec());
+    /// False: it can't be sent. Sent, it may still not get through: `on_input_lost`.
+    pub fn write(&self, data: &[u8]) -> bool {
+        self.input.send(data.to_vec()).is_ok()
+    }
+
+    /// Who hears of input written that the client didn't take: the bytes lost, and why.
+    pub fn on_input_lost(&self, tell: impl Fn(usize, String) + Send + 'static) {
+        *self.input_lost.lock().unwrap_or_else(|e| e.into_inner()) = Some(Box::new(tell));
     }
 
     /// The view is `cols` x `rows` cells: its client's pty is that and the crop's columns.
@@ -1010,7 +1066,8 @@ impl PtyViews {
 
 /// What an open view sends the webview: it opened (writes and resizes may
 /// follow), the window's crop (before the client's first bytes, and on each
-/// change), the client's bytes (base64), its exit, or why it couldn't open.
+/// change), the client's bytes (base64), its exit, why it couldn't open, or
+/// input written that didn't get through (its size and why, never its text).
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum PtyViewEvent {
@@ -1019,6 +1076,8 @@ pub enum PtyViewEvent {
     Data { data: String },
     Exit { code: i32 },
     Error { message: String },
+    #[serde(rename = "input_lost")]
+    InputLost { bytes: usize, reason: String },
 }
 
 /// Whether the webview can show panes through the pty view, and if it can't, why.
@@ -1066,8 +1125,8 @@ fn open_view(
     rows: u16,
     channel: Channel<PtyViewEvent>,
 ) -> Result<PtyView, String> {
-    let (data, cropped, exit) = (channel.clone(), channel.clone(), channel);
-    PtyView::open(
+    let (data, cropped, exit, lost) = (channel.clone(), channel.clone(), channel.clone(), channel);
+    let view = PtyView::open(
         &tmux_binary(),
         server,
         target,
@@ -1082,7 +1141,11 @@ fn open_view(
         move |code| {
             let _ = exit.send(PtyViewEvent::Exit { code });
         },
-    )
+    )?;
+    view.on_input_lost(move |bytes, reason| {
+        let _ = lost.send(PtyViewEvent::InputLost { bytes, reason });
+    });
+    Ok(view)
 }
 
 /// On Windows: the engine's view, through its daemon in WSL (`pty_bridge`).
@@ -1146,8 +1209,16 @@ pub fn pty_view_open(
 
 #[tauri::command]
 pub fn pty_view_write(views: State<'_, PtyViews>, id: u32, data: String) -> Result<(), String> {
-    views.with(id, |view| view.write(data.as_bytes()));
-    Ok(())
+    write_to(&views, id, data.as_bytes())
+}
+
+/// `data` to the view `id`, or why it can't go (the webview logs it).
+fn write_to(views: &PtyViews, id: u32, data: &[u8]) -> Result<(), String> {
+    match views.with(id, |view| view.write(data)) {
+        Some(true) => Ok(()),
+        Some(false) => Err("the view's client has gone".into()),
+        None => Err("the view isn't open".into()),
+    }
 }
 
 /// The view is `cols` x `rows` cells (the agent's pane, without the crop's columns).
@@ -1593,6 +1664,75 @@ mod tests {
         drop(view);
         drop(server);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A writer that takes `room` bytes, then fails, as a client that has gone does.
+    #[cfg(unix)]
+    struct Failing {
+        room: usize,
+    }
+
+    #[cfg(unix)]
+    impl Write for Failing {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            if self.room == 0 {
+                return Err(io::Error::other("the client has gone"));
+            }
+            let n = buf.len().min(self.room);
+            self.room -= n;
+            Ok(n)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Input that doesn't get through is told: what's left of the write that
+    /// failed, each one after it, and none that got through.
+    #[cfg(unix)]
+    #[test]
+    fn input_the_client_doesnt_take_is_told_by_size() {
+        let lost_with = |room, frames: &[&[u8]]| {
+            let (keys, read) = mpsc::channel();
+            for frame in frames {
+                keys.send(frame.to_vec()).unwrap();
+            }
+            drop(keys);
+            let lost = Mutex::new(Vec::new());
+            write_keys(read, Failing { room }, |bytes, reason| lost.lock().unwrap().push((bytes, reason)));
+            lost.into_inner().unwrap()
+        };
+        let gone = || "the client has gone".to_string();
+        assert_eq!(lost_with(6, &[b"abc", b"defgh", b"more"]), [(2, gone()), (4, gone())]);
+        assert_eq!(lost_with(8, &[b"all sent"]), []);
+        // A paste: the key before it isn't counted as any of it.
+        let paste: &[u8] = b"\x1b[200~long paste\x1b[201~";
+        assert_eq!(lost_with(LEAVE_COPY_MODE_KEY.len() + 6, &[paste]), [(paste.len() - 6, gone())]);
+        assert_eq!(lost_with(3, &[paste]), [(paste.len(), gone())]);
+        // A view that isn't open says so, to the webview that wrote to it.
+        assert!(write_to(&PtyViews::default(), 0, b"typed").is_err());
+    }
+
+    /// The same on real tmux: the client gone, what's written is told.
+    #[cfg(unix)]
+    #[test]
+    fn input_to_a_client_that_has_gone_is_told() {
+        let Some(server) = Server::start("lost", "/dev/null", "cat", (100, 30)) else { return };
+        let (exited, exit) = mpsc::channel();
+        let view = PtyView::open(Path::new("tmux"), Some(&server.name), "agents:a1", 90, 25, |_| {}, |_| {}, move |code| {
+            let _ = exited.send(code);
+        })
+        .unwrap();
+        let (told, lost) = mpsc::channel();
+        view.on_input_lost(move |bytes, _| {
+            let _ = told.send(bytes);
+        });
+        server.wait("the view's client attached", |s| s.run(&["list-clients", "-F", "#{session_name}"]).contains(view.name()));
+        server.run(&["kill-server"]);
+        assert!(exit.recv_timeout(Duration::from_secs(5)).is_ok(), "the client didn't exit");
+        assert!(view.write(b"pasted"));
+        assert_eq!(lost.recv_timeout(Duration::from_secs(5)), Ok(6));
     }
 
     /// ⌘C's key (COPY_BINDING): tmux's copy-mode selection goes to the view as

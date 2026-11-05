@@ -20,6 +20,7 @@
 
 use std::io::{self, Read, Write};
 use std::net::{Shutdown, TcpStream};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
@@ -75,6 +76,28 @@ impl Up {
     }
 }
 
+/// Frames up, to `send`, until the view goes. A send that fails ends them all
+/// (the socket has gone): `on_lost` is told the bytes of each input that didn't go.
+fn send_frames(frames: mpsc::Receiver<Up>, mut send: impl FnMut(Message) -> Result<(), String>, on_lost: impl Fn(usize, String)) {
+    let mut failed: Option<String> = None;
+    for frame in frames {
+        if failed.is_none() {
+            let Err(reason) = send(frame.frame()) else { continue };
+            failed = Some(reason);
+        }
+        if let (Up::Input { data }, Some(reason)) = (&frame, &failed) {
+            on_lost(data.len(), reason.clone());
+        }
+    }
+}
+
+/// Input the engine's client didn't take: its size and why.
+#[derive(Deserialize)]
+struct InputLost {
+    bytes: usize,
+    reason: String,
+}
+
 /// A text frame down.
 #[derive(Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -82,6 +105,8 @@ enum Down {
     Crop(Crop),
     Exit(i32),
     Error(String),
+    #[serde(rename = "input_lost")]
+    InputLost(InputLost),
 }
 
 /// What a frame from the daemon tells the webview, if anything.
@@ -92,6 +117,7 @@ pub fn event_of(message: Message) -> Option<PtyViewEvent> {
             Down::Crop(Crop { cols, left, width }) => Some(PtyViewEvent::Crop { cols, left, width }),
             Down::Exit(code) => Some(PtyViewEvent::Exit { code }),
             Down::Error(message) => Some(PtyViewEvent::Error { message }),
+            Down::InputLost(InputLost { bytes, reason }) => Some(PtyViewEvent::InputLost { bytes, reason }),
         },
         _ => None,
     }
@@ -128,6 +154,8 @@ impl Write for Half {
 pub struct PtyView {
     stream: TcpStream,
     up: mpsc::Sender<Up>,
+    /// Whether the socket is still being read: once it isn't, nothing written can arrive.
+    reading: Arc<AtomicBool>,
 }
 
 /// What giving the view the window takes (`PtyView::take_window`): a focus frame up.
@@ -164,14 +192,21 @@ impl PtyView {
         // Frames up on a thread of their own: a write to a daemon that isn't reading blocks.
         let mut writer = WebSocket::from_raw_socket(half()?, Role::Client, None);
         let (up, frames) = mpsc::channel::<Up>();
+        // The reader holds `on_event`: its end ends the events, whatever the writer is doing. The
+        // writer tells of input lost while they last; after, `write` says it can't be sent.
+        let on_event = Arc::new(Mutex::new(on_event));
+        let told = Arc::downgrade(&on_event);
         std::thread::spawn(move || {
-            for frame in frames {
-                if writer.send(frame.frame()).is_err() {
-                    break;
+            send_frames(frames, |frame| writer.send(frame).map_err(|e| e.to_string()), |bytes, reason| {
+                if let Some(tell) = told.upgrade() {
+                    (tell.lock().unwrap_or_else(|e| e.into_inner()))(PtyViewEvent::InputLost { bytes, reason });
                 }
-            }
+            });
         });
+        let reading = Arc::new(AtomicBool::new(true));
+        let still_reading = reading.clone();
         std::thread::spawn(move || {
+            let tell = |event| (on_event.lock().unwrap_or_else(|e| e.into_inner()))(event);
             let mut ended = false;
             loop {
                 match down.read() {
@@ -179,21 +214,23 @@ impl PtyView {
                     Ok(message) => {
                         if let Some(event) = event_of(message) {
                             ended |= matches!(event, PtyViewEvent::Exit { .. } | PtyViewEvent::Error { .. });
-                            on_event(event);
+                            tell(event);
                         }
                     }
                 }
             }
+            still_reading.store(false, Ordering::SeqCst);
             if !ended {
-                on_event(PtyViewEvent::Exit { code: -1 });
+                tell(PtyViewEvent::Exit { code: -1 });
             }
         });
-        Ok(PtyView { stream, up })
+        Ok(PtyView { stream, up, reading })
     }
 
     /// What the person typed (keys, a paste, mouse reports), as xterm.js says it.
-    pub fn write(&self, data: &[u8]) {
-        let _ = self.up.send(Up::Input { data: String::from_utf8_lossy(data).into_owned() });
+    /// False: it can't be sent, the socket having gone.
+    pub fn write(&self, data: &[u8]) -> bool {
+        self.reading.load(Ordering::SeqCst) && self.up.send(Up::Input { data: String::from_utf8_lossy(data).into_owned() }).is_ok()
     }
 
     /// The view is `cols` x `rows` cells; the daemon adds the crop's columns.
@@ -351,7 +388,33 @@ mod tests {
 
         let (_failed, events) = open();
         assert_eq!(events.iter().collect::<Vec<_>>(), [PtyViewEvent::Error { message: "can't find window: @1".into() }]);
-        let (_dropped, events) = open();
+        let (dropped, events) = open();
         assert_eq!(events.iter().collect::<Vec<_>>(), [PtyViewEvent::Exit { code: -1 }]);
+        // The socket gone: a write says it can't be sent, for the webview to log.
+        assert!(!dropped.write(b"pasted"));
+    }
+
+    /// Input that can't be sent up is told by size, and input the engine's
+    /// client didn't take comes down the same way.
+    #[test]
+    fn input_lost_on_the_way_to_the_engine_is_told_by_size() {
+        let (up, frames) = mpsc::channel();
+        for frame in [Up::Input { data: "sent".into() }, Up::Input { data: "pasted".into() }, Up::Focus, Up::Input { data: "typed".into() }] {
+            up.send(frame).unwrap();
+        }
+        drop(up);
+        let mut room = 1;
+        let lost = Mutex::new(Vec::new());
+        send_frames(
+            frames,
+            |_| if std::mem::take(&mut room) == 1 { Ok(()) } else { Err("the socket has gone".to_string()) },
+            |bytes, reason| lost.lock().unwrap().push((bytes, reason)),
+        );
+        let gone = || "the socket has gone".to_string();
+        assert_eq!(lost.into_inner().unwrap(), [(6, gone()), (5, gone())]);
+        assert_eq!(
+            event_of(Message::text(r#"{"input_lost": {"bytes": 8, "reason": "the view has closed"}}"#)),
+            Some(PtyViewEvent::InputLost { bytes: 8, reason: "the view has closed".into() })
+        );
     }
 }

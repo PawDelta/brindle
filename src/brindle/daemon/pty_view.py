@@ -20,6 +20,7 @@ Frames, after the token the guard takes:
 - down: the client's bytes as binary frames, a redraw at a time (:func:`forward`);
   ``{"crop": {"cols", "left", "width"}}`` before the first bytes and on each change;
   ``{"exit": code}`` last; ``{"error": message}`` when the view can't open;
+  ``{"input_lost": {"bytes", "reason"}}`` for input the client didn't take;
 - up, after: ``{"type": "input", "data"}``, ``{"type": "resize", "cols", "rows"}``
   and ``{"type": "focus"}``, as app/src-tauri/examples/pty_ws.rs takes them."""
 
@@ -104,6 +105,14 @@ _views = itertools.count(1)
 
 class ViewError(Exception):
     """Why a view can't open, or a command on it failed, in words the app shows."""
+
+
+class InputLost(Exception):
+    """Input written that the client didn't take: how many bytes, and why (never what)."""
+
+    def __init__(self, data_bytes: int, reason: str) -> None:
+        super().__init__(reason)
+        self.bytes, self.reason = data_bytes, reason
 
 
 def parse_version(version: str) -> tuple[int, int] | None:
@@ -587,10 +596,15 @@ class PtyView:
         self._reader.start()
 
     def write(self, data: bytes) -> None:
-        """What the person typed, to the client, all of it."""
+        """What the person typed, to the client, all of it; else InputLost, with what wasn't."""
         with self._lock:
-            while data and not self._closed:
-                data = data[os.write(self._master, data):]
+            while data:
+                if self._closed:
+                    raise InputLost(len(data), "the view has closed")
+                try:
+                    data = data[os.write(self._master, data):]
+                except OSError as e:
+                    raise InputLost(len(data), str(e)) from e
 
     def resize(self, cols: int, rows: int) -> None:
         """The view is ``cols`` x ``rows``: its client's pty is that and the crop's columns."""
@@ -697,6 +711,9 @@ async def _up(ws: WebSocket, view: PtyView) -> None:
                 view.resize(int(up["cols"]), int(up["rows"]))
             elif kind == "focus":
                 await asyncio.to_thread(view.take)
+        except InputLost as e:
+            log.info("brindle: pty view %s: %d bytes of input lost: %s", view.view, e.bytes, e.reason)
+            await ws.send_json({"input_lost": {"bytes": e.bytes, "reason": e.reason}})
         except (ValueError, KeyError, TypeError, AttributeError, ViewError, OSError) as e:
             log.info("brindle: pty view %s: %s", view.view, e)
 

@@ -205,15 +205,27 @@ Causes found and fixed:
   didn't ask). Before them xterm.js says it's off, so each line was an Enter: in
   Claude Code, `!echo one\recho two` ran the first line and left the second in
   the prompt. Written before the client set its pty raw, `\r` also became `\n`.
-  A paste now waits for those bytes (`DRAWN_WAIT`).
+  A paste now waits until xterm.js has parsed bracketed paste on, or the first
+  redraw's end (an older tmux turns it on only for a pane that asked), however
+  the bytes were split (`DRAWN_WAIT`). No real tmux 3.2 was on hand: that path
+  has run in jsdom only.
 - **A resume or reconnect left the keyboard on nothing.** The new view's key
   changes, its textarea goes with the focus, and SessionScreen focuses only on
   navigation. ⌘V then reached nothing; so did any ⌘V after a click on the app's
   own chrome. The new view now takes the keyboard, and a ⌘V with it on nothing
   goes to the view last used.
-- **Typed keys overtook a late webview paste**, past `PASTE_WAIT` (1 s, now 3 s).
+- **Typed keys overtook a late webview paste.** Past `PASTE_WAIT` (1 s, now 3 s)
+  the keys were let go and the paste came behind them. A ⌘V now keeps its place:
+  past the wait the app's clipboard is read there, and its late paste with that
+  text isn't pasted again (for `LATE_PASTE_WINDOW`). So a person's own Edit >
+  Paste of the same text, just after a ⌘V the webview never answered, is dropped
+  and logged. That read isn't the system's "person pasting", so macOS may ask.
 - **A lone surrogate lost the whole paste.** `serde_json` refuses one, and the
   error was swallowed. It is now U+FFFD, and a refused write is logged.
+- **Input lost on the way to the client said nothing.** `pty_view_write` answered
+  Ok for a view that wasn't open, and the writer stopped silently on a failed
+  write, a partial one included. Each now says so (`input_lost`: size and why, on
+  the view's channel or the engine's socket), and goes to the debug log.
 
 Checked and not the cause, on real tmux: pastes up to 1 MiB (no partial write,
 truncation or doubling), multibyte text, and bracket markers split across writes

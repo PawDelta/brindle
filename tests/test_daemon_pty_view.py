@@ -1,3 +1,4 @@
+import json
 import os
 import pty
 import shutil
@@ -176,7 +177,7 @@ def test_a_view_that_fails_once_its_session_is_made_leaves_no_session(db, monkey
 
 
 @pytest.mark.skipif(not shutil.which("tmux"), reason="needs tmux")
-def test_a_view_shows_the_pane_types_into_it_and_goes_when_closed(db):
+def test_a_view_shows_the_pane_types_into_it_and_goes_when_closed(db, monkeypatch):
     tmux._tmux("new-session", "-d", "-s", "agent", "-x", "80", "-y", "24", "cat")
     window = tmux._tmux("display-message", "-p", "-t", "=agent:", "#{window_id}").stdout.strip()
     tmux._tmux("set-hook", "-g", "session-closed", "wait-for -S view-closed")
@@ -202,6 +203,25 @@ def test_a_view_shows_the_pane_types_into_it_and_goes_when_closed(db):
                     tmux._tmux("copy-mode", "-t", window)
                     ws.send_json({"type": "input", "data": "\x1b[200~pasted-scrolled-back\x1b[201~"})
                     _until(ws, lambda seen: b"pasted-scrolled-back" in seen)
+                    # A write failing part way: the app hears what was lost (never what it was), and what's next goes.
+                    real_write = os.write
+
+                    def fails_part_way(fd, data):
+                        if not data.endswith(b"-the-way"):
+                            return real_write(fd, data)
+                        if data.startswith(b"lost"):
+                            return real_write(fd, data[:5])
+                        raise OSError("Input/output error")
+
+                    with monkeypatch.context() as patched:
+                        patched.setattr(pv.os, "write", fails_part_way)
+                        ws.send_json({"type": "input", "data": "lost-on-the-way"})
+                        said = ""
+                        while "input_lost" not in said:
+                            said = ws.receive().get("text") or ""
+                    assert json.loads(said) == {"input_lost": {"bytes": 10, "reason": "Input/output error"}}
+                    ws.send_json({"type": "input", "data": "typed-after-the-loss"})
+                    _until(ws, lambda seen: b"typed-after-the-loss" in seen)
 
                     # The person's terminal typed in takes the window; the view focused takes it back.
                     other = subprocess.Popen([*tmux._argv(tmux.current_server()), "attach", "-t", "=agent"],
