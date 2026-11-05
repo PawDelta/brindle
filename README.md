@@ -896,17 +896,21 @@ Pick a preset in Settings → Permissions or at setup:
 - **Secure**: short approvals, and a deny for anything no rule covers.
 
 A shell command of several parts is read part by part: `$(...)`, assignments,
-loops, `if`, `[[ ... ]]`, `;`, `&&`, `||`, pipes and heredocs as data. A deny on
-any part denies the whole command, however deep it sits. It runs unasked only if
-the rules allow every part and every part is a form brindle fully understands: a
-short allow-list of programs (git, gh, grep, sed, cargo and the like) used in
-ways that can't run something they were given. Anything else in it asks: a
-wrapper (`sudo`, `xargs`, `timeout`), a runner (`bash -c`, `tmux`, `watch`, `ssh`),
-an interpreter (`python3`, `node`), `trap`, a script by path, or a program not on
-the list. An ask from a supervisor, with nobody above it, goes straight to you.
-A single simple command isn't gated: the rules answer it as before, so under
-Autonomous `make test` runs, and so does a script an agent wrote and runs by
-itself. The list is a guard on what's written inline, not a sandbox.
+loops, `if`, `[[ ... ]]`, `;`, `&&`, `||`, pipes and heredocs as data. Each part
+is decided as if it ran alone, so a command gets no more power than its parts run
+one by one, and no stricter standard either: a deny or an ask on any part holds
+however deep it sits, and what would run alone runs.
+
+Where brindle can't tell what will run, it doesn't guess: a program or code only
+the run knows (`$X`, `eval "$X"`, `python3 -c "$X"`), a program fed what it will
+run (`... | sh`, `... | xargs`, `python3 - <<EOF`), or syntax it doesn't read. Under
+Autonomous the agent is told to run the parts as separate commands, and you get no
+prompt; under other presets it asks. The `shell/unchecked` setting overrides this:
+deny always refuses, and allow runs them, the dangerous opt-in.
+
+This reads what's written; it isn't a sandbox. A program allowed alone can do what
+it can do alone: under Autonomous `make test` runs, so does a script an agent wrote
+and `python3 -c` with any code it's given, at any depth.
 
 Every preset also denies reading `~/.ssh`, `~/.aws`, `~/.gnupg`, `.env*` and
 the daemon's token, and asks before every push into a `release` or

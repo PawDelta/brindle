@@ -139,7 +139,7 @@ def _bypass(command):
     ("python3 -c \"print(open(__import__('os').path.expanduser('~/.aws/credentials')).read())\"", "deny"),
     _bypass('cat "${HOME}/.aws/credentials"'),
     _bypass("node -e \"console.log(require('fs').readFileSync(require('os').homedir() + '/.npmrc', 'utf8'))\""),
-    ("python3 -c 'print(1)'", "ask"),    # not a dump; of several words, an interpreter isn't on the allow-list
+    ("python3 -c 'print(1)'", "allow"),
     ("echo $GH_TOKEN2", "deny"),
     ("printenv DB_PASS", "deny"),
     ("printenv MYSQL_PWD", "deny"),
@@ -228,7 +228,7 @@ def _bypass(command):
     _bypass('ls ~/.ssh > "$OUTPUT"'),    # a store named, a target only the run knows
     pytest.param('ls > "$OUTPUT"', "allow",
                  marks=pytest.mark.variant("no store named: an unresolved target is the policy's question")),
-    pytest.param("du -sh ~/*", "ask",
+    pytest.param("du -sh ~/*", "allow",
                  marks=pytest.mark.variant("replayed traffic: a shell glob never selects a dot store")),
     pytest.param("d=$(pwd); du -sh $d/*", "allow",
                  marks=pytest.mark.variant("replayed traffic: an unknown prefix before a bare pattern names nothing")),
@@ -247,16 +247,16 @@ def _bypass(command):
     pytest.param("for f in ~/.ssh/*; do ls $f; done", "allow",
                  marks=pytest.mark.variant("a command made only of harmless checks may name a store")),
     pytest.param("dd if=README.md", "allow", marks=pytest.mark.variant("non-credential input is safe")),
-    pytest.param('TOKEN="$TOKEN" echo ready', "ask",
+    pytest.param('TOKEN="$TOKEN" echo ready', "allow",
                  marks=pytest.mark.variant("assignment value does not print")),
-    pytest.param('env API_TOKEN="$API_TOKEN" echo ready', "ask",
+    pytest.param('env API_TOKEN="$API_TOKEN" echo ready', "allow",
                  marks=pytest.mark.variant("assignment through env does not print its value")),
-    pytest.param("case x in (env) echo ready;; esac", "ask",
-                 marks=pytest.mark.variant("a case pattern names a command without running it")),
+    pytest.param("case x in (env) echo ready;; esac", "deny",
+                 marks=pytest.mark.variant("a case isn't read: the split message, not a credential deny by its pattern")),
     ("env -u FOO git status", "allow"),
     ("env VAR=1 git status", "allow"),
     ("printenv PATH", "allow"),
-    ("bash -c 'printenv HOME'", "ask"),
+    ("bash -c 'printenv HOME'", "allow"),
     ("printenv --help", "allow"),
     ("env --help", "allow"),
     ("echo $HOME", "allow"),
@@ -291,12 +291,12 @@ def test_credential_dumps_are_denied(tmp_path, command, expected):
     saved = permissions.SavedAction("grant", "bash", command, "allow")
     decision = permissions.decide(req, saved=[saved])
     assert decision.decision == expected, decision.reason
-    assert decision.rule is None or expected != "deny"    # a hard deny, no rule's
+    assert (decision.rule is None) == (expected == "deny") or expected == "allow"
 
 
-def _held(command):
-    """Nothing can say it's safe, and no part is denied outright: the person is asked."""
-    return pytest.param(command, "ask", marks=pytest.mark.variant("bypass attempt"))
+def _split(command):
+    """The reader can't tell what will run, and no part is denied outright."""
+    return pytest.param(command, "split", marks=pytest.mark.variant("bypass attempt"))
 
 
 LOOP = "until s=$(gh run view 1 --json status --jq .status); [[ $s == completed* ]]; do echo w; done"
@@ -314,13 +314,6 @@ LOOP = "until s=$(gh run view 1 --json status --jq .status); [[ $s == completed*
     ("cat <<'EOF' | grep x\nbash and python are only text here\nEOF", "allow"),     # a heredoc to a program as data
     ("gh pr checks 1 | awk -F'\\t' '{print $2\" | \"$1}' | awk '/^a|^b/,/c/' | sort", "allow"),   # a | that runs nothing
     ("sed -i '' s/a/b/ notes.md; sed -n 1,5p notes.md; awk '$1 > 5 || /a/' notes.md", "allow"),
-    ("sqlite3 -readonly db 'select 1' '.schema x'; launchctl list | grep y; cargo test 2>&1 | tail -1", "allow"),
-    ("sqlite3 -separator '|' db \"SELECT Count(*), json_extract(p, '$.load_extension(') FROM t\"; ls", "allow"),
-    ("git log --oneline -1 -Sa -G b --format=%h; git commit -qam x; git merge --no-ff -q y; git push -qu origin z", "allow"),
-    ("sed -E 's/.*[:=] *[[:space:]]?//; /^## /,$p' notes.md; sed -i.bak '1,5d;s#a#b#g' notes.md; ls", "allow"),
-    ("find . -name '*.md' -not -path './x/*' -print; sort -rn -k2 notes.md; curl -sL -o x -w '%{http_code}' y", "allow"),
-    ("AWS_PROFILE=p aws s3 ls | head -1; uv run pytest -q | tail -1", "allow"),
-    ("sl" "eep 1; git status", "allow"),
     ("x=$(git log -1); [[ $x == a* ]] && eval 'git status'", "allow"),
     # A cd that may not run: it leads there or stays, and what's read must be clear in both.
     ("cd sub; git log -1 | head -5", "allow"),
@@ -356,158 +349,121 @@ LOOP = "until s=$(gh run view 1 --json status --jq .status); [[ $s == completed*
     _bypass("cd ~/.ssh; grep x id_rsa"),
     _bypass("cd ~; grep -r x .aws"),
     _bypass("if true; then cd ~/.ssh; fi; grep x id_rsa"),
-    # The allow-list: of several parts, anything not on it asks, however harmless its words.
-    # A shell or an interpreter: what it runs isn't read.
-    _held("bash -c 'git status'"),
-    _held("git log | bash scripts/filter.sh"),
-    _held("echo ls | sh"),
-    _held("bash <<'EOF'\necho hi\nEOF"),
-    _held("python3 -c 'print(1)'"),
-    _held("python3 - <<'EOF'\nprint(1)\nEOF"),
-    _held("node -e '1'"),
-    # What only starts another command.
-    _held("sudo ls; ls"),
-    _held("xargs grep x; ls"),
-    _held("timeout 5 git status; ls"),
-    _held("command git status; ls"),
-    _held("time git status; ls"),
-    _held("env -i git status; ls"),
-    _held("find . -exec ls ';'"),
-    # What runs a string, a program by path, a program it has never heard of.
-    _held("trap 'echo done' EXIT"),
-    _held("watch 'git status'"),
-    _held("tmux ls; ls"),
-    _held("ssh host ls; ls"),
-    _held("./x.sh; ls"),
-    _held("some-tool; ls"),
-    # An understood program in a form that isn't: an assignment or an option that runs something.
-    _held("GIT_SSH_COMMAND=x git fetch; ls"),
-    _held("export GIT_SSH_COMMAND=x; git fetch"),
-    _held("git -c core.pager=x log; ls"),
-    _held("git log --ext-diff; ls"),
-    _held("git fetch --upload-pack=x; ls"),
-    _held("git rebase -x y main; ls"),
-    _held("git rebase -x'echo y' main; echo done"),         # attached to its option
-    _held("git rebase -qx y main; ls"),                     # clustered
-    _held("git rebase --exec=y main; ls"),
-    _held("git rebase --exe=y main; ls"),                   # an abbreviation git would take
-    _held("git merge -sy z; ls"),
-    _held("git commit -e; ls"),
-    _held("git log --output=x; ls"),
-    _held("git grep -Oy x; ls"),
-    _held("git bisect run x; ls"),
-    _held('git log "$X"; ls'),
-    _held("gh extension exec x; ls"),
-    _held("gh repo clone o/r -- --upload-pack=x; ls"),
-    # sed: only commands read whole and known.
-    _held("sed 's/a/date/e' notes.md"),
-    _held("sed 's/a/date/gIe' notes.md"),
-    _held("sed '/x/I e date' notes.md"),
-    _held("sed '1~2e date' notes.md"),
-    _held("sed '1{e date\n}' notes.md"),
-    _held("sed 's/a/b/w out' notes.md"),
-    _held("sed 's#[#]#;e date#' notes.md"),                 # seds differ on where that closes
-    _held("sed -i s/a/b/ 'e date'; ls"),                    # to one sed, the second word is the script
-    _held("sed -f x notes.md; ls"),
-    _held('X=$(ls); sed "$X" notes.md'),
-    # awk: only what it can tell runs nothing.
-    _held("awk 'BEGIN{system(\"date\")}'"),
-    _held("awk 'BEGIN{print | \"sh\"}'"),
-    _held("awk '{print /;/ | \"sh\"}' notes.md"),           # a ; in a regex doesn't end the statement
-    _held("awk '/\"/ {print | \"sh\"} /\"/' notes.md"),     # a " in a regex isn't a string
-    _held("awk '{print 1 \\\n | \"sh\"}' notes.md"),
-    _held("awk '{print > \"out\"}' notes.md"),
-    _held("awk 'BEGIN{\"date\" | getline x}'"),
-    _held("awk 'BEGIN{print ENVIRON[\"TOKEN\"]}'"),
-    _held("awk -f x notes.md; ls"),
-    _held("find . -fprint x; ls"),
-    _held("find . -delete; ls"),
-    _held("sort --compress-program=x notes.md; ls"),
-    _held("sort --comp=x notes.md; ls"),
-    _held("rg --pre x y; ls"),
-    _held("curl -K x; ls"),
-    _held("curl -sK x; ls"),
-    _held("curl -T x y; ls"),
-    _held("make SHELL=x; ls"),
-    _held("make --eval=x; ls"),
-    _held("uv run python x.py; ls"),
-    _held("cargo --config x test; ls"),
-    _held("cargo test --config x; ls"),
-    _held("npm i x; ls"),
-    _held("npm run y --script-shell=x; ls"),
-    _held("sips -j x notes.md; ls"),
-    _held("lsappinfo launch x; ls"),
-    _held("brindle run x; ls"),
-    _held("launchctl submit x; ls"),
-    # sqlite3: SELECT and known PRAGMAs calling known functions, in any case.
-    _held("sqlite3 db '.shell ls'"),
-    _held("sqlite3 db <<'EOF'\n.shell ls\nEOF"),
-    _held("sqlite3 -cmd x db y; ls"),
-    _held("sqlite3 db 'select load_extension(\"x\")'"),
-    _held("sqlite3 db 'SELECT LOAD_EXTENSION(\"x\")'; echo done"),
-    _held("sqlite3 db 'select Load_Extension (\"x\")'"),
-    _held("sqlite3 db 'select load_extension/**/(\"x\")'"),
-    _held("sqlite3 db 'select \"load_extension\"(1)'"),
-    _held("sqlite3 db 'select writefile(1, 2)'"),
-    _held("sqlite3 db 'select 1; attach 2 as y'"),
-    _held("sqlite3 db 'PRAGMA writable_schema=1'"),
-    _held('T=$(ls); sqlite3 db "select $T"'),
-    # What it can't read, and a subshell: nothing to allow.
-    _held("(git status) 2>&1"),                         # a descriptor alone is no program, nor a crash
-    _held("case x in x) ls;; esac"),
-    # Past the list, a deny it can see still denies.
     _bypass("(git push --force origin x) 2>&1"),
     _bypass("some-tool; git push --force origin x"),
-    # A [[ whose operands are arithmetic runs what's in them, however it's quoted.
-    _held("[[ 'a[$(git push --force origin x)]' -eq 0 ]]"),
-    _held("[[ a -lt 'b[$(printenv)]' ]]"),
-    _held("[[ -v 'a[$(git reset --hard)]' ]]"),
-    _held("x='a[$(printenv)]'; [[ $x -eq 0 ]]"),
-    _held("let 'a[$(git push --force origin x)]=1'"),
-    _held("declare -i n='a[$(printenv)]'"),
-    _held("printf -v 'a[$(printenv)]' x"),
-    # A cd brindle can't follow, with a file named after it.
-    _held("cd $X; grep x id_rsa"),
-    _held("CDPATH=~; cd .aws; grep x credentials"),
-    _held("export CDPATH=~; cd .ssh; head id_rsa"),
-    _held("for i in 1 2 3; do cd ..; grep x .aws/credentials; done"),
-    _held("while true; do cd ..; grep x .aws/credentials; done"),
-    _held("mkdir q; cd q; grep x id_rsa"),
-    _held("ln -s $X q; cd q; head id_rsa"),
-    _held("shopt -s cdable_vars; x=~/.aws; cd x; grep x credentials"),
-    _held("cd -; grep x id_rsa"),
-    _held("cd $X; wc -l < id_rsa"),
-    # Those readers name a file after all.
-    _held("mkdir q; cd q; grep -f id_rsa x"),
-    _held("mkdir q; cd q; grep --fi id_rsa x"),
-    _held("mkdir q; cd q; sed -n 1p id_rsa"),
-    _held("mkdir q; cd q; awk '{print}' id_rsa"),
-    _held('mkdir q; cd q; grep "$X"'),
-    _held("mkdir q; cd q; grep x*"),
-    # An rm a word could make recursive, or a pattern that may reach the daemon's token.
-    _held("rm -f $X"),
-    _held("rm -f *"),
-    _held("touch x; rm -f -*"),
     _bypass("touch x; rm -rf /t*"),
-    _held("touch x; rm --rec a* /"),
-    _held("rm -f {a,-rf} b*"),
-    _held("touch x; rm -f `echo -rf` a*"),
-    _held("touch x; rm -f ~/.brindle/d*"),
     _bypass("touch x; rm -f */daemon.json"),
+    # What the reader can't tell: no prompt, the agent is told to split it.
+    # A program only the run knows, code only the run knows.
+    _split("X=$(ls); $X"),
+    _split('eval "$X"'),
+    _split('bash -c "$X"'),
+    _split("bash -c 'eval \"$X\"'"),
+    _split("timeout 5 bash -c 'X=$(ls); $X'"),
+    _split('python3 -c "$X"'),
+    _split('python3 "$F"'),
+    _split('python3 -X dev -c "$X"'),
+    _split("bash --norc -c 'eval \"$X\"'"),
+    _split('trap "$X" EXIT'),
+    _split("alias x='ls'\nx"),
+    # What a group assigns isn't known after it: skipped, backgrounded or in a pipe's subshell.
+    _split("X=git; { X=ls; } | cat; $X reset --hard"),
+    _split("X=git; false && { X=ls; }; $X reset --hard"),
+    _split("X=git; { X=ls; } & $X reset --hard"),
+    # A program that runs what it's fed, however it's fed and however it's written.
+    _split("echo ls | sh"),
+    _split("bash <<'EOF'\necho hi\nEOF"),
+    _split("python3 - <<'EOF'\nprint(1)\nEOF"),
+    _split("x=$(python3 - <<'EOF'\nprint(1)\nEOF\n)"),
+    _split("echo 'print(1)' | python3"),
+    _split("echo a | python3 -i -c 'pass'"),
+    _split("echo a | bash /dev/stdin"),
+    _split("sh < x.sh"),
+    _split("echo a | xargs"),
+    _split("echo a | timeout 5 sh"),
+    _split("echo a | timeout 5 xargs ls"),
+    _split("echo a | env -S 'sh -x'"),
+    _split("echo a | /bin/sh"),
+    _split("echo a | uv run python"),
+    _split("echo a | python3.12"),
+    _split("echo a | { sh; }"),
+    _split("echo a | while read l; do sh; done"),
+    _split("echo a | for i in 1; do sh; done"),
+    _split("echo a | if true; then bash; fi"),
+    _split("while read l; do sh; done < x.sh"),
+    _split("x=$(echo a | sh)"),
+    _split("echo a | cat $(sh)"),
+    _split("echo .shell | sqlite3 db"),
+    _split("sqlite3 db <<'EOF'\n.shell ls\nEOF"),
+    # Fed only data, they're decided as they would be alone.
+    ("ps aux | grep bash", "allow"),
+    ("git log | bash scripts/filter.sh", "allow"),
+    ("cat x.json | python3 -m json.tool", "allow"),
+    ("cat x.json | python3 -c 'import json,sys; print(json.load(sys.stdin))'", "allow"),
+    # A shell's and a trap's literal code is read as if written out.
+    ("trap 'rm -f tmp' EXIT", "allow"),
+    _bypass("bash -lc 'git status; git reset --hard'"),
+    _bypass("timeout 5 bash -c 'git reset --hard'"),
+    _bypass("trap 'git reset --hard' EXIT"),
+    _bypass("trap -- 'git reset --hard' EXIT"),
+    # An expanding heredoc runs its substitutions, and prints its variables.
+    ("cat <<EOF\n$HOME and $(date)\nEOF", "allow"),
+    ("cat <<EOF\n\\$(printenv)\nEOF", "allow"),
+    _bypass("cat <<EOF\n$(printenv)\nEOF"),
+    _bypass("cat <<EOF\n\"$(gh auth token)\"\nEOF"),
+    _bypass("cat <<EOF\n$(echo $GITHUB_TOKEN)\nEOF"),
+    _bypass("cat <<EOF\n$GITHUB_TOKEN\nEOF"),
+    # Syntax it doesn't read.
+    _split("(git status) 2>&1"),                         # a descriptor alone is no program, nor a crash
+    _split("case x in x) ls;; esac"),
+    # A [[ whose operands are arithmetic runs what's in them, however it's quoted.
+    _split("[[ 'a[$(git push --force origin x)]' -eq 0 ]]"),
+    _split("[[ a -lt 'b[$(printenv)]' ]]"),
+    _split("[[ -v 'a[$(git reset --hard)]' ]]"),
+    _split("x='a[$(printenv)]'; [[ $x -eq 0 ]]"),
+    _split("let 'a[$(git push --force origin x)]=1'"),
+    _split("declare -i n='a[$(printenv)]'"),
+    _split("printf -v 'a[$(printenv)]' x"),
+    # A cd brindle can't follow, with a file named after it.
+    _split("cd $X; grep x id_rsa"),
+    _split("CDPATH=~; cd .aws; grep x credentials"),
+    _split("export CDPATH=~; cd .ssh; head id_rsa"),
+    _split("for i in 1 2 3; do cd ..; grep x .aws/credentials; done"),
+    _split("while true; do cd ..; grep x .aws/credentials; done"),
+    _split("mkdir q; cd q; grep x id_rsa"),
+    _split("ln -s $X q; cd q; head id_rsa"),
+    _split("shopt -s cdable_vars; x=~/.aws; cd x; grep x credentials"),
+    _split("cd -; grep x id_rsa"),
+    _split("cd $X; wc -l < id_rsa"),
+    # Those readers name a file after all.
+    _split("mkdir q; cd q; grep -f id_rsa x"),
+    _split("mkdir q; cd q; grep --fi id_rsa x"),
+    _split("mkdir q; cd q; sed -n 1p id_rsa"),
+    _split("mkdir q; cd q; awk '{print}' id_rsa"),
+    _split('mkdir q; cd q; grep "$X"'),
+    _split("mkdir q; cd q; grep x*"),
+    # An rm a word could make recursive, or a pattern that may reach the daemon's token.
+    _split("rm -f $X"),
+    _split("rm -f *"),
+    _split("touch x; rm -f -*"),
+    _split("touch x; rm --rec a* /"),
+    _split("rm -f {a,-rf} b*"),
+    _split("touch x; rm -f `echo -rf` a*"),
+    _split("touch x; rm -f ~/.brindle/d*"),
     # Syntax the shell itself won't take fails closed, where it would otherwise run.
-    ("echo 'a", "ask"),
-    ("for i in a; do", "ask"),
-    _held("if true; then"),
-    _held("cat <<EOF\nnever closed"),
-    _held("(echo"),
-    ("[[ a", "ask"),
-    ("[[ a ]] b", "ask"),
-    ("[[ a ; b ]]", "ask"),
+    _split("echo 'a"),
+    _split("for i in a; do"),
+    _split("if true; then"),
+    _split("cat <<EOF\nnever closed"),
+    _split("(echo"),
+    _split("[[ a"),
+    _split("[[ a ]] b"),
+    _split("[[ a ; b ]]"),
 ])
 def test_autonomous_decides_a_script_part_by_part(tmp_path, monkeypatch, command, expected):
-    """A command runs unasked if every part is allowed and a form brindle fully understands;
-    a deny on any part denies, at any depth; and anything else asks."""
-    from brindle import permissions
+    """Each part as if run alone: a command runs unasked if every part would, and a part that's
+    denied denies at any depth. What the reader can't tell gets no prompt: a deny saying to split it."""
+    from brindle import permission_groups, permissions
 
     monkeypatch.setenv("HOME", str(tmp_path))
     for folder in ("wt/sub", "Projects", ".ssh", ".aws", ".brindle"):
@@ -517,20 +473,39 @@ def test_autonomous_decides_a_script_part_by_part(tmp_path, monkeypatch, command
     permissions.apply_preset("autonomous")
     here = str(tmp_path / "wt")
     decision = permissions.decide(permissions.Request("claude", "bash", "Bash", here, here, here, command=command))
-    assert decision.decision == expected, decision.reason
+    split = decision.decision == "deny" and decision.reason == permission_groups.UNVERIFIABLE_GUIDANCE
+    assert ("split" if split else decision.decision) == expected, decision.reason
 
 
-def test_only_a_rule_a_person_wrote_naming_the_command_stands_in_for_the_allow_list(tmp_path):
+# Commands alone, then the shell structures they may stand in.
+_ALONE = ["git push --force origin x", "git reset --hard", "git branch -D x", "git push origin main", "rm -rf /",
+          "cat ~/.ssh/id_rsa", "cat ~/.brindle/daemon.json", "printenv", "gh auth token", "echo $GITHUB_TOKEN",
+          "git status", "make test", "some-tool", "sqlite3 db \"select load_extension('x')\"",
+          "git rebase -x'echo y' main", "sed 's/a/date/e' notes", "python3 -c 'print(1)'", "bash -c 'git status'"]
+_NESTED = ["x=$({c})", 'echo "$({c})"', "echo `{c}`", "if {c}; then :; fi", "if true; then {c}; fi", "for i in a b; do {c}; done",
+           "for i in $({c}); do :; done", "while {c}; do :; done", "until s=$({c}); [[ $s == d* ]]; do :; done",
+           "[[ $({c}) == x ]]", "true; {c}", "true && {c}", "false || {c}", "true | {c}", "{c} | cat", "{{ {c}; }}",
+           "cat <<'EOF'\nsafe\nEOF\n{c}", "cat <<EOF\n$({c})\nEOF", "true; for i in a; do if true; then x=$({c}); fi; done"]
+
+
+@pytest.mark.parametrize("preset", ["autonomous", "standard"])
+def test_a_command_answers_at_any_depth_as_it_does_alone(tmp_path, monkeypatch, preset):
+    """A compound gets no more power than its parts run one by one, and no special stricter
+    standard. A command allowed alone may ask only where standard asks for its neighbours' reads."""
     from brindle import permissions
 
-    permissions.apply_preset("autonomous")
-    permissions.add_rule("bash", "*", "allow", "glob", source="learned")     # a pattern has decided nothing
-    here = str(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    for folder in ("wt", ".ssh", ".brindle"):
+        (tmp_path / folder).mkdir()
+    permissions.apply_preset(preset)
+    here = str(tmp_path / "wt")
     answer = lambda command: permissions.decide(permissions.Request("claude", "bash", "Bash", here, here, here,
                                                                     command=command)).decision
-    assert answer("some-tool; git status") == "ask"
-    permissions.add_rule("bash", "some-tool", "allow", "prefix")
-    assert answer("some-tool; git status") == "allow"
+    for command in _ALONE:
+        alone = answer(command)
+        for form in _NESTED:
+            nested = answer(form.format(c=command))
+            assert nested == alone or preset == "standard" and alone == "allow" and nested == "ask", (command, form)
 
 
 def test_stores_resolved_at_run_time(tmp_path, monkeypatch):
