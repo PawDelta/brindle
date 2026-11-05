@@ -87,13 +87,21 @@ def test_background_fetch_never_asks_for_credentials(tmp_path, asks, monkeypatch
         git.fetch_remote_branch(repo, "main")
     assert "get" in asks.seen.read_text()
 
-    # Public HTTP and SSH refresh without any helper. The person's own ssh command is kept,
-    # and BatchMode comes first: ssh keeps the first value of an option.
+    # Public HTTP and SSH refresh without any helper. The person's own ssh command is kept, and
+    # BatchMode goes right after ssh itself, as ssh keeps the first value of an option.
     ssh_log = tmp_path / "ssh-log"
-    fake_ssh = _script(tmp_path / "fake-ssh", f'echo "$@" >> "{ssh_log}"\nfor last; do :; done\neval "$last"')
+    fakes = tmp_path / "fakes"
+    fakes.mkdir()
+    fake_body = f'echo "$@" >> "{ssh_log}"\nfor last; do :; done\neval "$last"'
+    fake_ssh, wrapper, plink = (_script(fakes / name, fake_body) for name in ("ssh", "wrapper", "plink"))
     ssh_url = f"ssh://example.invalid{public}"
-    for origin, ssh_command, bare_ssh in ((f"{url}/public", None, None), (ssh_url, f"{fake_ssh} -o BatchMode=no", None),
-                                          (ssh_url, None, str(fake_ssh))):
+    for origin, ssh_command, bare_ssh, expected in (
+            (f"{url}/public", None, None, None),
+            (ssh_url, f"{fake_ssh} -o BatchMode=no", None, "-o BatchMode=yes -o BatchMode=no"),
+            (ssh_url, f"/usr/bin/env PROBE=1 {fake_ssh} -F /dev/null", None, "-o BatchMode=yes -F /dev/null"),
+            (ssh_url, f"{wrapper} --flag", None, "--flag -o BatchMode=yes"),
+            (ssh_url, str(plink), None, ""),
+            (ssh_url, None, str(fake_ssh), "-o BatchMode=yes")):
         sh(f"git remote set-url origin {origin}", repo)
         new = sh(f"git commit -q --allow-empty -m next && git push -q {public} HEAD:refs/heads/main"
                  " && git rev-parse HEAD", repo)
@@ -107,8 +115,10 @@ def test_background_fetch_never_asks_for_credentials(tmp_path, asks, monkeypatch
         assert session_sync.fetch(str(repo), "main")
         assert sh("git rev-parse origin/main", repo) == new
         assert not git.fetch_refused(repo)
-        if origin == ssh_url:
-            assert ssh_log.read_text().startswith("-o BatchMode=yes")
+        if expected:
+            assert expected in ssh_log.read_text()
+        elif expected == "":    # takes no -o
+            assert "BatchMode" not in ssh_log.read_text()
     server.shutdown()
 
 

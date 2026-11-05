@@ -125,8 +125,7 @@ _FETCH_REFUSED = "brindle-fetch-refused"
 # as opposed to offline or no such repo.
 _REFUSED = re.compile(r"terminal prompts disabled|could not read (username|password)|authentication failed"
                       r"|permission denied|host key verification failed|returned error: 40[13]", re.IGNORECASE)
-# The program of an ssh command: past any NAME=value in front of it.
-_SSH_PROGRAM = re.compile(r"""\s*(?:\w+=\S*\s+)*('[^']*'|"[^"]*"|\S+)""")
+_SHELL_WORD = re.compile(r"""'[^']*'|"[^"]*"|\S+""")
 
 
 def gh_credential_helper() -> str | None:
@@ -183,19 +182,26 @@ def _background_env(cwd: str | Path) -> dict[str, str]:
 
 
 def _batch_ssh(cwd: str | Path) -> str | None:
-    """The ssh command git would run, in BatchMode: right after the program,
-    as ssh keeps the first value of an option and the command may set its own.
-    None for PuTTY's, which takes no ``-o`` (and has no terminal to ask at here)."""
+    """The ssh command git would run, in BatchMode: right after ``ssh`` itself,
+    wherever a wrapper puts it (``env A=1 ssh -F x``), as ssh keeps the first
+    value of an option and the command may set its own. A program that isn't
+    named ssh gets it last, where git's own arguments go: a wrapper passes those
+    on, and its own options stay its own (so its ``-o BatchMode=no`` would win).
+    None for PuTTY's, which takes no ``-o``."""
     try:
         ssh = os.environ.get("GIT_SSH_COMMAND") or run(["config", "--get", "core.sshCommand"], cwd,
                                                        check=False).stdout.strip()
     except GitError:
         ssh = ""
     ssh = ssh or shlex.quote(os.environ.get("GIT_SSH") or "ssh")     # GIT_SSH: a bare program, no options
-    program = _SSH_PROGRAM.match(ssh)
-    if program is None or "plink" in os.path.basename(program.group(1).strip("'\"")).lower():
+    words = [(word.end(), os.path.basename(word.group().strip("'\"")).lower())
+             for word in _SHELL_WORD.finditer(ssh) if not re.match(r"\w+=", word.group())]    # not NAME=value
+    for end, name in words:
+        if name.removesuffix(".exe") == "ssh":
+            return f"{ssh[:end]} -o BatchMode=yes{ssh[end:]}"
+    if any("plink" in name for _, name in words):
         return None
-    return f"{ssh[:program.end()]} -o BatchMode=yes{ssh[program.end():]}"
+    return f"{ssh} -o BatchMode=yes"
 
 
 def background(args: list[str], cwd: str | Path,
