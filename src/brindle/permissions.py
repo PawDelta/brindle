@@ -3203,6 +3203,10 @@ _PLAIN_WRAPPERS: dict[str, tuple[frozenset[str], frozenset[str], tuple[str, ...]
 }
 
 
+# NAME= at the start of a word, whatever the value holds (a newline included).
+_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+
+
 def _unwrapped(words: list[str]) -> list[str] | None:
     """The command a plain wrapper (_PLAIN_WRAPPERS) runs, or None when ``words``
     isn't one, an option isn't known, or nothing is left to run."""
@@ -3216,7 +3220,7 @@ def _unwrapped(words: list[str]) -> list[str] | None:
         if word == "--":
             i += 1
             break
-        if program == "env" and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", word):
+        if program == "env" and _ASSIGNMENT.match(word):
             i += 1
         elif program == "nice" and re.fullmatch(r"-\+?\d+", word):
             i += 1
@@ -3236,7 +3240,7 @@ def _wrapped_forms(words: list[str]) -> list[list[str]]:
     """``words`` and the command behind each plain wrapper around it, nested ones included."""
     forms = [words]
     while (inner := _unwrapped(forms[-1])) is not None:
-        while inner and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", inner[0]):
+        while inner and _ASSIGNMENT.match(inner[0]):
             inner = inner[1:]
         if not inner:
             break

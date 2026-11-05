@@ -125,6 +125,7 @@ def test_shell_forms(tmp_path, command, expected):
     "command -p blocked",
     "exec -a name blocked",
     "git status && nohup env A=1 nice -n 5 timeout 5 blocked",
+    pytest.param('nohup env A="one\ntwo" blocked', marks=pytest.mark.variant("a newline in an assignment value")),
 ])
 def test_a_deny_sees_the_command_behind_a_wrapper(tmp_path, command):
     from brindle import permissions
