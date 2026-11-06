@@ -943,9 +943,11 @@ def missing_identity(path: str | Path, env: dict[str, str] | None = None) -> lis
     Each is resolved as git does (GIT_<ROLE>_<FIELD> in ``env``, default the
     process's, then <role>.<field>, then user.<field>, and EMAIL for an email),
     so whatever the person set, for either role, is kept."""
-    env = os.environ if env is None else env
-    found = run(["config", "--get-regexp", r"^(user|author|committer)\.(name|email)$"],
-                path, check=False).stdout
+    env = dict(os.environ) if env is None else env
+    # Read the config with that same environment: a worker's profile can point
+    # git at other config files or carry its own settings (GIT_CONFIG_*).
+    found = run_env(["config", "--get-regexp", r"^(user|author|committer)\.(name|email)$"],
+                    path, env, check=False).stdout
     conf = {k.lower(): v.strip() for k, _, v in (line.partition(" ") for line in found.splitlines())}
     missing = []
     for role in ("author", "committer"):

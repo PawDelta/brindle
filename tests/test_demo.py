@@ -49,7 +49,7 @@ def _git(path, *args):
 def test_demo_merges_with_no_git_identity(db, repo, monkeypatch, tmp_path):
     _no_identity(monkeypatch, tmp_path)
     monkeypatch.setattr(agents, "load_profile", lambda *a, **k: _profile({}))
-    wss = [workspaces.create(db, str(repo), n, run_setup=False).workspace for n in "abcd"]
+    wss = [workspaces.create(db, str(repo), n, run_setup=False).workspace for n in "abcdef"]
 
     # No identity at all: the worker's commit and brindle's merge fall back,
     # and no config is written.
@@ -85,6 +85,25 @@ def test_demo_merges_with_no_git_identity(db, repo, monkeypatch, tmp_path):
     monkeypatch.setattr(agents, "load_profile", lambda *a, **k: _profile(who))
     _worker_commit(db, wss[3], "d.py")
     assert _last(wss[3].path) == "Profile Person <profile@example.com>"
+
+    # Git settings chosen by the profile decide what counts as set: an identity
+    # passed as GIT_CONFIG_PARAMETERS is kept ...
+    params = "'user.name=Config Person' 'user.email=config@example.com'"
+    monkeypatch.setattr(agents, "load_profile",
+                        lambda *a, **k: _profile({"GIT_CONFIG_PARAMETERS": params}))
+    _worker_commit(db, wss[4], "g.py")
+    assert _last(wss[4].path) == "Config Person <config@example.com>"
+    # ... and an identity only in the daemon's global config is not seen by a
+    # worker whose profile points git elsewhere, so that worker gets the fallback.
+    theirs = tmp_path / "theirs.gitconfig"
+    _git(repo, "config", "--file", str(theirs), "user.name", "Daemon Person")
+    _git(repo, "config", "--file", str(theirs), "user.email", "daemon@example.com")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(theirs))
+    monkeypatch.setattr(agents, "load_profile",
+                        lambda *a, **k: _profile({"GIT_CONFIG_GLOBAL": "/dev/null"}))
+    _worker_commit(db, wss[5], "h.py")
+    assert _last(wss[5].path) == "brindle <brindle@localhost>"
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/dev/null")
 
     # The demo repo: workers and merges both work with no identity.
     monkeypatch.setattr(agents, "load_profile", lambda *a, **k: _profile({}))
