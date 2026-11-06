@@ -1261,7 +1261,8 @@ def _on_review(db: DB, reviewer: Agent, ws: Workspace, approved: bool,
             return True, False   # the other reviewer's verdict decides; both must approve
         # An approval replay must not interrupt conflict resolution or repeat
         # an escalation. Only a new conflicting commit gets another notice.
-        if db.mark(worker.id, "conflict") == recorded.sha:
+        if db.conn.execute("SELECT 1 FROM pipeline_conflicts WHERE workspace_id=? AND sha=?",
+                           (ws.id, recorded.sha)).fetchone():
             return True, False
         db.update_agent(worker.id, pipeline="ready")
         return True, True
@@ -1653,7 +1654,10 @@ def _resolve_conflict(db: DB, worker: Agent, ws: Workspace, cfg: RepoConfig,
     base = ws.base_branch
     # _on_review and this handler run under the branch's merge lock. Keep
     # the receipt in the DB so another sweep/process sees the same handoff.
-    db.set_mark(worker.id, "conflict", gates.head(ws))
+    sha = gates.head(ws)
+    with db.tx() as c:
+        c.execute("INSERT OR IGNORE INTO pipeline_conflicts (workspace_id, sha) VALUES (?,?)",
+                  (ws.id, sha))
     guarded = conflicts.protected(files, cfg.protected_paths)
     if guarded:
         db.update_agent(worker.id, pipeline=None)

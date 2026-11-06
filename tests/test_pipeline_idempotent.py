@@ -57,7 +57,7 @@ def keep_worktree(monkeypatch):
     monkeypatch.setattr(workspaces, "remove", boom)
 
 
-@pytest.mark.parametrize("alive, unavailable", [(True, None), (True, "profile unavailable"), (False, "profile unavailable")])
+@pytest.mark.parametrize("alive, unavailable", [(True, None), (True, "profile unavailable"), (False, "profile unavailable"), (False, None)])
 def test_conflict_notice_once_per_commit_and_unavailable_worker_escalates(db, tmp_path, monkeypatch, alive, unavailable):
     ws = Workspace("feat", str(tmp_path), "feat", "worktree", "feat", "main", str(tmp_path), None, "", 0)
     db.add_workspace(ws)
@@ -65,24 +65,34 @@ def test_conflict_notice_once_per_commit_and_unavailable_worker_escalates(db, tm
     add(db, ws, "w1", "assign", parent="boss", result="done", pipeline="reviewing")
     add(db, ws, "rev0", "review", "reviewer", parent="boss")
     monkeypatch.setattr(pipeline, "load_repo_config", lambda *a, **k: pipeline.RepoConfig(auto_merge_default_branch=True))
-    monkeypatch.setattr(agents, "is_alive", lambda a, **k: a.id == "boss" or alive)
+    monkeypatch.setattr(agents, "is_alive", lambda a, **k: a.id != "w1" or alive)
     monkeypatch.setattr(pipeline, "_light_profile", lambda *a: "default")
-    monkeypatch.setattr(agents, "delegate", lambda *a, **k: pytest.fail("unavailable resolver started"))
+    def delegate(*a, **k):
+        assert not unavailable
+        add(db, ws, sha, "assign", parent="boss")
+        return db.get_agent(sha), ws
+    monkeypatch.setattr(agents, "delegate", delegate)
     monkeypatch.setattr(autopilot, "_unavailable", lambda *a, **k: unavailable)
     monkeypatch.setattr(agents, "send_message", lambda db_, to, body, **kw: db_.enqueue(to, body, None))
+    merges = []
     def conflicting(db_, parent, ws_, conflicts_out=None, **kw):
+        merges.append(sha)
         conflicts_out.append("app.py")
         return "Not merged: conflict"
     monkeypatch.setattr(pipeline, "merge", conflicting)
     for sha in ("commit-1", "commit-2"):
         monkeypatch.setattr(gates, "head", lambda ws_: sha)
+        for agent in db.list_agents(ws.id):
+            db.update_agent(agent.id, pipeline=None)
         db.update_agent("w1", pipeline="reviewing")
         db.add_review(ws.id, sha, "rev0", True, "ok")
         for _ in range(2):
             pipeline.on_review(db, db.get_agent("rev0"), ws, True, "ok")
         assert len(drain(db)) == 1
-        assert len(drain(db, "w1")) == (0 if unavailable else 1)
-        assert db.get_agent("w1").pipeline == (None if unavailable else "resolving")
+        assert merges.count(sha) == 1
+        assert len(drain(db, "w1")) == (1 if alive and not unavailable else 0)
+        assert drain(db, sha) == []
+        assert pipeline.piped_worker(db, ws).pipeline == (None if unavailable else "resolving")
         assert bool(db.get_agent("w1").merge_failed) == bool(unavailable)
         assert bool(db.conn.execute("SELECT 1 FROM events WHERE kind='pipeline.escalated'").fetchone()) == bool(unavailable)
 
