@@ -55,6 +55,9 @@ def asks(tmp_path, monkeypatch):
     return SimpleNamespace(seen=seen, config=home_config, asker=asker)
 
 
+@pytest.mark.variant(
+    "credential-dialog guard: real HTTP/SSH fetches must bypass credential helpers and askpass, "
+    "and SSH must lose its controlling terminal even when launched from a PTY; Python coverage cannot see those prompts")
 def test_background_fetch_never_asks_for_credentials(tmp_path, asks, monkeypatch):
     public = tmp_path / "public"
     repo = tmp_path / "repo"
