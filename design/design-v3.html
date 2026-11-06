@@ -137,14 +137,16 @@ h2.sub small { font-weight: 400; color: var(--ink-3); font-size: 13px; margin-le
 
 /* Scheme 2 · Tinted: the website's chip voice, tuned. Pass text on a 12% pass wash and a 40% pass hairline, sans not mono. */
 .sch-tinted .b.primary { background: color-mix(in srgb, var(--pass) 12%, transparent); border-color: color-mix(in srgb, var(--pass) 40%, transparent); color: var(--pass); }
-.sch-tinted .b.primary:hover, .sch-tinted .b.primary.is-hover { background: color-mix(in srgb, var(--pass) 18%, transparent); border-color: color-mix(in srgb, var(--pass) 62%, transparent); }
-.sch-tinted .b.primary:active, .sch-tinted .b.primary.is-active { background: color-mix(in srgb, var(--pass) 25%, transparent); border-color: var(--pass); }
+/* Hover and pressed deepen the hairline and pull the text toward ink rather than thickening the wash, so the
+   label keeps AA on the light canvas (a 18%/25% wash would drop it to 4.4:1 and 4.0:1). */
+.sch-tinted .b.primary:hover, .sch-tinted .b.primary.is-hover { background: color-mix(in srgb, var(--pass) 14%, transparent); border-color: color-mix(in srgb, var(--pass) 62%, transparent); color: color-mix(in srgb, var(--pass) 85%, var(--ink)); }
+.sch-tinted .b.primary:active, .sch-tinted .b.primary.is-active { background: color-mix(in srgb, var(--pass) 18%, transparent); border-color: var(--pass); color: color-mix(in srgb, var(--pass) 75%, var(--ink)); }
 .sch-tinted .b.secondary { border-color: var(--line-strong); color: var(--ink); }
 .sch-tinted .b.secondary:hover, .sch-tinted .b.secondary.is-hover { background: var(--surface-2); border-color: color-mix(in srgb, var(--line-strong) 70%, var(--ink-3)); }
 .sch-tinted .b.secondary:active, .sch-tinted .b.secondary.is-active { background: color-mix(in srgb, var(--surface-2) 86%, var(--ink)); }
 .sch-tinted .b.destructive { background: color-mix(in srgb, var(--fail) 12%, transparent); border-color: color-mix(in srgb, var(--fail) 40%, transparent); color: var(--fail); }
-.sch-tinted .b.destructive:hover, .sch-tinted .b.destructive.is-hover { background: color-mix(in srgb, var(--fail) 18%, transparent); border-color: color-mix(in srgb, var(--fail) 62%, transparent); }
-.sch-tinted .b.destructive:active, .sch-tinted .b.destructive.is-active { background: color-mix(in srgb, var(--fail) 25%, transparent); border-color: var(--fail); }
+.sch-tinted .b.destructive:hover, .sch-tinted .b.destructive.is-hover { background: color-mix(in srgb, var(--fail) 14%, transparent); border-color: color-mix(in srgb, var(--fail) 62%, transparent); color: color-mix(in srgb, var(--fail) 85%, var(--ink)); }
+.sch-tinted .b.destructive:active, .sch-tinted .b.destructive.is-active { background: color-mix(in srgb, var(--fail) 18%, transparent); border-color: var(--fail); color: color-mix(in srgb, var(--fail) 75%, var(--ink)); }
 
 /* Scheme 3 · Neutral: the main action is solid ink (white on dark, near-black on light). Green stays a status colour only. */
 .sch-neutral .b.primary { background: var(--ink); color: var(--canvas); border-color: var(--ink); }
@@ -155,7 +157,7 @@ h2.sub small { font-weight: 400; color: var(--ink-3); font-size: 13px; margin-le
 .sch-neutral .b.secondary:active, .sch-neutral .b.secondary.is-active { background: color-mix(in srgb, var(--surface-2) 86%, var(--ink)); }
 .sch-neutral .b.destructive { border-color: color-mix(in srgb, var(--fail) 45%, transparent); color: var(--fail); }
 .sch-neutral .b.destructive:hover, .sch-neutral .b.destructive.is-hover { background: color-mix(in srgb, var(--fail) 10%, transparent); border-color: color-mix(in srgb, var(--fail) 70%, transparent); }
-.sch-neutral .b.destructive:active, .sch-neutral .b.destructive.is-active { background: color-mix(in srgb, var(--fail) 16%, transparent); border-color: var(--fail); }
+.sch-neutral .b.destructive:active, .sch-neutral .b.destructive.is-active { background: color-mix(in srgb, var(--fail) 16%, transparent); border-color: var(--fail); color: color-mix(in srgb, var(--fail) 80%, var(--ink)); }
 
 /* Loading: the button keeps its label and size, dims to 55% after 300 ms; the motion lives outside it.
    One indicator per scheme: solid → an arc tracing the edge; tinted → a line sweeping under; neutral → a spinner beside, in reserved room. */
@@ -585,19 +587,38 @@ button.mr:hover { background: var(--surface-2); }
 <script>
 /* ── Tokens as numbers, for the contrast check (must match the CSS above) ─── */
 const TOK = {
-  dark:  { canvas: "#080d0b", surface2: "#121a16", ink: "#e8f0eb", ink2: "#afbfb6", pass: "#34d399", onFawn: "#03160e", fail: "#f08c88", onFail: "#1a0d0c" },
-  light: { canvas: "#f4f6f6", surface2: "#e9eded", ink: "#0e1716", ink2: "#3a4d4a", pass: "#046e50", onFawn: "#ffffff", fail: "#a63e3a", onFail: "#ffffff" },
+  dark:  { canvas: "#080d0b", canvas2: "#0a100d", surface2: "#121a16", ink: "#e8f0eb", ink2: "#afbfb6", pass: "#34d399", onFawn: "#03160e", fail: "#f08c88", onFail: "#1a0d0c" },
+  light: { canvas: "#f4f6f6", canvas2: "#eef1f1", surface2: "#e9eded", ink: "#0e1716", ink2: "#3a4d4a", pass: "#046e50", onFawn: "#ffffff", fail: "#a63e3a", onFail: "#ffffff" },
 };
-const hex = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
-const over = (fg, a, bg) => hex(fg).map((c, i) => Math.round(c * a + hex(bg)[i] * (1 - a)));
+const hex = (h) => (typeof h === "string" ? [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16)) : h);
+/* a at alpha over b (a colour-mix of a at p% with b) */
+const over = (a, p, b) => hex(a).map((c, i) => Math.round(c * p + hex(b)[i] * (1 - p)));
 const lum = (rgb) => { const [r, g, b] = rgb.map((v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }); return 0.2126 * r + 0.7152 * g + 0.0722 * b; };
 const ratio = (fg, bg) => { const a = lum(fg), b = lum(bg); return (Math.max(a, b) + 0.05) / (Math.min(a, b) + 0.05); };
-/* text and effective ground of each role's default state, per scheme */
+/* Text and effective ground of each role, per scheme and enabled state, on a given ground (the CSS above, as numbers).
+   g is the ground the button sits on: the canvas, or the sidebar's canvas-2. */
 const PAIR = {
-  solid:   { primary: (t) => [hex(t.onFawn), hex(t.pass)], secondary: (t) => [hex(t.ink), hex(t.surface2)], quiet: (t) => [hex(t.ink2), hex(t.canvas)], destructive: (t) => [hex(t.onFail), hex(t.fail)] },
-  tinted:  { primary: (t) => [hex(t.pass), over(t.pass, .12, t.canvas)], secondary: (t) => [hex(t.ink), hex(t.canvas)], quiet: (t) => [hex(t.ink2), hex(t.canvas)], destructive: (t) => [hex(t.fail), over(t.fail, .12, t.canvas)] },
-  neutral: { primary: (t) => [hex(t.canvas), hex(t.ink)], secondary: (t) => [hex(t.ink), hex(t.canvas)], quiet: (t) => [hex(t.ink2), hex(t.canvas)], destructive: (t) => [hex(t.fail), hex(t.canvas)] },
+  solid: {
+    primary: (t, s) => [t.onFawn, s === "hover" ? over(t.pass, .88, t.ink) : s === "pressed" ? over(t.pass, .76, t.ink) : t.pass],
+    secondary: (t, s) => [t.ink, s === "hover" ? over(t.surface2, .92, t.ink) : s === "pressed" ? over(t.surface2, .84, t.ink) : t.surface2],
+    quiet: (t, s, g) => s === "default" ? [t.ink2, g] : [t.ink, s === "hover" ? t.surface2 : over(t.surface2, .86, t.ink)],
+    destructive: (t, s) => [t.onFail, s === "hover" ? over(t.fail, .88, t.ink) : s === "pressed" ? over(t.fail, .76, t.ink) : t.fail],
+  },
+  tinted: {
+    primary: (t, s, g) => s === "default" ? [t.pass, over(t.pass, .12, g)] : s === "hover" ? [over(t.pass, .85, t.ink), over(t.pass, .14, g)] : [over(t.pass, .75, t.ink), over(t.pass, .18, g)],
+    secondary: (t, s, g) => [t.ink, s === "default" ? g : s === "hover" ? t.surface2 : over(t.surface2, .86, t.ink)],
+    quiet: (t, s, g) => s === "default" ? [t.ink2, g] : [t.ink, s === "hover" ? t.surface2 : over(t.surface2, .86, t.ink)],
+    destructive: (t, s, g) => s === "default" ? [t.fail, over(t.fail, .12, g)] : s === "hover" ? [over(t.fail, .85, t.ink), over(t.fail, .14, g)] : [over(t.fail, .75, t.ink), over(t.fail, .18, g)],
+  },
+  neutral: {
+    primary: (t, s) => [t.canvas, s === "hover" ? over(t.ink, .84, t.canvas) : s === "pressed" ? over(t.ink, .72, t.canvas) : t.ink],
+    secondary: (t, s, g) => [t.ink, s === "default" ? g : s === "hover" ? t.surface2 : over(t.surface2, .86, t.ink)],
+    quiet: (t, s, g) => s === "default" ? [t.ink2, g] : [t.ink, s === "hover" ? t.surface2 : over(t.surface2, .86, t.ink)],
+    destructive: (t, s, g) => s === "default" ? [t.fail, g] : s === "hover" ? [t.fail, over(t.fail, .10, g)] : [over(t.fail, .80, t.ink), over(t.fail, .16, g)],
+  },
 };
+/* The lowest ratio of a role's state across the two grounds a button sits on */
+const contrastOf = (sch, role, t, s) => Math.min(...[t.canvas, t.canvas2].map((g) => { const [fg, bg] = PAIR[sch][role](t, s, g); return ratio(hex(fg), hex(bg)); }));
 
 const SCHEMES = [
   { id: "solid", name: "Solid", d: "The main action is a block of pass green. Secondary buttons sit on a raised surface; destructive is solid red.", best: "the main action reads from across the room", trade: "the most green a screen has had; one solid per screen",
@@ -627,11 +648,11 @@ function renderSpec() {
   const block = (theme) => {
     const t = TOK[theme];
     const rows = ROLES.map(([role, name, label]) => {
-      const [fg, bg] = PAIR[scheme][role](t), r = ratio(fg, bg);
-      return `<div class="role"><b>${name}</b><small>${r.toFixed(1)}:1 <i class="${r >= 4.5 ? "" : "no"}">${r >= 4.5 ? "AA" : "fails AA"}</i></small></div>` +
+      const rs = ["default", "hover", "pressed"].map((s) => contrastOf(scheme, role, t, s)), low = Math.min(...rs);
+      return `<div class="role"><b>${name}</b><small title="default · hover · pressed, the lower of the canvas and the sidebar's ground">${rs.map((r) => r.toFixed(1)).join(" · ")} <i class="${low >= 4.5 ? "" : "no"}">${low >= 4.5 ? "AA" : "fails AA"}</i></small></div>` +
         STATES.map(([cls, st]) => `<div>${st === "loading" ? LD(role, B(role, label), "slow static") : B(role, label, cls, cls === "is-disabled" ? "disabled" : "")}</div>`).join("");
     }).join("");
-    return `<div class="spec th-${theme}"><div class="spec-h"><b>${theme === "dark" ? "Dark" : "Light"}</b>text / ground contrast for the default state, on the app's canvas</div>
+    return `<div class="spec th-${theme}"><div class="spec-h"><b>${theme === "dark" ? "Dark" : "Light"}</b>text / ground contrast for default · hover · pressed, the lower of the canvas and the sidebar's ground; AA when every state is 4.5:1 or better</div>
       <div class="spec-grid"><div class="ch">role</div>${STATES.map(([, s]) => `<div class="ch">${s}</div>`).join("")}${rows}</div></div>`;
   };
   $("#spec").innerHTML = block("light") + block("dark");
@@ -698,9 +719,12 @@ function setScheme(id) {
 const m = (n, s, title, cmd, extra = {}) => ({ n, s, title, cmd, ...extra });
 const P = (n, title, cmd, when, dur) => m(n, "passed", title, cmd, { when, dur });
 const T = (n, title, cmd) => m(n, "todo", title, cmd);
+/* Each goal carries its own interaction state (ui), so the frame's goal and the five-milestone
+   proof under it never share a filter, a pin, a focus or an opened phase. */
+const freshUI = () => ({ filter: "all", list: false, pin: null, focus: null, open: new Set(), full: new Set() });
 const DATA = {
   40: {
-    id: "7d2f41c0", title: "Ship brindle 0.7: Windows, the OS sandbox and the outbox", repo: "brindle", mode: "autopilot", working: 3, lastCheck: "4 min ago",
+    n: 40, ui: freshUI(), id: "7d2f41c0", title: "Ship brindle 0.7: Windows, the OS sandbox and the outbox", repo: "brindle", mode: "autopilot", working: 3, lastCheck: "4 min ago",
     phases: [{ name: "Engine on Windows", from: 1, to: 10 }, { name: "OS sandbox", from: 11, to: 20 }, { name: "Outbox and permissions", from: 21, to: 30 }, { name: "Desktop app and release", from: 31, to: 40 }],
     items: [
       P(1, "Engine starts on Windows without tmux", "uv run pytest tests/test_spawn_windows.py -q", "3 d ago", "38s"),
@@ -746,7 +770,7 @@ const DATA = {
     ],
   },
   5: {
-    id: "a3c91e07", title: "Ship the one-approval release flow", repo: "brindle", mode: "autopilot", working: 2, lastCheck: "4 min ago", phases: null,
+    n: 5, ui: freshUI(), id: "a3c91e07", title: "Ship the one-approval release flow", repo: "brindle", mode: "autopilot", working: 2, lastCheck: "4 min ago", phases: null,
     items: [
       P(1, "The release script builds signed artifacts", "uv run pytest tests/test_release.py -q", "38 min ago", "41s"),
       P(2, "Feed rollback is gated before production credentials", "uv run pytest tests/test_feed_gate.py -q", "12 min ago", "9s"),
@@ -760,7 +784,9 @@ const LIVE = {
   40: ["tests/test_permission_sync.py::test_answer_reaches_second_session ✓", "tests/test_permission_sync.py::test_deny_wins_over_allow ✓", "tests/test_permission_sync.py::test_allow_for_session_syncs …", "tests/test_permission_sync.py::test_allow_for_session_syncs ✓", "tests/test_permission_sync.py::test_restart_keeps_answers …", "tests/test_permission_sync.py::test_restart_keeps_answers ✓", "tests/test_permission_sync.py::test_two_sessions_one_repo …"],
   5: ["tests/test_release_flow.py::test_bump_pr_opens ✓", "tests/test_release_flow.py::test_tags_after_merge ✓", "tests/test_release_flow.py::test_feed_waits_for_tags ✓", "tests/test_release_flow.py::test_windows_artifact_signed …", "tests/test_release_flow.py::test_windows_artifact_signed ✓", "tests/test_release_flow.py::test_single_approval_gate …"],
 };
-const S = { dir: 1, n: 40, filter: "all", list: false, pin: null, focus: null, open: new Set(), full: new Set() };
+const S = { dir: 1, n: 40 };
+/* The goal an element belongs to: the proof cards under the frame always show DATA[5]; the frame shows D(). */
+const goalOf = (el) => (el.closest("#small-sb, #small-pn") ? DATA[5] : D());
 let elapsed = 134, liveAt = 0;
 const mmss = (s) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 const EL = () => `<span class="js-el">${mmss(elapsed)}</span>`;
@@ -768,65 +794,65 @@ const CHECK = '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 6.2 5 8
 const CHEV = '<svg class="chev" viewBox="0 0 12 12" aria-hidden="true"><path d="M4.5 3 7.5 6 4.5 9" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 const D = () => DATA[S.n];
 const counts = (items) => ({ passed: items.filter((x) => x.s === "passed").length, failed: items.filter((x) => x.s === "failed").length, running: items.filter((x) => x.s === "running").length, todo: items.filter((x) => x.s === "todo").length });
-const groups = (d = D()) => d.phases ? d.phases.map((p, i) => ({ i, name: p.name, items: d.items.slice(p.from - 1, p.to) })) : [{ i: 0, name: null, items: d.items }];
+const groups = (d) => d.phases ? d.phases.map((p, i) => ({ i, name: p.name, items: d.items.slice(p.from - 1, p.to) })) : [{ i: 0, name: null, items: d.items }];
 const gState = (g) => { const c = counts(g.items); if (c.passed === g.items.length) return "done"; if (c.todo === g.items.length) return "todo"; return "active"; };
-const activeGroup = (d = D()) => groups(d).find((g) => gState(g) === "active") || groups(d)[0];
+const activeGroup = (d) => groups(d).find((g) => gState(g) === "active") || groups(d)[0];
 const G = (x) => `<span class="g" data-s="${x.s}" aria-hidden="true">${x.s === "passed" ? CHECK : x.s === "failed" ? "!" : ""}</span>`;
 const stateLine = (x) => x.s === "passed" ? `passed · ${x.when} · ${x.dur}` : x.s === "failed" ? `check failing · ${x.when}` : x.s === "running" ? `running · ${x.who} · ${mmss(elapsed)}` : "upcoming";
 const metaOf = (x, full) => x.s === "passed" ? (full ? `${x.when} · ${x.dur}` : x.dur) : x.s === "failed" ? (full ? `failing · ${x.when}` : x.when) : x.s === "running" ? (full ? `${x.who} · ${EL()}` : EL()) : "";
 const row = (x, { btn = false, full = false, x: close = false } = {}) => `<${btn ? "button type=\"button\"" : "div"} class="mr" data-s="${x.s}" data-n="${x.n}">${G(x)}<span class="n">${x.n}</span><span class="t" title="${x.title}">${x.title}</span><span class="m">${metaOf(x, full)}</span>${close ? '<button class="x js-unpin" type="button" aria-label="Unpin">×</button>' : ""}</${btn ? "button" : "div"}>`;
-const hit = (x) => S.filter === "all" || x.s === S.filter;
+const hit = (x, d) => d.ui.filter === "all" || x.s === d.ui.filter;
 const summary = (items) => { const c = counts(items); return `<b>${c.passed} of ${items.length} complete</b>` + (c.failed ? `<span class="dsep">·</span><span class="t-fail">${c.failed} failing</span>` : "") + (c.running ? `<span class="dsep">·</span><span class="t-branch">${c.running} running</span>` : ""); };
-const phaseLine = (d = D()) => { if (!d.phases) return ""; const a = activeGroup(d); return `Phase ${a.i + 1} of ${d.phases.length} · ${a.name}`; };
-const foot = (d = D(), extra = "") => `<div class="foot">${extra ? `<span>${extra}</span><span class="dsep">·</span>` : ""}<span>Checked ${d.lastCheck}</span></div>`;
-const fcard = (x, lg = false, d = D()) => {
+const phaseLine = (d) => { if (!d.phases) return ""; const a = activeGroup(d); return `Phase ${a.i + 1} of ${d.phases.length} · ${a.name}`; };
+const foot = (d, extra = "") => `<div class="foot">${extra ? `<span>${extra}</span><span class="dsep">·</span>` : ""}<span>Checked ${d.lastCheck}</span></div>`;
+const fcard = (x, lg, d) => {
   const k = x.s === "running" ? "Now" : x.s === "failed" ? "Check failing" : x.s === "passed" ? "Passed" : "Upcoming";
-  const live = x.s === "running" ? `<div class="fc-live js-live">${LIVE[S.n][liveAt % LIVE[S.n].length]}</div>` : "";
+  const live = x.s === "running" ? `<div class="fc-live js-live" data-goal="${d.n}">${LIVE[d.n][liveAt % LIVE[d.n].length]}</div>` : "";
   const err = x.s === "failed" ? `<div class="fc-err">${x.err}</div>` : "";
   const meta = x.s === "running" ? `${x.who} · ${x.branch} · ${EL()}` : x.s === "failed" ? `${x.cmd} · ${x.when}` : x.s === "passed" ? `${x.cmd} · ${x.when} · ${x.dur}` : x.cmd;
   const act = lg && x.s === "failed" ? `<button class="quiet js-rerun" type="button" data-n="${x.n}">↻ Re-run check</button>` : "";
-  const out = lg ? `<div class="shell fc-out"><div><span class="p">$</span> ${x.cmd}</div>${x.s === "running" ? '<div class="js-stream"></div>' : x.out ? x.out.map(([c, t]) => `<div class="${c}">${t}</div>`).join("") : x.s === "passed" ? `<div class="ok">passed in ${x.dur}</div>` : '<div class="dim">Not run yet.</div>'}</div>` : "";
+  const out = lg ? `<div class="shell fc-out"><div><span class="p">$</span> ${x.cmd}</div>${x.s === "running" ? `<div class="js-stream" data-goal="${d.n}"></div>` : x.out ? x.out.map(([c, t]) => `<div class="${c}">${t}</div>`).join("") : x.s === "passed" ? `<div class="ok">passed in ${x.dur}</div>` : '<div class="dim">Not run yet.</div>'}</div>` : "";
   return `<div class="fc${lg ? " lg" : ""}" data-s="${x.s}"><div class="fc-k">${k}<span class="flex1"></span>${act}</div><div class="fc-t"><span class="n">${x.n}</span>${x.title}</div><div class="fc-m">${meta}</div>${lg ? out : live + err}</div>`;
 };
 
 /* The full list: grouped by phase, two columns, filter chips. Shared by every direction's panel. */
-const chips = () => { const c = counts(D().items); return `<span class="chips">${[["all", "All", D().items.length], ["failed", "Failing", c.failed], ["running", "Running", c.running], ["todo", "Upcoming", c.todo], ["passed", "Passed", c.passed]].map(([f, l, n]) => `<button class="chip js-filter" type="button" data-f="${f}" aria-pressed="${S.filter === f}">${l}<i>${n}</i></button>`).join("")}</span>`; };
-function fullList() {
-  const gs = groups().map((g) => ({ ...g, items: g.items.filter(hit) })).filter((g) => g.items.length);
-  if (!gs.length) return `<div class="ml"><div class="ml-empty">Nothing ${S.filter} right now.</div></div>`;
+const chips = (d) => { const c = counts(d.items); return `<span class="chips">${[["all", "All", d.items.length], ["failed", "Failing", c.failed], ["running", "Running", c.running], ["todo", "Upcoming", c.todo], ["passed", "Passed", c.passed]].map(([f, l, n]) => `<button class="chip js-filter" type="button" data-f="${f}" aria-pressed="${d.ui.filter === f}">${l}<i>${n}</i></button>`).join("")}</span>`; };
+function fullList(d) {
+  const gs = groups(d).map((g) => ({ ...g, items: g.items.filter((x) => hit(x, d)) })).filter((g) => g.items.length);
+  if (!gs.length) return `<div class="ml"><div class="ml-empty">Nothing ${d.ui.filter} right now.</div></div>`;
   return `<div class="ml">${gs.map((g) => `<div class="ml-g">${g.name ? `<div class="ml-gh">${g.name}<span class="c">${counts(g.items).passed}/${g.items.length}</span></div>` : ""}<div class="ml-rows">${g.items.map((x) => row(x, { full: true })).join("")}</div></div>`).join("")}</div>`;
 }
-const listFoot = (d = D()) => `<div class="gp-foot"><button class="quiet js-list" type="button" aria-expanded="${S.list}">${CHEV} All ${d.items.length} milestones</button>${S.list ? chips() : ""}<span class="flex1"></span><span>${phaseLine(d) ? phaseLine(d) + " · " : ""}checked ${d.lastCheck}</span></div><div class="clp${S.list ? " open" : ""}"><div>${fullList()}</div></div>`;
-const gpTop = (d = D()) => `<div class="gp-top"><span class="lbl">Goal</span><span class="pill t-branch">In progress</span><h2 class="gp-title">${d.title}</h2><span class="flex1"></span><span class="gp-sub">${summary(d.items)}</span></div>`;
+const listFoot = (d) => `<div class="gp-foot"><button class="quiet js-list" type="button" aria-expanded="${d.ui.list}">${CHEV} All ${d.items.length} milestones</button>${d.ui.list ? chips(d) : ""}<span class="flex1"></span><span>${phaseLine(d) ? phaseLine(d) + " · " : ""}checked ${d.lastCheck}</span></div><div class="clp${d.ui.list ? " open" : ""}"><div>${fullList(d)}</div></div>`;
+const gpTop = (d) => `<div class="gp-top"><span class="lbl">Goal</span><span class="pill t-branch">In progress</span><h2 class="gp-title">${d.title}</h2><span class="flex1"></span><span class="gp-sub">${summary(d.items)}</span></div>`;
 
 /* ── Direction 1: the strip is the object; what needs attention sits under it ── */
-function strip(lg = false, d = D()) {
-  const dim = S.filter !== "all";
-  return `<div class="strip${lg ? " lg" : ""}${dim ? " dim" : ""}" role="img" aria-label="${counts(d.items).passed} of ${d.items.length} milestones complete">${groups(d).map((g) => `<span class="ph" style="flex:${g.items.length}">${g.items.map((x) => `<i class="sg${hit(x) ? " hit" : ""}${S.pin === x.n ? " pin" : ""}" data-s="${x.s}" data-n="${x.n}"></i>`).join("")}</span>`).join("")}</div>`;
+function strip(lg, d) {
+  const dim = d.ui.filter !== "all";
+  return `<div class="strip${lg ? " lg" : ""}${dim ? " dim" : ""}" role="img" aria-label="${counts(d.items).passed} of ${d.items.length} milestones complete">${groups(d).map((g) => `<span class="ph" style="flex:${g.items.length}">${g.items.map((x) => `<i class="sg${hit(x, d) ? " hit" : ""}${d.ui.pin === x.n ? " pin" : ""}" data-s="${x.s}" data-n="${x.n}"></i>`).join("")}</span>`).join("")}</div>`;
 }
-const attention = (d = D()) => d.items.filter((x) => x.s === "running" || x.s === "failed").sort((a, b) => (a.s === "failed" ? -1 : 1) - (b.s === "failed" ? -1 : 1));
+const attention = (d) => d.items.filter((x) => x.s === "running" || x.s === "failed").sort((a, b) => (a.s === "failed" ? -1 : 1) - (b.s === "failed" ? -1 : 1));
 const DIR1 = {
-  side: (d = D()) => {
-    const pin = S.pin && d.items.find((x) => x.n === S.pin && x.s !== "failed" && x.s !== "running");
+  side: (d) => {
+    const pin = d.ui.pin && d.items.find((x) => x.n === d.ui.pin && x.s !== "failed" && x.s !== "running");
     return `<div class="ms s1"><div class="ms-h">${summary(d.items)}</div>${strip(false, d)}
       <div>${attention(d).map((x) => row(x) + (x.s === "failed" ? `<div class="mr-err">${x.err}</div>` : "")).join("")}${pin ? row(pin, { x: true }) : ""}</div>
       ${foot(d, phaseLine(d))}</div>`;
   },
-  panel: (d = D()) => `<section class="gp s1" aria-label="Goal">${gpTop(d)}
+  panel: (d) => `<section class="gp s1" aria-label="Goal">${gpTop(d)}
     <div>${strip(true, d)}${d.phases ? `<div class="ph-labs">${groups(d).map((g) => `<span style="flex:${g.items.length}" data-st="${gState(g)}"><b>${g.name}</b><small>${counts(g.items).passed}/${g.items.length}</small></span>`).join("")}</div>` : ""}</div>
     <div class="s1p-cards">${attention(d).map((x) => fcard(x, true, d)).join("")}</div>
     ${listFoot(d)}</section>`,
 };
 
 /* ── Direction 2: a phase-grouped outline; passed phases fold to one line ──── */
-function outline(full = false, d = D()) {
+function outline(full, d) {
   const gs = groups(d);
   const flat = !d.phases && d.items.length <= 6;
   if (flat) return `<ul class="ol"><li><div class="kids" style="padding-left:0">${d.items.map((x) => row(x, { full })).join("")}</div></li></ul>`;
   return `<ul class="ol">${gs.map((g) => {
     const st = gState(g), c = counts(g.items), key = g.i;
-    const open = S.open.has(key) || (st === "active" && !S.open.has(-1 - key));
-    const all = S.full.has(key) || st !== "active";
+    const open = d.ui.open.has(key) || (st === "active" && !d.ui.open.has(-1 - key));
+    const all = d.ui.full.has(key) || st !== "active";
     const kids = all ? g.items : g.items.filter((x) => x.s === "failed" || x.s === "running");
     const hidden = g.items.length - kids.length;
     const count = st === "done" ? `${c.passed} of ${g.items.length}` : st === "todo" ? `${g.items.length} upcoming` : `${c.passed} of ${g.items.length}`;
@@ -835,19 +861,19 @@ function outline(full = false, d = D()) {
   }).join("")}</ul>`;
 }
 const DIR2 = {
-  side: (d = D()) => `<div class="ms s2"><div class="ms-h">${summary(d.items)}<span class="flex1"></span><span>${d.phases ? `phase ${activeGroup(d).i + 1} of ${d.phases.length}` : ""}</span></div>${outline(false, d)}${foot(d)}</div>`,
-  panel: (d = D()) => `<section class="gp s2" aria-label="Goal">${gpTop(d)}${outline(true, d)}${listFoot(d)}</section>`,
+  side: (d) => `<div class="ms s2"><div class="ms-h">${summary(d.items)}<span class="flex1"></span><span>${d.phases ? `phase ${activeGroup(d).i + 1} of ${d.phases.length}` : ""}</span></div>${outline(false, d)}${foot(d)}</div>`,
+  panel: (d) => `<section class="gp s2" aria-label="Goal">${gpTop(d)}${outline(true, d)}${listFoot(d)}</section>`,
 };
 
 /* ── Direction 3: a focus card and a map of dots, one row per phase ────────── */
-function map(lg = false, d = D()) {
-  const dim = S.filter !== "all";
-  return `<div class="map${lg ? " lg" : ""}${dim ? " dim" : ""}" role="group" aria-label="Milestones">${groups(d).map((g) => `<div class="map-r" data-st="${gState(g)}">${lg && g.name ? `<span class="map-l">${g.name}</span>` : ""}${g.items.map((x) => `<button class="dt js-dot${hit(x) ? " hit" : ""}${(S.focus || defaultFocus(d).n) === x.n ? " pin" : ""}" type="button" data-s="${x.s}" data-n="${x.n}" aria-label="${x.n} · ${x.title}"></button>`).join("")}${lg && g.name ? `<span class="map-c">${counts(g.items).passed}/${g.items.length}</span>` : ""}</div>`).join("")}</div>`;
+function map(lg, d) {
+  const dim = d.ui.filter !== "all";
+  return `<div class="map${lg ? " lg" : ""}${dim ? " dim" : ""}" role="group" aria-label="Milestones">${groups(d).map((g) => `<div class="map-r" data-st="${gState(g)}">${lg && g.name ? `<span class="map-l">${g.name}</span>` : ""}${g.items.map((x) => `<button class="dt js-dot${hit(x, d) ? " hit" : ""}${(d.ui.focus || defaultFocus(d).n) === x.n ? " pin" : ""}" type="button" data-s="${x.s}" data-n="${x.n}" aria-label="${x.n} · ${x.title}"></button>`).join("")}${lg && g.name ? `<span class="map-c">${counts(g.items).passed}/${g.items.length}</span>` : ""}</div>`).join("")}</div>`;
 }
-const defaultFocus = (d = D()) => d.items.find((x) => x.s === "running") || d.items.find((x) => x.s === "failed") || d.items.find((x) => x.s === "todo") || d.items[0];
+const defaultFocus = (d) => d.items.find((x) => x.s === "running") || d.items.find((x) => x.s === "failed") || d.items.find((x) => x.s === "todo") || d.items[0];
 const DIR3 = {
-  side: (d = D()) => {
-    const f = d.items.find((x) => x.n === S.focus) || defaultFocus(d);
+  side: (d) => {
+    const f = d.items.find((x) => x.n === d.ui.focus) || defaultFocus(d);
     const others = d.items.filter((x) => (x.s === "failed" || x.s === "running") && x.n !== f.n);
     const next = d.items.find((x) => x.s === "todo");
     const c = counts(d.items);
@@ -857,8 +883,8 @@ const DIR3 = {
       <div>${others.map((x) => row(x, { btn: true })).join("")}${next && next.n !== f.n ? `<div class="next"><b>Next</b><span>${next.n} · ${next.title}</span></div>` : ""}</div>
       ${foot(d, phaseLine(d))}</div>`;
   },
-  panel: (d = D()) => {
-    const f = d.items.find((x) => x.n === S.focus) || defaultFocus(d);
+  panel: (d) => {
+    const f = d.items.find((x) => x.n === d.ui.focus) || defaultFocus(d);
     const others = d.items.filter((x) => (x.s === "failed" || x.s === "running") && x.n !== f.n);
     const next = d.items.find((x) => x.s === "todo");
     return `<section class="gp s3" aria-label="Goal">${gpTop(d)}
@@ -935,16 +961,14 @@ function renderFrame(animate = true) {
   tickLive(false);
   requestAnimationFrame(shapeAll);
 }
-function selectDir(i) { S.dir = i; S.pin = null; S.focus = null; renderDirTabs(); renderFrame(); }
+function selectDir(i) { S.dir = i; [DATA[40], DATA[5]].forEach((d) => { d.ui.pin = null; d.ui.focus = null; }); renderDirTabs(); renderFrame(); }
 
 /* Tooltip for segments and dots */
 const tip = $("#tip");
 function showTip(el) {
-  const n = +el.dataset.n, x = D().items.find((y) => y.n === n) || DATA[5].items.find((y) => y.n === n);
+  const x = goalOf(el).items.find((y) => y.n === +el.dataset.n);
   if (!x) return;
-  const d = el.closest("#small-sb, #small-pn") ? DATA[5] : D();
-  const xx = d.items.find((y) => y.n === n) || x;
-  tip.innerHTML = `<b>${xx.n} · ${xx.title}</b><span>${stateLine(xx)}</span>`;
+  tip.innerHTML = `<b>${x.n} · ${x.title}</b><span>${stateLine(x)}</span>`;
   const r = el.getBoundingClientRect();
   tip.classList.add("on"); tip.setAttribute("aria-hidden", "false");
   const tw = tip.offsetWidth, th = tip.offsetHeight;
@@ -961,21 +985,23 @@ document.addEventListener("click", (e) => {
   if (!t) return;
   if (t.matches(".tab[data-scheme]")) return setScheme(t.dataset.scheme);
   if (t.matches(".tab[data-dir]")) return selectDir(+t.dataset.dir);
-  if (t.dataset.n && t.matches(".sg")) { S.pin = S.pin === +t.dataset.n ? null : +t.dataset.n; renderFrame(false); return; }
-  if (t.matches(".js-dot")) { S.focus = +t.dataset.n; renderFrame(false); hideTip(); return; }
-  if (t.matches(".mr[data-n]") && S.dir === 3) { S.focus = +t.dataset.n; renderFrame(false); return; }
-  if (t.matches(".js-unpin")) { S.pin = null; renderFrame(false); return; }
-  if (t.matches(".js-phase")) { const g = +t.dataset.g, open = t.getAttribute("aria-expanded") !== "true"; S.open.delete(g); S.open.delete(-1 - g); S.open.add(open ? g : -1 - g); renderFrame(false); return; }
-  if (t.matches(".js-full")) { const g = +t.dataset.g; S.full.has(g) ? S.full.delete(g) : S.full.add(g); renderFrame(false); return; }
-  if (t.matches(".js-list")) { S.list = !S.list; if (!S.list) S.filter = "all"; renderFrame(false); return; }
-  if (t.matches(".js-filter")) { S.filter = t.dataset.f; renderFrame(false); return; }
+  /* Milestone interactions act on the goal the element belongs to (the frame's, or the proof cards' five) */
+  const d = goalOf(t), u = d.ui;
+  if (t.dataset.n && t.matches(".sg")) { u.pin = u.pin === +t.dataset.n ? null : +t.dataset.n; renderFrame(false); return; }
+  if (t.matches(".js-dot")) { u.focus = +t.dataset.n; renderFrame(false); hideTip(); return; }
+  if (t.matches(".mr[data-n]") && S.dir === 3) { u.focus = +t.dataset.n; renderFrame(false); return; }
+  if (t.matches(".js-unpin")) { u.pin = null; renderFrame(false); return; }
+  if (t.matches(".js-phase")) { const g = +t.dataset.g, open = t.getAttribute("aria-expanded") !== "true"; u.open.delete(g); u.open.delete(-1 - g); u.open.add(open ? g : -1 - g); renderFrame(false); return; }
+  if (t.matches(".js-full")) { const g = +t.dataset.g; u.full.has(g) ? u.full.delete(g) : u.full.add(g); renderFrame(false); return; }
+  if (t.matches(".js-list")) { u.list = !u.list; if (!u.list) u.filter = "all"; renderFrame(false); return; }
+  if (t.matches(".js-filter")) { u.filter = t.dataset.f; renderFrame(false); return; }
   if (t.matches(".js-rerun")) {
-    const x = D().items.find((y) => y.n === +t.dataset.n), was = { ...x };
-    x.s = "running"; x.who = "check"; x.branch = "fix/outbox-order"; renderFrame(false);
+    const x = d.items.find((y) => y.n === +t.dataset.n), was = { ...x };
+    x.s = "running"; x.who = "check"; x.branch = d.n === 40 ? "fix/outbox-order" : "fix/changelog-sync"; renderFrame(false);
     setTimeout(() => { Object.assign(x, was, { when: "just now" }); renderFrame(false); }, 2800);
     return;
   }
-  if (t.dataset.n && t.matches("[data-n]") && t.closest(".seg")) { S.n = +t.dataset.n; S.pin = null; S.focus = null; S.list = false; S.filter = "all"; S.open.clear(); S.full.clear(); $$(".seg [data-n]").forEach((b) => b.setAttribute("aria-pressed", String(b === t))); renderFrame(); return; }
+  if (t.dataset.n && t.matches("[data-n]") && t.closest(".seg")) { S.n = +t.dataset.n; [DATA[40], DATA[5]].forEach((g) => (g.ui = freshUI())); $$(".seg [data-n]").forEach((b) => b.setAttribute("aria-pressed", String(b === t))); renderFrame(); return; }
   if (t.dataset.themeSet) return setTheme(t.dataset.themeSet);
   if (t.dataset.motion) return setMotion(t.dataset.motion);
   if (t.dataset.ms) { responseMs = +t.dataset.ms; $$("[data-ms]").forEach((b) => b.setAttribute("aria-pressed", String(b === t))); return; }
@@ -993,8 +1019,8 @@ document.addEventListener("keydown", (e) => {
 function tickLive(advance = true) {
   if (advance) liveAt++;
   $$(".js-el").forEach((el) => (el.textContent = mmss(elapsed)));
-  $$(".js-live").forEach((el) => { if (advance) { el.classList.remove("fresh"); void el.offsetWidth; el.classList.add("fresh"); } el.textContent = LIVE[S.n][liveAt % LIVE[S.n].length]; });
-  $$(".js-stream").forEach((el) => { const lines = []; for (let k = Math.max(0, liveAt - 3); k <= liveAt; k++) lines.push(LIVE[S.n][k % LIVE[S.n].length]); el.innerHTML = lines.map((l) => `<div class="${l.endsWith("✓") ? "ok" : "dim"}">${l}</div>`).join(""); });
+  $$(".js-live").forEach((el) => { const L = LIVE[+el.dataset.goal]; if (advance) { el.classList.remove("fresh"); void el.offsetWidth; el.classList.add("fresh"); } el.textContent = L[liveAt % L.length]; });
+  $$(".js-stream").forEach((el) => { const L = LIVE[+el.dataset.goal], lines = []; for (let k = Math.max(0, liveAt - 3); k <= liveAt; k++) lines.push(L[k % L.length]); el.innerHTML = lines.map((l) => `<div class="${l.endsWith("✓") ? "ok" : "dim"}">${l}</div>`).join(""); });
 }
 setInterval(() => { elapsed++; $$(".js-el").forEach((el) => (el.textContent = mmss(elapsed))); }, 1000);
 setInterval(() => tickLive(true), 1500);
@@ -1018,9 +1044,9 @@ const q = new URLSearchParams(location.search);
 if (q.get("theme")) setTheme(q.get("theme"));
 if (q.get("n") === "5") { S.n = 5; $$(".seg [data-n]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.n === "5"))); }
 if (q.get("dir")) S.dir = Math.max(1, Math.min(3, +q.get("dir")));
-if (q.get("list")) S.list = true;
-if (q.get("filter")) { S.list = true; S.filter = q.get("filter"); }
-if (q.get("focus")) S.focus = +q.get("focus");
+if (q.get("list")) D().ui.list = true;
+if (q.get("filter")) { D().ui.list = true; D().ui.filter = q.get("filter"); }
+if (q.get("focus")) D().ui.focus = +q.get("focus");
 setScheme(["solid", "tinted", "neutral"].includes(q.get("scheme")) ? q.get("scheme") : "neutral");
 renderCtxs();
 renderDirTabs();
