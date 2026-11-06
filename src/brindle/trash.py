@@ -6,10 +6,14 @@ index) travel together. A private ref protects its commit while it is here.
 
 from __future__ import annotations
 
+import ctypes
+import errno
 import fcntl
 import json
 import os
 import shutil
+import sys
+import tempfile
 import time
 import uuid
 from contextlib import contextmanager
@@ -56,8 +60,46 @@ def entries() -> list[dict]:
 
 
 def _move(source: Path, dest: Path) -> None:
-    # Never use shutil.move: its copy/delete fallback can lose dirty files.
-    source.rename(dest)
+    # Checking existence before rename is insufficient: even an empty directory
+    # created after the check must survive. Unsupported filesystems fail closed.
+    libc = ctypes.CDLL(None, use_errno=True)
+    if sys.platform == "darwin" and hasattr(libc, "renamex_np"):
+        rename = libc.renamex_np
+        rename.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+        args = (os.fsencode(source), os.fsencode(dest), 4)  # RENAME_EXCL
+    elif sys.platform == "linux" and hasattr(libc, "renameat2"):
+        rename = libc.renameat2
+        rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        args = (-100, os.fsencode(source), -100, os.fsencode(dest), 1)  # AT_FDCWD, RENAME_NOREPLACE
+    else:
+        raise TrashError(errno.ENOTSUP, "atomic exclusive rename unavailable", str(dest))
+    rename.restype = ctypes.c_int
+    if rename(*args):
+        error = ctypes.get_errno()
+        raise TrashError(error, os.strerror(error), str(dest))
+
+
+def _repair_modules(tree: Path, original: Path, old_admin: Path, admin: Path, checkout: Path) -> None:
+    """Relink initialized submodules, including nested ones, in the staged copy."""
+    from brindle.disk import _replace
+
+    for top, dirs, files in os.walk(tree):
+        dirs[:] = [d for d in dirs if d != ".git"]
+        folder = Path(top)
+        if folder == tree or ".git" not in files:
+            continue
+        pointer = folder / ".git"
+        text = pointer.read_text()
+        if pointer.is_symlink() or not text.startswith("gitdir: "):
+            raise TrashError(f"unsupported submodule Git pointer: {pointer}")
+        relative = folder.relative_to(tree)
+        target = (original / relative / text[8:].strip()).resolve()
+        if not target.is_relative_to(admin):
+            if not target.is_relative_to(old_admin):
+                raise TrashError(f"submodule metadata is outside the saved worktree: {pointer}")
+            target = admin / target.relative_to(old_admin)
+        _replace(pointer, lambda out: out.write(f"gitdir: {target}\n".encode()))
+        git.run(["config", "--file", str(target / "config"), "core.worktree", str(checkout / relative)], tree)
 
 
 def _unpin(root: str | Path, ident: str) -> None:
@@ -163,36 +205,37 @@ def restore(ident: str) -> str:
         folder = directory() / ident
         admin = None
         admin_created = False
+        published = False
         dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.mkdir()  # Reserve the destination; never merge into an existing folder.
-        reservation = dest.lstat()
         try:
-            if "common" in entry:
-                admin = Path(entry["common"]) / "worktrees" / f"trash-{ident}"
-                admin.parent.mkdir(parents=True, exist_ok=True)
-                admin.mkdir()
-                admin_created = True
-                shutil.copytree(folder / "admin", admin, dirs_exist_ok=True, symlinks=True)
-                _replace(admin / "gitdir", lambda out: out.write((str(dest / ".git") + "\n").encode()))
-                _replace(folder / "tree" / ".git", lambda out: out.write(f"gitdir: {admin}\n".encode()))
-            # Metadata copying can take time. Check again immediately before
-            # moving the checkout, excluding only our reserved registration.
-            if any(branch and w.get("branch") == branch and Path(w["worktree"]).resolve() != dest.resolve()
-                   for w in git.list_worktrees(root)):
-                raise TrashError("restore branch is now in use")
-            if branch and git.out(["rev-parse", "--verify", branch], root) != entry["sha"]:
-                raise TrashError("restore branch has moved")
-            current = dest.lstat()
-            if (current.st_dev, current.st_ino) != (reservation.st_dev, reservation.st_ino):
-                raise TrashError("restore path is now in use")
-            _move(folder / "tree", dest)
+            # Keep the saved checkout untouched until its repaired copy has
+            # been validated and published on the destination's volume.
+            with tempfile.TemporaryDirectory(prefix=".brindle-restore-", dir=dest.parent) as staging:
+                tree = Path(staging) / "tree"
+                shutil.copytree(folder / "tree", tree, symlinks=True)
+                if "common" in entry:
+                    old_admin = (dest / (tree / ".git").read_text()[8:].strip()).resolve()
+                    admin = Path(entry["common"]) / "worktrees" / f"trash-{ident}"
+                    admin.parent.mkdir(parents=True, exist_ok=True)
+                    admin.mkdir()
+                    admin_created = True
+                    shutil.copytree(folder / "admin", admin, dirs_exist_ok=True, symlinks=True)
+                    _replace(admin / "gitdir", lambda out: out.write((str(dest / ".git") + "\n").encode()))
+                    _replace(tree / ".git", lambda out: out.write(f"gitdir: {admin}\n".encode()))
+                    _repair_modules(tree, dest, old_admin, admin, tree)
+                    git.run(["--git-dir", str(admin), "--work-tree", str(tree), "status", "--porcelain"], root)
+                    _repair_modules(tree, dest, old_admin, admin, dest)
+                # Re-read after copying, excluding only our own registration.
+                if any(branch and w.get("branch") == branch and Path(w["worktree"]).resolve() != dest.resolve()
+                       for w in git.list_worktrees(root)):
+                    raise TrashError("restore branch is now in use")
+                if branch and git.out(["rev-parse", "--verify", branch], root) != entry["sha"]:
+                    raise TrashError("restore branch has moved")
+                _move(tree, dest)
+                published = True
         except BaseException:
-            if admin_created:
+            if admin_created and not published:
                 shutil.rmtree(admin)
-            if os.path.lexists(dest):
-                current = dest.lstat()
-                if (current.st_dev, current.st_ino) == (reservation.st_dev, reservation.st_ino):
-                    dest.rmdir()
             raise
         shutil.rmtree(folder)
         _unpin(root, ident)

@@ -34,6 +34,18 @@ def test_removed_worktree_goes_to_trash(db, repo, monkeypatch, action):
     ws = workspaces.create(db, str(repo), "recover-me").workspace
     path = Path(ws.path)
     git.run(["commit", "--allow-empty", "-m", "unmerged work"], path)
+    if action == "restore":
+        module = repo.parent / "module-source"
+        git.run(["clone", str(repo), str(module)], repo)
+        git.run(["-c", "protocol.file.allow=always", "submodule", "add", str(repo), "nested"], module)
+        git.run(["commit", "-am", "nested module"], module)
+        git.run(["-c", "protocol.file.allow=always", "submodule", "add", str(module), "module"], path)
+        git.run(["-c", "protocol.file.allow=always", "submodule", "update", "--init", "--recursive"], path)
+        git.run(["commit", "-am", "initialized modules"], path)
+        for sub in (path / "module", path / "module" / "nested"):
+            (sub / "app.py").write_text("staged module work")
+            git.run(["add", "app.py"], sub)
+            (sub / "app.py").write_text("unstaged module work")
     (path / "staged.txt").write_text("staged version")
     git.run(["add", "staged.txt"], path)
     (path / "staged.txt").write_text("working version")
@@ -68,6 +80,7 @@ def test_removed_worktree_goes_to_trash(db, repo, monkeypatch, action):
     assert next(c["size"] for c in disk.storage_report(db, str(repo))["categories"]
                 if c["name"] == "trash") >= entry["size"]
     assert CliRunner().invoke(app, ["trash", "list"]).exit_code == 0
+    saved_pointer = (trash.directory() / entry["id"] / "tree" / ".git").read_bytes()
     if action in {"refused", "path", "moved", "restore-race", "path-race"}:
         if action == "path":
             path.mkdir()
@@ -75,16 +88,23 @@ def test_removed_worktree_goes_to_trash(db, repo, monkeypatch, action):
             # A different commit, without a process or checkout on the branch.
             git.run(["commit", "--allow-empty", "-m", "moved"], repo)
             git.run(["branch", "-f", ws.branch, "HEAD"], repo)
-        elif action in {"restore-race", "path-race"}:
+        elif action == "path-race":
+            move = trash._move
+            occupied = []
+            def occupy_before_publish(source, dest):
+                if dest == path:
+                    if path.exists():
+                        path.rename(path.with_name("reservation"))
+                    path.mkdir()
+                    occupied.append(path.stat().st_ino)
+                return move(source, dest)
+            monkeypatch.setattr(trash, "_move", occupy_before_publish)
+        elif action == "restore-race":
             copy = trash.shutil.copytree
             def checkout_during_restore(source, dest, *args, **kwargs):
                 result = copy(source, dest, *args, **kwargs)
                 if Path(source) == trash.directory() / entry["id"] / "admin":
-                    if action == "path-race":
-                        path.rename(path.with_name("reservation"))
-                        path.mkdir()
-                    else:
-                        git.run(["worktree", "add", "--force", str(path.with_name("raced")), ws.branch], repo)
+                    git.run(["worktree", "add", "--force", str(path.with_name("raced")), ws.branch], repo)
                 return result
             monkeypatch.setattr(trash.shutil, "copytree", checkout_during_restore)
         else:
@@ -92,8 +112,10 @@ def test_removed_worktree_goes_to_trash(db, repo, monkeypatch, action):
         with pytest.raises(trash.TrashError):
             trash.restore(entry["id"])
         assert trash.entries()
+        assert (trash.directory() / entry["id"] / "tree" / ".git").read_bytes() == saved_pointer
+        assert (trash.directory() / entry["id"] / "tree" / "uncommitted.txt").read_text() == "precious work"
         if action == "path-race":
-            assert path.is_dir()
+            assert path.stat().st_ino == occupied[0]
     elif action in {"expiry", "cap", "empty"}:
         if action == "empty":
             assert CliRunner().invoke(app, ["trash", "empty", "--yes"]).exit_code == 0
@@ -113,6 +135,12 @@ def test_removed_worktree_goes_to_trash(db, repo, monkeypatch, action):
         assert "uncommitted.txt" in git.dirty_files(path)
         assert git.worktree_for_branch(repo, ws.branch) == str(path)
         assert git.out(["rev-parse", "HEAD"], path) == entry["sha"]
+        if action == "restore":
+            for sub in (path / "module", path / "module" / "nested"):
+                assert git.out(["status", "--porcelain"], sub)
+                assert git.out(["show", ":app.py"], sub) == "staged module work"
+                assert (sub / "app.py").read_text() == "unstaged module work"
+            assert not trash.entries()
 
 
 def _settings(values: dict) -> None:
