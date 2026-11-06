@@ -35,9 +35,20 @@ const clone = (url = URL) => {
 };
 
 describe("ProjectPicker", () => {
+  it("lets a first project clone into a new folder without a native picker", async () => {
+    const { picked } = setup(new FakeDaemon(), null);
+    fireEvent.change(screen.getByRole("textbox", { name: "Clone into" }), { target: { value: " " } });
+    clone();
+    expect(screen.getByRole("button", { name: "Clone" })).toHaveProperty("disabled", true);
+    fireEvent.change(screen.getByRole("textbox", { name: "Clone into" }), { target: { value: "~/Code/new-projects" } });
+    clone();
+    await waitFor(() => expect(picked).toHaveBeenCalledWith({ repo_root: "~/Code/new-projects/proj", name: "proj" }));
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
   it("onboarding's Pick a project clones a repository into ~/Projects, with git's lines in the progress card", async () => {
     const { daemon, picked } = setup();
-    expect(screen.getByTestId("clone-parent").textContent).toBe(DEFAULT_PARENT);
+    expect(screen.getByTestId("clone-parent")).toHaveProperty("value", DEFAULT_PARENT);
     clone();
     await waitFor(() => expect(picked).toHaveBeenCalledWith({ repo_root: "~/Projects/proj", name: "proj" }));
     expect(daemon.clones).toEqual([{ url: URL, parent_dir: "~/Projects" }]);
@@ -52,7 +63,7 @@ describe("ProjectPicker", () => {
     const { picked, pickFolder } = setup(daemon);
     // The folder to clone into, changed through the picker.
     fireEvent.click(screen.getByRole("button", { name: "Change…" }));
-    await waitFor(() => expect(screen.getByTestId("clone-parent").textContent).toBe("/home/u/Code"));
+    await waitFor(() => expect(screen.getByTestId("clone-parent")).toHaveProperty("value", "/home/u/Code"));
     expect(pickFolder).toHaveBeenCalledWith("Clone into");
     clone();
     const failed = await screen.findByTestId("clone-failed");
