@@ -51,6 +51,16 @@ def test_demo_merges_with_no_git_identity(db, repo, monkeypatch, tmp_path):
     workspaces.merge_back(db, real_b)
     assert _last_author(repo) == "Existing Person <brindle@localhost>"
 
+    # The demo repo carries its own identity: workers and merges both work.
+    root = demo.create()
+    first = workspaces.create(db, str(root), "slug", base="main", run_setup=False).workspace
+    second = workspaces.create(db, str(root), "wrap", base="main", run_setup=False).workspace
+    _worker_commit(first, "a.py")
+    _worker_commit(second, "b.py")
+    workspaces.merge_back(db, first)
+    workspaces.merge_back(db, second)    # main moved on: a real merge commit
+    assert _last_author(root) == "brindle demo <demo@brindle.invalid>"
+
     # The demo repo: workers and merges both work with no identity.
     root = demo.create()
     first = workspaces.create(db, str(root), "slug", base="main", run_setup=False).workspace
