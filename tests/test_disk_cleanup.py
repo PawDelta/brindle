@@ -27,7 +27,7 @@ DAY = 86400
 
 @pytest.mark.parametrize("action", ["restore", "expiry", "refused", "path", "cap", "empty",
                                   "registration-failure", "moved", "deleted", "cross-volume", "restore-race",
-                                  "path-race", "locked"])
+                                  "path-race", "locked", "prune"])
 def test_removed_worktree_goes_to_trash(db, repo, monkeypatch, action):
     from brindle import trash
 
@@ -38,13 +38,13 @@ def test_removed_worktree_goes_to_trash(db, repo, monkeypatch, action):
         for timing in ("before", "during"):
             with monkeypatch.context() as patch:
                 if timing == "before":
-                    git.run(["worktree", "lock", str(path)], repo)
+                    git.run(["worktree", "lock", "--reason", "retained checkout", str(path)], repo)
                 else:
                     replace = disk._replace
                     def lock_after_preparation(dest, write):
                         replace(dest, write)
                         if dest.name == "entry.json":
-                            git.run(["worktree", "lock", str(path)], repo)
+                            git.run(["worktree", "lock", "--reason", "retained checkout", str(path)], repo)
                     patch.setattr(disk, "_replace", lock_after_preparation)
                 with pytest.raises(git.GitError):
                     git.remove_worktree(repo, path)
@@ -159,6 +159,14 @@ def test_removed_worktree_goes_to_trash(db, repo, monkeypatch, action):
         if action == "deleted":
             git.delete_branch(repo, ws.branch, force=True)
             git.run(["prune", "--expire", "now"], repo)
+        saved_lock = trash.directory() / entry["id"] / "admin" / "locked"
+        original_lock = saved_lock.read_bytes() if saved_lock.exists() else None
+        if action == "prune":
+            read = git.list_worktrees
+            def prune_during_restore(root):
+                git.run(["worktree", "prune"], root)
+                return read(root)
+            monkeypatch.setattr(git, "list_worktrees", prune_during_restore)
         result = CliRunner().invoke(app, ["trash", "restore", entry["id"]])
         assert result.exit_code == 0, result.output
         assert (path / "uncommitted.txt").read_text() == "precious work"
@@ -167,6 +175,8 @@ def test_removed_worktree_goes_to_trash(db, repo, monkeypatch, action):
         assert "uncommitted.txt" in git.dirty_files(path)
         assert git.worktree_for_branch(repo, ws.branch) == str(path)
         assert git.out(["rev-parse", "HEAD"], path) == entry["sha"]
+        restored_lock = Path(git.out(["rev-parse", "--absolute-git-dir"], path)) / "locked"
+        assert (restored_lock.read_bytes() if restored_lock.exists() else None) == original_lock
         if action == "restore":
             assert (external / "module" / ".git" / "config").read_bytes() == external_config
             assert (path / "unrelated" / ".git").read_bytes() == unrelated_pointer

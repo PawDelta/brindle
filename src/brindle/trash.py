@@ -225,6 +225,14 @@ def put(root: str | Path, path: str | Path, *, force: bool = False) -> None:
             raise
 
 
+def _check_restored_registration(admin: Path, dest: Path, entry: dict, registered: list[dict]) -> None:
+    if (admin / "gitdir").read_text().strip() != str(dest / ".git") or not any(
+        Path(w["worktree"]).resolve() == dest.resolve() and w.get("HEAD") == entry["sha"]
+        and w.get("branch") == entry["branch"] and "locked" in w for w in registered
+    ):
+        raise TrashError("restore registration changed during preparation")
+
+
 def restore(ident: str) -> str:
     from brindle.disk import _replace
 
@@ -249,6 +257,7 @@ def restore(ident: str) -> str:
         folder = directory() / ident
         admin = None
         admin_created = False
+        temporary_lock = False
         published = False
         dest.parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -261,22 +270,37 @@ def restore(ident: str) -> str:
                     old_admin = (dest / (tree / ".git").read_text()[8:].strip()).resolve()
                     admin = Path(entry["common"]) / "worktrees" / f"trash-{ident}"
                     admin.parent.mkdir(parents=True, exist_ok=True)
-                    admin.mkdir()
-                    admin_created = True
-                    shutil.copytree(folder / "admin", admin, dirs_exist_ok=True, symlinks=True)
-                    _replace(admin / "gitdir", lambda out: out.write((str(dest / ".git") + "\n").encode()))
+                    # Prune must never see partial or unlocked administration
+                    # pointing at the still-absent destination.
+                    with tempfile.TemporaryDirectory(prefix=".brindle-admin-", dir=entry["common"]) as metadata:
+                        prepared = Path(metadata) / "admin"
+                        shutil.copytree(folder / "admin", prepared, symlinks=True)
+                        temporary_lock = not (prepared / "locked").exists()
+                        if temporary_lock:
+                            _replace(prepared / "locked", lambda out: out.write(b"brindle restore in progress\n"))
+                        _replace(prepared / "gitdir", lambda out: out.write((str(dest / ".git") + "\n").encode()))
+                        _move(prepared, admin)
+                        admin_created = True
                     _replace(tree / ".git", lambda out: out.write(f"gitdir: {admin}\n".encode()))
                     _repair_modules(tree, dest, old_admin, admin, tree)
                     git.run(["--git-dir", str(admin), "--work-tree", str(tree), "status", "--porcelain"], root)
                     _repair_modules(tree, dest, old_admin, admin, dest)
                 # Re-read after copying, excluding only our own registration.
+                registered = git.list_worktrees(root)
+                if admin is not None:
+                    _check_restored_registration(admin, dest, entry, registered)
                 if any(branch and w.get("branch") == branch and Path(w["worktree"]).resolve() != dest.resolve()
-                       for w in git.list_worktrees(root)):
+                       for w in registered):
                     raise TrashError("restore branch is now in use")
                 if branch and git.out(["rev-parse", "--verify", branch], root) != entry["sha"]:
                     raise TrashError("restore branch has moved")
                 _move(tree, dest)
                 published = True
+                if admin is not None:
+                    _check_restored_registration(admin, dest, entry, git.list_worktrees(root))
+                    git.run(["status", "--porcelain"], dest)
+                    if temporary_lock:
+                        (admin / "locked").unlink()
         except BaseException:
             if admin_created and not published:
                 shutil.rmtree(admin)
