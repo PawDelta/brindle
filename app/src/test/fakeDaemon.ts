@@ -487,8 +487,9 @@ const asTerminal = (text: string) => text.replace(/\n$/, "").replaceAll("\n", "\
 
 /* A pane as a tmux client draws it on attaching: the screen cleared, the
    pane's screen, then its cursor; a dead pane's last screen and tmux's line. */
+// As a tmux client opens: the alternate screen first (the terminal takes that as tmux attached, and pastes then).
 const drawn = (pane: Pane): string =>
-  "\x1b[H\x1b[2J" +
+  "\x1b[?1049h\x1b[H\x1b[2J" +
   (pane.live ? asTerminal(pane.screen) + (pane.cursor ? `\x1b[${pane.cursor[1] + 1};${pane.cursor[0] + 1}H` : "") : `${pane.text ? asTerminal(pane.text) + "\r\n" : ""}\r\n${PANE_DEAD_LINE}`);
 
 /* A view the app's tmux client opened (PtyViews.open): where, on whose pane

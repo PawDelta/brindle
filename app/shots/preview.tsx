@@ -12,6 +12,7 @@ import App from "../src/App";
 import { PtyViewsProvider, wsPtyView, type PtyViews } from "../src/api/ptyView";
 import type { AppUpdateStatus, AppUpdates } from "../src/api/tauri";
 import { THEME_KEY, applyTheme } from "../src/components/ThemeToggle";
+import { ONBOARDED_KEY, markOnboarded } from "../src/api/providers";
 import type { Route } from "../src/routes";
 import { createAppStore } from "../src/store/store";
 import { startSync } from "../src/store/sync";
@@ -37,6 +38,9 @@ const theme = params.get("theme") === "light" ? "light" : "dark";
 // As the person's own pick: the theme switch reads it back and keeps it applied.
 localStorage.setItem(THEME_KEY, theme);
 applyTheme(theme);
+// An app already past its first launch (the real gate in App.tsx still runs): only the first-run walk-through starts without it.
+if (scene === "flow") localStorage.removeItem(ONBOARDED_KEY);
+else markOnboarded();
 // No WebGL context to be had: the terminal falls back to the DOM renderer.
 if (params.get("renderer") === "dom") {
   const getContext = HTMLCanvasElement.prototype.getContext;
