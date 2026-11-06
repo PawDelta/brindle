@@ -1,0 +1,1101 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>brindle design v2</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+/* ── Tokens: copied from app/src/styles.css (both themes, same names) ─────────── */
+:root {
+  --canvas: #080d0b; --canvas-2: #0a100d; --surface: #080d0b; --surface-2: #121a16;
+  --line: rgba(120, 150, 135, 0.16); --line-strong: rgba(130, 160, 145, 0.28);
+  --ink: #e8f0eb; --ink-2: #afbfb6; --ink-3: #889a90;
+  --fawn: #34d399;
+  --sap: #e8875a; --sap-soft: rgba(232, 135, 90, 0.12);
+  --pass: #34d399; --pass-soft: rgba(52, 211, 153, 0.12);
+  --branch: #a99be0; --branch-soft: rgba(169, 155, 224, 0.12);
+  --fail: #f08c88; --fail-soft: rgba(240, 140, 136, 0.12);
+  --on-fawn: #03160e; --on-branch: #15102a; --on-sap: #1a0f08;
+  --thread-in: #d7af87; --thread-top: #e8875a; --thread-mid: #a99be0; --thread-out: #34d399;
+  --shell-bg: #070b09; --shell-bg-2: color-mix(in srgb, var(--shell-bg), white 5%); --shell-ink: #e8f0eb; --shell-dim: #859a8e; --shell-acc: #34d399; --shell-bad: #f08c88; --shell-line: rgba(52, 96, 74, 0.5);
+  --sans: "Geist", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --r-sm: 2px; --r: 4px;
+  /* page-only (the mockup's own frame, not app tokens) */
+  --page: #050807; --win-shadow: 0 40px 90px -20px rgba(0,0,0,.7), 0 0 0 1px rgba(255,255,255,.02);
+  --card-shadow: 0 1px 0 rgba(255,255,255,.03) inset, 0 18px 40px -24px rgba(0,0,0,.8);
+  color-scheme: dark;
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --canvas: #f4f6f6; --canvas-2: #eef1f1; --surface: #f4f6f6; --surface-2: #e9eded;
+    --line: rgba(20, 40, 36, 0.11); --line-strong: rgba(20, 40, 36, 0.22);
+    --ink: #0e1716; --ink-2: #3a4d4a; --ink-3: #4c615e;
+    --fawn: #046e50;
+    --sap: #9b4724; --sap-soft: rgba(155, 71, 36, 0.1);
+    --pass: #046e50; --pass-soft: rgba(4, 110, 80, 0.1);
+    --branch: #6350b3; --branch-soft: rgba(99, 80, 179, 0.1);
+    --fail: #a63e3a; --fail-soft: rgba(166, 62, 58, 0.1);
+    --on-fawn: #ffffff; --on-branch: #ffffff; --on-sap: #ffffff;
+    --thread-in: #86572a; --thread-top: #9b4724; --thread-mid: #6350b3; --thread-out: #046e50;
+    --page: #e6eaea; --win-shadow: 0 40px 80px -30px rgba(14,23,22,.28), 0 2px 6px rgba(14,23,22,.06);
+    --card-shadow: 0 1px 2px rgba(14,23,22,.04), 0 16px 36px -26px rgba(14,23,22,.3);
+    color-scheme: light;
+  }
+}
+:root[data-theme="light"] {
+  --canvas: #f4f6f6; --canvas-2: #eef1f1; --surface: #f4f6f6; --surface-2: #e9eded;
+  --line: rgba(20, 40, 36, 0.11); --line-strong: rgba(20, 40, 36, 0.22);
+  --ink: #0e1716; --ink-2: #3a4d4a; --ink-3: #4c615e;
+  --fawn: #046e50;
+  --sap: #9b4724; --sap-soft: rgba(155, 71, 36, 0.1);
+  --pass: #046e50; --pass-soft: rgba(4, 110, 80, 0.1);
+  --branch: #6350b3; --branch-soft: rgba(99, 80, 179, 0.1);
+  --fail: #a63e3a; --fail-soft: rgba(166, 62, 58, 0.1);
+  --on-fawn: #ffffff; --on-branch: #ffffff; --on-sap: #ffffff;
+  --thread-in: #86572a; --thread-top: #9b4724; --thread-mid: #6350b3; --thread-out: #046e50;
+  --page: #e6eaea; --win-shadow: 0 40px 80px -30px rgba(14,23,22,.28), 0 2px 6px rgba(14,23,22,.06);
+  --card-shadow: 0 1px 2px rgba(14,23,22,.04), 0 16px 36px -26px rgba(14,23,22,.3);
+  color-scheme: light;
+}
+
+/* ── Page ─────────────────────────────────────────────────────────────────── */
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body {
+  background: var(--page); color: var(--ink); font-family: var(--sans); font-size: 14px; line-height: 1.5;
+  -webkit-font-smoothing: antialiased; font-variant-numeric: tabular-nums;
+}
+button, input, select { font: inherit; color: inherit; }
+button { cursor: pointer; }
+:focus-visible { outline: 2px solid var(--branch); outline-offset: 2px; }
+.mono { font-family: var(--mono); }
+.flex1 { flex: 1; }
+.t-pass { color: var(--pass); } .t-branch { color: var(--branch); } .t-fail { color: var(--fail); } .t-sap { color: var(--sap); }
+.t-2 { color: var(--ink-2); } .t-3 { color: var(--ink-3); }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+.topbar {
+  position: sticky; top: 0; z-index: 20; display: flex; align-items: center; gap: 24px; padding: 12px 40px;
+  background: color-mix(in srgb, var(--page) 82%, transparent); backdrop-filter: blur(14px) saturate(1.2);
+  border-bottom: 1px solid var(--line);
+}
+.topbar nav { display: flex; gap: 4px; }
+.topbar nav a { color: var(--ink-3); text-decoration: none; font-size: 13px; padding: 4px 10px; border-radius: 6px; }
+.topbar nav a:hover { color: var(--ink); background: var(--surface-2); }
+.seg { display: inline-flex; padding: 2px; gap: 2px; border-radius: 7px; background: var(--surface-2); border: 1px solid var(--line); }
+.seg button { border: 0; background: transparent; padding: 3px 10px; border-radius: 5px; font-size: 12px; color: var(--ink-3); }
+.seg button[aria-pressed="true"] { background: var(--canvas); color: var(--ink); box-shadow: 0 1px 2px rgba(0,0,0,.12), 0 0 0 1px var(--line); }
+.page { max-width: 1340px; margin: 0 auto; padding: 0 40px 120px; }
+.sec { padding-top: 64px; scroll-margin-top: 56px; }
+.eyebrow { font-family: var(--mono); font-size: 12px; color: var(--ink-3); letter-spacing: 0.02em; }
+.sec h1 { margin: 6px 0 8px; font-size: 30px; font-weight: 600; letter-spacing: -0.025em; line-height: 1.15; }
+.sec .lede { margin: 0; max-width: 760px; color: var(--ink-2); font-size: 15px; }
+.hero { padding-top: 48px; }
+.hero h1 { font-size: 38px; }
+
+/* Logo lockup, as styles.css draws it */
+.logo { display: inline-flex; align-items: center; gap: 0.5em; font-weight: 600; letter-spacing: -0.01em; white-space: nowrap; line-height: 24px; }
+.logo-mark { flex: none; display: block; width: 1.98em; height: 1.375em; }
+.logo-word { letter-spacing: -0.02em; }
+.logo .lm-in { stroke: var(--thread-in); } .logo .lm-top { stroke: var(--thread-top); } .logo .lm-mid { stroke: var(--thread-mid); } .logo .lm-bot { stroke: var(--thread-out); }
+
+/* ── Option tabs ──────────────────────────────────────────────────────────── */
+.tabs { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin: 28px 0 14px; }
+.tab {
+  position: relative; text-align: left; border: 1px solid var(--line); background: var(--canvas); border-radius: 10px;
+  padding: 12px 14px 13px; display: flex; flex-direction: column; gap: 3px; color: var(--ink-2);
+  transition: border-color 160ms var(--ease), box-shadow 200ms var(--ease), transform 200ms var(--ease);
+}
+.tab:hover { border-color: var(--line-strong); }
+.tab[aria-selected="true"] { border-color: color-mix(in srgb, var(--branch) 55%, transparent); box-shadow: 0 0 0 3px var(--branch-soft), var(--card-shadow); color: var(--ink); }
+.tab .k { font-family: var(--mono); font-size: 11px; color: var(--ink-3); display: flex; align-items: center; gap: 8px; }
+.tab .k kbd { font: inherit; border: 1px solid var(--line-strong); border-radius: 4px; padding: 0 5px; line-height: 16px; }
+.tab b { font-size: 14px; font-weight: 600; color: var(--ink); letter-spacing: -0.01em; }
+.tab span.d { font-size: 12.5px; line-height: 1.45; }
+.optnote { display: flex; gap: 28px; flex-wrap: wrap; margin: 0 0 18px; font-size: 13px; color: var(--ink-2); }
+.optnote b { color: var(--ink); font-weight: 600; }
+.colmarks { display: flex; width: 1240px; margin: 0 auto 8px; font-family: var(--mono); font-size: 11px; color: var(--ink-3); }
+.colmarks span { display: flex; align-items: center; gap: 8px; }
+.colmarks span::after { content: ""; flex: 1; height: 1px; background: var(--line-strong); }
+.colmarks .c1 { width: 352px; padding-right: 14px; }
+.colmarks .c2 { flex: 1; padding-left: 14px; }
+.framewrap { overflow-x: auto; padding: 4px 0 40px; }
+
+/* ── The app window ───────────────────────────────────────────────────────── */
+.win {
+  width: 1240px; margin: 0 auto; border-radius: 12px; overflow: hidden; background: var(--canvas);
+  box-shadow: var(--win-shadow); border: 1px solid var(--line-strong); display: flex; flex-direction: column;
+}
+.win-bar { height: 34px; flex: none; display: flex; align-items: center; gap: 8px; padding: 0 14px; background: var(--canvas-2); border-bottom: 1px solid var(--line); position: relative; }
+.win-bar i { width: 12px; height: 12px; border-radius: 50%; display: block; box-shadow: inset 0 0 0 0.5px rgba(0,0,0,.18); }
+.win-bar i:nth-child(1) { background: #ff5f57; } .win-bar i:nth-child(2) { background: #febc2e; } .win-bar i:nth-child(3) { background: #28c840; }
+.win-bar .ttl { position: absolute; left: 0; right: 0; text-align: center; font-size: 12px; color: var(--ink-3); pointer-events: none; }
+.win-body { display: flex; height: 872px; }
+
+/* Sidebar (components/Sidebar.tsx): w-[352px] bg-canvas-2 px-[12px] pb-[12px] pt-[14px] gap-[10px] text-[13px] */
+.side { width: 352px; flex: none; display: flex; flex-direction: column; gap: 10px; padding: 14px 12px 12px; background: var(--canvas-2); border-right: 1px solid var(--line); font-size: 13px; overflow: hidden; }
+.side-top { display: flex; align-items: center; gap: 8px; padding: 0 6px 4px; }
+.side-top .logo { font-size: 17px; }
+.newbtn { display: flex; align-items: center; gap: 4px; border: 0; background: transparent; border-radius: var(--r); padding: 2px 6px; font-size: 11.5px; color: var(--ink-3); }
+.newbtn:hover { background: var(--surface); color: var(--ink); }
+.inbox { margin: 0 4px; display: flex; align-items: center; gap: 8px; border-radius: var(--r); padding: 7px 10px 7px 8px; font-size: 12.5px; font-weight: 600; border: 0; background: transparent; text-align: left; }
+.inbox:hover { background: var(--surface-2); }
+.side-nb { color: var(--on-sap); background: var(--sap); border-radius: 999px; min-width: 20px; padding: 0 6px; text-align: center; font-family: var(--mono); font-size: 11px; font-weight: 700; line-height: 20px; }
+.ctx { display: flex; flex-direction: column; gap: 10px; min-height: 0; }
+.ctx-h { padding: 0 8px; }
+.ctx-title { display: flex; align-items: flex-start; gap: 4px; font-size: 12.5px; font-weight: 600; line-height: 1.35; }
+.ctx-title span { flex: 1; }
+.ctx-title i { font-style: normal; font-size: 11px; color: var(--ink-3); font-weight: 400; }
+.ctx-meta { font-size: 11px; color: var(--ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.handle { position: relative; height: 14px; flex: none; display: flex; align-items: center; justify-content: center; cursor: row-resize; }
+.handle::before { content: ""; position: absolute; left: 8px; right: 8px; top: 50%; height: 1px; background: var(--line); }
+.handle i { position: relative; z-index: 1; display: block; width: 36px; height: 4px; border-radius: 2px; background: var(--line-strong); }
+.side-h { display: flex; align-items: center; gap: 8px; padding: 6px 8px 4px; font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--ink-3); }
+.tree { flex: 1; min-height: 0; overflow: hidden; display: flex; flex-direction: column; gap: 14px; -webkit-mask-image: linear-gradient(#000 calc(100% - 28px), transparent); mask-image: linear-gradient(#000 calc(100% - 28px), transparent); }
+.repo-h { padding: 0 8px 4px; font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--ink-3); }
+.srow { display: flex; align-items: flex-start; gap: 8px; border-radius: var(--r); padding: 5px 8px; }
+.srow.sel { background: var(--branch-soft); }
+.srow .nm { font-size: 13px; line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.srow .mt { display: block; font-size: 11.5px; color: var(--ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.srow .mt code { font-family: var(--mono); font-size: 11px; }
+.srow .fold { margin-left: auto; font-size: 11px; color: var(--ink-3); padding-top: 1px; }
+.side-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--ink-3); margin-top: 6px; }
+.side-dot[data-tone="work"] { background: var(--branch); }
+.side-dot[data-tone="wait"] { background: var(--sap); }
+.side-dot[data-tone="done"] { background: var(--pass); }
+.side-dot[data-tone="paused"] { background: transparent; border: 1.5px solid var(--ink-3); width: 7px; height: 7px; }
+.agents { margin: 0 0 4px 8px; padding: 0; list-style: none; border-left: 1px solid var(--line); display: flex; flex-direction: column; gap: 1px; }
+.agents li { display: flex; align-items: center; gap: 8px; padding: 3px 8px 3px 12px; font-size: 12px; color: var(--ink-2); white-space: nowrap; }
+.agents li .side-dot { margin-top: 0; width: 6px; height: 6px; }
+.agents li code { font-family: var(--mono); font-size: 11px; color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; }
+.paused { display: flex; align-items: center; gap: 8px; padding: 5px 8px; font-size: 11.5px; color: var(--ink-3); }
+.paused span { width: 18px; text-align: center; font-size: 11px; }
+.status { display: flex; align-items: center; justify-content: space-between; gap: 8px; border-top: 1px solid var(--line); padding: 8px 8px 0; font-size: 11.5px; color: var(--ink-3); white-space: nowrap; }
+.usage { display: flex; align-items: center; gap: 8px; }
+.usage .bar { width: 46px; height: 4px; border-radius: 2px; background: var(--line); overflow: hidden; }
+.usage .bar i { display: block; height: 100%; width: 41%; background: var(--ink-3); }
+.pages { height: 40px; flex: none; display: flex; align-items: center; gap: 4px; padding: 0 8px; font-size: 11.5px; color: var(--ink-3); white-space: nowrap; }
+.pages .av { width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center; background: var(--surface-2); border: 1px solid var(--line-strong); font-size: 9.5px; font-weight: 600; color: var(--ink-2); margin-right: 6px; }
+.pages .ttog { font-family: var(--mono); font-size: 11px; border: 1px solid var(--line-strong); border-radius: var(--r-sm); padding: 0 5px; }
+
+/* Main column (screens/Session/SessionScreen.tsx) */
+.main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.sbar { display: flex; align-items: center; gap: 16px; border-bottom: 1px solid var(--line); padding: 4px 16px; min-height: 37px; }
+.sbar .who { font-size: 14px; font-weight: 600; }
+.sbar code { font-family: var(--mono); font-size: 12px; color: var(--ink-3); }
+.sbar .st { display: flex; align-items: center; gap: 4px; font-size: 12px; color: var(--ink-2); }
+.sbar .st b { font-family: var(--mono); font-weight: 400; color: var(--branch); }
+.btn { display: inline-flex; align-items: center; gap: 4px; border-radius: var(--r); border: 1px solid var(--line-strong); background: transparent; padding: 4px 16px; font-size: 14px; font-weight: 500; color: var(--ink); line-height: 20px; white-space: nowrap; }
+.btn:hover { background: var(--surface-2); }
+.btn-main { display: inline-flex; align-items: center; gap: 4px; border-radius: var(--r); padding: 4px 16px; line-height: 20px; border: 1px solid color-mix(in srgb, var(--pass) 55%, transparent); background: color-mix(in srgb, var(--pass) 4%, transparent); font-family: var(--mono); font-size: 13px; font-weight: 500; letter-spacing: -0.01em; color: var(--pass); white-space: nowrap; }
+.btn-main:hover { background: var(--pass-soft); }
+.btn-dots { border: 0; background: transparent; color: var(--ink-3); font-size: 16px; padding: 0 6px; border-radius: var(--r); }
+.quiet { border: 0; background: transparent; border-radius: var(--r); padding: 2px 8px; font-size: 12px; color: var(--ink-2); display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.quiet:hover { background: var(--surface-2); color: var(--ink); }
+.goalslot { border-top: 0; }
+.termwrap { flex: 1; min-height: 0; display: flex; padding: 16px; }
+.shell { background: var(--shell-bg); color: var(--shell-ink); border-radius: var(--r); font-family: var(--mono); font-size: 12.5px; line-height: 1.6; }
+.term { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+.term .tabs-s { display: flex; gap: 2px; background: var(--shell-bg-2); padding: 4px 6px 0; border-bottom: 1px solid var(--shell-line); }
+.term .tabs-s span { padding: 3px 12px; font-size: 11.5px; color: var(--shell-dim); border-radius: 3px 3px 0 0; }
+.term .tabs-s span.on { background: var(--shell-bg); color: var(--shell-ink); }
+.term pre { margin: 0; padding: 12px 16px; white-space: pre-wrap; font: inherit; flex: 1; overflow: hidden; }
+.term .a { color: var(--shell-acc); } .term .d { color: var(--shell-dim); } .term .b { color: var(--shell-bad); }
+.term .cur { display: inline-block; width: 7px; height: 14px; background: #a4aba7; vertical-align: -2px; animation: blink 1.1s steps(1) infinite; }
+@keyframes blink { 50% { opacity: 0; } }
+
+/* Shared goal-panel bits */
+.lbl { font-size: 12px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.05em; color: var(--ink-3); }
+.pill { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 500; white-space: nowrap; }
+.pill::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex: none; }
+.gp { padding: 12px 16px 14px; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 8px; }
+.gp-top { display: flex; align-items: center; gap: 8px; }
+.gp-title { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: -0.01em; line-height: 1.3; }
+.gp-sub { font-size: 12px; color: var(--ink-2); }
+.foot { font-size: 11px; color: var(--ink-3); padding: 2px 6px 0; display: flex; gap: 6px; align-items: center; }
+.sep { color: var(--ink-3); opacity: .7; margin: 0 5px; }
+.chev { width: 12px; height: 12px; transition: transform 240ms var(--ease); flex: none; }
+[aria-expanded="true"] > .chev { transform: rotate(90deg); }
+.iconbtn { border: 0; background: transparent; color: var(--ink-3); width: 22px; height: 22px; border-radius: var(--r); display: grid; place-items: center; flex: none; }
+.iconbtn:hover { background: var(--surface-2); color: var(--ink); }
+.clp { display: grid; grid-template-rows: 0fr; transition: grid-template-rows 320ms var(--ease), opacity 240ms var(--ease); opacity: 0; }
+.clp.open { grid-template-rows: 1fr; opacity: 1; }
+.clp > div { overflow: hidden; min-height: 0; }
+.opt { animation: opt-in 360ms var(--ease) both; }
+@keyframes opt-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes ping { 0% { transform: scale(1); opacity: .55; } 80%, 100% { transform: scale(3.2); opacity: 0; } }
+@keyframes breathe { from { opacity: .45; } to { opacity: 1; } }
+
+/* The status node, shared by A and D: done ✓, running arc, failing !, not started dashed */
+.nd { --sz: 16px; width: var(--sz); height: var(--sz); border-radius: 50%; display: grid; place-items: center; flex: none; position: relative; font-size: calc(var(--sz) * .56); font-weight: 700; line-height: 1; }
+.nd svg { width: 62%; height: 62%; }
+.nd[data-s="passed"] { background: var(--pass); color: var(--canvas); }
+.nd[data-s="running"] { box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--branch) 28%, transparent); background: var(--canvas); }
+.nd[data-s="running"]::before { content: ""; position: absolute; inset: 0; border-radius: 50%; border: 1.5px solid transparent; border-top-color: var(--branch); border-right-color: var(--branch); animation: spin 1s linear infinite; }
+.nd[data-s="running"]::after { content: ""; width: 30%; height: 30%; border-radius: 50%; background: var(--branch); }
+.nd[data-s="failed"] { background: var(--fail-soft); box-shadow: inset 0 0 0 1.5px var(--fail); color: var(--fail); }
+.nd[data-s="todo"] { border: 1.5px dashed var(--line-strong); color: var(--ink-3); font-weight: 500; font-family: var(--mono); background: var(--canvas-2); }
+
+/* ── Option A: ring + collapsible stepper ─────────────────────────────────── */
+.ring { position: relative; flex: none; display: grid; place-items: center; }
+.ring svg { position: absolute; inset: 0; transform: rotate(-90deg); overflow: visible; }
+.ring circle { fill: none; }
+.ring .rs { stroke-dasharray: 0 100; transition: stroke-dasharray 760ms var(--ease); }
+.ring.drawn .rs { stroke-dasharray: var(--da); }
+.ring .rs[data-s="passed"] { stroke: var(--pass); }
+.ring .rs[data-s="running"] { stroke: color-mix(in srgb, var(--branch) 26%, transparent); }
+.ring .rs[data-s="failed"] { stroke: var(--fail); }
+.ring .rs[data-s="todo"] { stroke: var(--line-strong); }
+.ring .rs-live { stroke: var(--branch); stroke-dasharray: 0 100; }
+.ring .rc { font-size: 12px; font-weight: 600; letter-spacing: -0.02em; }
+.ring .rc i { font-style: normal; color: var(--ink-3); font-weight: 500; }
+.ring.lg .rc { font-size: 15px; }
+.oa-head { display: flex; align-items: center; gap: 10px; padding: 0 2px; }
+.oa-head.lg { gap: 14px; align-items: center; }
+.oa-ht { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.oa-count { font-size: 12px; font-weight: 500; }
+.oa-sub { font-size: 11.5px; color: var(--ink-3); display: flex; align-items: center; flex-wrap: wrap; }
+.oa-steps { list-style: none; margin: 0; padding: 6px 0 2px; display: flex; flex-direction: column; }
+.oa-step { position: relative; display: flex; gap: 10px; padding: 0 6px 10px; }
+.oa-step:not(:last-child)::before { content: ""; position: absolute; left: 13.5px; top: 20px; bottom: 2px; width: 1px; background: var(--line-strong); }
+.oa-step[data-s="passed"]:not(:last-child)::before { background: color-mix(in srgb, var(--pass) 55%, transparent); }
+.oa-step[data-s="running"]:not(:last-child)::before { background: linear-gradient(var(--branch), var(--line-strong)); }
+.oa-step .nd { margin-top: 1px; }
+.oa-b { min-width: 0; flex: 1; }
+.oa-t { font-size: 12.5px; line-height: 1.35; color: var(--ink); }
+.oa-step[data-s="passed"] .oa-t { color: var(--ink-2); }
+.oa-step[data-s="todo"] .oa-t { color: var(--ink-3); }
+.oa-m { font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.oa-step[data-s="running"] .oa-m b { color: var(--branch); font-weight: 500; }
+.oa-step[data-s="failed"] .oa-m b { color: var(--fail); font-weight: 500; }
+.oa-step[data-s="passed"] .oa-m b { color: var(--pass); font-weight: 500; }
+.oa-full .oa-step { padding-bottom: 14px; gap: 12px; }
+.oa-full .oa-step:not(:last-child)::before { left: 15px; top: 22px; }
+.oa-full .nd { --sz: 18px; }
+.oa-full .oa-t { font-size: 14px; font-weight: 500; }
+.oa-full .oa-step[data-s="passed"] .oa-t { font-weight: 400; }
+.oa-row2 { display: flex; align-items: baseline; gap: 12px; }
+.oa-row2 .oa-t { flex: 1; }
+.oa-full .oa-m { font-size: 11.5px; }
+.oa-err { margin-top: 6px; font-family: var(--mono); font-size: 11.5px; color: var(--fail); background: var(--fail-soft); border-radius: var(--r); padding: 5px 8px; }
+.oa-sum { display: flex; flex-direction: column; gap: 4px; padding: 2px 0 0 70px; }
+.oa-sum div { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--ink-2); min-width: 0; }
+.oa-sum div span.tt { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.oa-sum .k { font-family: var(--mono); font-size: 11px; width: 74px; flex: none; }
+.oa-sum .nd { --sz: 14px; }
+
+/* ── Option B: segmented timeline ─────────────────────────────────────────── */
+.ob-hd { display: flex; align-items: baseline; gap: 8px; padding: 0 2px; }
+.ob-bar { display: flex; gap: 3px; height: 6px; margin: 2px 2px 0; }
+.ob-seg { flex: 1; border-radius: 3px; background: var(--line); position: relative; overflow: hidden; }
+.ob-seg[data-s="passed"] { background: var(--pass); }
+.ob-seg[data-s="failed"] { background: var(--fail); }
+.ob-seg[data-s="running"] { background: color-mix(in srgb, var(--branch) 24%, transparent); }
+.ob-seg[data-s="running"]::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 58%; background: var(--branch); border-radius: inherit; }
+.ob-seg[data-s="running"]::after { content: ""; position: absolute; top: 0; bottom: 0; left: 0; width: 45%; background: linear-gradient(90deg, transparent, rgba(255,255,255,.55), transparent); mix-blend-mode: overlay; animation: shim 1.8s var(--ease) infinite; }
+@keyframes shim { from { transform: translateX(-110%); } to { transform: translateX(240%); } }
+.ob-labs { display: flex; gap: 3px; margin: 6px 2px 0; }
+.ob-labs span { flex: 1; font-size: 11px; color: var(--ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ob-labs span b { font-family: var(--mono); font-weight: 500; margin-right: 4px; }
+.ob-labs span[data-s="passed"] b { color: var(--pass); } .ob-labs span[data-s="running"] { color: var(--ink); } .ob-labs span[data-s="running"] b { color: var(--branch); } .ob-labs span[data-s="failed"] b { color: var(--fail); }
+.ob-tl { list-style: none; margin: 8px 0 0; padding: 0; }
+.ob-it { display: grid; grid-template-columns: 14px 1fr auto; gap: 10px; padding: 0 4px; }
+.ob-full .ob-it { grid-template-columns: 44px 14px 1fr; gap: 12px; }
+.ob-when { font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); padding-top: 2px; white-space: nowrap; text-align: right; }
+.ob-full .ob-when { font-size: 11.5px; padding-top: 1px; }
+.ob-it[data-s="running"] .ob-when { color: var(--branch); }
+.ob-rail { position: relative; }
+.ob-rail::before { content: ""; position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; transform: translateX(-.5px); background: var(--line-strong); }
+.ob-it:first-child .ob-rail::before { top: 8px; }
+.ob-it:last-child .ob-rail::before { bottom: auto; height: 8px; }
+.ob-it[data-s="passed"] .ob-rail::before { background: color-mix(in srgb, var(--pass) 50%, transparent); }
+.ob-dot { position: absolute; left: 50%; top: 4px; width: 8px; height: 8px; margin-left: -4px; border-radius: 50%; background: var(--canvas-2); box-shadow: inset 0 0 0 1.5px var(--line-strong); }
+.ob-full .ob-dot { background: var(--canvas); }
+.ob-it[data-s="passed"] .ob-dot { background: var(--pass); box-shadow: 0 0 0 3px var(--canvas-2); }
+.ob-it[data-s="failed"] .ob-dot { background: var(--fail); box-shadow: 0 0 0 3px var(--fail-soft); }
+.ob-it[data-s="running"] .ob-dot { background: var(--branch); box-shadow: 0 0 0 3px var(--branch-soft); }
+.ob-it[data-s="running"] .ob-dot::before, .ob-it[data-s="running"] .ob-dot::after { content: ""; position: absolute; inset: 0; border-radius: 50%; background: var(--branch); animation: ping 2.2s var(--ease) infinite; }
+.ob-it[data-s="running"] .ob-dot::after { animation-delay: 1.1s; }
+.ob-b { min-width: 0; padding-bottom: 12px; }
+.ob-full .ob-b { padding-bottom: 14px; }
+.ob-t { font-size: 12.5px; line-height: 1.35; }
+.ob-full .ob-t { font-size: 14px; font-weight: 500; }
+.ob-it[data-s="passed"] .ob-t { color: var(--ink-2); font-weight: 400; }
+.ob-it[data-s="todo"] .ob-t { color: var(--ink-3); font-weight: 400; }
+.ob-m { font-size: 11px; color: var(--ink-3); margin-top: 2px; font-family: var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ob-full .ob-m { font-size: 11.5px; }
+.ob-live { margin-top: 5px; display: flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 10.5px; color: var(--ink-2); background: var(--branch-soft); border-radius: var(--r); padding: 3px 7px; min-width: 0; }
+.ob-full .ob-live { font-size: 11.5px; padding: 4px 9px; max-width: 640px; }
+.ob-live span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.ob-live span.fresh { animation: line-in 380ms var(--ease); }
+@keyframes line-in { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
+.ob-err { margin-top: 5px; font-family: var(--mono); font-size: 10.5px; color: var(--fail); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ob-full .ob-err { font-size: 11.5px; }
+
+/* ── Option C: minimal checklist with an output drawer ────────────────────── */
+.oc-hd { display: flex; align-items: center; gap: 10px; padding: 0 6px 2px; }
+.oc-meter { flex: 1; height: 2px; background: var(--line); border-radius: 1px; overflow: hidden; display: flex; }
+.oc-meter i { display: block; height: 100%; background: var(--pass); transition: width 600ms var(--ease); }
+.oc-list { display: flex; flex-direction: column; gap: 1px; }
+.oc-row { display: flex; align-items: flex-start; gap: 10px; width: 100%; text-align: left; border: 0; background: transparent; border-radius: var(--r); padding: 5px 6px; color: var(--ink); transition: background 140ms var(--ease); }
+.oc-row:hover, .oc-row[aria-expanded="true"] { background: var(--surface-2); }
+.oc-full .oc-row { padding: 7px 8px; gap: 12px; }
+.oc-box { width: 14px; height: 14px; border-radius: 4px; flex: none; display: grid; place-items: center; margin-top: 2px; position: relative; }
+.oc-full .oc-box { width: 16px; height: 16px; margin-top: 1px; }
+.oc-box svg { width: 10px; height: 10px; }
+.oc-row[data-s="passed"] .oc-box { background: var(--pass); color: var(--canvas); }
+.oc-row[data-s="failed"] .oc-box { background: var(--fail-soft); box-shadow: inset 0 0 0 1.25px var(--fail); color: var(--fail); }
+.oc-row[data-s="todo"] .oc-box { box-shadow: inset 0 0 0 1.25px var(--line-strong); }
+.oc-row[data-s="running"] .oc-box { border-radius: 50%; box-shadow: inset 0 0 0 1.25px color-mix(in srgb, var(--branch) 25%, transparent); }
+.oc-row[data-s="running"] .oc-box::before { content: ""; position: absolute; inset: 0; border-radius: 50%; border: 1.25px solid transparent; border-top-color: var(--branch); animation: spin .9s linear infinite; }
+.oc-t { flex: 1; min-width: 0; font-size: 12.5px; line-height: 1.4; }
+.oc-full .oc-t { font-size: 14px; }
+.oc-row[data-s="passed"] .oc-t { color: var(--ink-2); }
+.oc-row[data-s="todo"] .oc-t { color: var(--ink-3); }
+.oc-st { font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); padding-top: 2px; white-space: nowrap; }
+.oc-full .oc-st { font-size: 11.5px; padding-top: 1px; min-width: 120px; text-align: right; }
+.oc-row[data-s="running"] .oc-st { color: var(--branch); }
+.oc-row[data-s="failed"] .oc-st { color: var(--fail); }
+.oc-row .chev { color: var(--ink-3); opacity: 0; margin-top: 3px; transition: opacity 140ms, transform 240ms var(--ease); }
+.oc-row:hover .chev, .oc-row[aria-expanded="true"] .chev, .oc-row:focus-visible .chev { opacity: 1; }
+.oc-row[aria-expanded="true"] .chev { transform: rotate(90deg); }
+.oc-drawer > div > div { margin: 2px 0 8px 30px; }
+.oc-full .oc-drawer > div > div { margin-left: 36px; }
+.oc-out { padding: 8px 10px; font-size: 10.5px; line-height: 1.55; border: 1px solid var(--shell-line); }
+.oc-full .oc-out { font-size: 12px; padding: 10px 12px; }
+.oc-out div { white-space: pre-wrap; word-break: break-all; }
+.oc-out .p { color: var(--shell-dim); } .oc-out .ok { color: var(--shell-acc); } .oc-out .bad { color: var(--shell-bad); } .oc-out .dim { color: var(--shell-dim); }
+.oc-acts { display: flex; align-items: center; gap: 2px; margin-top: 4px; font-size: 11px; }
+.oc-acts .quiet { font-size: 11.5px; padding: 1px 6px; }
+.oc-acts .when { margin-left: auto; font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); }
+
+/* ── Option D: horizontal milestone track ─────────────────────────────────── */
+.od-track { display: grid; grid-template-columns: repeat(5, 1fr); margin-top: 6px; }
+.od-st { position: relative; display: flex; flex-direction: column; align-items: center; gap: 8px; border: 0; background: transparent; padding: 0 8px 4px; text-align: center; color: var(--ink-2); border-radius: 6px; }
+.od-st::before, .od-st::after { content: ""; position: absolute; top: 12px; height: 2px; width: 50%; background: var(--line-strong); z-index: 0; }
+.od-st::before { left: 0; } .od-st::after { right: 0; }
+.od-st:first-child::before, .od-st:last-child::after { display: none; }
+.od-st[data-in="done"]::before, .od-st[data-out="done"]::after { background: var(--pass); }
+.od-st[data-in="live"]::before, .od-st[data-out="live"]::after { background: repeating-linear-gradient(90deg, var(--branch) 0 6px, transparent 6px 10px); background-size: 10px 2px; animation: march .7s linear infinite; }
+@keyframes march { from { background-position: 0 0; } to { background-position: 10px 0; } }
+.od-st .nd { --sz: 26px; z-index: 1; transition: box-shadow 200ms var(--ease), transform 200ms var(--ease); }
+.od-st .nd[data-s="passed"] { box-shadow: 0 0 0 4px var(--canvas); }
+.od-st .nd[data-s="todo"] { background: var(--canvas); font-size: 11px; }
+.od-st[aria-selected="true"] .nd { transform: scale(1.06); }
+.od-st[aria-selected="true"] .nd[data-s="running"] { box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--branch) 28%, transparent), 0 0 0 5px var(--branch-soft); }
+.od-st[aria-selected="true"] .nd[data-s="failed"] { box-shadow: inset 0 0 0 1.5px var(--fail), 0 0 0 5px var(--fail-soft); }
+.od-st[aria-selected="true"] .nd[data-s="passed"] { box-shadow: 0 0 0 4px var(--canvas), 0 0 0 7px var(--pass-soft); }
+.od-lab { font-size: 12.5px; line-height: 1.35; max-width: 170px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.od-st[aria-selected="true"] .od-lab { color: var(--ink); font-weight: 500; }
+.od-st:hover .od-lab { color: var(--ink); }
+.od-when { font-family: var(--mono); font-size: 11px; color: var(--ink-3); margin-top: -4px; }
+.od-st[data-s="running"] .od-when { color: var(--branch); } .od-st[data-s="failed"] .od-when { color: var(--fail); }
+.od-detail { position: relative; margin-top: 12px; background: var(--canvas-2); border-radius: 6px; padding: 12px 14px; display: grid; grid-template-columns: 1fr 1.25fr; gap: 16px; border: 1px solid var(--line); }
+.od-detail::before { content: ""; position: absolute; top: -6px; left: calc((var(--sel) + .5) * 20% - 6px); width: 10px; height: 10px; background: var(--canvas-2); border-left: 1px solid var(--line); border-top: 1px solid var(--line); transform: rotate(45deg); transition: left 320ms var(--ease); }
+.od-detail h4 { margin: 0 0 4px; font-size: 14px; font-weight: 600; line-height: 1.35; }
+.od-detail .m { font-family: var(--mono); font-size: 11.5px; color: var(--ink-3); }
+.od-detail code { display: block; margin-top: 8px; font-family: var(--mono); font-size: 12px; color: var(--ink-2); }
+.od-detail .oc-out { font-size: 11.5px; min-height: 84px; }
+.od-mini { display: grid; grid-template-columns: repeat(5, 1fr); margin: 4px 0 2px; }
+.od-mini .od-st { padding: 0; gap: 4px; }
+.od-mini .od-st::before, .od-mini .od-st::after { top: 6px; height: 1.5px; }
+.od-mini .nd { --sz: 14px; font-size: 8px; }
+.od-mini .nd[data-s="todo"] { font-size: 8px; }
+.od-mini .od-st .nd[data-s="passed"] { box-shadow: 0 0 0 3px var(--canvas-2); }
+.od-mini .od-n { font-family: var(--mono); font-size: 10px; color: var(--ink-3); }
+.od-rows { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; }
+.od-row { display: grid; grid-template-columns: 62px 1fr; gap: 8px; padding: 5px 6px; border-radius: var(--r); }
+.od-row:hover { background: var(--surface-2); }
+.od-row .k { font-family: var(--mono); font-size: 10.5px; padding-top: 1px; }
+.od-row .t { font-size: 12.5px; line-height: 1.35; }
+.od-row .t small { display: block; font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); margin-top: 2px; }
+.od-note { font-size: 11px; color: var(--ink-3); padding: 0 6px; }
+
+/* ── Section 2: loading, outside the button ───────────────────────────────── */
+.ld-ctrl { display: flex; flex-wrap: wrap; align-items: center; gap: 18px; margin: 26px 0 14px; font-size: 13px; color: var(--ink-2); }
+.ld-ctrl label { display: flex; align-items: center; gap: 8px; }
+.phases { display: grid; grid-template-columns: 180px 1fr 1fr; margin: 0 0 22px; border-radius: 8px; overflow: hidden; border: 1px solid var(--line); font-size: 12px; }
+.phases div { padding: 9px 12px; background: var(--canvas); border-right: 1px solid var(--line); }
+.phases div:last-child { border-right: 0; }
+.phases b { display: block; font-family: var(--mono); font-weight: 500; font-size: 11px; color: var(--ink-3); margin-bottom: 1px; }
+.phases div:nth-child(2) b { color: var(--branch); }
+.lv-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; }
+.lv { border: 1px solid var(--line); border-radius: 10px; background: var(--canvas); overflow: hidden; box-shadow: var(--card-shadow); display: flex; flex-direction: column; }
+.lv header { padding: 14px 16px 10px; display: flex; gap: 12px; align-items: flex-start; }
+.lv .key { font-family: var(--mono); font-size: 11px; width: 22px; height: 22px; display: grid; place-items: center; border-radius: 6px; background: var(--branch-soft); color: var(--branch); flex: none; }
+.lv h3 { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: -0.01em; }
+.lv header p { margin: 2px 0 0; font-size: 12.5px; color: var(--ink-2); }
+.stage { display: grid; grid-template-columns: 170px 1fr; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); min-height: 132px; }
+.stage .sb { background: var(--canvas-2); border-right: 1px solid var(--line); padding: 14px 10px; display: flex; flex-direction: column; gap: 12px; }
+.stage .sb .logo { font-size: 13px; }
+.stage .mn { padding: 18px 20px; display: flex; flex-direction: column; justify-content: center; gap: 14px; }
+.stage .mn .row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.stage .mn .cap { font-size: 11px; color: var(--ink-3); font-family: var(--mono); width: 100%; margin-bottom: -6px; }
+.lv footer { padding: 10px 16px 12px; display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 12px; color: var(--ink-3); }
+.lv footer b { color: var(--ink-2); font-weight: 500; }
+
+/* The wrapper every loading variant sits in: the button keeps its own look, the motion lives outside it. */
+.ld { position: relative; display: inline-flex; align-items: center; isolation: isolate; }
+.ld > button { position: relative; z-index: 1; transition: opacity 180ms var(--ease); }
+.ld.slow > button { opacity: .55; cursor: progress; }
+.ld.slow > button:hover { background: transparent; }
+.ld .deco { position: absolute; left: 0; top: 0; pointer-events: none; overflow: visible; z-index: 0; opacity: 0; transition: opacity 200ms var(--ease); }
+.ld.slow .deco { opacity: 1; }
+/* A: arc tracing the border */
+.ld-arc .deco path { fill: none; }
+.ld-arc .deco .trk { stroke: var(--line); stroke-width: 1; }
+.ld-arc .deco .arc { stroke: var(--branch); stroke-width: 1.5; stroke-linecap: round; stroke-dasharray: 16 84; animation: trace 1.25s linear infinite; }
+@keyframes trace { from { stroke-dashoffset: 0; } to { stroke-dashoffset: -100; } }
+/* B: spinner beside, in space that's always reserved */
+.ld-side .slot { width: 16px; height: 16px; margin-left: 8px; display: grid; place-items: center; flex: none; }
+.ld-side .spin { width: 12px; height: 12px; border-radius: 50%; border: 1.5px solid color-mix(in srgb, var(--branch) 22%, transparent); border-top-color: var(--branch); opacity: 0; transform: scale(.6); transition: opacity 180ms var(--ease), transform 220ms var(--ease); animation: spin .8s linear infinite; }
+.ld-side.slow .spin { opacity: 1; transform: scale(1); }
+.ld-side .dots { display: none; font-family: var(--mono); font-size: 12px; color: var(--branch); letter-spacing: 1px; opacity: 0; }
+/* C: soft glow ring */
+.ld-glow::before { content: ""; position: absolute; inset: -3px; border-radius: 7px; box-shadow: 0 0 0 1px color-mix(in srgb, var(--branch) 55%, transparent), 0 0 14px 2px color-mix(in srgb, var(--branch) 30%, transparent); opacity: 0; transition: opacity 240ms var(--ease); z-index: 0; pointer-events: none; }
+.ld-glow.slow::before { opacity: 1; animation: breathe 1.1s ease-in-out infinite alternate; }
+/* D: small orbiting dot */
+.ld-orbit .orb { position: absolute; left: 0; top: 0; width: 5px; height: 5px; border-radius: 50%; background: var(--branch); offset-rotate: 0deg; offset-distance: 0%; opacity: 0; z-index: 2; pointer-events: none; transition: opacity 200ms var(--ease); }
+.ld-orbit.slow .orb { opacity: 1; animation: orbit 1.6s linear infinite; }
+.ld-orbit .orb.lead { box-shadow: 0 0 6px 1px color-mix(in srgb, var(--branch) 60%, transparent); }
+.ld-orbit.slow .orb.t1 { opacity: .45; animation-delay: .07s; }
+.ld-orbit.slow .orb.t2 { opacity: .2; animation-delay: .14s; }
+.ld-orbit .orb.t1, .ld-orbit .orb.t2 { width: 4px; height: 4px; }
+@keyframes orbit { from { offset-distance: 0%; } to { offset-distance: 100%; } }
+.ld-sidebtn { font-size: 11.5px; }
+
+/* Reduced motion: one switch (.rm) set from prefers-reduced-motion, or the page's own toggle. */
+.rm *, .rm *::before, .rm *::after { animation: none !important; transition: none !important; }
+.rm .ld-arc .deco .arc { stroke-dasharray: none; opacity: .75; }
+.rm .ld-side .spin { display: none; }
+.rm .ld-side.slow .dots { display: inline; opacity: 1; }
+.rm .ld-glow.slow::before { opacity: .85; }
+.rm .ld-orbit.slow .orb.lead { offset-distance: 30%; }
+.rm .ld-orbit.slow .orb.t1, .rm .ld-orbit.slow .orb.t2 { opacity: 0; }
+.rm .ring .rs { stroke-dasharray: var(--da); }
+.rm .term .cur { opacity: 1; }
+
+/* ── Section 3: rules ─────────────────────────────────────────────────────── */
+.rules { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 26px; }
+.rule { border: 1px solid var(--line); border-radius: 10px; background: var(--canvas); box-shadow: var(--card-shadow); padding: 18px 18px 16px; display: flex; flex-direction: column; gap: 14px; }
+.rule-h { display: flex; align-items: center; gap: 10px; }
+.rule-id { font-family: var(--mono); font-size: 11.5px; color: var(--ink-2); border: 1px solid var(--line-strong); border-radius: 4px; padding: 0 6px; line-height: 20px; }
+.rule blockquote { margin: 0; font-size: 16px; line-height: 1.4; font-weight: 500; letter-spacing: -0.012em; }
+.dg { border-radius: 8px; background: var(--canvas-2); border: 1px solid var(--line); padding: 10px 12px 8px; }
+.dg-h { display: flex; align-items: center; gap: 8px; font-size: 11px; font-family: var(--mono); color: var(--ink-3); margin-bottom: 4px; }
+.dg-h b { font-weight: 500; }
+.dg svg { display: block; width: 100%; height: auto; }
+.dg svg text { font-family: var(--sans); fill: var(--ink-2); font-size: 11px; paint-order: stroke; stroke: var(--canvas-2); stroke-width: 4px; stroke-linejoin: round; }
+.dg svg .lane-l { fill: var(--ink-3); font-size: 10.5px; font-family: var(--mono); }
+.dg svg .ax { stroke: var(--line-strong); }
+.dg svg .tk { fill: var(--ink-3); font-size: 10px; font-family: var(--mono); }
+.dg svg .ln { stroke: var(--line-strong); stroke-width: 1.5; }
+.dg svg .idle { stroke: var(--ink-3); stroke-width: 2; stroke-dasharray: 3 3; }
+.dg svg .busy { stroke: var(--branch); stroke-width: 4; stroke-linecap: round; }
+.dg svg .ok { stroke: var(--pass); } .dg svg .okf { fill: var(--pass); }
+.dg svg .bad { stroke: var(--fail); } .dg svg .badf { fill: var(--fail); }
+.dg svg .brf { fill: var(--branch); } .dg svg .bgf { fill: var(--canvas-2); }
+.dg svg .softbad { fill: var(--fail-soft); } .dg svg .softok { fill: var(--pass-soft); } .dg svg .softbr { fill: var(--branch-soft); }
+.dg svg .t-fail { fill: var(--fail); } .dg svg .t-pass { fill: var(--pass); } .dg svg .t-ink { fill: var(--ink); } .dg svg .t-3 { fill: var(--ink-3); } .dg svg .t-sap { fill: var(--sap); }
+.dg svg .sapf { fill: var(--sap); } .dg svg .sap { stroke: var(--sap); }
+.pc { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.pc > div { border-radius: 8px; padding: 10px 12px; display: flex; gap: 10px; align-items: flex-start; font-size: 12.5px; line-height: 1.45; color: var(--ink-2); }
+.pc .pro { background: var(--pass-soft); } .pc .con { background: var(--sap-soft); }
+.pc .ic { width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; flex: none; margin-top: 1px; }
+.pc .pro .ic { background: var(--pass); color: var(--canvas); } .pc .con .ic { background: var(--sap); color: var(--canvas); }
+.pc .ic svg { width: 12px; height: 12px; }
+.pc b { display: block; color: var(--ink); font-weight: 600; font-size: 12px; margin-bottom: 1px; }
+.cost { display: grid; grid-template-columns: 110px 1fr 84px; gap: 6px 10px; align-items: center; font-size: 11.5px; color: var(--ink-3); }
+.cost .b { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
+.cost .b i { display: block; height: 100%; border-radius: 3px; }
+.cost .v { font-family: var(--mono); text-align: right; }
+.verdict { margin-top: 16px; display: flex; gap: 12px; align-items: flex-start; padding: 14px 16px; border-radius: 10px; background: var(--branch-soft); font-size: 13.5px; color: var(--ink); }
+.verdict b { font-weight: 600; }
+
+@media (max-width: 1100px) { .tabs, .lv-grid, .rules { grid-template-columns: 1fr 1fr; } .rules { grid-template-columns: 1fr; } }
+@media (max-width: 720px) { .tabs, .lv-grid, .pc { grid-template-columns: 1fr; } .page, .topbar { padding-left: 16px; padding-right: 16px; } .topbar nav { display: none; } }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <span class="logo" style="font-size:15px"><svg class="logo-mark" viewBox="1.2 5.6 29.6 20.8" aria-hidden="true"><g fill="none" stroke-width="3" stroke-linecap="round"><path class="lm-mid" d="M9 16 H23"/><path class="lm-top" d="M8 16 C11 16 11.5 7.5 16 7.5 C20.5 7.5 21 16 24 16"/><path class="lm-bot" d="M8 16 C11 16 11.5 24.5 16 24.5 C20.5 24.5 21 16 24 16"/><path class="lm-in" stroke-width="4.8" d="M3.8 16 H9"/><path class="lm-bot" stroke-width="4.8" d="M23 16 H28.2"/></g></svg><span class="logo-word">brindle</span></span>
+  <span class="eyebrow">design v2 · in the real frame</span>
+  <nav><a href="#milestones">1 · Milestones</a><a href="#loading">2 · Slow buttons</a><a href="#rules">3 · Learned rules</a></nav>
+  <span class="flex1"></span>
+  <div class="seg" role="group" aria-label="Motion"><button data-motion="system" aria-pressed="true">Motion: system</button><button data-motion="reduced" aria-pressed="false">Reduced</button></div>
+  <div class="seg" role="group" aria-label="Theme"><button data-theme-set="system" aria-pressed="true">System</button><button data-theme-set="light" aria-pressed="false">Light</button><button data-theme-set="dark" aria-pressed="false">Dark</button></div>
+</header>
+
+<main class="page">
+  <!-- ═══ 1 · Milestones ═══ -->
+  <section class="sec hero" id="milestones">
+    <div class="eyebrow">1 · milestones</div>
+    <h1>Four directions for milestones, in the app</h1>
+    <p class="lede">Same session, same five milestones in every option: two passed, one running, one with a failing check, one not started, and one title that runs long. Each option draws both places milestones live: the sidebar's context pane (compact) and the session panel above the terminal (full). Use <span class="mono">1–4</span> or the cards to switch.</p>
+    <div class="tabs" role="tablist" aria-label="Milestone options" id="tabs"></div>
+    <div class="optnote" id="optnote"></div>
+    <div class="colmarks" aria-hidden="true"><span class="c1">Sidebar · compact</span><span class="c2">Session panel · full</span></div>
+    <div class="framewrap">
+      <div class="win" aria-label="brindle app window (mockup)">
+        <div class="win-bar"><i></i><i></i><i></i><span class="ttl">brindle</span></div>
+        <div class="win-body">
+          <aside class="side" aria-label="Sidebar">
+            <div class="side-top">
+              <span class="logo"><svg class="logo-mark" viewBox="1.2 5.6 29.6 20.8" aria-hidden="true"><g fill="none" stroke-width="3" stroke-linecap="round"><path class="lm-mid" d="M9 16 H23"/><path class="lm-top" d="M8 16 C11 16 11.5 7.5 16 7.5 C20.5 7.5 21 16 24 16"/><path class="lm-bot" d="M8 16 C11 16 11.5 24.5 16 24.5 C20.5 24.5 21 16 24 16"/><path class="lm-in" stroke-width="4.8" d="M3.8 16 H9"/><path class="lm-bot" stroke-width="4.8" d="M23 16 H28.2"/></g></svg><span class="logo-word">brindle</span></span>
+              <span class="flex1"></span>
+              <button class="newbtn" type="button"><span style="font-size:14px;line-height:1">+</span> New session</button>
+            </div>
+            <button class="inbox" type="button"><span class="flex1">Inbox</span><span class="side-nb">2</span></button>
+            <section class="ctx" aria-label="Session context">
+              <div class="ctx-h">
+                <div class="ctx-title"><span>Ship the one-approval release flow</span><i>✎</i></div>
+                <div class="ctx-meta"><span class="mono">a3c91e07</span> · brindle · autopilot · 2 working</div>
+              </div>
+              <div id="sb-goal"></div>
+            </section>
+            <div class="handle" aria-hidden="true"><i></i></div>
+            <div class="side-h">Sessions</div>
+            <div class="tree">
+              <div>
+                <div class="repo-h">brindle</div>
+                <div class="srow sel"><span class="side-dot" data-tone="work"></span><span style="min-width:0;flex:1"><span class="nm">Ship the one-approval release flow</span><span class="mt"><code>a3c91e07</code> · autopilot · 4 agents · 2 working</span></span><span class="fold">▾</span></div>
+                <ul class="agents">
+                  <li><span class="side-dot" data-tone="work"></span>supervisor<code>claude · brindle/session-3</code></li>
+                  <li><span class="side-dot" data-tone="work"></span>codex<code>feat/release-one-approval</code></li>
+                  <li><span class="side-dot" data-tone="work"></span>sonnet<code>fix/changelog-sync</code></li>
+                  <li><span class="side-dot" data-tone="done"></span>codex<code>feat/feed-gate · merged</code></li>
+                </ul>
+                <div class="srow"><span class="side-dot"></span><span style="min-width:0;flex:1"><span class="nm">Knowledge map ranks decisions first</span><span class="mt"><code>5be20d14</code> · manual · 1 agent</span></span><span class="fold">▸</span></div>
+                <div class="paused"><span>▸</span>Paused · 2</div>
+              </div>
+              <div>
+                <div class="repo-h">pawdelta-web</div>
+                <div class="srow"><span class="side-dot" data-tone="wait"></span><span style="min-width:0;flex:1"><span class="nm">Release notes for 0.6.2</span><span class="mt"><code>c07e19aa</code> · autopilot · 1 waiting</span></span><span class="fold">▸</span></div>
+              </div>
+            </div>
+            <div class="status"><span class="usage">Claude <span class="bar"><i></i></span> 41% of week</span><span>v0.6.1</span></div>
+            <nav class="pages"><span class="av">HL</span>Knowledge <span>·</span> Agents <span>·</span> Settings<span class="flex1"></span><span class="ttog">&gt;_</span></nav>
+          </aside>
+          <div class="main">
+            <header class="sbar">
+              <span class="who">Claude · supervisor</span>
+              <code>a3c91e07</code>
+              <span class="st"><b>●</b> working <span class="t-3">· 2 min ago</span></span>
+              <span class="flex1"></span>
+              <button class="btn" type="button">Pause</button>
+              <button class="btn-dots" type="button" aria-label="More">⋯</button>
+            </header>
+            <div id="panel-goal" class="goalslot"></div>
+            <div class="termwrap">
+              <div class="shell term">
+                <div class="tabs-s"><span class="on">chat</span><span>shell</span></div>
+<pre><span class="a">●</span> Merged <span class="d">feat/feed-gate</span> into brindle/session-3. Milestone 2's check passes.
+
+<span class="a">●</span> Assigned codex → <span class="d">feat/release-one-approval</span> for milestone 3.
+  <span class="d">⎿  check: uv run pytest tests/test_release_flow.py -q (running)</span>
+
+<span class="b">●</span> Milestone 4's check failed: release_notes/0.6.2.md not found.
+  <span class="d">⎿  assigning sonnet → fix/changelog-sync with the failing test</span>
+
+<span class="d">›</span> <span class="cur"></span></pre>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══ 2 · Slow buttons ═══ -->
+  <section class="sec" id="loading">
+    <div class="eyebrow">2 · slow buttons</div>
+    <h1>Dim after 300 ms, with the motion outside the button</h1>
+    <p class="lede">Every button below is live: click it. Nothing changes for the first 300 ms, so a fast answer never flickers. Past that the button dims to 55% and keeps its label and size, and the motion happens around it, never inside it. With reduced motion, each variant shows a still mark instead.</p>
+    <div class="ld-ctrl">
+      <label>Server answers in <span class="seg" role="group" aria-label="Simulated response time"><button data-ms="200" aria-pressed="false">200 ms</button><button data-ms="2600" aria-pressed="true">2.6 s</button><button data-ms="6000" aria-pressed="false">6 s</button></span></label>
+      <button class="btn" type="button" id="press-all">Press all twelve</button>
+      <span class="t-3" style="font-size:12px">Try 200 ms: nothing should appear.</span>
+    </div>
+    <div class="phases" aria-hidden="true">
+      <div><b>0–300 ms</b>pressed, unchanged</div>
+      <div><b>≥ 300 ms</b>button dims to 55%, indicator fades in around it (200 ms)</div>
+      <div><b>answer</b>indicator fades out, button returns; a failure shows under the button as today</div>
+    </div>
+    <div class="lv-grid" id="lv-grid"></div>
+  </section>
+
+  <!-- ═══ 3 · Rules ═══ -->
+  <section class="sec" id="rules">
+    <div class="eyebrow">3 · two proposed learned rules</div>
+    <h1>What each rule would change</h1>
+    <p class="lede">Both rules come from repeated review findings about cleanup code. Each card shows the failure as it happened, the same moment with the rule followed, and what the rule costs.</p>
+    <div class="rules">
+      <article class="rule">
+        <div class="rule-h"><span class="rule-id">801c9de5</span><span class="pill t-pass">clear trigger</span><span class="flex1"></span><span class="t-3 mono" style="font-size:11px">found 3 times</span></div>
+        <blockquote>Re-check state right before any kill, stop, delete or reap; skip if it changed.</blockquote>
+        <div class="dg">
+          <div class="dg-h"><b class="t-fail">before</b> · cleanup acts on a plan made earlier</div>
+          <svg viewBox="0 0 560 148" role="img" aria-label="Before: cleanup plans to reap an idle worker, the worker picks up a task, cleanup kills it mid-task.">
+            <line class="ax" x1="96" y1="128" x2="548" y2="128"/>
+            <text class="tk" x="140" y="143" text-anchor="middle">t0</text><text class="tk" x="290" y="143" text-anchor="middle">t1</text><text class="tk" x="440" y="143" text-anchor="middle">t2</text>
+            <text class="lane-l" x="8" y="42">cleanup</text>
+            <text class="lane-l" x="8" y="96">worker w-12</text>
+            <line class="ln" x1="96" y1="38" x2="548" y2="38"/>
+            <circle class="brf" cx="140" cy="38" r="5"/>
+            <text x="140" y="22" text-anchor="middle">plan: reap w-12 (idle)</text>
+            <line class="idle" x1="96" y1="92" x2="290" y2="92"/>
+            <line class="busy" x1="290" y1="92" x2="440" y2="92"/>
+            <circle class="brf" cx="290" cy="92" r="4"/>
+            <text x="290" y="114" text-anchor="middle">picks up a task → busy</text>
+            <line class="bad" x1="440" y1="44" x2="440" y2="84" stroke-width="1.5" stroke-dasharray="3 3"/>
+            <circle class="softbad" cx="440" cy="38" r="11"/><path class="bad" d="M435 33 L445 43 M445 33 L435 43" stroke-width="2" stroke-linecap="round"/>
+            <text class="t-fail" x="458" y="35">kill w-12</text>
+            <circle class="badf" cx="440" cy="92" r="5"/>
+            <text class="t-fail" x="452" y="96">killed mid-task</text>
+          </svg>
+        </div>
+        <div class="dg">
+          <div class="dg-h"><b class="t-pass">after</b> · one look at the state, right before acting</div>
+          <svg viewBox="0 0 560 148" role="img" aria-label="After: right before the kill, cleanup re-checks the worker, sees it is busy and skips; the worker keeps working.">
+            <line class="ax" x1="96" y1="128" x2="548" y2="128"/>
+            <text class="tk" x="140" y="143" text-anchor="middle">t0</text><text class="tk" x="290" y="143" text-anchor="middle">t1</text><text class="tk" x="420" y="143" text-anchor="middle">t2</text>
+            <text class="lane-l" x="8" y="42">cleanup</text>
+            <text class="lane-l" x="8" y="96">worker w-12</text>
+            <line class="ln" x1="96" y1="38" x2="548" y2="38"/>
+            <circle class="brf" cx="140" cy="38" r="5"/>
+            <text x="140" y="22" text-anchor="middle">plan: reap w-12 (idle)</text>
+            <path class="softbr" d="M420 26 L432 38 L420 50 L408 38 Z"/><path d="M420 26 L432 38 L420 50 L408 38 Z" fill="none" stroke="var(--branch)" stroke-width="1.5"/>
+            <text x="420" y="18" text-anchor="middle" class="t-ink">re-check: busy?</text>
+            <line x1="420" y1="50" x2="420" y2="84" stroke="var(--branch)" stroke-width="1.2" stroke-dasharray="2 3"/>
+            <circle class="softok" cx="500" cy="38" r="11"/><path class="ok" d="M494 38.5 L498.5 43 L506 34" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            <text class="t-pass" x="500" y="64" text-anchor="middle">changed → skip</text>
+            <line class="idle" x1="96" y1="92" x2="290" y2="92"/>
+            <line class="busy" x1="290" y1="92" x2="536" y2="92"/>
+            <path class="brf" d="M536 86 L546 92 L536 98 Z"/>
+            <circle class="brf" cx="290" cy="92" r="4"/>
+            <text x="290" y="114" text-anchor="middle">picks up a task → busy</text>
+            <text x="470" y="114" text-anchor="middle" class="t-ink">keeps working</text>
+          </svg>
+        </div>
+        <div class="pc">
+          <div class="pro"><span class="ic"><svg viewBox="0 0 12 12"><path d="M2.5 6.2 5 8.5 9.5 3.5" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span><b>Stops a known bug, found 3 times</b>No more killing a worker, or deleting a worktree, that turned busy or dirty after the cleanup was planned.</span></div>
+          <div class="con"><span class="ic"><svg viewBox="0 0 12 12"><path d="M6 2.5v7M2.5 6h7" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg></span><span><b>One extra test per cleanup fix</b>Each fix needs a test where the state changes between planning and acting.</span></div>
+        </div>
+        <div class="cost">
+          <span>tests per fix</span><span class="b"><i style="width:22%;background:var(--sap)"></i></span><span class="v">+1</span>
+          <span>diff width</span><span class="b"><i style="width:12%;background:var(--ink-3)"></i></span><span class="v">1 call</span>
+          <span>review rounds</span><span class="b"><i style="width:10%;background:var(--ink-3)"></i></span><span class="v">±0</span>
+        </div>
+      </article>
+
+      <article class="rule">
+        <div class="rule-h"><span class="rule-id">17d7c3ae</span><span class="pill t-sap">vague trigger</span><span class="flex1"></span><span class="t-3 mono" style="font-size:11px">fixed-in-one-place bugs</span></div>
+        <blockquote>When you add a guard to shared state, apply it to every path that reads that state.</blockquote>
+        <div class="dg">
+          <div class="dg-h"><b class="t-fail">before</b> · a fix guards one reader of the state</div>
+          <svg viewBox="0 0 560 168" role="img" aria-label="Before: a guard is added to the reaper's path only; later the merge path reads the same state unguarded and the bug comes back.">
+            <rect x="96" y="8" width="452" height="20" rx="4" class="softbr"/>
+            <text x="106" y="22" class="t-ink" style="font-family:var(--mono);font-size:10.5px">shared state: worktree.dirty</text>
+            <line class="ax" x1="96" y1="152" x2="548" y2="152"/>
+            <text class="tk" x="200" y="165" text-anchor="middle">fix #1</text><text class="tk" x="430" y="165" text-anchor="middle">a week later</text>
+            <text class="lane-l" x="8" y="54">A · reaper</text><text class="lane-l" x="8" y="94">B · merge</text><text class="lane-l" x="8" y="134">C · resume</text>
+            <line class="ln" x1="96" y1="50" x2="548" y2="50"/><line class="ln" x1="96" y1="90" x2="548" y2="90"/><line class="ln" x1="96" y1="130" x2="548" y2="130"/>
+            <path class="okf" d="M200 40 l9 3.5 v6 c0 5 -4 8.5 -9 10.5 c-5 -2 -9 -5.5 -9 -10.5 v-6 z"/>
+            <text x="216" y="46" class="t-pass">guard added</text>
+            <circle class="softbad" cx="430" cy="90" r="11"/><path class="bad" d="M425 85 L435 95 M435 85 L425 95" stroke-width="2" stroke-linecap="round"/>
+            <text x="448" y="86" class="t-fail">same bug,</text><text x="448" y="99" class="t-fail">other path</text>
+            <circle cx="430" cy="130" r="4" fill="none" stroke="var(--ink-3)" stroke-width="1.2" stroke-dasharray="2 2"/>
+            <text x="442" y="134" class="t-3">unguarded too</text>
+          </svg>
+        </div>
+        <div class="dg">
+          <div class="dg-h"><b class="t-pass">after</b> · every reader gets the guard, in one change</div>
+          <svg viewBox="0 0 560 168" role="img" aria-label="After: the guard goes on paths A, B and C together; it is unclear whether path D counts; the diff and review rounds grow.">
+            <rect x="96" y="8" width="452" height="20" rx="4" class="softbr"/>
+            <text x="106" y="22" class="t-ink" style="font-family:var(--mono);font-size:10.5px">shared state: worktree.dirty</text>
+            <line class="ax" x1="96" y1="152" x2="548" y2="152"/>
+            <text class="tk" x="200" y="165" text-anchor="middle">fix #1</text><text class="tk" x="430" y="165" text-anchor="middle">review</text>
+            <text class="lane-l" x="8" y="48">A · reaper</text><text class="lane-l" x="8" y="78">B · merge</text><text class="lane-l" x="8" y="108">C · resume</text><text class="lane-l t-sap" x="8" y="138" style="fill:var(--sap)">D · status?</text>
+            <line class="ln" x1="96" y1="44" x2="548" y2="44"/><line class="ln" x1="96" y1="74" x2="548" y2="74"/><line class="ln" x1="96" y1="104" x2="548" y2="104"/>
+            <line x1="96" y1="134" x2="548" y2="134" stroke="var(--sap)" stroke-width="1.2" stroke-dasharray="3 4" opacity=".7"/>
+            <path class="okf" d="M200 35 l8 3 v5 c0 4.5 -3.5 7.5 -8 9.5 c-4.5 -2 -8 -5 -8 -9.5 v-5 z"/>
+            <path class="okf" d="M200 65 l8 3 v5 c0 4.5 -3.5 7.5 -8 9.5 c-4.5 -2 -8 -5 -8 -9.5 v-5 z"/>
+            <path class="okf" d="M200 95 l8 3 v5 c0 4.5 -3.5 7.5 -8 9.5 c-4.5 -2 -8 -5 -8 -9.5 v-5 z"/>
+            <circle class="sapf" cx="200" cy="134" r="8" opacity=".9"/><text x="200" y="138" text-anchor="middle" style="fill:var(--canvas);stroke:none;font-weight:700;font-size:11px">?</text>
+            <text x="216" y="138" class="t-sap">does this path count?</text>
+            <rect x="396" y="56" width="16" height="16" rx="3" class="softbr" stroke="var(--branch)"/><rect x="418" y="56" width="16" height="16" rx="3" class="softbr" stroke="var(--branch)"/><rect x="440" y="56" width="16" height="16" rx="3" class="softbr" stroke="var(--branch)"/>
+            <text x="426" y="92" text-anchor="middle" class="t-3">3 review rounds</text>
+            <text x="470" y="68" class="t-ink" style="font-family:var(--mono);font-size:10.5px">3 → 7 files</text>
+          </svg>
+        </div>
+        <div class="pc">
+          <div class="pro"><span class="ic"><svg viewBox="0 0 12 12"><path d="M2.5 6.2 5 8.5 9.5 3.5" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg></span><span><b>Catches fixed-in-one-place bugs</b>The same bug can't come back through a path the first fix didn't touch.</span></div>
+          <div class="con"><span class="ic"><svg viewBox="0 0 12 12"><path d="M6 3v3.6M6 8.8v.2" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></svg></span><span><b>Vague, and costly</b>"Every path that reads it" has no clear edge, so diffs get wider and reviews take more rounds while people argue the scope.</span></div>
+        </div>
+        <div class="cost">
+          <span>tests per fix</span><span class="b"><i style="width:45%;background:var(--sap)"></i></span><span class="v">+1 per path</span>
+          <span>diff width</span><span class="b"><i style="width:70%;background:var(--sap)"></i></span><span class="v">2–3×</span>
+          <span>review rounds</span><span class="b"><i style="width:60%;background:var(--sap)"></i></span><span class="v">+1–2</span>
+        </div>
+      </article>
+    </div>
+    <div class="verdict"><span class="pill t-branch" style="margin-top:2px">suggestion</span><span><b>Adopt 801c9de5 as written.</b> Its trigger is a concrete call (kill, stop, delete, reap) and its cost is one test. <b>Hold 17d7c3ae</b> until it names its scope, for example "every caller of the function you guarded, found with graphify". Then it would be checkable, not a matter of judgment.</span></div>
+  </section>
+</main>
+
+<script>
+/* ── Data: one session, five milestones, used by every option ─────────────── */
+const GOAL = { title: "Ship the one-approval release flow", detail: "One Approve publishes the bump PR, both tags and the desktop feed." };
+const MS = [
+  { n: 1, s: "passed", title: "Release script builds signed artifacts", short: "Signed builds", cmd: "uv run pytest tests/test_release.py -q", when: "38 min ago", ago: "38m", dur: "41s",
+    out: [["ok", "23 passed in 41.2s"]] },
+  { n: 2, s: "passed", title: "Feed rollback is gated before production credentials", short: "Feed gate", cmd: "uv run pytest tests/test_feed_gate.py -q", when: "12 min ago", ago: "12m", dur: "9s",
+    out: [["ok", "8 passed in 8.7s"]] },
+  { n: 3, s: "running", title: "One approval covers the bump PR, both tags and the desktop feed for every platform, the Windows and Intel-on-Apple-Silicon builds included", short: "One approval", cmd: "uv run pytest tests/test_release_flow.py -q", who: "codex", when: "running", ago: "now", dur: "" },
+  { n: 4, s: "failed", title: "Changelog notes sync to the site", short: "Changelog sync", cmd: "uv run pytest tests/test_changelog.py -q", when: "3 min ago", ago: "3m", dur: "3.9s",
+    err: "AssertionError: release_notes/0.6.2.md not found",
+    out: [["bad", "FAILED tests/test_changelog.py::test_sync_writes_notes"], ["bad", "AssertionError: release_notes/0.6.2.md not found"], ["dim", "1 failed, 6 passed in 3.9s"]] },
+  { n: 5, s: "todo", title: "Docs page walks through the new flow", short: "Docs", cmd: "test -f docs/release.md", when: "not run yet", ago: "—", dur: "" },
+];
+const LIVE = [
+  "tests/test_release_flow.py::test_bump_pr_opens ✓",
+  "tests/test_release_flow.py::test_tags_after_merge ✓",
+  "tests/test_release_flow.py::test_feed_waits_for_tags ✓",
+  "tests/test_release_flow.py::test_windows_artifact_signed …",
+  "tests/test_release_flow.py::test_windows_artifact_signed ✓",
+  "tests/test_release_flow.py::test_intel_on_arm_feed …",
+  "tests/test_release_flow.py::test_intel_on_arm_feed ✓",
+  "tests/test_release_flow.py::test_single_approval_gate …",
+];
+let elapsed = 72, liveAt = 0;
+
+const CHECK = '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 6.2 5 8.5 9.5 3.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const CROSS = '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M3.5 3.5l5 5M8.5 3.5l-5 5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>';
+const CHEV = '<svg class="chev" viewBox="0 0 12 12" aria-hidden="true"><path d="M4.5 3 7.5 6 4.5 9" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const mmss = (s) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+const EL = () => `<span class="js-el">${mmss(elapsed)}</span>`;
+const count = (s) => MS.filter((m) => m.s === s).length;
+const node = (m, sz) => `<span class="nd" data-s="${m.s}"${sz ? ` style="--sz:${sz}px"` : ""} aria-hidden="true">${m.s === "passed" ? CHECK : m.s === "failed" ? "!" : m.s === "todo" ? (sz && sz >= 20 ? m.n : "") : ""}</span>`;
+const LABEL = { passed: "Done", running: "Running", failed: "Check failing", todo: "Not started" };
+function meta(m) {
+  if (m.s === "passed") return `<b>Done</b> · ${m.when} · ${m.dur}`;
+  if (m.s === "running") return `<b>Running</b> · ${EL()} · ${m.who}`;
+  if (m.s === "failed") return `<b>Check failing</b> · ${m.when}`;
+  return "Not started";
+}
+const summaryLine = () => {
+  const parts = [];
+  if (count("running")) parts.push(`<span class="t-branch">${count("running")} running</span>`);
+  if (count("failed")) parts.push(`<span class="t-fail">${count("failed")} failing</span>`);
+  if (count("todo")) parts.push(`<span>${count("todo")} not started</span>`);
+  return parts.join('<span class="sep">·</span>');
+};
+const outLines = (m) => {
+  if (m.s === "running") return `<div class="js-stream"></div>`;
+  if (!m.out) return `<div class="dim">No result yet. The supervisor runs this once milestone 3 lands.</div>`;
+  return m.out.map(([c, t]) => `<div class="${c}">${t}</div>`).join("");
+};
+const shellBlock = (m) => `<div class="shell oc-out"><div><span class="p">$</span> ${m.cmd}</div>${outLines(m)}</div>`;
+
+/* ── Option A: progress ring + collapsible stepper ───────────────────────── */
+function ring(size, sw, lg) {
+  const r = (size - sw) / 2, c = size / 2, gap = 3, len = 20 - gap;
+  let segs = "", live = "";
+  MS.forEach((m, i) => {
+    const start = i * 20 + gap / 2;
+    segs += `<circle class="rs" data-s="${m.s}" cx="${c}" cy="${c}" r="${r}" pathLength="100" stroke-width="${sw}" stroke-dashoffset="${-start}" style="--da:${len} ${100 - len};transition-delay:${i * 70}ms"/>`;
+    if (m.s === "running") live = `<circle class="rs-live" data-start="${start}" data-len="${len}" cx="${c}" cy="${c}" r="${r}" pathLength="100" stroke-width="${sw}" stroke-dashoffset="${-start}"/>`;
+  });
+  return `<div class="ring${lg ? " lg" : ""}" style="width:${size}px;height:${size}px" role="img" aria-label="${count("passed")} of ${MS.length} milestones complete"><svg viewBox="0 0 ${size} ${size}">${segs}${live}</svg><span class="rc">${count("passed")}<i>/${MS.length}</i></span></div>`;
+}
+function aSteps(full) {
+  return `<ol class="oa-steps${full ? " oa-full" : ""}">${MS.map((m) => `
+    <li class="oa-step" data-s="${m.s}">${node(m)}<div class="oa-b">
+      ${full ? `<div class="oa-row2"><span class="oa-t">${m.n}. ${m.title}</span><span class="pill ${m.s === "passed" ? "t-pass" : m.s === "running" ? "t-branch" : m.s === "failed" ? "t-fail" : "t-3"}">${LABEL[m.s]}</span></div>` : `<div class="oa-t">${m.title}</div>`}
+      <div class="oa-m">${full ? `${m.cmd}${m.s === "passed" ? ` · ${m.when}` : m.s === "running" ? ` · ${EL()}` : m.s === "failed" ? ` · ${m.when}` : ""}` : meta(m)}</div>
+      ${full && m.s === "failed" ? `<div class="oa-err">${m.err}</div>` : ""}
+    </div></li>`).join("")}</ol>`;
+}
+const A = {
+  side: () => `<div class="oa">
+    <div class="oa-head">${ring(36, 3.5)}
+      <div class="oa-ht"><div class="oa-count">${count("passed")} of ${MS.length} milestones complete</div><div class="oa-sub">${summaryLine()}</div></div>
+      <button class="iconbtn js-clp" type="button" aria-expanded="true" aria-label="Milestones">${CHEV}</button></div>
+    <div class="clp open" data-clp><div>${aSteps(false)}</div></div>
+    <div class="foot">Checked 4 min ago</div></div>`,
+  panel: () => {
+    const now = MS.find((m) => m.s === "running"), bad = MS.find((m) => m.s === "failed");
+    return `<section class="gp oa" aria-label="Goal">
+    <div class="oa-head lg">${ring(56, 5, true)}
+      <div class="oa-ht"><div class="gp-top"><span class="lbl">Goal</span><span class="pill t-branch">In progress</span></div>
+        <h2 class="gp-title">${GOAL.title}</h2><div class="oa-sub">${count("passed")} of ${MS.length} complete<span class="sep">·</span>${summaryLine()}</div></div>
+      <button class="quiet js-clp" type="button" aria-expanded="false">${CHEV} Milestones (${MS.length})</button></div>
+    <div class="clp open" data-sum><div><div class="oa-sum">
+      ${now ? `<div><span class="k t-branch">now</span>${node(now, 14)}<span class="tt">${now.n}. ${now.title}</span><span class="mono t-3" style="font-size:11px;flex:none">${EL()}</span></div>` : ""}
+      ${bad ? `<div><span class="k t-fail">needs a fix</span>${node(bad, 14)}<span class="tt">${bad.n}. ${bad.title}</span><span class="mono t-3" style="font-size:11px;flex:none">${bad.when}</span></div>` : ""}
+    </div></div></div>
+    <div class="clp" data-clp><div>${aSteps(true)}</div></div></section>`;
+  },
+};
+
+/* ── Option B: segmented timeline with a live pulse ──────────────────────── */
+const segbar = (labels) => `<div class="ob-bar" role="img" aria-label="${count("passed")} of ${MS.length} milestones complete">${MS.map((m) => `<span class="ob-seg" data-s="${m.s}"></span>`).join("")}</div>` +
+  (labels ? `<div class="ob-labs" aria-hidden="true">${MS.map((m) => `<span data-s="${m.s}"><b>${m.s === "passed" ? "✓" : m.s === "failed" ? "✕" : m.n}</b>${m.short}</span>`).join("")}</div>` : "");
+function bItems(full) {
+  return `<ol class="ob-tl${full ? " ob-full" : ""}">${MS.map((m) => `
+    <li class="ob-it" data-s="${m.s}">
+      ${full ? `<span class="ob-when">${m.s === "running" ? "now" : m.ago}</span>` : ""}
+      <span class="ob-rail"><i class="ob-dot"></i></span>
+      <div class="ob-b"><div class="ob-t">${full ? `${m.n}. ` : ""}${m.title}</div>
+        <div class="ob-m">${m.s === "passed" ? `${full ? m.cmd + " · " : ""}passed in ${m.dur}` : m.s === "running" ? `${full ? m.cmd + " · " : ""}${m.who} · ${EL()}` : m.s === "failed" ? `${full ? m.cmd + " · " : ""}1 failed, 6 passed` : full ? `${m.cmd} · waits on 3` : "waits on 3"}</div>
+        ${m.s === "running" ? `<div class="ob-live"><span class="js-live">${LIVE[liveAt % LIVE.length]}</span></div>` : ""}
+        ${m.s === "failed" ? `<div class="ob-err">${m.err}</div>` : ""}
+      </div>
+      ${full ? "" : `<span class="ob-when">${m.s === "running" ? "now" : m.ago}</span>`}
+    </li>`).join("")}</ol>`;
+}
+const B = {
+  side: () => `<div class="ob">
+    <div class="ob-hd"><span class="oa-count">${count("passed")} of ${MS.length} milestones complete</span><span class="flex1"></span><span class="oa-sub">${summaryLine().replace(/<span>\d not started<\/span>/, "").replace(/<span class="sep">·<\/span>$/, "")}</span></div>
+    ${segbar(false)}${bItems(false)}<div class="foot">Checked 4 min ago</div></div>`,
+  panel: () => `<section class="gp ob" aria-label="Goal">
+    <div class="gp-top"><span class="lbl">Goal</span><span class="pill t-branch">In progress</span><span class="flex1"></span><span class="gp-sub">${count("passed")} of ${MS.length} milestones complete</span></div>
+    <h2 class="gp-title">${GOAL.title}</h2>
+    ${segbar(true)}${bItems(true)}</section>`,
+};
+
+/* ── Option C: minimal checklist, each row opens its check's output ───────── */
+const cOpen = { side: new Set([4]), panel: new Set([4]) };
+function cRows(where) {
+  const full = where === "panel";
+  return `<div class="oc-list${full ? " oc-full" : ""}">${MS.map((m) => {
+    const open = cOpen[where].has(m.n);
+    const st = m.s === "passed" ? (full ? `${m.when} · ${m.dur}` : m.dur) : m.s === "running" ? EL() : m.s === "failed" ? (full ? `failing · ${m.when}` : "failing") : "—";
+    return `<button class="oc-row" type="button" data-s="${m.s}" data-n="${m.n}" data-where="${where}" aria-expanded="${open}">
+        <span class="oc-box" aria-hidden="true">${m.s === "passed" ? CHECK : m.s === "failed" ? CROSS : ""}</span>
+        <span class="oc-t">${full ? `${m.n}. ` : ""}${m.title}</span><span class="oc-st">${st}</span>${CHEV}</button>
+      <div class="oc-drawer clp${open ? " open" : ""}"><div><div>${shellBlock(m)}
+        <div class="oc-acts"><button class="quiet js-rerun" type="button" data-n="${m.n}"${m.s === "running" || m.s === "todo" ? " disabled" : ""}>↻ Re-run check</button><button class="quiet" type="button">Copy</button><span class="when">${m.s === "running" ? "streaming" : m.s === "todo" ? "" : `ran ${m.when}`}</span></div></div></div></div>`;
+  }).join("")}</div>`;
+}
+const C = {
+  side: () => `<div class="oc">
+    <div class="oc-hd"><span class="oa-count">Milestones</span><span class="oc-meter"><i style="width:${(count("passed") / MS.length) * 100}%"></i></span><span class="mono t-2" style="font-size:11px">${count("passed")}/${MS.length}</span></div>
+    ${cRows("side")}<div class="foot">Checked 4 min ago</div></div>`,
+  panel: () => `<section class="gp oc" aria-label="Goal">
+    <div class="gp-top"><span class="lbl">Goal</span><span class="pill t-branch">In progress</span><span class="flex1"></span><span class="gp-sub">${count("passed")} of ${MS.length} milestones complete</span></div>
+    <h2 class="gp-title">${GOAL.title}</h2>
+    <div class="oc-meter" style="flex:none;height:3px;margin-bottom:2px"><i style="width:${(count("passed") / MS.length) * 100}%"></i></div>
+    ${cRows("panel")}</section>`,
+};
+
+/* ── Option D: a horizontal track for wide windows ───────────────────────── */
+let dSel = 2;
+const segState = (m) => (m.s === "passed" ? "done" : m.s === "running" ? "live" : "idle");
+function dTrack(mini) {
+  return `<div class="${mini ? "od-mini" : "od-track"}" role="tablist" aria-label="Milestones">${MS.map((m, i) => `
+    <button class="od-st" type="button" role="tab" data-s="${m.s}" data-i="${i}" aria-selected="${!mini && i === dSel}" data-in="${segState(m)}" data-out="${i < MS.length - 1 ? segState(MS[i + 1]) : "idle"}" title="${m.n}. ${m.title}">
+      ${node(m, mini ? 14 : 26)}
+      ${mini ? `<span class="od-n">${m.n}</span>` : `<span class="od-lab">${m.title}</span><span class="od-when">${m.s === "running" ? `running ${EL()}` : m.s === "passed" ? `${m.ago} · ${m.dur}` : m.s === "failed" ? `failing · ${m.ago}` : "not started"}</span>`}
+    </button>`).join("")}</div>`;
+}
+const dDetail = () => {
+  const m = MS[dSel];
+  return `<div class="od-detail" style="--sel:${dSel}">
+    <div><div class="m"><span class="pill ${m.s === "passed" ? "t-pass" : m.s === "running" ? "t-branch" : m.s === "failed" ? "t-fail" : "t-3"}">${LABEL[m.s]}</span></div><h4 style="margin-top:6px">${m.n}. ${m.title}</h4>
+      <div class="m">${m.s === "running" ? `${m.who} · feat/release-one-approval · ${EL()}` : m.s === "todo" ? "waits on milestone 3" : `last check ${m.when} · ${m.dur}`}</div>
+      </div>
+    ${shellBlock(m)}</div>`;
+};
+const D = {
+  side: () => {
+    const now = MS.find((m) => m.s === "running"), bad = MS.find((m) => m.s === "failed"), next = MS.find((m) => m.s === "todo");
+    return `<div class="od">
+    <div class="oc-hd"><span class="oa-count">${count("passed")} of ${MS.length} milestones complete</span></div>
+    ${dTrack(true)}
+    <div class="od-rows">
+      ${now ? `<div class="od-row"><span class="k t-branch">now</span><span class="t">${now.n}. ${now.title}<small>${now.who} · ${EL()}</small></span></div>` : ""}
+      ${bad ? `<div class="od-row"><span class="k t-fail">needs fix</span><span class="t">${bad.n}. ${bad.title}<small>${bad.err.replace("AssertionError: ", "")}</small></span></div>` : ""}
+      ${next ? `<div class="od-row"><span class="k t-3">next</span><span class="t t-3">${next.n}. ${next.title}</span></div>` : ""}
+    </div>
+    <div class="foot">Checked 4 min ago</div></div>`;
+  },
+  panel: () => `<section class="gp od" aria-label="Goal">
+    <div class="gp-top"><span class="lbl">Goal</span><span class="pill t-branch">In progress</span><span class="gp-title" style="font-size:14px;margin-left:6px">${GOAL.title}</span><span class="flex1"></span><span class="gp-sub">${count("passed")} of ${MS.length} milestones complete</span></div>
+    ${dTrack(false)}<div class="js-ddetail">${dDetail()}</div></section>`,
+};
+
+const OPTIONS = [
+  { id: "a", name: "Ring + stepper", r: A, d: "A segmented ring says where the goal stands at a glance; the stepper below folds away.",
+    best: "a glance from across the room", trade: "the ring is one more shape to learn" },
+  { id: "b", name: "Segmented timeline", r: B, d: "One segment per milestone, a live pulse on what's running, and when each check last ran.",
+    best: "seeing activity and recency", trade: "tallest of the four in the panel" },
+  { id: "c", name: "Checklist + output", r: C, d: "As quiet as a to-do list. Any row opens its last check's output in place; a failing one is already open.",
+    best: "fixing a failing check without leaving the session", trade: "progress is less visual" },
+  { id: "d", name: "Horizontal track", r: D, d: "For wide windows: milestones as stations on one line, the selected one's check below. The sidebar keeps a mini track.",
+    best: "wide windows, a sense of order", trade: "needs a fallback under ~1100 px" },
+];
+let cur = 0;
+
+/* ── Render + behaviour ─────────────────────────────────────────────────── */
+const $ = (s, el = document) => el.querySelector(s);
+const $$ = (s, el = document) => [...el.querySelectorAll(s)];
+const rm = () => document.documentElement.classList.contains("rm");
+function renderTabs() {
+  $("#tabs").innerHTML = OPTIONS.map((o, i) => `<button class="tab" role="tab" type="button" aria-selected="${i === cur}" data-i="${i}"><span class="k"><kbd>${i + 1}</kbd>Option ${o.id.toUpperCase()}</span><b>${o.name}</b><span class="d">${o.d}</span></button>`).join("");
+  const o = OPTIONS[cur];
+  $("#optnote").innerHTML = `<span><b>Best for</b> · ${o.best}</span><span><b>Trade-off</b> · ${o.trade}</span>`;
+}
+function render(animate = true) {
+  const o = OPTIONS[cur].r;
+  const sb = $("#sb-goal"), pn = $("#panel-goal");
+  sb.innerHTML = `<div class="opt">${o.side()}</div>`;
+  pn.innerHTML = `<div class="opt">${o.panel()}</div>`;
+  if (!animate) $$(".opt").forEach((e) => (e.style.animation = "none"));
+  requestAnimationFrame(() => requestAnimationFrame(() => $$(".ring").forEach((r) => r.classList.add("drawn"))));
+  if (!rm()) $$(".rs-live").forEach((c) => {
+    const s = +c.dataset.start, l = +c.dataset.len;
+    c.animate([{ strokeDasharray: `0 100`, opacity: 1 }, { strokeDasharray: `${l} ${100 - l}`, opacity: 1, offset: 0.75 }, { strokeDasharray: `${l} ${100 - l}`, opacity: 0 }], { duration: 2000, iterations: Infinity, easing: "cubic-bezier(0.22, 1, 0.36, 1)" });
+  });
+  tickLive(false);
+}
+function select(i) { cur = i; renderTabs(); render(); }
+
+document.addEventListener("click", (e) => {
+  const t = e.target.closest("button");
+  if (!t) return;
+  if (t.matches(".tab")) return select(+t.dataset.i);
+  if (t.matches(".js-clp")) {
+    const box = t.closest(".oa"), open = t.getAttribute("aria-expanded") !== "true";
+    t.setAttribute("aria-expanded", String(open));
+    box.querySelector("[data-clp]").classList.toggle("open", open);
+    box.querySelector("[data-sum]")?.classList.toggle("open", !open);
+    return;
+  }
+  if (t.matches(".oc-row")) {
+    const set = cOpen[t.dataset.where], n = +t.dataset.n, open = !set.has(n);
+    open ? set.add(n) : set.delete(n);
+    t.setAttribute("aria-expanded", String(open));
+    t.nextElementSibling.classList.toggle("open", open);
+    return;
+  }
+  if (t.matches(".js-rerun")) {
+    const m = MS[+t.dataset.n - 1], was = { ...m };
+    m.s = "running"; m.who = "check"; render(false);
+    setTimeout(() => { Object.assign(m, was, { when: "just now", ago: "0m" }); render(false); }, 2800);
+    return;
+  }
+  if (t.matches(".od-st") && t.closest(".od-track")) {
+    dSel = +t.dataset.i;
+    $$(".od-track .od-st").forEach((b) => b.setAttribute("aria-selected", String(+b.dataset.i === dSel)));
+    $(".js-ddetail").innerHTML = dDetail(); tickLive(false);
+    return;
+  }
+  if (t.dataset.themeSet) return setTheme(t.dataset.themeSet);
+  if (t.dataset.motion) return setMotion(t.dataset.motion);
+  if (t.dataset.ms) { responseMs = +t.dataset.ms; $$("[data-ms]").forEach((b) => b.setAttribute("aria-pressed", String(b === t))); return; }
+  if (t.id === "press-all") return $$(".ld > button").forEach(press);
+  if (t.parentElement?.classList.contains("ld")) return press(t);
+});
+document.addEventListener("keydown", (e) => {
+  if (e.target.closest("input, textarea") || e.metaKey || e.ctrlKey) return;
+  const n = Number(e.key);
+  if (n >= 1 && n <= 4) select(n - 1);
+});
+
+/* Live bits: the running check's elapsed time and its streaming output. */
+function tickLive(advance = true) {
+  if (advance) liveAt++;
+  $$(".js-el").forEach((el) => (el.textContent = mmss(elapsed)));
+  $$(".js-live").forEach((el) => { if (advance) { el.classList.remove("fresh"); void el.offsetWidth; el.classList.add("fresh"); } el.textContent = LIVE[liveAt % LIVE.length]; });
+  $$(".js-stream").forEach((el) => {
+    const lines = [];
+    for (let k = Math.max(0, liveAt - 3); k <= liveAt; k++) lines.push(LIVE[k % LIVE.length]);
+    el.innerHTML = lines.map((l) => `<div class="${l.endsWith("✓") ? "ok" : "dim"}">${l}</div>`).join("");
+  });
+}
+setInterval(() => { elapsed++; $$(".js-el").forEach((el) => (el.textContent = mmss(elapsed))); }, 1000);
+setInterval(() => tickLive(true), 1500);
+
+/* ── Section 2: loading variants ─────────────────────────────────────────── */
+let responseMs = 2600;
+const VARIANTS = [
+  { k: "A", cls: "ld-arc", name: "Arc traces the border", d: "A short arc runs around the outside of the button, 3 px off its edge.", notes: ["<b>Shift</b> none", "<b>Reads as</b> working on this button", "<b>Reduced motion</b> a still outline"] },
+  { k: "B", cls: "ld-side", name: "Spinner beside, space reserved", d: "A 12 px spinner sits next to the button, in room the layout always keeps for it.", notes: ["<b>Shift</b> none, 24 px kept", "<b>Reads as</b> the most familiar", "<b>Reduced motion</b> three still dots"] },
+  { k: "C", cls: "ld-glow", name: "Soft glow ring", d: "A branch-tinted ring and glow breathe slowly around the button.", notes: ["<b>Shift</b> none", "<b>Reads as</b> calm, ambient", "<b>Reduced motion</b> a still ring"] },
+  { k: "D", cls: "ld-orbit", name: "Orbiting dot", d: "One small dot, with a short trail, circles the button's outline.", notes: ["<b>Shift</b> none", "<b>Reads as</b> playful, light", "<b>Reduced motion</b> a still dot on the outline"] },
+];
+const ld = (v, btn) => `<span class="ld ${v.cls}">${btn}${v.cls === "ld-side" ? '<span class="slot" aria-hidden="true"><i class="spin"></i><span class="dots">···</span></span>' : ""}${v.cls === "ld-arc" ? '<svg class="deco" aria-hidden="true"><path class="trk"/><path class="arc" pathLength="100"/></svg>' : ""}${v.cls === "ld-orbit" ? '<i class="orb t2"></i><i class="orb t1"></i><i class="orb lead"></i>' : ""}<span class="sr" aria-live="polite"></span></span>`;
+$("#lv-grid").innerHTML = VARIANTS.map((v) => `<article class="lv">
+  <header><span class="key">${v.k}</span><div><h3>${v.name}</h3><p>${v.d}</p></div></header>
+  <div class="stage">
+    <div class="sb"><span class="logo" style="font-size:13px"><svg class="logo-mark" viewBox="1.2 5.6 29.6 20.8" aria-hidden="true"><g fill="none" stroke-width="3" stroke-linecap="round"><path class="lm-mid" d="M9 16 H23"/><path class="lm-top" d="M8 16 C11 16 11.5 7.5 16 7.5 C20.5 7.5 21 16 24 16"/><path class="lm-bot" d="M8 16 C11 16 11.5 24.5 16 24.5 C20.5 24.5 21 16 24 16"/><path class="lm-in" stroke-width="4.8" d="M3.8 16 H9"/><path class="lm-bot" stroke-width="4.8" d="M23 16 H28.2"/></g></svg><span class="logo-word">brindle</span></span>
+      <div>${ld(v, '<button class="newbtn ld-sidebtn" type="button"><span style="font-size:14px;line-height:1">+</span> New session</button>')}</div></div>
+    <div class="mn">
+      <span class="cap">new session · review sheet</span>
+      <div class="row">${ld(v, '<button class="btn-main" type="button">Start session</button>')}${ld(v, '<button class="btn" type="button">Merge</button>')}</div>
+    </div>
+  </div>
+  <footer>${v.notes.map((n) => `<span>${n}</span>`).join("")}</footer></article>`).join("");
+
+function rrPath(w, h, o, r) {
+  const x0 = -o, y0 = -o, x1 = w + o, y1 = h + o, R = r + o;
+  return `M ${x0 + R} ${y0} H ${x1 - R} A ${R} ${R} 0 0 1 ${x1} ${y0 + R} V ${y1 - R} A ${R} ${R} 0 0 1 ${x1 - R} ${y1} H ${x0 + R} A ${R} ${R} 0 0 1 ${x0} ${y1 - R} V ${y0 + R} A ${R} ${R} 0 0 1 ${x0 + R} ${y0} Z`;
+}
+function shape(wrap) {
+  const b = wrap.querySelector("button"), w = b.offsetWidth, h = b.offsetHeight;
+  if (wrap.classList.contains("ld-arc")) {
+    const svg = wrap.querySelector(".deco"), d = rrPath(w, h, 3, 4);
+    svg.setAttribute("width", w); svg.setAttribute("height", h);
+    svg.querySelectorAll("path").forEach((p) => p.setAttribute("d", d));
+  }
+  if (wrap.classList.contains("ld-orbit")) {
+    const d = rrPath(w, h, 4, 4);
+    wrap.querySelectorAll(".orb").forEach((o) => (o.style.offsetPath = `path("${d}")`));
+  }
+}
+function press(btn) {
+  const wrap = btn.parentElement;
+  if (wrap.dataset.busy) return;
+  wrap.dataset.busy = "1";
+  btn.setAttribute("aria-busy", "true");
+  const live = wrap.querySelector(".sr");
+  const slow = setTimeout(() => { shape(wrap); wrap.classList.add("slow"); live.textContent = "Working…"; }, 300);
+  setTimeout(() => {
+    clearTimeout(slow);
+    wrap.classList.remove("slow");
+    btn.removeAttribute("aria-busy");
+    live.textContent = "";
+    delete wrap.dataset.busy;
+  }, responseMs);
+}
+
+/* ── Theme + motion ──────────────────────────────────────────────────────── */
+function setTheme(t) {
+  const el = document.documentElement;
+  t === "system" ? el.removeAttribute("data-theme") : el.setAttribute("data-theme", t);
+  $$("[data-theme-set]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.themeSet === t)));
+}
+const mq = matchMedia("(prefers-reduced-motion: reduce)");
+let motion = "system";
+function applyMotion() { document.documentElement.classList.toggle("rm", motion === "reduced" || mq.matches); render(false); }
+function setMotion(m) { motion = m; $$("[data-motion]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.motion === m))); applyMotion(); }
+mq.addEventListener("change", applyMotion);
+
+/* URL presets, for screenshots: ?theme=light&opt=c&motion=reduced&press=1 */
+const q = new URLSearchParams(location.search);
+cur = Math.max(0, "abcd".indexOf(q.get("opt") || "a"));
+renderTabs();
+if (q.get("theme")) setTheme(q.get("theme"));
+if (q.get("motion")) setMotion(q.get("motion")); else applyMotion();
+if (q.get("press")) { responseMs = 600000; $$(".ld > button").forEach(press); }
+if (q.get("open")) $$(".js-clp").forEach((b) => b.click());
+</script>
+</body>
+</html>
