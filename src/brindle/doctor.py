@@ -574,6 +574,7 @@ def _repo_checks(repo_root: str) -> list[Check]:
                                  "none configured: nothing verifies a branch before it merges. "
                                  'Add e.g. {"checks": ["uv run pytest -q"]} to .brindle/config.json'))
             out.extend(codex_hook_checks(repo_root))
+            out.extend(os_sandbox_checks(repo_root))
             if cfg.add_dirs:
                 from brindle.profiles import load_profile, missing_add_dirs
                 # The repo's entries as any profile gets them: resolved, ~ expanded.
@@ -1001,6 +1002,15 @@ def codex_hook_checks(repo_root: str) -> list[Check]:
                       "trust its hook there until that's fixed")]
     return [Check(OK, "codex hook", "brindle trusts it on the next Codex launch"
                   + (" (brindle moved since the last trust)" if state == codex_hook.MOVED else ""))]
+
+
+def os_sandbox_checks(repo_root: str) -> list[Check]:
+    """Whether Claude and Antigravity workers' shell commands run in the OS
+    sandbox here (brindle.os_sandbox), and if not what keeps them from starting."""
+    from brindle import os_sandbox
+
+    levels = {"ok": OK, "warn": WARN, "fail": FAIL}
+    return [Check(levels[level], "os sandbox", detail) for level, detail in os_sandbox.status(repo_root)]
 
 
 def pro_checks() -> list[Check]:

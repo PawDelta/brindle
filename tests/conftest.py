@@ -549,6 +549,10 @@ def brindle_home(tmp_path, monkeypatch, ambient_brindle_env):
     # ... and nobody turned this home's policy on: a test of the real default
     # says so (tests/test_permission_policy.py).
     monkeypatch.setenv("BRINDLE_POLICY_DEFAULT_OFF", "1")
+    # The OS sandbox's capability check probes the CLI's version and the OS
+    # primitive on the machine: tests/test_os_sandbox.py runs the real one; a
+    # launch with the policy on elsewhere takes the sandbox as available.
+    monkeypatch.setattr("brindle.os_sandbox.capability_problem", lambda provider, binary=None: None)
     # Never touch the real ~/.claude.json (providers.trust_folder writes there).
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-config"))
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))

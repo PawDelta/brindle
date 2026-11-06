@@ -2667,13 +2667,26 @@ def _brindle_secret_paths() -> list[str]:
     return [os.path.normpath(str(p)) for p in paths]
 
 
+def _provider_auth_paths() -> list[str]:
+    """The CLIs' own sign-ins on disk, which their commands may not read:
+    Claude Code's credentials file (its config home, brindle's or the
+    person's; macOS keeps it in the keychain instead) and agy's and Gemini's
+    OAuth tokens. The CLIs read their own outside the sandbox."""
+    from brindle import provider_homes
+
+    paths = [provider_homes.effective_home("claude") / ".credentials.json", "~/.claude/.credentials.json",
+             "~/.gemini/antigravity-cli/antigravity-oauth-token", "~/.gemini/oauth_creds.json"]
+    return list(dict.fromkeys(str(p) for p in paths))
+
+
 def credential_paths() -> list[str]:
     """Every credential store a worker may not touch, for a CLI's own file
-    rules (a Claude worker's Read/Edit denies): ``~/``-spelled stores and
-    brindle's own secrets' absolute paths."""
+    rules (a Claude worker's Read/Edit denies) and for the OS sandbox's
+    denies (brindle.os_sandbox, which resolves aliases): ``~/``-spelled stores
+    and brindle's own secrets' and the CLIs' sign-ins' absolute paths."""
     stores = ["~/.ssh", "~/.gnupg", "~/.aws", "~/.npmrc", "~/.netrc", "~/.git-credentials",
               "~/.docker/config.json", "~/.config/gh", "~/.config/gcloud"]
-    return [*stores, *_brindle_secret_paths()]
+    return [*stores, *_brindle_secret_paths(), *_provider_auth_paths()]
 
 
 def _credential_store(rel: str) -> bool:

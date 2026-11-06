@@ -1841,6 +1841,24 @@ def permissions_policy(state: Optional[str] = typer.Argument(None, help="on or o
     _say_policy()
 
 
+@permissions_app.command("os-sandbox")
+def permissions_os_sandbox(state: Optional[str] = typer.Argument(None, help="on or off.")) -> None:
+    """Show whether Claude and Antigravity workers' shell commands run in the OS sandbox
+    (on with the permission policy, and required then), or turn that off or back on for your workers."""
+    from brindle import os_sandbox
+    from brindle.config import forget_user, set_user
+
+    if state not in (None, "on", "off"):
+        typer.echo("os-sandbox must be on or off")
+        raise typer.Exit(2)
+    if state == "off":
+        set_user(os_sandbox.USER_KEY, "off")
+    elif state == "on":
+        forget_user(os_sandbox.USER_KEY)
+    for level, detail in os_sandbox.status(_here_repo()):
+        typer.echo(f"os sandbox: {detail}" if level == "ok" else f"os sandbox ({level}): {detail}")
+
+
 @permissions_app.command("reset")
 def permissions_reset(yes: bool = typer.Option(False, "--yes", "-y", help="Don't ask for confirmation.")) -> None:
     """Back to the preset's rules: drop your rules, learned rules, saved actions and approval counts."""
