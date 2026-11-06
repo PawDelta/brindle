@@ -65,6 +65,9 @@ pub(crate) const START_LOG: &str = "app-daemon.log";
 /// The launchd job that runs the daemon on macOS (`start_daemon`), in brindle's home.
 #[cfg(target_os = "macos")]
 const LAUNCHD_PLIST: &str = "app-daemon.plist";
+/// The app's bundle identifier (tauri.conf.json), which that job's plist names.
+#[cfg(target_os = "macos")]
+const BUNDLE_ID: &str = "com.pawdelta.brindle";
 /// How long a liveness check's connect and answer may take.
 const CHECK_TIMEOUT: Duration = Duration::from_secs(3);
 /// How a start's failure begins when the installed brindle predates `brindle
@@ -710,8 +713,11 @@ fn daemon_plist(label: &str, cmd: &Command, log: &Path) -> String {
     plist += "\t<key>RunAtLoad</key>\n\t<false/>\n\
               \t<key>KeepAlive</key>\n\t<false/>\n\
               \t<key>AbandonProcessGroup</key>\n\t<true/>\n\
-              \t<key>ProcessType</key>\n\t<string>Interactive</string>\n\
-              </dict>\n</plist>\n";
+              \t<key>ProcessType</key>\n\t<string>Interactive</string>\n";
+    // launchd.plist(5): an app that installs a legacy plist names itself here, so
+    // Login Items lists the job under the app, not under the engine's script.
+    plist += &format!("\t<key>AssociatedBundleIdentifiers</key>\n\t<string>{BUNDLE_ID}</string>\n");
+    plist += "</dict>\n</plist>\n";
     plist
 }
 
@@ -2218,6 +2224,8 @@ mod tests {
         let plist = std::fs::read_to_string(home.join(LAUNCHD_PLIST)).unwrap();
         assert_eq!(std::fs::metadata(home.join(LAUNCHD_PLIST)).unwrap().permissions().mode() & 0o777, 0o600);
         assert!(plist.contains("<key>RunAtLoad</key>\n\t<false/>"), "{plist}");
+        // Listed under the app in Login Items; launchd loaded it with the key, as above.
+        assert!(plist.contains(&format!("<key>AssociatedBundleIdentifiers</key>\n\t<string>{BUNDLE_ID}</string>")), "{plist}");
         assert!(!launchctl(&["print", &launchd_service(&label)]).unwrap().contains("keepalive"));
         // Its own coalition, not this process's (the app's, when the app starts it): what
         // the pid's parent being launchd (ppid 1) alone doesn't give a child of the app's.

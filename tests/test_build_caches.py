@@ -20,6 +20,21 @@ def global_caches(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
 
 
+@pytest.mark.parametrize("config, env, flagged", [
+    ({}, None, True),                                       # no choice yet: no browser scan
+    ({"claudeInChromeDefaultEnabled": True}, None, False),  # turned on with /chrome
+    ({}, "1", False),                                       # turned on by its own variable
+])
+def test_claude_starts_without_chrome_unless_the_person_chose_it(tmp_path, monkeypatch, config, env, flagged):
+    monkeypatch.delenv("CLAUDE_CODE_ENABLE_CFC", raising=False)
+    (tmp_path / ".claude.json").write_text(json.dumps(config))
+    monkeypatch.setattr(providers, "claude_global_config", lambda: str(tmp_path / ".claude.json"))
+    if env:
+        monkeypatch.setenv("CLAUDE_CODE_ENABLE_CFC", env)
+    argv = ClaudeCode().command(LaunchContext("w1", load_profile("developer"), None, cwd=str(tmp_path)))
+    assert ("--no-chrome" in argv) is flagged
+
+
 @pytest.mark.parametrize("who, shared_target", [("worker", True), ("codex", True), ("check", True),
                                                 ("check", False)])
 def test_worker_and_check_env_share_build_caches(db, repo, tmp_path, monkeypatch, who, shared_target):

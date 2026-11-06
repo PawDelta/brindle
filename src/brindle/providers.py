@@ -542,6 +542,19 @@ def claude_onboarded() -> bool:
         return False
 
 
+def claude_chrome_chosen(env: dict[str, str] | None = None) -> bool:
+    """Whether the person chose Claude in Chrome for this launch: "Enabled by
+    default" (``/chrome``) in Claude Code's global config, or its own variable
+    in the profile's env or brindle's. With neither, ``--no-chrome``: see
+    ClaudeCode.command."""
+    if (env or {}).get("CLAUDE_CODE_ENABLE_CFC") or os.environ.get("CLAUDE_CODE_ENABLE_CFC"):
+        return True
+    try:
+        return _read_json(os.path.realpath(claude_global_config())).get("claudeInChromeDefaultEnabled") is True
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
 def record_claude_onboarding() -> str:
     """Record that the person went through Claude Code's first-run screens,
     as Claude Code records it (``hasCompletedOnboarding``), with its theme
@@ -931,6 +944,14 @@ class ClaudeCode(Provider):
             # One turn per process; brindle's headless runner (agents.run_headless)
             # starts the next with --resume when a message arrives.
             argv.append("-p")
+        # A subscriber's interactive Claude Code, on a config with no Chrome
+        # choice yet (brindle's home starts with none), lists seven browsers'
+        # profile folders at every start to decide whether to offer Claude in
+        # Chrome. Run from brindle, macOS holds that against brindle's engine
+        # (docs/investigations/macos-prompts.md). /chrome still works: once it
+        # turns the setting on, this flag is left off from the next launch.
+        if not claude_chrome_chosen(p.env):
+            argv.append("--no-chrome")
         argv += [
             "--settings", json.dumps(settings),
             "--mcp-config", json.dumps(mcp),
