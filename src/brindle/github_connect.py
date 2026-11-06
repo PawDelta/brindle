@@ -180,11 +180,9 @@ def _token(record: dict) -> str | None:
     return secret.decode()
 
 
-def offered() -> bool:
-    """Whether there is a connection for git to try: one GitHub hasn't turned down and
-    that hasn't run out. Reads nothing secret."""
-    record = _load()
-    return record is not None and not _refused() and not _expired(record)
+def connected() -> bool:
+    """Whether the person connected GitHub, working or not. Reads nothing secret."""
+    return _load() is not None
 
 
 def credential() -> tuple[str, str] | None:
@@ -408,8 +406,12 @@ def helper_command() -> str:
 
 
 def git_helper() -> str | None:
-    """The helper for git to ask, when there is a connection for it to try."""
-    return helper_command() if offered() else None
+    """The helper for git to ask, for as long as the person is connected: also once
+    GitHub has stopped taking the credential or it has run out, when the helper answers
+    nothing. Dropping it then would hand github.com back to git's keychain helper, or
+    to gh's, just when the person has to connect again: a dialog, or another account's
+    credential used without a word. Only disconnecting gives their helpers back."""
+    return helper_command() if connected() else None
 
 
 def answer(action: str, request: str, *, local: bool = False) -> str:
@@ -419,15 +421,15 @@ def answer(action: str, request: str, *, local: bool = False) -> str:
     is git saying GitHub refused what it was given: when that was this credential, it goes
     on record (note_refused). ``store`` keeps nothing: brindle already has it.
 
-    A token in the daemon's keychain item is the daemon's to give: any other process
-    passes git's question on to it (``local``: this is the daemon answering)."""
+    A process that can't answer by itself passes git's question on to the daemon
+    (``local``: this is the daemon answering). That is every process but the daemon
+    when the token is in its keychain item, and one that can't read brindle's store at
+    all: git under Codex's sandbox, which is denied the folder (and sees it as absent)."""
     fields = dict(line.split("=", 1) for line in request.splitlines() if "=" in line)
     if (fields.get("protocol"), fields.get("host")) != ORIGIN:
         return ""
     record = _load()
-    if record is None:
-        return ""
-    if record.get("storage") == "keychain" and not is_helper():
+    if record is None or record.get("storage") == "keychain" and not is_helper():
         return "" if local else _ask_daemon(action, request)
     if action == "get":
         got = credential()

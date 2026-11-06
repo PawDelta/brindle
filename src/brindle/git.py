@@ -214,9 +214,10 @@ def _github_helper_entries(helper: str) -> tuple[str, str]:
 
 
 def _connected_github_helper() -> str | None:
-    """brindle's own GitHub connection as a git helper, when there is one GitHub
-    hasn't turned down. Looking is a read of brindle's own store: no keychain item
-    of git's or gh's, and no process started."""
+    """brindle's own GitHub connection as a git helper, for as long as the person
+    is connected: one GitHub stopped taking answers nothing, and still keeps every
+    other helper out (github_connect.git_helper). Looking is a read of brindle's
+    own store: no keychain item of git's or gh's, and no process started."""
     from brindle import github_connect
 
     return github_connect.git_helper()
@@ -325,7 +326,7 @@ def background(args: list[str], cwd: str | Path,
                        check=False, timeout=timeout, no_terminal=True)
     except GitError:
         return None
-    # A connection GitHub refuses is taken off by git itself (the helper's erase).
+    # A connection GitHub refuses goes on record by git itself (the helper's erase), and answers nothing after.
     if gh and proc.returncode != 0 and _REFUSED.search(proc.stderr or ""):
         _gh_refused[str(cwd)] = time.monotonic()
     return proc

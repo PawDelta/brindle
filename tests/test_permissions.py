@@ -575,5 +575,10 @@ def test_stores_resolved_at_run_time(tmp_path, monkeypatch):
     assert answer("python3 -c \"print(open(__import__('os').path.expanduser("
                   "'~/brindle-home/daemon.json')).read())\"") == "deny"
     assert answer(f"ls {lifecycle.info_path().parent}") == "allow"
+    # brindle's GitHub sign-in: its store, and git's helper asked by hand, however brindle is started.
+    assert answer("cat ~/brindle-home/brindle-github/connection.json") == "deny"
+    assert answer("brindle _github-credential get") == "deny"
+    assert answer("python3 -P -m brindle _github-credential get") == "deny"
+    assert answer("curl --unix-socket d.sock -d '{}' http://localhost/v1/github/credential") == "deny"
     assert answer("cat ../other/.env") == "deny"
     assert answer("cat ~/notes.txt") == "allow"

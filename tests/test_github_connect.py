@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 from conftest import sh
 
-from brindle import clone, git, github_connect, mac_keychain, providers
+from brindle import clone, git, github_connect, keystore, mac_keychain, providers
 from brindle.daemon import auth, holds, peer, routes_actions, routes_read
 from brindle.service.errors import ServiceError
 
@@ -61,14 +61,13 @@ class _Origin(http.server.SimpleHTTPRequestHandler):
 
 
 def test_connected_github_answers_git_without_the_keychain(brindle_home, tmp_path, monkeypatch, github_api):
-    # The person's own helper and askpass stand for the keychain's: a fake that notes being asked.
+    # The person's own helper stands for the keychain's: a fake that notes being asked.
     asked = tmp_path / "asked"
     asker = _script(tmp_path / "asker", f'echo "$*" >> "{asked}"')
     home_config = tmp_path / "gitconfig"
-    home_config.write_text(f"[credential]\n\thelper = !{asker}\n[core]\n\taskPass = {asker}\n"
-                           "[user]\n\tname = n\n\temail = a@b.c\n")
+    home_config.write_text(f"[credential]\n\thelper = !{asker}\n[user]\n\tname = n\n\temail = a@b.c\n")
     for name, value in (("GIT_CONFIG_GLOBAL", str(home_config)), ("GIT_CONFIG_NOSYSTEM", "1"),
-                        ("GIT_ASKPASS", str(asker)), ("GIT_TERMINAL_PROMPT", "0"), ("NO_PROXY", "127.0.0.1")):
+                        ("GIT_ASKPASS", ""), ("GIT_TERMINAL_PROMPT", "0"), ("NO_PROXY", "127.0.0.1")):
         monkeypatch.setenv(name, value)
     monkeypatch.delenv("GIT_CONFIG_PARAMETERS", raising=False)
     private, repo = tmp_path / "private", tmp_path / "repo"
@@ -105,12 +104,34 @@ def test_connected_github_answers_git_without_the_keychain(brindle_home, tmp_pat
         assert github_connect.answer("get", "protocol=https\nhost=example.com\n") == ""    # never another host's
         asked.unlink()
 
-        # GitHub stops taking it: git says so once, and no later poll offers it again.
+        # GitHub stops taking it: git says so once, and it is on record.
         monkeypatch.setattr(_Origin, "accepts", "replaced-on-github")
         assert not git.background_fetch(repo, ["--quiet", "origin", "main"]) and git.fetch_refused(repo)
-        assert github_connect.status()["needs_reconnect"] and git.pane_git_config(gh=False) is None
+        assert github_connect.status()["needs_reconnect"]
         assert not git.background_fetch(repo, ["--quiet", "origin", "main"])
-        assert not asked.exists()
+
+        def nobody_answers():
+            """brindle's helper is still the only one for the host, and has nothing to give: what the
+            person asks for fails plainly and a new pane gets no password, rather than the keychain's
+            helper (or gh's) coming back just when they have to connect again."""
+            with pytest.raises(git.GitError):
+                git.fetch_remote_branch(repo, "main")
+            new_pane = {**os.environ, "GIT_CONFIG_PARAMETERS": git.pane_git_config(gh=False)}
+            filled = git.run_env(["credential", "fill"], repo, new_pane, input=f"protocol=http\nhost={host}\n\n",
+                                 check=False).stdout
+            assert "password=" not in filled and not asked.exists()
+
+        nobody_answers()
+        # The same for one that ran out, though GitHub would still take it.
+        monkeypatch.setattr(_Origin, "accepts", TOKEN)
+        github_api["expires"] = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(time.time() - 60))
+        github_connect.connect_token(TOKEN)
+        nobody_answers()
+        # Only disconnecting gives github.com back to the person's own helpers.
+        github_connect.disconnect()
+        with pytest.raises(git.GitError):
+            git.fetch_remote_branch(repo, "main")
+        assert "get" in asked.read_text()
     finally:
         server.shutdown()
 
@@ -128,6 +149,26 @@ def test_connection_routes_keep_the_token_and_refuse_what_github_wont_take(db, t
     assert got == {**read(db, None), "connected": True, "login": "octo", "route": "token", "storage": "file"}
     assert TOKEN not in str(got) and github_connect.credential() == ("octo", TOKEN)
     assert str(github_connect._dir()) in providers._codex_denied_reads()     # Codex's sandbox can't read the store
+    # So git's helper under that sandbox, to which the folder looks absent, asks the daemon, which reads the file.
+    denied, readable = [False], keystore.FileStore.load
+
+    def load(store):
+        if denied[0]:
+            raise PermissionError("denied by the sandbox")
+        return readable(store)
+
+    def daemon(path, body, seconds):
+        denied[0] = False
+        try:
+            return routes_actions.github_credential(db, {}, body)
+        finally:
+            denied[0] = True
+
+    monkeypatch.setattr(keystore.FileStore, "load", load)
+    monkeypatch.setattr(holds, "call", daemon)
+    denied[0] = True
+    assert github_connect.answer("get", ASK) == ANSWER
+    denied[0] = False
     # A token GitHub refuses changes nothing, and the error carries no token.
     with pytest.raises(ServiceError) as refused:
         routes_actions.connect_github(db, {}, {"route": "token", "token": "another-fixture-github-refuses"})
@@ -143,7 +184,7 @@ def test_connection_routes_keep_the_token_and_refuse_what_github_wont_take(db, t
     github_api["expires"] = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(time.time() - 60))
     got = routes_actions.connect_github(db, {}, {"route": "gh"})
     assert (got["route"], got["gh_available"], got["needs_reconnect"]) == ("gh", True, True)
-    assert got["expires_at"] < time.time() and github_connect.git_helper() is None
+    assert got["expires_at"] < time.time() and github_connect.answer("get", ASK) == ""
 
     assert routes_actions.disconnect_github(db, {}, {})["connected"] is False
     assert github_connect.credential() is None

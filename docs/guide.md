@@ -517,9 +517,12 @@ sign in, and fetches wait for it to be unlocked. Without the signed helper (a
 CLI install), or with `--file`, it is a 0600 file under `~/.brindle`, which
 anything running as you can read. `brindle github status` says which.
 
-**If GitHub stops taking it** (revoked, expired, replaced), brindle stops
-offering it and says to connect again. Disconnecting forgets brindle's copy and
-revokes nothing: delete a token on GitHub yourself.
+**If GitHub stops taking it** (revoked, expired, replaced), brindle says to
+connect again, and until you do, git gets no sign-in for github.com from
+brindle: fetches and pushes there fail plainly. Your own helpers are not brought
+back for that host, since that would raise the keychain dialog again or use
+another account without saying so. Disconnecting is what gives them back. It
+forgets brindle's copy and revokes nothing: delete a token on GitHub yourself.
 
 **What this doesn't protect.** Agents run as you. brindle's permission rules
 deny the commands it recognises as reading credentials, but they are rules, not
@@ -527,7 +530,7 @@ a sandbox: a command they don't recognise can read the file, or ask brindle's
 daemon for the credential the way git in the agent's own pane has to. So choose
 by what a taken credential would be worth: a fine-grained token for chosen
 repositories is worth far less than a copy of gh's sign-in. Codex's own sandbox
-does deny its commands the file.
+does deny its commands the file; git under it gets the sign-in from the daemon.
 
 ## Token usage and history
 
