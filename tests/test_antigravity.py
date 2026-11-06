@@ -385,6 +385,9 @@ def test_interactive_supervisor_on_autonomous_needs_no_grants(db, ws, monkeypatc
     with monkeypatch.context() as person:
         person.delenv("BRINDLE_AGENT_ID")
         person.setattr("brindle.cli.DB", lambda: db)
+        for args in (["missing-request"], ["bash", "git push origin main"]):
+            assert CliRunner().invoke(app, ["permissions", "allow", "--once", *args]).exit_code == 1
+            assert permissions.load_store().saved == []
         result = CliRunner().invoke(app, shlex.split(commands[0])[1:])
         assert result.exit_code == 0, result.output
     denied = permissions.add_rule("bash", pushes[0], "deny")
