@@ -310,24 +310,58 @@ def test_under_the_app_only_the_helper_daemon_holds_the_token_and_the_rest_ask_i
     assert github_connect.credential() == ("hubot", OTHER) and list(items.values()) == [OTHER.encode()]
     _connect(TOKEN)
 
-    # A connect that fails, at the keychain or at the record, leaves the one before it whole, and takes
-    # back what it staged: also when it would have moved the token between the keychain and the file.
+    # A connect that fails, at the keychain, at the list of its items or at the record, leaves the one before
+    # it whole and takes back what it staged: also when it would have moved the token to or from the file.
     locked = mac_keychain.Refused(-25293, locked=True)
     _fails_to_store(monkeypatch, _HelpersItem, "refuses", locked)
-    _fails_to_store(monkeypatch, os, "replace", _disk_full)
+    _fails_to_store(monkeypatch, os, "replace", _disk_full)                     # the list: so nothing is staged
+    _fails_to_store(monkeypatch, keystore.FileStore, "save", _disk_full)        # the record, with the token staged
     monkeypatch.setenv(github_connect.STORE_ENV, "file")
     _fails_to_store(monkeypatch, os, "replace", _disk_full)
+    monkeypatch.delenv(github_connect.STORE_ENV)
     assert github_connect.credential() == ("octo", TOKEN) and list(items.values()) == [TOKEN.encode()]
-    # A keychain that won't let go of the old item leaves an orphan on a list; the next change removes it.
+
+    # The worst of it: a staged connect can't be published, and then nothing about clearing it away works
+    # either. The keychain won't remove the item and the list can't be written. The connection is untouched,
+    # and the item is still named on the list, written before the item was made.
+    disk_works, write = [True], github_connect._write
+
+    def list_write(name, text):
+        if not disk_works[0]:
+            raise OSError("disk full")
+        write(name, text)
+
+    def disk_fills(secret):
+        disk_works[0] = False       # from the moment the item is in the keychain
+
+    monkeypatch.setattr(github_connect, "_write", list_write)
+    monkeypatch.setattr(_HelpersItem, "staged", staticmethod(disk_fills))
     monkeypatch.setattr(_HelpersItem, "keeps", True)
-    assert _connect(OTHER)["storage"] == "file" and len(items) == 1 and len(github_connect._stale()) == 1
+    with pytest.raises(ServiceError):
+        _connect(OTHER)
+    assert github_connect.credential() == ("octo", TOKEN)
+    assert sorted(items.values()) == sorted([TOKEN.encode(), OTHER.encode()]) and len(github_connect._items()) == 2
+    # Things work again. The next change leaves it be, as it could be a connect still at the keychain's dialog;
+    # one after it is plainly abandoned removes it.
+    disk_works[0] = True
+    monkeypatch.setattr(_HelpersItem, "staged", staticmethod(lambda secret: None))
+    monkeypatch.setattr(_HelpersItem, "keeps", False)
+    _connect(TOKEN)
+    assert sorted(items.values()) == sorted([TOKEN.encode(), OTHER.encode()])
+    with monkeypatch.context() as later:
+        later.setattr(github_connect, "ABANDONED_SECONDS", 0)
+        _connect(TOKEN)
+    assert list(items.values()) == [TOKEN.encode()] and list(github_connect._items()) == list(items)
+
+    # A keychain that won't remove the old item when a connect replaces it: listed to go, and the next change does.
+    monkeypatch.setenv(github_connect.STORE_ENV, "file")
+    monkeypatch.setattr(_HelpersItem, "keeps", True)
+    assert _connect(OTHER)["storage"] == "file" and len(items) == 1 and list(github_connect._items().values()) == [0]
     assert github_connect.credential() == ("hubot", OTHER)
     monkeypatch.delenv(github_connect.STORE_ENV)
-    _fails_to_store(monkeypatch, _HelpersItem, "refuses", locked)
-    assert github_connect.credential() == ("hubot", OTHER)
     monkeypatch.setattr(_HelpersItem, "keeps", False)
     assert _connect(TOKEN)["storage"] == "keychain" and list(items.values()) == [TOKEN.encode()]
-    assert not github_connect._stale() and "token" not in github_connect._store().load()
+    assert list(github_connect._items()) == list(items) and "token" not in github_connect._store().load()
 
     # Any other brindle process (git's helper in a pane, the CLI) holds no token: it passes git's question on.
     def daemon(path, body, seconds):
