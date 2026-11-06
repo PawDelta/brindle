@@ -5298,6 +5298,9 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
                 from brindle import autopilot as pilot
 
                 pilot.limit_reached(db, agent)
+            current = db.get_agent(agent_id)
+            if current is not None and current.status == "idle":   # not paused for a usage limit
+                tell_parent_api_error(db, current, err_fields)
     elif event == "subagent-start":
         # A crash can skip SubagentStop, so this doesn't touch agent.status:
         # the sidebar hides a subagent that's been "running" too long instead.
@@ -5597,6 +5600,61 @@ def tell_parent_unreported(db: DB, agent: Agent, *, remind: bool = False) -> boo
     finally:
         if not sent:
             db.release_note(agent.id, claimed_at, agent.unreported_noted, field="unreported_noted")
+
+
+# What kind of API error a turn ended on, as its supervisor is told it: a
+# fixed label, never the error text (which can quote request ids or headers).
+API_ERROR_KINDS = (
+    (re.compile(r"\b529\b|overloaded"), "overloaded (529)"),
+    (re.compile(r"\b429\b|rate.?limit|usage.?limit|resource.?exhausted"), "rate limited (429)"),
+    (re.compile(r"\b40[13]\b|unauthori[sz]ed|authentication|forbidden"), "authentication refused (401/403)"),
+    (re.compile(r"\b5\d\d\b|internal server error|bad gateway|service unavailable|api_error"),
+     "server error (5xx)"),
+    (re.compile(r"timed? ?out|timeout"), "request timed out"),
+    (re.compile(r"connection|network|econnreset|socket"), "connection error"),
+)
+
+
+def api_error_kind(text: str) -> str:
+    """The kind of API error ``text`` describes, as a fixed label."""
+    low = (text or "").lower()
+    return next((label for pattern, label in API_ERROR_KINDS if pattern.search(low)), "API error")
+
+
+def tell_parent_api_error(db: DB, agent: Agent, error: str) -> bool:
+    """A worker's turn ended on an API error (Claude Code gave up on it, or
+    never runs a hook after it) before the worker reported. Its CLI sits idle
+    at its prompt and nothing wakes it, so tell its supervisor now, once per
+    stop (the same claim as tell_parent_unreported, so the idle reminder
+    doesn't repeat it), naming only the error's kind. Returns whether the
+    supervisor was told."""
+    if agent.mode not in ("assign", "handoff_detached") or not agent.parent_id or agent.result is not None:
+        return False
+    if db.get_agent(agent.parent_id) is None:
+        return False
+    if agent.unreported_noted and not unreported_note_expired(agent):
+        return False
+    claimed_at = time.time()
+    if not db.claim_unreported(agent.id, claimed_at, agent.unreported_noted,
+                               reopened_at=agent.reopened_at,
+                               status_since=agent.status_since or agent.created_at):
+        return False
+    ws = db.get_workspace(agent.workspace_id)
+    where = f" on branch `{ws.branch}` (workspace {ws.id})" if ws else ""
+    body = (f"[brindle] Worker {agent.id} ({agent.profile}, {agent.provider}){where} stopped on an "
+            f"API error before reporting: {api_error_kind(error)}. Its CLI is idle at its prompt and "
+            "won't go on by itself. send_message it to run the turn again, assign the task to "
+            "another profile, or remove_workspace if the work is abandoned. "
+            f"What brindle sees: {liveness(db, agent, ws)}.")
+    try:
+        send_message(db, agent.parent_id, body, sender_id=agent.id)
+    except (AgentError, tmux.TmuxError):
+        try:
+            db.enqueue(agent.parent_id, body, agent.id)
+        except Exception:  # noqa: BLE001
+            db.release_note(agent.id, claimed_at, agent.unreported_noted, field="unreported_noted")
+            return False
+    return True
 
 
 def _tell_parent_unreported(db: DB, agent: Agent, ws: Workspace | None) -> bool:

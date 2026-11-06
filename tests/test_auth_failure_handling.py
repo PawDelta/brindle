@@ -65,6 +65,23 @@ def test_selected_model_stop_failure_fails_the_worker_and_tells_its_parent(db, r
     assert (db.get_agent(worker.id).status, told) == ("failed", [supervisor.id])
 
 
+def test_overloaded_stop_failure_tells_the_supervisor_its_kind_once(db, repo, monkeypatch, no_pane):
+    ws = Workspace("ws-529", str(repo), "main", "main", "main", "main", str(repo), 20000, "tmux-529", 0)
+    db.add_workspace(ws)
+    supervisor = agents.spawn(db, ws, "developer", mode="interactive")
+    worker = agents.spawn(db, ws, "developer", mode="assign", parent_id=supervisor.id)
+    told = []
+    monkeypatch.setattr(agents, "send_message", lambda db_, to, body, **k: told.append((to, body)))
+    payload = {"error": "overloaded_error", "last_assistant_message":
+               'API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"},'
+               '"request_id":"req_011CUxyz"}'}
+    agents.handle_hook(db, worker.id, "stop-failure", payload)
+    agents.handle_hook(db, worker.id, "stop-failure", payload)   # the same stop, seen again
+    assert db.get_agent(worker.id).status == "idle"            # still takes a message to go on
+    assert [to for to, _ in told] == [supervisor.id]
+    assert "overloaded (529)" in told[0][1] and "req_011CUxyz" not in told[0][1]
+
+
 def test_fresh_exported_key_included_in_agent_env(db, repo, monkeypatch):
     from brindle.db import Workspace, Agent
     from brindle import agents, keystore
