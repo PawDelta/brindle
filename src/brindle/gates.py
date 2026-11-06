@@ -359,7 +359,7 @@ def _run_queued(db: DB, ws: Workspace, cmd: str, env: dict[str, str], timeout: i
         # there is room, and if it times out again report it as a timeout.
         ok, out = _run_once(db, ws, cmd, env, timeout, cancel, slots)
         if not ok and autopilot.TIMED_OUT in out:
-            out = f"timed out, not a failure (the machine was too loaded to finish in time)\n{out}"
+            out = f"{TIMEOUT_VERDICT} (the machine was too loaded to finish in time)\n{out}"
     return ok, out
 
 
@@ -523,6 +523,20 @@ def _check_lock(repo_root: str, tree: str, cmd: str, cancel=None):
 MAX_FAILURE_CHARS = 4_000
 
 
+TIMEOUT_VERDICT = "timed out, not a failure"
+
+
+def timed_out(out: str) -> bool:
+    """Whether a check's output is the verdict of a run that timed out twice."""
+    return out.startswith(TIMEOUT_VERDICT)
+
+
+def summary_timed_out(summary: str) -> bool:
+    """Whether a ``check_summary`` has a check that timed out (inconclusive:
+    neither passed nor failed)."""
+    return any(line.startswith("TIMEOUT `") for line in summary.splitlines())
+
+
 def summary_failed(summary: str) -> bool:
     """Whether a ``check_summary`` reports a failing check."""
     return any(line.startswith("FAIL `") for line in summary.splitlines())
@@ -566,6 +580,9 @@ def check_summary(db: DB, ws: Workspace, cfg: RepoConfig, cancel=None) -> str:
                 lines.append(f"PASS `{cmd}` ({out})" if out.startswith(check_scope.SKIPPED) else f"PASS `{cmd}`")
                 continue
             failed = True
+            if timed_out(out):   # inconclusive: neither a pass nor a red check
+                lines.append(f"TIMEOUT `{cmd}`\n{out[-budget:]}")
+                continue
             # Keep the tail, not the head: run_check's own exit-code marker is the
             # last line, and that's the part a reviewer needs most.
             shown = out if len(out) <= budget else "... (truncated)\n" + out[-budget:]
@@ -629,6 +646,10 @@ def pr_checked(db: DB, ws: Workspace, progress=None, passed: tuple[str, list[str
                     if progress:
                         progress(f"check {n}/{len(cfg.checks)}: {cmd}")
                     ok, out = run_checked(db, ws, cmd, env, cfg.check_timeout, full=True)
+                    if not ok and timed_out(out):
+                        raise workspaces.WorkspaceError(
+                            f"checks timed out, not a failure: {cmd}; nothing was pushed. "
+                            f"Try again once the machine is quieter.\n{out[-MAX_FAILURE_CHARS:]}")
                     if not ok:
                         raise ChecksFailed(cmd, out)
                 if checked is not None:
@@ -677,6 +698,9 @@ def run(db: DB, ws: Workspace, cfg: RepoConfig, *, review_required: bool,
                 r.passed.append(f"`{cmd}` passed (reused)")
                 continue
             ok, out = run_checked(db, ws, cmd, env, cfg.check_timeout)
+            if not ok and timed_out(out):
+                return r.fail(f"Checks timed out, not a failure, in {ws.branch}:\n{out}\n"
+                              "Nothing is merged; merge again once the machine is quieter.")
             if not ok:
                 return r.fail(f"Check failed in {ws.branch}:\n{out}\nSend this to the worker to fix.")
             r.passed.append(f"`{cmd}` passed")

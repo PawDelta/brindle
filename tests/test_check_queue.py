@@ -177,8 +177,15 @@ def test_a_timeout_reruns_once_then_reads_as_a_timeout_not_a_failure(db, repo, m
         return False, f"$ {cmd}\n(timed out after {timeout}s)"
 
     monkeypatch.setattr(autopilot, "run_check", run)
-    ok, out = gates._run_queued(db, ws, "suite", {}, 5)
-    assert not ok and len(runs) == 2 and out.startswith("timed out, not a failure")
+    configure(repo, pre_commit=False)
+    cfg = load_repo_config(str(repo))
+    cfg.checks = ["suite", "later"]
+    summary = gates.check_summary(db, ws, cfg)
+    assert len(runs) == 2   # the run, and its one rerun
+    assert gates.summary_timed_out(summary) and not gates.summary_failed(summary)
+    assert "SKIP `later`" in summary   # an unfinished check is never taken as a pass
+    r = gates.run(db, ws, cfg, review_required=False)
+    assert not r.ok and "not a failure" in r.problem and "Check failed" not in r.problem
     results = iter([(False, "(timed out after 5s)"), (True, "ok")])   # room came back: the rerun passes
     monkeypatch.setattr(autopilot, "run_check", lambda *a, **k: next(results))
     assert gates._run_queued(db, ws, "suite", {}, 5) == (True, "ok")
