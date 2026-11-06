@@ -115,7 +115,8 @@ describe("Onboarding", () => {
     expect(composer.textContent).toContain("in proj");
     expect(screen.queryByRole("region", { name: "Welcome" })).toBeNull();
     expect(daemon.installs).toEqual(["claude"]);
-    expect(screen.queryByRole("dialog")).toBeNull();
+    // The one thing over it: the first-time walkthrough, offered once now that setup is done.
+    expect(screen.getByRole("dialog").getAttribute("aria-label")).toBe("Walkthrough");
   });
 
   it("onboarding uses a CLI found on this Mac as-is: it says where it was found, installs nothing, and asks only for its sign-in", async () => {
