@@ -149,6 +149,16 @@ def _bypass(command):
     ("rg token ~/.config", "deny"),
     ("cat ../other/.env", "deny"),
     ("gh auth token", "deny"),
+    ("git credential fill", "deny"),
+    ("git credential-osxkeychain get", "deny"),
+    ("git-credential-store get", "deny"),
+    ("gh auth git-credential", "deny"),
+    _bypass("git -c x=y credential fill"),
+    _bypass("git -C path credential fill"),
+    _bypass("git -cx=y -Cpath credential fill"),
+    _bypass("env A=1 command git credential fill"),
+    _bypass("printf 'protocol=https\\nhost=github.com\\n' | git credential fill | cat"),
+    _bypass('echo "$(git credential fill)"'),
     ("gcloud --project p auth print-access-token", "deny"),
     ("aws configure export-credentials", "deny"),
     ("echo $GITHUB_TOKEN", "deny"),
@@ -309,11 +319,22 @@ def test_credential_dumps_are_denied(tmp_path, command, expected):
     here = tmp_path / "wt"
     here.mkdir()
     (tmp_path / "other").mkdir()
-    req = permissions.Request("claude", "bash", "Bash", str(here), str(here), str(here), command=command)
+    payload = {"tool_name": "Bash", "tool_input": {"command": command}, "cwd": str(here)}
+    requests = [permissions.from_claude(payload, str(here), str(here)),
+                *permissions.from_codex(payload, str(here), str(here)),
+                permissions.from_agy({"toolCall": {"name": "run_command", "args": {"CommandLine": command}}},
+                                     str(here), str(here))]
     saved = permissions.SavedAction("grant", "bash", command, "allow")
-    decision = permissions.decide(req, saved=[saved])
-    assert decision.decision == expected, decision.reason
-    assert (decision.rule is None) == (expected == "deny") or expected == "allow"
+    for req in requests:
+        decision = permissions.decide(req, saved=[saved])
+        assert decision.decision == expected, decision.reason
+        assert (decision.rule is None) == (expected == "deny") or expected == "allow"
+    if expected == "deny" and permissions.prints_credentials(requests[0]):
+        for preset in permissions.PRESETS:
+            permissions.apply_preset(preset)
+            for req in requests:
+                decision = permissions.decide(req, saved=[saved])
+                assert decision.decision == "deny" and decision.rule is None, (preset, req, decision)
 
 
 def _split(command):
@@ -326,6 +347,9 @@ LOOP = "until s=$(gh run view 1 --json status --jq .status); [[ $s == completed*
 
 @pytest.mark.parametrize("command, expected", [
     # Each form read part by part, every part allowed: no prompt under Autonomous.
+    ("git push origin feature", "allow"),
+    pytest.param("git push", "ask", marks=pytest.mark.variant("its unknown upstream may be the default branch")),
+    ("git fetch", "allow"),
     (f'{LOOP}; echo "$s"', "allow"),                                                # substitution, until, [[ pattern
     ("r=$(gh run list --jq '.[0].id'); s=$r; gh run view \"$s\" | head -1", "allow"),   # assignments
     ("if [[ $s == *ok && -n $t || $u < v ]]; then echo y; else echo n; fi", "allow"),   # && and || are the test's
