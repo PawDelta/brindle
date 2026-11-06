@@ -206,8 +206,8 @@ body {
   .btn:disabled { opacity: 0.45; cursor: not-allowed; }
 
   .btn-primary { background: color-mix(in srgb, var(--pass) 12%, transparent); border-color: color-mix(in srgb, var(--pass) 40%, transparent); color: var(--pass); }
-  .btn-primary:hover:not(:disabled) { background: color-mix(in srgb, var(--pass) 18%, transparent); border-color: color-mix(in srgb, var(--pass) 62%, transparent); }
-  .btn-primary:active:not(:disabled) { background: color-mix(in srgb, var(--pass) 25%, transparent); border-color: var(--pass); }
+  .btn-primary:hover:not(:disabled) { background: color-mix(in srgb, var(--pass) 14%, transparent); border-color: color-mix(in srgb, var(--pass) 62%, transparent); color: color-mix(in srgb, var(--pass) 85%, var(--ink)); }
+  .btn-primary:active:not(:disabled) { background: color-mix(in srgb, var(--pass) 18%, transparent); border-color: var(--pass); color: color-mix(in srgb, var(--pass) 75%, var(--ink)); }
 
   .btn-secondary { border-color: var(--line-strong); color: var(--ink); }
   .btn-secondary:hover:not(:disabled) { background: var(--surface-2); border-color: color-mix(in srgb, var(--line-strong) 70%, var(--ink-3)); }
@@ -218,8 +218,8 @@ body {
   .btn-quiet:active:not(:disabled) { background: color-mix(in srgb, var(--surface-2) 86%, var(--ink)); color: var(--ink); }
 
   .btn-destructive { background: color-mix(in srgb, var(--fail) 12%, transparent); border-color: color-mix(in srgb, var(--fail) 40%, transparent); color: var(--fail); }
-  .btn-destructive:hover:not(:disabled) { background: color-mix(in srgb, var(--fail) 18%, transparent); border-color: color-mix(in srgb, var(--fail) 62%, transparent); }
-  .btn-destructive:active:not(:disabled) { background: color-mix(in srgb, var(--fail) 25%, transparent); border-color: var(--fail); }
+  .btn-destructive:hover:not(:disabled) { background: color-mix(in srgb, var(--fail) 14%, transparent); border-color: color-mix(in srgb, var(--fail) 62%, transparent); color: color-mix(in srgb, var(--fail) 85%, var(--ink)); }
+  .btn-destructive:active:not(:disabled) { background: color-mix(in srgb, var(--fail) 18%, transparent); border-color: var(--fail); color: color-mix(in srgb, var(--fail) 75%, var(--ink)); }
 
   /* Loading (components/LoadingButton.tsx): nothing for 300ms, then the
      button keeps its label and size, dims to 55% and a line sweeps under it,

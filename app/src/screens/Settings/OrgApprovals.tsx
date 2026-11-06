@@ -260,7 +260,7 @@ function OrganizationPermissions({ client }: { client: DaemonClient }) {
       </fieldset>
       <div className="flex flex-wrap gap-s1">
         <LoadingButton type="submit" className={button} disabled={locked} onClick={(event) => { event.preventDefault(); if (!locked) return save(); }}>Save approval limits</LoadingButton>
-        {role && <button type="button" className={button} disabled={locked} onClick={() => void save(true)}>Use inherited limits</button>}
+        {role && <LoadingButton className={button} disabled={locked} onClick={() => save(true)}>Use inherited limits</LoadingButton>}
         <button type="button" className={button} disabled={busy} onClick={() => void reload()}>Reload policy and keep drafts</button>
       </div>
       {saved && <p role="status" className="text-sm text-pass">Approval limits saved.</p>}

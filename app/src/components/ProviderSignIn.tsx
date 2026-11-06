@@ -343,20 +343,20 @@ export function ProviderSignIn({ provider, loginContext, check, onDone, autoStar
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoStart]);
 
-  if (phase.kind === "idle") {
+  // While the CLI's login starts, the button stays and says it is waiting (LoadingButton); the steps follow once it runs.
+  if (phase.kind === "idle" || phase.kind === "starting") {
     return (
-      <LoadingButton className={small ? `${button} px-s1 py-0.5 text-xs` : button} onClick={() => begin()}>
+      <LoadingButton className={small ? `${button} px-s1 py-0.5 text-xs` : button} busy={phase.kind === "starting"} onClick={() => void begin()}>
         Sign in to {name}
       </LoadingButton>
     );
   }
   const terminal = "terminal" in phase ? phase.terminal : null;
-  const busy = phase.kind === "starting" || phase.kind === "waiting" || phase.kind === "checking";
+  const busy = phase.kind === "waiting" || phase.kind === "checking";
   return (
     <div className="flex w-full flex-col gap-s1 rounded-md bg-canvas-2 px-s2 py-s1 text-sm" role="status" aria-label={`Sign in to ${name}`} data-testid="sign-in-flow" data-phase={phase.kind}>
       <div className="flex flex-wrap items-center gap-s1">
         {busy && <span className="size-3 shrink-0 animate-spin rounded-full border-2 border-branch border-t-transparent" aria-hidden />}
-        {phase.kind === "starting" && <span>Starting {name}'s sign-in…</span>}
         {phase.kind === "waiting" && <span>Finish signing in to {name} in your browser…</span>}
         {phase.kind === "checking" && <span>Confirming your sign-in…</span>}
         {phase.kind === "done" && <span className="font-medium text-pass">Signed in to {name} ✓</span>}
@@ -389,7 +389,7 @@ export function ProviderSignIn({ provider, loginContext, check, onDone, autoStar
           </button>
         )}
       </div>
-      {(phase.kind === "starting" || phase.kind === "waiting") && (
+      {phase.kind === "waiting" && (
         <p className="text-xs text-ink-2">Follow the steps in your browser, then come back here. This updates automatically when you're signed in. Your password stays with {name}.</p>
       )}
       {copyError && link && (

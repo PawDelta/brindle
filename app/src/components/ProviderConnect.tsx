@@ -490,12 +490,7 @@ function CloudSignIn({ client, provider, route, openUrl, save, label, locked = f
   return (
     <div className="flex flex-col gap-s1" data-testid="cloud-sign-in" data-state={result ?? job?.status ?? "idle"}>
       <div className="flex flex-wrap items-center gap-s2">
-        {busy ? (
-          <span className="inline-flex items-center gap-s1 text-sm" role="status">
-            <span className="size-3.5 shrink-0 animate-spin rounded-full border-2 border-pass/55 border-t-transparent" aria-hidden />
-            Waiting for the browser…
-          </span>
-        ) : result === "signed in" ? (
+        {result === "signed in" && !busy ? (
           <span className="text-sm" role="status">
             <span aria-hidden className="text-pass">
               ✓{" "}
@@ -503,9 +498,15 @@ function CloudSignIn({ client, provider, route, openUrl, save, label, locked = f
             Signed in through {CLOUD_NAME[route] ?? route}
           </span>
         ) : (
-          <LoadingButton className={button} disabled={locked} onClick={() => begin()}>
+          // The button stays while the sign-in runs, and shows the wait (LoadingButton); what to do sits beside it.
+          <LoadingButton className={button} busy={busy} disabled={locked || busy} onClick={() => begin()}>
             {failed ? "Try again" : (label ?? cloud.signIn)}
           </LoadingButton>
+        )}
+        {busy && (
+          <span className="text-sm" role="status">
+            Waiting for the browser…
+          </span>
         )}
         {url && busy && (
           <button type="button" className={`${quiet} ${link}`} onClick={() => void openUrl(url).catch(() => undefined)}>
