@@ -438,7 +438,7 @@ CREATE TABLE IF NOT EXISTS permission_requests (
     reason TEXT NOT NULL,           -- the policy's; '' when the policy is off
     created_at REAL NOT NULL,
     suggestions TEXT,               -- JSON: the CLI's own "always allow" updates
-    channel TEXT,                   -- supervisor | hook | prompt | answered
+    channel TEXT,                   -- supervisor | hook | prompt | answered | terminal (CLI approval)
     -- what the person (or, supervisor_allow | supervisor_deny, the supervisor) answered:
     -- a record only, answers go through the daemon
     answer TEXT,
@@ -1877,15 +1877,20 @@ class DB:
                                  "AND channel IS NOT 'answered' ORDER BY created_at DESC, rowid DESC LIMIT 1",
                                  (agent_id,)).fetchone()
 
-    def clear_permission_requests(self, agent_id: str) -> None:
+    def clear_permission_requests(self, agent_id: str, *, keep_terminal: bool = False) -> None:
         """Forget the agent's requests, but for a subagent's that a hook still
         holds: it runs on past its worker's turn, and a hold whose row goes reads
         that as its CLI's prompt having taken a request no prompt shows
         (agents._await_app_answer). One whose hook died is 'prompt' once the
-        Inbox sees its hold gone (service.inbox.pending_permissions), and goes then."""
+        Inbox sees its hold gone (service.inbox.pending_permissions), and goes then.
+        Normal turn completion keeps terminal approvals: the person executes
+        the command after reading that turn's reply. The CLI consumes them;
+        failure cleanup and agent deletion still remove them."""
         with self.tx() as c:
             for row in c.execute("SELECT tool_use_id, request, channel FROM permission_requests "
                                  "WHERE agent_id=?", (agent_id,)).fetchall():
+                if keep_terminal and row["channel"] == "terminal":
+                    continue
                 if not (row["channel"] in ("hook", "supervisor") and request_subagent(row)):
                     c.execute("DELETE FROM permission_requests WHERE agent_id=? AND tool_use_id=?",
                               (agent_id, row["tool_use_id"]))

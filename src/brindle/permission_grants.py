@@ -29,6 +29,7 @@ from __future__ import annotations
 import fnmatch
 import glob
 import hashlib
+import json
 import os
 import re
 import subprocess
@@ -699,6 +700,12 @@ def covers(action: SavedAction, req: Request, rules: list[Rule] | None = None) -
         return False
     if action.repo is not None and req.repo_root and action.repo != req.repo_root:
         return False
+    if "request" in action.binding:
+        # A terminal one-time answer covers only the original call, never
+        # another agent, cwd, spelling or command beside it.
+        return (action.decision == "allow" and action.uses_left is not None
+                and action.binding["request"] == permissions.request_digest(
+                    json.dumps(req.to_dict(), sort_keys=True), None))
     deny = action.decision == "deny"
     hits = [scope_matches(action.kind, action.pattern, key, deny, req, rules) for key in ask_keys(req)]
     if deny:
@@ -1170,6 +1177,12 @@ def settle(req: Request, rule: Rule | None, saved: list[SavedAction], *, session
         return None
     lim = org_limits(req.repo_root or None) if hits else None
     for s in hits:
+        if "request" in s.binding and s.uses_left is not None:
+            # The person answered this exact call, as with Inbox's "once".
+            # It is not a remembered scope subject to saved-approval limits.
+            if s.uses_left > 0 and (not spend or permissions.spend_saved_use(s.id)):
+                return Decision("allow", "the person approved this exact request once", rule, saved=s.id)
+            continue
         if (all(limits_allow(s.level, s.pattern, s.life, s.minutes, r) is None for r in asks or [rule])
                 and org_refuses(lim, s.kind, s.life, s.minutes, s.level, s.scope) is None
                 and (s.uses_left is None or s.uses_left > 0 and (not spend or permissions.spend_saved_use(s.id)))):

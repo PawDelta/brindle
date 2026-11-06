@@ -282,17 +282,22 @@ def test_dont_ask_refuses_an_uncovered_command_instead_of_prompting(db, ws, monk
     compound = "touch one.txt && touch two.txt"
     long_a, long_b = "touch " + "x" * 250 + "a", "touch " + "x" * 250 + "b"  # one summary
     permissions.add_rule("bash", "rm protected.txt", "deny")
-    for command in (compound, compound, long_a, long_b, "git push --force", "touch one.txt || rm protected.txt"):
+    approval = "touch approval.txt"
+    permissions.add_rule("bash", approval, "ask")
+    for command in (compound, compound, long_a, long_b, approval, "git push --force", "touch one.txt || rm protected.txt"):
         assert answer("w1", command) == "deny"
     stored = db.conn.execute("SELECT request FROM permission_requests WHERE agent_id='w1'").fetchall()
-    assert sorted(json.loads(r["request"])["command"] for r in stored) == sorted([compound, long_a, long_b])
+    assert sorted(json.loads(r["request"])["command"] for r in stored) == sorted([compound, long_a, long_b, approval])
     told = [r["body"] for r in db.conn.execute("SELECT body FROM inbox WHERE agent_id='boss' ORDER BY id")]
-    assert len(told) == 3
+    assert len(told) == 4
     monkeypatch.delenv("BRINDLE_AGENT_ID")  # the person runs them, from their own terminal
-    for line in told[0].splitlines():
+    monkeypatch.setattr("brindle.cli.DB", lambda: db)
+    for line in (told[0] + "\n" + told[3]).splitlines():
         if line.startswith("brindle permissions allow "):
             assert CliRunner().invoke(app, shlex.split(line)[1:]).exit_code == 0
     assert answer("w1", compound) == "allow"
+    assert answer("w1", approval) == "allow"
+    assert answer("w1", approval) == "deny"
     assert antigravity.SKIP_FLAG not in launch("developer", mode="interactive")[0]  # a person answers
     # An explicit "prompt" keeps agy's own prompt, beside the reviewer's gate.
     set_local(ws.repo_root, "agy_approvals", "prompt")
@@ -363,6 +368,7 @@ def test_interactive_supervisor_on_autonomous_needs_no_grants(db, ws, monkeypatc
     for tool, args in [
         ("run_command", {"CommandLine": "git push --force origin feat"}),
         ("run_command", {"CommandLine": "git push --force origin feat", "Cwd": str(tmp_path)}),
+        ("run_command", {"CommandLine": "ls -a ~/.ssh | wc -l"}),
         ("view_file", {"AbsolutePath": str(tmp_path / ".ssh" / "id_rsa")}),
         ("view_file", {"AbsolutePath": os.path.join(ws.path, ".env")}),
     ]:
@@ -371,6 +377,41 @@ def test_interactive_supervisor_on_autonomous_needs_no_grants(db, ws, monkeypatc
     pushes = ["git push origin main", "git push origin HEAD:release/1.0"]
     for push in pushes:
         assert answer("run_command", {"CommandLine": push})["decision"] == "deny"
+    # The terminal remedy must actually release this exact call once.
+    refused = answer("run_command", {"CommandLine": pushes[0]})
+    commands = [line for line in refused["reason"].splitlines() if line.startswith("brindle permissions allow ")]
+    assert len(commands) == 1
+    assert CliRunner().invoke(app, shlex.split(commands[0])[1:]).exit_code == 1
+    db.add_permission_request("sup", "transient", "{}", "unanswered prompt")
+    antigravity.handle_hook(db, "sup", "agy-stop", {})
+    assert all(r["tool_use_id"] != "transient" for r in db.permission_requests_of("sup"))
+    with monkeypatch.context() as person:
+        person.delenv("BRINDLE_AGENT_ID")
+        person.setattr("brindle.cli.DB", lambda: db)
+        for args in (["missing-request"], ["bash", "git push origin main"]):
+            assert CliRunner().invoke(app, ["permissions", "allow", "--once", *args]).exit_code == 1
+            assert permissions.load_store().saved == []
+        denied = permissions.add_rule("bash", pushes[0], "deny")
+        assert CliRunner().invoke(app, shlex.split(commands[0])[1:]).exit_code == 1
+        assert permissions.load_store().saved == []
+        permissions.forget(denied.id)
+        result = CliRunner().invoke(app, shlex.split(commands[0])[1:])
+        assert result.exit_code == 0, result.output
+        assert CliRunner().invoke(app, shlex.split(commands[0])[1:]).exit_code == 1
+    denied = permissions.add_rule("bash", pushes[0], "deny")
+    assert answer("run_command", {"CommandLine": pushes[0]})["decision"] == "deny"
+    permissions.forget(denied.id)
+    assert answer("run_command", {"CommandLine": "git push --force origin main"})["decision"] == "deny"
+    assert answer("run_command", {"CommandLine": pushes[1]})["decision"] == "deny"
+    assert answer("run_command", {"CommandLine": pushes[0], "Cwd": str(tmp_path)})["decision"] == "deny"
+    add_agent(db, ws, agent_id="other", window="")
+    with monkeypatch.context() as other:
+        other.setenv("BRINDLE_AGENT_ID", "other")
+        assert answer("run_command", {"CommandLine": pushes[0]})["decision"] == "deny"
+    antigravity.handle_hook(db, "other", "agy-stop", {"error": "provider error"})
+    assert db.permission_requests_of("other") == []
+    assert answer("run_command", {"CommandLine": pushes[0]})["decision"] == "allow"
+    assert answer("run_command", {"CommandLine": pushes[0]})["decision"] == "deny"
     # The default branch a push rule means is that of the repo it runs in, however it gets there.
     trunk = tmp_path / "trunk-repo"
     trunk.mkdir()
@@ -404,8 +445,26 @@ def test_interactive_supervisor_on_autonomous_needs_no_grants(db, ws, monkeypatc
     permissions.forget(allow.id)
     permissions.apply_preset("autonomous")
     # ... and with one, the person's answer in its Inbox decides.
+    from brindle.daemon import holds
+    from brindle.service import inbox
+
     held = []
-    monkeypatch.setattr(agents, "_hold_for_app", lambda db, agent, req, *a, **k: (held.append(req.command), "allow_once")[1])
+    monkeypatch.setattr(holds.HOLDS, "_holds", {})
+    monkeypatch.setattr(holds.HOLDS, "_outcomes", {})
+    monkeypatch.setattr(agents, "_pane_state", lambda agent: None)
+    monkeypatch.setattr(holds.Holder, "register", lambda h, until: holds.HOLDS.register(
+        h.agent_id, h.request_id, h.digest, h.nonce, until))
+    monkeypatch.setattr(holds.Holder, "end", lambda h: holds.HOLDS.end(h.request_id, h.nonce))
+
+    def person_answers(holder, seconds):
+        [pending] = [p for p in inbox.pending_permissions(db, db.get_agent("sup")) if p.via == "hook"]
+        assert pending.dto.request_id == holder.request_id
+        held.append(pending.request.command)
+        assert holds.HOLDS.claim("sup", holder.request_id, pending.dto.digest, "allow_once")
+        assert holds.HOLDS.release("sup", holder.request_id)
+        return holds.HOLDS.take(holder.request_id, holder.nonce)
+
+    monkeypatch.setattr(holds.Holder, "wait", person_answers)
     assert [answer("run_command", {"CommandLine": push})["decision"] for push in pushes] == ["allow", "allow"]
     assert held == pushes
 
