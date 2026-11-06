@@ -177,6 +177,37 @@ CREATE TABLE IF NOT EXISTS task_notes (
     noted REAL NOT NULL,
     PRIMARY KEY (task_id, kind)
 );
+-- Per-agent marks kept apart from agents (a released table gains no column):
+-- kind 'commits' is what its supervisor was told had unreported commits
+-- (cull.note_unreported_commits).
+CREATE TABLE IF NOT EXISTS agent_marks (
+    agent_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    value TEXT NOT NULL,
+    PRIMARY KEY (agent_id, kind)
+);
+-- Every report_result call, from receipt to delivery (agents.report_result):
+-- state received -> accepted (promoted into agents.result) -> delivered (the
+-- supervisor's inbox row or the review's claim written in that same
+-- transaction), or rejected (agents.result never touched), or superseded (by a
+-- newer delivered report, or folded into canonical_id). Every transition is a
+-- compare-and-set on the state; rows are never deleted. A report is (agent, summary digest, branch head once
+-- read): the same summary at a new head is a new report.
+CREATE TABLE IF NOT EXISTS report_outbox (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    agent_id TEXT NOT NULL,
+    head TEXT,                     -- NULL until the branch head is read and bound (outbox_bind)
+    digest TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    is_first INTEGER NOT NULL,
+    state TEXT NOT NULL,
+    delivery TEXT,                 -- the inbox message or review claim delivering it (outbox_deliver)
+    fallback TEXT,                 -- failed review start, pending durable supervisor delivery
+    canonical_id INTEGER,          -- the row a consolidated receipt was folded into (outbox_bind)
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    UNIQUE (agent_id, head, digest)
+);
 CREATE TABLE IF NOT EXISTS session_credentials (
     session_id TEXT NOT NULL,
     key TEXT NOT NULL,
@@ -1740,6 +1771,209 @@ class DB:
                             (since, agent_id, previous, reopened_at, status_since))
         return cur.rowcount == 1
 
+    def _outbox_follow(self, c, row):
+        """``row``, or the row it was folded into (canonical_id), however far."""
+        while row is not None and row["state"] == "superseded" and row["canonical_id"]:
+            row = c.execute("SELECT * FROM report_outbox WHERE id=?", (row["canonical_id"],)).fetchone()
+        return row
+
+    def outbox_get(self, row_id: int):
+        """The row ``row_id`` now stands for (see ``_outbox_follow``)."""
+        row = self.conn.execute("SELECT * FROM report_outbox WHERE id=?", (row_id,)).fetchone()
+        return self._outbox_follow(self.conn, row)
+
+    def outbox_receive(self, agent_id: str, digest: str, payload: str):
+        """Record a received report, in one transaction, before anything slow
+        (the branch head is bound later: ``outbox_bind``), or find the unbound
+        row an earlier call of the same summary left. ``is_first``: the agent
+        had no result yet."""
+        now = time.time()
+        with self.tx() as c:
+            row = c.execute("SELECT * FROM report_outbox WHERE agent_id=? AND digest=? AND head IS NULL"
+                            " AND state IN ('received','rejected','accepted')", (agent_id, digest)).fetchone()
+            if row is None:
+                had = c.execute("SELECT result FROM agents WHERE id=?", (agent_id,)).fetchone()
+                cur = c.execute("INSERT INTO report_outbox (agent_id, head, digest, payload, is_first,"
+                                " state, created_at, updated_at) VALUES (?,NULL,?,?,?,'received',?,?)",
+                                (agent_id, digest, payload, int(had is None or had["result"] is None), now, now))
+                row = c.execute("SELECT * FROM report_outbox WHERE id=?", (cur.lastrowid,)).fetchone()
+            return row
+
+    def outbox_bind(self, row_id: int, head: str):
+        """Bind ``head`` to a received report. If the same summary was already
+        reported at that head, this row is folded into that one (superseded,
+        canonical_id set; never deleted) and that one is returned. A row some
+        other call already bound or folded gives the row it stands for."""
+        with self.tx() as c:
+            row = c.execute("SELECT * FROM report_outbox WHERE id=?", (row_id,)).fetchone()
+            if row["head"] is not None or row["state"] == "superseded":
+                return self._outbox_follow(c, row)
+            same = c.execute("SELECT * FROM report_outbox WHERE agent_id=? AND digest=? AND head=?",
+                             (row["agent_id"], row["digest"], head)).fetchone()
+            if same is not None:
+                c.execute("UPDATE report_outbox SET state='superseded', canonical_id=?, updated_at=?"
+                          " WHERE id=? AND head IS NULL AND state IN ('received','rejected','accepted')",
+                          (same["id"], time.time(), row_id))
+                return self._outbox_follow(c, same)
+            c.execute("UPDATE report_outbox SET head=? WHERE id=? AND head IS NULL", (head, row_id))
+            return c.execute("SELECT * FROM report_outbox WHERE id=?", (row_id,)).fetchone()
+
+    def outbox_reject(self, row_id: int) -> bool:
+        """A report that failed validation: received -> rejected. False if another
+        call moved it on (the caller reloads and follows the row's state)."""
+        with self.tx() as c:
+            return c.execute("UPDATE report_outbox SET state='rejected', updated_at=? WHERE id=?"
+                             " AND state IN ('received','rejected')", (time.time(), row_id)).rowcount == 1
+
+    def outbox_accept(self, row_id: int, agent_id: str, payload: str) -> bool:
+        """received/rejected -> accepted, and promote the report into the agent's
+        result, in one transaction. Only the call that wins the transition
+        writes ``agents.result``; the others get False."""
+        with self.tx() as c:
+            won = c.execute("UPDATE report_outbox SET state='accepted', updated_at=? WHERE id=?"
+                            " AND state IN ('received','rejected')", (time.time(), row_id)).rowcount == 1
+            if won:
+                c.execute("UPDATE agents SET result=? WHERE id=?", (mask(payload), agent_id))
+        if won:
+            bus.publish_agent(self, "agent.result", agent_id)
+        return won
+
+    def outbox_deliver(self, row_id: int, *, message: tuple | None = None,
+                       agent_fields: dict | None = None, nothing: bool = False) -> bool:
+        """THE delivery of a report: accepted -> delivered, in ONE transaction
+        with what delivers it, which must be stored: ``message`` (supervisor id,
+        body, sender, held, line -> its inbox row, or with ``line`` (body -> one
+        line) the full text kept as read plus the one line queued), and/or
+        ``agent_fields`` (the pipeline's claim on the worker, e.g. a review),
+        or ``nothing`` when there is no one to tell (the caller says so). It also
+        supersedes the agent's older undelivered reports. False, writing nothing,
+        unless this call won accepted -> delivered: only that call does the
+        outside work (a notice, a reviewer)."""
+        if message is None and not agent_fields and not nothing:
+            raise ValueError("a delivery needs a message, a claim, or nothing to tell")
+        from contextlib import nullcontext
+        from brindle import agents, identity_lock
+
+        # Preparation can outlive a sign-in change or a competing delivery.
+        # Authorize the current recipient under the same lock as notification,
+        # inside the transaction, immediately before writing any message.
+        with agents.delivery_lock(message[0]) if message else nullcontext():
+            return self._outbox_deliver(row_id, message, agent_fields, nothing, identity_lock)
+
+    def _outbox_deliver(self, row_id, message, agent_fields, nothing, identity_lock) -> bool:
+        message_id = None
+        now = time.time()
+        with self.tx() as c:
+            row = c.execute("SELECT * FROM report_outbox WHERE id=?", (row_id,)).fetchone()
+            if row is None or row["state"] != "accepted":
+                return False
+            if row["fallback"] is not None:
+                worker = self.get_agent(row["agent_id"])
+                if (worker is None or worker.pipeline != "reviewing"
+                        or row["delivery"] != f"review {worker.reviewing_since}"):
+                    return False
+            if message is not None:
+                parent = self.get_agent(message[0])
+                if parent is None:
+                    return False
+                identity_lock.ensure(parent)
+            if c.execute("UPDATE report_outbox SET state='delivered', updated_at=? WHERE id=?"
+                         " AND state='accepted'", (now, row_id)).rowcount != 1:
+                return False
+            ids = []
+            if message is not None:
+                to, body, sender, held, line = message
+                cur = c.execute("INSERT INTO inbox (agent_id, sender_id, body, created_at, held, delivered_at)"
+                                " VALUES (?,?,?,?,?,?)",
+                                (to, sender, mask(body), now, int(held or line is not None),
+                                 now if line is not None else None))
+                message_id = int(cur.lastrowid)
+                ids.append(f"message {message_id}")
+                if line is not None:
+                    c.execute("INSERT INTO inbox (agent_id, sender_id, body, created_at) VALUES (?,?,?,?)",
+                              (to, sender, mask(line(message_id)), now))
+            if agent_fields:
+                cols = ", ".join(f"{k}=?" for k in agent_fields)
+                c.execute(f"UPDATE agents SET {cols} WHERE id=?", (*agent_fields.values(), row["agent_id"]))
+                if agent_fields.get("reviewing_since") is not None:
+                    ids.append(f"review {agent_fields['reviewing_since']}")
+            c.execute("UPDATE report_outbox SET delivery=? WHERE id=?",
+                      (", ".join(ids) or "nothing to tell", row_id))
+            c.execute("UPDATE report_outbox SET state='superseded', updated_at=? WHERE agent_id=? AND id<?"
+                      " AND state IN ('received','accepted')", (now, row["agent_id"], row_id))
+        if message_id:
+            bus.publish_agent(self, "message.queued", message[0], message_id=message_id,
+                              sender_id=message[2], held=bool(message[3]))
+        if agent_fields and "pipeline" in agent_fields:
+            bus.publish_agent(self, "agent.pipeline", row["agent_id"], pipeline=agent_fields["pipeline"],
+                              merge_failed=bool(agent_fields.get("merge_failed")))
+        return True
+
+    def outbox_review_failed(self, agent_id: str, report: float, reason: str):
+        """Reopen only this review's receipt, retaining its claim until the
+        fallback message is stored by outbox_deliver. A newer review wins."""
+        with self.tx() as c:
+            worker = self.get_agent(agent_id)
+            if worker is None or worker.pipeline != "reviewing" or worker.reviewing_since != report:
+                return None
+            row = c.execute("SELECT * FROM report_outbox WHERE agent_id=? AND delivery=?"
+                            " AND state IN ('delivered','accepted') ORDER BY id DESC LIMIT 1",
+                            (agent_id, f"review {report}")).fetchone()
+            if row is None:
+                # A review claimed before the outbox existed still needs the
+                # same durable, authorized fallback as a newly reported one.
+                now = time.time()
+                cur = c.execute("INSERT INTO report_outbox (agent_id, digest, payload, is_first, state,"
+                                " delivery, fallback, created_at, updated_at)"
+                                " VALUES (?,?,?,0,'accepted',?,?,?,?)",
+                                (agent_id, f"review:{report}", worker.result or "", f"review {report}",
+                                 mask(reason), now, now))
+                return c.execute("SELECT * FROM report_outbox WHERE id=?", (cur.lastrowid,)).fetchone()
+            c.execute("UPDATE report_outbox SET state='accepted', fallback=?, updated_at=?"
+                      " WHERE id=? AND state='delivered' AND delivery=?",
+                      (mask(reason), time.time(), row["id"], f"review {report}"))
+            return c.execute("SELECT * FROM report_outbox WHERE id=?", (row["id"],)).fetchone()
+
+    def outbox_stuck(self, before: float) -> list:
+        """Reports received or accepted but not delivered since before ``before``."""
+        return self.conn.execute("SELECT * FROM report_outbox WHERE state IN ('received','accepted')"
+                                 " AND updated_at < ? ORDER BY id", (before,)).fetchall()
+
+    def outbox_last_delivered_head(self, agent_id: str) -> str | None:
+        row = self.conn.execute("SELECT head FROM report_outbox WHERE agent_id=? AND state='delivered'"
+                                " AND head != '' ORDER BY id DESC LIMIT 1", (agent_id,)).fetchone()
+        return row["head"] if row else None
+
+    def mark(self, agent_id: str, kind: str) -> str | None:
+        """The value of ``agent_id``'s ``agent_marks`` row of ``kind``, if any."""
+        row = self.conn.execute("SELECT value FROM agent_marks WHERE agent_id=? AND kind=?",
+                                (agent_id, kind)).fetchone()
+        return row["value"] if row else None
+
+    def set_mark(self, agent_id: str, kind: str, value: str | None) -> None:
+        with self.tx() as c:
+            if value is None:
+                c.execute("DELETE FROM agent_marks WHERE agent_id=? AND kind=?", (agent_id, kind))
+            else:
+                c.execute("INSERT INTO agent_marks (agent_id, kind, value) VALUES (?,?,?) "
+                          "ON CONFLICT(agent_id, kind) DO UPDATE SET value=excluded.value",
+                          (agent_id, kind, value))
+
+    def claim_mark(self, agent_id: str, kind: str, value: str) -> tuple[bool, str | None]:
+        """Like ``claim_note``, for a mark: atomically set it to ``value``
+        unless it already is, so only one sweeping process sends that notice.
+        Returns whether it won, and the value it replaced (for ``set_mark``
+        to undo it when the notice couldn't be sent)."""
+        with self.tx() as c:
+            row = c.execute("SELECT value FROM agent_marks WHERE agent_id=? AND kind=?",
+                            (agent_id, kind)).fetchone()
+            if row and row["value"] == value:
+                return False, value
+            c.execute("INSERT INTO agent_marks (agent_id, kind, value) VALUES (?,?,?) "
+                      "ON CONFLICT(agent_id, kind) DO UPDATE SET value=excluded.value",
+                      (agent_id, kind, value))
+        return True, row["value"] if row else None
+
     def release_note(self, agent_id: str, since: float, previous: float | None,
                      *, field: str = "stuck_noted") -> None:
         """Undo ``claim_note`` when the note couldn't be sent, unless a later one replaced it."""
@@ -1807,6 +2041,8 @@ class DB:
     def delete_agent(self, agent_id: str) -> None:
         with self.tx() as c:
             c.execute("DELETE FROM agents WHERE id=?", (agent_id,))
+            c.execute("DELETE FROM agent_marks WHERE agent_id=?", (agent_id,))
+            c.execute("DELETE FROM report_outbox WHERE agent_id=?", (agent_id,))
 
     # -- inbox -------------------------------------------------------------
 
@@ -1900,8 +2136,10 @@ class DB:
         with self.tx() as c:
             row = c.execute(
                 "SELECT * FROM inbox WHERE agent_id=? AND delivered_at IS NULL "
-                "AND COALESCE(held,0)=0 ORDER BY id LIMIT 1",
-                (agent_id,),
+                "AND COALESCE(held,0)=0 AND NOT EXISTS"
+                " (SELECT 1 FROM agent_marks WHERE agent_id=? AND kind='pane-delivery')"
+                " ORDER BY id LIMIT 1",
+                (agent_id, agent_id),
             ).fetchone()
             if not row:
                 return None
@@ -1913,6 +2151,20 @@ class DB:
         with self.tx() as c:
             c.execute("UPDATE inbox SET delivered_at=NULL WHERE id=? AND agent_id=?",
                       (message_id, agent_id))
+
+    def record_pane_delivery(self, message_id: int, agent_id: str, state: str) -> bool:
+        """A partial external write is pending, owned by its durable pane mark.
+
+        Publish both together so even a process exit before the caller unwinds
+        leaves the message visible and unavailable to ordinary queue readers.
+        """
+        with self.tx() as c:
+            if not c.execute("UPDATE inbox SET delivered_at=NULL WHERE id=? AND agent_id=?",
+                             (message_id, agent_id)).rowcount:
+                return False
+            c.execute("INSERT INTO agent_marks (agent_id, kind, value) VALUES (?,'pane-delivery',?)"
+                      " ON CONFLICT(agent_id, kind) DO UPDATE SET value=excluded.value", (agent_id, state))
+        return True
 
     def retry_pending(self, message_id: int, agent_id: str, idle_since: float) -> None:
         """Release the caller's failed delivery claim without creating a second message.
@@ -2076,11 +2328,17 @@ class DB:
             return [_load(Message, r) for r in rows]
 
     def reset_notice(self, agent_id: str) -> None:
-        """A notice that couldn't go out: let the next one try again."""
+        """Release a failed notice's claim unless its queued copy still owns it.
+
+        A transport denial can leave the notice pending. Keep its claim so a
+        later notification cannot duplicate it before flush delivers that row.
+        """
         with self.tx() as c:
             c.execute(
-                "UPDATE inbox SET noticed_at=NULL WHERE agent_id=? AND held=1 AND delivered_at IS NULL",
-                (agent_id,),
+                "UPDATE inbox SET noticed_at=NULL WHERE agent_id=? AND held=1 AND delivered_at IS NULL"
+                " AND NOT EXISTS (SELECT 1 FROM inbox WHERE agent_id=? AND COALESCE(held,0)=0"
+                " AND noticed_at IS NOT NULL AND delivered_at IS NULL)",
+                (agent_id, agent_id),
             )
 
     def read_held(self, agent_id: str) -> list[Message]:

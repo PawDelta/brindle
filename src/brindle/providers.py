@@ -368,6 +368,25 @@ class Provider:
         screen state worth reading here)."""
         return None
 
+    def _composer_bounds(self, lines: list[str]) -> tuple[int, int]:
+        """Input marker and exclusive end in plain capture lines, if recognized."""
+        return -1, len(lines)
+
+    def composer_text(self, screen: str) -> str | None:
+        """Complete visible draft; an absent closing UI boundary is ambiguous.
+
+        Share the provider's draft-guard boundaries, keeping blank continuation
+        lines while excluding status rows. Unsupported layouts fail closed.
+        """
+        from brindle import prompt_answer
+
+        lines = prompt_answer.plain(screen).splitlines()
+        start, end = self._composer_bounds(lines)
+        if start < 0 or end == len(lines):
+            return None
+        match = self.INPUT_LINE.match(lines[start])
+        return "\n".join([match.group(1).lstrip(), *lines[start + 1:end]]).rstrip()
+
     def clear_input(self, target: str, *, server) -> None:
         """Discard a multiline draft before retrying a worker's first brief."""
         tmux.send_keys(target, "C-c", server=server)
@@ -1150,6 +1169,18 @@ class ClaudeCode(Provider):
             i += 1
         return False
 
+    def _composer_bounds(self, lines: list[str]) -> tuple[int, int]:
+        prompts = [i for i, line in enumerate(lines) if self.INPUT_LINE.match(line)]
+        start = prompts[-1] if prompts else -1
+        # The closing border is below all continuation rows, including blank
+        # rows and quoted borders/footers within the draft.
+        end = next((i for i in range(len(lines) - 1, start, -1)
+                    if lines[i].strip() and self.BORDER.match(lines[i])), len(lines))
+        if end == len(lines):
+            end = next((i for i in range(len(lines) - 1, start, -1)
+                        if self.INPUT_FOOTER.search(lines[i])), len(lines))
+        return start, end
+
     def paste_blocked(self, screen: str, interactive: bool) -> str | None:
         """None if it's safe to paste into this pane now, else why not.
         ``screen`` must be captured WITH escape sequences (``tmux capture-pane
@@ -1170,14 +1201,10 @@ class ClaudeCode(Provider):
         if not interactive:
             return None
         styled_lines = screen.rstrip().splitlines()
-        candidates = [i for i, ln in enumerate(styled_lines) if self.INPUT_LINE.match(self._strip_ansi(ln))]
-        if not candidates:
+        start, end = self._composer_bounds([self._strip_ansi(ln) for ln in styled_lines])
+        if start < 0:
             return None
-        start = candidates[-1]
-        for i, line in enumerate(styled_lines[start:]):
-            plain = self._strip_ansi(line)
-            if i and (self.BORDER.match(plain) or self.INPUT_FOOTER.search(plain)):
-                break
+        for i, line in enumerate(styled_lines[start:end]):
             text = line[line.find("❯") + 1:] if not i else line
             if self._strip_ansi(text).strip() and not self._is_placeholder_text(text):
                 return "typing"
@@ -1811,16 +1838,27 @@ class Codex(Provider):
     FOOTER = re.compile(r"^[ \t]*(?:\? for shortcuts|\d+% context left)")
     MODEL_PATH = re.compile(r"^[ \t]*[^·\n]+ · (?:~/|/|[A-Za-z]:[\\/])")
 
+    def _composer_bounds(self, lines: list[str]) -> tuple[int, int]:
+        prompts = [i for i, line in enumerate(lines) if self.INPUT_LINE.match(line)]
+        start = prompts[-1] if prompts else -1
+        end = next((i for i in range(len(lines) - 1, start, -1)
+                    if self.FOOTER.match(lines[i])), len(lines))
+        # Current Codex puts model/path above shortcuts, in a status block
+        # separated from the draft by a blank row. Retain all other rows.
+        footer_start = end
+        while footer_start > start + 1 and lines[footer_start - 1].strip():
+            footer_start -= 1
+        if end < len(lines) and footer_start < end and self.MODEL_PATH.match(lines[footer_start]):
+            end = footer_start
+        return start, end
+
     def paste_blocked(self, screen: str, interactive: bool) -> str | None:
         # Approval choices also use ›. Never paste into those menus, even
         # for a worker whose ordinary input is not hand-typed.
         plain = self.ANSI_SGR.sub("", screen)
         lines = screen.splitlines()
         plain_lines = plain.splitlines()
-        prompts = [i for i, line in enumerate(plain_lines) if self.INPUT_LINE.match(line)]
-        start = prompts[-1] if prompts else -1
-        end = next((i for i in range(start + 1, len(lines))
-                    if self.FOOTER.match(plain_lines[i])), len(lines))
+        start, end = self._composer_bounds(plain_lines)
         # A returned chat composer and its footer supersede old approval
         # dialogs in the transcript. A selected numbered menu choice is
         # still an approval, even if a shortcuts footer is visible below it.
@@ -1831,17 +1869,8 @@ class Codex(Provider):
             return "approval"
         if not interactive:
             return None
-        if not prompts:
+        if start < 0:
             return "input" if plain.strip() else None
-        # The model/path status row precedes the shortcuts row in current
-        # Codex. Recognize it only in that footer block, after a blank row,
-        # so it does not become a continuation of the person's draft.
-        footer_start = end
-        while footer_start > start + 1 and self.ANSI_SGR.sub("", lines[footer_start - 1]).strip():
-            footer_start -= 1
-        if (end < len(lines) and footer_start < end
-                and self.MODEL_PATH.match(self.ANSI_SGR.sub("", lines[footer_start]))):
-            end = footer_start
         # Keep continuation rows, including rows after an empty first line.
         # Keep styling before › too: dim may already be active at the marker.
         styled = "\n".join(lines[start:end]).replace("›", "", 1)
@@ -2065,17 +2094,25 @@ class Antigravity(Provider):
     def _strip_ansi(cls, text: str) -> str:
         return cls.ANSI_SGR.sub("", text)
 
+    def _composer_bounds(self, lines: list[str]) -> tuple[int, int]:
+        prompts = [i for i, line in enumerate(lines) if self.INPUT_LINE.match(line)]
+        start = prompts[-1] if prompts else -1
+        end = next((i for i in range(len(lines) - 1, start, -1)
+                    if lines[i].strip() and re.fullmatch(r"[\s─━╭╮╰╯│]+", lines[i])), len(lines))
+        if end == len(lines):
+            end = next((i for i in range(len(lines) - 1, start, -1)
+                        if self.READY.search(lines[i])), len(lines))
+        return start, end
+
     def paste_blocked(self, screen: str, interactive: bool) -> str | None:
         if not interactive:
             return None
         styled_lines = screen.rstrip().splitlines()
-        candidates = [i for i, ln in enumerate(styled_lines) if self.INPUT_LINE.match(self._strip_ansi(ln))]
-        if not candidates:
+        start, end = self._composer_bounds([self._strip_ansi(ln) for ln in styled_lines])
+        if start < 0:
             return None
-        for i, line in enumerate(styled_lines[candidates[-1]:]):
+        for i, line in enumerate(styled_lines[start:end]):
             text = self._strip_ansi(line)
-            if i and (self.READY.search(text) or re.fullmatch(r"[\s─━╭╮╰╯│]+", text)):
-                break
             text = self.INPUT_LINE.sub(r"\1", text) if not i else text
             if text.strip() and not self.MODE_HINT.match(text.strip()):
                 return "typing"

@@ -218,7 +218,7 @@ CLAUDE_TYPING_WITH_INVERSE_CURSOR = (
     (CLAUDE_PLACEHOLDER_GREY_256, True, None),  # grey 256-colour placeholder
     (CLAUDE_PLACEHOLDER_TRUECOLOR_GREY, True, None),  # grey truecolor placeholder
     (CLAUDE_TYPING_WITH_INVERSE_CURSOR, True, "typing"),  # ignore the inverse-video cursor cell
-    ("❯\n" + "continued draft\n" * 40 + "────\n? for shortcuts", True, "typing"),   # a long draft, prompt far above
+    ("❯\n\n" + "continued draft\n" * 40 + "────\n? for shortcuts", True, "typing"),   # a long draft after a blank row
 ])
 def test_claude_paste_blocked(screen, interactive, want):
     assert ClaudeCode().paste_blocked(screen, interactive) == want
@@ -283,8 +283,9 @@ def test_find_running_reuses_a_live_interactive_agent(db, ws, monkeypatch):
 
 
 def test_handoff_wait_is_bounded_and_detaches(db, ws, monkeypatch):
+    """A detached handoff's reports survive interruptions, then collection drains them."""
     (Path(ws.repo_root) / ".brindle").mkdir(exist_ok=True)
-    (Path(ws.repo_root) / ".brindle" / "config.json").write_text('{"pipeline": false}')
+    (Path(ws.repo_root) / ".brindle" / "config.json").write_text('{"pipeline": true}')
     from brindle import mcp_server
 
     fake_agent(db, ws, status="processing", agent_id="boss")
@@ -296,17 +297,111 @@ def test_handoff_wait_is_bounded_and_detaches(db, ws, monkeypatch):
     assert "still running" in out and "wait_for_worker" in out
     assert db.get_agent("w1").mode == "handoff_detached"
 
-    # Finishing later forwards the result to the supervisor's inbox...
-    agents.report_result(db, "w1", "done later")
-    assert db.pending_count("boss") == 1
+    # Finishing later forwards each accepted report exactly once, even when
+    # interrupted before delivery or interleaved with a concurrent report.
+    broken = {"git": False, "docs": False, "pre": False, "notify": False}
+    at = {"head": "h1"}
+    inner = []
+    during_docs = []   # (what the interleaved call reports, what the outer call's check then says)
+    during_head = []
+    read_docs, warm_checks, notify_parent = agents.stale_analysis_docs, agents.warm_checks, agents._notify_supervisor
+
+    def git_head(ws_):
+        if broken["git"]:
+            raise RuntimeError("interrupted at the first git call")
+        if during_head:   # a duplicate call that starts while this one reads the head
+            during_head.pop()()
+        return at["head"]
+
+    def docs(db_, agent_id):
+        if broken["docs"]:
+            raise RuntimeError("interrupted after receipt")
+        if during_docs:   # a second call runs to the end while this one checks documents
+            text, verdict = during_docs.pop()
+            agents.report_result(db, "w1", text)
+            return verdict
+        return read_docs(db_, agent_id)
+
+    def warm(ws_):
+        if broken["pre"]:
+            raise RuntimeError("interrupted after accept")
+        if inner:   # a concurrent duplicate call, mid-flight
+            inner.pop()()
+        warm_checks(ws_)
+
+    def notify(db_, parent):
+        if broken["notify"]:
+            raise RuntimeError("interrupted after dispatch")
+        notify_parent(db_, parent)
+
+    def states():
+        return [r["state"] for r in db.conn.execute("SELECT state FROM report_outbox WHERE canonical_id IS NULL ORDER BY id")]
+
+    def messages():
+        return db.conn.execute("SELECT count(*) FROM inbox WHERE agent_id='boss' AND COALESCE(held, 0)=0").fetchone()[0]
+
+    monkeypatch.setattr(agents, "warm_checks", warm)
+    monkeypatch.setattr(agents, "stale_analysis_docs", docs)
+    monkeypatch.setattr(agents, "_branch_head", git_head)
+    monkeypatch.setattr(agents, "_notify_supervisor", notify)
+
+    broken["git"] = True                                   # the first git call hangs
+    with pytest.raises(RuntimeError):
+        agents.report_result(db, "w1", "done")
+    assert states() == ["received"] and db.get_agent("w1").result is None
+    broken.update(git=False, docs=True)                    # after receipt
+    with pytest.raises(RuntimeError):
+        agents.report_result(db, "w1", "done")
+    assert states() == ["received"] and db.get_agent("w1").result is None   # nothing reads it yet
+    broken.update(docs=False, pre=True)                    # after accept
+    with pytest.raises(RuntimeError):
+        agents.report_result(db, "w1", "done")
+    assert states() == ["accepted"] and db.get_agent("w1").result == "done" and messages() == 0
+    broken["pre"] = False
+    inner.append(lambda: agents.report_result(db, "w1", "done"))   # a duplicate call, concurrently
+    agents.report_result(db, "w1", "done")
+    assert states() == ["delivered"] and messages() == 1
     assert [(e["kind"], e["agent_id"], e["payload"].get("sender_id"))
             for e in bus.tail(db, kinds=("agent.result", "message.queued"))] == [
         ("agent.result", "w1", None), ("message.queued", "boss", "w1")]
-    # ...and if the supervisor collects it directly, the duplicate is dropped.
+    agents.report_result(db, "w1", "done")
+    at["head"] = "h2"                                      # the same summary at a new head
+    broken["notify"] = True                                # after dispatch
+    with pytest.raises(RuntimeError):
+        agents.report_result(db, "w1", "done")
+    assert states() == ["delivered", "delivered"] and messages() == 2
+    agents.report_result(db, "w1", "done")
+    assert messages() == 2
+    # A duplicate that starts while the head is read, for a head already reported: its
+    # receipt is folded into the delivered row (kept, never deleted) and both calls follow it.
+    during_head.append(lambda: agents.report_result(db, "w1", "done"))
+    agents.report_result(db, "w1", "done")
+    assert states() == ["delivered", "delivered"] and messages() == 2
+    h2 = db.conn.execute("SELECT id FROM report_outbox WHERE head='h2' AND canonical_id IS NULL").fetchone()[0]
+    folded = db.conn.execute("SELECT state FROM report_outbox WHERE canonical_id=?", (h2,)).fetchall()
+    assert folded and all(r["state"] == "superseded" for r in folded)
+    broken["notify"] = False
+    # Two calls interleaved at the document check: the one that accepts first writes the
+    # result and delivers; the other, whether its check passed or found stale documents,
+    # follows the row's state and delivers nothing.
+    for n, verdict in enumerate((None, "read the new analysis docs first"), 1):
+        at["head"] = f"x{n}"
+        db.update_agent("w1", result=None)   # the document check applies to a first report
+        during_docs.append((f"v{n}", verdict))
+        agents.report_result(db, "w1", f"v{n}")
+        assert db.get_agent("w1").result == f"v{n}" and messages() == 2 + n
+    # An older report stuck undelivered is superseded by a newer one that is delivered.
+    old = db.outbox_receive("w1", "old", "stale")
+    db.outbox_bind(old["id"], "h0")
+    at["head"] = "h3"
+    agents.report_result(db, "w1", "done, more")
+    assert db.conn.execute("SELECT state FROM report_outbox WHERE id=?", (old["id"],)).fetchone()[0] == "superseded"
+    assert states()[-1] == "delivered"
+    # Collecting the latest result directly drops the queued handoff messages.
     out = mcp_server._await_worker(db, "w1", wait_seconds=0)
-    assert "done later" in out
+    assert "done, more" in out
     assert db.pending_count("boss") == 0
-    assert db.get_agent("w1") is None  # handoff worker closed after collection
+    assert db.get_agent("w1") is None
 
 
 @pytest.mark.skipif(not shutil.which("tmux"), reason="tmux not installed")

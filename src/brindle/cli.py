@@ -3542,23 +3542,24 @@ def review_after_checks_cmd(workspace_id: str, caller: Optional[str] = typer.Opt
     prompt (or, when a check fails, send the worker the failing output and
     start none). Started detached from start_review, so the review still starts
     even if the MCP server that asked for it has exited."""
-    from brindle import gates
-    from brindle.config import load_repo_config
+    from brindle import gates, pipeline
 
     db = _helper_db()
     ws = db.get_workspace(workspace_id)
     if ws is None:
         return
+    # Older or explicit helpers may omit --report. Bind before doing any
+    # checks, never to whichever report happens to own the branch on failure.
+    if report is None:
+        with agents.review_dispatch_lock(ws.id):
+            report = pipeline.review_claim(db, ws)
     try:
         agents.review_after_checks(db, caller, ws, profile, focus, workspaces.config_for(db, ws),
                                    request_id=request_id, second=second, slot=slot, report=report)
     except (agents.AgentError, ValueError) as e:
-        from brindle import pipeline
-
-        worker = pipeline.piped_worker(db, ws)
-        if worker and worker.pipeline == "reviewing":
-            db.update_agent(worker.id, pipeline=None)   # nothing is reviewing it after all
-        if db.get_agent(caller) if caller else None:
+        if report is not None:
+            pipeline.review_start_failed(db, ws, report, str(e))
+        elif db.get_agent(caller) if caller else None:
             gates.tell(db, caller, f"[brindle] No reviewer could start on `{ws.branch}` after its "
                                    f"checks ({e}). Review it yourself with workspace_diff, then "
                                    "merge_workspace.")

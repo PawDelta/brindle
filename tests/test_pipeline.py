@@ -351,6 +351,88 @@ def test_issue186_a_reported_branch_nobody_is_checking_is_reviewed_again(db, rep
     assert db.get_agent("w1").pipeline == "reviewing"
 
 
+def test_report_dispatch_preserves_the_current_claim(db, tmp_path, monkeypatch):
+    """Duplicate, superseding, failed and legacy dispatches share one branch's history."""
+    from brindle.db import Workspace
+
+    ws = Workspace("ws", str(tmp_path), "work", "worktree", "work", "main",
+                   str(tmp_path), None, "fake", 1)
+    db.add_workspace(ws)
+    add(db, ws, "boss", "interactive", "supervisor", status="processing")
+    add(db, ws, "w1", "assign", parent="boss", result="done")
+    monkeypatch.setattr(pipeline, "load_repo_config", lambda *a, **k: RepoConfig(checks=["true"], review_profile="reviewer"))
+    monkeypatch.setattr(agents, "_branch_head", lambda *a: "head")
+    monkeypatch.setattr(gates, "head", lambda *a: "head")
+    monkeypatch.setattr(agents.git, "ahead_behind", lambda *a: (0, 1))
+    monkeypatch.setattr(agents.git, "dirty_files", lambda *a, **k: [])
+    monkeypatch.setattr(agents, "warm_checks", lambda ws_: None)
+    monkeypatch.setattr(agents, "is_alive", lambda *a: False)
+    starts, claims = [], []
+    phase = "duplicate"
+
+    def detach(argv):
+        starts.append(argv)
+        claims.append(db.get_agent("w1").reviewing_since)
+        if phase == "duplicate" and len(starts) == 1:
+            agents.report_result(db, "w1", "done")
+        elif phase == "newer-report" and db.get_agent("w1").result == "older":
+            agents.report_result(db, "w1", "newer")
+            raise agents.AgentError("old launch failed after the new report")
+        elif phase in ("fallback-moved", "legacy-fallback"):
+            raise agents.AgentError("reviewer unavailable")
+
+    original = agents.condense
+
+    def condense(*a, **kw):
+        if phase == "fallback-moved":
+            db.update_agent("w1", pipeline="fixing")  # a verdict landed during preparation
+        return original(*a, **kw)
+
+    monkeypatch.setattr(agents, "_detach", detach)
+    monkeypatch.setattr(agents, "condense", condense)
+    agents.report_result(db, "w1", "done")
+    assert len(starts) == 1 and db.get_agent("w1").reviewing_since == claims[0]
+    assert db.get_agent("w1").pipeline == "reviewing" and db.pending_count("boss") == 0
+
+    phase = "newer-report"
+    agents.report_result(db, "w1", "older")
+    current = db.get_agent("w1")
+    assert len(starts) == 3 and current.reviewing_since == claims[-1]
+    assert current.result == "newer" and claims[-2] != claims[-1]
+    assert current.pipeline == "reviewing" and db.pending_count("boss") == 0
+
+    phase = "fallback-moved"
+    agents.report_result(db, "w1", "ready for another review")
+    current = db.get_agent("w1")
+    assert len(starts) == 4 and current.reviewing_since == claims[-1]
+    assert current.pipeline == "fixing" and db.pending_count("boss") == 0
+
+    # Recovery can also inherit a claim made before any outbox receipt existed.
+    phase = "legacy-fallback"
+    db.update_agent("w1", pipeline="reviewing", reviewing_since=1.0)
+    pipeline._start_review(db, pipeline.load_repo_config(ws.repo_root), db.get_agent("boss"),
+                           db.get_agent("w1"), ws, "done", 1.0)
+    row = db.conn.execute("SELECT * FROM report_outbox ORDER BY id DESC LIMIT 1").fetchone()
+    assert row["state"] == "delivered" and db.pending_count("boss") == 1
+    assert db.get_agent("w1").pipeline is None
+
+    # A direct legacy report must retain its receipt when the recipient is locked.
+    from brindle import identity_lock
+
+    phase = "legacy-dirty"
+    monkeypatch.setattr(agents.git, "dirty_files", lambda *a, **k: ["work.py"])
+    monkeypatch.setattr(identity_lock, "locked_by", lambda aid: "other" if aid == "boss" else None)
+    with pytest.raises(agents.AgentError):
+        pipeline.on_report(db, db.get_agent("w1"), ws, "dirty report")
+    assert db.pending_count("boss") == 1
+    monkeypatch.setattr(identity_lock, "locked_by", lambda aid: None)
+    pipeline.on_report(db, db.get_agent("w1"), ws, "dirty report")
+    pipeline.on_report(db, db.get_agent("w1"), ws, "dirty report")
+    row = db.conn.execute("SELECT * FROM report_outbox WHERE canonical_id IS NULL ORDER BY id DESC LIMIT 1").fetchone()
+    assert row["state"] == "delivered" and db.pending_count("boss") == 2
+    assert db.get_agent("w1").pipeline is None
+
+
 @pytest.mark.parametrize("session, exits_mid_delivery", [
     ("sess-w1", False), (None, False),
     # Alive when the verdict lands, gone by the time send_message delivers.

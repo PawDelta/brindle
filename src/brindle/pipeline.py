@@ -498,9 +498,24 @@ def _report_only(worker: Agent, ws: Workspace) -> bool:
     return not git.dirty_files(ws.path, tracked_only=True)
 
 
-def on_report(db: DB, worker: Agent, ws: Workspace, result: str) -> bool:
+def on_report(db: DB, worker: Agent, ws: Workspace, result: str, outbox_id: int | None = None) -> bool:
     """Start the review of a reported branch. Returns whether the pipeline
     took the report (so the caller doesn't forward it to the supervisor)."""
+    with agents.review_dispatch_lock(ws.id):
+        if outbox_id is None:
+            row = agents._receive_report(db, worker.id, ws, result)
+            db.outbox_accept(row["id"], worker.id, row["payload"])
+            outbox_id = row["id"]
+        return _on_report(db, worker, ws, result, outbox_id)
+
+
+def _on_report(db: DB, worker: Agent, ws: Workspace, result: str, outbox_id: int) -> bool:
+    row = db.outbox_get(outbox_id)
+    if row["state"] in ("delivered", "superseded"):
+        return bool(row["delivery"] and row["delivery"].startswith("review "))
+    if row["fallback"] is not None:
+        _report_fallback(db, worker, ws, result, row)
+        return True
     try:
         cfg = load_repo_config(ws.repo_root, branch=ws.base_branch)
     except ValueError:
@@ -514,18 +529,23 @@ def on_report(db: DB, worker: Agent, ws: Workspace, result: str) -> bool:
         return False   # nothing to review or merge: the report goes straight to the supervisor
     dirty = git.dirty_files(ws.path, tracked_only=True)   # untracked scratch files don't travel with the branch
     if dirty:
-        db.update_agent(worker.id, pipeline=None)
-        _escalate(db, ws, worker)
         shown = ", ".join(dirty[:5]) + (f" and {len(dirty) - 5} more" if len(dirty) > 5 else "")
-        _tell(db, parent.id,
-              agents.condense(
-                  f"[brindle pipeline] {worker.id} reported on `{ws.branch}` but left uncommitted "
-                  f"changes ({shown}), so it can't be reviewed or merged. "
-                  f"Its report: {agents.first_line(result)}", result), worker.id)
+        text = agents.condense(
+            f"[brindle pipeline] {worker.id} reported on `{ws.branch}` but left uncommitted "
+            f"changes ({shown}), so it can't be reviewed or merged. "
+            f"Its report: {agents.first_line(result)}", result)
+        # The report's one delivery: the supervisor's message and the worker leaving
+        # the pipeline are stored together; the rest happens after, from that.
+        if db.outbox_deliver(outbox_id, message=agents._report_message(db, parent, text, worker.id),
+                             agent_fields={"pipeline": None}):
+            _escalate(db, ws, worker)
+            agents._notify_supervisor(db, parent)
         return True
     # Before the check run starts: it reads this report's claim (see review_claim).
     report = time.time()
-    db.update_agent(worker.id, pipeline="reviewing", reviewing_since=report, merge_failed=None)
+    claim = dict(pipeline="reviewing", reviewing_since=report, merge_failed=None)
+    if not db.outbox_deliver(outbox_id, agent_fields=claim):
+        return True   # this report was handled already: its claim and review stand
     _start_review(db, cfg, parent, worker, ws, result, report)
     return True
 
@@ -580,6 +600,20 @@ def _start_review(db: DB, cfg: RepoConfig, parent: Agent, worker: Agent, ws: Wor
     identity (its ``reviewing_since``), captured by the caller once and
     handed to every start: none looks it up later, so none can mistake a
     branch the checks have since sent back for a fresh one."""
+    with agents.review_dispatch_lock(ws.id):
+        _start_report_review(db, cfg, parent, worker, ws, result, report)
+
+
+def _start_report_review(db: DB, cfg: RepoConfig, parent: Agent, worker: Agent, ws: Workspace,
+                         result: str, report: float) -> None:
+    if not still_claimed(db, ws, report):
+        return
+    pending = db.conn.execute("SELECT * FROM report_outbox WHERE agent_id=? AND delivery=?"
+                              " AND state='accepted' AND fallback IS NOT NULL",
+                              (worker.id, f"review {report}")).fetchone()
+    if pending is not None:
+        _report_fallback(db, worker, ws, result, pending)
+        return
     try:
         second = second_profile(db, cfg, worker, ws)
         # With a second review both calls carry a concrete profile, so the
@@ -594,13 +628,38 @@ def _start_review(db: DB, cfg: RepoConfig, parent: Agent, worker: Agent, ws: Wor
                     agents.close(db, started.id)   # don't leave a lone first review running
                 raise
     except agents.AgentError as e:
-        db.update_agent(worker.id, pipeline=None)
+        review_start_failed(db, ws, report, str(e))
+
+
+def review_start_failed(db: DB, ws: Workspace, report: float, reason: str) -> None:
+    """Both immediate and detached launch failures belong to the captured report.
+
+    Keep its claim until the fallback commits. A helper that lost ownership
+    while unwinding must neither clear a newer review nor notify its parent.
+    """
+    with agents.review_dispatch_lock(ws.id):
+        worker = piped_worker(db, ws)
+        if worker is None or worker.pipeline != "reviewing" or worker.reviewing_since != report:
+            return   # an overlapping report or verdict now owns the branch
+        row = db.outbox_review_failed(worker.id, report, reason)
+        if row is not None:
+            _report_fallback(db, worker, ws, row["payload"], row)
+
+
+def _report_fallback(db: DB, worker: Agent, ws: Workspace, result: str, row) -> None:
+    """A failed review start is still the same report's delivery. Its claim
+    stays in place until the supervisor's message and pipeline exit commit."""
+    parent = db.get_agent(worker.parent_id) if worker.parent_id else None
+    if parent is None:
+        return
+    text = agents.condense(
+        f"[brindle pipeline] {worker.id} reported on `{ws.branch}`, but no reviewer could "
+        f"start ({row['fallback']}). Review it yourself with workspace_diff, then merge_workspace. "
+        f"Its report: {agents.first_line(result)}", result)
+    if db.outbox_deliver(row["id"], message=agents._report_message(db, parent, text, worker.id),
+                         agent_fields={"pipeline": None}):
         _escalate(db, ws, worker)
-        _tell(db, parent.id,
-              agents.condense(
-                  f"[brindle pipeline] {worker.id} reported on `{ws.branch}`, but no reviewer could "
-                  f"start ({e}). Review it yourself with workspace_diff, then merge_workspace. "
-                  f"Its report: {agents.first_line(result)}", result), worker.id)
+        agents._notify_supervisor(db, parent)
 
 
 def restart_review(db: DB, worker: Agent, ws: Workspace, since: float) -> bool:

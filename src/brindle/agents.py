@@ -32,6 +32,7 @@ from brindle.config import RepoConfig
 from brindle.db import DB, Agent, Workspace, request_subagent
 from brindle.model_availability import ModelAvailabilityChecker, PROVISIONING_TIMEOUT, provisioning_context
 from brindle.pro import route_health
+from brindle.redact import mask
 from brindle.profiles import load_profile, local_fallback, missing_add_dirs
 from brindle.providers import LaunchContext, get_provider, unusable
 from brindle.sidebar_follow import (
@@ -2209,8 +2210,7 @@ def _send_message(db: DB, agent: Agent, body: str, sender_id: str | None,
         db.enqueue(agent.id, text, sender_id)
         return "delivered" if agent.status == "idle" else "queued"
     if not provider.uses_hooks:
-        tmux.paste(agent.tmux_window, text, lead=message_lead(db, agent, sender_id),
-                   server=server_of(agent))
+        _paste_message(db, agent, text, message_lead(db, agent, sender_id))
         if not (condensed or notice):
             # Direct deliveries need the same durable history as queued ones,
             # including supervisor spec updates used by the next reviewer.
@@ -2355,6 +2355,101 @@ def _sync_hooks_off(db: DB, agent: Agent, why: str | None) -> None:
         agent.hooks_off = why
 
 
+def _paste_message(db: DB, agent: Agent, text: str, lead: str | None,
+                   message_id: int | None = None, resume: str | None = None) -> None:
+    """Authorize at the transport boundary, after capture/formatting/preparation.
+
+    The delivery lock orders messages, but does not serialize sign-in changes.
+    Every queued delivery, including notices and later flushes, checks again.
+    """
+    from brindle import identity_lock
+
+    server = server_of(agent)
+    state = {"message_id": message_id, "pane": agent.tmux_window, "server": server,
+             "provider": agent.provider, "body": text, "lead": lead, "stage": resume}
+
+    def current():
+        fresh = get(db, agent.id)
+        if (fresh.tmux_window != state["pane"] or server_of(fresh) != server
+                or fresh.provider != state["provider"]):
+            raise _PasteBlocked
+        identity_lock.ensure(fresh)
+        return fresh
+
+    def authorize():
+        fresh = current()
+        if resume is not None and state["stage"] == resume:
+            if not _partial_composer(fresh, state, resume):
+                raise _PasteBlocked
+            current()  # the composer capture can itself block across an identity or pane change
+
+    def progress(stage):
+        state["stage"] = stage
+        if not db.record_pane_delivery(message_id, agent.id, json.dumps(state)):
+            raise _PasteBlocked
+
+    authorize()
+    options = {"progress": progress, "resume": resume} if message_id is not None else {}
+    tmux.paste(agent.tmux_window, text, lead=lead, server=server,
+               authorize=authorize, **options)
+    if message_id is not None and resume is None:
+        db.mark_delivered(message_id)
+        db.set_mark(agent.id, "pane-delivery", None)
+
+
+def _partial_composer(agent: Agent, state: dict, stage: str) -> bool:
+    """Match the complete known draft, never a substring or transcript echo.
+
+    An unsupported, collapsed or changed composer is left to the person.
+    Capturing joined lines preserves text across terminal-width wrapping.
+    """
+    provider = get_provider(agent.provider)
+    screen = tmux.capture(agent.tmux_window, lines=200, escapes=True, server=server_of(agent))
+    if provider.paste_blocked(screen, False) or provider.screen_state(screen) == "waiting":
+        return False
+    draft = provider.composer_text(screen)
+    expected = (state["lead"].replace("\n", " ") + " ") if state["lead"] else ""
+    if stage == "body":
+        expected += state["body"]
+    return draft == expected.rstrip()
+
+
+def _resume_pane_delivery(db: DB, agent: Agent, saved: str) -> bool:
+    """Resume the same queued message before any other transport can take it."""
+    from brindle import identity_lock
+
+    state = json.loads(saved)
+    row = db.conn.execute("SELECT * FROM inbox WHERE id=? AND agent_id=?",
+                          (state["message_id"], agent.id)).fetchone()
+    if row is None:
+        db.set_mark(agent.id, "pane-delivery", None)
+        return False
+    identity_lock.ensure(agent)
+    if (agent.tmux_window != state["pane"] or server_of(agent) != state["server"]
+            or agent.provider != state["provider"] or row["body"] != state["body"]
+            or agent.status not in ("idle", "processing")
+            or (agent.status == "processing" and not get_provider(agent.provider).types_midturn)):
+        return False
+    if state["stage"] != "submitted":
+        stage = "body" if _partial_composer(agent, state, "body") else "lead"
+        if stage == "lead" and (state["stage"] != "lead" or not _partial_composer(agent, state, "lead")):
+            return False
+        try:
+            _paste_message(db, agent, state["body"], state["lead"], row["id"], resume=stage)
+        except _PasteBlocked:
+            return False
+    db.mark_delivered(row["id"])
+    db.set_mark(agent.id, "pane-delivery", None)
+    return True
+
+
+def _send_to_inbox(db: DB, agent: Agent, text: str, sender: str) -> bool:
+    from brindle import identity_lock, inbox
+
+    identity_lock.ensure(get(db, agent.id))
+    return inbox.send(agent, text, sender=sender)
+
+
 def _deliver_to_inbox(db: DB, agent: Agent, message_id: int, text: str,
                       sender_id: str | None) -> bool:
     """Send a queued message through Claude Code's own inbox (see
@@ -2366,7 +2461,7 @@ def _deliver_to_inbox(db: DB, agent: Agent, message_id: int, text: str,
         return False
     sender = db.get_agent(sender_id) if sender_id else None
     who = f"brindle {sender.profile} {sender.id}" if sender else "brindle"
-    if not inbox.send(agent, text, sender=who):
+    if not _send_to_inbox(db, agent, text, who):
         return False
     db.mark_delivered(message_id)
     return True
@@ -2378,6 +2473,11 @@ def flush(db: DB, agent_id: str) -> bool:
     CLI that holds mid-turn input: see _flush_midturn). A chat with a live
     waiter (brindle.wake) is left to it, and one that runs a waiter never
     uses the inbox. Returns True if something was delivered."""
+    with delivery_lock(agent_id):
+        return _flush_messages(db, agent_id)
+
+
+def _flush_messages(db: DB, agent_id: str) -> bool:
     from brindle import inbox
     from brindle import launch_health
     from brindle import wake
@@ -2385,24 +2485,30 @@ def flush(db: DB, agent_id: str) -> bool:
     agent = db.get_agent(agent_id)
     if _delivery_held(db, agent):
         return False
+    partial = db.mark(agent_id, "pane-delivery")
+    if partial is not None:
+        return _resume_pane_delivery(db, agent, partial)
     if not wake.enabled(agent) and inbox.usable(agent):
         delivered = False
         while (msg := db.pop_pending(agent_id)) is not None:
-            baseline = launch_health.before_delivery(db, agent)
-            if inbox.send(agent, msg.body, sender="brindle"):
+            try:
+                baseline = launch_health.before_delivery(db, agent)
+                sent = _send_to_inbox(db, agent, msg.body, "brindle")
+            except BaseException:
+                db.release_pending(msg.id, agent_id)
+                raise
+            if sent:
                 delivered = True
                 launch_health.delivered(db, agent, baseline)
             else:
-                db.enqueue(agent_id, msg.body, msg.sender_id,  # back in the queue, for the pane
-                           notice=msg.noticed_at is not None)
+                db.release_pending(msg.id, agent_id)
                 break
         if delivered:
             return True
     # One paste into the pane at a time, whichever path: the idle claim alone
     # leaves the agent busy for a second sender's mid-turn paste while the
     # first is still typing, reordering or merging the two.
-    with delivery_lock(agent_id):
-        return _flush_pane(db, agent_id)
+    return _flush_pane(db, agent_id)
 
 
 def delivery_lock(agent_id: str):
@@ -2460,7 +2566,7 @@ def _flush_pane(db: DB, agent_id: str) -> bool:
         lead = message_lead(db, agent, msg.sender_id)
         if _paste_blocked(agent):  # last look, after preparation: a draft may have appeared
             raise _PasteBlocked
-        tmux.paste(agent.tmux_window, msg.body, lead=lead, server=server_of(agent))
+        _paste_message(db, agent, msg.body, lead, msg.id)
     except BaseException as exc:
         # pop_pending claimed this row before the external send. Release the
         # same row and our idle claim so the next flush can try it once more.
@@ -2496,7 +2602,7 @@ def _flush_midturn(db: DB, agent_id: str) -> bool:
         lead = message_lead(db, agent, msg.sender_id)
         if _paste_blocked(agent):  # last look before pasting: a draft may have appeared
             raise _PasteBlocked
-        tmux.paste(agent.tmux_window, msg.body, lead=lead, server=server_of(agent))
+        _paste_message(db, agent, msg.body, lead, msg.id)
     except BaseException as exc:
         db.release_pending(msg.id, agent_id)  # back in the queue for the turn-end flush
         if isinstance(exc, _PasteBlocked):
@@ -2606,19 +2712,110 @@ def report_result(db: DB, agent_id: str, result: str, forward: bool = True,
     the result is then only recorded in the history. A first result waits
     while an analysis doc the agent read has a newer version it hasn't read
     (unless the caller already checked: ``docs_checked``)."""
-    from brindle import history, pipeline, pricing, usage as usage_mod
-
     if removed and db.get_agent(agent_id) is None:
         agent, ws = removed
     else:
         agent = get(db, agent_id)
         ws = db.get_workspace(agent.workspace_id)
-    first = agent.result is None
-    if first and not removed and not docs_checked:
-        stale = stale_analysis_docs(db, agent.id)
-        if stale:
-            return stale
-    db.set_result(agent.id, result)
+    if removed:   # a reviewer the pipeline already removed: only recorded
+        db.set_result(agent.id, result)
+        return _handle_report(db, agent, ws, result, agent.result is None, forward, removed)
+    # The report goes through the outbox (db.report_outbox): received, then
+    # accepted into agents.result, then delivered. Each step is one
+    # transaction, and a repeat call resumes at the step the last one reached.
+    row = _receive_report(db, agent.id, ws, result)
+    if row["state"] in ("delivered", "superseded"):
+        return "result already recorded"
+    first = bool(row["is_first"])
+    if row["state"] in ("received", "rejected"):
+        if first and not docs_checked:
+            stale = stale_analysis_docs(db, agent.id)
+            if stale:   # not accepted: agents.result is never touched
+                if db.outbox_reject(row["id"]):
+                    return stale
+                row = db.outbox_get(row["id"])   # another call moved it on: follow its state
+                if row["state"] in ("delivered", "superseded"):
+                    return "result already recorded"
+        if db.outbox_accept(row["id"], agent.id, row["payload"]):
+            agent = get(db, agent.id)
+        else:
+            row = db.outbox_get(row["id"])
+            if row["state"] in ("delivered", "superseded"):
+                return "result already recorded"
+    return _handle_report(db, agent, ws, row["payload"], first, forward, removed, outbox_id=row["id"])
+
+
+def _receive_report(db: DB, agent_id: str, ws: Workspace | None, result: str):
+    payload = mask(result)
+    digest = hashlib.sha256(payload.encode()).hexdigest()[:16]
+    row = db.outbox_receive(agent_id, digest, payload)   # before any git or document work
+    return db.outbox_bind(row["id"], _branch_head(ws) if ws else "")
+
+
+def _holds_for(db: DB, agent: Agent) -> bool:
+    """Whether a message to ``agent`` waits unread for read_messages (see send_message)."""
+    return bool(runs_process(agent) and pulls_messages(db, agent))
+
+
+def _report_message(db: DB, parent: Agent, body: str, sender_id: str) -> tuple:
+    """A report as the inbox row(s) ``send_message`` would leave for ``parent``:
+    held for read_messages, or a one-line pointer to the kept full text for an
+    interactive supervisor, or the formatted text."""
+    if _holds_for(db, parent):
+        return (parent.id, body, sender_id, True, None)
+    if parent.mode == "interactive" and parent.provider != "shell":
+        return (parent.id, body, sender_id, False, lambda mid: one_line(db, mid, body, sender_id))
+    return (parent.id, format_message(db, body, sender_id), sender_id, False, None)
+
+
+def _notify_supervisor(db: DB, parent: Agent) -> None:
+    """Tell a supervisor its inbox has a report: the one-line notice for unread
+    messages, or the queue flushed into an idle one. The message itself is
+    already stored, so a failure here loses nothing."""
+    from brindle import identity_lock
+
+    with delivery_lock(parent.id):
+        try:
+            parent = get(db, parent.id)
+            identity_lock.ensure(parent)
+            _notify_report(db, parent)
+        except (AgentError, tmux.TmuxError):
+            log.warning("brindle: couldn't notify %s of a report", parent.id, exc_info=True)
+
+
+def _notify_report(db: DB, parent: Agent) -> None:
+    from brindle import identity_lock
+
+    try:
+        if _holds_for(db, parent):
+            claimed = db.claim_notice(parent.id) if is_alive(parent) else None
+            if claimed is not None:
+                try:
+                    identity_lock.ensure(get(db, parent.id))
+                    _send_message(db, parent, unread_notice(db, claimed), None, notice=True)
+                except BaseException:
+                    db.reset_notice(parent.id)
+                    raise
+        elif is_alive(parent):
+            identity_lock.ensure(get(db, parent.id))
+            flush(db, parent.id)
+    except (AgentError, tmux.TmuxError):
+        log.warning("brindle: couldn't notify %s of a report", parent.id, exc_info=True)
+
+
+def _branch_head(ws: Workspace) -> str:
+    try:
+        return git.out(["rev-parse", "HEAD"], ws.path)
+    except git.GitError:
+        return ""
+
+
+def _handle_report(db: DB, agent: Agent, ws: Workspace | None, result: str, first: bool,
+                   forward: bool, removed: tuple[Agent, Workspace] | None,
+                   outbox_id: int | None = None) -> str:
+    """What follows recording a report: usage, history, the pipeline, the supervisor."""
+    from brindle import history, pipeline, pricing, usage as usage_mod
+
     if ws:
         bus.publish_agent(db, "agent.reported", agent.id, workspace_id=ws.id,
                           repo_root=ws.repo_root, mode=agent.mode, first=first)
@@ -2650,17 +2847,22 @@ def report_result(db: DB, agent_id: str, result: str, forward: bool = True,
         if first:
             pipeline.note_reported(db, ws, agent)
         warm_checks(ws)
-        if forward and pipeline.on_report(db, agent, ws, forwarded):
+        if forward and pipeline.on_report(db, agent, ws, forwarded, outbox_id=outbox_id):
             return ("result recorded. brindle is having your branch reviewed; it will merge it, "
                     "or send you the review's findings to fix.")
-    if forward and agent.mode in FORWARDING_MODES and agent.parent_id and db.get_agent(agent.parent_id):
+    if forward and agent.mode in FORWARDING_MODES and agent.parent_id:
+        parent = db.get_agent(agent.parent_id)
+        if parent is None:
+            return "result recorded"   # no supervisor to tell: the report stays accepted, undelivered
         where = f" on branch `{ws.branch}` (workspace {ws.id})" if ws else ""
-        send_message(
-            db, agent.parent_id,
-            condense(f"Assigned task finished{where}: {first_line(result)}", forwarded),
-            sender_id=agent.id,
-        )
+        body = condense(f"Assigned task finished{where}: {first_line(result)}", forwarded)
+        if outbox_id is None:
+            send_message(db, agent.parent_id, body, sender_id=agent.id)
+        elif db.outbox_deliver(outbox_id, message=_report_message(db, parent, body, agent.id)):
+            _notify_supervisor(db, parent)   # outside the transaction, from the stored row
         return "result recorded and sent to your supervisor"
+    if outbox_id is not None:
+        db.outbox_deliver(outbox_id, nothing=True)   # no one to tell
     return "result recorded"
 
 
