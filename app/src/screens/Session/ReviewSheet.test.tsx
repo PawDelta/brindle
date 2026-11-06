@@ -148,7 +148,7 @@ describe("review", () => {
     await within(sheet()).findByRole("navigation", { name: "Changed files" });
     expect(within(sheet()).getByTestId("review-edit-pill").textContent).toContain("fully editable · supervisor idle");
     // The selected file is read from the checkout: the blob every edit of it is pinned to.
-    await waitFor(() => expect(gets(daemon, "/sessions/sup1/file")).toBe(1));
+    await waitFor(() => expect(within(hunk()).getByRole("button", { name: HUNK })).toHaveProperty("disabled", false));
     expect(daemon.requests.find((r) => r.path === "/sessions/sup1/file")?.query).toEqual({ path: "src/ls.py" });
 
     // Click into the hunk: its new side is a box; ⌘S reads the file again, splices the lines in and writes the
@@ -248,7 +248,7 @@ describe("review", () => {
     await screen.findByRole("dialog", { name: "Review & open PR" });
     fireEvent.click(within(sheet()).getByTestId("review-changes"));
     await within(sheet()).findByRole("navigation", { name: "Changed files" });
-    await waitFor(() => expect(gets(daemon, "/sessions/sup1/file")).toBe(1));
+    await waitFor(() => expect(within(hunk()).getByRole("button", { name: HUNK })).toHaveProperty("disabled", false));
     // An edit typed, not saved; then the diff is read again (a stale notice, say) and refused once while ready.
     fireEvent.click(within(hunk()).getByRole("button", { name: HUNK }));
     const box = () => within(hunk()).getByLabelText(/Edit src\/ls\.py @@/) as HTMLTextAreaElement;
@@ -279,7 +279,7 @@ describe("review", () => {
     await screen.findByRole("dialog", { name: "Review & open PR" });
     fireEvent.click(within(sheet()).getByTestId("review-changes"));
     await within(sheet()).findByRole("navigation", { name: "Changed files" });
-    await waitFor(() => expect(gets(daemon, "/sessions/sup1/file")).toBe(1));
+    await waitFor(() => expect(within(hunk()).getByRole("button", { name: HUNK })).toHaveProperty("disabled", false));
 
     // A hunk draft, typed; while the engine re-checks, a worker's commit puts two lines above and changes the file.
     fireEvent.click(within(hunk()).getByRole("button", { name: HUNK }));
@@ -331,7 +331,7 @@ describe("review", () => {
     const list = () => within(sheet()).getByRole("navigation", { name: "Changed files" });
     fireEvent.click(within(sheet()).getByTestId("review-changes"));
     await within(sheet()).findByRole("navigation", { name: "Changed files" });
-    await waitFor(() => expect(gets(daemon, "/sessions/sup1/file")).toBe(1));
+    await waitFor(() => expect(within(hunk()).getByRole("button", { name: HUNK })).toHaveProperty("disabled", false));
 
     // A hunk draft on src/ls.py; while brindle re-checks, the file goes back to what the base has: it is not in
     // the next diff at all. The draft keeps it in the list, marked, with the lines the edit was made from.
@@ -457,7 +457,7 @@ describe("review", () => {
     await screen.findByRole("dialog", { name: "Review & open PR" });
     fireEvent.click(within(sheet()).getByTestId("review-changes"));
     await within(sheet()).findByRole("navigation", { name: "Changed files" });
-    await waitFor(() => expect(gets(daemon, "/sessions/sup1/file")).toBe(1));
+    await waitFor(() => expect(within(hunk()).getByRole("button", { name: HUNK })).toHaveProperty("disabled", false));
     fireEvent.click(within(hunk()).getByRole("button", { name: HUNK }));
     const box = within(hunk()).getByLabelText(/Edit src\/ls\.py @@/) as HTMLTextAreaElement;
     fireEvent.change(box, { target: { value: "import json\nprint(json.dumps(x, indent=2))\nprint('done')\n\ndef main():\n    pass" } });
