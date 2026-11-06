@@ -129,12 +129,40 @@ describe("the sidebar's weekly usage reading", () => {
     expect(within(reading).getByRole("progressbar").getAttribute("aria-valuenow")).toBe("9");
     stop();
     cleanup();
-    // A provider with no weekly reading keeps the session's model, with an empty meter, not another provider's.
-    const bare = app("normal", { workspaces: [{ ...root, agents: root.agents?.map((a) => ({ ...a, provider: "antigravity", model: "gemini-3-pro" })) }] });
-    expect((await screen.findByTestId("usage-model", {}, { timeout: 3000 })).textContent).toBe("Gemini 3 Pro");
-    expect(screen.getByTestId("usage-reading").dataset.provider).toBe("antigravity");
-    expect(screen.getByTestId("usage-reading").querySelector("[role=progressbar]")).toBeNull();
-    bare.stop();
+
+    // Two sessions in one mounted sidebar: switching moves model, provider and meter together. The second runs on
+    // Antigravity, which the engine reports limited with no weekly window: its model shows, an empty meter, the warning kept.
+    const sup2: SessionDTO = { ...session, id: "sup2", goal: "Other work" };
+    const agents = [
+      { ...root.agents![0], model: "claude-opus-4-7" },
+      { ...root.agents![0], id: "sup2", provider: "antigravity", profile: "antigravity", model: "gemini-3-pro" },
+    ];
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session, sup2], workspaces: [{ ...root, agents }], usage: usageScenario("several") });
+    const store = createAppStore();
+    const client = daemon.client();
+    const sync = startSync({ client, store, connect: daemon.connect });
+    const tree = (root: string) => (
+      <DaemonContext.Provider value={client}>
+        <StoreContext.Provider value={store}>
+          <SessionsProvider client={client}>
+            <UsageProvider client={client} pollMs={60_000}>
+              <Sidebar route={{ screen: "session", root, repo: REPO, agent: root }} navigate={vi.fn()} refresh={sync.refresh} />
+            </UsageProvider>
+          </SessionsProvider>
+        </StoreContext.Provider>
+      </DaemonContext.Provider>
+    );
+    const view = render(tree("sup1"));
+    expect((await screen.findByTestId("usage-model", {}, { timeout: 3000 })).textContent).toBe("Claude Opus 4 7");
+    expect(screen.getByTestId("usage-reading").dataset.provider).toBe("claude");
+    expect(within(screen.getByTestId("usage-reading")).getByRole("progressbar").getAttribute("aria-valuenow")).toBe("63");
+    view.rerender(tree("sup2"));
+    await waitFor(() => expect(screen.getByTestId("usage-model").textContent).toBe("Gemini 3 Pro"));
+    const second = screen.getByTestId("usage-reading");
+    expect(second.dataset.provider).toBe("antigravity");
+    expect(second.querySelector("[role=progressbar]")).toBeNull();
+    expect(second.className).toContain("text-sap");
+    sync.stop();
   });
 
   it("a provider with no sign-in yet is quiet setup while another works, and a real sign-out stays a warning", async () => {

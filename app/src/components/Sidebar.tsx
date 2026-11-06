@@ -635,7 +635,7 @@ export function Sidebar({ route, navigate, refresh, openUrl }: SidebarProps) {
   // The meter names the model only with its own provider's usage; with none, the global most-used provider shows alone.
   // The session's model always shows, with its own provider's weekly usage, or "—" when that provider reports none.
   const model = agent?.model;
-  const own = agent && model ? (usage?.providers.find((p) => p.provider === agent.provider && weeklyWindow(p)) ?? { provider: agent.provider, known: false, limited: false, limited_until: null, updated_at: null, windows: [] }) : undefined;
+  const own = agent && model ? (usage?.providers.find((p) => p.provider === agent.provider) ?? { provider: agent.provider, known: false, limited: false, limited_until: null, updated_at: null, windows: [] }) : undefined;
   const shown = own ?? mostUsed;
   const warning = !!shown && (shown.limited || planWindows(shown).some((window) => window.used >= WARN));
 
