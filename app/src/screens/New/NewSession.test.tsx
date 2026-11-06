@@ -38,6 +38,38 @@ const posts = (daemon: FakeDaemon) => daemon.requests.filter((r) => r.method ===
 const startButton = () => screen.findByRole("button", { name: "Start" }).then((b) => waitFor(() => expect(b).toHaveProperty("disabled", false)).then(() => b));
 
 describe("NewSession", () => {
+  it("asks for a git identity when the repo has none", async () => {
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], workspaces: [root], sessions: [] });
+    daemon.gitIdentityMissing.add(REPO);
+    const fetch = daemon.fetch;
+    let busy = true;
+    daemon.fetch = async (input, init) => {
+      if (new URL(String(input)).pathname.endsWith("/sessions") && init?.method === "POST" && !daemon.gitIdentityMissing.has(REPO) && busy) {
+        busy = false;
+        return Response.json({ error: { code: "busy", message: "No room to start yet." } }, { status: 503 });
+      }
+      return fetch(input, init);
+    };
+    const { onOpen, stop } = setup(daemon);
+    fireEvent.change(await screen.findByLabelText("What should brindle work on?"), { target: { value: "Fix login" } });
+    fireEvent.click(await startButton());
+    let form = await screen.findByRole("region", { name: "Git identity" });
+    fireEvent.click(within(form).getByRole("button", { name: "Cancel" }));
+    expect(onOpen).not.toHaveBeenCalled();
+    expect(daemon.data.sessions).toHaveLength(0);
+    fireEvent.click(await startButton());
+    form = await screen.findByRole("region", { name: "Git identity" });
+    fireEvent.change(within(form).getByLabelText("Name"), { target: { value: "A Person" } });
+    fireEvent.change(within(form).getByLabelText("Email"), { target: { value: "person@example.com" } });
+    fireEvent.click(within(form).getByRole("button", { name: "Save and start" }));
+    await screen.findByRole("alert");
+    expect(screen.queryByRole("region", { name: "Git identity" })).toBeNull();
+    fireEvent.click(await startButton());
+    await waitFor(() => expect(onOpen).toHaveBeenCalledWith("new1", REPO));
+    expect(daemon.gitIdentityMissing.has(REPO)).toBe(false);
+    stop();
+  });
+
   it.each([["claude", false, false], ["antigravity", false, false], ["antigravity", true, false], ["claude", false, true], ["claude", false, "manual"]] as const)("unblocks %s sign-in using unresolved preflight items (API key: %s, cloud: %s)", async (provider, key, cloud) => {
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], workspaces: [root], sessions: [] });
     let signed = false;

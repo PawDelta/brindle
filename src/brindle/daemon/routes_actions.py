@@ -22,6 +22,7 @@ import io
 import json
 import logging
 import os
+import re
 import secrets
 import stat
 import subprocess
@@ -267,6 +268,8 @@ def start_session(db: DB, params: dict, body: Body) -> Any:
                and any(s.root.id == session_id for s in sessions_mod.live(db, repo_root)))
     provider = _get(body, "provider")
     if not opening:
+        if git.missing_user_identity(repo_root):
+            raise ServiceError("git_identity_missing", git.IDENTITY_MESSAGE, 409)
         provider = svc.supervisor_provider(repo_root, provider)
         blocked = session_blockers(db, repo, provider)
         if blocked:
@@ -2556,6 +2559,19 @@ _CLONE_LOCK = threading.Lock()
 _CLONING: dict[str, tuple[Job, str]] = {}      # destination -> (its clone job, the url)
 
 
+def set_repo_git_identity(db: DB, params: dict, body: Body) -> Any:
+    """Save only missing identity fields in the repository's shared config."""
+    repo = git.main_repo_root(_get(body, "repo", required=True))
+    name = _get(body, "name", required=True).strip()
+    email = _get(body, "email", required=True).strip()
+    if not name or not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email):
+        raise ServiceError("invalid", "Enter your name and a valid email address.")
+    with git.checkout_lock(repo):
+        for field in git.missing_user_identity(repo):
+            git.run(["config", "--local", "--", f"user.{field}", name if field == "name" else email], repo)
+    return {"saved": True}
+
+
 def open_repo(db: DB, params: dict, body: Body) -> Any:
     """Register the folder ``path`` as session start does (workspaces.adopt_root).
     A folder that isn't a git repo is refused (409 ``not_a_repo``) unless the
@@ -2688,6 +2704,7 @@ ROUTES = [
     _post("/terminals/shell", shell_terminal),
     Route("/v1/terminals/{id}", _endpoint(close_terminal), methods=["DELETE"]),
     _post("/repos/clone", clone_repo),
+    _post("/repos/git-identity", set_repo_git_identity),
     _post("/repos/open", open_repo),
     _post("/engine/upgrade", upgrade_engine),
     _post("/setup/codex-hook", setup_codex_hook),
