@@ -1038,14 +1038,6 @@ class ClaudeCode(Provider):
             # this one, so a question asked there stalls the worker, and no
             # hook can answer it: its supervisor is a send_message away.
             settings["permissions"] = {"deny": [*_credential_file_denies(), "AskUserQuestion"]}
-        from brindle import os_sandbox
-
-        if os_sandbox.wanted(ctx.cwd, self.name, ctx.mode):
-            # Its shell commands (and their children, and its subagents') run
-            # in Claude Code's own sandbox with every credential store denied
-            # and its credentials scrubbed; refused when that can't be required
-            # (os_sandbox.OsSandboxRefused). --settings outranks all but managed.
-            settings["sandbox"] = os_sandbox.claude_settings(ctx.cwd, ctx.profile)
         mcp = {"mcpServers": {"brindle": mcp_server_spec(ctx.agent_id)}}
         p = ctx.profile
         argv = [claude_binary()]
@@ -2134,13 +2126,6 @@ class Antigravity(Provider):
             # but honors its "deny" with this flag, so brindle's hook, installed
             # above on every tool, is the gate: see antigravity.pre_tool_main.
             argv.append(antigravity.SKIP_FLAG)
-        from brindle import os_sandbox
-
-        if os_sandbox.wanted(ctx.cwd, self.name, ctx.mode):
-            # Its commands run in agy's own sandbox with every credential store
-            # denied; the hook denies agy's own second run outside it
-            # (os_sandbox.bypass_requested). Refused when that can't be required.
-            argv += os_sandbox.agy_flags(ctx.cwd)
         if ctx.profile.model:
             argv += ["--model", ctx.profile.model]
         if ctx.profile.effort:

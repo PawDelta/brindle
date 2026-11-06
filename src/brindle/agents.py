@@ -25,7 +25,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 
-from brindle import bus, cloud_credential, company_identity, company_login, git, keystore, knowledge, os_sandbox, pane_auth, providers, secrets, tmux, upgrade, workspaces
+from brindle import bus, cloud_credential, company_identity, company_login, git, keystore, knowledge, pane_auth, providers, secrets, tmux, upgrade, workspaces
 from brindle import spawn as processes   # this module's own spawn() starts an agent
 from brindle.assembler import DECISIONS, DOCUMENT_CHUNKS, OTHER_SESSIONS, TASK_AND_RULES, Block, assemble
 from brindle.config import RepoConfig
@@ -801,10 +801,6 @@ def _window_environment(agent: Agent, ws: Workspace, m=_UNREAD):
         extra = company_identity.enforced_deny(route[0], tmux.inherited_names(ws.tmux_session), credentials,
                                                own=route[1])
         deny = (*deny, *(n for n in extra if n not in deny))
-    if agent.provider == "antigravity" and os_sandbox.wanted(ws.path, agent.provider, agent.mode):
-        # agy's sandbox doesn't scrub the command environment: a Gemini key agy
-        # itself ignores never reaches the pane (os_sandbox.agy_env_denies).
-        deny = (*deny, *(n for n in os_sandbox.agy_env_denies() if n not in deny))
     # Claude Code's managed settings supply the credential: no stored Claude key.
     no_stored = set(deny) | (set(providers._ENV_AUTH["claude"]) if org_managed else set())
     env = {**keystore.pane_keys(credentials - no_stored, {**env, **org_env}), **env, **org_env}
@@ -1281,7 +1277,7 @@ def _launch_resolved(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
         argv = provider.command(LaunchContext(agent.id, profile, prompt, resume=resume, cwd=ws.path,
                                               mode=agent.mode, plan_first=bool(agent.plan_first),
                                               mcp_recovery=mcp_recovery, chrome_chosen=chrome_chosen))
-    except (providers.CodexSandboxRefused, os_sandbox.OsSandboxRefused) as e:
+    except providers.CodexSandboxRefused as e:
         raise AgentError(str(e)) from e
     if provider.name == "codex":
         from brindle import codex_hook
@@ -1445,7 +1441,7 @@ def run_headless(db: DB, agent_id: str, resume: str | None = None, *,
             from brindle import launch_health
             launch_health.delivered(db, agent, launch_health.before_delivery(db, agent))
             code = subprocess.call(provider.command(ctx), cwd=ws.path, stdin=subprocess.DEVNULL)
-        except (OSError, providers.CodexSandboxRefused, os_sandbox.OsSandboxRefused) as e:
+        except (OSError, providers.CodexSandboxRefused) as e:
             print(f"brindle: couldn't start {provider.name}: {e}", flush=True)
             code = 127
         session = session or new_session

@@ -1841,46 +1841,6 @@ def permissions_policy(state: Optional[str] = typer.Argument(None, help="on or o
     _say_policy()
 
 
-@permissions_app.command("os-sandbox")
-def permissions_os_sandbox(
-    state: Optional[str] = typer.Argument(None, help="on or off."),
-    allow: list[str] = typer.Option([], "--allow", help="Let sandboxed commands reach a host service: "
-                                    "ssh_agent, docker, host_tmux, apple_events; NAME=PATH for a narrower socket."),
-    disallow: list[str] = typer.Option([], "--disallow", help="Take an allowance back."),
-) -> None:
-    """Show whether Claude and Antigravity workers' shell commands run in the OS sandbox
-    (on with the permission policy, and required then), turn that off or back on for your
-    workers, or open named host services to their commands (each one separately)."""
-    from brindle import os_sandbox
-    from brindle.config import forget_user, set_user, update_user
-
-    if state not in (None, "on", "off"):
-        typer.echo("os-sandbox must be on or off")
-        raise typer.Exit(2)
-    if state == "off":
-        set_user(os_sandbox.USER_KEY, "off")
-    elif state == "on":
-        forget_user(os_sandbox.USER_KEY)
-    changes = [(spec.partition("=")[0], spec.partition("=")[2] or True) for spec in allow]
-    changes += [(name, False) for name in disallow]
-    for name, _ in changes:
-        if name not in os_sandbox.ALLOWANCES:
-            typer.echo(f"unknown allowance {name!r}; known: {', '.join(os_sandbox.ALLOWANCES)}")
-            raise typer.Exit(2)
-    if changes:
-        def apply(current):
-            found = os_sandbox.parse_allowances(current)
-            for name, value in changes:
-                found.pop(name, None)
-                if value is not False:
-                    found[name] = value
-            return found
-
-        update_user(os_sandbox.ALLOW_KEY, apply)
-    for level, detail in os_sandbox.status(_here_repo()):
-        typer.echo(f"os sandbox: {detail}" if level == "ok" else f"os sandbox ({level}): {detail}")
-
-
 @permissions_app.command("reset")
 def permissions_reset(yes: bool = typer.Option(False, "--yes", "-y", help="Don't ask for confirmation.")) -> None:
     """Back to the preset's rules: drop your rules, learned rules, saved actions and approval counts."""

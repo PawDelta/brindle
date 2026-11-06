@@ -1,8 +1,9 @@
 # The OS sandbox for Claude Code and Antigravity workers
 
-Status, 2026-11-06: implemented in `brindle.os_sandbox`, on by default when
-`permission_policy` is on (owner decision of 2026-11-06), with the owner switch
-`"os_sandbox": "off"` in `~/.brindle/config.json`. Codex is unchanged.
+Status, 2026-11-06: built, then parked the same day by the owner's decision (no
+OS sandbox in 0.6.3, not even opt-in). The code and its tests live in
+`dev/os_sandbox/` with a README on wiring it back; nothing in the product
+imports them. What follows describes the parked design and the evidence.
 
 ## Boundary
 
