@@ -930,7 +930,7 @@ def on_reviewer_dead(db: DB, reviewer: Agent, ws: Workspace) -> bool:
     the lock so a second detector cannot spend another attempt or escalate a
     stop that is already being handled.
     """
-    from brindle import launch_health
+    from brindle import launch_health, redact, tmux
     from brindle.profiles import profile_names
 
     with agents.review_dispatch_lock(ws.id):
@@ -942,6 +942,10 @@ def on_reviewer_dead(db: DB, reviewer: Agent, ws: Workspace) -> bool:
         current = db.get_agent(reviewer.id)
         if current is None or current.result is not None:
             return True
+        if (current.status in ("paused", "done")
+                or current.tmux_window != reviewer.tmux_window or current.tmux_server != reviewer.tmux_server
+                or agents.alive_or_starting(current)):
+            return True  # the observed process has been resumed or replaced
         reviewer = current
         try:
             sha = gates.head(ws)
@@ -988,8 +992,8 @@ def on_reviewer_dead(db: DB, reviewer: Agent, ws: Workspace) -> bool:
                 return True
             except agents.ReviewHeadMoved:
                 return True
-            except agents.AgentError:
-                pass  # the single fresh attempt could not launch; ask the person
+            except (agents.AgentError, tmux.TmuxError, OSError) as exc:
+                error += " Replacement could not start: " + redact.mask(str(exc))[:1000]
         detail = (f"Reviewer {reviewer.id} exited without a verdict after automatic recovery. "
                   f"Last pane error: {error} Fix the CLI installation, login or routing, then "
                   f"request_review(\"{ws.id}\"). Review is still required before merging.")

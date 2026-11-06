@@ -1126,6 +1126,26 @@ def consent_identity(db: DB, repo: str, profile: str, provider: str, session: st
 def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
             resume: str | None, watch_pane: bool, background_setup: bool = False,
             model_checked: bool = False) -> None:
+    """Serialize reviewer launches with death recovery before running preflight."""
+    if agent.mode == "review":
+        # Recovery and resume share the whole launch, including preflight. A
+        # stale resume must not revive a reviewer recovery has already replaced.
+        with review_dispatch_lock(ws.id):
+            current = db.get_agent(agent.id)
+            if (current is None or current.result != agent.result
+                    or current.tmux_window != agent.tmux_window
+                    or current.tmux_server != agent.tmux_server
+                    or (resume is not None and alive_or_starting(current))):
+                raise AgentError(f"Reviewer {agent.id}'s launch has already been handled.")
+            return _launch_checked(db, agent, ws, prompt=prompt, resume=resume, watch_pane=watch_pane,
+                                   background_setup=background_setup, model_checked=model_checked)
+    return _launch_checked(db, agent, ws, prompt=prompt, resume=resume, watch_pane=watch_pane,
+                           background_setup=background_setup, model_checked=model_checked)
+
+
+def _launch_checked(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
+                    resume: str | None, watch_pane: bool, background_setup: bool = False,
+                    model_checked: bool = False) -> None:
     """Start (or restart) ``agent``'s CLI in a new tmux window of ``ws``.
     In air-gap mode (``brindle.airgap``) only a local profile is launched,
     whatever the mode: a worker, a reviewer, a subagent or the chat itself.

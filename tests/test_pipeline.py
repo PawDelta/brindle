@@ -21,7 +21,10 @@ from test_merge_order import add
 from test_pipeline_idempotent import drain
 
 
-@pytest.mark.parametrize("guard", [None, "health", "unreported", "verdict", "running", "queued", "moved", "standalone"])
+@pytest.mark.parametrize("guard", [None, "health", "unreported", "verdict", "running", "queued", "moved", "standalone",
+                                    "resumed", pytest.param("repane", marks=pytest.mark.variant(
+                                        "a resumed review can exit in its new pane before stale death handling")), "tmux-error",
+                                    pytest.param("os-error", marks=pytest.mark.variant("process creation can raise OSError instead of TmuxError"))])
 def test_dead_reviewer_restarts_once_then_needs_the_person(db, repo, monkeypatch, guard):
     from brindle import launch_health, tmux
     from brindle.service import inbox
@@ -58,12 +61,18 @@ def test_dead_reviewer_restarts_once_then_needs_the_person(db, repo, monkeypatch
     monkeypatch.setattr(agents, "get_provider", lambda name: FakeProvider())
 
     def launch(db_, a, ws_, **kw):
+        if a.id == "rev0":
+            FakeProvider().command(agents.LaunchContext(a.id, agents.load_profile(a.profile), kw["prompt"]))
+            db.update_agent(a.id, status="processing", tmux_window="%4" if guard == "repane" else "%2")
+            return
+        if guard in ("tmux-error", "os-error"):
+            raise (tmux.TmuxError if guard == "tmux-error" else OSError)(f"new-window failed {secret}")
         FakeProvider().command(agents.LaunchContext(a.id, agents.load_profile(a.profile), kw["prompt"]))
         pipeline.on_reviewer_dead(db, db.get_agent("rev0"), ws)  # second detector during dispatch
         db.update_agent(a.id, tmux_window="%3", status="processing", status_since=1, created_at=1)
         panes["%3"] = True
 
-    monkeypatch.setattr(agents, "_launch", launch)
+    monkeypatch.setattr(agents, "_launch_resolved", launch)
     initial = db.get_agent("rev0")
     initial.task = "review"
     launch_health.prepare(db, initial, "test")
@@ -78,6 +87,24 @@ def test_dead_reviewer_restarts_once_then_needs_the_person(db, repo, monkeypatch
         db.update_agent("rev0", review_sha="old-commit")
     elif guard == "standalone":
         db.update_agent("w1", pipeline=None)
+    elif guard in ("resumed", "repane"):
+        dispatch_lock = agents.review_dispatch_lock
+        resumed = False
+
+        @contextlib.contextmanager
+        def resumed_before_recovery(workspace_id, **kw):
+            nonlocal resumed
+            with dispatch_lock(workspace_id, **kw):
+                if not resumed:
+                    resumed = True
+                    with monkeypatch.context() as launching:
+                        launching.setattr(agents, "review_dispatch_lock", dispatch_lock)
+                        agents._launch(db, initial, ws, prompt="review", resume=None, watch_pane=False)
+                    if guard == "resumed":
+                        monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id == "rev0")
+                yield
+
+        monkeypatch.setattr(agents, "review_dispatch_lock", resumed_before_recovery)
 
     if guard == "health":
         launch_health.inspect(db, "rev0", wait=False)
@@ -91,37 +118,48 @@ def test_dead_reviewer_restarts_once_then_needs_the_person(db, repo, monkeypatch
         assert len(messages) == 2 and launched == []
         assert all("workspace routing discovery failed" in m and secret not in m for m in messages)
         return
-    if guard in ("verdict", "running", "queued", "moved"):
-        assert launched == []
+    if guard in ("verdict", "running", "queued", "moved", "resumed", "repane"):
+        assert launched == (["rev0"] if guard in ("resumed", "repane") else [])
         assert db.get_agent("w1").pipeline == "reviewing"
         assert drain(db) == []
+        if guard in ("resumed", "repane"):
+            pipeline.on_reviewer_dead(db, initial, ws)  # handler also rejects the old observation
+            assert db.get_agent("rev0").status == "processing"
+            assert not db.conn.execute("SELECT 1 FROM review_death_restarts").fetchall()
         return
-    assert len(launched) == 1
-    assert db.get_agent(launched[0]).review_sha == sha
-    assert db.get_agent("w1").pipeline == "reviewing"
-    assert drain(db) == []
-    launch_health.inspect(db, "rev0", wait=False)
-    agents.tell_parent_unreported(db, db.get_agent("rev0"))
-    assert len(launched) == 1
-    panes["%3"] = False
-    panes.exits["%3"] = (1, None)
+    failed_launch = guard in ("tmux-error", "os-error")
+    if not failed_launch:
+        assert len(launched) == 1
+        assert db.get_agent(launched[0]).review_sha == sha
+        assert db.get_agent("w1").pipeline == "reviewing"
+        assert drain(db) == []
+        launch_health.inspect(db, "rev0", wait=False)
+        agents.tell_parent_unreported(db, db.get_agent("rev0"))
+        with pytest.raises(agents.AgentError):
+            agents._launch(db, initial, ws, prompt="review", resume=None, watch_pane=False)
+        assert len(launched) == 1
+        panes["%3"] = False
+        panes.exits["%3"] = (1, None)
     cull.note_dead_panes(db, time.time(), panes)
     cull.note_dead_panes(db, time.time(), panes)
-    assert len(launched) == 1
+    assert len(launched) == (0 if failed_launch else 1)
     assert db.get_agent("w1").pipeline is None
     assert gates.verdict(db, ws.id, sha) is None
     messages = drain(db)
     assert len(messages) == 1 and "workspace routing discovery failed" in messages[0]
     assert secret not in messages[0] and "[redacted]" in messages[0]
+    if failed_launch:
+        assert "new-window failed" in messages[0]
     assert pipeline.review_state(db, ws).startswith("needs you")
-    row = db.get_agent(launched[0])
+    row = db.get_agent("rev0" if failed_launch else launched[0])
     assert "workspace routing discovery failed" in inbox.needs_you(vars(row), {})
     assert secret not in row.failed_why
     monkeypatch.setattr(inbox.view, "snapshot", lambda *a, **kw: [{"id": ws.id, "agents": [vars(row)]}])
     card = next(item for item in inbox.items(db, str(repo), panes) if item.agent_id == row.id)
     assert "workspace routing discovery failed" in card.detail and secret not in card.detail
-    agents.request_review(db, db.get_agent("boss"), ws, "reviewer")
-    assert db.get_agent(row.id).failed_why is None
+    if not failed_launch:
+        agents.request_review(db, db.get_agent("boss"), ws, "reviewer")
+        assert db.get_agent(row.id).failed_why is None
 
 
 def test_reviewer_without_verdict_gets_fallback_then_an_escalation_event(db, repo, monkeypatch):
