@@ -36,7 +36,7 @@ import { plain } from "./api/wording";
 import { DaemonContext } from "./api/context";
 import { checkEngine, type EngineStatus } from "./api/engine";
 import { openExternal, pickFolder as nativePicker, type OpenUrl, type PickFolder } from "./api/open";
-import type { SessionDTO } from "./api/schema";
+import type { SessionDTO, WorkspaceDTO } from "./api/schema";
 import type { About, AppUpdater, AppUpdates, CliLink, ReleaseBuildUpdater } from "./api/tauri";
 import { AppUpdateBanner, AppUpdateProvider } from "./components/AppUpdateBanner";
 import { UpgradeCard, useEngineUpgrade } from "./components/EngineUpgrade";
@@ -361,6 +361,12 @@ function FirstLaunch(props: AppProps) {
 const STARTUP_WAIT = 30000;
 const STARTUP_CHECK = 500;
 
+function waitingForPanes(workspaces: WorkspaceDTO[]): boolean {
+  return workspaces.flatMap((ws) => ws.agents ?? []).some((a) =>
+    a.provider !== "subagent" && !a.headless && !a.locked
+    && !["paused", "done", "failed", "closed", "rewound", "exited"].includes(a.status) && !a.window);
+}
+
 /* Mount the shell only once recovery has settled. Reconnects belong to its
    banner, never to this launch gate. The deadline also bounds a hung read. */
 function Startup({ client, refresh, children }: { client: DaemonClient | null; refresh?: () => Promise<void>; children: ReactNode }) {
@@ -387,16 +393,25 @@ function Startup({ client, refresh, children }: { client: DaemonClient | null; r
         if (!meta.resuming) {
           const workspaces = await client.snapshot();
           if (!unchanged()) return;
-          const waiting = workspaces.flatMap((ws) => ws.agents ?? []).some((a) =>
-            !a.headless && !a.locked && !["paused", "done", "failed", "closed", "rewound", "exited"].includes(a.status) && !a.window);
-          if (!waiting) {
+          if (!waitingForPanes(workspaces)) {
             // A snapshot read before recovery may still be in flight in sync.
             // Queue a fresh one before mounting terminals on the store's rows.
-            await Promise.all([reload(), refresh?.()]);
+            const version = store.getState().snapshotVersion;
+            if (refresh) await Promise.all([reload(), refresh()]);
+            else {
+              const inbox = await client.inbox();
+              if (!unchanged()) return;
+              store.dispatch({ type: "snapshot", workspaces, inbox });
+              await reload();
+            }
             if (!unchanged()) return;
             // Recovery can start in another daemon while the reads finish.
             const latest = await client.meta();
             if (!unchanged() || latest.resuming || latest.pid !== meta.pid) return;
+            const applied = store.getState();
+            // Sync reports failures in the store and still resolves its promise.
+            // Only newly applied, ready rows may be used to mount terminals.
+            if (applied.snapshotVersion === version || applied.error || applied.stale || waitingForPanes(applied.workspaces)) return;
             current = false;
             clearTimeout(deadline);
             setDone(true);

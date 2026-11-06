@@ -33,6 +33,8 @@ export interface AppState {
   stale: boolean;
   /* A snapshot has arrived: the inbox is the daemon's, not the empty start. */
   synced: boolean;
+  /* Advances only when a successful snapshot is applied, not when a refresh settles. */
+  snapshotVersion: number;
   /* The newest bus events, oldest first (for notifications). */
   recent: BusEvent[];
   error: string | null;
@@ -60,6 +62,7 @@ export const initialState: AppState = {
   org: { bar: null, notices: [] },
   stale: false,
   synced: false,
+  snapshotVersion: 0,
   recent: [],
   error: null,
   appUpdate: null,
@@ -75,7 +78,8 @@ export function reduce(state: AppState, action: Action): AppState {
       return { ...state, connection: action.state,
         connectionGeneration: state.connectionGeneration + Number(state.connection !== action.state) };
     case "snapshot":
-      return { ...state, ...liveSnapshot(action.workspaces, action.inbox, state.pastWorkers), stale: false, synced: true, error: null };
+      return { ...state, ...liveSnapshot(action.workspaces, action.inbox, state.pastWorkers), stale: false, synced: true, error: null,
+        snapshotVersion: state.snapshotVersion + 1 };
     case "error":
       return { ...state, error: action.message };
     case "stream":

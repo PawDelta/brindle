@@ -67,7 +67,7 @@ describe("App", () => {
       resuming = false;
       await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
       expect(screen.getByTestId("starting")).toBeTruthy();
-      daemon.data.workspaces = [root];
+      daemon.data.workspaces = [root, { ...worker, agents: worker.agents?.map((a) => ({ ...a, provider: "subagent", window: null })) }];
       let resolve!: (rows: Awaited<ReturnType<typeof client.snapshot>>) => void;
       vi.spyOn(client, "snapshot").mockReturnValueOnce(new Promise((ok) => { resolve = ok; }));
       await act(async () => { await vi.advanceTimersByTimeAsync(500); });
@@ -94,6 +94,30 @@ describe("App", () => {
       daemon.drop();
       await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
       expect(screen.queryByTestId("starting")).toBeNull();
+    } finally { sync.stop(); vi.useRealTimers(); }
+  });
+
+  it("keeps starting when a ready probe is followed by a failed store refresh", async () => {
+    vi.useFakeTimers();
+    const old = { ...root, agents: root.agents?.map((a) => ({ ...a, window: windowOf("old") })) };
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [old] });
+    const client = daemon.client();
+    const store = createAppStore();
+    const sync = startSync({ client, store, connect: daemon.connect });
+    try {
+      await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+      await sync.idle();
+      daemon.data.workspaces = [root];
+      const failed = vi.spyOn(client, "inbox").mockRejectedValue(new Error("offline"));
+      renderApp(<App store={store} client={client} refresh={sync.refresh} />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+      expect(store.getState().workspaces).toEqual([old]);
+      expect(screen.getByTestId("starting")).toBeTruthy();
+      expect(screen.queryByTestId("terminal")).toBeNull();
+      failed.mockRestore();
+      await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+      expect(screen.queryByTestId("starting")).toBeNull();
+      expect(screen.getByTestId("terminal").dataset.target).toBe(windowOf("sup1"));
     } finally { sync.stop(); vi.useRealTimers(); }
   });
 
