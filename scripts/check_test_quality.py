@@ -26,7 +26,8 @@ ROOT = Path(__file__).resolve().parent.parent
 MAX_PERMUTATIONS = 12
 # Freeze the collected suite, including this guardrail's tests. Raising this
 # ceiling is an explicit review decision, rather than an automatic baseline.
-TEST_BUDGET = 3565
+# Recoverable worktree cleanup adds 12 restore, retention and failure cases.
+TEST_BUDGET = 3577
 
 
 class Finding(NamedTuple):
