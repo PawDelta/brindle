@@ -150,10 +150,14 @@ def test_engine_builds_of_two_worktrees_sharing_a_cargo_target_keep_separate_wor
     shared = tmp_path / "shared-target"
     for wt in ("wt1", "wt2"):
         app = tmp_path / wt / "app"
-        (app / "scripts" / "engine").mkdir(parents=True)
+        (app / "scripts" / "engine" / "helper").mkdir(parents=True)
+        (app / "src-tauri" / "icons").mkdir(parents=True)
         (app / "scripts" / "build_engine.sh").write_text(script.read_text())
-        for name in ("brindle", "engine.entitlements"):
-            (app / "scripts" / "engine" / name).write_text("")
+        # The build's other inputs, which its stamp reads.
+        for name in ("scripts/engine/brindle", "scripts/engine/engine.entitlements", "scripts/engine/helper/main.c",
+                     "scripts/engine/helper/Info.plist", "scripts/engine/helper/helper.entitlements",
+                     "src-tauri/icons/icon.icns"):
+            (app / name).write_text("")
         env = {"PATH": f"{stubs}:/usr/bin:/bin", "HOME": str(tmp_path), "BRINDLE_SRC": str(tmp_path),
                "CARGO_TARGET_DIR": str(shared)}
         proc = subprocess.run(["bash", str(app / "scripts" / "build_engine.sh")], env=env,

@@ -44,6 +44,27 @@ pub fn python_command(engine: &Path) -> String {
     format!("{}/python/bin/python3 ", engine.display())
 }
 
+/// The engine's helper app's executable in the .app (build_engine.sh;
+/// scripts/engine/helper), from `Contents`: the engine's Python under an app's
+/// name, which macOS shows when the engine or an agent needs its permission.
+const HELPER_IN_BUNDLE: &str = "Library/LoginItems/brindle.app/Contents/MacOS/brindle";
+
+/// Where the helper of the app that carries `engine` (its `Contents/Resources/engine`) is.
+fn helper_path(engine: &Path) -> Option<PathBuf> {
+    Some(engine.parent()?.parent()?.join(HELPER_IN_BUNDLE))
+}
+
+/// `engine`'s app's helper, when it has one: an engine outside a bundle has none.
+pub fn helper(engine: &Path) -> Option<PathBuf> {
+    helper_path(engine).filter(|helper| helper.is_file())
+}
+
+/// The prefix of the command line of the brindle the daemon's job runs through
+/// `engine`'s helper: the same line as `python_command`'s but for its program.
+pub fn helper_command(engine: &Path) -> Option<String> {
+    helper_path(engine).map(|helper| format!("{} ", helper.display()))
+}
+
 /// Whether `bin` is `engine`'s launcher.
 pub fn is_launcher(engine: &Path, bin: &Path) -> bool {
     bin == engine.join(LAUNCHER)
@@ -53,7 +74,10 @@ pub fn is_launcher(engine: &Path, bin: &Path) -> bool {
 /// `path`: its Python, the arguments ahead of brindle's own, and the PATH. For a
 /// process macOS judges by its program from the start (the daemon's launchd job):
 /// a script has no Team ID, the engine's signed Python does. The result is the
-/// same process the launcher makes (tested). None: leave it to the launcher.
+/// same process the launcher makes (tested), but for its program when the app
+/// carries the engine's helper: that runs the same Python in its own process,
+/// under the name and usage strings macOS then shows for everything the daemon
+/// starts. None: leave it to the launcher.
 pub fn launcher_exec(engine: &Path, path: &OsStr) -> Option<(PathBuf, Vec<String>, std::ffi::OsString)> {
     let build = require_build(engine).ok()?;
     let mut dirs = vec![engine.join("bin")];
@@ -64,7 +88,8 @@ pub fn launcher_exec(engine: &Path, path: &OsStr) -> Option<(PathBuf, Vec<String
         }
     }
     let args = ["-I", "-B", "-X", &build_option(&build), "-m", "brindle"].map(String::from).to_vec();
-    Some((engine.join("python/bin/python3"), args, std::env::join_paths(dirs).ok()?))
+    let program = helper(engine).unwrap_or_else(|| engine.join("python/bin/python3"));
+    Some((program, args, std::env::join_paths(dirs).ok()?))
 }
 
 /// The file in the engine naming its build (build_engine.sh: its inputs' hash).
