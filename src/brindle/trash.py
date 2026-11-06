@@ -160,6 +160,8 @@ def put(root: str | Path, path: str | Path, *, force: bool = False) -> None:
         original = source.stat()
         registered = next((w for w in git.list_worktrees(root)
                            if Path(w["worktree"]).resolve() == source.resolve()), None)
+        if registered and "locked" in registered and not force:
+            raise TrashError(f"worktree is locked: {source}")
         if registered and not force and git.dirty_files(source):
             raise TrashError(f"uncommitted changes at {source}")
         ident = uuid.uuid4().hex
@@ -201,6 +203,7 @@ def put(root: str | Path, path: str | Path, *, force: bool = False) -> None:
                 raise TrashError(f"uncommitted changes at {source}")
             if registered and not any(w.get("HEAD") == data["sha"] and w.get("branch") == data["branch"]
                                       and Path(w["worktree"]).resolve() == source.resolve()
+                                      and (force or "locked" not in w)
                                       for w in git.list_worktrees(root)):
                 raise TrashError(f"worktree changed during removal: {source}")
             _move(source, dest / "tree")

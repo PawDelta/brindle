@@ -27,13 +27,31 @@ DAY = 86400
 
 @pytest.mark.parametrize("action", ["restore", "expiry", "refused", "path", "cap", "empty",
                                   "registration-failure", "moved", "deleted", "cross-volume", "restore-race",
-                                  "path-race"])
+                                  "path-race", "locked"])
 def test_removed_worktree_goes_to_trash(db, repo, monkeypatch, action):
     from brindle import trash
 
     ws = workspaces.create(db, str(repo), "recover-me").workspace
     path = Path(ws.path)
     git.run(["commit", "--allow-empty", "-m", "unmerged work"], path)
+    if action == "locked":
+        for timing in ("before", "during"):
+            with monkeypatch.context() as patch:
+                if timing == "before":
+                    git.run(["worktree", "lock", str(path)], repo)
+                else:
+                    replace = disk._replace
+                    def lock_after_preparation(dest, write):
+                        replace(dest, write)
+                        if dest.name == "entry.json":
+                            git.run(["worktree", "lock", str(path)], repo)
+                    patch.setattr(disk, "_replace", lock_after_preparation)
+                with pytest.raises(git.GitError):
+                    git.remove_worktree(repo, path)
+                assert path.is_dir() and git.worktree_for_branch(repo, ws.branch) == str(path)
+                assert not trash.entries()
+            if timing == "before":
+                git.run(["worktree", "unlock", str(path)], repo)
     if action in {"restore", "deleted"}:
         module = repo.parent / "module-source"
         git.run(["clone", str(repo), str(module)], repo)
