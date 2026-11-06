@@ -4105,6 +4105,10 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
     # replace that verdict in the same role (gates.standing_reviews).
     if reviewer is not None:
         db.update_agent(reviewer.id, review_slot=profile if second else "")
+        for old in db.list_agents(ws.id):
+            if old.id != reviewer.id and old.review_sha == sha and (old.failed_why or "").startswith("review: "):
+                db.update_agent(old.id, status="done", failed_why=None)
+                db.set_result(old.id, f"Replaced by reviewer {reviewer.id}.")
         if cited:   # the docs its brief cites, pinned at the versions it got
             knowledge.record_receipt(db, reviewer.id, cited)
             analysis_brief.record_session_citations(db, reviewer.id, cited)

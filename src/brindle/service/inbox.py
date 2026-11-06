@@ -77,6 +77,8 @@ def needs_you(agent: dict, ws: dict) -> str | None:
     if agent["status"] == "waiting":
         return "needs you"
     if agent["status"] == "failed":
+        if (agent.get("failed_why") or "").startswith("review: "):
+            return agent["failed_why"].removeprefix("review: ")
         return FAILED.get(agent.get("failed_why"), FAILED_UNKNOWN)
     if ws.get("asking") == agent["id"]:
         return "has a question"
@@ -207,6 +209,8 @@ def items(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None) -
             if reason and not asking:
                 kind = _kind(a, ws, reason)
                 out.append(InboxItemDTO(kind=kind, reason=reason, **link,
+                                        detail=row.failed_why.removeprefix("review: ")
+                                        if (row.failed_why or "").startswith("review: ") else None,
                                         action=_sign_in(row.provider) if kind == "credentials" else None))
             # Only a plan agents.approve_plan would take: a plan-first worker with a supervisor.
             if row.plan_state == "proposed" and row.plan_first and row.parent_id is not None:
