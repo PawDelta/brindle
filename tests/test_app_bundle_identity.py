@@ -26,6 +26,12 @@ def test_engine_helper_declares_usage_strings():
     assert [key for key in USAGE if not info.get(key, "").strip()] == []
     # With launchd's job switched off the daemon is the app's child: the app is asked for.
     assert set(USAGE) <= set(plistlib.loads((APP / "src-tauri/Info.plist").read_bytes()))
+    # Under the hardened runtime a usage string isn't enough for these two: what is asked
+    # for must also be signed with the resource's entitlement, the helper and the app alike.
+    signed = [APP / "scripts/engine/helper/helper.entitlements", APP / "src-tauri" / mac["entitlements"]]
+    for entitlements in map(plistlib.loads, (path.read_bytes() for path in signed)):
+        assert entitlements["com.apple.security.automation.apple-events"] is True
+        assert entitlements["com.apple.security.device.audio-input"] is True
 
     # Bundled where the pieces that are compiled apart expect it, in a folder named as
     # the bundle is: macOS shows a bundle's own name only when its folder's matches.

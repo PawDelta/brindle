@@ -534,6 +534,19 @@ jobs:
             echo "::error::the engine's helper app isn't signed as a bundle by the app's team"
             exit 1
           fi
+          # Under the hardened runtime macOS asks about an agent's Automation
+          # or microphone request only on behalf of code signed for it: the
+          # helper, and the app (the daemon is its child when launchd's job
+          # is switched off). Read from what was actually signed.
+          for code in "$APP" "$helper"; do
+            signed="$(codesign -d --entitlements - "$code" 2>/dev/null || true)"
+            for entitlement in com.apple.security.automation.apple-events com.apple.security.device.audio-input; do
+              case "$signed" in
+                *"$entitlement"*) ;;
+                *) echo "::error::$code isn't signed with $entitlement"; exit 1 ;;
+              esac
+            done
+          done
           echo "verified=true" >> "$GITHUB_OUTPUT"
 
       - name: Collect

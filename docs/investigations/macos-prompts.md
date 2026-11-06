@@ -207,8 +207,9 @@ to the helper, so what was granted to `python3` no longer counts. Exactly:
 ad hoc signature, or without launching the app):
 
 1. Notarization accepts the bundle with the helper in it; `spctl` accepts the
-   app; the release's Gatekeeper step passes its helper check (team, bound
-   Info.plist). Both architectures.
+   app; the release's Gatekeeper step passes its helper checks (team, bound
+   Info.plist, and the Automation and microphone entitlements on the app's
+   and the helper's signatures). Both architectures.
 2. The app starts its daemon and reuses it on the next open, with no "another
    install" message. `ps` shows the daemon as
    `…/Contents/Library/LoginItems/brindle.app/Contents/MacOS/brindle -I -B -X
@@ -220,25 +221,36 @@ ad hoc signature, or without launching the app):
    new session, another provider's CLI and a `brindle` hook in that folder
    ask nothing more. Then quit and reopen the app (daemon kept), and let the
    daemon exit idle and start again: still nothing.
-5. System Settings → Privacy & Security → Files and Folders shows one brindle
+5. **Automation and microphone consent.** The helper and the app are signed
+   with `com.apple.security.automation.apple-events` and
+   `com.apple.security.device.audio-input`; without them the hardened runtime
+   refuses with no prompt. From an agent's pane, `osascript -e 'tell
+   application "Finder" to get name of home'` raises "brindle wants to control
+   Finder" with the helper's reason, and allowing it lets the command through.
+   Turning on a CLI's voice input raises the microphone prompt naming brindle,
+   and it then hears. Both again with Allow in the Background off (the app's
+   strings and entitlements). An ad hoc build can't show either.
+6. System Settings → Privacy & Security → Files and Folders shows one brindle
    row for the engine, with brindle's icon and name (not "brindle.app" twice
    in a confusing way, not a bare identifier). Login Items → Allow in the
    Background still lists brindle.
-6. An update from a build without the helper: sessions come back after the
+7. An update from a build without the helper: sessions come back after the
    restart, and the first protected access asks once more, as above. An update
    between two builds with the helper asks nothing.
-7. With brindle switched off under Allow in the Background (the daemon is then
+8. With brindle switched off under Allow in the Background (the daemon is then
    the app's child), the same prompts name brindle through the app's own
    strings.
-8. After the daemon that started tmux has exited and a new one runs (idle
+9. After the daemon that started tmux has exited and a new one runs (idle
    exit with a person's own tmux session keeping the server), a new pane's
    prompt still names brindle, or asks nothing. What macOS does when the
    responsible process is gone was not established here.
-9. `open -a brindle` and Spotlight still open the app, not the helper (both
-   are named brindle; the helper is background-only and nothing registers it
-   with LaunchServices).
-10. On Intel and on Apple Silicon, and on the oldest macOS at hand (the app
+10. `open -a brindle` and Spotlight still open the app, not the helper (both
+    are named brindle; the helper is background-only and nothing registers it
+    with LaunchServices).
+11. On Intel and on Apple Silicon, and on the oldest macOS at hand (the app
     supports 11).
+12. The app itself is now signed with entitlements for the first time: it
+    opens, its webview works, and an update installs, as before.
 
 **Not done: one fixed daemon label.** It would stop the repeat Login Items
 notice (decision 1). Nothing found here makes it safe without relaunching the

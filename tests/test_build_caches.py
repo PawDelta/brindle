@@ -155,7 +155,8 @@ def test_engine_builds_of_two_worktrees_sharing_a_cargo_target_keep_separate_wor
         (app / "scripts" / "build_engine.sh").write_text(script.read_text())
         # The build's other inputs, which its stamp reads.
         for name in ("scripts/engine/brindle", "scripts/engine/engine.entitlements", "scripts/engine/helper/main.c",
-                     "scripts/engine/helper/Info.plist", "src-tauri/icons/icon.icns"):
+                     "scripts/engine/helper/Info.plist", "scripts/engine/helper/helper.entitlements",
+                     "src-tauri/icons/icon.icns"):
             (app / name).write_text("")
         env = {"PATH": f"{stubs}:/usr/bin:/bin", "HOME": str(tmp_path), "BRINDLE_SRC": str(tmp_path),
                "CARGO_TARGET_DIR": str(shared)}

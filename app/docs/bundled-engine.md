@@ -210,8 +210,9 @@ and seals the bundle's resources:
    `--options runtime --timestamp` and no entitlements;
 2. `python/bin/python3.13` and `bin/tmux`, the same, plus `engine.entitlements`;
 3. the helper app, as the bundle it is (its Info.plist bound, its identifier
-   `com.pawdelta.brindle.engine`), the same way. Privacy grants are kept by
-   that identifier and the team, so they last across updates.
+   `com.pawdelta.brindle.engine`), the same way but with
+   `helper/helper.entitlements` (below). Privacy grants are kept by that
+   identifier and the team, so they last across updates.
 
 The launcher is a shell script and needs no signature of its own: the app's
 seal covers it as a resource. The helper sits in `Contents/Library/LoginItems`,
@@ -221,6 +222,19 @@ identity build_engine.sh still signs the helper, ad hoc and without the
 hardened runtime (whose library validation would refuse the unsigned
 libpython). The release's Gatekeeper step checks the helper is signed as a
 bundle by the app's team.
+
+**Entitlements for what macOS asks about** (`helper/helper.entitlements`,
+`src-tauri/entitlements.plist`). Under the hardened runtime a usage string
+isn't enough for Automation or the microphone: macOS asks the person only on
+behalf of code signed with the resource's entitlement, and otherwise refuses
+an agent's request without a prompt. So the helper is signed with
+`com.apple.security.automation.apple-events` and
+`com.apple.security.device.audio-input`, besides the engine's Python's own
+entitlement, and the app with the same two (`bundle.macOS.entitlements`), for
+when the daemon is its child. Files, folders and the local network need none.
+The engine's `python3` and tmux keep only `engine.entitlements`: neither is
+what macOS asks on behalf of. build_engine.sh, `smoke_bundle.sh` and the
+release's Gatekeeper step each read the two back from the actual signature.
 
 **Without a Developer ID the app is signed ad hoc.** tauri.macos.conf.json sets
 `signingIdentity` to `-`, which Tauri uses only when `APPLE_SIGNING_IDENTITY`
@@ -372,6 +386,8 @@ cargo test --manifest-path app/src-tauri/Cargo.toml
 - that the helper app is named brindle, carries usage strings, is signed with
   its Info.plist bound, runs the engine's brindle under `env -i` and refuses
   anything else;
+- that the app's and the helper's signatures carry the Automation and
+  microphone entitlements;
 - that its `bin/brindle daemon --idle-exit`, run from inside the .app under
   `env -i`, listens and answers `GET /v1/sessions` with 200 over its Unix
   socket;

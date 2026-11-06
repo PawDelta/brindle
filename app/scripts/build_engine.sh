@@ -106,8 +106,10 @@ ENGINE_TREE="$(git -C "$BRINDLE_SRC" ls-tree "$COMMIT" -- "${ENGINE_PATHS[@]}" |
 TMUX_STAMP="tmux=$TMUX_VERSION libevent=$LIBEVENT_VERSION utf8proc=$UTF8PROC_VERSION macos=$MACOSX_DEPLOYMENT_TARGET"
 STAMP="python=$PY_VERSION+$PY_RELEASE $TMUX_STAMP arch=$ARCH brindle=$ENGINE_TREE"
 ENTITLEMENTS="$APP/scripts/engine/engine.entitlements"
+# The helper's: python's, and what macOS needs to ask on its behalf (the file says).
+HELPER_ENTITLEMENTS="$HELPER_SRC/helper.entitlements"
 STAMP="$STAMP sign=${APPLE_SIGNING_IDENTITY:-none}"
-STAMP="$STAMP build=$(cat "$0" "$APP/scripts/engine/brindle" "$ENTITLEMENTS" \
+STAMP="$STAMP build=$(cat "$0" "$APP/scripts/engine/brindle" "$ENTITLEMENTS" "$HELPER_ENTITLEMENTS" \
   "$HELPER_SRC/main.c" "$HELPER_SRC/Info.plist" "$HELPER_ICON" | shasum -a 256 | cut -c1-16)"
 if [ "$FORCE" = 0 ] && [ "$(cat "$OUT/.stamp" 2>/dev/null)" = "$STAMP" ] \
     && [ -x "$HELPER_OUT/Contents/MacOS/brindle" ]; then
@@ -305,9 +307,12 @@ if [ -n "${APPLE_SIGNING_IDENTITY:-}" ]; then
   if [ "$APPLE_SIGNING_IDENTITY" = - ]; then
     ts=--timestamp=none
     cp "$ENTITLEMENTS" "$WORK/adhoc.entitlements"
-    /usr/libexec/PlistBuddy -c "Add :com.apple.security.cs.disable-library-validation bool true" \
-      "$WORK/adhoc.entitlements"
+    cp "$HELPER_ENTITLEMENTS" "$WORK/adhoc-helper.entitlements"
+    for adhoc in "$WORK/adhoc.entitlements" "$WORK/adhoc-helper.entitlements"; do
+      /usr/libexec/PlistBuddy -c "Add :com.apple.security.cs.disable-library-validation bool true" "$adhoc"
+    done
     ENTITLEMENTS="$WORK/adhoc.entitlements"
+    HELPER_ENTITLEMENTS="$WORK/adhoc-helper.entitlements"
   fi
   # Apple's timestamp server fails now and then (rc.7's Intel build): try five times over
   # about two minutes, showing each failure, so the last one's error is codesign's own.
@@ -323,15 +328,25 @@ if [ -n "${APPLE_SIGNING_IDENTITY:-}" ]; then
   find "$STAGE" -type f \( -name '*.so' -o -name '*.dylib' \) -print0 | while IFS= read -r -d '' lib; do
     sign "$lib" >/dev/null || die "codesign failed for $lib"
   done
-  # The helper as the bundle it is (its Info.plist bound, its identifier the bundle's).
-  for exe in "$STAGE/bin/tmux" "$STAGE/python/bin/python${PY_VERSION%.*}" "$HELPER"; do
+  for exe in "$STAGE/bin/tmux" "$STAGE/python/bin/python${PY_VERSION%.*}"; do
     sign --entitlements "$ENTITLEMENTS" "$exe" >/dev/null || die "codesign failed for $exe"
   done
+  # The helper as the bundle it is (its Info.plist bound, its identifier the bundle's).
+  sign --entitlements "$HELPER_ENTITLEMENTS" "$HELPER" >/dev/null || die "codesign failed for $HELPER"
 else
   # No identity: the helper alone is signed, ad hoc and without the hardened
   # runtime, whose library validation would refuse the engine's unsigned libpython.
-  codesign --force --sign - "$HELPER" 2>/dev/null || die "codesign failed for $HELPER"
+  codesign --force --sign - --entitlements "$HELPER_ENTITLEMENTS" "$HELPER" 2>/dev/null \
+    || die "codesign failed for $HELPER"
 fi
+# Whatever signed it: the entitlements macOS needs to ask on the helper's behalf are in the signature.
+signed="$(codesign -d --entitlements - "$HELPER" 2>/dev/null || true)"
+for entitlement in com.apple.security.automation.apple-events com.apple.security.device.audio-input; do
+  case "$signed" in
+    *"$entitlement"*) ;;
+    *) die "the engine's helper app isn't signed with $entitlement" ;;
+  esac
+done
 
 printf '%s' "$STAMP" | shasum -a 256 | cut -c1-16 > "$STAGE/BUILD"
 

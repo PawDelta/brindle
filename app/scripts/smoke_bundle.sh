@@ -281,8 +281,24 @@ if [ "$BUILD" = 1 ]; then
   fi
 fi
 
-# check_app LABEL PATH: the bundle's signature, name, version, and its
-# binary's --version.
+# check_entitlements LABEL PATH: the signature of the code at PATH carries the
+# hardened runtime's resource access for Automation and the microphone. macOS
+# asks the person about an agent's request on behalf of the app (or the
+# engine's helper app) only if that is signed for it; a usage string alone
+# leaves the request refused without a prompt.
+check_entitlements() {
+  local label="$1" signed entitlement
+  signed="$(codesign -d --entitlements - "$2" 2>/dev/null || true)"
+  for entitlement in com.apple.security.automation.apple-events com.apple.security.device.audio-input; do
+    case "$signed" in
+      *"$entitlement"*) pass "$label: signed with $entitlement" ;;
+      *) fail "$label: its signature lacks $entitlement" ;;
+    esac
+  done
+}
+
+# check_app LABEL PATH: the bundle's signature, entitlements, name, version,
+# and its binary's --version.
 check_app() {
   local label="$1" app="$2" plist="$2/Contents/Info.plist" name version exe out
   if [ ! -d "$app" ]; then fail "$label: no $app"; return; fi
@@ -294,6 +310,7 @@ check_app() {
   else
     fail "$label: codesign --verify --deep --strict: $out"
   fi
+  check_entitlements "$label" "$app"
   name="$(plutil -extract CFBundleName raw -o - "$plist" 2>/dev/null || true)"
   [ "$name" = "brindle" ] && pass "$label: CFBundleName is brindle" \
     || fail "$label: CFBundleName is '$name', not brindle"
@@ -418,6 +435,7 @@ check_helper() {
   else
     fail "helper: not signed as a bundle: $out"
   fi
+  check_entitlements "helper" "$helper"
   out="$(env -i HOME="${TMPDIR:-/tmp}" PATH=/usr/bin:/bin "$helper/Contents/MacOS/brindle" -I -B -m brindle --version 2>&1)" \
     && pass "helper: runs the engine's brindle under env -i: $out" \
     || fail "helper: -I -B -m brindle --version failed: $out"
