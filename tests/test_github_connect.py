@@ -15,8 +15,9 @@ from pathlib import Path
 
 import pytest
 from conftest import sh
+from typer.testing import CliRunner
 
-from brindle import clone, git, github_connect, keystore, mac_keychain, providers
+from brindle import cli, clone, git, github_connect, keystore, mac_keychain, providers
 from brindle.daemon import auth, holds, peer, routes_actions, routes_read
 from brindle.service.errors import ServiceError
 
@@ -248,8 +249,17 @@ def test_connection_routes_keep_the_token_and_refuse_what_github_wont_take(db, t
     assert (got["route"], got["gh_available"], got["needs_reconnect"]) == ("gh", True, True)
     assert got["expires_at"] < time.time() and github_connect.answer("get", ASK) == github_connect.QUIT
 
+    # A disconnect that can't remove the record says so, from the route and from the CLI: the connection is
+    # still there, to be disconnected once it can be.
+    with monkeypatch.context() as failing:
+        failing.setattr(keystore.FileStore, "delete", _disk_full)
+        with pytest.raises(ServiceError) as failed:
+            routes_actions.disconnect_github(db, {}, {})
+        said = CliRunner().invoke(cli.app, ["github", "disconnect"])
+    assert failed.value.code == "not_disconnected" and said.exit_code == 1 and "disconnected" not in said.output
+    assert github_connect.connected()
     assert routes_actions.disconnect_github(db, {}, {})["connected"] is False
-    assert github_connect.credential() is None
+    assert github_connect.credential() is None and not github_connect.connected()
 
 
 class _HelpersItem:

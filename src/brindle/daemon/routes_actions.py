@@ -2345,11 +2345,16 @@ def connect_github(db: DB, params: dict, body: Body) -> Any:
 
 
 def disconnect_github(db: DB, params: dict, body: Body) -> Any:
-    """Forget brindle's GitHub sign-in; nothing is revoked on GitHub."""
+    """Forget brindle's GitHub sign-in; nothing is revoked on GitHub. An error when it
+    couldn't be forgotten: the reply never says disconnected of one still in place."""
     from brindle import github_connect
     from brindle.service.dto import GitHubConnectionDTO
 
-    return GitHubConnectionDTO(**github_connect.disconnect(local=True)).to_json()
+    try:
+        state = github_connect.disconnect(local=True)
+    except github_connect.ConnectError as e:
+        raise ServiceError(e.code, str(e), 500) from None
+    return GitHubConnectionDTO(**state).to_json()
 
 
 def github_credential(db: DB, params: dict, body: Body) -> Any:

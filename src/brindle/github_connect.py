@@ -598,13 +598,21 @@ def connect_gh(*, file: bool = False, local: bool = False) -> dict:
 
 def disconnect(*, local: bool = False) -> dict:
     """Forget the connection. Nothing is revoked on GitHub: a copied sign-in is still gh's
-    own, and a pasted token may be in use elsewhere; the person deletes a token on GitHub."""
+    own, and a pasted token may be in use elsewhere; the person deletes a token on GitHub.
+    ConnectError when the record couldn't be removed: the connection is then still there,
+    and nothing says otherwise. Clearing its token away afterwards can't fail it."""
     record = _load()
     if record is not None and record.get("storage") == "keychain" and not is_helper() and not local:
         return _daemon("DELETE")
-    with contextlib.suppress(keystore.CredentialError, OSError), _lock():
-        _store().delete()       # from here on there is no connection
-        (_dir() / REFUSED_FILE).unlink(missing_ok=True)
+    try:
+        with _lock():
+            _store().delete()       # from here on there is no connection
+            # Past that nothing may fail this disconnect.
+            with contextlib.suppress(OSError):
+                (_dir() / REFUSED_FILE).unlink(missing_ok=True)
+    except (keystore.CredentialError, OSError) as e:
+        # Still connected, and said so: git and agents can use the credential as before.
+        raise ConnectError("not_disconnected", f"couldn't forget the connection, which is still in place: {e}") from None
     # Only then its token, if it has one of its own: still listed if it can't be removed
     # now, and never removed while the record names it.
     _clean_up()
