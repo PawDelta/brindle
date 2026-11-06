@@ -94,7 +94,7 @@ button { cursor: pointer; }
 .sec { padding-top: 64px; scroll-margin-top: 56px; }
 .eyebrow { font-family: var(--mono); font-size: 12px; color: var(--ink-3); letter-spacing: 0.02em; }
 .sec h1 { margin: 6px 0 8px; font-size: 30px; font-weight: 600; letter-spacing: -0.025em; line-height: 1.15; }
-.sec .lede { margin: 0; max-width: 760px; color: var(--ink-2); font-size: 15px; }
+.sec .lede { margin: 0; max-width: 780px; color: var(--ink-2); font-size: 15px; }
 .hero { padding-top: 48px; }
 .hero h1 { font-size: 38px; }
 
@@ -104,12 +104,15 @@ button { cursor: pointer; }
 .logo-word { letter-spacing: -0.02em; }
 .logo .lm-in { stroke: var(--thread-in); } .logo .lm-top { stroke: var(--thread-top); } .logo .lm-mid { stroke: var(--thread-mid); } .logo .lm-bot { stroke: var(--thread-out); }
 
-/* ── Option tabs ──────────────────────────────────────────────────────────── */
-.tabs { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin: 28px 0 14px; }
+/* ── Principles, variation tabs ───────────────────────────────────────────── */
+.principles { list-style: none; margin: 22px 0 0; padding: 0; display: grid; grid-template-columns: repeat(5, 1fr); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.principles li { background: var(--canvas); padding: 10px 12px 11px; font-size: 12.5px; line-height: 1.45; color: var(--ink-2); }
+.principles b { display: block; font-family: var(--mono); font-weight: 500; font-size: 11px; color: var(--ink-3); margin-bottom: 2px; }
+.tabs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 18px 0 14px; }
 .tab {
   position: relative; text-align: left; border: 1px solid var(--line); background: var(--canvas); border-radius: 10px;
   padding: 12px 14px 13px; display: flex; flex-direction: column; gap: 3px; color: var(--ink-2);
-  transition: border-color 160ms var(--ease), box-shadow 200ms var(--ease), transform 200ms var(--ease);
+  transition: border-color 160ms var(--ease), box-shadow 200ms var(--ease);
 }
 .tab:hover { border-color: var(--line-strong); }
 .tab[aria-selected="true"] { border-color: color-mix(in srgb, var(--branch) 55%, transparent); box-shadow: 0 0 0 3px var(--branch-soft), var(--card-shadow); color: var(--ink); }
@@ -117,7 +120,7 @@ button { cursor: pointer; }
 .tab .k kbd { font: inherit; border: 1px solid var(--line-strong); border-radius: 4px; padding: 0 5px; line-height: 16px; }
 .tab b { font-size: 14px; font-weight: 600; color: var(--ink); letter-spacing: -0.01em; }
 .tab span.d { font-size: 12.5px; line-height: 1.45; }
-.optnote { display: flex; gap: 28px; flex-wrap: wrap; margin: 0 0 18px; font-size: 13px; color: var(--ink-2); }
+.optnote { display: flex; gap: 28px; flex-wrap: wrap; align-items: center; margin: 0 0 18px; font-size: 13px; color: var(--ink-2); }
 .optnote b { color: var(--ink); font-weight: 600; }
 .colmarks { display: flex; width: 1240px; margin: 0 auto 8px; font-family: var(--mono); font-size: 11px; color: var(--ink-3); }
 .colmarks span { display: flex; align-items: center; gap: 8px; }
@@ -135,7 +138,7 @@ button { cursor: pointer; }
 .win-bar i { width: 12px; height: 12px; border-radius: 50%; display: block; box-shadow: inset 0 0 0 0.5px rgba(0,0,0,.18); }
 .win-bar i:nth-child(1) { background: #ff5f57; } .win-bar i:nth-child(2) { background: #febc2e; } .win-bar i:nth-child(3) { background: #28c840; }
 .win-bar .ttl { position: absolute; left: 0; right: 0; text-align: center; font-size: 12px; color: var(--ink-3); pointer-events: none; }
-.win-body { display: flex; height: 872px; }
+.win-body { display: flex; height: 820px; }
 
 /* Sidebar (components/Sidebar.tsx): w-[352px] bg-canvas-2 px-[12px] pb-[12px] pt-[14px] gap-[10px] text-[13px] */
 .side { width: 352px; flex: none; display: flex; flex-direction: column; gap: 10px; padding: 14px 12px 12px; background: var(--canvas-2); border-right: 1px solid var(--line); font-size: 13px; overflow: hidden; }
@@ -168,7 +171,6 @@ button { cursor: pointer; }
 .side-dot[data-tone="work"] { background: var(--branch); }
 .side-dot[data-tone="wait"] { background: var(--sap); }
 .side-dot[data-tone="done"] { background: var(--pass); }
-.side-dot[data-tone="paused"] { background: transparent; border: 1.5px solid var(--ink-3); width: 7px; height: 7px; }
 .agents { margin: 0 0 4px 8px; padding: 0; list-style: none; border-left: 1px solid var(--line); display: flex; flex-direction: column; gap: 1px; }
 .agents li { display: flex; align-items: center; gap: 8px; padding: 3px 8px 3px 12px; font-size: 12px; color: var(--ink-2); white-space: nowrap; }
 .agents li .side-dot { margin-top: 0; width: 6px; height: 6px; }
@@ -195,9 +197,6 @@ button { cursor: pointer; }
 .btn-main { display: inline-flex; align-items: center; gap: 4px; border-radius: var(--r); padding: 4px 16px; line-height: 20px; border: 1px solid color-mix(in srgb, var(--pass) 55%, transparent); background: color-mix(in srgb, var(--pass) 4%, transparent); font-family: var(--mono); font-size: 13px; font-weight: 500; letter-spacing: -0.01em; color: var(--pass); white-space: nowrap; }
 .btn-main:hover { background: var(--pass-soft); }
 .btn-dots { border: 0; background: transparent; color: var(--ink-3); font-size: 16px; padding: 0 6px; border-radius: var(--r); }
-.quiet { border: 0; background: transparent; border-radius: var(--r); padding: 2px 8px; font-size: 12px; color: var(--ink-2); display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
-.quiet:hover { background: var(--surface-2); color: var(--ink); }
-.goalslot { border-top: 0; }
 .termwrap { flex: 1; min-height: 0; display: flex; padding: 16px; }
 .shell { background: var(--shell-bg); color: var(--shell-ink); border-radius: var(--r); font-family: var(--mono); font-size: 12.5px; line-height: 1.6; }
 .term { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
@@ -213,209 +212,124 @@ button { cursor: pointer; }
 .lbl { font-size: 12px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.05em; color: var(--ink-3); }
 .pill { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 500; white-space: nowrap; }
 .pill::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex: none; }
-.gp { padding: 12px 16px 14px; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 8px; }
-.gp-top { display: flex; align-items: center; gap: 8px; }
-.gp-title { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: -0.01em; line-height: 1.3; }
-.gp-sub { font-size: 12px; color: var(--ink-2); }
-.foot { font-size: 11px; color: var(--ink-3); padding: 2px 6px 0; display: flex; gap: 6px; align-items: center; }
-.sep { color: var(--ink-3); opacity: .7; margin: 0 5px; }
-.chev { width: 12px; height: 12px; transition: transform 240ms var(--ease); flex: none; }
+.gp { padding: 12px 16px 12px; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 10px; }
+.gp-top { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.gp-title { font-size: 14px; font-weight: 600; letter-spacing: -0.01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.foot { font-size: 11px; color: var(--ink-3); display: flex; gap: 6px; align-items: center; }
+.chev { width: 12px; height: 12px; transition: transform 240ms var(--ease); flex: none; color: var(--ink-3); }
 [aria-expanded="true"] > .chev { transform: rotate(90deg); }
-.iconbtn { border: 0; background: transparent; color: var(--ink-3); width: 22px; height: 22px; border-radius: var(--r); display: grid; place-items: center; flex: none; }
-.iconbtn:hover { background: var(--surface-2); color: var(--ink); }
-.clp { display: grid; grid-template-rows: 0fr; transition: grid-template-rows 320ms var(--ease), opacity 240ms var(--ease); opacity: 0; }
+.clp { display: grid; grid-template-rows: 0fr; transition: grid-template-rows 300ms var(--ease), opacity 220ms var(--ease); opacity: 0; }
 .clp.open { grid-template-rows: 1fr; opacity: 1; }
 .clp > div { overflow: hidden; min-height: 0; }
 .opt { animation: opt-in 360ms var(--ease) both; }
 @keyframes opt-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 @keyframes spin { to { transform: rotate(360deg); } }
-@keyframes ping { 0% { transform: scale(1); opacity: .55; } 80%, 100% { transform: scale(3.2); opacity: 0; } }
 @keyframes breathe { from { opacity: .45; } to { opacity: 1; } }
+.cnt { font-family: var(--mono); font-size: 12px; color: var(--ink-3); white-space: nowrap; }
+.cnt b { color: var(--ink); font-weight: 500; }
 
-/* The status node, shared by A and D: done ✓, running arc, failing !, not started dashed */
-.nd { --sz: 16px; width: var(--sz); height: var(--sz); border-radius: 50%; display: grid; place-items: center; flex: none; position: relative; font-size: calc(var(--sz) * .56); font-weight: 700; line-height: 1; }
-.nd svg { width: 62%; height: 62%; }
-.nd[data-s="passed"] { background: var(--pass); color: var(--canvas); }
-.nd[data-s="running"] { box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--branch) 28%, transparent); background: var(--canvas); }
-.nd[data-s="running"]::before { content: ""; position: absolute; inset: 0; border-radius: 50%; border: 1.5px solid transparent; border-top-color: var(--branch); border-right-color: var(--branch); animation: spin 1s linear infinite; }
-.nd[data-s="running"]::after { content: ""; width: 30%; height: 30%; border-radius: 50%; background: var(--branch); }
-.nd[data-s="failed"] { background: var(--fail-soft); box-shadow: inset 0 0 0 1.5px var(--fail); color: var(--fail); }
-.nd[data-s="todo"] { border: 1.5px dashed var(--line-strong); color: var(--ink-3); font-weight: 500; font-family: var(--mono); background: var(--canvas-2); }
+/* ── Milestones, the calm design ──────────────────────────────────────────── */
+/* The bar: one segment per milestone; hover names it, click jumps to it. */
+.msb { display: flex; gap: 2px; height: 6px; }
+.msb.sm { height: 4px; gap: 1.5px; }
+.msb.phased { gap: 7px; } .msb.phased .ph { display: flex; gap: 2px; min-width: 0; }
+.msb.sm.phased { gap: 5px; } .msb.sm.phased .ph { gap: 1.5px; }
+.sg { position: relative; flex: 1; min-width: 2px; border: 0; padding: 0; border-radius: 1.5px; background: var(--line-strong); transform-origin: center; transition: transform 160ms var(--ease); }
+.sg::after { content: ""; position: absolute; inset: -7px -1px; }
+.sg:hover, .sg:focus-visible { transform: scaleY(1.8); }
+.sg:focus-visible { outline-offset: 3px; }
+.sg[data-s="passed"] { background: color-mix(in srgb, var(--pass) 72%, transparent); }
+.sg[data-s="failed"] { background: var(--fail); }
+.sg[data-s="running"] { background: var(--branch); animation: breathe 1.1s ease-in-out infinite alternate; }
+.phl { display: flex; gap: 7px; margin-top: -4px; }
+.phl span { min-width: 0; font-size: 11px; color: var(--ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.phl span.on { color: var(--ink-2); }
+.phl span b { font-family: var(--mono); font-weight: 400; margin-left: 5px; }
+#tip { position: fixed; z-index: 60; pointer-events: none; max-width: 300px; padding: 6px 9px 7px; border-radius: 6px; background: var(--ink); color: var(--canvas); font-size: 12px; line-height: 1.35; transform: translate(-50%, calc(-100% - 10px)); opacity: 0; transition: opacity 120ms var(--ease); box-shadow: 0 10px 24px -10px rgba(0,0,0,.5); }
+#tip.on { opacity: 1; }
+#tip b { font-family: var(--mono); font-weight: 500; opacity: .6; margin-right: 6px; }
+#tip span { display: block; font-family: var(--mono); font-size: 10.5px; opacity: .7; margin-top: 2px; }
 
-/* ── Option A: ring + collapsible stepper ─────────────────────────────────── */
-.ring { position: relative; flex: none; display: grid; place-items: center; }
-.ring svg { position: absolute; inset: 0; transform: rotate(-90deg); overflow: visible; }
-.ring circle { fill: none; }
-.ring .rs { stroke-dasharray: 0 100; transition: stroke-dasharray 760ms var(--ease); }
-.ring.drawn .rs { stroke-dasharray: var(--da); }
-.ring .rs[data-s="passed"] { stroke: var(--pass); }
-.ring .rs[data-s="running"] { stroke: color-mix(in srgb, var(--branch) 26%, transparent); }
-.ring .rs[data-s="failed"] { stroke: var(--fail); }
-.ring .rs[data-s="todo"] { stroke: var(--line-strong); }
-.ring .rs-live { stroke: var(--branch); stroke-dasharray: 0 100; }
-.ring .rc { font-size: 12px; font-weight: 600; letter-spacing: -0.02em; }
-.ring .rc i { font-style: normal; color: var(--ink-3); font-weight: 500; }
-.ring.lg .rc { font-size: 15px; }
-.oa-head { display: flex; align-items: center; gap: 10px; padding: 0 2px; }
-.oa-head.lg { gap: 14px; align-items: center; }
-.oa-ht { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
-.oa-count { font-size: 12px; font-weight: 500; }
-.oa-sub { font-size: 11.5px; color: var(--ink-3); display: flex; align-items: center; flex-wrap: wrap; }
-.oa-steps { list-style: none; margin: 0; padding: 6px 0 2px; display: flex; flex-direction: column; }
-.oa-step { position: relative; display: flex; gap: 10px; padding: 0 6px 10px; }
-.oa-step:not(:last-child)::before { content: ""; position: absolute; left: 13.5px; top: 20px; bottom: 2px; width: 1px; background: var(--line-strong); }
-.oa-step[data-s="passed"]:not(:last-child)::before { background: color-mix(in srgb, var(--pass) 55%, transparent); }
-.oa-step[data-s="running"]:not(:last-child)::before { background: linear-gradient(var(--branch), var(--line-strong)); }
-.oa-step .nd { margin-top: 1px; }
-.oa-b { min-width: 0; flex: 1; }
-.oa-t { font-size: 12.5px; line-height: 1.35; color: var(--ink); }
-.oa-step[data-s="passed"] .oa-t { color: var(--ink-2); }
-.oa-step[data-s="todo"] .oa-t { color: var(--ink-3); }
-.oa-m { font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.oa-step[data-s="running"] .oa-m b { color: var(--branch); font-weight: 500; }
-.oa-step[data-s="failed"] .oa-m b { color: var(--fail); font-weight: 500; }
-.oa-step[data-s="passed"] .oa-m b { color: var(--pass); font-weight: 500; }
-.oa-full .oa-step { padding-bottom: 14px; gap: 12px; }
-.oa-full .oa-step:not(:last-child)::before { left: 15px; top: 22px; }
-.oa-full .nd { --sz: 18px; }
-.oa-full .oa-t { font-size: 14px; font-weight: 500; }
-.oa-full .oa-step[data-s="passed"] .oa-t { font-weight: 400; }
-.oa-row2 { display: flex; align-items: baseline; gap: 12px; }
-.oa-row2 .oa-t { flex: 1; }
-.oa-full .oa-m { font-size: 11.5px; }
-.oa-err { margin-top: 6px; font-family: var(--mono); font-size: 11.5px; color: var(--fail); background: var(--fail-soft); border-radius: var(--r); padding: 5px 8px; }
-.oa-sum { display: flex; flex-direction: column; gap: 4px; padding: 2px 0 0 70px; }
-.oa-sum div { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--ink-2); min-width: 0; }
-.oa-sum div span.tt { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
-.oa-sum .k { font-family: var(--mono); font-size: 11px; width: 74px; flex: none; }
-.oa-sum .nd { --sz: 14px; }
+/* Filters and search: only past ~15 milestones. */
+.mtool { display: flex; align-items: center; gap: 6px; }
+.chipf { display: inline-flex; align-items: center; gap: 6px; border: 1px solid transparent; background: transparent; border-radius: var(--r); padding: 1px 8px; font-size: 12px; color: var(--ink-3); }
+.chipf span { font-family: var(--mono); font-size: 11px; opacity: .8; }
+.chipf:hover { color: var(--ink); }
+.chipf[aria-pressed="true"] { background: var(--surface-2); border-color: var(--line); color: var(--ink); }
+.msq { margin-left: auto; display: flex; align-items: center; gap: 6px; width: 220px; border-bottom: 1px solid var(--line-strong); padding: 1px 2px 2px; color: var(--ink-3); }
+.msq:focus-within { border-color: var(--branch); }
+.msq svg { width: 13px; height: 13px; flex: none; }
+.msq input { flex: 1; min-width: 0; border: 0; background: transparent; outline: none; font-size: 12.5px; color: var(--ink); }
+.msq input::placeholder { color: var(--ink-3); }
+.msq kbd { font-family: var(--mono); font-size: 10.5px; border: 1px solid var(--line); border-radius: 3px; padding: 0 4px; }
 
-/* ── Option B: segmented timeline ─────────────────────────────────────────── */
-.ob-hd { display: flex; align-items: baseline; gap: 8px; padding: 0 2px; }
-.ob-bar { display: flex; gap: 3px; height: 6px; margin: 2px 2px 0; }
-.ob-seg { flex: 1; border-radius: 3px; background: var(--line); position: relative; overflow: hidden; }
-.ob-seg[data-s="passed"] { background: var(--pass); }
-.ob-seg[data-s="failed"] { background: var(--fail); }
-.ob-seg[data-s="running"] { background: color-mix(in srgb, var(--branch) 24%, transparent); }
-.ob-seg[data-s="running"]::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 58%; background: var(--branch); border-radius: inherit; }
-.ob-seg[data-s="running"]::after { content: ""; position: absolute; top: 0; bottom: 0; left: 0; width: 45%; background: linear-gradient(90deg, transparent, rgba(255,255,255,.55), transparent); mix-blend-mode: overlay; animation: shim 1.8s var(--ease) infinite; }
-@keyframes shim { from { transform: translateX(-110%); } to { transform: translateX(240%); } }
-.ob-labs { display: flex; gap: 3px; margin: 6px 2px 0; }
-.ob-labs span { flex: 1; font-size: 11px; color: var(--ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.ob-labs span b { font-family: var(--mono); font-weight: 500; margin-right: 4px; }
-.ob-labs span[data-s="passed"] b { color: var(--pass); } .ob-labs span[data-s="running"] { color: var(--ink); } .ob-labs span[data-s="running"] b { color: var(--branch); } .ob-labs span[data-s="failed"] b { color: var(--fail); }
-.ob-tl { list-style: none; margin: 8px 0 0; padding: 0; }
-.ob-it { display: grid; grid-template-columns: 14px 1fr auto; gap: 10px; padding: 0 4px; }
-.ob-full .ob-it { grid-template-columns: 44px 14px 1fr; gap: 12px; }
-.ob-when { font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); padding-top: 2px; white-space: nowrap; text-align: right; }
-.ob-full .ob-when { font-size: 11.5px; padding-top: 1px; }
-.ob-it[data-s="running"] .ob-when { color: var(--branch); }
-.ob-rail { position: relative; }
-.ob-rail::before { content: ""; position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; transform: translateX(-.5px); background: var(--line-strong); }
-.ob-it:first-child .ob-rail::before { top: 8px; }
-.ob-it:last-child .ob-rail::before { bottom: auto; height: 8px; }
-.ob-it[data-s="passed"] .ob-rail::before { background: color-mix(in srgb, var(--pass) 50%, transparent); }
-.ob-dot { position: absolute; left: 50%; top: 4px; width: 8px; height: 8px; margin-left: -4px; border-radius: 50%; background: var(--canvas-2); box-shadow: inset 0 0 0 1.5px var(--line-strong); }
-.ob-full .ob-dot { background: var(--canvas); }
-.ob-it[data-s="passed"] .ob-dot { background: var(--pass); box-shadow: 0 0 0 3px var(--canvas-2); }
-.ob-it[data-s="failed"] .ob-dot { background: var(--fail); box-shadow: 0 0 0 3px var(--fail-soft); }
-.ob-it[data-s="running"] .ob-dot { background: var(--branch); box-shadow: 0 0 0 3px var(--branch-soft); }
-.ob-it[data-s="running"] .ob-dot::before, .ob-it[data-s="running"] .ob-dot::after { content: ""; position: absolute; inset: 0; border-radius: 50%; background: var(--branch); animation: ping 2.2s var(--ease) infinite; }
-.ob-it[data-s="running"] .ob-dot::after { animation-delay: 1.1s; }
-.ob-b { min-width: 0; padding-bottom: 12px; }
-.ob-full .ob-b { padding-bottom: 14px; }
-.ob-t { font-size: 12.5px; line-height: 1.35; }
-.ob-full .ob-t { font-size: 14px; font-weight: 500; }
-.ob-it[data-s="passed"] .ob-t { color: var(--ink-2); font-weight: 400; }
-.ob-it[data-s="todo"] .ob-t { color: var(--ink-3); font-weight: 400; }
-.ob-m { font-size: 11px; color: var(--ink-3); margin-top: 2px; font-family: var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.ob-full .ob-m { font-size: 11.5px; }
-.ob-live { margin-top: 5px; display: flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 10.5px; color: var(--ink-2); background: var(--branch-soft); border-radius: var(--r); padding: 3px 7px; min-width: 0; }
-.ob-full .ob-live { font-size: 11.5px; padding: 4px 9px; max-width: 640px; }
-.ob-live span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
-.ob-live span.fresh { animation: line-in 380ms var(--ease); }
+/* The list. Rows share one grid: mark, number, title, status. */
+.mscroll { max-height: 330px; overflow: auto; margin: -2px -8px 0; padding: 0 8px; }
+.mr, .mg { display: grid; grid-template-columns: 14px 22px minmax(0, 1fr) auto; column-gap: 10px; align-items: start; padding: 5px 8px; border-radius: var(--r); font-size: 13.5px; line-height: 20px; }
+.mr .no, .mg .no { font-family: var(--mono); font-size: 11.5px; color: var(--ink-3); text-align: right; }
+.mr .tt { min-width: 0; color: var(--ink); }
+.mr .st { font-family: var(--mono); font-size: 11.5px; color: var(--ink-3); white-space: nowrap; padding-left: 12px; }
+.mr[data-s="failed"] .st { color: var(--fail); } .mr[data-s="running"] .st { color: var(--branch); }
+.mr.c .tt { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--ink-2); }
+.mr.c[data-s="todo"] .tt { color: var(--ink-3); }
+.mr[data-s="todo"]:not(.c) .tt { color: var(--ink-2); }
+.mr .x { grid-column: 3 / 5; display: flex; align-items: center; gap: 10px; min-width: 0; margin-top: 1px; font-family: var(--mono); font-size: 11.5px; color: var(--ink-3); }
+.mr .x .e { color: var(--fail); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.mr .x .lv { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; color: var(--ink-2); }
+.mr .x .lv.fresh { animation: line-in 380ms var(--ease); }
 @keyframes line-in { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: none; } }
-.ob-err { margin-top: 5px; font-family: var(--mono); font-size: 10.5px; color: var(--fail); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.ob-full .ob-err { font-size: 11.5px; }
+.mr .out { grid-column: 3 / 5; margin-top: 6px; }
+.lnk { border: 0; background: transparent; padding: 0; font: inherit; color: var(--ink-2); white-space: nowrap; text-decoration: underline; text-decoration-color: var(--line-strong); text-underline-offset: 3px; }
+.lnk:hover { color: var(--ink); text-decoration-color: currentColor; }
+.mr.flash { animation: flash 1.6s var(--ease); }
+@keyframes flash { 0%, 35% { background: var(--branch-soft); box-shadow: inset 2px 0 0 var(--branch); } 100% { background: transparent; box-shadow: inset 2px 0 0 transparent; } }
+.mg { width: 100%; border: 0; background: transparent; text-align: left; color: var(--ink-2); font-size: 13px; align-items: center; grid-template-columns: 14px 22px minmax(0, 1fr) auto; }
+.mg:hover { background: var(--surface-2); color: var(--ink); }
+.mg .rg { font-family: var(--mono); font-size: 11px; color: var(--ink-3); margin-left: 8px; }
+.mg .chev { justify-self: end; }
+.mgl { padding-bottom: 2px; }
+.mi { width: 14px; height: 20px; display: grid; place-items: center; }
+.mi svg { width: 12px; height: 12px; color: var(--pass); }
+.mi[data-s="failed"]::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--fail); box-shadow: 0 0 0 3px var(--fail-soft); }
+.mi[data-s="running"]::before { content: ""; width: 11px; height: 11px; border-radius: 50%; border: 1.5px solid color-mix(in srgb, var(--branch) 25%, transparent); border-top-color: var(--branch); box-sizing: border-box; animation: spin .9s linear infinite; }
+.mi[data-s="todo"]::before { content: ""; width: 8px; height: 8px; border-radius: 50%; box-shadow: inset 0 0 0 1.5px var(--line-strong); }
+.empty { margin: 8px; font-size: 12.5px; color: var(--ink-3); }
 
-/* ── Option C: minimal checklist with an output drawer ────────────────────── */
-.oc-hd { display: flex; align-items: center; gap: 10px; padding: 0 6px 2px; }
-.oc-meter { flex: 1; height: 2px; background: var(--line); border-radius: 1px; overflow: hidden; display: flex; }
-.oc-meter i { display: block; height: 100%; background: var(--pass); transition: width 600ms var(--ease); }
-.oc-list { display: flex; flex-direction: column; gap: 1px; }
-.oc-row { display: flex; align-items: flex-start; gap: 10px; width: 100%; text-align: left; border: 0; background: transparent; border-radius: var(--r); padding: 5px 6px; color: var(--ink); transition: background 140ms var(--ease); }
-.oc-row:hover, .oc-row[aria-expanded="true"] { background: var(--surface-2); }
-.oc-full .oc-row { padding: 7px 8px; gap: 12px; }
-.oc-box { width: 14px; height: 14px; border-radius: 4px; flex: none; display: grid; place-items: center; margin-top: 2px; position: relative; }
-.oc-full .oc-box { width: 16px; height: 16px; margin-top: 1px; }
-.oc-box svg { width: 10px; height: 10px; }
-.oc-row[data-s="passed"] .oc-box { background: var(--pass); color: var(--canvas); }
-.oc-row[data-s="failed"] .oc-box { background: var(--fail-soft); box-shadow: inset 0 0 0 1.25px var(--fail); color: var(--fail); }
-.oc-row[data-s="todo"] .oc-box { box-shadow: inset 0 0 0 1.25px var(--line-strong); }
-.oc-row[data-s="running"] .oc-box { border-radius: 50%; box-shadow: inset 0 0 0 1.25px color-mix(in srgb, var(--branch) 25%, transparent); }
-.oc-row[data-s="running"] .oc-box::before { content: ""; position: absolute; inset: 0; border-radius: 50%; border: 1.25px solid transparent; border-top-color: var(--branch); animation: spin .9s linear infinite; }
-.oc-t { flex: 1; min-width: 0; font-size: 12.5px; line-height: 1.4; }
-.oc-full .oc-t { font-size: 14px; }
-.oc-row[data-s="passed"] .oc-t { color: var(--ink-2); }
-.oc-row[data-s="todo"] .oc-t { color: var(--ink-3); }
-.oc-st { font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); padding-top: 2px; white-space: nowrap; }
-.oc-full .oc-st { font-size: 11.5px; padding-top: 1px; min-width: 120px; text-align: right; }
-.oc-row[data-s="running"] .oc-st { color: var(--branch); }
-.oc-row[data-s="failed"] .oc-st { color: var(--fail); }
-.oc-row .chev { color: var(--ink-3); opacity: 0; margin-top: 3px; transition: opacity 140ms, transform 240ms var(--ease); }
-.oc-row:hover .chev, .oc-row[aria-expanded="true"] .chev, .oc-row:focus-visible .chev { opacity: 1; }
-.oc-row[aria-expanded="true"] .chev { transform: rotate(90deg); }
-.oc-drawer > div > div { margin: 2px 0 8px 30px; }
-.oc-full .oc-drawer > div > div { margin-left: 36px; }
-.oc-out { padding: 8px 10px; font-size: 10.5px; line-height: 1.55; border: 1px solid var(--shell-line); }
-.oc-full .oc-out { font-size: 12px; padding: 10px 12px; }
-.oc-out div { white-space: pre-wrap; word-break: break-all; }
-.oc-out .p { color: var(--shell-dim); } .oc-out .ok { color: var(--shell-acc); } .oc-out .bad { color: var(--shell-bad); } .oc-out .dim { color: var(--shell-dim); }
-.oc-acts { display: flex; align-items: center; gap: 2px; margin-top: 4px; font-size: 11px; }
-.oc-acts .quiet { font-size: 11.5px; padding: 1px 6px; }
-.oc-acts .when { margin-left: auto; font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); }
+/* Variation 2: phases */
+.mph + .mph { border-top: 1px solid var(--line); }
+.mp { width: 100%; display: grid; grid-template-columns: 14px minmax(0, 1fr) 72px 44px 12px; column-gap: 10px; align-items: center; border: 0; background: transparent; text-align: left; padding: 8px 8px; border-radius: var(--r); }
+.mp:hover { background: var(--surface-2); }
+.mp .pn { font-size: 13px; font-weight: 600; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mp .pn small { font-size: 12px; font-weight: 400; margin-left: 10px; }
+.mp[data-done] .pn { color: var(--ink-2); font-weight: 500; }
+.mp .pb { height: 3px; border-radius: 2px; background: var(--line); overflow: hidden; }
+.mp .pb i { display: block; height: 100%; background: color-mix(in srgb, var(--pass) 72%, transparent); }
+.mp .pc { font-family: var(--mono); font-size: 11.5px; color: var(--ink-3); text-align: right; }
+.mph .clp > div > div { padding: 0 0 6px 24px; }
 
-/* ── Option D: horizontal milestone track ─────────────────────────────────── */
-.od-track { display: grid; grid-template-columns: repeat(5, 1fr); margin-top: 6px; }
-.od-st { position: relative; display: flex; flex-direction: column; align-items: center; gap: 8px; border: 0; background: transparent; padding: 0 8px 4px; text-align: center; color: var(--ink-2); border-radius: 6px; }
-.od-st::before, .od-st::after { content: ""; position: absolute; top: 12px; height: 2px; width: 50%; background: var(--line-strong); z-index: 0; }
-.od-st::before { left: 0; } .od-st::after { right: 0; }
-.od-st:first-child::before, .od-st:last-child::after { display: none; }
-.od-st[data-in="done"]::before, .od-st[data-out="done"]::after { background: var(--pass); }
-.od-st[data-in="live"]::before, .od-st[data-out="live"]::after { background: repeating-linear-gradient(90deg, var(--branch) 0 6px, transparent 6px 10px); background-size: 10px 2px; animation: march .7s linear infinite; }
-@keyframes march { from { background-position: 0 0; } to { background-position: 10px 0; } }
-.od-st .nd { --sz: 26px; z-index: 1; transition: box-shadow 200ms var(--ease), transform 200ms var(--ease); }
-.od-st .nd[data-s="passed"] { box-shadow: 0 0 0 4px var(--canvas); }
-.od-st .nd[data-s="todo"] { background: var(--canvas); font-size: 11px; }
-.od-st[aria-selected="true"] .nd { transform: scale(1.06); }
-.od-st[aria-selected="true"] .nd[data-s="running"] { box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--branch) 28%, transparent), 0 0 0 5px var(--branch-soft); }
-.od-st[aria-selected="true"] .nd[data-s="failed"] { box-shadow: inset 0 0 0 1.5px var(--fail), 0 0 0 5px var(--fail-soft); }
-.od-st[aria-selected="true"] .nd[data-s="passed"] { box-shadow: 0 0 0 4px var(--canvas), 0 0 0 7px var(--pass-soft); }
-.od-lab { font-size: 12.5px; line-height: 1.35; max-width: 170px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-.od-st[aria-selected="true"] .od-lab { color: var(--ink); font-weight: 500; }
-.od-st:hover .od-lab { color: var(--ink); }
-.od-when { font-family: var(--mono); font-size: 11px; color: var(--ink-3); margin-top: -4px; }
-.od-st[data-s="running"] .od-when { color: var(--branch); } .od-st[data-s="failed"] .od-when { color: var(--fail); }
-.od-detail { position: relative; margin-top: 12px; background: var(--canvas-2); border-radius: 6px; padding: 12px 14px; display: grid; grid-template-columns: 1fr 1.25fr; gap: 16px; border: 1px solid var(--line); }
-.od-detail::before { content: ""; position: absolute; top: -6px; left: calc((var(--sel) + .5) * 20% - 6px); width: 10px; height: 10px; background: var(--canvas-2); border-left: 1px solid var(--line); border-top: 1px solid var(--line); transform: rotate(45deg); transition: left 320ms var(--ease); }
-.od-detail h4 { margin: 0 0 4px; font-size: 14px; font-weight: 600; line-height: 1.35; }
-.od-detail .m { font-family: var(--mono); font-size: 11.5px; color: var(--ink-3); }
-.od-detail code { display: block; margin-top: 8px; font-family: var(--mono); font-size: 12px; color: var(--ink-2); }
-.od-detail .oc-out { font-size: 11.5px; min-height: 84px; }
-.od-mini { display: grid; grid-template-columns: repeat(5, 1fr); margin: 4px 0 2px; }
-.od-mini .od-st { padding: 0; gap: 4px; }
-.od-mini .od-st::before, .od-mini .od-st::after { top: 6px; height: 1.5px; }
-.od-mini .nd { --sz: 14px; font-size: 8px; }
-.od-mini .nd[data-s="todo"] { font-size: 8px; }
-.od-mini .od-st .nd[data-s="passed"] { box-shadow: 0 0 0 3px var(--canvas-2); }
-.od-mini .od-n { font-family: var(--mono); font-size: 10px; color: var(--ink-3); }
-.od-rows { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; }
-.od-row { display: grid; grid-template-columns: 62px 1fr; gap: 8px; padding: 5px 6px; border-radius: var(--r); }
-.od-row:hover { background: var(--surface-2); }
-.od-row .k { font-family: var(--mono); font-size: 10.5px; padding-top: 1px; }
-.od-row .t { font-size: 12.5px; line-height: 1.35; }
-.od-row .t small { display: block; font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); margin-top: 2px; }
-.od-note { font-size: 11px; color: var(--ink-3); padding: 0 6px; }
+/* Variation 3: focus lanes */
+.mf { display: grid; grid-template-columns: 64px minmax(0, 1fr); column-gap: 8px; }
+.mf .k { font-family: var(--mono); font-size: 11px; padding-top: 6px; }
+.mf .k + div { padding-bottom: 6px; }
+.mf .k:not(:first-child), .mf .k:not(:first-child) + div { border-top: 1px solid var(--line); padding-top: 6px; }
+.mf .k:not(:first-child) { padding-top: 12px; }
+.mfoot { display: flex; gap: 2px; border-top: 1px solid var(--line); padding-top: 6px; margin-top: 2px; }
+.mfoot .mg { width: auto; display: inline-flex; gap: 8px; padding: 4px 10px 4px 8px; }
+
+/* Sidebar: the bar, what runs, and a failing chip. */
+.sbm { display: flex; flex-direction: column; gap: 10px; padding: 0 8px; }
+.sbm .top { display: flex; align-items: baseline; gap: 8px; font-size: 12px; }
+.sbm .ph { font-size: 11.5px; color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sbm .big { font-size: 22px; font-weight: 600; letter-spacing: -0.03em; line-height: 1; }
+.sbm .big i { font-style: normal; font-size: 13px; color: var(--ink-3); font-weight: 500; letter-spacing: 0; margin-left: 2px; }
+.sbnow { display: grid; grid-template-columns: 14px minmax(0, 1fr); column-gap: 8px; border: 0; background: transparent; text-align: left; padding: 4px 6px; margin: -4px -6px; border-radius: var(--r); font-size: 12.5px; line-height: 20px; }
+.sbnow:hover { background: var(--surface-2); }
+.sbnow .tt { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; line-height: 1.4; padding-top: 1px; }
+.sbnow small { display: block; font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); margin-top: 2px; line-height: 1.4; }
+.sbnow small b { color: var(--branch); font-weight: 400; }
+.fchip { display: inline-flex; align-items: center; gap: 6px; border: 0; border-radius: var(--r); padding: 1px 8px; background: var(--fail-soft); color: var(--fail); font-size: 11.5px; font-weight: 500; line-height: 18px; white-space: nowrap; }
+.fchip::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.fchip:hover { background: color-mix(in srgb, var(--fail) 18%, transparent); }
 
 /* ── Section 2: loading, outside the button ───────────────────────────────── */
 .ld-ctrl { display: flex; flex-wrap: wrap; align-items: center; gap: 18px; margin: 26px 0 14px; font-size: 13px; color: var(--ink-2); }
@@ -439,6 +353,9 @@ button { cursor: pointer; }
 .stage .mn .cap { font-size: 11px; color: var(--ink-3); font-family: var(--mono); width: 100%; margin-bottom: -6px; }
 .lv footer { padding: 10px 16px 12px; display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 12px; color: var(--ink-3); }
 .lv footer b { color: var(--ink-2); font-weight: 500; }
+.sh-out { padding: 8px 10px; font-size: 11.5px; line-height: 1.55; border: 1px solid var(--shell-line); }
+.sh-out div { white-space: pre-wrap; word-break: break-all; }
+.sh-out .p { color: var(--shell-dim); } .sh-out .ok { color: var(--shell-acc); } .sh-out .bad { color: var(--shell-bad); } .sh-out .dim { color: var(--shell-dim); }
 
 /* The wrapper every loading variant sits in: the button keeps its own look, the motion lives outside it. */
 .ld { position: relative; display: inline-flex; align-items: center; isolation: isolate; }
@@ -478,8 +395,8 @@ button { cursor: pointer; }
 .rm .ld-glow.slow::before { opacity: .85; }
 .rm .ld-orbit.slow .orb.lead { offset-distance: 30%; }
 .rm .ld-orbit.slow .orb.t1, .rm .ld-orbit.slow .orb.t2 { opacity: 0; }
-.rm .ring .rs { stroke-dasharray: var(--da); }
 .rm .term .cur { opacity: 1; }
+.rm .mr.flash { background: var(--branch-soft); box-shadow: inset 2px 0 0 var(--branch); }
 
 /* ── Section 3: rules ─────────────────────────────────────────────────────── */
 .rules { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 26px; }
@@ -518,8 +435,8 @@ button { cursor: pointer; }
 .verdict { margin-top: 16px; display: flex; gap: 12px; align-items: flex-start; padding: 14px 16px; border-radius: 10px; background: var(--branch-soft); font-size: 13.5px; color: var(--ink); }
 .verdict b { font-weight: 600; }
 
-@media (max-width: 1100px) { .tabs, .lv-grid, .rules { grid-template-columns: 1fr 1fr; } .rules { grid-template-columns: 1fr; } }
-@media (max-width: 720px) { .tabs, .lv-grid, .pc { grid-template-columns: 1fr; } .page, .topbar { padding-left: 16px; padding-right: 16px; } .topbar nav { display: none; } }
+@media (max-width: 1100px) { .lv-grid { grid-template-columns: 1fr 1fr; } .rules { grid-template-columns: 1fr; } .principles { grid-template-columns: repeat(3, 1fr); } }
+@media (max-width: 720px) { .tabs, .lv-grid, .pc, .principles { grid-template-columns: 1fr; } .page, .topbar { padding-left: 16px; padding-right: 16px; } .topbar nav { display: none; } }
 </style>
 </head>
 <body>
@@ -536,11 +453,18 @@ button { cursor: pointer; }
   <!-- ═══ 1 · Milestones ═══ -->
   <section class="sec hero" id="milestones">
     <div class="eyebrow">1 · milestones</div>
-    <h1>Four directions for milestones, in the app</h1>
-    <p class="lede">Same session, same five milestones in every option: two passed, one running, one with a failing check, one not started, and one title that runs long. Each option draws both places milestones live: the sidebar's context pane (compact) and the session panel above the terminal (full). Use <span class="mono">1–4</span> or the cards to switch.</p>
-    <div class="tabs" role="tablist" aria-label="Milestone options" id="tabs"></div>
-    <div class="optnote" id="optnote"></div>
-    <div class="colmarks" aria-hidden="true"><span class="c1">Sidebar · compact</span><span class="c2">Session panel · full</span></div>
+    <h1>Milestones for goals with forty of them</h1>
+    <p class="lede">A typical goal has 30 to 50 milestones. This one has 40: 28 passed, 1 running, 1 with a failing check and 10 upcoming, in four phases. Only what needs a look is open, and everything else folds into one quiet line. Three variations of the same calm approach, each drawn in the sidebar and the session panel. Switch to the 5-milestone goal to see the same design on a short goal.</p>
+    <ol class="principles">
+      <li><b>bar</b>One segment per milestone. Hover for its title, click to jump to it.</li>
+      <li><b>open</b>Only the running milestone, the failing one and the next one or two.</li>
+      <li><b>folded</b>Passed fold into “✓ 28 passed”, the rest into “○ 8 more upcoming”.</li>
+      <li><b>past 15</b>Filter chips and search appear once a goal has more than 15.</li>
+      <li><b>sidebar</b>The bar, what's running, and a chip when a check is failing.</li>
+    </ol>
+    <div class="tabs" role="tablist" aria-label="Variations" id="tabs"></div>
+    <div class="optnote"><span class="seg" role="group" aria-label="Goal size"><button data-size="40" aria-pressed="true">40 milestones</button><button data-size="5" aria-pressed="false">5 milestones</button></span><span id="optnote" style="display:contents"></span></div>
+    <div class="colmarks" aria-hidden="true"><span class="c1">Sidebar</span><span class="c2">Session panel</span></div>
     <div class="framewrap">
       <div class="win" aria-label="brindle app window (mockup)">
         <div class="win-bar"><i></i><i></i><i></i><span class="ttl">brindle</span></div>
@@ -554,8 +478,8 @@ button { cursor: pointer; }
             <button class="inbox" type="button"><span class="flex1">Inbox</span><span class="side-nb">2</span></button>
             <section class="ctx" aria-label="Session context">
               <div class="ctx-h">
-                <div class="ctx-title"><span>Ship the one-approval release flow</span><i>✎</i></div>
-                <div class="ctx-meta"><span class="mono">a3c91e07</span> · brindle · autopilot · 2 working</div>
+                <div class="ctx-title"><span id="ctx-title">Ship the one-approval release flow</span><i>✎</i></div>
+                <div class="ctx-meta" id="ctx-meta"><span class="mono">a3c91e07</span> · brindle · autopilot · 2 working</div>
               </div>
               <div id="sb-goal"></div>
             </section>
@@ -564,14 +488,14 @@ button { cursor: pointer; }
             <div class="tree">
               <div>
                 <div class="repo-h">brindle</div>
-                <div class="srow sel"><span class="side-dot" data-tone="work"></span><span style="min-width:0;flex:1"><span class="nm">Ship the one-approval release flow</span><span class="mt"><code>a3c91e07</code> · autopilot · 4 agents · 2 working</span></span><span class="fold">▾</span></div>
+                <div class="srow" id="row-big"><span class="side-dot" data-tone="work"></span><span style="min-width:0;flex:1"><span class="nm">Ship the one-approval release flow</span><span class="mt"><code>a3c91e07</code> · autopilot · 4 agents · 2 working</span></span><span class="fold">▾</span></div>
                 <ul class="agents">
                   <li><span class="side-dot" data-tone="work"></span>supervisor<code>claude · brindle/session-3</code></li>
-                  <li><span class="side-dot" data-tone="work"></span>codex<code>feat/release-one-approval</code></li>
+                  <li><span class="side-dot" data-tone="work"></span>codex<code>feat/release-signing</code></li>
                   <li><span class="side-dot" data-tone="work"></span>sonnet<code>fix/changelog-sync</code></li>
-                  <li><span class="side-dot" data-tone="done"></span>codex<code>feat/feed-gate · merged</code></li>
+                  <li><span class="side-dot" data-tone="done"></span>codex<code>feat/approval-audit · merged</code></li>
                 </ul>
-                <div class="srow"><span class="side-dot"></span><span style="min-width:0;flex:1"><span class="nm">Knowledge map ranks decisions first</span><span class="mt"><code>5be20d14</code> · manual · 1 agent</span></span><span class="fold">▸</span></div>
+                <div class="srow" id="row-small"><span class="side-dot" data-tone="work"></span><span style="min-width:0;flex:1"><span class="nm">Knowledge map ranks decisions first</span><span class="mt"><code>5be20d14</code> · autopilot · 2 agents · 1 working</span></span><span class="fold">▸</span></div>
                 <div class="paused"><span>▸</span>Paused · 2</div>
               </div>
               <div>
@@ -585,23 +509,31 @@ button { cursor: pointer; }
           <div class="main">
             <header class="sbar">
               <span class="who">Claude · supervisor</span>
-              <code>a3c91e07</code>
+              <code id="sbar-id">a3c91e07</code>
               <span class="st"><b>●</b> working <span class="t-3">· 2 min ago</span></span>
               <span class="flex1"></span>
               <button class="btn" type="button">Pause</button>
               <button class="btn-dots" type="button" aria-label="More">⋯</button>
             </header>
-            <div id="panel-goal" class="goalslot"></div>
+            <div id="panel-goal"></div>
             <div class="termwrap">
               <div class="shell term">
                 <div class="tabs-s"><span class="on">chat</span><span>shell</span></div>
-<pre><span class="a">●</span> Merged <span class="d">feat/feed-gate</span> into brindle/session-3. Milestone 2's check passes.
+<pre data-size="40"><span class="a">●</span> Merged <span class="d">feat/approval-audit</span> into brindle/session-3. Milestone 29's check passes.
 
-<span class="a">●</span> Assigned codex → <span class="d">feat/release-one-approval</span> for milestone 3.
-  <span class="d">⎿  check: uv run pytest tests/test_release_flow.py -q (running)</span>
+<span class="a">●</span> Assigned codex → <span class="d">feat/release-signing</span> for milestone 30.
+  <span class="d">⎿  check: uv run pytest tests/test_release_signing.py -q (running)</span>
 
-<span class="b">●</span> Milestone 4's check failed: release_notes/0.6.2.md not found.
+<span class="b">●</span> Milestone 26's check failed: release_notes/0.6.2.md not found.
   <span class="d">⎿  assigning sonnet → fix/changelog-sync with the failing test</span>
+
+<span class="d">›</span> <span class="cur"></span></pre>
+<pre data-size="5" hidden><span class="a">●</span> Merged <span class="d">feat/rank-search</span>. Milestone 2's check passes.
+
+<span class="a">●</span> Assigned codex → <span class="d">feat/rank-path-filter</span> for milestone 3.
+
+<span class="b">●</span> Milestone 4's check failed: map view has no Decisions group.
+  <span class="d">⎿  I'll take it once milestone 3 lands; it touches the same ranker.</span>
 
 <span class="d">›</span> <span class="cur"></span></pre>
               </div>
@@ -748,280 +680,286 @@ button { cursor: pointer; }
     <div class="verdict"><span class="pill t-branch" style="margin-top:2px">suggestion</span><span><b>Adopt 801c9de5 as written.</b> Its trigger is a concrete call (kill, stop, delete, reap) and its cost is one test. <b>Hold 17d7c3ae</b> until it names its scope, for example "every caller of the function you guarded, found with graphify". Then it would be checkable, not a matter of judgment.</span></div>
   </section>
 </main>
+<div id="tip" role="tooltip"></div>
 
 <script>
-/* ── Data: one session, five milestones, used by every option ─────────────── */
-const GOAL = { title: "Ship the one-approval release flow", detail: "One Approve publishes the bump PR, both tags and the desktop feed." };
-const MS = [
-  { n: 1, s: "passed", title: "Release script builds signed artifacts", short: "Signed builds", cmd: "uv run pytest tests/test_release.py -q", when: "38 min ago", ago: "38m", dur: "41s",
-    out: [["ok", "23 passed in 41.2s"]] },
-  { n: 2, s: "passed", title: "Feed rollback is gated before production credentials", short: "Feed gate", cmd: "uv run pytest tests/test_feed_gate.py -q", when: "12 min ago", ago: "12m", dur: "9s",
-    out: [["ok", "8 passed in 8.7s"]] },
-  { n: 3, s: "running", title: "One approval covers the bump PR, both tags and the desktop feed for every platform, the Windows and Intel-on-Apple-Silicon builds included", short: "One approval", cmd: "uv run pytest tests/test_release_flow.py -q", who: "codex", when: "running", ago: "now", dur: "" },
-  { n: 4, s: "failed", title: "Changelog notes sync to the site", short: "Changelog sync", cmd: "uv run pytest tests/test_changelog.py -q", when: "3 min ago", ago: "3m", dur: "3.9s",
-    err: "AssertionError: release_notes/0.6.2.md not found",
-    out: [["bad", "FAILED tests/test_changelog.py::test_sync_writes_notes"], ["bad", "AssertionError: release_notes/0.6.2.md not found"], ["dim", "1 failed, 6 passed in 3.9s"]] },
-  { n: 5, s: "todo", title: "Docs page walks through the new flow", short: "Docs", cmd: "test -f docs/release.md", when: "not run yet", ago: "—", dur: "" },
+/* ── Data: a 40-milestone goal in four phases, and a 5-milestone one ─────── */
+const PHASES = [
+  { name: "Release pipeline", from: 1, to: 10 },
+  { name: "Desktop feed", from: 11, to: 20 },
+  { name: "One approval", from: 21, to: 32 },
+  { name: "Docs & launch", from: 33, to: 40 },
 ];
-const LIVE = [
-  "tests/test_release_flow.py::test_bump_pr_opens ✓",
-  "tests/test_release_flow.py::test_tags_after_merge ✓",
-  "tests/test_release_flow.py::test_feed_waits_for_tags ✓",
-  "tests/test_release_flow.py::test_windows_artifact_signed …",
-  "tests/test_release_flow.py::test_windows_artifact_signed ✓",
-  "tests/test_release_flow.py::test_intel_on_arm_feed …",
-  "tests/test_release_flow.py::test_intel_on_arm_feed ✓",
-  "tests/test_release_flow.py::test_single_approval_gate …",
+const TITLES = [
+  "Release script builds signed macOS artifacts", "Windows installer builds in CI", "Linux AppImage builds in CI",
+  "Version bump writes engine and app versions together", "Bump PR opens with a changelog draft", "Engine tag is pushed after the bump merges",
+  "App tag is pushed after the engine tag", "Release job waits for both tags before publishing", "Artifacts upload to the release with checksums",
+  "Re-running a release reuses existing assets",
+  "Feed manifest lists every platform build", "Feed signature verifies with the release key", "Intel-on-Apple-Silicon build gets its own feed entry",
+  "Feed rollback is gated before production credentials", "Staging feed publishes before production", "Production publish needs the approval token",
+  "Update banner reads the new feed format", "Older apps still read the legacy feed", "Feed publish is idempotent per version", "Feed health check runs after publish",
+  "Approval card lists the bump PR, tags and feed in one place", "One Approve click starts the whole release", "Approval is refused while CI is red",
+  "Release state survives an app restart", "Each approval is audited with who and when", "Changelog notes sync to the site",
+  "Release notes link from the approval card", "Cancelling mid-release leaves tags untouched", "A partial failure reports which step stopped",
+  "Windows and Intel-on-Apple-Silicon artifacts are signed under the single approval, and notarization waits for both before the feed goes out",
+  "Approval card shows the feed diff before publishing", "A finished release leaves one inbox item",
+  "Docs page walks through the new flow", "Release checklist in CONTRIBUTING is updated", "Changelog entry for the release flow",
+  "Site release notes page lists 0.6.2", "Docs show the approval card", "Internal board item is closed", "Dry run on a scratch repo", "0.6.2 ships with one approval",
 ];
-let elapsed = 72, liveAt = 0;
+const agoOf = (n) => (n <= 10 ? "2d" : n <= 20 ? "1d" : `${30 - n}h`);
+const BIG = TITLES.map((title, i) => {
+  const n = i + 1;
+  const s = n === 26 ? "failed" : n === 30 ? "running" : n > 30 ? "todo" : "passed";
+  return { n, title, s, ago: agoOf(n), dur: `${(n * 7) % 47 + 4}s` };
+});
+Object.assign(BIG[25], { ago: "3m", when: "3 min ago", cmd: "uv run pytest tests/test_changelog.py -q", err: "AssertionError: release_notes/0.6.2.md not found",
+  out: [["bad", "FAILED tests/test_changelog.py::test_sync_writes_notes"], ["bad", "AssertionError: release_notes/0.6.2.md not found"], ["dim", "1 failed, 6 passed in 3.9s"]], fixer: "sonnet is on it" });
+Object.assign(BIG[29], { cmd: "uv run pytest tests/test_release_signing.py -q", who: "codex" });
+Object.assign(BIG[30], { cmd: "uv run pytest tests/test_approval_card.py -q -k feed_diff" });
+Object.assign(BIG[31], { cmd: "uv run pytest tests/test_release_inbox.py -q" });
+const SMALL = [
+  { n: 1, s: "passed", title: "Decisions index has a rank field", ago: "1h" },
+  { n: 2, s: "passed", title: "Search ranks decisions above docs", ago: "22m" },
+  { n: 3, s: "running", title: "Ranking respects path filters, so decisions covering the files in view come first even when a doc matches the query better", who: "codex", cmd: "uv run pytest tests/test_kb_rank.py -q" },
+  { n: 4, s: "failed", title: "Map view shows decisions as their own group", ago: "6m", when: "6 min ago", cmd: "npx vitest run src/screens/Knowledge", err: "expected group \"Decisions\" in legend, got 9 groups",
+    out: [["bad", "FAIL src/screens/Knowledge/map.test.tsx > groups decisions"], ["bad", "expected group \"Decisions\" in legend, got 9 groups"], ["dim", "1 failed, 31 passed"]], fixer: "waits on 3" },
+  { n: 5, s: "todo", title: "Docs page explains the ranking", cmd: "test -f docs/knowledge.md" },
+];
+const GOALS = {
+  40: { title: "Ship the one-approval release flow", id: "a3c91e07", meta: "brindle · autopilot · 2 working", ms: BIG,
+    live: ["test_sign_windows_msi ✓", "test_sign_intel_on_arm ✓", "test_notarize_waits_for_both …", "test_notarize_waits_for_both ✓", "test_feed_blocked_until_signed …", "test_feed_blocked_until_signed ✓", "test_single_approval_token …"] },
+  5: { title: "Knowledge map ranks decisions first", id: "5be20d14", meta: "brindle · autopilot · 1 working", ms: SMALL,
+    live: ["test_rank_path_filter_basic ✓", "test_rank_prefers_covering_decision …", "test_rank_prefers_covering_decision ✓", "test_rank_ties_by_recency …"] },
+};
+let SIZE = 40, V = 0, F = "all", Q = "", OPEN = new Set(), OUT = new Set(), elapsed = 72, liveAt = 0;
+const goal = () => GOALS[SIZE];
+const MS = () => goal().ms;
+const phased = () => V === 1 && SIZE === 40;
 
-const CHECK = '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 6.2 5 8.5 9.5 3.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
-const CROSS = '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M3.5 3.5l5 5M8.5 3.5l-5 5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>';
+const CHECK = '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 6.2 5 8.5 9.5 3.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 const CHEV = '<svg class="chev" viewBox="0 0 12 12" aria-hidden="true"><path d="M4.5 3 7.5 6 4.5 9" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const SEARCH = '<svg viewBox="0 0 14 14" aria-hidden="true"><circle cx="6" cy="6" r="4.2" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M9.2 9.2 12.5 12.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>';
 const mmss = (s) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 const EL = () => `<span class="js-el">${mmss(elapsed)}</span>`;
-const count = (s) => MS.filter((m) => m.s === s).length;
-const node = (m, sz) => `<span class="nd" data-s="${m.s}"${sz ? ` style="--sz:${sz}px"` : ""} aria-hidden="true">${m.s === "passed" ? CHECK : m.s === "failed" ? "!" : m.s === "todo" ? (sz && sz >= 20 ? m.n : "") : ""}</span>`;
-const LABEL = { passed: "Done", running: "Running", failed: "Check failing", todo: "Not started" };
-function meta(m) {
-  if (m.s === "passed") return `<b>Done</b> · ${m.when} · ${m.dur}`;
-  if (m.s === "running") return `<b>Running</b> · ${EL()} · ${m.who}`;
-  if (m.s === "failed") return `<b>Check failing</b> · ${m.when}`;
-  return "Not started";
-}
-const summaryLine = () => {
-  const parts = [];
-  if (count("running")) parts.push(`<span class="t-branch">${count("running")} running</span>`);
-  if (count("failed")) parts.push(`<span class="t-fail">${count("failed")} failing</span>`);
-  if (count("todo")) parts.push(`<span>${count("todo")} not started</span>`);
-  return parts.join('<span class="sep">·</span>');
-};
-const outLines = (m) => {
-  if (m.s === "running") return `<div class="js-stream"></div>`;
-  if (!m.out) return `<div class="dim">No result yet. The supervisor runs this once milestone 3 lands.</div>`;
-  return m.out.map(([c, t]) => `<div class="${c}">${t}</div>`).join("");
-};
-const shellBlock = (m) => `<div class="shell oc-out"><div><span class="p">$</span> ${m.cmd}</div>${outLines(m)}</div>`;
+const LIVE = () => goal().live[liveAt % goal().live.length];
+const icon = (s) => `<span class="mi" data-s="${s}" aria-hidden="true">${s === "passed" ? CHECK : ""}</span>`;
+const LABEL = { passed: "passed", running: "running", failed: "check failing", todo: "upcoming" };
 
-/* ── Option A: progress ring + collapsible stepper ───────────────────────── */
-function ring(size, sw, lg) {
-  const r = (size - sw) / 2, c = size / 2, gap = 3, len = 20 - gap;
-  let segs = "", live = "";
-  MS.forEach((m, i) => {
-    const start = i * 20 + gap / 2;
-    segs += `<circle class="rs" data-s="${m.s}" cx="${c}" cy="${c}" r="${r}" pathLength="100" stroke-width="${sw}" stroke-dashoffset="${-start}" style="--da:${len} ${100 - len};transition-delay:${i * 70}ms"/>`;
-    if (m.s === "running") live = `<circle class="rs-live" data-start="${start}" data-len="${len}" cx="${c}" cy="${c}" r="${r}" pathLength="100" stroke-width="${sw}" stroke-dashoffset="${-start}"/>`;
-  });
-  return `<div class="ring${lg ? " lg" : ""}" style="width:${size}px;height:${size}px" role="img" aria-label="${count("passed")} of ${MS.length} milestones complete"><svg viewBox="0 0 ${size} ${size}">${segs}${live}</svg><span class="rc">${count("passed")}<i>/${MS.length}</i></span></div>`;
+/* What the list opens: running, failing, and the next one or two upcoming. */
+function split(ms) {
+  const all = MS(), next = new Set(all.filter((m) => m.s === "todo").slice(0, 2).map((m) => m.n));
+  return {
+    passed: ms.filter((m) => m.s === "passed"), failed: ms.filter((m) => m.s === "failed"), running: ms.filter((m) => m.s === "running"),
+    next: ms.filter((m) => next.has(m.n)), rest: ms.filter((m) => m.s === "todo" && !next.has(m.n)),
+  };
 }
-function aSteps(full) {
-  return `<ol class="oa-steps${full ? " oa-full" : ""}">${MS.map((m) => `
-    <li class="oa-step" data-s="${m.s}">${node(m)}<div class="oa-b">
-      ${full ? `<div class="oa-row2"><span class="oa-t">${m.n}. ${m.title}</span><span class="pill ${m.s === "passed" ? "t-pass" : m.s === "running" ? "t-branch" : m.s === "failed" ? "t-fail" : "t-3"}">${LABEL[m.s]}</span></div>` : `<div class="oa-t">${m.title}</div>`}
-      <div class="oa-m">${full ? `${m.cmd}${m.s === "passed" ? ` · ${m.when}` : m.s === "running" ? ` · ${EL()}` : m.s === "failed" ? ` · ${m.when}` : ""}` : meta(m)}</div>
-      ${full && m.s === "failed" ? `<div class="oa-err">${m.err}</div>` : ""}
-    </div></li>`).join("")}</ol>`;
+const isNext = (m) => split(MS()).next.some((x) => x.n === m.n);
+/* A group folds only when it would hide three or more rows; a short goal shows everything. */
+const folds = (arr) => arr.length >= 3;
+function ranges(arr) {
+  const out = []; let a = null, b = null;
+  for (const { n } of arr) { if (a !== null && n === b + 1) b = n; else { if (a !== null) out.push(a === b ? `${a}` : `${a}–${b}`); a = b = n; } }
+  if (a !== null) out.push(a === b ? `${a}` : `${a}–${b}`);
+  return out.join(", ");
 }
-const A = {
-  side: () => `<div class="oa">
-    <div class="oa-head">${ring(36, 3.5)}
-      <div class="oa-ht"><div class="oa-count">${count("passed")} of ${MS.length} milestones complete</div><div class="oa-sub">${summaryLine()}</div></div>
-      <button class="iconbtn js-clp" type="button" aria-expanded="true" aria-label="Milestones">${CHEV}</button></div>
-    <div class="clp open" data-clp><div>${aSteps(false)}</div></div>
-    <div class="foot">Checked 4 min ago</div></div>`,
-  panel: () => {
-    const now = MS.find((m) => m.s === "running"), bad = MS.find((m) => m.s === "failed");
-    return `<section class="gp oa" aria-label="Goal">
-    <div class="oa-head lg">${ring(56, 5, true)}
-      <div class="oa-ht"><div class="gp-top"><span class="lbl">Goal</span><span class="pill t-branch">In progress</span></div>
-        <h2 class="gp-title">${GOAL.title}</h2><div class="oa-sub">${count("passed")} of ${MS.length} complete<span class="sep">·</span>${summaryLine()}</div></div>
-      <button class="quiet js-clp" type="button" aria-expanded="false">${CHEV} Milestones (${MS.length})</button></div>
-    <div class="clp open" data-sum><div><div class="oa-sum">
-      ${now ? `<div><span class="k t-branch">now</span>${node(now, 14)}<span class="tt">${now.n}. ${now.title}</span><span class="mono t-3" style="font-size:11px;flex:none">${EL()}</span></div>` : ""}
-      ${bad ? `<div><span class="k t-fail">needs a fix</span>${node(bad, 14)}<span class="tt">${bad.n}. ${bad.title}</span><span class="mono t-3" style="font-size:11px;flex:none">${bad.when}</span></div>` : ""}
-    </div></div></div>
-    <div class="clp" data-clp><div>${aSteps(true)}</div></div></section>`;
-  },
-};
+function row(m, open) {
+  const st = m.s === "passed" ? m.ago : m.s === "running" ? `running ${EL()}` : m.s === "failed" ? `failing · ${m.ago}` : isNext(m) ? "next" : "";
+  let x = "";
+  if (open && m.s === "failed") x = `<div class="x"><span class="e">${m.err}</span><button class="lnk js-out" type="button" data-n="${m.n}" aria-expanded="${OUT.has(m.n)}">${OUT.has(m.n) ? "Hide output" : "Output"}</button><span>${m.fixer}</span></div>${OUT.has(m.n) ? `<div class="out">${shell(m)}</div>` : ""}`;
+  if (open && m.s === "running") x = `<div class="x"><span>${m.who}</span><span class="lv js-live">${LIVE()}</span></div>`;
+  return `<div class="mr${open ? "" : " c"}" data-row="${m.n}" data-s="${m.s}">${icon(m.s)}<span class="no">${m.n}</span><span class="tt">${m.title}</span><span class="st">${st}</span>${x}</div>`;
+}
+const shell = (m) => `<div class="shell sh-out"><div><span class="p">$</span> ${m.cmd}</div>${m.out.map(([c, t]) => `<div class="${c}">${t}</div>`).join("")}</div>`;
+function group(key, s, label, arr) {
+  const open = OPEN.has(key);
+  return `<button class="mg" type="button" data-g="${key}" aria-expanded="${open}">${icon(s)}<span></span><span>${label}<span class="rg">${ranges(arr)}</span></span>${CHEV}</button>
+    <div class="clp${open ? " open" : ""}" data-clp="${key}"><div><div class="mgl">${arr.map((m) => row(m, false)).join("")}</div></div></div>`;
+}
+/* Variation 1, and the inside of each phase in variation 2. */
+function flat(ms, kp = "") {
+  const g = split(ms);
+  let h = "";
+  if (g.passed.length) h += folds(g.passed) ? group(`${kp}passed`, "passed", `${g.passed.length} passed`, g.passed) : g.passed.map((m) => row(m, false)).join("");
+  h += [...g.failed, ...g.running].sort((a, b) => a.n - b.n).map((m) => row(m, true)).join("");
+  h += g.next.map((m) => row(m, true)).join("");
+  if (g.rest.length) h += folds(g.rest) ? group(`${kp}upcoming`, "todo", `${g.rest.length} ${g.next.length ? "more " : ""}upcoming`, g.rest) : g.rest.map((m) => row(m, false)).join("");
+  return h;
+}
+function phases(ms) {
+  return PHASES.map((p, i) => {
+    const pm = ms.filter((m) => m.n >= p.from && m.n <= p.to), done = pm.filter((m) => m.s === "passed").length, key = `ph${i}`, open = OPEN.has(key);
+    const bad = pm.filter((m) => m.s === "failed").length, run = pm.filter((m) => m.s === "running").length;
+    const s = done === pm.length ? "passed" : run ? "running" : bad ? "failed" : "todo";
+    const note = [bad ? `<span class="t-fail">${bad} failing</span>` : "", run ? `<span class="t-branch">${run} running</span>` : ""].filter(Boolean).join(" · ");
+    return `<div class="mph"><button class="mp" type="button" data-g="${key}" aria-expanded="${open}"${done === pm.length ? " data-done" : ""}>${icon(s)}<span class="pn">${p.name}${note ? `<small>${note}</small>` : ""}</span><span class="pb"><i style="width:${(done / pm.length) * 100}%"></i></span><span class="pc">${done}/${pm.length}</span>${CHEV}</button>
+      <div class="clp${open ? " open" : ""}" data-clp="${key}"><div><div>${flat(pm, `${key}-`)}</div></div></div></div>`;
+  }).join("");
+}
+/* Variation 3: three short lanes, the rest behind two quiet links. */
+function focus(ms) {
+  const g = split(ms);
+  const lane = (k, cls, arr) => (arr.length ? `<span class="k ${cls}">${k}</span><div>${arr.map((m) => row(m, true)).join("")}</div>` : "");
+  const link = (key, s, label, arr) => (arr.length ? `<button class="mg" type="button" data-g="${key}" aria-expanded="${OPEN.has(key)}">${icon(s)}<span>${label}</span>${CHEV}</button>` : "");
+  const list = (key, arr) => `<div class="clp${OPEN.has(key) ? " open" : ""}" data-clp="${key}"><div><div class="mgl">${arr.map((m) => row(m, false)).join("")}</div></div></div>`;
+  return `<div class="mf">${lane("failing", "t-fail", g.failed)}${lane("running", "t-branch", g.running)}${lane("next", "t-3", g.next)}</div>
+    <div class="mfoot">${link("passed", "passed", `${g.passed.length} passed`, g.passed)}${link("upcoming", "todo", `${g.rest.length} more upcoming`, g.rest)}</div>
+    ${list("passed", g.passed)}${list("upcoming", g.rest)}`;
+}
+function body() {
+  const ms = MS();
+  if (ms.length > 15 && (F !== "all" || Q.trim())) {
+    const q = Q.trim().toLowerCase();
+    const hit = ms.filter((m) => (F === "all" || m.s === F) && (!q || m.title.toLowerCase().includes(q) || String(m.n) === q));
+    return hit.length ? hit.map((m) => row(m, m.s === "failed" || m.s === "running")).join("") : `<p class="empty">No milestone matches${q ? ` “${Q.trim()}”` : ""}.</p>`;
+  }
+  if (phased()) return phases(ms);
+  if (V === 2) return focus(ms);
+  return flat(ms);
+}
 
-/* ── Option B: segmented timeline with a live pulse ──────────────────────── */
-const segbar = (labels) => `<div class="ob-bar" role="img" aria-label="${count("passed")} of ${MS.length} milestones complete">${MS.map((m) => `<span class="ob-seg" data-s="${m.s}"></span>`).join("")}</div>` +
-  (labels ? `<div class="ob-labs" aria-hidden="true">${MS.map((m) => `<span data-s="${m.s}"><b>${m.s === "passed" ? "✓" : m.s === "failed" ? "✕" : m.n}</b>${m.short}</span>`).join("")}</div>` : "");
-function bItems(full) {
-  return `<ol class="ob-tl${full ? " ob-full" : ""}">${MS.map((m) => `
-    <li class="ob-it" data-s="${m.s}">
-      ${full ? `<span class="ob-when">${m.s === "running" ? "now" : m.ago}</span>` : ""}
-      <span class="ob-rail"><i class="ob-dot"></i></span>
-      <div class="ob-b"><div class="ob-t">${full ? `${m.n}. ` : ""}${m.title}</div>
-        <div class="ob-m">${m.s === "passed" ? `${full ? m.cmd + " · " : ""}passed in ${m.dur}` : m.s === "running" ? `${full ? m.cmd + " · " : ""}${m.who} · ${EL()}` : m.s === "failed" ? `${full ? m.cmd + " · " : ""}1 failed, 6 passed` : full ? `${m.cmd} · waits on 3` : "waits on 3"}</div>
-        ${m.s === "running" ? `<div class="ob-live"><span class="js-live">${LIVE[liveAt % LIVE.length]}</span></div>` : ""}
-        ${m.s === "failed" ? `<div class="ob-err">${m.err}</div>` : ""}
-      </div>
-      ${full ? "" : `<span class="ob-when">${m.s === "running" ? "now" : m.ago}</span>`}
-    </li>`).join("")}</ol>`;
+/* The segmented bar, shared by the sidebar (sm) and the panel. */
+function bar(sm) {
+  const ms = MS();
+  const seg = (m) => `<button class="sg" type="button" data-n="${m.n}" data-s="${m.s}" aria-label="${m.n}. ${m.title}, ${LABEL[m.s]}"></button>`;
+  if (phased()) return `<div class="msb phased${sm ? " sm" : ""}">${PHASES.map((p) => `<div class="ph" style="flex:${p.to - p.from + 1}">${ms.filter((m) => m.n >= p.from && m.n <= p.to).map(seg).join("")}</div>`).join("")}</div>`;
+  return `<div class="msb${sm ? " sm" : ""}">${ms.map(seg).join("")}</div>`;
 }
-const B = {
-  side: () => `<div class="ob">
-    <div class="ob-hd"><span class="oa-count">${count("passed")} of ${MS.length} milestones complete</span><span class="flex1"></span><span class="oa-sub">${summaryLine().replace(/<span>\d not started<\/span>/, "").replace(/<span class="sep">·<\/span>$/, "")}</span></div>
-    ${segbar(false)}${bItems(false)}<div class="foot">Checked 4 min ago</div></div>`,
-  panel: () => `<section class="gp ob" aria-label="Goal">
-    <div class="gp-top"><span class="lbl">Goal</span><span class="pill t-branch">In progress</span><span class="flex1"></span><span class="gp-sub">${count("passed")} of ${MS.length} milestones complete</span></div>
-    <h2 class="gp-title">${GOAL.title}</h2>
-    ${segbar(true)}${bItems(true)}</section>`,
-};
+const counts = () => { const ms = MS(); return { all: ms.length, passed: ms.filter((m) => m.s === "passed").length, failed: ms.filter((m) => m.s === "failed").length, running: ms.filter((m) => m.s === "running").length, todo: ms.filter((m) => m.s === "todo").length }; };
+const curPhase = () => PHASES.findIndex((p) => MS().some((m) => m.s === "running" && m.n >= p.from && m.n <= p.to));
 
-/* ── Option C: minimal checklist, each row opens its check's output ───────── */
-const cOpen = { side: new Set([4]), panel: new Set([4]) };
-function cRows(where) {
-  const full = where === "panel";
-  return `<div class="oc-list${full ? " oc-full" : ""}">${MS.map((m) => {
-    const open = cOpen[where].has(m.n);
-    const st = m.s === "passed" ? (full ? `${m.when} · ${m.dur}` : m.dur) : m.s === "running" ? EL() : m.s === "failed" ? (full ? `failing · ${m.when}` : "failing") : "—";
-    return `<button class="oc-row" type="button" data-s="${m.s}" data-n="${m.n}" data-where="${where}" aria-expanded="${open}">
-        <span class="oc-box" aria-hidden="true">${m.s === "passed" ? CHECK : m.s === "failed" ? CROSS : ""}</span>
-        <span class="oc-t">${full ? `${m.n}. ` : ""}${m.title}</span><span class="oc-st">${st}</span>${CHEV}</button>
-      <div class="oc-drawer clp${open ? " open" : ""}"><div><div>${shellBlock(m)}
-        <div class="oc-acts"><button class="quiet js-rerun" type="button" data-n="${m.n}"${m.s === "running" || m.s === "todo" ? " disabled" : ""}>↻ Re-run check</button><button class="quiet" type="button">Copy</button><span class="when">${m.s === "running" ? "streaming" : m.s === "todo" ? "" : `ran ${m.when}`}</span></div></div></div></div>`;
-  }).join("")}</div>`;
+function side() {
+  const c = counts(), g = split(MS()), run = g.running[0], bad = g.failed[0];
+  const chip = bad ? `<button class="fchip js-jump" type="button" data-n="${bad.n}" title="${bad.n}. ${bad.title}">${c.failed} failing</button>` : "";
+  const now = run ? `<button class="sbnow js-jump" type="button" data-n="${run.n}">${icon("running")}<span><span class="tt">${run.n}. ${run.title}</span><small><b>running</b> ${EL()} · ${run.who}</small></span></button>` : "";
+  if (V === 1) {
+    const pi = curPhase();
+    const ph = phased() && pi >= 0 ? `<span class="ph">Phase ${pi + 1} of ${PHASES.length} · ${PHASES[pi].name}</span>` : "";
+    return `<div class="sbm">${bar(true)}<div class="top">${ph || `<span class="cnt"><b>${c.passed}</b> of ${c.all}</span>`}<span class="flex1"></span>${ph ? `<span class="cnt"><b>${c.passed}</b> of ${c.all}</span>` : ""}</div>${now}${chip ? `<div>${chip}</div>` : ""}<div class="foot">Checked 4 min ago</div></div>`;
+  }
+  if (V === 2) return `<div class="sbm"><div class="top"><span class="big">${c.passed}<i>/ ${c.all}</i></span><span class="flex1"></span>${chip}</div>${bar(true)}${now}<div class="foot">Checked 4 min ago</div></div>`;
+  return `<div class="sbm"><div class="top"><span class="cnt"><b>${c.passed}</b> of ${c.all}</span><span class="flex1"></span>${chip}</div>${bar(true)}${now}<div class="foot">Checked 4 min ago</div></div>`;
 }
-const C = {
-  side: () => `<div class="oc">
-    <div class="oc-hd"><span class="oa-count">Milestones</span><span class="oc-meter"><i style="width:${(count("passed") / MS.length) * 100}%"></i></span><span class="mono t-2" style="font-size:11px">${count("passed")}/${MS.length}</span></div>
-    ${cRows("side")}<div class="foot">Checked 4 min ago</div></div>`,
-  panel: () => `<section class="gp oc" aria-label="Goal">
-    <div class="gp-top"><span class="lbl">Goal</span><span class="pill t-branch">In progress</span><span class="flex1"></span><span class="gp-sub">${count("passed")} of ${MS.length} milestones complete</span></div>
-    <h2 class="gp-title">${GOAL.title}</h2>
-    <div class="oc-meter" style="flex:none;height:3px;margin-bottom:2px"><i style="width:${(count("passed") / MS.length) * 100}%"></i></div>
-    ${cRows("panel")}</section>`,
-};
-
-/* ── Option D: a horizontal track for wide windows ───────────────────────── */
-let dSel = 2;
-const segState = (m) => (m.s === "passed" ? "done" : m.s === "running" ? "live" : "idle");
-function dTrack(mini) {
-  return `<div class="${mini ? "od-mini" : "od-track"}" role="tablist" aria-label="Milestones">${MS.map((m, i) => `
-    <button class="od-st" type="button" role="tab" data-s="${m.s}" data-i="${i}" aria-selected="${!mini && i === dSel}" data-in="${segState(m)}" data-out="${i < MS.length - 1 ? segState(MS[i + 1]) : "idle"}" title="${m.n}. ${m.title}">
-      ${node(m, mini ? 14 : 26)}
-      ${mini ? `<span class="od-n">${m.n}</span>` : `<span class="od-lab">${m.title}</span><span class="od-when">${m.s === "running" ? `running ${EL()}` : m.s === "passed" ? `${m.ago} · ${m.dur}` : m.s === "failed" ? `failing · ${m.ago}` : "not started"}</span>`}
-    </button>`).join("")}</div>`;
+function toolbar() {
+  const c = counts();
+  const chip = (k, l, n) => `<button class="chipf" type="button" data-f="${k}" aria-pressed="${F === k}">${l}<span>${n}</span></button>`;
+  return `<div class="mtool" role="toolbar" aria-label="Filter milestones">${chip("all", "All", c.all)}${chip("failed", "Failing", c.failed)}${chip("running", "Running", c.running)}${chip("todo", "Upcoming", c.todo)}
+    <label class="msq">${SEARCH}<input type="search" placeholder="Search milestones" aria-label="Search milestones" value="${Q}"><kbd>/</kbd></label></div>`;
 }
-const dDetail = () => {
-  const m = MS[dSel];
-  return `<div class="od-detail" style="--sel:${dSel}">
-    <div><div class="m"><span class="pill ${m.s === "passed" ? "t-pass" : m.s === "running" ? "t-branch" : m.s === "failed" ? "t-fail" : "t-3"}">${LABEL[m.s]}</span></div><h4 style="margin-top:6px">${m.n}. ${m.title}</h4>
-      <div class="m">${m.s === "running" ? `${m.who} · feat/release-one-approval · ${EL()}` : m.s === "todo" ? "waits on milestone 3" : `last check ${m.when} · ${m.dur}`}</div>
-      </div>
-    ${shellBlock(m)}</div>`;
-};
-const D = {
-  side: () => {
-    const now = MS.find((m) => m.s === "running"), bad = MS.find((m) => m.s === "failed"), next = MS.find((m) => m.s === "todo");
-    return `<div class="od">
-    <div class="oc-hd"><span class="oa-count">${count("passed")} of ${MS.length} milestones complete</span></div>
-    ${dTrack(true)}
-    <div class="od-rows">
-      ${now ? `<div class="od-row"><span class="k t-branch">now</span><span class="t">${now.n}. ${now.title}<small>${now.who} · ${EL()}</small></span></div>` : ""}
-      ${bad ? `<div class="od-row"><span class="k t-fail">needs fix</span><span class="t">${bad.n}. ${bad.title}<small>${bad.err.replace("AssertionError: ", "")}</small></span></div>` : ""}
-      ${next ? `<div class="od-row"><span class="k t-3">next</span><span class="t t-3">${next.n}. ${next.title}</span></div>` : ""}
-    </div>
-    <div class="foot">Checked 4 min ago</div></div>`;
-  },
-  panel: () => `<section class="gp od" aria-label="Goal">
-    <div class="gp-top"><span class="lbl">Goal</span><span class="pill t-branch">In progress</span><span class="gp-title" style="font-size:14px;margin-left:6px">${GOAL.title}</span><span class="flex1"></span><span class="gp-sub">${count("passed")} of ${MS.length} milestones complete</span></div>
-    ${dTrack(false)}<div class="js-ddetail">${dDetail()}</div></section>`,
-};
+function panel() {
+  const c = counts(), pi = curPhase();
+  const labels = phased() ? `<div class="phl" aria-hidden="true">${PHASES.map((p, i) => { const pm = MS().filter((m) => m.n >= p.from && m.n <= p.to); return `<span style="flex:${pm.length}" class="${i === pi ? "on" : ""}">${p.name}<b>${pm.filter((m) => m.s === "passed").length}/${pm.length}</b></span>`; }).join("")}</div>` : "";
+  return `<section class="gp" aria-label="Goal">
+    <div class="gp-top"><span class="lbl">Goal</span><span class="pill t-branch">In progress</span><span class="gp-title">${goal().title}</span><span class="flex1"></span><span class="cnt"><b>${c.passed}</b> of ${c.all} milestones</span></div>
+    ${bar(false)}${labels}
+    ${c.all > 15 ? toolbar() : ""}
+    <div class="mscroll js-list">${body()}</div></section>`;
+}
 
 const OPTIONS = [
-  { id: "a", name: "Ring + stepper", r: A, d: "A segmented ring says where the goal stands at a glance; the stepper below folds away.",
-    best: "a glance from across the room", trade: "the ring is one more shape to learn" },
-  { id: "b", name: "Segmented timeline", r: B, d: "One segment per milestone, a live pulse on what's running, and when each check last ran.",
-    best: "seeing activity and recency", trade: "tallest of the four in the panel" },
-  { id: "c", name: "Checklist + output", r: C, d: "As quiet as a to-do list. Any row opens its last check's output in place; a failing one is already open.",
-    best: "fixing a failing check without leaving the session", trade: "progress is less visual" },
-  { id: "d", name: "Horizontal track", r: D, d: "For wide windows: milestones as stations on one line, the selected one's check below. The sidebar keeps a mini track.",
-    best: "wide windows, a sense of order", trade: "needs a fallback under ~1100 px" },
+  { name: "Flat, folded", d: "One list. Passed and upcoming fold into a line each; only what needs a look is open.", best: "most goals, any length", trade: "no sense of stages" },
+  { name: "Phases", d: "The same list grouped into phases with counts. Finished phases fold to one line; the current one is open.", best: "long goals planned in stages", trade: "the supervisor has to name phases" },
+  { name: "Focus lanes", d: "Three short lanes, failing, running and next, with everything else behind two quiet links.", best: "watching a goal run", trade: "the full list is one click away" },
 ];
-let cur = 0;
+const defaults = () => new Set(phased() ? [`ph${Math.max(0, curPhase())}`] : []);
 
 /* ── Render + behaviour ─────────────────────────────────────────────────── */
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const rm = () => document.documentElement.classList.contains("rm");
 function renderTabs() {
-  $("#tabs").innerHTML = OPTIONS.map((o, i) => `<button class="tab" role="tab" type="button" aria-selected="${i === cur}" data-i="${i}"><span class="k"><kbd>${i + 1}</kbd>Option ${o.id.toUpperCase()}</span><b>${o.name}</b><span class="d">${o.d}</span></button>`).join("");
-  const o = OPTIONS[cur];
-  $("#optnote").innerHTML = `<span><b>Best for</b> · ${o.best}</span><span><b>Trade-off</b> · ${o.trade}</span>`;
+  $("#tabs").innerHTML = OPTIONS.map((o, i) => `<button class="tab" role="tab" type="button" aria-selected="${i === V}" data-i="${i}"><span class="k"><kbd>${i + 1}</kbd>Variation ${i + 1}</span><b>${o.name}</b><span class="d">${o.d}</span></button>`).join("");
+  const o = OPTIONS[V];
+  $("#optnote").innerHTML = `<span><b>Best for</b> · ${o.best}</span><span><b>Trade-off</b> · ${o.trade}</span>${V === 1 && SIZE === 5 ? '<span class="t-3">A 5-milestone goal has no phases, so it reads as one list.</span>' : ""}`;
 }
 function render(animate = true) {
-  const o = OPTIONS[cur].r;
-  const sb = $("#sb-goal"), pn = $("#panel-goal");
-  sb.innerHTML = `<div class="opt">${o.side()}</div>`;
-  pn.innerHTML = `<div class="opt">${o.panel()}</div>`;
+  const g = goal();
+  $("#ctx-title").textContent = g.title;
+  $("#ctx-meta").innerHTML = `<span class="mono">${g.id}</span> · ${g.meta}`;
+  $("#sbar-id").textContent = g.id;
+  $("#row-big").classList.toggle("sel", SIZE === 40);
+  $("#row-small").classList.toggle("sel", SIZE === 5);
+  $$("pre[data-size]").forEach((p) => (p.hidden = p.dataset.size !== String(SIZE)));
+  $("#sb-goal").innerHTML = `<div class="opt">${side()}</div>`;
+  $("#panel-goal").innerHTML = `<div class="opt">${panel()}</div>`;
   if (!animate) $$(".opt").forEach((e) => (e.style.animation = "none"));
-  requestAnimationFrame(() => requestAnimationFrame(() => $$(".ring").forEach((r) => r.classList.add("drawn"))));
-  if (!rm()) $$(".rs-live").forEach((c) => {
-    const s = +c.dataset.start, l = +c.dataset.len;
-    c.animate([{ strokeDasharray: `0 100`, opacity: 1 }, { strokeDasharray: `${l} ${100 - l}`, opacity: 1, offset: 0.75 }, { strokeDasharray: `${l} ${100 - l}`, opacity: 0 }], { duration: 2000, iterations: Infinity, easing: "cubic-bezier(0.22, 1, 0.36, 1)" });
-  });
   tickLive(false);
 }
-function select(i) { cur = i; renderTabs(); render(); }
+function renderList() { $(".js-list").innerHTML = body(); tickLive(false); }
+function select(i) { V = i; OPEN = defaults(); F = "all"; Q = ""; renderTabs(); render(); }
+
+/* A segment, the running title or the failing chip: show that milestone in the panel. */
+function jump(n) {
+  const m = MS().find((x) => x.n === n);
+  F = "all"; Q = "";
+  if (phased()) {
+    const pi = PHASES.findIndex((p) => n >= p.from && n <= p.to);
+    OPEN.add(`ph${pi}`);
+    if (m.s === "passed") OPEN.add(`ph${pi}-passed`);
+    if (m.s === "todo" && !isNext(m)) OPEN.add(`ph${pi}-upcoming`);
+  } else {
+    if (m.s === "passed") OPEN.add("passed");
+    if (m.s === "todo" && !isNext(m)) OPEN.add("upcoming");
+  }
+  render(false);
+  const el = $(`#panel-goal [data-row="${n}"]`);
+  if (!el) return;
+  const box = $(".js-list"), top = el.offsetTop - box.offsetTop;
+  box.scrollTo({ top: Math.max(0, top - 40), behavior: rm() ? "auto" : "smooth" });
+  el.classList.add("flash");
+}
 
 document.addEventListener("click", (e) => {
   const t = e.target.closest("button");
   if (!t) return;
   if (t.matches(".tab")) return select(+t.dataset.i);
-  if (t.matches(".js-clp")) {
-    const box = t.closest(".oa"), open = t.getAttribute("aria-expanded") !== "true";
-    t.setAttribute("aria-expanded", String(open));
-    box.querySelector("[data-clp]").classList.toggle("open", open);
-    box.querySelector("[data-sum]")?.classList.toggle("open", !open);
+  if (t.dataset.size) { SIZE = +t.dataset.size; $$("[data-size]").forEach((b) => b.tagName === "BUTTON" && b.setAttribute("aria-pressed", String(b === t))); OPEN = defaults(); F = "all"; Q = ""; elapsed = 72; renderTabs(); render(); return; }
+  if (t.matches(".sg, .js-jump")) return jump(+t.dataset.n);
+  if (t.dataset.g) {
+    const key = t.dataset.g, open = !OPEN.has(key);
+    open ? OPEN.add(key) : OPEN.delete(key);
+    $$(`[data-g="${key}"]`).forEach((b) => b.setAttribute("aria-expanded", String(open)));
+    $$(`[data-clp="${key}"]`).forEach((c) => c.classList.toggle("open", open));
     return;
   }
-  if (t.matches(".oc-row")) {
-    const set = cOpen[t.dataset.where], n = +t.dataset.n, open = !set.has(n);
-    open ? set.add(n) : set.delete(n);
-    t.setAttribute("aria-expanded", String(open));
-    t.nextElementSibling.classList.toggle("open", open);
-    return;
-  }
-  if (t.matches(".js-rerun")) {
-    const m = MS[+t.dataset.n - 1], was = { ...m };
-    m.s = "running"; m.who = "check"; render(false);
-    setTimeout(() => { Object.assign(m, was, { when: "just now", ago: "0m" }); render(false); }, 2800);
-    return;
-  }
-  if (t.matches(".od-st") && t.closest(".od-track")) {
-    dSel = +t.dataset.i;
-    $$(".od-track .od-st").forEach((b) => b.setAttribute("aria-selected", String(+b.dataset.i === dSel)));
-    $(".js-ddetail").innerHTML = dDetail(); tickLive(false);
-    return;
-  }
+  if (t.matches(".js-out")) { const n = +t.dataset.n; OUT.has(n) ? OUT.delete(n) : OUT.add(n); renderList(); return; }
+  if (t.dataset.f) { F = t.dataset.f; $$(".chipf").forEach((b) => b.setAttribute("aria-pressed", String(b === t))); renderList(); return; }
   if (t.dataset.themeSet) return setTheme(t.dataset.themeSet);
   if (t.dataset.motion) return setMotion(t.dataset.motion);
   if (t.dataset.ms) { responseMs = +t.dataset.ms; $$("[data-ms]").forEach((b) => b.setAttribute("aria-pressed", String(b === t))); return; }
   if (t.id === "press-all") return $$(".ld > button").forEach(press);
   if (t.parentElement?.classList.contains("ld")) return press(t);
 });
+document.addEventListener("input", (e) => { if (e.target.matches(".msq input")) { Q = e.target.value; renderList(); } });
 document.addEventListener("keydown", (e) => {
-  if (e.target.closest("input, textarea") || e.metaKey || e.ctrlKey) return;
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.target.closest("input, textarea")) { if (e.key === "Escape") { e.target.value = ""; Q = ""; e.target.blur(); renderList(); } return; }
+  if (e.key === "/" && $(".msq input")) { e.preventDefault(); $(".msq input").focus(); return; }
   const n = Number(e.key);
-  if (n >= 1 && n <= 4) select(n - 1);
+  if (n >= 1 && n <= 3) select(n - 1);
 });
 
-/* Live bits: the running check's elapsed time and its streaming output. */
+/* Hovering a segment names its milestone. */
+const tip = $("#tip");
+function showTip(el) {
+  const m = MS().find((x) => x.n === +el.dataset.n), r = el.getBoundingClientRect();
+  const st = m.s === "passed" ? `passed · ${m.ago} ago` : m.s === "running" ? `running ${mmss(elapsed)} · ${m.who}` : m.s === "failed" ? `check failing · ${m.ago} ago` : isNext(m) ? "next" : "upcoming";
+  tip.innerHTML = `<b>${m.n}</b>${m.title}<span>${st}</span>`;
+  tip.style.left = `${Math.min(Math.max(r.left + r.width / 2, 160), innerWidth - 160)}px`;
+  tip.style.top = `${r.top}px`;
+  tip.classList.add("on");
+}
+document.addEventListener("mouseover", (e) => { const s = e.target.closest(".sg"); s ? showTip(s) : tip.classList.remove("on"); });
+document.addEventListener("focusin", (e) => { const s = e.target.closest(".sg"); s ? showTip(s) : tip.classList.remove("on"); });
+addEventListener("scroll", () => tip.classList.remove("on"), { passive: true });
+
+/* Live bits: the running check's elapsed time and its newest output line. */
 function tickLive(advance = true) {
   if (advance) liveAt++;
   $$(".js-el").forEach((el) => (el.textContent = mmss(elapsed)));
-  $$(".js-live").forEach((el) => { if (advance) { el.classList.remove("fresh"); void el.offsetWidth; el.classList.add("fresh"); } el.textContent = LIVE[liveAt % LIVE.length]; });
-  $$(".js-stream").forEach((el) => {
-    const lines = [];
-    for (let k = Math.max(0, liveAt - 3); k <= liveAt; k++) lines.push(LIVE[k % LIVE.length]);
-    el.innerHTML = lines.map((l) => `<div class="${l.endsWith("✓") ? "ok" : "dim"}">${l}</div>`).join("");
-  });
+  $$(".js-live").forEach((el) => { if (advance) { el.classList.remove("fresh"); void el.offsetWidth; el.classList.add("fresh"); } el.textContent = LIVE(); });
 }
 setInterval(() => { elapsed++; $$(".js-el").forEach((el) => (el.textContent = mmss(elapsed))); }, 1000);
-setInterval(() => tickLive(true), 1500);
+setInterval(() => tickLive(true), 1600);
 
 /* ── Section 2: loading variants ─────────────────────────────────────────── */
 let responseMs = 2600;
@@ -1088,14 +1026,15 @@ function applyMotion() { document.documentElement.classList.toggle("rm", motion 
 function setMotion(m) { motion = m; $$("[data-motion]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.motion === m))); applyMotion(); }
 mq.addEventListener("change", applyMotion);
 
-/* URL presets, for screenshots: ?theme=light&opt=c&motion=reduced&press=1 */
+/* URL presets, for screenshots: ?theme=light&v=2&size=5&motion=reduced&press=1 */
 const q = new URLSearchParams(location.search);
-cur = Math.max(0, "abcd".indexOf(q.get("opt") || "a"));
+V = Math.min(2, Math.max(0, (+q.get("v") || 1) - 1));
+if (q.get("size") === "5") { SIZE = 5; $$("button[data-size]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.size === "5"))); }
+OPEN = defaults();
 renderTabs();
 if (q.get("theme")) setTheme(q.get("theme"));
 if (q.get("motion")) setMotion(q.get("motion")); else applyMotion();
 if (q.get("press")) { responseMs = 600000; $$(".ld > button").forEach(press); }
-if (q.get("open")) $$(".js-clp").forEach((b) => b.click());
 </script>
 </body>
 </html>

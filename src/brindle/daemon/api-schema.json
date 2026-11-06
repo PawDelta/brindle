@@ -267,6 +267,18 @@
           "title": "Mode",
           "type": "string"
         },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model"
+        },
         "parent_id": {
           "anyOf": [
             {
@@ -6853,6 +6865,18 @@
             "mode": {
               "title": "Mode",
               "type": "string"
+            },
+            "model": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Model"
             },
             "parent_id": {
               "anyOf": [

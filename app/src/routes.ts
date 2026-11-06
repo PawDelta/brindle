@@ -8,7 +8,7 @@
    session to show); the Inbox lists everything waiting on a person, each
    row jumping to its session. Knowledge (a repo's decisions and sources),
    Agents (which model runs each kind of work, and the person's custom
-   agents), Settings and Account are the pages behind the sidebar's foot. There is
+   agents) and Settings (with Account and Usage among its tabs) are the pages behind the sidebar's foot. There is
    no home board: the sidebar is the overview. */
 
 export interface SessionRef {
@@ -40,15 +40,47 @@ export type Route =
      `from`: the session the person came from, for Docs' Back to session. */
   | { screen: "knowledge"; view?: KnowledgeView; doc?: number | string; section?: string; session?: string; from?: SessionRef }
   | { screen: "agents" }
-  /* `section`: scrolled to on opening (the sidebar's usage reading opens Account › Usage,
-     a provider's problem Settings › Providers); `ask` counts the requests, so asking
-     again while the page is open scrolls again; `rule`: a permission rule to open in its
-     editor, from the Inbox's permission items. */
-  | { screen: "settings"; section?: "providers" | "permissions" | "storage"; ask?: number; rule?: string }
-  /* One repo's checks, rules and overrides of the person's settings (from its sidebar heading or Settings). */
+  /* Settings, one place with tabs (settingsTab below). `tab`: the tab to open on;
+     `section`: the tab it lives on, scrolled to on opening (a provider's problem opens
+     Settings › Providers); `ask` counts the requests, so asking again while the page is
+     open switches and scrolls again; `rule`: a permission rule to open in its editor,
+     from the Inbox's permission items. */
+  | { screen: "settings"; tab?: SettingsTab; section?: "providers" | "permissions" | "storage"; ask?: number; rule?: string }
+  /* The older routes, kept: they open Settings on their tab. One repo's checks, rules and
+     overrides of the person's settings (from its sidebar heading): the Project tab. */
   | { screen: "project-settings"; repo?: string }
+  /* The plan, sign-in and spend (the sidebar's initials button): the Account tab; `section`
+     "usage" (the sidebar's usage reading) the Usage tab. */
   | { screen: "account"; section?: "usage"; ask?: number }
   | ({ screen: "session"; agent?: string; sheet?: SheetRef } & SessionRef);
+
+/* Settings' tabs, in order: everything the person sets, behind the sidebar's account entry. */
+export const SETTINGS_TABS = [
+  { id: "account", label: "Account" },
+  { id: "usage", label: "Usage" },
+  { id: "general", label: "General" },
+  { id: "providers", label: "Workers & providers" },
+  { id: "permissions", label: "Permissions" },
+  { id: "storage", label: "Storage" },
+  { id: "project", label: "Project" },
+  { id: "about", label: "About" },
+] as const;
+export type SettingsTab = (typeof SETTINGS_TABS)[number]["id"];
+
+/* The Settings tab a route opens on, the older Account and Project settings routes
+   included; null for a route that isn't Settings. */
+export function settingsTab(route: Route): SettingsTab | null {
+  switch (route.screen) {
+    case "account":
+      return route.section === "usage" ? "usage" : "account";
+    case "project-settings":
+      return "project";
+    case "settings":
+      return route.tab ?? route.section ?? "general";
+    default:
+      return null;
+  }
+}
 
 /* Where the app lands before it knows its sessions: the empty state. */
 export const HOME: Route = { screen: "new" };
