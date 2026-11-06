@@ -447,7 +447,7 @@ def note_stuck(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
     Only a waiting worker's pane is read: hooks mark a wait (a permission
     request), a question a turn ended on is forwarded by the turn-end hook
     (prompt_answer.at_turn_end), and startup prompts are settle_startups'."""
-    from brindle import prompt_answer
+    from brindle import permission_routing, prompt_answer
 
     done = []
     owners = agents.pane_owners(db, panes)
@@ -457,6 +457,8 @@ def note_stuck(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
                 or not agents.runs_process(a) or not agents.same_server(a, panes)
                 or not agents.is_alive(a, panes) or not agents.owns_pane(db, a, owners)):
             continue
+        if permission_routing.waits_on_supervisor(db, a):
+            continue    # it has the whole request and may answer: "only the user can" would be wrong
         try:
             screen = tmux.capture(a.tmux_window, lines=40, server=agents.server_of(a))
         except tmux.TmuxError:

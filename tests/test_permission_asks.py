@@ -117,7 +117,8 @@ def _closed(db, agent):
 
 @pytest.mark.variant("review regression: a wait must end with its hold, not with the tool's PostToolUse")
 @pytest.mark.parametrize("pane, looked, resolved_by, wait", [
-    ("busy", lambda c, h, db, a: (True, None), "person", 10.0),   # its pane read past the prompt for 3 looks
+    # its pane showed the prompt, then read past it for 3 looks
+    (["prompt", "busy", "busy", "busy"], lambda c, h, db, a: (True, None), "person", 3.0),
     (None, lambda c, h, db, a: (True, "allow_once"), "person", 1.0),   # one look, HOLD_LOOK_SECONDS
     (None, lambda c, h, db, a: (True, "terminal"), "terminal", None),
     (None, lambda c, h, db, a: (_closed(db, a), (True, None))[1], "agent_exit", None),
@@ -148,7 +149,8 @@ def test_an_ask_ends_with_its_hold_not_with_the_tool(db, ws, clock, monkeypatch,
     monkeypatch.setattr("brindle.daemon.holds.Holder.register", register)
     monkeypatch.setattr("brindle.daemon.holds.Holder.wait", look)
     monkeypatch.setattr("brindle.daemon.holds.Holder.end", slow_end)
-    monkeypatch.setattr(agents, "_pane_state", lambda agent: pane)
+    states = iter(pane or [])
+    monkeypatch.setattr(agents, "_pane_state", lambda agent: next(states, None))
     ask_about(db, ws, a, "make build")
 
     def row():

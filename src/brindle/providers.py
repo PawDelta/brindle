@@ -920,8 +920,10 @@ class ClaudeCode(Provider):
             # A worker's file tools may not touch the credential stores its
             # shell commands are denied (permissions.prints_credentials):
             # Read would print a key the hook denies `cat`, Edit would plant
-            # one. An interactive pane is a person's own chat.
-            settings["permissions"] = {"deny": _credential_file_denies()}
+            # one. An interactive pane is a person's own chat. Nobody watches
+            # this one, so a question asked there stalls the worker, and no
+            # hook can answer it: its supervisor is a send_message away.
+            settings["permissions"] = {"deny": [*_credential_file_denies(), "AskUserQuestion"]}
         mcp = {"mcpServers": {"brindle": mcp_server_spec(ctx.agent_id)}}
         p = ctx.profile
         argv = [claude_binary()]

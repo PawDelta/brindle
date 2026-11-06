@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from brindle import agents, autopilot, bus, identity_lock, permissions, prompt_answer, session_sync, tmux, view
 from brindle.config import load_repo_config
 from brindle.daemon.holds import HOLDS, LEASE_SECONDS
-from brindle.db import DB, Agent
+from brindle.db import DB, Agent, request_subagent
 from brindle.providers import get_provider
 from brindle.service.dto import InboxActionDTO, InboxItemDTO, PermissionChoiceDTO, PermissionDTO
 from brindle.service.errors import ServiceError
@@ -33,6 +33,7 @@ RELEASE = "terminal"     # the person's "answer in the terminal instead": the ho
 # the request (PermissionDTO.terminal_prompt_visible). Claude Code 2.1.304, in
 # a real pane: yes, the prompt shows while its PermissionRequest hook runs, and
 # answering there runs the tool at once (its PostToolUse then ends the hold).
+# Not for a subagent's request (2.1.318): its prompt comes only once the hold ends.
 # Native workers and agy under agy_approvals "brindle" have no prompt at all.
 # Codex 0.162.1: no. It awaits its PermissionRequest hooks before it asks
 # (codex-rs core/src/tools/approvals.rs, "Approval precedence is: 1. Hooks"),
@@ -435,7 +436,7 @@ def pending_permissions(db: DB, agent: Agent) -> list[Pending]:
             via="hook", request_id=row["tool_use_id"], tool=req.tool, kind=req.kind, target=req.target(),
             digest=permissions.request_digest(row["request"], row["suggestions"]), choices=choices,
             hold_until=hold.hold_until, hold_note=_hold_note(agent.provider, hold.hold_until),
-            terminal_prompt_visible=TERMINAL_PROMPT_VISIBLE.get(agent.provider))))
+            terminal_prompt_visible=TERMINAL_PROMPT_VISIBLE.get(agent.provider) and not request_subagent(row))))
     # A request with its supervisor shows at the CLI's own prompt too: not the person's yet.
     if out or supervised or not agent.tmux_window or _closed(agent):
         return out
