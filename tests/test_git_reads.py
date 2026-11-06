@@ -169,6 +169,7 @@ def gh_with_private_origin(tmp_path, asks, monkeypatch):
     hosts = tmp_path / "gh-config" / "hosts.yml"
     hosts.parent.mkdir()
     monkeypatch.setenv("GH_CONFIG_DIR", str(hosts.parent))
+    monkeypatch.delenv("GIT_CONFIG_PARAMETERS", raising=False)   # a pane's own gh helper, when run from an agent's pane
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     log = tmp_path / "gh-log"
