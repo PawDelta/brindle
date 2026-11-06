@@ -14,7 +14,8 @@
 # Credentials as the workflow's signing setup exports them: APPLE_API_KEY_PATH,
 # APPLE_API_KEY and APPLE_API_ISSUER, else APPLE_ID, APPLE_PASSWORD and
 # APPLE_TEAM_ID. NOTARY_TRIES (default 5) and NOTARY_PAUSE (seconds, default
-# 30, times the try) set the retries.
+# 30, times the try) set the retries. STAPLE_TRIES (default 12) and STAPLE_PAUSE
+# (default 30, times the try) allow 33 minutes for Apple's ticket service.
 set -uo pipefail
 
 dmg="${1:?usage: notarize_dmg.sh DMG}"
@@ -63,6 +64,7 @@ if [ "$status" != Accepted ]; then
   exit 1
 fi
 
+tries="${STAPLE_TRIES:-12}" pause="${STAPLE_PAUSE:-30}"
 for attempt in $(seq 1 "$tries"); do
   xcrun stapler staple "$dmg" && xcrun stapler validate "$dmg" && exit 0
   again "stapling $name failed" "$attempt"
