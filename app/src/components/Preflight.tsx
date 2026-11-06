@@ -99,6 +99,33 @@ function Settle({ item, provider, onDone, label, repo }: { item: PreflightItem; 
   );
 }
 
+/* A consent the CLI asks for once: a real checkbox (mouse and keyboard) that records the agreement when ticked. */
+function ConsentBox({ item, provider, name, onDone, repo }: { item: PreflightItem; provider: string; name: string; onDone(next: PreflightDTO): void; repo?: string | null }) {
+  const client = useDaemon();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const agree = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      onDone(await client.settlePreflight(provider, item.id, item.action, repo));
+    } catch (e) {
+      setError(message(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="flex flex-col gap-1">
+      <label className="flex cursor-pointer items-start gap-s1 text-sm">
+        <input type="checkbox" className="mt-0.5" checked={false} disabled={busy} onChange={() => void agree()} />
+        <span>I agree to {name}'s terms and notices shown above, and let brindle record that for {name} on this computer.</span>
+      </label>
+      {error && <span className="text-sm text-sap">{error}</span>}
+    </div>
+  );
+}
+
 const KIND_LABEL: Record<PreflightItem["kind"], string> = { signin: "Sign in", key: "API key", trust: "Trust", consent: "Consent", setup: "Install", off: "Turned off" };
 
 /* The other CLIs brindle finds installed and in use here, for a launch whose own CLI is missing or off. */
@@ -168,7 +195,7 @@ export function Preflight({ preflight, onRefresh, onLaunch, launchLabel = "Start
                 )}
                 {item.kind === "key" && <KeyField item={item} provider={provider} onDone={refresh} />}
                 {item.kind === "trust" && <Settle item={item} provider={provider} onDone={onRefresh} label="Trust this folder" repo={repo} />}
-                {item.kind === "consent" && <Settle item={item} provider={provider} onDone={onRefresh} label="Agree" repo={repo} />}
+                {item.kind === "consent" && <ConsentBox item={item} provider={provider} name={name} onDone={onRefresh} repo={repo} />}
                 {/* Settled outside the card (installed, turned back on): asked again, it reads done. */}
                 {(item.kind === "setup" || item.kind === "off") && (
                   <button type="button" className={button} onClick={refresh}>
