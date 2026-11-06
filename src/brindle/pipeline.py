@@ -1259,6 +1259,10 @@ def _on_review(db: DB, reviewer: Agent, ws: Workspace, approved: bool,
             return True, False
         if second_review_pending(db, cfg, worker, ws):
             return True, False   # the other reviewer's verdict decides; both must approve
+        # An approval replay must not interrupt conflict resolution or repeat
+        # an escalation. Only a new conflicting commit gets another notice.
+        if db.mark(worker.id, "conflict") == recorded.sha:
+            return True, False
         db.update_agent(worker.id, pipeline="ready")
         return True, True
     _send_back(db, ws, worker, cfg, summary, has_supervisor_action(summary),
@@ -1624,6 +1628,21 @@ def _retry_on_heavy(db: DB, worker: Agent, ws: Workspace, cfg: RepoConfig, why: 
     return True
 
 
+def _conflict_needs_you(db: DB, worker: Agent, ws: Workspace, files: list[str],
+                        report: str, why: str) -> None:
+    """A conflict with no usable worker belongs to the supervisor."""
+    db.update_agent(worker.id, pipeline=None, merge_failed=f"Conflict in {', '.join(files)}: {why}")
+    _escalate(db, ws, worker)
+    _tell(db, worker.parent_id,
+          agents.condense(
+              f"[brindle pipeline] `{ws.branch}` was approved, but merging `{ws.base_branch}` "
+              f"into it conflicts in: {', '.join(files)}, and its worker cannot resolve it "
+              f"({why}). This needs you: resolve it (in {ws.path}: `git merge {ws.base_branch}`, "
+              f"resolve, commit) or assign someone, then request_review and "
+              f"merge_workspace(\"{ws.id}\"). Worker: {agents.first_line(report)}",
+              f"Worker's report:\n{report}"), worker.id)
+
+
 def _resolve_conflict(db: DB, worker: Agent, ws: Workspace, cfg: RepoConfig,
                       files: list[str], report: str) -> None:
     """``ws``'s branch conflicts with its base. A protected path goes to the
@@ -1632,6 +1651,9 @@ def _resolve_conflict(db: DB, worker: Agent, ws: Workspace, cfg: RepoConfig,
     way the branch leaves 'ready': its next report starts a fresh review."""
     parent_id = worker.parent_id
     base = ws.base_branch
+    # _on_review and this handler run under the branch's merge lock. Keep
+    # the receipt in the DB so another sweep/process sees the same handoff.
+    db.set_mark(worker.id, "conflict", gates.head(ws))
     guarded = conflicts.protected(files, cfg.protected_paths)
     if guarded:
         db.update_agent(worker.id, pipeline=None)
@@ -1650,6 +1672,12 @@ def _resolve_conflict(db: DB, worker: Agent, ws: Workspace, cfg: RepoConfig,
         return
     task = resolution_task(ws, files, cfg)
     if agents.is_alive(worker):
+        # A pane can remain alive while its configured profile cannot run.
+        # Queuing it more instructions would leave the conflict unattended.
+        problem = autopilot._unavailable(worker.profile, cfg, ws.repo_root)
+        if problem:
+            _conflict_needs_you(db, worker, ws, files, report, problem)
+            return
         db.update_agent(worker.id, pipeline="resolving")
         try:
             agents.send_message(db, worker.id, task, sender_id=None)
@@ -1667,6 +1695,9 @@ def _resolve_conflict(db: DB, worker: Agent, ws: Workspace, cfg: RepoConfig,
                  "markers left, the tests covering the conflicting files pass, and report_result "
                  "was called")
     try:
+        problem = autopilot._unavailable(profile, cfg, ws.repo_root)
+        if problem:
+            raise agents.AgentError(problem)
         resolver, _ws = agents.delegate(db, parent, ws, profile, task, "assign", isolate=False,
                                         done_when=done_when, plan_first=False)
     except agents.NoRoom as e:
@@ -1679,18 +1710,7 @@ def _resolve_conflict(db: DB, worker: Agent, ws: Workspace, cfg: RepoConfig,
               f"({e}); list_tasks shows it waiting. Nothing to do unless that fails.", worker.id)
         return
     except agents.AgentError as e:
-        db.update_agent(worker.id, pipeline=None)
-        _escalate(db, ws, worker)
-        _tell(db, parent_id,
-              agents.condense(
-                  f"[brindle pipeline] `{ws.branch}` was approved, but merging `{base}` into it "
-                  f"conflicts in: {', '.join(files)}, its worker {worker.id} has finished, and no "
-                  f"worker could be started to resolve it ({e}). This needs you: resolve it (in "
-                  f"{ws.path}: `git merge {base}`, resolve, commit) or assign someone, then "
-                  f"request_review and merge_workspace(\"{ws.id}\"). Worker: "
-                  f"{agents.first_line(report)}",
-                  f"Worker's report:\n{report}"),
-              worker.id)
+        _conflict_needs_you(db, worker, ws, files, report, str(e))
         return
     db.update_agent(worker.id, pipeline=None)
     db.update_agent(resolver.id, pipeline="resolving")
