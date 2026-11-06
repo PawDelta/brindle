@@ -636,9 +636,10 @@ describe("providers in the sidebar", () => {
     const problem = await within(nav()).findByTestId("provider-problem");
     expect(statusLine().lastElementChild).toBe(problem);
     expect(within(statusLine()).getByTestId("usage-reading")).toBeTruthy();
-    expect(problem.textContent).toBe("Codex signed out");
-    expect(problem.getAttribute("data-kind")).toBe("signed_out");
-    expect(problem.className).toContain("text-sap");
+    // Claude works, so Codex's missing sign-in is setup to do: quiet words, not a warning.
+    expect(problem.textContent).toBe("Set up Codex");
+    expect(problem.getAttribute("data-kind")).toBe("set_up");
+    expect(problem.className).not.toContain("text-sap");
     expect(within(statusLine()).queryByTestId("provider-problem-more")).toBeNull();
     expect(statusLine().className).toContain("whitespace-nowrap");
     // Clicking the words: Settings, scrolled to Providers, where the row has its Sign in.
@@ -653,7 +654,7 @@ describe("providers in the sidebar", () => {
     fireEvent.click(within(screen.getByTestId("provider-opencode")).getByRole("button", { name: "Install OpenCode" }));
     await screen.findByTestId("provider-install-opencode-failed");
     await waitFor(() => expect(within(statusLine()).getByTestId("provider-problem-more").textContent).toBe("+1"));
-    expect(within(statusLine()).getByTestId("provider-problem").textContent).toContain("Codex signed out");
+    expect(within(statusLine()).getByTestId("provider-problem").textContent).toContain("OpenCode install failed");
     fireEvent.click(link("Knowledge"));
     expect(within(statusLine()).getByTestId("provider-problem-more").textContent).toBe("+1");
     // Back through the words; the failed install let go, the sign-out is all that's left.
