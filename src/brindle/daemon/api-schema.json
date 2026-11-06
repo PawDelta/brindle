@@ -1987,6 +1987,86 @@
       "title": "GcloudOptionsDTO",
       "type": "object"
     },
+    "GitHubConnectionDTO": {
+      "description": "brindle's own GitHub sign-in (brindle.github_connect), as every\n/v1/github/connection route answers. ``route``: how the person connected (a\ncopy of the GitHub CLI's sign-in, or a token they pasted). ``needs_reconnect``:\nGitHub no longer takes it. ``gh_available``: a copy of gh's sign-in can be\noffered. Never the token.",
+      "properties": {
+        "connected": {
+          "title": "Connected",
+          "type": "boolean"
+        },
+        "expires_at": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expires At"
+        },
+        "gh_available": {
+          "default": false,
+          "title": "Gh Available",
+          "type": "boolean"
+        },
+        "login": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Login"
+        },
+        "needs_reconnect": {
+          "default": false,
+          "title": "Needs Reconnect",
+          "type": "boolean"
+        },
+        "route": {
+          "anyOf": [
+            {
+              "enum": [
+                "gh",
+                "token"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Route"
+        },
+        "storage": {
+          "anyOf": [
+            {
+              "enum": [
+                "keychain",
+                "file"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Storage"
+        }
+      },
+      "required": [
+        "connected"
+      ],
+      "title": "GitHubConnectionDTO",
+      "type": "object"
+    },
     "GoalDTO": {
       "$defs": {
         "MilestoneDTO": {
@@ -7226,6 +7306,22 @@
     {
       "method": "WS",
       "path": "/v1/events"
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/github/connection"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/github/connection"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/github/connection"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/github/credential"
     },
     {
       "method": "GET",

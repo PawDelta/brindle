@@ -424,6 +424,21 @@ class AccountDTO(_DTO):
     orgs: list[AccountOrgDTO] = []
 
 
+class GitHubConnectionDTO(_DTO):
+    """brindle's own GitHub sign-in (brindle.github_connect), as every
+    /v1/github/connection route answers. ``route``: how the person connected (a
+    copy of the GitHub CLI's sign-in, or a token they pasted). ``needs_reconnect``:
+    GitHub no longer takes it. ``gh_available``: a copy of gh's sign-in can be
+    offered. Never the token."""
+    connected: bool
+    login: str | None = None
+    route: Literal["gh", "token"] | None = None
+    storage: Literal["keychain", "file"] | None = None
+    expires_at: float | None = None
+    needs_reconnect: bool = False
+    gh_available: bool = False
+
+
 class ActionTerminalDTO(_DTO):
     """An action terminal (a sign-in, ``brindle keys set``; see
     brindle.daemon.terminal.open_action). The app's tmux client attaches to
