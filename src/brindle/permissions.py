@@ -3475,6 +3475,23 @@ _PLAIN_WRAPPERS: dict[str, tuple[frozenset[str], frozenset[str], tuple[str, ...]
     "caffeinate": (frozenset({"-t", "-w"}), frozenset({"-d", "-i", "-m", "-s", "-u"}), (), 0),
     "command": (frozenset(), frozenset({"-p"}), (), 0),
     "exec": (frozenset({"-a"}), frozenset({"-c", "-l"}), (), 0),
+    "sudo": (frozenset({"-a", "-C", "-D", "-g", "-h", "-p", "-R", "-r", "-t", "-T", "-U", "-u",
+                        "--auth-type", "--close-from", "--chdir", "--group", "--host", "--prompt", "--chroot",
+                        "--role", "--type", "--command-timeout", "--other-user", "--user"}),
+             frozenset({"-A", "-b", "-E", "-H", "-i", "-k", "-n", "-P", "-S", "-s", "--askpass",
+                        "--background", "--preserve-env", "--set-home", "--login", "--reset-timestamp",
+                        "--non-interactive", "--preserve-groups", "--stdin", "--shell"}),
+             ("--auth-type=", "--close-from=", "--chdir=", "--group=", "--host=", "--prompt=", "--chroot=",
+              "--role=", "--type=", "--command-timeout=", "--other-user=", "--user=", "--preserve-env=",
+              "-a", "-C", "-D", "-g", "-h", "-p", "-R", "-r", "-t", "-T", "-U", "-u"), 0),
+    "doas": (frozenset({"-u"}), frozenset({"-n"}), ("-u",), 0),
+    "flock": (frozenset({"-w", "--wait", "-E", "--conflict-exit-code"}),
+              frozenset({"-s", "--shared", "-x", "-e", "--exclusive", "-u", "--unlock", "-n", "--nonblock",
+                         "-o", "--close", "-F", "--no-fork", "--verbose"}),
+              ("-w", "--wait=", "-E", "--conflict-exit-code="), 1),
+    "chroot": (frozenset({"--userspec", "--groups"}), frozenset({"--skip-chdir"}),
+               ("--userspec=", "--groups="), 1),
+    "unbuffer": (frozenset(), frozenset({"-p"}), (), 0),
 }
 
 
@@ -3502,6 +3519,15 @@ def _unwrapped(words: list[str]) -> list[str] | None:
         elif word in valued:
             i += 2
         elif word in flags or any(word.startswith(a) and len(word) > len(a) for a in attached):
+            i += 1
+        elif program in ("sudo", "doas") and re.match(r"-[A-Za-z]", word):
+            for at, letter in enumerate(word[1:], 1):
+                option = "-" + letter
+                if option in valued:
+                    i += at == len(word) - 1
+                    break
+                if option not in flags:
+                    return None
             i += 1
         elif word.startswith("-") and len(word) > 1:
             return None
