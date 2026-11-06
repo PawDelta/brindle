@@ -73,6 +73,7 @@ def is_read(args: list[str]) -> bool:
 _TOOLS_MISSING = ("git needs Apple's Command Line Developer Tools, which aren't installed. "
                   "Install them with `xcode-select --install` (or `brew install git`), then try again.")
 _tools_checked = False
+_TOOLS_CHECK_SECONDS = 10
 
 
 def ensure_developer_tools() -> None:
@@ -84,7 +85,7 @@ def ensure_developer_tools() -> None:
     if _tools_checked or sys.platform != "darwin" or shutil.which("git") != "/usr/bin/git":
         return
     try:
-        found = spawn.read(["xcode-select", "-p"], timeout=10).returncode == 0
+        found = spawn.read(["xcode-select", "-p"], timeout=_TOOLS_CHECK_SECONDS).returncode == 0
     except (OSError, subprocess.TimeoutExpired):
         found = False
     if not found:
