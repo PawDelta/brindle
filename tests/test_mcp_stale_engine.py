@@ -135,37 +135,60 @@ def test_failed_report_is_redelivered_once(db, tmp_path, monkeypatch, finding):
         assert notifications == [False] and db.message_delivered(pending_id)
 
         # Pane delivery (idle and mid-turn) and pull notices share that guard.
-        # Keep the real paste preparation; skip only its submit debounce.
-        monkeypatch.setattr(tmux, "paste", partial(tmux.paste, submit=False))
+        def debounce():
+            if phase == "paste-submit":
+                assert db.pending_count("boss") == 1 and db.pop_pending("boss") is None
+                locked.append(True)
+
+        monkeypatch.setattr(tmux, "paste", partial(tmux.paste, debounce=debounce))
         db.update_agent("boss", tmux_server="fake-transport")
-        buffers = set()
+        buffers, composer, completed = {}, [], []
 
         def transport(argv, **kwargs):
             index = next(i for i, arg in enumerate(argv)
                          if arg in ("load-buffer", "paste-buffer", "delete-buffer", "send-keys"))
             command, *args = argv[index:]
             if command == "load-buffer":
-                buffers.add(args[1])
+                buffers[args[1]] = kwargs["input"]
                 if phase == "paste-load":
                     locked.append(True)
             elif command in ("paste-buffer", "delete-buffer"):
-                buffers.discard(args[args.index("-b") + 1])
+                body = buffers.pop(args[args.index("-b") + 1], "")
                 if command == "paste-buffer":
-                    notifications.append(bool(locked))
-            elif command == "send-keys" and phase == "paste-lead":
-                locked.append(True)
+                    assert not locked
+                    composer.append(body)
+            elif command == "send-keys":
+                assert not locked
+                if "-l" in args:
+                    composer.append(args[-1])
+                    if phase == "paste-lead":
+                        locked.append(True)
+                elif args[-1] == "Enter":
+                    completed.append("".join(composer))
+                    composer.clear()
+                    notifications.append(False)
             return SimpleNamespace(returncode=0, stdout="", stderr="")
 
         monkeypatch.setattr(tmux, "subprocess", SimpleNamespace(run=transport, TimeoutExpired=subprocess.TimeoutExpired))
-        monkeypatch.setattr(tmux, "capture", lambda *a, **k: "› \n? for shortcuts\n")
+
+        def screen(*a, **k):
+            if db.get_agent("boss").provider == "claude":
+                return "────\n❯ " + "".join(composer) + "\n────\n? for shortcuts\n"
+            return "› " + "".join(composer) + "\n? for shortcuts\n"
+
+        monkeypatch.setattr(tmux, "capture", screen)
         monkeypatch.setattr(inbox, "usable", lambda *a: False)
         piped = False
-        for route in ("idle", "midturn", "notice"):
+        for route in ("idle", "midturn", "submit", "notice"):
             notifications.clear()
-            db.update_agent("boss", provider="codex", status="idle" if route == "idle" else "processing")
+            db.update_agent("boss", provider="claude" if route == "submit" else "codex",
+                            status="idle" if route in ("idle", "submit") else "processing")
             monkeypatch.setattr(agents, "pulls_messages", lambda *a: route == "notice")
             monkeypatch.setattr(agents, "is_alive", lambda *a: False)
             call(route)
+            expected = (agents.message_lead(db, db.get_agent("boss"), "worker") + " "
+                        + db.conn.execute("SELECT body FROM inbox WHERE agent_id='boss'"
+                                          " AND delivered_at IS NULL ORDER BY id DESC LIMIT 1").fetchone()[0])
             monkeypatch.setattr(agents, "is_alive", lambda *a: True)
             if route == "notice":
                 # The notice uses _deliver_to_inbox instead of flush's inbox path.
@@ -173,23 +196,73 @@ def test_failed_report_is_redelivered_once(db, tmp_path, monkeypatch, finding):
                 phase = "connect"
                 monkeypatch.setattr(inbox, "usable", lambda *a: True)
             else:
-                phase = "paste-load" if route == "idle" else "paste-lead"
+                phase = {"idle": "paste-load", "midturn": "paste-lead", "submit": "paste-submit"}[route]
             agents._notify_supervisor(db, db.get_agent("boss"))
             assert notifications == [] and not buffers
             pending = db.pending_count("boss")
             assert pending == 1
-            if route == "idle":
+            if route in ("idle", "submit"):
                 assert db.get_agent("boss").status == "idle"  # release our status claim, too
             locked.clear()
             phase = "transport"
+            if route in ("midturn", "submit"):
+                # A changed draft is never ours to submit. Restoration must
+                # work from durable state, even through a fresh DB connection.
+                assert db.pop_pending("boss") is None
+                pane = db.get_agent("boss").tmux_window
+                db.update_agent("boss", tmux_window="%replacement")
+                assert agents.flush(db, "boss") is False
+                db.update_agent("boss", tmux_window=pane)
+                composer.append(" unrelated draft")
+                with monkeypatch.context() as available:
+                    available.setattr(inbox, "usable", lambda *a: True)
+                    assert agents.flush(db, "boss") is False  # cannot bypass partial delivery via IPC
+                composer.pop()
+                if route == "submit":
+                    capture, start = tmux.capture, tmux._start
+                    preparing = []
+
+                    def during_write(*a, **k):
+                        preparing.append(True)
+                        return start(*a, **k)
+
+                    def changed_identity(*a, **k):
+                        screen = capture(*a, **k)
+                        if preparing:
+                            locked.append(True)
+                        return screen
+
+                    with monkeypatch.context() as raced:
+                        raced.setattr(tmux, "_start", during_write)
+                        raced.setattr(tmux, "capture", changed_identity)
+                        with pytest.raises(agents.AgentError):
+                            agents.flush(db, "boss")
+                    locked.clear()
             if route == "notice":
                 monkeypatch.setattr(inbox, "usable", lambda *a: True)
                 # The queued notice keeps its claim; another notification must
                 # not duplicate it while the report itself is still unread.
                 agents._notify_supervisor(db, db.get_agent("boss"))
                 assert notifications == [] and db.pending_count("boss") == pending
-            assert agents.flush(db, "boss")
+            resumed = brindle_db.DB()
+            try:
+                if route == "submit":
+                    def interrupted(*a):
+                        raise RuntimeError("lost after submission")
+
+                    with monkeypatch.context() as interrupted_store:
+                        interrupted_store.setattr(resumed, "mark_delivered", interrupted)
+                        with pytest.raises(RuntimeError):
+                            agents.flush(resumed, "boss")
+                    assert not composer and db.pending_count("boss") == 1
+                assert agents.flush(resumed, "boss")
+            finally:
+                resumed.conn.close()
             assert notifications == [False]
+            assert db.mark("boss", "pane-delivery") is None
+            if route != "notice":
+                assert completed[-1] == expected
+                assert not composer
             if route == "notice":
                 assert len(db.read_held("boss")) == 1
             assert db.pending_count("boss") == 0

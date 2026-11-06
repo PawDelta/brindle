@@ -2354,7 +2354,8 @@ def _sync_hooks_off(db: DB, agent: Agent, why: str | None) -> None:
         agent.hooks_off = why
 
 
-def _paste_message(db: DB, agent: Agent, text: str, lead: str | None) -> None:
+def _paste_message(db: DB, agent: Agent, text: str, lead: str | None,
+                   message_id: int | None = None, resume: str | None = None) -> None:
     """Authorize at the transport boundary, after capture/formatting/preparation.
 
     The delivery lock orders messages, but does not serialize sign-in changes.
@@ -2363,9 +2364,97 @@ def _paste_message(db: DB, agent: Agent, text: str, lead: str | None) -> None:
     from brindle import identity_lock
 
     server = server_of(agent)
-    identity_lock.ensure(get(db, agent.id))
+    state = {"message_id": message_id, "pane": agent.tmux_window, "server": server,
+             "provider": agent.provider, "body": text, "lead": lead, "stage": resume}
+
+    def current():
+        fresh = get(db, agent.id)
+        if (fresh.tmux_window != state["pane"] or server_of(fresh) != server
+                or fresh.provider != state["provider"]):
+            raise _PasteBlocked
+        identity_lock.ensure(fresh)
+        return fresh
+
+    def authorize():
+        fresh = current()
+        if resume is not None and state["stage"] == resume:
+            if not _partial_composer(fresh, state, resume):
+                raise _PasteBlocked
+            current()  # the composer capture can itself block across an identity or pane change
+
+    def progress(stage):
+        state["stage"] = stage
+        if not db.record_pane_delivery(message_id, agent.id, json.dumps(state)):
+            raise _PasteBlocked
+
+    authorize()
+    options = {"progress": progress, "resume": resume} if message_id is not None else {}
     tmux.paste(agent.tmux_window, text, lead=lead, server=server,
-               authorize=lambda: identity_lock.ensure(get(db, agent.id)))
+               authorize=authorize, **options)
+    if message_id is not None and resume is None:
+        db.mark_delivered(message_id)
+        db.set_mark(agent.id, "pane-delivery", None)
+
+
+def _partial_composer(agent: Agent, state: dict, stage: str) -> bool:
+    """Match the complete known draft, never a substring or transcript echo.
+
+    An unsupported, collapsed or changed composer is left to the person.
+    Capturing joined lines preserves text across terminal-width wrapping.
+    """
+    from brindle import prompt_answer
+
+    provider = get_provider(agent.provider)
+    marker = getattr(provider, "INPUT_LINE", None)
+    if marker is None:
+        return False
+    screen = tmux.capture(agent.tmux_window, lines=200, escapes=True, server=server_of(agent))
+    if provider.paste_blocked(screen, False) or provider.screen_state(screen) == "waiting":
+        return False
+    lines = prompt_answer.plain(screen).splitlines()
+    prompts = [(i, match) for i, line in enumerate(lines) if (match := marker.match(line))]
+    if not prompts:
+        return False
+    start, match = prompts[-1]
+    borders = [getattr(provider, name, None) for name in ("BORDER", "INPUT_FOOTER", "FOOTER", "READY")]
+    end = next((i for i in range(start + 1, len(lines))
+                if any(pattern is not None and pattern.search(lines[i]) for pattern in borders)), None)
+    if end is None:
+        return False
+    draft = "\n".join([match.group(1).lstrip(), *lines[start + 1:end]]).rstrip()
+    expected = (state["lead"].replace("\n", " ") + " ") if state["lead"] else ""
+    if stage == "body":
+        expected += state["body"]
+    return draft == expected.rstrip()
+
+
+def _resume_pane_delivery(db: DB, agent: Agent, saved: str) -> bool:
+    """Resume the same queued message before any other transport can take it."""
+    from brindle import identity_lock
+
+    state = json.loads(saved)
+    row = db.conn.execute("SELECT * FROM inbox WHERE id=? AND agent_id=?",
+                          (state["message_id"], agent.id)).fetchone()
+    if row is None:
+        db.set_mark(agent.id, "pane-delivery", None)
+        return False
+    identity_lock.ensure(agent)
+    if (agent.tmux_window != state["pane"] or server_of(agent) != state["server"]
+            or agent.provider != state["provider"] or row["body"] != state["body"]
+            or agent.status not in ("idle", "processing")
+            or (agent.status == "processing" and not get_provider(agent.provider).types_midturn)):
+        return False
+    if state["stage"] != "submitted":
+        stage = "body" if _partial_composer(agent, state, "body") else "lead"
+        if stage == "lead" and (state["stage"] != "lead" or not _partial_composer(agent, state, "lead")):
+            return False
+        try:
+            _paste_message(db, agent, state["body"], state["lead"], row["id"], resume=stage)
+        except _PasteBlocked:
+            return False
+    db.mark_delivered(row["id"])
+    db.set_mark(agent.id, "pane-delivery", None)
+    return True
 
 
 def _send_to_inbox(db: DB, agent: Agent, text: str, sender: str) -> bool:
@@ -2398,6 +2487,11 @@ def flush(db: DB, agent_id: str) -> bool:
     CLI that holds mid-turn input: see _flush_midturn). A chat with a live
     waiter (brindle.wake) is left to it, and one that runs a waiter never
     uses the inbox. Returns True if something was delivered."""
+    with delivery_lock(agent_id):
+        return _flush_messages(db, agent_id)
+
+
+def _flush_messages(db: DB, agent_id: str) -> bool:
     from brindle import inbox
     from brindle import launch_health
     from brindle import wake
@@ -2405,6 +2499,9 @@ def flush(db: DB, agent_id: str) -> bool:
     agent = db.get_agent(agent_id)
     if _delivery_held(db, agent):
         return False
+    partial = db.mark(agent_id, "pane-delivery")
+    if partial is not None:
+        return _resume_pane_delivery(db, agent, partial)
     if not wake.enabled(agent) and inbox.usable(agent):
         delivered = False
         while (msg := db.pop_pending(agent_id)) is not None:
@@ -2425,8 +2522,7 @@ def flush(db: DB, agent_id: str) -> bool:
     # One paste into the pane at a time, whichever path: the idle claim alone
     # leaves the agent busy for a second sender's mid-turn paste while the
     # first is still typing, reordering or merging the two.
-    with delivery_lock(agent_id):
-        return _flush_pane(db, agent_id)
+    return _flush_pane(db, agent_id)
 
 
 def delivery_lock(agent_id: str):
@@ -2484,7 +2580,7 @@ def _flush_pane(db: DB, agent_id: str) -> bool:
         lead = message_lead(db, agent, msg.sender_id)
         if _paste_blocked(agent):  # last look, after preparation: a draft may have appeared
             raise _PasteBlocked
-        _paste_message(db, agent, msg.body, lead)
+        _paste_message(db, agent, msg.body, lead, msg.id)
     except BaseException as exc:
         # pop_pending claimed this row before the external send. Release the
         # same row and our idle claim so the next flush can try it once more.
@@ -2520,7 +2616,7 @@ def _flush_midturn(db: DB, agent_id: str) -> bool:
         lead = message_lead(db, agent, msg.sender_id)
         if _paste_blocked(agent):  # last look before pasting: a draft may have appeared
             raise _PasteBlocked
-        _paste_message(db, agent, msg.body, lead)
+        _paste_message(db, agent, msg.body, lead, msg.id)
     except BaseException as exc:
         db.release_pending(msg.id, agent_id)  # back in the queue for the turn-end flush
         if isinstance(exc, _PasteBlocked):

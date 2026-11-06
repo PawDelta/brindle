@@ -1250,21 +1250,29 @@ def capture(target: str, lines: int = 200, escapes: bool = False,
 
 
 def paste(target: str, text: str, submit: bool = True, lead: str | None = None,
-          server: object = _THIS_SERVER, authorize: Callable[[], None] | None = None) -> None:
+          server: object = _THIS_SERVER, authorize: Callable[[], None] | None = None,
+          debounce: Callable[[], None] | None = None,
+          progress: Callable[[str], None] | None = None, resume: str | None = None) -> None:
     """Paste ``text`` as one bracketed paste (so newlines don't submit early),
     then press Enter. ``lead``, a single line, is typed before it instead of
     pasted: agent CLIs treat pasted text as untrusted content, and typed
     text as the person's own words, so the lead is what vouches for it.
     ``server`` as for capture. ``authorize`` is checked at each external write,
     after preparation: buffer loading or a preceding command may have blocked
-    across an identity change. Callers retain their queue claim on denial."""
+    across an identity change. ``progress`` records completed writes durably;
+    ``resume`` skips a lead or body already verified in the same composer."""
     options = {"authorize": authorize} if authorize is not None else {}
     buf = f"brindle-{uuid.uuid4().hex[:8]}"
     try:
-        _tmux("load-buffer", "-b", buf, "-", input=text, server=server, **options)
-        if lead:
-            _tmux("send-keys", "-t", target, "-l", lead.replace("\n", " ") + " ", server=server, **options)
-        _tmux("paste-buffer", "-p", "-d", "-b", buf, "-t", target, server=server, **options)
+        if resume != "body":
+            _tmux("load-buffer", "-b", buf, "-", input=text, server=server, **options)
+            if lead and resume != "lead":
+                _tmux("send-keys", "-t", target, "-l", lead.replace("\n", " ") + " ", server=server, **options)
+                if progress is not None:
+                    progress("lead")
+            _tmux("paste-buffer", "-p", "-d", "-b", buf, "-t", target, server=server, **options)
+            if progress is not None:
+                progress("body")
     except BaseException:
         # Discard a prepared buffer even when authorization was revoked. This
         # is cleanup only: it must never type into the now-locked pane.
@@ -1273,10 +1281,15 @@ def paste(target: str, text: str, submit: bool = True, lead: str | None = None,
         except (TmuxError, OSError):
             pass  # retain the original failure, so the caller releases its claim
         raise
-    if submit:
+    if submit and debounce is not None:
+        debounce()
+    if submit and debounce is None:
         # TUIs debounce paste events; Enter too soon gets folded into the paste.
         time.sleep(0.3)
+    if submit:
         _tmux("send-keys", "-t", target, "Enter", server=server, **options)
+        if progress is not None:
+            progress("submitted")
 
 
 def send_keys(target: str, *keys: str, server: object = _THIS_SERVER) -> None:

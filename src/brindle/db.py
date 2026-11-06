@@ -2131,8 +2131,10 @@ class DB:
         with self.tx() as c:
             row = c.execute(
                 "SELECT * FROM inbox WHERE agent_id=? AND delivered_at IS NULL "
-                "AND COALESCE(held,0)=0 ORDER BY id LIMIT 1",
-                (agent_id,),
+                "AND COALESCE(held,0)=0 AND NOT EXISTS"
+                " (SELECT 1 FROM agent_marks WHERE agent_id=? AND kind='pane-delivery')"
+                " ORDER BY id LIMIT 1",
+                (agent_id, agent_id),
             ).fetchone()
             if not row:
                 return None
@@ -2144,6 +2146,20 @@ class DB:
         with self.tx() as c:
             c.execute("UPDATE inbox SET delivered_at=NULL WHERE id=? AND agent_id=?",
                       (message_id, agent_id))
+
+    def record_pane_delivery(self, message_id: int, agent_id: str, state: str) -> bool:
+        """A partial external write is pending, owned by its durable pane mark.
+
+        Publish both together so even a process exit before the caller unwinds
+        leaves the message visible and unavailable to ordinary queue readers.
+        """
+        with self.tx() as c:
+            if not c.execute("UPDATE inbox SET delivered_at=NULL WHERE id=? AND agent_id=?",
+                             (message_id, agent_id)).rowcount:
+                return False
+            c.execute("INSERT INTO agent_marks (agent_id, kind, value) VALUES (?,'pane-delivery',?)"
+                      " ON CONFLICT(agent_id, kind) DO UPDATE SET value=excluded.value", (agent_id, state))
+        return True
 
     def retry_pending(self, message_id: int, agent_id: str, idle_since: float) -> None:
         """Release the caller's failed delivery claim without creating a second message.
