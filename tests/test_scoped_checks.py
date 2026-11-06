@@ -2,13 +2,14 @@
 the supervisor's checkout always runs them in full."""
 import json
 import shlex
+import sys
 import time
 from pathlib import Path
 
 import pytest
 
 from conftest import sh
-from brindle import autopilot, check_scope, codemap, gates, workspaces
+from brindle import autopilot, check_scope, codemap, gates, git, workspaces
 from brindle.config import load_repo_config
 from brindle.db import Agent
 
@@ -144,3 +145,22 @@ def test_scoped_checks(db, repo, tmp_path, monkeypatch, where, cmd, changes, ran
     assert commands == ran
     full = where in ("supervisor", "cap-pr")
     assert envs == [None if full else "\n".join(sorted(changes))] * len(ran)   # the real gate dispatch sets it
+
+
+def test_empty_namesake_selection_fails_and_is_not_cached(db, repo, monkeypatch):
+    """The generated command, run for real through the gate, fails when its tests collect nothing."""
+    cmd = f"{shlex.quote(sys.executable)} -m pytest -q -p no:cacheprovider"
+    write(repo, {".brindle/config.json": json.dumps({"checks": [cmd], "scoped_checks": "infer"}),
+                 "src/pkg/__init__.py": "", "src/pkg/lonely.py": "X = 1\n", "tests/test_lonely.py": "Y = 1\n"})
+    sh("git add -A && git commit -qm base", repo)
+    monkeypatch.setattr(codemap, "graph_path", lambda target: None)
+    ws = workspaces.create(db, str(repo), "feat").workspace
+    db.add_agent(Agent("w1", ws.id, "developer", "claude", None, "assign", "done", "@0", None, time.time()))
+    write(Path(ws.path), {"src/pkg/lonely.py": "X = 2\n"})
+    sh("git add -A && git commit -qm work", Path(ws.path))
+    assert check_scope.command(ws, cmd, check_scope.CheckScope(), check_scope.changed_files(db, ws)) \
+        == f"{cmd} tests/test_lonely.py"
+    ok, _ = gates.run_checked(db, ws, cmd, {}, 120)
+    assert not ok
+    tree = git.out(["rev-parse", "HEAD^{tree}"], ws.path)
+    assert db.get_tree_check(ws.repo_root, tree, f"{cmd} tests/test_lonely.py\nsrc/pkg/lonely.py") is None
