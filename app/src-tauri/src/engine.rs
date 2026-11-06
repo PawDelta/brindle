@@ -44,6 +44,29 @@ pub fn python_command(engine: &Path) -> String {
     format!("{}/python/bin/python3 ", engine.display())
 }
 
+/// Whether `bin` is `engine`'s launcher.
+pub fn is_launcher(engine: &Path, bin: &Path) -> bool {
+    bin == engine.join(LAUNCHER)
+}
+
+/// What `engine`'s launcher (scripts/engine/brindle) ends by running, given
+/// `path`: its Python, the arguments ahead of brindle's own, and the PATH. For a
+/// process macOS judges by its program from the start (the daemon's launchd job):
+/// a script has no Team ID, the engine's signed Python does. The result is the
+/// same process the launcher makes (tested). None: leave it to the launcher.
+pub fn launcher_exec(engine: &Path, path: &OsStr) -> Option<(PathBuf, Vec<String>, std::ffi::OsString)> {
+    let build = require_build(engine).ok()?;
+    let mut dirs = vec![engine.join("bin")];
+    let system = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"].map(PathBuf::from);
+    for dir in std::env::split_paths(path).chain(system) {
+        if dir.is_absolute() && !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
+    }
+    let args = ["-I", "-B", "-X", &build_option(&build), "-m", "brindle"].map(String::from).to_vec();
+    Some((engine.join("python/bin/python3"), args, std::env::join_paths(dirs).ok()?))
+}
+
 /// The file in the engine naming its build (build_engine.sh: its inputs' hash).
 const BUILD_FILE: &str = "BUILD";
 
@@ -335,6 +358,32 @@ mod tests {
         assert_eq!(out[1], "-I -B -m brindle daemon --idle-exit");
         let why = require_build(&engine).unwrap_err();
         assert!(why.contains("names no build") && !why.contains("incomplete"), "{why}");
+    }
+
+    /// The daemon's job skips the launcher: what it runs must be what the launcher runs.
+    #[cfg(unix)]
+    #[test]
+    fn the_daemon_starts_the_process_the_launcher_would() {
+        let path = "/h/.local/bin:relative:/opt/homebrew/bin:/usr/bin";
+        let (engine, out) = run_launcher("launcher-exec", &[("PATH", path)], Some("00b2c3\n"));
+        let launcher = engine.join(LAUNCHER);
+        let cmd = crate::daemon::start_command(&launcher, OsStr::new(path), Some(&engine));
+        assert_eq!(cmd.get_program(), engine.join("python/bin/python3"));
+        let args: Vec<_> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert_eq!(args.join(" "), out[1]);
+        let env = cmd.get_envs().find(|(k, _)| *k == OsStr::new("PATH")).and_then(|(_, v)| v).unwrap();
+        assert_eq!(env.to_string_lossy(), out[0]);
+        // As daemon::reuse would tell it: this engine's, of this build.
+        let command = format!("{} {}", cmd.get_program().to_string_lossy(), args.join(" "));
+        assert!(command.starts_with(&python_command(&engine)) && command.contains("-X brindle-build=00b2c3 "), "{command}");
+
+        // Another brindle, or an engine with no build to name: run as they are.
+        let other = Path::new("/opt/homebrew/bin/brindle");
+        assert_eq!(crate::daemon::start_command(other, OsStr::new(path), Some(&engine)).get_program(), other);
+        assert_eq!(crate::daemon::start_command(other, OsStr::new(path), None).get_program(), other);
+        let (bare, _) = run_launcher("launcher-exec-nobuild", &[("PATH", path)], None);
+        let launcher = bare.join(LAUNCHER);
+        assert_eq!(crate::daemon::start_command(&launcher, OsStr::new(path), Some(&bare)).get_program(), launcher);
     }
 
     #[test]

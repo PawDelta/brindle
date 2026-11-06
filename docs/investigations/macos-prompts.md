@@ -42,9 +42,9 @@ dialog is a separate claim, and is marked unverified unless stated**. See
 | Prompt | Trigger | Who attributes it | How a well-behaved Mac app avoids it; can brindle? | Fixed or why kept | How verified |
 |---|---|---|---|---|---|
 | "brindle is an app downloaded from the internet" (first open) | Gatekeeper, quarantine flag on first open | macOS, names brindle | Nobody can: notarizing only removes the scarier wording. brindle already does | Kept, unavoidable. No warning needed: everyone knows this dialog | Live: `spctl` says accepted, Notarized Developer ID; ticket stapled. Dialog itself: unverified |
-| "Background Items Added" / "can run in the background" | `launchctl bootstrap` of the daemon's plist (`daemon.rs` `start_daemon`) | macOS Login Items (BTM); the job's program is the engine's unsigned launcher script | One fixed label via `SMAppService`; `AssociatedBundleIdentifiers` on a legacy plist. Partly | **Partly fixed:** the plist now names `com.pawdelta.brindle`, as `launchd.plist(5)` asks, so the item should list under brindle. Repeats kept, see below | Code; man page; test. launchd accepts the key (live, test label). Notice and its wording: unverified |
+| "Background Items Added" / "can run in the background" | `launchctl bootstrap` of the daemon's plist (`daemon.rs` `start_daemon`) | macOS Login Items (BTM), by the job's program. That was the engine's unsigned launcher script, which has no Team ID | One fixed label via `SMAppService`; on a legacy plist, `AssociatedBundleIdentifiers` with a program of the app's team. Partly | **Partly fixed:** the plist names `com.pawdelta.brindle`, as `launchd.plist(5)` asks, and the job now runs the engine's signed Python directly (`start_command`), the same process the launcher would make. Apple DTS says a Mach-O program is what makes that key work ([forum thread](https://developer.apple.com/forums/thread/755904)). So the item should list under brindle. Repeats kept, see below | Code; test against the real launcher script; team match live (`codesign`); launchd accepts the key (live, test label). macOS logged nothing about it either way, so the listing and notice wording are unverified |
 | Same notice, repeated | A new label per app process that has to start a daemon (`launchd_label`: `<hash>.<app pid>`). Live: six such jobs loaded here, five idle | Same | One fixed label. Yes, with a relaunch test | **Kept for now**, owner's decision below. Whether BTM notifies per label is unverified | Pile-up live (`launchctl list`). Per-label notice: unverified |
-| "Chrome": a privacy prompt about another app's data, or a browser prompt | `claude` at startup lists `Default` and `Profile *` and checks `Extensions/<id>` under Chrome, Brave, Arc, Edge, Chromium, Vivaldi and Opera's folders, when the `claudeInChromeDefaultEnabled` setting is unset, the session is interactive and the login is a subscription | The engine's python3, as responsible process (panes descend from it) | Don't touch other apps' folders until asked. Yes | **Fixed:** `--no-chrome` unless the person chose it (`providers.py` `claude_chrome_chosen`). `/chrome` still works and takes effect on the next launch | Code (Claude's `kno`, `Zrs`, `dM`); test. That this scan is what raises the reported dialog: **unverified**, and Chrome's folder isn't an app container, so it's the best candidate rather than proven |
+| "Chrome": a privacy prompt about another app's data, or a browser prompt | `claude` at startup lists `Default` and `Profile *` and checks `Extensions/<id>` under Chrome, Brave, Arc, Edge, Chromium, Vivaldi and Opera's folders, when the `claudeInChromeDefaultEnabled` setting is unset, the session is interactive and the login is a subscription | The engine's python3, as responsible process (panes descend from it) | Don't touch other apps' folders until asked. Yes | **Fixed:** `--no-chrome` unless the person chose it (`providers.py` `claude_chrome_chosen`), judged from the config folder the pane really runs with: a profile's, unless an enforced identity drops it. `/chrome` still works and takes effect on the next launch | Code (Claude's `kno`, `Zrs`, `dM`); test. That this scan is what raises the reported dialog: **unverified**, and Chrome's folder isn't an app container, so it's the best candidate rather than proven |
 | Browser tab `clau.de/chrome/reconnect`; files written to seven browsers' `NativeMessagingHosts` | Claude in Chrome turned on (`mM`): manifests installed, tab opened on first install when the extension is present | Claude Code | Only when asked. Now the case | Kept: only after the person opts in | Code |
 | "would like to access data from other apps" | Anything reading `~/Library/Containers` or `Group Containers`. brindle's code reads neither (grep); Codex and agy's binaries name neither; Claude Code carries a macOS guard list naming them | Engine's python3, for an agent's own command | Don't scan `~` or `~/Library`. brindle doesn't; an agent told to can | Kept: only when an agent's own work reaches there | Code. Dialog: unverified |
 | "would like to access files in your Documents / Desktop / Downloads folder" | Daemon's or an agent's first touch of a project there. The folder picker's choice doesn't carry over: it's the app's, and the daemon is another identity | Engine's python3; brindle.app for the app's own reads (`open_local_path`) | Do the work inside the app's identity, with a usage string, and ask when the person acts. Needs the helper bundle | **Kept, warned:** one line on onboarding's project step. Usage strings added for the app's own prompts (`app/src-tauri/Info.plist`). brindle clones into `~/Projects` by default, which is unprotected, so this only fires for an existing project there | Code; that the prompt names `python3` and that it asks once per folder: unverified |
@@ -76,8 +76,8 @@ CLI run from Terminal is attributed to Terminal, which usually holds the grants
 already. Apps started by Finder or `open` are their own
 ([Qt on the responsible process](https://www.qt.io/blog/the-curious-case-of-the-responsible-process)).
 
-Under brindle, launchd starts the job, which `exec`s python3 from the launcher,
-and tmux and every pane descend from it. So the same `claude` that was silent in
+Under brindle, launchd starts the engine's python3, and tmux and every pane
+descend from it. So the same `claude` that was silent in
 Terminal asks again, as `python3`. (`launchctl procinfo` needs root, so this is
 from the published mechanism, not measured.)
 
@@ -107,8 +107,9 @@ Good news, checked live:
   versioned path isn't a problem here because panes aren't the responsible process.
 
 The weakness isn't stability but **presentation**: the identity is called
-`python3`. The launcher `engine/bin/brindle` is an unsigned script, so Login
-Items sees an unsigned program.
+`python3`. The launcher `engine/bin/brindle` is an unsigned script, which is why
+the daemon's job now starts python3 directly. CLI use still goes through the
+launcher, attributed to the terminal.
 
 ### Login item: `SMAppService` compared with `daemon.rs`
 
@@ -182,7 +183,9 @@ a release build, signed in with a **Claude subscription**, and with Chrome
 installed. Note the exact wording and name on each dialog.
 
 1. Open from the DMG, copy to Applications, open. Which dialogs, in what order?
-2. Does the Background Items notice name brindle (the new plist key)?
+2. Does the Background Items notice, and the Login Items row, name brindle (the
+   new plist key, with python3 as the job's program)? And does the daemon start
+   and get reused as before (no "another install" message)?
 3. Quit, wait for the daemon to exit idle, reopen. A second notice? (Decision 1.)
 4. Start a first session. **Is the Chrome prompt gone?** To confirm the cause,
    run `claude` from a pane on a build without this branch and compare.
