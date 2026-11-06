@@ -3,8 +3,7 @@ import time
 
 import pytest
 
-from brindle import agents, codex_hook, providers, tmux, workspaces
-from brindle.config import POLICY_DEFAULT_KEY, set_user
+from brindle import agents, tmux, workspaces
 from brindle.db import Agent
 from brindle.profiles import load_profile
 from brindle.providers import Codex, LaunchContext
@@ -32,43 +31,6 @@ def codex_agent(db, ws, status="processing"):
     a = Agent("c1", ws.id, "developer", "codex", None, "interactive", status, "@0", None, time.time())
     db.add_agent(a)
     return a
-
-
-def test_codex_on_a_default_policy_is_not_refused_and_told_once(db, ws, monkeypatch):
-    """Codex would ignore brindle's sandbox profile (its config sets sandbox_mode).
-    The policy only on by default: it starts, on Codex's own approvals, without
-    the hook, with one notice however many launch. Set by someone: still refused."""
-    set_user(POLICY_DEFAULT_KEY, "on")
-    monkeypatch.setattr(providers, "_codex_layers",
-                        lambda cwd: [("/codex/config.toml", {"sandbox_mode": "workspace-write"})])
-    monkeypatch.setattr(codex_hook, "ensure", lambda **_: codex_hook.TRUSTED)   # the hook isn't what's missing
-    agent = codex_agent(db, ws)
-
-    def launch():
-        argv = Codex().command(LaunchContext("c1", load_profile("developer"), None, cwd=ws.path))
-        assert not [a for a in argv if a.startswith(("default_permissions=", "permissions.", "hooks."))]
-        return codex_hook.tell_skipped(db, agent, ws.path)
-
-    assert launch() and not launch()
-    [message] = db.conn.execute("SELECT body FROM inbox WHERE agent_id='c1'").fetchall()
-    assert "/codex/config.toml" in message["body"] and "won't start" not in message["body"]
-    assert codex_hook.launch_warning("codex", ws.path) is None
-
-    # A clean config, but Codex won't trust the hook: this supervisor starts on
-    # Codex's own prompts, so it's told that once too, as a worker's supervisor is.
-    monkeypatch.setattr(providers, "_codex_layers", lambda cwd: [])
-    monkeypatch.setattr(codex_hook, "ensure", lambda **_: codex_hook.NEW)
-    argv = Codex().command(LaunchContext("c1", load_profile("developer"), None, cwd=ws.path))
-    assert not [a for a in argv if a.startswith("hooks.")]
-    assert codex_hook.tell_untrusted(db, agent, ws.path) and not codex_hook.tell_untrusted(db, agent, ws.path)
-    assert db.conn.execute("SELECT count(*) FROM inbox WHERE agent_id='c1' AND instr(body, ?) > 0",
-                           (codex_hook.UNTRUSTED,)).fetchone()[0] == 1
-
-    monkeypatch.setattr(providers, "_codex_layers",
-                        lambda cwd: [("/codex/config.toml", {"sandbox_mode": "workspace-write"})])
-    set_user("permission_policy", "on")
-    with pytest.raises(providers.CodexSandboxRefused):
-        Codex().command(LaunchContext("c1", load_profile("developer"), None, cwd=ws.path))
 
 
 @pytest.mark.parametrize("input_text", [

@@ -661,26 +661,30 @@ def test_codex_launch_trusts_and_passes_the_hook_when_the_policy_is_on(ws, monke
 
 
 def _sandboxed(command):
-    return pytest.param(command, "deny", marks=pytest.mark.variant(
+    return pytest.param("standard", command, "deny", marks=pytest.mark.variant(
         "live release simulation: ran in a Codex worker's sandbox, which never asked brindle"))
 
 
-@pytest.mark.parametrize("command,expected", [
+@pytest.mark.parametrize("preset,command,expected", [
+    ("autonomous", "echo 'git reset --hard' | sh", "deny"),
+    ("autonomous", 'python3 -c "$X"', "deny"),
+    pytest.param("autonomous", "git status; git log | head -1", None,
+                 marks=pytest.mark.variant("every part allowed: no answer")),
     _sandboxed("env"),
     _sandboxed("printenv GH_TOKEN"),
     _sandboxed("cat ~/.aws/credentials"),
     _sandboxed("git reset --hard"),
     _sandboxed("git push --force"),
     _sandboxed("rm -rf ~"),
-    pytest.param("sh -c 'env'", "deny", marks=pytest.mark.variant("bypass attempt")),
-    pytest.param("bash -lc printenv", "deny", marks=pytest.mark.variant("bypass attempt")),
-    pytest.param("cat $HOME/.npmrc", "deny", marks=pytest.mark.variant("bypass attempt")),
-    pytest.param("python3 -c \"print(open(__import__('os').path.expanduser('~/.aws/credentials')).read())\"",
+    pytest.param("standard", "sh -c 'env'", "deny", marks=pytest.mark.variant("bypass attempt")),
+    pytest.param("standard", "bash -lc printenv", "deny", marks=pytest.mark.variant("bypass attempt")),
+    pytest.param("standard", "cat $HOME/.npmrc", "deny", marks=pytest.mark.variant("bypass attempt")),
+    pytest.param("standard", "python3 -c \"print(open(__import__('os').path.expanduser('~/.aws/credentials')).read())\"",
                  "deny", marks=pytest.mark.variant("bypass attempt")),
-    pytest.param("git status; git reset --hard", "deny", marks=pytest.mark.variant("a part of a compound")),
-    ("git status", None),
+    pytest.param("standard", "git status; git reset --hard", "deny", marks=pytest.mark.variant("a part of a compound")),
+    ("standard", "git status", None),
 ])
-def test_codex_pre_tool_hook_denies_what_codex_runs_without_asking(db, ws, monkeypatch, command, expected):
+def test_codex_pre_tool_hook_denies_what_codex_runs_without_asking(db, ws, monkeypatch, preset, command, expected):
     """Codex runs a sandboxed command without asking, so its PermissionRequest
     hook never sees it: the launch passes a PreToolUse hook, run before every
     shell command, which answers brindle's denies."""
@@ -688,6 +692,7 @@ def test_codex_pre_tool_hook_denies_what_codex_runs_without_asking(db, ws, monke
 
     monkeypatch.setattr(codex_hook, "_AppServer", FakeAppServer)
     turn_on(ws)
+    permissions.apply_preset(preset)
     a = worker(db, ws)
     argv = launch_argv(ws)
     [flag] = [arg for arg in argv if arg.startswith("hooks.PreToolUse=")]
@@ -697,23 +702,6 @@ def test_codex_pre_tool_hook_denies_what_codex_runs_without_asking(db, ws, monke
     assert codex_hook.status() == codex_hook.TRUSTED   # trusted with the PermissionRequest hook
     payload = {**codex_payload("Bash", {"command": command}, ws.path), "hook_event_name": "PreToolUse"}
     out = agents.hook_main(db, a.id, hook.rsplit(" ", 1)[1], json.dumps(payload), trusted=False)
-    assert (json.loads(out)["hookSpecificOutput"]["permissionDecision"] if out else None) == expected
-
-
-@pytest.mark.parametrize("command, expected", [
-    ("echo 'git reset --hard' | sh", "deny"),
-    ('python3 -c "$X"', "deny"),
-    pytest.param("git status; git log | head -1", None, marks=pytest.mark.variant("every part allowed: no answer")),
-])
-def test_codex_pre_tool_hook_gives_autonomous_the_same_answer(db, ws, monkeypatch, command, expected):
-    """It shares the checker: what can't be told is refused before Codex's sandbox runs it."""
-    monkeypatch.setattr(codex_hook, "_AppServer", FakeAppServer)
-    turn_on(ws)
-    permissions.apply_preset("autonomous")
-    a = worker(db, ws)
-    [flag] = [arg for arg in launch_argv(ws) if arg.startswith("hooks.PreToolUse=")]
-    payload = {**codex_payload("Bash", {"command": command}, ws.path), "hook_event_name": "PreToolUse"}
-    out = agents.hook_main(db, a.id, hook_command_of(flag).rsplit(" ", 1)[1], json.dumps(payload), trusted=False)
     assert (json.loads(out)["hookSpecificOutput"]["permissionDecision"] if out else None) == expected
 
 
@@ -989,14 +977,53 @@ def test_codex_hook_trust_is_per_codex_home(ws, monkeypatch, tmp_path):
     assert codex_hook.ensure("codex") == codex_hook.REMOVED and FakeAppServer.calls == []
 
 
-def test_supervisor_is_told_once_when_brindle_cant_trust_its_hook(db, ws):
-    turn_on(ws)  # no Codex answers here, so the hook stays untrusted
-    db.add_agent(Agent("boss", ws.id, "supervisor", "claude", None, "interactive", "idle", "", None, time.time()))
-    reviewer = worker(db, ws, id_="r1")
-    assert codex_hook.launch_flags(ws.path) == []
-    assert codex_hook.tell_untrusted(db, reviewer, ws.path)
-    assert not codex_hook.tell_untrusted(db, reviewer, ws.path)
-    assert db.conn.execute("SELECT COUNT(*) FROM inbox WHERE agent_id='boss'").fetchone()[0] == 1
+@pytest.mark.parametrize("fallback", [False, True])
+def test_supervisor_is_told_once_when_brindle_cant_trust_its_hook(db, ws, monkeypatch, fallback):
+    if not fallback:
+        turn_on(ws)  # no Codex answers here, so the hook stays untrusted
+        db.add_agent(Agent("boss", ws.id, "supervisor", "claude", None, "interactive", "idle", "", None, time.time()))
+        reviewer = worker(db, ws, id_="r1")
+        assert codex_hook.launch_flags(ws.path) == []
+        assert codex_hook.tell_untrusted(db, reviewer, ws.path)
+        assert not codex_hook.tell_untrusted(db, reviewer, ws.path)
+        assert db.conn.execute("SELECT COUNT(*) FROM inbox WHERE agent_id='boss'").fetchone()[0] == 1
+        return
+
+    from brindle import providers
+    from brindle.config import POLICY_DEFAULT_KEY, set_user
+    from brindle.profiles import load_profile
+    from brindle.providers import Codex, LaunchContext
+
+    # Default-on policy falls back to Codex's approvals; an explicit choice still refuses.
+    set_user(POLICY_DEFAULT_KEY, "on")
+    monkeypatch.setattr(providers, "_codex_layers",
+                        lambda cwd: [("/codex/config.toml", {"sandbox_mode": "workspace-write"})])
+    monkeypatch.setattr(codex_hook, "ensure", lambda **_: codex_hook.TRUSTED)
+    agent = Agent("s1", ws.id, "developer", "codex", None, "interactive", "processing", "@0", None, time.time())
+    db.add_agent(agent)
+
+    def launch():
+        argv = Codex().command(LaunchContext(agent.id, load_profile("developer"), None, cwd=ws.path))
+        assert not [a for a in argv if a.startswith(("default_permissions=", "permissions.", "hooks."))]
+        return codex_hook.tell_skipped(db, agent, ws.path)
+
+    assert launch() and not launch()
+    assert db.conn.execute("SELECT count(*) FROM inbox WHERE agent_id='s1'").fetchone()[0] == 1
+    assert codex_hook.launch_warning("codex", ws.path) is None
+
+    monkeypatch.setattr(providers, "_codex_layers", lambda cwd: [])
+    monkeypatch.setattr(codex_hook, "ensure", lambda **_: codex_hook.NEW)
+    argv = Codex().command(LaunchContext(agent.id, load_profile("developer"), None, cwd=ws.path))
+    assert not [a for a in argv if a.startswith("hooks.")]
+    assert codex_hook.tell_untrusted(db, agent, ws.path) and not codex_hook.tell_untrusted(db, agent, ws.path)
+    assert db.conn.execute("SELECT count(*) FROM inbox WHERE agent_id='s1' AND instr(body, ?) > 0",
+                           (codex_hook.UNTRUSTED,)).fetchone()[0] == 1
+
+    monkeypatch.setattr(providers, "_codex_layers",
+                        lambda cwd: [("/codex/config.toml", {"sandbox_mode": "workspace-write"})])
+    set_user("permission_policy", "on")
+    with pytest.raises(providers.CodexSandboxRefused):
+        Codex().command(LaunchContext(agent.id, load_profile("developer"), None, cwd=ws.path))
 
 
 def test_unreadable_codex_trust_never_gets_reinstalled(ws, monkeypatch):

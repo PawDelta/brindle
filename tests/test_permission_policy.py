@@ -53,16 +53,29 @@ def claude_payload(tool, tool_input, cwd=None):
 # -- who the policy is on for -----------------------------------------------------------------
 
 
-@pytest.mark.parametrize("first_run", ["cli", "daemon"])
+@pytest.mark.variant("Free-user regression: first CLI/daemon startup enables policy; upgrading preserves the existing opt-out")
+@pytest.mark.parametrize("first_run", ["cli", "daemon", "existing"])
 def test_new_free_user_gets_the_policy(repo, monkeypatch, first_run):
     """Nothing of brindle's on this machine and no plan, from a first CLI command
     or the app's daemon: the policy is on with Autonomous, and it answers a
     supervisor on Claude and on Codex, which no mode or parent_id gate drops."""
+    if first_run == "existing":
+        DB()  # An installation predating first-run policy defaults already has a database.
     monkeypatch.delenv("BRINDLE_NO_FIRST_RUN", raising=False)
     monkeypatch.setattr("brindle.permissions.DEFAULT_PRESET", "autonomous")
-    if first_run == "cli":
+    if first_run != "daemon":
         assert CliRunner().invoke(app, ["--version"]).exit_code == 0
     db = DB()
+    if first_run == "existing":
+        assert load_repo_config(repo).permission_policy == "off"
+        policy = svc.policy_dto()
+        assert (policy.policy_on, policy.policy_source) == (False, "default")
+        assert not [p.name for p in policy.presets if p.current]
+        routes_actions.patch_config(db, {}, {"scope": "user", "values": {"permission_policy": "on"}})
+        policy = svc.policy_dto()
+        assert (policy.policy_on, policy.policy_source) == (True, "user")
+        assert [p.name for p in policy.presets if p.current] == [policy.preset]
+        return
     assert load_repo_config(repo).permission_policy == "on"
     assert permissions.load_store().preset == "autonomous"
 
@@ -79,22 +92,6 @@ def test_new_free_user_gets_the_policy(repo, monkeypatch, first_run):
     assert answer["hookSpecificOutput"]["decision"]["behavior"] == "allow"
     monkeypatch.setattr(codex_hook, "ensure", lambda **_: codex_hook.TRUSTED)
     assert codex_hook.launch_flags(ws.path)   # a supervisor launches with the hook too
-
-
-def test_existing_free_user_keeps_what_they_have(db, repo, monkeypatch):
-    """Upgraded from before the default: nobody chose, so it stays off, the app
-    says so rather than show a preset as active, and they can turn it on."""
-    monkeypatch.delenv("BRINDLE_NO_FIRST_RUN")
-    assert CliRunner().invoke(app, ["--version"]).exit_code == 0
-    DB()
-    assert load_repo_config(repo).permission_policy == "off"
-    policy = svc.policy_dto()
-    assert (policy.policy_on, policy.policy_source) == (False, "default")
-    assert not [p.name for p in policy.presets if p.current]
-    routes_actions.patch_config(db, {}, {"scope": "user", "values": {"permission_policy": "on"}})
-    policy = svc.policy_dto()
-    assert (policy.policy_on, policy.policy_source) == (True, "user")
-    assert [p.name for p in policy.presets if p.current] == [policy.preset]
 
 
 @pytest.mark.parametrize("before,repo_says,preset,policy,source", [

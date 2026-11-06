@@ -6,6 +6,8 @@ import json
 import plistlib
 from pathlib import Path
 
+import pytest
+
 APP = Path(__file__).resolve().parent.parent / "app"
 # What an agent's work can make macOS ask for on the engine's behalf.
 USAGE = [f"NS{what}UsageDescription" for what in (
@@ -13,6 +15,7 @@ USAGE = [f"NS{what}UsageDescription" for what in (
     "FileProviderDomain", "LocalNetwork", "AppleEvents", "Microphone")]
 
 
+@pytest.mark.variant("macOS bundle identity and privacy declarations are plist/build assets outside Python coverage")
 def test_engine_helper_declares_usage_strings():
     info = plistlib.loads((APP / "scripts/engine/helper/Info.plist").read_bytes())
     app = json.loads((APP / "src-tauri/tauri.conf.json").read_text())
