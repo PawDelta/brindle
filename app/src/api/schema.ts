@@ -119,6 +119,7 @@ export interface AgentDTO {
   id: string;
   locked?: string | null;
   mode: string;
+  model?: string | null;
   parent_id?: string | null;
   pending?: number | null;
   profile: string;

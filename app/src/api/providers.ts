@@ -113,17 +113,22 @@ export function markOnboarded(): void {
    it stop), then an install that failed. */
 export interface ProviderProblem {
   provider: string;
-  kind: "signed_out" | "install_failed";
+  /* "set_up" is not a fault: another provider works and this one just has no sign-in yet. */
+  kind: "signed_out" | "install_failed" | "set_up";
   text: string;
 }
 
 export function providerProblems(rows: ProviderInstalled[] | null, installs: Record<string, Install>): ProviderProblem[] {
   const all = rows ?? [];
   const named = (provider: string) => factsOf(all.find((r) => r.provider === provider) ?? { provider, name: provider }).name;
-  const out: ProviderProblem[] = all.filter((r) => connected(r) && r.signed_in === false).map((r) => ({ provider: r.provider, kind: "signed_out", text: `${named(r.provider)} signed out` }));
+  // With a provider already working, another one's missing sign-in is setup still to do (the first launch), not a failure.
+  const working = all.some(signedIn);
+  const signedOut = all.filter((r) => connected(r) && r.signed_in === false);
+  const out: ProviderProblem[] = working ? [] : signedOut.map((r) => ({ provider: r.provider, kind: "signed_out", text: `${named(r.provider)} signed out` }));
   for (const [provider, i] of Object.entries(installs)) {
     if (i.status === "failed") out.push({ provider, kind: "install_failed", text: `${named(provider)} install failed` });
   }
+  if (working) out.push(...signedOut.map((r): ProviderProblem => ({ provider: r.provider, kind: "set_up", text: `Set up ${named(r.provider)}` })));
   return out;
 }
 

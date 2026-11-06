@@ -10,7 +10,7 @@ import { createAppStore } from "../store/store";
 import { startSync } from "../store/sync";
 import { UsageProvider } from "../store/usage";
 import { StoreContext } from "../store/useStore";
-import { FakeDaemon, type DaemonData } from "../test/fakeDaemon";
+import { FakeDaemon, freshProviders, type DaemonData } from "../test/fakeDaemon";
 import { REPO, root } from "../test/fixtures";
 import { PtyViewsProvider } from "../api/ptyView";
 import { standInViews } from "../test/panes";
@@ -118,6 +118,26 @@ describe("the sidebar's weekly usage reading", () => {
     await waitFor(() => expect(scrolled.mock.contexts).toContain(usage));
     expect(within(usage).getByRole("article", { name: "Claude" }).getAttribute("data-state")).toBe("warn");
     stop();
+  });
+
+  it("names the model the current session runs on beside the provider", async () => {
+    const { stop } = app("normal", { workspaces: [{ ...root, agents: root.agents?.map((a) => ({ ...a, model: "claude-opus-4-7" })) }] });
+    expect((await screen.findByTestId("usage-model", {}, { timeout: 3000 })).textContent).toBe("Claude Opus 4 7");
+    stop();
+  });
+
+  it("a provider with no sign-in yet is quiet setup while another works, and a real sign-out stays a warning", async () => {
+    const codexOut = { codex: { path: "/bin/codex", version: "1", signed_in: false } };
+    const first = app("normal", { providers: freshProviders({ claude: { path: "/bin/claude", version: "2" }, ...codexOut }) });
+    const quiet = await screen.findByTestId("provider-problem", {}, { timeout: 3000 });
+    expect(quiet.textContent).toBe("Set up Codex");
+    expect(quiet.className).not.toContain("text-sap");
+    first.stop();
+    cleanup();
+    const second = app("normal", { providers: freshProviders({ claude: { path: "/bin/claude", version: "2", signed_in: false }, ...codexOut }) });
+    await waitFor(() => expect(screen.getByTestId("provider-problem").textContent).toContain("Claude Code signed out"), { timeout: 3000 });
+    expect(screen.getByTestId("provider-problem").className).toContain("text-sap");
+    second.stop();
   });
 
   it("clicked again with Account already open, scrolls back to Usage", async () => {

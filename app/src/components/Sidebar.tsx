@@ -50,6 +50,7 @@ import { useSessions } from "../store/sessions";
 import { providerProblems, type ProviderProblem } from "../api/providers";
 import { useProviders } from "../store/providers";
 import { useUsage } from "../store/usage";
+import { prettyModel } from "../screens/Agents/agents";
 import { useAppState, useStore } from "../store/useStore";
 import Logo from "./Logo";
 import { Preflight } from "./Preflight";
@@ -84,7 +85,7 @@ function WeeklyMeter({ provider }: { provider: ProviderUsage }) {
 let usageAsks = 0;
 /* No reading is not a fault: a new user has none yet, and the first load may still be out.
    Only a failed load says "unavailable"; otherwise a neutral "Usage" opens the same page. */
-function UsageReading({ provider, warning, failed, navigate }: { provider?: ProviderUsage; warning: boolean; failed: boolean } & Pick<SidebarProps, "navigate">) {
+function UsageReading({ provider, model, warning, failed, navigate }: { provider?: ProviderUsage; model?: string | null; warning: boolean; failed: boolean } & Pick<SidebarProps, "navigate">) {
   const window = provider && weeklyWindow(provider);
   return (
     <button
@@ -99,6 +100,7 @@ function UsageReading({ provider, warning, failed, navigate }: { provider?: Prov
       {provider ? (
         <>
           <span>{providerName(provider.provider)}</span>
+          {model && <span data-testid="usage-model">{prettyModel(model)}</span>}
           <WeeklyMeter provider={provider} />
           {window?.resets_at != null && <span className="truncate">· resets {new Date(window.resets_at * 1000).toLocaleDateString("en-US", { weekday: "short" })}</span>}
         </>
@@ -162,7 +164,7 @@ function ProviderProblemLine({ problems, navigate }: { problems: ProviderProblem
   return (
     <button
       type="button"
-      className="group ml-auto inline-flex min-w-0 flex-[0_1_auto] items-baseline gap-1 font-mono text-[10.5px] font-medium text-sap"
+      className={`group ml-auto inline-flex min-w-0 flex-[0_1_auto] items-baseline gap-1 font-mono text-[10.5px] ${first.kind === "set_up" ? "text-ink-3" : "font-medium text-sap"}`}
       aria-label={`${first.text}: open Settings › Providers`}
       data-testid="provider-problem"
       data-provider={first.provider}
@@ -628,6 +630,10 @@ export function Sidebar({ route, navigate, refresh, openUrl }: SidebarProps) {
     return listed(here) ?? listed(readLastSession()) ?? (all[0] ? { root: all[0].session.id, repo: all[0].repo } : null);
   }, [route, all]);
 
+  // The model the selected session's own agent last ran on, from the agents the snapshot already lists.
+  const workspaces = useAppState((s) => s.workspaces);
+  const model = useMemo(() => workspaces.flatMap((ws) => ws.agents ?? []).find((a) => a.id === selected?.root)?.model, [workspaces, selected]);
+
   // An open session's agents show.
   useEffect(() => {
     if (route.screen === "session") setFolded((f) => (f.has(route.root) ? new Set([...f].filter((id) => id !== route.root)) : f));
@@ -734,7 +740,7 @@ export function Sidebar({ route, navigate, refresh, openUrl }: SidebarProps) {
         <span className="flex-1" />
         <button
           type="button"
-          className={`flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11.5px] text-ink-3 hover:bg-surface hover:text-ink ${route.screen === "new" ? "bg-branch-soft text-ink" : ""}`}
+          className={`flex items-center gap-1 rounded-md border px-2 py-0.5 text-[11.5px] font-medium hover:text-ink ${route.screen === "new" ? "border-branch/40 bg-branch-soft text-ink" : "border-branch/30 bg-branch-soft/50 text-ink-2 hover:bg-branch-soft"}`}
           aria-current={route.screen === "new" ? "page" : undefined}
           title="New session (⌘N)"
           onClick={() => navigate({ screen: "new" })}
@@ -746,6 +752,7 @@ export function Sidebar({ route, navigate, refresh, openUrl }: SidebarProps) {
         </button>
       </div>
       <InboxEntry route={route} navigate={navigate} />
+      <div className="mx-2 h-px shrink-0 bg-line" role="separator" data-testid="inbox-divider" />
       <SessionContext session={selected} route={route} navigate={navigate} refresh={refresh ?? noRefresh} openUrl={openUrl} style={{ height: split }} />
       <Handle height={split} onChange={resize} />
       <div className="side-h">Sessions</div>
@@ -823,7 +830,7 @@ export function Sidebar({ route, navigate, refresh, openUrl }: SidebarProps) {
         {repos && repos.length > 0 && live.length === 0 && <p className="px-s1 text-xs text-ink-3">Nothing running. Start a session, or continue a recent one.</p>}
       </nav>
       <div className="flex min-h-4 items-center justify-between gap-2 whitespace-nowrap border-t border-line px-s1 pt-s1" data-testid="status-line">
-        <UsageReading provider={mostUsed} warning={warning} failed={usageError != null} navigate={navigate} />
+        <UsageReading provider={mostUsed} model={model} warning={warning} failed={usageError != null} navigate={navigate} />
         <ProviderProblemLine problems={problems} navigate={navigate} />
         <AppUpdatePill />
       </div>
