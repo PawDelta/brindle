@@ -8,7 +8,8 @@
       "minimumSystemVersion": "11.0",
       "signingIdentity": "-",
       "files": {
-        "Resources/engine": "engine"
+        "Resources/engine": "engine",
+        "Library/LoginItems/brindle.app": "engine-helper/brindle.app"
       }
     }
   }

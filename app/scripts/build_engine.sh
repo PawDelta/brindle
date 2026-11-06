@@ -15,6 +15,13 @@
 #   licenses/     the licenses of Python, tmux, libevent and utf8proc, for
 #                 the app's third-party notices (scripts/notices.mjs)
 #
+# and, beside it, the engine's helper app into app/src-tauri/engine-helper/
+# (bundled as Contents/Library/LoginItems/brindle.app): what the daemon's
+# launchd job runs, so macOS names brindle, with a reason, when the engine or
+# an agent needs its permission (scripts/engine/helper). It is always signed
+# (ad hoc without an identity): the app's signature takes nested code only
+# signed.
+#
 # brindle comes from this same checkout (BRINDLE_SRC, default the repo's root)
 # at BRINDLE_REF (default HEAD, so uncommitted engine changes aren't in it):
 # only the engine's own paths, exported with `git archive`, and the checkout
@@ -52,6 +59,10 @@ export CFLAGS="-O2 -Werror=unguarded-availability-new"
 
 APP="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="$APP/src-tauri/engine"
+# The helper app (tauri.macos.conf.json bundles it into Library/LoginItems).
+HELPER_OUT="$APP/src-tauri/engine-helper/brindle.app"
+HELPER_SRC="$APP/scripts/engine/helper"
+HELPER_ICON="$APP/src-tauri/icons/icon.icns"
 # This checkout's own, never under CARGO_TARGET_DIR: worktrees share that
 # (brindle.build_caches), and the build deletes and recreates its staging
 # dirs here outside Cargo's lock.
@@ -96,8 +107,10 @@ TMUX_STAMP="tmux=$TMUX_VERSION libevent=$LIBEVENT_VERSION utf8proc=$UTF8PROC_VER
 STAMP="python=$PY_VERSION+$PY_RELEASE $TMUX_STAMP arch=$ARCH brindle=$ENGINE_TREE"
 ENTITLEMENTS="$APP/scripts/engine/engine.entitlements"
 STAMP="$STAMP sign=${APPLE_SIGNING_IDENTITY:-none}"
-STAMP="$STAMP build=$(cat "$0" "$APP/scripts/engine/brindle" "$ENTITLEMENTS" | shasum -a 256 | cut -c1-16)"
-if [ "$FORCE" = 0 ] && [ "$(cat "$OUT/.stamp" 2>/dev/null)" = "$STAMP" ]; then
+STAMP="$STAMP build=$(cat "$0" "$APP/scripts/engine/brindle" "$ENTITLEMENTS" \
+  "$HELPER_SRC/main.c" "$HELPER_SRC/Info.plist" "$HELPER_ICON" | shasum -a 256 | cut -c1-16)"
+if [ "$FORCE" = 0 ] && [ "$(cat "$OUT/.stamp" 2>/dev/null)" = "$STAMP" ] \
+    && [ -x "$HELPER_OUT/Contents/MacOS/brindle" ]; then
   echo "build_engine: $OUT is up to date (brindle ${COMMIT:0:10})"
   exit 0
 fi
@@ -230,6 +243,29 @@ for script in bin_dir.iterdir():
     script.write_bytes(header + body)
 PY
 
+# ---- The helper app ------------------------------------------------------
+
+# Python in the helper's own process, from the engine's libpython (found by
+# the bundle's layout, as main.c finds the engine), built against this
+# Python's headers before they go. Its version is the engine's: an app update
+# that leaves the engine as it was leaves the helper as it was.
+HELPER="$WORK/helper/brindle.app"
+rm -rf "$WORK/helper"; mkdir -p "$HELPER/Contents/MacOS" "$HELPER/Contents/Resources"
+# shellcheck disable=SC2086  # CFLAGS is a list
+cc $CFLAGS -Wall -Wextra -Werror -arch "$(uname -m)" \
+  -isystem "$STAGE/python/include/python${PY_VERSION%.*}" "$HELPER_SRC/main.c" \
+  -L"$STAGE/python/lib" -lpython"${PY_VERSION%.*}" \
+  -Wl,-rpath,@executable_path/../../../../../Resources/engine/python/lib \
+  -o "$HELPER/Contents/MacOS/brindle" || die "compiling the engine's helper failed"
+bad="$(foreign_libs "$HELPER/Contents/MacOS/brindle" | grep -v -x "@rpath/libpython${PY_VERSION%.*}.dylib" || true)"
+[ -z "$bad" ] || die "the engine's helper links libraries outside macOS and the engine: $bad"
+cp "$HELPER_SRC/Info.plist" "$HELPER/Contents/Info.plist"
+cp "$HELPER_ICON" "$HELPER/Contents/Resources/icon.icns"
+engine_version="$("$PY" -I -c 'import importlib.metadata as m; print(m.version("brindle"))')"
+for key in CFBundleShortVersionString CFBundleVersion; do
+  /usr/libexec/PlistBuddy -c "Set :$key $engine_version" "$HELPER/Contents/Info.plist"
+done
+
 # What the engine never uses: Tk, IDLE, the bundled pip, headers, man pages.
 rm -rf "$STAGE/python/include" "$STAGE/python/share" \
   "$STAGE"/python/lib/tcl* "$STAGE"/python/lib/tk* "$STAGE"/python/lib/itcl* \
@@ -287,9 +323,14 @@ if [ -n "${APPLE_SIGNING_IDENTITY:-}" ]; then
   find "$STAGE" -type f \( -name '*.so' -o -name '*.dylib' \) -print0 | while IFS= read -r -d '' lib; do
     sign "$lib" >/dev/null || die "codesign failed for $lib"
   done
-  for exe in "$STAGE/bin/tmux" "$STAGE/python/bin/python${PY_VERSION%.*}"; do
+  # The helper as the bundle it is (its Info.plist bound, its identifier the bundle's).
+  for exe in "$STAGE/bin/tmux" "$STAGE/python/bin/python${PY_VERSION%.*}" "$HELPER"; do
     sign --entitlements "$ENTITLEMENTS" "$exe" >/dev/null || die "codesign failed for $exe"
   done
+else
+  # No identity: the helper alone is signed, ad hoc and without the hardened
+  # runtime, whose library validation would refuse the engine's unsigned libpython.
+  codesign --force --sign - "$HELPER" 2>/dev/null || die "codesign failed for $HELPER"
 fi
 
 printf '%s' "$STAMP" | shasum -a 256 | cut -c1-16 > "$STAGE/BUILD"
@@ -311,5 +352,23 @@ for launcher in "$OUT/bin/brindle" "$OUT/python/bin/brindle"; do
   got="$(cd "$WORK" && env -i HOME="$WORK" PATH=/usr/bin:/bin "$launcher" --version)"
   [ "$got" = "$want" ] || die "relocated $launcher printed '$got', wanted '$want'"
 done
+
+# The helper, where it is bundled from; and run as the daemon's job runs it,
+# in the bundle's layout (target/engine-build/bundle, kept for trying it by
+# hand): it finds the engine and its libpython by that layout alone.
+rm -rf "$(dirname "$HELPER_OUT")"; mkdir -p "$(dirname "$HELPER_OUT")"
+mv "$HELPER" "$HELPER_OUT"
+codesign --verify --strict "$HELPER_OUT" || die "the engine's helper app isn't validly signed"
+LAYOUT="$WORK/bundle/Contents"
+rm -rf "$WORK/bundle"; mkdir -p "$LAYOUT/Resources" "$LAYOUT/Library/LoginItems"
+ln -s "$OUT" "$LAYOUT/Resources/engine"
+cp -R "$HELPER_OUT" "$LAYOUT/Library/LoginItems/brindle.app"
+helper="$LAYOUT/Library/LoginItems/brindle.app/Contents/MacOS/brindle"
+got="$(cd "$WORK" && env -i HOME="$WORK" PATH=/usr/bin:/bin "$helper" -I -B -X "brindle-build=$(cat "$OUT/BUILD")" -m brindle --version 2>&1 || true)"
+[ "$got" = "$want" ] || die "the engine's helper printed '$got', wanted '$want'"
+# Anything but brindle is refused: what holds brindle's grants runs only brindle.
+if env -i "$helper" -I -B -c 'print(1)' >/dev/null 2>&1; then
+  die "the engine's helper ran Python code that isn't brindle"
+fi
 echo "$STAMP" > "$OUT/.stamp"
 echo "build_engine: $OUT: $want (${COMMIT:0:10}), Python $PY_VERSION, tmux $TMUX_VERSION, $(du -sh "$OUT" | cut -f1)"

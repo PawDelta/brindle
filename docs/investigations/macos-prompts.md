@@ -23,11 +23,13 @@ dialog is a separate claim, and is marked unverified unless stated**. See
   folders of seven browsers at every start. brindle's isolated config home
   always starts with no choice. Fixed: panes start with `--no-chrome` until the
   person opts in.
-- **The biggest unfixed issue is identity.** Everything agents do is attributed
+- **The biggest issue was identity.** Everything agents do was attributed
   to the engine's `python3`, not to brindle.app and not to the Terminal a CLI
   user already granted. It has no bundle, so it can't carry a name or usage
-  strings. Fixing that is a helper bundle, the owner's call (see
-  [Decisions for the owner](#decisions-for-the-owner)).
+  strings. **Built since** (decision 2): the daemon's job now runs the engine
+  through a helper app named brindle. See
+  [The engine's helper app](#the-engines-helper-app). The table below still
+  says "python3" where it describes what was found.
 - **Keychain:** brindle's own items should not prompt. Most keychain popups are
   more likely git and `gh`, which `fix/background-git-no-keychain-prompt` owns.
 - **Background items:** one new launchd label per app process. The repeat notice
@@ -144,6 +146,105 @@ way for agents. With Security.framework from the signed engine, an agent's
 items, and the CLI, daemon and hooks all sharing one identity. Worth doing for
 that reason, separately from this work.
 
+## The engine's helper app
+
+Decision 2 below, built on `feat/engine-named-helper-app` (how it is made:
+`app/docs/bundled-engine.md`, "The helper app"). The daemon's launchd job runs
+`Contents/Library/LoginItems/brindle.app`, an app bundle of its own
+(`com.pawdelta.brindle.engine`, named brindle, with usage strings) that runs
+the engine's Python in its own process. The daemon is then the responsible
+process as that bundle, for itself, tmux and every pane.
+
+**Why a nested app, there.** Apple's DTS on the forums: a launchd job needs an
+app for TCC to show "a nice prompt"
+([thread 697278](https://developer.apple.com/forums/thread/697278)); a helper
+embedded in an app was attributed correctly on macOS 11.6
+([thread 692758](https://developer.apple.com/forums/thread/692758)). Two
+shapes work in those threads. A bare executable in the app's `Contents/MacOS`
+is taken for the app itself: one identity, but it has worked "for years"
+without being documented, and DTS was surprised it does
+([thread 853725](https://developer.apple.com/forums/thread/853725)). A helper
+with its own bundle is its own identity with its own name and strings, which
+is how every app works, so that is what was built. `Library/LoginItems` is one
+of the places a bundle's signature takes nested code, and where
+`SMAppService` would want it later. `SMAppService` wasn't needed for
+attribution.
+
+**Checked here** (ad hoc signatures only, the app never launched):
+
+- The helper, run outside the app with a temp `BRINDLE_HOME`, starts the
+  daemon, which answers `GET /v1/meta`. `codesign -dvv +<pid>` on that running
+  daemon says `Identifier=com.pawdelta.brindle.engine`, `Info.plist
+  entries=21`; the engine's `python3` says `Info.plist=not bound`. `lsof`
+  shows the engine's libpython loaded in the helper's process. The same with
+  the hardened runtime on.
+- `brindle daemon status` and `stop`, from the launcher's `python3`, find and
+  stop it; the app's `reuse` uses it for its build and replaces another's
+  (Rust test).
+
+**When existing users are asked again.** The identity changes from `python3`
+to the helper, so what was granted to `python3` no longer counts. Exactly:
+
+1. The update's first launch replaces the old build's daemon, as every engine
+   update does: the old daemon pauses its sessions, the new one (the helper)
+   resumes them. No session is lost, and nothing is asked at that moment.
+2. macOS asks the next time the engine or an agent touches something
+   protected, once per kind: a project in Documents, Desktop or Downloads, on
+   a removable or network drive or in a cloud storage folder; a device on the
+   local network; another app's Automation; the microphone. Each asks once,
+   naming brindle. Someone whose projects are all under `~/Projects` is asked
+   nothing.
+3. One exception: panes of a tmux server that outlived the old daemon keep
+   that server's attribution until it exits. Normally there is none: the old
+   daemon closes every window as it pauses, tmux exits with its last session,
+   and the new daemon's first session starts a server under the helper. It
+   survives only if the person runs their own sessions on the default tmux
+   server, or a pause was cut short.
+4. The old `python3` rows stay in System Settings and do nothing. The job's
+   program changed too, so one more Background Items notice is likely.
+
+**What a signed staff build must confirm** (none of it can be seen with an
+ad hoc signature, or without launching the app):
+
+1. Notarization accepts the bundle with the helper in it; `spctl` accepts the
+   app; the release's Gatekeeper step passes its helper check (team, bound
+   Info.plist). Both architectures.
+2. The app starts its daemon and reuses it on the next open, with no "another
+   install" message. `ps` shows the daemon as
+   `…/Contents/Library/LoginItems/brindle.app/Contents/MacOS/brindle -I -B -X
+   brindle-build=… -m brindle daemon --idle-exit`.
+3. **The dialog names brindle.** Open a project in `~/Documents` and start a
+   session: the prompt says brindle, with the helper's reason under it, not
+   python3. Note the exact wording.
+4. **One grant covers later agents.** After allowing it: a second agent, a
+   new session, another provider's CLI and a `brindle` hook in that folder
+   ask nothing more. Then quit and reopen the app (daemon kept), and let the
+   daemon exit idle and start again: still nothing.
+5. System Settings → Privacy & Security → Files and Folders shows one brindle
+   row for the engine, with brindle's icon and name (not "brindle.app" twice
+   in a confusing way, not a bare identifier). Login Items → Allow in the
+   Background still lists brindle.
+6. An update from a build without the helper: sessions come back after the
+   restart, and the first protected access asks once more, as above. An update
+   between two builds with the helper asks nothing.
+7. With brindle switched off under Allow in the Background (the daemon is then
+   the app's child), the same prompts name brindle through the app's own
+   strings.
+8. After the daemon that started tmux has exited and a new one runs (idle
+   exit with a person's own tmux session keeping the server), a new pane's
+   prompt still names brindle, or asks nothing. What macOS does when the
+   responsible process is gone was not established here.
+9. `open -a brindle` and Spotlight still open the app, not the helper (both
+   are named brindle; the helper is background-only and nothing registers it
+   with LaunchServices).
+10. On Intel and on Apple Silicon, and on the oldest macOS at hand (the app
+    supports 11).
+
+**Not done: one fixed daemon label.** It would stop the repeat Login Items
+notice (decision 1). Nothing found here makes it safe without relaunching the
+real app into an update, which is the case `d27fb029` broke, so it is left
+out.
+
 ## Decisions for the owner
 
 1. **One fixed daemon label: about a day, not done here.** It would remove the
@@ -157,7 +258,7 @@ that reason, separately from this work.
    First check whether it's needed, on any Mac, with no admin rights:
    `sfltool dumpbtm`, counting entries for `com.pawdelta.brindle.daemon`. Several
    means per-label is real.
-2. **Helper bundle for the engine: several days, the real fix for attribution.**
+2. **Helper bundle for the engine: built, see above.** As it was put:
    A small `brindle engine.app` inside the bundle, with Info.plist and usage
    strings, as the daemon's responsible process. It would replace "python3" in
    every prompt and System Settings row, and let prompts explain themselves. It

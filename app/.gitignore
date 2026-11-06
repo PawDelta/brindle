@@ -4,6 +4,7 @@ dist/
 src-tauri/target/
 src-tauri/gen/
 src-tauri/engine/
+src-tauri/engine-helper/
 src-tauri/notices/
 shots/out/
 e2e/out/

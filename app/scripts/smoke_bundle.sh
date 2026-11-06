@@ -380,23 +380,56 @@ check_minimum_macos() {
   fi
 }
 
-# The daemon's process is the engine's own Python, naming the engine's build
-# (BUILD) on its command line, which is how the app tells it's this build's.
+# The daemon's process is the engine's own, PROGRAM (its Python from the
+# launcher; its helper app from the app's launchd job), naming the engine's
+# build (BUILD) on its command line, which is how the app tells it's this build's.
 check_engine_process() {
-  local label="$1" home="$2" pid cmd build
+  local label="$1" home="$2" program="$3" pid cmd build
   pid="$(plutil -extract pid raw -o - "$home/brindle/daemon.json" 2>/dev/null || true)"
   cmd="$(ps -o command= -p "$pid" 2>/dev/null || true)"
   build="$(cat "$ENGINE_DIR/BUILD" 2>/dev/null || true)"
   case "$cmd" in
-    "$ENGINE_DIR/python/bin/python3 -I -B -X brindle-build=$build -m brindle daemon"*)
+    "$program -I -B -X brindle-build=$build -m brindle daemon"*)
       [ -n "$build" ] && pass "$label: the daemon is the engine's, build $build: $cmd" \
         || fail "$label: the engine has no BUILD" ;;
-    *) fail "$label: the daemon (pid '$pid') runs '$cmd', not $ENGINE_DIR/python/bin/python3 of build '$build'" ;;
+    *) fail "$label: the daemon (pid '$pid') runs '$cmd', not $program of build '$build'" ;;
   esac
 }
 
+# The engine's helper app (build_engine.sh; scripts/engine/helper), which the
+# daemon's launchd job runs so macOS names brindle in its privacy prompts: an
+# app bundle of its own named brindle, signed with its Info.plist bound, that
+# runs the engine's brindle from inside the .app and nothing else.
+check_helper() {
+  local helper="$1" plist="$1/Contents/Info.plist" name out
+  if [ ! -x "$helper/Contents/MacOS/brindle" ]; then
+    fail "helper: no $helper/Contents/MacOS/brindle"
+    return
+  fi
+  name="$(plutil -extract CFBundleName raw -o - "$plist" 2>/dev/null || true)"
+  [ "$name" = "brindle" ] && pass "helper: CFBundleName is brindle" \
+    || fail "helper: CFBundleName is '$name', not brindle"
+  plutil -extract NSDocumentsFolderUsageDescription raw -o - "$plist" >/dev/null 2>&1 \
+    && pass "helper: its Info.plist carries usage strings" \
+    || fail "helper: no NSDocumentsFolderUsageDescription in $plist"
+  if out="$(codesign --verify --strict "$helper" 2>&1)" \
+      && codesign -dv "$helper" 2>&1 | grep -q '^Info.plist entries='; then
+    pass "helper: signed, its Info.plist bound"
+  else
+    fail "helper: not signed as a bundle: $out"
+  fi
+  out="$(env -i HOME="${TMPDIR:-/tmp}" PATH=/usr/bin:/bin "$helper/Contents/MacOS/brindle" -I -B -m brindle --version 2>&1)" \
+    && pass "helper: runs the engine's brindle under env -i: $out" \
+    || fail "helper: -I -B -m brindle --version failed: $out"
+  if env -i "$helper/Contents/MacOS/brindle" -I -B -c 'print(1)' >/dev/null 2>&1; then
+    fail "helper: ran Python code that isn't brindle"
+  else
+    pass "helper: refuses to run anything but brindle"
+  fi
+}
+
 check_engine() {
-  local app="$1" exe home sock status out tmux pid
+  local app="$1" exe home sock status out tmux pid helper
   exe="$(plutil -extract CFBundleExecutable raw -o - "$app/Contents/Info.plist" 2>/dev/null || true)"
   ENGINE_DIR="$(cd "$app/Contents/Resources/engine" 2>/dev/null && pwd -P || true)"
   if [ -z "$ENGINE_DIR" ]; then
@@ -416,6 +449,8 @@ check_engine() {
   [ -z "$out" ] && pass "engine: bin/tmux links only macOS's libraries" \
     || fail "engine: bin/tmux links $out"
   check_minimum_macos "$app"
+  helper="$(cd "$app/Contents/Library/LoginItems/brindle.app" 2>/dev/null && pwd -P || true)"
+  check_helper "${helper:-$app/Contents/Library/LoginItems/brindle.app}"
 
   # What hooks and agents run from the installed engine (PR #301: python/bin/brindle
   # had a CI-path shebang, so Codex's hook exited 126): no script's shebang
@@ -476,7 +511,7 @@ check_engine() {
     else
       fail "engine: GET /v1/sessions over the socket: '$status' $(head -c 300 "$home/sessions.json" 2>/dev/null)"
     fi
-    check_engine_process "engine" "$home"
+    check_engine_process "engine" "$home" "$ENGINE_DIR/python/bin/python3"
   fi
 
   # The app, under env -i too: a release starts its own engine's daemon.
@@ -485,7 +520,8 @@ check_engine() {
   if out="$(isolated "$home" /usr/bin/perl -e 'alarm 60; exec @ARGV or die "exec: $!"' \
       "$app/Contents/MacOS/$exe" --headless-check 2>&1)"; then
     pass "app: --headless-check under env -i reached the daemon: $out"
-    check_engine_process "app" "$home"
+    # The app's own start: launchd's job, whose program is the helper app.
+    check_engine_process "app" "$home" "$helper/Contents/MacOS/brindle"
   else
     fail "app: --headless-check under env -i: $out"
   fi
@@ -493,7 +529,7 @@ check_engine() {
   # Nothing outlives the checks (the exit trap stops them too, on failure).
   stop_engines
   ENGINE_HOMES=()
-  out="$(pgrep -f "$ENGINE_DIR/" || true)"
+  out="$(pgrep -f "$ENGINE_DIR/|$helper/" || true)"
   [ -z "$out" ] && pass "engine: the checks' daemons are stopped" \
     || fail "engine: processes still run from the engine: $out"
 }
