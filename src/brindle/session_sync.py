@@ -313,7 +313,7 @@ def _replay_squashes(db: DB, ws: Workspace, ref: str) -> list[str]:
         _new, files = git.merge_local_base(ws.path, f"{squash}^1", no_ff=True)
         if files:
             return files
-        git.run(["merge", "-s", "ours", "--no-edit", "-m",
+        git.run([*git.identity_args(ws.path), "merge", "-s", "ours", "--no-edit", "-m",
                  f"Record squash {squash[:8]} of {ws.branch} at {covers[:8]} as merged", squash], ws.path)
     return []
 

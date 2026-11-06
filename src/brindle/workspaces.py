@@ -77,6 +77,10 @@ def workspace_env(ws: Workspace, cfg: RepoConfig | None = None) -> dict[str, str
     for key in ("BRINDLE_HOME", "BRINDLE_TMUX_SOCKET", "BRINDLE_CLAUDE_BIN"):
         if key in os.environ:
             env[key] = os.environ[key]
+    if os.path.isdir(ws.path):
+        # A worker's own commits on an account with no git identity: what's
+        # missing, in its environment only (a set identity is never replaced).
+        env.update(git.identity_env(ws.path))
     if ws.kind != "main" and os.path.isdir(ws.repo_root):
         try:
             cfg = cfg or workspace_config(ws)
