@@ -1,4 +1,6 @@
 """Release build contracts for assets outside Python coverage."""
+import json
+import plistlib
 from pathlib import Path
 
 import pytest
@@ -36,3 +38,28 @@ def test_intel_builds_on_apple_silicon():
     assert 'tries="${STAPLE_TRIES:-12}"' in staple
     assert 'xcrun stapler staple "$dmg" && xcrun stapler validate "$dmg"' in staple
     assert '"--staple-only"' in staple
+
+    # The helper whose architecture we check must also retain its bundle identity
+    # and privacy grants across app updates.
+    app_root = root / "app"
+    info = plistlib.loads((app_root / "scripts/engine/helper/Info.plist").read_bytes())
+    app = json.loads((app_root / "src-tauri/tauri.conf.json").read_text())
+    mac = json.loads((app_root / "src-tauri/tauri.macos.conf.json").read_text())["bundle"]["macOS"]
+    usage = [f"NS{what}UsageDescription" for what in (
+        "DesktopFolder", "DocumentsFolder", "DownloadsFolder", "RemovableVolumes", "NetworkVolumes",
+        "FileProviderDomain", "LocalNetwork", "AppleEvents", "Microphone")]
+    assert info["CFBundlePackageType"] == "APPL" and info["LSBackgroundOnly"] is True
+    assert info["CFBundleIdentifier"].startswith(app["identifier"] + ".")
+    assert info["CFBundleName"] == info["CFBundleDisplayName"] == app["productName"]
+    assert info["LSMinimumSystemVersion"] == mac["minimumSystemVersion"]
+    assert [key for key in usage if not info.get(key, "").strip()] == []
+    assert set(usage) <= set(plistlib.loads((app_root / "src-tauri/Info.plist").read_bytes()))
+    signed = [app_root / "scripts/engine/helper/helper.entitlements", app_root / "src-tauri" / mac["entitlements"]]
+    for entitlements in map(plistlib.loads, (path.read_bytes() for path in signed)):
+        assert entitlements["com.apple.security.automation.apple-events"] is True
+        assert entitlements["com.apple.security.device.audio-input"] is True
+    place = f"Library/LoginItems/{info['CFBundleName']}.app"
+    assert place in mac["files"]
+    executable = f"{place}/Contents/MacOS/{info['CFBundleExecutable']}"
+    assert executable in (app_root / "src-tauri/src/engine.rs").read_text()
+    assert mac["files"][place] in build and f"Contents/MacOS/{info['CFBundleExecutable']}" in build
