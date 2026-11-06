@@ -463,6 +463,16 @@ jobs:
           APP: ${{ steps.bundle.outputs.app }}
         run: bash app/scripts/notarize_dmg.sh --staple-only "$APP"
 
+      - name: Package the stapled app
+        if: steps.signing.outputs.notarized == 'true'
+        env:
+          APP: ${{ steps.bundle.outputs.app }}
+          DMG: ${{ steps.bundle.outputs.dmg }}
+          BUNDLE: ${{ steps.bundle.outputs.dir }}
+          VERSION: ${{ steps.version.outputs.version }}
+          UPDATER: ${{ steps.signing.outputs.updater }}
+        run: bash app/scripts/package_macos.sh
+
       # Tauri notarizes only the .app. The DMG around it needs its own
       # submission and ticket, or Gatekeeper rejects the download itself
       # ("Unnotarized Developer ID") before the app inside is ever checked.
@@ -527,9 +537,7 @@ jobs:
           done
           assess app -t exec "$APP"
           assess DMG -t open --context context:primary-signature "$DMG"
-          # Tauri packaged these before the app's final staple above. Verify
-          # their actual contents too, so repairing only the loose app cannot
-          # publish an updater or installer carrying an unstapled app.
+          # Verify the regenerated artifacts themselves before publication.
           packaged="$(mktemp -d "$RUNNER_TEMP/stapled-bundles.XXXXXX")"
           mounted=false
           cleanup_bundles() {

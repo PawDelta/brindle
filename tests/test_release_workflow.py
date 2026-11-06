@@ -23,6 +23,9 @@ def test_intel_builds_on_apple_silicon():
         assert binary in smoke
     assert '"$expected"' in smoke
     assert steps["Staple the app"]["run"].endswith('--staple-only "$APP"')
+    names = [step.get("name") for step in job["steps"]]
+    assert names.index("Staple the app") < names.index("Package the stapled app") < names.index("Notarize and staple the DMG")
+    assert steps["Package the stapled app"]["run"] == "bash app/scripts/package_macos.sh"
     assert steps["Notarize and staple the DMG"]["run"].endswith('notarize_dmg.sh "$DMG"')
     assert steps["collect"]["env"]["NOTARIZED"] == "${{ steps.gatekeeper.outputs.verified == 'true' }}"
     gate = steps["gatekeeper"]["run"]
