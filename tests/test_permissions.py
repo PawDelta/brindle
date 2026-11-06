@@ -8,17 +8,12 @@ runner = CliRunner()
 
 
 def test_single_arg_allow():
-    """Verify `brindle permissions allow <command>` with a single argument defaults to bash."""
-    # We will test the CLI directly
-    # Since we can't test actual db writes easily without side-effects, we can test that it doesn't crash 
-    # and instead it tries to do something.
-    result = runner.invoke(app, ["permissions", "allow", "aws *"])
-    # It should not complain about missing 'match'
-    assert "Missing argument 'match'" not in result.stdout
-    # We expect it to try to add a rule, and since we run it, it might succeed and print something like
-    # rule-id: allow bash exact 'aws *'
-    # Actually wait, `aws *` exact match for bash rule. Let's verify output.
-    assert "allow bash exact 'aws *'" in result.stdout
+    from brindle import permissions
+
+    assert runner.invoke(app, ["permissions", "allow", "aws *"]).exit_code == 0
+    store = permissions.load_store()
+    assert any(r.kind == "bash" and r.match == "aws *" and r.decision == "allow" for r in store.rules)
+    assert store.saved == []
 
 
 def test_an_agent_cannot_change_the_permission_rules(monkeypatch):
@@ -263,11 +258,12 @@ def _bypass(command):
     _bypass("ls > ~/.ssh/authorized_keys"),    # a harmless check redirected into a store truncates it
     _bypass("test -e README.md > ~/.aws/credentials"),
     _bypass('for f in ~/.aws/credentials; do test -e README.md > "$f"; done'),    # a store bound by a loop
-    ("ls ~/.ssh", "allow"),
-    ("test -e ~/.aws/credentials", "allow"),
-    ("stat ~/.ssh/id_rsa", "allow"),
-    pytest.param("for f in ~/.ssh/*; do ls $f; done", "allow",
-                 marks=pytest.mark.variant("a command made only of harmless checks may name a store")),
+    pytest.param(("ls ~/.ssh", "ls -a ~/.ssh | wc -l", "ls -la ~/.ssh", "find ~/.ssh", "du -sh ~/.ssh"),
+                 "deny", marks=pytest.mark.variant("build 84 listing and equivalent credential directory probes")),
+    (("test -e ~/.aws/credentials", "[ -e ~/.ssh ]"), "allow"),
+    (("stat ~/.ssh/id_rsa", "stat ~/.ssh"), "deny"),
+    pytest.param("for f in ~/.ssh/*; do ls $f; done", "deny",
+                 marks=pytest.mark.variant("credential listing through a loop")),
     pytest.param("dd if=README.md", "allow", marks=pytest.mark.variant("non-credential input is safe")),
     pytest.param('TOKEN="$TOKEN" echo ready', "allow",
                  marks=pytest.mark.variant("assignment value does not print")),
@@ -304,16 +300,28 @@ def test_credential_dumps_are_denied(tmp_path, command, expected):
     whatever a learned grant or the unmatched setting would allow."""
     from brindle import permissions
 
-    permissions.set_unmatched("allow")
-    permissions.add_rule("bash", "*", "allow", "glob", source="learned")
     here = tmp_path / "wt"
     here.mkdir()
     (tmp_path / "other").mkdir()
-    req = permissions.Request("claude", "bash", "Bash", str(here), str(here), str(here), command=command)
-    saved = permissions.SavedAction("grant", "bash", command, "allow")
-    decision = permissions.decide(req, saved=[saved])
-    assert decision.decision == expected, decision.reason
-    assert (decision.rule is None) == (expected == "deny") or expected == "allow"
+    for command in (command,) if isinstance(command, str) else command:
+        permissions.set_unmatched("allow")
+        permissions.add_rule("bash", "*", "allow", "glob", source="learned")
+        payload = {"tool_name": "Bash", "tool_input": {"command": command}, "cwd": str(here)}
+        requests = [permissions.from_claude(payload, str(here), str(here)),
+                    *permissions.from_codex(payload, str(here), str(here)),
+                    permissions.from_agy({"toolCall": {"name": "run_command", "args": {"CommandLine": command}}},
+                                         str(here), str(here))]
+        saved = permissions.SavedAction("grant", "bash", command, "allow")
+        for req in requests:
+            decision = permissions.decide(req, saved=[saved])
+            assert decision.decision == expected, (command, decision.reason)
+            assert (decision.rule is None) == (expected == "deny") or expected == "allow"
+        if expected == "deny" and permissions.prints_credentials(requests[0]):
+            for preset in permissions.PRESETS:
+                permissions.apply_preset(preset)
+                for req in requests:
+                    decision = permissions.decide(req, saved=[saved])
+                    assert decision.decision == "deny" and decision.rule is None, (preset, req, decision)
 
 
 def _split(command):
