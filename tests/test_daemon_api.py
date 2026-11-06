@@ -96,6 +96,14 @@ def test_requests_need_the_token_and_no_foreign_origin(headers, status):
     assert ("api_version" in body) == (status == 200)
 
 
+def test_meta_tracks_startup_recovery():
+    app = build_app(TOKEN)
+    for resuming in (True, False):
+        app.state.resuming = resuming
+        code, body = asyncio.run(_read_request(app, "/v1/meta", AUTH))
+        assert code == 200 and body["resuming"] is resuming
+
+
 @pytest.mark.variant("a token sent in the URL must never open the socket, only the first frame")
 @pytest.mark.parametrize("query,frame,reached", [
     (f"token={TOKEN}".encode(), "wrong", False),    # a token in the URL counts for nothing

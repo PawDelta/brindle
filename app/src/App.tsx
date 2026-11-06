@@ -351,9 +351,71 @@ function FirstLaunch(props: AppProps) {
   // The providers feed starts with the app itself: the first launch reads its own rows.
   return (
     <ProvidersProvider client={client}>
-      <Shell {...props} initialRoute={(gate.kind === "app" && gate.route) || props.initialRoute} />
+      <Startup client={client} refresh={props.refresh}>
+        <Shell {...props} initialRoute={(gate.kind === "app" && gate.route) || props.initialRoute} />
+      </Startup>
     </ProvidersProvider>
   );
+}
+
+const STARTUP_WAIT = 30000;
+const STARTUP_CHECK = 500;
+
+/* Mount the shell only once recovery has settled. Reconnects belong to its
+   banner, never to this launch gate. The deadline also bounds a hung read. */
+function Startup({ client, refresh, children }: { client: DaemonClient | null; refresh?: () => Promise<void>; children: ReactNode }) {
+  const store = useStore();
+  const [done, setDone] = useState(!client);
+  const [line, setLine] = useState("Connecting to brindle…");
+  const { reload } = useSessions();
+  useEffect(() => {
+    if (!client || done) return;
+    let current = true;
+    let next: ReturnType<typeof setTimeout>;
+    const deadline = setTimeout(() => {
+      current = false;
+      clearTimeout(next);
+      setDone(true);
+    }, STARTUP_WAIT);
+    const check = async () => {
+      const { lastEventId, connection } = store.getState();
+      const unchanged = () => current && store.getState().lastEventId === lastEventId && store.getState().connection === connection;
+      try {
+        const meta = await client.meta();
+        if (!unchanged()) return;
+        setLine(meta.resuming ? "Bringing your sessions back…" : "Checking your sessions…");
+        if (!meta.resuming) {
+          const workspaces = await client.snapshot();
+          if (!unchanged()) return;
+          const waiting = workspaces.flatMap((ws) => ws.agents ?? []).some((a) =>
+            !a.headless && !a.locked && !["paused", "done", "failed", "closed", "rewound", "exited"].includes(a.status) && !a.window);
+          if (!waiting) {
+            // A snapshot read before recovery may still be in flight in sync.
+            // Queue a fresh one before mounting terminals on the store's rows.
+            await Promise.all([reload(), refresh?.()]);
+            if (!unchanged()) return;
+            current = false;
+            clearTimeout(deadline);
+            setDone(true);
+            return;
+          }
+          setLine("Waiting for your sessions to open…");
+        }
+      } catch {
+        if (!unchanged()) return;
+        setLine("Waiting for brindle to answer… You’ll be let in shortly.");
+      } finally {
+        if (current) next = setTimeout(() => void check(), STARTUP_CHECK);
+      }
+    };
+    void check();
+    return () => {
+      current = false;
+      clearTimeout(next);
+      clearTimeout(deadline);
+    };
+  }, [client, done, reload, refresh, store]);
+  return done ? <>{children}</> : <Starting line={line} />;
 }
 
 /* The sign-in gate: the app needs a brindle account. Once the engine

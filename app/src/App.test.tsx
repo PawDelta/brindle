@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { ReactElement } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App, { landing } from "./App";
@@ -49,6 +49,66 @@ const surfaceTitle = () => screen.getByTestId("surface-title").textContent;
 
 describe("App", () => {
   beforeEach(() => localStorage.setItem(ONBOARDED_KEY, "1"));
+  it("shows starting until sessions are ready", async () => {
+    vi.useFakeTimers();
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root] });
+    const client = daemon.client();
+    const store = createAppStore();
+    const sync = startSync({ client, store, connect: daemon.connect });
+    let resuming = true;
+    const meta = client.meta.bind(client);
+    vi.spyOn(client, "meta").mockImplementation(async () => ({ ...await meta(), resuming }));
+    daemon.data.workspaces = [{ ...root, agents: root.agents?.map((a) => ({ ...a, window: null })) }];
+    try {
+      renderApp(<App store={store} client={client} refresh={sync.refresh} />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+      expect(screen.getByTestId("starting")).toBeTruthy();
+      expect(screen.queryByTestId("terminal")).toBeNull();
+      resuming = false;
+      await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+      expect(screen.getByTestId("starting")).toBeTruthy();
+      daemon.data.workspaces = [root];
+      let resolve!: (rows: Awaited<ReturnType<typeof client.snapshot>>) => void;
+      vi.spyOn(client, "snapshot").mockReturnValueOnce(new Promise((ok) => { resolve = ok; }));
+      await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+      // A disconnect during the read makes its ready windows stale.
+      await act(async () => {
+        store.dispatch({ type: "connection", state: "closed" });
+        resolve([root]);
+      });
+      expect(screen.getByTestId("starting")).toBeTruthy();
+      await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+      expect(screen.queryByTestId("starting")).toBeNull();
+      expect(nav()).toBeTruthy();
+      expect(screen.getByTestId("terminal").textContent).toBe("sup1");
+      resuming = true;
+      daemon.drop();
+      await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+      expect(screen.queryByTestId("starting")).toBeNull();
+    } finally { sync.stop(); vi.useRealTimers(); }
+  });
+
+  it("opens after the startup deadline and discards the pending response", async () => {
+    vi.useFakeTimers();
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root] });
+    const client = daemon.client();
+    let resolve!: (rows: Awaited<ReturnType<typeof client.snapshot>>) => void;
+    vi.spyOn(client, "snapshot").mockReturnValue(new Promise((ok) => { resolve = ok; }));
+    const store = createAppStore();
+    store.dispatch({ type: "snapshot", workspaces: [root], inbox: [] });
+    try {
+      renderApp(<App store={store} client={client} initialRoute={{ screen: "session", root: "sup1", repo: REPO }} />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+      expect(screen.queryByRole("complementary", { name: "Sidebar" })).toBeNull();
+      await act(async () => { await vi.advanceTimersByTimeAsync(30000); });
+      expect(nav()).toBeTruthy();
+      expect(screen.getByTestId("terminal").textContent).toBe("sup1");
+      await act(async () => { resolve([worker]); });
+      expect(store.getState().workspaces).toEqual([root]);
+      expect(screen.queryByTestId("starting")).toBeNull();
+    } finally { vi.useRealTimers(); }
+  });
+
   it.each([false, true])("resume paused: lists the goal and resumes into the session's chat pane (already selected: %s)", async (selected) => {
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session, paused], workspaces: [root] });
     const store = createAppStore();

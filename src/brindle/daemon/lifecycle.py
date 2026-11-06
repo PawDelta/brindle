@@ -651,6 +651,7 @@ def serve(*, unix: bool = True, tcp: bool = False, idle_exit: bool = False) -> d
 
     debuglog.Uploader().start()
     activity = Activity(build_app(token, port=info["port"], poller=poller))
+    activity.state.resuming = idle_exit
     server = make_server(activity)
     recovery = Recovery()
     if idle_exit:
@@ -662,12 +663,18 @@ def serve(*, unix: bool = True, tcp: bool = False, idle_exit: bool = False) -> d
     upgrade.on_stale_launch = lambda: setattr(server, "should_exit", True)
 
     async def run() -> None:
+        async def resume() -> None:
+            try:
+                await asyncio.to_thread(resume_after_start, recovery)
+            finally:
+                activity.state.resuming = False
+
         watcher = asyncio.create_task(_watch(server, activity, idle_exit, parent=parent))
         resizer = asyncio.create_task(asyncio.to_thread(_reset_window_sizes))
         sweeper = asyncio.create_task(asyncio.to_thread(_upgrade_sweep))
         hook = asyncio.create_task(asyncio.to_thread(_keep_codex_hook))   # an update may have changed it
         # The app's daemon brings back what the last one paused on its way out.
-        resumer = asyncio.create_task(asyncio.to_thread(resume_after_start, recovery)) if idle_exit else None
+        resumer = asyncio.create_task(resume()) if idle_exit else None
         try:
             await server.serve(sockets=socks)
         finally:
