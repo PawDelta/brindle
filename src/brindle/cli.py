@@ -396,9 +396,15 @@ def start(
             _fail(str(e).strip("'\""))
     db = DB()
     if branch or worktree:
+        # An existing explicit checkout can belong to a different repository.
+        # A new checkout inherits the current repo's config; check before creating it.
+        target = Path(worktree).expanduser().resolve() if worktree else Path.cwd()
+        identity_path = target if (target / ".git").exists() else Path.cwd()
+        _run(git.require_user_identity, identity_path)
         ws = _run(workspaces.checkout_for, db, os.getcwd(), branch=branch, worktree=worktree)
     else:
         ws = _here_or_scratch(db, reuse_scratch=False)
+        _run(git.require_user_identity, ws.repo_root)
         if attach and not yes and sys.stdin.isatty():
             got = _run(svc.place, db, ws)
             if isinstance(got, svc.Conflict):

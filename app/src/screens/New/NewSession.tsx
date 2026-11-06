@@ -163,6 +163,17 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, on
   // another CLI, say) began is that older start's, and is dropped.
   const [preflight, setPreflight] = useState<{ fields: StartFields; items: PreflightDTO; attempt: number } | null>(null);
   const attempts = useRef(0);
+  const currentRepo = useRef(repo);
+  currentRepo.current = repo;
+  const [identity, setIdentity] = useState<{ repo: string; fields: StartFields; choice?: { key: string; session: string } } | null>(null);
+  const [gitName, setGitName] = useState("");
+  const [gitEmail, setGitEmail] = useState("");
+
+  useEffect(() => {
+    setIdentity(null);
+    setGitName("");
+    setGitEmail("");
+  }, [repo]);
 
   useEffect(() => {
     let live = true;
@@ -194,6 +205,8 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, on
     let opened: string | null = null;
     try {
       const got = await client.startSession({ repo, ...fields, choice: choice?.key, session_id: choice?.session });
+      if (currentRepo.current !== repo || attempt !== attempts.current) return false;
+      setIdentity(null);
       setPending(null);
       setPreflight(null);
       if ("opened" in got) opened = got.opened.id;
@@ -202,6 +215,11 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, on
         opened = got.id;
       }
     } catch (e) {
+      if (currentRepo.current !== repo || attempt !== attempts.current) return false;
+      if (e instanceof DaemonError && e.code === "git_identity_missing") {
+        setIdentity({ repo, fields, choice });
+        return false;
+      }
       if (e instanceof DaemonError && e.preflight) setPreflight({ fields, items: e.preflight, attempt });
       // No card of its own: a card still showing stays usable, as this (now latest) start's,
       // so its re-checks apply again; any asked before this start began are still dropped.
@@ -217,6 +235,25 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, on
     // Opened once the list and the snapshot have it: a root neither knows yet reads as paused.
     if (opened) onOpen(opened, repo);
     return opened !== null;
+  };
+
+  const saveIdentity = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!identity || busy) return;
+    const mine = identity;
+    const attempt = attempts.current;
+    setBusy(true);
+    setError(null);
+    try {
+      await client.setRepoGitIdentity(mine.repo, gitName, gitEmail);
+      if (currentRepo.current !== mine.repo || attempt !== attempts.current) return;
+      setIdentity(null);
+      await start(mine.fields, mine.choice);
+    } catch (e) {
+      if (currentRepo.current === mine.repo && attempt === attempts.current) setError(message(e));
+    } finally {
+      setBusy(false);
+    }
   };
 
   const submit = async (e: FormEvent) => {
@@ -362,6 +399,19 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, on
         </ul>
       )}
     </form>
+    {identity?.repo === repo && (
+      <section aria-label="Git identity" className={`${card} px-s2 py-s2`}>
+        <p className={lede}>What name and email should Git put on your commits? Saved for this repo.</p>
+        <form onSubmit={saveIdentity} className="flex flex-col gap-s1">
+          <label>Name<input className={field} aria-label="Name" required value={gitName} onChange={(e) => setGitName(e.target.value)} /></label>
+          <label>Email<input className={field} aria-label="Email" type="email" required value={gitEmail} onChange={(e) => setGitEmail(e.target.value)} /></label>
+          <div className="flex gap-s1">
+            <button className={button} disabled={busy || !gitName.trim() || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(gitEmail.trim())}>Save and start</button>
+            <button type="button" className={button} disabled={busy} onClick={() => setIdentity(null)}>Cancel</button>
+          </div>
+        </form>
+      </section>
+    )}
     {/* Its own forms (a key's field) can't sit inside the composer's. */}
     {preflight && (
       <Preflight

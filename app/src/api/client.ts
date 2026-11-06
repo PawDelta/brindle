@@ -1217,6 +1217,10 @@ export class DaemonClient {
     return this.post<StartResult>("/sessions", body);
   }
 
+  setRepoGitIdentity(repo: string, name: string, email: string) {
+    return this.post<{ saved: boolean }>("/repos/git-identity", { repo, name, email });
+  }
+
   /* `brindle demo` from the app: a practice repo of brindle's own (never one of the person's)
      and a session started there, on the CLI this Mac is signed in to. Throws a DaemonError with
      `preflight` set as startSession does, and `repo` the practice repo kept for it (the next
