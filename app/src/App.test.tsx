@@ -251,6 +251,15 @@ describe("App", () => {
     fireEvent.click(link("Open Account"));
     expect(await screen.findByRole("region", { name: "Account" })).toBeTruthy();
     expect(link("Open Account").getAttribute("aria-current")).toBe("page");
+    // Clicked again from another of Settings' tabs, an entry opens its own tab again.
+    const selected = (name: string) => screen.getByRole("tab", { name }).getAttribute("aria-selected");
+    fireEvent.click(screen.getByRole("tab", { name: "Permissions" }));
+    fireEvent.click(link("Open Account"));
+    await waitFor(() => expect(selected("Account")).toBe("true"));
+    fireEvent.click(link("Settings"));
+    fireEvent.click(await screen.findByRole("tab", { name: "Storage" }));
+    fireEvent.click(link("Settings"));
+    await waitFor(() => expect(selected("General")).toBe("true"));
 
     // ⌘1 is the first live session, back from any page; ⌘N the composer.
     fireEvent.keyDown(window, { key: "1", metaKey: true });

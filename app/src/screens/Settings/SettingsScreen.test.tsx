@@ -108,11 +108,16 @@ describe("settings screen", () => {
       ["About", "engine"],
     ];
     expect(screen.getAllByRole("tab").map((t) => t.textContent)).toEqual(shows.map(([tab]) => tab));
+    // A tab's section is shown when it is there and no panel around it is hidden (a visited tab's stays, hidden).
+    const shown = (testId: string) => {
+      const el = screen.queryByTestId(testId);
+      return !!el && !el.closest("[hidden]");
+    };
     for (const [tab, testId] of shows) {
       fireEvent.click(screen.getByRole("tab", { name: tab }));
       expect(screen.getByRole("tab", { name: tab }).getAttribute("aria-selected")).toBe("true");
-      expect(await screen.findByTestId(testId)).toBeTruthy();
-      for (const [, other] of shows.filter(([t]) => t !== tab)) expect(screen.queryByTestId(other)).toBeNull();
+      await waitFor(() => expect(shown(testId)).toBe(true));
+      for (const [, other] of shows.filter(([t]) => t !== tab)) expect(shown(other)).toBe(false);
     }
     stop();
   });
@@ -686,12 +691,22 @@ describe("settings screen", () => {
     stop();
   });
 
-  it("staff update: gives staff an Update button that installs the new build and offers a restart", async () => {
-    const updater = { install: vi.fn(async () => "0.1.0-rc.8"), restart: vi.fn(async () => {}) };
+  it("staff update: gives staff an Update button that installs the new build and offers a restart, across a look at another tab", async () => {
+    // The install is held until the test lets it finish.
+    let finish: (version: string) => void = () => {};
+    const updater = { install: vi.fn(() => new Promise<string>((resolve) => (finish = resolve))), restart: vi.fn(async () => {}) };
     const { stop } = setup({ debug: { staff: true, enabled: false } }, { tab: "about", appUpdater: updater });
     const section = await screen.findByTestId("app-update");
     expect(updater.install).not.toHaveBeenCalled();
     fireEvent.click(within(section).getByRole("button", { name: "Update" }));
+    // Another tab and back while it installs: the same row, still updating, with no second Update to start.
+    fireEvent.click(screen.getByRole("tab", { name: "General" }));
+    fireEvent.click(screen.getByRole("tab", { name: "About" }));
+    expect(screen.getByTestId("app-update")).toBe(section);
+    expect(within(section).getByRole("button", { name: "Updating…" })).toHaveProperty("disabled", true);
+    fireEvent.click(screen.getByRole("tab", { name: "General" }));
+    finish("0.1.0-rc.8");
+    fireEvent.click(screen.getByRole("tab", { name: "About" }));
     const restart = await within(section).findByRole("button", { name: "Restart" });
     expect(updater.install).toHaveBeenCalledTimes(1);
     expect(section.textContent).toContain("brindle 0.1.0-rc.8 is installed");

@@ -117,8 +117,10 @@ export function landing(repos: { repo_root: string }[], sessions: Record<string,
 /* Agents' "Connect …" links and the Inbox's rule links: each press asks Settings to scroll (and open the rule) again. */
 let providerAsks = 0;
 
-function Screen({ route, navigate, client, refresh, store, openUrl, pickFolder, installCli, appUpdater, appUpdates, releaseBuildUpdater, readAbout }: {
+function Screen({ route, visit, navigate, client, refresh, store, openUrl, pickFolder, installCli, appUpdater, appUpdates, releaseBuildUpdater, readAbout }: {
   route: Route;
+  /* Counts the navigations (Shell's), one to the open route included. */
+  visit: number;
   navigate(route: Route): void;
   client: DaemonClient;
   refresh: () => Promise<void>;
@@ -166,6 +168,7 @@ function Screen({ route, navigate, client, refresh, store, openUrl, pickFolder, 
           openUrl={openUrl}
           onNavigate={(screen) => navigate({ screen })}
           tab={settingsTab(route) ?? undefined}
+          visit={visit}
           section={route.screen === "settings" ? route.section : undefined}
           ask={route.screen === "project-settings" ? undefined : route.ask}
           rule={route.screen === "settings" ? route.rule : undefined}
@@ -229,7 +232,12 @@ function Banner({ status, connection, onRetry, client, store }: { status: Engine
 function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, pickFolder = nativePicker, installCli, appUpdater, appUpdates, releaseBuildUpdater, readAbout }: AppProps) {
   // Until the sessions are known the app shows the empty state, quietly; then it lands.
   const [route, setRoute] = useState<Route | null>(initialRoute ?? null);
-  const navigate = useCallback((to: Route) => setRoute(to), []);
+  /* Counts the navigations: one to the route already open still counts (Settings opens its tab again). */
+  const [visit, setVisit] = useState(0);
+  const navigate = useCallback((to: Route) => {
+    setVisit((n) => n + 1);
+    setRoute(to);
+  }, []);
   const { repos, sessions, error: feedError, reload } = useSessions();
   useEffect(() => {
     // A place the person already picked (the sidebar answers before the sessions do) stays.
@@ -279,7 +287,7 @@ function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, p
             {client ? (
               route ? (
                 <div className={`relative flex min-h-0 flex-1 flex-col ${shown.screen === "inbox" ? "gap-s2 p-s3" : ""}`}>
-                  <Screen route={route} navigate={navigate} client={client} refresh={refresh ?? noop} store={store} openUrl={openUrl} pickFolder={pickFolder} installCli={installCli} appUpdater={appUpdater} appUpdates={appUpdates} releaseBuildUpdater={releaseBuildUpdater} readAbout={readAbout} />
+                  <Screen route={route} visit={visit} navigate={navigate} client={client} refresh={refresh ?? noop} store={store} openUrl={openUrl} pickFolder={pickFolder} installCli={installCli} appUpdater={appUpdater} appUpdates={appUpdates} releaseBuildUpdater={releaseBuildUpdater} readAbout={readAbout} />
 </div>
               ) : feedError ? (
                 // Nothing to land on: the sessions couldn't be read (the engine itself may be fine). Ask again.

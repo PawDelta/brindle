@@ -12,8 +12,9 @@
    where each value comes from, for the session's repo or one picked) and
    About (Engine & health: the engine's version and update, the
    command-line tool, and the doctor as a short health list with a fix
-   where the app has one; Staff only; the app's About). Only the open tab
-   renders; the config, doctor and providers are read once for the screen.
+   where the app has one; Staff only; the app's About). A tab's panel mounts on
+   its first visit and stays (hidden) after, so work started in it carries on;
+   the config, doctor and providers are read once for the screen.
 
    Providers (design/connect/ step 8, with the owner's final model): brindle
    detects each CLI (GET /v1/providers/installed) and uses it as-is; the CLI
@@ -142,6 +143,9 @@ export interface SettingsScreenProps {
   appUpdates?: AppUpdates;
   /* The tab to open on (routes.ts settingsTab): General when none is named. */
   tab?: SettingsTab;
+  /* Counts the app's navigations: a new value opens `tab` again, the screen already
+     open on another (the sidebar's entry clicked again). */
+  visit?: number;
   /* The section to scroll to on opening, on its own tab: "providers" from the sidebar's problem line, "permissions" or "storage" from the Inbox. */
   section?: "providers" | "permissions" | "storage";
   /* A new value asks to open `tab` and scroll to `section` again, the page already open. */
@@ -172,6 +176,19 @@ const LEDE: Record<SettingsTab, string> = {
   about: "The engine's version and health, and this app.",
 };
 
+/* A tab's panel: mounted on the tab's first visit and kept after, hidden while
+   another tab is open, so what runs in it (an app update, a provider's
+   sign-in, an unsaved rule) outlives a look at another tab. */
+function Pane({ id, tab, seen, children }: { id: SettingsTab; tab: SettingsTab; seen: ReadonlySet<SettingsTab>; children: ReactNode }) {
+  if (!seen.has(id)) return null;
+  const open = tab === id;
+  return (
+    <div id={`settings-panel-${id}`} role="tabpanel" aria-labelledby={`settings-tab-${id}`} hidden={!open} className={open ? "flex min-h-0 flex-col gap-s3" : "hidden"}>
+      {children}
+    </div>
+  );
+}
+
 /* The tabs: one button each, the open one marked; arrow keys move between them. */
 function TabBar({ tab, onTab }: { tab: SettingsTab; onTab(tab: SettingsTab): void }) {
   const move = (step: number) => {
@@ -189,7 +206,7 @@ function TabBar({ tab, onTab }: { tab: SettingsTab; onTab(tab: SettingsTab): voi
           type="button"
           role="tab"
           aria-selected={tab === t.id}
-          aria-controls="settings-panel"
+          aria-controls={`settings-panel-${t.id}`}
           tabIndex={tab === t.id ? 0 : -1}
           className={`-mb-px border-b-2 px-s2 py-1 text-sm ${tab === t.id ? "border-pass font-medium text-ink" : "border-transparent text-ink-2 hover:text-ink"}`}
           onClick={() => onTab(t.id)}
@@ -1094,7 +1111,7 @@ function HealthRow({ c, busy, onFix }: { c: DoctorCheck; busy: boolean; onFix(fi
   );
 }
 
-export function SettingsScreen({ client, installCli, appUpdater, appUpdates, releaseBuildUpdater, readAbout, tab: routedTab, section, ask, rule, repo: routed, current, openUrl = openExternal, onNavigate }: SettingsScreenProps) {
+export function SettingsScreen({ client, installCli, appUpdater, appUpdates, releaseBuildUpdater, readAbout, tab: routedTab, visit, section, ask, rule, repo: routed, current, openUrl = openExternal, onNavigate }: SettingsScreenProps) {
   const store = useContext(StoreContext);
   if (!store) throw new Error("SettingsScreen needs a <StoreContext.Provider>");
   const connection = useAppState((state) => state.connection);
@@ -1106,9 +1123,14 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
   /* The tab a route asks for (or the one its section lives on); the person's clicks after that. */
   const wanted: SettingsTab = routedTab ?? section ?? (routed ? "project" : "general");
   const [tab, setTab] = useState<SettingsTab>(wanted);
+  // Every navigation here (a new `visit`) opens its tab again, even one to the same route.
   useEffect(() => {
     setTab(wanted);
-  }, [wanted, ask]);
+  }, [wanted, ask, visit]);
+  /* The tabs opened so far: their panels stay mounted (Pane). */
+  const [seen, setSeen] = useState<ReadonlySet<SettingsTab>>(() => new Set([wanted]));
+  if (!seen.has(tab)) setSeen(new Set(seen).add(tab));
+  const panes = { tab, seen };
   /* Start on the repo the route names, else the current session's. */
   useEffect(() => {
     const first = routed ?? current;
@@ -1331,28 +1353,7 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
     <section className="flex min-h-0 flex-col gap-s3" aria-label="Settings">
       <PageHeader title="Settings" lede={LEDE[tab]} />
       <TabBar tab={tab} onTab={setTab} />
-      <div id="settings-panel" role="tabpanel" aria-labelledby={`settings-tab-${tab}`} data-tab={tab} className="flex min-h-0 flex-col gap-s3">
-      {tab === "account" && <AccountPanel client={client} openUrl={openUrl} onNavigate={(to) => (to === "settings" ? setTab("general") : onNavigate?.(to))} />}
-      {tab === "usage" && <UsagePanel ask={ask} />}
-      {tab === "project" &&
-        (repo ? (
-          <section className="flex min-h-0 flex-col gap-s3" aria-label="Project settings" data-testid="project-settings">
-            <div className="flex flex-wrap items-center gap-s1 text-sm text-ink-2">
-              <span>Settings for</span>
-              {repos && repos.length > 1 ? <RepoSelect {...pick} repo={repo} /> : <span className="font-medium text-ink">{repos?.find((r) => r.repo_root === repo)?.name ?? repo.split("/").filter(Boolean).pop()}</span>}
-            </div>
-            <RepoSettings key={repo} client={client} repo={repo} />
-          </section>
-        ) : (
-          noRepo
-        ))}
-      {tab === "general" && (
-      <div className="border-t border-line">
-        <Row label="Appearance">
-          <ThemeToggle choices />
-        </Row>
-      </div>
-      )}
+      <div className="flex min-h-0 flex-col gap-s3" data-tab={tab}>
       {tab !== "account" && tab !== "usage" && tab !== "project" && noRepo}
       {tab !== "account" && tab !== "usage" && tab !== "project" && loadError && (
         <div role="alert" className={`${alert} flex items-center justify-between gap-s2`}>
@@ -1362,7 +1363,32 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
           </button>
         </div>
       )}
-      {tab === "general" && config && (
+      <Pane id="account" {...panes}>
+        <AccountPanel client={client} openUrl={openUrl} onNavigate={(to) => (to === "settings" ? setTab("general") : onNavigate?.(to))} />
+      </Pane>
+      <Pane id="usage" {...panes}>
+        <UsagePanel ask={ask} />
+      </Pane>
+      <Pane id="project" {...panes}>
+        {repo ? (
+          <section className="flex min-h-0 flex-col gap-s3" aria-label="Project settings" data-testid="project-settings">
+            <div className="flex flex-wrap items-center gap-s1 text-sm text-ink-2">
+              <span>Settings for</span>
+              {repos && repos.length > 1 ? <RepoSelect {...pick} repo={repo} /> : <span className="font-medium text-ink">{repos?.find((r) => r.repo_root === repo)?.name ?? repo.split("/").filter(Boolean).pop()}</span>}
+            </div>
+            <RepoSettings key={repo} client={client} repo={repo} />
+          </section>
+        ) : (
+          noRepo
+        )}
+      </Pane>
+      <Pane id="general" {...panes}>
+      <div className="border-t border-line">
+        <Row label="Appearance">
+          <ThemeToggle choices />
+        </Row>
+      </div>
+      {config && (
         <Section id="your-settings" title="Your settings" blurb="Saved to ~/.brindle/config.json and applied to every project, unless a repo sets one itself." testId="your-settings">
           {common.map(yourRow)}
           {more && others.map(yourRow)}
@@ -1407,15 +1433,11 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
         </Section>
       )}
 
-      {tab === "general" && (
-        <>
-          <DocSwitches client={client} />
-          <TeamDestination client={client} />
-        </>
-      )}
+      <DocSwitches client={client} />
+      <TeamDestination client={client} />
+      </Pane>
 
-      {tab === "permissions" && (
-        <>
+      <Pane id="permissions" {...panes}>
           {config && (
             <Section id="you" title="How Claude asks you" blurb="Whether Claude's held requests wait for you in the Inbox or Claude decides most itself." testId="user-settings">
               <PermissionMode client={client} />
@@ -1429,11 +1451,9 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
               <OrgApprovals client={client} />
             </Row>
           </Section>
-        </>
-      )}
+      </Pane>
 
-      {tab === "providers" && (
-      <>
+      <Pane id="providers" {...panes}>
       <Section
         id="providers"
         title="Providers"
@@ -1555,13 +1575,13 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
       <Section id="github" title="GitHub" blurb="How brindle reaches your private repositories over HTTPS." testId="github">
         <GithubRow client={client} />
       </Section>
-      </>
-      )}
+      </Pane>
 
-      {tab === "storage" && <Storage client={client} />}
+      <Pane id="storage" {...panes}>
+        <Storage client={client} />
+      </Pane>
 
-      {tab === "about" && (
-      <>
+      <Pane id="about" {...panes}>
       <Section
         id="engine"
         title="Engine & health"
@@ -1671,8 +1691,7 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
       )}
 
       <About read={readAbout} updates={appUpdates} status={updateStatus} engine={meta?.engine_version} />
-      </>
-      )}
+      </Pane>
       </div>
     </section>
   );
