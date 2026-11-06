@@ -6726,6 +6726,18 @@
           "title": "Profile",
           "type": "string"
         },
+        "request": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Request"
+        },
         "status": {
           "title": "Status",
           "type": "string"

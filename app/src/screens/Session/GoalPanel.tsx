@@ -26,12 +26,56 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { BusEvent } from "../../api/events";
 import type { DaemonClient } from "../../api/client";
 import { openExternal, type OpenUrl } from "../../api/open";
+import { usePtyViews } from "../../api/ptyView";
 import type { GoalDTO, MilestoneDTO } from "../../api/schema";
 import { alert, button, card, mainTone, mono, pill, quiet } from "../../components/ui";
 import type { AppStore } from "../../store/store";
 import { isGoalActivity, usePrReadiness, type Readiness } from "./review";
 
 const GOAL_JOBS = new Set(["goal.check", "session.pr"]);
+
+/* The person's full startup request, kept separate from the evolving goal title.
+   Keyed by session and text by the caller, so copy feedback cannot cross sessions. */
+export function SessionRequest({ text }: { text: string }) {
+  const views = usePtyViews();
+  const [expanded, setExpanded] = useState(false);
+  const [feedback, setFeedback] = useState<"copied" | "error" | null>(null);
+  const live = useRef(false);
+  useEffect(() => {
+    live.current = true;
+    return () => { live.current = false; };
+  }, []);
+  useEffect(() => {
+    if (!feedback) return;
+    const timer = window.setTimeout(() => setFeedback(null), 1600);
+    return () => window.clearTimeout(timer);
+  }, [feedback]);
+  const copy = async () => {
+    setFeedback(null);
+    try {
+      if (views) await views.copy(text);
+      else await navigator.clipboard.writeText(text);
+      if (live.current) setFeedback("copied");
+    } catch {
+      if (live.current) setFeedback("error");
+    }
+  };
+  return (
+    <div className="shrink-0 border-b border-line px-s2 py-s1">
+      <div className="flex items-center gap-s1 text-xs text-ink-3">
+        <span>Original request</span>
+        <button type="button" className={quiet} aria-label="Copy original request" title="Copy original request" onClick={() => void copy()}>
+          ⧉
+        </button>
+        <span role="status">{feedback === "copied" ? "Copied" : feedback === "error" ? "Couldn't copy" : ""}</span>
+      </div>
+      <p data-testid="session-request" className={`whitespace-pre-wrap break-words text-sm text-ink-2 ${expanded ? "max-h-64 overflow-auto" : "line-clamp-3"}`} title="Double-click to copy the full request" onDoubleClick={() => void copy()}>{text}</p>
+      <button type="button" className={`${quiet} text-xs`} aria-expanded={expanded} onClick={() => setExpanded((value) => !value)}>
+        {expanded ? "Show less" : "Show full request"}
+      </button>
+    </div>
+  );
+}
 
 /* The last few lines of a check's output: enough to see why it stopped. */
 export function outputTail(output: string | null | undefined, lines = 6): string | null {
