@@ -190,9 +190,9 @@ def tell_refused_fetches(db: DB) -> None:
                     "and background fetches never ask for them (no keychain dialogs). New branches and syncs "
                     "use origin as last fetched, so they may be behind it. `git fetch origin` refreshes it now "
                     "(run by hand or in a pane, it may ask for credentials). An SSH remote with its key in "
-                    "ssh-agent lets brindle refresh it itself. So does gh signed in to github.com with its token "
-                    "in gh's config file (`gh auth login --insecure-storage`, which keeps it in plain text): "
-                    "a token in the keychain isn't used here, as reading it could raise a dialog."))
+                    "ssh-agent lets brindle refresh it itself. On macOS, so does gh signed in to github.com with "
+                    "its token in gh's config file (`gh auth login --insecure-storage`, which keeps it in plain "
+                    "text): a token in the keychain isn't used here, as reading it could raise a dialog."))
             except agents.AgentError:
                 continue
             db.conn.execute("INSERT INTO fetch_refused_notices (root_id, repo_root, told_at) VALUES (?, ?, ?)",

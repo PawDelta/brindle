@@ -121,10 +121,11 @@ def ok(args: list[str], cwd: str | Path) -> bool:
 # raise a dialog nobody can explain: on macOS git's keychain helper asks for the
 # login password whenever the git running here isn't the one approved in the
 # person's terminal. So these calls clear every credential helper and can't prompt
-# in any other way. The one helper they may get is gh's for github.com, and only
-# with its token in gh's own config file (gh_token_in_file): a token in the keychain
-# is read through `security`, which a locked keychain can answer with a dialog, and
-# no check of the keychain is both silent itself and still true when gh reads it.
+# in any other way. The one helper they may get is gh's for github.com, on macOS,
+# with its token in gh's own config file (gh_token_in_file), and it runs where the
+# keychain can't be reached (_NO_KEYCHAIN): a token in the keychain is read through
+# `security`, which a locked keychain can answer with a dialog, and no check made
+# beforehand is both silent itself and still true by the time gh reads it.
 # What the person asked for (`git push`, `brindle pr`, a named PR's branch) goes
 # through ``run``, with their normal credentials.
 
@@ -133,6 +134,13 @@ GH_LOOKUP_SECONDS = 5.0
 GH_SEEN_SECONDS = 60.0       # how long a sign-in lookup stands: a pane's launch shouldn't each start gh
 _gh_seen: dict[str, tuple[float, str | None]] = {}
 _gh_refused: dict[str, float] = {}     # repo: when origin last turned down gh's answer, for as long as GH_SEEN_SECONDS
+_SANDBOX_EXEC = "/usr/bin/sandbox-exec"
+# gh's keyring is go-keyring, which on macOS only ever runs this one absolute path; the
+# services are what any other way into the keychain would have to ask. Denied, gh's read
+# fails at once: it answers from its file or not at all, and SecurityAgent is never asked.
+_NO_KEYCHAIN = ('(version 1)(allow default)(deny process-exec* (literal "/usr/bin/security"))'
+                '(deny mach-lookup (global-name "com.apple.SecurityServer") (global-name "com.apple.securityd")'
+                ' (global-name "com.apple.securityd.xpc"))')
 _GH_HOST_BLOCK = re.compile(r"^github\.com:\n((?: +\S.*(?:\n|$))+)", re.MULTILINE)
 _GH_FILE_TOKEN = re.compile(r"oauth_token: [\w-]{20,}")
 _FETCH_REFUSED = "brindle-fetch-refused"
@@ -174,16 +182,15 @@ def _gh_hosts_file() -> Path:
 
 
 def gh_token_in_file() -> bool:
-    """Whether `gh auth git-credential` answers for github.com from gh's config
-    file, so without going near the keyring: a non-empty ``oauth_token`` directly
-    under the host wins over the keyring, and is never one gh refreshes. One only
-    under ``users`` doesn't: gh tries the keyring first. Nor does a file with no
-    ``users``, which gh's account migration may yet read the keyring for.
+    """Whether `gh auth git-credential` can answer for github.com from gh's config
+    file: a non-empty ``oauth_token`` directly under the host wins over the keyring,
+    and is never one gh refreshes. One only under ``users`` doesn't: gh tries the
+    keyring first, which _NO_KEYCHAIN turns into no answer.
 
-    Only the file as gh writes it counts, anything else is no proof; so a parser's
-    reading of it, and a parser's error quoting it, aren't needed. A token's text
-    goes no further than these lines. Read on each call, this can't go stale
-    if the person moves the token to the keychain, and starts no process."""
+    This says gh is worth starting, not that it's safe to: _NO_KEYCHAIN is what keeps
+    the keychain out of it, whatever this file says by the time gh reads it. Only
+    the file as gh writes it counts; so a parser's reading of it, and a parser's
+    error quoting it, aren't needed. A token's text goes no further than these lines."""
     try:
         block = _GH_HOST_BLOCK.search(_gh_hosts_file().read_text())
     except (OSError, ValueError):
@@ -193,7 +200,7 @@ def gh_token_in_file() -> bool:
     lines = block[1].splitlines()
     indent = len(lines[0]) - len(lines[0].lstrip())
     keys = [line[indent:] for line in lines if line.startswith(" " * indent) and line[indent] != " "]
-    return "users:" in keys and any(_GH_FILE_TOKEN.fullmatch(key) for key in keys)
+    return any(_GH_FILE_TOKEN.fullmatch(key) for key in keys)
 
 
 def _github_helper_entries(helper: str) -> tuple[str, str]:
@@ -228,10 +235,9 @@ def _background_env(cwd: str | Path) -> dict[str, str]:
     (an empty GIT_ASKPASS also passes over core.askPass and SSH_ASKPASS) and no
     terminal prompt, which with ``background``'s missing terminal leave ssh, under
     any name or wrapper, nowhere to ask. BatchMode has it fail at once where it
-    can be given, still with an agent's keys and the person's own command. gh's
-    telemetry stays off: it starts a child of its own, which nothing here vouches for."""
+    can be given, still with an agent's keys and the person's own command."""
     env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "", "SSH_ASKPASS": "",
-           "SSH_ASKPASS_REQUIRE": "never", "LC_ALL": "C", "GH_TELEMETRY": "false"}
+           "SSH_ASKPASS_REQUIRE": "never", "LC_ALL": "C"}
     if ssh := _batch_ssh(cwd):
         env["GIT_SSH_COMMAND"] = ssh
     return env
@@ -265,13 +271,18 @@ def _batch_ssh(cwd: str | Path) -> str | None:
 
 
 def _background_gh_helper(cwd: str | Path) -> str | None:
-    """gh's helper for a network call nobody asked for, when reading its token can't
-    raise a dialog. Starts gh at most once in GH_SEEN_SECONDS, and not at all without
-    a token in its file or just after origin turned down what it gave."""
+    """gh's helper for a network call nobody asked for, in its sandbox: nothing gh
+    does on starting or answering (a migration, a token moved since) can reach the
+    keychain, and if the sandbox won't start, git simply gets no answer. Asks gh
+    nothing itself, not its sign-in either, as gh outside that could. None without
+    the sandbox or a token in gh's file, or just after origin turned down gh's answer."""
     refused = _gh_refused.get(str(cwd))
     if refused is not None and time.monotonic() - refused < GH_SEEN_SECONDS:
         return None
-    return gh_credential_helper() if gh_token_in_file() else None
+    exe = shutil.which("gh")
+    if exe is None or not os.access(_SANDBOX_EXEC, os.X_OK) or not gh_token_in_file():
+        return None
+    return f"!{shlex.quote(_SANDBOX_EXEC)} -p {shlex.quote(_NO_KEYCHAIN)} {shlex.quote(exe)} auth git-credential"
 
 
 def background(args: list[str], cwd: str | Path,
@@ -289,7 +300,6 @@ def background(args: list[str], cwd: str | Path,
         return None
     if helper and proc.returncode != 0 and _REFUSED.search(proc.stderr or ""):
         _gh_refused[str(cwd)] = time.monotonic()
-        _gh_seen.clear()
     return proc
 
 

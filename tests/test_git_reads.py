@@ -143,20 +143,16 @@ def test_background_fetch_never_asks_for_credentials(tmp_path, asks, monkeypatch
 # hosts.yml as gh writes it. Only a host-level token keeps gh away from the keyring.
 _USERS = "github.com:\n    users:\n        me:\n{per_user}    git_protocol: https\n{host}    user: me\n"
 _FILE_TOKEN = "not-a-real-token-just-a-fixture"
+_TOKEN_IN_FILE = _USERS.format(per_user=f"            oauth_token: {_FILE_TOKEN}\n",
+                               host=f"    oauth_token: {_FILE_TOKEN}\n")
+_TOKEN_IN_KEYCHAIN = _USERS.format(per_user="", host="")
 
 
-@pytest.mark.parametrize("hosts, signs_in", [
-    pytest.param(_USERS.format(per_user=f"            oauth_token: {_FILE_TOKEN}\n",
-                               host=f"    oauth_token: {_FILE_TOKEN}\n"), True, id="token-in-gh-config"),
-    pytest.param(_USERS.format(per_user="", host=""), False, id="token-in-keychain"),
-    pytest.param(_USERS.format(per_user=f"            oauth_token: {_FILE_TOKEN}\n", host=""), False, id="per-user-only",
-                 marks=pytest.mark.variant("gh tries the keyring before a per-user file token")),
-    pytest.param(_USERS.format(per_user="", host='    oauth_token: ""\n'), False, id="empty-host-token",
-                 marks=pytest.mark.variant("an empty token falls through to the keyring")),
-    pytest.param(f"github.com:\n    oauth_token: {_FILE_TOKEN}\n    user: me\n", False, id="never-migrated",
-                 marks=pytest.mark.variant("gh's account migration reads the keyring for another host in this file")),
-])
-def test_background_fetch_uses_signed_in_gh_for_github(tmp_path, asks, monkeypatch, hosts, signs_in):
+@pytest.fixture
+def gh_with_private_origin(tmp_path, asks, monkeypatch):
+    """A local origin that plays github.com, and a gh that acts as the real one: without a
+    token directly under the host in its file, or with an unmigrated host beside it, it goes
+    to the keyring (only ever `security -h` here), whenever it runs."""
     private = tmp_path / "private"
     repo = tmp_path / "repo"
     sh(f"git init -q --bare -b main {private} && git init -q -b main {repo}", tmp_path)
@@ -167,61 +163,70 @@ def test_background_fetch_uses_signed_in_gh_for_github(tmp_path, asks, monkeypat
     url = f"http://127.0.0.1:{server.server_port}"
     sh(f"git remote add origin {url}/private", repo)
 
-    gh_config = tmp_path / "gh-config"
-    gh_config.mkdir()
-    (gh_config / "hosts.yml").write_text(hosts)
-    monkeypatch.setenv("GH_CONFIG_DIR", str(gh_config))
+    hosts = tmp_path / "gh-config" / "hosts.yml"
+    hosts.parent.mkdir()
+    monkeypatch.setenv("GH_CONFIG_DIR", str(hosts.parent))
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    gh_log = tmp_path / "gh-log"
+    log = tmp_path / "gh-log"
     revoked = tmp_path / "revoked"
-    _script(bin_dir / "gh", f'echo "telemetry=$GH_TELEMETRY $*" >> "{gh_log}"\n'
-                            'case "$1 $2" in\n"config get") echo me ;;\n'
-                            f'"auth git-credential") [ "$3" = get ] && {{ [ -f "{revoked}" ] && pw=old || pw=from-gh;'
-                            ' printf "username=me\\npassword=$pw\\n"; } ;;\nesac')
+    _script(bin_dir / "gh", f'echo "$*" >> "{log}"\n'
+                            f'if ! grep -q "^    oauth_token: [a-z]" "{hosts}" || grep -q "^ghe" "{hosts}"; then\n'
+                            f'  /usr/bin/security -h > /dev/null 2>&1 && echo KEYRING-REACHED >> "{log}"\nfi\n'
+                            '[ "$1 $2" = "config get" ] && echo me && exit 0\n'
+                            f'grep -q "^    oauth_token: [a-z]" "{hosts}" || exit 1\n'
+                            '[ "$1 $2 $3" = "auth git-credential get" ] || exit 0\n'
+                            f'[ -f "{revoked}" ] && pw=old || pw=from-gh\n'
+                            'printf "username=me\\npassword=$pw\\n"')
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
-    monkeypatch.setattr(git, "gh_credential_helper", _real_gh_lookup)
     monkeypatch.setattr(git, "gh_token_in_file", _real_gh_file_check)
+    monkeypatch.setattr(git, "gh_credential_helper", _real_gh_lookup)    # a background call must not start this one
     monkeypatch.setattr(git, "_gh_seen", {})
+    yield SimpleNamespace(repo=repo, url=url, hosts=hosts, log=log, revoked=revoked, bin=bin_dir)
+    server.shutdown()
+
+
+@pytest.mark.parametrize("hosts, signs_in", [
+    pytest.param(_TOKEN_IN_FILE, True, id="token-in-gh-config"),
+    pytest.param(_TOKEN_IN_KEYCHAIN, False, id="token-in-keychain"),
+    pytest.param(_USERS.format(per_user=f"            oauth_token: {_FILE_TOKEN}\n", host=""), False, id="per-user-only",
+                 marks=pytest.mark.variant("gh tries the keyring before a per-user file token")),
+    pytest.param(_USERS.format(per_user="", host='    oauth_token: ""\n'), False, id="empty-host-token",
+                 marks=pytest.mark.variant("an empty token falls through to the keyring")),
+])
+def test_background_fetch_uses_signed_in_gh_for_github(tmp_path, asks, gh_with_private_origin, monkeypatch, hosts, signs_in):
+    origin = gh_with_private_origin
+    repo = origin.repo
+    origin.hosts.write_text(hosts)
+    # Every platform's test: the real sandbox has its own test below.
+    monkeypatch.setattr(git, "_SANDBOX_EXEC", str(_script(origin.bin / "sandbox-exec", 'shift 2\nexec "$@"')))
 
     def helper_for(host_url):
         return git.background(["config", "--get-urlmatch", "credential.helper", host_url], repo).stdout.strip()
 
+    assert ("sandbox-exec" in helper_for("https://github.com")) == signs_in
     assert ("auth git-credential" in helper_for("https://github.com")) == signs_in
     assert helper_for("https://example.com") == "" and helper_for("http://github.com") == ""    # never another host's
 
-    # The local origin plays github.com: a real fetch, with the helper scoped to it.
-    monkeypatch.setattr(git, "_GITHUB_HELPER", f"credential.{url}.helper")
+    # A real fetch, with the helper scoped to the local origin.
+    monkeypatch.setattr(git, "_GITHUB_HELPER", f"credential.{origin.url}.helper")
     assert git.background_fetch(repo, ["--quiet", "origin", "main"]) == signs_in
     assert git.fetch_refused(repo) != signs_in
     assert not asks.seen.exists()    # the person's own helper (the keychain's) stays out of it
     if not signs_in:
-        server.shutdown()
-        assert not gh_log.exists()   # gh isn't even started: its token may be behind a dialog
+        assert not origin.log.exists()   # gh isn't even started: nothing for it to answer with
         return
+    assert origin.log.read_text().splitlines() == ["auth git-credential get", "auth git-credential store"]
 
-    assert "telemetry=false auth git-credential get" in gh_log.read_text()    # gh starts nothing else of its own
-    assert git.background_fetch(repo, ["--quiet", "origin", "main"])
-    assert gh_log.read_text().count("config get") == 1     # a poll doesn't ask gh about its sign-in each time
-
-    # gh's answer stops working: the decision goes, and polls don't keep starting gh for it.
-    revoked.touch()
+    # gh's answer stops working: polls don't keep starting gh for it.
+    origin.revoked.touch()
     assert not git.background_fetch(repo, ["--quiet", "origin", "main"]) and git.fetch_refused(repo)
-    assert git._gh_seen == {}
-    used = gh_log.read_text()
+    used = origin.log.read_text()
     assert not git.background_fetch(repo, ["--quiet", "origin", "main"])
-    assert gh_log.read_text() == used
+    assert origin.log.read_text() == used
     monkeypatch.setattr(git, "GH_SEEN_SECONDS", 0)     # that short while is over: gh is asked afresh, and works again
-    revoked.unlink()
+    origin.revoked.unlink()
     assert git.background_fetch(repo, ["--quiet", "origin", "main"]) and not git.fetch_refused(repo)
-    assert gh_log.read_text().count("config get") >= 2
-    server.shutdown()
-
-    # The token moved to the keychain (`gh auth login`): the next call sees it at once, whatever is cached.
-    (gh_config / "hosts.yml").write_text(_USERS.format(per_user="", host=""))
-    used = gh_log.read_text()
-    assert helper_for("https://github.com") == ""
-    assert gh_log.read_text() == used
 
     # gh's own order of where its config lives.
     monkeypatch.delenv("GH_CONFIG_DIR")
@@ -229,6 +234,41 @@ def test_background_fetch_uses_signed_in_gh_for_github(tmp_path, asks, monkeypat
     (tmp_path / "xdg" / "gh").mkdir(parents=True)
     (tmp_path / "xdg" / "gh" / "hosts.yml").write_text(hosts)
     assert git.gh_token_in_file()
+
+    # Without the sandbox (not macOS, or Apple took it away) gh isn't used at all.
+    monkeypatch.setattr(git, "_GITHUB_HELPER", "credential.https://github.com.helper")
+    monkeypatch.setattr(git, "_SANDBOX_EXEC", str(tmp_path / "no-sandbox-exec"))
+    assert helper_for("https://github.com") == ""
+
+
+@pytest.mark.parametrize("hosts, moved_before_git_starts, fetched", [
+    pytest.param(_TOKEN_IN_FILE, True, False, id="token-moved-to-keychain-after-the-check"),
+    pytest.param(f"{_TOKEN_IN_FILE}ghe.example.com:\n    user: me\n", False, True, id="unmigrated-keychain-host-beside-it"),
+])
+def test_gh_cannot_reach_the_keychain_from_a_background_call(asks, gh_with_private_origin, monkeypatch, tmp_path,
+                                                             hosts, moved_before_git_starts, fetched):
+    """However gh comes to want the keyring, whatever was true when brindle looked: the real sandbox."""
+    try:
+        sh("/usr/bin/sandbox-exec -p '(version 1)(allow default)' /usr/bin/true", tmp_path)
+    except subprocess.CalledProcessError:
+        pytest.skip("no sandbox-exec here, or this run is sandboxed already")
+    origin = gh_with_private_origin
+    origin.hosts.write_text(hosts)
+    monkeypatch.setattr(git, "_GITHUB_HELPER", f"credential.{origin.url}.helper")
+    if moved_before_git_starts:
+        real_env = git._background_env
+
+        def token_moves(cwd):
+            origin.hosts.write_text(_TOKEN_IN_KEYCHAIN)     # `gh auth login` in another terminal
+            return real_env(cwd)
+
+        monkeypatch.setattr(git, "_background_env", token_moves)
+
+    assert git.background_fetch(origin.repo, ["--quiet", "origin", "main"]) == fetched
+    ran = origin.log.read_text()
+    assert "auth git-credential get" in ran     # gh did run, and wanted the keyring
+    assert "KEYRING-REACHED" not in ran and "config get" not in ran
+    assert not asks.seen.exists()
 
 
 def test_agent_panes_sign_in_to_github_through_gh_without_the_keychain_helper(db, tmp_path, asks, monkeypatch):
