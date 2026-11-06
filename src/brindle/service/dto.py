@@ -173,13 +173,14 @@ class SessionDTO(_DTO):
     created_at: float
     status_since: float | None = None
     goal: str | None = None
+    request: str | None = None   # full startup prompt, before the goal is derived
     name: str | None = None      # the person's name for the session; shown instead of the goal
 
     @classmethod
     def from_agent(cls, a: Agent, goal: str | None = None) -> SessionDTO:
         return cls(id=a.id, workspace_id=a.workspace_id, profile=a.profile, status=a.status,
                    mode=a.mode, created_at=a.created_at, status_since=a.status_since, goal=goal,
-                   name=a.name)
+                   name=a.name, request=a.task)
 
 
 class PermissionChoiceDTO(_DTO):

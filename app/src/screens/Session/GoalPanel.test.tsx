@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { ReactElement } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import App from "../../App";
@@ -84,6 +84,36 @@ function holdingClient(daemon: FakeDaemon, path: string) {
 const unfold = () => fireEvent.click(screen.getByRole("button", { name: /^Milestones \(/ }));
 
 describe("GoalPanel", () => {
+  it("copies the complete original request from the session header by double-click or button", async () => {
+    const request = "Build a goal screen.\n" + "Keep the original request readable and copyable. ".repeat(20);
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [{ ...appSession, request }], workspaces: [root], goal: { ...structuredClone(goal), root_id: APP_ROOT } });
+    const client = daemon.client();
+    const store = createAppStore();
+    const sync = startSync({ client, store, connect: daemon.connect });
+    localStorage.setItem(ONBOARDED_KEY, "1");
+    render(<PtyViewsProvider value={daemon.ptyViews()}><App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: APP_ROOT, repo: REPO }} /></PtyViewsProvider>);
+    try {
+      const original = await screen.findByTestId("session-request");
+      expect(original.textContent).toBe(request);
+      expect(original.className).toContain("line-clamp-3");
+      fireEvent.dblClick(original);
+      await waitFor(() => expect(daemon.clipboard).toBe(request));
+      fireEvent.click(screen.getByRole("button", { name: "Show full request" }));
+      expect(original.className).not.toContain("line-clamp-3");
+      daemon.clipboard = "";
+      vi.useFakeTimers();
+      await act(async () => fireEvent.click(screen.getByRole("button", { name: "Copy original request" })));
+      expect(daemon.clipboard).toBe(request);
+      const feedback = screen.getByTestId("session-request").parentElement!.querySelector('[role="status"]')!;
+      expect(feedback.textContent).not.toBe("");
+      act(() => vi.advanceTimersByTime(2000));
+      expect(feedback.textContent).toBe("");
+    } finally {
+      vi.useRealTimers();
+      sync.stop();
+    }
+  });
+
   it("sends the session root with each request", async () => {
     const daemon = new FakeDaemon({ goal: structuredClone(goal) });
     const store = createAppStore();

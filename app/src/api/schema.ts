@@ -995,6 +995,7 @@ export interface SessionDTO {
   mode: string;
   name?: string | null;
   profile: string;
+  request?: string | null;
   status: string;
   status_since?: number | null;
   workspace_id: string;
