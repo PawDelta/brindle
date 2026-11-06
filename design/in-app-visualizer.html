@@ -351,6 +351,8 @@ button { cursor: pointer; }
 .fits dt.y { color: var(--pass); } .fits dt.no { color: var(--ink-3); }
 /* Inbox banner replica (screens/Inbox/InboxScreen.tsx Banner) */
 .ibx { padding: 18px 18px 0; display: flex; flex-direction: column; gap: 8px; }
+.ibx-page { padding: 4px 24px 28px; display: flex; flex-direction: column; gap: 22px; max-width: 920px; }
+.ibx-grp { display: flex; flex-direction: column; gap: 8px; }
 .ibx-gh { display: flex; align-items: baseline; gap: 10px; padding: 0 2px; }
 .ibx-gh h4 { margin: 0; font-size: 13.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ibx-gh span { font-size: 11.5px; color: var(--ink-3); white-space: nowrap; }
@@ -615,7 +617,7 @@ html.shot .topbar { position: static; }
       <div><b>Answers are host chrome</b>A pick inside the page only proposes. The answer bar under it is brindle's own, with options from the tool call, and sends on your click.</div>
     </div>
     <div class="demo-ctl">
-      <div class="seg" role="group" aria-label="View"><button data-view="visuals" aria-pressed="true">Visuals place</button><button data-view="session" aria-pressed="false">Inside a session</button></div>
+      <div class="seg" role="group" aria-label="View"><button data-view="inbox" aria-pressed="false">Inbox</button><button data-view="visuals" aria-pressed="true">Visuals place</button><button data-view="session" aria-pressed="false">Inside a session</button></div>
       <button class="lnk" type="button" id="sim-auto">Simulate auto-open</button>
       <span class="t-3">·</span>
       <button class="lnk" type="button" id="reset">Reset</button>
@@ -638,10 +640,10 @@ html.shot .topbar { position: static; }
             </div>
             <section class="ctx" aria-label="Session context">
               <div class="ctx-h">
-                <div class="ctx-title">Ship the one-approval release flow</div>
-                <div class="ctx-meta"><span class="mono">a3c91e07</span> · brindle · autopilot · 2 working</div>
+                <div class="ctx-title" id="ctx-title">Ship the one-approval release flow</div>
+                <div class="ctx-meta" id="ctx-meta"><span class="mono">a3c91e07</span> · brindle · autopilot · 2 working</div>
               </div>
-              <div class="side-ms">
+              <div class="side-ms" id="ctx-ms">
                 <div class="m" data-state="done"><span class="i">✓</span><span class="t">Feed gate merged<small>pytest tests/test_feed.py · passed</small></span></div>
                 <div class="m" data-state="now"><span class="i">2</span><span class="t">Release flow with one approval<small id="ms2">waiting on your choice of flow</small></span></div>
                 <div class="m" data-state="todo"><span class="i">3</span><span class="t">Changelog sync on tag</span></div>
@@ -652,18 +654,18 @@ html.shot .topbar { position: static; }
             <div class="tree">
               <div>
                 <div class="repo-h">brindle</div>
-                <button class="srow" type="button" id="row-a3"><span class="side-dot" data-tone="work"></span><span style="min-width:0;flex:1"><span class="nm">Ship the one-approval release flow</span><span class="mt"><code>a3c91e07</code> · autopilot · 4 agents · 2 working</span></span><span class="fold">▾</span></button>
+                <button class="srow" type="button" data-row-s="a3c91e07"><span class="side-dot" data-tone="work"></span><span style="min-width:0;flex:1"><span class="nm">Ship the one-approval release flow</span><span class="mt"><code>a3c91e07</code> · autopilot · 4 agents · 2 working</span></span><span class="fold">▾</span></button>
                 <ul class="agents">
                   <li><span class="side-dot" data-tone="work"></span>a3c91e07 · supervisor<span>working</span></li>
                   <li><span class="side-dot" data-tone="work"></span>e1f07a2c · developer<span>working</span></li>
                   <li><span class="side-dot" data-tone="done"></span>9d24b6f1 · reviewer<span>done</span></li>
                 </ul>
-                <button class="srow" type="button"><span class="side-dot"></span><span style="min-width:0;flex:1"><span class="nm">Knowledge map ranks decisions first</span><span class="mt"><code>5be20d14</code> · manual · 1 agent</span></span><span class="fold">▸</span></button>
+                <button class="srow" type="button" data-row-s="5be20d14"><span class="side-dot"></span><span style="min-width:0;flex:1"><span class="nm">Knowledge map ranks decisions first</span><span class="mt"><code>5be20d14</code> · manual · 1 agent</span></span><span class="fold">▸</span></button>
                 <div class="paused"><span>▸</span>Paused · 2</div>
               </div>
               <div>
                 <div class="repo-h">pawdelta-web</div>
-                <button class="srow" type="button"><span class="side-dot" data-tone="wait"></span><span style="min-width:0;flex:1"><span class="nm">Release notes for 0.6.2</span><span class="mt"><code>c07e19aa</code> · autopilot · 1 agent</span></span><span class="fold">▸</span></button>
+                <button class="srow" type="button" data-row-s="c07e19aa"><span class="side-dot" data-tone="wait"></span><span style="min-width:0;flex:1"><span class="nm">Release notes for 0.6.2</span><span class="mt"><code>c07e19aa</code> · autopilot · 1 agent</span></span><span class="fold">▸</span></button>
               </div>
             </div>
             <div class="status"><span class="usage">Claude <span class="bar"><i></i></span>41% · resets Mon</span><span>v0.6.1</span></div>
@@ -687,24 +689,7 @@ html.shot .topbar { position: static; }
         <div class="stage">
           <div class="ibx">
             <div class="ibx-gh"><h4>Ship the one-approval release flow</h4><span>a3c91e07 · brindle</span></div>
-            <article class="ibx-card new">
-              <div class="ibx-k">question · visual <span class="newmark">new</span></div>
-              <div class="ibx-t">Which release flow should 0.6.2 ship with?</div>
-              <div class="ibx-d">Three flows drawn side by side, with where the approval sits in each.</div>
-              <div class="thumb" aria-hidden="true">
-                <div><b>A</b><span class="fl"><span></span><span></span><span class="g"></span><span></span></span><i class="m"></i><i class="s"></i></div>
-                <div class="rec"><b>B</b><span class="fl"><span></span><span class="g"></span><span></span><span></span></span><i class="m"></i><i class="s"></i></div>
-                <div><b>C</b><span class="fl"><span class="g"></span><span></span><span class="g"></span><span></span></span><i class="m"></i><i class="s"></i></div>
-              </div>
-              <div class="ibx-r"><span class="mono">supervisor</span><span>Ship the one-approval…</span><span class="mono" style="font-size:11px">4m ago</span></div>
-              <div class="ibx-acts">
-                <button class="act" type="button"><svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2" y="3" width="12" height="10" rx="1.5"/><path d="M2 6h12"/></svg>Open visual</button>
-                <span class="t-3" style="font-size:11px;margin-left:4px">or answer</span>
-                <button class="act ghost" type="button">A</button><button class="act ghost" type="button">B</button><button class="act ghost" type="button">C</button>
-                <span class="flex1"></span>
-                <button class="link" type="button">Go to session ›</button>
-              </div>
-            </article>
+            <div id="ibx-demo"></div>
           </div>
         </div>
         <dl class="fits">
@@ -1026,11 +1011,12 @@ visuals can't reach the network (CSP)</pre>
         <text class="dg-t" x="326" y="377">Visuals place · session strip</text>
         <text class="dg-s" x="326" y="396">tabs, list, chips, side panel</text>
         <text class="dg-s" x="326" y="412">live from bus: visual.*</text>
-        <rect class="dg-n untrust" x="620" y="344" width="200" height="96" rx="5"/>
+        <rect class="dg-n untrust" x="620" y="340" width="210" height="112" rx="5"/>
         <text class="dg-t" x="636" y="369">Sandboxed frame</text>
         <text class="dg-s" x="636" y="388">brindle-visual://&lt;id&gt;/r2</text>
         <text class="dg-s" x="636" y="404">sandbox=allow-scripts</text>
         <text class="dg-s" x="636" y="420">CSP: default-src 'none'</text>
+        <text class="dg-s" x="636" y="436">+ host denies all navigation</text>
         <rect class="dg-n trust" x="870" y="352" width="180" height="80" rx="5"/>
         <text class="dg-t" x="886" y="377">Answer bar</text>
         <text class="dg-s" x="886" y="396">host chrome; options</text>
@@ -1046,9 +1032,9 @@ visuals can't reach the network (CSP)</pre>
         <text class="dg-al" x="450" y="310">visual.published</text>
         <path class="dg-a" d="M570 392 H616"/>
         <text class="dg-al" x="573" y="384">open</text>
-        <path class="dg-a" d="M820 392 H866"/>
-        <text class="dg-al" x="818" y="458">postMessage {choice}</text>
-        <path class="dg-a" d="M842 392 V452 M842 452 H842" style="marker-end:none;stroke-dasharray:2 3"/>
+        <path class="dg-a" d="M830 392 H866"/>
+        <text class="dg-al" x="838" y="464">postMessage {choice}</text>
+        <path class="dg-a" d="M848 392 V452" style="marker-end:none;stroke-dasharray:2 3"/>
         <path class="dg-a ret" d="M960 352 V264"/>
         <text class="dg-al ret" x="970" y="310">Send (your click)</text>
         <path class="dg-a ret dash" d="M850 236 H804"/>
@@ -1064,7 +1050,7 @@ visuals can't reach the network (CSP)</pre>
         <g><circle class="dg-num" cx="593" cy="230" r="9"/><text class="dg-numt" x="593" y="233.5">3</text></g>
         <g><circle class="dg-num" cx="440" cy="290" r="9"/><text class="dg-numt" x="440" y="293.5">4</text></g>
         <g><circle class="dg-num" cx="593" cy="402" r="9"/><text class="dg-numt" x="593" y="405.5">5</text></g>
-        <g><circle class="dg-num" cx="843" cy="402" r="9"/><text class="dg-numt" x="843" y="405.5">6</text></g>
+        <g><circle class="dg-num" cx="848" cy="404" r="9"/><text class="dg-numt" x="848" y="407.5">6</text></g>
         <g><circle class="dg-num" cx="960" cy="296" r="9"/><text class="dg-numt" x="960" y="299.5">7</text></g>
         <g><circle class="dg-num" cx="1155" cy="160" r="9"/><text class="dg-numt" x="1155" y="163.5">8</text></g>
       </svg>
@@ -1089,7 +1075,9 @@ visuals can't reach the network (CSP)</pre>
         <h3>Rendering</h3>
         <ul>
           <li>Served by the daemon on its own scheme, <code>brindle-visual://</code>, never from the app's origin, with a CSP header: <code>default-src 'none'; script-src/style-src 'unsafe-inline'; img-src data: blob:</code>.</li>
-          <li><code>&lt;iframe sandbox="allow-scripts"&gt;</code> without <code>allow-same-origin</code>, forms, popups, modals or top navigation: an opaque origin with no storage and no way out.</li>
+          <li><code>&lt;iframe sandbox="allow-scripts"&gt;</code> without <code>allow-same-origin</code>, forms, popups, modals or top navigation: an opaque origin with no storage.</li>
+          <li><b>CSP and the sandbox are not enough on their own:</b> a sandboxed frame may still navigate itself (<code>location.href = "https://…?d=…"</code>, a meta refresh, a link it clicks), and <code>default-src</code> doesn't govern that, nor WebRTC. So the host denies by default: the webview's navigation and request hooks (Tauri's protocol handler and <code>on_navigation</code>; WebView2 <code>NavigationStarting</code> / <code>WebResourceRequested</code>; WebKitGTK <code>decide-policy</code>) let a visual frame load only <code>brindle-visual://&lt;id&gt;/r&lt;n&gt;</code> and its own <code>data:</code> / <code>blob:</code> URLs. Every other navigation, subresource and redirect, a protocol-handler redirect included, is refused, and the attempt marks the visual failed. <code>RTCPeerConnection</code> is removed before the page's script runs.</li>
+          <li><b>Proved before it's built on:</b> a suite of hostile probe pages (self-navigation, meta refresh, anchor and <code>window.open</code>, a redirecting <code>brindle-visual</code> URL, CSS / image / font URLs, prefetch and DNS-prefetch hints, WebSocket, EventSource, beacon, WebRTC ICE) runs in each shipped webview (macOS WKWebView, Windows WebView2, Linux WebKitGTK) against a local listener that must see zero requests. It stays as a CI test for the shell.</li>
           <li>brindle prepends its token sheet (<code>--canvas</code>, <code>--ink</code>, …) and sends the theme on change, so a page written against the tokens matches the app in light and dark.</li>
           <li>Only the active tab is mounted; hidden ones unload.</li>
         </ul>
@@ -1107,7 +1095,8 @@ visuals can't reach the network (CSP)</pre>
     <table class="risk">
       <thead><tr><th>Risk: agents write this HTML</th><th>What could happen</th><th>Mitigation</th></tr></thead>
       <tbody>
-        <tr><td>Data leaving the machine</td><td>A page fetches, beacons or embeds a remote image carrying repo contents.</td><td>CSP with no network at all (no connect, img, font or frame sources), set by the daemon as a header; opaque-origin sandbox. A violation marks the visual failed and says what it tried.</td></tr>
+        <tr><td>Data leaving the machine</td><td>A page fetches, beacons or embeds a remote image carrying repo contents.</td><td>A CSP header from the daemon with no connect, img, font or frame sources, and an opaque-origin sandbox. A violation marks the visual failed and says what it tried.</td></tr>
+        <tr><td>Navigating away with the data</td><td>The frame navigates itself (<code>location.href</code>, a meta refresh, a link) to a URL carrying repo contents, or a <code>brindle-visual</code> response redirects out. <code>sandbox="allow-scripts"</code> and <code>default-src</code> both allow this.</td><td>A host-level policy that denies by default: the webview's navigation and request hooks allow a visual frame only its own <code>brindle-visual://&lt;id&gt;</code> URLs; everything else, redirects included, is refused. The probe suite above proves it on every shipped webview before any visual ships, and stays in CI.</td></tr>
         <tr><td>Forged answers</td><td>A page posts a choice on load, or makes a fake “Send” the person clicks.</td><td>Posts only highlight; the send button is host chrome outside the frame, needs a real click, and only offers the tool call's options. Answers are logged with the revision they were made on.</td></tr>
         <tr><td>Impersonating brindle</td><td>A page draws a sign-in box or a fake permission prompt.</td><td>The frame always sits inside a labelled border (author, session, “sandboxed · no network”); it can't open dialogs, go fullscreen or navigate the window; brindle never asks for secrets inside a visual, and says so in the provenance line.</td></tr>
         <tr><td>Injection back into the agent</td><td>Page text tries to reach the agent as instructions.</td><td>Only the option id and the person's own note travel back, wrapped as brindle's delivered message from the person.</td></tr>
@@ -1170,9 +1159,12 @@ function pushTheme() {
 
 /* ── Data ──────────────────────────────────────────────────────────────── */
 const SESSIONS = {
-  a3c91e07: { name: "Ship the one-approval release flow", repo: "brindle" },
-  "5be20d14": { name: "Knowledge map ranks decisions first", repo: "brindle" },
-  c07e19aa: { name: "Release notes for 0.6.2", repo: "pawdelta-web" },
+  a3c91e07: { name: "Ship the one-approval release flow", repo: "brindle", meta: "brindle · autopilot · 2 working", ask: "v_8f2c", wait: "waiting on your choice of flow", on: "e1f07a2c on it",
+    ms: [["done", "Feed gate merged", "pytest tests/test_feed.py · passed"], ["now", "Release flow with one approval"], ["todo", "Changelog sync on tag"]] },
+  "5be20d14": { name: "Knowledge map ranks decisions first", repo: "brindle", meta: "brindle · manual · 1 agent", ask: "v_c4e9", wait: "waiting on your ranking", on: "supervisor on it",
+    ms: [["now", "Rank the decision cards"], ["todo", "Edges between related decisions"]] },
+  c07e19aa: { name: "Release notes for 0.6.2", repo: "pawdelta-web", meta: "pawdelta-web · autopilot · 1 agent", wait: "draft rev 3 up · review waits on you",
+    ms: [["done", "Collect 0.6.2 changes", "12 PRs · read"], ["now", "Draft the notes"], ["todo", "Sync and deploy the site"]] },
 };
 const RELEASE = [
   { id: "a", label: "Tag first", detail: "merge, tag, then approve publish", flow: ["PR", "merge", "tag", "approve", "publish"], gate: 3, pro: ["Fastest hotfix path", "No change to CI"], con: ["A tag exists before anyone approves"] },
@@ -1196,10 +1188,13 @@ const V = [
 const byId = (id) => V.find((v) => v.id === id);
 
 /* ── State ─────────────────────────────────────────────────────────────── */
-const S = { view: "visuals", tabs: ["v_8f2c", "v_c4e9", "v_31d0", "v_e510"], active: "v_8f2c", filter: "all", sess: "all", picks: {}, picked: {}, sent: {}, notes: {}, panel: null, auto: false, inbox: 3, flow: null };
-function reset() { Object.assign(S, { view: "visuals", tabs: ["v_8f2c", "v_c4e9", "v_31d0", "v_e510"], active: "v_8f2c", filter: "all", sess: "all", picks: {}, picked: {}, sent: {}, notes: {}, panel: null, auto: false, inbox: 3, flow: null }); V.forEach((v) => { v.unread = v.id === "v_8f2c" || v.id === "v_c4e9"; }); render(true); }
+const FRESH = () => ({ view: "visuals", svs: "a3c91e07", tabs: ["v_8f2c", "v_c4e9", "v_31d0", "v_e510"], active: "v_8f2c", filter: "all", sess: "all", picks: {}, picked: {}, sent: {}, notes: {}, panel: null, auto: false, flow: null });
+const S = FRESH();
+function reset() { Object.assign(S, FRESH()); V.forEach((v) => { v.unread = v.id === "v_8f2c" || v.id === "v_c4e9"; }); render(); }
 const asks = (v) => v.question && !v.decided && !S.sent[v.id] && !v.stale;
 const isDecided = (v) => v.decided || S.sent[v.id];
+/* The Inbox: one card per visual that asks you, plus a branch review that isn't a visual. */
+const inboxCount = () => V.filter(asks).length + 1;
 
 /* ── The visual's own page (untrusted HTML, rendered sandboxed) ────────── */
 function pageCss() {
@@ -1302,7 +1297,7 @@ function head(v, inPanel) {
   const s = SESSIONS[v.s];
   const acts = inPanel
     ? `<button class="quiet" type="button" data-pop="${v.id}" title="Open as a tab in Visuals"><svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M9 2h5v5M14 2 8 8M12 9.5V13a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1h3.5"/></svg>Open as tab</button><button class="btn-dots" type="button" data-close-panel aria-label="Close">×</button>`
-    : `<button class="link" type="button" data-goto="${v.s}">Open in session ›</button><button class="btn-dots" type="button" aria-label="More">⋯</button>`;
+    : `<button class="link" type="button" data-goto="${v.s}" data-gv="${v.id}">Open in session ›</button><button class="btn-dots" type="button" aria-label="More">⋯</button>`;
   return `<div class="vhead"><div class="b"><h5>${v.title}</h5><div class="vmeta"><span class="sq" data-s="${v.s}"></span><span>${v.by}</span><span class="dot">·</span>${inPanel ? "" : `<span>${s.name}</span><span class="dot">·</span>`}<code>${v.s}</code><span class="dot">·</span><span>rev ${v.rev} · ${v.age} ago</span></div></div><div class="vacts">${acts}</div></div>`;
 }
 function prov(v) {
@@ -1345,40 +1340,92 @@ function visualsView() {
     </div>
   </div>`;
 }
-function termText() {
-  const sent = S.sent.v_8f2c;
-  const o = sent && RELEASE.find((x) => x.id === sent);
-  return `<span class="a">●</span> Feed gate merged into brindle/session-3.
+/* Each session's own chat: its intro, a link per visual it drew, and, once you answer one of
+   its visuals, the delivered message and what the supervisor does next. */
+const vlink = (id, sub) => `  <span class="vl" data-openv="${id}">◧ ${byId(id).title}</span>\n  <span class="d">  ${sub}</span>`;
+const CHAT = {
+  a3c91e07: {
+    intro: () => `<span class="a">●</span> Feed gate merged into brindle/session-3.
   Milestone 1's check passes.
 
 <span class="a">●</span> Milestone 2 needs a call from you: where the
   one approval sits. I drew the three flows.
 
-  <span class="vl" data-openv="v_8f2c">◧ Release flow: where the one approval sits</span>
-  <span class="d">  brindle · 3 options · asks you · ⌘⇧V</span>
+${vlink("v_8f2c", "brindle · 3 options · asks you · ⌘⇧V")}
 
 <span class="a">●</span> Meanwhile e1f07a2c keeps going on the
-  changelog sync; it doesn't depend on this.
-${sent ? `
-<span class="dl"><span class="d">brindle delivered this message from you
-(visual v_8f2c, rev 2):</span>
-<span class="a">Chose ${o.id.toUpperCase()} · ${o.label}</span>${S.notes.v_8f2c ? `\n<span class="d">note:</span> ${esc(S.notes.v_8f2c)}` : ""}</span>
-<span class="a">●</span> Going with ${o.label}. Assigning e1f07a2c
-  → <span class="d">feat/release-gate-ci</span>.
-` : ""}
-<span class="d">›</span> <span class="cur"></span>`;
+  changelog sync; it doesn't depend on this.`,
+    after: { v_8f2c: (o) => `Going with ${o.label}. Assigning e1f07a2c\n  → <span class="d">feat/release-gate-ci</span>.`, v_31d0: (o) => `Rule updated to ${o.label.toLowerCase()}.` },
+  },
+  "5be20d14": {
+    intro: () => `<span class="a">●</span> The map has 40 decision cards and no
+  clear order. I drew three rankings.
+
+${vlink("v_c4e9", "brindle · 3 options · asks you · ⌘⇧V")}
+
+<span class="d">  (an earlier layout is stale; kept to read)</span>`,
+    after: { v_c4e9: (o) => `Ranking ${o.label.toLowerCase()}. It's one small\n  change, so I'm doing it myself, no workers.` },
+  },
+  c07e19aa: {
+    intro: () => `<span class="a">●</span> Draft rev 3 of the 0.6.2 notes is up.
+  Nothing to decide; have a read.
+
+${vlink("v_e510", "brindle · read only")}
+
+<span class="b">●</span> The tone samples didn't render: I linked a
+  chart library from a CDN. Inlining it now.`,
+    after: {},
+  },
+};
+function termText(sid) {
+  const c = CHAT[sid];
+  const answered = V.filter((v) => v.s === sid && S.sent[v.id]).map((v) => {
+    const o = v.options.find((x) => x.id === S.sent[v.id]);
+    const then = c.after[v.id] ? `\n<span class="a">●</span> ${c.after[v.id](o)}` : "";
+    return `\n<span class="dl"><span class="d">brindle delivered this message from you
+(visual ${v.id}, rev ${v.rev}):</span>
+<span class="a">Chose ${o.id.toUpperCase()} · ${o.label}</span>${S.notes[v.id] ? `\n<span class="d">note:</span> ${esc(S.notes[v.id])}` : ""}</span>${then}\n`;
+  }).join("");
+  return `${c.intro()}\n${answered}\n<span class="d">›</span> <span class="cur"></span>`;
 }
 function sessionView() {
-  const mine = V.filter((v) => v.s === "a3c91e07");
+  const sid = S.svs;
+  const mine = V.filter((v) => v.s === sid);
   const p = S.panel && byId(S.panel);
   return `<div class="sv">
-    <header class="sbar"><span class="who">Claude · supervisor</span><code>a3c91e07</code><span class="st"><b>●</b> working <span class="t-3">· 2 min ago</span></span><span class="flex1"></span><button class="btn" type="button">Pause</button><button class="btn-dots" type="button" aria-label="More">⋯</button></header>
+    <header class="sbar"><span class="who">Claude · supervisor</span><code>${sid}</code><span class="st"><b>●</b> working <span class="t-3">· 2 min ago</span></span><span class="flex1"></span><button class="btn" type="button">Pause</button><button class="btn-dots" type="button" aria-label="More">⋯</button></header>
     <div class="vstrip" id="strip"><span class="lab">Visuals</span>${mine.map((v) => `<button class="vchip${v.unread ? " unread" : ""}" type="button" data-chip="${v.id}" aria-pressed="${S.panel === v.id}">${glyph(v)}<span class="tt">${v.title}</span>${asks(v) ? '<span class="ask">asks</span>' : ""}</button>`).join("")}<span class="flex1"></span><button class="link" type="button" data-allvis>All in Visuals ›</button></div>
     <div class="sv-body">
-      <div class="termwrap"><div class="shell term"><div class="tabs-s"><span class="on">chat</span><span>shell</span></div><pre id="term">${termText()}</pre></div></div>
+      <div class="termwrap"><div class="shell term"><div class="tabs-s"><span class="on">chat</span><span>shell</span></div><pre id="term">${termText(sid)}</pre></div></div>
       ${p ? `<aside class="panel" id="panel">${head(p, true)}${S.auto ? `<div class="autonote"><span><b>Opened for you</b>: the supervisor needs a decision.</span><button class="link" type="button">Turn off</button></div>` : ""}${body(p)}<div id="bar-panel">${bar(p, true)}</div></aside>` : ""}
     </div>
   </div>`;
+}
+
+/* The Inbox page (screens/Inbox/InboxScreen.tsx): a visual that asks you is a question card
+   with Open visual, quick answers from the tool call's options, and Go to session. */
+const THUMB = `<div class="thumb" aria-hidden="true"><div><b>A</b><span class="fl"><span></span><span></span><span class="g"></span><span></span></span><i class="m"></i><i class="s"></i></div><div class="rec"><b>B</b><span class="fl"><span></span><span class="g"></span><span></span><span></span></span><i class="m"></i><i class="s"></i></div><div><b>C</b><span class="fl"><span class="g"></span><span></span><span class="g"></span><span></span></span><i class="m"></i><i class="s"></i></div></div>`;
+function inboxCard(v) {
+  const quick = v.options.map((o) => `<button class="act ghost" type="button" data-qa="${v.id}" data-opt="${o.id}" title="${esc(o.label)}">${o.id.toUpperCase()}</button>`).join("");
+  return `<article class="ibx-card${v.unread ? " new" : ""}" data-card="${v.id}">
+    <div class="ibx-k">question · visual ${v.unread ? '<span class="newmark">new</span>' : ""}</div>
+    <div class="ibx-t">${v.question}</div>
+    <div class="ibx-d">${v.id === "v_8f2c" ? "Three flows drawn side by side, with where the approval sits in each." : "The same 40 cards ranked three ways, side by side."}</div>
+    ${THUMB}
+    <div class="ibx-r"><span class="mono">${v.by}</span><span style="max-width:220px;overflow:hidden;text-overflow:ellipsis">${SESSIONS[v.s].name}</span><span class="mono" style="font-size:11px">${v.age} ago</span></div>
+    <div class="ibx-acts"><button class="act" type="button" data-ov="${v.id}"><svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2" y="3" width="12" height="10" rx="1.5"/><path d="M2 6h12"/></svg>Open visual</button><span class="t-3" style="font-size:11px;margin-left:4px">or answer</span>${quick}<span class="flex1"></span><button class="link" type="button" data-goto="${v.s}">Go to session ›</button></div>
+  </article>`;
+}
+function inboxView() {
+  const cards = V.filter(asks);
+  const groups = Object.keys(SESSIONS).map((s) => ({ s, items: cards.filter((v) => v.s === s) }));
+  const n = inboxCount();
+  const html = groups.map(({ s, items }) => {
+    const review = s === "c07e19aa" ? `<article class="ibx-card"><div class="ibx-k" style="color:var(--branch)">review</div><div class="ibx-t">chore/notes-0.6.2 is ready for review</div><div class="ibx-d">The draft the supervisor drew as a visual; the branch waits on your read.</div><div class="ibx-r"><span class="mono">supervisor · chore/notes-0.6.2</span><span>Release notes for 0.6.2</span><span class="mono" style="font-size:11px">1h ago</span></div><div class="ibx-acts"><span class="t-3" style="font-size:11px">handled in its session</span><span class="flex1"></span><button class="link" type="button" data-goto="${s}">Go to session ›</button></div></article>` : "";
+    if (!items.length && !review) return "";
+    return `<section class="ibx-grp"><div class="ibx-gh"><h4>${SESSIONS[s].name}</h4><span>${s} · ${SESSIONS[s].repo}</span><span class="flex1"></span><button class="link" type="button" data-goto="${s}">Open the session ›</button></div>${items.map(inboxCard).join("")}${review}</section>`;
+  }).join("");
+  return `<div class="vz" style="overflow:auto"><div class="vz-head"><div class="flex1"><h3>Inbox</h3><p>${n} waiting across ${new Set([...cards.map((v) => v.s), "c07e19aa"]).size} sessions. A visual that asks you is a card here; open it, or answer from the card.</p></div></div><div class="ibx-page">${html}</div></div>`;
 }
 
 /* ── Render ────────────────────────────────────────────────────────────── */
@@ -1389,20 +1436,33 @@ function sidebar() {
   const unread = V.filter((v) => v.unread).length;
   $("#vis-n").innerHTML = `${V.length}${unread ? ` <span class="nw" title="${unread} new">${unread}</span>` : ""}`;
   const n = $("#inbox-n");
-  if (n.textContent !== String(S.inbox)) { n.textContent = S.inbox; }
+  if (n.textContent !== String(inboxCount())) n.textContent = inboxCount();
   $("#e-vis").setAttribute("aria-current", S.view === "visuals" ? "page" : "false");
-  $("#ms2").textContent = S.sent.v_8f2c ? `you chose ${S.sent.v_8f2c.toUpperCase()} · e1f07a2c on it` : "waiting on your choice of flow";
-  $("#row-a3").classList.toggle("sel", S.view === "session");
+  $("#e-inbox").setAttribute("aria-current", S.view === "inbox" ? "page" : "false");
+  $$("[data-row-s]").forEach((r) => r.classList.toggle("sel", S.view === "session" && r.dataset.rowS === S.svs));
   $$("[data-view]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.view === S.view)));
+  // The context pane: the session on screen, else the last one opened (as Sidebar.tsx does).
+  const s = SESSIONS[S.svs];
+  const ask = s.ask && byId(s.ask);
+  $("#ctx-title").textContent = s.name;
+  $("#ctx-meta").innerHTML = `<span class="mono">${S.svs}</span> · ${s.meta}`;
+  $("#ctx-ms").innerHTML = s.ms.map(([st, t, sub], i) => {
+    const small = st === "now" ? (ask && S.sent[ask.id] ? `you chose ${S.sent[ask.id].toUpperCase()} · ${s.on}` : s.wait) : sub;
+    return `<div class="m" data-state="${st}"><span class="i">${st === "done" ? "✓" : i + 1}</span><span class="t">${t}${small ? `<small>${small}</small>` : ""}</span></div>`;
+  }).join("");
 }
 function render() {
   const v = byId(S.active);
   if (S.view === "visuals" && v) v.unread = false;
   if (S.view === "session" && S.panel) byId(S.panel).unread = false;
-  $("#main").innerHTML = S.view === "visuals" ? visualsView() : sessionView();
-  if (S.flow) $("#main").insertAdjacentHTML("beforeend", `<div class="flowback"><span class="pd"></span><span>Sent to <b>supervisor</b> · it's in its chat now</span>${S.view === "visuals" ? '<button class="link" type="button" data-goto="a3c91e07">View ›</button>' : ""}</div>`);
+  $("#main").innerHTML = S.view === "visuals" ? visualsView() : S.view === "inbox" ? inboxView() : sessionView();
+  if (S.flow) { const f = byId(S.flow); $("#main").insertAdjacentHTML("beforeend", `<div class="flowback"><span class="pd"></span><span>Sent to <b>${f.by.split(" ")[0]}</b> in ${f.s} · it's in its chat now</span>${S.view === "session" && S.svs === f.s ? "" : `<button class="link" type="button" data-goto="${f.s}">View ›</button>`}</div>`); }
   mountFrames();
   sidebar();
+  // Section 2's card is the same live item: answered anywhere, it shows the answer here too.
+  const demo = byId("v_8f2c");
+  $("#ibx-demo").innerHTML = asks(demo) ? inboxCard(demo)
+    : `<article class="ibx-card"><div class="ibx-k" style="color:var(--pass)">question · answered</div><div class="ibx-t">Which release flow should 0.6.2 ship with?</div><div class="ibx-d">You chose ${S.sent.v_8f2c.toUpperCase()} · ${RELEASE.find((o) => o.id === S.sent.v_8f2c).label}; the card left the Inbox and the supervisor has it.</div><div class="ibx-acts"><button class="act" type="button" data-ov="v_8f2c">Open visual</button><span class="flex1"></span><button class="link" type="button" data-goto="a3c91e07">Go to session ›</button><button class="link" type="button" id="reset2" style="margin-left:12px">Reset</button></div></article>`;
   S.flash = null;
 }
 /* Only the answer bars and the chrome around them: the frame keeps its state. */
@@ -1420,17 +1480,25 @@ function openTab(id) {
 }
 function send(id) {
   const v = byId(id);
+  if (!S.picks[id] || isDecided(v) || v.stale) return;
   const note = $(`[data-note="${id}"]`);
   if (note) S.notes[id] = note.value.trim();
   S.sent[id] = S.picks[id];
-  S.inbox = Math.max(0, S.inbox - 1);
+  v.unread = false;
   S.flow = id;
   render();
-  const nb = $("#inbox-n"); nb.classList.remove("bump"); void nb.offsetWidth;
   $$("iframe[data-v]").forEach((f) => f.dataset.v === id && f.contentWindow.postMessage({ type: "brindle.locked" }, "*"));
   clearTimeout(send.t); send.t = setTimeout(() => { S.flow = null; const fb = $(".flowback"); fb && fb.remove(); }, 4200);
 }
 
+/* A session, by its id: its chips, its chat, its context pane; with `panel`, one of its visuals beside the chat. */
+function goSession(sid, panel) {
+  S.svs = sid; S.view = "session"; S.flow = null; S.auto = false;
+  S.panel = panel && byId(panel).s === sid ? panel : S.panel && byId(S.panel).s === sid ? S.panel : null;
+  render();
+}
+/* An entry outside the mock window (section 2's Inbox card) brings the window into view. */
+function intoView(el) { if (!el.closest(".win")) $(".win").scrollIntoView({ behavior: "smooth", block: "start" }); }
 document.addEventListener("click", (e) => {
   const t = e.target.closest("button, [data-openv]");
   if (!t) return;
@@ -1445,14 +1513,17 @@ document.addEventListener("click", (e) => {
   else if (d.chip) { S.panel = S.panel === d.chip ? null : d.chip; S.auto = false; render(); }
   else if (d.closePanel !== undefined) { S.panel = null; S.auto = false; render(); }
   else if (d.pop) { const id = d.pop; S.panel = null; openTab(id); }
-  else if (d.goto) { S.view = "session"; S.flow = null; S.panel = S.panel || (S.sent.v_8f2c ? null : null); render(); }
+  else if (d.goto) { goSession(d.goto, d.gv || null); }
   else if (d.allvis !== undefined) { S.view = "visuals"; render(); }
   else if (d.openv) { S.panel = d.openv; S.view = "session"; render(); }
+  else if (d.rowS) goSession(d.rowS, null);
+  else if (d.ov) { S.auto = false; openTab(d.ov); intoView(t); }
+  else if (d.qa) { if (!t.closest(".win")) S.view = "inbox"; S.picks[d.qa] = d.opt; send(d.qa); intoView(t); }
   else if (t.id === "e-vis") { S.view = "visuals"; render(); }
-  else if (t.id === "row-a3") { S.view = "session"; render(); }
-  else if (t.id === "reset") reset();
+  else if (t.id === "e-inbox") { S.view = "inbox"; S.flow = null; render(); }
+  else if (t.id === "reset" || t.id === "reset2") reset();
   else if (t.id === "sim-auto") {
-    S.view = "session"; S.panel = null; S.auto = false; S.flow = null; render();
+    S.view = "session"; S.svs = "a3c91e07"; S.panel = null; S.auto = false; S.flow = null; render();
     setTimeout(() => { S.panel = "v_8f2c"; S.auto = true; render(); }, 700);
   }
 });
@@ -1484,7 +1555,7 @@ function planGate() {
   const g = $("#pgate");
   g.classList.toggle("ok", P.phase === "approved");
   if (P.phase === "approved") {
-    g.innerHTML = `<span class="k">approved · rev ${P.rev}</span><span class="s"><b>Your answers went to the supervisor.</b> Workers starting:</span><span class="starts"><span><span class="side-dot" data-tone="work"></span>w1 · schema</span><span><span class="side-dot" data-tone="work"></span>w2 · engine</span><span><span class="side-dot"></span>w4 · queued after w2</span></span><span class="flex1"></span><button class="quiet" type="button" data-plan="reset">Reset</button>`;
+    g.innerHTML = `<span class="k">approved · rev ${P.rev}</span><span class="s"><b>Your answers went to the supervisor.</b> Workers starting:</span><span class="starts"><span><span class="side-dot" data-tone="work"></span>w1 · schema</span><span><span class="side-dot" data-tone="work"></span>w2 · engine</span>${P.rev === 1 ? '<span><span class="side-dot"></span>w3 · queued after w2</span>' : ""}<span><span class="side-dot"></span>w4 · queued after w2</span></span><span class="flex1"></span><button class="quiet" type="button" data-plan="reset">Reset</button>`;
     return;
   }
   g.innerHTML = `<span class="k">${P.rev === 2 ? "rev 2 · took your comments" : "plan · waits on you"}</span><span class="s"><b>Nothing has started.</b> ${comments} comment${comments === 1 ? "" : "s"} · ${changed} decision${changed === 1 ? "" : "s"} changed · ${answered} of 2 questions answered</span><span class="flex1"></span>${P.rev === 1 ? '<button class="btn sm" type="button" data-plan="redirect">Redirect with comments</button>' : ""}<button class="btn-main sm" type="button" data-plan="approve">Approve · start ${workers} workers</button>`;
@@ -1513,7 +1584,8 @@ if (q.get("panel")) S.panel = q.get("panel");
 if (q.get("active")) S.active = q.get("active");
 if (q.get("auto")) S.auto = true;
 if (q.get("pick")) { S.picks.v_8f2c = q.get("pick"); S.picked.v_8f2c = true; }
-if (q.get("sent")) { S.picks.v_8f2c = S.picks.v_8f2c || "b"; S.sent.v_8f2c = S.picks.v_8f2c; S.notes.v_8f2c = "keep the hotfix path"; S.inbox = 2; }
+if (q.get("sent")) { S.picks.v_8f2c = S.picks.v_8f2c || "b"; S.sent.v_8f2c = S.picks.v_8f2c; S.notes.v_8f2c = "keep the hotfix path"; }
+if (q.get("svs")) S.svs = q.get("svs");
 if (q.get("steps")) $$("#steps .step").forEach((s, i) => s.classList.add(i < 2 ? "done" : i === 2 ? "on" : "x"));
 render();
 if (q.get("theme")) setTheme(q.get("theme"));
