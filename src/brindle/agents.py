@@ -1127,6 +1127,11 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
             resume: str | None, watch_pane: bool, background_setup: bool = False,
             model_checked: bool = False) -> None:
     """Serialize reviewer launches with death recovery before running preflight."""
+    _gate_check()
+    try:
+        upgrade.check_launch()
+    except upgrade.StaleInstall as e:
+        raise AgentError(str(e)) from e
     if agent.mode == "review":
         # Recovery and resume share the whole launch, including preflight. A
         # stale resume must not revive a reviewer recovery has already replaced.
@@ -1156,11 +1161,6 @@ def _launch_checked(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
 
     Within a gated resume (resume's ``gate``), the preflight checks the gate
     and the launch itself holds it (_gate_commit)."""
-    _gate_check()
-    try:
-        upgrade.check_launch()
-    except upgrade.StaleInstall as e:
-        raise AgentError(str(e)) from e
     from brindle import preflight, provider_homes
 
     # A provider the person turned off in brindle never starts, and nothing
