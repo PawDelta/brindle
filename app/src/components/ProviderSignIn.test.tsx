@@ -84,8 +84,20 @@ describe("ProviderSignIn, the CLI read through a pty view", () => {
   });
 
   it("reads the CLI once the shell says the pty view can run, though it said so only after the login answered", async () => {
-    const { daemon, check, shell, flow } = setup();
-    fireEvent.click(screen.getByRole("button", { name: "Sign in to Gemini (Antigravity)" }));
+    const { daemon, check, shell, flow, release } = setup(true);
+    // While the login starts, the button stays: still for 300ms, then busy (LoadingButton).
+    vi.useFakeTimers();
+    try {
+      const signIn = screen.getByRole("button", { name: "Sign in to Gemini (Antigravity)" });
+      await act(async () => { fireEvent.click(signIn); await vi.advanceTimersByTimeAsync(299); });
+      expect(signIn.isConnected).toBe(true);
+      expect(signIn.getAttribute("aria-busy")).toBeNull();
+      await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+      expect(signIn.getAttribute("aria-busy")).toBe("true");
+    } finally {
+      vi.useRealTimers();
+    }
+    release();
     await waitFor(() => expect(flow().dataset.phase).toBe("waiting"));
     // Still pending: nothing can read the pane yet, and nothing is opened.
     await flush();

@@ -317,6 +317,8 @@ def test_interactive_supervisor_on_autonomous_needs_no_grants(db, ws, monkeypatc
     monkeypatch.setenv("BRINDLE_AGENT_ID", "sup")
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(antigravity, "tool_names", lambda: ["assign"])
+    # Model the launch flag here; parent-process discovery has its own test.
+    monkeypatch.setattr(antigravity, "_launched_with_skip_flag", lambda: True)
     monkeypatch.setattr(permissions, "DEFAULT_PRESET", "autonomous")
     roots = {
         ws.path: ws.path,
