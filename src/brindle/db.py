@@ -2307,11 +2307,17 @@ class DB:
             return [_load(Message, r) for r in rows]
 
     def reset_notice(self, agent_id: str) -> None:
-        """A notice that couldn't go out: let the next one try again."""
+        """Release a failed notice's claim unless its queued copy still owns it.
+
+        A transport denial can leave the notice pending. Keep its claim so a
+        later notification cannot duplicate it before flush delivers that row.
+        """
         with self.tx() as c:
             c.execute(
-                "UPDATE inbox SET noticed_at=NULL WHERE agent_id=? AND held=1 AND delivered_at IS NULL",
-                (agent_id,),
+                "UPDATE inbox SET noticed_at=NULL WHERE agent_id=? AND held=1 AND delivered_at IS NULL"
+                " AND NOT EXISTS (SELECT 1 FROM inbox WHERE agent_id=? AND COALESCE(held,0)=0"
+                " AND noticed_at IS NOT NULL AND delivered_at IS NULL)",
+                (agent_id, agent_id),
             )
 
     def read_held(self, agent_id: str) -> list[Message]:

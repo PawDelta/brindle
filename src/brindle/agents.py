@@ -2209,8 +2209,7 @@ def _send_message(db: DB, agent: Agent, body: str, sender_id: str | None,
         db.enqueue(agent.id, text, sender_id)
         return "delivered" if agent.status == "idle" else "queued"
     if not provider.uses_hooks:
-        tmux.paste(agent.tmux_window, text, lead=message_lead(db, agent, sender_id),
-                   server=server_of(agent))
+        _paste_message(db, agent, text, message_lead(db, agent, sender_id))
         if not (condensed or notice):
             # Direct deliveries need the same durable history as queued ones,
             # including supervisor spec updates used by the next reviewer.
@@ -2355,6 +2354,26 @@ def _sync_hooks_off(db: DB, agent: Agent, why: str | None) -> None:
         agent.hooks_off = why
 
 
+def _paste_message(db: DB, agent: Agent, text: str, lead: str | None) -> None:
+    """Authorize at the transport boundary, after capture/formatting/preparation.
+
+    The delivery lock orders messages, but does not serialize sign-in changes.
+    Every queued delivery, including notices and later flushes, checks again.
+    """
+    from brindle import identity_lock
+
+    server = server_of(agent)
+    identity_lock.ensure(get(db, agent.id))
+    tmux.paste(agent.tmux_window, text, lead=lead, server=server)
+
+
+def _send_to_inbox(db: DB, agent: Agent, text: str, sender: str) -> bool:
+    from brindle import identity_lock, inbox
+
+    identity_lock.ensure(get(db, agent.id))
+    return inbox.send(agent, text, sender=sender)
+
+
 def _deliver_to_inbox(db: DB, agent: Agent, message_id: int, text: str,
                       sender_id: str | None) -> bool:
     """Send a queued message through Claude Code's own inbox (see
@@ -2366,7 +2385,7 @@ def _deliver_to_inbox(db: DB, agent: Agent, message_id: int, text: str,
         return False
     sender = db.get_agent(sender_id) if sender_id else None
     who = f"brindle {sender.profile} {sender.id}" if sender else "brindle"
-    if not inbox.send(agent, text, sender=who):
+    if not _send_to_inbox(db, agent, text, who):
         return False
     db.mark_delivered(message_id)
     return True
@@ -2388,13 +2407,17 @@ def flush(db: DB, agent_id: str) -> bool:
     if not wake.enabled(agent) and inbox.usable(agent):
         delivered = False
         while (msg := db.pop_pending(agent_id)) is not None:
-            baseline = launch_health.before_delivery(db, agent)
-            if inbox.send(agent, msg.body, sender="brindle"):
+            try:
+                baseline = launch_health.before_delivery(db, agent)
+                sent = _send_to_inbox(db, agent, msg.body, "brindle")
+            except BaseException:
+                db.release_pending(msg.id, agent_id)
+                raise
+            if sent:
                 delivered = True
                 launch_health.delivered(db, agent, baseline)
             else:
-                db.enqueue(agent_id, msg.body, msg.sender_id,  # back in the queue, for the pane
-                           notice=msg.noticed_at is not None)
+                db.release_pending(msg.id, agent_id)
                 break
         if delivered:
             return True
@@ -2460,7 +2483,7 @@ def _flush_pane(db: DB, agent_id: str) -> bool:
         lead = message_lead(db, agent, msg.sender_id)
         if _paste_blocked(agent):  # last look, after preparation: a draft may have appeared
             raise _PasteBlocked
-        tmux.paste(agent.tmux_window, msg.body, lead=lead, server=server_of(agent))
+        _paste_message(db, agent, msg.body, lead)
     except BaseException as exc:
         # pop_pending claimed this row before the external send. Release the
         # same row and our idle claim so the next flush can try it once more.
@@ -2496,7 +2519,7 @@ def _flush_midturn(db: DB, agent_id: str) -> bool:
         lead = message_lead(db, agent, msg.sender_id)
         if _paste_blocked(agent):  # last look before pasting: a draft may have appeared
             raise _PasteBlocked
-        tmux.paste(agent.tmux_window, msg.body, lead=lead, server=server_of(agent))
+        _paste_message(db, agent, msg.body, lead)
     except BaseException as exc:
         db.release_pending(msg.id, agent_id)  # back in the queue for the turn-end flush
         if isinstance(exc, _PasteBlocked):

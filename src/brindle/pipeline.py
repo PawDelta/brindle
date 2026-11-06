@@ -628,11 +628,22 @@ def _start_report_review(db: DB, cfg: RepoConfig, parent: Agent, worker: Agent, 
                     agents.close(db, started.id)   # don't leave a lone first review running
                 raise
     except agents.AgentError as e:
-        if not still_claimed(db, ws, report):
+        review_start_failed(db, ws, report, str(e))
+
+
+def review_start_failed(db: DB, ws: Workspace, report: float, reason: str) -> None:
+    """Both immediate and detached launch failures belong to the captured report.
+
+    Keep its claim until the fallback commits. A helper that lost ownership
+    while unwinding must neither clear a newer review nor notify its parent.
+    """
+    with agents.review_dispatch_lock(ws.id):
+        worker = piped_worker(db, ws)
+        if worker is None or worker.pipeline != "reviewing" or worker.reviewing_since != report:
             return   # an overlapping report or verdict now owns the branch
-        row = db.outbox_review_failed(worker.id, report, str(e))
+        row = db.outbox_review_failed(worker.id, report, reason)
         if row is not None:
-            _report_fallback(db, worker, ws, result, row)
+            _report_fallback(db, worker, ws, row["payload"], row)
 
 
 def _report_fallback(db: DB, worker: Agent, ws: Workspace, result: str, row) -> None:

@@ -184,7 +184,7 @@ def test_the_mcp_tool_says_so_when_the_worktree_is_gone(db, repo, ws, boss, spaw
 
 def test_a_review_that_cannot_start_after_the_checks_reaches_the_supervisor(db, ws, boss, monkeypatch):
     add(db, ws, "w1", "assign", parent="boss", status="processing", pipeline="reviewing")
-    db.update_agent("w1", pipeline="reviewing")
+    db.update_agent("w1", pipeline="reviewing", reviewing_since=1.0)
 
     def refuse(*a, **kw):
         raise agents.AgentError("codex is not installed")
@@ -192,6 +192,7 @@ def test_a_review_that_cannot_start_after_the_checks_reaches_the_supervisor(db, 
     monkeypatch.setattr(agents, "review_after_checks", refuse)
     monkeypatch.setattr(cli, "_helper_db", lambda: db)
     cli.review_after_checks_cmd(ws.id, "boss", None, None)
-    [msg] = inbox(db, "boss")
-    assert "No reviewer could start" in msg and "codex is not installed" in msg
+    assert db.pending_count("boss") == 1
+    row = db.conn.execute("SELECT * FROM report_outbox").fetchone()
+    assert row["state"] == "delivered"
     assert db.get_agent("w1").pipeline is None

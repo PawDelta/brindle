@@ -25,7 +25,7 @@ from brindle.db import DB, SCHEMA_VERSION
 def test_failed_report_is_redelivered_once(db, tmp_path, monkeypatch, finding):
     """A single receipt survives each failed stage, including both review findings."""
     from contextlib import contextmanager
-    from brindle import agents, bus, git, identity_lock, pipeline, usage
+    from brindle import agents, bus, cli, gates, git, identity_lock, inbox, launch_health, pipeline, tmux, usage, workspaces
     from brindle.config import RepoConfig
     from brindle.db import Workspace
     from test_merge_order import add
@@ -37,7 +37,7 @@ def test_failed_report_is_redelivered_once(db, tmp_path, monkeypatch, finding):
     add(db, ws, "worker", "assign", parent="boss")
     monkeypatch.setenv("BRINDLE_AGENT_ID", "worker")
     piped = finding == "reviewer-fallback"
-    dirty, locked, notifications, starts = [], [], [], []
+    dirty, locked, notifications = [], [], []
     monkeypatch.setattr(pipeline, "load_repo_config", lambda *a, **k: RepoConfig(pipeline=piped))
     monkeypatch.setattr(git, "ahead_behind", lambda *a: (0, 1))
     monkeypatch.setattr(git, "dirty_files", lambda *a, **k: dirty)
@@ -46,21 +46,6 @@ def test_failed_report_is_redelivered_once(db, tmp_path, monkeypatch, finding):
     monkeypatch.setattr(pipeline, "note_reported", lambda *a: None)
     monkeypatch.setattr(agents, "is_alive", lambda *a: phase == "notify")
     monkeypatch.setattr(identity_lock, "locked_by", lambda aid: "other identity" if aid == "boss" and locked else None)
-    monkeypatch.setattr(agents, "flush", lambda *a: notifications.append(bool(locked)))
-
-    def head(*a, **k):
-        if phase == "git":
-            raise RuntimeError("lost while reading HEAD")
-        return "head"
-
-    def warm(*a):
-        if phase == "accepted":
-            raise RuntimeError("lost after acceptance")
-
-    def start(*a, **k):
-        starts.append(k["report"])
-        raise agents.AgentError("reviewer unavailable")
-
     original_condense, original_lock = agents.condense, agents.delivery_lock
 
     def condense(*a, **k):
@@ -84,59 +69,144 @@ def test_failed_report_is_redelivered_once(db, tmp_path, monkeypatch, finding):
         if phase == "notify" and kind == "message.queued":
             locked.append(True)  # changed after durable queueing, before notification
 
-    monkeypatch.setattr(git, "out", head)
-    monkeypatch.setattr(agents, "warm_checks", warm)
-    monkeypatch.setattr(agents, "start_review", start)
+    monkeypatch.setattr(git, "out", lambda *a, **k: "head")
+    monkeypatch.setattr(agents, "warm_checks", lambda *a: None)
     monkeypatch.setattr(agents, "condense", condense)
     monkeypatch.setattr(agents, "delivery_lock", lock)
     monkeypatch.setattr(bus, "publish_agent", published)
 
-    def call():
-        return asyncio.run(mcp_server.mcp.call_tool("report_result", {"result": "done"}))
-
-    def blocked(state):
-        with pytest.raises(ToolError):
-            call()
-        rows = db.conn.execute("SELECT * FROM report_outbox WHERE canonical_id IS NULL").fetchall()
-        assert len(rows) == 1 and rows[0]["state"] == state
-        assert db.get_agent("worker").result == (None if state == "received" else "done")
-        assert db.pending_count("boss") == 0
+    def call(result="done"):
+        return asyncio.run(mcp_server.mcp.call_tool("report_result", {"result": result}))
 
     if finding == "identity-lock":
-        phase = "git"
-        blocked("received")
-        phase = "accepted"
-        blocked("accepted")
-    else:
-        phase = "fallback-interrupted"
-        blocked("accepted")
-        assert db.get_agent("worker").pipeline == "reviewing"
-    phase = "identity"
-    blocked("accepted")
-    locked.clear()
-    if finding == "identity-lock":
-        piped = True
-        dirty.append("work.py")
-        phase = "dirty"
-        blocked("accepted")
+        for phase in ("identity", "dirty"):
+            locked.clear()
+            if phase == "dirty":
+                piped = True
+                dirty.append("work.py")
+            with pytest.raises(ToolError):
+                call()
+            rows = db.conn.execute("SELECT * FROM report_outbox WHERE canonical_id IS NULL").fetchall()
+            assert len(rows) == 1 and rows[0]["state"] == "accepted"
+            assert db.get_agent("worker").result == "done" and db.pending_count("boss") == 0
         locked.clear()
         phase = "notify"
         call()
+        locked.clear()
+        call()
+        call()
+        assert db.pending_count("boss") == 1 and notifications == []
+        assert db.outbox_get(rows[0]["id"])["state"] == "delivered"
+        assert db.get_agent("worker").pipeline is None
+        # A later flush of the durable report must authorize after preparation,
+        # even when it wasn't initiated by report_result itself.
+        phase = "transport"
+        db.update_agent("boss", status="idle")
+        monkeypatch.setattr(agents, "is_alive", lambda *a: True)
+        monkeypatch.setattr(inbox, "usable", lambda *a: True)
+        monkeypatch.setattr(inbox, "send", lambda *a, **k: notifications.append(bool(locked)) or True)
+        monkeypatch.setattr(launch_health, "before_delivery", lambda *a: locked.append(True))
+        agents._notify_supervisor(db, db.get_agent("boss"))
+        assert notifications == [] and db.pending_count("boss") == 1
+        with pytest.raises(agents.AgentError):
+            agents.flush(db, "boss")
+        assert notifications == [] and db.pending_count("boss") == 1
+        locked.clear()
+        monkeypatch.setattr(launch_health, "before_delivery", lambda *a: "")
+        assert agents.flush(db, "boss")
+        assert notifications == [False] and db.pending_count("boss") == 0
+
+        # Pane delivery (idle and mid-turn) and pull notices share that guard.
+        monkeypatch.setattr(tmux, "paste", lambda *a, **k: notifications.append(bool(locked)))
+        monkeypatch.setattr(tmux, "capture", lambda *a, **k: "› \n? for shortcuts\n")
+        monkeypatch.setattr(inbox, "usable", lambda *a: False)
+        piped = False
+        for route in ("idle", "midturn", "notice"):
+            notifications.clear()
+            db.update_agent("boss", provider="codex", status="idle" if route == "idle" else "processing")
+            monkeypatch.setattr(agents, "pulls_messages", lambda *a: route == "notice")
+            monkeypatch.setattr(agents, "is_alive", lambda *a: False)
+            call(route)
+            monkeypatch.setattr(agents, "is_alive", lambda *a: True)
+            if route == "notice":
+                # The notice uses _deliver_to_inbox instead of flush's inbox path.
+                db.update_agent("boss", provider="claude")
+                monkeypatch.setattr(inbox, "usable", lambda *a: locked.append(True) or True)
+            else:
+                monkeypatch.setattr(agents, "message_lead", lambda *a: locked.append(True) or "")
+            agents._notify_supervisor(db, db.get_agent("boss"))
+            assert notifications == []
+            pending = db.pending_count("boss")
+            assert pending == 1
+            if route == "idle":
+                assert db.get_agent("boss").status == "idle"  # release our status claim, too
+            locked.clear()
+            monkeypatch.setattr(agents, "message_lead", lambda *a: "")
+            if route == "notice":
+                monkeypatch.setattr(inbox, "usable", lambda *a: True)
+                # The queued notice keeps its claim; another notification must
+                # not duplicate it while the report itself is still unread.
+                agents._notify_supervisor(db, db.get_agent("boss"))
+                assert notifications == [] and db.pending_count("boss") == pending
+            assert agents.flush(db, "boss")
+            assert notifications == [False]
+            if route == "notice":
+                assert len(db.read_held("boss")) == 1
+            assert db.pending_count("boss") == 0
     else:
-        assert db.get_agent("worker").pipeline == "reviewing"
-        phase = "recover"
-        worker = db.get_agent("worker")
-        pipeline.restart_review(db, worker, ws, worker.reviewing_since)
-        assert len(starts) == 1  # recovery delivers the pending fallback without another launch
-    locked.clear()
-    call()
-    call()
-    assert db.pending_count("boss") == 1
-    rows = db.conn.execute("SELECT * FROM report_outbox WHERE canonical_id IS NULL").fetchall()
-    assert len(rows) == 1 and rows[0]["state"] == "delivered"
-    assert db.get_agent("worker").pipeline is None
-    assert notifications == []  # paused supervisor, or identity changed before notification
-    assert len(starts) == (1 if finding == "reviewer-fallback" else 0)
+        # Run the actual detached helper through its check and reviewer launch.
+        phase = "detached"
+        cfg = RepoConfig(checks=["suite"], review_profile="reviewer")
+        queued = []
+        db.update_agent("boss", status="processing")
+        monkeypatch.setattr(pipeline, "load_repo_config", lambda *a, **k: cfg)
+        monkeypatch.setattr(workspaces, "config_for", lambda *a: cfg)
+        monkeypatch.setattr(cli, "_helper_db", lambda: db)
+        monkeypatch.setattr(agents, "_detach", queued.append)
+        monkeypatch.setattr(gates, "head", lambda *a: "head")
+        monkeypatch.setattr(gates, "check_summary", lambda *a, **k: "PASS `suite`")
+        monkeypatch.setattr(git, "paths", lambda *a, **k: [])
+
+        def fail_launch(*a, **k):
+            if phase == "identity":
+                locked.append(True)
+            if phase == "stale-helper":
+                agents.report_result(db, "worker", "newer report")
+            raise agents.AgentError("reviewer unavailable after checks")
+
+        def finish(argv):
+            opt = lambda name: argv[argv.index(name) + 1] if name in argv else None
+            cli.review_after_checks_cmd(ws.id, "boss", opt("--profile"), None,
+                                        request_id=opt("--request-id"), slot=opt("--review-slot"),
+                                        report=float(opt("--report")))
+
+        monkeypatch.setattr(agents, "spawn", fail_launch)
+        for fault in ("identity", "fallback-interrupted", "stale-helper"):
+            phase = "detached"
+            call(fault)
+            claim = db.get_agent("worker").reviewing_since
+            phase = fault
+            if fault == "stale-helper":
+                finish(queued[-1])
+                assert db.get_agent("worker").reviewing_since != claim
+                assert db.get_agent("worker").pipeline == "reviewing"
+                assert db.pending_count("boss") == 2
+                continue
+            with pytest.raises((agents.AgentError, RuntimeError)):
+                finish(queued[-1])
+            row = db.conn.execute("SELECT * FROM report_outbox ORDER BY id DESC LIMIT 1").fetchone()
+            assert row["state"] == "accepted" and row["fallback"]
+            assert db.get_agent("worker").pipeline == "reviewing"
+            assert db.get_agent("worker").reviewing_since == claim
+            assert db.pending_count("boss") == (0 if fault == "identity" else 1)
+            phase = "recover"
+            locked.clear()
+            worker = db.get_agent("worker")
+            pipeline.restart_review(db, worker, ws, worker.reviewing_since)
+            call(fault)
+            call(fault)
+            assert db.outbox_get(row["id"])["state"] == "delivered"
+            assert db.get_agent("worker").pipeline is None
 
 
 @pytest.mark.parametrize("migration, incompatible", [
