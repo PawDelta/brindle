@@ -41,6 +41,8 @@ def test_repo_git_identity_is_set_for_that_repo_only(db, world, tmp_path, monkey
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    for key in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "EMAIL"):
+        monkeypatch.delenv(key, raising=False)
     for key in ("user.name", "user.email"):
         git.run(["config", "--local", "--unset-all", key], world.repo_root, check=False)
     started = []
@@ -2484,7 +2486,6 @@ def test_a_new_session_runs_on_a_usable_cli_or_starts_nothing(db, world, tmp_pat
     from brindle.pro import managed_models, team_policy
     from brindle.service import sessions as svc
 
-    monkeypatch.setattr(routes_actions.git, "missing_user_identity", lambda path: [])
     _provider_setup(tmp_path, monkeypatch)
     bins = {"codex": "BRINDLE_CODEX_BIN", "opencode": "BRINDLE_OPENCODE_BIN"}
     if "missing" in state:
