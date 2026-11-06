@@ -13,7 +13,6 @@ import re
 import shlex
 import shutil
 import subprocess
-import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -70,28 +69,9 @@ def is_read(args: list[str]) -> bool:
     return False
 
 
-_TOOLS_MISSING = ("git needs Apple's Command Line Developer Tools, which aren't installed. "
-                  "Install them with `xcode-select --install` (or `brew install git`), then try again.")
-_tools_checked = False
-_TOOLS_CHECK_SECONDS = 10
-
-
-def ensure_developer_tools() -> None:
-    """On macOS, ``/usr/bin/git`` is a shim that pops Apple's install dialog when
-    the Command Line Tools are missing. Ask ``xcode-select -p`` (silent) first and
-    raise a GitError that says what to install. A git elsewhere on PATH (Homebrew)
-    needs no tools. Checked once per process, when it passes."""
-    global _tools_checked
-    if _tools_checked or sys.platform != "darwin" or shutil.which("git") != "/usr/bin/git":
-        return
-    try:
-        probe = spawn.read(["xcode-select", "-p"], timeout=_TOOLS_CHECK_SECONDS)
-        found = probe.returncode == 0
-    except (OSError, subprocess.TimeoutExpired):
-        found = False
-    if not found:
-        raise GitError(_TOOLS_MISSING)
-    _tools_checked = True
+class GitToolsMissing(GitError):
+    """macOS without the Command Line Developer Tools (see spawn.ensure_git):
+    its own type so every layer can say what to install instead of "not a repo"."""
 
 
 def run(args: list[str], cwd: str | Path, check: bool = True,
@@ -105,7 +85,6 @@ def run_env(args: list[str], cwd: str | Path, env: dict[str, str] | None,
     """``run`` with its own environment (e.g. ``GIT_INDEX_FILE`` for a scratch
     index that leaves the checkout's real index alone; see brindle.rewind).
     ``no_terminal``: nothing it starts can ask at the terminal (a read can't anyway)."""
-    ensure_developer_tools()
     to = TIMEOUT if timeout is None else timeout
     reading = is_read(args)
     start = spawn.read if reading else spawn.action
@@ -118,6 +97,8 @@ def run_env(args: list[str], cwd: str | Path, env: dict[str, str] | None,
             invalidate_branches()    # and after, so a lookup during the action can't re-cache old refs
     except spawn.Busy as e:
         raise GitBusy(f"git {' '.join(args)}: {e}") from e
+    except spawn.ToolsMissing as e:
+        raise GitToolsMissing(str(e)) from e
     except (OSError, subprocess.TimeoutExpired) as e:
         raise GitError(f"git {' '.join(args)}: {e}") from e
     if check and proc.returncode != 0:
@@ -858,6 +839,8 @@ def hash_blob(cwd: str | Path, data: bytes, path: str, write: bool = False) -> s
         proc = start(["git", *args], cwd=cwd, input=data, text=False, timeout=TIMEOUT)
     except spawn.Busy as e:
         raise GitBusy(f"git {' '.join(args)}: {e}") from e
+    except spawn.ToolsMissing as e:
+        raise GitToolsMissing(str(e)) from e
     except (OSError, subprocess.TimeoutExpired) as e:
         raise GitError(f"git {' '.join(args)}: {e}") from e
     if proc.returncode != 0:

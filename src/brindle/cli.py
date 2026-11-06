@@ -179,6 +179,8 @@ def init(
 
     try:
         root = git.main_repo_root(os.getcwd())
+    except git.GitToolsMissing as e:
+        _fail(str(e))       # `git init` would raise Apple's install dialog itself
     except git.GitError:
         _fail("not in a git repo. Run `git init` first, or just run `brindle`: "
               "outside a repo it starts a scratch session you can transfer later.")
@@ -224,8 +226,7 @@ def _uncommitted(root: str) -> tuple[bool, bool]:
     """Whether .brindle/ has uncommitted changes, and whether anything else in ``root`` does."""
     from brindle.config import CONFIG_DIR
 
-    out = subprocess.run(["git", "status", "--porcelain", "--untracked-files=all"], cwd=root,
-                         capture_output=True, text=True).stdout
+    out = git.run(["status", "--porcelain", "--untracked-files=all"], root, check=False).stdout
     paths = [line[3:].strip('"') for line in out.splitlines() if line.strip()]
     ours = [p for p in paths if p.startswith(f"{CONFIG_DIR}/")]
     return bool(ours), len(ours) < len(paths)
@@ -283,9 +284,11 @@ def new(
     if not no_agent:
         try:
             root = git.main_repo_root(os.getcwd())
+        except git.GitToolsMissing as e:
+            _fail(str(e))
         except git.GitError:
             root = None
-        provider = _resolve_supervisor(root, provider, yes=yes)
+        provider =_resolve_supervisor(root, provider, yes=yes)
     db = DB()
     if pr is not None:
         created = _run(workspaces.create_from_pr, db, os.getcwd(), pr, run_setup=not no_setup)
@@ -808,6 +811,8 @@ def _here_or_scratch(db: DB, reuse_scratch: bool) -> Workspace:
     cwd = os.getcwd()
     try:
         git.main_repo_root(cwd)
+    except git.GitToolsMissing as e:
+        _fail(str(e))       # not "outside a repo": a scratch session would run git too
     except git.GitError:
         existing = scratch.for_origin(db, cwd) if reuse_scratch else None
         if existing:
@@ -923,6 +928,8 @@ def default(
 
         try:
             legacy_root = git.main_repo_root(os.getcwd())
+        except git.GitToolsMissing as e:
+            _fail(str(e))
         except git.GitError:
             legacy_root = None
         legacy.warn_once(legacy_root)

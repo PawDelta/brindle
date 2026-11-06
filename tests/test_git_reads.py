@@ -227,20 +227,37 @@ def test_branch_exists_is_cached(tmp_path, monkeypatch):
 
 
 def test_missing_developer_tools_is_explained_before_git_runs(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+
+    from brindle import clone
+    from brindle.cli import app
+    from brindle.service.errors import from_exception
+
     fake = tmp_path / "bin"
     fake.mkdir()
     (fake / "xcode-select").write_text("#!/bin/sh\nexit 2\n")
     (fake / "xcode-select").chmod(0o755)
     monkeypatch.setenv("PATH", f"{fake}:{os.environ['PATH']}")
-    monkeypatch.setattr(git.sys, "platform", "darwin")
+    monkeypatch.setattr(spawn.sys, "platform", "darwin")
     real_which = shutil.which
-    monkeypatch.setattr(git.shutil, "which", lambda n, *a, **k: "/usr/bin/git" if n == "git" else real_which(n, *a, **k))
-    monkeypatch.setattr(git, "_tools_checked", False)
+    monkeypatch.setattr(spawn.shutil, "which", lambda n, *a, **k: "/usr/bin/git" if n == "git" else real_which(n, *a, **k))
+    monkeypatch.setattr(spawn, "_tools_checked", False)
+    monkeypatch.chdir(tmp_path)
+    popen = subprocess.Popen
     started: list[list[str]] = []
-    monkeypatch.setattr(spawn, "read", lambda argv, **kw: (started.append(argv), subprocess.run(argv, capture_output=True, text=True))[1])
-    with pytest.raises(git.GitError, match=r"xcode-select --install"):
+    monkeypatch.setattr(subprocess, "Popen", lambda argv, *a, **k: (started.append(argv), popen(argv, *a, **k))[1])
+    # git.run: typed, mapped to its own API code (not "conflict"), before git starts
+    with pytest.raises(git.GitToolsMissing, match=r"xcode-select --install") as caught:
         git.run(["status"], tmp_path)
+    assert from_exception(caught.value).code == "developer_tools_missing"
+    # the clone job starts git itself, and the daemon maps the same way
+    with pytest.raises(spawn.ToolsMissing) as cloned:
+        clone.clone("https://example.com/x.git", tmp_path / "x", lambda line: None)
+    assert from_exception(cloned.value).code == "developer_tools_missing"
+    # brindle init keeps the install guidance instead of suggesting `git init`
+    result = CliRunner().invoke(app, ["init"])
+    assert result.exit_code != 0 and "xcode-select --install" in result.output and "git init" not in result.output
     assert all(argv[0] != "git" for argv in started)
     (fake / "xcode-select").write_text("#!/bin/sh\necho /Library/Developer\n")
-    git.ensure_developer_tools()
-    assert git._tools_checked
+    spawn.ensure_git()
+    assert spawn._tools_checked

@@ -25,6 +25,7 @@ export interface ProjectPickerProps {
 /* Where a clone goes unless the person picks another folder. */
 export const DEFAULT_PARENT = "~/Projects";
 
+const TOOLS_MISSING = "developer_tools_missing";
 const message = (e: unknown) => plain(e instanceof Error ? e.message : String(e));
 const nameOf = (path: string) => path.replace(/\/+$/, "").split("/").at(-1) ?? path;
 
@@ -32,6 +33,10 @@ export function ProjectPicker({ client, pickFolder, onPicked }: ProjectPickerPro
   const [opening, setOpening] = useState(false);
   const [openError, setOpenError] = useState<string | null>(null);
   const [plainFolder, setPlainFolder] = useState<string | null>(null);
+  /* git's tools are missing (macOS): the engine's words, command included, and the last folder tried. */
+  const [toolsMissing, setToolsMissing] = useState<string | null>(null);
+  const [installing, setInstalling] = useState<"idle" | "started" | "failed">("idle");
+  const lastOpened = useRef<string | null>(null);
   const [url, setUrl] = useState("");
   const [parent, setParent] = useState(DEFAULT_PARENT);
   const { job, busy, start, clear } = useJob();
@@ -41,11 +46,14 @@ export function ProjectPicker({ client, pickFolder, onPicked }: ProjectPickerPro
   const open = async (path: string, init = false) => {
     setOpenError(null);
     setPlainFolder(null);
+    setToolsMissing(null);
+    lastOpened.current = path;
     setOpening(true);
     try {
       onPicked(await client.openRepo(path, init));
     } catch (e) {
-      if (e instanceof DaemonError && e.code === "not_a_repo") setPlainFolder(path);
+      if (e instanceof DaemonError && e.code === TOOLS_MISSING) setToolsMissing(e.message);
+      else if (e instanceof DaemonError && e.code === "not_a_repo") setPlainFolder(path);
       else setOpenError(message(e));
     } finally {
       setOpening(false);
@@ -71,6 +79,22 @@ export function ProjectPicker({ client, pickFolder, onPicked }: ProjectPickerPro
   const submit = (e: FormEvent) => {
     e.preventDefault();
     if (url.trim()) clone({ url: url.trim(), parent });
+  };
+
+  const missing = toolsMissing ?? (job?.status === "failed" && job.code === TOOLS_MISSING ? job.error ?? "" : null);
+  const installTools = async () => {
+    try {
+      await client.installDeveloperTools();
+      setInstalling("started");
+    } catch {
+      setInstalling("failed");
+    }
+  };
+  const tryAgain = () => {
+    setToolsMissing(null);
+    setInstalling("idle");
+    if (job?.code === TOOLS_MISSING) clone();
+    else if (lastOpened.current) void open(lastOpened.current);
   };
 
   // Cloned: the repo is where git put it.
@@ -131,7 +155,23 @@ export function ProjectPicker({ client, pickFolder, onPicked }: ProjectPickerPro
           </div>
         </form>
       </div>
-      {job && (
+      {missing !== null && (
+        <div className={`${card} flex flex-col items-start gap-s1 p-s2`} role="alert" data-testid="developer-tools-missing">
+          <p className="font-semibold">brindle needs git's tools first.</p>
+          <p className="text-sm text-ink-2">{missing}</p>
+          {installing === "started" && <p className="text-sm text-ink-2">Apple's installer is open. When it finishes, try again.</p>}
+          {installing === "failed" && <p className="text-sm text-ink-2">The installer didn't start. Run the command above in Terminal.</p>}
+          <div className="flex flex-wrap gap-s1">
+            <button type="button" className={button} disabled={installing === "started"} onClick={() => void installTools()}>
+              Install Command Line Tools
+            </button>
+            <button type="button" className={button} disabled={opening || busy} onClick={tryAgain}>
+              Try again
+            </button>
+          </div>
+        </div>
+      )}
+      {job && !(job.status === "failed" && job.code === TOOLS_MISSING) && (
         <ProgressCard
           label={`Cloning ${cloning.current?.url ?? ""}`}
           testId="clone"

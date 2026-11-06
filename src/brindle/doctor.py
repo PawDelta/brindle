@@ -596,7 +596,10 @@ def _repo_checks(repo_root: str) -> list[Check]:
 
 
 def _working_tree_check(repo_root: str) -> list[Check]:
-    dirty = spawn.read(["git", "status", "--porcelain"], cwd=repo_root).stdout.strip()
+    try:
+        dirty = spawn.read(["git", "status", "--porcelain"], cwd=repo_root).stdout.strip()
+    except spawn.ToolsMissing as e:
+        return [Check(FAIL, "git", str(e))]
     if dirty:
         return [Check(WARN, "working tree", "uncommitted changes: workers branch from committed work only")]
     return [Check(OK, "working tree", "clean")]

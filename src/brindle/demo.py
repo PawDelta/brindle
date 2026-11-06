@@ -167,6 +167,9 @@ def discard(db: DB, root: Path) -> None:
 def create(local: bool = False, provider: str | None = None) -> Path:
     """A fresh demo repo with one commit; returns its path. ``provider``: the
     CLI its workers and reviewers run on (PROFILES); Claude's when None."""
+    from brindle import spawn
+
+    spawn.ensure_git()      # before the demo's files exist: the git below would raise Apple's dialog
     base = brindle_home() / "demo"
     base.mkdir(parents=True, exist_ok=True)
     # A new name every time, so no earlier demo's sessions or branches show up.
