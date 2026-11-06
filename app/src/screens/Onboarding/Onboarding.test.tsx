@@ -7,6 +7,10 @@ import { DaemonClient } from "../../api/client";
 import { PtyViewsProvider } from "../../api/ptyView";
 import { BASE_URL, FakeDaemon, TOKEN, flush, freshProviders } from "../../test/fakeDaemon";
 import { ONBOARDED_KEY } from "../../api/providers";
+import { DaemonContext } from "../../api/context";
+import { SessionsProvider } from "../../store/sessions";
+import { StoreContext } from "../../store/useStore";
+import { WatchDemo } from "./Demo";
 
 vi.mock("../../components/PtyTerminal", () => import("../../test/panes"));
 
@@ -501,6 +505,43 @@ describe("Onboarding", () => {
     await waitFor(() => expect(phase()).toBe("failed"));
     fireEvent.click(escape(screen.getByTestId("onboarding")).skip);
     await step("ready");
+  });
+
+  it("consent: the demo's consent is a checkbox you tick; a failed recording leaves it open to tick again, then the demo starts", async () => {
+    const daemon = new FakeDaemon({ preflight: { claude: [{ id: "claude.onboarding", kind: "consent", label: "Claude Code's security notes", done: false }] } });
+    let failNext = true;
+    const client = new DaemonClient({
+      baseUrl: BASE_URL,
+      token: TOKEN,
+      fetch: (input, init) => {
+        if (failNext && String(input).includes("/preflight/")) {
+          failNext = false;
+          return Promise.resolve(Response.json({ error: { code: "internal", message: "could not write the file" } }, { status: 500 }));
+        }
+        return daemon.fetch(input, init);
+      },
+    });
+    const onStarted = vi.fn();
+    render(
+      <DaemonContext.Provider value={client}>
+        <StoreContext.Provider value={createAppStore()}>
+          <SessionsProvider client={client}>
+            <WatchDemo client={client} onStarted={onStarted} />
+          </SessionsProvider>
+        </StoreContext.Provider>
+      </DaemonContext.Provider>,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Watch brindle work on a practice repo" }));
+    const card = await screen.findByTestId("preflight");
+    const box = within(card).getByRole("checkbox", { name: /Claude Code's security notes/ }) as HTMLInputElement;
+    fireEvent.click(box);
+    await within(card).findByText(/could not write the file/);
+    expect(box.checked).toBe(false);
+    expect(within(card).getByRole("button", { name: "Start the demo" })).toHaveProperty("disabled", true);
+    fireEvent.click(box);
+    await waitFor(() => expect(within(card).getByRole("button", { name: "Start the demo" })).toHaveProperty("disabled", false));
+    fireEvent.click(within(card).getByRole("button", { name: "Start the demo" }));
+    await waitFor(() => expect(onStarted).toHaveBeenCalled());
   });
 
 });

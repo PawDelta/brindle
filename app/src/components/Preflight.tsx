@@ -116,13 +116,15 @@ function ConsentBox({ item, provider, name, onDone, repo }: { item: PreflightIte
     }
   };
   return (
-    <div className="flex flex-col gap-1">
-      <label className="flex cursor-pointer items-start gap-s1 text-sm">
-        <input type="checkbox" className="mt-0.5" checked={false} disabled={busy} onChange={() => void agree()} />
-        <span>I agree to {name}'s terms and notices shown above, and let brindle record that for {name} on this computer.</span>
+    <>
+      <label className="flex cursor-pointer items-center gap-s1">
+        <input type="checkbox" className="size-4 shrink-0" checked={false} disabled={busy} onChange={() => void agree()} />
+        <span className="text-xs font-medium uppercase tracking-wider text-ink-3">{KIND_LABEL.consent}</span>
+        <span className="text-sm font-medium">{item.label}</span>
       </label>
-      {error && <span className="text-sm text-sap">{error}</span>}
-    </div>
+      <p className="basis-full pl-6 text-xs text-ink-3">Tick the box to confirm. brindle records your choice for {name} on this computer.</p>
+      {error && <span className="basis-full pl-6 text-sm text-sap">{error}</span>}
+    </>
   );
 }
 
@@ -169,12 +171,18 @@ export function Preflight({ preflight, onRefresh, onLaunch, launchLabel = "Start
       <ul className="flex flex-col gap-s2">
         {items.map((item) => (
           <li key={item.id} className="flex flex-col gap-1" data-testid={`preflight-${item.kind}`} data-done={item.done}>
-            <div className="flex items-center gap-s1">
+            <div className="flex flex-wrap items-center gap-s1">
+              {item.kind === "consent" && !item.done ? (
+                <ConsentBox item={item} provider={provider} name={name} onDone={onRefresh} repo={repo} />
+              ) : (
+              <>
               <span className={`flex size-4 shrink-0 items-center justify-center rounded-full text-[10px] font-semibold ${item.done ? "bg-pass text-on-branch" : "border border-line-strong text-ink-3"}`} aria-hidden>
                 {item.done ? "✓" : ""}
               </span>
               <span className="text-xs font-medium uppercase tracking-wider text-ink-3">{KIND_LABEL[item.kind]}</span>
               <span className={`text-sm ${item.done ? "text-ink-3 line-through" : "font-medium"}`}>{item.label}</span>
+              </>
+              )}
             </div>
             {!item.done && item.detail && <p className="pl-6 text-sm text-ink-2">{item.detail}</p>}
             {!item.done && (
@@ -195,7 +203,6 @@ export function Preflight({ preflight, onRefresh, onLaunch, launchLabel = "Start
                 )}
                 {item.kind === "key" && <KeyField item={item} provider={provider} onDone={refresh} />}
                 {item.kind === "trust" && <Settle item={item} provider={provider} onDone={onRefresh} label="Trust this folder" repo={repo} />}
-                {item.kind === "consent" && <ConsentBox item={item} provider={provider} name={name} onDone={onRefresh} repo={repo} />}
                 {/* Settled outside the card (installed, turned back on): asked again, it reads done. */}
                 {(item.kind === "setup" || item.kind === "off") && (
                   <button type="button" className={button} onClick={refresh}>
