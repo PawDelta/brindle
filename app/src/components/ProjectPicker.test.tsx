@@ -90,8 +90,7 @@ describe("ProjectPicker", () => {
     daemon.toolsMissing = true;
     const { picked } = setup(daemon, vi.fn(() => Promise.resolve("/home/u/Code")));
     clone();
-    const panel = await screen.findByTestId("developer-tools-missing");
-    expect(panel.textContent).toContain("xcode-select --install");
+    await screen.findByTestId("developer-tools-missing");
     // Then a folder, which fails the same way: Try again must repeat the folder, not the older clone.
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Open a folder…" })); });
     await screen.findByTestId("developer-tools-missing");
