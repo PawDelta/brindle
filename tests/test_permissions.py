@@ -52,6 +52,20 @@ def test_an_agent_cannot_change_the_permission_rules(monkeypatch):
     pytest.param("fish -c blocked", "deny", marks=pytest.mark.variant("bypass attempt")),
     pytest.param("eval -- blocked", "deny", marks=pytest.mark.variant("bypass attempt")),
     pytest.param("trap -- blocked EXIT", "deny", marks=pytest.mark.variant("bypass attempt")),
+    ("timeout 5 blocked", "deny"),
+    ("timeout -k 1 -s KILL 5 blocked now", "deny"),
+    ("nice -n 5 blocked", "deny"),
+    ("nice -10 blocked", "deny"),
+    ("nohup blocked", "deny"),
+    ("time -p blocked", "deny"),
+    ("env -i -u X A=1 blocked", "deny"),
+    ("stdbuf -oL -i 0 blocked", "deny"),
+    ("caffeinate -t 5 -i blocked", "deny"),
+    ("command -p blocked", "deny"),
+    ("exec -a name blocked", "deny"),
+    ("git status && nohup env A=1 nice -n 5 timeout 5 blocked", "deny"),
+    pytest.param('nohup env A="one\ntwo" blocked', "deny",
+                 marks=pytest.mark.variant("a newline in an assignment value")),
     pytest.param("git status | blocked", "deny", marks=pytest.mark.variant("bypass attempt")),
     pytest.param('echo "$(blocked)"', "deny", marks=pytest.mark.variant("bypass attempt")),
     pytest.param('for x in safe blocked; do $x; done', "deny", marks=pytest.mark.variant("bypass attempt")),
@@ -110,32 +124,6 @@ def test_shell_forms(tmp_path, command, expected):
         assert ["printf", "%s", "a;b"] in permissions._segments(command)
     decision = permissions.decide(req)
     assert decision.decision == expected, decision.reason
-
-
-@pytest.mark.parametrize("command", [
-    "timeout 5 blocked",
-    "timeout -k 1 -s KILL 5 blocked now",
-    "nice -n 5 blocked",
-    "nice -10 blocked",
-    "nohup blocked",
-    "time -p blocked",
-    "env -i -u X A=1 blocked",
-    "stdbuf -oL -i 0 blocked",
-    "caffeinate -t 5 -i blocked",
-    "command -p blocked",
-    "exec -a name blocked",
-    "git status && nohup env A=1 nice -n 5 timeout 5 blocked",
-    pytest.param('nohup env A="one\ntwo" blocked', marks=pytest.mark.variant("a newline in an assignment value")),
-])
-def test_a_deny_sees_the_command_behind_a_wrapper(tmp_path, command):
-    from brindle import permissions
-
-    permissions.apply_preset("standard")
-    permissions.add_rule("bash", "blocked", "deny", "prefix")
-    here = str(tmp_path)
-    req = permissions.Request("claude", "bash", "Bash", here, here, here, command=command)
-    decision = permissions.decide(req)
-    assert decision.decision == "deny", decision.reason
 
 
 def _bypass(command):

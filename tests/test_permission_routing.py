@@ -128,6 +128,12 @@ def history(db):
 
 
 def test_the_supervisor_answers_before_the_person_sees_it(db, team, monkeypatch):
+    permissions.apply_preset("autonomous")
+    permissions.add_rule("bash", "make", "ask", "prefix")
+    for mode, answer in (("default", "allow"), ("dontAsk", None)):
+        out = agents.handle_hook(db, "w1", "pre-tool", {
+            "tool_name": "Bash", "tool_input": {"command": "terraform plan"}, "permission_mode": mode})
+        assert (out and out["hookSpecificOutput"]["permissionDecision"]) == answer
     # Long and on two lines: the supervisor is shown all of what an allow allows.
     command = "make build " + " ".join(f"TARGET{i}=x" for i in range(60)) + "\nmake install"
 
@@ -142,7 +148,7 @@ def test_the_supervisor_answers_before_the_person_sees_it(db, team, monkeypatch)
     assert ask(db, command) == "allow"
     [message] = team.sent
     assert command in message
-    assert history(db) == [("supervisor", "allow")]
+    assert history(db) == [("policy", "allow"), ("supervisor", "allow")]
 
 
 @pytest.mark.parametrize("escalated", [True, False])     # False: the boss doesn't answer in time
@@ -164,36 +170,16 @@ def test_the_person_gets_what_the_supervisor_escalates_or_leaves(db, team, monke
     assert history(db) == [("person", "deny")]
 
 
-def test_under_autonomous_a_supervisor_is_prompted_for_nothing_every_part_of_which_is_allowed(db, team, monkeypatch):
-    """No hold and no history for what's allowed; and with nobody above it, what
-    a supervisor is asked goes straight to the person, with no window to wait out."""
-    permissions.apply_preset("autonomous")
-    permissions.add_rule("bash", "make", "ask", "prefix")
-    waiting(monkeypatch)                # any wait on an answer fails the test
-    until = 'until s=$(gh run view 1 --json status --jq .status); [[ $s == completed* ]]; do echo w; done; echo "$s"'
-    assert ask(db, until, agent_id="boss") == "allow"
-    assert history(db) == [("policy", "allow")]
-
-    def person_sees_it_first(holder):
-        [shown] = inbox.pending_permissions(db, db.get_agent("boss"))
-        assert shown.dto.request_id == holder.request_id
-        assert team.clock.now == 1000.0     # no time passed: it waited on nobody
-        person_answers("allow_once")(holder)
-    waiting(monkeypatch, person_sees_it_first)
-    team.caller = "boss"
-    assert ask(db, "make build", agent_id="boss") == "allow"
-    assert team.sent == []
-    assert history(db) == [("policy", "allow"), ("person", "allow")]
-
-
 SUBAGENT = "a47d9298166766162"
 MAKE_BUILD = {"tool_name": "Bash", "tool_input": {"command": "make build"}}
 
 
+@pytest.mark.variant("Claude Code 2.1.318 double-prompt regression: a busy pane hides subagent requests until the hook returns")
 @pytest.mark.parametrize("who, inside, resolved_by", [
     ("w1", SUBAGENT, "supervisor"),     # a worker's subagent, answered by its supervisor
     ("boss", SUBAGENT, "person"),       # a person's own chat, answered from the Inbox
     ("w1", None, "supervisor"),         # the main thread, before any look has caught its prompt
+    ("boss", None, "person"),          # a supervisor's own request goes straight to the person
 ])
 def test_allowed_request_does_not_prompt_again(db, team, monkeypatch, who, inside, resolved_by):
     """A pane that has shown no prompt says nothing about the request. Claude
@@ -203,18 +189,31 @@ def test_allowed_request_does_not_prompt_again(db, team, monkeypatch, who, insid
     the CLI gets: not a prompt in the pane."""
     monkeypatch.setattr(agents, "_pane_state", lambda agent: "busy")
     team.caller = who
+    prior = []
+    if who == "boss" and inside is None:
+        permissions.apply_preset("autonomous")
+        permissions.add_rule("bash", "make", "ask", "prefix")
+        waiting(monkeypatch)
+        until = 'until s=$(gh run view 1 --json status --jq .status); [[ $s == completed* ]]; do echo w; done; echo "$s"'
+        assert ask(db, until, agent_id=who) == "allow"
+        prior = [("policy", "allow")]
+        assert history(db) == prior
 
     def answered(holder):
         if who == "boss":
+            assert team.clock.now == 1000.0
             [shown] = inbox.pending_permissions(db, db.get_agent(who))
             assert shown.dto.request_id == holder.request_id
-            assert shown.dto.terminal_prompt_visible is False      # nothing on screen to answer
+            if inside:
+                assert shown.dto.terminal_prompt_visible is False  # a subagent has no prompt on screen
             person_answers("allow_once")(holder)
         else:
             assert team.says("boss", holder.request_id, "allow")[0] == 200
     waiting(monkeypatch, *[lambda holder: None] * (agents.ANSWERED_LOOKS * 5), answered)
     assert ask(db, "make build", agent_id=who, inside=inside) == "allow"
-    assert history(db) == [(resolved_by, "allow")]
+    assert history(db) == [*prior, (resolved_by, "allow")]
+    if who == "boss":
+        assert team.sent == []
 
 
 def test_a_held_subagent_request_outlives_its_workers_turn_and_other_threads(db, team, monkeypatch):
@@ -254,20 +253,19 @@ def test_a_held_subagent_request_goes_to_the_pane_when_the_app_cannot_answer_it(
     assert ask(db, "make build", agent_id="boss", inside=SUBAGENT) is None
 
 
-@pytest.mark.parametrize("mode, answer", [
-    ("default", "allow"),       # the CLI would prompt: the policy's allow goes in first, so no dialog flashes
-    ("dontAsk", None),          # the CLI would refuse: an allow here would widen what the profile may run
-])
-def test_what_the_policy_allows_never_reaches_the_clis_prompt(db, team, mode, answer):
-    permissions.apply_preset("autonomous")
-    out = agents.handle_hook(db, "w1", "pre-tool", {
-        "tool_name": "Bash", "tool_input": {"command": "terraform plan"}, "permission_mode": mode})
-    assert (out and out["hookSpecificOutput"]["permissionDecision"]) == answer
+def test_a_person_only_ask_skips_the_supervisor(db, team, monkeypatch):
+    def boss_cannot(holder):
+        assert team.says("boss", holder.request_id, "allow")[0] == 409
+        [shown] = inbox.pending_permissions(db, db.get_agent("w1"))
+        assert shown.dto.request_id == holder.request_id
+        person_answers("allow_once")(holder)
+    waiting(monkeypatch, boss_cannot)
+    assert ask(db, "deploy prod") == "allow"
+    assert team.sent == []
+    assert history(db) == [("person", "allow")]
 
-
-def test_no_stuck_notice_while_the_request_is_still_the_supervisors(db, team, monkeypatch):
-    """The supervisor was asked and may answer it: a second message saying only
-    the user can would send it to the person. Once its window is over, it would."""
+    # While a supervisor can answer, a second notice saying only the user can
+    # would wrongly escalate it. Once its window expires the notice is needed.
     monkeypatch.setattr(agents, "pane_owners", lambda db, panes: {})
     monkeypatch.setattr(agents, "owns_pane", lambda db, a, owners: True)
     monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
@@ -281,18 +279,6 @@ def test_no_stuck_notice_while_the_request_is_still_the_supervisors(db, team, mo
     db.conn.execute("UPDATE permission_requests SET created_at=created_at-?",
                     (team.cfg_supervisor_seconds + 1,))
     assert cull.note_stuck(db, time.time(), {}) != [] and len(team.sent) == 1
-
-
-def test_a_person_only_ask_skips_the_supervisor(db, team, monkeypatch):
-    def boss_cannot(holder):
-        assert team.says("boss", holder.request_id, "allow")[0] == 409
-        [shown] = inbox.pending_permissions(db, db.get_agent("w1"))
-        assert shown.dto.request_id == holder.request_id
-        person_answers("allow_once")(holder)
-    waiting(monkeypatch, boss_cannot)
-    assert ask(db, "deploy prod") == "allow"
-    assert team.sent == []
-    assert history(db) == [("person", "allow")]
 
 
 @pytest.mark.parametrize("who", ["w1", "other"])   # the worker itself; another worker's supervisor
