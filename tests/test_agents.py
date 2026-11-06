@@ -276,13 +276,25 @@ def test_teach_auto_mode_menu_is_declined_never_typed_into(db, ws, monkeypatch, 
             assert pane.keys == ["Down"] * options.index(expected) + ["Enter"]
             agents.flush(db, aid)
             assert pasted == ["queued message"] and db.pending_count(aid) == 0
-            quoted = question + "\n" + CLAUDE_IDLE
-            assert ClaudeCode().paste_blocked(quoted, False) is None
-            assert ClaudeCode().input_ready(quoted)
+            keys = []
+            monkeypatch.setattr(tmux, "send_keys", lambda *a, **k: keys.append(a))
+            for draft in ("", "Don't show again", "another draft", "\x1b[2mTry a task\x1b[0m", "first line\ncontinued draft"):
+                quoted_options = "\n".join(options) if draft == "another draft" else ""
+                quoted = question + "\n" + quoted_options + "\n" + CLAUDE_IDLE.replace("❯ ", "❯ " + draft)
+                monkeypatch.setattr(tmux, "capture", lambda *a, **k: quoted)
+                handled = prompt_answer.decline_teach_auto_mode(db, db.get_agent(aid), quoted)
+                assert keys == []
+                assert not handled
+                assert ClaudeCode().input_ready(quoted)
+                assert ClaudeCode().paste_blocked(quoted, False) is None
         else:
             assert pane.keys == [] and pane.chosen is None
             assert not pasted and db.pending_count(aid) == 1
             assert len(told) == 1
+            quoted_option = "9. Don't show again\n" + screen
+            monkeypatch.setattr(tmux, "capture", lambda *a, **k: quoted_option)
+            assert prompt_answer.decline_teach_auto_mode(db, db.get_agent(aid), quoted_option)
+            assert pane.keys == []
         db.delete_agent(aid)
 
 

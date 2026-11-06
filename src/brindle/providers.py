@@ -810,26 +810,46 @@ class ClaudeCode(Provider):
 
     @classmethod
     def teach_auto_mode_menu(cls, screen: str) -> bool:
+        return cls._teach_auto_mode_menu_text(screen) is not None
+
+    @staticmethod
+    def _teach_auto_mode_menu_text(screen: str) -> str | None:
         """The live 2.1.319 environment upsell, never a quoted title above a composer."""
         from brindle import prompt_answer
 
         text = prompt_answer.plain(screen)
         title = re.search(r"(?m)^[ \t]*Teach auto mode about your environment\?[ \t]*$", text)
         if not title:
-            return False
-        return not re.search(r"(?m)^[ \t]*❯[ \t]*\n[─ \t]+$", text[title.end():])
+            return None
+        # A bordered composer supersedes transcript text whether it holds a
+        # draft, continuation rows, a placeholder, or nothing at all. Include
+        # composers containing the title itself in a multiline draft.
+        composers = re.finditer(r"(?ms)^[ \t]*─+[ \t]*\n[ \t]*❯[^\n]*\n.*?^[ \t]*─+[ \t]*$", text)
+        if any(composer.end() > title.start() for composer in composers):
+            return None
+        return text[title.end():]
 
-    @staticmethod
-    def teach_auto_mode_key(screen: str) -> str | None:
+    @classmethod
+    def teach_auto_mode_key(cls, screen: str) -> str | None:
         from brindle import prompt_answer
 
-        if len([ln for ln in prompt_answer._tail(screen) if prompt_answer.SELECTED.match(ln)]) != 1:
+        menu = cls._teach_auto_mode_menu_text(screen)
+        if menu is None:
+            return None
+        # Read only the contiguous numbered choices beneath this title.
+        # Earlier transcript choices and the chat composer are never options.
+        choices = re.search(rf"(?m)(?:^[ \t]*(?:[{prompt_answer.CURSOR}][ \t]*)?"
+                            r"\d+[.)][ \t]+[^\n]+(?:\n|$))+", menu)
+        if choices is None:
+            return None
+        menu = choices.group()
+        if len([ln for ln in menu.splitlines() if prompt_answer.SELECTED.match(ln)]) != 1:
             return None
         # Binary 2.1.319: dismiss persists autoModeEnvSetup.dismissed=true;
         # later (Not now) only defers it seven days. Never use the default Yes.
-        labels = [prompt_answer._option_text(line) for line in prompt_answer._tail(screen)]
+        labels = [prompt_answer._option_text(line) for line in menu.splitlines()]
         option = "Don't show again" if "don't show again" in labels else "Not now"
-        return prompt_answer.next_key(screen, prompt_answer.Decision("decline", option))
+        return prompt_answer.next_key(menu, prompt_answer.Decision("decline", option))
 
     def hooks_disabled(self, cwd: str | None, setting_sources: list[str] | None = None) -> str | None:
         # brindle's hooks come in through --settings, which disableAllHooks
