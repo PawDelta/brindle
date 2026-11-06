@@ -24,6 +24,7 @@ export interface ApiSchema {
   ConnectionReadyDTO: ConnectionReadyDTO;
   DecisionDTO: DecisionDTO;
   GcloudOptionsDTO: GcloudOptionsDTO;
+  GitHubConnectionDTO: GitHubConnectionDTO;
   GoalDTO: GoalDTO;
   InboxActionDTO: InboxActionDTO;
   InboxItemDTO: InboxItemDTO;
@@ -401,6 +402,25 @@ export interface DecisionDTO {
   scope: string[];
   status: string;
   topic: string;
+}
+/**
+ * brindle's own GitHub sign-in (brindle.github_connect), as every
+ * /v1/github/connection route answers. ``route``: how the person connected (a
+ * copy of the GitHub CLI's sign-in, or a token they pasted). ``needs_reconnect``:
+ * GitHub no longer takes it. ``gh_available``: a copy of gh's sign-in can be
+ * offered. Never the token.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "GitHubConnectionDTO".
+ */
+export interface GitHubConnectionDTO {
+  connected: boolean;
+  expires_at?: number | null;
+  gh_available?: boolean;
+  login?: string | null;
+  needs_reconnect?: boolean;
+  route?: ("gh" | "token") | null;
+  storage?: ("keychain" | "file") | null;
 }
 /**
  * This interface was referenced by `ApiSchema`'s JSON-Schema

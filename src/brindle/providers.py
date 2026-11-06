@@ -167,8 +167,11 @@ def _codex_denied_reads() -> list[str]:
     from brindle.daemon import lifecycle
     from brindle.pro import credentials
 
+    from brindle import github_connect
+
     return [*CODEX_DENIED_READS, str(lifecycle.info_path()), str(brindle_home() / keystore.KEYS_SERVICE),
-            str(credentials.file_store_dir()), os.path.join(codex_home(), "auth.json")]
+            str(credentials.file_store_dir()), *github_connect.store_paths(),
+            os.path.join(codex_home(), "auth.json")]
 
 
 class CodexSandboxRefused(RuntimeError):

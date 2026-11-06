@@ -79,6 +79,38 @@ agent_app = typer.Typer(no_args_is_help=True, help="Manage agents.")
 app.add_typer(agent_app, name="agent")
 app.add_typer(repo_cmds.app, name="repo")
 app.add_typer(keys_cmds.app, name="keys")
+trash_app = typer.Typer(no_args_is_help=True, help="Recover removed worktrees.")
+app.add_typer(trash_app, name="trash")
+
+
+@trash_app.command("list")
+def trash_list():
+    from brindle import disk, trash
+
+    for entry in trash.entries():
+        typer.echo(f"{entry['id']}  {disk.human(entry['size'])}  {entry['path']}")
+
+
+@trash_app.command("restore")
+def trash_restore(ident: str):
+    from brindle import trash
+
+    try:
+        typer.echo(trash.restore(ident))
+    except (OSError, git.GitError) as e:
+        _fail(str(e))
+
+
+@trash_app.command("empty")
+def trash_empty(yes: bool = typer.Option(False, "--yes", "-y")):
+    from brindle import trash
+
+    if not yes:
+        typer.confirm("Permanently empty the worktree trash?", abort=True)
+    try:
+        typer.echo(f"Removed {len(trash.empty())} trash entry(s)")
+    except (OSError, git.GitError) as e:
+        _fail(str(e))
 
 
 def _fail(msg: str) -> None:
@@ -1699,8 +1731,30 @@ def permissions_allow(
     match: Optional[str] = typer.Argument(None, help="The command, path, URL or tool name (exact unless --prefix/--glob)."),
     prefix: bool = typer.Option(False, "--prefix", help="Match anything starting with MATCH."),
     glob: bool = typer.Option(False, "--glob", help="MATCH is a shell-style glob (* also crosses /)."),
+    once: bool = typer.Option(False, "--once", help="Approve the pending request ID exactly once."),
 ) -> None:
     """Allow requests that match. A bash allow never covers a command with shell metacharacters."""
+    if once:
+        from brindle import permissions as perms
+
+        if match is not None or prefix or glob:
+            _fail("--once takes one pending request ID, without a pattern or matching options")
+        db = DB()
+        # Serialize terminal answers so two invocations cannot approve the
+        # same pending request twice. Keep the request if saving fails.
+        with db.tx() as c:
+            row = c.execute("SELECT agent_id, request FROM permission_requests "
+                            "WHERE tool_use_id=? AND channel='terminal'", (kind,)).fetchone()
+            req = perms.Request.from_dict(json.loads(row["request"])) if row else None
+            if req is None:
+                _fail("no such pending permission request")
+            decision = perms.decide(req, saved=[])
+            if decision.decision == "deny":
+                _fail(f"this request is denied: {decision.reason}")
+            action = perms.save_once(req)
+            c.execute("DELETE FROM permission_requests WHERE agent_id=? AND tool_use_id=?", (row["agent_id"], kind))
+        typer.echo(f"{action.id}: allowed this exact request once")
+        return
     if match is None:
         match = kind
         kind = "bash"
@@ -2769,7 +2823,7 @@ def services_cmd(
 @app.command()
 def rm(
     workspace: str,
-    force: bool = typer.Option(False, "--force", "-f", help="Discard uncommitted changes; ignore teardown failure."),
+    force: bool = typer.Option(False, "--force", "-f", help="Trash uncommitted changes too; ignore teardown failure."),
     delete_branch: Optional[bool] = typer.Option(None, "--delete-branch/--keep-branch", "-D/-K", help="Delete the branch (only if merged, unless --force), or keep it. Default: delete it once fully merged into its base."),
 ) -> None:
     """Stop a workspace's agents and remove its worktree; a fully merged branch goes too.
@@ -3379,6 +3433,74 @@ def cloud_credential_cmd(cloud: str = typer.Argument(..., help="aws, gcp or azur
     from brindle import cloud_credential
 
     raise typer.Exit(cloud_credential.run(cloud, org))
+
+
+github_app = typer.Typer(no_args_is_help=True,
+                         help="Connect GitHub: brindle keeps its own sign-in, so git never asks the keychain.")
+
+
+@github_app.command("status")
+def github_status() -> None:
+    """Whether brindle has its own GitHub sign-in, and of what kind."""
+    from brindle import github_connect
+
+    typer.echo(f"GitHub: {github_connect.describe(github_connect.status())}")
+
+
+@github_app.command("connect")
+def github_connect_cmd(
+    gh: bool = typer.Option(False, "--gh", help="Copy your GitHub CLI sign-in (brindle gets the access gh has)."),
+    token: bool = typer.Option(False, "--token", help="Paste a fine-grained token (asked for, or read from stdin)."),
+    file: bool = typer.Option(False, "--file", help="Keep it in a 0600 file under brindle's home, not the keychain: "
+                                                    "no dialog ever, and readable by anything running as you."),
+) -> None:
+    """Give brindle its own GitHub sign-in: a copy of the GitHub CLI's, or a token."""
+    import getpass
+
+    from brindle import github_connect
+
+    if not gh and not token:
+        gh = github_connect.gh_available() and sys.stdin.isatty() and typer.confirm(
+            "Copy your GitHub CLI sign-in? brindle then has the same access to GitHub that gh has: "
+            "every repository you can reach. (No: paste a fine-grained token instead)", default=True)
+    try:
+        if gh:
+            state = github_connect.connect_gh(file=file)
+        else:
+            if sys.stdin.isatty():
+                typer.echo("Make a fine-grained token at https://github.com/settings/personal-access-tokens/new "
+                           "for the repositories brindle should reach, with Contents, Pull requests and "
+                           "Workflows read and write.")
+            pasted = getpass.getpass("Token: ") if sys.stdin.isatty() else sys.stdin.readline()
+            state = github_connect.connect_token(pasted, file=file)
+    except github_connect.ConnectError as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(1) from None
+    typer.echo(f"GitHub: {github_connect.describe(state)}")
+
+
+@github_app.command("disconnect")
+def github_disconnect() -> None:
+    """Forget brindle's GitHub sign-in. Nothing is revoked on GitHub."""
+    from brindle import github_connect
+
+    try:
+        github_connect.disconnect()
+    except github_connect.ConnectError as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(1) from None
+    typer.echo("GitHub: disconnected. A pasted token still exists on GitHub until you delete it there.")
+
+
+app.add_typer(github_app, name="github")
+
+
+@app.command("_github-credential", hidden=True)
+def github_credential_cmd(action: str = typer.Argument("")) -> None:
+    """git's credential helper for github.com, answering from brindle's GitHub connection."""
+    from brindle import github_connect
+
+    raise typer.Exit(github_connect.main([action]))
 
 
 @app.command("_sync-settings", hidden=True)

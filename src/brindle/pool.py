@@ -22,7 +22,6 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import os
-import shutil
 import time
 import uuid
 from pathlib import Path
@@ -222,11 +221,9 @@ def discard(repo_root: str, entry: PoolEntry, cfg: RepoConfig | None = None) -> 
         )
         workspaces.run_commands(cfg.teardown, entry.path, workspaces.workspace_env(placeholder))
     if os.path.exists(entry.path):
-        git.run(["worktree", "remove", "--force", entry.path], repo_root, check=False)
+        git.remove_worktree(repo_root, entry.path, force=True)
     git.run(["branch", "-D", entry.branch], repo_root, check=False)
     git.run(["worktree", "prune"], repo_root, check=False)
-    if os.path.exists(entry.path):
-        shutil.rmtree(entry.path, ignore_errors=True)
 
 
 # -- cleanup ------------------------------------------------------------------
@@ -274,8 +271,7 @@ def sweep(db: DB, repo_root: str, cfg: RepoConfig | None = None) -> None:
                 cwds = disk._cwds(disk.live_check_ignore(repo_root))   # read once for the whole sweep
             if disk.live_in(db, path, cwds):
                 continue  # a forgotten row's folder something still runs in: kept
-            git.run(["worktree", "remove", "--force", path], repo_root, check=False)
-            shutil.rmtree(child, ignore_errors=True)
+            git.remove_worktree(repo_root, path, force=True)
     git.run(["worktree", "prune"], repo_root, check=False)
 
     live_branches = {

@@ -46,9 +46,13 @@ _CALLER_UNCHECKED = "the caller can't be checked"
 
 
 def _hold_route(path: str) -> bool:
+    """A route an agent's own child may call, on the Unix socket alone: the permission
+    holds, and git's credential helper asking for brindle's GitHub sign-in
+    (brindle.github_connect), which git in an agent's pane uses like any other."""
     from brindle.daemon.holds import PREFIX
+    from brindle.github_connect import CREDENTIAL_PATH
 
-    return path == PREFIX or path.startswith(PREFIX + "/")
+    return path == PREFIX or path.startswith(PREFIX + "/") or path == CREDENTIAL_PATH
 
 
 def new_token() -> str:
@@ -86,7 +90,8 @@ class Guard:
             if peer.PEER_PID in scope and "origin" not in headers:
                 await self.app(scope, receive, send)
             else:
-                await _reject(send, 403, "forbidden", "permission holds are for brindle's hooks, on the Unix socket")
+                await _reject(send, 403, "forbidden", "this route is for brindle's own hooks and git helper, "
+                                                      "on the Unix socket")
             return
         # Only the Unix socket names its caller: over TCP the token is all that keeps agents out.
         refused = await self._agent_caller(scope[peer.PEER_PID]) if peer.PEER_PID in scope else None
