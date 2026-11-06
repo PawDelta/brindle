@@ -122,7 +122,7 @@ describe("NewSession", () => {
         vi.useRealTimers();
       }
     }
-    if (!agreed) fireEvent.click(within(card).getByRole("button", { name: "Agree" }));
+    if (!agreed) fireEvent.click(within(card).getByRole("checkbox", { name: /Consent/ }));
     await waitFor(() => expect(within(card).getByRole("button", { name: "Start" })).toHaveProperty("disabled", false));
     fireEvent.click(within(card).getByRole("button", { name: "Start" }));
     await waitFor(() => expect(onOpen).toHaveBeenCalledWith("new1", REPO));
@@ -347,9 +347,9 @@ describe("NewSession", () => {
     fireEvent.click(within(card).getByRole("button", { name: "Save" }));
     await waitFor(() => expect(daemon.keysStored).toEqual(["ANTHROPIC_API_KEY"]));
     expect(screen.queryByDisplayValue("sk-ant-test-0000")).toBeNull();
-    // The consent is a button; the fake settles the key with the stored key.
+    // The consent is a checkbox you click; the fake settles the key with the stored key.
     daemon.data.preflight.claude[0].done = true;
-    fireEvent.click(within(card).getByRole("button", { name: "Agree" }));
+    fireEvent.click(within(card).getByRole("checkbox", { name: /Agree to Claude Code's terms/ }));
     await waitFor(() => expect(within(card).getByRole("button", { name: "Start" })).toHaveProperty("disabled", false));
     fireEvent.click(within(card).getByRole("button", { name: "Start" }));
     await waitFor(() => expect(onOpen).toHaveBeenCalledWith("new1", REPO));
@@ -367,7 +367,7 @@ describe("NewSession", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Watch brindle work on a practice repo" }));
     const card = await screen.findByTestId("preflight");
     expect(daemon.demos).toEqual([]);
-    fireEvent.click(within(card).getByRole("button", { name: "Agree" }));
+    fireEvent.click(within(card).getByRole("checkbox", { name: /Agree to Claude Code's terms/ }));
     await waitFor(() => expect(within(card).getByRole("button", { name: "Start the demo" })).toHaveProperty("disabled", false));
     // While that start is under way, every way to start the demo waits: a double click sends one request.
     daemon.holdLaunch = true;

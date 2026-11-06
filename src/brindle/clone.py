@@ -48,12 +48,14 @@ def repo_name(url: str) -> str:
 
 
 def destination(url: str, parent_dir: str) -> Path:
-    """Where ``url`` would be cloned: refused unless ``parent_dir`` is a folder
-    and nothing is at the destination yet."""
+    """Where ``url`` would be cloned: create a missing parent folder, and
+    refuse an existing destination."""
     parent = Path(parent_dir).expanduser()
-    if not parent.is_dir():
-        raise ServiceError("invalid", f"not a folder: {parent_dir}")
     dest = parent / repo_name(validate_url(url))
+    try:
+        parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise ServiceError("invalid", f"can't create clone folder: {parent_dir}") from exc
     if dest.exists() or dest.is_symlink():
         raise ServiceError("exists", f"{dest} already exists", 409)
     return dest
