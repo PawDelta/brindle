@@ -147,7 +147,8 @@ CREATE TABLE IF NOT EXISTS milestones (
     repo TEXT,                     -- alias of the attached repo the check runs in (brindle.repos); NULL: the session's own
     state TEXT,                    -- last check: passed | not_done | regressed | failed (couldn't run); NULL: never checked
     state_why TEXT,                -- for failed: why the check couldn't run
-    ever_passed INTEGER            -- 1 once any check passed (kept through later failures)
+    ever_passed INTEGER,           -- 1 once any check passed (kept through later failures)
+    phase_name TEXT                -- optional phase the goal groups it under (goals.md `phase:`); NULL: none
 );
 -- Repos attached to a session (brindle Pro multi_repo; see brindle.repos):
 -- assign/handoff may put workers there by alias.
@@ -968,6 +969,7 @@ class Milestone:
     state: str | None = None
     state_why: str | None = None
     ever_passed: int | None = None   # 1 once any check passed, whatever sha it ran at
+    phase_name: str | None = None    # the goal's phase this milestone sits in (goals.md `phase:`)
 
 
 _EXIT = re.compile(r"\(exit (-?\d+)\)\s*$")
@@ -1334,7 +1336,7 @@ class DB:
         for col in ("checked_sha", "passed_sha", "profile", "repo"):
             if col not in cols:
                 self.conn.execute(f"ALTER TABLE milestones ADD COLUMN {col} TEXT")
-        for col in ("state", "state_why"):
+        for col in ("state", "state_why", "phase_name"):
             if col not in cols:
                 self.conn.execute(f"ALTER TABLE milestones ADD COLUMN {col} TEXT")
         if "ever_passed" not in cols:
@@ -2437,15 +2439,15 @@ class DB:
             c.execute("UPDATE autopilot SET progress=progress+1, nudges=0 WHERE root_id=?", (root_id,))
 
     def set_milestones(self, root_id: str, items: list[tuple]) -> None:
-        """Replace the session's milestones with ``(title, check_cmd, detail[, profile[, repo]])`` items."""
+        """Replace the session's milestones with ``(title, check_cmd, detail[, profile[, repo[, phase]]])`` items."""
         with self.tx() as c:
             c.execute("DELETE FROM milestones WHERE root_id=?", (root_id,))
             for i, (title, check, detail, *rest) in enumerate(items, start=1):
                 c.execute(
-                    "INSERT INTO milestones (root_id, position, title, check_cmd, detail, profile, repo) "
-                    "VALUES (?,?,?,?,?,?,?)",
+                    "INSERT INTO milestones (root_id, position, title, check_cmd, detail, profile, repo, phase_name) "
+                    "VALUES (?,?,?,?,?,?,?,?)",
                     (root_id, i, title, check, detail, rest[0] if rest else None,
-                     rest[1] if len(rest) > 1 else None),
+                     rest[1] if len(rest) > 1 else None, rest[2] if len(rest) > 2 else None),
                 )
 
     def milestones(self, root_id: str) -> list[Milestone]:
