@@ -1,8 +1,7 @@
 # The desktop app's release, on an app-v<version> tag (the version in
 # app/package.json). The `macos` job builds once per architecture, each on
-# a runner of that architecture (aarch64-apple-darwin on Apple Silicon,
-# x86_64-apple-darwin on Intel: the bundled engine is built for the runner's
-# own architecture only), with the Tauri CLI, signed with the Developer ID when
+# Apple Silicon runner (including the Intel engine and tmux cross-build),
+# with the Tauri CLI, signed with the Developer ID when
 # the Apple secrets are set and its updater bundle signed with the minisign key
 # when TAURI_SIGNING_PRIVATE_KEY is set. With notarization credentials, Tauri
 # notarizes the .app; the job then notarizes and staples the DMG as well, and
@@ -201,12 +200,9 @@ jobs:
             --jq '[.[] | select(.state == "approved") | .user.login] | join(", ")' || echo "unknown")"
           echo "Stable gate: $GITHUB_REF_NAME at $GITHUB_SHA is on main; approved by ${approvers:-nobody recorded}" >> "$GITHUB_STEP_SUMMARY"
 
-  # One build per Mac architecture, each on a runner of that architecture:
-  # build_engine.sh builds the bundled engine for the machine it runs on only
-  # (app/docs/bundled-engine.md, "One architecture per build"), so a
-  # universal build would carry an engine for one of them only.
-  # macos-15-intel is GitHub's x86_64 image (macos-13, the older Intel label,
-  # was retired in December 2025). Nothing is published from here: the
+  # One build per Mac architecture, both on Apple Silicon. The engine's native
+  # dependencies and helper follow the target; Rosetta runs the Intel checks.
+  # Nothing is published from here: the
   # `macos-publish` job does that once both have passed (`release-publish`
   # for a release-branch build).
   macos:
@@ -225,7 +221,7 @@ jobs:
             runner: macos-latest
           - arch: x86_64
             target: x86_64-apple-darwin
-            runner: macos-15-intel
+            runner: macos-latest
     runs-on: ${{ matrix.runner }}
     # Pushed tags use production signing; a release-branch push (past
     # release-gate) uses the separately protected staff environment.
@@ -264,15 +260,15 @@ jobs:
           if [ -n "$RELEASE_VERSION" ]; then version="$RELEASE_VERSION" name="$RELEASE_NAME" rc=false path=""; fi
           { echo "version=$version"; echo "rc=$rc"; echo "path=$path"; echo "name=$name"; } >> "$GITHUB_OUTPUT"
 
-      # The runner must be the architecture it builds: build_engine.sh refuses
-      # any other target.
       - name: Runner architecture
         run: |
-          machine="$(uname -m)"
-          [ "$machine" = arm64 ] && machine=aarch64
-          if [ "$machine" != "$ARCH" ]; then
-            echo "::error::runner is $(uname -m), this job builds $TARGET"
+          if [ "$(uname -m)" != arm64 ]; then
+            echo "::error::expected an Apple Silicon runner"
             exit 1
+          fi
+          if [ "$ARCH" = x86_64 ]; then
+            softwareupdate --install-rosetta --agree-to-license
+            arch -x86_64 /usr/bin/true
           fi
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -441,24 +437,31 @@ jobs:
           fi
           { echo "dir=$bundle"; echo "app=$bundle/macos/brindle.app"; echo "dmg=${dmgs[0]}"; } >> "$GITHUB_OUTPUT"
 
+      - name: Binary architectures
+        env:
+          APP: ${{ steps.bundle.outputs.app }}
+        run: |
+          expected="$ARCH"
+          [ "$expected" != aarch64 ] || expected=arm64
+          for binary in \
+            "$APP/Contents/MacOS/brindle-desktop" \
+            "$APP/Contents/Resources/engine/bin/tmux" \
+            "$APP/Contents/Resources/engine/python/bin/python3" \
+            "$APP/Contents/Library/LoginItems/brindle.app/Contents/MacOS/brindle"; do
+            actual="$(lipo -archs "$binary")"
+            echo "$binary: $actual"
+            [ "$actual" = "$expected" ] || { echo "::error::expected $expected, found $actual in $binary"; exit 1; }
+          done
+
       # Tauri staples the .app straight after notarization, but Apple's ticket
       # is sometimes not downloadable yet, and Tauri carries on without one
       # (rc.4's Intel build: "Accepted", then "does not have a ticket stapled").
-      # Retry until the ticket is there; fail if it never comes.
+      # Allow 33 minutes of backoff for ticket propagation; exhaustion fails the job.
       - name: Staple the app
         if: steps.signing.outputs.notarized == 'true'
         env:
           APP: ${{ steps.bundle.outputs.app }}
-        run: |
-          for attempt in 1 2 3 4 5 6 7 8 9 10; do
-            if xcrun stapler validate "$APP" >/dev/null 2>&1; then
-              echo "ticket stapled (attempt $attempt)"
-              exit 0
-            fi
-            xcrun stapler staple "$APP" || true
-            sleep 30
-          done
-          xcrun stapler validate "$APP" || { echo "::error::no notarization ticket for the .app after 10 tries"; exit 1; }
+        run: bash app/scripts/notarize_dmg.sh --staple-only "$APP"
 
       # Tauri notarizes only the .app. The DMG around it needs its own
       # submission and ticket, or Gatekeeper rejects the download itself
@@ -495,6 +498,8 @@ jobs:
         env:
           APP: ${{ steps.bundle.outputs.app }}
           DMG: ${{ steps.bundle.outputs.dmg }}
+          BUNDLE: ${{ steps.bundle.outputs.dir }}
+          UPDATER: ${{ steps.signing.outputs.updater }}
         run: |
           assess() {  # what, spctl args...
             local what="$1" out attempt; shift
@@ -522,6 +527,29 @@ jobs:
           done
           assess app -t exec "$APP"
           assess DMG -t open --context context:primary-signature "$DMG"
+          # Tauri packaged these before the app's final staple above. Verify
+          # their actual contents too, so repairing only the loose app cannot
+          # publish an updater or installer carrying an unstapled app.
+          packaged="$(mktemp -d "$RUNNER_TEMP/stapled-bundles.XXXXXX")"
+          mounted=false
+          cleanup_bundles() {
+            if [ "$mounted" = true ]; then hdiutil detach "$packaged/mount"; fi
+            rm -rf "$packaged"
+          }
+          trap cleanup_bundles EXIT
+          if [ "$UPDATER" = true ]; then
+            mkdir "$packaged/updater"
+            tar -xzf "$BUNDLE/macos/brindle.app.tar.gz" -C "$packaged/updater"
+            xcrun stapler validate "$packaged/updater/brindle.app" \
+              || { echo "::error::updater contains an unstapled app; refusing publication"; exit 1; }
+          fi
+          mkdir "$packaged/mount"
+          hdiutil attach "$DMG" -readonly -nobrowse -mountpoint "$packaged/mount"
+          mounted=true
+          xcrun stapler validate "$packaged/mount/brindle.app" \
+            || { echo "::error::DMG contains an unstapled app; refusing publication"; exit 1; }
+          hdiutil detach "$packaged/mount"
+          mounted=false
           # The engine's helper app (build_engine.sh): what macOS takes the
           # daemon and every agent for. Its privacy grants are kept by its
           # bundle id and team, so it must be signed as a bundle, by the app's team.
