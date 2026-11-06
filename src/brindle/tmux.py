@@ -771,6 +771,22 @@ def last_input() -> float | None:
     return max(times) if times else None
 
 
+def pane_input(pane: str, server: object = _THIS_SERVER) -> float | None:
+    """When a client showing ``pane`` (its session's active pane) last had
+    input: the person's keys reach tmux before the program in the pane has
+    drawn them. Epoch seconds, the latest across those clients; None when no
+    client shows it. Raises TmuxError when the server can't be asked.
+    ``server`` as for capture."""
+    proc = _tmux("list-clients", "-F", "#{pane_id}\t#{client_activity}", check=False, server=server)
+    if proc.returncode != 0:
+        if _NO_SERVER.search(proc.stderr):
+            return None
+        raise TmuxError(f"tmux list-clients: {proc.stderr.strip()}")
+    rows = (line.split("\t") for line in proc.stdout.splitlines())
+    times = [float(row[1]) for row in rows if len(row) == 2 and row[0] == pane and row[1].isdigit()]
+    return max(times) if times else None
+
+
 def current_session() -> str | None:
     """The tmux session this process runs in (from its pane), or None."""
     pane = os.environ.get("TMUX_PANE")

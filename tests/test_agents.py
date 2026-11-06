@@ -313,13 +313,31 @@ def test_flush_keeps_message_queued_over_background_session_launcher(db, ws, mon
     assert db.pending_count("a1") == 1
 
 
-@pytest.mark.parametrize("provider,fault", [("claude", "unreadable"), ("claude", "draft"), ("codex", "draft")])
+_REAL_PANE_INPUT = getattr(tmux, "pane_input", None)   # before conftest's nobody_typing
+
+
+@pytest.mark.parametrize("provider,fault", [("claude", "unreadable"), ("claude", "draft"), ("codex", "draft"),
+                                            ("claude", "typed")])
 def test_paste_blocked_or_draft_holds_message_then_delivers_it_once(db, ws, monkeypatch, provider, fault):
     fake_agent(db, ws, status="processing" if provider == "codex" else "idle", mode="interactive")
     db.update_agent("a1", provider=provider)
     db.enqueue("a1", "queued message", None)
     clean, draft = {"claude": (CLAUDE_IDLE, CLAUDE_TYPING_WITH_INVERSE_CURSOR), "codex": ("› \n? for shortcuts\n", "› hello\n? for shortcuts\n")}[provider]
     s, pasted = {"screen": None if fault == "unreadable" else clean, "arm": fault == "draft"}, []
+    # "typed": the person is typing a reply into the chat, but the loaded CLI
+    # hasn't drawn their keys yet; tmux saw them (the person's own client).
+    s["typed"] = time.time() if fault == "typed" else None
+    if fault == "typed":
+        from types import SimpleNamespace
+        real_tmux = tmux._tmux
+
+        def tmux_call(*args, **k):
+            if args[0] != "list-clients":
+                return real_tmux(*args, **k)
+            rows = f"%9\t{int(time.time())}\n@0\t{int(s['typed'])}\n"   # another pane's keys don't count
+            return SimpleNamespace(returncode=0, stdout=rows, stderr="")
+        monkeypatch.setattr(tmux, "pane_input", _REAL_PANE_INPUT, raising=False)
+        monkeypatch.setattr(tmux, "_tmux", tmux_call)
 
     def capture(*a, **k):
         if s["screen"] is None:
@@ -334,6 +352,7 @@ def test_paste_blocked_or_draft_holds_message_then_delivers_it_once(db, ws, monk
     monkeypatch.setattr(agents, "message_lead", prepare_lead)
     assert agents.flush(db, "a1") is False and not pasted and db.pending_count("a1") == 1
     s["screen"] = clean   # the draft is sent or cleared
+    s["typed"] = s["typed"] and time.time() - 60
     assert agents.flush(db, "a1") is True and pasted == ["queued message"]
 
 

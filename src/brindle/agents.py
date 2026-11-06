@@ -2560,6 +2560,11 @@ def _delivery_held(db: DB, agent: Agent | None) -> bool:
             or (wake.enabled(agent) and wake.live(agent)))
 
 
+# A chat the person pressed a key in this recently is theirs: a queued message
+# waits for the next flush (a turn's end, the hook's hand-over, or cull's sweep).
+TYPED_WITHIN = 5.0
+
+
 class _PasteBlocked(Exception):
     """Raised inside a delivery's protected block when the pane became blocked."""
 
@@ -2649,6 +2654,16 @@ def _paste_blocked(agent: Agent) -> bool:
     provider = get_provider(agent.provider)
     interactive = agent.mode == "interactive"
     server = server_of(agent)
+    if interactive:
+        # Keys the person just pressed may not be on screen yet (a loaded
+        # machine draws late), and more may follow mid-paste: hold, before
+        # the screen is read or a background view is escaped.
+        try:
+            typed = tmux.pane_input(agent.tmux_window, server=server)
+        except tmux.TmuxError:
+            return True
+        if typed is not None and time.time() - typed < TYPED_WITHIN:
+            return True
     try:
         screen = tmux.capture(agent.tmux_window, lines=40, escapes=True, server=server)
     except tmux.TmuxError:
