@@ -168,7 +168,7 @@ afterEach(() => {
 
 const live: Pane = { live: true, screen: "$ claude\nhello\n", cursor: [2, 1] };
 /* A pane as the app's tmux client draws it on attaching (the fake daemon's). */
-const drawnLive = "\x1b[H\x1b[2J$ claude\r\nhello\x1b[2;3H";
+const drawnLive = "\x1b[?1049h\x1b[H\x1b[2J$ claude\r\nhello\x1b[2;3H";
 const session: SessionDTO = { id: "sup1", workspace_id: "proj", profile: "supervisor", status: "idle", mode: "interactive", created_at: 0, goal: "Ship ls --json" };
 
 /* Under the app the sidebar's tree picks the agent and the route carries it;
@@ -421,7 +421,7 @@ describe("SessionScreen", () => {
 
     // Another agent picked (by the sidebar's tree, in the app): its pane, named by its branch; the view before it closed.
     pick("w1");
-    await waitFor(() => expect(term().written).toBe("\x1b[H\x1b[2Jworker\x1b[2;3H"));
+    await waitFor(() => expect(term().written).toBe("\x1b[?1049h\x1b[H\x1b[2Jworker\x1b[2;3H"));
     expect(shownAgent()).toBe("w1");
     expect(title()).toBe("Claude Code · ls");
     expect(view.closed).toBe(true);
@@ -442,7 +442,7 @@ describe("SessionScreen", () => {
     expect(within(card).getByRole("button", { name: "Continue" })).toBeTruthy();
     // What it left: the dead pane tmux kept, through a tmux client on its window.
     fireEvent.click(within(card).getByRole("button", { name: "Show what it left" }));
-    await waitFor(() => expect(term().written).toBe(`\x1b[H\x1b[2J$ \r\n\r\n${PANE_DEAD_LINE}`));
+    await waitFor(() => expect(term().written).toBe(`\x1b[?1049h\x1b[H\x1b[2J$ \r\n\r\n${PANE_DEAD_LINE}`));
     expect(daemon.viewers("sup1")).toHaveLength(1);
     expect(screen.getByTestId("session-status").textContent).toContain("stopped");
 

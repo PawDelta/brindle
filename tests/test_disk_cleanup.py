@@ -612,6 +612,8 @@ def test_pushed_branch_is_deleted_on_origin_once_its_pr_merged(repo, monkeypatch
 
 def test_spotlight_is_kept_out_of_brindle_dirs(db, repo, monkeypatch):
     monkeypatch.setattr(disk.sys, "platform", "darwin")
+    # Faked darwin makes spawn.ensure_git probe xcode-select, which a Linux host lacks: the tools are present here.
+    monkeypatch.setattr(spawn, "_tools_checked", True)
 
     root = workspaces.new_worktree_root(str(repo))
     workspaces.new_worktree_root(str(repo))
