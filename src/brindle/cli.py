@@ -364,9 +364,11 @@ def start(
             _fail(str(e).strip("'\""))
     db = DB()
     if branch or worktree:
+        _run(git.require_user_identity, os.getcwd())
         ws = _run(workspaces.checkout_for, db, os.getcwd(), branch=branch, worktree=worktree)
     else:
         ws = _here_or_scratch(db, reuse_scratch=False)
+        _run(git.require_user_identity, ws.repo_root)
         if attach and not yes and sys.stdin.isatty():
             got = _run(svc.place, db, ws)
             if isinstance(got, svc.Conflict):

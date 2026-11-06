@@ -647,6 +647,7 @@ export class FakeDaemon {
   notGitFolders: string[] = [];
   /* macOS without the Command Line Tools: open and clone fail with developer_tools_missing until the installer ran. */
   toolsMissing = false;
+  gitIdentityMissing = new Set<string>();
   /* POST /developer-tools/install calls (only ever from a click). */
   toolsInstalls = 0;
   /* The clones started ({url, parent_dir}) and the folders opened, in order. */
@@ -2433,6 +2434,12 @@ export class FakeDaemon {
       }
       return policy;
     }
+    if (method === "POST" && path === "/repos/git-identity") {
+      const fields = body as { repo: string; name: string; email: string };
+      if (!fields.name.trim() || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(fields.email)) return error("invalid", "Enter a name and email.", 400);
+      this.gitIdentityMissing.delete(fields.repo);
+      return json({ saved: true });
+    }
     if (method === "POST" && /^\/sessions(\/|$)/.test(path)) return this.write(path, (body ?? {}) as Record<string, unknown>);
     if (method === "POST" && path === "/demo") return this.startDemo();
     if (method === "DELETE" && path === "/demo") return this.cancelDemo();
@@ -2784,6 +2791,7 @@ export class FakeDaemon {
       if (typeof body.repo !== "string") return error("invalid", "repo is required", 400);
       const repo = d.repos.find((r) => r.repo_root === body.repo);
       if (!repo) return error("conflict", `${body.repo} is not a git repository`, 409);
+      if (this.gitIdentityMissing.has(repo.repo_root)) return error("git_identity_missing", "Git needs your name and email for commits in this repo.", 409);
       const chosen = this.supervisorRefusal(repo.repo_root, typeof body.provider === "string" && body.provider ? body.provider : null);
       if (chosen instanceof Response) return chosen;
       const refused = this.preflightRefusal(chosen.provider);

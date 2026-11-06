@@ -7493,6 +7493,10 @@
     },
     {
       "method": "POST",
+      "path": "/v1/repos/git-identity"
+    },
+    {
+      "method": "POST",
       "path": "/v1/repos/open"
     },
     {
