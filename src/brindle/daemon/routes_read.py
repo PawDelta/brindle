@@ -748,6 +748,16 @@ def account(db: DB, request: Request) -> Any:
 
 
 @_json
+def github_connection(db: DB, request: Request) -> Any:
+    """brindle's own GitHub sign-in (brindle.github_connect): whether there is one, of what
+    kind, and whether gh's can be copied. Reads brindle's store and gh's config: no keychain."""
+    from brindle import github_connect
+    from brindle.service.dto import GitHubConnectionDTO
+
+    return GitHubConnectionDTO(**github_connect.status()).to_json()
+
+
+@_json
 def get_cost(db: DB, request: Request) -> Any:
     cost.require_entitled()
     days = int(request.query_params.get("days") or COST_DAYS)
@@ -1023,6 +1033,7 @@ ROUTES = [
     Route("/v1/providers/{provider}/connection", provider_connection),
     Route("/v1/cloud/options", cloud_options),
     Route("/v1/account", account),
+    Route("/v1/github/connection", github_connection),
     Route("/v1/cost", get_cost),
     Route("/v1/usage", get_usage),
 ]

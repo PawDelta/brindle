@@ -2317,6 +2317,58 @@ def delete_key(db: DB, params: dict, body: Body) -> Any:
     return {"name": name, "set": False}
 
 
+def connect_github(db: DB, params: dict, body: Body) -> Any:
+    """Give brindle its own GitHub sign-in (brindle.github_connect): ``route`` "gh"
+    copies the GitHub CLI's, "token" takes ``token``. The reply is the connection,
+    never the token, which is neither logged nor put on the bus. Agent callers are
+    refused, as for every route here."""
+    from brindle import github_connect
+    from brindle.service.dto import GitHubConnectionDTO
+
+    token = body.pop("token", None)
+    route = _get(body, "route", required=True)
+    try:
+        if route == "gh":
+            state = github_connect.connect_gh(local=True)
+        elif route == "token":
+            state = github_connect.connect_token(token, local=True)
+        else:
+            raise ServiceError("invalid", 'route must be "gh" or "token"')
+    except github_connect.ConnectError as e:
+        status = {"github_token_invalid": 422, "github_gh_unavailable": 409}.get(e.code, 502)
+        raise ServiceError(e.code, str(e), status) from None
+    except ServiceError:
+        raise
+    except Exception:  # noqa: BLE001 - no traceback: its frames held the token
+        raise ServiceError("internal", "couldn't connect GitHub", 500) from None
+    return GitHubConnectionDTO(**state).to_json()
+
+
+def disconnect_github(db: DB, params: dict, body: Body) -> Any:
+    """Forget brindle's GitHub sign-in; nothing is revoked on GitHub. An error when it
+    couldn't be forgotten: the reply never says disconnected of one still in place."""
+    from brindle import github_connect
+    from brindle.service.dto import GitHubConnectionDTO
+
+    try:
+        state = github_connect.disconnect(local=True)
+    except github_connect.ConnectError as e:
+        raise ServiceError(e.code, str(e), 500) from None
+    return GitHubConnectionDTO(**state).to_json()
+
+
+def github_credential(db: DB, params: dict, body: Body) -> Any:
+    """git's credential helper, in another of brindle's processes, passing git's
+    question on (github_connect.answer): the daemon holds the token when it is in
+    the keychain. The one route here that answers with the token, as git needs it,
+    and the one an agent's processes may call, since git in a pane signs in this
+    way too: on the Unix socket only (daemon.auth). Its body is never logged."""
+    from brindle import github_connect
+
+    action, request = _get(body, "action", default=""), _get(body, "request", default="")
+    return {"answer": github_connect.answer(action, request, local=True)}
+
+
 def retest_key(db: DB, params: dict, body: Body) -> Any:
     """Re-check the stored key with its provider; the reply says how it came out."""
     from brindle import keys_cmds, keystore
@@ -2629,6 +2681,9 @@ ROUTES = [
     Route("/v1/keys/{name}", _endpoint(delete_key), methods=["DELETE"]),
     _post("/keys/{name}/test", retest_key),
     _post("/keys/{name}/import", import_key),
+    _post("/github/connection", connect_github),
+    Route("/v1/github/connection", _endpoint(disconnect_github), methods=["DELETE"]),
+    _post("/github/credential", github_credential),
     _post("/terminals/{id}/input", terminal_input),
     _post("/terminals/shell", shell_terminal),
     Route("/v1/terminals/{id}", _endpoint(close_terminal), methods=["DELETE"]),

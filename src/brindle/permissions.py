@@ -2632,16 +2632,20 @@ _SECRET_FLAG = re.compile(r"^--?(?:show|reveal|print|include|dump|export)-?"
                           r"|^--with-decryption$", re.I)
 
 
+_GITHUB_HELPER = "_github-credential"                  # github_connect's helper, as `brindle` is asked for it
+_GITHUB_HELPER_ROUTE = "/v1/github/credential"         # github_connect.CREDENTIAL_PATH
+
+
 def _brindle_secret_paths() -> list[str]:
     """brindle's own secrets on disk: the daemon's token, its key store, Pro's
     credentials, and the Codex sign-in it keeps (the Codex sandbox's denies,
     providers._codex_denied_reads)."""
-    from brindle import keystore, provider_homes
+    from brindle import github_connect, keystore, provider_homes
     from brindle.daemon import lifecycle
     from brindle.pro import credentials
 
     paths = [lifecycle.info_path(), brindle_home() / keystore.KEYS_SERVICE, credentials.file_store_dir(),
-             provider_homes.source("codex") / "auth.json"]
+             *github_connect.store_paths(), provider_homes.source("codex") / "auth.json"]
     if (own := provider_homes.home("codex")) is not None:
         paths.append(own / "auth.json")
     return [os.path.normpath(str(p)) for p in paths]
@@ -2946,6 +2950,10 @@ def _credential_words(req: Request, part: ShellPart, words: list[str], depth: in
         # run knows is prints_credentials' whole-command question, when a store is named).
         return any(_credential_file(req, part, path) for path in [*part.reads, *part.writes])
     if any(_SECRET_FLAG.match(arg) for arg in args) or _touches_credentials(req, part, words):
+        return True
+    # brindle's own GitHub sign-in, as git's helper is given it (brindle.github_connect): the
+    # helper run by hand, under whatever program starts brindle, or its route on the daemon.
+    if any(arg == _GITHUB_HELPER or _GITHUB_HELPER_ROUTE in arg for arg in args):
         return True
     if program == "printenv":
         if any(a in ("--help", "--version") for a in args):
