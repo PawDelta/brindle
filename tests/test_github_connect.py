@@ -264,7 +264,10 @@ def test_under_the_app_only_the_helper_daemon_holds_the_token_and_the_rest_ask_i
     monkeypatch.setattr(_HelpersItem, "refuses", mac_keychain.Refused(-25293, locked=False))
     assert github_connect.answer("get", ASK) == stop and github_connect.status()["needs_reconnect"]
     # Whatever else goes wrong in the helper git started, git is still told to stop.
-    monkeypatch.setattr(_HelpersItem, "refuses", RuntimeError("anything"))
+    def broken(action, request):
+        raise RuntimeError("anything")
+
+    monkeypatch.setattr(github_connect, "answer", broken)
     monkeypatch.setattr(sys, "stdin", io.StringIO(ASK))
     assert github_connect.main(["get"]) == 0 and capsys.readouterr().out == stop
 
