@@ -79,6 +79,20 @@ def _move(source: Path, dest: Path) -> None:
         raise TrashError(error, os.strerror(error), str(dest))
 
 
+def _plain_path(root: Path, path: Path) -> bool:
+    """A path under root with no symlinks in any component below root."""
+    if not path.is_relative_to(root):
+        return False
+    current = root
+    for part in path.relative_to(root).parts:
+        if part in {".", ".."}:
+            return False
+        current /= part
+        if current.is_symlink():
+            return False
+    return True
+
+
 def _repair_modules(tree: Path, original: Path, old_admin: Path, admin: Path, checkout: Path) -> None:
     """Relink initialized submodules, including nested ones, in the staged copy."""
     from brindle.disk import _replace
@@ -86,21 +100,32 @@ def _repair_modules(tree: Path, original: Path, old_admin: Path, admin: Path, ch
     pending = [(tree, admin)]
     while pending:
         parent, repository = pending.pop()
-        index = git.out(["--git-dir", str(repository), "--work-tree", str(parent),
-                         "ls-files", "--stage", "-z"], tree)
-        # Only gitlinks name submodules. Other nested repositories and .git
-        # fixture files belong to the checkout's contents and stay untouched.
-        modules = {record.split("\t", 1)[1] for record in index.split("\0") if record.startswith("160000 ")}
+        args = ["--git-dir", str(repository), "--work-tree", str(parent)]
+        index = git.out([*args, "ls-files", "--stage", "-z"], tree)
+        head = git.out([*args, "ls-tree", "-r", "-z", "HEAD"], tree)
+        # HEAD and saved submodule paths still identify initialized modules
+        # after a staged removal. Unrelated nested repositories stay untouched.
+        modules = {record.split("\t", 1)[1] for record in (index + head).split("\0")
+                   if record.startswith("160000 ")}
+        metadata = parent / ".gitmodules"
+        if _plain_path(tree, metadata) and metadata.is_file():
+            paths = git.run(["config", "--null", "--file", str(metadata), "--get-regexp",
+                             r"^submodule\..*\.path$"], tree, check=False)
+            if paths.returncode not in {0, 1}:
+                raise TrashError(f"cannot read saved submodule paths: {metadata}")
+            modules.update(record.split("\n", 1)[1] for record in paths.stdout.split("\0") if "\n" in record)
         for name in sorted(modules):
             folder = parent / name
             pointer = folder / ".git"
-            if folder.is_symlink() or not pointer.exists():
+            if folder == parent or Path(name).is_absolute() or not _plain_path(tree, folder) or not pointer.exists():
                 continue  # Uninitialized or replaced submodule.
             if pointer.is_symlink():
                 raise TrashError(f"unsupported submodule Git pointer: {pointer}")
             relative = folder.relative_to(tree)
             if pointer.is_dir():
                 target = pointer  # Older, embedded submodule administration.
+                if not target.resolve().is_relative_to(tree.resolve()):
+                    raise TrashError(f"submodule metadata is outside the staged worktree: {pointer}")
             else:
                 text = pointer.read_text()
                 if not text.startswith("gitdir: "):
@@ -111,6 +136,9 @@ def _repair_modules(tree: Path, original: Path, old_admin: Path, admin: Path, ch
                         raise TrashError(f"submodule metadata is outside the saved worktree: {pointer}")
                     target = admin / target.relative_to(old_admin)
                 _replace(pointer, lambda out: out.write(f"gitdir: {target}\n".encode()))
+            boundary = tree if target.is_relative_to(tree) else admin
+            if not _plain_path(boundary, target / "config"):
+                raise TrashError(f"submodule configuration is outside staged administration: {target}")
             git.run(["config", "--file", str(target / "config"), "core.worktree", str(checkout / relative)], tree)
             pending.append((folder, target))
 

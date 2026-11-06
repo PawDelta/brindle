@@ -34,7 +34,7 @@ def test_removed_worktree_goes_to_trash(db, repo, monkeypatch, action):
     ws = workspaces.create(db, str(repo), "recover-me").workspace
     path = Path(ws.path)
     git.run(["commit", "--allow-empty", "-m", "unmerged work"], path)
-    if action == "restore":
+    if action in {"restore", "deleted"}:
         module = repo.parent / "module-source"
         git.run(["clone", str(repo), str(module)], repo)
         git.run(["-c", "protocol.file.allow=always", "submodule", "add", str(repo), "nested"], module)
@@ -46,10 +46,20 @@ def test_removed_worktree_goes_to_trash(db, repo, monkeypatch, action):
             (sub / "app.py").write_text("staged module work")
             git.run(["add", "app.py"], sub)
             (sub / "app.py").write_text("unstaged module work")
+        if action == "deleted":
+            git.run(["rm", "--cached", "module"], path)
+    if action == "restore":
         git.run(["worktree", "add", "--detach", str(path / "unrelated"), "HEAD"], repo)
         unrelated_pointer = (path / "unrelated" / ".git").read_bytes()
         (path / "fixtures").mkdir()
         (path / "fixtures" / ".git").write_text("fixture data")
+        external = repo.parent / "external"
+        external.mkdir()
+        git.run(["clone", str(repo), str(external / "module")], repo)
+        external_config = (external / "module" / ".git" / "config").read_bytes()
+        sha = git.out(["rev-parse", "HEAD"], external / "module")
+        git.run(["update-index", "--add", "--cacheinfo", "160000", sha, "escaped/module"], path)
+        (path / "escaped").symlink_to(external, target_is_directory=True)
     (path / "staged.txt").write_text("staged version")
     git.run(["add", "staged.txt"], path)
     (path / "staged.txt").write_text("working version")
@@ -140,14 +150,18 @@ def test_removed_worktree_goes_to_trash(db, repo, monkeypatch, action):
         assert git.worktree_for_branch(repo, ws.branch) == str(path)
         assert git.out(["rev-parse", "HEAD"], path) == entry["sha"]
         if action == "restore":
+            assert (external / "module" / ".git" / "config").read_bytes() == external_config
             assert (path / "unrelated" / ".git").read_bytes() == unrelated_pointer
             assert git.out(["status", "--porcelain"], path / "unrelated") == ""
             assert (path / "fixtures" / ".git").read_text() == "fixture data"
+        if action in {"restore", "deleted"}:
             for sub in (path / "module", path / "module" / "nested"):
                 assert git.out(["status", "--porcelain"], sub)
                 assert git.out(["show", ":app.py"], sub) == "staged module work"
                 assert (sub / "app.py").read_text() == "unstaged module work"
             assert not trash.entries()
+        if action == "deleted":
+            assert "D\tmodule" in git.out(["diff", "--cached", "--name-status"], path).splitlines()
 
 
 def _settings(values: dict) -> None:
