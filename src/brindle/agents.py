@@ -5299,7 +5299,8 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
 
                 pilot.limit_reached(db, agent)
             current = db.get_agent(agent_id)
-            if current is not None and current.status == "idle":   # not paused for a usage limit
+            # Not paused for a usage limit; agy's own stop tells its parent itself.
+            if current is not None and current.status == "idle" and current.provider == "claude":
                 tell_parent_api_error(db, current, err_fields)
     elif event == "subagent-start":
         # A crash can skip SubagentStop, so this doesn't touch agent.status:
