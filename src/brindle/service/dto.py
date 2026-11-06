@@ -20,6 +20,15 @@ class _DTO(BaseModel):
         return self.model_dump(mode="json")
 
 
+class RepoDTO(_DTO):
+    """A repo brindle has worked in. ``demo``: brindle's practice repo (under the
+    demo folder), which the app does not offer as a project to start in."""
+
+    repo_root: str
+    name: str
+    demo: bool = False
+
+
 class OrgIdentityDTO(_DTO):
     sub: str
     org_id: str
@@ -627,6 +636,11 @@ class PermissionPolicyDTO(_DTO):
     groups: list[PermissionGroupDTO] = []
     # What the person's org sets over all of it (locked rows; GET /permissions?repo=).
     org_controls: list[OrgControlViewDTO] = []
+    # Whether brindle answers from any of this at all (permission_policy): for
+    # that repo with ?repo=, else as the person's own settings have it. Off, no
+    # preset is ``current``. policy_source: repo, user, or default (nobody set it).
+    policy_on: bool = True
+    policy_source: str = "default"
 
 
 class AskScopeDTO(_DTO):

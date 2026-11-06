@@ -183,7 +183,7 @@ export interface DaemonData {
   /* The person's permission store (permissions.Store, GET /permissions):
      the preset, the unmatched setting, every rule and saved action, and
      per-rule prompt counts over the last day. */
-  policy: { preset: string | null; unmatched: string; rules: PermissionRuleDTO[]; saved: SavedActionDTO[]; prompts: Record<string, number>; groups?: Record<string, { baseline: string; subcategories: Record<string, string> }>; org_controls?: OrgControlViewDTO[] };
+  policy: { preset: string | null; unmatched: string; rules: PermissionRuleDTO[]; saved: SavedActionDTO[]; prompts: Record<string, number>; groups?: Record<string, { baseline: string; subcategories: Record<string, string> }>; org_controls?: OrgControlViewDTO[]; policy_on?: boolean; policy_source?: string };
   /* GET /permissions/asks: the requests hooks hold, grouped
      (permission_grants.groups). A decision takes its requests out of these
      and out of `inbox` (the hold's answer). */
@@ -487,8 +487,9 @@ const asTerminal = (text: string) => text.replace(/\n$/, "").replaceAll("\n", "\
 
 /* A pane as a tmux client draws it on attaching: the screen cleared, the
    pane's screen, then its cursor; a dead pane's last screen and tmux's line. */
+// As a tmux client opens: the alternate screen first (the terminal takes that as tmux attached, and pastes then).
 const drawn = (pane: Pane): string =>
-  "\x1b[H\x1b[2J" +
+  "\x1b[?1049h\x1b[H\x1b[2J" +
   (pane.live ? asTerminal(pane.screen) + (pane.cursor ? `\x1b[${pane.cursor[1] + 1};${pane.cursor[0] + 1}H` : "") : `${pane.text ? asTerminal(pane.text) + "\r\n" : ""}\r\n${PANE_DEAD_LINE}`);
 
 /* A view the app's tmux client opened (PtyViews.open): where, on whose pane
@@ -608,6 +609,8 @@ export class FakeSocket implements WebSocketLike {
   }
 }
 
+const TOOLS_MESSAGE = "git needs Apple's Command Line Developer Tools, which aren't installed. Install them with `xcode-select --install` (or `brew install git`), then try again.";
+
 export class FakeDaemon {
   token = TOKEN;
   data: DaemonData;
@@ -642,6 +645,10 @@ export class FakeDaemon {
   cloneFails: Record<string, number> = {};
   /* Folders POST /repos/open refuses: not a git repository. */
   notGitFolders: string[] = [];
+  /* macOS without the Command Line Tools: open and clone fail with developer_tools_missing until the installer ran. */
+  toolsMissing = false;
+  /* POST /developer-tools/install calls (only ever from a click). */
+  toolsInstalls = 0;
   /* The clones started ({url, parent_dir}) and the folders opened, in order. */
   readonly clones: { url: string; parent_dir: string }[] = [];
   readonly opened: string[] = [];
@@ -1257,6 +1264,10 @@ export class FakeDaemon {
     const say = (line: string) => this.publish("job.progress", { payload: { job, line } });
     setTimeout(() => {
       say(`Cloning into '${name}'...`);
+      if (this.toolsMissing) {
+        this.publish("job.failed", { payload: { job, job_kind: "repo.clone", error: { code: "developer_tools_missing", message: TOOLS_MESSAGE } } });
+        return;
+      }
       if ((this.cloneFails[url] ?? 0) > 0) {
         this.cloneFails[url]--;
         const message = `remote: Repository not found.\nfatal: Authentication failed for '${url}/'`;
@@ -1281,7 +1292,7 @@ export class FakeDaemon {
     if (this.data.meta.airgap) return error("airgap", "The demo runs hosted agents, and air-gap mode is on on this Mac.", 403);
     const name = `textkit-${this.demos.length + 1}`;
     const root = `/home/u/.brindle/demo/${name}`;
-    if (this.heldDemo !== root) this.data.repos = [...this.data.repos, { repo_root: root, name }];
+    if (this.heldDemo !== root) this.data.repos = [...this.data.repos, { repo_root: root, name, demo: true }];
     const started = await this.write("/sessions", { repo: root });
     if (!started.ok) {
       this.heldDemo = root;
@@ -1303,6 +1314,7 @@ export class FakeDaemon {
   private openRepo(body: Record<string, unknown>): Response {
     const path = typeof body.path === "string" ? body.path.replace(/\/+$/, "") : "";
     if (!path) return error("invalid", "path is required", 400);
+    if (this.toolsMissing) return error("developer_tools_missing", TOOLS_MESSAGE, 409);
     if (this.notGitFolders.includes(path) && !body.init) return error("not_a_repo", `${path} is not a git repository`, 409);
     this.opened.push(path);
     const repo = this.data.repos.find((r) => r.repo_root === path) ?? { repo_root: path, name: path.split("/").at(-1) ?? path };
@@ -1456,6 +1468,11 @@ export class FakeDaemon {
     if ((m = path.match(/^\/keys\/([^/]+)\/import$/))) return this.importKey(m[1], body);
     if (path === "/repos/clone") return this.cloneRepo(body);
     if (path === "/repos/open") return this.openRepo(body);
+    if (path === "/developer-tools/install") {
+      this.toolsInstalls++;
+      this.toolsMissing = false;
+      return json({ started: true });
+    }
     if (path === "/terminals/shell") return this.openShell(body);
     if ((m = path.match(/^\/terminals\/([^/]+)\/input$/))) return this.terminalInput(m[1], body);
     if ((m = path.match(/^\/keys\/([^/]+)\/set$/))) {
@@ -1603,6 +1620,10 @@ export class FakeDaemon {
     const file = scope === "user" ? this.data.config.user : scope === "shared" ? this.data.config.repo : this.data.config.local;
     for (const [key, value] of entries) file[key] = value;
     for (const key of unset) delete file[key];
+    if (scope === "user" && "permission_policy" in (values as object)) {
+      this.data.policy.policy_on = file.permission_policy === "on";
+      this.data.policy.policy_source = "user";
+    }
     return json({ updated: [...entries.map(([k]) => k), ...unset].sort(), path: scope === "user" ? "/home/u/.brindle/config.json" : `${String(body.repo)}/.brindle/${scope === "shared" ? "config.json" : "config.local.json"}` });
   }
 
@@ -1740,9 +1761,11 @@ export class FakeDaemon {
     const p = this.data.policy;
     const now = Date.now() / 1000;
     return {
+      policy_on: p.policy_on ?? true,
+      policy_source: p.policy_source ?? "default",
       preset: p.preset,
       unmatched: p.unmatched,
-      presets: Object.entries(FAKE_PRESETS).map(([name, x]) => ({ name, description: x.description, unmatched: x.unmatched, current: name === p.preset })),
+      presets: Object.entries(FAKE_PRESETS).map(([name, x]) => ({ name, description: x.description, unmatched: x.unmatched, current: (p.policy_on ?? true) && name === p.preset })),
       rules: p.rules.map((r) => ({ ...r, prompts: p.prompts[r.id] ?? 0, expired: r.expires != null && r.expires <= now })),
       saved: p.saved.map((s) => ({ ...s, expired: s.expires != null && s.expires <= now })),
       prompt_counts: { ...p.prompts },
@@ -1867,6 +1890,7 @@ export class FakeDaemon {
       p.preset = String(body.preset);
       p.unmatched = preset.unmatched;
       p.rules = [...preset.rules(), ...p.rules.filter((r) => r.source !== "preset")];
+      if ((p.policy_source ?? "default") === "default") p.policy_on = true;   // permissions.choose_preset
       return json(this.policyDTO());
     }
     if (path === "/permissions/rules" && method === "POST") {

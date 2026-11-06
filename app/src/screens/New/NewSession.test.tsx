@@ -228,6 +228,16 @@ describe("NewSession", () => {
     stop();
   });
 
+  it("hides the demo repo from the project options", async () => {
+    const demo = { repo_root: "/home/u/.brindle/demo/textkit-1", name: "textkit-1", demo: true };
+    const { stop } = setup(new FakeDaemon({ repos: [demo, { repo_root: REPO, name: "proj" }, { repo_root: OTHER, name: "other" }], sessions: [live], workspaces: [root, worker] }));
+    const repo = await screen.findByRole("combobox", { name: "Repo" });
+    expect((repo as HTMLInputElement).value).toBe("proj");
+    fireEvent.focus(repo);
+    expect(screen.getAllByRole("option").map((o) => o.textContent)).toEqual(["proj", "other"]);
+    stop();
+  });
+
   it("filters the project list as you type, picks with the keyboard, and closes on an outside click or Escape", async () => {
     const { stop } = setup();
     const repo = await screen.findByRole("combobox", { name: "Repo" });

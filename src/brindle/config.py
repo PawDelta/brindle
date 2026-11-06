@@ -144,16 +144,21 @@ class RepoConfig:
     delegation: str = "balanced"      # how readily a supervisor hands work to workers: "conservative" (save tokens), "balanced" or "fast" (save time)
     max_weight: str | None = None      # ceiling for weight routing: "light", "medium", "heavy", "advanced", or None (unlimited)
     plan_first: bool = False           # workers propose a plan and wait for approval before editing
-    # "on": brindle answers workers' permission requests by its rules (see
-    # brindle.permissions). Unset, it's "on" for Pro and up and "off" on Free.
+    # "on": brindle answers agents' permission requests by its rules (see
+    # brindle.permissions). Unset, see _default_permission_policy.
     permission_policy: str = "off"
+    # Where that came from: "repo" (either of its files), "user" (the person's
+    # own file) or "default" (nobody set it, so nobody chose it).
+    permission_policy_source: str = "default"
     # Seconds brindle's permission hook holds a request left to the person for
     # the app's answer (brindle.agents._hold_for_app): a day, so in practice
     # until the person answers it, sends it to the terminal, or the agent is
     # closed. By provider:
     #   Claude Code  PermissionRequest hook; timeout written as this + 30s (docs:
     #                600s default, no maximum). Its own prompt shows meanwhile
-    #                (seen in 2.1.304); on timeout that prompt is what's left.
+    #                (seen in 2.1.304), except for an Agent-tool subagent's request,
+    #                where it comes once the hook returns nothing (seen in 2.1.318);
+    #                on timeout that prompt is what's left.
     #   Codex        PermissionRequest hook (permission_policy on, hook trusted);
     #                timeout codex_hook.TIMEOUT, a day + 30s (Codex caps only
     #                SessionEnd hooks), so a longer hold is cut to fit. Whether
@@ -172,7 +177,8 @@ class RepoConfig:
     # "brindle": agy agents run with --dangerously-skip-permissions and
     # brindle's hook allows or denies every call (see brindle.antigravity).
     # "prompt": agy asks as usual. None (unset): "brindle" for agents brindle
-    # runs, "prompt" for an interactive one, where a person answers.
+    # runs and for an interactive one with the policy on and the Autonomous
+    # preset, "prompt" for any other interactive one, where a person answers.
     agy_approvals: str | None = None
     # A task whose files overlap a running one: "block", "warn" or "queue" (wait
     # for it to merge). None: block within a session, queue behind another session's.
@@ -358,15 +364,46 @@ def linked_main(path: str | Path) -> Path | None:
     return common.parent if common.name == ".git" else None
 
 
-def _default_permission_policy() -> str:
-    """"on" for Pro and up (so approvals are recorded and learned), "off" on
-    Free. Fails closed: no license, or any error, means "off"."""
+# ~/.brindle/config.json: the permission policy this install has when nobody
+# set ``permission_policy``. Kept apart from that key because it isn't the
+# person's choice: an explicit value always beats it, and only an explicit one
+# makes brindle refuse a Codex launch it can't enforce (providers.codex_sandbox_base).
+POLICY_DEFAULT_KEY = "permission_policy_default"
+
+
+def _default_permission_policy(user: dict) -> str:
+    """"on" for an install that recorded it (record_first_run) and for Pro and
+    up, "off" for a Free install from before that. Fails closed: no license,
+    or any error, means "off"."""
+    if user.get(POLICY_DEFAULT_KEY) == "on":
+        return "on"
     try:
         from brindle.pro import license
 
         return "on" if license.has("learned_rules") else "off"
     except Exception:  # noqa: BLE001 -- an unreadable license is Free
         return "off"
+
+
+# What a person who has used brindle here has at least one of. Neither the app
+# (it creates the home, and only reads config.json) nor an engine update writes these.
+EARLIER_STATE = ("brindle.db", CONFIG_FILE, "permissions.json")
+
+
+def record_first_run() -> None:
+    """A new install starts with the permission policy on, on every plan, so
+    its agents aren't left to ask about everything: recorded once, at the first
+    thing brindle does on this machine (the CLI's first command, else the first
+    database open, which is the app's daemon starting). Someone with anything
+    of brindle's here already keeps what they have. Never raises."""
+    if os.environ.get("BRINDLE_NO_FIRST_RUN"):   # the test suite's homes are existing installs
+        return
+    try:
+        home = brindle_home()
+        if not any((home / name).exists() for name in EARLIER_STATE):
+            set_user(POLICY_DEFAULT_KEY, "on")
+    except OSError:   # an unwritable home: nothing else will work either, and this isn't the one to say so
+        pass
 
 
 CHECK_RAM_GB = 2        # RAM budgeted per concurrent check run
@@ -464,8 +501,12 @@ def load_repo_config(repo_root: str | Path, *, user_only: bool = False, branch: 
                 cfg.agent_env.append(name.strip())
     if not any("check_concurrency" in source for source in (local, shared, user)):
         cfg.check_concurrency = host_check_concurrency()
-    if not any("permission_policy" in source for source in (local, shared, user)):
-        cfg.permission_policy = _default_permission_policy()
+    if "permission_policy" in local or "permission_policy" in shared:
+        cfg.permission_policy_source = "repo"
+    elif "permission_policy" in user:
+        cfg.permission_policy_source = "user"
+    else:
+        cfg.permission_policy = _default_permission_policy(user)
     services = local["services"] if "services" in local else shared.get("services")
     if isinstance(services, list):
         cfg.services = [s for s in services if isinstance(s, dict)]

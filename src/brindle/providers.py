@@ -87,6 +87,7 @@ class LaunchContext:
     mode: str | None = None     # the agent's mode ('interactive', 'handoff', 'assign', ...)
     plan_first: bool = False    # its edits are gated on plan approval (the hook watches edit tools too)
     mcp_recovery: bool = False  # a fresh reviewer after a failed MCP connection
+    chrome_chosen: bool | None = None  # claude_chrome_chosen of the pane's environment, where it's known
 
 
 def _uv_cache_env(ctx: LaunchContext) -> dict[str, str]:
@@ -171,7 +172,14 @@ def _codex_denied_reads() -> list[str]:
 
 
 class CodexSandboxRefused(RuntimeError):
-    """The permission policy is on, but Codex would ignore brindle's sandbox profile."""
+    """The permission policy is on, but Codex would ignore brindle's sandbox
+    profile: ``problem``, a clause saying why, and ``fix``, what would change that."""
+
+    def __init__(self, problem: str, fix: str) -> None:
+        self.problem, self.fix = problem, fix
+        super().__init__(
+            f"brindle won't start this Codex worker: permission_policy is on, but {problem}. {fix}, or turn the "
+            'permission policy off for this repo ("permission_policy": "off" in .brindle/config.local.json)')
 
 
 def _codex_layers(cwd: str) -> list[tuple[str, dict]] | None:
@@ -209,48 +217,55 @@ def codex_sandbox_base(cwd: str) -> str:
     workspace sandbox). Raises CodexSandboxRefused when Codex would ignore
     brindle's profile, or run it with full access: a ``sandbox_mode`` in any
     layer (or the active profile) wins over ``default_permissions``."""
-    off = 'or turn the permission policy off for this repo ("permission_policy": "off" in .brindle/config.local.json)'
-    why = ("brindle won't start this Codex worker: permission_policy is on, but {} so Codex would ignore the "
-           "sandbox profile that stops its commands reading credential files. {}, " + off)
+    ignored = "so Codex would ignore the sandbox profile that stops its commands reading credential files"
     layers = _codex_layers(cwd)
     if layers is None:
         raise CodexSandboxRefused(
-            "brindle won't start this Codex worker: permission_policy is on, but Codex didn't report its "
-            "config layers (`codex app-server` config/read; is Codex installed and current?), so brindle can't "
-            "tell whether a sandbox_mode would make Codex ignore the sandbox profile that stops its commands "
-            "reading credential files. Update Codex, " + off)
+            "Codex didn't report its config layers (`codex app-server` config/read; is Codex installed and "
+            "current?), so brindle can't tell whether a sandbox_mode would make Codex ignore the sandbox profile "
+            "that stops its commands reading credential files", "Update Codex")
     active = next((c["profile"] for _, c in layers if isinstance(c.get("profile"), str)), None)
     for where, cfg in layers:
         if "sandbox_mode" in cfg:
-            raise CodexSandboxRefused(why.format(f"{where} sets sandbox_mode,", f"Remove sandbox_mode from {where}"))
+            raise CodexSandboxRefused(f"{where} sets sandbox_mode, {ignored}", f"Remove sandbox_mode from {where}")
         own = (cfg.get("profiles") or {}).get(active) if active and isinstance(cfg.get("profiles"), dict) else None
         for key in ("sandbox_mode", "default_permissions"):
             if isinstance(own, dict) and key in own:
-                raise CodexSandboxRefused(why.format(f"{where} sets {key} in [profiles.{active}],",
-                                                     f"Remove {key} from [profiles.{active}] in {where}"))
+                raise CodexSandboxRefused(f"{where} sets {key} in [profiles.{active}], {ignored}",
+                                          f"Remove {key} from [profiles.{active}] in {where}")
     where, base = next(((w, c["default_permissions"]) for w, c in layers if "default_permissions" in c),
                        ("", ":workspace"))
     if base == ":danger-full-access":
-        raise CodexSandboxRefused(why.format(f'{where} sets default_permissions = ":danger-full-access",',
-                                             f"Remove default_permissions from {where}"))
+        raise CodexSandboxRefused(f'{where} sets default_permissions = ":danger-full-access", {ignored}',
+                                  f"Remove default_permissions from {where}")
     return base if isinstance(base, str) else ":workspace"
 
 
 def _codex_sandbox(ctx: LaunchContext) -> list[str]:
-    """The ``-c`` flags for a Codex worker's sandbox. With the permission
+    """The ``-c`` flags for a Codex agent's sandbox. With the permission
     policy on: a permissions profile for this launch only, the person's own
     default (else Codex's workspace sandbox) plus brindle's writable build
-    caches, with every credential store read-denied; where Codex would
-    ignore that profile the launch is refused (codex_sandbox_base).
+    caches, with every credential store read-denied. Where Codex would ignore
+    that profile (codex_sandbox_base) the launch is refused if someone set the
+    policy on; if it's only on by default, this agent runs as with the policy
+    off instead and whoever watches it is told once (codex_hook.skip_policy).
     Otherwise the writable roots the older way. Nothing in the person's
     config files changes."""
-    from brindle.codex_hook import policy_on
+    from brindle import codex_hook
 
     roots = _codex_writable_roots(ctx)
-    if not (ctx.cwd and policy_on(ctx.cwd)):
-        return ["-c", f"sandbox_workspace_write.writable_roots={json.dumps(roots)}"] if roots else []
-    base = codex_sandbox_base(ctx.cwd)
-    entries = {**{root: "write" for root in roots}, **{path: "deny" for path in _codex_denied_reads()}}
+    plain = ["-c", f"sandbox_workspace_write.writable_roots={json.dumps(roots)}"] if roots else []
+    codex_hook.skip_policy(ctx.cwd, None)   # decided afresh each launch: the config may have changed
+    if not (ctx.cwd and codex_hook.policy_on(ctx.cwd)):
+        return plain
+    try:
+        base = codex_sandbox_base(ctx.cwd)
+    except CodexSandboxRefused as e:
+        if codex_hook.policy_chosen(ctx.cwd):
+            raise
+        codex_hook.skip_policy(ctx.cwd, e)
+        return plain
+    entries ={**{root: "write" for root in roots}, **{path: "deny" for path in _codex_denied_reads()}}
     table = "{" + ",".join(f"{json.dumps(k)}={json.dumps(v)}" for k, v in entries.items()) + "}"
     return ["-c", f"default_permissions={json.dumps(CODEX_PROFILE)}",
             "-c", f"permissions.{CODEX_PROFILE}.extends={json.dumps(base)}",
@@ -538,6 +553,22 @@ def claude_onboarded() -> bool:
     security notes): ``hasCompletedOnboarding`` in its global config."""
     try:
         return _read_json(os.path.realpath(claude_global_config())).get("hasCompletedOnboarding") is True
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
+def claude_chrome_chosen(env: dict[str, str] | None = None) -> bool:
+    """Whether the person chose Claude in Chrome for a CLI that runs with
+    ``env``: its own variable, or "Enabled by default" (``/chrome``) in the
+    global config of the config folder ``env`` names, else the one this launch
+    would use. With neither, ``--no-chrome``: see ClaudeCode.command."""
+    env = env or {}
+    if env.get("CLAUDE_CODE_ENABLE_CFC") or os.environ.get("CLAUDE_CODE_ENABLE_CFC"):
+        return True
+    folder = env.get("CLAUDE_CONFIG_DIR")
+    config = os.path.join(folder, ".claude.json") if folder else claude_global_config()
+    try:
+        return _read_json(os.path.realpath(config)).get("claudeInChromeDefaultEnabled") is True
     except (OSError, ValueError, AttributeError):
         return False
 
@@ -920,8 +951,10 @@ class ClaudeCode(Provider):
             # A worker's file tools may not touch the credential stores its
             # shell commands are denied (permissions.prints_credentials):
             # Read would print a key the hook denies `cat`, Edit would plant
-            # one. An interactive pane is a person's own chat.
-            settings["permissions"] = {"deny": _credential_file_denies()}
+            # one. An interactive pane is a person's own chat. Nobody watches
+            # this one, so a question asked there stalls the worker, and no
+            # hook can answer it: its supervisor is a send_message away.
+            settings["permissions"] = {"deny": [*_credential_file_denies(), "AskUserQuestion"]}
         mcp = {"mcpServers": {"brindle": mcp_server_spec(ctx.agent_id)}}
         p = ctx.profile
         argv = [claude_binary()]
@@ -929,6 +962,14 @@ class ClaudeCode(Provider):
             # One turn per process; brindle's headless runner (agents.run_headless)
             # starts the next with --resume when a message arrives.
             argv.append("-p")
+        # A subscriber's interactive Claude Code, on a config with no Chrome
+        # choice yet (brindle's home starts with none), lists seven browsers'
+        # profile folders at every start to decide whether to offer Claude in
+        # Chrome. Run from brindle, macOS holds that against brindle's engine
+        # (docs/investigations/macos-prompts.md). /chrome still works: once it
+        # turns the setting on, this flag is left off from the next launch.
+        if not (claude_chrome_chosen(p.env) if ctx.chrome_chosen is None else ctx.chrome_chosen):
+            argv.append("--no-chrome")
         argv += [
             "--settings", json.dumps(settings),
             "--mcp-config", json.dumps(mcp),

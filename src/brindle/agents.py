@@ -29,7 +29,7 @@ from brindle import bus, cloud_credential, company_identity, company_login, git,
 from brindle import spawn as processes   # this module's own spawn() starts an agent
 from brindle.assembler import DECISIONS, DOCUMENT_CHUNKS, OTHER_SESSIONS, TASK_AND_RULES, Block, assemble
 from brindle.config import RepoConfig
-from brindle.db import DB, Agent, Workspace
+from brindle.db import DB, Agent, Workspace, request_subagent
 from brindle.model_availability import ModelAvailabilityChecker, PROVISIONING_TIMEOUT, provisioning_context
 from brindle.pro import route_health
 from brindle.profiles import load_profile, local_fallback, missing_add_dirs
@@ -212,6 +212,9 @@ def managed(repo_root: str):
 _UNREAD = object()   # a ``managed`` argument not passed: read the org's settings now
 
 
+_KEYCHAIN_HELPER_PLATFORM = sys.platform == "darwin"     # where git's default credential helper can raise a dialog
+
+
 def agent_env(ws: Workspace, agent_id: str, agent: Agent | None = None,
               m=_UNREAD) -> dict[str, str]:
     env = {**workspaces.workspace_env(ws), "BRINDLE_AGENT_ID": agent_id}
@@ -315,6 +318,10 @@ def agent_env(ws: Workspace, agent_id: str, agent: Agent | None = None,
     # so a few of them don't each start one per core. Passed explicitly, since
     # a pane can inherit an older tmux environment; a profile's value still wins.
     env.setdefault("PYTEST_XDIST_AUTO_NUM_WORKERS", os.environ.get("PYTEST_XDIST_AUTO_NUM_WORKERS", "2"))
+    # An agent's own `git push` to GitHub signs in through gh, not git's keychain
+    # helper, whose dialog nobody in a pane can answer (see git.pane_git_config).
+    if _KEYCHAIN_HELPER_PLATFORM and (config := git.pane_git_config()):
+        env.setdefault("GIT_CONFIG_PARAMETERS", config)
     return env
 
 
@@ -1236,16 +1243,21 @@ def _launch_resolved(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
     mcp_recovery = bool(agent.mode == "review" and agent.review_sha and db.conn.execute(
         "SELECT 1 FROM review_mcp_retries WHERE workspace_id=? AND sha=?",
         (ws.id, agent.review_sha)).fetchone())
+    # The pane's own config folder: a profile's env line may move it, except
+    # under an enforced company identity (agent_env).
+    chrome_chosen = (providers.claude_chrome_chosen(_window_environment(agent, ws, m)[0])
+                     if provider.name == "claude" else None)
     try:
         argv = provider.command(LaunchContext(agent.id, profile, prompt, resume=resume, cwd=ws.path,
                                               mode=agent.mode, plan_first=bool(agent.plan_first),
-                                              mcp_recovery=mcp_recovery))
+                                              mcp_recovery=mcp_recovery, chrome_chosen=chrome_chosen))
     except providers.CodexSandboxRefused as e:
         raise AgentError(str(e)) from e
     if provider.name == "codex":
         from brindle import codex_hook
 
         try:
+            codex_hook.tell_skipped(db, agent, ws.path)
             codex_hook.tell_untrusted(db, agent, ws.path)  # launched without the hook it couldn't trust
         except Exception:  # noqa: BLE001 - never stop a launch over this
             pass
@@ -4010,14 +4022,17 @@ def pre_tool_decision(db: DB, agent: Agent, payload: dict) -> dict | None:
                     "permissionDecisionReason": why,
                 }}
     ruled = _pre_tool_policy(db, agent, ws, payload, load)
-    if ruled is not None:
+    allowed = ruled is not None and ruled["hookSpecificOutput"]["permissionDecision"] == "allow"
+    if ruled is not None and not allowed:
         return ruled
     if tool != "Bash":
-        return None
+        return ruled
     command = str((payload.get("tool_input") or {}).get("command", ""))
     from brindle import codemap
 
     codemap.record_query(db, agent, ws, command)
+    if allowed:
+        return ruled
     try:
         profile = load()
     except Exception:
@@ -4039,14 +4054,26 @@ def pre_tool_decision(db: DB, agent: Agent, payload: dict) -> dict | None:
     }}
 
 
+# Claude Code's modes that would prompt for what no rule of its own allows. In
+# these an allow at PreToolUse only saves the prompt; in any other mode (dontAsk
+# refuses, auto has its classifier, plan its own floor) it would change the outcome.
+PROMPTING_MODES = ("default", "acceptEdits")
+# What it answers there. Reads run unasked inside the worktree (nothing to save),
+# and the MCP and other tools stay with the PermissionRequest hook.
+PRE_TOOL_ALLOW_KINDS = ("bash", "write", "edit", "fetch")
+
+
 def _pre_tool_policy(db: DB, agent: Agent, ws: Workspace | None, payload: dict, load) -> dict | None:
     """With ``permission_policy`` on, the policy's word on a PreToolUse call
     before any approval of brindle's own: a deny denies it, and an ask a rule
     makes explicitly forces Claude Code's prompt (``permissionDecision``
     "ask"), so the PermissionRequest hook then holds it for the person,
     whatever the profile's allowed_tools or Claude Code's own mode would have
-    run without asking. None otherwise (an allow, or an ask no rule made,
-    leaves the rest of the hook to decide). ``load`` loads the agent's
+    run without asking. An allow goes in here too where Claude Code would
+    otherwise prompt, so the prompt the PermissionRequest hook would only close
+    never shows; its deny rules, ask rules and safety checks still apply. Left
+    to that hook: an allow a saved action settles, which spends a use there.
+    None otherwise (the rest of the hook decides). ``load`` loads the agent's
     profile. Never raises."""
     try:
         if ws is None:
@@ -4072,6 +4099,15 @@ def _pre_tool_policy(db: DB, agent: Agent, ws: Workspace | None, payload: dict, 
             return {"hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
                 "permissionDecision": decision.decision,
+                "permissionDecisionReason": f"brindle: {decision.reason}",
+            }}
+        if (decision.decision == "allow" and decision.saved is None and req.kind in PRE_TOOL_ALLOW_KINDS
+                and payload.get("permission_mode") in PROMPTING_MODES):
+            _record_permission(db, agent, ws, req.summary(), f"allow: {decision.reason}")
+            _note_decision(db, agent, ws, req.kind, req.summary(), decision)
+            return {"hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "allow",
                 "permissionDecisionReason": f"brindle: {decision.reason}",
             }}
         return None
@@ -4316,7 +4352,7 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
             suggestions = permissions.persistent_suggestions(suggestions)
             # Recorded either way: its PostToolUse counts as the person's approval.
             answer = _hold_for_app(db, agent, req, decision.reason, suggestions, keep=True,
-                                   hold=cfg.permission_hold_seconds,
+                                   hold=cfg.permission_hold_seconds, subagent=_subagent_of(payload),
                                    **(_supervising(db, agent, cfg, decision, payload) if policy else {}))
             if answer:
                 return permissions.claude_answer(answer, suggestions)
@@ -4338,6 +4374,18 @@ def _supervising(db: DB, agent: Agent, cfg, decision, payload: dict) -> dict:
             "tool_input": payload.get("tool_input")}
 
 
+def _subagent_of(payload: dict) -> str | None:
+    """The Agent-tool subagent a Claude Code hook fired for (its payload's
+    ``agent_id``), or None on the main thread. A subagent's request has no prompt
+    on screen while the hook holds it: Claude Code draws it only once the hook
+    returns nothing (seen in 2.1.318), so nothing on the pane says what became of
+    it. It ends with an answer, the person's "answer in the terminal", or the hold
+    letting go: when the app isn't connected the daemon's wait route ends it, so the
+    dialog comes (brindle.daemon.holds)."""
+    subagent = payload.get("agent_id")
+    return subagent if isinstance(subagent, str) and subagent else None
+
+
 def _session_of(db: DB, agent: Agent) -> str | None:
     """The session (root agent) ``agent`` belongs to, for saved actions that last one."""
     try:
@@ -4352,15 +4400,11 @@ def _session_of(db: DB, agent: Agent) -> str | None:
 # agent was closed or its request answered at the CLI's own prompt.
 HOLD_LOOK_SECONDS = 1.0
 HOLD_MIN_LOOK = 0.1     # the shortest such wait (the daemon reads 0 as its longest)
-# Those waits between looks at the pane until a look has caught its CLI's own
-# prompt (it may not be drawn yet, so the pane reads busy for a while): 5s
-# apart, so ANSWERED_LOOKS past it span long enough for it to be drawn. Once
-# one has, the pane is looked at after every wait.
-UNSEEN_LOOK_EVERY = 5
-# Looks in a row a pane must read past its CLI's own permission prompt, busy
-# or idle, before the hold ends: longer than one look, so a read while the
-# prompt is redrawn doesn't take it for answered. Any other read starts the
-# count over.
+# Looks in a row a pane that has shown its CLI's own permission prompt must then
+# read past it, busy or idle, before the hold ends: longer than one look, so a
+# read while the prompt is redrawn doesn't take it for answered. Any other read
+# starts the count over. A pane that hasn't shown it says nothing: no prompt may
+# be drawn yet, or at all while the hook holds the request (_subagent_of).
 ANSWERED_LOOKS = 3
 # Seconds a CLI's hook timeout is set above the hold (permission_hold_seconds),
 # so the hook gives the request to the prompt itself before the CLI cancels it.
@@ -4370,7 +4414,7 @@ ANSWERS = ("allow_once", "allow_always", "deny")
 
 def _hold_for_app(db: DB, agent: Agent, req, reason: str, suggestions: list | None, keep: bool,
                   hold: float, supervisor: Agent | None = None, supervise: float = 0,
-                  tool_input: object = None) -> str | None:
+                  tool_input: object = None, subagent: str | None = None) -> str | None:
     """Record a request the policy left to the person and, while the app's
     daemon runs, hold it there for the person's answer for ``hold`` seconds
     (_await_app_answer; the row's ``hold_until`` says till when, for the
@@ -4383,12 +4427,15 @@ def _hold_for_app(db: DB, agent: Agent, req, reason: str, suggestions: list | No
     and keep it once the hold ends (for that pairing). ``supervisor``: the
     worker's supervisor answers it first, for ``supervise`` seconds of the
     hold (brindle.permission_routing), and the person after; it is shown the
-    CLI's complete ``tool_input``, which also tells identical requests apart."""
+    CLI's complete ``tool_input``, which also tells identical requests apart.
+    ``subagent``: _subagent_of."""
     from brindle import permission_asks, permission_routing, permissions
     from brindle.daemon.holds import Holder
 
     request_id = uuid.uuid4().hex[:16]
-    recorded = json.dumps(req.to_dict()), json.dumps(suggestions) if suggestions else None
+    # The subagent goes in the recorded JSON (Request.from_dict ignores it): no released table gains a column.
+    recorded = (json.dumps({**req.to_dict(), **({"subagent": subagent} if subagent else {})}),
+                json.dumps(suggestions) if suggestions else None)
     # Only an answer to exactly this request and these suggestions counts.
     digest = permissions.request_digest(*recorded)
     holder = Holder(agent.id, request_id, digest)
@@ -4419,7 +4466,8 @@ def _hold_for_app(db: DB, agent: Agent, req, reason: str, suggestions: list | No
     if held:
         try:
             ended = _await_app_answer(db, agent, holder, req, hold_until,
-                                      *([supervise_until] if supervise_until else []))
+                                      *([supervise_until] if supervise_until else []),
+                                      **({"pane_shows": False} if subagent else {}))
             ended_at = time.time()     # the wait's end, before the cleanup below
             answer = ended if ended in ANSWERS or ended in permission_routing.AS_ANSWER else None
         finally:
@@ -4443,7 +4491,7 @@ def _closed(agent: Agent | None) -> bool:
 
 
 def _await_app_answer(db: DB, agent: Agent, holder, req, hold_until: float,
-                      supervise_until: float | None = None) -> str:
+                      supervise_until: float | None = None, pane_shows: bool = True) -> str:
     """The person's answer from the app's inbox (one of ANSWERS), or the
     supervisor's (permission_routing.AS_ANSWER) while the request is its,
     until ``supervise_until``, as the daemon hands it to ``holder``
@@ -4451,16 +4499,19 @@ def _await_app_answer(db: DB, agent: Agent, holder, req, hold_until: float,
     hold ended: "timeout" at ``hold_until``, "terminal" when the person
     asks to answer in the terminal, "agent_exit" once the agent is closed or
     killed, "prompt" once its CLI's own prompt took the request (its
-    PostToolUse removed the row, or its pane stayed past the prompt for
-    ANSWERED_LOOKS), "daemon_lost" if the daemon goes away. Without an answer
-    the request goes to the CLI's own prompt (or, where there is none, is
-    refused). The agent shows waiting meanwhile, as at that prompt."""
+    PostToolUse removed the row, or its pane showed the prompt, then stayed
+    past it for ANSWERED_LOOKS), "daemon_lost" if the daemon goes away (or, the
+    request the person's, no app is left to show it in). Without an answer the
+    request goes to the CLI's own prompt (or, where there is none, is refused).
+    The agent shows waiting meanwhile, as at that prompt. ``pane_shows``: False
+    when the CLI draws no prompt while the hook holds the request (_subagent_of),
+    so the pane is never looked at."""
     from brindle.permission_routing import AS_ANSWER
 
     db.set_status(agent.id, "waiting")
     if supervise_until is None:
         bus.publish_agent(db, "permission.pending", agent.id, tool=req.tool, target=req.target())
-    deadline, past, seen, waits = time.monotonic() + hold_until - time.time(), 0, False, 0
+    deadline, past, seen = time.monotonic() + hold_until - time.time(), 0, False
     while True:
         now = db.get_agent(agent.id)
         recorded = db.conn.execute("SELECT channel FROM permission_requests WHERE agent_id=? AND tool_use_id=?",
@@ -4480,13 +4531,13 @@ def _await_app_answer(db: DB, agent: Agent, holder, req, hold_until: float,
             supervise_until = None
             db.update_permission_request(agent.id, holder.request_id, channel="hook")
             bus.publish_agent(db, "permission.pending", agent.id, tool=req.tool, target=req.target())
-        # Its CLI shows its own prompt for as long as this hook holds the request: a pane
-        # past it was answered there, whether or not a look caught the prompt. An allow
-        # runs the tool (its PostToolUse comes once it is done), a deny or a dismissal none.
-        if seen or waits % UNSEEN_LOOK_EVERY == 0:
+        # On the main thread its CLI shows its own prompt for as long as this hook holds the
+        # request: a pane that showed it and is now past it was answered there. An allow runs
+        # the tool (its PostToolUse comes once it is done), a deny or a dismissal none.
+        if pane_shows:
             state = _pane_state(now)
-            past = past + 1 if state in ("idle", "busy") else 0     # the prompt, or a read it can't tell
             seen = seen or state == "prompt"
+            past = past + 1 if seen and state in ("idle", "busy") else 0     # the prompt, or a read it can't tell
             if past >= ANSWERED_LOOKS:
                 ended = "prompt"
                 break
@@ -4494,7 +4545,6 @@ def _await_app_answer(db: DB, agent: Agent, holder, req, hold_until: float,
         if supervise_until is not None:     # back in time to hand it to the person
             look = max(min(look, supervise_until - time.time()), HOLD_MIN_LOOK)
         held, answer = holder.wait(look)
-        waits += 1
         if answer is not None:
             # Else the person sent it to the prompt.
             ended = answer if answer in ANSWERS or answer in AS_ANSWER else "terminal"
@@ -4529,8 +4579,9 @@ def _pane_state(agent: Agent) -> str | None:
 def note_permission_outcome(db: DB, agent: Agent, payload: dict) -> None:
     """PostToolUse: if the tool's request had been left to the person, they
     approved it. Count that toward a suggestion (never a rule by itself).
-    The request is the oldest recorded one for the same tool and input
-    (PermissionRequest has no tool_use_id to pair them by)."""
+    The request is the oldest recorded one for the same tool and input on the
+    same thread (PermissionRequest has no tool_use_id to pair them by), and never
+    a subagent's its hook still holds: that tool can't have run yet."""
     try:
         if not db.permission_requests_of(agent.id):
             return   # nothing was left to the person: skip the permissions import
@@ -4541,8 +4592,11 @@ def note_permission_outcome(db: DB, agent: Agent, payload: dict) -> None:
         if ran is None:
             return
         same = (ran.tool, ran.kind, ran.command, ran.path, ran.url)
+        thread = _subagent_of(payload)
 
         def matches(row) -> bool:
+            if request_subagent(row) != thread or (thread and row["channel"] in ("hook", "supervisor")):
+                return False
             r = json.loads(row["request"])
             return (r.get("tool"), r.get("kind"), r.get("command"), r.get("path"), r.get("url")) == same
 

@@ -1294,8 +1294,8 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
   const common = YOURS.filter((s) => s.common);
   const others = YOURS.filter((s) => !s.common);
   const shown = SETTINGS.map((s) => s.key);
-  // What the person set for every repo that has no row here.
-  const yourLines = userLines(config?.user ?? {}).filter(([k]) => !shown.includes(k));
+  // What the person set for every repo that has no row here (permission_policy_default is brindle's, not theirs).
+  const yourLines = userLines(config?.user ?? {}).filter(([k]) => !shown.includes(k) && k !== "permission_policy_default");
   const yourRow = (s: Setting) => <SettingRow key={s.key} s={s} value={userDraft[s.key]} dirty={userDirty.includes(s.key)} disabled={saving} onChange={(v) => editUser(s.key, v)} />;
   const repoView = view === "repo" && !!repo;
 

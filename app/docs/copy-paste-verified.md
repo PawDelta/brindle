@@ -187,6 +187,64 @@ both failing without the label:
 To check by hand: drag in each pane and watch for "Copied" at the view's
 top right.
 
+## Paste reliability (branch `fix/terminal-paste-reliable`)
+
+Reports from staff builds 74 to 76 said paste was flaky, without exact symptoms.
+Probed on real tmux 3.8 and Claude Code 2.1.318, with a client on a pty as the
+view's. A paste that is dropped now says why in the debug log, by size.
+
+Causes found and fixed:
+
+- **A pane scrolled back loses the paste.** In copy mode tmux hands a bracketed
+  paste to the mode, which reads no such keys: the pane got nothing, and stayed
+  scrolled back. Unbracketed it was worse: `echo hello\rquit now\r` reached the
+  pane as `uit now\r`, its `q` having left copy mode. A paste now goes behind a
+  key that leaves copy mode (`LEAVE_COPY_MODE_BINDING`).
+- **A paste before the view's first bytes went unbracketed.** tmux's very first
+  bytes turn bracketed paste on (tmux then strips the markers for a pane that
+  didn't ask). Before them xterm.js says it's off, so each line was an Enter: in
+  Claude Code, `!echo one\recho two` ran the first line and left the second in
+  the prompt. Written before the client set its pty raw, `\r` also became `\n`.
+  A paste is now always sent bracketed: every view's stream ends at tmux, which
+  strips the markers for a pane that didn't ask (checked on real tmux 3.8; no
+  real tmux 3.2 was on hand). It waits until xterm.js has parsed tmux's switch to
+  the alternate screen, however the bytes were split, which tmux does first
+  thing with the pty already raw (`ATTACH_WAIT`). Not by then: dropped and logged,
+  never sent on a guess.
+- **A resume or reconnect left the keyboard on nothing.** The new view's key
+  changes, its textarea goes with the focus, and SessionScreen focuses only on
+  navigation. ⌘V then reached nothing; so did any ⌘V after a click on the app's
+  own chrome. The new view now takes the keyboard, and a ⌘V with it on nothing
+  goes to the view last used.
+- **Typed keys overtook a late webview paste.** Past `PASTE_WAIT` (1 s, now 3 s)
+  the keys were let go and the paste came behind them. A ⌘V now keeps its place:
+  past the wait the app's clipboard is read there, and its late paste with that
+  text isn't pasted again (for `LATE_PASTE_WINDOW`). That match is by content and
+  time, so it can be wrong both ways: a person's own Edit > Paste of the same
+  text, just after a ⌘V the webview never answered, is dropped and logged; and a
+  webview paste later than the window is pasted again. Neither has been seen in
+  the real app. An exact fix is to give every Mac ⌘V one source, the app's
+  clipboard, but that read isn't the system's "person pasting", so macOS may ask
+  on each paste, which the webview paste exists to avoid. The owner chose to keep
+  this on 2026-11-04, accepting those cases.
+- **A lone surrogate lost the whole paste.** `serde_json` refuses one, and the
+  error was swallowed. It is now U+FFFD, and a refused write is logged.
+- **Input lost on the way to the client said nothing.** `pty_view_write` answered
+  Ok for a view that wasn't open, and the writer stopped silently on a failed
+  write, a partial one included. Each now says so (`input_lost`: size and why, on
+  the view's channel or the engine's socket), and goes to the debug log.
+
+Checked and not the cause, on real tmux: pastes up to 1 MiB (no partial write,
+truncation or doubling), multibyte text, and bracket markers split across writes
+up to 100 ms apart. Bracketed `!` two-liners in Claude Code kept both lines
+(`\r`, `\n`, U+2028, with extended keys on, and with `!` typed first). The
+"ran as one line" report was not reproduced.
+
+Not run in the real app: a debug build started from an agent session is refused
+by the daemon, so `PASTE_WAIT` under load and the ⌘V-off-the-view path have
+been checked in jsdom only. That path reads the app's clipboard, as a webview
+paste with no text does, and macOS may ask the person's leave to.
+
 ## Checks in the real app
 
 Build the branch: `cd app && npx tauri build --debug --no-bundle`. Then

@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import App from "./App";
+import { ONBOARDED_KEY } from "./api/providers";
 import { PtyViewsProvider } from "./api/ptyView";
 import { Sheet } from "./components/Sheet";
 import { createAppStore } from "./store/store";
@@ -30,6 +31,7 @@ vi.mock("./components/PtyTerminal", async () => {
 
 beforeEach(() => {
   localStorage.clear();
+  localStorage.setItem(ONBOARDED_KEY, "1");
   terminal.mount = null;
 });
 afterEach(cleanup);

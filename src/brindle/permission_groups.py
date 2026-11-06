@@ -40,13 +40,15 @@ INHERIT = "inherit"
 STRICTNESS = {"allow": 0, "ask": 1, "deny": 2}
 
 # An unchecked command (one brindle can't verify: a program only the run
-# knows, syntax it doesn't read, eval) where it would otherwise ask: inherit
-# (or none) asks, approvable only once; "deny" refuses it with guidance the
-# agent can act on; "allow" is the dangerous opt-in that runs it unasked.
-# Whatever it says, a deny or ask rule a part of the command is seen to match wins.
+# knows, syntax it doesn't read, eval, a program fed what it will run) where it
+# would otherwise ask: inherit (or none) asks, approvable only once, or where
+# the shell baseline runs commands unasked (autonomous) refuses it as "deny"
+# does, with guidance the agent can act on; "allow" is the dangerous opt-in
+# that runs it unasked. Whatever it says, a deny or ask rule a part of the
+# command is seen to match wins.
 UNVERIFIABLE = "shell/unchecked"
-UNVERIFIABLE_GUIDANCE = ("brindle can't verify this command; run it as separate simple commands "
-                         "or drop the $(…)")
+UNVERIFIABLE_GUIDANCE = ("brindle can't tell what this command would run: run its parts as separate simple "
+                         "commands, each with its words written out")
 # preset -> {"group/subcategory": decision} over a baseline of the preset's unmatched setting.
 PRESET_OVERRIDES: dict[str, dict[str, str]] = {
     "autonomous": {"git/push-protected": "ask"},
@@ -163,9 +165,9 @@ def _commits(words: list[str]) -> bool:
 
 
 def _git(req: Request, words: list[str]) -> str:
-    pushes = permissions.push_calls(shlex.join(words))
+    pushes = permissions.pushes_in_repos(replace(req, command=shlex.join(words)))
     if pushes:
-        return "push-protected" if any(_protected(p, req.repo_root) for p in pushes) else "push-feature"
+        return "push-protected" if any(_protected(p, repo) for p, repo in pushes) else "push-feature"
     if permissions._readonly_part(req, words):
         return "readonly"
     return "commit" if _commits(words) else "other"
@@ -406,10 +408,15 @@ def answer(groups: dict[str, dict], group: str, sub: str) -> str:
 
 def unverifiable(groups: dict[str, dict], unmatched: str) -> str:
     """What a command brindle can't verify gets where it would ask: the
-    table's answer, or with none, ask."""
-    if groups:
-        return answer(groups, *UNVERIFIABLE.split("/"))
-    return "ask"
+    table's answer. Left to inherit, or with no table, ask; but where a shell
+    command runs unasked (autonomous), no one should be stopped for one the
+    agent can split: a deny that tells it how."""
+    if not groups:
+        return "deny" if unmatched == "allow" else "ask"
+    set_to = groups["shell"]["subcategories"].get("unchecked", INHERIT)
+    if set_to != INHERIT:
+        return set_to
+    return "deny" if groups["shell"]["baseline"] == "allow" else "ask"
 
 
 def baseline(req: Request, groups: dict[str, dict], rules: list[Rule], checks: list[str] | None = None,

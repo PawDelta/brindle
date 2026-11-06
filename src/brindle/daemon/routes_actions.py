@@ -1558,12 +1558,13 @@ def _invalid(e: ValueError) -> ServiceError:
 def set_permission_preset(db: DB, params: dict, body: Body) -> Any:
     """PUT /permissions/preset {preset}: seed the store from that preset (its
     rules replace the preset's earlier ones; the person's own and learned rules
-    stay) and record the choice. Answers the whole policy."""
+    stay), record the choice and turn the policy on (permissions.choose_preset;
+    a "permission_policy": "off" the person set stays). Answers the whole policy."""
     from brindle import permissions as perms
     from brindle.service import permissions as svc
 
     try:
-        store = perms.apply_preset(_get(body, "preset", required=True))
+        store = perms.choose_preset(_get(body, "preset", required=True))
     except ValueError as e:
         raise _invalid(e) from e
     _policy_changed()
@@ -2524,6 +2525,15 @@ def open_repo(db: DB, params: dict, body: Body) -> Any:
             "initialized": initialized}
 
 
+def install_developer_tools(db: DB, params: dict, body: Body) -> Any:
+    """Start Apple's installer for the Command Line Developer Tools
+    (``xcode-select --install``). Only ever answers a click on the app's Install
+    button: nothing else starts it. The installer is a dialog of its own and
+    outlives this request."""
+    spawn.detach(["xcode-select", "--install"])
+    return {"started": True}
+
+
 def _post(path: str, fn: Action) -> Route:
     return Route(f"/v1{path}", _endpoint(fn), methods=["POST"])
 
@@ -2531,6 +2541,7 @@ def _post(path: str, fn: Action) -> Route:
 ROUTES = [
     _post("/sessions", start_session),
     _post("/demo", start_demo),
+    _post("/developer-tools/install", install_developer_tools),
     Route("/v1/demo", _endpoint(cancel_demo), methods=["DELETE"]),
     _post("/sessions/{root}/continue", continue_session),
     _post("/sessions/{root}/pause", pause_session),

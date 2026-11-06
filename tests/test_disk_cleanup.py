@@ -595,14 +595,14 @@ def test_pushed_branch_is_deleted_on_origin_once_its_pr_merged(repo, monkeypatch
                               port_base=None, tmux_session="x", created_at=0.0)
     assert disk.delete_pushed_remote(ws, sha) is None   # off by default
     _settings({"delete_pushed_branches": True})
-    running, raced = git.run, []
+    running, raced = git.run_env, []
 
     def someone_pushes_first(args, *rest, **kw):
-        if args[0] == "push" and not raced:
+        if "push" in args and not raced:
             raced.append(sh(f"git push -q origin {newer}:refs/heads/brindle/session-1", repo))
         return running(args, *rest, **kw)
 
-    monkeypatch.setattr(git, "run", someone_pushes_first)
+    monkeypatch.setattr(git, "run_env", someone_pushes_first)
 
     assert disk.delete_pushed_remote(ws, sha) is None
     assert sh("git ls-remote --heads origin brindle/session-1", repo).split()[0] == newer
@@ -612,6 +612,8 @@ def test_pushed_branch_is_deleted_on_origin_once_its_pr_merged(repo, monkeypatch
 
 def test_spotlight_is_kept_out_of_brindle_dirs(db, repo, monkeypatch):
     monkeypatch.setattr(disk.sys, "platform", "darwin")
+    # Faked darwin makes spawn.ensure_git probe xcode-select, which a Linux host lacks: the tools are present here.
+    monkeypatch.setattr(spawn, "_tools_checked", True)
 
     root = workspaces.new_worktree_root(str(repo))
     workspaces.new_worktree_root(str(repo))

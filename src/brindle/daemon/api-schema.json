@@ -4725,6 +4725,16 @@
           "title": "Org Controls",
           "type": "array"
         },
+        "policy_on": {
+          "default": true,
+          "title": "Policy On",
+          "type": "boolean"
+        },
+        "policy_source": {
+          "default": "default",
+          "title": "Policy Source",
+          "type": "string"
+        },
         "preset": {
           "anyOf": [
             {
@@ -5483,6 +5493,30 @@
         "ready"
       ],
       "title": "ProviderConnectionDTO",
+      "type": "object"
+    },
+    "RepoDTO": {
+      "description": "A repo brindle has worked in. ``demo``: brindle's practice repo (under the\ndemo folder), which the app does not offer as a project to start in.",
+      "properties": {
+        "demo": {
+          "default": false,
+          "title": "Demo",
+          "type": "boolean"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "repo_root": {
+          "title": "Repo Root",
+          "type": "string"
+        }
+      },
+      "required": [
+        "repo_root",
+        "name"
+      ],
+      "title": "RepoDTO",
       "type": "object"
     },
     "RoutingDTO": {
@@ -7176,6 +7210,10 @@
     {
       "method": "POST",
       "path": "/v1/demo"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/developer-tools/install"
     },
     {
       "method": "GET",

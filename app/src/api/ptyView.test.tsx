@@ -145,6 +145,23 @@ it("logs each copy and paste through the shell's clipboard, and why one failed, 
   expect(await tauriPaste()).toBe("");
   expect(logs.at(-1)).toEqual(["pty_view", "error", "couldn't read the clipboard for a paste: no clipboard here"]);
   expect(JSON.stringify(logs)).not.toContain("secret");
+  // A write the shell refused (its error was swallowed): said, by size; what's typed next still goes.
+  const view = tauriPtyView({ server: "brindle", target: "s:@1" }, { cols: 80, rows: 24 }, { onData() {}, onExit() {}, onError() {} });
+  act(() => said({ kind: "open" }));
+  ipc.invoke.mockImplementationOnce(() => Promise.reject("lone leading surrogate in hex escape"));
+  view.write("secret ✓");
+  view.write("next");
+  await settle();
+  expect(logs.at(-1)).toEqual(["pty_view", "error", "input didn't reach the view: lone leading surrogate in hex escape", { bytes: 8, target: "s:@1" }]);
+  expect(ipc.calls.filter((c) => c.cmd === "pty_view_write").at(-1)!.args).toEqual({ id: 7, data: "next" });
+  // A write the shell took that the client didn't, whole or in part: said too, the view closed by then or not.
+  act(() => said({ kind: "input_lost", bytes: 5, reason: "Input/output error" }));
+  expect(logs.at(-1)).toEqual(["pty_view", "error", "input lost on its way to the view's client: Input/output error", { bytes: 5, target: "s:@1" }]);
+  view.close();
+  act(() => said({ kind: "input_lost", bytes: 3, reason: "Input/output error" }));
+  expect(logs.at(-1)).toEqual(["pty_view", "error", "input lost on its way to the view's client: Input/output error", { bytes: 3, target: "s:@1" }]);
+  expect(JSON.stringify(logs)).not.toContain("secret");
+  ipc.calls.length = 0;
 });
 
 it("closes a view still opening at once, so the shell drops it as it opens; and says why one couldn't open", async () => {

@@ -694,9 +694,9 @@ Goal driving, merge gates and cleanup:
 | `goal_audit` | `true` | once every milestone passes, an adversarial reviewer checks the work against the original goal before the goal counts as reached |
 | `merge_into` | none | branch that worker branches are cut from and merge into, whatever branch the supervisor is on |
 | `auto_merge_default_branch` | `false` | let the pipeline merge into the repo's default branch (origin HEAD, else `main`/`master`) on its own; by default it sends a "needs you" message instead, and you run `merge_workspace` yourself (manual merges are never gated) |
-| `permission_policy` | `"on"` with a Pro license, else `"off"` | `"on"`: brindle answers workers' permission requests from its rules (see "Permission policy" below); `"off"`: the provider's own prompts and permission mode decide, except Antigravity workers under `agy_approvals: "brindle"`, whose hook still enforces the rules. The only permission switch: a leftover `permission_essentials` key is ignored |
+| `permission_policy` | `"on"` on a new install or with a Pro license, else `"off"` | `"on"`: brindle answers agents' permission requests from its rules, on every plan (see "Permission policy" below); `"off"`: the provider's own prompts and permission mode decide, except Antigravity workers under `agy_approvals: "brindle"`, whose hook still enforces the rules. A value you set always wins over the default. A Free install from before this default stays off until you turn it on. The only permission switch: a leftover `permission_essentials` key is ignored |
 | `permission_supervisor_hold_seconds` | `120` | with `permission_policy` on, how long a Claude Code or Codex worker's ask waits on its supervisor (`answer_permission`) before you see it; asks a person-only rule makes (pushes into the default or a release branch) come straight to you |
-| `agy_approvals` | unset | `"brindle"`: Antigravity agents run without approval prompts and brindle's hook allows or denies every call, applying the profile's `allowed_tools` (see "Antigravity" under "Permission policy"); `"prompt"`: agy asks as usual. Unset, workers get `"brindle"` and interactive agy sessions `"prompt"` |
+| `agy_approvals` | unset | `"brindle"`: Antigravity agents run without approval prompts and brindle's hook allows or denies every call, applying the profile's `allowed_tools` (see "Antigravity" under "Permission policy"); `"prompt"`: agy asks as usual. Unset, workers get `"brindle"`, and so does an interactive agy session with `permission_policy` on and the Autonomous preset; other interactive sessions get `"prompt"` |
 | `rules` | `[]` | standing rules for the supervisor, e.g. `["Fix review findings without asking", "Validate options before offering them"]`; added to every supervisor's brief. Rules in `~/.brindle/config.json`, the repo's config and `config.local.json` are all kept, so a team's rules and your own add up |
 | `plan_first` | `false` | workers propose a plan (`submit_plan`) and wait for `approve_plan` before editing |
 | `overlap` | unset | a task whose `files` overlap a running task's: `"block"` refuses it, `"warn"` starts it with a warning, `"queue"` queues it until that task merges. Unset, it is refused within a session and queued behind another session's task (both sessions' supervisors are told; the other session's work is never cancelled), and the queued task starts from that task's merge commit |
@@ -879,11 +879,25 @@ plan that includes them.
 ### Permission policy
 
 With `"permission_policy": "on"` (repo config or `~/.brindle/config.json`), when
-a Claude Code worker (Codex and Antigravity: see below) is about to show a permission prompt, its
+a Claude Code agent, supervisors included (Codex and Antigravity: see below), is about to show a permission prompt, its
 `PermissionRequest` hook hands brindle the structured request (the tool and its
 command, path or URL; brindle never reads the screen) and brindle answers
 **allow**, **deny**, or **ask**, which leaves the prompt to you as usual. Any
-error is ask.
+error is ask. What the policy allows is answered earlier, at `PreToolUse`, wherever
+Claude Code would otherwise prompt, so no prompt shows at all; its own deny and ask
+rules still apply. Workers can't use Claude Code's `AskUserQuestion`: nobody watches
+their panes, so they ask their supervisor with `send_message`.
+
+**Who it's on for.** A new install, on any plan, starts with it on and the
+Autonomous preset. A Free install from before that keeps what it had:
+Settings → Permissions says the rules are off and has one button to turn them on,
+as does `brindle permissions policy on`. Picking a preset turns the policy on too,
+unless you set `"permission_policy": "off"` yourself (that stays until you change
+it). A repo's own `permission_policy` still wins in that repo, and your
+organization's controls come before your rules wherever the policy is on. With it
+on, brindle keeps what it decides on your machine (`~/.brindle`): the ask rate in
+Settings, and how many times you approved a request, for `brindle permissions
+suggestions`. None of that leaves the machine because of this setting.
 
 Nothing is built in. Every rule lives in `~/.brindle/permissions.json`, and
 you can edit or remove any of them, including the ones a **preset** seeded.
@@ -896,6 +910,23 @@ Pick a preset in Settings → Permissions or at setup:
 - **Permissive**: edits in the worktree and everyday commands run, the rest asks;
 - **Standard**: routine reads and everyday commands run, changes ask;
 - **Secure**: short approvals, and a deny for anything no rule covers.
+
+A shell command of several parts is read part by part: `$(...)`, assignments,
+loops, `if`, `[[ ... ]]`, `;`, `&&`, `||`, pipes and heredocs as data. Each part
+is decided as if it ran alone, so a command gets no more power than its parts run
+one by one, and no stricter standard either: a deny or an ask on any part holds
+however deep it sits, and what would run alone runs.
+
+Where brindle can't tell what will run, it doesn't guess: a program or code only
+the run knows (`$X`, `eval "$X"`, `python3 -c "$X"`), a program fed what it will
+run (`... | sh`, `... | xargs`, `python3 - <<EOF`), or syntax it doesn't read. Under
+Autonomous the agent is told to run the parts as separate commands, and you get no
+prompt; under other presets it asks. The `shell/unchecked` setting overrides this:
+deny always refuses, and allow runs them, the dangerous opt-in.
+
+This reads what's written; it isn't a sandbox. A program allowed alone can do what
+it can do alone: under Autonomous `make test` runs, so does a script an agent wrote
+and `python3 -c` with any code it's given, at any depth.
 
 Every preset also denies reading `~/.ssh`, `~/.aws`, `~/.gnupg`, `.env*` and
 the daemon's token, and asks before every push into a `release` or
@@ -974,7 +1005,15 @@ allow may do. It is read again on every request:
 - A policy without the block, one that can't be read, or a paused or shut-down member: no saved allow applies.
 - Org admins edit the block in Settings → Organization approvals. It is enforced from the cached policy, or in air-gap mode from `.brindle/policy.json`.
 
-**Codex.** Codex runs a hook only once it's trusted, so with
+**Codex.** A `sandbox_mode` in your Codex config (or a Codex that can't report
+its config) makes Codex ignore the sandbox profile brindle's rules rely on. If you
+or the repo set `permission_policy` on, brindle then refuses to start Codex and
+says what to change. If it's only on by default, or you took the recommended
+Autonomous preset, Codex starts on its own approvals and sandbox instead, without
+brindle's hook, and the supervisor is told once. Picking another preset or
+`brindle permissions policy on` counts as setting it.
+
+Codex runs a hook only once it's trusted, so with
 `permission_policy` on, brindle trusts its own hook the first time a Codex worker
 needs it (and says so at `brindle start`). It adds one entry,
 `[hooks.state."/<session-flags>/config.toml:permission_request:0:0"]
@@ -1029,7 +1068,7 @@ flag is needed on these versions, and brindle leaves explicit disablement alone.
 
 **Antigravity.** agy's hook can deny but its "allow" is ignored (an agy bug),
 and it has no "no opinion" answer. So, where agy prompts (an interactive agy
-session, or any agy agent under `"agy_approvals": "prompt"`), the hook denies what the policy denies,
+session not on Autonomous, or any agy agent under `"agy_approvals": "prompt"`), the hook denies what the policy denies,
 answers "allow" for a file inside the workspace (which agy reads and writes
 without asking anyway) and "ask" for everything else, and brindle copies the
 rules agy can express exactly into your `~/.gemini/antigravity-cli/settings.json`
@@ -1069,6 +1108,23 @@ approve a prompt in the agent's pane in this mode, so a worker never waits at
 one nobody is watching. `"prompt"` leaves agy asking as described above (and
 `assign`/`handoff` name the profile's `allowed_tools` agy's own settings don't
 already allow).
+
+An interactive agy session (a supervisor you talk to) runs the same way when
+`agy_approvals` is unset, `permission_policy` is on and you're on Autonomous, so
+what Autonomous runs needs no grant, as on Claude Code: brindle's tools, other
+MCP servers, shell commands, and files or commands outside the worktree. Its
+denies still refuse the call. agy can't prompt in this mode, so an ask (a push
+into the default branch or `release/*`) waits in the app's Inbox while the app's
+daemon runs, and the session shows as waiting. The default branch is that of the
+repo the push runs in (its folder, a `cd` or `git -C`). With no daemon it's refused, and
+the agent is told to say what it needs: you run it yourself in a terminal, or
+open the app and have it try again. `brindle permissions allow` doesn't lift an ask.
+A call brindle might read differently from agy (a relative or `~` path, a `..`,
+two paths, a JSON-encoded value) is refused until the agent names one absolute
+path, without involving you. The session keeps the mode it started in: changing
+preset or `permission_policy` takes effect at its next start or resume. This
+reads what's written and isn't a sandbox: a shell command or file tool can
+change `.agents/hooks.json` on Autonomous, as it can for an Autonomous worker.
 
 ## brindle Pro and Team
 
@@ -2289,7 +2345,12 @@ never left at a prompt nobody is watching. A profile's `permission_mode` maps to
 (`auto` to agy's Auto mode, `acceptEdits` to accept-edits, `plan` to plan;
 `dontAsk` runs brindle's hook as the only gate even in an interactive session).
 
-An interactive agy session, or any agy agent under `"agy_approvals": "prompt"`,
+An interactive agy session on Autonomous with `permission_policy` on runs the
+same way, so it needs no grants; an ask waits in the app's Inbox (see
+"Antigravity" under "Permission policy"). On a new folder brindle answers agy's
+trust dialog itself at launch, and it doesn't change your `settings.json` for it.
+
+Any other interactive agy session, or any agy agent under `"agy_approvals": "prompt"`,
 asks before running anything your own `agy` settings don't already allow, and
 the sidebar shows it as needing you. There a profile's `allowed_tools` don't
 apply by themselves: agy reads no hook's "allow", and its only allow list,

@@ -596,7 +596,10 @@ def _repo_checks(repo_root: str) -> list[Check]:
 
 
 def _working_tree_check(repo_root: str) -> list[Check]:
-    dirty = spawn.read(["git", "status", "--porcelain"], cwd=repo_root).stdout.strip()
+    try:
+        dirty = spawn.read(["git", "status", "--porcelain"], cwd=repo_root).stdout.strip()
+    except spawn.ToolsMissing as e:
+        return [Check(FAIL, "git", str(e))]
     if dirty:
         return [Check(WARN, "working tree", "uncommitted changes: workers branch from committed work only")]
     return [Check(OK, "working tree", "clean")]
@@ -667,6 +670,8 @@ def stream(repo_root: str | None, db: DB | None = None, disk: bool = False, cwd:
                 found.append(git.main_repo_root(cwd))
             except git.GitBusy:
                 raise      # the deadline stopped it: report that, not "no repo"
+            except git.GitToolsMissing as e:
+                return [Check(FAIL, "git", str(e))]     # not "no repo": git itself can't run
             except git.GitError:
                 pass
             return []

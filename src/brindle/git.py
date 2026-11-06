@@ -10,7 +10,10 @@ import contextlib
 import fcntl
 import os
 import re
+import shlex
+import shutil
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -20,6 +23,7 @@ from brindle import spawn
 
 TIMEOUT = 120
 BASE_CONFIG_KEY = "brindle-base"
+QUICK_FETCH_SECONDS = 5      # a refresh someone waits on, with what's already here as good enough
 
 
 class GitError(RuntimeError):
@@ -66,6 +70,11 @@ def is_read(args: list[str]) -> bool:
     return False
 
 
+class GitToolsMissing(GitError):
+    """macOS without the Command Line Developer Tools (see spawn.ensure_git):
+    its own type so every layer can say what to install instead of "not a repo"."""
+
+
 def run(args: list[str], cwd: str | Path, check: bool = True,
         timeout: int | float | None = None, input: str | None = None) -> subprocess.CompletedProcess:
     return run_env(args, cwd, None, check=check, timeout=timeout, input=input)
@@ -73,20 +82,24 @@ def run(args: list[str], cwd: str | Path, check: bool = True,
 
 def run_env(args: list[str], cwd: str | Path, env: dict[str, str] | None,
             check: bool = True, timeout: int | float | None = None,
-            input: str | None = None) -> subprocess.CompletedProcess:
+            input: str | None = None, no_terminal: bool = False) -> subprocess.CompletedProcess:
     """``run`` with its own environment (e.g. ``GIT_INDEX_FILE`` for a scratch
-    index that leaves the checkout's real index alone; see brindle.rewind)."""
+    index that leaves the checkout's real index alone; see brindle.rewind).
+    ``no_terminal``: nothing it starts can ask at the terminal (a read can't anyway)."""
     to = TIMEOUT if timeout is None else timeout
     reading = is_read(args)
     start = spawn.read if reading else spawn.action
+    detached = {"no_terminal": True} if no_terminal and not reading else {}
     if not reading:
         invalidate_branches()
     try:
-        proc = start(["git", *args], cwd=cwd, env=env, input=input, timeout=to)
+        proc = start(["git", *args], cwd=cwd, env=env, input=input, timeout=to, **detached)
         if not reading:
             invalidate_branches()    # and after, so a lookup during the action can't re-cache old refs
     except spawn.Busy as e:
         raise GitBusy(f"git {' '.join(args)}: {e}") from e
+    except spawn.ToolsMissing as e:
+        raise GitToolsMissing(str(e)) from e
     except (OSError, subprocess.TimeoutExpired) as e:
         raise GitError(f"git {' '.join(args)}: {e}") from e
     if check and proc.returncode != 0:
@@ -100,6 +113,232 @@ def out(args: list[str], cwd: str | Path) -> str:
 
 def ok(args: list[str], cwd: str | Path) -> bool:
     return run(args, cwd, check=False).returncode == 0
+
+
+# -- network git that nobody asked for ---------------------------------------
+#
+# What brindle fetches on its own (a session starting, a sync, a poll) must not
+# raise a dialog nobody can explain: on macOS git's keychain helper asks for the
+# login password whenever the git running here isn't the one approved in the
+# person's terminal. So these calls clear every credential helper and can't prompt
+# in any other way. The one helper they may get is gh's for github.com, on macOS,
+# with its token in gh's own config file (gh_token_in_file), and it runs where the
+# keychain can't be reached (_NO_KEYCHAIN): a token in the keychain is read through
+# `security`, which a locked keychain can answer with a dialog, and no check made
+# beforehand is both silent itself and still true by the time gh reads it.
+# What the person asked for (`git push`, `brindle pr`, a named PR's branch) goes
+# through ``run``, with their normal credentials.
+
+_GITHUB_HELPER = "credential.https://github.com.helper"
+GH_LOOKUP_SECONDS = 5.0
+GH_SEEN_SECONDS = 60.0       # how long a sign-in lookup stands: a pane's launch shouldn't each start gh
+_gh_seen: dict[str, tuple[float, str | None]] = {}
+_gh_refused: dict[str, float] = {}     # repo: when origin last turned down gh's answer, for as long as GH_SEEN_SECONDS
+_SANDBOX_EXEC = "/usr/bin/sandbox-exec"
+# gh's keyring is go-keyring, which on macOS only ever runs this one absolute path; the
+# services are what any other way into the keychain would have to ask. Denied, gh's read
+# fails at once: it answers from its file or not at all, and SecurityAgent is never asked.
+_NO_KEYCHAIN = ('(version 1)(allow default)(deny process-exec* (literal "/usr/bin/security"))'
+                '(deny mach-lookup (global-name "com.apple.SecurityServer") (global-name "com.apple.securityd")'
+                ' (global-name "com.apple.securityd.xpc"))')
+_GH_HOST_BLOCK = re.compile(r"^github\.com:\n((?: +\S.*(?:\n|$))+)", re.MULTILINE)
+_GH_FILE_TOKEN = re.compile(r"oauth_token: [\w-]{20,}")
+_FETCH_REFUSED = "brindle-fetch-refused"
+# git's and ssh's words for "not without credentials" (LC_ALL=C: see _background_env),
+# as opposed to offline or no such repo.
+_REFUSED = re.compile(r"terminal prompts disabled|could not read (username|password)|authentication failed"
+                      r"|permission denied|host key verification failed|returned error: 40[13]", re.IGNORECASE)
+_SHELL_WORD = re.compile(r"""'[^']*'|"[^"]*"|\S+""")
+
+
+def gh_credential_helper() -> str | None:
+    """The git credential helper of a ``gh`` signed in to github.com. Asking
+    gh's config touches neither the network nor the keychain."""
+    exe = shutil.which("gh")
+    if exe is None:
+        return None
+    now = time.monotonic()
+    seen = _gh_seen.get(exe)
+    if seen is not None and now - seen[0] < GH_SEEN_SECONDS:
+        return seen[1]
+    try:
+        proc = spawn.read([exe, "config", "get", "user", "-h", "github.com"], timeout=GH_LOOKUP_SECONDS)
+    except (OSError, subprocess.SubprocessError, spawn.Busy):
+        return None
+    helper = f"!{shlex.quote(exe)} auth git-credential" if proc.returncode == 0 and proc.stdout.strip() else None
+    _gh_seen[exe] = (now, helper)
+    return helper
+
+
+def _gh_hosts_file() -> Path:
+    """Where gh keeps its hosts, in gh's own order (go-gh's config.ConfigDir)."""
+    if path := os.environ.get("GH_CONFIG_DIR"):
+        return Path(path, "hosts.yml")
+    if path := os.environ.get("XDG_CONFIG_HOME"):
+        return Path(path, "gh", "hosts.yml")
+    if sys.platform == "win32" and (path := os.environ.get("AppData")):
+        return Path(path, "GitHub CLI", "hosts.yml")
+    return Path.home() / ".config" / "gh" / "hosts.yml"
+
+
+def gh_token_in_file() -> bool:
+    """Whether `gh auth git-credential` can answer for github.com from gh's config
+    file: a non-empty ``oauth_token`` directly under the host wins over the keyring,
+    and is never one gh refreshes. One only under ``users`` doesn't: gh tries the
+    keyring first, which _NO_KEYCHAIN turns into no answer.
+
+    This says gh is worth starting, not that it's safe to: _NO_KEYCHAIN is what keeps
+    the keychain out of it, whatever this file says by the time gh reads it. Only
+    the file as gh writes it counts; so a parser's reading of it, and a parser's
+    error quoting it, aren't needed. A token's text goes no further than these lines."""
+    try:
+        block = _GH_HOST_BLOCK.search(_gh_hosts_file().read_text())
+    except (OSError, ValueError):
+        return False
+    if block is None:
+        return False
+    lines = block[1].splitlines()
+    indent = len(lines[0]) - len(lines[0].lstrip())
+    keys = [line[indent:] for line in lines if line.startswith(" " * indent) and line[indent] != " "]
+    return any(_GH_FILE_TOKEN.fullmatch(key) for key in keys)
+
+
+def _github_helper_entries(helper: str) -> tuple[str, str]:
+    """github.com signs in through this helper alone."""
+    return f"{_GITHUB_HELPER}=", f"{_GITHUB_HELPER}={helper}"
+
+
+def pane_git_config() -> str | None:
+    """``GIT_CONFIG_PARAMETERS`` for an agent's pane: github.com signs in through
+    gh alone (when gh is signed in), the person's other helpers for that host
+    cleared, as a helper still listed would also be told to store and erase
+    what gh gave it: the keychain dialog over again, and their entry overwritten.
+    Every other host keeps the person's helpers; their config isn't edited.
+
+    Not GIT_CONFIG_COUNT and its GIT_CONFIG_KEY_<n>: a name with KEY in it is
+    what environment filters drop (brindle's own, Codex's), and git refuses to
+    run at all with a count whose key went missing.
+
+    gh reads its token through `security`, so a locked keychain can still ask
+    here: an agent's push is one at a time, not a poll."""
+    helper = gh_credential_helper()
+    if helper is None:
+        return None
+    entries = _github_helper_entries(helper)
+    ours = " ".join("'" + entry.replace("'", "'\\''") + "'" for entry in entries)    # git takes single quotes only
+    inherited = os.environ.get("GIT_CONFIG_PARAMETERS")
+    return f"{inherited} {ours}" if inherited else ours
+
+
+def _background_env(cwd: str | Path) -> dict[str, str]:
+    """The environment of a network call nobody asked for: no askpass program
+    (an empty GIT_ASKPASS also passes over core.askPass and SSH_ASKPASS) and no
+    terminal prompt, which with ``background``'s missing terminal leave ssh, under
+    any name or wrapper, nowhere to ask. BatchMode has it fail at once where it
+    can be given, still with an agent's keys and the person's own command."""
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "", "SSH_ASKPASS": "",
+           "SSH_ASKPASS_REQUIRE": "never", "LC_ALL": "C"}
+    if ssh := _batch_ssh(cwd):
+        env["GIT_SSH_COMMAND"] = ssh
+    return env
+
+
+def _batch_ssh(cwd: str | Path) -> str | None:
+    """The ssh command git would run, in BatchMode: right after the OpenSSH
+    executable, however it's named (a symlink, ``slogin``) and wherever a wrapper
+    puts it (``env A=1 ssh -F x``), as ssh keeps the first value of an option and
+    the command may set its own. Any other program gets it last, where git's own
+    arguments go: a wrapper passes those on, and its own options stay its own.
+    None for PuTTY's, which takes no ``-o``."""
+    try:
+        ssh = os.environ.get("GIT_SSH_COMMAND") or run(["config", "--get", "core.sshCommand"], cwd,
+                                                       check=False).stdout.strip()
+    except GitError:
+        ssh = ""
+    ssh = ssh or shlex.quote(os.environ.get("GIT_SSH") or "ssh")     # GIT_SSH: a bare program, no options
+    names = []
+    for word in _SHELL_WORD.finditer(ssh):
+        if re.match(r"\w+=", word.group()):      # NAME=value in front of a program
+            continue
+        text = word.group().strip("'\"")
+        names.append(os.path.basename(text).lower())
+        resolved = os.path.basename(os.path.realpath(shutil.which(text) or text)).lower()
+        if resolved.removesuffix(".exe") in ("ssh", "slogin"):
+            return f"{ssh[:word.end()]} -o BatchMode=yes{ssh[word.end():]}"
+    if any("plink" in name for name in names):
+        return None
+    return f"{ssh} -o BatchMode=yes"
+
+
+def _background_gh_helper(cwd: str | Path) -> str | None:
+    """gh's helper for a network call nobody asked for, in its sandbox: nothing gh
+    does on starting or answering (a migration, a token moved since) can reach the
+    keychain, and if the sandbox won't start, git simply gets no answer. Asks gh
+    nothing itself, not its sign-in either, as gh outside that could. None without
+    the sandbox or a token in gh's file, or just after origin turned down gh's answer."""
+    refused = _gh_refused.get(str(cwd))
+    if refused is not None and time.monotonic() - refused < GH_SEEN_SECONDS:
+        return None
+    exe = shutil.which("gh")
+    if exe is None or not os.access(_SANDBOX_EXEC, os.X_OK) or not gh_token_in_file():
+        return None
+    return f"!{shlex.quote(_SANDBOX_EXEC)} -p {shlex.quote(_NO_KEYCHAIN)} {shlex.quote(exe)} auth git-credential"
+
+
+def background(args: list[str], cwd: str | Path,
+               timeout: int | float | None = None) -> subprocess.CompletedProcess | None:
+    """``git <args>``, a network call brindle starts on its own: it can't raise a
+    credential dialog. Every helper is cleared; github.com over HTTPS may get gh's
+    (_background_gh_helper), and git only asks it for that host. None when git
+    couldn't run or finish; a failure is the caller's to read."""
+    helper = _background_gh_helper(cwd)
+    config = ["credential.helper=", *(_github_helper_entries(helper) if helper else ())]
+    try:
+        proc = run_env([*(word for entry in config for word in ("-c", entry)), *args], cwd, _background_env(cwd),
+                       check=False, timeout=timeout, no_terminal=True)
+    except GitError:
+        return None
+    if helper and proc.returncode != 0 and _REFUSED.search(proc.stderr or ""):
+        _gh_refused[str(cwd)] = time.monotonic()
+    return proc
+
+
+def background_fetch(root: str | Path, args: list[str], timeout: int | float | None = None) -> bool:
+    """``git fetch <args>`` as ``background``: True when it worked. A failure
+    leaves the refs as they were; one for want of credentials goes on record
+    (fetch_refused), and a later success takes it off."""
+    proc = background(["fetch", *args], root, timeout)
+    if proc is None:
+        return False
+    _note_refusal(root, proc)
+    return proc.returncode == 0
+
+
+def _note_refusal(root: str | Path, proc: subprocess.CompletedProcess) -> None:
+    """Keep whether origin wants credentials, across brindle's processes."""
+    try:
+        marker = _refused_marker(root)
+        if proc.returncode != 0 and _REFUSED.search(proc.stderr or ""):
+            marker.touch()
+        elif proc.returncode == 0:
+            marker.unlink(missing_ok=True)
+    except (GitError, OSError):
+        pass
+
+
+def _refused_marker(root: str | Path) -> Path:
+    dot_git = Path(root, ".git")
+    common = dot_git if dot_git.is_dir() else Path(out(["rev-parse", "--path-format=absolute", "--git-common-dir"], root))
+    return common / _FETCH_REFUSED
+
+
+def fetch_refused(root: str | Path) -> bool:
+    """Whether the last background refresh of this repo failed for want of
+    credentials: its remote-tracking refs may be behind origin."""
+    try:
+        return _refused_marker(root).exists()
+    except (GitError, OSError):
+        return False
 
 
 # -- repo discovery --------------------------------------------------------
@@ -191,10 +430,7 @@ def merged_into_default(root: str | Path, branch: str) -> bool:
     if not branch or branch == base or branch == "HEAD":
         return False
     if has_remote(root, "origin"):
-        try:
-            run(["fetch", "origin", f"+refs/heads/{base}:refs/remotes/origin/{base}"], root, timeout=5, check=False)
-        except GitError:
-            pass
+        background_fetch(root, ["origin", f"+refs/heads/{base}:refs/remotes/origin/{base}"], QUICK_FETCH_SECONDS)
     refs = ref_shas(root)
     return merged_into(root, branch, default_targets(root, refs, base), refs=refs, thorough=True)
 
@@ -392,7 +628,7 @@ def resolve_start_point(root: str | Path, base: str, fetch: bool) -> str:
     it exists, otherwise the local base branch, otherwise HEAD. A failed fetch
     (offline, no auth) is not fatal; we fall back to what we have."""
     if fetch and has_remote(root):
-        run(["fetch", "origin", base, "--quiet", "--no-tags"], root, check=False)
+        background_fetch(root, ["origin", base, "--quiet", "--no-tags"])
     if remote_branch_exists(root, base):
         local_ahead = branch_exists(root, base) and ok(
             ["merge-base", "--is-ancestor", f"origin/{base}", base], root
@@ -408,14 +644,11 @@ def resolve_start_point(root: str | Path, base: str, fetch: bool) -> str:
 def fetch_remote_branch(root: str | Path, branch: str, remote: str = "origin") -> str:
     """Fetch ``branch`` from ``remote`` into ``refs/remotes/<remote>/<branch>``.
     Unlike ``resolve_start_point``'s fetch, failure here is fatal: the caller
-    needs that exact branch. Returns the remote-tracking ref name."""
+    needs that exact branch, which the person named: their normal credentials
+    apply. Returns the remote-tracking ref name."""
     run(["fetch", "--quiet", "--no-tags", remote,
          f"+refs/heads/{branch}:refs/remotes/{remote}/{branch}"], root)
     return f"{remote}/{branch}"
-
-
-def _quiet_env() -> dict[str, str]:
-    return {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
 
 
 def fast_forward(path: str | Path, branch: str) -> str | None:
@@ -425,12 +658,8 @@ def fast_forward(path: str | Path, branch: str) -> str | None:
     remote. Never rewrites history or touches uncommitted work."""
     if not has_remote(path):
         return None
-    try:
-        run_env(["fetch", "--quiet", "--no-tags", "origin",
-                 f"+refs/heads/{branch}:refs/remotes/origin/{branch}"],
-                path, _quiet_env(), timeout=5)
-    except GitError:
-        pass
+    background_fetch(path, ["--quiet", "--no-tags", "origin", f"+refs/heads/{branch}:refs/remotes/origin/{branch}"],
+                     QUICK_FETCH_SECONDS)
     remote = f"origin/{branch}"
     if not remote_branch_exists(path, branch) or ok(["merge-base", "--is-ancestor", remote, "HEAD"], path):
         return None
@@ -445,11 +674,10 @@ def upstream_gone(path: str | Path, branch: str) -> bool:
     """True if ``branch`` tracks origin and that branch no longer exists there."""
     if run(["config", "--get", f"branch.{branch}.remote"], path, check=False).stdout.strip() != "origin":
         return False
-    try:
-        proc = run_env(["ls-remote", "--exit-code", "--heads", "origin", branch],
-                       path, _quiet_env(), check=False, timeout=5)
-    except GitError:
+    proc = background(["ls-remote", "--exit-code", "--heads", "origin", branch], path, QUICK_FETCH_SECONDS)
+    if proc is None:
         return False
+    _note_refusal(path, proc)
     return proc.returncode == 2
 
 
@@ -684,6 +912,8 @@ def hash_blob(cwd: str | Path, data: bytes, path: str, write: bool = False) -> s
         proc = start(["git", *args], cwd=cwd, input=data, text=False, timeout=TIMEOUT)
     except spawn.Busy as e:
         raise GitBusy(f"git {' '.join(args)}: {e}") from e
+    except spawn.ToolsMissing as e:
+        raise GitToolsMissing(str(e)) from e
     except (OSError, subprocess.TimeoutExpired) as e:
         raise GitError(f"git {' '.join(args)}: {e}") from e
     if proc.returncode != 0:
@@ -708,7 +938,7 @@ def sync(path: str | Path, base: str, strategy: str = "rebase") -> str:
     """Bring ``base``'s latest commits into this branch. Raises on conflict,
     leaving the rebase/merge in progress so an agent or human can resolve it."""
     if has_remote(path):
-        run(["fetch", "origin", base, "--quiet", "--no-tags"], path, check=False)
+        background_fetch(path, ["origin", base, "--quiet", "--no-tags"])
     ref = base_ref(path, base)
     if strategy == "rebase":
         proc = run(["rebase", ref], path, check=False)

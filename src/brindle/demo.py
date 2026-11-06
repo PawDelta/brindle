@@ -127,6 +127,12 @@ def _config_path(root: Path) -> Path:
     return root / ".brindle" / "config.json"
 
 
+def is_demo_repo(path: str | Path) -> bool:
+    """True when ``path`` is inside the demo folder (symlinks resolved); a repo
+    merely named textkit-* elsewhere is not a demo."""
+    return (brindle_home() / "demo").resolve() in Path(path).resolve().parents
+
+
 def unused(db: DB) -> list[Path]:
     """The practice repos no session has run in yet (one a launch's preflight
     held while the person settled it), newest first."""
@@ -161,6 +167,9 @@ def discard(db: DB, root: Path) -> None:
 def create(local: bool = False, provider: str | None = None) -> Path:
     """A fresh demo repo with one commit; returns its path. ``provider``: the
     CLI its workers and reviewers run on (PROFILES); Claude's when None."""
+    from brindle import spawn
+
+    spawn.ensure_git()      # before the demo's files exist: the git below would raise Apple's dialog
     base = brindle_home() / "demo"
     base.mkdir(parents=True, exist_ok=True)
     # A new name every time, so no earlier demo's sessions or branches show up.

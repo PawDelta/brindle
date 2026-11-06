@@ -650,14 +650,31 @@ function PresetCard({ copy, on, disabled, buttonRef, onPick, onKey }: { copy: Pr
   );
 }
 
-/* Continue applies the choice (PUT /permissions/preset); Skip for now leaves the engine's
-   own default, Autonomous. */
-function Permissions({ client, onNext }: { client: DaemonClient; onNext(): void }) {
-  const [choice, setChoice] = useState<PermissionPreset>("autonomous");
+/* Continue applies the choice (PUT /permissions/preset); Skip for now keeps the
+   existing policy. Read it before offering a choice so CLI settings are respected. */
+export function Permissions({ client, onNext }: { client: DaemonClient; onNext(): void }) {
+  const [choice, setChoice] = useState<PermissionPreset | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const refs = useRef<Record<string, HTMLButtonElement | null>>({});
   const copy = PRESETS.find((p) => p.preset === choice) ?? PRESETS[0];
+
+  useEffect(() => {
+    let live = true;
+    client.permissions().then(
+      (policy) => {
+        if (live) setChoice(PRESETS.find((p) => p.preset === policy.preset)?.preset ?? "autonomous");
+      },
+      () => {
+        if (live) onNext();
+      },
+    );
+    return () => {
+      live = false;
+    };
+    // The destination belongs to this visit; changing it must not restart the read.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [client]);
 
   const move = (from: number, step: number) => {
     const next = PRESETS[(from + step + PRESETS.length) % PRESETS.length];
@@ -665,6 +682,7 @@ function Permissions({ client, onNext }: { client: DaemonClient; onNext(): void 
     refs.current[next.preset]?.focus();
   };
   const apply = async () => {
+    if (choice === null) return;
     setBusy(true);
     setError(null);
     try {
@@ -676,6 +694,7 @@ function Permissions({ client, onNext }: { client: DaemonClient; onNext(): void 
     }
   };
 
+  if (choice === null) return <Starting />;
   return (
     <Frame step="permissions" kicker="Permissions" title="How much should your agents do on their own?" lede="Agents stop and wait whenever they need your permission. Pick how often that happens. You can change this, and edit or remove any rule it adds, in Settings → Permissions.">
       <div className="mt-s1 grid gap-s2 sm:grid-cols-2" role="radiogroup" aria-label="Permission preset">
@@ -1094,6 +1113,9 @@ export function Onboarding({ client, providers, openUrl, pickFolder, onDone }: O
       return (
         <Frame step="project" kicker="Ready" title="Pick a project" lede="The folder brindle works in: one on this Mac, or a repository to clone. Your first session starts there.">
           <ProjectPicker client={client} pickFolder={pickFolder} onPicked={(repo) => void picked(repo.repo_root)} />
+          <p className={fine}>
+            macOS may ask for your permission when brindle opens a project: to let its engine, which can appear as python3, into a folder in Documents, Desktop or Downloads, or to install Apple's command line tools for git. brindle can't work in the project without them.
+          </p>
         </Frame>
       );
   }

@@ -387,7 +387,7 @@ def seeded(db, repo, monkeypatch):
 
 
 @pytest.mark.parametrize("path,check", [
-    ("/v1/repos", lambda b, s: [r["repo_root"] for r in b] == [s["repo"]]),
+    ("/v1/repos", lambda b, s: [(r["repo_root"], r["demo"]) for r in b] == [(s["repo"], False)]),
     ("/v1/sessions", lambda b, s: [(x["id"], x["goal"]) for x in b] == [("r1", "ship the thing")]),
     ("/v1/snapshot", lambda b, s: [a["id"] for a in b[0]["agents"] if a["id"] == "w1"] == ["w1"]),
     ("/v1/inbox", lambda b, s: [(i["kind"], i["agent_id"]) for i in b] == [("waiting", "w1")]),

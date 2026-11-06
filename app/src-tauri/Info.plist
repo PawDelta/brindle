@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- What macOS shows under its privacy prompts when it asks on brindle.app's
+     behalf (the Tauri CLI merges this file into the bundle's Info.plist). Only
+     for prompts it attributes to the app: its own, and the engine's and agents'
+     when the daemon is the app's child (launchd's job switched off). Otherwise
+     those are the engine's helper app's (scripts/engine/helper/Info.plist;
+     docs/investigations/macos-prompts.md). -->
+<plist version="1.0">
+<dict>
+  <key>NSFileProviderDomainUsageDescription</key>
+  <string>brindle works on the projects you open. It needs this for one in a cloud storage folder.</string>
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>An agent brindle runs is reaching a device on your local network, such as a development server.</string>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>An agent brindle runs wants to control another app. Allow it only if that is what you asked the agent to do.</string>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>An agent brindle runs listens through the microphone when you turn on its voice input.</string>
+  <key>NSDesktopFolderUsageDescription</key>
+  <string>brindle works on the projects you open. It needs this for one in your Desktop folder.</string>
+  <key>NSDocumentsFolderUsageDescription</key>
+  <string>brindle works on the projects you open. It needs this for one in your Documents folder.</string>
+  <key>NSDownloadsFolderUsageDescription</key>
+  <string>brindle works on the projects you open. It needs this for one in your Downloads folder.</string>
+  <key>NSRemovableVolumesUsageDescription</key>
+  <string>brindle works on the projects you open. It needs this for one on a removable drive.</string>
+  <key>NSNetworkVolumesUsageDescription</key>
+  <string>brindle works on the projects you open. It needs this for one on a network drive.</string>
+</dict>
+</plist>

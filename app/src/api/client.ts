@@ -25,6 +25,7 @@ import type {
   PreflightItemDTO,
   ProfileDTO,
   ProviderConnectionDTO,
+  RepoDTO,
   RoutingDTO,
   SavedActionDTO,
   SessionDTO,
@@ -329,10 +330,7 @@ export interface Meta {
   airgap: boolean;
 }
 
-export interface Repo {
-  repo_root: string;
-  name: string;
-}
+export type Repo = RepoDTO;
 
 export interface Diff {
   workspace_id: string;
@@ -1166,6 +1164,12 @@ export class DaemonClient {
      failure among them). */
   cloneRepo(url: string, parent_dir: string) {
     return this.post<Job>("/repos/clone", { url, parent_dir });
+  }
+
+  /* Starts Apple's installer for the Command Line Developer Tools (`xcode-select --install`);
+     only ever from a click. */
+  installDeveloperTools() {
+    return this.post<{ started: boolean }>("/developer-tools/install", {});
   }
 
   /* A folder on this machine, as a repo brindle works in. */

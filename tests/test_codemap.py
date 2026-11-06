@@ -168,7 +168,7 @@ def test_session_graph_resolution_and_seeding(db, mapped, monkeypatch):
     real_popen = codemap.subprocess.Popen
 
     def fake_popen(argv, **kw):
-        if "-c" in argv:
+        if "-c" in argv and "pass_fds" in kw:      # the refresh runner, not a `git -c`
             runners.append((argv[-3], argv[-2] or None, os.dup(kw["pass_fds"][0])))
             return None
         if "graphify" in argv:
