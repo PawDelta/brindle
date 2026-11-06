@@ -1533,12 +1533,26 @@ def _git_calls(command: str) -> list[tuple[str, list[str]]]:
 
 def _git_invocations(command: str) -> list[tuple[list[str], str, list[str]]]:
     """(its -C folders, subcommand, its arguments) for every git invocation in ``command``."""
+    argv = simple_argv(command)
+    if argv is not None:
+        while argv and _ASSIGNMENT.match(argv[0]):
+            argv = argv[1:]
+        segments = [argv]
+    else:
+        reader = _PartReader(Request("", "bash", "", command=command))
+        try:
+            reader.read(command)
+        except ValueError:
+            # Keep recognizable invocations even when another part cannot be read.
+            # The parser's scan still distinguishes arguments and heredoc data from code.
+            reader.scan(command)
+        segments = [part.words for part in reader.parts]
     calls = []
-    for words in _segments(command):
-        for i, w in enumerate(words):
-            if os.path.basename(w) != "git":
+    for segment in segments:
+        for words in _wrapped_forms(segment):
+            if not words or os.path.basename(words[0]) != "git":
                 continue
-            rest, j, folders = words[i + 1:], 0, []
+            rest, j, folders = words[1:], 0, []
             while j < len(rest) and rest[j].startswith("-"):
                 if rest[j] == "-C" and j + 1 < len(rest):
                     folders.append(rest[j + 1])
@@ -3441,7 +3455,7 @@ def _may_name_token(req: Request, word: str) -> bool:
 
 # Matchers that must tell a word from its neighbours (an option from a message
 # that mentions one), so they see the words quoted as written, not re-joined.
-_WORD_MATCHERS = ("git-force",)
+_WORD_MATCHERS = ("git-force", "git-push", "push")
 
 # Wrappers that only run their arguments: per program, the options that take a
 # value in the next word, the flags that take none, and the options with a value
@@ -3461,6 +3475,23 @@ _PLAIN_WRAPPERS: dict[str, tuple[frozenset[str], frozenset[str], tuple[str, ...]
     "caffeinate": (frozenset({"-t", "-w"}), frozenset({"-d", "-i", "-m", "-s", "-u"}), (), 0),
     "command": (frozenset(), frozenset({"-p"}), (), 0),
     "exec": (frozenset({"-a"}), frozenset({"-c", "-l"}), (), 0),
+    "sudo": (frozenset({"-a", "-C", "-D", "-g", "-h", "-p", "-R", "-r", "-t", "-T", "-U", "-u",
+                        "--auth-type", "--close-from", "--chdir", "--group", "--host", "--prompt", "--chroot",
+                        "--role", "--type", "--command-timeout", "--other-user", "--user"}),
+             frozenset({"-A", "-b", "-B", "-E", "-H", "-i", "-k", "-n", "-N", "-P", "-S", "-s", "--askpass",
+                        "--background", "--preserve-env", "--set-home", "--login", "--reset-timestamp",
+                        "--non-interactive", "--no-update", "--bell", "--preserve-groups", "--stdin", "--shell"}),
+             ("--auth-type=", "--close-from=", "--chdir=", "--group=", "--host=", "--prompt=", "--chroot=",
+              "--role=", "--type=", "--command-timeout=", "--other-user=", "--user=", "--preserve-env=",
+              "-a", "-C", "-D", "-g", "-h", "-p", "-R", "-r", "-t", "-T", "-U", "-u"), 0),
+    "doas": (frozenset({"-u"}), frozenset({"-n"}), ("-u",), 0),
+    "flock": (frozenset({"-w", "--wait", "-E", "--conflict-exit-code"}),
+              frozenset({"-s", "--shared", "-x", "-e", "--exclusive", "-u", "--unlock", "-n", "--nonblock",
+                         "-o", "--close", "-F", "--no-fork", "--verbose"}),
+              ("-w", "--wait=", "-E", "--conflict-exit-code="), 1),
+    "chroot": (frozenset({"--userspec", "--groups"}), frozenset({"--skip-chdir"}),
+               ("--userspec=", "--groups="), 1),
+    "unbuffer": (frozenset(), frozenset({"-p"}), (), 0),
 }
 
 
@@ -3488,6 +3519,15 @@ def _unwrapped(words: list[str]) -> list[str] | None:
         elif word in valued:
             i += 2
         elif word in flags or any(word.startswith(a) and len(word) > len(a) for a in attached):
+            i += 1
+        elif program in ("sudo", "doas") and re.match(r"-[A-Za-z]", word):
+            for at, letter in enumerate(word[1:], 1):
+                option = "-" + letter
+                if option in valued:
+                    i += at == len(word) - 1
+                    break
+                if option not in flags:
+                    return None
             i += 1
         elif word.startswith("-") and len(word) > 1:
             return None
