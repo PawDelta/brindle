@@ -18,7 +18,7 @@ from dataclasses import dataclass, fields
 from typing import Iterator
 
 from brindle import bus
-from brindle.config import db_path, record_first_run
+from brindle.config import db_path
 from brindle.redact import mask
 
 # Claude Code's own subagents (native_subagents table, see below). A crash
@@ -1202,8 +1202,6 @@ def migration_incompatibility() -> str | None:
 
 class DB:
     def __init__(self, path: str | None = None) -> None:
-        if path is None:
-            record_first_run()   # before this creates the file that says brindle has run here
         p = str(path) if path is not None else str(db_path())
         if p != ":memory:":
             from pathlib import Path
