@@ -361,6 +361,17 @@ def capture(agent) -> str:
         return ""
 
 
+def last_error(agent, screen: str | None = None) -> str | None:
+    """The dead pane's final diagnostic, masked before selecting or shortening it."""
+    from brindle import prompt_answer, redact
+
+    lines = [line.strip() for line in redact.mask(prompt_answer.plain(
+        capture(agent) if screen is None else screen)).splitlines() if line.strip()]
+    errors = [line for line in lines if re.search(r"\berror\b|\bfailed\b|\bfatal\b", line, re.I)]
+    useful = errors or [line for line in lines if not line.lower().startswith("pane is dead")]
+    return useful[-1][:1000] if useful else None
+
+
 def before_delivery(db, agent, text: str | None = None) -> str:
     row = db.conn.execute("SELECT token, delivered_at, pane FROM launch_health WHERE agent_id=?", (agent.id,)).fetchone()
     # Bind this delivery before capture/paste/IPC can race with a resume,
@@ -583,6 +594,11 @@ def inspect(db, agent_id: str, *, wait: bool = True, token: str | None = None) -
         return outcome  # diagnostics only; do not spend a supervisor turn on a live process
     ws = db.get_workspace(agent.workspace_id)
     agents._note_reviewer_end(db, agent, ws)
+    if not alive and agent.mode == "review" and ws:
+        from brindle import pipeline
+
+        if pipeline.on_reviewer_dead(db, agent, ws):
+            return outcome
     if cause and ws:
         model_access.refuse(agent.profile, cause, repo_root=ws.repo_root, fp=row["fingerprint"])
         if cause.key == MODEL.key:  # permanent for this profile; AUTH/CAPACITY may be transient
@@ -595,6 +611,8 @@ def inspect(db, agent_id: str, *, wait: bool = True, token: str | None = None) -
                                 outcome=refused)
     detail = (cause.line() if cause else
               "the worker exited before launch health could be established. Check its pane and CLI installation/login, then retry.")
+    if agent.mode == "review" and (error := last_error(agent, screen)):
+        detail += f" Last pane error: {error}"
     from brindle import secrets
 
     dropped = secrets.dropped_for(agent.id) if not alive else []
@@ -603,7 +621,7 @@ def inspect(db, agent_id: str, *, wait: bool = True, token: str | None = None) -
         detail += (f" Its environment went without {', '.join(dropped)} (not on the allowlist, "
                    "agent_env_mode enforce); if it needs any of them, add them to agent_env "
                    "in .brindle/config.json.")
-    # Never forward provider output, which can contain URLs, keys or prompt text.
+    # Reviewer diagnostics above pass through the shared redaction first.
     body = f"Worker {agent.id} launch health: {detail}"
     try:
         agents.send_message(db, agent.parent_id, body)

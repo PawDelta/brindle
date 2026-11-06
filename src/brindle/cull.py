@@ -48,6 +48,7 @@ import os
 import re
 import signal
 import time
+from contextlib import ExitStack
 from pathlib import Path
 
 from brindle import agents, git, procs, tmux
@@ -360,7 +361,14 @@ def note_dead_panes(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
         cause = exit_cause(*exits[a.tmux_window])
         # Only from the status it was read in, and only once: a hook that
         # moved it since, or another sweep that got there first, wins.
-        status = db.claim_exited(a.id, a.status, f"exited: {cause}")
+        with ExitStack() as hold:
+            if a.mode == "review":
+                hold.enter_context(agents.review_dispatch_lock(a.workspace_id))
+                current = db.get_agent(a.id)
+                if (current is None or current.tmux_window != a.tmux_window
+                        or current.tmux_server != a.tmux_server or agents.alive_or_starting(current)):
+                    continue
+            status = db.claim_exited(a.id, a.status, f"exited: {cause}")
         if status is None:
             continue
         db.end_native_subagents(a.id)
@@ -372,6 +380,11 @@ def note_dead_panes(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
         if not a.parent_id:
             continue
         ws = db.get_workspace(a.workspace_id)
+        if a.mode == "review" and ws is not None:
+            from brindle import pipeline
+
+            if pipeline.on_reviewer_dead(db, a, ws):
+                continue
         where = f" on branch `{ws.branch}`" if ws else ""
         who = "Reviewer" if a.mode == "review" else "Worker"
         body = (f"{who} {a.id} ({a.profile}, {a.provider}){where} stopped before it reported: "
@@ -379,6 +392,11 @@ def note_dead_panes(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
                 "worktree and branch are untouched. Resume it with `brindle continue` (which "
                 "restarts a live session's failed workers), or rewind it to an earlier turn "
                 "with rewind_agent.")
+        if a.mode == "review":
+            from brindle import launch_health
+
+            if error := launch_health.last_error(a):
+                body += f" Last pane error: {error}"
         try:
             agents.send_message(db, a.parent_id, body, sender_id=a.id)
         except agents.AgentError:

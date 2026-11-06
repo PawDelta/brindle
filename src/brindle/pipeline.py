@@ -561,7 +561,9 @@ def review_state(db: DB, ws: Workspace, *, head_reader=None) -> str | None:
     if worker is None:
         return None
     merged = db.merged_sha(ws.id)
-    if not (worker.pipeline or worker.merge_failed or merged or db.last_review(ws.id)):
+    failures = [a for a in db.list_agents(ws.id) if a.mode == "review" and a.failed_why
+                and a.failed_why.startswith("review: ")]
+    if not (worker.pipeline or worker.merge_failed or merged or failures or db.last_review(ws.id)):
         return None   # an ordinary idle worker needs no git inspection on redraw
     try:
         sha = head_reader() if head_reader is not None else gates.head(ws)
@@ -572,6 +574,9 @@ def review_state(db: DB, ws: Workspace, *, head_reader=None) -> str | None:
     if worker.merge_failed and not worker.pipeline:
         why = " ".join(worker.merge_failed.split())
         return "merge failed: " + (why if len(why) <= 200 else why[:199] + "…")
+    for a in failures:
+        if a.review_sha == sha:
+            return "needs you: " + a.failed_why.removeprefix("review: ")
     checks = gates.checks_state(ws)
     if worker.pipeline == "ready":
         merging = f"merging, {checks}" if gates.marked("merge-run", ws.id) else "waiting to merge"
@@ -917,6 +922,89 @@ def _supervisor_review_summary(ws: Workspace, worker: Agent, reviewer: Agent,
     return "\n\n".join(parts)
 
 
+def on_reviewer_dead(db: DB, reviewer: Agent, ws: Workspace) -> bool:
+    """Replace a piped branch's dead reviewer once, without waking its supervisor.
+
+    Share the dispatch lock with explicit requests and check helpers, including
+    the gap before the replacement's agent row exists. Read fresh rows inside
+    the lock so a second detector cannot spend another attempt or escalate a
+    stop that is already being handled.
+    """
+    from brindle import launch_health, redact, tmux
+    from brindle.profiles import profile_names
+
+    with agents.review_dispatch_lock(ws.id):
+        worker = piped_worker(db, ws)
+        if worker is None or worker.pipeline != "reviewing":
+            # Once escalated, later detectors must not send a second alarm.
+            current = db.get_agent(reviewer.id)
+            return bool(current and current.failed_why and current.failed_why.startswith("review: "))
+        current = db.get_agent(reviewer.id)
+        if current is None or current.result is not None:
+            return True
+        if (current.status in ("paused", "done")
+                or current.tmux_window != reviewer.tmux_window or current.tmux_server != reviewer.tmux_server
+                or agents.alive_or_starting(current)):
+            return True  # the observed process has been resumed or replaced
+        reviewer = current
+        try:
+            sha = gates.head(ws)
+        except git.GitError:
+            return False  # no branch remains to restart a review on
+        if reviewer.review_sha != sha or db.reviews_at(ws.id, sha):
+            db.update_agent(reviewer.id, status="done")
+            return True
+        others = [a for a in db.list_agents(ws.id) if a.mode == "review" and a.id != reviewer.id]
+        if any(a.result is None and a.review_sha == sha and agents.alive_or_starting(a)
+               and not a.unreported_noted for a in others):
+            db.update_agent(reviewer.id, status="done")
+            return True
+        profiles = {reviewer.profile, *profile_names(ws.repo_root), *(a.profile for a in others)}
+        report = review_claim(db, ws)
+        if any(agents._review_pending(ws.id, profile, sha, report) for profile in profiles):
+            db.update_agent(reviewer.id, status="done")
+            return True
+        # An explicit dispatcher may have claimed a slot before creating its row.
+        if db.conn.execute("SELECT 1 FROM review_claims WHERE workspace_id=? AND sha=? "
+                           "AND agent_id IS NULL AND claimed_at>?",
+                           (ws.id, sha, time.time() - agents.LAUNCH_GRACE)).fetchone():
+            return True
+        try:
+            cfg = load_repo_config(ws.repo_root, branch=ws.base_branch)
+        except ValueError:
+            cfg = RepoConfig()
+        error = launch_health.last_error(reviewer) or "No error text remains in the dead pane."
+        claimed = db.conn.execute("INSERT OR IGNORE INTO review_death_restarts (workspace_id, sha) "
+                                  "VALUES (?,?)", (ws.id, sha)).rowcount
+        if claimed:
+            parent = db.get_agent(worker.parent_id) if worker.parent_id else None
+            db.update_agent(reviewer.id, unreported_noted=int(time.time()))
+            try:
+                replacement = agents.request_review(
+                    db, parent, ws, reviewer.profile, cfg=cfg,
+                    check_summary=_cached_check_summary(db, ws, cfg, reviewer),
+                    second=bool(_review_slot(db, reviewer)), slot=db.review_slot(reviewer.id),
+                    expected_sha=sha,
+                )
+                if replacement is not None:
+                    db.set_result(reviewer.id, f"Replaced by reviewer {replacement.id} after process exit.")
+                    db.update_agent(reviewer.id, status="done")
+                return True
+            except agents.ReviewHeadMoved:
+                return True
+            except (agents.AgentError, tmux.TmuxError, OSError) as exc:
+                error += " Replacement could not start: " + redact.mask(str(exc))[:1000]
+        detail = (f"Reviewer {reviewer.id} exited without a verdict after automatic recovery. "
+                  f"Last pane error: {error} Fix the CLI installation, login or routing, then "
+                  f"request_review(\"{ws.id}\"). Review is still required before merging.")
+        db.update_agent(reviewer.id, status="failed", failed_why="review: " + detail,
+                        unreported_noted=int(time.time()))
+        db.update_agent(worker.id, pipeline=None)
+        _escalate(db, ws, worker)
+        _tell(db, worker.parent_id, f"[brindle pipeline] `{ws.branch}` needs you. {detail}", reviewer.id)
+        return True
+
+
 def on_reviewer_unreported(db: DB, reviewer: Agent, ws: Workspace) -> bool:
     """A reviewer of a piped branch stopped without a verdict, which would
     leave its worker in ``pipeline='reviewing'`` for good. Escalates only as
@@ -936,6 +1024,8 @@ def on_reviewer_unreported(db: DB, reviewer: Agent, ws: Workspace) -> bool:
     worker = piped_worker(db, ws)
     if worker is None or worker.pipeline != "reviewing":
         return False
+    if reviewer.review_sha and os.path.isdir(ws.path) and not agents.is_alive(reviewer):
+        return on_reviewer_dead(db, reviewer, ws)
     if agents.command_running(db, reviewer) or (
         agents.is_alive(reviewer) and agents.transcript_active(reviewer)
     ):
