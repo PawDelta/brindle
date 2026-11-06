@@ -2249,7 +2249,8 @@ def cloning(world, repo, monkeypatch):
     return f"file://{repo.parent / 'origin.git'}"
 
 
-def test_a_clone_streams_git_progress_and_finishes_with_the_path(db, cloning, tmp_path):
+@pytest.mark.parametrize("parent_exists", [True, False])
+def test_a_clone_streams_git_progress_and_finishes_with_the_path(db, cloning, tmp_path, parent_exists):
     from brindle import git
 
     # The picker's other path: opening a plain folder only initializes it after confirmation.
@@ -2268,8 +2269,11 @@ def test_a_clone_streams_git_progress_and_finishes_with_the_path(db, cloning, tm
     head = git.run(["rev-parse", "HEAD"], folder).stdout
     assert _send("POST", "/v1/repos/open", {"path": str(folder), "init": True})[0] == 200
     assert git.run(["rev-parse", "HEAD"], folder).stdout == head
+    code, reply = _send("POST", "/v1/repos/clone", {"url": cloning, "parent_dir": str(folder / "notes.txt")})
+    assert (code, reply["error"]["code"]) == (400, "invalid")
     parent = tmp_path / "projects"
-    parent.mkdir()
+    if parent_exists:
+        parent.mkdir()
     code, reply = _send("POST", "/v1/repos/clone", {"url": cloning, "parent_dir": str(parent)})
     assert code == 202, reply
     done = bus.tail(db, kinds=("job.done", "job.failed"))
