@@ -20,7 +20,8 @@ ALLOW_FILE_URLS = False
 
 _SCP = re.compile(r"^git@[^\s/:@-][^\s/:@]*:[^\s:]\S*$")      # git@<host>:<path>, never a relative local path
 _AUTH_FAILURE = re.compile(r"authentication failed|permission denied|could not read (?:username|password)|"
-                           r"terminal prompts disabled|access denied|invalid username or password", re.I)
+                           r"terminal prompts disabled|access denied|invalid username or password|"
+                           r"told us to quit", re.I)      # the last: brindle's GitHub connection, needing a reconnect
 TAIL = 20
 
 

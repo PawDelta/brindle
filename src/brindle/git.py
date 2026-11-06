@@ -152,7 +152,8 @@ _FETCH_REFUSED = "brindle-fetch-refused"
 # git's and ssh's words for "not without credentials" (LC_ALL=C: see _background_env),
 # as opposed to offline or no such repo.
 _REFUSED = re.compile(r"terminal prompts disabled|could not read (username|password)|authentication failed"
-                      r"|permission denied|host key verification failed|returned error: 40[13]", re.IGNORECASE)
+                      r"|permission denied|host key verification failed|returned error: 40[13]"
+                      r"|told us to quit", re.IGNORECASE)    # the last: brindle's own helper, with nothing to give
 _SHELL_WORD = re.compile(r"""'[^']*'|"[^"]*"|\S+""")
 
 

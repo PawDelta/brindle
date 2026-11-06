@@ -61,6 +61,8 @@ ITEM_ACCOUNT = "connection"
 # What git must be asking about for the helper to answer: never another host or scheme,
 # whatever a repo's config has git ask.
 ORIGIN = ("https", "github.com")
+# The helper's word to git that nobody else is to be asked: no other helper, askpass or terminal.
+QUIT = "quit=true\n"
 API = "https://api.github.com"
 ROUTES = ("gh", "token")
 STORE_ENV = "BRINDLE_GITHUB_STORE"
@@ -407,8 +409,8 @@ def helper_command() -> str:
 
 def git_helper() -> str | None:
     """The helper for git to ask, for as long as the person is connected: also once
-    GitHub has stopped taking the credential or it has run out, when the helper answers
-    nothing. Dropping it then would hand github.com back to git's keychain helper, or
+    GitHub has stopped taking the credential or it has run out, when the helper ends
+    git's asking (QUIT). Dropping it then would hand github.com back to git's keychain helper, or
     to gh's, just when the person has to connect again: a dialog, or another account's
     credential used without a word. Only disconnecting gives their helpers back."""
     return helper_command() if connected() else None
@@ -424,16 +426,24 @@ def answer(action: str, request: str, *, local: bool = False) -> str:
     A process that can't answer by itself passes git's question on to the daemon
     (``local``: this is the daemon answering). That is every process but the daemon
     when the token is in its keychain item, and one that can't read brindle's store at
-    all: git under Codex's sandbox, which is denied the folder (and sees it as absent)."""
+    all: git under Codex's sandbox, which is denied the folder (and sees it as absent).
+
+    A ``get`` that a connection can't answer (refused, run out, its keychain locked, the
+    daemon not there to ask) ends git's asking (QUIT): with an empty answer git would go
+    on to an askpass program or the terminal, which can raise a dialog or sign in as
+    someone else. Only with no connection at all is the answer empty."""
     fields = dict(line.split("=", 1) for line in request.splitlines() if "=" in line)
     if (fields.get("protocol"), fields.get("host")) != ORIGIN:
         return ""
+    stop = QUIT if action == "get" else ""
     record = _load()
     if record is None or record.get("storage") == "keychain" and not is_helper():
-        return "" if local else _ask_daemon(action, request)
+        if local:
+            return stop if record is not None else ""
+        return _ask_daemon(action, request, stop)
     if action == "get":
         got = credential()
-        return f"username={got[0]}\npassword={got[1]}\n" if got else ""
+        return f"username={got[0]}\npassword={got[1]}\n" if got else stop
     if action == "erase":
         token = _token(record)
         if token and fields.get("password") == token:
@@ -441,16 +451,23 @@ def answer(action: str, request: str, *, local: bool = False) -> str:
     return ""
 
 
-def _ask_daemon(action: str, request: str) -> str:
-    """git's question, answered by the daemon over its Unix socket; nothing when it isn't
-    there to ask."""
+def _ask_daemon(action: str, request: str, unanswered: str) -> str:
+    """git's question, answered by the daemon over its Unix socket; ``unanswered`` when it
+    isn't there to ask."""
     from brindle.daemon import holds
 
     got = holds.call(CREDENTIAL_PATH, {"action": action, "request": request}, ASK_DAEMON_SECONDS)
-    return got["answer"] if got and isinstance(got.get("answer"), str) else ""
+    return got["answer"] if got and isinstance(got.get("answer"), str) else unanswered
 
 
 def main(argv: list[str]) -> int:
-    """``brindle _github-credential <get|store|erase>``, as git runs it."""
-    sys.stdout.write(answer(argv[0] if argv else "", sys.stdin.read()))
+    """``brindle _github-credential <get|store|erase>``, as git runs it. git only does for
+    github.com, so a ``get`` that goes wrong here ends its asking too, rather than leaving
+    it to go on to an askpass program."""
+    action = argv[0] if argv else ""
+    try:
+        said = answer(action, sys.stdin.read())
+    except Exception:  # noqa: BLE001 - whatever broke, git must not fall through to a prompt
+        said = QUIT if action == "get" else ""
+    sys.stdout.write(said)
     return 0

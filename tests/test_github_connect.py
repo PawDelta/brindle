@@ -5,6 +5,7 @@ import base64
 import ctypes
 import functools
 import http.server
+import io
 import os
 import sys
 import threading
@@ -61,13 +62,14 @@ class _Origin(http.server.SimpleHTTPRequestHandler):
 
 
 def test_connected_github_answers_git_without_the_keychain(brindle_home, tmp_path, monkeypatch, github_api):
-    # The person's own helper stands for the keychain's: a fake that notes being asked.
+    # The person's own helper and askpass stand for the keychain's and a dialog: a fake that notes being asked.
     asked = tmp_path / "asked"
     asker = _script(tmp_path / "asker", f'echo "$*" >> "{asked}"')
     home_config = tmp_path / "gitconfig"
-    home_config.write_text(f"[credential]\n\thelper = !{asker}\n[user]\n\tname = n\n\temail = a@b.c\n")
+    home_config.write_text(f"[credential]\n\thelper = !{asker}\n[core]\n\taskPass = {asker}\n"
+                           "[user]\n\tname = n\n\temail = a@b.c\n")
     for name, value in (("GIT_CONFIG_GLOBAL", str(home_config)), ("GIT_CONFIG_NOSYSTEM", "1"),
-                        ("GIT_ASKPASS", ""), ("GIT_TERMINAL_PROMPT", "0"), ("NO_PROXY", "127.0.0.1")):
+                        ("GIT_ASKPASS", str(asker)), ("GIT_TERMINAL_PROMPT", "0"), ("NO_PROXY", "127.0.0.1")):
         monkeypatch.setenv(name, value)
     monkeypatch.delenv("GIT_CONFIG_PARAMETERS", raising=False)
     private, repo = tmp_path / "private", tmp_path / "repo"
@@ -111,22 +113,24 @@ def test_connected_github_answers_git_without_the_keychain(brindle_home, tmp_pat
         assert not git.background_fetch(repo, ["--quiet", "origin", "main"])
 
         def nobody_answers():
-            """brindle's helper is still the only one for the host, and has nothing to give: what the
-            person asks for fails plainly and a new pane gets no password, rather than the keychain's
-            helper (or gh's) coming back just when they have to connect again."""
+            """brindle's helper is still the only one for the host, and ends git's asking: what the
+            person asks for fails plainly and a new pane gets no password. Neither the keychain's
+            helper (or gh's) nor an askpass dialog comes back just when they have to connect again."""
             with pytest.raises(git.GitError):
                 git.fetch_remote_branch(repo, "main")
             new_pane = {**os.environ, "GIT_CONFIG_PARAMETERS": git.pane_git_config(gh=False)}
             filled = git.run_env(["credential", "fill"], repo, new_pane, input=f"protocol=http\nhost={host}\n\n",
-                                 check=False).stdout
-            assert "password=" not in filled and not asked.exists()
+                                 check=False)
+            assert filled.returncode != 0 and "password=" not in filled.stdout and not asked.exists()
 
         nobody_answers()
-        # The same for one that ran out, though GitHub would still take it.
+        # The same for one that ran out, though GitHub would still take it; a poll puts that on record as a refusal.
         monkeypatch.setattr(_Origin, "accepts", TOKEN)
         github_api["expires"] = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(time.time() - 60))
         github_connect.connect_token(TOKEN)
         nobody_answers()
+        git._refused_marker(repo).unlink()
+        assert not git.background_fetch(repo, ["--quiet", "origin", "main"]) and git.fetch_refused(repo)
         # Only disconnecting gives github.com back to the person's own helpers.
         github_connect.disconnect()
         with pytest.raises(git.GitError):
@@ -184,7 +188,7 @@ def test_connection_routes_keep_the_token_and_refuse_what_github_wont_take(db, t
     github_api["expires"] = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(time.time() - 60))
     got = routes_actions.connect_github(db, {}, {"route": "gh"})
     assert (got["route"], got["gh_available"], got["needs_reconnect"]) == ("gh", True, True)
-    assert got["expires_at"] < time.time() and github_connect.answer("get", ASK) == ""
+    assert got["expires_at"] < time.time() and github_connect.answer("get", ASK) == github_connect.QUIT
 
     assert routes_actions.disconnect_github(db, {}, {})["connected"] is False
     assert github_connect.credential() is None
@@ -207,7 +211,8 @@ class _HelpersItem:
         type(self).secret = None
 
 
-def test_under_the_app_only_the_helper_daemon_holds_the_token_and_the_rest_ask_it(db, monkeypatch, github_api):
+def test_under_the_app_only_the_helper_daemon_holds_the_token_and_the_rest_ask_it(db, monkeypatch, github_api,
+                                                                                  capsys):
     is_helper = [True]
     monkeypatch.setattr(github_connect, "is_helper", lambda: is_helper[0])
     monkeypatch.setattr(github_connect, "_item", _HelpersItem)
@@ -230,8 +235,13 @@ def test_under_the_app_only_the_helper_daemon_holds_the_token_and_the_rest_ask_i
     is_helper[0] = False
     assert github_connect.credential() is None and github_connect.git_helper() is not None
     assert github_connect.answer("get", ASK) == ANSWER
-    # A daemon that isn't the helper can't read the item, and doesn't go asking itself.
-    assert routes_actions.github_credential(db, {}, {"action": "get", "request": ASK}) == {"answer": ""}
+    # A daemon that isn't the helper can't read the item, and doesn't go asking itself: git is told to stop
+    # asking, as it is when no daemon is there, so no askpass or other helper stands in.
+    stop = github_connect.QUIT
+    assert routes_actions.github_credential(db, {}, {"action": "get", "request": ASK}) == {"answer": stop}
+    with monkeypatch.context() as no_daemon:
+        no_daemon.setattr(holds, "call", lambda path, body, seconds: None)
+        assert github_connect.answer("get", ASK) == stop and github_connect.answer("store", ASK) == ""
 
     # That route takes git under an agent, with no token, on the Unix socket; never over TCP.
     reached, sent = [], []
@@ -250,9 +260,13 @@ def test_under_the_app_only_the_helper_daemon_holds_the_token_and_the_rest_ask_i
 
     # A locked keychain is no answer for now, with nothing to redo; an item no longer the helper's needs a new connect.
     monkeypatch.setattr(_HelpersItem, "refuses", mac_keychain.Refused(-25293, locked=True))
-    assert github_connect.answer("get", ASK) == "" and not github_connect.status()["needs_reconnect"]
+    assert github_connect.answer("get", ASK) == stop and not github_connect.status()["needs_reconnect"]
     monkeypatch.setattr(_HelpersItem, "refuses", mac_keychain.Refused(-25293, locked=False))
-    assert github_connect.answer("get", ASK) == "" and github_connect.status()["needs_reconnect"]
+    assert github_connect.answer("get", ASK) == stop and github_connect.status()["needs_reconnect"]
+    # Whatever else goes wrong in the helper git started, git is still told to stop.
+    monkeypatch.setattr(_HelpersItem, "refuses", RuntimeError("anything"))
+    monkeypatch.setattr(sys, "stdin", io.StringIO(ASK))
+    assert github_connect.main(["get"]) == 0 and capsys.readouterr().out == stop
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="Security.framework is macOS's")
