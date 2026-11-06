@@ -67,6 +67,8 @@ export interface AppProps {
   client: DaemonClient | null;
   /* Fetch the snapshot and inbox again (Sync.refresh). */
   refresh?: () => Promise<void>;
+  /* Stop background sync when this process cannot use the daemon. */
+  onAgentRefused?: () => void;
   /* Where to open; by default the last-used session, else the first live one, else the empty state. */
   initialRoute?: Route;
   /* Opens a page in the system browser; the shell's by default. */
@@ -447,9 +449,14 @@ function Startup({ client, refresh, children }: { client: DaemonClient | null; r
    sign-out later (the Account page's, which puts the account it reads
    into the store) brings the gate back. A page with no engine has no
    account to ask about: it goes on to say so. */
-type Signed = { kind: "checking" } | { kind: "error"; error: string } | { kind: "out" } | { kind: "in" };
+type Signed = { kind: "checking" } | { kind: "error"; error: string } | { kind: "refused" } | { kind: "out" } | { kind: "in" };
 
-function SignInGate({ client, openUrl = openExternal, children }: { client: DaemonClient | null; openUrl?: OpenUrl; children: ReactNode }) {
+function SignInGate({ client, openUrl = openExternal, onAgentRefused, children }: {
+  client: DaemonClient | null;
+  openUrl?: OpenUrl;
+  onAgentRefused?: () => void;
+  children: ReactNode;
+}) {
   const store = useStore();
   const [signed, setSigned] = useState<Signed>(client ? { kind: "checking" } : { kind: "in" });
   /* Reads asked so far: Retry and a finished sign-in ask again. */
@@ -465,7 +472,17 @@ function SignInGate({ client, openUrl = openExternal, children }: { client: Daem
         store.dispatch({ type: "account", account: a });
         setSigned(a.signed_in ? { kind: "in" } : { kind: "out" });
       },
-      (e: unknown) => live && setSigned({ kind: "error", error: plain(e instanceof Error ? e.message : String(e)) }),
+      (e: unknown) => {
+        if (!live) return;
+        // Identity is checked against process ancestry. This launch cannot
+        // recover through sign-in or by clearing its inherited environment.
+        if (e instanceof DaemonError && e.code === "agent_caller") {
+          onAgentRefused?.();
+          setSigned({ kind: "refused" });
+        } else {
+          setSigned({ kind: "error", error: plain(e instanceof Error ? e.message : String(e)) });
+        }
+      },
     );
     return () => {
       live = false;
@@ -483,6 +500,15 @@ function SignInGate({ client, openUrl = openExternal, children }: { client: Daem
   }, [out, signed.kind]);
 
   if (signed.kind === "in" || !client) return <>{children}</>;
+  if (signed.kind === "refused") {
+    return (
+      <div className="flex h-full items-center justify-center p-s4">
+        <p className="max-w-prose text-ink-2" role="alert">
+          brindle was opened from an agent's terminal. Open it from the Dock
+        </p>
+      </div>
+    );
+  }
   if (checking) return <Starting />;
   const problem = signed.kind === "error" && (
     <div className={`${alert} flex flex-wrap items-center gap-s2`} role="alert" data-testid="signin-gate-failed">
@@ -504,13 +530,13 @@ export default function App(props: AppProps) {
   return (
     <StoreContext.Provider value={props.store}>
       <DaemonContext.Provider value={props.client}>
-        <SessionsProvider client={props.client}>
-          <UsageProvider client={props.client}>
-            <SignInGate client={props.client} openUrl={props.openUrl}>
+        <SignInGate client={props.client} openUrl={props.openUrl} onAgentRefused={props.onAgentRefused}>
+          <SessionsProvider client={props.client}>
+            <UsageProvider client={props.client}>
               <FirstLaunch {...props} />
-            </SignInGate>
-          </UsageProvider>
-        </SessionsProvider>
+            </UsageProvider>
+          </SessionsProvider>
+        </SignInGate>
       </DaemonContext.Provider>
     </StoreContext.Provider>
   );

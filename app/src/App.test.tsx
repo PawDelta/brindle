@@ -787,6 +787,32 @@ describe("the sign-in gate", () => {
     sync.stop();
   });
 
+  it("app opened from an agent says how to reopen it", async () => {
+    vi.useFakeTimers();
+    const daemon = new FakeDaemon();
+    const requests: string[] = [];
+    const client = new DaemonClient({ baseUrl: BASE_URL, token: TOKEN, fetch: async (input) => {
+      requests.push(String(input));
+      return new Response(JSON.stringify({ error: { code: "agent_caller", message: "refused: the caller runs under brindle agent w1" } }), { status: 403, headers: { "Content-Type": "application/json" } });
+    } });
+    const store = createAppStore();
+    const sync = startSync({ client, store, connect: daemon.connect });
+    try {
+      renderApp(<App store={store} client={client} refresh={sync.refresh} onAgentRefused={sync.stop} />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+      expect(screen.getByRole("alert").textContent).toContain("brindle was opened from an agent's terminal. Open it from the Dock");
+      expect(screen.queryByTestId("signin-gate")).toBeNull();
+      expect(sidebar()).toBeNull();
+      expect(screen.queryByRole("button")).toBeNull();
+      expect(store.getState().connection).toBe("closed");
+      const count = requests.length;
+      daemon.drop();
+      await act(async () => { await vi.advanceTimersByTimeAsync(60000); });
+      expect(requests).toHaveLength(count);
+      expect(requests.some((path) => path.endsWith("/providers/installed"))).toBe(false);
+    } finally { sync.stop(); vi.useRealTimers(); }
+  });
+
   it("onboarded on this Mac with a CLI signed in, but signed out of brindle: still the gate, then the app once signed in", async () => {
     localStorage.setItem(ONBOARDED_KEY, "1");
     const daemon = new FakeDaemon({ account: SIGNED_OUT, repos: [{ repo_root: REPO, name: "proj" }], providers: freshProviders({ claude: { path: "/home/u/.local/bin/claude", version: "2.1.47", signed_in: true }, opencode: { path: "/usr/local/bin/opencode", version: "0.9.0" } }) });
