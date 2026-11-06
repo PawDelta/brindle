@@ -264,6 +264,15 @@ def _bypass(command):
     _bypass('a=(~/.ssh/id_rsa); cat "${a[0]}"'),
     _bypass('for f in "$HOME"/.ssh/*; do cat $f; done'),
     _bypass("cat $HOME/.s*h/id_rsa"),
+    # Disguised: a path only the run resolves that could still be a store.
+    _bypass('bash -c "cat \\"\\$HOME/.a\\$1/credentials\\"" _ ws'),    # pieces and $1 inside sh -c
+    _bypass("python3 -c \"import os; print(open(os.environ['HOME'] + '/.a' + 'ws/credentials').read())\""),
+    _bypass('f=(~/.ss?/id_*); cat "${f[@]}"'),    # an array over a store's pattern
+    _bypass("shopt -s dotglob; cat ~/*/credentials"),
+    pytest.param("python3 -c \"import os; print(os.path.expanduser('~') + '/' + 'notes')\"", "allow",
+                 marks=pytest.mark.variant("look-alike: a home path built in pieces that is no store")),
+    pytest.param("shopt -s dotglob; ls ./build/*", "allow",
+                 marks=pytest.mark.variant("look-alike: dotglob over no home")),
     _bypass('ls ~/.ssh > "$OUTPUT"'),    # a store named, a target only the run knows
     pytest.param('ls > "$OUTPUT"', "allow",
                  marks=pytest.mark.variant("no store named: an unresolved target is the policy's question")),

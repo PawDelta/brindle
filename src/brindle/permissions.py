@@ -2820,6 +2820,92 @@ def _names_store_in_text(command: str) -> bool:
     return False
 
 
+# Disguised credential reads: a path brindle can't resolve that could still be a
+# store. Its unknown pieces stand for anything (_UNKNOWN), a dot included.
+_UNKNOWN = "\0"
+_EXPANSION = re.compile(r"\$\((?:[^()]|\([^()]*\))*\)|`[^`]*`|\$\{[^}]*\}|\$(?:[A-Za-z_]\w*|[0-9@*#?$!-])")
+# Options that let a pattern's * select dot entries (bash, zsh).
+_DOTGLOB = re.compile(r"\bdotglob\b|\bglob_?dots\b|\bGLOBIGNORE=")
+# A path under a home in text the splitter can't read (an array's list, inline code).
+_HOME_PATH_TEXT = (r"(?:(?<![\w$.~/-])~[A-Za-z0-9_.-]*|\$\{HOME\}|\$HOME(?!\w)|/Users/[^/\s'\"]+|/home/[^/\s'\"]+"
+                   r"|/var/root|/root|%s)(/[^\s;|&()<>]*)")
+# What separates two pieces of an inline program's string: + (Python, JS, Ruby), . (Perl, PHP),
+# .. (Lua), nothing (Python's 'a' 'b'); a comma (os.path.join) joins them as a path.
+_STRING_JOIN = re.compile(r"""(['"`])\s*(\+|\.\.?|,)?\s*(['"`])""")
+# Programs whose words name no file they read.
+_NAMES_NOTHING = frozenset({*_HARMLESS_CHECKS, "cd", "pushd", "echo", "printf", "shopt", "set", "export"})
+
+
+def _reaches_store(rel: str, dotglob: bool = False) -> bool:
+    """Whether ``rel``, under a home, may be a store once its unknown pieces
+    (_UNKNOWN) and pattern characters take any value: an unknown may hold a
+    dot or a slash, a pattern selects a dot entry only with dotglob."""
+    parts = [p for p in rel.split("/") if p and p != "."]
+    for store in (*_CREDENTIAL_DIRS, *_CREDENTIAL_FILES):
+        for name, pattern in zip(store.split("/"), parts):
+            if pattern == _UNKNOWN:
+                return True    # a whole component only the run knows: any path from here on
+            if not (pattern.startswith((".", _UNKNOWN)) or dotglob) and re.search(r"[*?\[]", pattern):
+                break
+            if not fnmatch.fnmatchcase(name, pattern.replace(_UNKNOWN, "*")):
+                break
+        else:
+            if parts:
+                return True
+    return False
+
+
+def _home_relative(text: str, cwd: str | None) -> str | None:
+    """``text`` (unknowns as _UNKNOWN, quotes gone) relative to a home it may be
+    under, or None: ~ and ~user, a home's path, an unknown prefix ($d/...)."""
+    home = os.path.expanduser("~")
+    if text.startswith("~"):
+        return text.partition("/")[2] if "/" in text else None
+    if text.startswith(_UNKNOWN + "/"):
+        # $d/.a$x may be a home's; $TMPDIR/$f names nothing more than any $f does.
+        return None if text[2:].startswith(_UNKNOWN) else text[2:]
+    path = os.path.normpath(os.path.join(cwd, text)) if cwd else text
+    if path.startswith(home + "/"):
+        return path[len(home) + 1:]
+    if other := _OTHER_HOME.match(path):
+        return path[other.end() + 1:]
+    return None
+
+
+def _word_reaches_store(part: ShellPart, word: str, dotglob: bool) -> bool:
+    """A word only the run resolves ($1, $(...), a pattern) that may name a store."""
+    text = _HOME_REFERENCE.sub(lambda _: os.path.expanduser("~"), word)
+    text = re.sub(r"[\"'\\]", "", _EXPANSION.sub(_UNKNOWN, text))
+    if _UNKNOWN not in text and not (dotglob and re.search(r"[*?\[]", text)):
+        return False
+    places = [part.cwd] if part.cwd is not None else part.places
+    return any((rel := _home_relative(path, place)) is not None and _reaches_store(rel, dotglob)
+               for path in _argument_paths(text) for place in places or [None])
+
+
+def _part_reaches_store(part: ShellPart, dotglob: bool) -> bool:
+    if not part.words or os.path.basename(part.words[0]) in _NAMES_NOTHING and not part.reads + part.writes:
+        return False
+    return any(_word_reaches_store(part, word, dotglob) for word in [*part.unresolved, *part.written[1:]])
+
+
+def _text_reaches_store(text: str, dotglob: bool = False) -> bool:
+    """Whether text brindle can't split names a home path that may be a store."""
+    pattern = re.compile(_HOME_PATH_TEXT % re.escape(os.path.expanduser("~")))
+    for found in pattern.finditer(text):
+        rel = re.sub(r"[\"'\\]", "", _EXPANSION.sub(_UNKNOWN, found.group(1)))
+        if _reaches_store(rel, dotglob):
+            return True
+    return False
+
+
+def _code_reaches_store(code: str) -> bool:
+    """An interpreter's inline code that spells a store in pieces ('/.a' + 'ws')."""
+    joined = _STRING_JOIN.sub(lambda m: "/" if m.group(2) == "," else "", code)
+    joined = re.sub(r"\$\{|[}'\"`]", "", joined)
+    return bool(_CREDENTIAL_TEXT.search(joined)) or _names_store_in_text(joined) or _text_reaches_store(joined)
+
+
 def _credential_options(args: list[str], valued: set[str]) -> tuple[list[str], set[str]]:
     """CLI operands and option names, excluding the values options consume."""
     operands, options = [], set()
@@ -2910,7 +2996,7 @@ def _command_path(args: list[str], valued: set[str], flags: set[str], target: tu
     return match(0, 0)
 
 
-def _credential_shell(req: Request, part: ShellPart, args: list[str], depth: int) -> bool:
+def _credential_shell(req: Request, part: ShellPart, args: list[str], depth: int, plain: bool = False) -> bool:
     """Find a shell's command string after actual options, never inside --norc."""
     index, command_string = 0, False
     while index < len(args):
@@ -2930,13 +3016,19 @@ def _credential_shell(req: Request, part: ShellPart, args: list[str], depth: int
             index += 1
         else:
             break
-    return (command_string and index < len(args)
-            and prints_credentials(replace(req, command=args[index], cwd=part.cwd or ""), depth + 1))
+    if not command_string or index >= len(args):
+        return False
+    # The scan keeps a double-quoted word's \$, \` and \\ as written; the shell hands the
+    # inner one $, ` and \ ("cat \"\$HOME/.a\"\"ws/x\""). Either reading may be the run's.
+    texts = [args[index]] if plain else list(dict.fromkeys([args[index], re.sub(r"\\([$`\\])", r"\1", args[index])]))
+    return any(prints_credentials(replace(req, command=text, cwd=part.cwd or ""), depth + 1, plain=plain)
+               for text in texts)
 
 
 def _credential_words(req: Request, part: ShellPart, words: list[str], depth: int,
-                      references: list[tuple[str, ...]] | None = None) -> bool:
-    """Classify output, unwrapping only commands that actually execute their operands."""
+                      references: list[tuple[str, ...]] | None = None, plain: bool = False) -> bool:
+    """Classify output, unwrapping only commands that actually execute their operands
+    (``plain``: without prints_credentials' disguised-read checks)."""
     if not words or depth > 30:
         return False
     if references is None:
@@ -2964,7 +3056,7 @@ def _credential_words(req: Request, part: ShellPart, words: list[str], depth: in
                 tokens = _script_tokens(args[index + 1], credential_scan=True) or []
                 refs = [tuple(ref[2] for ref in t[1].refs) for t in tokens if t[0] == "word"]
                 return _credential_words(req, part, ["env", *split, *args[index + 2:]], depth + 1,
-                                         [(), *refs, *references[index + 3:]])
+                                         [(), *refs, *references[index + 3:]], plain)
             if arg in valued:
                 index += 2
             elif arg.startswith("-") or program == "env" and _ASSIGNMENT.match(arg):
@@ -2972,8 +3064,8 @@ def _credential_words(req: Request, part: ShellPart, words: list[str], depth: in
             else:
                 break
         return (program == "env" and index >= len(args)
-                or _credential_words(req, part, args[index:], depth + 1, references[index + 1:]))
-    if program in ("sh", "bash", "zsh", "dash", "ksh") and _credential_shell(req, part, args, depth):
+                or _credential_words(req, part, args[index:], depth + 1, references[index + 1:], plain))
+    if program in ("sh", "bash", "zsh", "dash", "ksh") and _credential_shell(req, part, args, depth, plain):
         return True
     if program in _HARMLESS_CHECKS:
         # Reveals no content; only a redirection into a store touches one (a target only the
@@ -3060,11 +3152,12 @@ def _credential_words(req: Request, part: ShellPart, words: list[str], depth: in
         return any(_credential_file(req, part, name) for name in [*words[1:], *part.written[1:], *part.reads])
     if re.sub(r"[\d.]+$", "", program) in _INTERPRETERS:
         # Code given inline (python -c, node -e ...) that names a credential store reads it.
-        return any(_CREDENTIAL_TEXT.search(arg) or _names_store_in_text(arg) for arg in args)
+        return any(_CREDENTIAL_TEXT.search(arg) or _names_store_in_text(arg)
+                   or not plain and _code_reaches_store(arg) for arg in args)
     return False
 
 
-def prints_credentials(req: Request, depth: int = 0) -> bool:
+def prints_credentials(req: Request, depth: int = 0, *, plain: bool = False) -> bool:
     """A non-overridable output restriction, independent of grants and policy.
 
     Keep already read parts when later syntax is unknown: an unreadable tail
@@ -3080,7 +3173,14 @@ def prints_credentials(req: Request, depth: int = 0) -> bool:
         fallback = _PartReader(req, credential_scan=True)
         fallback.scan(req.command)
         reader.parts.extend(fallback.parts)
-    if any(_credential_words(req, part, part.words, depth) for part in reader.parts):
+    if any(_credential_words(req, part, part.words, depth, plain=plain) for part in reader.parts):
+        return True
+    # A path only the run resolves (pieces, $1, $(...), an array's pattern, a glob
+    # dotglob lets select dot entries) that could be a store: what it reads can't be
+    # told, so it may be one (``plain`` leaves these out, for decide's message).
+    dotglob = bool(_DOTGLOB.search(req.command))
+    if not plain and (any(_part_reaches_store(part, dotglob) for part in reader.parts)
+                      or reader.unread and _text_reaches_store(req.command, dotglob)):
         return True
     # Does the command name a store anywhere: a part's words or redirections, an
     # assignment's value, a loop's list? Then a word or target only the run knows
@@ -3109,6 +3209,9 @@ def decide(req: Request | None, *, checks: list[str] | None = None,
     if req is None or req.kind not in KINDS:
         return Decision("ask", "brindle couldn't read the request")
     if prints_credentials(req):
+        if not prints_credentials(req, plain=True):
+            return Decision("deny", "can't tell which file this reads, and it could be a credential store; "
+                                    "run it a simpler way")
         return Decision("deny", 'would print credentials; check a variable with [ -n "$VAR" ] '
                                 'or print a non-secret one')
     from brindle import permission_grants
