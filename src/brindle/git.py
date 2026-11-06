@@ -76,16 +76,18 @@ def run(args: list[str], cwd: str | Path, check: bool = True,
 
 def run_env(args: list[str], cwd: str | Path, env: dict[str, str] | None,
             check: bool = True, timeout: int | float | None = None,
-            input: str | None = None) -> subprocess.CompletedProcess:
+            input: str | None = None, no_terminal: bool = False) -> subprocess.CompletedProcess:
     """``run`` with its own environment (e.g. ``GIT_INDEX_FILE`` for a scratch
-    index that leaves the checkout's real index alone; see brindle.rewind)."""
+    index that leaves the checkout's real index alone; see brindle.rewind).
+    ``no_terminal``: nothing it starts can ask at the terminal (a read can't anyway)."""
     to = TIMEOUT if timeout is None else timeout
     reading = is_read(args)
     start = spawn.read if reading else spawn.action
+    detached = {"no_terminal": True} if no_terminal and not reading else {}
     if not reading:
         invalidate_branches()
     try:
-        proc = start(["git", *args], cwd=cwd, env=env, input=input, timeout=to)
+        proc = start(["git", *args], cwd=cwd, env=env, input=input, timeout=to, **detached)
         if not reading:
             invalidate_branches()    # and after, so a lookup during the action can't re-cache old refs
     except spawn.Busy as e:
@@ -171,9 +173,10 @@ def pane_git_config() -> str | None:
 
 def _background_env(cwd: str | Path) -> dict[str, str]:
     """The environment of a network call nobody asked for: no askpass program
-    (an empty GIT_ASKPASS also passes over core.askPass and SSH_ASKPASS), no
-    terminal prompt, and ssh that fails rather than asks (for a passphrase, or
-    about a host key), still with an agent's keys and the person's own command."""
+    (an empty GIT_ASKPASS also passes over core.askPass and SSH_ASKPASS) and no
+    terminal prompt, which with ``background``'s missing terminal leave ssh, under
+    any name or wrapper, nowhere to ask. BatchMode has it fail at once where it
+    can be given, still with an agent's keys and the person's own command."""
     env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "", "SSH_ASKPASS": "",
            "SSH_ASKPASS_REQUIRE": "never", "LC_ALL": "C"}
     if ssh := _batch_ssh(cwd):
@@ -182,11 +185,11 @@ def _background_env(cwd: str | Path) -> dict[str, str]:
 
 
 def _batch_ssh(cwd: str | Path) -> str | None:
-    """The ssh command git would run, in BatchMode: right after ``ssh`` itself,
-    wherever a wrapper puts it (``env A=1 ssh -F x``), as ssh keeps the first
-    value of an option and the command may set its own. A program that isn't
-    named ssh gets it last, where git's own arguments go: a wrapper passes those
-    on, and its own options stay its own (so its ``-o BatchMode=no`` would win).
+    """The ssh command git would run, in BatchMode: right after the OpenSSH
+    executable, however it's named (a symlink, ``slogin``) and wherever a wrapper
+    puts it (``env A=1 ssh -F x``), as ssh keeps the first value of an option and
+    the command may set its own. Any other program gets it last, where git's own
+    arguments go: a wrapper passes those on, and its own options stay its own.
     None for PuTTY's, which takes no ``-o``."""
     try:
         ssh = os.environ.get("GIT_SSH_COMMAND") or run(["config", "--get", "core.sshCommand"], cwd,
@@ -194,12 +197,16 @@ def _batch_ssh(cwd: str | Path) -> str | None:
     except GitError:
         ssh = ""
     ssh = ssh or shlex.quote(os.environ.get("GIT_SSH") or "ssh")     # GIT_SSH: a bare program, no options
-    words = [(word.end(), os.path.basename(word.group().strip("'\"")).lower())
-             for word in _SHELL_WORD.finditer(ssh) if not re.match(r"\w+=", word.group())]    # not NAME=value
-    for end, name in words:
-        if name.removesuffix(".exe") == "ssh":
-            return f"{ssh[:end]} -o BatchMode=yes{ssh[end:]}"
-    if any("plink" in name for _, name in words):
+    names = []
+    for word in _SHELL_WORD.finditer(ssh):
+        if re.match(r"\w+=", word.group()):      # NAME=value in front of a program
+            continue
+        text = word.group().strip("'\"")
+        names.append(os.path.basename(text).lower())
+        resolved = os.path.basename(os.path.realpath(shutil.which(text) or text)).lower()
+        if resolved.removesuffix(".exe") in ("ssh", "slogin"):
+            return f"{ssh[:word.end()]} -o BatchMode=yes{ssh[word.end():]}"
+    if any("plink" in name for name in names):
         return None
     return f"{ssh} -o BatchMode=yes"
 
@@ -210,7 +217,8 @@ def background(args: list[str], cwd: str | Path,
     credential dialog. None when git couldn't run or finish; a failure is the
     caller's to read."""
     try:
-        return run_env(["-c", "credential.helper=", *args], cwd, _background_env(cwd), check=False, timeout=timeout)
+        return run_env(["-c", "credential.helper=", *args], cwd, _background_env(cwd), check=False, timeout=timeout,
+                       no_terminal=True)
     except GitError:
         return None
 

@@ -678,9 +678,10 @@ def stop(p: subprocess.Popen, grace: float | None = None) -> tuple[Any, Any]:
 
 def action(argv: list[str], *, cwd: Any = None, env: dict[str, str] | None = None,
            input: str | bytes | None = None, text: bool = True, timeout: float | None = None,
-           wait: float | None = None) -> subprocess.CompletedProcess:
+           wait: float | None = None, no_terminal: bool = False) -> subprocess.CompletedProcess:
     """Run a command that changes something, like
-    ``subprocess.run(capture_output=True)``. It may wait for room before it
+    ``subprocess.run(capture_output=True)``. ``no_terminal``: in a session of
+    its own, so nothing it starts can ask at the terminal. It may wait for room before it
     starts: until the request's deadline (then Busy, and nothing was done),
     or with no deadline up to ``wait`` seconds (ACTION_WAIT), after which it
     starts regardless. Once started, no deadline stops it, nor anything else
@@ -696,6 +697,6 @@ def action(argv: list[str], *, cwd: Any = None, env: dict[str, str] | None = Non
                _name(argv), start_anyway=True)
     try:
         return subprocess.run(argv, cwd=cwd, env=env, text=text, input=input,
-                              capture_output=True, timeout=timeout)
+                              capture_output=True, timeout=timeout, start_new_session=no_terminal)
     finally:
         _release()

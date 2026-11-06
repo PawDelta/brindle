@@ -4,6 +4,7 @@ import functools
 import http.server
 import os
 import subprocess
+import sys
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -92,12 +93,16 @@ def test_background_fetch_never_asks_for_credentials(tmp_path, asks, monkeypatch
     ssh_log = tmp_path / "ssh-log"
     fakes = tmp_path / "fakes"
     fakes.mkdir()
-    fake_body = f'echo "$@" >> "{ssh_log}"\nfor last; do :; done\neval "$last"'
+    fake_body = (f'( : < /dev/tty ) 2>/dev/null && echo HAS-A-TERMINAL >> "{ssh_log}"\n'
+                 f'echo "$@" >> "{ssh_log}"\nfor last; do :; done\neval "$last"')
     fake_ssh, wrapper, plink = (_script(fakes / name, fake_body) for name in ("ssh", "wrapper", "plink"))
+    alias = fakes / "alias"
+    alias.symlink_to(fake_ssh)
     ssh_url = f"ssh://example.invalid{public}"
     for origin, ssh_command, bare_ssh, expected in (
             (f"{url}/public", None, None, None),
             (ssh_url, f"{fake_ssh} -o BatchMode=no", None, "-o BatchMode=yes -o BatchMode=no"),
+            (ssh_url, f"{alias} -F /dev/null -o BatchMode=no", None, "-o BatchMode=yes -F /dev/null -o BatchMode=no"),
             (ssh_url, f"/usr/bin/env PROBE=1 {fake_ssh} -F /dev/null", None, "-o BatchMode=yes -F /dev/null"),
             (ssh_url, f"{wrapper} --flag", None, "--flag -o BatchMode=yes"),
             (ssh_url, str(plink), None, ""),
@@ -120,6 +125,15 @@ def test_background_fetch_never_asks_for_credentials(tmp_path, asks, monkeypatch
         elif expected == "":    # takes no -o
             assert "BatchMode" not in ssh_log.read_text()
     server.shutdown()
+
+    # Started from a terminal, whatever ssh runs has none to ask at (under any name, BatchMode or not).
+    inner = tmp_path / "from_a_terminal.py"
+    inner.write_text('import sys\nfrom brindle import git\nopen("/dev/tty").close()    # this run has a terminal\n'
+                     'sys.exit(0 if git.background_fetch(sys.argv[1], ["--quiet", "origin", "main"]) else 3)\n')
+    in_a_pty = f'import os, pty, sys; sys.exit(os.waitstatus_to_exitcode(pty.spawn([sys.executable, "{inner}", "{repo}"])))'
+    ssh_log.write_text("")
+    sh(f"{sys.executable} -c '{in_a_pty}' < /dev/null", tmp_path)
+    assert "BatchMode=yes" in ssh_log.read_text() and "HAS-A-TERMINAL" not in ssh_log.read_text()
 
 
 def test_agent_panes_sign_in_to_github_through_gh_without_the_keychain_helper(db, tmp_path, asks, monkeypatch):
