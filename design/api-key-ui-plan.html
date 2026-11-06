@@ -259,7 +259,7 @@ svg.dia{width:100%;height:auto;display:block}
       <tr><td><code>claude -p</code> takes <code>--input-format stream-json</code> and <code>--output-format stream-json</code>, with <code>--include-partial-messages</code>, <code>--include-hook-events</code>, <code>--replay-user-messages</code></td><td><span class="pill ok">verified</span></td><td><code>claude --help</code>, 2.1.319. All flags are present; most work only with <code>--print</code>.</td></tr>
       <tr><td>Permission asks can go to a host program instead of the TUI</td><td><span class="pill ok">verified</span></td><td><code>--permission-prompts host</code>: "the SDK host or --permission-prompt-tool"; <code>none</code> denies anything that would prompt. The wire format of the host request is <span class="pill unv">unverified</span>.</td></tr>
       <tr><td>A per-session budget stop exists</td><td><span class="pill new">new</span></td><td><code>--max-budget-usd</code>, <code>--print</code> only. The note didn't mention it.</td></tr>
-      <tr><td>The Agent SDK is a separate option with a <code>canUseTool</code> callback</td><td><span class="pill fix">corrected</span></td><td>The SDK has <code>can_use_tool</code>, but it runs a bundled Claude Code CLI as a subprocess and talks to it in the same stream-json control protocol (control requests with subtype <code>can_use_tool</code>). It's a client library for option B, not another architecture. Taken from SDK docs and third-party write-ups; brindle doesn't depend on the SDK.</td></tr>
+      <tr><td>The Agent SDK is a separate option with a <code>canUseTool</code> callback</td><td><span class="pill fix">corrected</span></td><td>The SDK has <code>can_use_tool</code>, "invoked only when the permission flow falls through to a prompt" (official Python reference). It runs the Claude Code CLI as a subprocess and talks to it over the stream-json control protocol, so it's a supported client library for option B, not another architecture. By default it uses the CLI bundled with that SDK version, but <code>ClaudeAgentOptions.cli_path</code> ("Custom path to the Claude Code CLI executable") lets brindle point it at the <code>claude</code> brindle already picks (<code>claude_binary()</code>). Some SDK features need a minimum version of <em>both</em> the SDK and the CLI, so whether the pair is compatible is a spike gate (G8). brindle doesn't depend on the SDK today.</td></tr>
       <tr><td><code>codex exec --json</code> gives structured events and approvals</td><td><span class="pill fix">corrected</span></td><td><code>exec</code> runs one prompt and prints JSONL, with no approval round trip (it has no <code>--ask-for-approval</code>; the only answers come from hooks). The structured, two-way interface is <code>codex app-server</code> (JSON-RPC, still marked <em>[experimental]</em>). Its schema, generated locally, has <code>turn/start</code>, <code>turn/steer</code>, <code>turn/interrupt</code>, <code>thread/resume</code>, <code>item/commandExecution/requestApproval</code>, <code>item/fileChange/requestApproval</code>, <code>turn/diff/updated</code> and <code>thread/tokenUsage/updated</code>.</td></tr>
       <tr><td>Credential order: org-managed, cloud, OAuth token, auth token, API key, subscription</td><td><span class="pill ok">verified</span></td><td><span class="ev">providers.py:1471</span> <code>claude_credential()</code>. Only names are returned, never values.</td></tr>
       <tr><td><code>approve_api_key()</code> pre-answers the "use this API key?" screen</td><td><span class="pill ok">verified</span></td><td><span class="ev">providers.py:546</span>, and <code>ClaudeCode.FIRST_RUN</code> detects that screen. <code>-p</code> skips first-run screens and the trust dialog altogether.</td></tr>
@@ -374,7 +374,8 @@ svg.dia{width:100%;height:auto;display:block}
           <text x="40" y="226">same session file</text>
           <text class="s" x="40" y="243">"Open in terminal" = claude --resume</text>
           <path class="ln d" d="M135 182v22"/><path class="ah" d="m131 197 4 8 4-8z"/>
-          <text class="lbl" x="262" y="232">B′ Agent SDK = a library over this same wire</text>
+          <text class="lbl" x="262" y="226">B′ Agent SDK = a supported library over</text>
+          <text class="lbl" x="262" y="242">this same wire (cli_path → brindle's claude)</text>
         </svg>
       </div>
       <div class="gets">
@@ -383,11 +384,11 @@ svg.dia{width:100%;height:auto;display:block}
         <div class="challenge">
           <h4>Challenge</h4>
           <ul>
-            <li><strong>Neither protocol is a stable contract.</strong> Claude's control messages are documented only through the SDK, and Codex's app-server says <em>[experimental]</em> in its own help.</li>
+            <li><strong>Neither raw protocol is a stable contract.</strong> Claude's control messages are documented only through the SDK, and Codex's app-server says <em>[experimental]</em> in its own help. On the Claude side that argues for going through the SDK (B′) rather than speaking the wire directly.</li>
             <li>We take over everything the TUI did: slash commands, plan approval, <code>AskUserQuestion</code>, image paste, the agent view, Claude in Chrome. Each one has to be rebuilt as a card or left out on purpose.</li>
             <li>Host prompts arrive <em>only when the CLI would ask</em>. If someone wires approvals there instead of into PreToolUse, <code>auto</code> or <code>bypassPermissions</code> skips brindle's rules without a sound.</li>
             <li>Two adapters, two lifecycles, and a second Codex hook-trust surface (does <code>-c hooks…</code> trust carry over to app-server?) <span class="pill unv">unverified</span>.</li>
-            <li><strong>B′ (the SDK as a dependency)</strong> adds a bundled CLI whose version brindle doesn't choose. brindle's screen and feature checks are tied to versions (<code>onFailure</code> needs 2.1.295; the auto-mode menu text is from 2.1.319). Use the SDK as the protocol reference, not as a runtime dependency.</li>
+            <li><strong>B′ (the SDK as a dependency)</strong> uses its own bundled CLI by default, which would bypass brindle's version-specific checks (<code>onFailure</code> needs 2.1.295; the auto-mode menu text is from 2.1.319). Setting <code>cli_path</code> to brindle's <code>claude_binary()</code> avoids that. The open costs are a new runtime dependency, its release cadence, and SDK features that need a minimum CLI version, so an SDK upgrade can require a CLI upgrade and the reverse. That's a reason to pin and test the pair, not to hand-roll the protocol.</li>
           </ul>
         </div>
       </div>
@@ -455,7 +456,7 @@ svg.dia{width:100%;height:auto;display:block}
       <tr><td>Agent quality (the CLI people chose)</td><td><span class="score s3">3</span></td><td><span class="score s3">3</span></td><td><span class="score s1">1</span></td></tr>
       <tr><td>TUI features kept (slash commands, menus)</td><td><span class="score s3">3</span> in the Terminal tab</td><td><span class="score s1">1</span> rebuild or drop</td><td><span class="score s1">1</span> none</td></tr>
       <tr><td>Regression risk to today's panes</td><td><span class="score s3">3</span> none</td><td><span class="score s2">2</span> opt-in mode</td><td><span class="score s3">3</span> separate provider</td></tr>
-      <tr><td>Protocol stability</td><td><span class="score s2">2</span> transcript is internal</td><td><span class="score s1">1</span> SDK-only / experimental</td><td><span class="score s3">3</span> public model APIs</td></tr>
+      <tr><td>Protocol stability</td><td><span class="score s2">2</span> transcript is internal</td><td><span class="score s2">2</span> Claude via SDK · Codex experimental</td><td><span class="score s3">3</span> public model APIs</td></tr>
       <tr><td>Works for subscribers too</td><td><span class="score s3">3</span></td><td><span class="score s3">3</span></td><td><span class="score s1">1</span> keys only</td></tr>
       <tr><td>Cost visibility in dollars</td><td><span class="score s2">2</span> tokens × price</td><td><span class="score s3">3</span> result totals + <code>--max-budget-usd</code></td><td><span class="score s3">3</span> exact</td></tr>
       <tr><td>Effort to first useful release</td><td><span class="score s3">3</span> ~3 wk</td><td><span class="score s2">2</span> ~7 wk</td><td><span class="score s3">3</span> ~1 wk (view only)</td></tr>
@@ -610,7 +611,7 @@ svg.dia{width:100%;height:auto;display:block}
         <li><strong>Moving agent processes out of tmux into the daemon.</strong> Liveness, pause, reap, cull, <code>pane_owners</code>, the sidebar and recovery all assume a pane. This plan keeps the runner in a pane on purpose.</li>
         <li><strong>Storing conversation events as a new record.</strong> That means a schema, migrations, and a second copy of every secret to mask. Derive them instead.</li>
         <li><strong>Making chat the default</strong> for anyone before parity, and teaching users that slash commands don't exist.</li>
-        <li><strong>A runtime dependency on the Agent SDK</strong> and its bundled CLI version.</li>
+        <li><strong>The Claude adapter's transport: the Agent SDK, or the raw protocol.</strong> Either way the adapter code is built around it, so swapping later costs a rewrite. Prefer the SDK with <code>cli_path</code> set to brindle's <code>claude</code>, and never ship its bundled CLI, which would bypass brindle's version checks. Pin the SDK/CLI pair, and decide only after G8.</li>
         <li><strong>Growing <code>brindle.native</code> into a general harness.</strong> That's a product commitment with no end, not a feature.</li>
         <li><strong>A public daemon route</strong> for events that web or plugins start depending on.</li>
       </ul>
@@ -658,7 +659,8 @@ svg.dia{width:100%;height:auto;display:block}
       <div class="gate"><span class="k soft">G5 · SOFT</span><div><p>Coverage: Bash, Edit, Write, the Agent subagent (<code>--forward-subagent-text</code>) and the brindle MCP tools all render from the stream; Edit events carry enough to draw a diff without re-reading the file.</p><p>Interrupt mid-tool leaves the session resumable.</p></div></div>
       <div class="gate"><span class="k soft">G6 · SOFT</span><div><p>Cost: per-turn tokens and dollars from the result events match <code>brindle.usage</code>'s reading of the transcript to within 1%. <code>--max-budget-usd</code> stops cleanly.</p></div></div>
       <div class="gate"><span class="k soft">G7 · SOFT</span><div><p>Codex half-day probe: app-server <code>thread/start</code> + <code>turn/start</code> with <code>CODEX_API_KEY</code>; <code>commandExecution/requestApproval</code> is answered; brindle's Codex PreToolUse hook runs under app-server with its trust intact.</p></div></div>
-      <div class="note"><p><strong>Go</strong> if G1–G4 all pass: build phases 1–3. <strong>Partial</strong> (G5 or G6 short): build, and list the gaps in the phase 2 plan. <strong>No-go</strong> (any hard gate fails): ship phase 1 (A) only, file what failed upstream, and revisit at the next CLI release. G7 decides phase 4 on its own.</p></div>
+      <div class="gate"><span class="k soft">G8 · SOFT</span><div><p>SDK or raw protocol: run G1–G4 a second time through the Python Agent SDK with <code>cli_path</code> set to brindle's <code>claude_binary()</code> (2.1.319), and <code>can_use_tool</code> wired to <code>_hold_for_app</code>. Record which SDK versions work with that CLI, and whether brindle's <code>--settings</code> hooks, <code>--mcp-config</code> and <code>--append-system-prompt</code> pass through unchanged.</p><p>Pass: phase 2 builds on the SDK, with the pair pinned and tested in CI. Fail: phase 2 speaks the protocol directly, using the SDK source as its reference.</p></div></div>
+      <div class="note"><p><strong>Go</strong> if G1–G4 all pass: build phases 1–3. <strong>Partial</strong> (G5 or G6 short): build, and list the gaps in the phase 2 plan. <strong>No-go</strong> (any hard gate fails): ship phase 1 (A) only, file what failed upstream, and revisit at the next CLI release. G7 decides phase 4 on its own; G8 picks the Claude transport.</p></div>
     </div>
   </div>
 
@@ -681,7 +683,7 @@ svg.dia{width:100%;height:auto;display:block}
     <div>
       <h3>Chat interface for Claude, opt-in, API-key users first</h3>
       <ul class="tight">
-        <li>A profile/session setting, <code>interface = "chat"</code>. The runner in its pane runs one long-lived stream-json process (an extension of <code>run_headless</code>).</li>
+        <li>A profile/session setting, <code>interface = "chat"</code>. The runner in its pane (an extension of <code>run_headless</code>) runs one long-lived session: through the Agent SDK with <code>cli_path</code> set to brindle's <code>claude</code> if G8 passed, otherwise over stream-json directly.</li>
         <li>Composer, interrupt, queued messages, host asks into holds, deny on no answer.</li>
         <li><code>--max-budget-usd</code> wired to <code>budget.py</code>; the credential shown in the header.</li>
         <li>Fixture tests per pinned version; unknown events shown raw.</li>
@@ -715,7 +717,7 @@ svg.dia{width:100%;height:auto;display:block}
     <tbody>
       <tr><td>0 · Spike</td><td>1–1.5</td><td>Live runs, fixtures, the hook-under-stream test</td><td><span class="pill ok">high</span></td></tr>
       <tr><td>1 · Overlay</td><td>2.5–3</td><td>View component, transcript adapter, lock and mask in the daemon</td><td><span class="pill ok">high</span></td></tr>
-      <tr><td>2 · Chat for Claude</td><td>3–4</td><td>Runner protocol, asks, composer, budget</td><td><span class="pill unv">medium</span> (depends on spike)</td></tr>
+      <tr><td>2 · Chat for Claude</td><td>3–4</td><td>Runner transport (SDK or raw), asks, composer, budget</td><td><span class="pill unv">medium</span> (depends on spike)</td></tr>
       <tr><td>3 · Handover and parity</td><td>3–4</td><td>Every screen-reading path learning the chat mode</td><td><span class="pill fix">low</span>: this is where estimates slip</td></tr>
       <tr><td>4 · Codex</td><td>2–3</td><td>Experimental protocol, hook trust, sandbox</td><td><span class="pill unv">medium</span></td></tr>
       <tr><td><strong>Total</strong></td><td><strong>~12–16</strong></td><td colspan="2">The earlier note said 2–3 months. That holds for the Claude path only; handover and lifecycle add the rest.</td></tr>
@@ -744,7 +746,7 @@ svg.dia{width:100%;height:auto;display:block}
   <span class="no">Sources</span>
   <div class="sources">
     <p>Code: <code>src/brindle/providers.py</code> (ClaudeCode, Codex, <code>claude_credential</code>, <code>approve_api_key</code>, <code>_hook</code>), <code>agents.py</code> (<code>run_headless</code>, <code>_hold_for_app</code>), <code>native/</code> (loop, runner, permissions, client), <code>codex_hook.py</code>, <code>identity_lock.py</code>, <code>signin_pause.py</code>, <code>profiles.py</code>, <code>app/src/screens/Session/ProviderSurface.tsx</code>. CLIs: <code>claude --help</code> (2.1.319), <code>codex --help</code>, <code>codex exec --help</code>, <code>codex app-server generate-json-schema</code> (0.162.1).</p>
-    <p>Agent SDK behaviour (bundled CLI, <code>can_use_tool</code> control requests): <a href="https://buildwithaws.substack.com/p/inside-the-claude-agent-sdk-from">Inside the Claude Agent SDK</a>, <a href="https://claude-agent-sdk.hexdocs.pm/hooks.html">claude_agent_sdk hooks (Elixir port)</a>, <a href="https://hexdocs.pm/claude_code/hooks.html">claude_code hooks</a>. These are third-party sources; check them against the official SDK source in the spike.</p>
+    <p>Agent SDK options (<code>cli_path</code>, <code>can_use_tool</code>, per-feature SDK and CLI version requirements): the official <a href="https://code.claude.com/docs/en/agent-sdk/python">Agent SDK Python reference</a>. Wire details (control requests with subtype <code>can_use_tool</code>): <a href="https://buildwithaws.substack.com/p/inside-the-claude-agent-sdk-from">Inside the Claude Agent SDK</a>, <a href="https://claude-agent-sdk.hexdocs.pm/hooks.html">claude_agent_sdk hooks (Elixir port)</a>, <a href="https://hexdocs.pm/claude_code/hooks.html">claude_code hooks</a>. These three are third-party; check them against the SDK source in the spike.</p>
   </div>
 </section>
 </div>
