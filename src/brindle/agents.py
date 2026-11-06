@@ -2310,6 +2310,9 @@ def screen_status(db: DB, agent: Agent, samples: int = 2, gap: float = 0.7) -> s
             screen = tmux.capture(agent.tmux_window, lines=40, server=server_of(agent))
         except tmux.TmuxError:
             return None
+        if samples >= 2 and prompt_answer.decline_teach_auto_mode(db, agent, screen):
+            db.set_status(agent.id, "waiting", only_if=agent.status)
+            return "waiting"
         state = "busy" if prompt_answer.pane_busy(screen) else provider.screen_state(screen)
         if agent.status == "idle" and state == "busy" and not provider.busy_in_footer(screen):
             state = None
