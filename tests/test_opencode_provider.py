@@ -193,6 +193,9 @@ def test_autonomous_starts_opencode_without_prompts(db, ws, monkeypatch, preset,
     saved_git("git branch --list")
     decisions = [json.loads(call("git branch --list", "o2"))["decision"] for _ in range(2)]
     assert decisions == ["allow", "deny"]
+    saved_git("git status")     # only the respelled form needs this one
+    decisions = [json.loads(call(f"git -C {ws.path} status", "o2"))["decision"] for _ in range(2)]
+    assert decisions == ["allow", "deny"]
     respelled = saved_git(f"git -C {ws.path} status")
     permissions.add_rule("bash", "git status", "deny")
     assert json.loads(call(f"git -C {ws.path} status", "o2"))["decision"] == "deny"

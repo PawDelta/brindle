@@ -447,21 +447,24 @@ def handle_hook(db, agent_id: str, event: str, payload: dict) -> None:
 
 def pre_tool(db, agent_id: str, payload: dict) -> str:
     """Policy denials win; scoped read-only git commands get one-call approval.
-    In an unasked launch nothing after this spends a saved use, so it's spent here,
-    once, and only when every check has passed."""
+    In an unasked launch nothing after this spends a saved use, so it's spent here:
+    each one that any form of the call relied on, once, when every check has passed."""
     from brindle import agents
 
     agent = db.get_agent(agent_id)
     if agent is None:
         return json.dumps(UNCHECKED) if _in_unasked_launch() else ""
-    answer = _checks(db, agent, payload)
+    respelled: list[dict] = []
+    answer = _checks(db, agent, payload, respelled)
     if _in_unasked_launch() and not (answer and answer.get("decision") == "deny"):
-        answer = agents.permission_request_decision(db, agent, payload, provider="opencode", spend=True) or answer
+        answer = agents.permission_request_decision(db, agent, payload, provider="opencode", spend=True,
+                                                    also=respelled) or answer
     return json.dumps(answer) if answer else ""
 
 
-def _checks(db, agent, payload: dict) -> dict | None:
-    """The answer to an OpenCode tool call, spending nothing: it may check a call twice."""
+def _checks(db, agent, payload: dict, respelled: list[dict]) -> dict | None:
+    """The answer to an OpenCode tool call, spending nothing, and in ``respelled``
+    the other forms of the call it checked."""
     from brindle import agents
 
     answer = agents.permission_request_decision(db, agent, payload, provider="opencode")
@@ -484,6 +487,7 @@ def _checks(db, agent, payload: dict) -> dict | None:
             if words[:2] == ["git", "-C"]:
                 words = ["git", *words[3:]]
             normalized = {**payload, "args": {**args, "command": shlex.join(words)}}
+            respelled.append(normalized)
             denied = agents.permission_request_decision(db, agent, normalized, provider="opencode")
             if denied:
                 return denied
