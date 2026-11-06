@@ -3,13 +3,13 @@
    Inbox, Account and Settings, the session view), one at a time, with Next,
    Back and Skip. It opens by itself once, right after the first launch's
    setup (App's FirstLaunch passes `autoStart`), and again whenever
-   openWalkthrough() is called (the home screen's "Take the tour"; any menu
-   can offer it the same way). Finished or skipped, it is remembered on this
-   Mac and never opens by itself again.
+   openWalkthrough() is called (the home screen's "Take the tour", the
+   sidebar's "?"). Finished or skipped, it is remembered on this Mac and
+   never opens by itself again.
 
    Each step finds its control by a data attribute, data-walkthrough="<id>",
-   with a fallback selector for controls that don't carry one yet. A step
-   whose control isn't on screen still shows, centred, without a highlight. */
+   brings it into view, and follows it as it moves or scrolls. A step whose
+   control isn't on screen still shows, centred, without a highlight. */
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
 import { main, panel, quiet } from "./ui";
@@ -20,8 +20,6 @@ const OPEN_EVENT = "brindle:walkthrough";
 export interface WalkthroughStep {
   /* The data-walkthrough value of the control this step points at. */
   target: string;
-  /* Where the control is found while it doesn't carry the attribute. */
-  fallback?: string;
   title: string;
   body: string;
 }
@@ -29,7 +27,6 @@ export interface WalkthroughStep {
 export const STEPS: WalkthroughStep[] = [
   {
     target: "new-session",
-    fallback: 'button[title^="New session"]',
     title: "Start a session here",
     body: "New session opens the composer: describe what brindle should work on and press Start. A supervisor plans the work and hands it to agents, each on its own branch.",
   },
@@ -40,20 +37,18 @@ export const STEPS: WalkthroughStep[] = [
   },
   {
     target: "inbox",
-    fallback: '[data-testid="inbox-link"]',
     title: "Your Inbox",
     body: "Anything that needs you, across every session (a permission, a plan to approve, a review), waits here.",
   },
   {
     target: "profile",
-    fallback: 'button[aria-label="Open Account"]',
     title: "Account and Settings",
     body: "Your initials open Account: your plan, sign-in and usage. Settings, beside them, holds the coding CLIs, keys and permission rules.",
   },
   {
     target: "session-view",
     title: "The session view",
-    body: "A running session fills this area with its supervisor's conversation; its agents are listed in the sidebar. Take this tour again any time from the home screen.",
+    body: "A running session fills this area with its supervisor's conversation; its agents are listed in the sidebar. Take this tour again any time from the ? at the foot of the sidebar.",
   },
 ];
 
@@ -79,8 +74,7 @@ export function openWalkthrough(): void {
 }
 
 function findTarget(step: WalkthroughStep): HTMLElement | null {
-  const el = document.querySelector<HTMLElement>(`[data-walkthrough="${step.target}"]`) ?? (step.fallback ? document.querySelector<HTMLElement>(step.fallback) : null);
-  return el;
+  return document.querySelector<HTMLElement>(`[data-walkthrough="${step.target}"]`);
 }
 
 interface Box {
@@ -94,11 +88,17 @@ const PAD = 4;
 const CARD_W = 320;
 const GAP = 12;
 
-function measure(step: WalkthroughStep): Box | null {
-  const r = findTarget(step)?.getBoundingClientRect();
-  // Not on screen (or not laid out): the card shows centred instead.
+function measure(el: HTMLElement | null): Box | null {
+  const r = el?.getBoundingClientRect();
+  // Not laid out, or scrolled wholly out of the window: the card shows centred instead.
   if (!r || r.width === 0 || r.height === 0) return null;
-  return { top: r.top - PAD, left: r.left - PAD, width: r.width + PAD * 2, height: r.height + PAD * 2 };
+  const w = window.innerWidth;
+  const h = window.innerHeight;
+  if (r.bottom <= 0 || r.right <= 0 || r.top >= h || r.left >= w) return null;
+  // Partly scrolled out: the ring hugs the part still in the window.
+  const top = Math.max(r.top, 0) - PAD;
+  const left = Math.max(r.left, 0) - PAD;
+  return { top, left, width: Math.min(r.right, w) + PAD - left, height: Math.min(r.bottom, h) + PAD - top };
 }
 
 /* The card beside its control: to the right when there's room (the sidebar's
@@ -135,22 +135,33 @@ export function Walkthrough({ autoStart = false }: { autoStart?: boolean }) {
     setStep(null);
   }, []);
 
-  // Follow the control: it can mount late (the composer once the projects load), move or resize.
+  // Follow the control: it can mount late (the composer once the projects load), move, resize, or
+  // scroll with any scrolling ancestor (a scroll doesn't bubble: the capture phase sees every one).
   useLayoutEffect(() => {
     if (step === null) return;
     const current = STEPS[step];
-    const update = () =>
+    let shown: HTMLElement | null = null;
+    const update = () => {
+      const el = findTarget(current);
+      // Brought into view once per step, when it is first found (jsdom has no scrollIntoView).
+      if (el && el !== shown) {
+        shown = el;
+        el.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+      }
       setBox((old) => {
-        const now = measure(current);
+        const now = measure(el);
         const same = old === now || (old && now && old.top === now.top && old.left === now.left && old.width === now.width && old.height === now.height);
         return same ? old : now;
       });
+    };
     update();
     window.addEventListener("resize", update);
+    window.addEventListener("scroll", update, true);
     const watch = new MutationObserver(update);
     watch.observe(document.body, { childList: true, subtree: true });
     return () => {
       window.removeEventListener("resize", update);
+      window.removeEventListener("scroll", update, true);
       watch.disconnect();
     };
   }, [step]);
@@ -173,6 +184,7 @@ export function Walkthrough({ autoStart = false }: { autoStart?: boolean }) {
       {box ? (
         <div
           aria-hidden
+          data-testid="walkthrough-highlight"
           className="absolute rounded-lg ring-2 ring-branch transition-all duration-150"
           style={{ ...box, boxShadow: "0 0 0 9999px rgb(0 0 0 / 0.4)" }}
         />
