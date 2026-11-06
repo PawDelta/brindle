@@ -38,6 +38,20 @@ that adds more than 15 test functions or more test lines than source lines.
   `@pytest.mark.variant("why")`.
 - Use database rows and fakes, not real tmux sessions, subprocesses or sleeps,
   unless spawning or timing is what the test is about.
+Tests must also be fast. The whole suite runs on every branch, so a slow test
+costs every worker, every time.
+- Each test's call phase must finish within 10 seconds (tests/conftest.py fails
+  the run otherwise; BRINDLE_TEST_DURATION_LIMIT overrides it). Aim for well
+  under one second. Mark a genuinely slow test `@pytest.mark.slow("why")`, and
+  expect reviewers to ask why.
+- Test the function, not the program: call the pure function or seed DB rows
+  instead of running the brindle CLI, a git repo, tmux or a subprocess.
+- At most one end-to-end test per feature; every other case goes in unit tests.
+- Build expensive setup (a git repo, a DB with many rows) once, in a
+  module-scoped fixture, and copy it rather than rebuild it per test.
+- Never wait on the wall clock: pass a fake clock or `now`, and drive events
+  directly instead of polling for them.
+- No network: fake the HTTP client or the server it talks to.
 - Reviewers: treat any of the above in a diff as a blocker, the same as a missing
   test. Deleting a redundant test is an improvement, not a coverage loss.
 - When a lookup takes an optional filter (such as a profile), treat None as 'no filter' only when the caller truly means any; never let a missing value match a live resource that belongs to a different identity. When an action can be triggered twice, make the second trigger check for and respect existing in-flight work instead of cancelling or replacing it, and cover that path with a test that runs the real dispatch code rather than a mock. (learned 2026-10-13 from 4 reviews of developer-sonnet work: Lookup ignores caller's filter and races on detached work; rule 8967a6e2)
@@ -62,4 +76,5 @@ that adds more than 15 test functions or more test lines than source lines.
 - When checking model permissions, ensure that the same predicate used in `ProPolicy.check_assign` is also applied during alias resolution and policy construction. Normalize provider/region prefixes for permission checks but maintain exact matching for pinned models. Update tests to validate both `GET` offering and `PUT` acceptance behaviors. (learned 2026-10-30 from 3 reviews of developer-heavy work: Model Permission Mismatch in Policy and Routing; rule f6ae9636)
 - When checking test coverage for production changes, do not treat deleted test files as valid coverage. Track added/modified test paths separately and require at least one test with new content to pass validation. (learned 2026-10-30 from 3 reviews of developer-heavy work: Test Deletion Allows Bypass of Coverage; rule eb5d2120)
 - In patch parsing, only recognize file headers (`--- ` or `+++ `) before entering a hunk. Ensure that body lines starting with `--- ` are not mistaken for file headers and cause misattribution in overlap scoring. (learned 2026-10-30 from 3 reviews of developer-heavy work: Diff Parser Misinterprets Hunk Content; rule a170d30e)
-- Immediately before each destructive action (kill, stop, delete, reap), re-read the ownership, attachment, activity, and dirty-worktree state and skip the candidate if it changed since planning. Apply every safety guard to every destructive path, not only the one that was patched, and add a deterministic regression test that changes state between planning and acting. (learned 2026-11-06 from 3 reviews of developer-heavy work: Destructive action on stale or unguarded state; rule 801c9de5)
+- When reducing or consolidating tests, do not delete a test that guards a failure path. Each protected scenario, such as a launch failure converting to its error code, must still be exercised by a retained test, and coverage should confirm this before anything is removed. (learned 2026-11-03 from 10 reviews of developer-sonnet work: Regression coverage removed while trimming tests; rule 45e97b5c)
+- When using ThreadPoolExecutor in asynchronous operations, ensure that request context such as deadline and disconnect tokens are properly propagated to each submitted task. Copy the request context separately for each task and audit other request-owned pools to prevent loss of critical session information. (learned 2026-11-03 from 3 reviews of developer-heavy work: Request Context Lost in ThreadPoolExecutor; rule ff6a01f8)
