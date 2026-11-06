@@ -498,7 +498,7 @@ def _dep_task(db: DB, repo_root: str, dep: str) -> Task | None:
 
 def unmet_dependencies(
     db: DB, caller_ws: Workspace, depends_on: list[str] | None, caller_id: str | None = None,
-    *, dependent_task_id: str | None = None, inspect: bool = True,
+    *, dependent_task_id: str | None = None, inspect: bool = True, lock_identities: bool = True,
 ) -> list[str]:
     """``depends_on`` entries not yet merged into ``caller_ws``'s branch.
 
@@ -513,7 +513,8 @@ def unmet_dependencies(
     before replying) that git check, and the check that no other identity
     holds a dependency's worktree (``identity_lock``), are left to the
     start, which makes them before launching: such a dependency doesn't
-    count as unmet here."""
+    count as unmet here. ``lock_identities`` False keeps the git check but
+    skips the identity one (the fair share's readiness: ``fair_share._runnable``)."""
     if not depends_on:
         return []
     from brindle import identity_lock
@@ -525,7 +526,7 @@ def unmet_dependencies(
         target_repo, task, ws = _resolve_dependency(
             db, caller_ws, dep, session_roots, dependent_task_id=dependent_task_id)
         resolved[dep] = (target_repo, task, ws)
-        if ws is not None and inspect:   # its lookup can probe sign-ins for a minute: the start's job
+        if ws is not None and inspect and lock_identities:   # its lookup can probe sign-ins for a minute: the start's job
             identity_lock.ensure_workspace(db, ws)
 
     unmet = []

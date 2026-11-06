@@ -49,18 +49,20 @@ def _session(db: DB, agent_id: str | None) -> str:
 
 def running(db: DB) -> dict[str, int]:
     """Workers at work per session root: running process-launching workers,
-    plus tasks claimed to start whose worker doesn't exist yet."""
+    plus tasks claimed to start whose worker doesn't link to them yet. One
+    snapshot: a claimed task becoming its worker (``tasks.start_queued``: the
+    worker's row, then the task's link to it) is then counted once or, in
+    between, twice, never missed by reading the two before and after it."""
     from brindle import agents
 
+    with db.snapshot():
+        workers = [a for a in db.list_agents()
+                   if a.mode in WORKER_MODES and a.status in ("starting", "processing")]
+        claims = [t for t in db.list_tasks(state="starting") if not t.agent_id]
     counts: dict[str, int] = {}
-    for a in db.list_agents():
-        if a.mode in WORKER_MODES and a.status in ("starting", "processing") and agents.runs_process(a):
-            s = _session(db, a.id)
-            counts[s] = counts.get(s, 0) + 1
-    for t in db.list_tasks(state="starting"):
-        if not t.agent_id:
-            s = _session(db, t.caller_id)
-            counts[s] = counts.get(s, 0) + 1
+    for agent_id in [a.id for a in workers if agents.runs_process(a)] + [t.caller_id for t in claims]:
+        s = _session(db, agent_id)
+        counts[s] = counts.get(s, 0) + 1
     return counts
 
 
@@ -84,9 +86,10 @@ def machine_lock() -> Iterator[None]:
 
 def _runnable(db: DB, t: Task) -> bool:
     """Whether pending task ``t`` could start but for room: every dependency
-    merged as the database knows it now (a dependency added since it began
-    waiting for room holds it), its session not paused, and it starts a
-    process of brindle's."""
+    merged now (a dependency added since it began waiting for room holds it;
+    one brindle doesn't track as a task is judged by git ancestry, as its
+    start judges it, so unknown readiness never takes a turn), its session
+    not paused, and it starts a process of brindle's."""
     from brindle import agents, tasks
 
     deps = tasks._loads(t.depends_on)
@@ -94,7 +97,7 @@ def _runnable(db: DB, t: Task) -> bool:
         ws = db.get_workspace(t.caller_ws_id)
         try:
             if ws is None or tasks.unmet_dependencies(db, ws, deps, caller_id=t.caller_id,
-                                                      dependent_task_id=t.id, inspect=False):
+                                                      dependent_task_id=t.id, lock_identities=False):
                 return False
         except agents.AgentError:   # a cancelled dependency: it never starts
             return False

@@ -8,7 +8,7 @@ import json
 import pytest
 
 from brindle import config, fair_share, spawn, tasks
-from brindle.db import Agent, Task, Workspace
+from brindle.db import DB, Agent, Task, Workspace
 
 _ids = itertools.count()
 
@@ -63,7 +63,33 @@ def test_fair_share_claim_decides_again_under_the_machine_lock(rows):
     assert not claimed and why and rows.get_task(late.id).state == "pending"
 
 
-def test_fair_share_queued_tasks_start_round_robin_across_sessions(rows):
+def test_fair_share_counts_a_claim_as_it_becomes_its_worker(rows, monkeypatch):
+    """A's claimed task links its worker (another connection) between the
+    count's read of the workers and of the claims: still one slot taken."""
+    config.set_user("machine_max_workers", 1)
+    session(rows, "a")
+    session(rows, "b")
+    first = queued(rows, "a", at=1.0)
+    assert tasks._claim_fair(rows, first)[0]
+    theirs = queued(rows, "b", at=2.0, ws="w2")
+    read_workers, linked = rows.list_agents, []
+
+    def workers_then_link(*args, **kwargs):
+        found = read_workers(*args, **kwargs)
+        if not linked:
+            linked.append(True)
+            other = DB()
+            other.add_agent(Agent("a-worker", "w", "developer", "claude", "a", "assign", "processing", "@1",
+                                  None, 1.0))
+            other.update_task(first.id, agent_id="a-worker", state="started")
+        return found
+
+    monkeypatch.setattr(rows, "list_agents", workers_then_link)
+    claimed, _refused, why = tasks._claim_fair(rows, theirs)
+    assert linked and not claimed and why
+
+
+def test_fair_share_queued_tasks_start_round_robin_across_sessions(rows, monkeypatch):
     config.set_user("machine_max_workers", 1)
     session(rows, "a")
     session(rows, "b")
@@ -72,6 +98,12 @@ def test_fair_share_queued_tasks_start_round_robin_across_sessions(rows):
     b1 = queued(rows, "b", at=3.0)
     # Older, but a dependency added since it began waiting holds it: it must not take a turn it can't use.
     queued(rows, "c", at=0.5, depends_on=[f"task:{b1.id}"])
+    # Nor may one on a branch brindle doesn't track as a task, which git says isn't merged yet.
+    w = rows.get_workspace("w")
+    rows.add_workspace(Workspace("ext", w.repo_root, "ext", "worktree", "ext", "main", w.path + "-ext", None,
+                                 "s-ext", 1.0))
+    monkeypatch.setattr(tasks.git, "ok", lambda args, cwd=None: args[0] != "merge-base")
+    queued(rows, "c", at=0.4, depends_on=["ext"])
     assert fair_share.order(rows) == [a1.id, b1.id, a2.id]
     assert tasks._claim_fair(rows, a1)[0]
     rows.add_agent(Agent("a1-worker", "w", "developer", "claude", "a", "assign", "processing", "@1", None, 1.0))
