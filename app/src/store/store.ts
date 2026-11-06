@@ -15,6 +15,8 @@ export const RECENT_EVENTS = 50;
 
 export interface AppState {
   connection: StreamState | "idle";
+  /* Changes monotonically even when a reconnect returns to the same state. */
+  connectionGeneration: number;
   /* Shared identity, refreshed by the sidebar and Account page. */
   account: AccountDTO | null;
   /* The newest bus event id applied: what a reconnect resumes from. */
@@ -31,6 +33,8 @@ export interface AppState {
   stale: boolean;
   /* A snapshot has arrived: the inbox is the daemon's, not the empty start. */
   synced: boolean;
+  /* Advances only when a successful snapshot is applied, not when a refresh settles. */
+  snapshotVersion: number;
   /* The newest bus events, oldest first (for notifications). */
   recent: BusEvent[];
   error: string | null;
@@ -48,6 +52,7 @@ export type Action =
 
 export const initialState: AppState = {
   connection: "idle",
+  connectionGeneration: 0,
   account: null,
   lastEventId: 0,
   workspaces: [],
@@ -57,6 +62,7 @@ export const initialState: AppState = {
   org: { bar: null, notices: [] },
   stale: false,
   synced: false,
+  snapshotVersion: 0,
   recent: [],
   error: null,
   appUpdate: null,
@@ -69,9 +75,11 @@ export function reduce(state: AppState, action: Action): AppState {
     case "app_update":
       return { ...state, appUpdate: action.status };
     case "connection":
-      return { ...state, connection: action.state };
+      return { ...state, connection: action.state,
+        connectionGeneration: state.connectionGeneration + Number(state.connection !== action.state) };
     case "snapshot":
-      return { ...state, ...liveSnapshot(action.workspaces, action.inbox, state.pastWorkers), stale: false, synced: true, error: null };
+      return { ...state, ...liveSnapshot(action.workspaces, action.inbox, state.pastWorkers), stale: false, synced: true, error: null,
+        snapshotVersion: state.snapshotVersion + 1 };
     case "error":
       return { ...state, error: action.message };
     case "stream":

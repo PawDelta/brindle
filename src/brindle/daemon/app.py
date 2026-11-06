@@ -37,6 +37,7 @@ async def meta(request: Request) -> JSONResponse:
         "tmux": shutil.which("tmux") is not None,
         "airgap": airgap.enabled(),
         "pty_view": True,       # WS /v1/pty_view: the Windows app's WSL bridge
+        "resuming": getattr(request.app.state, "resuming", False),
     })
 
 
