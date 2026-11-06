@@ -22,7 +22,8 @@ def write_doc(repo_root, branch="feat"):
 
 @pytest.fixture
 def remote(backend):
-    backend.docs, backend.switches, backend.status = [], {}, 200
+    # The person turned the library on: its switches are opt-in (analysis_policy.PLAN_DEFAULT_ON).
+    backend.docs, backend.switches, backend.status = [], {"store": "on"}, 200
 
     def store(form, headers):
         backend.docs.append(dict(form))
