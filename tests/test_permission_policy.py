@@ -11,7 +11,7 @@ from typer.testing import CliRunner
 
 from brindle import agents, codex_hook, cull, permissions, workspaces
 from brindle.cli import app
-from brindle.config import load_repo_config, set_local, set_user
+from brindle.config import POLICY_DEFAULT_KEY, forget_user, load_repo_config, set_local, set_user
 from brindle.daemon import routes_actions
 from brindle.db import DB, Agent
 from brindle.permissions import Request, Rule, decide
@@ -105,19 +105,34 @@ def test_existing_free_user_keeps_what_they_have(db, repo, monkeypatch):
     (None, "off", "secure", "off", "repo"),
 ])
 def test_a_preset_turns_the_policy_on(repo, db, monkeypatch, before, repo_says, preset, policy, source):
-    """In the app and with `brindle permissions preset`, unless the person's own
-    "off" or the repo's setting says otherwise."""
+    """In the app and with `brindle permissions preset`, each from the same start,
+    unless the person's own "off" or the repo's setting says otherwise."""
     monkeypatch.chdir(repo)
-    if before:
-        set_user("permission_policy", before)
     if repo_says:
         set_local(repo, "permission_policy", repo_says)
+
+    def from_the_start():
+        forget_user("permission_policy")
+        forget_user(POLICY_DEFAULT_KEY)
+        if before:
+            set_user("permission_policy", before)
+
+    def effective():
+        cfg = load_repo_config(repo)
+        return cfg.permission_policy, cfg.permission_policy_source
+
+    from_the_start()
     res = CliRunner().invoke(app, ["permissions", "preset", preset])
     assert res.exit_code == 0 and f"permission policy: {policy}" in res.output, res.output
-    cfg = load_repo_config(repo)
-    assert (cfg.permission_policy, cfg.permission_policy_source) == (policy, source)
     assert ("aren't in force" in res.output) == (policy == "off")
-    assert routes_actions.set_permission_preset(db, {}, {"preset": preset})["preset"] == preset
+    assert effective() == (policy, source)
+
+    from_the_start()
+    reply = routes_actions.set_permission_preset(db, {}, {"preset": preset})
+    assert effective() == (policy, source)
+    # The reply is the person's own state: a repo's off is only that repo's.
+    assert reply["policy_on"] == (before != "off")
+    assert [p["name"] for p in reply["presets"] if p["current"]] == ([preset] if before != "off" else [])
 
 
 # -- the engine -------------------------------------------------------------------------------

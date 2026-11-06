@@ -380,19 +380,16 @@ def skip_policy(cwd: str | None, why: Exception | None) -> None:
         _skipped[cwd] = why
 
 
-def tell_skipped(db, agent, cwd: str | None) -> bool:
-    """Tell whoever watches ``agent`` why brindle's rules don't cover it, once:
-    its supervisor, or a supervisor itself, which the person is talking to."""
-    why = _skipped.get(cwd) if agent.provider == "codex" else None
-    if why is None:
-        return False
+def _tell_once(db, agent, marker: str, text: str) -> bool:
+    """``text`` to whoever watches ``agent``, unless they already have one with
+    ``marker``: its supervisor, or a supervisor itself, which the person is
+    talking to (it's only starting: delivered once it's ready)."""
     told = agent.parent_id or agent.id
     if db.conn.execute("SELECT 1 FROM inbox WHERE agent_id=? AND instr(body, ?) > 0",
-                       (told, POLICY_SKIPPED)).fetchone():
+                       (told, marker)).fetchone():
         return False
-    text = f"{POLICY_SKIPPED}: {why.problem}. {why.fix} to have them cover Codex."
     if not agent.parent_id:
-        db.enqueue(told, text, None)   # it's only starting: delivered once it's ready
+        db.enqueue(told, text, None)
         return True
     from brindle import agents
 
@@ -401,6 +398,14 @@ def tell_skipped(db, agent, cwd: str | None) -> bool:
     except agents.AgentError:
         db.enqueue(told, text, None)
     return True
+
+
+def tell_skipped(db, agent, cwd: str | None) -> bool:
+    """Tell whoever watches ``agent`` why brindle's rules don't cover it, once."""
+    why = _skipped.get(cwd) if agent.provider == "codex" else None
+    if why is None:
+        return False
+    return _tell_once(db, agent, POLICY_SKIPPED, f"{POLICY_SKIPPED}: {why.problem}. {why.fix} to have them cover Codex.")
 
 
 def launch_flags(cwd: str | None, review: bool = False) -> list[str]:
@@ -440,7 +445,7 @@ def launch_warning(provider: str, cwd: str | None) -> str | None:
         return None
     state = status()
     if state == TRUSTED:
-        return None   # a config Codex would ignore brindle's sandbox profile under is refused at launch
+        return None   # a config Codex would ignore brindle's sandbox profile under is refused or skipped at launch
     why = {REMOVED: "it's turned off in Codex",
            UNREADABLE: "Codex's config.toml doesn't parse"}.get(
         state, "Codex didn't accept it (is Codex too old for hooks?)")
@@ -454,23 +459,14 @@ UNTRUSTED = ("brindle couldn't trust its own Codex permission hook (new, or chan
 
 
 def tell_untrusted(db, agent, cwd: str | None) -> bool:
-    """Tell ``agent``'s supervisor, once, that brindle couldn't trust its hook,
-    so this Codex agent started without it: nobody may watch a reviewer's pane
-    to find out otherwise. A hook the person turned off stays theirs to turn
-    back on (launch_warning, doctor), not news."""
-    if agent.provider != "codex" or not agent.parent_id or cwd in _skipped or not policy_on(cwd) \
-            or status() not in (NEW, MOVED):
+    """Tell whoever watches ``agent``, once, that brindle couldn't trust its
+    hook, so this Codex agent started without it: nobody may watch a reviewer's
+    pane to find out otherwise, and a supervisor gets no launch reply. A hook
+    the person turned off stays theirs to turn back on (launch_warning,
+    doctor), not news."""
+    if agent.provider != "codex" or cwd in _skipped or not policy_on(cwd) or status() not in (NEW, MOVED):
         return False
-    if db.conn.execute("SELECT 1 FROM inbox WHERE agent_id=? AND instr(body, ?) > 0",
-                       (agent.parent_id, UNTRUSTED)).fetchone():
-        return False
-    from brindle import agents
-
-    try:
-        agents.send_message(db, agent.parent_id, UNTRUSTED)
-    except agents.AgentError:
-        db.enqueue(agent.parent_id, UNTRUSTED, None)
-    return True
+    return _tell_once(db, agent, UNTRUSTED, UNTRUSTED)
 
 
 # -- asking Codex itself ---------------------------------------------------------------
