@@ -42,6 +42,7 @@ import { AppUpdateBanner, AppUpdateProvider } from "./components/AppUpdateBanner
 import { UpgradeCard, useEngineUpgrade } from "./components/EngineUpgrade";
 import { EngineBanner } from "./components/EngineBanner";
 import { Sidebar } from "./components/Sidebar";
+import { Walkthrough } from "./components/Walkthrough";
 import { TerminalPanel, TerminalProvider, shellPlace } from "./components/TerminalPanel";
 import { alert, button } from "./components/ui";
 import { HOME, readLastSession, writeLastSession, type Route, type SessionRef, type SheetRef } from "./routes";
@@ -210,7 +211,8 @@ function Banner({ status, connection, onRetry, client, store }: { status: Engine
   );
 }
 
-function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, pickFolder = nativePicker, installCli, appUpdater, appUpdates, releaseBuildUpdater, readAbout }: AppProps) {
+/* `firstRun`: the app opens right after the first launch's setup, so the walkthrough offers itself. */
+function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, pickFolder = nativePicker, installCli, appUpdater, appUpdates, releaseBuildUpdater, readAbout, firstRun = false }: AppProps & { firstRun?: boolean }) {
   // Until the sessions are known the app shows the empty state, quietly; then it lands.
   const [route, setRoute] = useState<Route | null>(initialRoute ?? null);
   const navigate = useCallback((to: Route) => setRoute(to), []);
@@ -258,7 +260,7 @@ function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, p
           <AppUpdateBanner openUrl={openUrl} />
           {/* The banner's upgrade follows the engine's terminal stream, which a page with no engine doesn't have. */}
           {client ? <Banner status={bannerStatus(engine, connection)} connection={connection} onRetry={check} client={client} store={store} /> : <EngineBanner status={bannerStatus(engine, connection)} connection={connection} onRetry={check} />}
-          <main className={`relative flex min-h-0 flex-1 flex-col ${fills ? "overflow-hidden" : "gap-s2 overflow-auto p-s3"}`}>
+          <main data-walkthrough="session-view" className={`relative flex min-h-0 flex-1 flex-col ${fills ? "overflow-hidden" : "gap-s2 overflow-auto p-s3"}`}>
             {error && <p className={`${alert} ${fills ? "m-s2 mb-0" : ""}`}>{error}</p>}
             {client ? (
               route ? (
@@ -283,6 +285,7 @@ function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, p
           {/* Docked under the session (or whatever page is shown): the screen above gets shorter, nothing lies over it. */}
           <TerminalPanel />
         </div>
+        {client && <Walkthrough autoStart={firstRun} />}
       </div>
       </AppUpdateProvider>
     </TerminalProvider>
@@ -297,12 +300,14 @@ function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, p
    without the route (an older one: 404), whose banner speaks for it. Any
    other failure (the network, a 500) says so in Starting's place, with
    Retry: a first launch never skips its setup on a hiccup. */
-/* The flow done, the app opens on New session (no demo offer on the first launch). */
+/* The flow done, the app opens on New session (no demo offer on the first launch),
+   with the walkthrough (components/Walkthrough) over it once. */
 type Gate =
   | { kind: "checking"; error?: string }
   | { kind: "onboarding"; providers: ProviderInstalled[] }
   | { kind: "permissions" }
-  | { kind: "app"; route?: Route };
+  /* `fresh`: reached through the first launch's setup just now (the walkthrough offers itself). */
+  | { kind: "app"; route?: Route; fresh?: boolean };
 
 function FirstLaunch(props: AppProps) {
   const { client, openUrl = openExternal, pickFolder = nativePicker } = props;
@@ -332,7 +337,7 @@ function FirstLaunch(props: AppProps) {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [client, asked]);
-  const done = useCallback((route?: Route) => setGate({ kind: "app", route }), []);
+  const done = useCallback((route?: Route) => setGate({ kind: "app", route, fresh: true }), []);
   const permissionsDone = useCallback(() => {
     markOnboarded();
     done();
@@ -354,7 +359,7 @@ function FirstLaunch(props: AppProps) {
   return (
     <ProvidersProvider client={client}>
       <Startup client={client} refresh={props.refresh}>
-        <Shell {...props} initialRoute={(gate.kind === "app" && gate.route) || props.initialRoute} />
+        <Shell {...props} initialRoute={(gate.kind === "app" && gate.route) || props.initialRoute} firstRun={gate.kind === "app" && gate.fresh} />
       </Startup>
     </ProvidersProvider>
   );
