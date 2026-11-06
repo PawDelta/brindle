@@ -531,7 +531,8 @@ def _escalate(db, agent, ws, req, rules, checks, *, once: bool = False) -> str |
         if db.conn.execute("SELECT 1 FROM permission_requests WHERE agent_id=? AND tool_use_id=?",
                            (agent.id, key)).fetchone():
             return command
-        db.add_permission_request(agent.id, key, request, "approval required" if command else "no rule allows it")
+        db.add_permission_request(agent.id, key, request, "approval required" if command else "no rule allows it",
+                                  channel="terminal" if command else None)
         if not agent.parent_id:
             return command
         grants = (permissions.bash_grants(req, rules, checks, cd_root=ws.path) if req.kind == "bash"
