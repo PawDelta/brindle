@@ -11,7 +11,8 @@
    one (components/ProjectPicker: open a folder, or clone a repository):
    in place of the composer while there is none, and behind "Add a
    project…" beside the repo after. Under it, the way to the demo the first
-   launch offers (screens/Onboarding/Demo). */
+   launch offers (screens/Onboarding/Demo), and "Take the tour" above it
+   opens the walkthrough again (components/Walkthrough). */
 
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { DaemonError, LOGIN_PROVIDERS, type DaemonClient, type Note, type PreflightDTO, type Repo, type SessionConflict, type StartSession } from "../../api/client";
@@ -21,6 +22,7 @@ import Logo from "../../components/Logo";
 import { Preflight } from "../../components/Preflight";
 import { ProjectCombobox } from "../../components/ProjectCombobox";
 import { ProjectPicker } from "../../components/ProjectPicker";
+import { openWalkthrough } from "../../components/Walkthrough";
 import { alert, button, card, field, h2, lede, main, mono, quiet, title } from "../../components/ui";
 import { isPaused, providerName } from "../../store/overview";
 import { useSessions } from "../../store/sessions";
@@ -93,9 +95,22 @@ export function NewSession({ client, onOpen, initialRepo, pickFolder, refresh, o
       <div className="flex min-w-0 flex-1 flex-col items-center gap-s3 overflow-auto px-s4 py-s6">
         <div className="flex w-full max-w-2xl flex-col gap-s3">
           <div className="flex flex-col gap-1">
-            <Logo className="text-2xl" />
+            <div className="flex items-center gap-s1">
+              <Logo className="text-2xl" />
+              <span className="flex-1" />
+              <button type="button" className={quiet} onClick={openWalkthrough}>
+                Take the tour
+              </button>
+            </div>
+            {repos !== null && repos.length > 0 && <h1 className={title}>Start a session</h1>}
             <p className="text-sm text-ink-2">
-              {repos === null ? "Loading…" : repos.length === 0 ? "No repo is set up yet." : live === 0 ? "Nothing is running. Describe what brindle should work on, or pick a recent session in the sidebar." : "Start another session. The ones running are in the sidebar."}
+              {repos === null
+                ? "Loading…"
+                : repos.length === 0
+                  ? "No repo is set up yet."
+                  : live === 0
+                    ? "Nothing is running yet. Describe what brindle should work on below, check the project, and press Start: a supervisor plans the work and hands it to agents. Recent sessions are in the sidebar."
+                    : "Start another session below. The ones running are in the sidebar."}
             </p>
           </div>
           {repos === null ? null : repos.length === 0 ? (
@@ -113,7 +128,7 @@ export function NewSession({ client, onOpen, initialRepo, pickFolder, refresh, o
 /* Nothing to show yet: a first project, opened or cloned. */
 function FirstRepo({ client, pickFolder, onPicked }: { client: DaemonClient; pickFolder?: PickFolder; onPicked(repo: Repo): void }) {
   return (
-    <section className={`${card} flex flex-col gap-s2 px-s3 py-s3`} aria-label="Welcome">
+    <section className={`${card} flex flex-col gap-s2 px-s3 py-s3`} aria-label="Welcome" data-walkthrough="project-picker">
       <h1 className="text-xl font-semibold tracking-tight">Welcome to brindle</h1>
       <p className="max-w-prose text-ink-2">
         brindle runs coding agents for you, each on its own branch in its own worktree, with a supervisor that hands out the work and a place here to see it all. No repo is set up yet: pick a project to start in.
@@ -309,13 +324,15 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, on
       </div>
       <div className="flex items-start gap-s1">
         <div className="flex min-w-0 flex-1 flex-wrap items-center gap-s1">
-        {repos.length > 1 ? (
-          <ProjectCombobox repos={repos} value={repo} onChange={onChoose} />
-        ) : (
-          <span className="text-sm text-ink-2">
-            in <span className="font-medium text-ink">{repos[0]?.name}</span>
-          </span>
-        )}
+        <span className="inline-flex items-center gap-s1" data-walkthrough="project-picker">
+          {repos.length > 1 ? (
+            <ProjectCombobox repos={repos} value={repo} onChange={onChoose} />
+          ) : (
+            <span className="text-sm text-ink-2">
+              in <span className="font-medium text-ink">{repos[0]?.name}</span>
+            </span>
+          )}
+        </span>
         {usable && usable.length === 1 && (
           <span className="text-sm text-ink-2">
             on <span className="font-medium text-ink">{providerName(usable[0])}</span>

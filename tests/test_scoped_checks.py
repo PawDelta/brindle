@@ -1,14 +1,16 @@
 """A worker's branch runs only the checks (and tests) its changes reach;
 the supervisor's checkout always runs them in full."""
 import json
+import os
 import shlex
+import sys
 import time
 from pathlib import Path
 
 import pytest
 
 from conftest import sh
-from brindle import autopilot, check_scope, codemap, gates, workspaces
+from brindle import autopilot, check_scope, codemap, gates, git, workspaces
 from brindle.config import load_repo_config
 from brindle.db import Agent
 
@@ -28,10 +30,12 @@ def write(root: Path, files: dict[str, str]) -> None:
 OTHER = {"tests/test_other.py": "def test_o(): pass\n"}
 CAPPED = ["tests/test_mod.py", "tests/test_mod_extra.py", "tests/test_other.py"]
 CAPPED_NOTE = check_scope.CAP_NOTE.format(max=1, tests=" ".join(CAPPED))
-EMPTY_NOTE = check_scope.CAP_NOTE.format(max=1, tests="none")
+EMPTY_NOTE = check_scope.FULL_NOTE.format(
+    why="the change reaches more tests than scoped_checks_max_files and none is its own or a namesake")
+LONELY_NOTE = check_scope.FULL_NOTE.format(why="no test reaches the changed files and none is named after them")
 BOTH = {"src/pkg/mod.py": MOD.replace("return 1", "return 3").replace("return 2", "return 4")}
-NARROWED =f"{PYTEST} tests/test_other.py || [ $? -eq 5 ]"
-DYNAMIC = f"{PYTEST} tests/test_dynamic.py || [ $? -eq 5 ]"   # an unresolvable import runs its own file
+NARROWED =f"{PYTEST} tests/test_other.py"
+DYNAMIC = f"{PYTEST} tests/test_dynamic.py"   # an unresolvable import runs its own file
 CAFE_NOTE = check_scope.FULL_NOTE.format(why="src/café.py is not in a package, so no import can name it")
 DYNAMIC_IMPORTS = {
     "alias-loader": "from importlib import import_module as load\nload(name)\n",
@@ -44,16 +48,16 @@ DYNAMIC_IMPORTS = {
 
 @pytest.mark.parametrize("where,cmd,changes,ran", [
     ("infer", PYTEST, {"src/pkg/mod.py": MOD.replace("return 2", "return 3"), **OTHER},
-     [f"{PYTEST} tests/test_g.py tests/test_other.py || [ $? -eq 5 ]"]),
-    ("infer", PYTEST, {"src/pkg/mod.py": MOD.split("\n\n\n", 1)[1]}, [f"{PYTEST} tests/test_f.py || [ $? -eq 5 ]"]),
+     [f"{PYTEST} tests/test_g.py tests/test_other.py"]),
+    ("infer", PYTEST, {"src/pkg/mod.py": MOD.split("\n\n\n", 1)[1]}, [f"{PYTEST} tests/test_f.py"]),
     ("infer", PYTEST, {"tests/test_f.py": TEST_F.replace("return 1", "return 2", 1)},
-     [f"{PYTEST} tests/test_f.py tests/test_g.py || [ $? -eq 5 ]"]),
+     [f"{PYTEST} tests/test_f.py tests/test_g.py"]),
     ("infer", PYTEST, {"tests/test_f.py": TEST_F.replace("return 1\n\n\ndef test_f", "return 2\n\n\ndef test_f")},
-     [f"{PYTEST} tests/test_f.py tests/test_g.py || [ $? -eq 5 ]"]),   # graphify failed on unlooked(): importers
+     [f"{PYTEST} tests/test_f.py tests/test_g.py"]),   # graphify failed on unlooked(): importers
     ("alias-loader", PYTEST, {"src/pkg/new.py": "def h():\n    return 0\n"}, [DYNAMIC]),   # load(name) may be anything
     ("infer", PYTEST, {"src/pkg/pro/status.py": "X = 1\n",
                        "tests/test_other.py": "import pkg.pro.status\ndef test_new(): pass\n"},
-     [f"{PYTEST} tests/test_direct.py tests/test_from.py tests/test_member.py tests/test_other.py || [ $? -eq 5 ]"]),
+     [f"{PYTEST} tests/test_direct.py tests/test_from.py tests/test_member.py tests/test_other.py"]),
     ("fromlist", PYTEST, {"src/pkg/new.py": "X = 1\n"}, [DYNAMIC]),
     pytest.param("dynamic-fromlist", PYTEST, {"src/pkg/new.py": "X = 1\n"}, [DYNAMIC],
                  marks=pytest.mark.variant("review requested a nonliteral fromlist bypass")),
@@ -62,34 +66,35 @@ DYNAMIC_IMPORTS = {
     pytest.param("dynamic-level", PYTEST, {"src/pkg/new.py": "X = 1\n"}, [DYNAMIC],
                  marks=pytest.mark.variant("review requested a nonliteral relative import level")),
     ("no-graph", PYTEST, {"tests/test_f.py": TEST_F.replace("return 1", "return 2", 1)},
-     [f"{PYTEST} tests/test_f.py tests/test_g.py || [ $? -eq 5 ]"]),
+     [f"{PYTEST} tests/test_f.py tests/test_g.py"]),
     pytest.param("infer", PYTEST, {"src/café.py": "X = 1\n"}, [f"printf '%s\\n' {shlex.quote(CAFE_NOTE)}; {PYTEST}"],
                  marks=pytest.mark.variant("git C-quotes a non-ASCII name without -z; it was once skipped")),
     ("infer", PYTEST, {"tests/conftest.py": "X = 2\n"}, [PYTEST]),
     ("infer", PYTEST, {"pyproject.toml": "[x]\n"}, [PYTEST]),
     ("infer", PYTEST, OTHER, [NARROWED]),
-    ("infer", OPTS, OTHER, [f"{OPTS} tests/test_other.py || [ $? -eq 5 ]"]),
+    ("infer", OPTS, OTHER, [f"{OPTS} tests/test_other.py"]),
     ("infer", SELECTS, OTHER, [SELECTS]),   # names tests itself: runs in full
     ("infer", "make lint", OTHER, ["make lint"]),
     ("infer", PYTEST, {}, []),   # nothing changed: skipped
     ("infer", PYTEST, {"app/x.tsx": "x\n"}, []),   # no Python-relevant change: skipped
     ("infer", PYTEST, {"app/x.tsx": "x\n", "src/pkg/mod.py": MOD.replace("return 2", "return 3")},
-     [f"{PYTEST} tests/test_g.py || [ $? -eq 5 ]"]),
+     [f"{PYTEST} tests/test_g.py"]),
     ("infer", PYTEST, {"uv.lock": "x\n"}, [PYTEST]),
     ("unset", PYTEST, {"src/pkg/mod.py": MOD.replace("return 2", "return 3")},
-     [f"{PYTEST} tests/test_g.py || [ $? -eq 5 ]"]),
+     [f"{PYTEST} tests/test_g.py"]),
     ("off", PYTEST, OTHER, [PYTEST]),
     ("supervisor", PYTEST, OTHER, [PYTEST]),
     ("cap", PYTEST, {"src/pkg/mod.py": MOD.replace("return 1", "return 3"), **OTHER},
-     [f"printf '%s\\n' {shlex.quote(CAPPED_NOTE)}; {PYTEST} {' '.join(CAPPED)} || [ $? -eq 5 ]"]),   # test_f dropped
+     [f"printf '%s\\n' {shlex.quote(CAPPED_NOTE)}; {PYTEST} {' '.join(CAPPED)}"]),   # test_f dropped
     ("cap-none", PYTEST, {"src/pkg/mod.py": MOD.replace("return 1", "return 3"), **OTHER},
-     [f"{PYTEST} tests/test_f.py tests/test_other.py || [ $? -eq 5 ]"]),
-    ("cap-empty", PYTEST, BOTH, [f"printf '%s\\n' {shlex.quote(EMPTY_NOTE)}"]),   # no own or namesake test: note only
+     [f"{PYTEST} tests/test_f.py tests/test_other.py"]),
+    ("cap-empty", PYTEST, BOTH, [f"printf '%s\\n' {shlex.quote(EMPTY_NOTE)}; {PYTEST}"]),   # no own or namesake test: full
+    ("infer", PYTEST, {"src/pkg/lonely.py": "X = 1\n"}, [f"printf '%s\\n' {shlex.quote(LONELY_NOTE)}; {PYTEST}"]),   # no importer
     ("cap-pr", PYTEST, {"src/pkg/mod.py": MOD.replace("return 1", "return 3"), **OTHER}, [PYTEST]),
 ], ids=["python-affected", "deleted-function", "test-helper", "lookup-failed", "fallback-unmapped", "unmapped-importers",
         "import-fromlist", "import-dynamic-fromlist", "import-relative-level", "import-dynamic-level", "unmapped-test-helper", "quoted-name",
         "fallback-conftest", "fallback-pyproject", "infer", "infer-options", "infer-selects", "other-command-changed_files_env", "empty-diff",
-        "non-python-only", "non-python-plus-python", "lockfile", "unset-mode", "off", "supervisor", "cap", "cap-none", "cap-empty", "cap-pr"])
+        "non-python-only", "non-python-plus-python", "lockfile", "unset-mode", "off", "supervisor", "cap", "cap-none", "cap-empty", "no-importers", "cap-pr"])
 def test_scoped_checks(db, repo, tmp_path, monkeypatch, where, cmd, changes, ran):
     config = {"checks": [cmd], "scoped_checks": "off" if where == "off" else "infer"}
     if where == "unset":
@@ -141,3 +146,21 @@ def test_scoped_checks(db, repo, tmp_path, monkeypatch, where, cmd, changes, ran
     assert commands == ran
     full = where in ("supervisor", "cap-pr")
     assert envs == [None if full else "\n".join(sorted(changes))] * len(ran)   # the real gate dispatch sets it
+
+
+def test_empty_namesake_selection_fails_and_is_not_cached(db, repo, monkeypatch):
+    """The generated command, run for real through the gate, fails when its tests collect nothing."""
+    cmd = "python -m pytest -q -p no:cacheprovider"   # a literal prefix, so scoping infers it
+    monkeypatch.setenv("PATH", f"{Path(sys.executable).parent}{os.pathsep}{os.environ['PATH']}")
+    write(repo, {".brindle/config.json": json.dumps({"checks": [cmd], "scoped_checks": "infer"}),
+                 "src/pkg/__init__.py": "", "src/pkg/lonely.py": "X = 1\n", "tests/test_lonely.py": "Y = 1\n"})
+    sh("git add -A && git commit -qm base", repo)
+    monkeypatch.setattr(codemap, "graph_path", lambda target: None)
+    ws = workspaces.create(db, str(repo), "feat").workspace
+    db.add_agent(Agent("w1", ws.id, "developer", "claude", None, "assign", "done", "@0", None, time.time()))
+    write(Path(ws.path), {"src/pkg/lonely.py": "X = 2\n"})
+    sh("git add -A && git commit -qm work", Path(ws.path))
+    ok, _ = gates.run_checked(db, ws, cmd, {}, 120)
+    assert not ok
+    tree = git.out(["rev-parse", "HEAD^{tree}"], ws.path)
+    assert db.get_tree_check(ws.repo_root, tree, f"{cmd} tests/test_lonely.py\nsrc/pkg/lonely.py") is None

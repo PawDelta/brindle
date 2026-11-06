@@ -55,6 +55,7 @@ import Logo from "./Logo";
 import { Preflight } from "./Preflight";
 import { SessionContext } from "./SessionContext";
 import { TerminalToggle } from "./TerminalPanel";
+import { openWalkthrough } from "./Walkthrough";
 
 export interface SidebarProps {
   route: Route;
@@ -135,6 +136,7 @@ function AccountButton({ route, navigate }: Pick<SidebarProps, "route" | "naviga
     <button
       type="button"
       aria-label="Open Account"
+      data-walkthrough="profile"
       aria-current={route.screen === "account" ? "page" : undefined}
       title={account?.signed_in ? name || email || "Signed in" : "Sign in"}
       className={`flex size-7 shrink-0 items-center justify-center rounded-full border border-line-strong font-mono text-[10px] ${account?.signed_in ? "text-ink-2" : "text-ink-3"} hover:bg-surface-2`}
@@ -539,6 +541,7 @@ function InboxEntry({ route, navigate }: Pick<SidebarProps, "route" | "navigate"
       className={`mx-1 flex items-center gap-s1 rounded-md border border-transparent py-[7px] pl-2 pr-[10px] text-left text-[12.5px] ${on ? "bg-surface-2" : "hover:bg-surface-2"} ${total > 0 ? "font-semibold text-ink" : "font-medium text-ink-3"}`}
       aria-current={on ? "page" : undefined}
       data-testid="inbox-link"
+      data-walkthrough="inbox"
       onClick={() => navigate({ screen: "inbox" })}
     >
       <span className="flex-1">Inbox</span>
@@ -737,6 +740,7 @@ export function Sidebar({ route, navigate, refresh, openUrl }: SidebarProps) {
           className={`flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11.5px] text-ink-3 hover:bg-surface hover:text-ink ${route.screen === "new" ? "bg-branch-soft text-ink" : ""}`}
           aria-current={route.screen === "new" ? "page" : undefined}
           title="New session (⌘N)"
+          data-walkthrough="new-session"
           onClick={() => navigate({ screen: "new" })}
         >
           <span className="text-sm leading-none" aria-hidden>
@@ -835,6 +839,18 @@ export function Sidebar({ route, navigate, refresh, openUrl }: SidebarProps) {
         <span aria-hidden className="text-ink-3">·</span>
         {page({ screen: "settings" }, "Settings")}
         <span className="flex-1" />
+        <button
+          type="button"
+          className={FOOT_LINK}
+          aria-label="Show the walkthrough"
+          title="Show the walkthrough"
+          onClick={() => {
+            navigate({ screen: "new" });
+            openWalkthrough();
+          }}
+        >
+          ?
+        </button>
         <TerminalToggle />
       </nav>
     </aside>
