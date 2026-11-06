@@ -70,6 +70,9 @@ def test_overloaded_stop_failure_tells_the_supervisor_its_kind_once(db, repo, mo
     db.add_workspace(ws)
     supervisor = agents.spawn(db, ws, "developer", mode="interactive")
     worker = agents.spawn(db, ws, "developer", mode="assign", parent_id=supervisor.id)
+    db.add_autopilot(supervisor.id)
+    # Claude's usage window is known: a usage limit would pause the session's workers.
+    monkeypatch.setattr(autopilot, "usage", lambda: {"used": 10, "resets_at": time.time() + 3600})
     told = []
     monkeypatch.setattr(agents, "send_message", lambda db_, to, body, **k: told.append((to, body)))
     payload = {"error": "overloaded_error", "last_assistant_message":
@@ -77,7 +80,8 @@ def test_overloaded_stop_failure_tells_the_supervisor_its_kind_once(db, repo, mo
                '"request_id":"req_011CUxyz"}'}
     agents.handle_hook(db, worker.id, "stop-failure", payload)
     agents.handle_hook(db, worker.id, "stop-failure", payload)   # the same stop, seen again
-    assert db.get_agent(worker.id).status == "idle"            # still takes a message to go on
+    assert db.get_agent(worker.id).status == "idle"            # not paused; still takes a message
+    assert db.get_autopilot(supervisor.id).state != "usage_paused"
     assert [to for to, _ in told] == [supervisor.id]
     assert "overloaded (529)" in told[0][1] and "req_011CUxyz" not in told[0][1]
 

@@ -1030,12 +1030,15 @@ API_ERROR_GRACE = 60.0
 
 
 def note_api_errors(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
-    """A Claude Code worker still 'processing' whose pane shows its last turn
-    ended on an API error (529 Overloaded, a 5xx, ...) and has printed
-    nothing since for API_ERROR_GRACE: its StopFailure hook never ran, so it
-    would sit there forever. Mark it idle (the screen shows its prompt) and
-    tell its supervisor once (agents.tell_parent_api_error). A model the
-    account refuses is note_model_refused's."""
+    """A Claude Code worker whose pane shows its last turn ended on an API
+    error (529 Overloaded, a 5xx, ...) and has printed nothing since for
+    API_ERROR_GRACE, and whose supervisor hasn't been told about this stop:
+    its StopFailure hook never ran, so it would sit there forever. It may
+    still say 'processing', or a screen read (agents.reconcile, which the
+    dashboard runs) may have moved it to 'idle' already. Mark it idle (the
+    screen shows its prompt) and tell its supervisor once per stop
+    (agents.tell_parent_api_error). A model the account refuses is
+    note_model_refused's."""
     from brindle import model_access
     from brindle.providers import ClaudeCode
 
@@ -1044,7 +1047,7 @@ def note_api_errors(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
     for a in db.list_agents():
         if (a.mode not in agents.FORWARDING_MODES or not a.parent_id or a.result is not None
                 or a.dismissed_at is not None or a.provider != "claude" or a.headless
-                or a.status != "processing"
+                or a.status not in ("processing", "idle") or a.unreported_noted
                 or not agents.runs_process(a) or not agents.same_server(a, panes)
                 or not agents.is_alive(a, panes) or not agents.owns_pane(db, a, owners)):
             continue
@@ -1058,7 +1061,8 @@ def note_api_errors(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
         error = ClaudeCode.api_error(screen)
         if not error or model_access.classify(error):
             continue
-        db.set_status(a.id, "idle", only_if="processing")
+        if a.status == "processing":
+            db.set_status(a.id, "idle", only_if="processing")
         current = db.get_agent(a.id)
         if current is None or current.status != "idle":
             continue   # a hook moved it first

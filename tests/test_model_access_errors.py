@@ -108,20 +108,24 @@ def test_a_worker_left_processing_on_an_api_error_screen_is_reported(db, repo, m
     now = time.time()
     db.add_agent(Agent("boss", ws.id, "supervisor", "claude", None, "interactive", "processing",
                        "@0", None, now))
-    db.add_agent(Agent("w1", ws.id, "developer", "claude", "boss", "assign", "processing", "@1", None, now))
-    db.add_agent(Agent("w2", ws.id, "developer", "claude", "boss", "assign", "processing", "@2", None, now))
-    screens = {"@1": screen('API Error: 529 {"type":"error","error":{"type":"overloaded_error"}}'),
-               "@2": screen("Done with the first file.")}
+    for w in ("w1", "w2", "w3"):
+        db.add_agent(Agent(w, ws.id, "developer", "claude", "boss", "assign", "processing", "@" + w[1], None, now))
+    error = screen('API Error: 529 {"type":"error","error":{"type":"overloaded_error"}}')
+    screens = {"@1": error, "@2": screen("Done with the first file."), "@3": error}
     monkeypatch.setattr(tmux, "capture", lambda target, **kw: screens[target])
     monkeypatch.setattr(tmux, "window_activity", lambda target, **kw: now - 120)
     monkeypatch.setattr(agents, "pane_owners", lambda db_, panes=None: {})
     for name in ("runs_process", "same_server", "is_alive", "owns_pane"):
         monkeypatch.setattr(agents, name, lambda *a, **kw: True)
+    # The dashboard's one-read reconcile has already moved w3 to idle.
+    assert agents.screen_status(db, db.get_agent("w3"), samples=1) == "idle"
     sent = []
     monkeypatch.setattr(agents, "send_message", lambda db_, to, body, sender_id=None: sent.append((to, body)))
-    assert cull.note_api_errors(db, now, {}) == ["told boss that worker w1 stopped on an API error"]
-    assert [db.get_agent(w).status for w in ("w1", "w2")] == ["idle", "processing"]
-    assert sent[0][0] == "boss" and "overloaded (529)" in sent[0][1]
+    assert cull.note_api_errors(db, now, {}) == [f"told boss that worker {w} stopped on an API error"
+                                                 for w in ("w1", "w3")]
+    assert [db.get_agent(w).status for w in ("w1", "w2", "w3")] == ["idle", "processing", "idle"]
+    assert all(to == "boss" and "overloaded (529)" in body for to, body in sent)
+    assert cull.note_api_errors(db, now, {}) == []   # once per stop
 
 
 def test_a_supervisor_is_told_about_a_refused_worker_and_about_an_alias_fallback(db, repo, monkeypatch):

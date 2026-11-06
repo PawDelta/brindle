@@ -5294,7 +5294,10 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
         else:
             db.set_status(agent_id, "idle")
             db.clear_permission_requests(agent_id)
-            if is_rate_limit:
+            # An overloaded API (529) is the provider's capacity, not this
+            # account's usage: it pauses nothing, and its worker is reported.
+            overloaded = bool(re.search(r"\b(529|overloaded|overloaded_error)\b", err_fields))
+            if is_rate_limit and not overloaded:
                 from brindle import autopilot as pilot
 
                 pilot.limit_reached(db, agent)
@@ -5633,8 +5636,8 @@ def tell_parent_api_error(db: DB, agent: Agent, error: str) -> bool:
         return False
     if db.get_agent(agent.parent_id) is None:
         return False
-    if agent.unreported_noted and not unreported_note_expired(agent):
-        return False
+    if agent.unreported_noted:
+        return False  # this stop was told already (a new prompt clears it)
     claimed_at = time.time()
     if not db.claim_unreported(agent.id, claimed_at, agent.unreported_noted,
                                reopened_at=agent.reopened_at,
