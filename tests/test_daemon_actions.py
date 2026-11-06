@@ -50,8 +50,10 @@ def test_repo_git_identity_is_set_for_that_repo_only(db, world, tmp_path, monkey
     code, reply = _send("POST", "/v1/sessions", body)
     assert (code, reply["error"]["code"], started) == (409, "git_identity_missing", [])
     monkeypatch.chdir(world.repo_root)
-    for branch in ([], ["--branch", "new-session"]):
+    missing_checkout = tmp_path / "new-checkout"
+    for branch in ([], ["--branch", "new-session"], ["--branch", "new-session", "--worktree", str(missing_checkout)]):
         assert CliRunner().invoke(app, ["start", "--no-attach", "--yes", *branch]).exit_code == 1
+    assert not missing_checkout.exists()
     assert started == []
     for name, email in [("", "me@example.com"), ("Me", "--global")]:
         assert _send("POST", "/v1/repos/git-identity", {**body, "name": name, "email": email})[0] == 400
@@ -67,6 +69,23 @@ def test_repo_git_identity_is_set_for_that_repo_only(db, world, tmp_path, monkey
     assert git.out(["config", "user.email"], world.repo_root) == "me@example.com"
     assert _send("POST", "/v1/sessions", body)[0] == 200 and started == [True]
     assert not global_config.exists()
+    other = tmp_path / "other"
+    other.mkdir()
+    git.run(["init", "-q", "-b", "main"], other)
+    git.run(["commit", "--allow-empty", "-qm", "Initial commit"], other)
+    reached = []
+
+    def stop_before_launch(repo, *args, **kwargs):
+        reached.append(repo)
+        raise SystemExit(0)
+
+    with monkeypatch.context() as cli_patch:
+        cli_patch.setattr("brindle.cli._resolve_supervisor", stop_before_launch)
+        for cwd, target, expected in [(world.repo_root, other, 1), (other, world.repo_root, 0)]:
+            cli_patch.chdir(cwd)
+            result = CliRunner().invoke(app, ["start", "--no-attach", "--yes", "--worktree", str(target)])
+            assert result.exit_code == expected
+        assert reached == [world.repo_root]
     git.run(["config", "--local", "--unset", "user.name"], world.repo_root)
     git.run(["config", "--global", "user.name", "Global Name"], world.repo_root)
     before = global_config.read_bytes()
