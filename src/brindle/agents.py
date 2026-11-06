@@ -3951,9 +3951,24 @@ def submit_plan(db: DB, agent_id: str, plan: str) -> str:
     if not agent.parent_id:
         raise AgentError("no supervisor to send the plan to")
     db.update_agent(agent.id, plan_state="proposed", plan_text=plan.strip())
+
+    supervisor = db.get_agent(agent.parent_id)
+    supervisor_ws = db.get_workspace(supervisor.workspace_id) if supervisor else None
+    reminder = ""
+    if supervisor_ws:
+        from brindle.autopilot import PLAN_SPLIT_REMINDER
+        from brindle.config import load_repo_config
+
+        delegation = load_repo_config(supervisor_ws.repo_root).delegation
+        if delegation in {"fast", "balanced"}:
+            reminder = PLAN_SPLIT_REMINDER
+    reminder_line = f"\n{reminder}" if reminder else ""
+
     send_message(db, agent.parent_id,
                  f"Worker {agent.id} proposes this plan and is waiting for your decision "
-                 f"(approve_plan agent_id={agent.id}):\n\n{plan.strip()}", sender_id=agent.id)
+                 f"(approve_plan agent_id={agent.id}):"
+                 f"{reminder_line}\n\n{plan.strip()}",
+                 sender_id=agent.id)
     return "Plan sent. Stop now and wait for your supervisor's decision; don't edit files until it's approved."
 
 

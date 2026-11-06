@@ -8,7 +8,7 @@
    screen, then what it prints, and tmux's "Pane is dead" once its command
    has exited. */
 
-import { DaemonClient } from "../api/client";
+import { DaemonClient, type GithubConnection } from "../api/client";
 import type { BusEvent, StreamMessage, WebSocketLike } from "../api/events";
 import { WS_UNAUTHORIZED } from "../api/events";
 import type { PtyStatus, PtyViewHandlers, PtyViewOpener, PtyViews, PtyViewTarget } from "../api/ptyView";
@@ -643,6 +643,15 @@ export class FakeDaemon {
   readonly fixes: string[] = [];
   /* URL → how many of its next clones fail as git does without credentials for it. */
   cloneFails: Record<string, number> = {};
+  /* GET/POST/DELETE /github/connection (engine branch feat/connect-github): the token "bad-token"
+     is refused (github_token_invalid), "gh" needs github.gh_available, and the requests' routes are kept in order. */
+  github: GithubConnection = { connected: false, login: null, route: null, storage: null, expires_at: null, needs_reconnect: false, gh_available: true };
+  readonly githubRoutes: string[] = [];
+  /* While true, POST /github/connection waits for releaseGithub(). */
+  holdGithub = false;
+  releaseGithub: () => void = () => undefined;
+  /* Clone URLs that fail as git does without credentials until GitHub is connected. */
+  privateRepos: string[] = [];
   /* Folders POST /repos/open refuses: not a git repository. */
   notGitFolders: string[] = [];
   /* macOS without the Command Line Tools: open and clone fail with developer_tools_missing until the installer ran. */
@@ -1268,8 +1277,9 @@ export class FakeDaemon {
         this.publish("job.failed", { payload: { job, job_kind: "repo.clone", error: { code: "developer_tools_missing", message: TOOLS_MESSAGE } } });
         return;
       }
-      if ((this.cloneFails[url] ?? 0) > 0) {
-        this.cloneFails[url]--;
+      const denied = this.privateRepos.includes(url) && !this.github.connected;
+      if (denied || (this.cloneFails[url] ?? 0) > 0) {
+        if (!denied) this.cloneFails[url]--;
         const message = `remote: Repository not found.\nfatal: Authentication failed for '${url}/'`;
         this.publish("job.failed", { payload: { job, job_kind: "repo.clone", error: { code: "clone_failed", message } } });
         return;
@@ -1281,6 +1291,22 @@ export class FakeDaemon {
       this.publish("job.done", { payload: { job, job_kind: "repo.clone", result: { path, name } } });
     }, 0);
     return json({ job, kind: "repo.clone" }, 202);
+  }
+
+  private githubConnection(method: string, body: Record<string, unknown>): Response {
+    if (method === "POST") {
+      this.githubRoutes.push(String(body.route));
+      if (body.route === "gh") {
+        if (!this.github.gh_available) return error("github_gh_unavailable", "The GitHub CLI isn't installed or signed in.", 409);
+        this.github = { ...this.github, connected: true, login: "sam", route: "gh", storage: null, expires_at: null, needs_reconnect: false };
+      } else if (body.route === "token" && typeof body.token === "string") {
+        if (body.token === "bad-token") return error("github_token_invalid", "GitHub didn't accept that token.", 400);
+        this.github = { ...this.github, connected: true, login: "sam", route: "token", storage: "keychain", expires_at: "2027-01-31", needs_reconnect: false };
+      } else return error("invalid", "route must be gh or token", 400);
+    } else if (method === "DELETE") {
+      this.github = { ...this.github, connected: false, login: null, route: null, storage: null, expires_at: null, needs_reconnect: false };
+    }
+    return json(this.github);
   }
 
   /* POST /repos/open: a folder as a repo brindle works in; refused (409) when it isn't a git repository. */
@@ -2434,6 +2460,11 @@ export class FakeDaemon {
       return policy;
     }
     if (method === "POST" && /^\/sessions(\/|$)/.test(path)) return this.write(path, (body ?? {}) as Record<string, unknown>);
+    if (path === "/github/connection") {
+      const fields = (body ?? {}) as Record<string, unknown>;
+      if (method === "POST" && this.holdGithub) return new Promise<Response>((resolve) => (this.releaseGithub = () => resolve(this.githubConnection(method, fields))));
+      return this.githubConnection(method, fields);
+    }
     if (method === "POST" && path === "/demo") return this.startDemo();
     if (method === "DELETE" && path === "/demo") return this.cancelDemo();
     if (method === "PUT" || method === "DELETE") {

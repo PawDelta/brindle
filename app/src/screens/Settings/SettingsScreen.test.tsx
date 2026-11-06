@@ -93,6 +93,20 @@ const posts = (daemon: FakeDaemon) => daemon.requests.filter((r) => r.method ===
 const doctorCalls = (daemon: FakeDaemon) => daemon.requests.filter((r) => r.path === "/doctor");
 
 describe("settings screen", () => {
+  it("github: Connect uses the gh sign-in, the row reads connected as @login, and Disconnect puts it back", async () => {
+    const { daemon, stop } = setup();
+    const row = await screen.findByTestId("github-row");
+    fireEvent.click(await within(row).findByRole("button", { name: "Connect" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Use my GitHub CLI sign-in" }));
+    await waitFor(() => expect(row.getAttribute("data-connected")).toBe("true"));
+    expect(row.textContent).toContain("@sam");
+    expect(daemon.githubRoutes).toEqual(["gh"]);
+    fireEvent.click(within(row).getByRole("button", { name: "Disconnect" }));
+    await waitFor(() => expect(row.getAttribute("data-connected")).toBe("false"));
+    expect(daemon.requests.some((r) => r.method === "DELETE" && r.path === "/github/connection")).toBe(true);
+    stop();
+  });
+
   it("edits your settings and saves them to the user scope, and leaves the repo's checks and rules to Project settings", async () => {
     const { daemon, stop } = setup();
     const mine = await screen.findByTestId("your-settings");

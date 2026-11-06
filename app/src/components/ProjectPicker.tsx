@@ -8,9 +8,10 @@
 
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { DaemonError, type DaemonClient, type Repo } from "../api/client";
-import type { PickFolder } from "../api/open";
+import type { OpenUrl, PickFolder } from "../api/open";
 import { plain } from "../api/wording";
 import { useJob } from "../screens/Branch/useJob";
+import { GithubConnectCard, githubReady, useGithub } from "./GithubConnect";
 import { ProgressCard } from "./ProgressCard";
 import { alert, button, card, field, mono } from "./ui";
 
@@ -20,6 +21,10 @@ export interface ProjectPickerProps {
   pickFolder?: PickFolder;
   /* A project is picked (opened, or cloned): its repo. */
   onPicked(repo: Repo): void;
+  /* The first launch offers Connect GitHub above clone (skippable); elsewhere it only comes up when a GitHub clone fails. */
+  offerGithub?: boolean;
+  /* Opens the token page in the system browser. */
+  openUrl?: OpenUrl;
 }
 
 /* Where a clone goes unless the person picks another folder. */
@@ -29,7 +34,15 @@ const TOOLS_MISSING = "developer_tools_missing";
 const message = (e: unknown) => plain(e instanceof Error ? e.message : String(e));
 const nameOf = (path: string) => path.replace(/\/+$/, "").split("/").at(-1) ?? path;
 
-export function ProjectPicker({ client, pickFolder, onPicked }: ProjectPickerProps) {
+const GITHUB_HTTPS = /^https:\/\/(www\.)?github\.com\//i;
+
+export function ProjectPicker({ client, pickFolder, onPicked, offerGithub = false, openUrl }: ProjectPickerProps) {
+  const gh = useGithub(client);
+  /* The first-launch card was skipped; a clone failure's Connect GitHub was pressed. */
+  const [skipped, setSkipped] = useState(false);
+  const [failureCard, setFailureCard] = useState(false);
+  /* Bumped when the failed clone is dismissed, retried or replaced: a connect that finishes later must not clone again. */
+  const generation = useRef(0);
   const [opening, setOpening] = useState(false);
   const [openError, setOpenError] = useState<string | null>(null);
   const [plainFolder, setPlainFolder] = useState<string | null>(null);
@@ -48,6 +61,7 @@ export function ProjectPicker({ client, pickFolder, onPicked }: ProjectPickerPro
     setPlainFolder(null);
     setToolsMissing(null);
     lastOpened.current = path;
+    generation.current++;
     clear();      // an earlier clone's failure is not what Try again retries now
     setOpening(true);
     try {
@@ -73,6 +87,7 @@ export function ProjectPicker({ client, pickFolder, onPicked }: ProjectPickerPro
   };
 
   const clone = (what = cloning.current) => {
+    generation.current++;
     if (!what) return;
     cloning.current = what;
     setToolsMissing(null);      // an earlier open's failure is not what Try again retries now
@@ -99,6 +114,10 @@ export function ProjectPicker({ client, pickFolder, onPicked }: ProjectPickerPro
     else if (lastOpened.current) void open(lastOpened.current);
   };
 
+  const ready = githubReady(gh.conn);
+  /* A GitHub HTTPS clone that failed (not for want of git's tools) while GitHub isn't connected: offer to connect. */
+  const githubFailure = job?.status === "failed" && !missing && GITHUB_HTTPS.test(cloning.current?.url ?? "") && gh.conn !== null && !ready;
+
   // Cloned: the repo is where git put it.
   const result = job?.status === "done" ? (job.result as { path?: string; name?: string } | undefined) : undefined;
   useEffect(() => {
@@ -108,6 +127,14 @@ export function ProjectPicker({ client, pickFolder, onPicked }: ProjectPickerPro
 
   return (
     <div className="flex flex-col gap-s2" data-testid="project-picker">
+      {offerGithub && !skipped && gh.conn !== null && !ready && (
+        <GithubConnectCard gh={gh} openUrl={openUrl} onSkip={() => setSkipped(true)} />
+      )}
+      {offerGithub && ready && (
+        <p className="text-sm text-ink-2" data-testid="github-connected">
+          GitHub is connected{gh.conn?.login ? ` as @${gh.conn.login}` : ""}.
+        </p>
+      )}
       <div className="grid gap-s2 sm:grid-cols-2">
         <section className={`${card} flex flex-col gap-s1 p-s2`} aria-label="Open a folder">
           <p className="font-semibold">Open a folder</p>
@@ -187,7 +214,37 @@ export function ProjectPicker({ client, pickFolder, onPicked }: ProjectPickerPro
           lines={job.progress}
           failure={{ headline: "Clone failed.", message: job.error ?? "" }}
           onRetry={() => clone()}
-          other={{ label: "Dismiss", onClick: clear }}
+          other={{
+            label: "Dismiss",
+            onClick: () => {
+              generation.current++;
+              clear();
+            },
+          }}
+          extra={
+            githubFailure && (
+              <button type="button" className={button} onClick={() => setFailureCard(true)}>
+                Connect GitHub
+              </button>
+            )
+          }
+        />
+      )}
+      {githubFailure && failureCard && (
+        <GithubConnectCard
+          gh={gh}
+          openUrl={openUrl}
+          skipLabel="Not now"
+          onSkip={() => setFailureCard(false)}
+          onConnected={(() => {
+            const at = generation.current;
+            return () => {
+              // Dismissed, retried or replaced by another operation while connecting: no clone of the old failure.
+              if (generation.current !== at) return;
+              setFailureCard(false);
+              clone();
+            };
+          })()}
         />
       )}
     </div>

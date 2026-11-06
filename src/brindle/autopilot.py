@@ -133,6 +133,10 @@ to be asked each step.
 """
 
 DELEGATIONS = ("conservative", "balanced", "fast")
+PLAN_SPLIT_REMINDER = (
+    "Which parts of this plan need no result from the rest? Start those workers now, "
+    "with `assign`, and approve the rest."
+)
 
 # The repo's "delegation": how readily a supervisor hands work to workers.
 # Delegating buys wall-clock time with tokens: a worker plus its review costs
@@ -153,14 +157,18 @@ what the same change costs in your own chat. Do small things directly: a fix,
 a change of a few files in one area, anything you'd finish in about five
 minutes, or work whose code you've already read. Delegate when a request has
 two or more independent parts that can run side by side, or a piece that
-would take more than about ten minutes; give each part its own worker.""",
+would take more than about ten minutes; give each part its own worker.
+For a plan-first worker's proposal, ask which parts need no result from the
+rest, start those workers with `assign`, and approve the rest.""",
     "fast": """## Delegation rule: fast (save time)
 
 The person prefers speed to token cost. Split any request with more than one
 independent part into parallel workers straight away, up to the worker limit,
 and delegate any single piece of more than a few minutes, so your own chat
 stays free to plan, answer and merge. Do only trivial edits yourself (a typo,
-a one-line config change), or what you must do before workers can start.""",
+a one-line config change), or what you must do before workers can start.
+For a plan-first worker's proposal, ask which parts need no result from the
+rest, start those workers with `assign`, and approve the rest.""",
 }
 
 
