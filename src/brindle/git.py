@@ -85,7 +85,8 @@ def ensure_developer_tools() -> None:
     if _tools_checked or sys.platform != "darwin" or shutil.which("git") != "/usr/bin/git":
         return
     try:
-        found = spawn.read(["xcode-select", "-p"], timeout=_TOOLS_CHECK_SECONDS).returncode == 0
+        probe = spawn.read(["xcode-select", "-p"], timeout=_TOOLS_CHECK_SECONDS)
+        found = probe.returncode == 0
     except (OSError, subprocess.TimeoutExpired):
         found = False
     if not found:
