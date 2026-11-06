@@ -44,6 +44,7 @@ def test_repo_git_identity_is_set_for_that_repo_only(db, world, tmp_path, monkey
     for key in ("user.name", "user.email"):
         git.run(["config", "--local", "--unset-all", key], world.repo_root, check=False)
     started = []
+    real_start = svc.start
     monkeypatch.setattr(svc, "start", lambda *a, **k: started.append(True) or {"id": "new"})
     body = {"repo": world.repo_root}
     code, reply = _send("POST", "/v1/sessions", body)
@@ -73,6 +74,17 @@ def test_repo_git_identity_is_set_for_that_repo_only(db, world, tmp_path, monkey
     assert _send("POST", "/v1/repos/git-identity", {**body, "name": "Other", "email": "other@example.com"})[0] == 200
     assert git.run(["config", "--local", "--get", "user.name"], world.repo_root, check=False).returncode == 1
     assert global_config.read_bytes() == before
+
+    # Once identity is settled, the existing running-session choice still holds the launch.
+    monkeypatch.setattr(svc, "start", real_start)
+    spawned = []
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id == "sup")
+    monkeypatch.setattr(agents, "spawn", lambda *a, **k: spawned.append(a))
+    code, reply = _send("POST", "/v1/sessions", body)
+    assert code == 409 and spawned == []
+    conflict = reply["conflict"]
+    assert [c["key"] for c in conflict["choices"]] == ["o", "a", "n", "p"]
+    assert [s["id"] for s in conflict["sessions"]] == ["sup"]
 
 
 def _send(method: str, path: str, body: dict | None = None, peer_pid: int | None = None,
@@ -316,18 +328,6 @@ def test_an_edit_from_review_commits_on_the_workers_branch(db, repo, world, tmp_
     assert path in reply["stat"]
     assert reply["commit"] == sh("git rev-parse HEAD", wt)
     assert [e["workspace_id"] for e in edited] == ["proj/w-e"]
-
-
-def test_a_running_session_comes_back_as_a_409_with_the_choices(db, world, monkeypatch):
-    spawned = []
-    monkeypatch.setattr(routes_actions.git, "missing_user_identity", lambda path: [])
-    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id == "sup")
-    monkeypatch.setattr(agents, "spawn", lambda *a, **k: spawned.append(a))
-    code, reply = _send("POST", "/v1/sessions", {"repo": world.repo_root})
-    assert code == 409 and spawned == []
-    conflict = reply["conflict"]
-    assert [c["key"] for c in conflict["choices"]] == ["o", "a", "n", "p"]
-    assert [s["id"] for s in conflict["sessions"]] == ["sup"]
 
 
 @pytest.fixture
