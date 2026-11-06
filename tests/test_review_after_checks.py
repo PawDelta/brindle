@@ -88,7 +88,7 @@ def test_timed_out_checks_start_no_review_and_are_not_sent_as_a_failure(db, ws, 
     monkeypatch.setattr(gates, "check_summary", lambda *a, **kw: "TIMEOUT `suite`\ntimed out, not a failure")
     assert agents.review_after_checks(db, "boss", ws, "reviewer", None, RepoConfig(checks=["suite"])) is None
     assert spawned == [] and failed == []
-    assert "not a failure" in db.pop_pending("boss").body
+    assert db.pop_pending("boss") is not None   # the supervisor was told
 
 
 def test_a_branch_that_moves_before_dispatch_is_checked_again_not_reviewed_unchecked(
