@@ -179,8 +179,7 @@ def test_autonomous_starts_opencode_without_prompts(db, ws, monkeypatch, preset,
     monkeypatch.setattr(permissions, "decide", lambda *args, **kwargs: 1 / 0)
     assert json.loads(call("touch x"))["decision"] == "deny"
 
-    # The plugin itself: a hook process that fails stops the call here, and only here.
-    node = shutil.which("node")
+    node = shutil.which("node")  # the plugin itself: a hook process that fails stops the call here, and only here
     if not node:
         pytest.skip("Node is required to execute the OpenCode plugin")
     program = """
