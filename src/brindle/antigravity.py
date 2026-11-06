@@ -30,10 +30,11 @@ agy's hooks, mapped onto brindle's:
 - ``PreToolUse`` (only with ``permission_policy: "on"``): brindle's permission
   policy (brindle.permissions) answers deny, or what agy would do anyway (allow
   for a file inside the workspace, else ask), never nothing. Under
-  agy_approvals "brindle" (unset, for every agent but an interactive one; see
-  strict_on), or a profile with permission_mode dontAsk (agy has no mode that
-  refuses rather than prompts), agy runs with --dangerously-skip-permissions
-  and this hook allows or denies every call, whatever permission_policy says.
+  agy_approvals "brindle" (unset, for workers and for an interactive agent on
+  Autonomous; see strict_on), or a profile with permission_mode dontAsk (agy
+  has no mode that refuses rather than prompts), agy runs with
+  --dangerously-skip-permissions and this hook allows or denies every call,
+  whatever permission_policy says.
 agy has no hook for "waiting for approval": that is read from the screen.
 Hooks can't approve anything in agy (a hook's "allow" is ignored), so with the
 policy on brindle mirrors the allow rules agy's syntax can express into the
@@ -466,10 +467,14 @@ def pre_tool_decision(db, agent_id: str | None, payload: object, strict: bool = 
         brain = os.path.realpath(Path.home() / ".gemini" / "antigravity-cli" / "brain")
         if isinstance(artifacts, str) and os.path.realpath(artifacts).startswith(brain + os.sep):
             spaces.append(os.path.realpath(artifacts))
-        ambiguous = permissions.agy_strict_ambiguity(payload, ws.path) if req is not None else None
+        # A person's own agent on Autonomous works where it's told, as it does
+        # on Claude Code: a command is judged from its Cwd, and a deny or ask still holds.
+        anywhere = agent.mode == "interactive" and _autonomous(cfg)
+        ambiguous = permissions.agy_strict_ambiguity(payload, ws.path, anywhere=anywhere) if req is not None else None
         if ambiguous and decision.decision != "deny":
+            where = "" if anywhere else " inside your worktree"
             out = {"decision": "deny", "reason": f"brindle: {ambiguous}, so it can't be checked; "
-                                                 "use one absolute path inside your worktree"}
+                                                 f"use one absolute path{where}"}
         else:
             # agy keeps what it tells the model about brindle's MCP server
             # (its instructions and tools) and its built-in skills here:
@@ -582,7 +587,7 @@ def _prompting_agent(db, agent_id: str) -> bool:
 
     agent = db.get_agent(agent_id)
     ws = db.get_workspace(agent.workspace_id) if agent else None
-    if ws is None or strict_on(ws.repo_root, agent.mode):
+    if ws is None or strict_on(ws.repo_root, agent.mode, preset=False):
         return False
     try:
         return load_profile(agent.profile, ws.repo_root).permission_mode != "dontAsk"
@@ -834,12 +839,27 @@ def policy_on(workspace: str) -> list[str] | None:
     return list(cfg.checks or []) if cfg.permission_policy == "on" else None
 
 
-def strict_on(workspace: str, mode: str | None = None) -> bool:
+def _autonomous(cfg) -> bool:
+    """Whether the repo's policy is on and the person's store runs what no
+    rule covers: the Autonomous preset. With the policy off, presets do nothing."""
+    from brindle import permissions
+
+    try:
+        return cfg.permission_policy == "on" and permissions.load_store().unmatched == "allow"
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def strict_on(workspace: str, mode: str | None = None, preset: bool = True) -> bool:
     """Whether an agy agent of ``mode`` in ``workspace`` runs with
     --dangerously-skip-permissions and brindle's hook decides every call:
     under agy_approvals "brindle", and, with it unset, for every agent but an
-    interactive one (nobody watches a worker's prompts; a person answers an
-    interactive agent's). "prompt" leaves agy asking."""
+    interactive one (nobody watches a worker's prompts), and for an
+    interactive one on Autonomous: agy would prompt for all it runs, reading
+    no hook's allow. Other interactive agents are the person's to answer, and
+    "prompt" leaves agy asking. ``preset=False``: the repo's setting alone, for
+    an agent already running, whose launch flag says the rest (the person may
+    have changed preset since)."""
     from brindle.config import load_repo_config
 
     try:
@@ -848,7 +868,7 @@ def strict_on(workspace: str, mode: str | None = None) -> bool:
         return False
     if cfg.agy_approvals in ("brindle", "prompt"):
         return cfg.agy_approvals == "brindle"
-    return mode != "interactive"
+    return mode != "interactive" or (preset and _autonomous(cfg))
 
 
 def sync_for_launch(workspace: str, checks: list[str] | None) -> None:

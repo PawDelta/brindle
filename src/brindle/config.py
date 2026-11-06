@@ -153,7 +153,9 @@ class RepoConfig:
     # closed. By provider:
     #   Claude Code  PermissionRequest hook; timeout written as this + 30s (docs:
     #                600s default, no maximum). Its own prompt shows meanwhile
-    #                (seen in 2.1.304); on timeout that prompt is what's left.
+    #                (seen in 2.1.304), except for an Agent-tool subagent's request,
+    #                where it comes once the hook returns nothing (seen in 2.1.318);
+    #                on timeout that prompt is what's left.
     #   Codex        PermissionRequest hook (permission_policy on, hook trusted);
     #                timeout codex_hook.TIMEOUT, a day + 30s (Codex caps only
     #                SessionEnd hooks), so a longer hold is cut to fit. Whether
@@ -172,7 +174,8 @@ class RepoConfig:
     # "brindle": agy agents run with --dangerously-skip-permissions and
     # brindle's hook allows or denies every call (see brindle.antigravity).
     # "prompt": agy asks as usual. None (unset): "brindle" for agents brindle
-    # runs, "prompt" for an interactive one, where a person answers.
+    # runs and for an interactive one with the policy on and the Autonomous
+    # preset, "prompt" for any other interactive one, where a person answers.
     agy_approvals: str | None = None
     # A task whose files overlap a running one: "block", "warn" or "queue" (wait
     # for it to merge). None: block within a session, queue behind another session's.

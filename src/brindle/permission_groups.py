@@ -165,9 +165,9 @@ def _commits(words: list[str]) -> bool:
 
 
 def _git(req: Request, words: list[str]) -> str:
-    pushes = permissions.push_calls(shlex.join(words))
+    pushes = permissions.pushes_in_repos(replace(req, command=shlex.join(words)))
     if pushes:
-        return "push-protected" if any(_protected(p, req.repo_root) for p in pushes) else "push-feature"
+        return "push-protected" if any(_protected(p, repo) for p, repo in pushes) else "push-feature"
     if permissions._readonly_part(req, words):
         return "readonly"
     return "commit" if _commits(words) else "other"

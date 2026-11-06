@@ -2,6 +2,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import type { ReactElement } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import App from "../../App";
+import { ONBOARDED_KEY } from "../../api/providers";
 import { DaemonClient, type AnalysisDoc } from "../../api/client";
 import { PtyViewsProvider } from "../../api/ptyView";
 import type { GoalDTO, MilestoneDTO, SessionDTO } from "../../api/schema";
@@ -115,6 +116,7 @@ describe("GoalPanel", () => {
     const summary = vi.spyOn(client, "docSessionSummary").mockResolvedValue({ total: 2, writing: 1, updated: 0, using: 1 });
     const cards = () => screen.getByTestId("docs").querySelectorAll("li[data-doc]").length;
     const sync = startSync({ client, store: createAppStore(), connect: daemon.connect });
+    localStorage.setItem(ONBOARDED_KEY, "1");
     renderApp(<App store={createAppStore()} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: APP_ROOT, repo: OTHER_REPO }} />);
     expect((await screen.findByTestId("goal-docs")).textContent).toContain("2 docs · writing 1, using 1 →");
     fireEvent.click(await screen.findByTestId("goal-docs"));

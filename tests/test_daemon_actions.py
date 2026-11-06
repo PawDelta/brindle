@@ -330,6 +330,11 @@ def test_the_demo_runs_in_a_practice_repo_on_the_cli_signed_in(db, world, brindl
     # the supervisor, workers and reviewers all run on it.
     assert len(made) == 1 and reply["repo"] == db.workspace_by_path(str(made[0])).repo_root
     assert demo_launches == [(reply["repo"], "codex")]
+    # The flag /repos sends (the app hides it from New session's projects); a lookalike elsewhere is no demo.
+    look = str(brindle_home / "textkit-1")
+    db.add_workspace(Workspace("look/root", look, "root", "main", "main", "main", look, None, "brindle-look", time.time()))
+    flagged = {r["repo_root"]: r["demo"] for r in _send("GET", "/v1/repos")[1]}
+    assert flagged[reply["repo"]] is True and flagged[look] is False
     cfg = config.load_repo_config(reply["repo"])
     assert (cfg.routing["light"], cfg.review_profile) == (["developer-codex"], "reviewer-codex")
 
@@ -1585,7 +1590,7 @@ def test_a_permission_request_at_the_clis_own_prompt_gets_no_keys(db, repo, worl
     ([CLAUDE_PROMPT, CLAUDE_IDLE, CLAUDE_IDLE, "", CLAUDE_IDLE, CLAUDE_IDLE, CLAUDE_IDLE], list(range(7)), False),
     pytest.param([CLAUDE_PROMPT, CLAUDE_BUSY, CLAUDE_BUSY, "", CLAUDE_BUSY, CLAUDE_BUSY, CLAUDE_BUSY], list(range(7)),
                  False, marks=pytest.mark.variant("review: allowed in the pane, its tool still running, so no PostToolUse yet")),
-    ([""] + [CLAUDE_BUSY] * 11 + [CLAUDE_PROMPT] * 5 + [CLAUDE_IDLE], [0, 5, 10, 15, 16], True)], ids=["denied", "allowed", "prompt-drawn-late"])
+    ([""] + [CLAUDE_BUSY] * 11 + [CLAUDE_PROMPT] * 5 + [CLAUDE_IDLE], list(range(17)), True)], ids=["denied", "allowed", "prompt-drawn-late"])
 def test_inbox_resolved_in_pane_when_the_clis_own_prompt_is_answered(db, repo, answering, monkeypatch, reads, looks, deny):
     from brindle import tmux
     from brindle.db import DB
@@ -2202,7 +2207,7 @@ def test_a_clone_streams_git_progress_and_finishes_with_the_path(db, cloning, tm
     assert [(e["kind"], e["payload"]["result"]) for e in done] == [
         ("job.done", {"path": str(parent / "origin")})]
     assert (parent / "origin" / "app.py").is_file()
-    assert {"repo_root": str(parent / "origin"), "name": "origin"} in _send("GET", "/v1/repos")[1]
+    assert {"repo_root": str(parent / "origin"), "name": "origin", "demo": False} in _send("GET", "/v1/repos")[1]
     assert any(e["payload"]["job"] == reply["job"] for e in bus.tail(db, kinds=("job.progress",)))
     again, err = _send("POST", "/v1/repos/clone", {"url": cloning, "parent_dir": str(parent)})
     assert (again, err["error"]["code"]) == (409, "exists")

@@ -53,6 +53,7 @@ export interface ApiSchema {
   ProfileDTO: ProfileDTO;
   ProviderChoiceDTO: ProviderChoiceDTO;
   ProviderConnectionDTO: ProviderConnectionDTO;
+  RepoDTO: RepoDTO;
   RoutingDTO: RoutingDTO;
   RoutingKindDTO: RoutingKindDTO;
   RoutingLockDTO: RoutingLockDTO;
@@ -800,6 +801,18 @@ export interface StoppedAgentDTO {
   id: string;
   name: string;
   profile: string;
+}
+/**
+ * A repo brindle has worked in. ``demo``: brindle's practice repo (under the
+ * demo folder), which the app does not offer as a project to start in.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "RepoDTO".
+ */
+export interface RepoDTO {
+  demo?: boolean;
+  name: string;
+  repo_root: string;
 }
 /**
  * This interface was referenced by `ApiSchema`'s JSON-Schema

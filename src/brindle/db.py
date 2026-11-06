@@ -8,6 +8,7 @@ transaction.
 from __future__ import annotations
 
 import functools
+import json
 import re
 import signal
 import sqlite3
@@ -1097,6 +1098,16 @@ class Task:
     forced: int | None = None          # 1: a supervisor started it despite the load (brindle.tasks.start_now)
 
 
+def request_subagent(row) -> str | None:
+    """The Agent-tool subagent a permission_requests row's request came from
+    (Claude Code's agent_id, kept in its request JSON), or None: the main thread."""
+    try:
+        subagent = json.loads(row["request"]).get("subagent")
+    except (ValueError, TypeError, AttributeError):
+        return None
+    return subagent if isinstance(subagent, str) and subagent else None
+
+
 def _load(cls, row):
     """Build ``cls`` from a row, ignoring columns this version doesn't know.
     A newer brindle may have added columns; an older brindle reading the same
@@ -1865,8 +1876,17 @@ class DB:
                                  (agent_id,)).fetchone()
 
     def clear_permission_requests(self, agent_id: str) -> None:
+        """Forget the agent's requests, but for a subagent's that a hook still
+        holds: it runs on past its worker's turn, and a hold whose row goes reads
+        that as its CLI's prompt having taken a request no prompt shows
+        (agents._await_app_answer). One whose hook died is 'prompt' once the
+        Inbox sees its hold gone (service.inbox.pending_permissions), and goes then."""
         with self.tx() as c:
-            c.execute("DELETE FROM permission_requests WHERE agent_id=?", (agent_id,))
+            for row in c.execute("SELECT tool_use_id, request, channel FROM permission_requests "
+                                 "WHERE agent_id=?", (agent_id,)).fetchall():
+                if not (row["channel"] in ("hook", "supervisor") and request_subagent(row)):
+                    c.execute("DELETE FROM permission_requests WHERE agent_id=? AND tool_use_id=?",
+                              (agent_id, row["tool_use_id"]))
 
     def pop_pending(self, agent_id: str) -> Message | None:
         """Atomically claim the oldest undelivered message, if any."""

@@ -222,6 +222,7 @@ def test_worker_file_tools_are_denied_the_credential_stores():
     denied = set(settings("assign")["permissions"]["deny"])
     assert {"Read(~/.ssh)", "Read(~/.ssh/**)", "Edit(~/.aws/**)", "Read(~/.docker/config.json)",
             f"Read(/{lifecycle.info_path()})", f"Edit(/{lifecycle.info_path().parent / 'pro'}/**)"} <= denied
+    assert "AskUserQuestion" in denied      # a question in a pane nobody watches stalls the worker
     assert "permissions" not in settings("interactive")
 
 
