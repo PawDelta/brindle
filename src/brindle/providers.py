@@ -828,7 +828,50 @@ class ClaudeCode(Provider):
         return error if error and cls.FATAL_API_ERROR.match(error) else None
 
     def input_ready(self, screen: str) -> bool:
-        return bool(self.INPUT_FOOTER.search(screen))
+        return not self.teach_auto_mode_menu(screen) and bool(self.INPUT_FOOTER.search(screen))
+
+    @classmethod
+    def teach_auto_mode_menu(cls, screen: str) -> bool:
+        return cls._teach_auto_mode_menu_text(screen) is not None
+
+    @staticmethod
+    def _teach_auto_mode_menu_text(screen: str) -> str | None:
+        """The live 2.1.319 environment upsell, never a quoted title above a composer."""
+        from brindle import prompt_answer
+
+        text = prompt_answer.plain(screen)
+        title = re.search(r"(?m)^[ \t]*Teach auto mode about your environment\?[ \t]*$", text)
+        if not title:
+            return None
+        # A bordered composer supersedes transcript text whether it holds a
+        # draft, continuation rows, a placeholder, or nothing at all. Include
+        # composers containing the title itself in a multiline draft.
+        composers = re.finditer(r"(?ms)^[ \t]*─+[ \t]*\n[ \t]*❯[^\n]*\n.*?^[ \t]*─+[ \t]*$", text)
+        if any(composer.end() > title.start() for composer in composers):
+            return None
+        return text[title.end():]
+
+    @classmethod
+    def teach_auto_mode_key(cls, screen: str) -> str | None:
+        from brindle import prompt_answer
+
+        menu = cls._teach_auto_mode_menu_text(screen)
+        if menu is None:
+            return None
+        # Read only the contiguous numbered choices beneath this title.
+        # Earlier transcript choices and the chat composer are never options.
+        choices = re.search(rf"(?m)(?:^[ \t]*(?:[{prompt_answer.CURSOR}][ \t]*)?"
+                            r"\d+[.)][ \t]+[^\n]+(?:\n|$))+", menu)
+        if choices is None:
+            return None
+        menu = choices.group()
+        if len([ln for ln in menu.splitlines() if prompt_answer.SELECTED.match(ln)]) != 1:
+            return None
+        # Binary 2.1.319: dismiss persists autoModeEnvSetup.dismissed=true;
+        # later (Not now) only defers it seven days. Never use the default Yes.
+        labels = [prompt_answer._option_text(line) for line in menu.splitlines()]
+        option = "Don't show again" if "don't show again" in labels else "Not now"
+        return prompt_answer.next_key(menu, prompt_answer.Decision("decline", option))
 
     def hooks_disabled(self, cwd: str | None, setting_sources: list[str] | None = None) -> str | None:
         # brindle's hooks come in through --settings, which disableAllHooks
@@ -1076,6 +1119,8 @@ class ClaudeCode(Provider):
     TODO_LINE = re.compile(r"^\s*[⎿☐☒✔]")
 
     def screen_state(self, screen: str) -> str | None:
+        if self.teach_auto_mode_menu(screen):
+            return "waiting"
         lines = screen.rstrip().splitlines()
         tail = "\n".join(lines[-25:])
         if ("Do you want to proceed?" in tail or "Enter to confirm" in tail
@@ -1208,6 +1253,8 @@ class ClaudeCode(Provider):
         - 'typing': the chat's input box already holds text someone is
           mid-typing (interactive only; a worker's input is never hand-typed)."""
         plain_full = self._strip_ansi(screen)
+        if self.teach_auto_mode_menu(screen):
+            return "menu"
         plain_lines = plain_full.rstrip().splitlines()[-25:]
         plain_tail = "\n".join(plain_lines)
         border_idx = [i for i, ln in enumerate(plain_lines) if self.BORDER.match(ln) and ln.strip()]
@@ -1243,6 +1290,10 @@ class ClaudeCode(Provider):
                 screen = tmux.capture(target, lines=60)
             except tmux.TmuxError:
                 return False
+            if self.teach_auto_mode_menu(screen):
+                if prompts.decline_teach_auto_mode(screen) == "blocked":
+                    return False
+                continue
             if prompts.draft(screen):
                 return True  # let delivery verification clear a partial brief
             if not self.TRUST_DIALOG.search(screen):
