@@ -2364,7 +2364,8 @@ def _paste_message(db: DB, agent: Agent, text: str, lead: str | None) -> None:
 
     server = server_of(agent)
     identity_lock.ensure(get(db, agent.id))
-    tmux.paste(agent.tmux_window, text, lead=lead, server=server)
+    tmux.paste(agent.tmux_window, text, lead=lead, server=server,
+               authorize=lambda: identity_lock.ensure(get(db, agent.id)))
 
 
 def _send_to_inbox(db: DB, agent: Agent, text: str, sender: str) -> bool:

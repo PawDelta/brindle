@@ -25,7 +25,8 @@ from brindle.db import DB, SCHEMA_VERSION
 def test_failed_report_is_redelivered_once(db, tmp_path, monkeypatch, finding):
     """A single receipt survives each failed stage, including both review findings."""
     from contextlib import contextmanager
-    from brindle import agents, bus, cli, gates, git, identity_lock, inbox, launch_health, pipeline, tmux, usage, workspaces
+    from functools import partial
+    from brindle import agents, bus, cli, gates, git, identity_lock, inbox, pipeline, tmux, usage, workspaces
     from brindle.config import RepoConfig
     from brindle.db import Workspace
     from test_merge_order import add
@@ -100,24 +101,62 @@ def test_failed_report_is_redelivered_once(db, tmp_path, monkeypatch, finding):
         assert db.get_agent("worker").pipeline is None
         # A later flush of the durable report must authorize after preparation,
         # even when it wasn't initiated by report_result itself.
-        phase = "transport"
+        phase = "connect"
         db.update_agent("boss", status="idle")
         monkeypatch.setattr(agents, "is_alive", lambda *a: True)
         monkeypatch.setattr(inbox, "usable", lambda *a: True)
-        monkeypatch.setattr(inbox, "send", lambda *a, **k: notifications.append(bool(locked)) or True)
-        monkeypatch.setattr(launch_health, "before_delivery", lambda *a: locked.append(True))
+        closed = []
+
+        class Socket:
+            def settimeout(self, value):
+                pass
+
+            def connect(self, path):
+                if phase == "connect":
+                    locked.append(True)
+
+            def sendall(self, payload):
+                notifications.append(bool(locked))
+
+            def close(self):
+                closed.append(True)
+
+        monkeypatch.setattr(inbox, "socket", SimpleNamespace(socket=lambda *a: Socket(), AF_UNIX=1, SOCK_STREAM=1))
+        pending_id = db.conn.execute("SELECT id FROM inbox WHERE delivered_at IS NULL").fetchone()[0]
         agents._notify_supervisor(db, db.get_agent("boss"))
-        assert notifications == [] and db.pending_count("boss") == 1
+        assert notifications == [] and closed == [True] and db.pending_count("boss") == 1
+        assert not db.message_delivered(pending_id)
         with pytest.raises(agents.AgentError):
             agents.flush(db, "boss")
         assert notifications == [] and db.pending_count("boss") == 1
         locked.clear()
-        monkeypatch.setattr(launch_health, "before_delivery", lambda *a: "")
+        phase = "transport"
         assert agents.flush(db, "boss")
-        assert notifications == [False] and db.pending_count("boss") == 0
+        assert notifications == [False] and db.message_delivered(pending_id)
 
         # Pane delivery (idle and mid-turn) and pull notices share that guard.
-        monkeypatch.setattr(tmux, "paste", lambda *a, **k: notifications.append(bool(locked)))
+        # Keep the real paste preparation; skip only its submit debounce.
+        monkeypatch.setattr(tmux, "paste", partial(tmux.paste, submit=False))
+        db.update_agent("boss", tmux_server="fake-transport")
+        buffers = set()
+
+        def transport(argv, **kwargs):
+            index = next(i for i, arg in enumerate(argv)
+                         if arg in ("load-buffer", "paste-buffer", "delete-buffer", "send-keys"))
+            command, *args = argv[index:]
+            if command == "load-buffer":
+                buffers.add(args[1])
+                if phase == "paste-load":
+                    locked.append(True)
+            elif command in ("paste-buffer", "delete-buffer"):
+                buffers.discard(args[args.index("-b") + 1])
+                if command == "paste-buffer":
+                    notifications.append(bool(locked))
+            elif command == "send-keys" and phase == "paste-lead":
+                locked.append(True)
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(tmux, "subprocess", SimpleNamespace(run=transport, TimeoutExpired=subprocess.TimeoutExpired))
         monkeypatch.setattr(tmux, "capture", lambda *a, **k: "› \n? for shortcuts\n")
         monkeypatch.setattr(inbox, "usable", lambda *a: False)
         piped = False
@@ -131,17 +170,18 @@ def test_failed_report_is_redelivered_once(db, tmp_path, monkeypatch, finding):
             if route == "notice":
                 # The notice uses _deliver_to_inbox instead of flush's inbox path.
                 db.update_agent("boss", provider="claude")
-                monkeypatch.setattr(inbox, "usable", lambda *a: locked.append(True) or True)
+                phase = "connect"
+                monkeypatch.setattr(inbox, "usable", lambda *a: True)
             else:
-                monkeypatch.setattr(agents, "message_lead", lambda *a: locked.append(True) or "")
+                phase = "paste-load" if route == "idle" else "paste-lead"
             agents._notify_supervisor(db, db.get_agent("boss"))
-            assert notifications == []
+            assert notifications == [] and not buffers
             pending = db.pending_count("boss")
             assert pending == 1
             if route == "idle":
                 assert db.get_agent("boss").status == "idle"  # release our status claim, too
             locked.clear()
-            monkeypatch.setattr(agents, "message_lead", lambda *a: "")
+            phase = "transport"
             if route == "notice":
                 monkeypatch.setattr(inbox, "usable", lambda *a: True)
                 # The queued notice keeps its claim; another notification must
