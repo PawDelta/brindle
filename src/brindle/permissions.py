@@ -98,7 +98,6 @@ from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Iterator
-from urllib.parse import unquote, urlsplit
 
 from brindle import spawn
 from brindle.config import CONFIG_DIR, config_root, brindle_home
@@ -1732,28 +1731,35 @@ def _push_git(folder: str, *args: str) -> str | None:
     return value
 
 
-def _push_targets(folder: str, pushes: list[Push]) -> list[Push]:
+def _push_targets(folder: str, pushes: list[Push], config: dict[str, list[str]]) -> list[Push]:
     """Protect every effective destination's HEAD, without contacting a server.
 
     Git expands pushurl and URL rewrites for us. A remote-tracking HEAD is
     not sufficient proof: its URL may have changed since it was fetched.
     Keep the source repo's existing protection as well as these defaults.
     """
-    urls = _push_git(folder, "remote", "get-url", "--push", "--all", pushes[0].remote)
+    unknown = [replace(push, destination=UNKNOWN_REF) for push in pushes]
+    remote = pushes[0].remote
+    for key, values in config.items():
+        if key in (f"remote.{remote}.url", f"remote.{remote}.pushurl") or key.startswith("url."):
+            # Git's line-oriented URL output cannot distinguish an embedded
+            # newline from another URL. Check the lossless config read first.
+            if any(re.search(r"[\x00-\x1f\x7f]", value) for value in (key, *values)):
+                return unknown
+    urls = _push_git(folder, "remote", "get-url", "--push", "--all", remote)
     defaults = []
-    for url in (urls or "").splitlines():
+    for url in (urls or "").removesuffix("\n").split("\n"):
+        if re.search(r"[\x00-\x1f\x7f]", url):
+            break
         if url.startswith("file://"):
-            try:
-                parsed = urlsplit(url)
-            except ValueError:
-                break
-            path = (unquote(parsed.path) if parsed.netloc in ("", "localhost")
-                    and not parsed.query and not parsed.fragment else "")
+            # Only literal absolute file paths: URL parsers strip controls,
+            # and Unicode percent-decoding can replace Git's actual bytes.
+            path = url[7:] if url.startswith("file:///") and not any(c in url for c in "%?#") else ""
         else:
             path = url if ":" not in url else ""
-        if not path:
+        if not path or path.startswith("~"):
             break
-        target = os.path.join(folder, os.path.expanduser(path))
+        target = os.path.join(folder, path)
         head = _push_git(target, "symbolic-ref", "--quiet", "HEAD")
         if not head or not head.startswith("refs/heads/"):
             break
@@ -1761,7 +1767,7 @@ def _push_targets(folder: str, pushes: list[Push]) -> list[Push]:
     else:
         if defaults:
             return [replace(push, target_defaults=tuple(defaults)) for push in pushes]
-    return [replace(push, destination=UNKNOWN_REF) for push in pushes]
+    return unknown
 
 
 def _resolve_push(req: Request, push: Push, folder: str) -> list[Push]:
@@ -1818,7 +1824,7 @@ def _resolve_push(req: Request, push: Push, folder: str) -> list[Push]:
             "false", "no", "off", "0"):
         return unknown
     if len(positional) == 2:
-        return _push_targets(folder, [replace(push, remote=remote, source=branch, destination=branch)])
+        return _push_targets(folder, [replace(push, remote=remote, source=branch, destination=branch)], config)
     specs = config.get(f"remote.{remote}.push")
     if specs is not None:
         resolved = []
@@ -1833,7 +1839,7 @@ def _resolve_push(req: Request, push: Push, folder: str) -> list[Push]:
                     or ref.startswith("refs/") and not ref.startswith("refs/heads/") for ref in (src, dst)):
                 destination = UNKNOWN_REF
             resolved.append(Push(remote, source, destination, push.force or force, push.delete or not src))
-        return _push_targets(folder, resolved)
+        return _push_targets(folder, resolved, config)
     mode = get("push.default", "simple")
     if mode == "current" or mode == "simple" and remote != (upstream_remote or "origin"):
         destination = branch
@@ -1846,7 +1852,7 @@ def _resolve_push(req: Request, push: Push, folder: str) -> list[Push]:
             return unknown
     else:
         return unknown
-    return _push_targets(folder, [replace(push, remote=remote, source=branch, destination=destination)])
+    return _push_targets(folder, [replace(push, remote=remote, source=branch, destination=destination)], config)
 
 
 def pushes_in_repos(req: Request) -> list[tuple[Push, str]]:

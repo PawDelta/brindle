@@ -267,6 +267,10 @@ def test_autonomous_runs_everything_but_default_branch_pushes_and_destructive_ac
     ("git push", "stable", {"push.default": "current", "remote.origin.pushurl": ["/origin", "/publish"]}, "ask"),
     ("git push", "feature", {"remote.origin.url": "https://example.com/repo.git"}, "ask"),
     ("git push", "feature", {"remote.origin.url": "file:///origin"}, "allow"),
+    ("git push", "stable", {"push.default": "current", "remote.origin.url": "file:///ori\tgin"}, "ask"),
+    ("git push", "stable", {"push.default": "current", "remote.origin.url": "file:///ori%FFgin"}, "ask"),
+    pytest.param("git push", "stable", {"push.default": "current", "remote.origin.url": "file:///origin\n/origin"},
+                 "ask", marks=pytest.mark.variant("embedded newline can masquerade as multiple push URLs")),
     ("git push", "feature", {"remote.origin.url": "file://[invalid"}, "ask"),
     ("git push", "feature", {"remote.origin.url": "/unreadable"}, "ask"),
     ("git push", "feature", {"push.default": "upstream",
@@ -301,8 +305,8 @@ def test_bare_push_asks_only_for_a_protected_target(tmp_path, monkeypatch, comma
 
     def run(args, cwd, **kwargs):
         reads.append((str(cwd), *args))
-        if str(cwd) in ("/origin", "/publish"):
-            target = "main" if str(cwd) == "/origin" else "stable"
+        if str(cwd) in ("/origin", "/publish", "/ori\tgin", "/ori\ufffdgin"):
+            target = "stable" if str(cwd) in ("/publish", "/ori\tgin") else "main"
             return subprocess.CompletedProcess(args, 0, f"refs/heads/{target}\n", "")
         if os.path.realpath(cwd) != folder:  # A main-checkout or unresolved -C read cannot resolve this worktree.
             return subprocess.CompletedProcess(args, 1, "", "")
