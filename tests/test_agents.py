@@ -283,8 +283,9 @@ def test_find_running_reuses_a_live_interactive_agent(db, ws, monkeypatch):
 
 
 def test_handoff_wait_is_bounded_and_detaches(db, ws, monkeypatch):
+    """A detached handoff's reports survive interruptions, then collection drains them."""
     (Path(ws.repo_root) / ".brindle").mkdir(exist_ok=True)
-    (Path(ws.repo_root) / ".brindle" / "config.json").write_text('{"pipeline": false}')
+    (Path(ws.repo_root) / ".brindle" / "config.json").write_text('{"pipeline": true}')
     from brindle import mcp_server
 
     fake_agent(db, ws, status="processing", agent_id="boss")
@@ -296,33 +297,14 @@ def test_handoff_wait_is_bounded_and_detaches(db, ws, monkeypatch):
     assert "still running" in out and "wait_for_worker" in out
     assert db.get_agent("w1").mode == "handoff_detached"
 
-    # Finishing later forwards the result to the supervisor's inbox...
-    agents.report_result(db, "w1", "done later")
-    assert db.pending_count("boss") == 1
-    assert [(e["kind"], e["agent_id"], e["payload"].get("sender_id"))
-            for e in bus.tail(db, kinds=("agent.result", "message.queued"))] == [
-        ("agent.result", "w1", None), ("message.queued", "boss", "w1")]
-    # ...and if the supervisor collects it directly, the duplicate is dropped.
-    out = mcp_server._await_worker(db, "w1", wait_seconds=0)
-    assert "done later" in out
-    assert db.pending_count("boss") == 0
-    assert db.get_agent("w1") is None  # handoff worker closed after collection
-
-
-def test_report_outbox_survives_interruptions_and_delivers_exactly_once(db, ws, monkeypatch):
-    """Every step of a report is on record and every transition is a
-    compare-and-set. Interrupted at the first git call, after receipt, after
-    accept, after dispatch, interleaved at the document check, or duplicated
-    during the head read, the next call resumes and the supervisor gets each
-    report exactly once; nothing reads a report before it is accepted; the same
-    summary at a new head is a new report; rows are kept, never deleted."""
-    fake_agent(db, ws, status="processing", agent_id="boss")
-    fake_agent(db, ws, mode="assign", parent="boss", agent_id="w1")
+    # Finishing later forwards each accepted report exactly once, even when
+    # interrupted before delivery or interleaved with a concurrent report.
     broken = {"git": False, "docs": False, "pre": False, "notify": False}
     at = {"head": "h1"}
     inner = []
     during_docs = []   # (what the interleaved call reports, what the outer call's check then says)
     during_head = []
+    read_docs, warm_checks, notify_parent = agents.stale_analysis_docs, agents.warm_checks, agents._notify_supervisor
 
     def git_head(ws_):
         if broken["git"]:
@@ -338,16 +320,19 @@ def test_report_outbox_survives_interruptions_and_delivers_exactly_once(db, ws, 
             text, verdict = during_docs.pop()
             agents.report_result(db, "w1", text)
             return verdict
+        return read_docs(db_, agent_id)
 
     def warm(ws_):
         if broken["pre"]:
             raise RuntimeError("interrupted after accept")
         if inner:   # a concurrent duplicate call, mid-flight
             inner.pop()()
+        warm_checks(ws_)
 
     def notify(db_, parent):
         if broken["notify"]:
             raise RuntimeError("interrupted after dispatch")
+        notify_parent(db_, parent)
 
     def states():
         return [r["state"] for r in db.conn.execute("SELECT state FROM report_outbox WHERE canonical_id IS NULL ORDER BY id")]
@@ -376,6 +361,9 @@ def test_report_outbox_survives_interruptions_and_delivers_exactly_once(db, ws, 
     inner.append(lambda: agents.report_result(db, "w1", "done"))   # a duplicate call, concurrently
     agents.report_result(db, "w1", "done")
     assert states() == ["delivered"] and messages() == 1
+    assert [(e["kind"], e["agent_id"], e["payload"].get("sender_id"))
+            for e in bus.tail(db, kinds=("agent.result", "message.queued"))] == [
+        ("agent.result", "w1", None), ("message.queued", "boss", "w1")]
     agents.report_result(db, "w1", "done")
     at["head"] = "h2"                                      # the same summary at a new head
     broken["notify"] = True                                # after dispatch
@@ -409,6 +397,11 @@ def test_report_outbox_survives_interruptions_and_delivers_exactly_once(db, ws, 
     agents.report_result(db, "w1", "done, more")
     assert db.conn.execute("SELECT state FROM report_outbox WHERE id=?", (old["id"],)).fetchone()[0] == "superseded"
     assert states()[-1] == "delivered"
+    # Collecting the latest result directly drops the queued handoff messages.
+    out = mcp_server._await_worker(db, "w1", wait_seconds=0)
+    assert "done, more" in out
+    assert db.pending_count("boss") == 0
+    assert db.get_agent("w1") is None
 
 
 @pytest.mark.skipif(not shutil.which("tmux"), reason="tmux not installed")

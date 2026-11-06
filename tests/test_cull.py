@@ -87,51 +87,6 @@ def add(db, ws, agent_id, **kw):
     db.add_agent(Agent(agent_id, ws.id, **fields))
 
 
-@pytest.mark.parametrize("case, expected", [
-    ("received", 1), ("fresh", 0), ("commits", 1), ("more-commits", 1),
-    ("covered", 0), ("active", 0), ("command", 0), ("locked", 1),
-])
-def test_lost_reports_and_unreported_commits_are_noticed_once(db, tmp_path, monkeypatch, case, expected):
-    from brindle import gates, git, identity_lock
-
-    ws = Workspace("ws", str(tmp_path), "work", "worktree", "work", "main",
-                   str(tmp_path), None, "fake", 1)
-    db.add_workspace(ws)
-    add(db, ws, "boss", mode="interactive", status="processing", headless=1, tmux_window="%boss")
-    add(db, ws, "worker", parent_id="boss", status_since=1,
-        provider="codex" if case == "active" else "claude")
-    now = time.time()
-    if case in ("received", "fresh", "covered", "more-commits", "locked"):
-        row = db.outbox_receive("worker", "digest", "done")
-        if case in ("covered", "more-commits"):
-            db.outbox_bind(row["id"], "head" if case == "covered" else "previous")
-            db.outbox_accept(row["id"], "worker", "done")
-            db.outbox_deliver(row["id"], nothing=True)
-        elif case != "fresh":
-            db.conn.execute("UPDATE report_outbox SET updated_at=1 WHERE id=?", (row["id"],))
-        if case in ("received", "fresh", "locked"):
-            db.set_status("worker", "processing")  # the outbox doesn't depend on the pane being idle
-    monkeypatch.setattr(agents, "is_alive", lambda *a: True)
-    monkeypatch.setattr(tmux, "window_activity", lambda *a, **k: now)
-    monkeypatch.setattr(gates, "head", lambda ws_: "head")
-    monkeypatch.setattr(git, "ok", lambda *a: True)
-    monkeypatch.setattr(git, "run", lambda argv, *a: SimpleNamespace(stdout="a b" if argv[0] == "rev-list" else ""))
-    monkeypatch.setattr(agents, "command_running", lambda *a: case == "command")
-    locked = [True] if case == "locked" else []
-    monkeypatch.setattr(identity_lock, "locked_by", lambda aid: "other" if aid == "boss" and locked else None)
-    panes = _live_panes()
-    cull.note_unreported_commits(db, now, panes)
-    if locked:
-        assert db.pending_count("boss") == 0
-        locked.clear()
-    cull.note_unreported_commits(db, now, panes)
-    cull.note_unreported_commits(db, now, panes)
-    assert db.pending_count("boss") == expected
-    if case == "received":
-        row = db.outbox_receive("worker", "next", "new report")
-        db.conn.execute("UPDATE report_outbox SET updated_at=1 WHERE id=?", (row["id"],))
-        cull.note_unreported_commits(db, now, panes)
-        assert db.pending_count("boss") == 2  # each undelivered receipt has its own notice
 
 
 def test_sweep_stops_processes_of_paused_agents(db, ws, proc_cleanup):
@@ -188,43 +143,99 @@ def test_sweep_pauses_agents_whose_window_is_gone(db, ws, proc_cleanup, monkeypa
     assert set(killed) == {"%1", "%2", "%3"}
 
 
-@pytest.mark.parametrize("provider,mode,fixing", [
-    ("claude", "assign", False),
-    ("codex", "assign", False),   # no turn-start event: its pane must be quiet too
-    ("claude", "review", False),  # a piped reviewer: the pipeline tells the supervisor
-    ("claude", "assign", "unchanged"),
-])
-def test_idle_unreported_worker_noticed_without_goal(db, ws, monkeypatch, provider, mode, fixing):
-    """autopilot.on_stop only checks on workers when a goal is set; most
-    sessions have none, so the sweep reminds the supervisor itself, even if
-    the worker's stop already sent a notice that went unread."""
-    from brindle import gates, pipeline
+def test_idle_unreported_worker_noticed_without_goal(db, ws, tmp_path, monkeypatch):
+    """A sweep distinguishes idle, busy, covered and undelivered workers in one session."""
+    from brindle import gates, git, identity_lock, pipeline
 
-    add(db, ws, "boss", mode="interactive", status="processing", profile="supervisor", tmux_window="@998")
-    db.add_autopilot("boss")
-    add(db, ws, "w1", parent_id="boss", provider=provider, mode=mode,
-        status_since=time.time() - 600)
-    db.update_agent("w1", unreported_noted=1)
-    if fixing:
-        db.update_agent("w1", result="done", pipeline="fixing", pipeline_rounds=1)
-        reviewed = gates.head(ws) if fixing == "unchanged" else "0" * 40
-        db.add_review(ws.id, reviewed, "r1", False, "fix the bug")
-        db.conn.execute("UPDATE reviews SET created_at=?", (time.time() - 900,))
-    sent = []
-    activity = time.time()  # its pane printed just now
-    monkeypatch.setattr(tmux, "window_activity", lambda target, **k: activity)
-    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
-    monkeypatch.setattr(agents, "command_running", lambda db_, a: False)
+    now = time.time()
+    panes = tmux.PaneSnapshot(tmux.current_server())
+    workers = [
+        ("idle-claude", "claude", "assign", False),
+        ("idle-codex", "codex", "assign", False),
+        ("idle-review", "claude", "review", False),
+        ("idle-fixing", "claude", "assign", True),
+    ]
+    for name, provider, mode, fixing in workers:
+        parent = "boss-" + name
+        add(db, ws, parent, mode="interactive", status="processing", profile="supervisor",
+            tmux_window="%" + parent)
+        db.add_autopilot(parent)
+        add(db, ws, name, parent_id=parent, provider=provider, mode=mode,
+            status_since=now - 600, tmux_window="%" + name)
+        db.update_agent(name, unreported_noted=1)
+        panes["%" + name] = panes["%" + parent] = True
+        if fixing:
+            db.update_agent(name, result="done", pipeline="fixing", pipeline_rounds=1)
+            db.add_review(ws.id, "head", "r1", False, "fix the bug")
+            db.conn.execute("UPDATE reviews SET created_at=?", (now - 900,))
+    sent, original_send = [], agents.send_message
+    activity = now
+    monkeypatch.setattr(tmux, "list_panes", lambda *a, **k: panes)
+    monkeypatch.setattr(tmux, "window_activity", lambda *a, **k: activity)
+    monkeypatch.setattr(agents, "is_alive", lambda *a: True)
+    monkeypatch.setattr(agents, "command_running", lambda *a: False)
     monkeypatch.setattr(agents, "send_message", lambda db_, to, body, **k: sent.append(to))
     monkeypatch.setattr(pipeline, "on_reviewer_unreported",
                         lambda db_, r, ws_: sent.append(r.parent_id) or True)
+    monkeypatch.setattr(gates, "head", lambda *a: "head")
     cull.sweep(db)
-    # Codex still reads 'idle' through a resumed turn: its fresh output says otherwise.
-    assert sent == ([] if provider == "codex" else ["boss"])
-    activity = time.time() - 600
+    expected = {"boss-idle-claude", "boss-idle-review", "boss-idle-fixing"}
+    assert len(sent) == 3 and set(sent) == expected  # Codex's fresh output keeps it active
+    activity = now - 600
     cull.sweep(db)
     cull.sweep(db)
-    assert sent == ["boss"]
+    assert len(sent) == 4 and set(sent) == expected | {"boss-idle-codex"}
+
+    # Those workers finish; now distinguish lost receipts from unreported commits.
+    for name, _, _, _ in workers:
+        db.update_agent(name, status="done")
+    notice_ws = Workspace("notices", str(tmp_path), "work", "worktree", "work", "main",
+                          str(tmp_path), None, "fake", 1)
+    db.add_workspace(notice_ws)
+    cases = ("received", "fresh", "commits", "more-commits", "covered", "active", "command", "locked")
+    for case in cases:
+        parent = "notice-boss-" + case
+        add(db, notice_ws, parent, mode="interactive", status="processing", headless=1,
+            tmux_window="%" + parent)
+        add(db, notice_ws, case, parent_id=parent, status_since=1, tmux_window="%" + case,
+            provider="codex" if case == "active" else "claude")
+        panes["%" + case] = panes["%" + parent] = True
+        if case in ("received", "fresh", "covered", "more-commits", "locked"):
+            row = db.outbox_receive(case, "digest", "done")
+            if case in ("covered", "more-commits"):
+                db.outbox_bind(row["id"], "head" if case == "covered" else "previous")
+                db.outbox_accept(row["id"], case, "done")
+                db.outbox_deliver(row["id"], nothing=True)
+            else:
+                db.set_status(case, "processing")  # receipt notices don't depend on idle panes
+                if case != "fresh":
+                    db.conn.execute("UPDATE report_outbox SET updated_at=1 WHERE id=?", (row["id"],))
+    monkeypatch.setattr(agents, "send_message", original_send)
+    monkeypatch.setattr(git, "ok", lambda *a: True)
+    monkeypatch.setattr(git, "run", lambda argv, *a: SimpleNamespace(stdout="a b" if argv[0] == "rev-list" else ""))
+    monkeypatch.setattr(agents, "command_running", lambda db_, a: a.id == "command")
+    activity = now
+    locked = [True]
+    monkeypatch.setattr(identity_lock, "locked_by",
+                        lambda aid: "other" if aid == "notice-boss-locked" and locked else None)
+
+    def counts():
+        return {case: db.pending_count("notice-boss-" + case) for case in cases}
+
+    cull.note_unreported_commits(db, now, panes)
+    expected = dict(received=1, fresh=0, commits=1, covered=0, active=0, command=0, locked=0)
+    expected["more-commits"] = 1
+    assert counts() == expected
+    locked.clear()
+    cull.note_unreported_commits(db, now, panes)
+    cull.note_unreported_commits(db, now, panes)
+    expected["locked"] = 1
+    assert counts() == expected
+    row = db.outbox_receive("received", "next", "new report")
+    db.conn.execute("UPDATE report_outbox SET updated_at=1 WHERE id=?", (row["id"],))
+    cull.note_unreported_commits(db, now, panes)
+    expected["received"] = 2  # each undelivered receipt has its own notice
+    assert counts() == expected
 
 
 def _live_panes():
