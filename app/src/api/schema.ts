@@ -119,6 +119,7 @@ export interface AgentDTO {
   id: string;
   locked?: string | null;
   mode: string;
+  model?: string | null;
   parent_id?: string | null;
   pending?: number | null;
   profile: string;
@@ -994,6 +995,7 @@ export interface SessionDTO {
   mode: string;
   name?: string | null;
   profile: string;
+  request?: string | null;
   status: string;
   status_since?: number | null;
   workspace_id: string;

@@ -53,7 +53,8 @@ def test_brief_only_for_large_work(weight, plan, db, backend, tmp_path):
     # Longer than any cap, with the usual fence markers inside: it must arrive whole and as is.
     block = "\n".join([*knowledge._FENCE, "x" * 20000, "final qualification "])
     backend.routes["POST /analysis-docs/brief"] = [(200, {"block": block, "cited": [{"doc_id": "d1", "version": 3}]})]
-    backend.routes["GET /me/analysis-docs/settings"] = [(200, {"switches": {"assist": "off"} if plan == "off" else {}})]
+    switches = {"assist": "on"} if plan == "pro" else {"assist": "off"} if plan == "off" else {}
+    backend.routes["GET /me/analysis-docs/settings"] = [(200, {"switches": switches})]
     login_as(backend, credentials.default_store(),
              features=("learning",) if plan == "free" else ("analysis_docs",))
     repo = str(tmp_path / "repo")
@@ -120,7 +121,7 @@ def test_reviewer_gets_the_doc_block_only_when_it_names_a_changed_file(block, sh
 def test_goal_is_briefed_once_and_told_to_leave_a_doc_when_audit_approves(db, boss, backend, monkeypatch):
     monkeypatch.setattr(autopilot, "_commit", lambda ws, tracked_only=False: "abc123")
     backend.routes["POST /analysis-docs/brief"] = [(200, {"block": "known: the cache", "cited": []})]
-    backend.routes["GET /me/analysis-docs/settings"] = [(200, {"switches": {}})]
+    backend.routes["GET /me/analysis-docs/settings"] = [(200, {"switches": {"assist": "on"}})]
     monkeypatch.setattr(auth.UrllibTransport, "request", lambda self, *a: backend.request(*a))
     login_as(backend, credentials.default_store(), features=("analysis_docs",))
     db.add_autopilot("boss")
