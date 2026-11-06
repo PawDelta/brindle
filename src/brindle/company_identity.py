@@ -503,17 +503,27 @@ def expected_ident(claude) -> str | None:
 def matches(expected: str | None, current: str | None) -> bool:
     """Whether ``current`` (a probed ``Identity.ident``) is the ``expected``
     one from ``expected_ident``, or a recorded ident. Never true when either is
-    unknown. Two Claude org idents match on the org id alone: the display name
-    in front of it can be renamed (or differ between members) without the org
-    changing. Every other ident (AWS, GCP, Azure, gateway) must match exactly."""
+    unknown. The company is the boundary: two Claude org idents match on the
+    org id alone (the display name in front of it can be renamed, or differ
+    between members), two AWS idents on the account alone (whatever role in
+    it). Every other ident (GCP, Azure, gateway) must match exactly."""
     if not expected or not current:
         return False
     if expected.startswith("org:"):
         return (_org_of(current) or "").casefold() == expected[4:].casefold()
-    was, now = _org_of(expected), _org_of(current)
+    was, now = _company_of(expected), _company_of(current)
     if was and now:
-        return was.casefold() == now.casefold()
+        return was == now
     return expected.casefold() == current.casefold()
+
+
+def _company_of(ident: str) -> tuple[str, str] | None:
+    """(kind, id) of the company an ident belongs to, for the kinds compared
+    at that level: a Claude org's id, an AWS account. None for any other."""
+    if org := _org_of(ident):
+        return "org", org.casefold()
+    m = re.fullmatch(r"AWS account ([^,\s]+), role .*", ident)
+    return ("aws", m.group(1).casefold()) if m else None
 
 
 def _org_of(ident: str) -> str | None:
