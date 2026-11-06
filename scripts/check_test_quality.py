@@ -29,7 +29,7 @@ MAX_PERMUTATIONS = 12
 # Recoverable worktree cleanup adds 14 restore, retention and failure cases.
 # The policy-on default, its Inbox card and failing closed in modes with no prompt
 # add 15 launch, home-state and OpenCode cases, each failing without its fix.
-TEST_BUDGET = 3650
+TEST_BUDGET = 3651
 
 
 class Finding(NamedTuple):

@@ -87,6 +87,7 @@ def test_promptless_interactive_start_keeps_profile_tools_and_autopilot_context(
     monkeypatch.setattr(model_access, "probe", lambda *a, **k: pytest.fail("availability generation probe"))
     monkeypatch.setattr(autopilot, "guide", lambda *a: "\nAutopilot context must survive initialization.")
     monkeypatch.setattr(cli, "_preflight", lambda *a: None)
+    monkeypatch.setattr(cli.git, "require_user_identity", lambda path: None)
     monkeypatch.setattr(cli, "_trust_codex_hook", lambda *a: None)
     monkeypatch.setattr(cli, "_cull_detached", lambda *a: None)
     monkeypatch.setattr(cli, "_local_models_detached", lambda *a: None)

@@ -248,6 +248,7 @@ def slow_background(monkeypatch):
 
 
 def test_brindle_start_returns_within_budget(db, repo, monkeypatch, detached, slow_background):
+    monkeypatch.setattr(cli.git, "require_user_identity", lambda path: None)
     monkeypatch.chdir(repo)
     ws = workspaces.adopt_root(db, str(repo))
     # A session still running here, which keeps running alongside the new one.

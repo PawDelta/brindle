@@ -324,6 +324,10 @@ def agent_env(ws: Workspace, agent_id: str, agent: Agent | None = None,
     # whose dialog nobody in a pane can answer (see git.pane_git_config).
     if config := git.pane_git_config(gh=_KEYCHAIN_HELPER_PLATFORM):
         env.setdefault("GIT_CONFIG_PARAMETERS", config)
+    if os.path.isdir(ws.path):
+        # An account with no git identity: fill only what is still missing once
+        # the whole environment (a profile's GIT_* lines included) is assembled.
+        env.update(git.identity_env(ws.path, env))
     return env
 
 
