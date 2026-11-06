@@ -547,12 +547,13 @@ it takes a few minutes, most of them the approval.
    "Use workflow from", pick a release tag (`app-v*`, usually the bad
    release's own): the job runs in `desktop-release`, which admits only
    `app-v*` tags, and the tag's commit must be on `main`. The tag must
-   carry this workflow, so it works from the first release made after it
-   landed.
+   carry this workflow's `release-gate` job; use a release made after the
+   approval split landed.
 2. Enter the version to go back to (`X.Y.Z`, a stable release published under
    `<X.Y.Z>/`, normally the one before the bad release) and run it.
-3. Approve the run in the `desktop-release` environment, as for a stable
-   publish.
+3. Approve the run in the `release-gate` environment, as for a stable
+   publish. The rollback job then uses `desktop-release` for credentials
+   without another approval.
 
 The job downloads `<X.Y.Z>/brindle_<X.Y.Z>_<arch>.app.tar.gz` and its `.sig`
 for both Macs from the site, and `scripts/feed_rollback.mjs` checks each

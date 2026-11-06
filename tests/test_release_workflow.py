@@ -8,13 +8,17 @@ import yaml
 
 
 @pytest.mark.variant("release approval dependencies are outside Python coverage")
-def test_single_release_approval_precedes_credentials():
+@pytest.mark.parametrize("workflow,gate_condition", [
+    ("app-release.yml", "github.event_name == 'push' && github.ref_type == 'tag'"),
+    ("app-feed-rollback.yml", "github.ref_type == 'tag' && startsWith(github.ref_name, 'app-v')"),
+])
+def test_single_release_approval_precedes_credentials(workflow, gate_condition):
     root = Path(__file__).resolve().parents[1]
-    jobs = yaml.safe_load((root / ".github/workflows/app-release.yml").read_text())["jobs"]
+    jobs = yaml.safe_load((root / ".github/workflows" / workflow).read_text())["jobs"]
     approval_jobs = [name for name, job in jobs.items() if job.get("environment") == "release-gate"]
     assert approval_jobs == ["release-gate"]
     gate = jobs["release-gate"]
-    assert gate["if"] == "github.event_name == 'push' && github.ref_type == 'tag'"
+    assert gate["if"] == gate_condition
     assert "secrets." not in yaml.safe_dump(gate)
 
     def ancestors(name):
