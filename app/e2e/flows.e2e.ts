@@ -59,10 +59,15 @@ test("session terminal: a paste reaches the pty, and a printed URL opens in the 
   await expect(link).toBeVisible();
   const mac = await page.evaluate(() => /Mac|iPhone|iPad/.test(navigator.platform));
   const opened = () => page.evaluate(() => (window as unknown as { opened: string[] }).opened);
-  // (forced: xterm's screen layer sits over its rows and takes the mouse)
-  await link.click({ force: true });
+  // By position, as a person's mouse: xterm's screen layer sits over its rows and takes
+  // the mouse, and a redraw can leave a locator's span with no size at the moment it clicks.
+  const box = (await link.boundingBox())!;
+  const at = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+  await page.mouse.click(at.x, at.y);
   expect(await opened()).toEqual([]);
-  await expect(link).toBeVisible();   // the click can redraw the rows: a forced click needs them back
-  await link.click({ force: true, modifiers: [mac ? "Meta" : "Control"] });
+  const modifier = mac ? "Meta" : "Control";
+  await page.keyboard.down(modifier);
+  await page.mouse.click(at.x, at.y);
+  await page.keyboard.up(modifier);
   await expect.poll(opened).toEqual(["https://example.com/pr/7"]);
 });

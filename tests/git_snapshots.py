@@ -32,7 +32,8 @@ def _path_records(root: Path):
 def _copy(src: Path, dst: Path, names) -> None:
     for name in names:
         shutil.rmtree(dst / name, ignore_errors=True)
-        shutil.copytree(src / name, dst / name, symlinks=True)
+        # Not lock files: git's background maintenance can remove one mid-copy, and none belongs in a snapshot.
+        shutil.copytree(src / name, dst / name, symlinks=True, ignore=shutil.ignore_patterns("*.lock"))
 
 
 def _relocate(value, old: str, new: str):
