@@ -942,9 +942,10 @@ IDENTITY_MESSAGE = ('Git needs your name and email for commits in this repo. Set
 
 
 def missing_user_identity(path: str | Path) -> list[str]:
-    """Missing user config fields, including values inherited from global config."""
-    return [field for field in ("name", "email")
-            if not run(["config", "--get", f"user.{field}"], path, check=False).stdout.strip()]
+    """The fields, "name" and "email", git has no value for at ``path`` in either
+    role, resolved as git does (missing_identity): an identity in the environment counts."""
+    missing = {field for _, field in missing_identity(path)}
+    return [field for field in ("name", "email") if field in missing]
 
 
 def require_user_identity(path: str | Path) -> None:

@@ -11,8 +11,7 @@ from brindle.db import Agent
 
 
 def _no_identity(monkeypatch, tmp_path):
-    for k in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
-              "EMAIL"):
+    for k in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "EMAIL"):
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("HOME", str(tmp_path / "newhome"))
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/dev/null")
@@ -25,11 +24,8 @@ def _profile(env):
 
 
 def _worker_commit(db, ws, name):
-    """What a worker does: plain git in its worktree, in the environment
-    brindle launches it with (agent_env)."""
     path = Path(ws.path)
-    agent = Agent(f"w-{name}", ws.id, "developer", "shell", None, "assign", "idle", "", None,
-                  time.time())
+    agent = Agent(f"w-{name}", ws.id, "developer", "shell", None, "assign", "idle", "", None, time.time())
     db.add_agent(agent)
     env = {**os.environ, **agents.agent_env(ws, agent.id, agent)}
     (path / name).write_text("x = 1\n")

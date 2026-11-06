@@ -56,10 +56,10 @@ def claude_payload(tool, tool_input, cwd=None):
 # -- who the policy is on for -----------------------------------------------------------------
 
 
+@pytest.mark.variant("the owner's decision: a home from before the default gets the rules; an explicit off or preset stays")
 @pytest.mark.parametrize("before, policy, source, preset", [
     (lambda repo: None, "on", "default", "autonomous"),
-    pytest.param(lambda repo: DB(), "on", "default", "autonomous", marks=pytest.mark.variant(
-        "the account that showed this: a home from before the default, with a database and no preset")),
+    (lambda repo: DB(), "on", "default", "autonomous"),
     (lambda repo: permissions.apply_preset("secure"), "on", "default", "secure"),
     (lambda repo: set_user(POLICY_DEFAULT_KEY, "on"), "on", "default", "autonomous"),
     (lambda repo: set_user("permission_policy", "off"), "off", "user", "autonomous"),
