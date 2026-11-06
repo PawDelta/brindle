@@ -102,6 +102,14 @@ def test_submit_plan_needs_a_plan_first_worker(db, repo, boss, sent):
     assert not sent
 
 
+def test_plan_approval_reminds_to_split(db, repo, boss, sent, monkeypatch):
+    planner(db, boss)
+    monkeypatch.setenv("BRINDLE_AGENT_ID", "w1")
+
+    assert "Plan sent" in mcp_server.submit_plan("Add feature A and feature B")
+    assert autopilot.PLAN_SPLIT_REMINDER in sent[0][1]
+
+
 def test_approve_plan_can_ask_for_a_revision(db, repo, boss, sent):
     planner(db, boss, plan_state="proposed")
     agents.approve_plan(db, "boss", "w1", "split it up", approved=False)

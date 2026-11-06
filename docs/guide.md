@@ -302,7 +302,9 @@ or put the goal in `.brindle/goals.md`, and it works like a project manager:
    key): the worker reads the code, then calls `submit_plan` with a short plan
    and waits. The plan reaches the supervisor as a message; `approve_plan`
    approves it, or (`approved=false`, with feedback) sends it back for a
-   revision. For Claude workers brindle's PreToolUse hook refuses Edit, Write
+   revision. Before deciding, check which parts need no result from the rest;
+   start those workers with `assign` and approve the rest. For Claude workers
+   brindle's PreToolUse hook refuses Edit, Write
    and NotebookEdit until the plan is approved; other CLIs are only told to
    wait. brindle doesn't count a worker waiting on approval as stalled, and
    reminds the supervisor about plans awaiting a decision.

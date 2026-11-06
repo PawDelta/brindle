@@ -3950,9 +3950,12 @@ def submit_plan(db: DB, agent_id: str, plan: str) -> str:
     if not agent.parent_id:
         raise AgentError("no supervisor to send the plan to")
     db.update_agent(agent.id, plan_state="proposed", plan_text=plan.strip())
+    from brindle.autopilot import PLAN_SPLIT_REMINDER
+
     send_message(db, agent.parent_id,
                  f"Worker {agent.id} proposes this plan and is waiting for your decision "
-                 f"(approve_plan agent_id={agent.id}):\n\n{plan.strip()}", sender_id=agent.id)
+                 f"(approve_plan agent_id={agent.id}):\n{PLAN_SPLIT_REMINDER}\n\n{plan.strip()}",
+                 sender_id=agent.id)
     return "Plan sent. Stop now and wait for your supervisor's decision; don't edit files until it's approved."
 
 
