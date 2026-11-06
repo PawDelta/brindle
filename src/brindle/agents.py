@@ -4863,7 +4863,8 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
 
         # A request left to the person with no PostToolUse by the end of the
         # turn wasn't approved (or we can't tell): drop it, learn nothing.
-        db.clear_permission_requests(agent_id)
+        # Terminal approval commands must remain usable after this reply.
+        db.clear_permission_requests(agent_id, keep_terminal=True)
         # A worker's turn is over: its branch may now share changed files
         # with another running branch, which the supervisor hears about now
         # rather than at merge time.

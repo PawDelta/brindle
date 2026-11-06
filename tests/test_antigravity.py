@@ -382,19 +382,23 @@ def test_interactive_supervisor_on_autonomous_needs_no_grants(db, ws, monkeypatc
     commands = [line for line in refused["reason"].splitlines() if line.startswith("brindle permissions allow ")]
     assert len(commands) == 1
     assert CliRunner().invoke(app, shlex.split(commands[0])[1:]).exit_code == 1
+    db.add_permission_request("sup", "transient", "{}", "unanswered prompt")
+    antigravity.handle_hook(db, "sup", "agy-stop", {})
+    assert all(r["tool_use_id"] != "transient" for r in db.permission_requests_of("sup"))
     with monkeypatch.context() as person:
         person.delenv("BRINDLE_AGENT_ID")
         person.setattr("brindle.cli.DB", lambda: db)
         for args in (["missing-request"], ["bash", "git push origin main"]):
             assert CliRunner().invoke(app, ["permissions", "allow", "--once", *args]).exit_code == 1
             assert permissions.load_store().saved == []
+        denied = permissions.add_rule("bash", pushes[0], "deny")
+        assert CliRunner().invoke(app, shlex.split(commands[0])[1:]).exit_code == 1
+        assert permissions.load_store().saved == []
+        permissions.forget(denied.id)
         result = CliRunner().invoke(app, shlex.split(commands[0])[1:])
         assert result.exit_code == 0, result.output
-    denied = permissions.add_rule("bash", pushes[0], "deny")
-    with monkeypatch.context() as person:
-        person.delenv("BRINDLE_AGENT_ID")
-        person.setattr("brindle.cli.DB", lambda: db)
         assert CliRunner().invoke(app, shlex.split(commands[0])[1:]).exit_code == 1
+    denied = permissions.add_rule("bash", pushes[0], "deny")
     assert answer("run_command", {"CommandLine": pushes[0]})["decision"] == "deny"
     permissions.forget(denied.id)
     assert answer("run_command", {"CommandLine": "git push --force origin main"})["decision"] == "deny"
@@ -404,6 +408,8 @@ def test_interactive_supervisor_on_autonomous_needs_no_grants(db, ws, monkeypatc
     with monkeypatch.context() as other:
         other.setenv("BRINDLE_AGENT_ID", "other")
         assert answer("run_command", {"CommandLine": pushes[0]})["decision"] == "deny"
+    antigravity.handle_hook(db, "other", "agy-stop", {"error": "provider error"})
+    assert db.permission_requests_of("other") == []
     assert answer("run_command", {"CommandLine": pushes[0]})["decision"] == "allow"
     assert answer("run_command", {"CommandLine": pushes[0]})["decision"] == "deny"
     # The default branch a push rule means is that of the repo it runs in, however it gets there.
