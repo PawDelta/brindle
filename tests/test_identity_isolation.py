@@ -230,6 +230,16 @@ def test_legacy_agents_without_a_recorded_identity_are_unaffected(db, ws, who, l
     assert tasks.unmet_dependencies(db, db.find_workspaces(ws.repo_root)[0], ["w1"]) == []
 
 
+@pytest.mark.parametrize("now, locked", [
+    ("claude org Acme Corp (org-1)", False),   # the org renamed: same org id
+    ("claude org Acme (org-2)", True),         # same name, another org: still locked
+])
+def test_identity_lock_compares_the_claude_org_id(db, ws, who, now, locked):
+    worker(db, ws)
+    who.ident = now
+    assert identity_lock.locked_by("w1") == (ACME if locked else None)
+
+
 def test_an_unknown_current_identity_never_locks(db, ws, who):
     worker(db, ws)
     who.kind = "undetermined"

@@ -502,11 +502,17 @@ def expected_ident(claude) -> str | None:
 
 def matches(expected: str | None, current: str | None) -> bool:
     """Whether ``current`` (a probed ``Identity.ident``) is the ``expected``
-    one from ``expected_ident``. Never true when either is unknown."""
+    one from ``expected_ident``, or a recorded ident. Never true when either is
+    unknown. Two Claude org idents match on the org id alone: the display name
+    in front of it can be renamed (or differ between members) without the org
+    changing. Every other ident (AWS, GCP, Azure, gateway) must match exactly."""
     if not expected or not current:
         return False
     if expected.startswith("org:"):
         return (_org_of(current) or "").casefold() == expected[4:].casefold()
+    was, now = _org_of(expected), _org_of(current)
+    if was and now:
+        return was.casefold() == now.casefold()
     return expected.casefold() == current.casefold()
 
 
