@@ -890,6 +890,10 @@ class ReadinessWatch:
         if spawn.room() < 1:
             return []
         poll_merged(db)
+        try:
+            session_sync.tell_refused_fetches(db)
+        except Exception:  # noqa: BLE001 - a missed notice never stops the sweep
+            log.exception("brindle: couldn't tell a supervisor about a refused fetch")
         now: dict[str, bool] = {}
         fingerprints: dict[str, tuple] = {}
         for (root_id,) in db.conn.execute("SELECT root_id FROM autopilot").fetchall():

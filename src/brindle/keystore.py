@@ -49,6 +49,34 @@ ACCOUNT = "default"
 MAX_BLOB = 64 * 1024
 FORCE_ENV = "BRINDLE_PRO_CREDENTIAL_STORE"
 KEYCHAIN_READ_TTL = 30.0  # seconds before another process's changes become visible
+# brindle's items are written by `security`, so reading them with `security`
+# raises no dialog, but a locked keychain does, and each read would raise it
+# anew. So a read that ended in a dialog's refusal stops all reads, across
+# brindle's processes, until the person acts (forget_refused): however long
+# later, polling must not ask again. `security` exits with the status's low byte:
+# errSecAuthFailed (denied) and errSecUserCanceled. Other failures raised no
+# dialog, and keep failing or recover on their own.
+KEYCHAIN_DIALOG_EXITS = frozenset({51, 128})
+KEYCHAIN_REFUSED_FILE = "keychain-refused"
+
+
+def _refused_marker() -> Path:
+    from brindle.config import brindle_home
+
+    return brindle_home() / KEYCHAIN_REFUSED_FILE
+
+
+def _note_refused() -> None:
+    with contextlib.suppress(OSError):
+        marker = _refused_marker()
+        marker.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        marker.touch()
+
+
+def forget_refused() -> None:
+    """The person acted (a key saved, `brindle keys unblock`): the keychain may be asked again."""
+    with contextlib.suppress(OSError):
+        _refused_marker().unlink(missing_ok=True)
 
 
 @dataclass
@@ -119,6 +147,8 @@ class KeychainStore:
     KEYCHAIN_READ_TTL seconds. Other processes' changes appear after expiry;
     save/delete in this process invalidate immediately, even on failure.
     Cached records are decoded afresh so callers can safely modify them.
+    A read refused at a dialog, or never answered, stops later reads until the
+    person acts (KEYCHAIN_DIALOG_EXITS): polling never repeats a dialog.
     """
     name = "keychain"
 
@@ -129,7 +159,10 @@ class KeychainStore:
 
     def _run(self, args: list[str], stdin: str | None = None) -> subprocess.CompletedProcess:
         if args[0] == "find-generic-password":     # a lookup: a brindle.spawn read
-            return spawn.read(["security", *args], timeout=STORE_LIMIT)
+            # Run to an outcome: stopped when a client goes away, a dialog it was
+            # waiting on would just come back at the next poll. A read cut short
+            # isn't a refusal either, so nothing could be held back for it.
+            return spawn.read(["security", *args], timeout=STORE_LIMIT, to_its_end=True)
         return spawn.action(["security", *args], input=stdin, timeout=STORE_WRITE_LIMIT)
 
     def load(self) -> dict | None:
@@ -139,10 +172,20 @@ class KeychainStore:
             if not _uncached_reads.get() and time.monotonic() < self._read.expires:
                 return _decode(self._read.blob) if self._read.blob is not None else None
             self._read.invalidate()
-            r = self._run(["find-generic-password", "-a", self.account, "-s", self.service, "-w"])
+            if _refused_marker().exists():
+                raise CredentialError("the keychain refused an earlier read (locked, or its dialog cancelled), and "
+                                      "brindle won't raise that dialog again by itself: once it's unlocked, "
+                                      "`brindle keys unblock` lets brindle read it")
+            try:
+                r = self._run(["find-generic-password", "-a", self.account, "-s", self.service, "-w"])
+            except subprocess.TimeoutExpired:    # a dialog nobody answered
+                _note_refused()
+                raise CredentialError("keychain read timed out") from None
             if r.returncode == 44:   # errSecItemNotFound
                 blob, value = None, None
             elif r.returncode != 0:
+                if r.returncode in KEYCHAIN_DIALOG_EXITS:
+                    _note_refused()
                 raise CredentialError(f"keychain read failed (security exit {r.returncode})")
             else:
                 blob = r.stdout
@@ -163,6 +206,7 @@ class KeychainStore:
             r = self._run(["-i"], stdin=line)
             if r.returncode != 0 or "error" in (r.stderr or "").lower():
                 raise CredentialError(f"keychain write failed (security exit {r.returncode})")
+            forget_refused()
 
     def delete(self) -> None:
         with self._read.lock:

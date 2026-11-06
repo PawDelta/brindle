@@ -546,6 +546,9 @@ def brindle_home(tmp_path, monkeypatch, ambient_brindle_env):
     # rule covers. The tests' policy is Standard (asks), so a test that wants the
     # default behaviour says so (tests/test_permission_presets.py).
     monkeypatch.setattr("brindle.permissions.DEFAULT_PRESET", "standard")
+    # ... and this home is an existing install's, whose policy nobody turned on:
+    # a test of the new install's default says so (tests/test_permission_policy.py).
+    monkeypatch.setenv("BRINDLE_NO_FIRST_RUN", "1")
     # Never touch the real ~/.claude.json (providers.trust_folder writes there).
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-config"))
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
@@ -639,6 +642,16 @@ def finish_review_inline(monkeypatch):
 
     monkeypatch.setattr(agents, "finish_review_later",
                         lambda reviewer_id, ws_id: agents.finish_review(DB(), reviewer_id, ws_id))
+
+
+@pytest.fixture(autouse=True)
+def gh_sign_in_unknown(monkeypatch):
+    """No test asks the machine's real gh whether it's signed in: a pane's
+    environment would depend on who runs the suite. tests/test_git_reads.py
+    puts the real lookup back, with a fake gh."""
+    from brindle import git
+
+    monkeypatch.setattr(git, "gh_credential_helper", lambda: None)
 
 
 @pytest.fixture(autouse=True)

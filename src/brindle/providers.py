@@ -172,7 +172,14 @@ def _codex_denied_reads() -> list[str]:
 
 
 class CodexSandboxRefused(RuntimeError):
-    """The permission policy is on, but Codex would ignore brindle's sandbox profile."""
+    """The permission policy is on, but Codex would ignore brindle's sandbox
+    profile: ``problem``, a clause saying why, and ``fix``, what would change that."""
+
+    def __init__(self, problem: str, fix: str) -> None:
+        self.problem, self.fix = problem, fix
+        super().__init__(
+            f"brindle won't start this Codex worker: permission_policy is on, but {problem}. {fix}, or turn the "
+            'permission policy off for this repo ("permission_policy": "off" in .brindle/config.local.json)')
 
 
 def _codex_layers(cwd: str) -> list[tuple[str, dict]] | None:
@@ -210,48 +217,55 @@ def codex_sandbox_base(cwd: str) -> str:
     workspace sandbox). Raises CodexSandboxRefused when Codex would ignore
     brindle's profile, or run it with full access: a ``sandbox_mode`` in any
     layer (or the active profile) wins over ``default_permissions``."""
-    off = 'or turn the permission policy off for this repo ("permission_policy": "off" in .brindle/config.local.json)'
-    why = ("brindle won't start this Codex worker: permission_policy is on, but {} so Codex would ignore the "
-           "sandbox profile that stops its commands reading credential files. {}, " + off)
+    ignored = "so Codex would ignore the sandbox profile that stops its commands reading credential files"
     layers = _codex_layers(cwd)
     if layers is None:
         raise CodexSandboxRefused(
-            "brindle won't start this Codex worker: permission_policy is on, but Codex didn't report its "
-            "config layers (`codex app-server` config/read; is Codex installed and current?), so brindle can't "
-            "tell whether a sandbox_mode would make Codex ignore the sandbox profile that stops its commands "
-            "reading credential files. Update Codex, " + off)
+            "Codex didn't report its config layers (`codex app-server` config/read; is Codex installed and "
+            "current?), so brindle can't tell whether a sandbox_mode would make Codex ignore the sandbox profile "
+            "that stops its commands reading credential files", "Update Codex")
     active = next((c["profile"] for _, c in layers if isinstance(c.get("profile"), str)), None)
     for where, cfg in layers:
         if "sandbox_mode" in cfg:
-            raise CodexSandboxRefused(why.format(f"{where} sets sandbox_mode,", f"Remove sandbox_mode from {where}"))
+            raise CodexSandboxRefused(f"{where} sets sandbox_mode, {ignored}", f"Remove sandbox_mode from {where}")
         own = (cfg.get("profiles") or {}).get(active) if active and isinstance(cfg.get("profiles"), dict) else None
         for key in ("sandbox_mode", "default_permissions"):
             if isinstance(own, dict) and key in own:
-                raise CodexSandboxRefused(why.format(f"{where} sets {key} in [profiles.{active}],",
-                                                     f"Remove {key} from [profiles.{active}] in {where}"))
+                raise CodexSandboxRefused(f"{where} sets {key} in [profiles.{active}], {ignored}",
+                                          f"Remove {key} from [profiles.{active}] in {where}")
     where, base = next(((w, c["default_permissions"]) for w, c in layers if "default_permissions" in c),
                        ("", ":workspace"))
     if base == ":danger-full-access":
-        raise CodexSandboxRefused(why.format(f'{where} sets default_permissions = ":danger-full-access",',
-                                             f"Remove default_permissions from {where}"))
+        raise CodexSandboxRefused(f'{where} sets default_permissions = ":danger-full-access", {ignored}',
+                                  f"Remove default_permissions from {where}")
     return base if isinstance(base, str) else ":workspace"
 
 
 def _codex_sandbox(ctx: LaunchContext) -> list[str]:
-    """The ``-c`` flags for a Codex worker's sandbox. With the permission
+    """The ``-c`` flags for a Codex agent's sandbox. With the permission
     policy on: a permissions profile for this launch only, the person's own
     default (else Codex's workspace sandbox) plus brindle's writable build
-    caches, with every credential store read-denied; where Codex would
-    ignore that profile the launch is refused (codex_sandbox_base).
+    caches, with every credential store read-denied. Where Codex would ignore
+    that profile (codex_sandbox_base) the launch is refused if someone set the
+    policy on; if it's only on by default, this agent runs as with the policy
+    off instead and whoever watches it is told once (codex_hook.skip_policy).
     Otherwise the writable roots the older way. Nothing in the person's
     config files changes."""
-    from brindle.codex_hook import policy_on
+    from brindle import codex_hook
 
     roots = _codex_writable_roots(ctx)
-    if not (ctx.cwd and policy_on(ctx.cwd)):
-        return ["-c", f"sandbox_workspace_write.writable_roots={json.dumps(roots)}"] if roots else []
-    base = codex_sandbox_base(ctx.cwd)
-    entries = {**{root: "write" for root in roots}, **{path: "deny" for path in _codex_denied_reads()}}
+    plain = ["-c", f"sandbox_workspace_write.writable_roots={json.dumps(roots)}"] if roots else []
+    codex_hook.skip_policy(ctx.cwd, None)   # decided afresh each launch: the config may have changed
+    if not (ctx.cwd and codex_hook.policy_on(ctx.cwd)):
+        return plain
+    try:
+        base = codex_sandbox_base(ctx.cwd)
+    except CodexSandboxRefused as e:
+        if codex_hook.policy_chosen(ctx.cwd):
+            raise
+        codex_hook.skip_policy(ctx.cwd, e)
+        return plain
+    entries ={**{root: "write" for root in roots}, **{path: "deny" for path in _codex_denied_reads()}}
     table = "{" + ",".join(f"{json.dumps(k)}={json.dumps(v)}" for k, v in entries.items()) + "}"
     return ["-c", f"default_permissions={json.dumps(CODEX_PROFILE)}",
             "-c", f"permissions.{CODEX_PROFILE}.extends={json.dumps(base)}",

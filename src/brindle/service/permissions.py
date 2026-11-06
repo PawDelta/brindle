@@ -8,6 +8,7 @@ import time
 
 from brindle import permission_grants as grants
 from brindle import permissions, tmux, view
+from brindle.config import brindle_home, load_repo_config
 from brindle.db import DB
 from brindle.service.dto import (
     AllowAllGrantDTO,
@@ -57,10 +58,14 @@ def org_controls(repo_root: str | None = None) -> list[OrgControlViewDTO]:
 def policy_dto(store: permissions.Store | None = None, repo_root: str | None = None) -> PermissionPolicyDTO:
     store = store or permissions.load_store()
     counts = permissions.prompt_counts(store)
+    cfg = load_repo_config(repo_root) if repo_root else load_repo_config(brindle_home(), user_only=True)
+    policy_on = cfg.permission_policy == "on"
     return PermissionPolicyDTO(
         org_controls=org_controls(repo_root),
+        policy_on=policy_on, policy_source=cfg.permission_policy_source,
         preset=store.preset, unmatched=store.unmatched,
-        presets=[PermissionPresetDTO(name=name, description=desc, unmatched=unmatched, current=name == store.preset)
+        presets=[PermissionPresetDTO(name=name, description=desc, unmatched=unmatched,
+                                     current=policy_on and name == store.preset)
                  for name, (_, unmatched, desc) in permissions.PRESETS.items()],
         rules=[rule_dto(r, counts) for r in store.rules],
         saved=[saved_dto(s) for s in store.saved], prompt_counts=counts,

@@ -1,10 +1,11 @@
 """The shared secret store (backends) and the model-key layer on top of it."""
 import os
-from subprocess import CompletedProcess
+from subprocess import CompletedProcess, TimeoutExpired
 
 import pytest
+from typer.testing import CliRunner
 
-from brindle import keystore
+from brindle import keys_cmds, keystore, spawn
 from brindle.keystore import CredentialError
 
 FAKE = "sk-ant-test-0123456789abcd"
@@ -22,6 +23,7 @@ def test_keychain_read_cached(monkeypatch, record, external):
 
     now, calls = [100.0], []
     stored = [record]
+    real_run = keystore.KeychainStore._run
 
     def run(self, args, stdin=None):
         calls.append(args[0])
@@ -64,14 +66,72 @@ def test_keychain_read_cached(monkeypatch, record, external):
     assert keystore.KeychainStore(service, account).load() is None
     assert store.load() is None
     assert calls.count("find-generic-password") == 7
+
+    def fails_twice(fake_run, reads: int) -> None:
+        now[0] += keystore.KEYCHAIN_READ_TTL
+        monkeypatch.setattr(keystore.KeychainStore, "_run", fake_run)
+        before = calls.count("find-generic-password")
+        for _ in range(2):
+            with pytest.raises(CredentialError) as exc:
+                keystore.KeychainStore(service, account).load()
+            assert FAKE not in str(exc.value)
+        assert calls.count("find-generic-password") == before + reads
+
+    def exits(code):
+        return lambda self, args, stdin=None: calls.append(args[0]) or CompletedProcess(args, code, FAKE, FAKE)
+
+    def unanswered(self, args, stdin=None):     # the dialog sat there until the read gave up
+        calls.append(args[0])
+        raise TimeoutExpired(args, 1)
+
+    fails_twice(exits(1), 2)                    # no dialog came of it: nothing to hold back
+    fails_twice(exits(128), 1)                  # a cancelled dialog is asked once, not at each poll...
+    os.utime(keystore._refused_marker(), (0, 0))
+    fails_twice(exits(128), 0)                  # ...however long the app stays open
+    assert CliRunner().invoke(keys_cmds.app, ["unblock"]).exit_code == 0
+    monkeypatch.setattr(keystore.KeychainStore, "_run", run)
+    before = calls.count("find-generic-password")
+    keystore.KeychainStore(service, account).load()
+    assert calls.count("find-generic-password") == before + 1
+    fails_twice(unanswered, 1)
+    monkeypatch.setattr(keystore.KeychainStore, "_run", run)
+    keystore.KeychainStore(service, account).save({"value": "replacement"})     # saving a key asks too
+    assert keystore.KeychainStore(service, account).load() == {"value": "replacement"}
+
+    started = []
+
+    class Security:     # through the real spawn.read: the client goes away while the lookup waits (on a dialog, say)
+        pid, returncode = 2 ** 30, None
+
+        def __init__(self, argv, **kw):
+            started.append(argv)
+
+        def communicate(self, input=None, timeout=None):
+            if not request.stopped:
+                request.stop("the client went away")
+                raise TimeoutExpired("security", 1)
+            self.returncode = 0
+            return keystore._encode({"value": "answered"}), ""
+
     now[0] += keystore.KEYCHAIN_READ_TTL
-    monkeypatch.setattr(keystore.KeychainStore, "_run", lambda self, args, stdin=None:
-                        calls.append(args[0]) or CompletedProcess(args, 1, FAKE, FAKE))
-    for _ in range(2):
-        with pytest.raises(CredentialError) as exc:
-            store.load()
-        assert FAKE not in str(exc.value)
-    assert calls.count("find-generic-password") == 9
+    with monkeypatch.context() as m, spawn.deadline(60) as request:
+        m.setattr(spawn.subprocess, "Popen", Security)
+        m.setattr(keystore.KeychainStore, "_run", real_run)
+        for _ in range(2):     # it runs to its answer, so the next poll doesn't start it (and any dialog) over
+            assert keystore.KeychainStore(service, account).load() == {"value": "answered"}
+    assert len(started) == 1 and not keystore._refused_marker().exists()
+
+    now[0] += keystore.KEYCHAIN_READ_TTL
+    started.clear()
+    with monkeypatch.context() as m:
+        m.setattr(spawn.subprocess, "Popen", Security)
+        m.setattr(keystore.KeychainStore, "_run", real_run)
+        for seconds, abandoned in ((60, True), (0, False)):     # a request already over starts nothing...
+            with spawn.deadline(seconds) as request, pytest.raises(spawn.Busy):
+                if abandoned:
+                    request.stop("the client went away")
+                keystore.KeychainStore(service, account).load()
+    assert started == [] and not keystore._refused_marker().exists()     # ...so nothing asked, nothing held back
 
 
 def test_file_backend_refuses_loose_permissions(brindle_home):

@@ -704,9 +704,10 @@ def delete_pushed_remote(ws, pushed_sha: str | None) -> str | None:
         return None
     ref = f"refs/heads/{ws.branch}"
     # The lease makes origin refuse the delete unless the branch is still at
-    # pushed_sha at that moment: a newer push is never lost.
-    if git.run(["push", f"--force-with-lease={ref}:{pushed_sha}", "origin", f":{ref}"], ws.repo_root,
-               check=False).returncode != 0:
+    # pushed_sha at that moment: a newer push is never lost. Nobody is waiting
+    # on this one (a poll saw the PR merge), so it can't ask for credentials.
+    proc = git.background(["push", f"--force-with-lease={ref}:{pushed_sha}", "origin", f":{ref}"], ws.repo_root)
+    if proc is None or proc.returncode != 0:
         return None
     return f"deleted origin/{ws.branch} (its PR merged)"
 

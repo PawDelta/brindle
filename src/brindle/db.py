@@ -18,7 +18,7 @@ from dataclasses import dataclass, fields
 from typing import Iterator
 
 from brindle import bus
-from brindle.config import db_path
+from brindle.config import db_path, record_first_run
 from brindle.redact import mask
 
 # Claude Code's own subagents (native_subagents table, see below). A crash
@@ -561,6 +561,14 @@ CREATE TABLE IF NOT EXISTS session_sync (
     told_sha TEXT,
     updated_at REAL NOT NULL,
     PRIMARY KEY (repo_root, branch)
+);
+-- The supervisors told that a repo no longer refreshes on its own: origin wants
+-- credentials (session_sync.tell_refused_fetches). Goes once origin answers again.
+CREATE TABLE IF NOT EXISTS fetch_refused_notices (
+    root_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    repo_root TEXT NOT NULL,
+    told_at REAL NOT NULL,
+    PRIMARY KEY (root_id, repo_root)
 );
 -- A session PR that landed on the default branch as a squash (or rebase):
 -- squash_sha is that commit, covers_sha the session commit the PR carried,
@@ -1163,6 +1171,8 @@ def migration_incompatibility() -> str | None:
 
 class DB:
     def __init__(self, path: str | None = None) -> None:
+        if path is None:
+            record_first_run()   # before this creates the file that says brindle has run here
         p = str(path) if path is not None else str(db_path())
         if p != ":memory:":
             from pathlib import Path
