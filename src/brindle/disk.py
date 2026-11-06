@@ -898,6 +898,9 @@ def retain(dry_run: bool = False) -> list[Item]:
     items = aged()
     if dry_run:
         return items
+    from brindle import trash
+
+    trash.retain()
     done = []
     named: set[str] | None = None
     for it in sorted(items, key=lambda i: i.why == TRANSCRIPTS):   # records before their transcripts
@@ -971,7 +974,7 @@ def storage_report(db, here: str | None = None, now: float | None = None) -> dic
     """What the daemon's ``GET /v1/storage``, ``brindle doctor`` and ``brindle
     clean --dry-run`` show: every worktree (``Tree.to_json``) biggest first,
     brindle's disk use by category, free space, and dead branches."""
-    from brindle import history
+    from brindle import history, trash
 
     items = all_trees(db, here, now)
     backups, logs, past = _backups(), _logs(), aged(now)
@@ -980,6 +983,7 @@ def storage_report(db, here: str | None = None, now: float | None = None) -> dic
         {"name": "build dirs", "size": sum(t.build_size for t in items),
          "detail": "of the worktrees: " + ", ".join(sorted(BUILD_DIRS))},
         {"name": "archive", "size": size_of(history.archive_dir()), "detail": str(history.archive_dir())},
+        {"name": "trash", "size": size_of(trash.directory()), "detail": str(trash.directory())},
         {"name": "database backups", "size": sum(p.stat().st_size for p in backups),
          "detail": f"{len(backups)} {BACKUP_GLOB}"},
         {"name": "logs", "size": sum(p.stat().st_size for p in logs),

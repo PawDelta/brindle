@@ -367,12 +367,7 @@ def _reuse_registered(db: DB, repo_root: str, branch: str, base: str) -> Created
         # left in the dead copy, so the session ends first, as remove() ends it.
         _rescue_sidebar(db, ws)
         tmux.kill_session(ws.tmux_session)
-        try:
-            git.remove_worktree(repo_root, ws.path, force=True)
-        except Exception:
-            pass
-        if os.path.exists(ws.path):
-            shutil.rmtree(ws.path, ignore_errors=True)
+        git.remove_worktree(repo_root, ws.path, force=True)
         git.run(["worktree", "prune"], repo_root, check=False)
         how = git.add_worktree(repo_root, ws.path, branch, base)
     return Created(ws, how, branch, [], None)
@@ -737,7 +732,7 @@ def remove(db: DB, ws: Workspace, *, force: bool = False, delete_branch: bool | 
             shown = ", ".join(dirty[:8]) + (" ..." if len(dirty) > 8 else "")
             raise WorkspaceError(
                 f"{ws.name} has uncommitted changes ({shown}). "
-                "Commit them, or pass --force to discard."
+                "Commit them, or pass --force to keep them in the trash."
             )
         # Before teardown, its agents or its session go.
         why: list = []
@@ -766,18 +761,10 @@ def remove(db: DB, ws: Workspace, *, force: bool = False, delete_branch: bool | 
         _rescue_sidebar(db, ws)
         tmux.kill_session(ws.tmux_session)
     if exists:
-        from brindle import codemap
-        codemap.remove_session_graph(ws.path)
         try:
             git.remove_worktree(ws.repo_root, ws.path, force=force)
-        except git.GitError:
-            if force:
-                shutil.rmtree(ws.path, ignore_errors=True)
-                git.run(["worktree", "prune"], ws.repo_root, check=False)
-            else:
-                raise
-        if force and os.path.exists(ws.path):
-            shutil.rmtree(ws.path, ignore_errors=True)
+        except git.GitError as e:
+            raise WorkspaceError(f"could not remove worktree directory at {ws.path}: {e}") from e
         if os.path.exists(ws.path):
             raise WorkspaceError(f"could not remove worktree directory at {ws.path}")
     else:

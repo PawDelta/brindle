@@ -79,6 +79,38 @@ agent_app = typer.Typer(no_args_is_help=True, help="Manage agents.")
 app.add_typer(agent_app, name="agent")
 app.add_typer(repo_cmds.app, name="repo")
 app.add_typer(keys_cmds.app, name="keys")
+trash_app = typer.Typer(no_args_is_help=True, help="Recover removed worktrees.")
+app.add_typer(trash_app, name="trash")
+
+
+@trash_app.command("list")
+def trash_list():
+    from brindle import disk, trash
+
+    for entry in trash.entries():
+        typer.echo(f"{entry['id']}  {disk.human(entry['size'])}  {entry['path']}")
+
+
+@trash_app.command("restore")
+def trash_restore(ident: str):
+    from brindle import trash
+
+    try:
+        typer.echo(trash.restore(ident))
+    except (OSError, git.GitError) as e:
+        _fail(str(e))
+
+
+@trash_app.command("empty")
+def trash_empty(yes: bool = typer.Option(False, "--yes", "-y")):
+    from brindle import trash
+
+    if not yes:
+        typer.confirm("Permanently empty the worktree trash?", abort=True)
+    try:
+        typer.echo(f"Removed {len(trash.empty())} trash entry(s)")
+    except (OSError, git.GitError) as e:
+        _fail(str(e))
 
 
 def _fail(msg: str) -> None:
@@ -2791,7 +2823,7 @@ def services_cmd(
 @app.command()
 def rm(
     workspace: str,
-    force: bool = typer.Option(False, "--force", "-f", help="Discard uncommitted changes; ignore teardown failure."),
+    force: bool = typer.Option(False, "--force", "-f", help="Trash uncommitted changes too; ignore teardown failure."),
     delete_branch: Optional[bool] = typer.Option(None, "--delete-branch/--keep-branch", "-D/-K", help="Delete the branch (only if merged, unless --force), or keep it. Default: delete it once fully merged into its base."),
 ) -> None:
     """Stop a workspace's agents and remove its worktree; a fully merged branch goes too.

@@ -771,11 +771,19 @@ def _add_exclude(root: str | Path, pattern: str) -> None:
 
 
 def remove_worktree(root: str | Path, path: str | Path, force: bool = False) -> None:
-    args = ["worktree", "remove", str(path)]
-    if force:
-        args[2:2] = ["--force", "--force"]
-    run(args, root)
-    run(["worktree", "prune"], root, check=False)
+    from brindle import trash
+
+    if os.path.lexists(path):
+        try:
+            trash.put(root, path, force=force)
+        except OSError as e:
+            raise GitError(f"worktree kept: {e}") from e
+        try:
+            trash.retain()
+        except (OSError, GitError):
+            pass  # Removal succeeded; the hourly sweep can apply retention later.
+    else:
+        run(["worktree", "prune"], root, check=False)
 
 
 def list_worktrees(root: str | Path) -> list[dict[str, str]]:
