@@ -13,6 +13,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -119,16 +120,21 @@ def ok(args: list[str], cwd: str | Path) -> bool:
 # What brindle fetches on its own (a session starting, a sync, a poll) must not
 # raise a dialog nobody can explain: on macOS git's keychain helper asks for the
 # login password whenever the git running here isn't the one approved in the
-# person's terminal. So these calls clear every credential helper, gh's too (its
-# token read goes through `security`, which a locked keychain answers with a
-# dialog), and can't prompt in any other way. What the person asked for (`git
-# push`, `brindle pr`, a named PR's branch) goes through ``run``, with their
-# normal credentials.
+# person's terminal. So these calls clear every credential helper and can't prompt
+# in any other way. The one helper they may get is gh's for github.com, and only
+# with its token in gh's own config file (gh_token_in_file): a token in the keychain
+# is read through `security`, which a locked keychain can answer with a dialog, and
+# no check of the keychain is both silent itself and still true when gh reads it.
+# What the person asked for (`git push`, `brindle pr`, a named PR's branch) goes
+# through ``run``, with their normal credentials.
 
 _GITHUB_HELPER = "credential.https://github.com.helper"
 GH_LOOKUP_SECONDS = 5.0
 GH_SEEN_SECONDS = 60.0       # how long a sign-in lookup stands: a pane's launch shouldn't each start gh
 _gh_seen: dict[str, tuple[float, str | None]] = {}
+_gh_refused: dict[str, float] = {}     # repo: when origin last turned down gh's answer, for as long as GH_SEEN_SECONDS
+_GH_HOST_BLOCK = re.compile(r"^github\.com:\n((?: +\S.*(?:\n|$))+)", re.MULTILINE)
+_GH_FILE_TOKEN = re.compile(r"oauth_token: [\w-]{20,}")
 _FETCH_REFUSED = "brindle-fetch-refused"
 # git's and ssh's words for "not without credentials" (LC_ALL=C: see _background_env),
 # as opposed to offline or no such repo.
@@ -156,6 +162,45 @@ def gh_credential_helper() -> str | None:
     return helper
 
 
+def _gh_hosts_file() -> Path:
+    """Where gh keeps its hosts, in gh's own order (go-gh's config.ConfigDir)."""
+    if path := os.environ.get("GH_CONFIG_DIR"):
+        return Path(path, "hosts.yml")
+    if path := os.environ.get("XDG_CONFIG_HOME"):
+        return Path(path, "gh", "hosts.yml")
+    if sys.platform == "win32" and (path := os.environ.get("AppData")):
+        return Path(path, "GitHub CLI", "hosts.yml")
+    return Path.home() / ".config" / "gh" / "hosts.yml"
+
+
+def gh_token_in_file() -> bool:
+    """Whether `gh auth git-credential` answers for github.com from gh's config
+    file, so without going near the keyring: a non-empty ``oauth_token`` directly
+    under the host wins over the keyring, and is never one gh refreshes. One only
+    under ``users`` doesn't: gh tries the keyring first. Nor does a file with no
+    ``users``, which gh's account migration may yet read the keyring for.
+
+    Only the file as gh writes it counts, anything else is no proof; so a parser's
+    reading of it, and a parser's error quoting it, aren't needed. A token's text
+    goes no further than these lines. Read on each call, this can't go stale
+    if the person moves the token to the keychain, and starts no process."""
+    try:
+        block = _GH_HOST_BLOCK.search(_gh_hosts_file().read_text())
+    except (OSError, ValueError):
+        return False
+    if block is None:
+        return False
+    lines = block[1].splitlines()
+    indent = len(lines[0]) - len(lines[0].lstrip())
+    keys = [line[indent:] for line in lines if line.startswith(" " * indent) and line[indent] != " "]
+    return "users:" in keys and any(_GH_FILE_TOKEN.fullmatch(key) for key in keys)
+
+
+def _github_helper_entries(helper: str) -> tuple[str, str]:
+    """github.com signs in through this helper alone."""
+    return f"{_GITHUB_HELPER}=", f"{_GITHUB_HELPER}={helper}"
+
+
 def pane_git_config() -> str | None:
     """``GIT_CONFIG_PARAMETERS`` for an agent's pane: github.com signs in through
     gh alone (when gh is signed in), the person's other helpers for that host
@@ -172,7 +217,7 @@ def pane_git_config() -> str | None:
     helper = gh_credential_helper()
     if helper is None:
         return None
-    entries = (f"{_GITHUB_HELPER}={value}" for value in ("", helper))
+    entries = _github_helper_entries(helper)
     ours = " ".join("'" + entry.replace("'", "'\\''") + "'" for entry in entries)    # git takes single quotes only
     inherited = os.environ.get("GIT_CONFIG_PARAMETERS")
     return f"{inherited} {ours}" if inherited else ours
@@ -183,9 +228,10 @@ def _background_env(cwd: str | Path) -> dict[str, str]:
     (an empty GIT_ASKPASS also passes over core.askPass and SSH_ASKPASS) and no
     terminal prompt, which with ``background``'s missing terminal leave ssh, under
     any name or wrapper, nowhere to ask. BatchMode has it fail at once where it
-    can be given, still with an agent's keys and the person's own command."""
+    can be given, still with an agent's keys and the person's own command. gh's
+    telemetry stays off: it starts a child of its own, which nothing here vouches for."""
     env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "", "SSH_ASKPASS": "",
-           "SSH_ASKPASS_REQUIRE": "never", "LC_ALL": "C"}
+           "SSH_ASKPASS_REQUIRE": "never", "LC_ALL": "C", "GH_TELEMETRY": "false"}
     if ssh := _batch_ssh(cwd):
         env["GIT_SSH_COMMAND"] = ssh
     return env
@@ -218,16 +264,33 @@ def _batch_ssh(cwd: str | Path) -> str | None:
     return f"{ssh} -o BatchMode=yes"
 
 
+def _background_gh_helper(cwd: str | Path) -> str | None:
+    """gh's helper for a network call nobody asked for, when reading its token can't
+    raise a dialog. Starts gh at most once in GH_SEEN_SECONDS, and not at all without
+    a token in its file or just after origin turned down what it gave."""
+    refused = _gh_refused.get(str(cwd))
+    if refused is not None and time.monotonic() - refused < GH_SEEN_SECONDS:
+        return None
+    return gh_credential_helper() if gh_token_in_file() else None
+
+
 def background(args: list[str], cwd: str | Path,
                timeout: int | float | None = None) -> subprocess.CompletedProcess | None:
     """``git <args>``, a network call brindle starts on its own: it can't raise a
-    credential dialog. None when git couldn't run or finish; a failure is the
-    caller's to read."""
+    credential dialog. Every helper is cleared; github.com over HTTPS may get gh's
+    (_background_gh_helper), and git only asks it for that host. None when git
+    couldn't run or finish; a failure is the caller's to read."""
+    helper = _background_gh_helper(cwd)
+    config = ["credential.helper=", *(_github_helper_entries(helper) if helper else ())]
     try:
-        return run_env(["-c", "credential.helper=", *args], cwd, _background_env(cwd), check=False, timeout=timeout,
-                       no_terminal=True)
+        proc = run_env([*(word for entry in config for word in ("-c", entry)), *args], cwd, _background_env(cwd),
+                       check=False, timeout=timeout, no_terminal=True)
     except GitError:
         return None
+    if helper and proc.returncode != 0 and _REFUSED.search(proc.stderr or ""):
+        _gh_refused[str(cwd)] = time.monotonic()
+        _gh_seen.clear()
+    return proc
 
 
 def background_fetch(root: str | Path, args: list[str], timeout: int | float | None = None) -> bool:

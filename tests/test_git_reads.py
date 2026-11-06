@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import functools
 import http.server
 import os
@@ -16,6 +17,8 @@ from conftest import sh
 from brindle import agents, config, disk, git, session_sync, spawn, workspaces
 
 _real_gh_lookup = git.gh_credential_helper     # conftest's gh_sign_in_unknown replaces it for each test
+_real_gh_file_check = git.gh_token_in_file     # and this
+_SIGNED_IN = "Basic " + base64.b64encode(b"me:from-gh").decode()
 
 
 def _script(path: Path, body: str) -> Path:
@@ -28,7 +31,7 @@ class _Origin(http.server.SimpleHTTPRequestHandler):
     """A bare repo's files, anonymously (git's dumb protocol); /private wants credentials."""
 
     def do_GET(self):
-        if not self.path.startswith("/private"):
+        if not self.path.startswith("/private") or self.headers.get("Authorization") == _SIGNED_IN:
             return super().do_GET()
         self.send_response(401)
         self.send_header("WWW-Authenticate", 'Basic realm="origin"')
@@ -135,6 +138,97 @@ def test_background_fetch_never_asks_for_credentials(tmp_path, asks, monkeypatch
     ssh_log.write_text("")
     sh(f"{sys.executable} -c '{in_a_pty}' < /dev/null", tmp_path)
     assert "BatchMode=yes" in ssh_log.read_text() and "HAS-A-TERMINAL" not in ssh_log.read_text()
+
+
+# hosts.yml as gh writes it. Only a host-level token keeps gh away from the keyring.
+_USERS = "github.com:\n    users:\n        me:\n{per_user}    git_protocol: https\n{host}    user: me\n"
+_FILE_TOKEN = "not-a-real-token-just-a-fixture"
+
+
+@pytest.mark.parametrize("hosts, signs_in", [
+    pytest.param(_USERS.format(per_user=f"            oauth_token: {_FILE_TOKEN}\n",
+                               host=f"    oauth_token: {_FILE_TOKEN}\n"), True, id="token-in-gh-config"),
+    pytest.param(_USERS.format(per_user="", host=""), False, id="token-in-keychain"),
+    pytest.param(_USERS.format(per_user=f"            oauth_token: {_FILE_TOKEN}\n", host=""), False, id="per-user-only",
+                 marks=pytest.mark.variant("gh tries the keyring before a per-user file token")),
+    pytest.param(_USERS.format(per_user="", host='    oauth_token: ""\n'), False, id="empty-host-token",
+                 marks=pytest.mark.variant("an empty token falls through to the keyring")),
+    pytest.param(f"github.com:\n    oauth_token: {_FILE_TOKEN}\n    user: me\n", False, id="never-migrated",
+                 marks=pytest.mark.variant("gh's account migration reads the keyring for another host in this file")),
+])
+def test_background_fetch_uses_signed_in_gh_for_github(tmp_path, asks, monkeypatch, hosts, signs_in):
+    private = tmp_path / "private"
+    repo = tmp_path / "repo"
+    sh(f"git init -q --bare -b main {private} && git init -q -b main {repo}", tmp_path)
+    sh(f"git commit -q --allow-empty -m init && git push -q {private} main", repo)
+    sh("git update-server-info", private)
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), functools.partial(_Origin, directory=str(tmp_path)))
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{server.server_port}"
+    sh(f"git remote add origin {url}/private", repo)
+
+    gh_config = tmp_path / "gh-config"
+    gh_config.mkdir()
+    (gh_config / "hosts.yml").write_text(hosts)
+    monkeypatch.setenv("GH_CONFIG_DIR", str(gh_config))
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    gh_log = tmp_path / "gh-log"
+    revoked = tmp_path / "revoked"
+    _script(bin_dir / "gh", f'echo "telemetry=$GH_TELEMETRY $*" >> "{gh_log}"\n'
+                            'case "$1 $2" in\n"config get") echo me ;;\n'
+                            f'"auth git-credential") [ "$3" = get ] && {{ [ -f "{revoked}" ] && pw=old || pw=from-gh;'
+                            ' printf "username=me\\npassword=$pw\\n"; } ;;\nesac')
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setattr(git, "gh_credential_helper", _real_gh_lookup)
+    monkeypatch.setattr(git, "gh_token_in_file", _real_gh_file_check)
+    monkeypatch.setattr(git, "_gh_seen", {})
+
+    def helper_for(host_url):
+        return git.background(["config", "--get-urlmatch", "credential.helper", host_url], repo).stdout.strip()
+
+    assert ("auth git-credential" in helper_for("https://github.com")) == signs_in
+    assert helper_for("https://example.com") == "" and helper_for("http://github.com") == ""    # never another host's
+
+    # The local origin plays github.com: a real fetch, with the helper scoped to it.
+    monkeypatch.setattr(git, "_GITHUB_HELPER", f"credential.{url}.helper")
+    assert git.background_fetch(repo, ["--quiet", "origin", "main"]) == signs_in
+    assert git.fetch_refused(repo) != signs_in
+    assert not asks.seen.exists()    # the person's own helper (the keychain's) stays out of it
+    if not signs_in:
+        server.shutdown()
+        assert not gh_log.exists()   # gh isn't even started: its token may be behind a dialog
+        return
+
+    assert "telemetry=false auth git-credential get" in gh_log.read_text()    # gh starts nothing else of its own
+    assert git.background_fetch(repo, ["--quiet", "origin", "main"])
+    assert gh_log.read_text().count("config get") == 1     # a poll doesn't ask gh about its sign-in each time
+
+    # gh's answer stops working: the decision goes, and polls don't keep starting gh for it.
+    revoked.touch()
+    assert not git.background_fetch(repo, ["--quiet", "origin", "main"]) and git.fetch_refused(repo)
+    assert git._gh_seen == {}
+    used = gh_log.read_text()
+    assert not git.background_fetch(repo, ["--quiet", "origin", "main"])
+    assert gh_log.read_text() == used
+    monkeypatch.setattr(git, "GH_SEEN_SECONDS", 0)     # that short while is over: gh is asked afresh, and works again
+    revoked.unlink()
+    assert git.background_fetch(repo, ["--quiet", "origin", "main"]) and not git.fetch_refused(repo)
+    assert gh_log.read_text().count("config get") >= 2
+    server.shutdown()
+
+    # The token moved to the keychain (`gh auth login`): the next call sees it at once, whatever is cached.
+    (gh_config / "hosts.yml").write_text(_USERS.format(per_user="", host=""))
+    used = gh_log.read_text()
+    assert helper_for("https://github.com") == ""
+    assert gh_log.read_text() == used
+
+    # gh's own order of where its config lives.
+    monkeypatch.delenv("GH_CONFIG_DIR")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    (tmp_path / "xdg" / "gh").mkdir(parents=True)
+    (tmp_path / "xdg" / "gh" / "hosts.yml").write_text(hosts)
+    assert git.gh_token_in_file()
 
 
 def test_agent_panes_sign_in_to_github_through_gh_without_the_keychain_helper(db, tmp_path, asks, monkeypatch):
