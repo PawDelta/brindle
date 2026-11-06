@@ -11,11 +11,11 @@
 # never offers an older build.
 #
 # Run it by hand (Actions › App feed rollback › Run workflow) with "Use
-# workflow from" set to a release tag (app-v*): the job runs in the
-# `desktop-release` environment, which admits only app-v* tags and needs the
-# owner's approval, like the stable publish. The tag's commit must be on main
-# (as for stable-gate in app-release.yml), so the code that runs with the
-# release role is code main has.
+# workflow from" set to a release tag (app-v*): release-gate uses the protected,
+# secret-free `release-gate` environment for the owner's approval. It checks
+# the tag's commit is on main, as for release-gate in app-release.yml.
+# Only then does rollback run in `desktop-release` for secrets and OIDC;
+# that credential environment has no required reviewers.
 #
 # Before anything is written, app/scripts/feed_rollback.mjs checks both
 # bundles, as the site serves them, against their signatures and the
@@ -53,24 +53,19 @@ env:
   AWS_MAX_ATTEMPTS: "8"
 
 jobs:
-  rollback:
+  release-gate:
     if: github.ref_type == 'tag' && startsWith(github.ref_name, 'app-v')
     runs-on: ubuntu-latest
-    environment: desktop-release
+    environment: release-gate
     timeout-minutes: 20
     permissions:
       contents: read
       actions: read     # this run's approvals, for the summary
-      id-token: write   # the downloads bucket's role, through GitHub's OIDC
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0   # origin/main, to check the commit is on it
           persist-credentials: false
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: 22
-
       - name: On main, approved, a stable version
         env:
           GH_TOKEN: ${{ github.token }}
@@ -87,6 +82,23 @@ jobs:
           approvers="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/approvals" \
             --jq '[.[] | select(.state == "approved") | .user.login] | join(", ")' || echo "unknown")"
           echo "Rollback to $VERSION from $GITHUB_REF_NAME at $GITHUB_SHA; approved by ${approvers:-nobody recorded}" >> "$GITHUB_STEP_SUMMARY"
+
+  rollback:
+    needs: release-gate
+    if: needs.release-gate.result == 'success'
+    runs-on: ubuntu-latest
+    environment: desktop-release
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write   # the downloads bucket's role, through GitHub's OIDC
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
 
       # The release's updater bundles and signatures, as installed apps will
       # download them, and the feed as it is now (for the summary).
