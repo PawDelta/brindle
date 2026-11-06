@@ -62,7 +62,7 @@ describe("settings repo view", () => {
     expect(screen.getByTestId("checks-loading")).toBeTruthy();
     // Checks, typed a keystroke at a time (the space and the Enter stay on screen), saved to the repo.
     const checks = await screen.findByRole("textbox", { name: "Checks" });
-    expect(screen.getByRole("radio", { name: "proj" }).getAttribute("aria-checked")).toBe("true");
+    expect(screen.getByRole("tab", { name: "Project" }).getAttribute("aria-selected")).toBe("true");
     expect(daemon.requests.find((r) => r.path === "/config" && r.query?.keys === "0")?.query).toEqual({ repo: REPO, keys: "0" });
     expect(checks).toHaveProperty("value", "npm test");
     for (const typed of ["npm test ", "npm test \n", "npm test \nn", "npm test \nnpm run build"]) fireEvent.change(checks, { target: { value: typed } });
@@ -87,9 +87,9 @@ describe("settings repo view", () => {
     // The Autopilot row is gone, and so is the old overrides list.
     expect(screen.queryByRole("switch", { name: "Autopilot" })).toBeNull();
     expect(screen.queryByTestId("project-overrides")).toBeNull();
-    // A section asked for (the sidebar's provider problem line) brings You's side back.
+    // A section asked for (the sidebar's provider problem line) opens its own tab.
     goto({ section: "providers", ask: 1 });
-    expect((await screen.findByRole("radio", { name: "You" })).getAttribute("aria-checked")).toBe("true");
+    expect((await screen.findByRole("tab", { name: "Workers & providers" })).getAttribute("aria-selected")).toBe("true");
     expect(await screen.findByTestId("providers")).toBeTruthy();
     stop();
   });
@@ -142,8 +142,7 @@ describe("settings repo view", () => {
     expect(screen.getByTestId("settings-save")).toBeTruthy();
     // The other repo's config fails to load: no checks to edit and no save bar to write this repo's edit into it.
     failing.add("/config");
-    fireEvent.click(screen.getByRole("radio", { name: /^proj/ }));
-    fireEvent.click(screen.getByRole("menuitem", { name: "other" }));
+    fireEvent.change(screen.getByRole("combobox", { name: "Repo" }), { target: { value: OTHER } });
     await screen.findByText(/Could not load project settings/);
     expect(screen.queryByTestId("settings-save")).toBeNull();
     expect(screen.queryByRole("textbox", { name: "Checks" })).toBeNull();

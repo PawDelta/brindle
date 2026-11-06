@@ -1,13 +1,19 @@
-/* Settings: this machine's brindle, in sections (About last) with a switch at
-   the top: "You" and the repo's name (the session's, or one picked from the
-   switch's menu when there are several). The repo side is RepoSettings
-   (ProjectSettingsScreen.tsx): the same rows with where each value comes
-   from. The You side has a small nav: Your settings (editable, saved to
-   ~/.brindle/config.json for every project), Permissions (how Claude's permission
-   requests are handled, your permission rules), Providers (one row per
-   provider CLI, with how it connects, its state and its buttons) and
-   Engine & health (the engine's version and update, the command-line tool,
-   and the doctor as a short health list with a fix where the app has one).
+/* Settings: everything the person sets, in one place behind the sidebar's
+   account entry, as tabs (routes.ts SETTINGS_TABS; the older Account and
+   Project settings routes open it on their tab): Account (the plan,
+   sign-in and spend: screens/Account AccountPanel), Usage (UsagePanel),
+   General (appearance, Your settings, editable and saved to
+   ~/.brindle/config.json for every project, the doc library's switches and
+   the team's export destination), Workers & providers (one row per provider
+   CLI, with how it connects, its state and its buttons, and GitHub),
+   Permissions (how Claude's permission requests are handled, your
+   permission rules, the organization's approvals), Storage, Project (the
+   repo's own: RepoSettings in ProjectSettingsScreen.tsx, the same rows with
+   where each value comes from, for the session's repo or one picked) and
+   About (Engine & health: the engine's version and update, the
+   command-line tool, and the doctor as a short health list with a fix
+   where the app has one; Staff only; the app's About). Only the open tab
+   renders; the config, doctor and providers are read once for the screen.
 
    Providers (design/connect/ step 8, with the owner's final model): brindle
    detects each CLI (GET /v1/providers/installed) and uses it as-is; the CLI
@@ -86,7 +92,10 @@ import { TeamDestination } from "./TeamDestination";
 import { OrgApprovals } from "./OrgApprovals";
 import { Permissions } from "./Permissions";
 import { ReleaseBuildUpdate } from "./ReleaseBuildUpdate";
-import { NO_REPO, useRepo } from "../../components/RepoSelect";
+import { NO_REPO, RepoSelect, useRepo } from "../../components/RepoSelect";
+import { openExternal, type OpenUrl } from "../../api/open";
+import { SETTINGS_TABS, type SettingsTab } from "../../routes";
+import { AccountPanel, UsagePanel } from "../Account";
 import { RepoSettings } from "./ProjectSettingsScreen";
 import { alert, button, card, field, h2, main, mono, notice, pill, quiet } from "../../components/ui";
 import { useProviders } from "../../store/providers";
@@ -131,48 +140,68 @@ export interface SettingsScreenProps {
   /* About's updates for a build that updates by itself: last checked, Check
      now, Restart to update (the shell's, api/tauri.ts AppUpdates). */
   appUpdates?: AppUpdates;
-  /* The section to scroll to on opening: "providers" from the sidebar's problem line, "permissions" or "storage" from the Inbox. */
+  /* The tab to open on (routes.ts settingsTab): General when none is named. */
+  tab?: SettingsTab;
+  /* The section to scroll to on opening, on its own tab: "providers" from the sidebar's problem line, "permissions" or "storage" from the Inbox. */
   section?: "providers" | "permissions" | "storage";
-  /* A new value asks to scroll to `section` again, the page already open. */
+  /* A new value asks to open `tab` and scroll to `section` again, the page already open. */
   ask?: number;
   /* A permission rule to open in its editor (the Inbox's "Open the deny rule"). */
   rule?: string;
-  /* The repo to open the switch on (the sidebar's repo header, the old project-settings route): its view, not You's. */
+  /* The repo the Project tab shows (the sidebar's repo header, the old project-settings route). */
   repo?: string;
-  /* The current session's repo: the one the switch starts on when no route names one. */
+  /* The current session's repo: the one the Project tab starts on when no route names one. */
   current?: string;
+  /* Opens a page in the system browser (the Account tab's billing, plans and sign-in). */
+  openUrl?: OpenUrl;
+  /* Opens the Agents screen, where some of a plan's features are used (the Account tab). */
+  onNavigate?(screen: "agents"): void;
 }
 
 export const message = (e: unknown) => plain(e instanceof Error ? e.message : String(e));
 
-const SECTIONS = [
-  { id: "your-settings", label: "Your settings" },
-  { id: "permissions", label: "Permissions" },
-  { id: "providers", label: "Providers" },
-  { id: "engine", label: "Engine & health" },
-  { id: "storage", label: "Storage" },
-  { id: "about", label: "About" },
-];
+/* Each tab's one line under the title. Account's is the panel's own (it follows the plan). */
+const LEDE: Record<SettingsTab, string> = {
+  account: "Your brindle plan, sign-in and what brindle is spending.",
+  usage: "Each provider's subscription windows: how much is used and when it resets.",
+  general: "Your settings apply to every project; a project can override them.",
+  providers: "How brindle reaches each model and your repositories.",
+  permissions: "How Claude's permission requests are handled, your rules, and your organization's limits.",
+  storage: "What brindle keeps on this machine.",
+  project: "This repo's settings: what the team sets, what is just for you, and what follows your own.",
+  about: "The engine's version and health, and this app.",
+};
 
-/* The staff section sits before About, and is in the nav only for staff. */
-const STAFF = { id: "staff", label: "Staff only" };
-
-/* The small in-page nav: one button per section, scrolling to it. */
-function SectionNav({ staff }: { staff: boolean }) {
-  const shown = staff ? [...SECTIONS.slice(0, -1), STAFF, ...SECTIONS.slice(-1)] : SECTIONS;
+/* The tabs: one button each, the open one marked; arrow keys move between them. */
+function TabBar({ tab, onTab }: { tab: SettingsTab; onTab(tab: SettingsTab): void }) {
+  const move = (step: number) => {
+    const i = SETTINGS_TABS.findIndex((t) => t.id === tab);
+    const next = SETTINGS_TABS[(i + step + SETTINGS_TABS.length) % SETTINGS_TABS.length].id;
+    onTab(next);
+    document.getElementById(`settings-tab-${next}`)?.focus();
+  };
   return (
-    <nav aria-label="Settings sections" className="flex flex-wrap gap-1">
-      {shown.map((s) => (
+    <div role="tablist" aria-label="Settings" className="flex flex-wrap gap-1 border-b border-line">
+      {SETTINGS_TABS.map((t) => (
         <button
-          key={s.id}
+          key={t.id}
+          id={`settings-tab-${t.id}`}
           type="button"
-          className={`${quiet} rounded-sm border border-line px-s2 text-xs`}
-          onClick={() => document.getElementById(s.id)?.scrollIntoView?.({ behavior: "smooth", block: "start" })}
+          role="tab"
+          aria-selected={tab === t.id}
+          aria-controls="settings-panel"
+          tabIndex={tab === t.id ? 0 : -1}
+          className={`-mb-px border-b-2 px-s2 py-1 text-sm ${tab === t.id ? "border-pass font-medium text-ink" : "border-transparent text-ink-2 hover:text-ink"}`}
+          onClick={() => onTab(t.id)}
+          onKeyDown={(e) => {
+            if (e.key === "ArrowRight") move(1);
+            else if (e.key === "ArrowLeft") move(-1);
+          }}
         >
-          {s.label}
+          {t.label}
         </button>
       ))}
-    </nav>
+    </div>
   );
 }
 
@@ -1065,56 +1094,7 @@ function HealthRow({ c, busy, onFix }: { c: DoctorCheck; busy: boolean; onFix(fi
   );
 }
 
-/* The switch at the top: You, or the repo (a menu to pick another when there are several). */
-function ScopeSwitch({ view, onView, repo, repos, onRepo, disabled }: { view: "you" | "repo"; onView(v: "you" | "repo"): void; repo: string | null; repos: ReturnType<typeof useRepo>["repos"]; onRepo(repo: string): void; disabled: boolean }) {
-  const name = repos?.find((r) => r.repo_root === repo)?.name ?? repo?.split("/").filter(Boolean).pop();
-  const choices: { id: "you" | "repo"; label: string }[] = [{ id: "you", label: "You" }, ...(repo ? [{ id: "repo" as const, label: name ?? repo }] : [])];
-  const [open, setOpen] = useState(false);
-  const several = !!repos && repos.length > 1;
-  return (
-    <div className="relative flex flex-wrap items-center gap-s1">
-      <div role="radiogroup" aria-label="Settings for" className="inline-flex rounded-md border border-line p-0.5">
-        {choices.map((c) => (
-          <button
-            key={c.id}
-            type="button"
-            role="radio"
-            aria-checked={view === c.id}
-            aria-haspopup={c.id === "repo" && several ? "menu" : undefined}
-            aria-expanded={c.id === "repo" && several ? open : undefined}
-            disabled={disabled}
-            className={`rounded-sm px-s2 py-0.5 text-sm disabled:opacity-50 ${view === c.id ? "bg-pass-soft font-medium text-pass" : "text-ink-2 hover:bg-surface-2"}`}
-            // The repo segment, already chosen, opens the menu of repos.
-            onClick={() => (c.id === "repo" && several && view === "repo" ? setOpen((o) => !o) : (setOpen(false), onView(c.id)))}
-          >
-            {c.label}
-            {c.id === "repo" && several ? " ▾" : ""}
-          </button>
-        ))}
-      </div>
-      {open && several && (
-        <div role="menu" aria-label="Repo" className={`${card} absolute left-0 top-full z-10 mt-1 flex min-w-40 flex-col p-0.5`}>
-          {repos!.map((r) => (
-            <button
-              key={r.repo_root}
-              type="button"
-              role="menuitem"
-              className={`rounded-sm px-s2 py-0.5 text-left text-sm hover:bg-surface-2 ${r.repo_root === repo ? "font-medium" : ""}`}
-              onClick={() => {
-                setOpen(false);
-                onRepo(r.repo_root);
-              }}
-            >
-              {r.name}
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-export function SettingsScreen({ client, installCli, appUpdater, appUpdates, releaseBuildUpdater, readAbout, section, ask, rule, repo: routed, current }: SettingsScreenProps) {
+export function SettingsScreen({ client, installCli, appUpdater, appUpdates, releaseBuildUpdater, readAbout, tab: routedTab, section, ask, rule, repo: routed, current, openUrl = openExternal, onNavigate }: SettingsScreenProps) {
   const store = useContext(StoreContext);
   if (!store) throw new Error("SettingsScreen needs a <StoreContext.Provider>");
   const connection = useAppState((state) => state.connection);
@@ -1123,17 +1103,17 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
   const { repos, setRepo } = pick;
   /* The repo a route names is the one on screen from the first paint, before the repos are known. */
   const repo = pick.repo ?? routed ?? current ?? null;
-  const [view, setView] = useState<"you" | "repo">(routed ? "repo" : "you");
-  /* Start on the repo the route names, else the current session's; only a route opens its view. */
+  /* The tab a route asks for (or the one its section lives on); the person's clicks after that. */
+  const wanted: SettingsTab = routedTab ?? section ?? (routed ? "project" : "general");
+  const [tab, setTab] = useState<SettingsTab>(wanted);
+  useEffect(() => {
+    setTab(wanted);
+  }, [wanted, ask]);
+  /* Start on the repo the route names, else the current session's. */
   useEffect(() => {
     const first = routed ?? current;
     if (first) setRepo(first);
-    if (routed) setView("repo");
   }, [routed, current, setRepo]);
-  /* A section asked for (the sidebar's problem line, the Inbox) lives on You's side. */
-  useEffect(() => {
-    if (section) setView("you");
-  }, [section, ask]);
   const [config, setConfig] = useState<Config | null>(null);
   const [checks, setChecks] = useState<DoctorCheck[] | null>(null);
   const [doctorError, setDoctorError] = useState<string | null>(null);
@@ -1314,8 +1294,8 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
   // Opened from the sidebar's problem line: scrolled to Providers, again once the sections above it have loaded.
   const placed = config !== null;
   useEffect(() => {
-    if (section) document.getElementById(section)?.scrollIntoView?.({ behavior: "smooth", block: "start" });
-  }, [section, ask, placed, view]);
+    if (section && tab === section) document.getElementById(section)?.scrollIntoView?.({ behavior: "smooth", block: "start" });
+  }, [section, ask, placed, tab]);
   const install = async () => {
     if (!installCli) return;
     setCliState("installing");
@@ -1344,29 +1324,37 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
   // What the person set for every repo that has no row here (permission_policy_default is brindle's, not theirs).
   const yourLines = userLines(config?.user ?? {}).filter(([k]) => !shown.includes(k) && k !== "permission_policy_default");
   const yourRow = (s: Setting) => <SettingRow key={s.key} s={s} value={userDraft[s.key]} dirty={userDirty.includes(s.key)} disabled={saving} onChange={(v) => editUser(s.key, v)} />;
-  const repoView = view === "repo" && !!repo;
+  /* What a tab needs a repo for (the config and doctor are read for it), when there is none yet. */
+  const noRepo = repos && repos.length === 0 && <p className="text-ink-3">{NO_REPO}</p>;
 
   return (
     <section className="flex min-h-0 flex-col gap-s3" aria-label="Settings">
-      <PageHeader title="Settings" lede={repoView ? "This repo's settings: what the team sets, what is just for you, and what follows your own." : "Your settings apply to every project; a project can override them. Below: permissions, sign-ins and engine health."}>
-        <ScopeSwitch view={repoView ? "repo" : "you"} onView={setView} repo={repo} repos={repos} onRepo={setRepo} disabled={saving} />
-      </PageHeader>
-      {repoView && (
-        <section className="flex min-h-0 flex-col gap-s3" aria-label="Project settings" data-testid="project-settings">
-          <RepoSettings key={repo} client={client} repo={repo} />
-        </section>
-      )}
-      {!repoView && <SectionNav staff={staff} />}
-      {!repoView && (
+      <PageHeader title="Settings" lede={LEDE[tab]} />
+      <TabBar tab={tab} onTab={setTab} />
+      <div id="settings-panel" role="tabpanel" aria-labelledby={`settings-tab-${tab}`} data-tab={tab} className="flex min-h-0 flex-col gap-s3">
+      {tab === "account" && <AccountPanel client={client} openUrl={openUrl} onNavigate={(to) => (to === "settings" ? setTab("general") : onNavigate?.(to))} />}
+      {tab === "usage" && <UsagePanel ask={ask} />}
+      {tab === "project" &&
+        (repo ? (
+          <section className="flex min-h-0 flex-col gap-s3" aria-label="Project settings" data-testid="project-settings">
+            <div className="flex flex-wrap items-center gap-s1 text-sm text-ink-2">
+              <span>Settings for</span>
+              {repos && repos.length > 1 ? <RepoSelect {...pick} repo={repo} /> : <span className="font-medium text-ink">{repos?.find((r) => r.repo_root === repo)?.name ?? repo.split("/").filter(Boolean).pop()}</span>}
+            </div>
+            <RepoSettings key={repo} client={client} repo={repo} />
+          </section>
+        ) : (
+          noRepo
+        ))}
+      {tab === "general" && (
       <div className="border-t border-line">
         <Row label="Appearance">
           <ThemeToggle choices />
         </Row>
       </div>
       )}
-      {!repoView && repos && repos.length === 0 && <p className="text-ink-3">{NO_REPO}</p>}
-      {!repoView && <>
-      {loadError && (
+      {tab !== "account" && tab !== "usage" && tab !== "project" && noRepo}
+      {tab !== "account" && tab !== "usage" && tab !== "project" && loadError && (
         <div role="alert" className={`${alert} flex items-center justify-between gap-s2`}>
           <span>Could not load settings: {loadError}</span>
           <button type="button" className={button} onClick={() => void loadConfig()}>
@@ -1374,7 +1362,7 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
           </button>
         </div>
       )}
-      {config && (
+      {tab === "general" && config && (
         <Section id="your-settings" title="Your settings" blurb="Saved to ~/.brindle/config.json and applied to every project, unless a repo sets one itself." testId="your-settings">
           {common.map(yourRow)}
           {more && others.map(yourRow)}
@@ -1419,24 +1407,33 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
         </Section>
       )}
 
-      {config && (
-        <Section id="you" title="How Claude asks you" blurb="Whether Claude's held requests wait for you in the Inbox or Claude decides most itself." testId="user-settings">
-          <PermissionMode client={client} />
-        </Section>
+      {tab === "general" && (
+        <>
+          <DocSwitches client={client} />
+          <TeamDestination client={client} />
+        </>
       )}
 
-      <Permissions client={client} rule={rule} ask={ask} />
+      {tab === "permissions" && (
+        <>
+          {config && (
+            <Section id="you" title="How Claude asks you" blurb="Whether Claude's held requests wait for you in the Inbox or Claude decides most itself." testId="user-settings">
+              <PermissionMode client={client} />
+            </Section>
+          )}
 
-      <Section id="organization" title="Organization" blurb="Your organization's members, their roles, and the approval limits it sets." testId="org-approvals">
-        <Row label="Organization approvals" help="For an organization's admins: assign roles and set which approvals members may save." wide>
-          <OrgApprovals client={client} />
-        </Row>
-      </Section>
+          <Permissions client={client} rule={rule} ask={ask} />
 
-      <Section id="github" title="GitHub" blurb="How brindle reaches your private repositories over HTTPS." testId="github">
-        <GithubRow client={client} />
-      </Section>
+          <Section id="organization" title="Organization" blurb="Your organization's members, their roles, and the approval limits it sets." testId="org-approvals">
+            <Row label="Organization approvals" help="For an organization's admins: assign roles and set which approvals members may save." wide>
+              <OrgApprovals client={client} />
+            </Row>
+          </Section>
+        </>
+      )}
 
+      {tab === "providers" && (
+      <>
       <Section
         id="providers"
         title="Providers"
@@ -1555,6 +1552,16 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
         )}
       </Section>
 
+      <Section id="github" title="GitHub" blurb="How brindle reaches your private repositories over HTTPS." testId="github">
+        <GithubRow client={client} />
+      </Section>
+      </>
+      )}
+
+      {tab === "storage" && <Storage client={client} />}
+
+      {tab === "about" && (
+      <>
       <Section
         id="engine"
         title="Engine & health"
@@ -1656,12 +1663,6 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
         )}
       </Section>
 
-      <Storage client={client} />
-
-      <DocSwitches client={client} />
-
-      <TeamDestination client={client} />
-
       {staff && (
         <Section id="staff" title="Staff only" blurb="Internal tools for Brindle staff. Not shown to customers." staff testId="staff-only">
           <DebugLogging client={client} />
@@ -1670,7 +1671,9 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
       )}
 
       <About read={readAbout} updates={appUpdates} status={updateStatus} engine={meta?.engine_version} />
-      </>}
+      </>
+      )}
+      </div>
     </section>
   );
 }

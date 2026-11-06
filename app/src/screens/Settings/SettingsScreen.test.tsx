@@ -38,7 +38,8 @@ afterEach(() => {
   ipc.answers.length = 0;
 });
 
-function setup(data: Partial<DaemonData> = {}, installCli?: SettingsScreenProps["installCli"], appUpdater?: SettingsScreenProps["appUpdater"], releaseUpdater?: SettingsScreenProps["releaseBuildUpdater"], rule?: string, readAbout?: SettingsScreenProps["readAbout"]) {
+/* `props`: the screen's own (the tab to open on, the shell's hooks); the client is the fake daemon's. */
+function setup(data: Partial<DaemonData> = {}, props: Omit<SettingsScreenProps, "client"> = {}) {
   const daemon = new FakeDaemon({
     repos: [{ repo_root: REPO, name: "proj" }],
     config: {
@@ -78,7 +79,7 @@ function setup(data: Partial<DaemonData> = {}, installCli?: SettingsScreenProps[
           <ProvidersProvider client={client}>
             {/* A sign-in's CLI read through the fake daemon's pty views, as the shell's show it. */}
             <PtyViewsProvider value={daemon.ptyViews()}>
-              <SettingsScreen client={client} installCli={installCli} appUpdater={appUpdater} releaseBuildUpdater={releaseUpdater} readAbout={readAbout} rule={rule} />
+              <SettingsScreen client={client} {...props} />
             </PtyViewsProvider>
           </ProvidersProvider>
         </SessionsProvider>
@@ -93,8 +94,31 @@ const posts = (daemon: FakeDaemon) => daemon.requests.filter((r) => r.method ===
 const doctorCalls = (daemon: FakeDaemon) => daemon.requests.filter((r) => r.path === "/doctor");
 
 describe("settings screen", () => {
+  it("is one place in tabs: each tab shows its own sections and only those", async () => {
+    const { stop } = setup();
+    // Each tab and what it alone shows: the account's plan and usage live here too, as does the repo's own Project.
+    const shows: [string, string][] = [
+      ["Account", "features"],
+      ["Usage", "usage"],
+      ["General", "your-settings"],
+      ["Workers & providers", "providers"],
+      ["Permissions", "permissions-settings"],
+      ["Storage", "storage"],
+      ["Project", "project-settings"],
+      ["About", "engine"],
+    ];
+    expect(screen.getAllByRole("tab").map((t) => t.textContent)).toEqual(shows.map(([tab]) => tab));
+    for (const [tab, testId] of shows) {
+      fireEvent.click(screen.getByRole("tab", { name: tab }));
+      expect(screen.getByRole("tab", { name: tab }).getAttribute("aria-selected")).toBe("true");
+      expect(await screen.findByTestId(testId)).toBeTruthy();
+      for (const [, other] of shows.filter(([t]) => t !== tab)) expect(screen.queryByTestId(other)).toBeNull();
+    }
+    stop();
+  });
+
   it("github: Connect uses the gh sign-in, the row reads connected as @login, and Disconnect puts it back", async () => {
-    const { daemon, stop } = setup();
+    const { daemon, stop } = setup({}, { tab: "providers" });
     const row = await screen.findByTestId("github-row");
     fireEvent.click(await within(row).findByRole("button", { name: "Connect" }));
     fireEvent.click(await screen.findByRole("button", { name: "Use my GitHub CLI sign-in" }));
@@ -111,13 +135,12 @@ describe("settings screen", () => {
     const { daemon, stop } = setup();
     const mine = await screen.findByTestId("your-settings");
     expect(daemon.requests.find((r) => r.path === "/config")?.query).toEqual({ repo: REPO });
-    // Your settings lead; the handful people change most show, the rest behind More. Checks is not among them.
-    expect(screen.getAllByRole("region").map((s) => s.id).filter(Boolean).slice(0, 2)).toEqual(["your-settings", "you"]);
-    // The repo's own checks and rules are on the switch's repo side, not here; no Autopilot row anywhere.
+    // Your settings lead the General tab; the handful people change most show, the rest behind More. Checks is not among them.
+    expect(screen.getAllByRole("region").map((s) => s.id).filter(Boolean)[0]).toBe("your-settings");
+    // The repo's own checks and rules are on the Project tab, not here; no Autopilot row anywhere.
     expect(screen.queryByTestId("repo-settings")).toBeNull();
     expect(screen.queryByRole("textbox", { name: "Checks" })).toBeNull();
-    expect(screen.getByRole("radio", { name: "You" }).getAttribute("aria-checked")).toBe("true");
-    expect(screen.getByRole("radio", { name: "proj" })).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "General" }).getAttribute("aria-selected")).toBe("true");
     expect(screen.queryByRole("switch", { name: "Autopilot" })).toBeNull();
     expect(within(mine).queryByRole("textbox", { name: "Checks" })).toBeNull();
     expect(within(mine).queryByRole("combobox", { name: "Overlapping tasks" })).toBeNull();
@@ -145,7 +168,7 @@ describe("settings screen", () => {
   });
 
   it("permissions: groups are the default view with the preset and ask rate; a group baseline and a subcategory override save through the groups API and show their marker", async () => {
-    const { daemon, stop } = setup({ policy: { preset: "autonomous", unmatched: "allow", rules: FAKE_PRESETS.autonomous.rules(), saved: [], prompts: { "d-push-default": 7 } } });
+    const { daemon, stop } = setup({ policy: { preset: "autonomous", unmatched: "allow", rules: FAKE_PRESETS.autonomous.rules(), saved: [], prompts: { "d-push-default": 7 } } }, { tab: "permissions" });
     const perms = await screen.findByTestId("permissions-settings");
     await waitFor(() => expect(within(perms).getByTestId("preset-name").textContent).toBe("Autonomous"));
     expect(within(perms).getByTestId("presets").querySelector('[data-preset="autonomous"]')!.textContent).toContain("RECOMMENDED");
@@ -169,7 +192,7 @@ describe("settings screen", () => {
 
   it("permissions: with the rules off nothing claims a preset is in force, one button turns them on, and a repo's or the person's own off isn't overridden by a preset", async () => {
     const policy = { preset: "autonomous", unmatched: "allow", rules: FAKE_PRESETS.autonomous.rules(), saved: [], prompts: {}, policy_on: false };
-    const { daemon, stop } = setup({ policy: { ...policy, policy_source: "default" } });
+    const { daemon, stop } = setup({ policy: { ...policy, policy_source: "default" } }, { tab: "permissions" });
     const banner = await screen.findByTestId("policy-off");
     const perms = screen.getByTestId("permissions-settings");
     expect(within(perms).getByTestId("preset-name").textContent).toBe("Not in force");
@@ -183,7 +206,7 @@ describe("settings screen", () => {
     cleanup();
 
     // A repo's off: nothing here can change it, so no button, and a preset says it isn't in force.
-    const repoOff = setup({ policy: { ...policy, policy_source: "repo" } });
+    const repoOff = setup({ policy: { ...policy, policy_source: "repo" } }, { tab: "permissions" });
     const held = await screen.findByTestId("policy-off");
     expect(within(held).queryByRole("button")).toBeNull();
     fireEvent.click(within(screen.getByTestId("permissions-settings")).getByRole("button", { name: "Use Standard" }));
@@ -193,7 +216,7 @@ describe("settings screen", () => {
   });
 
   it("permissions: unchecked commands opt-in is off, turns on only after an in-page confirmation, turns off in one click, and is locked when an org forces it", async () => {
-    const { daemon, stop } = setup({ policy: { preset: "autonomous", unmatched: "allow", rules: FAKE_PRESETS.autonomous.rules(), saved: [], prompts: {} } });
+    const { daemon, stop } = setup({ policy: { preset: "autonomous", unmatched: "allow", rules: FAKE_PRESETS.autonomous.rules(), saved: [], prompts: {} } }, { tab: "permissions" });
     const row = await screen.findByTestId("dangerous");
     const toggle = () => within(row).getByRole("switch", { name: "Run unchecked commands without asking" });
     expect(toggle().getAttribute("aria-checked")).toBe("false");
@@ -212,7 +235,7 @@ describe("settings screen", () => {
   });
 
   it("permissions: unchecked commands opt-in is locked when org policy denies it", async () => {
-    const { stop } = setup({ policy: { preset: "autonomous", unmatched: "allow", groups: { shell: { baseline: "ask", subcategories: { unchecked: "deny" } } }, rules: FAKE_PRESETS.autonomous.rules(), saved: [], prompts: {} } });
+    const { stop } = setup({ policy: { preset: "autonomous", unmatched: "allow", groups: { shell: { baseline: "ask", subcategories: { unchecked: "deny" } } }, rules: FAKE_PRESETS.autonomous.rules(), saved: [], prompts: {} } }, { tab: "permissions" });
     const row = await screen.findByTestId("dangerous");
     expect(within(row).getByText("Set by your organization")).toBeTruthy();
     expect((within(row).getByRole("switch") as HTMLButtonElement).disabled).toBe(true);
@@ -221,7 +244,7 @@ describe("settings screen", () => {
 
   it("permissions: changes the preset, searches and filters the Advanced rules, removes a former default with undo, and sets unmatched actions", async () => {
     const gitCommit = { id: "u-git-commit", kind: "bash", match: "git commit", match_type: "prefix", decision: "allow", source: "user", created: 1, describe: "bash prefix 'git commit'", exclusions: [] };
-    const { daemon, stop } = setup({ policy: { preset: "autonomous", unmatched: "allow", rules: [...FAKE_PRESETS.autonomous.rules(), gitCommit], saved: [], prompts: {} } });
+    const { daemon, stop } = setup({ policy: { preset: "autonomous", unmatched: "allow", rules: [...FAKE_PRESETS.autonomous.rules(), gitCommit], saved: [], prompts: {} } }, { tab: "permissions" });
     const perms = await screen.findByTestId("permissions-settings");
     await waitFor(() => expect(within(perms).getByTestId("preset-name").textContent).toBe("Autonomous"));
     fireEvent.click(within(perms).getByRole("button", { name: "Use Standard" }));
@@ -265,7 +288,7 @@ describe("settings screen", () => {
 
   it("permissions: a rule's limits save, and a deny that conflicts with an allow is auto-resolved without broadening the allow", async () => {
     const npm = { id: "u-npm", kind: "bash", match: "npm ", match_type: "prefix", decision: "allow", source: "user", created: 1, describe: "bash prefix 'npm '", exclusions: [] };
-    const { daemon, stop } = setup({ policy: { preset: "autonomous", unmatched: "allow", rules: [...FAKE_PRESETS.autonomous.rules(), npm], saved: [], prompts: {} } }, undefined, undefined, undefined, "d-push-default");
+    const { daemon, stop } = setup({ policy: { preset: "autonomous", unmatched: "allow", rules: [...FAKE_PRESETS.autonomous.rules(), npm], saved: [], prompts: {} } }, { tab: "permissions", rule: "d-push-default" });
     const editor = await screen.findByTestId("rule-editor");
     fireEvent.change(within(editor).getByRole("combobox", { name: "Remember approvals for" }), { target: { value: "time" } });
     fireEvent.change(within(editor).getByRole("spinbutton", { name: "Longest approval" }), { target: { value: "15" } });
@@ -287,7 +310,7 @@ describe("settings screen", () => {
 
   it("permissions: a saved action's scope and lifetime are edited, and deleting it can be undone", async () => {
     const saved = { id: "s9", kind: "write", pattern: "src/auth/login.ts", decision: "allow", scope: "exact", life: "forever", created: 1_700_000_000, note: "This file only · src/auth/login.ts" };
-    const { daemon, stop } = setup({ policy: { preset: "autonomous", unmatched: "allow", rules: FAKE_PRESETS.autonomous.rules(), saved: [saved], prompts: {} } });
+    const { daemon, stop } = setup({ policy: { preset: "autonomous", unmatched: "allow", rules: FAKE_PRESETS.autonomous.rules(), saved: [saved], prompts: {} } }, { tab: "permissions" });
     fireEvent.click(await screen.findByRole("button", { name: "Manage saved actions" }));
     fireEvent.click(screen.getByRole("button", { name: "Edit Write files saved action" }));
     const editor = screen.getByTestId("saved-editor");
@@ -316,7 +339,7 @@ describe("settings screen", () => {
       },
       config: { user: {}, repo: {}, local: {}, keys: [{ name: "ANTHROPIC_API_KEY", set: true, last4: "WXYZ", status: "verified", checked_at: now - 2 * 3600 - 60 }] },
       workspaces: [{ ...root, agents: [failed("a1"), failed("a2")] }],
-    });
+    }, { tab: "providers" });
     daemon.shellKeys.add("GEMINI_API_KEY");
     const health = (p: string) => within(screen.getByTestId(`provider-${p}`)).getByTestId("provider-health");
     const claude = await screen.findByTestId("provider-claude");
@@ -401,7 +424,7 @@ describe("settings screen", () => {
       providers: freshProviders({ codex: { path: "/opt/homebrew/bin/codex", version: "0.48.0" }, opencode: { path: "/home/u/.opencode/bin/opencode", version: "1.2.8" }, antigravity: { path: "/home/u/.local/bin/agy", version: "1.3.0" } }),
       connections: { opencode: { method: "api_key" } },
       config: { user: {}, repo: {}, local: {}, keys: [stored("OPENAI_API_KEY", "1111"), stored("OPENROUTER_API_KEY", "2222"), stored("ANTHROPIC_API_KEY", "3333"), stored("REVIEW_KEY", "4444")] },
-    });
+    }, { tab: "providers" });
     daemon.shellKeys.add("GEMINI_API_KEY");
     const deletes = () => daemon.requests.filter((r) => r.method === "DELETE").map((r) => r.path);
 
@@ -443,7 +466,7 @@ describe("settings screen", () => {
   });
 
   it("providers: one row per provider, found at its path with its version or not installed, signed in or not, with the settings note and no update controls", async () => {
-    const { stop } = setup();
+    const { stop } = setup({}, { tab: "providers" });
     const section = await screen.findByTestId("providers");
     expect(within(section).getByRole("heading", { name: "Providers" })).toBeTruthy();
     const claude = await within(section).findByTestId("provider-claude");
@@ -483,7 +506,7 @@ describe("settings screen", () => {
   });
 
   it("providers: Connect runs the maker's official installer with its lines streaming into the row, then detects the CLI again; a failed install stays with Retry", async () => {
-    const { daemon, stop } = setup();
+    const { daemon, stop } = setup({}, { tab: "providers" });
     const opencode = await screen.findByTestId("provider-opencode");
     await waitFor(() => expect(opencode.getAttribute("data-state")).toBe("not_installed"));
     daemon.deferInstall = true;
@@ -520,7 +543,7 @@ describe("settings screen", () => {
   });
 
   it("providers: Sign in runs the CLI's own login in the browser-first card, and the row reads signed in after", async () => {
-    const { daemon, stop } = setup();
+    const { daemon, stop } = setup({}, { tab: "providers" });
     const codex = await screen.findByTestId("provider-codex");
     await waitFor(() => expect(codex.getAttribute("data-state")).toBe("signed_out"));
     // The engine reads it not ready, wanting a sign-in.
@@ -544,7 +567,7 @@ describe("settings screen", () => {
   });
 
   it("lists the engine's health with a fix where the app has one, updates the engine as a job followed on the bus (done, or failed with uv's tail), and keeps the command-line tool's button off without the shell's installer", async () => {
-    const { daemon, stop } = setup();
+    const { daemon, stop } = setup({}, { tab: "about" });
     const engine = await screen.findByTestId("engine");
     await waitFor(() => expect(engine.textContent).toContain("brindle 0.5.0"));
     // What is wrong, counted (the pending update counts; optional warnings and the sign-in rows don't).
@@ -613,7 +636,7 @@ describe("settings screen", () => {
   });
 
   it("shows a doctor that didn't answer as a failure, never as a clean bill or an up-to-date engine", async () => {
-    const { failing, stop } = setup({ doctor: [] });
+    const { failing, stop } = setup({ doctor: [] }, { tab: "about" });
     failing.add("/doctor");
     await screen.findByTestId("doctor-error");
     const engine = screen.getByTestId("engine");
@@ -622,36 +645,35 @@ describe("settings screen", () => {
     expect(engine.textContent).not.toContain("Everything brindle needs is here");
     expect(engine.textContent).not.toContain("Up to date");
     expect(screen.queryByRole("button", { name: "Update brindle" })).toBeNull();
-    // The provider rows come from the engine's detection, not the doctor: they stay.
-    await waitFor(() => expect(screen.getByTestId("provider-claude").getAttribute("data-state")).toBe("signed_in"));
     failing.clear();
     fireEvent.click(screen.getByRole("button", { name: "Try again" }));
     await waitFor(() => expect(screen.queryByTestId("doctor-error")).toBeNull());
+    // The provider rows come from the engine's detection, not the doctor: they stay.
+    fireEvent.click(screen.getByRole("tab", { name: "Workers & providers" }));
+    await waitFor(() => expect(screen.getByTestId("provider-claude").getAttribute("data-state")).toBe("signed_in"));
     stop();
   });
 
   it("hides debug logging from anyone the daemon doesn't call staff", async () => {
-    const { daemon, stop } = setup({ debug: { staff: false, enabled: true } });
+    const { daemon, stop } = setup({ debug: { staff: false, enabled: true } }, { tab: "about" });
     await screen.findByTestId("engine");
     await waitFor(() => expect(daemon.requests.some((r) => r.method === "GET" && r.path === "/debug")).toBe(true));
     await flush();
     expect(screen.queryByTestId("debug-logging")).toBeNull();
     expect(screen.queryByRole("switch", { name: "Debug logging" })).toBeNull();
     expect(screen.queryByTestId("staff-only")).toBeNull();
-    expect(screen.queryByRole("button", { name: "Staff only" })).toBeNull();
     stop();
   });
 
   it("gives staff one Staff only section holding debug logging, app update and the release-branch rows, which turns debug logging on with PUT /debug", async () => {
     const updater = { install: vi.fn(async () => "0.1.0-rc.8"), restart: vi.fn(async () => {}) };
-    const { daemon, stop } = setup({ debug: { staff: true, enabled: false } }, undefined, updater, releaseBuildUpdater, undefined, async () => ({ version: "0.2.4+release.42.0123456789ab", files: [] }));
-    // The staff section holds the staff controls, last before About, and is in the nav.
+    const { daemon, stop } = setup({ debug: { staff: true, enabled: false } }, { tab: "about", appUpdater: updater, releaseBuildUpdater, readAbout: async () => ({ version: "0.2.4+release.42.0123456789ab", files: [] }) });
+    // The staff section holds the staff controls, on the About tab, last before About.
     const staffOnly = await screen.findByTestId("staff-only");
     await within(staffOnly).findByTestId("return-to-stable-row");
     expect(within(staffOnly).getByTestId("app-update-row")).toBeTruthy();
     expect(within(staffOnly).getByTestId("release-build-row")).toBeTruthy();
     expect(staffOnly.nextElementSibling?.id).toBe("about");
-    expect(screen.getByRole("button", { name: "Staff only" })).toBeTruthy();
     const section = within(staffOnly).getByTestId("debug-logging");
     expect(section.textContent).toContain("upload to brindle");
     const toggle = within(section).getByRole("switch", { name: "Debug logging" });
@@ -666,7 +688,7 @@ describe("settings screen", () => {
 
   it("staff update: gives staff an Update button that installs the new build and offers a restart", async () => {
     const updater = { install: vi.fn(async () => "0.1.0-rc.8"), restart: vi.fn(async () => {}) };
-    const { stop } = setup({ debug: { staff: true, enabled: false } }, undefined, updater);
+    const { stop } = setup({ debug: { staff: true, enabled: false } }, { tab: "about", appUpdater: updater });
     const section = await screen.findByTestId("app-update");
     expect(updater.install).not.toHaveBeenCalled();
     fireEvent.click(within(section).getByRole("button", { name: "Update" }));

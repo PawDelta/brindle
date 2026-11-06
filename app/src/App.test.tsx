@@ -298,17 +298,19 @@ describe("App", () => {
     await screen.findByRole("complementary", { name: "Sidebar" });
     fireEvent.click(await within(nav()).findByRole("button", { name: "Project settings for other" }));
     await screen.findByRole("region", { name: "Project settings" });
-    expect(screen.getByRole("radio", { name: /^other/ }).getAttribute("aria-checked")).toBe("true");
+    expect(screen.getByRole("tab", { name: "Project" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByRole("combobox", { name: "Repo" })).toHaveProperty("value", OTHER);
     fireEvent.click(screen.getByTestId("terminal-toggle"));
     await waitFor(() => expect(daemon.shells.map((s) => s.cwd)).toEqual([OTHER]));
-    // Settings opens on You; the switch's repo side is the current session's repo (here the second), with a menu for the others.
+    // Settings opens on General; its Project tab is the current session's repo (here the second), with a picker for the others.
     localStorage.setItem(LAST_SESSION_KEY, JSON.stringify({ root: "sup2", repo: OTHER }));
     fireEvent.click(link("Settings"));
-    fireEvent.click(await screen.findByRole("radio", { name: /^other/ }));
+    expect((await screen.findByRole("tab", { name: "General" })).getAttribute("aria-selected")).toBe("true");
+    fireEvent.click(screen.getByRole("tab", { name: "Project" }));
     await screen.findByRole("region", { name: "Project settings" });
-    fireEvent.click(screen.getByRole("radio", { name: /^other/ }));
-    fireEvent.click(screen.getByRole("menuitem", { name: "proj" }));
-    expect((await screen.findByRole("radio", { name: /^proj/ })).getAttribute("aria-checked")).toBe("true");
+    expect(screen.getByRole("combobox", { name: "Repo" })).toHaveProperty("value", OTHER);
+    fireEvent.change(screen.getByRole("combobox", { name: "Repo" }), { target: { value: REPO } });
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Repo" })).toHaveProperty("value", REPO));
     sync.stop();
   });
 
@@ -484,7 +486,7 @@ describe("App", () => {
     expect(screen.queryByTestId("engine-banner")).toBeNull();
 
     fireEvent.click(link("Settings"));
-    await screen.findByRole("region", { name: "Settings" });
+    fireEvent.click(await screen.findByRole("tab", { name: "About" }));
     const engineSection = screen.getByTestId("engine");
     fireEvent.click(within(engineSection).getByRole("button", { name: /Details/ }));
     expect(within(engineSection).getByTestId("connection").textContent).toBe("daemon · connected");
@@ -512,7 +514,7 @@ describe("App", () => {
     await waitFor(() => expect(screen.queryByTestId("engine-banner")).toBeNull());
     await waitFor(() => expect(screen.queryByTestId("inbox-badge")).toBeNull());
     fireEvent.click(link("Settings"));
-    await screen.findByRole("region", { name: "Settings" });
+    fireEvent.click(await screen.findByRole("tab", { name: "About" }));
     fireEvent.click(within(screen.getByTestId("engine")).getByRole("button", { name: /Details/ }));
     expect(within(screen.getByTestId("engine")).getByTestId("connection").textContent).toBe("daemon · connected");
     const after = daemon.requests.slice(before).filter((r) => r.method === "GET").map((r) => r.path);
