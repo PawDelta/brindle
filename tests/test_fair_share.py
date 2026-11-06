@@ -1,7 +1,9 @@
 """The machine-wide worker limit shared fairly across sessions (brindle.fair_share),
-as the start gate (tasks.task_wait) applies it, from database rows alone."""
+as the start gate (tasks.task_wait) and the claim (tasks._claim_fair) apply it,
+from database rows alone."""
 
 import itertools
+import json
 
 import pytest
 
@@ -13,10 +15,13 @@ _ids = itertools.count()
 
 @pytest.fixture
 def rows(db, tmp_path, monkeypatch):
-    """A workspace, the person's limit of 4 workers, and a machine with room."""
+    """Two repos' workspaces, the person's limit of 4 workers, and a machine with room."""
     monkeypatch.setattr(spawn, "no_room", lambda repo_root=None: None)
     config.set_user("machine_max_workers", 4)
-    db.add_workspace(Workspace("w", str(tmp_path), "w", "worktree", "main", "main", str(tmp_path), None, "s", 1.0))
+    for name in ("w", "w2"):
+        (tmp_path / name).mkdir()
+        path = str(tmp_path / name)
+        db.add_workspace(Workspace(name, path, name, "worktree", "main", "main", path, None, f"s-{name}", 1.0))
     return db
 
 
@@ -27,9 +32,9 @@ def session(db, root, running=0):
                            "@1", None, 1.0))
 
 
-def queued(db, root, at):
-    t = Task(f"{root}-t{next(_ids)}", db.get_workspace("w").repo_root, None, root, "w", "developer", "do",
-             "assign", 1, None, None, None, None, "pending", at)
+def queued(db, root, at, ws="w", depends_on=None):
+    t = Task(f"{root}-t{next(_ids)}", db.get_workspace(ws).repo_root, None, root, ws, "developer", "do",
+             "assign", 1, None, None, None, json.dumps(depends_on) if depends_on else None, "pending", at)
     db.add_task(t)
     db.update_task(t.id, waiting="no room", waiting_since=at)
     return db.get_task(t.id)
@@ -44,14 +49,35 @@ def test_fair_share_session_over_its_share_queues_while_another_has_work(rows):
     assert tasks.task_wait(rows, theirs) is None
 
 
+def test_fair_share_claim_decides_again_under_the_machine_lock(rows):
+    """A's task passed the gate, then B's (another repo) took the last slot
+    before A claimed: A's stale decision must not start a worker over the limit."""
+    config.set_user("machine_max_workers", 2)
+    session(rows, "a", running=1)
+    session(rows, "b")
+    late = queued(rows, "a", at=1.0)
+    assert tasks.task_wait(rows, late) is None
+    other = queued(rows, "b", at=2.0, ws="w2")
+    assert tasks._claim_fair(rows, other)[0]
+    claimed, _refused, why = tasks._claim_fair(rows, late)
+    assert not claimed and why and rows.get_task(late.id).state == "pending"
+
+
 def test_fair_share_queued_tasks_start_round_robin_across_sessions(rows):
-    session(rows, "a", running=2)
-    session(rows, "b", running=1)
+    config.set_user("machine_max_workers", 1)
+    session(rows, "a")
+    session(rows, "b")
     session(rows, "c")
     a1, a2 = queued(rows, "a", at=1.0), queued(rows, "a", at=2.0)
-    b1, c1 = queued(rows, "b", at=3.0), queued(rows, "c", at=4.0)
-    assert fair_share.order(rows) == [c1.id, b1.id, a1.id, a2.id]
-    assert [tasks.task_wait(rows, t) is None for t in (a1, a2, b1, c1)] == [False, False, False, True]
+    b1 = queued(rows, "b", at=3.0)
+    # Older, but a dependency added since it began waiting holds it: it must not take a turn it can't use.
+    queued(rows, "c", at=0.5, depends_on=[f"task:{b1.id}"])
+    assert fair_share.order(rows) == [a1.id, b1.id, a2.id]
+    assert tasks._claim_fair(rows, a1)[0]
+    rows.add_agent(Agent("a1-worker", "w", "developer", "claude", "a", "assign", "processing", "@1", None, 1.0))
+    rows.update_task(a1.id, agent_id="a1-worker", state="started")
+    rows.update_agent("a1-worker", status="done")   # a's worker finished: b's turn, not a's older backlog
+    assert [tasks.task_wait(rows, t) is None for t in (a2, b1)] == [False, True]
 
 
 def test_fair_share_lone_session_may_use_every_slot(rows, monkeypatch):

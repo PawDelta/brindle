@@ -6,16 +6,21 @@ workers together at the person's ``machine_max_workers``
 count, up to twice that while the machine is lightly loaded (``limit``). A
 session may use idle capacity, but while other sessions have work queued
 the free slots go round-robin: the next start is the oldest queued task of
-the session running the fewest workers (``order``), so a session at its fair
-share (the limit over the sessions with work, at least 1) waits behind the
-others. Only new starts are gated: running workers are never stopped to
-rebalance. A start that may not go now waits for room like any other
-(``tasks.task_wait``) and starts, in this order, as slots free.
+the session running the fewest workers, ties going to the session whose last
+turn was longest ago (``order``), so a session at its fair share (the limit
+over the sessions with work, at least 1) waits behind the others. Only new
+starts are gated: running workers are never stopped to rebalance. A start
+that may not go now waits for room like any other (``tasks.task_wait``)
+and starts, in this order, as slots free; the decision is made again under
+``machine_lock`` as the slot is claimed.
 """
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import time
+from collections.abc import Iterator
 
 from brindle.db import DB, Task
 
@@ -59,32 +64,81 @@ def running(db: DB) -> dict[str, int]:
     return counts
 
 
-def queued(db: DB) -> list[Task]:
-    """Tasks ready to start but for room: pending, not held by an unmerged
-    dependency (waiting for room, or with none), in a session not paused,
-    and starting a process of brindle's."""
+@contextlib.contextmanager
+def machine_lock() -> Iterator[None]:
+    """One start decision at a time across every brindle process and repo:
+    the fair-share check and the claim of the slot it allows happen together
+    (``tasks._claim_fair``, ``agents.delegate``), so two sessions can't both
+    take the last slot on stale counts."""
+    from brindle.config import brindle_home
+
+    locks = brindle_home() / "locks"
+    locks.mkdir(parents=True, exist_ok=True)
+    with open(locks / "fair-share.lock", "w") as f:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+
+
+def _runnable(db: DB, t: Task) -> bool:
+    """Whether pending task ``t`` could start but for room: every dependency
+    merged as the database knows it now (a dependency added since it began
+    waiting for room holds it), its session not paused, and it starts a
+    process of brindle's."""
     from brindle import agents, tasks
 
-    return [t for t in db.list_tasks(state="pending")
-            if (t.waiting is not None or not tasks._loads(t.depends_on))
-            and not tasks.session_paused(db, t) and agents.launches_process(t.profile, t.repo_root)]
+    deps = tasks._loads(t.depends_on)
+    if deps:
+        ws = db.get_workspace(t.caller_ws_id)
+        try:
+            if ws is None or tasks.unmet_dependencies(db, ws, deps, caller_id=t.caller_id,
+                                                      dependent_task_id=t.id, inspect=False):
+                return False
+        except agents.AgentError:   # a cancelled dependency: it never starts
+            return False
+    return not tasks.session_paused(db, t) and agents.launches_process(t.profile, t.repo_root)
+
+
+def queued(db: DB) -> list[Task]:
+    """Pending tasks ready to start but for room (``_runnable``)."""
+    return [t for t in db.list_tasks(state="pending") if _runnable(db, t)]
+
+
+def _last_starts(db: DB) -> dict[str, float]:
+    """When each session last had a task admitted (its ``started_at``): the
+    round-robin's turn history, so a session that just had a turn waits for
+    the others' even once its worker has finished."""
+    last: dict[str, float] = {}
+    for caller_id, at in db.conn.execute(
+            "SELECT caller_id, MAX(started_at) FROM tasks WHERE started_at IS NOT NULL "
+            "AND caller_id IS NOT NULL GROUP BY caller_id"):
+        s = _session(db, caller_id)
+        last[s] = max(last.get(s, at), at)
+    return last
 
 
 def order(db: DB, extra: Task | None = None) -> list[str]:
     """The ids of the queued tasks (and ``extra``) in the order they get
     slots: round-robin across sessions, each pick going to the session with
-    the fewest workers at work counting earlier picks, oldest task first."""
+    the fewest workers at work counting earlier picks, then to the one whose
+    last turn was longest ago, then its oldest task."""
     work = running(db)
+    last = _last_starts(db)
     heads: dict[str, list[Task]] = {}
     for t in [*(t for t in queued(db) if extra is None or t.id != extra.id), *([extra] if extra else [])]:
         heads.setdefault(_session(db, t.caller_id), []).append(t)
     for line in heads.values():
         line.sort(key=lambda t: t.created_at)
     out: list[str] = []
+    turn = max([time.time(), *last.values()])
     while heads:
-        s = min(heads, key=lambda s: (work.get(s, 0), heads[s][0].created_at))
+        s = min(heads, key=lambda s: (work.get(s, 0), last.get(s, float("-inf")), heads[s][0].created_at))
         out.append(heads[s].pop(0).id)
         work[s] = work.get(s, 0) + 1
+        turn += 1
+        last[s] = turn
         if not heads[s]:
             del heads[s]
     return out

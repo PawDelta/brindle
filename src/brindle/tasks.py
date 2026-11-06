@@ -1222,6 +1222,22 @@ def _claim_admitted(db: DB, t: Task, claim) -> tuple[bool, str | None]:
         return True, None
 
 
+def _claim_fair(db: DB, t: Task) -> tuple[bool, str | None, str | None]:
+    """``_claim_admitted`` with ``db.claim_task``, deciding the machine-wide
+    fair share (``fair_share.wait_reason``) again under ``fair_share.machine_lock``
+    so the check and the slot it allows are one step across every repo:
+    (claimed, the policy's refusal, why it must wait its turn instead). A
+    task told to wait stays pending."""
+    from brindle import fair_share
+
+    with fair_share.machine_lock():
+        why = fair_share.wait_reason(db, t) if agents.launches_process(t.profile, t.repo_root) else None
+        if why:
+            return False, None, why
+        claimed, refused = _claim_admitted(db, t, db.claim_task)
+        return claimed, refused, None
+
+
 def _launch_overlap(db: DB, t: Task, caller_ws: Workspace) -> tuple[bool, str | None]:
     """Check pending task ``t`` for the overlap only git can tell
     (``inspected_clash``) just before it launches, and handle it by the
@@ -1284,7 +1300,10 @@ def _start_if_ready(db: DB, t: Task, dep_ref: str, check_room: bool = True) -> b
     launch, overlap = _launch_overlap(db, t, caller_ws)
     if not launch:
         return False
-    claimed, refused = _claim_admitted(db, t, db.claim_task)
+    claimed, refused, turn = _claim_fair(db, t)
+    if turn:
+        wait_for_room(db, t, turn)
+        return False
     if refused:
         _cancel(db, t.id, f"the repo's policy refused it: {refused}")
     if not claimed:
@@ -1428,12 +1447,14 @@ def requeue(db: DB, caller: Agent | None, caller_ws: Workspace, task_id: str,
     )
     if unmet:
         return f"Requeued task {old.id} as {new.id}, waiting on {', '.join(unmet)}."
-    why = room_wait(new.repo_root) or task_wait(db, new)
+    why = room_wait(new.repo_root)
+    claimed, refused = False, None
+    if not why:
+        claimed, refused, why = _claim_fair(db, new)   # the slot it takes counts for others
     if why:
         wait_for_room(db, new, why)
         return (f"Requeued task {old.id} as {new.id}, waiting for room: {why}. "
                 "It starts on its own when there's room.")
-    claimed, refused = _claim_admitted(db, new, db.claim_task)   # the slot it takes counts for others
     if not claimed:
         reason = f"the repo's policy refused it: {refused}" if refused else "it was started or cancelled meanwhile"
         _cancel(db, new.id, reason)
