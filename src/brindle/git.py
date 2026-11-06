@@ -1049,15 +1049,14 @@ def merge_into(root: str | Path, target_path: str | Path, branch: str, squash: b
     with checkout_lock(target_path):
         if dirty_files(target_path, tracked_only=True):
             raise GitError(f"{target_path} has uncommitted changes; commit or stash them first")
-        who = identity_args(target_path)
         if squash:
             proc = _retry_transient(["merge", "--squash", branch], target_path)
             if proc.returncode == 0:
                 proc = _retry_transient(
-                    [*who, "commit", "--no-edit", "-m", f"Squash merge {branch}"], target_path
+                    ["commit", "--no-edit", "-m", f"Squash merge {branch}"], target_path
                 )
         else:
-            proc = _retry_transient([*who, "merge", "--no-ff", "--no-edit", branch], target_path)
+            proc = _retry_transient(["merge", "--no-ff", "--no-edit", branch], target_path)
         if proc.returncode != 0:
             run(["merge", "--abort"], target_path, check=False)
             raise GitError(
@@ -1081,12 +1080,13 @@ def _retry_transient(args: list[str], cwd: str | Path) -> subprocess.CompletedPr
     """Run a git command, retrying with backoff while it fails on the index
     lock. A merge that failed that way never started, so a retry can't touch
     the checkout's uncommitted changes; any other failure returns at once."""
-    proc = run(args, cwd, check=False)
+    who = identity_args(cwd)     # a new account has no author for the merge commit
+    proc = run([*who, *args], cwd, check=False)
     for delay in RETRY_DELAYS:
         if proc.returncode == 0 or not _is_transient(proc):
             break
         time.sleep(delay)
-        proc = run(args, cwd, check=False)
+        proc = run([*who, *args], cwd, check=False)
     return proc
 
 
