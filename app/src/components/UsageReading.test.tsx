@@ -114,7 +114,7 @@ describe("the sidebar's weekly usage reading", () => {
 
     fireEvent.click(reading);
     const usage = await screen.findByTestId("usage");
-    expect(screen.getByRole("region", { name: "Account" })).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "Usage" }).getAttribute("aria-selected")).toBe("true");
     await waitFor(() => expect(scrolled.mock.contexts).toContain(usage));
     expect(within(usage).getByRole("article", { name: "Claude" }).getAttribute("data-state")).toBe("warn");
     stop();
@@ -126,8 +126,6 @@ describe("the sidebar's weekly usage reading", () => {
     const { stop } = app("near");
     fireEvent.click(await screen.findByTestId("usage-reading"));
     const usage = await screen.findByTestId("usage");
-    // Once the plan's cards have loaded above it, the scrolls settle.
-    await screen.findByTestId("plan");
     await waitFor(() => expect(scrolled.mock.contexts).toContain(usage));
     const before = scrolled.mock.calls.length;
     fireEvent.click(screen.getByTestId("usage-reading"));
