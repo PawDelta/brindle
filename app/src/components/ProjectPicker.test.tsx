@@ -92,7 +92,7 @@ describe("ProjectPicker", () => {
     clone();
     const panel = await screen.findByTestId("developer-tools-missing");
     expect(panel.textContent).toContain("xcode-select --install");
-    // Then a folder, which fails the same way: Try again must retry the folder, not the older clone.
+    // Then a folder, which fails the same way: Try again must repeat the folder, not the older clone.
     await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Open a folder…" })); });
     await screen.findByTestId("developer-tools-missing");
     expect(screen.queryByTestId("clone-failed")).toBeNull();
