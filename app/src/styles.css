@@ -175,6 +175,75 @@ body {
   }
 }
 
+/* Buttons, the Tinted scheme (design/design-v3.html .sch-tinted): one base
+   in Geist Sans 13px, and four roles. The one main action (primary) is pass
+   text on a 12% pass wash with a 40% pass hairline; secondary is a hairline;
+   quiet is text only; destructive is primary's shape in fail. Hover deepens
+   the wash and the line, pressed deeper still; focus is the branch ring;
+   disabled is 45% and inert. In the components layer, so a utility on the
+   element (px-s1, text-xs, rounded-r-none) still wins. ui.ts names them. */
+@layer components {
+  .btn {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    min-height: 28px;
+    padding: 0 12px;
+    border-radius: var(--r);
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--ink);
+    font: 500 13px/1.25 var(--sans);
+    letter-spacing: -0.005em;
+    white-space: nowrap;
+    cursor: pointer;
+    transition: background-color 120ms var(--ease), border-color 120ms var(--ease), color 120ms var(--ease), opacity 160ms var(--ease);
+  }
+  .btn.text-xs { min-height: 24px; }
+  .btn:focus-visible { outline: 2px solid var(--branch); outline-offset: 2px; }
+  .btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+  .btn-primary { background: color-mix(in srgb, var(--pass) 12%, transparent); border-color: color-mix(in srgb, var(--pass) 40%, transparent); color: var(--pass); }
+  .btn-primary:hover:not(:disabled) { background: color-mix(in srgb, var(--pass) 14%, transparent); border-color: color-mix(in srgb, var(--pass) 62%, transparent); color: color-mix(in srgb, var(--pass) 85%, var(--ink)); }
+  .btn-primary:active:not(:disabled) { background: color-mix(in srgb, var(--pass) 18%, transparent); border-color: var(--pass); color: color-mix(in srgb, var(--pass) 75%, var(--ink)); }
+
+  .btn-secondary { border-color: var(--line-strong); color: var(--ink); }
+  .btn-secondary:hover:not(:disabled) { background: var(--surface-2); border-color: color-mix(in srgb, var(--line-strong) 70%, var(--ink-3)); }
+  .btn-secondary:active:not(:disabled) { background: color-mix(in srgb, var(--surface-2) 86%, var(--ink)); }
+
+  .btn-quiet { padding: 2px 8px; color: var(--ink-2); }
+  .btn-quiet:hover:not(:disabled) { background: var(--surface-2); color: var(--ink); }
+  .btn-quiet:active:not(:disabled) { background: color-mix(in srgb, var(--surface-2) 86%, var(--ink)); color: var(--ink); }
+
+  .btn-destructive { background: color-mix(in srgb, var(--fail) 12%, transparent); border-color: color-mix(in srgb, var(--fail) 40%, transparent); color: var(--fail); }
+  .btn-destructive:hover:not(:disabled) { background: color-mix(in srgb, var(--fail) 14%, transparent); border-color: color-mix(in srgb, var(--fail) 62%, transparent); color: color-mix(in srgb, var(--fail) 85%, var(--ink)); }
+  .btn-destructive:active:not(:disabled) { background: color-mix(in srgb, var(--fail) 18%, transparent); border-color: var(--fail); color: color-mix(in srgb, var(--fail) 75%, var(--ink)); }
+
+  /* Loading (components/LoadingButton.tsx): nothing for 300ms, then the
+     button keeps its label and size, dims to 55% and a line sweeps under it,
+     outside the button, in the role's colour. */
+  .ld { position: relative; display: inline-flex; align-items: center; isolation: isolate; vertical-align: middle; --ld: var(--ink-3); }
+  .ld > button { position: relative; z-index: 1; }
+  /* A screen may disable the running button too: it keeps its look until the wait shows. */
+  .ld[data-active] > button:disabled { opacity: 1; cursor: progress; }
+  .ld.slow > button, .ld.slow[data-active] > button:disabled { opacity: 0.55; pointer-events: none; }
+  .ld[data-tone="primary"] { --ld: var(--pass); }
+  .ld[data-tone="destructive"] { --ld: var(--fail); }
+  .ld-sweep { position: absolute; left: 2px; right: 2px; bottom: -6px; height: 2px; border-radius: 1px; background: var(--line-strong); overflow: hidden; opacity: 0; transition: opacity 200ms var(--ease); z-index: 0; pointer-events: none; }
+  .ld.slow > .ld-sweep { opacity: 1; }
+  .ld-sweep::after { content: ""; position: absolute; top: 0; bottom: 0; left: 0; width: 38%; border-radius: 1px; background: var(--ld); animation: ld-sweep 1.15s cubic-bezier(0.45, 0, 0.55, 1) infinite; }
+}
+@keyframes ld-sweep {
+  from { transform: translateX(-110%); }
+  to { transform: translateX(275%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .btn, .ld-sweep { transition: none; }
+  .ld-sweep::after { animation: none; width: 100%; opacity: 0.6; }
+}
+
 /* A sheet slides in over the screen (components/Sheet.tsx); the layer under it fades. */
 @keyframes sheet-in {
   from { transform: translateX(24px); opacity: 0; }
@@ -258,9 +327,11 @@ body {
 .side-ms .m[data-state="todo"] { color: var(--ink-3); }
 .side-ms .m .t { flex: 1; min-width: 0; line-height: 1.35; }
 .side-ms .m .t small { display: block; font-family: var(--mono); font-size: 10px; color: var(--ink-3); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.side-btn { display: inline-flex; align-items: center; gap: 6px; height: 22px; padding: 0 10px; border-radius: var(--r); font-size: 11px; font-weight: 500; border: 1px solid var(--line-strong); background: transparent; color: var(--ink); white-space: nowrap; }
-.side-btn:hover { background: var(--surface-2); }
-.side-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+/* The small button is the Tinted secondary (.btn-secondary) at the small size. */
+.side-btn { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 9px; border-radius: var(--r); font: 500 12px/1 var(--sans); letter-spacing: -0.005em; border: 1px solid var(--line-strong); background: transparent; color: var(--ink); white-space: nowrap; cursor: pointer; transition: background-color 120ms var(--ease), border-color 120ms var(--ease); }
+.side-btn:hover:not(:disabled) { background: var(--surface-2); border-color: color-mix(in srgb, var(--line-strong) 70%, var(--ink-3)); }
+.side-btn:active:not(:disabled) { background: color-mix(in srgb, var(--surface-2) 86%, var(--ink)); }
+.side-btn:disabled { opacity: 0.45; cursor: not-allowed; }
 /* A pill is its tone in the text and a dot in that tone, no box; a pill
    with its own dot (a .rounded-full inside) or in mono (a path) has none. */
 .pill:not(:has(.rounded-full)):not(.font-mono)::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex: none; }

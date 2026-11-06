@@ -12,6 +12,7 @@ import { useEffect, useState, type FormEvent } from "react";
 import { useDaemon } from "../api/context";
 import type { PreflightDTO, PreflightItem } from "../api/client";
 import { providerName } from "../store/overview";
+import { LoadingButton } from "./LoadingButton";
 import { ProviderSignIn } from "./ProviderSignIn";
 import { alert, button, card, field, main } from "./ui";
 
@@ -215,9 +216,9 @@ export function Preflight({ preflight, onRefresh, onLaunch, launchLabel = "Start
         ))}
       </ul>
       <div className="flex items-center gap-s1">
-        <button type="button" className={main} disabled={open.length > 0 || launching} onClick={onLaunch}>
+        <LoadingButton className={main} busy={launching} disabled={open.length > 0 || launching} onClick={onLaunch}>
           {launchLabel}
-        </button>
+        </LoadingButton>
         {instead.map((p) => (
           <button key={p} type="button" className={button} disabled={launching} onClick={() => onUseInstead?.(p)}>
             {launchLabel} on {providerName(p)} instead

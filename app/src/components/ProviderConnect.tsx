@@ -26,6 +26,7 @@ import { openExternal, type OpenUrl } from "../api/open";
 import type { CloudOptionsDTO } from "../api/schema";
 import { plain } from "../api/wording";
 import { useJob } from "../screens/Branch/useJob";
+import { LoadingButton } from "./LoadingButton";
 import { alert, button, field, mono, quiet } from "./ui";
 
 export type Method = "sign_in" | "api_key" | "cloud";
@@ -342,9 +343,9 @@ export function ApiKeyPaste({ client, provider, expect, keys, repo, openUrl = op
           disabled={busy}
           onChange={(e) => setValue(e.target.value)}
         />
-        <button type="submit" className={button} disabled={busy || !value.trim() || mismatch}>
-          {busy ? "Checking…" : "Save"}
-        </button>
+        <LoadingButton type="submit" className={button} busy={busy} disabled={busy || !value.trim() || mismatch}>
+          Save
+        </LoadingButton>
         {onCancel && (
           <button type="button" className={quiet} disabled={busy} onClick={onCancel}>
             Cancel
@@ -489,12 +490,7 @@ function CloudSignIn({ client, provider, route, openUrl, save, label, locked = f
   return (
     <div className="flex flex-col gap-s1" data-testid="cloud-sign-in" data-state={result ?? job?.status ?? "idle"}>
       <div className="flex flex-wrap items-center gap-s2">
-        {busy ? (
-          <span className="inline-flex items-center gap-s1 text-sm" role="status">
-            <span className="size-3.5 shrink-0 animate-spin rounded-full border-2 border-pass/55 border-t-transparent" aria-hidden />
-            Waiting for the browser…
-          </span>
-        ) : result === "signed in" ? (
+        {result === "signed in" && !busy ? (
           <span className="text-sm" role="status">
             <span aria-hidden className="text-pass">
               ✓{" "}
@@ -502,9 +498,15 @@ function CloudSignIn({ client, provider, route, openUrl, save, label, locked = f
             Signed in through {CLOUD_NAME[route] ?? route}
           </span>
         ) : (
-          <button type="button" className={button} disabled={locked} onClick={() => void begin()}>
+          // The button stays while the sign-in runs, and shows the wait (LoadingButton); what to do sits beside it.
+          <LoadingButton className={button} busy={busy} disabled={locked || busy} onClick={() => begin()}>
             {failed ? "Try again" : (label ?? cloud.signIn)}
-          </button>
+          </LoadingButton>
+        )}
+        {busy && (
+          <span className="text-sm" role="status">
+            Waiting for the browser…
+          </span>
         )}
         {url && busy && (
           <button type="button" className={`${quiet} ${link}`} onClick={() => void openUrl(url).catch(() => undefined)}>
@@ -700,9 +702,9 @@ function CodexSignOut({ client, onDone }: { client: DaemonClient; onDone(connect
   const { job, busy, start } = useJob();
   return (
     <>
-      <button type="button" className={button} disabled={busy} onClick={() => void start("Sign out of ChatGPT", () => client.codexSignOut(), (result) => onDone(result as ProviderConnection))}>
-        {busy ? "Signing out…" : "Sign out of ChatGPT"}
-      </button>
+      <LoadingButton className={button} busy={busy} disabled={busy} onClick={() => void start("Sign out of ChatGPT", () => client.codexSignOut(), (result) => onDone(result as ProviderConnection))}>
+        Sign out of ChatGPT
+      </LoadingButton>
       {job?.status === "failed" && (
         <span className="text-fail" role="alert">
           {plain(job.error ?? "")}
