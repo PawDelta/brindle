@@ -65,6 +65,9 @@ pub(crate) const START_LOG: &str = "app-daemon.log";
 /// The launchd job that runs the daemon on macOS (`start_daemon`), in brindle's home.
 #[cfg(target_os = "macos")]
 const LAUNCHD_PLIST: &str = "app-daemon.plist";
+/// The app's bundle identifier (tauri.conf.json), which that job's plist names.
+#[cfg(target_os = "macos")]
+const BUNDLE_ID: &str = "com.pawdelta.brindle";
 /// How long a liveness check's connect and answer may take.
 const CHECK_TIMEOUT: Duration = Duration::from_secs(3);
 /// How a start's failure begins when the installed brindle predates `brindle
@@ -315,8 +318,29 @@ fn find_brindle(path: &OsStr) -> Option<PathBuf> {
 /// `start_daemon`'s: on macOS as launchd's job, outside the app's coalition.
 #[cfg_attr(windows, allow(dead_code))]
 fn daemon_command(bin: &Path, path: &OsStr) -> Command {
-    let mut cmd = Command::new(bin);
-    cmd.args(["daemon", "--idle-exit"])
+    daemon_process(bin, &[], path)
+}
+
+/// What a start runs: `daemon_command`, except that the bundled engine's
+/// launcher is skipped for what it would run (`engine::launcher_exec`), so a
+/// launchd job's program is the engine's signed Python, not a script.
+#[cfg_attr(windows, allow(dead_code))]
+pub(crate) fn start_command(bin: &Path, path: &OsStr, engine: Option<&Path>) -> Command {
+    let direct = engine
+        .filter(|engine| crate::engine::is_launcher(engine, bin))
+        .and_then(|engine| crate::engine::launcher_exec(engine, path));
+    match direct {
+        Some((python, before, path)) => daemon_process(&python, &before, &path),
+        None => daemon_command(bin, path),
+    }
+}
+
+/// `program`, given `before` ahead of `daemon --idle-exit`: see `daemon_command`.
+#[cfg_attr(windows, allow(dead_code))]
+fn daemon_process(program: &Path, before: &[String], path: &OsStr) -> Command {
+    let mut cmd = Command::new(program);
+    cmd.args(before)
+        .args(["daemon", "--idle-exit"])
         .env("PATH", path)
         .stdin(Stdio::null())
         .stdout(Stdio::null());
@@ -710,8 +734,12 @@ fn daemon_plist(label: &str, cmd: &Command, log: &Path) -> String {
     plist += "\t<key>RunAtLoad</key>\n\t<false/>\n\
               \t<key>KeepAlive</key>\n\t<false/>\n\
               \t<key>AbandonProcessGroup</key>\n\t<true/>\n\
-              \t<key>ProcessType</key>\n\t<string>Interactive</string>\n\
-              </dict>\n</plist>\n";
+              \t<key>ProcessType</key>\n\t<string>Interactive</string>\n";
+    // launchd.plist(5): an app that installs a legacy plist names itself here, for
+    // Login Items. macOS honors it for a program with the app's Team ID, as the
+    // engine's Python has (`start_command`); not for a script, as in a dev build.
+    plist += &format!("\t<key>AssociatedBundleIdentifiers</key>\n\t<string>{BUNDLE_ID}</string>\n");
+    plist += "</dict>\n</plist>\n";
     plist
 }
 
@@ -840,7 +868,7 @@ fn start_in(
             std::fs::create_dir_all(home).map_err(|e| format!("{}: {e}", home.display()))?;
             // Each start's log begins afresh.
             File::create(&log_path).map_err(|e| format!("{}: {e}", log_path.display()))?;
-            let child = start_daemon(daemon_command(bin, path), home, &log_path)?;
+            let child = start_daemon(start_command(bin, path, engine), home, &log_path)?;
             Starting { child, since: Instant::now() }
         }
     };
@@ -863,7 +891,7 @@ fn start_in(
                     _ => {
                         set_step(home, Some((StartStep::Stopping { pid: info.pid }, since)));
                         stop_daemon(home, info.pid, STOP_GRACE)?;
-                        child = start_daemon(daemon_command(bin, path), home, &log_path)?;
+                        child = start_daemon(start_command(bin, path, engine), home, &log_path)?;
                         set_step(home, Some((StartStep::Starting { pid: child.id() }, since)));
                         continue;
                     }
@@ -2218,6 +2246,8 @@ mod tests {
         let plist = std::fs::read_to_string(home.join(LAUNCHD_PLIST)).unwrap();
         assert_eq!(std::fs::metadata(home.join(LAUNCHD_PLIST)).unwrap().permissions().mode() & 0o777, 0o600);
         assert!(plist.contains("<key>RunAtLoad</key>\n\t<false/>"), "{plist}");
+        // The app's name for Login Items; launchd loaded it with the key, as above.
+        assert!(plist.contains(&format!("<key>AssociatedBundleIdentifiers</key>\n\t<string>{BUNDLE_ID}</string>")), "{plist}");
         assert!(!launchctl(&["print", &launchd_service(&label)]).unwrap().contains("keepalive"));
         // Its own coalition, not this process's (the app's, when the app starts it): what
         // the pid's parent being launchd (ppid 1) alone doesn't give a child of the app's.

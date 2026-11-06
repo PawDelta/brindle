@@ -1243,10 +1243,14 @@ def _launch_resolved(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
     mcp_recovery = bool(agent.mode == "review" and agent.review_sha and db.conn.execute(
         "SELECT 1 FROM review_mcp_retries WHERE workspace_id=? AND sha=?",
         (ws.id, agent.review_sha)).fetchone())
+    # The pane's own config folder: a profile's env line may move it, except
+    # under an enforced company identity (agent_env).
+    chrome_chosen = (providers.claude_chrome_chosen(_window_environment(agent, ws, m)[0])
+                     if provider.name == "claude" else None)
     try:
         argv = provider.command(LaunchContext(agent.id, profile, prompt, resume=resume, cwd=ws.path,
                                               mode=agent.mode, plan_first=bool(agent.plan_first),
-                                              mcp_recovery=mcp_recovery))
+                                              mcp_recovery=mcp_recovery, chrome_chosen=chrome_chosen))
     except providers.CodexSandboxRefused as e:
         raise AgentError(str(e)) from e
     if provider.name == "codex":

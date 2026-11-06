@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- What macOS shows under its privacy prompts when it asks on brindle.app's
+     behalf (the Tauri CLI merges this file into the bundle's Info.plist). Only
+     for prompts it attributes to the app: the engine's have none of their own
+     (docs/investigations/macos-prompts.md). -->
+<plist version="1.0">
+<dict>
+  <key>NSDesktopFolderUsageDescription</key>
+  <string>brindle works on the projects you open. It needs this for one in your Desktop folder.</string>
+  <key>NSDocumentsFolderUsageDescription</key>
+  <string>brindle works on the projects you open. It needs this for one in your Documents folder.</string>
+  <key>NSDownloadsFolderUsageDescription</key>
+  <string>brindle works on the projects you open. It needs this for one in your Downloads folder.</string>
+  <key>NSRemovableVolumesUsageDescription</key>
+  <string>brindle works on the projects you open. It needs this for one on a removable drive.</string>
+  <key>NSNetworkVolumesUsageDescription</key>
+  <string>brindle works on the projects you open. It needs this for one on a network drive.</string>
+</dict>
+</plist>
