@@ -726,7 +726,7 @@ const DATA = {
       P(21, "The permission checker reads safe shell forms", "uv run pytest tests/test_permission_forms.py -q", "6 h ago", "27s"),
       P(22, "The double prompt is collapsed into one", "uv run pytest tests/test_prompt_once.py -q", "5 h ago", "13s"),
       P(23, "The outbox queues messages while the engine is offline", "uv run pytest tests/test_outbox_queue.py -q", "4 h ago", "35s"),
-      P(24, "The outbox retries with backoff and surfaces failures", "uv run pytest tests/test_outbox_retry.py -q", "3 h ago", "48s"),
+      P(24, "The outbox resends with backoff and surfaces failures", "uv run pytest tests/test_outbox_resend.py -q", "3 h ago", "48s"),
       P(25, "Queued messages show in the Inbox", "cd app && npx vitest run src/screens/Inbox", "2 h ago", "20s"),
       P(26, "A worker's permission request names the file", "uv run pytest tests/test_permission_detail.py -q", "1 h ago", "15s"),
       P(27, "Allow-for-session remembers the answer", "uv run pytest tests/test_allow_session.py -q", "52 min ago", "18s"),
