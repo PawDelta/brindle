@@ -62,6 +62,7 @@ test("session terminal: a paste reaches the pty, and a printed URL opens in the 
   // (forced: xterm's screen layer sits over its rows and takes the mouse)
   await link.click({ force: true });
   expect(await opened()).toEqual([]);
+  await expect(link).toBeVisible();   // the click can redraw the rows: a forced click needs them back
   await link.click({ force: true, modifiers: [mac ? "Meta" : "Control"] });
   await expect.poll(opened).toEqual(["https://example.com/pr/7"]);
 });

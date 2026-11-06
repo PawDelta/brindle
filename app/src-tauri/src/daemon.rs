@@ -2404,8 +2404,9 @@ mod tests {
             &bin,
             format!(
                 "#!/bin/bash\necho \"${APP_PID_ENV}\" > '{dir}/app'\n\
+                 tail -f /dev/null & p=$!; trap 'kill $p; echo stopped > \"{dir}/graceful\"; exit 0' TERM\n\
                  printf '{{\"socket\": \"/nonexistent.sock\", \"token\": \"t\", \"pid\": %s}}' $$ > '{home}/daemon.json'\n\
-                 tail -f /dev/null & p=$!; trap 'kill $p; echo stopped > \"{dir}/graceful\"; exit 0' TERM; wait $p\n",
+                 wait $p\n",
                 dir = dir.display(),
                 home = home.display()
             ),
