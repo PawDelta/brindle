@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../App";
-import { ONBOARDED_KEY } from "../api/providers";
+import { ONBOARDED_KEY, SIGNED_IN_SEEN_KEY } from "../api/providers";
 import { DaemonContext } from "../api/context";
 import type { SessionDTO } from "../api/schema";
 import type { Route } from "../routes";
@@ -123,6 +123,10 @@ describe("the sidebar's weekly usage reading", () => {
   it("names the model the current session runs on beside the provider", async () => {
     const { stop } = app("normal", { workspaces: [{ ...root, agents: root.agents?.map((a) => ({ ...a, model: "claude-opus-4-7" })) }] });
     expect((await screen.findByTestId("usage-model", {}, { timeout: 3000 })).textContent).toBe("Claude Opus 4 7");
+    // The meter beside the model is the session's own provider's (Claude 9%), not the fuller Codex (41%).
+    const reading = screen.getByTestId("usage-reading");
+    expect(reading.dataset.provider).toBe("claude");
+    expect(within(reading).getByRole("progressbar").getAttribute("aria-valuenow")).toBe("9");
     stop();
   });
 
@@ -134,6 +138,14 @@ describe("the sidebar's weekly usage reading", () => {
     expect(quiet.className).not.toContain("text-sap");
     first.stop();
     cleanup();
+    // Codex worked before and lost its sign-in while Claude still works: that is a real warning.
+    localStorage.setItem(SIGNED_IN_SEEN_KEY, JSON.stringify(["codex"]));
+    const lapsed = app("normal", { providers: freshProviders({ claude: { path: "/bin/claude", version: "2" }, ...codexOut }) });
+    await waitFor(() => expect(screen.getByTestId("provider-problem").textContent).toBe("Codex signed out"), { timeout: 3000 });
+    expect(screen.getByTestId("provider-problem").className).toContain("text-sap");
+    lapsed.stop();
+    cleanup();
+    localStorage.removeItem(SIGNED_IN_SEEN_KEY);
     const second = app("normal", { providers: freshProviders({ claude: { path: "/bin/claude", version: "2", signed_in: false }, ...codexOut }) });
     await waitFor(() => expect(screen.getByTestId("provider-problem").textContent).toContain("Claude Code signed out"), { timeout: 3000 });
     expect(screen.getByTestId("provider-problem").className).toContain("text-sap");

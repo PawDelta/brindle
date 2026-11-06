@@ -47,7 +47,7 @@ import { AppUpdatePill } from "./AppUpdateBanner";
 import { cliStatus, formatAge, isPaused, type CliStatus } from "../store/overview";
 import { planWindows, providerName, WARN } from "../screens/Account/usage";
 import { useSessions } from "../store/sessions";
-import { providerProblems, type ProviderProblem } from "../api/providers";
+import { providerProblems, rememberSignedIn, type ProviderProblem } from "../api/providers";
 import { useProviders } from "../store/providers";
 import { useUsage } from "../store/usage";
 import { prettyModel } from "../screens/Agents/agents";
@@ -614,9 +614,8 @@ export function Sidebar({ route, navigate, refresh, openUrl }: SidebarProps) {
   const noRefresh = useCallback(() => Promise.resolve(), []);
   const { usage, error: usageError } = useUsage();
   const mostUsed = usage?.providers.filter((provider) => weeklyWindow(provider)).sort((a, b) => weeklyWindow(b)!.used - weeklyWindow(a)!.used)[0];
-  const warning = !!mostUsed && (mostUsed.limited || planWindows(mostUsed).some((window) => window.used >= WARN));
   const { rows: providerRows, installs } = useProviders();
-  const problems = useMemo(() => providerProblems(providerRows, installs), [providerRows, installs]);
+  const problems = useMemo(() => providerProblems(providerRows, installs, rememberSignedIn(providerRows)), [providerRows, installs]);
 
   // The live sessions in reading order (⌘1-9), and the paused ones after them.
   const live = useMemo(() => (repos ?? []).flatMap((repo) => (sessions[repo.repo_root] ?? []).filter((s) => !isPaused(s)).map((session) => ({ session, repo: repo.repo_root }))), [repos, sessions]);
@@ -632,7 +631,12 @@ export function Sidebar({ route, navigate, refresh, openUrl }: SidebarProps) {
 
   // The model the selected session's own agent last ran on, from the agents the snapshot already lists.
   const workspaces = useAppState((s) => s.workspaces);
-  const model = useMemo(() => workspaces.flatMap((ws) => ws.agents ?? []).find((a) => a.id === selected?.root)?.model, [workspaces, selected]);
+  const agent = useMemo(() => workspaces.flatMap((ws) => ws.agents ?? []).find((a) => a.id === selected?.root), [workspaces, selected]);
+  // The meter names the model only with its own provider's usage; with none, the global most-used provider shows alone.
+  const own = agent?.model ? usage?.providers.find((p) => p.provider === agent.provider && weeklyWindow(p)) : undefined;
+  const shown = own ?? mostUsed;
+  const model = own ? agent?.model : undefined;
+  const warning = !!shown && (shown.limited || planWindows(shown).some((window) => window.used >= WARN));
 
   // An open session's agents show.
   useEffect(() => {
@@ -830,7 +834,7 @@ export function Sidebar({ route, navigate, refresh, openUrl }: SidebarProps) {
         {repos && repos.length > 0 && live.length === 0 && <p className="px-s1 text-xs text-ink-3">Nothing running. Start a session, or continue a recent one.</p>}
       </nav>
       <div className="flex min-h-4 items-center justify-between gap-2 whitespace-nowrap border-t border-line px-s1 pt-s1" data-testid="status-line">
-        <UsageReading provider={mostUsed} model={model} warning={warning} failed={usageError != null} navigate={navigate} />
+        <UsageReading provider={shown} model={model} warning={warning} failed={usageError != null} navigate={navigate} />
         <ProviderProblemLine problems={problems} navigate={navigate} />
         <AppUpdatePill />
       </div>

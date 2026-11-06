@@ -118,17 +118,44 @@ export interface ProviderProblem {
   text: string;
 }
 
-export function providerProblems(rows: ProviderInstalled[] | null, installs: Record<string, Install>): ProviderProblem[] {
+/* Providers once seen signed in on this Mac, kept so a later sign-out of one
+   of them is told from a provider that was never set up. */
+export const SIGNED_IN_SEEN_KEY = "brindle.signedInSeen";
+
+function readSeen(): Set<string> {
+  try {
+    return new Set<string>(JSON.parse(localStorage.getItem(SIGNED_IN_SEEN_KEY) ?? "[]"));
+  } catch {
+    return new Set();
+  }
+}
+
+/* Records the providers confirmed signed in now; returns every one seen so far. */
+export function rememberSignedIn(rows: ProviderInstalled[] | null): Set<string> {
+  const seen = readSeen();
+  const fresh = (rows ?? []).filter((r) => signedIn(r) && !seen.has(r.provider));
+  if (fresh.length === 0) return seen;
+  for (const r of fresh) seen.add(r.provider);
+  try {
+    localStorage.setItem(SIGNED_IN_SEEN_KEY, JSON.stringify([...seen]));
+  } catch {
+    // Storage refused: the sign-out reads as setup until it is remembered.
+  }
+  return seen;
+}
+
+export function providerProblems(rows: ProviderInstalled[] | null, installs: Record<string, Install>, seen: ReadonlySet<string> = new Set()): ProviderProblem[] {
   const all = rows ?? [];
   const named = (provider: string) => factsOf(all.find((r) => r.provider === provider) ?? { provider, name: provider }).name;
-  // With a provider already working, another one's missing sign-in is setup still to do (the first launch), not a failure.
+  // A provider never signed in, beside one that works, is setup still to do (the first launch), not a failure.
   const working = all.some(signedIn);
   const signedOut = all.filter((r) => connected(r) && r.signed_in === false);
-  const out: ProviderProblem[] = working ? [] : signedOut.map((r) => ({ provider: r.provider, kind: "signed_out", text: `${named(r.provider)} signed out` }));
+  const quiet = (r: ProviderInstalled) => working && !seen.has(r.provider);
+  const out: ProviderProblem[] = signedOut.filter((r) => !quiet(r)).map((r) => ({ provider: r.provider, kind: "signed_out", text: `${named(r.provider)} signed out` }));
   for (const [provider, i] of Object.entries(installs)) {
     if (i.status === "failed") out.push({ provider, kind: "install_failed", text: `${named(provider)} install failed` });
   }
-  if (working) out.push(...signedOut.map((r): ProviderProblem => ({ provider: r.provider, kind: "set_up", text: `Set up ${named(r.provider)}` })));
+  out.push(...signedOut.filter(quiet).map((r): ProviderProblem => ({ provider: r.provider, kind: "set_up", text: `Set up ${named(r.provider)}` })));
   return out;
 }
 
