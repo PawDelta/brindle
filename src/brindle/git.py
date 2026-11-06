@@ -13,6 +13,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass
@@ -69,6 +70,28 @@ def is_read(args: list[str]) -> bool:
     return False
 
 
+_TOOLS_MISSING = ("git needs Apple's Command Line Developer Tools, which aren't installed. "
+                  "Install them with `xcode-select --install` (or `brew install git`), then try again.")
+_tools_checked = False
+
+
+def ensure_developer_tools() -> None:
+    """On macOS, ``/usr/bin/git`` is a shim that pops Apple's install dialog when
+    the Command Line Tools are missing. Ask ``xcode-select -p`` (silent) first and
+    raise a GitError that says what to install. A git elsewhere on PATH (Homebrew)
+    needs no tools. Checked once per process, when it passes."""
+    global _tools_checked
+    if _tools_checked or sys.platform != "darwin" or shutil.which("git") != "/usr/bin/git":
+        return
+    try:
+        found = spawn.read(["xcode-select", "-p"], timeout=10).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        found = False
+    if not found:
+        raise GitError(_TOOLS_MISSING)
+    _tools_checked = True
+
+
 def run(args: list[str], cwd: str | Path, check: bool = True,
         timeout: int | float | None = None, input: str | None = None) -> subprocess.CompletedProcess:
     return run_env(args, cwd, None, check=check, timeout=timeout, input=input)
@@ -80,6 +103,7 @@ def run_env(args: list[str], cwd: str | Path, env: dict[str, str] | None,
     """``run`` with its own environment (e.g. ``GIT_INDEX_FILE`` for a scratch
     index that leaves the checkout's real index alone; see brindle.rewind).
     ``no_terminal``: nothing it starts can ask at the terminal (a read can't anyway)."""
+    ensure_developer_tools()
     to = TIMEOUT if timeout is None else timeout
     reading = is_read(args)
     start = spawn.read if reading else spawn.action

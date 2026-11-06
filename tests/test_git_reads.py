@@ -3,6 +3,7 @@ from __future__ import annotations
 import functools
 import http.server
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -223,3 +224,23 @@ def test_branch_exists_is_cached(tmp_path, monkeypatch):
     assert seen_by_lookup == [True]
     assert git.branch_exists(tmp_path, "feat")
     assert len(listings) == 2
+
+
+def test_missing_developer_tools_is_explained_before_git_runs(tmp_path, monkeypatch):
+    fake = tmp_path / "bin"
+    fake.mkdir()
+    (fake / "xcode-select").write_text("#!/bin/sh\nexit 2\n")
+    (fake / "xcode-select").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake}:{os.environ['PATH']}")
+    monkeypatch.setattr(git.sys, "platform", "darwin")
+    real_which = shutil.which
+    monkeypatch.setattr(git.shutil, "which", lambda n, *a, **k: "/usr/bin/git" if n == "git" else real_which(n, *a, **k))
+    monkeypatch.setattr(git, "_tools_checked", False)
+    started: list[list[str]] = []
+    monkeypatch.setattr(spawn, "read", lambda argv, **kw: (started.append(argv), subprocess.run(argv, capture_output=True, text=True))[1])
+    with pytest.raises(git.GitError, match=r"xcode-select --install"):
+        git.run(["status"], tmp_path)
+    assert all(argv[0] != "git" for argv in started)
+    (fake / "xcode-select").write_text("#!/bin/sh\necho /Library/Developer\n")
+    git.ensure_developer_tools()
+    assert git._tools_checked
