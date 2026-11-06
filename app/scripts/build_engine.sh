@@ -29,9 +29,8 @@
 # commit, so a commit that changes only the app rebuilds nothing. Downloads are
 # pinned by sha256 and cached, as is the build, in target/engine-build/. A
 # second run with the same inputs does nothing (engine/.stamp); --force
-# rebuilds anyway. This machine's architecture only (see "One architecture
-# per build" in docs/bundled-engine.md: the release builds each architecture
-# on its own runner).
+# rebuilds anyway. TAURI_ENV_TARGET_TRIPLE selects the architecture; Intel
+# builds on Apple Silicon use Rosetta to run the target Python and smoke checks.
 #
 # Usage: bash app/scripts/build_engine.sh [--force]
 set -euo pipefail
@@ -82,16 +81,23 @@ die() { echo "build_engine: $*" >&2; exit 1; }
 [ "$(uname -s)" = Darwin ] || die "builds the macOS engine; run it on a Mac"
 case "${TAURI_ENV_TARGET_TRIPLE:-}" in
   ""|aarch64-apple-darwin|x86_64-apple-darwin) ;;
-  *) die "builds for this Mac's architecture only, not ${TAURI_ENV_TARGET_TRIPLE} (see app/docs/bundled-engine.md)" ;;
+  *) die "unsupported target ${TAURI_ENV_TARGET_TRIPLE}" ;;
 esac
 case "$(uname -m)" in
   arm64) ARCH=aarch64 ;;
   x86_64) ARCH=x86_64 ;;
   *) die "unsupported architecture $(uname -m)" ;;
 esac
-if [ -n "${TAURI_ENV_TARGET_TRIPLE:-}" ] && [ "$TAURI_ENV_TARGET_TRIPLE" != "$ARCH-apple-darwin" ]; then
-  die "builds for this Mac's architecture ($ARCH) only, not $TAURI_ENV_TARGET_TRIPLE"
+CONFIGURE_BUILD="$(uname -m)-apple-darwin"
+if [ -n "${TAURI_ENV_TARGET_TRIPLE:-}" ]; then
+  ARCH="${TAURI_ENV_TARGET_TRIPLE%-apple-darwin}"
 fi
+MACH_ARCH="$ARCH"
+[ "$ARCH" != aarch64 ] || MACH_ARCH=arm64
+CONFIGURE_HOST="$MACH_ARCH-apple-darwin"
+export CC="clang -arch $MACH_ARCH"
+export CFLAGS="$CFLAGS -arch $MACH_ARCH"
+export LDFLAGS="-arch $MACH_ARCH"
 command -v uv >/dev/null || die "needs uv (https://docs.astral.sh/uv) to build brindle's wheel"
 
 BRINDLE_SRC="${BRINDLE_SRC:-$(git -C "$APP" rev-parse --show-toplevel)}" \
@@ -103,7 +109,7 @@ COMMIT="$(git -C "$BRINDLE_SRC" rev-parse --verify "$BRINDLE_REF^{commit}")" \
 # The engine paths' object ids at that commit: the same engine, the same key.
 ENGINE_TREE="$(git -C "$BRINDLE_SRC" ls-tree "$COMMIT" -- "${ENGINE_PATHS[@]}" | shasum -a 256 | cut -c1-16)"
 
-TMUX_STAMP="tmux=$TMUX_VERSION libevent=$LIBEVENT_VERSION utf8proc=$UTF8PROC_VERSION macos=$MACOSX_DEPLOYMENT_TARGET"
+TMUX_STAMP="tmux=$TMUX_VERSION libevent=$LIBEVENT_VERSION utf8proc=$UTF8PROC_VERSION macos=$MACOSX_DEPLOYMENT_TARGET arch=$ARCH compiler=$CC"
 STAMP="python=$PY_VERSION+$PY_RELEASE $TMUX_STAMP arch=$ARCH brindle=$ENGINE_TREE"
 ENTITLEMENTS="$APP/scripts/engine/engine.entitlements"
 # The helper's: python's, and what macOS needs to ask on its behalf (the file says).
@@ -149,7 +155,7 @@ build_tmux() {
   (
     cd "$src/libevent-$LIBEVENT_VERSION"
     # pipe2 is in the SDK but only from macOS 27: configure's link test would find it.
-    ac_cv_func_pipe2=no ./configure --prefix="$deps" --disable-shared --enable-static \
+    ac_cv_func_pipe2=no ./configure --host="$CONFIGURE_HOST" --build="$CONFIGURE_BUILD" --prefix="$deps" --disable-shared --enable-static \
       --disable-openssl --disable-samples --disable-libevent-regress --disable-debug-mode >/dev/null
     make -j"$jobs" >/dev/null
     make install >/dev/null
@@ -168,8 +174,8 @@ build_tmux() {
     # ncurses is then macOS's own, found without pkg-config. No jemalloc,
     # which tmux 3.8 asks for on macOS (docs/bundled-engine.md).
     PKG_CONFIG_LIBDIR="$deps/lib/pkgconfig" PKG_CONFIG_PATH="" \
-      CPPFLAGS="-I$deps/include" LDFLAGS="-L$deps/lib" \
-      ./configure --prefix="$src/prefix" --enable-utf8proc --disable-jemalloc >/dev/null
+      CPPFLAGS="-I$deps/include" LDFLAGS="$LDFLAGS -L$deps/lib" \
+      ./configure --host="$CONFIGURE_HOST" --build="$CONFIGURE_BUILD" --prefix="$src/prefix" --enable-utf8proc --disable-jemalloc >/dev/null
     make -j"$jobs" >/dev/null
   )
   cp "$src/tmux-$TMUX_VERSION/tmux" "$built"
@@ -254,7 +260,7 @@ PY
 HELPER="$WORK/helper/brindle.app"
 rm -rf "$WORK/helper"; mkdir -p "$HELPER/Contents/MacOS" "$HELPER/Contents/Resources"
 # shellcheck disable=SC2086  # CFLAGS is a list
-cc $CFLAGS -Wall -Wextra -Werror -arch "$(uname -m)" \
+cc $CFLAGS -Wall -Wextra -Werror -arch "$MACH_ARCH" \
   -isystem "$STAGE/python/include/python${PY_VERSION%.*}" "$HELPER_SRC/main.c" \
   -L"$STAGE/python/lib" -lpython"${PY_VERSION%.*}" \
   -Wl,-rpath,@executable_path/../../../../../Resources/engine/python/lib \
