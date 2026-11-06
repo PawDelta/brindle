@@ -115,9 +115,10 @@ describe("GoalPanel", () => {
     });
     const summary = vi.spyOn(client, "docSessionSummary").mockResolvedValue({ total: 2, writing: 1, updated: 0, using: 1 });
     const cards = () => screen.getByTestId("docs").querySelectorAll("li[data-doc]").length;
-    const sync = startSync({ client, store: createAppStore(), connect: daemon.connect });
+    const store = createAppStore();
+    const sync = startSync({ client, store, connect: daemon.connect });
     localStorage.setItem(ONBOARDED_KEY, "1");
-    renderApp(<App store={createAppStore()} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: APP_ROOT, repo: OTHER_REPO }} />);
+    renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: APP_ROOT, repo: OTHER_REPO }} />);
     expect((await screen.findByTestId("goal-docs")).textContent).toContain("2 docs · writing 1, using 1 →");
     fireEvent.click(await screen.findByTestId("goal-docs"));
     await waitFor(() => expect(cards()).toBe(2));
@@ -135,9 +136,9 @@ describe("GoalPanel", () => {
 
     // With no docs for the session, the goal line is hidden.
     summary.mockResolvedValue({ total: 0, writing: 0, updated: 0, using: 0 });
-    const again = startSync({ client, store: createAppStore(), connect: daemon.connect });
-    renderApp(<App store={createAppStore()} client={client} refresh={again.refresh} initialRoute={{ screen: "session", root: APP_ROOT, repo: OTHER_REPO }} />);
-    await waitFor(() => expect(daemon.requests.some((r) => r.path === "/goal")).toBe(true));
+    const again = startSync({ client, store, connect: daemon.connect });
+    renderApp(<App store={store} client={client} refresh={again.refresh} initialRoute={{ screen: "session", root: APP_ROOT, repo: OTHER_REPO }} />);
+    await screen.findByRole("region", { name: "Session" });
     await flush();
     expect(screen.queryByTestId("goal-docs")).toBeNull();
     again.stop();

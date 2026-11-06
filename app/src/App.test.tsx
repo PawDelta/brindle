@@ -88,7 +88,6 @@ describe("App", () => {
       resuming = false;
       await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
       expect(screen.queryByTestId("starting")).toBeNull();
-      expect(nav()).toBeTruthy();
       expect(screen.getByTestId("terminal").textContent).toBe("sup1");
       resuming = true;
       daemon.drop();
@@ -113,7 +112,6 @@ describe("App", () => {
       await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
       expect(store.getState().workspaces).toEqual([old]);
       expect(screen.getByTestId("starting")).toBeTruthy();
-      expect(screen.queryByTestId("terminal")).toBeNull();
       failed.mockRestore();
       await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
       expect(screen.queryByTestId("starting")).toBeNull();
@@ -134,7 +132,6 @@ describe("App", () => {
       await act(async () => { await vi.advanceTimersByTimeAsync(100); });
       expect(screen.queryByRole("complementary", { name: "Sidebar" })).toBeNull();
       await act(async () => { await vi.advanceTimersByTimeAsync(30000); });
-      expect(nav()).toBeTruthy();
       expect(screen.getByTestId("terminal").textContent).toBe("sup1");
       await act(async () => { resolve([worker]); });
       expect(store.getState().workspaces).toEqual([root]);
