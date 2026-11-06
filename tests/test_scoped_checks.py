@@ -32,8 +32,8 @@ EMPTY_NOTE = check_scope.FULL_NOTE.format(
     why="the change reaches more tests than scoped_checks_max_files and none is its own or a namesake")
 LONELY_NOTE = check_scope.FULL_NOTE.format(why="no test reaches the changed files and none is named after them")
 BOTH = {"src/pkg/mod.py": MOD.replace("return 1", "return 3").replace("return 2", "return 4")}
-NARROWED =f"{PYTEST} tests/test_other.py || [ $? -eq 5 ]"
-DYNAMIC = f"{PYTEST} tests/test_dynamic.py || [ $? -eq 5 ]"   # an unresolvable import runs its own file
+NARROWED =f"{PYTEST} tests/test_other.py"
+DYNAMIC = f"{PYTEST} tests/test_dynamic.py"   # an unresolvable import runs its own file
 CAFE_NOTE = check_scope.FULL_NOTE.format(why="src/café.py is not in a package, so no import can name it")
 DYNAMIC_IMPORTS = {
     "alias-loader": "from importlib import import_module as load\nload(name)\n",
@@ -46,16 +46,16 @@ DYNAMIC_IMPORTS = {
 
 @pytest.mark.parametrize("where,cmd,changes,ran", [
     ("infer", PYTEST, {"src/pkg/mod.py": MOD.replace("return 2", "return 3"), **OTHER},
-     [f"{PYTEST} tests/test_g.py tests/test_other.py || [ $? -eq 5 ]"]),
-    ("infer", PYTEST, {"src/pkg/mod.py": MOD.split("\n\n\n", 1)[1]}, [f"{PYTEST} tests/test_f.py || [ $? -eq 5 ]"]),
+     [f"{PYTEST} tests/test_g.py tests/test_other.py"]),
+    ("infer", PYTEST, {"src/pkg/mod.py": MOD.split("\n\n\n", 1)[1]}, [f"{PYTEST} tests/test_f.py"]),
     ("infer", PYTEST, {"tests/test_f.py": TEST_F.replace("return 1", "return 2", 1)},
-     [f"{PYTEST} tests/test_f.py tests/test_g.py || [ $? -eq 5 ]"]),
+     [f"{PYTEST} tests/test_f.py tests/test_g.py"]),
     ("infer", PYTEST, {"tests/test_f.py": TEST_F.replace("return 1\n\n\ndef test_f", "return 2\n\n\ndef test_f")},
-     [f"{PYTEST} tests/test_f.py tests/test_g.py || [ $? -eq 5 ]"]),   # graphify failed on unlooked(): importers
+     [f"{PYTEST} tests/test_f.py tests/test_g.py"]),   # graphify failed on unlooked(): importers
     ("alias-loader", PYTEST, {"src/pkg/new.py": "def h():\n    return 0\n"}, [DYNAMIC]),   # load(name) may be anything
     ("infer", PYTEST, {"src/pkg/pro/status.py": "X = 1\n",
                        "tests/test_other.py": "import pkg.pro.status\ndef test_new(): pass\n"},
-     [f"{PYTEST} tests/test_direct.py tests/test_from.py tests/test_member.py tests/test_other.py || [ $? -eq 5 ]"]),
+     [f"{PYTEST} tests/test_direct.py tests/test_from.py tests/test_member.py tests/test_other.py"]),
     ("fromlist", PYTEST, {"src/pkg/new.py": "X = 1\n"}, [DYNAMIC]),
     pytest.param("dynamic-fromlist", PYTEST, {"src/pkg/new.py": "X = 1\n"}, [DYNAMIC],
                  marks=pytest.mark.variant("review requested a nonliteral fromlist bypass")),
@@ -64,28 +64,28 @@ DYNAMIC_IMPORTS = {
     pytest.param("dynamic-level", PYTEST, {"src/pkg/new.py": "X = 1\n"}, [DYNAMIC],
                  marks=pytest.mark.variant("review requested a nonliteral relative import level")),
     ("no-graph", PYTEST, {"tests/test_f.py": TEST_F.replace("return 1", "return 2", 1)},
-     [f"{PYTEST} tests/test_f.py tests/test_g.py || [ $? -eq 5 ]"]),
+     [f"{PYTEST} tests/test_f.py tests/test_g.py"]),
     pytest.param("infer", PYTEST, {"src/café.py": "X = 1\n"}, [f"printf '%s\\n' {shlex.quote(CAFE_NOTE)}; {PYTEST}"],
                  marks=pytest.mark.variant("git C-quotes a non-ASCII name without -z; it was once skipped")),
     ("infer", PYTEST, {"tests/conftest.py": "X = 2\n"}, [PYTEST]),
     ("infer", PYTEST, {"pyproject.toml": "[x]\n"}, [PYTEST]),
     ("infer", PYTEST, OTHER, [NARROWED]),
-    ("infer", OPTS, OTHER, [f"{OPTS} tests/test_other.py || [ $? -eq 5 ]"]),
+    ("infer", OPTS, OTHER, [f"{OPTS} tests/test_other.py"]),
     ("infer", SELECTS, OTHER, [SELECTS]),   # names tests itself: runs in full
     ("infer", "make lint", OTHER, ["make lint"]),
     ("infer", PYTEST, {}, []),   # nothing changed: skipped
     ("infer", PYTEST, {"app/x.tsx": "x\n"}, []),   # no Python-relevant change: skipped
     ("infer", PYTEST, {"app/x.tsx": "x\n", "src/pkg/mod.py": MOD.replace("return 2", "return 3")},
-     [f"{PYTEST} tests/test_g.py || [ $? -eq 5 ]"]),
+     [f"{PYTEST} tests/test_g.py"]),
     ("infer", PYTEST, {"uv.lock": "x\n"}, [PYTEST]),
     ("unset", PYTEST, {"src/pkg/mod.py": MOD.replace("return 2", "return 3")},
-     [f"{PYTEST} tests/test_g.py || [ $? -eq 5 ]"]),
+     [f"{PYTEST} tests/test_g.py"]),
     ("off", PYTEST, OTHER, [PYTEST]),
     ("supervisor", PYTEST, OTHER, [PYTEST]),
     ("cap", PYTEST, {"src/pkg/mod.py": MOD.replace("return 1", "return 3"), **OTHER},
-     [f"printf '%s\\n' {shlex.quote(CAPPED_NOTE)}; {PYTEST} {' '.join(CAPPED)} || [ $? -eq 5 ]"]),   # test_f dropped
+     [f"printf '%s\\n' {shlex.quote(CAPPED_NOTE)}; {PYTEST} {' '.join(CAPPED)}"]),   # test_f dropped
     ("cap-none", PYTEST, {"src/pkg/mod.py": MOD.replace("return 1", "return 3"), **OTHER},
-     [f"{PYTEST} tests/test_f.py tests/test_other.py || [ $? -eq 5 ]"]),
+     [f"{PYTEST} tests/test_f.py tests/test_other.py"]),
     ("cap-empty", PYTEST, BOTH, [f"printf '%s\\n' {shlex.quote(EMPTY_NOTE)}; {PYTEST}"]),   # no own or namesake test: full
     ("infer", PYTEST, {"src/pkg/lonely.py": "X = 1\n"}, [f"printf '%s\\n' {shlex.quote(LONELY_NOTE)}; {PYTEST}"]),   # no importer
     ("cap-pr", PYTEST, {"src/pkg/mod.py": MOD.replace("return 1", "return 3"), **OTHER}, [PYTEST]),

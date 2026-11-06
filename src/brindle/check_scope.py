@@ -208,8 +208,8 @@ def command(ws: Workspace, cmd: str, scope: CheckScope | None, diff: tuple[str, 
             why = "the change reaches more tests than scoped_checks_max_files and none is its own or a namesake"
             return f"printf '%s\\n' {shlex.quote(FULL_NOTE.format(why=why))}; {cmd}"
         note = shlex.quote(CAP_NOTE.format(max=max_files, tests=" ".join(tests)))
-        return f"printf '%s\\n' {note}; {cmd} {_quoted(tests)} || [ $? -eq 5 ]"
-    return f"{cmd} {_quoted(tests)} || [ $? -eq 5 ]"   # 5: none of them selected
+        return f"printf '%s\\n' {note}; {cmd} {_quoted(tests)}"
+    return f"{cmd} {_quoted(tests)}"   # pytest's exit 5 (no tests collected) fails the check
 
 
 def capped_targets(ws: Workspace, changed: list[str]) -> list[str]:
