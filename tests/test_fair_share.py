@@ -54,9 +54,16 @@ def test_fair_share_queued_tasks_start_round_robin_across_sessions(rows):
     assert [tasks.task_wait(rows, t) is None for t in (a1, a2, b1, c1)] == [False, False, False, True]
 
 
-def test_fair_share_lone_session_may_use_every_slot(rows):
+def test_fair_share_lone_session_may_use_every_slot(rows, monkeypatch):
+    """Unset, the limit is the core count (4 here), twice that when the machine is lightly loaded."""
+    config.forget_user("machine_max_workers")
+    busy = [3.0]
+    monkeypatch.setattr(spawn, "_cores", lambda: 4)
+    monkeypatch.setattr(spawn, "_load", lambda: busy[0])
     session(rows, "a", running=3)
     t = queued(rows, "a", at=1.0)
     assert tasks.task_wait(rows, t) is None
     rows.add_agent(Agent("a-w-last", "w", "developer", "claude", "a", "assign", "processing", "@1", None, 1.0))
     assert tasks.task_wait(rows, t) is not None   # all 4 taken: even a lone session waits at the limit
+    busy[0] = 1.0
+    assert tasks.task_wait(rows, t) is None       # under half the cores busy: up to 8

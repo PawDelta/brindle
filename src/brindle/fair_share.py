@@ -2,7 +2,8 @@
 
 Each session is capped by its own ``max_agents``; this caps every session's
 workers together at the person's ``machine_max_workers``
-(``~/.brindle/config.json``, default ``DEFAULT_LIMIT``; 0: no limit). A
+(``~/.brindle/config.json``; 0: no limit), by default the machine's core
+count, up to twice that while the machine is lightly loaded (``limit``). A
 session may use idle capacity, but while other sessions have work queued
 the free slots go round-robin: the next start is the oldest queued task of
 the session running the fewest workers (``order``), so a session at its fair
@@ -18,16 +19,21 @@ import time
 
 from brindle.db import DB, Task
 
-DEFAULT_LIMIT = 20
 WORKER_MODES = ("handoff", "handoff_detached", "assign")
 
 
 def limit() -> int:
-    """The person's machine-wide worker limit; 0 means none."""
+    """The machine-wide worker limit: the person's ``machine_max_workers``
+    (0 means none); unset, the machine's core count, or up to twice that
+    while under half its cores are busy (``spawn._load``)."""
+    from brindle import spawn
     from brindle.config import user_settings
 
-    value = user_settings().get("machine_max_workers", DEFAULT_LIMIT)
-    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else DEFAULT_LIMIT
+    value = user_settings().get("machine_max_workers")
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    cores = spawn._cores()
+    return 2 * cores if spawn._load() < cores / 2 else cores
 
 
 def _session(db: DB, agent_id: str | None) -> str:
