@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from brindle import agents, mcp_server, permissions, quota, workspaces
-from brindle.config import load_repo_config
+from brindle.config import load_repo_config, set_user
 from brindle.db import Agent
 from brindle.pro import brief_learning, license
 
@@ -38,15 +38,18 @@ def approve(db, agent, payload=ASK):
 # -- the default policy ------------------------------------------------------------------------
 
 
-def test_pro_defaults_to_recording_approvals(db, repo, worker, pro):
+def test_pro_defaults_to_recording_approvals(db, repo, worker, pro, monkeypatch):
+    monkeypatch.delenv("BRINDLE_POLICY_DEFAULT_OFF")
     assert load_repo_config(str(repo)).permission_policy == "on"
     approve(db, worker)
     [entry] = permissions.load_store().approvals.values()
     assert (entry["kind"], entry["match"], entry["count"]) == ("bash", "terraform apply", 1)
 
 
-def test_free_records_nothing(db, repo, worker, monkeypatch):
-    monkeypatch.setattr(license, "has", lambda feature: False)
+@pytest.mark.variant("the opt-out the on-by-default policy must keep: an explicit off records nothing, on any plan")
+def test_explicit_off_records_nothing(db, repo, worker, monkeypatch):
+    monkeypatch.delenv("BRINDLE_POLICY_DEFAULT_OFF")
+    set_user("permission_policy", "off")
     assert load_repo_config(str(repo)).permission_policy == "off"
     with monkeypatch.context() as m:   # no permission_requests row: the outcome returns before parsing
         m.setattr(permissions, "from_claude", lambda *a, **k: pytest.fail("parsed the payload"))

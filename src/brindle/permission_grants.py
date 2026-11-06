@@ -1231,11 +1231,18 @@ class Group:
 
 
 def _policy(req: Request, repo_root: str) -> Decision:
-    """The rules' answer for ``req`` with saved actions set aside (an ask's rule, for its limits)."""
+    """The rules' answer for ``req`` with saved actions set aside (an ask's rule,
+    for its limits). With the repo's policy off nothing denies a request: Claude
+    Code's own prompt asks, so a deny here would call a request blocked while the
+    prompt beside it offers Yes."""
     from brindle.config import load_repo_config
 
-    checks = list(load_repo_config(repo_root).checks or []) if repo_root else None
-    return permissions.decide(req, checks=checks, rules=permissions.all_rules(repo_root or None), saved=[])
+    cfg = load_repo_config(repo_root) if repo_root else None
+    checks = list(cfg.checks or []) if cfg is not None else None
+    found = permissions.decide(req, checks=checks, rules=permissions.all_rules(repo_root or None), saved=[])
+    if found.decision == "deny" and cfg is not None and cfg.permission_policy != "on":
+        return Decision("ask", "brindle's permission rules are off here, so Claude Code asks you itself")
+    return found
 
 
 def pending_asks(db, repo_root: str | None = None) -> list[PendingAsk]:

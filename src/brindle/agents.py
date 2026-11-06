@@ -4309,6 +4309,23 @@ PROMPTING_MODES = ("default", "acceptEdits")
 PRE_TOOL_ALLOW_KINDS = ("bash", "write", "edit", "fetch")
 
 
+def _unasked(payload: object) -> bool:
+    """Whether Claude Code's mode runs this call if the PreToolUse hook gives
+    no answer (providers.CLAUDE_UNASKED_MODES), so no answer can't mean "ask"."""
+    return isinstance(payload, dict) and payload.get("permission_mode") in providers.CLAUDE_UNASKED_MODES
+
+
+def _pre_tool_unchecked(why: str) -> dict:
+    """PreToolUse's answer when brindle couldn't check a call in such a mode."""
+    return {"hookSpecificOutput": {
+        "hookEventName": "PreToolUse",
+        "permissionDecision": "deny",
+        "permissionDecisionReason": (
+            f"brindle: couldn't check this call ({why}), and in this permission mode nothing after that check "
+            "would stop it. Try again; if it keeps happening, tell your supervisor or the person"),
+    }}
+
+
 def _pre_tool_policy(db: DB, agent: Agent, ws: Workspace | None, payload: dict, load) -> dict | None:
     """With ``permission_policy`` on, the policy's word on a PreToolUse call
     before any approval of brindle's own: a deny denies it, and an ask a rule
@@ -4319,11 +4336,15 @@ def _pre_tool_policy(db: DB, agent: Agent, ws: Workspace | None, payload: dict, 
     otherwise prompt, so the prompt the PermissionRequest hook would only close
     never shows; its deny rules, ask rules and safety checks still apply. Left
     to that hook: an allow a saved action settles, which spends a use there.
-    None otherwise (the rest of the hook decides). ``load`` loads the agent's
-    profile. Never raises."""
+    None otherwise (the rest of the hook decides). In a mode that runs a call
+    no answer stops (_unasked) that hook never comes, so a saved use is spent
+    here, Autonomous's own asks (a person's "ask" for a group, which no rule
+    makes) are forced too, and what can't be checked is denied. ``load`` loads
+    the agent's profile. Never raises."""
+    unasked = _unasked(payload)
     try:
         if ws is None:
-            return None
+            return _pre_tool_unchecked("its workspace is gone") if unasked else None
         from brindle import permissions
         from brindle.config import load_repo_config
 
@@ -4332,14 +4353,21 @@ def _pre_tool_policy(db: DB, agent: Agent, ws: Workspace | None, payload: dict, 
             return None
         req = permissions.from_claude(payload, worktree=ws.path, repo_root=ws.repo_root, agent=agent.id)
         if req is None:
-            return None
+            return _pre_tool_unchecked("the request names no tool") if unasked else None
         try:
             profile_rules = permissions.profile_rules(load())
         except KeyError:  # a deleted profile: no override (profiles.profile_rules_for)
             profile_rules = []
         rules = [*permissions.all_rules(ws.repo_root), *profile_rules]
-        decision = permissions.decide(req, checks=cfg.checks, rules=rules, session=_session_of(db, agent))
-        if decision.decision == "deny" or (decision.decision == "ask" and decision.rule is not None):
+        session = _session_of(db, agent)
+        decision = permissions.decide(req, checks=cfg.checks, rules=rules, session=session)
+        if unasked and decision.decision == "allow" and decision.saved is not None:
+            decision = permissions.decide(req, checks=cfg.checks, rules=rules, session=session, spend=True)
+            if decision.decision == "allow":
+                _record_permission(db, agent, ws, req.summary(), f"allow: {decision.reason}")
+                _note_decision(db, agent, ws, req.kind, req.summary(), decision)
+        if (decision.decision == "deny" or (decision.decision == "ask" and (
+                decision.rule is not None or (unasked and permissions.autonomous(cfg))))):
             if decision.decision == "deny":   # an ask is counted when the PermissionRequest hook holds it
                 _note_decision(db, agent, ws, req.kind, req.summary(), decision)
             return {"hookSpecificOutput": {
@@ -4357,9 +4385,9 @@ def _pre_tool_policy(db: DB, agent: Agent, ws: Workspace | None, payload: dict, 
                 "permissionDecisionReason": f"brindle: {decision.reason}",
             }}
         return None
-    except Exception:  # noqa: BLE001 - a broken policy must fall through to Claude Code's own prompt
-        log.exception("brindle: permission policy failed in PreToolUse; leaving it to the prompt")
-        return None
+    except Exception:  # noqa: BLE001 - a broken policy falls through to Claude Code's own prompt, where it has one
+        log.exception("brindle: permission policy failed in PreToolUse")
+        return _pre_tool_unchecked("its permission check failed") if unasked else None
 
 
 def codex_pre_tool_decision(db: DB, agent: Agent, payload: dict) -> dict | None:
@@ -4435,7 +4463,7 @@ def _note_decision(db: DB, agent: Agent, ws: Workspace | None, kind: str, summar
 
 
 def permission_request_decision(db: DB, agent: Agent, payload: dict,
-                                provider: str = "claude") -> dict | None:
+                                provider: str = "claude", spend: bool = False, also: list[dict] = ()) -> dict | None:
     """Claude Code's or Codex's PermissionRequest hook: brindle's permission
     policy (brindle.permissions) answers allow or deny, or None to let the CLI
     prompt the person as usual (ask). Off unless the repo or user config
@@ -4443,7 +4471,11 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
     allows what its profile's allowed_tools cover and leaves the rest to
     Codex (#241). A request left to the person is held for the app's answer
     while the app is open (_hold_for_app; a Claude one is recorded with the
-    policy off too). Never raises: any failure is ask."""
+    policy off too). Never raises: any failure is ask, or a deny for an OpenCode
+    agent with nothing of its own to ask (opencode.unasked_launch)."""
+    from brindle import opencode
+
+    opencode_unasked = provider == "opencode" and os.environ.get(opencode.UNASKED_ENV) == "1"
     try:
         from brindle import permissions
         from brindle.config import load_repo_config
@@ -4451,7 +4483,7 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
 
         ws = db.get_workspace(agent.workspace_id)
         if ws is None:
-            return None
+            return opencode.UNCHECKED if opencode_unasked else None
         cfg = load_repo_config(ws.repo_root)
         policy = cfg.permission_policy == "on"
         # Policy off: of the other CLIs only a Codex reviewer has the hook
@@ -4560,16 +4592,23 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
             # Asked before every tool call, not only those OpenCode would prompt
             # for, so only a deny is answered (and recorded): the rest is OpenCode's own.
             reqs = permissions.from_opencode(payload, worktree=ws.path, repo_root=ws.repo_root, agent=agent.id)
+            for other in also:   # the same call in its other forms: one answer, each saved use spent once
+                reqs = [*(reqs or []), *(permissions.from_opencode(
+                    other, worktree=ws.path, repo_root=ws.repo_root, agent=agent.id) or [])]
+            if opencode_unasked and (not reqs or any(permissions.unread(r) for r in reqs)):
+                return opencode.UNCHECKED
             if not reqs:
                 return None
             rules = [*permissions.all_rules(ws.repo_root), *profile_rules]
-            decision = permissions.decide_all(reqs, checks=cfg.checks, rules=rules, session=session)
+            # ``spend``, ``also``: opencode.pre_tool's last step, in an unasked launch, where nothing else would.
+            decision = permissions.decide_all(reqs, checks=cfg.checks, rules=rules, session=session, spend=spend)
             if decision.decision == "ask" and len(reqs) == 1:
                 # A deny on one part of a compound command (cd x && <denied>) still denies.
                 decision = permissions.deny_in_parts(reqs[0], checks=cfg.checks, rules=rules) or decision
-            if decision.decision == "ask" and decision.rule is not None:
-                # A rule asks explicitly, and this plugin can't hold a request for the
-                # person: it fails closed rather than let OpenCode's own config run it.
+            if decision.decision == "ask" and (decision.rule is not None or opencode_unasked):
+                # A rule asks explicitly (or anything asks, where nothing of OpenCode's
+                # would: opencode.unasked_launch), and this plugin can't hold a request for
+                # the person: it fails closed rather than let OpenCode's own config run it.
                 permissions.note_prompt(decision)
                 decision = permissions.Decision(
                     "deny", f"{decision.reason.removesuffix('; asking the user')}, and OpenCode can't wait for "
@@ -4605,7 +4644,7 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
         return permissions.claude_output(decision)
     except Exception:  # noqa: BLE001 - a broken policy must fall through to the prompt
         log.exception("brindle: permission policy failed; leaving it to the user")
-        return None
+        return opencode.UNCHECKED if opencode_unasked else None
 
 
 def _supervising(db: DB, agent: Agent, cfg, decision, payload: dict) -> dict:
@@ -4998,7 +5037,7 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
         return _codex_pre_tool_hook(db, agent_id, payload)
     agent = db.get_agent(agent_id)
     if agent is None:
-        return None
+        return _pre_tool_unchecked("brindle doesn't know this agent") if event == "pre-tool" and _unasked(payload) else None
     if agent.hooks_off:
         db.update_agent(agent_id, hooks_off=None)  # its hooks run after all: turned back on
     # A hook runs only once the session is going, so its launch is past any
@@ -5606,6 +5645,10 @@ def hook_main(db: DB, agent_id: str, event: str, stdin_text: str, trusted: bool 
         payload = json.loads(stdin_text) if stdin_text.strip() else {}
     except json.JSONDecodeError:
         payload = {}
+    if event == "pre-tool" and not (isinstance(payload, dict) and payload.get("tool_name")):
+        # Nothing says what the call or the mode is. Fail the hook: a launch with no
+        # prompt to fall back on blocks a failed hook (ClaudeCode._hook), any other prompts.
+        raise ValueError("brindle: unreadable PreToolUse input")
     if event in PERMISSION_EVENTS:
         # Never let a failure turn into an allow: anything wrong means no
         # output, so the CLI prompts the person as usual; except Codex's

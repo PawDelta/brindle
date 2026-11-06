@@ -851,14 +851,9 @@ def policy_on(workspace: str) -> list[str] | None:
 
 
 def _autonomous(cfg) -> bool:
-    """Whether the repo's policy is on and the person's store runs what no
-    rule covers: the Autonomous preset. With the policy off, presets do nothing."""
     from brindle import permissions
 
-    try:
-        return cfg.permission_policy == "on" and permissions.load_store().unmatched == "allow"
-    except Exception:  # noqa: BLE001
-        return False
+    return permissions.autonomous(cfg)
 
 
 def strict_on(workspace: str, mode: str | None = None, preset: bool = True) -> bool:

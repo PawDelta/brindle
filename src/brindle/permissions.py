@@ -501,6 +501,15 @@ def preset_rules(name: str) -> list[Rule]:
     return list(PRESETS[name][0]())
 
 
+def autonomous(cfg) -> bool:
+    """Whether the repo's policy is on and the person's store runs what no
+    rule covers: the Autonomous preset. With the policy off, presets do nothing."""
+    try:
+        return cfg.permission_policy == "on" and load_store().unmatched == "allow"
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def preset_unmatched(name: str) -> str:
     return PRESETS[name][1]
 
@@ -775,6 +784,13 @@ OPENCODE_KINDS = {
     "write": "write", "edit": "edit", "patch": "edit", "multiedit": "edit",
     "bash": "bash", "webfetch": "fetch",
 }
+
+
+def unread(req: Request) -> bool:
+    """Whether ``req`` is missing what a rule would match it on: a patch whose files
+    couldn't all be read, a command or a URL. Where nothing covers it the store may
+    run it, so a caller with no prompt after it mustn't take that answer."""
+    return not {"bash": req.command, "fetch": req.url}.get(req.kind, req.path if req.kind in PATH_KINDS else True)
 
 
 def from_opencode(payload: dict, worktree: str = "", repo_root: str = "", agent: str = "") -> list[Request] | None:

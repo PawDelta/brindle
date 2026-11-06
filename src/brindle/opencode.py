@@ -65,13 +65,15 @@ export const Brindle = async ({ client }) => {
       const p = spawn(BRINDLE[0], [...BRINDLE.slice(1), "_hook", event, "--agent", agent],
                       { stdio: ["pipe", "pipe", "ignore"] })
       p.stdout.on("data", (d) => { out += d })
-      p.on("error", () => resolve(""))
-      p.on("close", () => resolve(out))
+      p.on("error", () => resolve(null))
+      // Only a clean exit answered: a signal closes with code null.
+      p.on("close", (code, signal) => resolve(code === 0 && !signal ? out : null))
       p.stdin.end(JSON.stringify(payload))
-    } catch { resolve("") }
+    } catch { resolve(null) }
   })
   const mine = (id) => typeof id === "string" && !children.has(id)
   const policy = process.env.BRINDLE_OPENCODE_POLICY === "1"
+  const unasked = process.env.BRINDLE_OPENCODE_UNASKED === "1"
   const dontAsk = JSON.parse(process.env.OPENCODE_CONFIG_CONTENT || "{}").permission?.bash?.["*"] === "deny"
   return {
     // Bash also checks scoped read-only git commands when the policy is off.
@@ -84,8 +86,11 @@ export const Brindle = async ({ client }) => {
       approvals.delete(id)
       if (!policy && input.tool !== "bash") return
       const out = await send("opencode-pre-tool", { session_id: input.sessionID, tool: input.tool, args: output.args })
+      // Nothing asks after this in an unasked launch: a check that didn't finish stops the call.
+      const unchecked = new Error("brindle couldn't check this call, so it didn't run")
+      if (out === null && unasked) throw unchecked
       let answer = null
-      try { answer = JSON.parse(out) } catch {}
+      try { answer = out ? JSON.parse(out) : null } catch { if (unasked) throw unchecked }
       if (answer && answer.decision === "deny") throw new Error(answer.reason || "denied by brindle's permission policy")
       if (input.tool === "bash" && typeof input.sessionID === "string" && input.sessionID
           && typeof input.callID === "string" && input.callID
@@ -321,12 +326,42 @@ def readonly_git(profile, command: str, cwd: str, repo_root: str, *, workdir: st
     return dynamic
 
 
-def permission_config(profile) -> dict:
+UNASKED_ENV = "BRINDLE_OPENCODE_UNASKED"
+
+
+def unasked_launch(profile, cwd: str | None) -> bool:
+    """Whether an OpenCode agent starts with nothing of OpenCode's asking: the
+    policy on with the Autonomous preset, and no mode of its profile's. OpenCode
+    has no hook that can hold a request for the app, so on a config that asks,
+    every edit and command would wait at a prompt in its pane. As with agy
+    (antigravity.strict_on), brindle's plugin is then the gate, and it fails closed."""
+    from brindle import permissions
+    from brindle.config import load_repo_config
+
+    if profile.permission_mode or not cwd:
+        return False
+    try:
+        return permissions.autonomous(load_repo_config(cwd))
+    except Exception:  # noqa: BLE001 - never stop a launch over this
+        return False
+
+
+def _in_unasked_launch() -> bool:
+    """Whether this hook runs for an agent unasked_launch started (the plugin's environment)."""
+    return os.environ.get(UNASKED_ENV) == "1"
+
+
+UNCHECKED = {"decision": "deny", "reason": "brindle couldn't check this call, and nothing after that check would stop it"}
+
+
+def permission_config(profile, unasked: bool = False) -> dict:
     """The profile's permission_mode and allowed_tools as OpenCode's
     ``permission`` block. OpenCode takes the last rule that matches, so the
     catch-all comes first. Reads, searches and brindle's MCP tools are left at
     OpenCode's default (allow). The plugin validates scoped ``git -C`` reads.
 
+    - ``unasked`` (unasked_launch): nothing asks, including what OpenCode asks
+      about by default (a .env read, a repeated call); the plugin decides.
     - ``bypassPermissions``: everything allowed.
     - ``dontAsk`` (nobody watches, e.g. a reviewer): only allowed_tools'
       commands run; edits, other commands and web fetches are refused.
@@ -335,6 +370,9 @@ def permission_config(profile) -> dict:
       commands run, others ask.
     - none / ``default``: as above, but edits ask too."""
     mode = profile.permission_mode
+    if unasked:
+        return {"read": "allow", "edit": "allow", "bash": "allow", "webfetch": "allow",
+                "external_directory": "allow", "doom_loop": "allow"}
     if mode == "bypassPermissions":
         return {"edit": "allow", "bash": "allow", "webfetch": "allow", "external_directory": "allow"}
     fallback = "deny" if mode == "dontAsk" else "ask"
@@ -365,7 +403,7 @@ def config(ctx) -> dict:
                             "timeout": 120000}},
         "plugin": [Path(write_plugin()).as_uri()],
         "instructions": [write_instructions(ctx.agent_id, instructions)],
-        "permission": permission_config(ctx.profile),
+        "permission": permission_config(ctx.profile, unasked_launch(ctx.profile, ctx.cwd)),
         # brindle's panes are one agent each: an update prompt nobody answers helps no one.
         "autoupdate": False,
     }
@@ -408,16 +446,33 @@ def handle_hook(db, agent_id: str, event: str, payload: dict) -> None:
 
 
 def pre_tool(db, agent_id: str, payload: dict) -> str:
-    """Policy denials win; scoped read-only git commands get one-call approval."""
+    """Policy denials win; scoped read-only git commands get one-call approval.
+    In an unasked launch nothing after this spends a saved use, so it's spent here:
+    each one that any form of the call relied on, once, when every check has passed."""
     from brindle import agents
 
     agent = db.get_agent(agent_id)
-    answer = agents.permission_request_decision(db, agent, payload, provider="opencode") if agent else None
-    if answer or not agent or payload.get("tool") != "bash":
-        return json.dumps(answer) if answer else ""
+    if agent is None:
+        return json.dumps(UNCHECKED) if _in_unasked_launch() else ""
+    respelled: list[dict] = []
+    answer = _checks(db, agent, payload, respelled)
+    if _in_unasked_launch() and not (answer and answer.get("decision") == "deny"):
+        answer = agents.permission_request_decision(db, agent, payload, provider="opencode", spend=True,
+                                                    also=respelled) or answer
+    return json.dumps(answer) if answer else ""
+
+
+def _checks(db, agent, payload: dict, respelled: list[dict]) -> dict | None:
+    """The answer to an OpenCode tool call, spending nothing, and in ``respelled``
+    the other forms of the call it checked."""
+    from brindle import agents
+
+    answer = agents.permission_request_decision(db, agent, payload, provider="opencode")
+    if answer or payload.get("tool") != "bash":
+        return answer
     ws = db.get_workspace(agent.workspace_id)
     if ws is None:
-        return ""
+        return None
     from brindle.profiles import load_profile
 
     profile = load_profile(agent.profile, ws.repo_root)
@@ -432,15 +487,16 @@ def pre_tool(db, agent_id: str, payload: dict) -> str:
             if words[:2] == ["git", "-C"]:
                 words = ["git", *words[3:]]
             normalized = {**payload, "args": {**args, "command": shlex.join(words)}}
+            respelled.append(normalized)
             denied = agents.permission_request_decision(db, agent, normalized, provider="opencode")
             if denied:
-                return json.dumps(denied)
+                return denied
         answer = {"decision": "allow"}
         if (spelling := squeezed(command)) != command:
             answer["command"] = spelling
     elif profile.permission_mode == "dontAsk" and _GIT_REQUEST.search(command):
         answer = {"decision": "deny", "reason": "command is not an allowed read-only git request"}
-    return json.dumps(answer) if answer else ""
+    return answer
 
 
 def hook_main(db, agent_id: str | None, event: str, stdin_text: str) -> str:
@@ -456,9 +512,9 @@ def hook_main(db, agent_id: str | None, event: str, stdin_text: str) -> str:
     if event == "opencode-pre-tool":
         try:
             return pre_tool(db, agent_id, payload)
-        except Exception as e:  # no answer means OpenCode's own rules apply
+        except Exception as e:  # no answer means OpenCode's own rules apply, which ask nothing in an unasked launch
             print(f"brindle hook {event}: {e}", file=sys.stderr)
-            return ""
+            return json.dumps(UNCHECKED) if _in_unasked_launch() else ""
     try:
         handle_hook(db, agent_id, event, payload)
     except Exception as e:  # never break the person's OpenCode session over brindle

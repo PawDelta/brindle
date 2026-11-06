@@ -364,46 +364,23 @@ def linked_main(path: str | Path) -> Path | None:
     return common.parent if common.name == ".git" else None
 
 
-# ~/.brindle/config.json: the permission policy this install has when nobody
-# set ``permission_policy``. Kept apart from that key because it isn't the
-# person's choice: an explicit value always beats it, and only an explicit one
-# makes brindle refuse a Codex launch it can't enforce (providers.codex_sandbox_base).
+# ~/.brindle/config.json: taking the recommended preset records the policy here
+# rather than as ``permission_policy``, because it isn't the person's choice of
+# the switch: an explicit value always beats it, and only an explicit one makes
+# brindle refuse a Codex launch it can't enforce (providers.codex_sandbox_base).
 POLICY_DEFAULT_KEY = "permission_policy_default"
 
 
 def _default_permission_policy(user: dict) -> str:
-    """"on" for an install that recorded it (record_first_run) and for Pro and
-    up, "off" for a Free install from before that. Fails closed: no license,
-    or any error, means "off"."""
+    """The permission policy when nobody set ``permission_policy``: "on", on
+    every plan and whatever the license says, for new installs and earlier ones
+    alike, so no one's agents are left to ask about everything. Reading no license
+    means an air-gapped or broken one gets the same rules: they're checked here,
+    from local files, and only ever add denies and asks to what would run anyway.
+    The test suite's homes opt out, so a test says when it wants the policy."""
     if user.get(POLICY_DEFAULT_KEY) == "on":
         return "on"
-    try:
-        from brindle.pro import license
-
-        return "on" if license.has("learned_rules") else "off"
-    except Exception:  # noqa: BLE001 -- an unreadable license is Free
-        return "off"
-
-
-# What a person who has used brindle here has at least one of. Neither the app
-# (it creates the home, and only reads config.json) nor an engine update writes these.
-EARLIER_STATE = ("brindle.db", CONFIG_FILE, "permissions.json")
-
-
-def record_first_run() -> None:
-    """A new install starts with the permission policy on, on every plan, so
-    its agents aren't left to ask about everything: recorded once, at the first
-    thing brindle does on this machine (the CLI's first command, else the first
-    database open, which is the app's daemon starting). Someone with anything
-    of brindle's here already keeps what they have. Never raises."""
-    if os.environ.get("BRINDLE_NO_FIRST_RUN"):   # the test suite's homes are existing installs
-        return
-    try:
-        home = brindle_home()
-        if not any((home / name).exists() for name in EARLIER_STATE):
-            set_user(POLICY_DEFAULT_KEY, "on")
-    except OSError:   # an unwritable home: nothing else will work either, and this isn't the one to say so
-        pass
+    return "off" if os.environ.get("BRINDLE_POLICY_DEFAULT_OFF") else "on"
 
 
 CHECK_RAM_GB = 2        # RAM budgeted per concurrent check run

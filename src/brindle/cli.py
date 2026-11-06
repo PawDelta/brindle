@@ -17,7 +17,7 @@ from brindle import agents, git, identity_lock, tmux, workspaces
 from brindle import history as history_mod
 from brindle import keys_cmds, repo_cmds
 from brindle.usage import format_tokens
-from brindle.config import record_first_run, write_template
+from brindle.config import write_template
 from brindle.db import DB, Workspace
 from brindle.profiles import list_profiles, load_profile
 
@@ -949,8 +949,6 @@ def default(
     provider_alias: Annotated[Optional[str], typer.Option("--provider", hidden=True)] = None,
 ) -> None:
     """Bare `brindle`: a fresh supervisor chat here (a scratch session outside git)."""
-    # First: a command may write config.json or permissions.json before any database.
-    record_first_run()
     provider = provider or provider_alias
     global _group_supervisor
     _group_supervisor = provider if ctx.invoked_subcommand else None   # `-s codex start`

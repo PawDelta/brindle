@@ -757,7 +757,7 @@ Goal driving, merge gates and cleanup:
 | `goal_audit` | `true` | once every milestone passes, an adversarial reviewer checks the work against the original goal before the goal counts as reached |
 | `merge_into` | none | branch that worker branches are cut from and merge into, whatever branch the supervisor is on |
 | `auto_merge_default_branch` | `false` | let the pipeline merge into the repo's default branch (origin HEAD, else `main`/`master`) on its own; by default it sends a "needs you" message instead, and you run `merge_workspace` yourself (manual merges are never gated) |
-| `permission_policy` | `"on"` on a new install or with a Pro license, else `"off"` | `"on"`: brindle answers agents' permission requests from its rules, on every plan (see "Permission policy" below); `"off"`: the provider's own prompts and permission mode decide, except Antigravity workers under `agy_approvals: "brindle"`, whose hook still enforces the rules. A value you set always wins over the default. A Free install from before this default stays off until you turn it on. The only permission switch: a leftover `permission_essentials` key is ignored |
+| `permission_policy` | `"on"` | `"on"`: brindle answers agents' permission requests from its rules, on every plan (see "Permission policy" below); `"off"`: the provider's own prompts and permission mode decide, except Antigravity workers under `agy_approvals: "brindle"`, whose hook still enforces the rules. A value you set always wins over the default. The only permission switch: a leftover `permission_essentials` key is ignored |
 | `permission_supervisor_hold_seconds` | `120` | with `permission_policy` on, how long a Claude Code or Codex worker's ask waits on its supervisor (`answer_permission`) before you see it; asks a person-only rule makes (pushes into the default or a release branch) come straight to you |
 | `agy_approvals` | unset | `"brindle"`: Antigravity agents run without approval prompts and brindle's hook allows or denies every call, applying the profile's `allowed_tools` (see "Antigravity" under "Permission policy"); `"prompt"`: agy asks as usual. Unset, workers get `"brindle"`, and so does an interactive agy session with `permission_policy` on and the Autonomous preset; other interactive sessions get `"prompt"` |
 | `rules` | `[]` | standing rules for the supervisor, e.g. `["Fix review findings without asking", "Validate options before offering them"]`; added to every supervisor's brief. Rules in `~/.brindle/config.json`, the repo's config and `config.local.json` are all kept, so a team's rules and your own add up |
@@ -951,12 +951,12 @@ Claude Code would otherwise prompt, so no prompt shows at all; its own deny and 
 rules still apply. Workers can't use Claude Code's `AskUserQuestion`: nobody watches
 their panes, so they ask their supervisor with `send_message`.
 
-**Who it's on for.** A new install, on any plan, starts with it on and the
-Autonomous preset. A Free install from before that keeps what it had:
-Settings → Permissions says the rules are off and has one button to turn them on,
-as does `brindle permissions policy on`. Picking a preset turns the policy on too,
-unless you set `"permission_policy": "off"` yourself (that stays until you change
-it). A repo's own `permission_policy` still wins in that repo, and your
+**Who it's on for.** Everyone, on any plan, new install or not, unless someone set
+`"permission_policy": "off"`: that stays until you change it, and Settings →
+Permissions then says the rules are off and has one button to turn them on, as does
+`brindle permissions policy on`. A preset you already have stays; with none, you
+get Autonomous. Running sessions pick up the change at their next start. A repo's
+own `permission_policy` still wins in that repo, and your
 organization's controls come before your rules wherever the policy is on. With it
 on, brindle keeps what it decides on your machine (`~/.brindle`): the ask rate in
 Settings, and how many times you approved a request, for `brindle permissions
@@ -1760,7 +1760,11 @@ its worktree or its `add_dirs`: with nobody to ask, anything else is refused.
 call and stops the ones the policy denies (as for Claude Code and Codex
 workers); calls the policy allows or asks about are left to the profile's
 permissions above, so the policy can narrow what an OpenCode worker does but
-never widens it.
+never widens it. The exception is Autonomous with a profile that sets no
+`permission_mode`: OpenCode then asks about nothing, since nothing can hold its
+prompt for the app, and the plugin is the gate. What the policy would ask you is
+refused unless a saved approval covers it, which spends a use, and a call the
+plugin couldn't check or read (a patch whose files it can't all name) is refused too.
 
 ### Cheap workers
 

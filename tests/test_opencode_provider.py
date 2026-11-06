@@ -9,6 +9,7 @@ import time
 import pytest
 
 from brindle import antigravity, opencode, permissions, pipeline, workspaces
+from brindle.config import set_local
 from brindle.db import Agent
 from brindle.profiles import load_profile
 from brindle.providers import DELIVERY_NOTE, LaunchContext, OpenCode, brindle_invocation
@@ -117,7 +118,7 @@ const {source, command, requested} = JSON.parse(input);
 globalThis.fakeSpawn = () => {
   const p = new EventEmitter(); p.stdout = new EventEmitter();
   p.stdin = {end() {queueMicrotask(() => {
-    p.stdout.emit('data', JSON.stringify({decision: 'allow'})); p.emit('close');
+    p.stdout.emit('data', JSON.stringify({decision: 'allow'})); p.emit('close', 0);
   })}}; return p;
 };
 process.env.BRINDLE_AGENT_ID = 'test'; process.env.BRINDLE_OPENCODE_POLICY = '';
@@ -147,6 +148,88 @@ console.log(JSON.stringify([counts, replies.map(r => r.body.response)]));
             assert json.loads(result.stdout) == [[0, 0, 0, 0, 1, 1, 1], ["once"]]
             decisions = ["ask"]  # the changed command received no approval
         assert ("deny" if "deny" in decisions else "ask" if "ask" in decisions else "allow") == decision
+
+
+@pytest.mark.parametrize("preset, mode, unasked", [
+    ("autonomous", None, True),
+    ("standard", None, False),
+    ("autonomous", "dontAsk", False),
+])
+def test_autonomous_starts_opencode_without_prompts(db, ws, monkeypatch, preset, mode, unasked):
+    """Nothing of OpenCode's asks on Autonomous, a profile's mode wins, and a failed check stops the call."""
+    permissions.apply_preset(preset)
+    set_local(ws.repo_root, "permission_policy", "on")
+    profile = dataclasses.replace(load_profile("supervisor"), permission_mode=mode)
+    argv = OpenCode().command(LaunchContext("o1", profile, None, cwd=ws.path))
+    got = _config(argv)["permission"]
+    assert (f"{opencode.UNASKED_ENV}=1" in argv) == unasked
+    assert (got["bash"] == got["edit"] == got["doom_loop"] == "allow") if unasked else (got["bash"] != "allow")
+    if not unasked:
+        return
+
+    add_agent(db, ws)
+    monkeypatch.setenv(opencode.UNASKED_ENV, "1")
+    def call(command, agent="o1", tool="bash", args=None):
+        return opencode.hook_main(db, agent, "opencode-pre-tool", json.dumps(
+            {"session_id": "s", "tool": tool, "args": {"command": command} if args is None else args}))
+
+    push = "git push origin main"
+    assert call("touch x") == ""
+    assert json.loads(call(push))["decision"] == "deny"
+    assert json.loads(call("touch x", "gone"))["decision"] == "deny"
+    # One saved use allows one call: nothing later spends it, and an unreadable patch can't be checked.
+    permissions.save_once(permissions.from_opencode(
+        {"tool": "bash", "args": {"command": push}}, ws.path, ws.repo_root, "o1")[0])
+    assert [call(push) == "" for _ in range(2)] == [True, False]
+    # The read-only git path checks a call twice (as written, then respelled): still one use, spent
+    # only once every check has passed, so a deny on the respelling leaves the approval for later.
+    db.add_agent(Agent("o2", ws.id, "supervisor", "opencode", None, "assign", "processing", "@1", None, time.time()))
+
+    def saved_git(command):
+        permissions.add_rule("bash", command, "ask")
+        return permissions.save_once(permissions.from_opencode(
+            {"tool": "bash", "args": {"command": command}}, ws.path, ws.repo_root, "o2")[0])
+
+    saved_git("git branch --list")
+    decisions = [json.loads(call("git branch --list", "o2"))["decision"] for _ in range(2)]
+    assert decisions == ["allow", "deny"]
+    saved_git("git status")     # only the respelled form needs this one
+    decisions = [json.loads(call(f"git -C {ws.path} status", "o2"))["decision"] for _ in range(2)]
+    assert decisions == ["allow", "deny"]
+    respelled = saved_git(f"git -C {ws.path} status")
+    permissions.add_rule("bash", "git status", "deny")
+    assert json.loads(call(f"git -C {ws.path} status", "o2"))["decision"] == "deny"
+    assert next(s for s in permissions.load_store().saved if s.id == respelled.id).uses_left == 1
+    hidden ="*** Begin Patch\n*** Update File : secret.txt\n*** End Patch"
+    for tool, args in (("apply_patch", {"patchText": 1}), ("apply_patch", {"patchText": hidden}), ("", {}), ("bash", {})):
+        assert json.loads(call(None, tool=tool, args=args))["decision"] == "deny", tool
+    assert call(None, tool="glob", args={"pattern": "*"}) == call(None, tool="todowrite", args={}) == ""
+    monkeypatch.setattr(permissions, "decide", lambda *args, **kwargs: 1 / 0)
+    assert json.loads(call("touch x"))["decision"] == "deny"
+
+    node = shutil.which("node")  # the plugin itself: a hook process that fails stops the call here, and only here
+    if not node:
+        pytest.skip("Node is required to execute the OpenCode plugin")
+    program = """
+import { EventEmitter } from 'node:events';
+const [, flag, close, out] = process.argv;
+globalThis.fakeSpawn = () => { const p = new EventEmitter(); p.stdout = new EventEmitter();
+  p.stdin = {end() {queueMicrotask(() => { p.stdout.emit('data', out); p.emit('close', ...JSON.parse(close)) })}}; return p; };
+Object.assign(process.env, {BRINDLE_AGENT_ID: 'test', BRINDLE_OPENCODE_POLICY: '1', OPENCODE_CONFIG_CONTENT: '{}',
+                            BRINDLE_OPENCODE_UNASKED: flag});
+let source = ''; for await (const chunk of process.stdin) source += chunk;
+const {Brindle} = await import('data:text/javascript;base64,' + Buffer.from(source).toString('base64'));
+const hooks = await Brindle({client: {}});
+await hooks['tool.execute.before']({sessionID:'s', callID:'c', tool:'edit'}, {args:{}}).then(
+  () => console.log('ran'), () => console.log('stopped'));
+"""
+    source = opencode.PLUGIN.replace('import { spawn } from "node:child_process"',
+                                     'const spawn = globalThis.fakeSpawn').replace("__BRINDLE__", '["fake"]')
+    for flag, close, out, want in (("1", "[1]", "", "stopped"), ("1", '[null, "SIGTERM"]', "", "stopped"),
+                                   ("1", "[0]", "{not json", "stopped"), ("1", "[0]", "", "ran"), ("", "[1]", "", "ran")):
+        got = subprocess.run([node, "--input-type=module", "-e", program, flag, close, out], input=source, text=True,
+                             capture_output=True, check=True).stdout.strip()
+        assert got == want, (flag, close, out)
 
 
 def add_agent(db, ws, mode="assign", status="processing", profile="developer-opencode"):
