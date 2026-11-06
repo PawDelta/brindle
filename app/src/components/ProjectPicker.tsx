@@ -95,7 +95,7 @@ export function ProjectPicker({ client, pickFolder, onPicked, offerGithub = fals
   };
   const submit = (e: FormEvent) => {
     e.preventDefault();
-    if (url.trim()) clone({ url: url.trim(), parent });
+    if (url.trim() && parent.trim()) clone({ url: url.trim(), parent: parent.trim() });
   };
 
   const missing = toolsMissing ?? (job?.status === "failed" && job.code === TOOLS_MISSING ? job.error ?? "" : null);
@@ -169,16 +169,20 @@ export function ProjectPicker({ client, pickFolder, onPicked, offerGithub = fals
         <form className={`${card} flex flex-col gap-s1 p-s2`} aria-label="Clone a repository" onSubmit={submit}>
           <p className="font-semibold">Clone a repository</p>
           <input className={`${field} font-mono`} aria-label="Repository URL" placeholder="https://github.com/you/project.git" value={url} disabled={busy} onChange={(e) => setUrl(e.target.value)} />
-          <p className="flex flex-wrap items-center gap-s1 text-xs text-ink-3">
-            Into <span className={`${mono} text-ink-2`} data-testid="clone-parent">{parent}</span>
+          <div className="flex flex-wrap items-center gap-s1 text-xs text-ink-3">
+            <label className="flex min-w-0 flex-1 items-center gap-s1">
+              Into
+              <input className={`${field} min-w-0 flex-1 font-mono`} aria-label="Clone into" data-testid="clone-parent" value={parent} disabled={busy} onChange={(e) => setParent(e.target.value)} />
+            </label>
             {pickFolder && (
               <button type="button" className={`${button} px-s1 py-0.5 text-xs`} disabled={busy} onClick={() => void changeParent()}>
                 Change…
               </button>
             )}
-          </p>
+          </div>
+          <p className="text-xs text-ink-3">Clone creates this folder if it doesn't exist yet.</p>
           <div className="mt-auto pt-s1">
-            <button type="submit" className={button} disabled={!url.trim() || busy}>
+            <button type="submit" className={button} disabled={!url.trim() || !parent.trim() || busy}>
               Clone
             </button>
           </div>

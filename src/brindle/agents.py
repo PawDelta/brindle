@@ -3867,6 +3867,13 @@ def review_after_checks(db: DB, caller_id: str | None, ws: Workspace, profile: s
                 if summary and gates.summary_failed(summary):
                     pipeline.on_checks_failed(db, ws, sha, since, text, caller)
                     return None
+                if summary and gates.summary_timed_out(summary):
+                    # Inconclusive: no review of unchecked code, and no failure sent to the worker.
+                    if to_id := gates.supervisor_id(db, ws):
+                        gates.tell(db, to_id, f"[brindle] checks on `{ws.branch}` timed out, not a "
+                                              "failure; no review was started. Request the review "
+                                              "again once the machine is quieter.")
+                    return None
                 piped = caller or pipeline.piped_worker(db, ws)
                 if since is not None and piped is not None and session_paused(db, piped):
                     return None   # its result is cached by commit: the sweep starts this review again after the resume

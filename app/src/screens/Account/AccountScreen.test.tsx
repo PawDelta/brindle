@@ -6,7 +6,7 @@ import { startSync } from "../../store/sync";
 import { StoreContext } from "../../store/useStore";
 import { FakeDaemon } from "../../test/fakeDaemon";
 import { REPO } from "../../test/fixtures";
-import { AccountScreen } from ".";
+import { AccountPanel } from ".";
 import { ACCOUNT_URL, DOCS_URL, ENTERPRISE_URL, PRICING_URL } from "./account";
 
 afterEach(cleanup);
@@ -38,7 +38,7 @@ function setup() {
   render(
     <StoreContext.Provider value={store}>
       <SessionsProvider client={client}>
-        <AccountScreen client={client} openUrl={openUrl} onNavigate={onNavigate} />
+        <AccountPanel client={client} openUrl={openUrl} onNavigate={onNavigate} />
       </SessionsProvider>
     </StoreContext.Provider>,
   );
@@ -208,7 +208,7 @@ describe("account screen", () => {
     render(
       <StoreContext.Provider value={store}>
         <SessionsProvider client={client}>
-          <AccountScreen client={client} openUrl={vi.fn(() => Promise.resolve())} />
+          <AccountPanel client={client} openUrl={vi.fn(() => Promise.resolve())} />
         </SessionsProvider>
       </StoreContext.Provider>,
     );

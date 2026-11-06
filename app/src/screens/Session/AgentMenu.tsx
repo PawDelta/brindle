@@ -23,6 +23,7 @@
 import { useContext, useEffect, useRef, useState } from "react";
 import type { DaemonClient, Rewound, Transferred } from "../../api/client";
 import type { AgentDTO, ProfileDTO, WorkspaceDTO } from "../../api/schema";
+import { LoadingButton } from "../../components/LoadingButton";
 import { button, danger, field, panel, quiet } from "../../components/ui";
 import { SessionsContext } from "../../store/sessions";
 import { useJob } from "../Branch/useJob";
@@ -282,9 +283,9 @@ export function AgentMenu({ client, agent, workspace, gone = false, root, repo, 
                 {open.action === "close" ? `Close ${target!.id}? It is stopped if running; its branch and work stay.` : `Kill ${target!.id}? It is stopped and its record deleted.`}
               </span>
               <div className="flex items-center gap-1">
-                <button type="button" className={danger} disabled={busy} onClick={() => void run(open.action as "close" | "kill")}>
+                <LoadingButton className={danger} disabled={busy} onClick={() => run(open.action as "close" | "kill")}>
                   {open.action === "close" ? "Confirm close" : "Confirm kill"}
-                </button>
+                </LoadingButton>
                 <button type="button" className={button} disabled={busy} onClick={cancel}>
                   Cancel
                 </button>
@@ -370,9 +371,9 @@ function RewindForm({ client, agent, repo, job, onCancel, onDone }: {
       </span>
       {job.job?.status === "failed" && <span className="text-xs text-sap">{job.job.error}</span>}
       <div className="flex items-center gap-1">
-        <button type="button" className={danger} disabled={to < 1 || job.busy} onClick={rewind}>
+        <LoadingButton className={danger} busy={job.busy} disabled={to < 1 || job.busy} onClick={rewind}>
           {job.busy ? "Rewinding…" : `Rewind to turn ${to || "…"}`}
-        </button>
+        </LoadingButton>
         <button type="button" className={button} disabled={job.busy} onClick={onCancel}>
           Cancel
         </button>

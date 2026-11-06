@@ -1,7 +1,7 @@
 """Task coordination between parallel workers.
 
 ``assign``/``handoff`` may declare ``files`` (paths/globs a task expects to
-touch) and ``depends_on`` (earlier tasks, by agent id or branch name, that
+touch) and ``depends_on`` (earlier tasks, by task id, agent id or branch name, that
 must be merged first). A task with unmet dependencies is recorded here as
 'pending' (no worker started yet) and started once ``merge_workspace``
 resolves its dependencies, cut from the updated base branch. A task with
@@ -426,10 +426,11 @@ def _resolve_dependency(
     db: DB, caller_ws: Workspace, dep: str, session_roots: list[str],
     *, dependent_task_id: str | None = None,
 ) -> tuple[str, Task | None, Workspace | None]:
-    """Resolve ``dep`` (agent id or branch name) to its target repository,
+    """Resolve ``dep`` (task id, agent id or branch name) to its target repository,
     task, and workspace once.
 
-    Exact worker/agent IDs are resolved by exact task.agent_id matches
+    Exact task IDs use the retained task row, including after its worker
+    and workspace have been removed. Exact worker/agent IDs use task.agent_id matches
     regardless of whether the live agent row still exists (e.g. after
     workspace cleanup). Branch names use local-name precedence (checking
     caller_ws.repo_root for either a task or workspace first), then search
@@ -443,8 +444,8 @@ def _resolve_dependency(
         if ws is None:
             raise agents.AgentError(f"dependency {dep} no longer exists")
         return ws.repo_root, None, ws
-    if dep.startswith("task:"):
-        task = db.get_task(dep.removeprefix("task:"))
+    task = db.get_task(dep.removeprefix("task:"))
+    if task is not None or dep.startswith("task:"):
         if task is None:
             raise agents.AgentError(f"dependency {dep} no longer exists")
         agent = db.get_agent(task.agent_id) if task.agent_id else None
@@ -553,12 +554,12 @@ def _dep_matches(dep: str, ws: Workspace, worker_id: str | None) -> bool:
 
 
 def _refers_to(dep: str, t: Task, from_repo: str | None = None) -> bool:
-    """Whether a dependency names ``t`` by pinned task ID, worker ID or branch.
+    """Whether a dependency names ``t`` by task ID, worker ID or branch.
 
     Task and worker IDs match from any repo. Branch names match only from
     ``from_repo`` (the depending task's repo), since two repos can have a
     branch with the same name."""
-    if dep == f"task:{t.id}" or (t.agent_id is not None and dep == t.agent_id):
+    if dep in (t.id, f"task:{t.id}") or (t.agent_id is not None and dep == t.agent_id):
         return True
     return dep == t.branch and (from_repo is None or from_repo == t.repo_root)
 
@@ -650,9 +651,12 @@ def set_dependencies(db: DB, task_id: str, depends_on: list[str], expect: list[s
 
 
 def known_dependency(db: DB, repo_root: str, dep: str) -> bool:
-    """Whether ``dep`` names an agent or a branch brindle knows in
-    ``repo_root``: a typo would leave a task waiting for good."""
-    return ((dep.startswith("task:") and db.get_task(dep.removeprefix("task:")) is not None)
+    """Whether ``dep`` names a task, agent or a branch brindle knows in
+    ``repo_root``: a typo would leave a task waiting for good.
+
+    Task IDs, like agent IDs, are exact references across repositories.
+    Their retained rows remain valid after the worker's workspace is gone."""
+    return (db.get_task(dep.removeprefix("task:")) is not None
             or (dep.startswith("workspace:") and db.get_workspace(dep.removeprefix("workspace:")) is not None)
             or db.get_agent(dep) is not None
             or any(w.branch == dep for w in db.find_workspaces(repo_root))
@@ -1003,12 +1007,13 @@ def pending_duplicate(db: DB, caller_id: str | None, repo_root: str, task_text: 
 def _holder_start(db: DB, caller_ws: Workspace, depends_on: list[str]) -> str | None:
     """The commit a queued task's branch must start from: a dependency's
     merge commit that ``caller_ws``'s branch lacks, as when the holder merged
-    into another session's branch; None to start from the caller's branch."""
+    into another session. Dependencies may name tasks, workers or workspaces
+    directly; None means start from the caller's branch."""
     for dep in depends_on:
         if dep.startswith("workspace:"):
             dep_ws = db.get_workspace(dep.removeprefix("workspace:"))
         else:
-            task = db.get_task(dep.removeprefix("task:")) if dep.startswith("task:") else None
+            task = db.get_task(dep.removeprefix("task:"))
             agent = db.get_agent(task.agent_id) if task and task.agent_id else db.get_agent(dep)
             dep_ws = db.get_workspace(agent.workspace_id) if agent else None
         if dep_ws is None or dep_ws.repo_root != caller_ws.repo_root:
@@ -1099,11 +1104,10 @@ def on_merged(db: DB, ws: Workspace) -> None:
             if d == f"workspace:{ws.id}" or (worker_id is not None and d == worker_id):
                 matches = True
                 break
-            if d.startswith("task:"):
-                upstream = db.get_task(d.removeprefix("task:"))
-                if upstream and worker_id is not None and upstream.agent_id == worker_id:
-                    matches = True
-                    break
+            upstream = db.get_task(d.removeprefix("task:"))
+            if upstream and worker_id is not None and upstream.agent_id == worker_id:
+                matches = True
+                break
             if d == ws.branch and ws.repo_root in session_roots:
                 try:
                     target_repo, _, _ = _resolve_dependency(
@@ -1392,11 +1396,10 @@ def on_removed_unmerged(db: DB, ws: Workspace) -> None:
             if d == f"workspace:{ws.id}" or (worker_id is not None and d == worker_id):
                 matches = True
                 break
-            if d.startswith("task:"):
-                upstream = db.get_task(d.removeprefix("task:"))
-                if upstream and worker_id is not None and upstream.agent_id == worker_id:
-                    matches = True
-                    break
+            upstream = db.get_task(d.removeprefix("task:"))
+            if upstream and worker_id is not None and upstream.agent_id == worker_id:
+                matches = True
+                break
             if d == ws.branch and ws.repo_root in session_roots:
                 try:
                     target_repo, _, _ = _resolve_dependency(

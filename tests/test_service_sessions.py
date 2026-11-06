@@ -37,10 +37,12 @@ def running(db, repo, monkeypatch):
 ])
 def test_start_asks_about_a_running_session_then_does_what_was_chosen(db, repo, running, choice,
                                                                       branch, paused):
+    db.update_agent("sup1", task="Build the screen.\nKeep every detail of this request.")
     asked = svc.place(db, workspaces.adopt_root(db, str(repo)))
     assert isinstance(asked, svc.Conflict)
     conflict = asked.to_json()["conflict"]
     assert [s["id"] for s in conflict["sessions"]] == ["sup1"] and conflict["default"] == 0
+    assert conflict["sessions"][0]["request"] == db.get_agent("sup1").task
     got = svc.start(db, str(repo), choice=choice, session_id="sup1")
     if branch is None:
         assert isinstance(got, svc.Opened) and got.root.id == "sup1"

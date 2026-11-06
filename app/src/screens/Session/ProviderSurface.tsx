@@ -24,6 +24,7 @@ import { useContext, useEffect, useRef, useState } from "react";
 import type { AgentDTO, InboxItemDTO } from "../../api/schema";
 import { DaemonContext } from "../../api/context";
 import { usePtyViews } from "../../api/ptyView";
+import { LoadingButton } from "../../components/LoadingButton";
 import { Preflight } from "../../components/Preflight";
 import { PtyTerminal, type TerminalView } from "../../components/PtyTerminal";
 import { button, card as cardClass, main, quiet } from "../../components/ui";
@@ -227,9 +228,9 @@ export function ProviderSurface({ repo, agent: listedAgent, alive, sessionStatus
                       </button>
                     )}
                     {!(card.kind === "ended" && card.locked) && !(card.kind === "failed" && card.unshowable) && (
-                      <button type="button" className={credentials && card.kind === "failed" ? button : main} disabled={busy} onClick={() => void resume()}>
+                      <LoadingButton className={credentials && card.kind === "failed" ? button : main} busy={busy} disabled={busy} onClick={() => resume()}>
                         {card.kind === "failed" ? "Restart" : "Continue"}
-                      </button>
+                      </LoadingButton>
                     )}
                     {left && (
                       <button type="button" className={quiet} aria-expanded={showLeft} onClick={() => setShowLeft((s) => !s)}>

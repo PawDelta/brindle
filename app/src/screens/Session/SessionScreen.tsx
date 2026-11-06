@@ -13,6 +13,7 @@
 import { useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { DaemonClient } from "../../api/client";
 import type { OpenUrl } from "../../api/open";
+import { LoadingButton } from "../../components/LoadingButton";
 import { button, main, mono } from "../../components/ui";
 import type { SheetRef } from "../../routes";
 import { CLI_INK, agentName, cliStatus, isPaused, liveWorkers, needsYou, providerName } from "../../store/overview";
@@ -21,6 +22,7 @@ import type { AppStore } from "../../store/store";
 import { useAppState } from "../../store/useStore";
 import { AgentMenu, SessionMenu, closeSessionLabel, type CloseSessionItem } from "./AgentMenu";
 import { failure, type Notice } from "./notice";
+import { SessionRequest } from "./GoalPanel";
 import { ProviderSurface } from "./ProviderSurface";
 import { usePrReadiness, useSessionDiff } from "./review";
 import { ReviewSheet } from "./ReviewSheet";
@@ -183,6 +185,7 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
         closeSession={closeSession}
         onChat={showChanges ? closeSheet : undefined}
       />
+      {session?.request && <SessionRequest key={`${root}:${session.request}`} text={session.request} />}
       {pausedUnder && (
         <div role="status" className="flex items-center gap-s2 border-b border-line px-s2 py-1 text-sm text-ink-2">
           <span>This session was paused</span>
@@ -302,13 +305,13 @@ function SessionBar({ client, root, repo, node, alive, sessionStatus, paused, re
         </button>
       )}
       {paused ? (
-        <button type="button" className={main} disabled={recovery.busy} onClick={() => void recovery.resume()}>
+        <LoadingButton className={main} busy={recovery.busy} disabled={recovery.busy} onClick={() => recovery.resume()}>
           Continue
-        </button>
+        </LoadingButton>
       ) : (
-        <button type="button" className={button} disabled={busy} onClick={() => void pause()}>
+        <LoadingButton className={button} busy={busy} disabled={busy} onClick={() => pause()}>
           Pause
-        </button>
+        </LoadingButton>
       )}
       {/* Not keyed by the agent, and kept when no agent is left to show (a transfer pauses the scratch
           session's root, which leaves the snapshot): a card it opened stays while its job runs and says how it ended. */}

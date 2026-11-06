@@ -307,6 +307,7 @@ def test_dont_ask_refuses_an_uncovered_command_instead_of_prompting(db, ws, monk
     assert answer("w1", "touch should_not_exist.txt") == "ask"
 
 
+@pytest.mark.slow("builds a real agy launch plan with per-repo policy lookups; about 11 s on a loaded host")
 def test_interactive_supervisor_on_autonomous_needs_no_grants(db, ws, monkeypatch, tmp_path):
     # A new person: the policy on and a fresh store on the default preset. agy
     # prompted for everything its settings.json didn't allow, and reads no
@@ -316,6 +317,8 @@ def test_interactive_supervisor_on_autonomous_needs_no_grants(db, ws, monkeypatc
     monkeypatch.setenv("BRINDLE_AGENT_ID", "sup")
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(antigravity, "tool_names", lambda: ["assign"])
+    # Model the launch flag here; parent-process discovery has its own test.
+    monkeypatch.setattr(antigravity, "_launched_with_skip_flag", lambda: True)
     monkeypatch.setattr(permissions, "DEFAULT_PRESET", "autonomous")
     roots = {
         ws.path: ws.path,
