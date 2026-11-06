@@ -283,6 +283,7 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
     done.extend(settle_startups(db, now, panes))
     done.extend(note_stuck(db, now, panes))
     done.extend(note_idle_unreported(db, now, panes))
+    done.extend(note_unreported_commits(db, now, panes))
     done.extend(note_reported_stuck(db, now, panes))
     done.extend(note_stalled(db, now, panes))
     done.extend(note_long_commands(db, now, panes))
@@ -520,8 +521,6 @@ def note_idle_unreported(db: DB, now: float, panes: dict[str, bool]) -> list[str
     report, so it counts as unreported while it hasn't reported again since
     the review that asked for fixes (committing doesn't count), and its spell
     starts no earlier than that review."""
-    from brindle.providers import get_provider
-
     done = []
     owners = agents.pane_owners(db, panes)
     for a in db.list_agents():
@@ -533,16 +532,9 @@ def note_idle_unreported(db: DB, now: float, panes: dict[str, bool]) -> list[str
                 or not agents.runs_process(a) or not agents.same_server(a, panes)
                 or not agents.is_alive(a, panes) or not agents.owns_pane(db, a, owners)):
             continue
-        since = max(a.status_since or a.created_at, fix_round or 0)
-        provider = get_provider(a.provider)
-        if not (provider.uses_hooks and provider.announces_turns):
-            last = tmux.window_activity(a.tmux_window, server=agents.server_of(a))
-            if last is None:
-                continue  # no telling whether a later turn is running
-            since = max(since, last)
-        # Still changing files (a script or a background command editing its
-        # worktree) isn't idle. Commits don't count: see _fix_round_since.
-        since = max(since, _last_edit(db.get_workspace(a.workspace_id)))
+        since = _idle_since(db, a, fix_round or 0)
+        if since is None:
+            continue  # no telling whether a later turn is running
         if now - since < IDLE_UNREPORTED_AFTER or a.stuck_noted == since:
             continue
         won, previous = db.claim_note(a.id, since)
@@ -557,6 +549,100 @@ def note_idle_unreported(db: DB, now: float, panes: dict[str, bool]) -> list[str
                 db.release_note(a.id, since, previous)
         if sent:
             done.append(f"told {a.parent_id} that worker {a.id} is idle without reporting")
+    return done
+
+
+def _idle_since(db: DB, a: Agent, floor: float = 0) -> float | None:
+    """When ``a``, which its hooks report idle, last showed any sign of work, or
+    None when there's no telling. A provider with no hook for a turn starting
+    (Codex) stays 'idle' through later turns, so its pane's last output counts;
+    files changing in its worktree (a script or a background command) count
+    too. Commits don't: see _fix_round_since."""
+    from brindle.providers import get_provider
+
+    since = max(a.status_since or a.created_at, floor)
+    provider = get_provider(a.provider)
+    if not (provider.uses_hooks and provider.announces_turns):
+        last = tmux.window_activity(a.tmux_window, server=agents.server_of(a))
+        if last is None:
+            return None
+        since = max(since, last)
+    return max(since, _last_edit(db.get_workspace(a.workspace_id)))
+
+
+# How long a report may sit received or accepted, undelivered, before the
+# supervisor is told (a report that is being handled takes seconds).
+REPORT_GRACE = 120.0
+
+
+def _tell_once(db: DB, a: Agent, key: str, body: str) -> bool:
+    """Tell ``a``'s supervisor ``body``, once per ``key`` (a mark of its own in
+    agent_marks, so one notice never stands in for another): claimed in the
+    database first, and let go if the send fails."""
+    won, previous = db.claim_mark(a.id, key, "told")
+    if not won:
+        return False
+    sent = False
+    try:
+        agents.send_message(db, a.parent_id, body, sender_id=a.id)
+        sent = True
+    except agents.AgentError:
+        pass
+    finally:
+        if not sent:
+            db.set_mark(a.id, key, previous)
+    return sent
+
+
+def note_unreported_commits(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
+    """Tell each supervisor, once, about a worker whose report may have been
+    lost (a broken MCP connection, then back to waiting, with nobody told the
+    branch is ready): a report stuck received or accepted in the outbox past
+    REPORT_GRACE, or, for a worker idle at its prompt, commits no delivered
+    report covers (a branch with no report at all included)."""
+    from brindle import gates
+
+    done = []
+    for row in db.outbox_stuck(now - REPORT_GRACE):
+        a = db.get_agent(row["agent_id"])
+        if (a is None or not a.parent_id or a.dismissed_at is not None
+                or a.mode not in agents.FORWARDING_MODES):
+            continue
+        ws = db.get_workspace(a.workspace_id)
+        where = f"{ws.branch} (worker {a.id}, workspace {ws.id})" if ws else f"worker {a.id}"
+        if _tell_once(db, a, f"report:{row['id']}:{row['state']}", (
+                f"{where} has a report that was {row['state']} but not delivered; the worker may "
+                f"have failed to report. Ask it to call report_result again, or workspace_diff "
+                f"to review the branch.")):
+            done.append(f"told {a.parent_id} that worker {a.id} has an undelivered report")
+    owners = agents.pane_owners(db, panes)
+    for a in db.list_agents():
+        if (a.mode not in agents.FORWARDING_MODES or not a.parent_id
+                or a.dismissed_at is not None or a.status != "idle"
+                or not agents.runs_process(a) or not agents.same_server(a, panes)
+                or not agents.is_alive(a, panes) or not agents.owns_pane(db, a, owners)):
+            continue
+        since = _idle_since(db, a)
+        if since is None or now - since < IDLE_UNREPORTED_AFTER or agents.command_running(db, a):
+            continue
+        ws = db.get_workspace(a.workspace_id)
+        if ws is None or not os.path.isdir(ws.path) or not ws.base_branch:
+            continue
+        reported = db.outbox_last_delivered_head(a.id)
+        try:
+            head = gates.head(ws)
+            if head == reported:
+                continue
+            span = f"{reported}..HEAD" if reported and git.ok(["merge-base", "--is-ancestor", reported, "HEAD"], ws.path) \
+                else f"{ws.base_branch}..HEAD"
+            covered = len(git.run(["rev-list", span], ws.path).stdout.split())
+        except git.GitError:
+            continue
+        if covered and _tell_once(db, a, f"commits:{head}", (
+                f"{ws.branch} has {covered} unreported commits; the worker may have failed to "
+                f"report (worker {a.id}, workspace {ws.id}). Ask it to call report_result again, "
+                f"or workspace_diff to review the branch.")):
+            done.append(f"told {a.parent_id} that worker {a.id} has unreported commits")
     return done
 
 

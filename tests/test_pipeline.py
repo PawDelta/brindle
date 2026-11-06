@@ -351,6 +351,66 @@ def test_issue186_a_reported_branch_nobody_is_checking_is_reviewed_again(db, rep
     assert db.get_agent("w1").pipeline == "reviewing"
 
 
+@pytest.mark.parametrize("race", ["duplicate", "newer-report", "fallback-moved", "legacy-fallback", "legacy-dirty"])
+def test_report_dispatch_preserves_the_current_claim(db, repo, monkeypatch, race):
+    """Interleave dispatch at the actual launch and fallback boundaries."""
+    ws = _reported(db, repo)
+    monkeypatch.setattr(agents, "warm_checks", lambda ws_: None)
+    monkeypatch.setattr(agents, "is_alive", lambda *a: False)
+    starts, claims = [], []
+
+    def detach(argv):
+        starts.append(argv)
+        claims.append(db.get_agent("w1").reviewing_since)
+        if len(starts) == 1:
+            if race == "duplicate":
+                agents.report_result(db, "w1", "done")
+            elif race == "newer-report":
+                agents.report_result(db, "w1", "newer")
+                raise agents.AgentError("old launch failed after the new report")
+            else:
+                raise agents.AgentError("reviewer unavailable")
+
+    original = agents.condense
+
+    def condense(*a, **kw):
+        if race == "fallback-moved":
+            db.update_agent("w1", pipeline="fixing")  # a verdict landed during preparation
+        return original(*a, **kw)
+
+    monkeypatch.setattr(agents, "_detach", detach)
+    monkeypatch.setattr(agents, "condense", condense)
+    if race == "legacy-fallback":
+        db.update_agent("w1", pipeline="reviewing", reviewing_since=1.0)
+        pipeline._start_review(db, pipeline.load_repo_config(ws.repo_root), db.get_agent("boss"),
+                               db.get_agent("w1"), ws, "done", 1.0)
+    elif race == "legacy-dirty":
+        from brindle import identity_lock
+
+        monkeypatch.setattr(agents.git, "dirty_files", lambda *a, **k: ["work.py"])
+        monkeypatch.setattr(identity_lock, "locked_by", lambda aid: "other" if aid == "boss" else None)
+        with pytest.raises(agents.AgentError):
+            pipeline.on_report(db, db.get_agent("w1"), ws, "done")
+        assert db.pending_count("boss") == 0
+        monkeypatch.setattr(identity_lock, "locked_by", lambda aid: None)
+        pipeline.on_report(db, db.get_agent("w1"), ws, "done")
+        pipeline.on_report(db, db.get_agent("w1"), ws, "done")
+    else:
+        agents.report_result(db, "w1", "done")
+    current = db.get_agent("w1")
+    if race in ("legacy-fallback", "legacy-dirty"):
+        row = db.conn.execute("SELECT * FROM report_outbox").fetchone()
+        assert row is not None and row["state"] == "delivered" and db.pending_count("boss") == 1
+        assert current.pipeline is None
+    else:
+        assert len(starts) == (2 if race == "newer-report" else 1)
+        assert current.reviewing_since == claims[-1]
+        assert current.pipeline == ("fixing" if race == "fallback-moved" else "reviewing")
+        assert db.pending_count("boss") == 0
+        if race == "newer-report":
+            assert current.result == "newer" and claims[0] != claims[1]
+
+
 @pytest.mark.parametrize("session, exits_mid_delivery", [
     ("sess-w1", False), (None, False),
     # Alive when the verdict lands, gone by the time send_message delivers.

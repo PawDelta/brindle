@@ -87,6 +87,53 @@ def add(db, ws, agent_id, **kw):
     db.add_agent(Agent(agent_id, ws.id, **fields))
 
 
+@pytest.mark.parametrize("case, expected", [
+    ("received", 1), ("fresh", 0), ("commits", 1), ("more-commits", 1),
+    ("covered", 0), ("active", 0), ("command", 0), ("locked", 1),
+])
+def test_lost_reports_and_unreported_commits_are_noticed_once(db, tmp_path, monkeypatch, case, expected):
+    from brindle import gates, git, identity_lock
+
+    ws = Workspace("ws", str(tmp_path), "work", "worktree", "work", "main",
+                   str(tmp_path), None, "fake", 1)
+    db.add_workspace(ws)
+    add(db, ws, "boss", mode="interactive", status="processing", headless=1, tmux_window="%boss")
+    add(db, ws, "worker", parent_id="boss", status_since=1,
+        provider="codex" if case == "active" else "claude")
+    now = time.time()
+    if case in ("received", "fresh", "covered", "more-commits", "locked"):
+        row = db.outbox_receive("worker", "digest", "done")
+        if case in ("covered", "more-commits"):
+            db.outbox_bind(row["id"], "head" if case == "covered" else "previous")
+            db.outbox_accept(row["id"], "worker", "done")
+            db.outbox_deliver(row["id"], nothing=True)
+        elif case != "fresh":
+            db.conn.execute("UPDATE report_outbox SET updated_at=1 WHERE id=?", (row["id"],))
+        if case in ("received", "fresh", "locked"):
+            db.set_status("worker", "processing")  # the outbox doesn't depend on the pane being idle
+    monkeypatch.setattr(agents, "is_alive", lambda *a: True)
+    monkeypatch.setattr(tmux, "window_activity", lambda *a, **k: now)
+    monkeypatch.setattr(gates, "head", lambda ws_: "head")
+    monkeypatch.setattr(git, "ok", lambda *a: True)
+    monkeypatch.setattr(git, "run", lambda argv, *a: SimpleNamespace(stdout="a b" if argv[0] == "rev-list" else ""))
+    monkeypatch.setattr(agents, "command_running", lambda *a: case == "command")
+    locked = [True] if case == "locked" else []
+    monkeypatch.setattr(identity_lock, "locked_by", lambda aid: "other" if aid == "boss" and locked else None)
+    panes = _live_panes()
+    cull.note_unreported_commits(db, now, panes)
+    if locked:
+        assert db.pending_count("boss") == 0
+        locked.clear()
+    cull.note_unreported_commits(db, now, panes)
+    cull.note_unreported_commits(db, now, panes)
+    assert db.pending_count("boss") == expected
+    if case == "received":
+        row = db.outbox_receive("worker", "next", "new report")
+        db.conn.execute("UPDATE report_outbox SET updated_at=1 WHERE id=?", (row["id"],))
+        cull.note_unreported_commits(db, now, panes)
+        assert db.pending_count("boss") == 2  # each undelivered receipt has its own notice
+
+
 def test_sweep_stops_processes_of_paused_agents(db, ws, proc_cleanup):
     add(db, ws, "abc12345", status="paused")
     p = launch_as("abc12345")

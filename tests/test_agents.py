@@ -309,6 +309,108 @@ def test_handoff_wait_is_bounded_and_detaches(db, ws, monkeypatch):
     assert db.get_agent("w1") is None  # handoff worker closed after collection
 
 
+def test_report_outbox_survives_interruptions_and_delivers_exactly_once(db, ws, monkeypatch):
+    """Every step of a report is on record and every transition is a
+    compare-and-set. Interrupted at the first git call, after receipt, after
+    accept, after dispatch, interleaved at the document check, or duplicated
+    during the head read, the next call resumes and the supervisor gets each
+    report exactly once; nothing reads a report before it is accepted; the same
+    summary at a new head is a new report; rows are kept, never deleted."""
+    fake_agent(db, ws, status="processing", agent_id="boss")
+    fake_agent(db, ws, mode="assign", parent="boss", agent_id="w1")
+    broken = {"git": False, "docs": False, "pre": False, "notify": False}
+    at = {"head": "h1"}
+    inner = []
+    during_docs = []   # (what the interleaved call reports, what the outer call's check then says)
+    during_head = []
+
+    def git_head(ws_):
+        if broken["git"]:
+            raise RuntimeError("interrupted at the first git call")
+        if during_head:   # a duplicate call that starts while this one reads the head
+            during_head.pop()()
+        return at["head"]
+
+    def docs(db_, agent_id):
+        if broken["docs"]:
+            raise RuntimeError("interrupted after receipt")
+        if during_docs:   # a second call runs to the end while this one checks documents
+            text, verdict = during_docs.pop()
+            agents.report_result(db, "w1", text)
+            return verdict
+
+    def warm(ws_):
+        if broken["pre"]:
+            raise RuntimeError("interrupted after accept")
+        if inner:   # a concurrent duplicate call, mid-flight
+            inner.pop()()
+
+    def notify(db_, parent):
+        if broken["notify"]:
+            raise RuntimeError("interrupted after dispatch")
+
+    def states():
+        return [r["state"] for r in db.conn.execute("SELECT state FROM report_outbox WHERE canonical_id IS NULL ORDER BY id")]
+
+    def messages():
+        return db.conn.execute("SELECT count(*) FROM inbox WHERE agent_id='boss' AND COALESCE(held, 0)=0").fetchone()[0]
+
+    monkeypatch.setattr(agents, "warm_checks", warm)
+    monkeypatch.setattr(agents, "stale_analysis_docs", docs)
+    monkeypatch.setattr(agents, "_branch_head", git_head)
+    monkeypatch.setattr(agents, "_notify_supervisor", notify)
+
+    broken["git"] = True                                   # the first git call hangs
+    with pytest.raises(RuntimeError):
+        agents.report_result(db, "w1", "done")
+    assert states() == ["received"] and db.get_agent("w1").result is None
+    broken.update(git=False, docs=True)                    # after receipt
+    with pytest.raises(RuntimeError):
+        agents.report_result(db, "w1", "done")
+    assert states() == ["received"] and db.get_agent("w1").result is None   # nothing reads it yet
+    broken.update(docs=False, pre=True)                    # after accept
+    with pytest.raises(RuntimeError):
+        agents.report_result(db, "w1", "done")
+    assert states() == ["accepted"] and db.get_agent("w1").result == "done" and messages() == 0
+    broken["pre"] = False
+    inner.append(lambda: agents.report_result(db, "w1", "done"))   # a duplicate call, concurrently
+    agents.report_result(db, "w1", "done")
+    assert states() == ["delivered"] and messages() == 1
+    agents.report_result(db, "w1", "done")
+    at["head"] = "h2"                                      # the same summary at a new head
+    broken["notify"] = True                                # after dispatch
+    with pytest.raises(RuntimeError):
+        agents.report_result(db, "w1", "done")
+    assert states() == ["delivered", "delivered"] and messages() == 2
+    agents.report_result(db, "w1", "done")
+    assert messages() == 2
+    # A duplicate that starts while the head is read, for a head already reported: its
+    # receipt is folded into the delivered row (kept, never deleted) and both calls follow it.
+    during_head.append(lambda: agents.report_result(db, "w1", "done"))
+    agents.report_result(db, "w1", "done")
+    assert states() == ["delivered", "delivered"] and messages() == 2
+    h2 = db.conn.execute("SELECT id FROM report_outbox WHERE head='h2' AND canonical_id IS NULL").fetchone()[0]
+    folded = db.conn.execute("SELECT state FROM report_outbox WHERE canonical_id=?", (h2,)).fetchall()
+    assert folded and all(r["state"] == "superseded" for r in folded)
+    broken["notify"] = False
+    # Two calls interleaved at the document check: the one that accepts first writes the
+    # result and delivers; the other, whether its check passed or found stale documents,
+    # follows the row's state and delivers nothing.
+    for n, verdict in enumerate((None, "read the new analysis docs first"), 1):
+        at["head"] = f"x{n}"
+        db.update_agent("w1", result=None)   # the document check applies to a first report
+        during_docs.append((f"v{n}", verdict))
+        agents.report_result(db, "w1", f"v{n}")
+        assert db.get_agent("w1").result == f"v{n}" and messages() == 2 + n
+    # An older report stuck undelivered is superseded by a newer one that is delivered.
+    old = db.outbox_receive("w1", "old", "stale")
+    db.outbox_bind(old["id"], "h0")
+    at["head"] = "h3"
+    agents.report_result(db, "w1", "done, more")
+    assert db.conn.execute("SELECT state FROM report_outbox WHERE id=?", (old["id"],)).fetchone()[0] == "superseded"
+    assert states()[-1] == "delivered"
+
+
 @pytest.mark.skipif(not shutil.which("tmux"), reason="tmux not installed")
 def test_watch_pane_shares_the_window_and_messages_reach_the_agent(db, ws):
     a = agents.spawn(db, ws, "developer", provider_name="shell", watch_pane=True)

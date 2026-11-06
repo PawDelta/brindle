@@ -32,6 +32,7 @@ from brindle.config import RepoConfig
 from brindle.db import DB, Agent, Workspace, request_subagent
 from brindle.model_availability import ModelAvailabilityChecker, PROVISIONING_TIMEOUT, provisioning_context
 from brindle.pro import route_health
+from brindle.redact import mask
 from brindle.profiles import load_profile, local_fallback, missing_add_dirs
 from brindle.providers import LaunchContext, get_provider, unusable
 from brindle.sidebar_follow import (
@@ -2605,19 +2606,110 @@ def report_result(db: DB, agent_id: str, result: str, forward: bool = True,
     the result is then only recorded in the history. A first result waits
     while an analysis doc the agent read has a newer version it hasn't read
     (unless the caller already checked: ``docs_checked``)."""
-    from brindle import history, pipeline, pricing, usage as usage_mod
-
     if removed and db.get_agent(agent_id) is None:
         agent, ws = removed
     else:
         agent = get(db, agent_id)
         ws = db.get_workspace(agent.workspace_id)
-    first = agent.result is None
-    if first and not removed and not docs_checked:
-        stale = stale_analysis_docs(db, agent.id)
-        if stale:
-            return stale
-    db.set_result(agent.id, result)
+    if removed:   # a reviewer the pipeline already removed: only recorded
+        db.set_result(agent.id, result)
+        return _handle_report(db, agent, ws, result, agent.result is None, forward, removed)
+    # The report goes through the outbox (db.report_outbox): received, then
+    # accepted into agents.result, then delivered. Each step is one
+    # transaction, and a repeat call resumes at the step the last one reached.
+    row = _receive_report(db, agent.id, ws, result)
+    if row["state"] in ("delivered", "superseded"):
+        return "result already recorded"
+    first = bool(row["is_first"])
+    if row["state"] in ("received", "rejected"):
+        if first and not docs_checked:
+            stale = stale_analysis_docs(db, agent.id)
+            if stale:   # not accepted: agents.result is never touched
+                if db.outbox_reject(row["id"]):
+                    return stale
+                row = db.outbox_get(row["id"])   # another call moved it on: follow its state
+                if row["state"] in ("delivered", "superseded"):
+                    return "result already recorded"
+        if db.outbox_accept(row["id"], agent.id, row["payload"]):
+            agent = get(db, agent.id)
+        else:
+            row = db.outbox_get(row["id"])
+            if row["state"] in ("delivered", "superseded"):
+                return "result already recorded"
+    return _handle_report(db, agent, ws, row["payload"], first, forward, removed, outbox_id=row["id"])
+
+
+def _receive_report(db: DB, agent_id: str, ws: Workspace | None, result: str):
+    payload = mask(result)
+    digest = hashlib.sha256(payload.encode()).hexdigest()[:16]
+    row = db.outbox_receive(agent_id, digest, payload)   # before any git or document work
+    return db.outbox_bind(row["id"], _branch_head(ws) if ws else "")
+
+
+def _holds_for(db: DB, agent: Agent) -> bool:
+    """Whether a message to ``agent`` waits unread for read_messages (see send_message)."""
+    return bool(runs_process(agent) and pulls_messages(db, agent))
+
+
+def _report_message(db: DB, parent: Agent, body: str, sender_id: str) -> tuple:
+    """A report as the inbox row(s) ``send_message`` would leave for ``parent``:
+    held for read_messages, or a one-line pointer to the kept full text for an
+    interactive supervisor, or the formatted text."""
+    if _holds_for(db, parent):
+        return (parent.id, body, sender_id, True, None)
+    if parent.mode == "interactive" and parent.provider != "shell":
+        return (parent.id, body, sender_id, False, lambda mid: one_line(db, mid, body, sender_id))
+    return (parent.id, format_message(db, body, sender_id), sender_id, False, None)
+
+
+def _notify_supervisor(db: DB, parent: Agent) -> None:
+    """Tell a supervisor its inbox has a report: the one-line notice for unread
+    messages, or the queue flushed into an idle one. The message itself is
+    already stored, so a failure here loses nothing."""
+    from brindle import identity_lock
+
+    with delivery_lock(parent.id):
+        try:
+            parent = get(db, parent.id)
+            identity_lock.ensure(parent)
+            _notify_report(db, parent)
+        except (AgentError, tmux.TmuxError):
+            log.warning("brindle: couldn't notify %s of a report", parent.id, exc_info=True)
+
+
+def _notify_report(db: DB, parent: Agent) -> None:
+    from brindle import identity_lock
+
+    try:
+        if _holds_for(db, parent):
+            claimed = db.claim_notice(parent.id) if is_alive(parent) else None
+            if claimed is not None:
+                try:
+                    identity_lock.ensure(get(db, parent.id))
+                    _send_message(db, parent, unread_notice(db, claimed), None, notice=True)
+                except BaseException:
+                    db.reset_notice(parent.id)
+                    raise
+        elif is_alive(parent):
+            identity_lock.ensure(get(db, parent.id))
+            flush(db, parent.id)
+    except (AgentError, tmux.TmuxError):
+        log.warning("brindle: couldn't notify %s of a report", parent.id, exc_info=True)
+
+
+def _branch_head(ws: Workspace) -> str:
+    try:
+        return git.out(["rev-parse", "HEAD"], ws.path)
+    except git.GitError:
+        return ""
+
+
+def _handle_report(db: DB, agent: Agent, ws: Workspace | None, result: str, first: bool,
+                   forward: bool, removed: tuple[Agent, Workspace] | None,
+                   outbox_id: int | None = None) -> str:
+    """What follows recording a report: usage, history, the pipeline, the supervisor."""
+    from brindle import history, pipeline, pricing, usage as usage_mod
+
     if ws:
         bus.publish_agent(db, "agent.reported", agent.id, workspace_id=ws.id,
                           repo_root=ws.repo_root, mode=agent.mode, first=first)
@@ -2649,17 +2741,22 @@ def report_result(db: DB, agent_id: str, result: str, forward: bool = True,
         if first:
             pipeline.note_reported(db, ws, agent)
         warm_checks(ws)
-        if forward and pipeline.on_report(db, agent, ws, forwarded):
+        if forward and pipeline.on_report(db, agent, ws, forwarded, outbox_id=outbox_id):
             return ("result recorded. brindle is having your branch reviewed; it will merge it, "
                     "or send you the review's findings to fix.")
-    if forward and agent.mode in FORWARDING_MODES and agent.parent_id and db.get_agent(agent.parent_id):
+    if forward and agent.mode in FORWARDING_MODES and agent.parent_id:
+        parent = db.get_agent(agent.parent_id)
+        if parent is None:
+            return "result recorded"   # no supervisor to tell: the report stays accepted, undelivered
         where = f" on branch `{ws.branch}` (workspace {ws.id})" if ws else ""
-        send_message(
-            db, agent.parent_id,
-            condense(f"Assigned task finished{where}: {first_line(result)}", forwarded),
-            sender_id=agent.id,
-        )
+        body = condense(f"Assigned task finished{where}: {first_line(result)}", forwarded)
+        if outbox_id is None:
+            send_message(db, agent.parent_id, body, sender_id=agent.id)
+        elif db.outbox_deliver(outbox_id, message=_report_message(db, parent, body, agent.id)):
+            _notify_supervisor(db, parent)   # outside the transaction, from the stored row
         return "result recorded and sent to your supervisor"
+    if outbox_id is not None:
+        db.outbox_deliver(outbox_id, nothing=True)   # no one to tell
     return "result recorded"
 
 

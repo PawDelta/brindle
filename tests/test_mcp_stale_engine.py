@@ -21,6 +21,117 @@ from brindle import mcp_server, mcp_stdio, upgrade
 from brindle.db import DB, SCHEMA_VERSION
 
 
+@pytest.mark.parametrize("failure", [
+    "git", "accepted", "locked", "dirty-locked", "review-fallback",
+    "fallback-interrupted", "notify-locked",
+    pytest.param("lock-race", marks=pytest.mark.variant("identity changes while waiting for the delivery lock")),
+])
+def test_failed_report_is_redelivered_once(db, tmp_path, monkeypatch, failure):
+    """Real MCP dispatch resumes a lost report without losing or duplicating delivery."""
+    from brindle import agents, bus, git, identity_lock, pipeline, usage
+    from brindle.config import RepoConfig
+    from brindle.db import Workspace
+    from test_merge_order import add
+
+    ws = Workspace("ws", str(tmp_path), "work", "worktree", "work", "main",
+                   str(tmp_path), None, "fake", 1)
+    db.add_workspace(ws)
+    add(db, ws, "boss", "interactive", "supervisor", status="paused")
+    add(db, ws, "worker", "assign", parent="boss")
+    monkeypatch.setenv("BRINDLE_AGENT_ID", "worker")
+    piped = failure in ("dirty-locked", "review-fallback", "fallback-interrupted")
+    monkeypatch.setattr(pipeline, "load_repo_config", lambda *a, **k: RepoConfig(pipeline=piped))
+    monkeypatch.setattr(git, "ahead_behind", lambda *a: (0, 1))
+    monkeypatch.setattr(git, "dirty_files", lambda *a, **k: ["work.py"] if failure == "dirty-locked" else [])
+    monkeypatch.setattr(usage, "agent_usage", lambda *a: None)
+    monkeypatch.setattr(agents, "stale_analysis_docs", lambda *a: None)
+    monkeypatch.setattr(pipeline, "note_reported", lambda *a: None)
+    monkeypatch.setattr(agents, "is_alive", lambda *a: failure == "notify-locked")
+    locked, armed, notifications, starts = [], [True], [], []
+    monkeypatch.setattr(identity_lock, "locked_by", lambda aid: "other identity" if aid == "boss" and locked else None)
+    monkeypatch.setattr(agents, "flush", lambda *a: notifications.append(bool(locked)))
+
+    def head(*a, **k):
+        if failure == "git" and armed:
+            raise RuntimeError("lost while reading HEAD")
+        return "head"
+
+    def warm(*a):
+        if failure == "accepted" and armed:
+            raise RuntimeError("lost after acceptance")
+
+    def start(*a, **k):
+        starts.append(k["report"])
+        if armed and failure == "review-fallback":
+            locked.append(True)  # the reviewer fails after the supervisor changes identity
+        raise agents.AgentError("reviewer unavailable")
+
+    original_condense = agents.condense
+
+    def condense(*a, **k):
+        if armed and failure in ("locked", "dirty-locked"):
+            locked.append(True)  # identity changes after the initial dispatch check
+        if armed and failure == "fallback-interrupted":
+            raise RuntimeError("lost while preparing fallback")
+        return original_condense(*a, **k)
+
+    publish = bus.publish_agent
+
+    def published(db_, kind, *a, **k):
+        publish(db_, kind, *a, **k)
+        if armed and failure == "notify-locked" and kind == "message.queued":
+            locked.append(True)  # changed after durable queueing, before notification
+
+    monkeypatch.setattr(git, "out", head)
+    monkeypatch.setattr(agents, "warm_checks", warm)
+    monkeypatch.setattr(agents, "start_review", start)
+    monkeypatch.setattr(agents, "condense", condense)
+    monkeypatch.setattr(bus, "publish_agent", published)
+    if failure == "lock-race":
+        from contextlib import contextmanager
+
+        original_lock = agents.delivery_lock
+
+        @contextmanager
+        def lock(agent_id):
+            with original_lock(agent_id):
+                if armed:
+                    locked.append(True)
+                yield
+
+        monkeypatch.setattr(agents, "delivery_lock", lock)
+
+    def call():
+        return asyncio.run(mcp_server.mcp.call_tool("report_result", {"result": "done"}))
+
+    if failure in ("git", "accepted", "locked", "dirty-locked", "review-fallback", "fallback-interrupted", "lock-race"):
+        with pytest.raises(ToolError):
+            call()
+        row = db.conn.execute("SELECT * FROM report_outbox").fetchone()
+        assert row["state"] == ("received" if failure == "git" else "accepted")
+        assert db.get_agent("worker").result == (None if failure == "git" else "done")
+        assert db.pending_count("boss") == 0
+        if failure in ("review-fallback", "fallback-interrupted"):
+            assert db.get_agent("worker").pipeline == "reviewing"
+    else:
+        call()
+    armed.clear()
+    locked.clear()
+    if failure == "fallback-interrupted":
+        worker = db.get_agent("worker")
+        pipeline.restart_review(db, worker, ws, worker.reviewing_since)
+        assert len(starts) == 1  # recovery delivers the pending fallback without another launch
+    call()
+    call()
+    assert db.pending_count("boss") == 1
+    rows = db.conn.execute("SELECT * FROM report_outbox WHERE canonical_id IS NULL").fetchall()
+    assert len(rows) == 1 and rows[0]["state"] == "delivered"
+    assert db.get_agent("worker").pipeline is None
+    assert notifications == []  # paused supervisor, or identity changed before notification
+    if failure in ("review-fallback", "fallback-interrupted"):
+        assert len(starts) == 1
+
+
 @pytest.mark.parametrize("migration, incompatible", [
     ("ALTER TABLE workspaces ADD COLUMN from_a_newer_engine TEXT", None),
     ("ALTER TABLE workspaces ADD COLUMN from_a_newer_engine TEXT NOT NULL DEFAULT ''", None),
