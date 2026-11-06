@@ -2317,6 +2317,41 @@ def delete_key(db: DB, params: dict, body: Body) -> Any:
     return {"name": name, "set": False}
 
 
+def connect_github(db: DB, params: dict, body: Body) -> Any:
+    """Give brindle its own GitHub sign-in (brindle.github_connect): ``route`` "gh"
+    copies the GitHub CLI's, "token" takes ``token``. The reply is the connection,
+    never the token, which is neither logged nor put on the bus. Agent callers are
+    refused, as for every route here."""
+    from brindle import github_connect
+    from brindle.service.dto import GitHubConnectionDTO
+
+    token = body.pop("token", None)
+    route = _get(body, "route", required=True)
+    try:
+        if route == "gh":
+            state = github_connect.connect_gh()
+        elif route == "token":
+            state = github_connect.connect_token(token)
+        else:
+            raise ServiceError("invalid", 'route must be "gh" or "token"')
+    except github_connect.ConnectError as e:
+        status = {"github_token_invalid": 422, "github_gh_unavailable": 409}.get(e.code, 502)
+        raise ServiceError(e.code, str(e), status) from None
+    except ServiceError:
+        raise
+    except Exception:  # noqa: BLE001 - no traceback: its frames held the token
+        raise ServiceError("internal", "couldn't connect GitHub", 500) from None
+    return GitHubConnectionDTO(**state).to_json()
+
+
+def disconnect_github(db: DB, params: dict, body: Body) -> Any:
+    """Forget brindle's GitHub sign-in; nothing is revoked on GitHub."""
+    from brindle import github_connect
+    from brindle.service.dto import GitHubConnectionDTO
+
+    return GitHubConnectionDTO(**github_connect.disconnect()).to_json()
+
+
 def retest_key(db: DB, params: dict, body: Body) -> Any:
     """Re-check the stored key with its provider; the reply says how it came out."""
     from brindle import keys_cmds, keystore
@@ -2629,6 +2664,8 @@ ROUTES = [
     Route("/v1/keys/{name}", _endpoint(delete_key), methods=["DELETE"]),
     _post("/keys/{name}/test", retest_key),
     _post("/keys/{name}/import", import_key),
+    _post("/github/connection", connect_github),
+    Route("/v1/github/connection", _endpoint(disconnect_github), methods=["DELETE"]),
     _post("/terminals/{id}/input", terminal_input),
     _post("/terminals/shell", shell_terminal),
     Route("/v1/terminals/{id}", _endpoint(close_terminal), methods=["DELETE"]),

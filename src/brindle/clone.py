@@ -1,6 +1,7 @@
 """Cloning a repo for the desktop app's project picker: the user's own
 ``git clone``, with their git credentials and SSH keys exactly as a terminal
-would use them. brindle never sees or stores a credential."""
+would use them. The one exception is github.com over HTTPS for someone who
+connected GitHub to brindle (brindle.github_connect): that connection signs in."""
 
 from __future__ import annotations
 
@@ -61,8 +62,12 @@ def clone(url: str, dest: Path, on_line: Callable[[str], None]) -> str:
     """Run ``git clone --progress`` into ``dest``, passing each progress line
     (git ends them with CR or LF) to ``on_line``. Returns the path; a failure
     raises a ServiceError carrying git's own message."""
+    from brindle import git
+
     env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}      # no prompt to hang on: fail with git's message
-    proc = spawn.start(["git", "clone", "--progress", "--", url, str(dest)], stdin=subprocess.DEVNULL,
+    # Someone who connected GitHub to brindle signs in to github.com with that, not git's keychain helper.
+    proc = spawn.start(["git", *git.connected_github_config(), "clone", "--progress", "--", url, str(dest)],
+                       stdin=subprocess.DEVNULL,
                        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, env=env)
     lines: list[str] = []
     buf = b""

@@ -3381,6 +3381,68 @@ def cloud_credential_cmd(cloud: str = typer.Argument(..., help="aws, gcp or azur
     raise typer.Exit(cloud_credential.run(cloud, org))
 
 
+github_app = typer.Typer(no_args_is_help=True,
+                         help="Connect GitHub: brindle keeps its own sign-in, so git never asks the keychain.")
+
+
+@github_app.command("status")
+def github_status() -> None:
+    """Whether brindle has its own GitHub sign-in, and of what kind."""
+    from brindle import github_connect
+
+    typer.echo(f"GitHub: {github_connect.describe(github_connect.status())}")
+
+
+@github_app.command("connect")
+def github_connect_cmd(
+    gh: bool = typer.Option(False, "--gh", help="Copy your GitHub CLI sign-in (brindle gets the access gh has)."),
+    token: bool = typer.Option(False, "--token", help="Paste a fine-grained token (asked for, or read from stdin)."),
+) -> None:
+    """Give brindle its own GitHub sign-in: a copy of the GitHub CLI's, or a token."""
+    import getpass
+
+    from brindle import github_connect
+
+    if not gh and not token:
+        gh = github_connect.gh_available() and sys.stdin.isatty() and typer.confirm(
+            "Copy your GitHub CLI sign-in? brindle then has the same access to GitHub that gh has: "
+            "every repository you can reach. (No: paste a fine-grained token instead)", default=True)
+    try:
+        if gh:
+            state = github_connect.connect_gh()
+        else:
+            if sys.stdin.isatty():
+                typer.echo("Make a fine-grained token at https://github.com/settings/personal-access-tokens/new "
+                           "for the repositories brindle should reach, with Contents, Pull requests and "
+                           "Workflows read and write.")
+            pasted = getpass.getpass("Token: ") if sys.stdin.isatty() else sys.stdin.readline()
+            state = github_connect.connect_token(pasted)
+    except github_connect.ConnectError as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(1) from None
+    typer.echo(f"GitHub: {github_connect.describe(state)}")
+
+
+@github_app.command("disconnect")
+def github_disconnect() -> None:
+    """Forget brindle's GitHub sign-in. Nothing is revoked on GitHub."""
+    from brindle import github_connect
+
+    github_connect.disconnect()
+    typer.echo("GitHub: disconnected. A pasted token still exists on GitHub until you delete it there.")
+
+
+app.add_typer(github_app, name="github")
+
+
+@app.command("_github-credential", hidden=True)
+def github_credential_cmd(action: str = typer.Argument("")) -> None:
+    """git's credential helper for github.com, answering from brindle's GitHub connection."""
+    from brindle import github_connect
+
+    raise typer.Exit(github_connect.main([action]))
+
+
 @app.command("_sync-settings", hidden=True)
 def sync_settings_cmd() -> None:
     """Pull synced settings (brindle Pro); detached from `brindle`."""
