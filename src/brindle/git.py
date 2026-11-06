@@ -898,42 +898,44 @@ FALLBACK_NAME = "brindle"
 FALLBACK_EMAIL = "brindle@localhost"
 
 
-def missing_identity(path: str | Path) -> list[str]:
-    """Which of "name" and "email" git has no value for at ``path`` (a new
-    account has neither). Each is looked up on its own, in config and the
-    environment, so a half-set identity keeps the half the person set."""
-    if ok(["var", "GIT_COMMITTER_IDENT"], path):
-        return []
-    def has(key: str, *env: str) -> bool:
-        return bool(run(["config", "--get", key], path, check=False).stdout.strip()
-                    or any(os.environ.get(e) for e in env))
+def missing_identity(path: str | Path, env: dict[str, str] | None = None) -> list[tuple[str, str]]:
+    """The (role, field) pairs, role "author" or "committer", field "name" or
+    "email", that git has no value for at ``path`` (a new account has none).
+    Each is resolved as git does (GIT_<ROLE>_<FIELD> in ``env``, default the
+    process's, then <role>.<field>, then user.<field>, and EMAIL for an email),
+    so whatever the person set, for either role, is kept."""
+    env = os.environ if env is None else env
+    found = run(["config", "--get-regexp", r"^(user|author|committer)\.(name|email)$"],
+                path, check=False).stdout
+    conf = {k.lower(): v.strip() for k, _, v in (line.partition(" ") for line in found.splitlines())}
     missing = []
-    if not has("user.name", "GIT_COMMITTER_NAME", "GIT_AUTHOR_NAME"):
-        missing.append("name")
-    if not has("user.email", "GIT_COMMITTER_EMAIL", "GIT_AUTHOR_EMAIL", "EMAIL"):
-        missing.append("email")
+    for role in ("author", "committer"):
+        for field in ("name", "email"):
+            have = (env.get(f"GIT_{role}_{field}".upper()) or conf.get(f"{role}.{field}")
+                    or conf.get(f"user.{field}") or (field == "email" and env.get("EMAIL")))
+            if not have:
+                missing.append((role, field))
     return missing
 
 
+def _fallback(field: str) -> str:
+    return FALLBACK_NAME if field == "name" else FALLBACK_EMAIL
+
+
 def identity_args(path: str | Path) -> list[str]:
-    """``-c`` flags giving brindle's own commits a fallback author for what git
-    has no identity for at ``path``. Never replaces a value the person set
-    (repo, global, system, environment); nothing is written to any config file."""
-    gaps = missing_identity(path)
-    return [*(["-c", f"user.name={FALLBACK_NAME}"] if "name" in gaps else []),
-            *(["-c", f"user.email={FALLBACK_EMAIL}"] if "email" in gaps else [])]
+    """``-c`` flags giving brindle's own commits a fallback for each part of
+    the identity git has no value for at ``path``. Never replaces a value the
+    person set (config or environment); nothing is written to any config file."""
+    return [a for role, field in missing_identity(path)
+            for a in ("-c", f"{role}.{field}={_fallback(field)}")]
 
 
-def identity_env(path: str | Path) -> dict[str, str]:
+def identity_env(path: str | Path, env: dict[str, str] | None = None) -> dict[str, str]:
     """The same fallback as environment variables, for a worker's own git
-    commands: only for what is missing, so a set identity is untouched."""
-    gaps = missing_identity(path)
-    env = {}
-    if "name" in gaps:
-        env.update(GIT_AUTHOR_NAME=FALLBACK_NAME, GIT_COMMITTER_NAME=FALLBACK_NAME)
-    if "email" in gaps:
-        env.update(GIT_AUTHOR_EMAIL=FALLBACK_EMAIL, GIT_COMMITTER_EMAIL=FALLBACK_EMAIL)
-    return env
+    commands, judged against the worker's effective ``env``: only what is
+    missing, so an identity set anywhere (a profile's GIT_* lines too) stands."""
+    return {f"GIT_{role}_{field}".upper(): _fallback(field)
+            for role, field in missing_identity(path, {**os.environ, **(env or {})})}
 
 
 def commit_all(path: str | Path, message: str) -> str | None:

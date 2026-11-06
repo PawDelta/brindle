@@ -2,9 +2,12 @@
 
 import os
 import subprocess
+import time
 from pathlib import Path
+from types import SimpleNamespace
 
-from brindle import demo, workspaces
+from brindle import agents, demo, workspaces
+from brindle.db import Agent
 
 
 def _no_identity(monkeypatch, tmp_path):
@@ -17,59 +20,79 @@ def _no_identity(monkeypatch, tmp_path):
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
 
 
-def _worker_commit(ws, name):
-    """What a worker does: plain git in its worktree, no -c flags, in the
-    environment brindle launches it with."""
+def _profile(env):
+    return SimpleNamespace(env=env, tool_search=None, provider="shell", auth="auto")
+
+
+def _worker_commit(db, ws, name):
+    """What a worker does: plain git in its worktree, in the environment
+    brindle launches it with (agent_env)."""
     path = Path(ws.path)
-    env = {**os.environ, **workspaces.workspace_env(ws)}
+    agent = Agent(f"w-{name}", ws.id, "developer", "shell", None, "assign", "idle", "", None,
+                  time.time())
+    db.add_agent(agent)
+    env = {**os.environ, **agents.agent_env(ws, agent.id, agent)}
     (path / name).write_text("x = 1\n")
     subprocess.run(["git", "add", "-A"], cwd=path, check=True)
     subprocess.run(["git", "commit", "-qm", "work"], cwd=path, check=True, env=env)
 
 
-def _last_author(path):
-    return subprocess.run(["git", "log", "-1", "--format=%an <%ae>"], cwd=path, check=True,
+def _last(path, fmt="%an <%ae>"):
+    return subprocess.run(["git", "log", "-1", f"--format={fmt}"], cwd=path, check=True,
                           capture_output=True, text=True).stdout.strip()
 
 
+def _git(path, *args):
+    subprocess.run(["git", *args], cwd=path, check=True)
+
+
 def test_demo_merges_with_no_git_identity(db, repo, monkeypatch, tmp_path):
-    # A person's real repo with no identity: the worker's commits and
-    # brindle's merge commit fall back, and no config is written.
     _no_identity(monkeypatch, tmp_path)
-    real_a = workspaces.create(db, str(repo), "a", run_setup=False).workspace
-    real_b = workspaces.create(db, str(repo), "b", run_setup=False).workspace
-    _worker_commit(real_a, "a.py")
-    workspaces.merge_back(db, real_a)
+    monkeypatch.setattr(agents, "load_profile", lambda *a, **k: _profile({}))
+    wss = [workspaces.create(db, str(repo), n, run_setup=False).workspace for n in "abcd"]
+
+    # No identity at all: the worker's commit and brindle's merge fall back,
+    # and no config is written.
+    _worker_commit(db, wss[0], "a.py")
+    workspaces.merge_back(db, wss[0])
     config = subprocess.run(["git", "config", "--local", "--list"], cwd=repo, check=True,
                             capture_output=True, text=True).stdout
     assert "user.name" not in config and "user.email" not in config
 
     # Half an identity (a name, no email): that half is kept.
-    subprocess.run(["git", "config", "user.name", "Existing Person"], cwd=repo, check=True)
-    _worker_commit(real_b, "b.py")
-    assert _last_author(real_b.path) == "Existing Person <brindle@localhost>"
-    workspaces.merge_back(db, real_b)
-    assert _last_author(repo) == "Existing Person <brindle@localhost>"
+    _git(repo, "config", "user.name", "Existing Person")
+    _worker_commit(db, wss[1], "b.py")
+    assert _last(wss[1].path) == "Existing Person <brindle@localhost>"
+    workspaces.merge_back(db, wss[1])
+    assert _last(repo) == "Existing Person <brindle@localhost>"
 
-    # The demo repo carries its own identity: workers and merges both work.
-    root = demo.create()
-    first = workspaces.create(db, str(root), "slug", base="main", run_setup=False).workspace
-    second = workspaces.create(db, str(root), "wrap", base="main", run_setup=False).workspace
-    _worker_commit(first, "a.py")
-    _worker_commit(second, "b.py")
-    workspaces.merge_back(db, first)
-    workspaces.merge_back(db, second)    # main moved on: a real merge commit
-    assert _last_author(root) == "brindle demo <demo@brindle.invalid>"
+    # A role-specific identity (author.*, with useConfigOnly): kept as the
+    # author; the committer, which has none, falls back.
+    _git(repo, "config", "--unset", "user.name")
+    _git(repo, "config", "user.useConfigOnly", "true")
+    _git(repo, "config", "author.name", "Role Author")
+    _git(repo, "config", "author.email", "role@example.com")
+    _worker_commit(db, wss[2], "c.py")
+    assert _last(wss[2].path, "%an <%ae> / %cn <%ce>") == \
+        "Role Author <role@example.com> / brindle <brindle@localhost>"
+    workspaces.merge_back(db, wss[2])
+
+    # An identity from the worker's profile (GIT_* env lines) is not overwritten.
+    _git(repo, "config", "--unset", "author.name")
+    _git(repo, "config", "--unset", "author.email")
+    who = {f"GIT_{r}_{f}": v for r in ("AUTHOR", "COMMITTER")
+           for f, v in (("NAME", "Profile Person"), ("EMAIL", "profile@example.com"))}
+    monkeypatch.setattr(agents, "load_profile", lambda *a, **k: _profile(who))
+    _worker_commit(db, wss[3], "d.py")
+    assert _last(wss[3].path) == "Profile Person <profile@example.com>"
 
     # The demo repo: workers and merges both work with no identity.
+    monkeypatch.setattr(agents, "load_profile", lambda *a, **k: _profile({}))
     root = demo.create()
     first = workspaces.create(db, str(root), "slug", base="main", run_setup=False).workspace
     second = workspaces.create(db, str(root), "wrap", base="main", run_setup=False).workspace
-    _worker_commit(first, "a.py")
-    _worker_commit(second, "b.py")
+    _worker_commit(db, first, "e.py")
+    _worker_commit(db, second, "f.py")
     workspaces.merge_back(db, first)
     workspaces.merge_back(db, second)    # main moved on: a real merge commit
-
-    names = subprocess.run(["git", "ls-files"], cwd=root, check=True, capture_output=True,
-                           text=True).stdout.split()
-    assert "a.py" in names and "b.py" in names
+    assert _last(root) == "brindle demo <demo@brindle.invalid>"
