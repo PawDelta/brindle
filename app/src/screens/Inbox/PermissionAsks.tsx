@@ -18,7 +18,8 @@ import type { AskDecide, DaemonClient } from "../../api/client";
 import { UNITS, covered, limitsText, minutesText, scopeWithin, splitMinutes, toMinutes, type Unit } from "../../api/permissions";
 import type { AskDecisionDTO, AskGroupDTO, AskResultDTO, InboxItemDTO, OrgControlViewDTO } from "../../api/schema";
 import { plain } from "../../api/wording";
-import { card, field, mainTone } from "../../components/ui";
+import { LoadingButton } from "../../components/LoadingButton";
+import { button, card, field, mainTone, quiet } from "../../components/ui";
 import { formatAge } from "../../store/overview";
 import { askKey, describeItem, itemKey, permissionAnswer, permissionLine, seenAt } from "./items";
 import type { useInboxActions } from "./useInboxActions";
@@ -34,11 +35,12 @@ const ago = (since: number) => {
 const skippedText = (skipped: AskResultDTO[] | undefined) =>
   skipped?.length ? ` ${requests(skipped.length)} left waiting: ${skipped.map((s) => `${s.exact}${s.why ? ` (${s.why})` : ""}`).join(", ")}.` : "";
 
-/* The card's buttons: one shape; Allow wears the main action's tone (ui.ts). */
-const SHAPE = "inline-flex min-h-8 items-center justify-center gap-2 whitespace-nowrap rounded-lg border px-4";
-const BTN = `${SHAPE} text-sm font-medium disabled:opacity-50`;
-const DENY = "border-transparent text-ink-2 hover:bg-fail-soft hover:text-fail";
-const PLAIN = "border-line-strong bg-transparent text-ink hover:bg-surface-2";
+/* The card's buttons: one size; Deny is quiet, Allow once secondary, Allow
+   the main action (ui.ts), each a LoadingButton while its answer is out. */
+const SHAPE = "min-h-8 gap-2 px-4";
+const BTN = SHAPE;
+const DENY = quiet;
+const PLAIN = button;
 const LINK = "text-xs text-branch hover:underline disabled:opacity-50";
 
 const GROUP_NAMES: Record<string, string> = { files: "Files", shell: "Shell", git: "Git", network: "Network", mcp: "MCP" };
@@ -223,14 +225,14 @@ export function PermissionCard({ label, source, isNew, id, dataKey, who, what, c
 }
 
 /* Allow ▾: the Allow button, and the other ways to allow in a menu. */
-function AllowSplit({ label, disabled, onPrimary, children }: { label: string; disabled: boolean; /* none: Allow only opens the menu */ onPrimary?(): void; children(): ReactNode }) {
+function AllowSplit({ label, disabled, busy, onPrimary, children }: { label: string; disabled: boolean; busy?: boolean; /* none: Allow only opens the menu */ onPrimary?(): unknown; children(): ReactNode }) {
   const [open, setOpen] = useState(false);
   const close = () => setOpen(false);
   return (
     <div className="relative inline-flex" onKeyDown={(e) => e.key === "Escape" && close()}>
-      <button type="button" className={`${SHAPE} ${mainTone} rounded-r-none border-r-0`} disabled={disabled} onClick={onPrimary ?? (() => setOpen((o) => !o))}>
+      <LoadingButton className={`${SHAPE} ${mainTone} rounded-r-none border-r-0`} busy={busy} disabled={disabled} onClick={onPrimary ?? (() => setOpen((o) => !o))}>
         {label}
-      </button>
+      </LoadingButton>
       <button type="button" className={`${SHAPE} ${mainTone} min-w-8 rounded-l-none px-2.5`} disabled={disabled} aria-haspopup="menu" aria-expanded={open} aria-label="More ways to allow" onClick={() => setOpen((o) => !o)}>
         ▾
       </button>
@@ -295,7 +297,7 @@ function AskCard({ client, g, groups, isNew, busy, run, onOpenRule }: { client: 
     if (mode === "timed" && !(inMinutes > 0)) return setHelp("Choose a valid positive duration.");
     if (mode === "timed" && cap !== null && inMinutes > cap) return setHelp(`${g.org ? `${g.org.name} lets` : "Your rule lets"} an approval last up to ${minutesText(cap)}.`);
     setHelp(null);
-    void run(async () => decided(g, await client.decidePermissionAsks({ key: g.key, scope: forScope, mode, ...(mode === "timed" ? { minutes: inMinutes } : {}) }), duration));
+    return run(async () => decided(g, await client.decidePermissionAsks({ key: g.key, scope: forScope, mode, ...(mode === "timed" ? { minutes: inMinutes } : {}) }), duration));
   };
   /* Always for the chip's group item: that subcategory's override becomes allow (the baseline's answer, not a
      saved action), and the requests waiting on it resume once. */
@@ -381,14 +383,14 @@ function AskCard({ client, g, groups, isNew, busy, run, onOpenRule }: { client: 
       {modes.length > 0 && (
         <div className="mt-1 flex flex-wrap items-center justify-end gap-2" role="group" aria-label="Decision">
           {modes.includes("deny") && (
-            <button type="button" className={`${BTN} ${DENY}`} disabled={busy} onClick={() => decide("deny")}>
+            <LoadingButton className={`${BTN} ${DENY}`} disabled={busy} onClick={() => decide("deny")}>
               Deny
-            </button>
+            </LoadingButton>
           )}
           {modes.includes("once") && (
-            <button type="button" className={`${BTN} ${PLAIN}`} disabled={busy} onClick={() => decide("once")}>
+            <LoadingButton className={`${BTN} ${PLAIN}`} disabled={busy} onClick={() => decide("once")}>
               Allow once
-            </button>
+            </LoadingButton>
           )}
           {allowable && (
             <AllowSplit label="Allow" disabled={busy} onPrimary={() => decide(session ? "session" : "timed")}>
@@ -441,7 +443,12 @@ export function PermissionItemCard({ item, isNew, actions, who, onGo }: { item: 
   const line = permissionLine(item);
   const choices = p?.terminal ? [] : (p?.choices ?? []);
   const busy = actions.busy.has(itemKey(item));
-  const answer = (choice: string) => actions.run(item, "permission", permissionAnswer(item, choice));
+  // Which choice is out, so only its button shows the wait.
+  const [answering, setAnswering] = useState<string | null>(null);
+  const answer = (choice: string) => {
+    setAnswering(choice);
+    actions.run(item, "permission", permissionAnswer(item, choice));
+  };
   const once = choices.find((c) => c.choice.endsWith("once"));
   const deny = choices.find((c) => c.choice === "deny");
   const more = choices.filter((c) => c !== once && c !== deny);
@@ -489,17 +496,17 @@ export function PermissionItemCard({ item, isNew, actions, who, onGo }: { item: 
       {!window && (
         <div className="mt-1 flex flex-wrap items-center justify-end gap-2" role="group" aria-label="Decision">
           {deny && (
-            <button type="button" className={`${BTN} ${DENY}`} disabled={busy} title={deny.rule ?? undefined} onClick={() => answer(deny.choice)}>
+            <LoadingButton className={`${BTN} ${DENY}`} busy={busy && answering === deny.choice} disabled={busy} title={deny.rule ?? undefined} onClick={() => answer(deny.choice)}>
               Deny
-            </button>
+            </LoadingButton>
           )}
           {once && (
-            <button type="button" className={`${BTN} ${PLAIN}`} disabled={busy} title={once.rule ?? undefined} onClick={() => answer(once.choice)}>
+            <LoadingButton className={`${BTN} ${PLAIN}`} busy={busy && answering === once.choice} disabled={busy} title={once.rule ?? undefined} onClick={() => answer(once.choice)}>
               Allow once
-            </button>
+            </LoadingButton>
           )}
           {more.length > 0 && (
-            <AllowSplit label="Allow" disabled={busy} onPrimary={session ? () => answer(session.choice) : undefined}>
+            <AllowSplit label="Allow" disabled={busy} busy={!!session && busy && answering === session.choice} onPrimary={session ? () => answer(session.choice) : undefined}>
               {() => more.map((c) => <MenuItem key={c.choice} title={c.label} hint={c.rule ?? "Answered at once"} onClick={() => answer(c.choice)} disabled={busy} />)}
             </AllowSplit>
           )}

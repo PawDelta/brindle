@@ -55,6 +55,7 @@ import type { AskScopeDTO, OrgControlViewDTO, PermissionPolicyDTO, PermissionRul
 import { plain } from "../../api/wording";
 import { Sheet } from "../../components/Sheet";
 import { RuleTarget, type Target } from "./RuleTarget";
+import { LoadingButton } from "../../components/LoadingButton";
 import { alert, button, card, field, h2, mono, pill, quiet } from "../../components/ui";
 
 const message = (e: unknown) => plain(e instanceof Error ? e.message : String(e));
@@ -908,9 +909,9 @@ function RuleEditor({ client, rule, rules, onClose, onSaved }: {
             <button type="button" className={quiet} onClick={onClose}>
               Cancel
             </button>
-            <button type="button" className={button} disabled={saving} onClick={save}>
-              {saving ? "Saving…" : "Save rule"}
-            </button>
+            <LoadingButton className={button} busy={saving} disabled={saving} onClick={save}>
+              Save rule
+            </LoadingButton>
           </>
         )
       }
@@ -1155,9 +1156,9 @@ function SavedEditor({ client, saved: s, onClose, onDelete, onSaved }: { client:
           <button type="button" className={quiet} onClick={onClose}>
             Cancel
           </button>
-          <button type="button" className={button} disabled={saving} onClick={() => void save()}>
-            {saving ? "Saving…" : "Save changes"}
-          </button>
+          <LoadingButton className={button} disabled={saving} onClick={() => save()}>
+            Save changes
+          </LoadingButton>
         </>
       }
     >

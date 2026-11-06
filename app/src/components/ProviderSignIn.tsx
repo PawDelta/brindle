@@ -27,6 +27,7 @@ import { openExternal } from "../api/open";
 import { keptLink, PANE_DEAD, readPane, READ_SIZE, type PaneReading } from "../api/paneText";
 import { usePtyViews, type PtyViews, type PtyViewTarget } from "../api/ptyView";
 import { providerLabel } from "../api/providers";
+import { LoadingButton } from "./LoadingButton";
 import { PtyTerminal } from "./PtyTerminal";
 import { alert, button, field, quiet } from "./ui";
 
@@ -327,8 +328,14 @@ export function ProviderSignIn({ provider, loginContext, check, onDone, autoStar
       setCopyError(true);
     }
   };
+  const [sending, setSending] = useState(false);
   const answer = async (terminal: string, line: string) => {
-    if (await send(terminal, line)) setCode("");
+    setSending(true);
+    try {
+      if (await send(terminal, line)) setCode("");
+    } finally {
+      setSending(false);
+    }
   };
 
   useEffect(() => {
@@ -336,20 +343,20 @@ export function ProviderSignIn({ provider, loginContext, check, onDone, autoStar
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoStart]);
 
-  if (phase.kind === "idle") {
+  // While the CLI's login starts, the button stays and says it is waiting (LoadingButton); the steps follow once it runs.
+  if (phase.kind === "idle" || phase.kind === "starting") {
     return (
-      <button type="button" className={small ? `${button} px-s1 py-0.5 text-xs` : button} onClick={() => void begin()}>
+      <LoadingButton className={small ? `${button} px-s1 py-0.5 text-xs` : button} busy={phase.kind === "starting"} onClick={() => void begin()}>
         Sign in to {name}
-      </button>
+      </LoadingButton>
     );
   }
   const terminal = "terminal" in phase ? phase.terminal : null;
-  const busy = phase.kind === "starting" || phase.kind === "waiting" || phase.kind === "checking";
+  const busy = phase.kind === "waiting" || phase.kind === "checking";
   return (
     <div className="flex w-full flex-col gap-s1 rounded-md bg-canvas-2 px-s2 py-s1 text-sm" role="status" aria-label={`Sign in to ${name}`} data-testid="sign-in-flow" data-phase={phase.kind}>
       <div className="flex flex-wrap items-center gap-s1">
         {busy && <span className="size-3 shrink-0 animate-spin rounded-full border-2 border-branch border-t-transparent" aria-hidden />}
-        {phase.kind === "starting" && <span>Starting {name}'s sign-in…</span>}
         {phase.kind === "waiting" && <span>Finish signing in to {name} in your browser…</span>}
         {phase.kind === "checking" && <span>Confirming your sign-in…</span>}
         {phase.kind === "done" && <span className="font-medium text-pass">Signed in to {name} ✓</span>}
@@ -382,7 +389,7 @@ export function ProviderSignIn({ provider, loginContext, check, onDone, autoStar
           </button>
         )}
       </div>
-      {(phase.kind === "starting" || phase.kind === "waiting") && (
+      {phase.kind === "waiting" && (
         <p className="text-xs text-ink-2">Follow the steps in your browser, then come back here. This updates automatically when you're signed in. Your password stays with {name}.</p>
       )}
       {copyError && link && (
@@ -394,9 +401,9 @@ export function ProviderSignIn({ provider, loginContext, check, onDone, autoStar
       {phase.kind === "choose" && (
         <div className="flex flex-wrap gap-s1" role="group" aria-label="Sign-in method">
           {phase.choices.map((c) => (
-            <button key={c.n} type="button" className={button} onClick={() => void answer(phase.terminal, c.n)}>
+            <LoadingButton key={c.n} className={button} disabled={sending} onClick={() => answer(phase.terminal, c.n)}>
               {c.label}
-            </button>
+            </LoadingButton>
           ))}
         </div>
       )}
@@ -409,9 +416,9 @@ export function ProviderSignIn({ provider, loginContext, check, onDone, autoStar
           }}
         >
           <input className={`${field} w-full font-mono`} aria-label="Code from the browser" placeholder="Paste the code from the browser" value={code} autoFocus onChange={(e) => setCode(e.target.value)} />
-          <button type="submit" className={button} disabled={!code.trim()}>
+          <LoadingButton type="submit" className={button} busy={sending} disabled={!code.trim()}>
             Continue
-          </button>
+          </LoadingButton>
         </form>
       )}
       {phase.kind === "failed" && (
