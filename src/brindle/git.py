@@ -69,6 +69,11 @@ def is_read(args: list[str]) -> bool:
     return False
 
 
+class GitToolsMissing(GitError):
+    """macOS without the Command Line Developer Tools (see spawn.ensure_git):
+    its own type so every layer can say what to install instead of "not a repo"."""
+
+
 def run(args: list[str], cwd: str | Path, check: bool = True,
         timeout: int | float | None = None, input: str | None = None) -> subprocess.CompletedProcess:
     return run_env(args, cwd, None, check=check, timeout=timeout, input=input)
@@ -92,6 +97,8 @@ def run_env(args: list[str], cwd: str | Path, env: dict[str, str] | None,
             invalidate_branches()    # and after, so a lookup during the action can't re-cache old refs
     except spawn.Busy as e:
         raise GitBusy(f"git {' '.join(args)}: {e}") from e
+    except spawn.ToolsMissing as e:
+        raise GitToolsMissing(str(e)) from e
     except (OSError, subprocess.TimeoutExpired) as e:
         raise GitError(f"git {' '.join(args)}: {e}") from e
     if check and proc.returncode != 0:
@@ -832,6 +839,8 @@ def hash_blob(cwd: str | Path, data: bytes, path: str, write: bool = False) -> s
         proc = start(["git", *args], cwd=cwd, input=data, text=False, timeout=TIMEOUT)
     except spawn.Busy as e:
         raise GitBusy(f"git {' '.join(args)}: {e}") from e
+    except spawn.ToolsMissing as e:
+        raise GitToolsMissing(str(e)) from e
     except (OSError, subprocess.TimeoutExpired) as e:
         raise GitError(f"git {' '.join(args)}: {e}") from e
     if proc.returncode != 0:

@@ -14,6 +14,8 @@ export interface JobState {
   /* job.done's payload.result, or the failure's message. */
   result?: unknown;
   error?: string;
+  /* The engine's error code on a failure ("developer_tools_missing", ...). */
+  code?: string;
 }
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e));
@@ -35,7 +37,7 @@ export function useJob() {
       const started = await run();
       setJob({ label, status: "running", id: started.job, progress: [] });
     } catch (e) {
-      setJob({ label, status: "failed", progress: [], error: message(e) });
+      setJob({ label, status: "failed", progress: [], error: message(e), code: (e as { code?: string }).code });
     }
   };
 
@@ -56,8 +58,8 @@ export function useJob() {
           setJob((j) => (j && j.id === id ? { ...j, status: "done", result: e.payload.result } : j));
           onDone.current?.(e.payload.result);
         } else if (e.kind === "job.failed") {
-          const err = e.payload.error as { message?: string } | undefined;
-          setJob((j) => (j && j.id === id ? { ...j, status: "failed", error: err?.message ?? "the job failed" } : j));
+          const err = e.payload.error as { message?: string; code?: string } | undefined;
+          setJob((j) => (j && j.id === id ? { ...j, status: "failed", error: err?.message ?? "the job failed", code: err?.code } : j));
         }
       }
     };

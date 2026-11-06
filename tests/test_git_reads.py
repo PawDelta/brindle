@@ -3,6 +3,7 @@ from __future__ import annotations
 import functools
 import http.server
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -223,3 +224,45 @@ def test_branch_exists_is_cached(tmp_path, monkeypatch):
     assert seen_by_lookup == [True]
     assert git.branch_exists(tmp_path, "feat")
     assert len(listings) == 2
+
+
+def test_missing_developer_tools_is_explained_before_git_runs(tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+
+    from brindle import clone
+    from brindle.cli import app
+    from brindle.service.errors import from_exception
+
+    fake = tmp_path / "bin"
+    fake.mkdir()
+    (fake / "xcode-select").write_text("#!/bin/sh\nexit 2\n")
+    (fake / "xcode-select").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake}:{os.environ['PATH']}")
+    monkeypatch.setattr(spawn.sys, "platform", "darwin")
+    real_which = shutil.which
+    monkeypatch.setattr(spawn.shutil, "which", lambda n, *a, **k: "/usr/bin/git" if n == "git" else real_which(n, *a, **k))
+    monkeypatch.setattr(spawn, "_tools_checked", False)
+    monkeypatch.chdir(tmp_path)
+    popen = subprocess.Popen
+    started: list[list[str]] = []
+    monkeypatch.setattr(subprocess, "Popen", lambda argv, *a, **k: (started.append(argv), popen(argv, *a, **k))[1])
+    # git.run: typed, mapped to its own API code (not "conflict"), before git starts
+    with pytest.raises(git.GitToolsMissing, match=r"xcode-select --install") as caught:
+        git.run(["status"], tmp_path)
+    assert from_exception(caught.value).code == "developer_tools_missing"
+    # the clone job starts git itself, and the daemon maps the same way
+    with pytest.raises(spawn.ToolsMissing) as cloned:
+        clone.clone("https://example.com/x.git", tmp_path / "x", lambda line: None)
+    assert from_exception(cloned.value).code == "developer_tools_missing"
+    # brindle init stops on the typed failure (it isn't "not a repo")
+    assert CliRunner().invoke(app, ["init"]).exit_code != 0
+    # brindle doctor's repository discovery reports it as a failing check
+    from itertools import islice
+
+    from brindle import doctor
+    groups = list(islice(doctor.stream(None, cwd=str(tmp_path)), 2))
+    assert any(c.level == doctor.FAIL for c in groups[1])
+    assert all(argv[0] != "git" for argv in started)
+    (fake / "xcode-select").write_text("#!/bin/sh\necho /Library/Developer\n")
+    spawn.ensure_git()
+    assert spawn._tools_checked

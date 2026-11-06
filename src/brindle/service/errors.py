@@ -41,6 +41,7 @@ class ServiceError(Exception):
 _MAP: tuple[tuple[tuple[type[BaseException], ...], str, int], ...] = (
     ((agents.StillRunning,), "still_running", 409),
     ((spawn.Busy,), "busy", 503),        # above GitError and TmuxError: GitBusy and TmuxBusy are both
+    ((git.GitToolsMissing, spawn.ToolsMissing), "developer_tools_missing", 409),   # above GitError
     ((CostNotEntitled, LicenseNotEntitled), "not_entitled", 402),
     ((AuthError,), "signed_out", 401),
     ((profiles.ProfileError, coordinator.CoordinatorError, autopilot.AutopilotError), "invalid", 400),

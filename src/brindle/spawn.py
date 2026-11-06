@@ -93,6 +93,42 @@ class Busy(RuntimeError):
     abandoned. For an action: nothing was started, so asking again is safe."""
 
 
+class ToolsMissing(OSError):
+    """macOS without the Command Line Developer Tools: ``/usr/bin/git`` would
+    raise Apple's install dialog. An OSError, like a missing program, so every
+    caller that already handles one keeps working; git.py and the service layer
+    turn it into their typed errors."""
+
+
+TOOLS_MISSING = ("git needs Apple's Command Line Developer Tools, which aren't installed. "
+                 "Install them with `xcode-select --install` (or `brew install git`), then try again.")
+_TOOLS_CHECK_SECONDS = 10
+_tools_checked = False
+
+
+def ensure_git() -> None:
+    """On macOS, ``/usr/bin/git`` is a shim that pops the install dialog when the
+    tools are missing. Ask ``xcode-select -p`` (silent) first and raise ToolsMissing.
+    A git elsewhere on PATH (Homebrew) needs no tools. Checked once per process,
+    when it passes. Every start, read and action of ``git`` comes through here."""
+    global _tools_checked
+    if _tools_checked or sys.platform != "darwin" or shutil.which("git") != "/usr/bin/git":
+        return
+    try:
+        probe = read(["xcode-select", "-p"], timeout=_TOOLS_CHECK_SECONDS)
+        found = probe.returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        found = False
+    if not found:
+        raise ToolsMissing(TOOLS_MISSING)
+    _tools_checked = True
+
+
+def _guard(argv: list[str] | str) -> None:
+    if not isinstance(argv, str) and argv and os.path.basename(str(argv[0])) == "git":
+        ensure_git()
+
+
 class Skipped(Busy):
     """No room, and the caller (a background loop) asked to skip this round
     rather than wait for it."""
@@ -514,6 +550,7 @@ def start(argv: list[str] | str, *, write: bool = True, until: float | None = No
     It isn't counted in running() once started, and it runs at normal
     priority: it may outlive the request, and whatever it starts (a worker's
     agents, a server's clients) would inherit a background priority."""
+    _guard(argv)
     dl = _live()
     if dl is not None:
         _admit(dl.at if until is None else min(dl.at, until), dl, False, _name(argv))
@@ -557,6 +594,7 @@ def read(argv: list[str], *, cwd: Any = None, env: dict[str, str] | None = None,
     already over still starts nothing, but once started only ``timeout`` applies,
     for a read that stopping would only start over (a keychain lookup, and the
     dialog it may be waiting on)."""
+    _guard(argv)
     dl = _live()
     now = time.monotonic()
     own_end = now + timeout if timeout is not None else math.inf
@@ -693,6 +731,7 @@ def action(argv: list[str], *, cwd: Any = None, env: dict[str, str] | None = Non
     the request starts after it (Deadline.committed); ``timeout`` is the
     caller's own hard limit, as with ``subprocess.run``. It runs at normal
     priority: someone waits on it (a setup command, a merge and its hooks)."""
+    _guard(argv)
     dl = _live()
     if dl is not None:
         _admit(dl.at, dl, False, _name(argv))

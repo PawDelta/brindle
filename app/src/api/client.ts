@@ -1166,6 +1166,12 @@ export class DaemonClient {
     return this.post<Job>("/repos/clone", { url, parent_dir });
   }
 
+  /* Starts Apple's installer for the Command Line Developer Tools (`xcode-select --install`);
+     only ever from a click. */
+  installDeveloperTools() {
+    return this.post<{ started: boolean }>("/developer-tools/install", {});
+  }
+
   /* A folder on this machine, as a repo brindle works in. */
   openRepo(path: string, init = false) {
     return this.post<Repo>("/repos/open", { path, ...(init ? { init: true } : {}) });
