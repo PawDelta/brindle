@@ -4564,10 +4564,14 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
             # Asked before every tool call, not only those OpenCode would prompt
             # for, so only a deny is answered (and recorded): the rest is OpenCode's own.
             reqs = permissions.from_opencode(payload, worktree=ws.path, repo_root=ws.repo_root, agent=agent.id)
+            if opencode_unasked and (not reqs or any(permissions.unread(r) for r in reqs)):
+                return opencode.UNCHECKED
             if not reqs:
                 return None
             rules = [*permissions.all_rules(ws.repo_root), *profile_rules]
-            decision = permissions.decide_all(reqs, checks=cfg.checks, rules=rules, session=session)
+            # In an unasked launch this is the only check: a saved use is spent here or never.
+            decision = permissions.decide_all(reqs, checks=cfg.checks, rules=rules, session=session,
+                                              spend=opencode_unasked)
             if decision.decision == "ask" and len(reqs) == 1:
                 # A deny on one part of a compound command (cd x && <denied>) still denies.
                 decision = permissions.deny_in_parts(reqs[0], checks=cfg.checks, rules=rules) or decision

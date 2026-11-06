@@ -786,6 +786,13 @@ OPENCODE_KINDS = {
 }
 
 
+def unread(req: Request) -> bool:
+    """Whether ``req`` is missing what a rule would match it on: a patch whose files
+    couldn't all be read, a command or a URL. Where nothing covers it the store may
+    run it, so a caller with no prompt after it mustn't take that answer."""
+    return not {"bash": req.command, "fetch": req.url}.get(req.kind, req.path if req.kind in PATH_KINDS else True)
+
+
 def from_opencode(payload: dict, worktree: str = "", repo_root: str = "", agent: str = "") -> list[Request] | None:
     """The plugin's {tool, args} as Requests (one per file an ``apply_patch``
     touches); None when it names no tool."""

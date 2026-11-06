@@ -66,7 +66,8 @@ export const Brindle = async ({ client }) => {
                       { stdio: ["pipe", "pipe", "ignore"] })
       p.stdout.on("data", (d) => { out += d })
       p.on("error", () => resolve(null))
-      p.on("close", (code) => resolve(code ? null : out))
+      // Only a clean exit answered: a signal closes with code null.
+      p.on("close", (code, signal) => resolve(code === 0 && !signal ? out : null))
       p.stdin.end(JSON.stringify(payload))
     } catch { resolve(null) }
   })
@@ -86,9 +87,10 @@ export const Brindle = async ({ client }) => {
       if (!policy && input.tool !== "bash") return
       const out = await send("opencode-pre-tool", { session_id: input.sessionID, tool: input.tool, args: output.args })
       // Nothing asks after this in an unasked launch: a check that didn't finish stops the call.
-      if (out === null && unasked) throw new Error("brindle couldn't check this call, so it didn't run")
+      const unchecked = new Error("brindle couldn't check this call, so it didn't run")
+      if (out === null && unasked) throw unchecked
       let answer = null
-      try { answer = JSON.parse(out) } catch {}
+      try { answer = out ? JSON.parse(out) : null } catch { if (unasked) throw unchecked }
       if (answer && answer.decision === "deny") throw new Error(answer.reason || "denied by brindle's permission policy")
       if (input.tool === "bash" && typeof input.sessionID === "string" && input.sessionID
           && typeof input.callID === "string" && input.callID

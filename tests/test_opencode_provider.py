@@ -118,7 +118,7 @@ const {source, command, requested} = JSON.parse(input);
 globalThis.fakeSpawn = () => {
   const p = new EventEmitter(); p.stdout = new EventEmitter();
   p.stdin = {end() {queueMicrotask(() => {
-    p.stdout.emit('data', JSON.stringify({decision: 'allow'})); p.emit('close');
+    p.stdout.emit('data', JSON.stringify({decision: 'allow'})); p.emit('close', 0);
   })}}; return p;
 };
 process.env.BRINDLE_AGENT_ID = 'test'; process.env.BRINDLE_OPENCODE_POLICY = '';
@@ -169,13 +169,22 @@ def test_autonomous_starts_opencode_without_prompts(db, ws, monkeypatch, preset,
 
     add_agent(db, ws)
     monkeypatch.setenv(opencode.UNASKED_ENV, "1")
-    def call(command, agent="o1"):
+    def call(command, agent="o1", tool="bash", args=None):
         return opencode.hook_main(db, agent, "opencode-pre-tool", json.dumps(
-            {"session_id": "s", "tool": "bash", "args": {"command": command}}))
+            {"session_id": "s", "tool": tool, "args": {"command": command} if args is None else args}))
 
+    push = "git push origin main"
     assert call("touch x") == ""
-    assert json.loads(call("git push origin main"))["decision"] == "deny"
+    assert json.loads(call(push))["decision"] == "deny"
     assert json.loads(call("touch x", "gone"))["decision"] == "deny"
+    # One saved use allows one call: nothing later spends it, and an unreadable patch can't be checked.
+    permissions.save_once(permissions.from_opencode(
+        {"tool": "bash", "args": {"command": push}}, ws.path, ws.repo_root, "o1")[0])
+    assert [call(push) == "" for _ in range(2)] == [True, False]
+    hidden = "*** Begin Patch\n*** Update File : secret.txt\n*** End Patch"
+    for tool, args in (("apply_patch", {"patchText": 1}), ("apply_patch", {"patchText": hidden}), ("", {}), ("bash", {})):
+        assert json.loads(call(None, tool=tool, args=args))["decision"] == "deny", tool
+    assert call(None, tool="glob", args={"pattern": "*"}) == call(None, tool="todowrite", args={}) == ""
     monkeypatch.setattr(permissions, "decide", lambda *args, **kwargs: 1 / 0)
     assert json.loads(call("touch x"))["decision"] == "deny"
 
@@ -184,10 +193,11 @@ def test_autonomous_starts_opencode_without_prompts(db, ws, monkeypatch, preset,
         pytest.skip("Node is required to execute the OpenCode plugin")
     program = """
 import { EventEmitter } from 'node:events';
+const [, flag, close, out] = process.argv;
 globalThis.fakeSpawn = () => { const p = new EventEmitter(); p.stdout = new EventEmitter();
-  p.stdin = {end() {queueMicrotask(() => p.emit('close', 1))}}; return p; };
+  p.stdin = {end() {queueMicrotask(() => { p.stdout.emit('data', out); p.emit('close', ...JSON.parse(close)) })}}; return p; };
 Object.assign(process.env, {BRINDLE_AGENT_ID: 'test', BRINDLE_OPENCODE_POLICY: '1', OPENCODE_CONFIG_CONTENT: '{}',
-                            BRINDLE_OPENCODE_UNASKED: process.argv[1]});
+                            BRINDLE_OPENCODE_UNASKED: flag});
 let source = ''; for await (const chunk of process.stdin) source += chunk;
 const {Brindle} = await import('data:text/javascript;base64,' + Buffer.from(source).toString('base64'));
 const hooks = await Brindle({client: {}});
@@ -196,9 +206,11 @@ await hooks['tool.execute.before']({sessionID:'s', callID:'c', tool:'edit'}, {ar
 """
     source = opencode.PLUGIN.replace('import { spawn } from "node:child_process"',
                                      'const spawn = globalThis.fakeSpawn').replace("__BRINDLE__", '["fake"]')
-    ran = {flag: subprocess.run([node, "--input-type=module", "-e", program, flag], input=source, text=True,
-                                capture_output=True, check=True).stdout.strip() for flag in ("1", "")}
-    assert ran == {"1": "stopped", "": "ran"}
+    for flag, close, out, want in (("1", "[1]", "", "stopped"), ("1", '[null, "SIGTERM"]', "", "stopped"),
+                                   ("1", "[0]", "{not json", "stopped"), ("1", "[0]", "", "ran"), ("", "[1]", "", "ran")):
+        got = subprocess.run([node, "--input-type=module", "-e", program, flag, close, out], input=source, text=True,
+                             capture_output=True, check=True).stdout.strip()
+        assert got == want, (flag, close, out)
 
 
 def add_agent(db, ws, mode="assign", status="processing", profile="developer-opencode"):

@@ -1763,7 +1763,8 @@ permissions above, so the policy can narrow what an OpenCode worker does but
 never widens it. The exception is Autonomous with a profile that sets no
 `permission_mode`: OpenCode then asks about nothing, since nothing can hold its
 prompt for the app, and the plugin is the gate. What the policy would ask you is
-refused, and so is a call the plugin couldn't check.
+refused unless a saved approval covers it, which spends a use, and a call the
+plugin couldn't check or read (a patch whose files it can't all name) is refused too.
 
 ### Cheap workers
 
