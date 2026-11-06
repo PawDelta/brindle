@@ -1533,12 +1533,24 @@ def _git_calls(command: str) -> list[tuple[str, list[str]]]:
 
 def _git_invocations(command: str) -> list[tuple[list[str], str, list[str]]]:
     """(its -C folders, subcommand, its arguments) for every git invocation in ``command``."""
+    argv = simple_argv(command)
+    if argv is not None:
+        segments = [argv]
+    else:
+        reader = _PartReader(Request("", "bash", "", command=command))
+        try:
+            reader.read(command)
+        except ValueError:
+            # Keep recognizable invocations even when another part cannot be read.
+            # The parser's scan still distinguishes arguments and heredoc data from code.
+            reader.scan(command)
+        segments = [part.words for part in reader.parts]
     calls = []
-    for words in _segments(command):
-        for i, w in enumerate(words):
-            if os.path.basename(w) != "git":
+    for segment in segments:
+        for words in _wrapped_forms(segment):
+            if not words or os.path.basename(words[0]) != "git":
                 continue
-            rest, j, folders = words[i + 1:], 0, []
+            rest, j, folders = words[1:], 0, []
             while j < len(rest) and rest[j].startswith("-"):
                 if rest[j] == "-C" and j + 1 < len(rest):
                     folders.append(rest[j + 1])
@@ -3441,7 +3453,7 @@ def _may_name_token(req: Request, word: str) -> bool:
 
 # Matchers that must tell a word from its neighbours (an option from a message
 # that mentions one), so they see the words quoted as written, not re-joined.
-_WORD_MATCHERS = ("git-force",)
+_WORD_MATCHERS = ("git-force", "git-push", "push")
 
 # Wrappers that only run their arguments: per program, the options that take a
 # value in the next word, the flags that take none, and the options with a value

@@ -134,6 +134,14 @@ def test_a_new_store_is_autonomous_and_an_old_one_migrates_to_standard_keeping_i
     (lambda ws: bash(ws, "git push origin HEAD:refs/heads/release/desktop"), "ask", "d-push-release-sub"),
     (lambda ws: bash(ws, 'git show --stat abc def | grep -v "^ \\|^$"'), "allow", "d-readonly"),   # no syntax ask
     (lambda ws: bash(ws, "git push --force origin feature"), "deny", "d-git-force"),
+    pytest.param(lambda ws: bash(ws, "grep 'git push --force' README.md"), "allow", "d-readonly",
+                 marks=pytest.mark.variant("reported force-push text in a grep pattern")),
+    pytest.param(lambda ws: bash(ws, "echo git push --force"), "allow", "d-readonly",
+                 marks=pytest.mark.variant("reported force-push text in echo arguments")),
+    pytest.param(lambda ws: bash(ws, "cat <<'EOF'\ngit push --force\nEOF"), "allow", None,
+                 marks=pytest.mark.variant("reported force-push text in a heredoc body")),
+    pytest.param(lambda ws: bash(ws, 'git commit -m "$(cat <<\'EOF\'\ngit push --force\nEOF\n)"'), "allow", None,
+                 marks=pytest.mark.variant("reported force-push text in a commit message")),
     (lambda ws: bash(ws, "git push origin +topic:feature"), "deny", "d-git-force"),   # a forced refspec
     (lambda ws: bash(ws, "git push origin :feature"), "deny", "d-git-force"),         # deletes the branch
     (lambda ws: bash(ws, "git reset --hard HEAD~1"), "deny", "d-git-force"),
