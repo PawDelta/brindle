@@ -46,6 +46,10 @@ def test_removed_worktree_goes_to_trash(db, repo, monkeypatch, action):
             (sub / "app.py").write_text("staged module work")
             git.run(["add", "app.py"], sub)
             (sub / "app.py").write_text("unstaged module work")
+        git.run(["worktree", "add", "--detach", str(path / "unrelated"), "HEAD"], repo)
+        unrelated_pointer = (path / "unrelated" / ".git").read_bytes()
+        (path / "fixtures").mkdir()
+        (path / "fixtures" / ".git").write_text("fixture data")
     (path / "staged.txt").write_text("staged version")
     git.run(["add", "staged.txt"], path)
     (path / "staged.txt").write_text("working version")
@@ -136,6 +140,9 @@ def test_removed_worktree_goes_to_trash(db, repo, monkeypatch, action):
         assert git.worktree_for_branch(repo, ws.branch) == str(path)
         assert git.out(["rev-parse", "HEAD"], path) == entry["sha"]
         if action == "restore":
+            assert (path / "unrelated" / ".git").read_bytes() == unrelated_pointer
+            assert git.out(["status", "--porcelain"], path / "unrelated") == ""
+            assert (path / "fixtures" / ".git").read_text() == "fixture data"
             for sub in (path / "module", path / "module" / "nested"):
                 assert git.out(["status", "--porcelain"], sub)
                 assert git.out(["show", ":app.py"], sub) == "staged module work"

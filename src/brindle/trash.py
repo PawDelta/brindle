@@ -83,23 +83,36 @@ def _repair_modules(tree: Path, original: Path, old_admin: Path, admin: Path, ch
     """Relink initialized submodules, including nested ones, in the staged copy."""
     from brindle.disk import _replace
 
-    for top, dirs, files in os.walk(tree):
-        dirs[:] = [d for d in dirs if d != ".git"]
-        folder = Path(top)
-        if folder == tree or ".git" not in files:
-            continue
-        pointer = folder / ".git"
-        text = pointer.read_text()
-        if pointer.is_symlink() or not text.startswith("gitdir: "):
-            raise TrashError(f"unsupported submodule Git pointer: {pointer}")
-        relative = folder.relative_to(tree)
-        target = (original / relative / text[8:].strip()).resolve()
-        if not target.is_relative_to(admin):
-            if not target.is_relative_to(old_admin):
-                raise TrashError(f"submodule metadata is outside the saved worktree: {pointer}")
-            target = admin / target.relative_to(old_admin)
-        _replace(pointer, lambda out: out.write(f"gitdir: {target}\n".encode()))
-        git.run(["config", "--file", str(target / "config"), "core.worktree", str(checkout / relative)], tree)
+    pending = [(tree, admin)]
+    while pending:
+        parent, repository = pending.pop()
+        index = git.out(["--git-dir", str(repository), "--work-tree", str(parent),
+                         "ls-files", "--stage", "-z"], tree)
+        # Only gitlinks name submodules. Other nested repositories and .git
+        # fixture files belong to the checkout's contents and stay untouched.
+        modules = {record.split("\t", 1)[1] for record in index.split("\0") if record.startswith("160000 ")}
+        for name in sorted(modules):
+            folder = parent / name
+            pointer = folder / ".git"
+            if folder.is_symlink() or not pointer.exists():
+                continue  # Uninitialized or replaced submodule.
+            if pointer.is_symlink():
+                raise TrashError(f"unsupported submodule Git pointer: {pointer}")
+            relative = folder.relative_to(tree)
+            if pointer.is_dir():
+                target = pointer  # Older, embedded submodule administration.
+            else:
+                text = pointer.read_text()
+                if not text.startswith("gitdir: "):
+                    raise TrashError(f"unsupported submodule Git pointer: {pointer}")
+                target = (original / relative / text[8:].strip()).resolve()
+                if not target.is_relative_to(admin):
+                    if not target.is_relative_to(old_admin):
+                        raise TrashError(f"submodule metadata is outside the saved worktree: {pointer}")
+                    target = admin / target.relative_to(old_admin)
+                _replace(pointer, lambda out: out.write(f"gitdir: {target}\n".encode()))
+            git.run(["config", "--file", str(target / "config"), "core.worktree", str(checkout / relative)], tree)
+            pending.append((folder, target))
 
 
 def _unpin(root: str | Path, ident: str) -> None:
