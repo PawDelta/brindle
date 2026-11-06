@@ -936,6 +936,21 @@ def summarize_untracked(files: list[str]) -> str:
 FALLBACK_NAME = "brindle"
 FALLBACK_EMAIL = "brindle@localhost"
 
+IDENTITY_MESSAGE = ('Git needs your name and email for commits in this repo. Set them with '
+                    '`git config user.name "Your Name"` and `git config user.email you@example.com` '
+                    'in this repository, then try again.')
+
+
+def missing_user_identity(path: str | Path) -> list[str]:
+    """Missing user config fields, including values inherited from global config."""
+    return [field for field in ("name", "email")
+            if not run(["config", "--get", f"user.{field}"], path, check=False).stdout.strip()]
+
+
+def require_user_identity(path: str | Path) -> None:
+    if missing_user_identity(path):
+        raise GitError(IDENTITY_MESSAGE)
+
 
 def missing_identity(path: str | Path, env: dict[str, str] | None = None) -> list[tuple[str, str]]:
     """The (role, field) pairs, role "author" or "committer", field "name" or
@@ -1069,9 +1084,7 @@ def _identity_hint(proc: subprocess.CompletedProcess) -> str:
     a hook or config blanked), in plain words."""
     text = f"{proc.stderr}\n{proc.stdout}"
     if "tell me who you are" in text or "empty ident name" in text or "unable to auto-detect" in text:
-        return ('\nGit has no name and email to put on the commit. Set them with '
-                '`git config user.name "Your Name"` and `git config user.email you@example.com` '
-                'in this repository, then merge again.')
+        return '\n' + IDENTITY_MESSAGE
     return ""
 
 
