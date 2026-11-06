@@ -29,6 +29,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from collections.abc import Iterator
@@ -291,13 +292,9 @@ class FileStore:
         try:
             self.dir.mkdir(mode=0o700, parents=True, exist_ok=True)
             self._check_dir()
-            tmp = self.dir / f".{self.basename}.{os.getpid()}.tmp"
-            try:
-                os.unlink(tmp)
-            except FileNotFoundError:
-                pass
-            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
-                         0o600)
+            # A name of this write's own (0600, made new): one per process would have two of the
+            # daemon's threads writing, unlinking and renaming each other's file.
+            fd, tmp = tempfile.mkstemp(dir=self.dir, prefix=f".{self.basename}.", suffix=".tmp")
             try:
                 with os.fdopen(fd, "w", encoding="ascii") as fh:
                     fh.write(_encode(creds))

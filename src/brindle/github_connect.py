@@ -43,11 +43,14 @@ import functools
 import http.client
 import json
 import os
+import secrets
 import shlex
 import shutil
 import ssl
 import subprocess
 import sys
+import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -55,6 +58,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from brindle import keystore, mac_keychain, spawn
+
+try:
+    import fcntl
+except ImportError:     # Windows: threads are still serialized
+    fcntl = None
 
 SERVICE = "brindle-github"
 ITEM_ACCOUNT = "connection"
@@ -66,7 +74,10 @@ QUIT = "quit=true\n"
 API = "https://api.github.com"
 ROUTES = ("gh", "token")
 STORE_ENV = "BRINDLE_GITHUB_STORE"
-REFUSED_FILE = "refused"
+REFUSED_FILE = "refused"            # holds the generation GitHub (or the keychain) no longer takes
+STALE_FILE = "stale"                # generations whose keychain items are still to be removed
+LOCK_FILE = "lock"
+_threads = threading.Lock()
 CONNECTION_PATH = "/v1/github/connection"
 CREDENTIAL_PATH = "/v1/github/credential"     # git's helper asking the daemon: see daemon.auth
 HELPER_APP = "Library/LoginItems/brindle.app"   # in the app's Contents, beside the engine
@@ -116,6 +127,22 @@ def _file_chosen(file: bool) -> bool:
 
 
 # -- the store ----------------------------------------------------------------------------------
+#
+# A connection is one generation: a record (who, how, until when, where the token is) and
+# the token it names. A change stages the new generation's token where nothing reads it yet
+# (a keychain item under a name of its own; with ``file`` storage, inside the new record's
+# own temp file), publishes the record with one rename, and only then removes the token of
+# the generation before. So:
+#
+# * a reader finds a record and the token that goes with it, never one side of a change;
+# * a change that fails, at either step, leaves the old connection whole, also when it was
+#   moving between the keychain and the file;
+# * a removal that fails leaves an orphan to remove at the next change (STALE_FILE), never
+#   a record without its token.
+#
+# Publishing, the memory of a refusal and the orphans' list change under one lock, across
+# threads and processes. Staging, which may wait at a keychain dialog, and reading don't
+# take it.
 
 
 def _dir() -> Path:
@@ -125,17 +152,57 @@ def _dir() -> Path:
 
 
 def _store():
-    """What isn't secret about the connection, and with ``file`` storage the token too."""
+    """The connection's record: what isn't secret, and with ``file`` storage the token too.
+    Its save is one rename of a file written under a name of its own."""
     return keystore.FileStore(_dir(), "connection")
 
 
-def _item() -> mac_keychain.Item:
-    return mac_keychain.Item(SERVICE, ITEM_ACCOUNT)
+def _generation(record: dict) -> str:
+    return record.get("generation") or ""
+
+
+def _item(record: dict) -> mac_keychain.Item:
+    """The keychain item of ``record``'s generation."""
+    generation = _generation(record)
+    return mac_keychain.Item(SERVICE, f"{ITEM_ACCOUNT}-{generation}" if generation else ITEM_ACCOUNT)
 
 
 def store_paths() -> list[str]:
     """What holds the credential on disk, for the lists of what agents may not read."""
     return [str(_dir())]
+
+
+@contextlib.contextmanager
+def _lock():
+    """Alone among brindle's threads and processes in changing what is committed. Never
+    taken twice by one thread, and never held across anything that can wait on a person."""
+    folder = _dir()
+    mask = os.umask(0o077)
+    try:
+        folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fd = os.open(folder / LOCK_FILE, os.O_RDWR | os.O_CREAT, 0o600)
+    finally:
+        os.umask(mask)
+    try:
+        with _threads:
+            if fcntl is not None:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+    finally:
+        os.close(fd)        # which gives the lock back
+
+
+def _write(name: str, text: str) -> None:
+    """``text`` as the small file ``name`` beside the record, whole or not at all."""
+    fd, tmp = tempfile.mkstemp(dir=_dir(), prefix=f".{name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.replace(tmp, _dir() / name)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
 
 
 def _load() -> dict | None:
@@ -146,16 +213,49 @@ def _load() -> dict | None:
     return record if record and record.get("route") in ROUTES else None
 
 
-def _refused() -> bool:
-    return (_dir() / REFUSED_FILE).exists()
+def _refused(record: dict) -> bool:
+    """Whether ``record``'s generation is the one on record as no use: a refusal of an
+    earlier generation, arriving late, says nothing of this one."""
+    try:
+        return (_dir() / REFUSED_FILE).read_text(encoding="utf-8") == _generation(record)
+    except OSError:
+        return False
 
 
-def note_refused() -> None:
-    """The credential is no use any more (GitHub turned it down, or its keychain item is
-    gone or no longer this program's): it isn't offered again until the person connects
-    again, so no poll keeps trying it."""
-    with contextlib.suppress(OSError):
-        (_dir() / REFUSED_FILE).touch()
+def note_refused(record: dict) -> None:
+    """``record``'s credential is no use any more (GitHub turned it down, or its keychain
+    item is gone or no longer this program's): it isn't given to git again until the person
+    connects again, so no poll keeps trying it. Nothing, if another connection was committed
+    meanwhile."""
+    with contextlib.suppress(OSError), _lock():
+        committed = _load()
+        if committed is not None and _generation(committed) == _generation(record):
+            _write(REFUSED_FILE, _generation(record))
+
+
+def _stale() -> list[str]:
+    try:
+        names = json.loads((_dir() / STALE_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    return [name for name in names if isinstance(name, str)] if isinstance(names, list) else []
+
+
+def _remove_tokens(generations: list[str]) -> None:
+    """Remove the keychain items of generations no record names any more, with those an
+    earlier try left behind. What can't be removed now (the keychain wouldn't, or this
+    isn't the helper, whose items they are) stays listed for the next change: an orphan,
+    never a broken connection."""
+    todo = list(dict.fromkeys([*_stale(), *generations]))
+    left = [g for g in todo if not (is_helper() and _item({"generation": g}).delete())]
+    if not todo:
+        return
+    with contextlib.suppress(OSError), _lock():
+        listed = [g for g in _stale() if g not in todo]
+        if listed or left:
+            _write(STALE_FILE, json.dumps([*listed, *left]))
+        else:
+            (_dir() / STALE_FILE).unlink(missing_ok=True)
 
 
 def _expired(record: dict) -> bool:
@@ -163,23 +263,33 @@ def _expired(record: dict) -> bool:
     return isinstance(expires, (int, float)) and expires <= time.time()
 
 
-def _token(record: dict) -> str | None:
-    """The connection's token, for the process that holds it. From the keychain it is read
-    without any dialog: locked means none for now; gone or refused means connect again."""
-    if record.get("storage") != "keychain":
-        return record.get("token")
-    if not is_helper():
-        return None
-    try:
-        secret = _item().load()
-    except mac_keychain.Refused as e:
-        if not e.locked:
-            note_refused()
-        return None
-    if secret is None:
-        note_refused()
-        return None
-    return secret.decode()
+def _committed() -> tuple[dict, str | None] | None:
+    """The committed connection and its token, of one generation; None without a
+    connection. The token is None where it can't be had: in a process that isn't the one
+    holding it, or from a keychain that is locked (which passes) or no longer gives it
+    (which goes on record). Read without any dialog."""
+    record = _load()
+    for _ in range(2):      # a reconnect may publish between the record's read and the item's: once more
+        if record is None:
+            return None
+        if record.get("storage") != "keychain":
+            return record, record.get("token")
+        if not is_helper():
+            return record, None
+        try:
+            secret = _item(record).load()
+        except mac_keychain.Refused as e:
+            if not e.locked:
+                note_refused(record)
+            return record, None
+        if secret is not None:
+            return record, secret.decode()
+        latest = _load()
+        if latest is not None and _generation(latest) == _generation(record):
+            note_refused(record)        # still the committed one, and its item is gone
+            return record, None
+        record = latest
+    return (record, None) if record is not None else None
 
 
 def connected() -> bool:
@@ -190,10 +300,12 @@ def connected() -> bool:
 def credential() -> tuple[str, str] | None:
     """(username, password) for git on github.com, in the process that holds the token."""
     record = _load()
-    if record is None or _refused() or _expired(record):
+    if record is None or _refused(record) or _expired(record):
         return None
-    token = _token(record)
-    return (record.get("login") or "x-access-token", token) if token else None
+    got = _committed()
+    if got is None or not got[1] or _refused(got[0]) or _expired(got[0]):
+        return None
+    return got[0].get("login") or "x-access-token", got[1]
 
 
 # -- what the app, the CLI and doctor show ---------------------------------------------------------
@@ -217,7 +329,7 @@ def status() -> dict:
         "route": record["route"] if record else None,
         "storage": (record.get("storage") or "file") if record else None,
         "expires_at": record.get("expires_at") if record else None,
-        "needs_reconnect": record is not None and (_refused() or _expired(record)),
+        "needs_reconnect": record is not None and (_refused(record) or _expired(record)),
         "gh_available": gh_available(),
     }
 
@@ -327,24 +439,37 @@ def _connect(route: str, token: str, file: bool) -> dict:
     if status_code != 200 or not isinstance(login, str) or not login:
         raise ConnectError("github_unreachable", f"GitHub answered the sign-in check with HTTP {status_code}")
     in_keychain = is_helper() and not _file_chosen(file)
-    record = {"route": route, "login": login, "saved_at": time.time(),
+    record = {"route": route, "login": login, "saved_at": time.time(), "generation": secrets.token_hex(8),
               "storage": "keychain" if in_keychain else "file",
               "expires_at": _expiry(headers.get("github-authentication-token-expiration"))}
+    staged = _item(record) if in_keychain else None
     try:
-        if in_keychain:
-            _item().save(token.encode(), ask=True)      # the person asked: macOS may have them unlock it
+        # Stage: nothing reads this generation yet. The person asked, so macOS may have them
+        # unlock the keychain, and no lock of brindle's is held while it does.
+        if staged is not None:
+            staged.save(token.encode(), ask=True)
         else:
             record["token"] = token
-            if is_helper():
-                _item().delete()        # an earlier connection's: the file holds it now
-        _store().save(record)
-    except mac_keychain.Refused:
-        raise ConnectError("not_stored", "the keychain didn't take the sign-in (locked, or its dialog was "
-                                         "dismissed): unlock it and connect again") from None
-    except (keystore.CredentialError, OSError) as e:
+        # Publish: from this rename on, this is the connection.
+        with _lock():
+            previous = _load()
+            with contextlib.suppress(OSError):
+                for abandoned in _dir().glob(".connection.*.tmp"):  # a write that died half way: no writer is in here now
+                    abandoned.unlink(missing_ok=True)
+            _store().save(record)
+            # Past the rename nothing may fail this connect: what was staged is the connection now.
+            with contextlib.suppress(OSError):
+                (_dir() / REFUSED_FILE).unlink(missing_ok=True)
+    except (mac_keychain.Refused, keystore.CredentialError, OSError) as e:
+        # The connection before this one is as it was. Take back what was staged.
+        if staged is not None:
+            _remove_tokens([_generation(record)])
+        if isinstance(e, mac_keychain.Refused):
+            raise ConnectError("not_stored", "the keychain didn't take the sign-in (locked, or its dialog was "
+                                             "dismissed): unlock it and connect again") from None
         raise ConnectError("not_stored", f"couldn't keep the connection: {e}") from None
-    with contextlib.suppress(OSError):
-        (_dir() / REFUSED_FILE).unlink(missing_ok=True)
+    # Only now the token of the generation before, if it has one of its own.
+    _remove_tokens([_generation(previous)] if previous is not None and previous.get("storage") == "keychain" else [])
     return status()
 
 
@@ -385,15 +510,17 @@ def disconnect(*, local: bool = False) -> dict:
     """Forget the connection. Nothing is revoked on GitHub: a copied sign-in is still gh's
     own, and a pasted token may be in use elsewhere; the person deletes a token on GitHub."""
     record = _load()
-    if record is not None and record.get("storage") == "keychain":
-        if not is_helper() and not local:
-            return _daemon("DELETE")
-        if is_helper():
-            _item().delete()
-    with contextlib.suppress(keystore.CredentialError, OSError):
-        _store().delete()
-    with contextlib.suppress(OSError):
+    if record is not None and record.get("storage") == "keychain" and not is_helper() and not local:
+        return _daemon("DELETE")
+    gone = None
+    with contextlib.suppress(keystore.CredentialError, OSError), _lock():
+        record = _load()
+        _store().delete()       # from here on there is no connection
+        gone = record
         (_dir() / REFUSED_FILE).unlink(missing_ok=True)
+    # Only then its token, if it has one of its own, and only if the record did go: an
+    # orphan if the token can't be removed now, never a record left without it.
+    _remove_tokens([_generation(gone)] if gone is not None and gone.get("storage") == "keychain" else [])
     return status()
 
 
@@ -445,9 +572,9 @@ def answer(action: str, request: str, *, local: bool = False) -> str:
         got = credential()
         return f"username={got[0]}\npassword={got[1]}\n" if got else stop
     if action == "erase":
-        token = _token(record)
-        if token and fields.get("password") == token:
-            note_refused()
+        got = _committed()
+        if got is not None and got[1] and fields.get("password") == got[1]:
+            note_refused(got[0])
     return ""
 
 

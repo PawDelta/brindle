@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import ctypes
+import fcntl
 import functools
 import http.server
 import io
@@ -20,8 +21,28 @@ from brindle.daemon import auth, holds, peer, routes_actions, routes_read
 from brindle.service.errors import ServiceError
 
 TOKEN = "not-a-real-token-just-a-fixture"
+OTHER = "a-second-fixture-for-another-login"
 ASK = "protocol=https\nhost=github.com\n"
 ANSWER = f"username=octo\npassword={TOKEN}\n"
+WAIT = 10.0     # seconds a test's thread is given to reach a point: a failure's limit, never a pause
+
+
+def _connect(token):
+    """A connect as the daemon's route does it; ``db`` is not its to use."""
+    return routes_actions.connect_github(None, {}, {"route": "token", "token": token})
+
+
+def _disk_full(*args, **kwargs):
+    raise OSError("disk full")
+
+
+def _fails_to_store(monkeypatch, patched, name, breaking):
+    """A connect whose write breaks, with ``patched.name`` as ``breaking``: refused as not stored."""
+    with monkeypatch.context() as failing:
+        failing.setattr(patched, name, breaking)
+        with pytest.raises(ServiceError) as failed:
+            _connect(OTHER)
+    assert failed.value.code == "not_stored" and OTHER not in str(failed.value.to_json())
 
 
 def _script(path: Path, body: str) -> Path:
@@ -32,14 +53,14 @@ def _script(path: Path, body: str) -> Path:
 
 @pytest.fixture
 def github_api(monkeypatch):
-    """GitHub's answer to "who is this token": octo for TOKEN, refused for any other."""
+    """GitHub's answer to "who is this token": octo for TOKEN, hubot for OTHER, refused for any other."""
     answers = {"expires": None}
 
     def http(url, token):
-        if token != TOKEN:
+        if token not in (TOKEN, OTHER):
             return 401, {}, {}
         headers = {"github-authentication-token-expiration": answers["expires"]} if answers["expires"] else {}
-        return 200, headers, {"login": "octo"}
+        return 200, headers, {"login": "octo" if token == TOKEN else "hubot"}
 
     monkeypatch.setattr(github_connect, "_http", http)
     return answers
@@ -173,6 +194,43 @@ def test_connection_routes_keep_the_token_and_refuse_what_github_wont_take(db, t
     denied[0] = True
     assert github_connect.answer("get", ASK) == ANSWER
     denied[0] = False
+
+    # A connect that can't be written leaves the one before it whole, and nothing half-written behind.
+    _fails_to_store(monkeypatch, os, "replace", _disk_full)
+    assert github_connect.credential() == ("octo", TOKEN)
+    assert not list(github_connect._dir().glob(".*.tmp"))
+    # Another connect is mid-write, holding the lock every change takes: git still gets the old one, whole,
+    # and then the new one, whole.
+    mid_write, go_on, writer, sync = threading.Event(), threading.Event(), [], os.fsync
+
+    def fsync(fd):
+        if threading.current_thread() in writer:
+            mid_write.set()
+            go_on.wait(WAIT)
+        return sync(fd)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    writer.append(threading.Thread(target=_connect, args=(OTHER,)))
+    writer[0].start()
+    assert mid_write.wait(WAIT)
+    with open(github_connect._dir() / github_connect.LOCK_FILE) as lock, pytest.raises(BlockingIOError):
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)        # as another process would find it
+    assert github_connect.credential() == ("octo", TOKEN)
+    go_on.set()
+    writer[0].join(WAIT)
+    assert github_connect.credential() == ("hubot", OTHER)
+    # Two of the daemon's threads writing one file store at once each keep their own file: neither's write is lost.
+    shared, writer[:] = keystore.FileStore(tmp_path / "shared", "record"), []
+    mid_write.clear()
+    go_on.clear()
+    writer.append(threading.Thread(target=shared.save, args=({"from": "the first"},)))
+    writer[0].start()
+    assert mid_write.wait(WAIT)
+    shared.save({"from": "the second"})
+    go_on.set()
+    writer[0].join(WAIT)
+    assert shared.load() == {"from": "the first"} and [p.name for p in shared.dir.iterdir()] == ["record.json"]
+    _connect(TOKEN)
     # A token GitHub refuses changes nothing, and the error carries no token.
     with pytest.raises(ServiceError) as refused:
         routes_actions.connect_github(db, {}, {"route": "token", "token": "another-fixture-github-refuses"})
@@ -195,32 +253,81 @@ def test_connection_routes_keep_the_token_and_refuse_what_github_wont_take(db, t
 
 
 class _HelpersItem:
-    """The helper app's keychain item, as only that program sees it."""
-    secret: bytes | None = None
+    """The helper app's keychain, as only that program sees it: one item per generation of the connection."""
+    items: dict[str, bytes] = {}
     refuses: mac_keychain.Refused | None = None
+    keeps = False                   # a keychain that won't remove an item now
+    staged = staticmethod(lambda secret: None)
+
+    def __init__(self, record):
+        self.name = record["generation"]
 
     def load(self):
         if self.refuses:
             raise self.refuses
-        return self.secret
+        return self.items.get(self.name)
 
     def save(self, secret, ask):
-        type(self).secret = secret
+        if self.refuses:
+            raise self.refuses
+        self.items[self.name] = secret
+        self.staged(secret)
 
     def delete(self):
-        type(self).secret = None
+        if not self.keeps:
+            self.items.pop(self.name, None)
+        return self.name not in self.items
 
 
 def test_under_the_app_only_the_helper_daemon_holds_the_token_and_the_rest_ask_it(db, monkeypatch, github_api,
                                                                                   capsys):
-    is_helper = [True]
+    is_helper, items = [True], {}
     monkeypatch.setattr(github_connect, "is_helper", lambda: is_helper[0])
     monkeypatch.setattr(github_connect, "_item", _HelpersItem)
-    monkeypatch.setattr(_HelpersItem, "secret", None)
+    monkeypatch.setattr(_HelpersItem, "items", items)
     got = routes_actions.connect_github(db, {}, {"route": "token", "token": TOKEN})
-    assert got["storage"] == "keychain" and _HelpersItem.secret == TOKEN.encode()
+    assert got["storage"] == "keychain" and list(items.values()) == [TOKEN.encode()]
     assert "token" not in github_connect._store().load()          # nothing secret on disk
     assert github_connect.answer("get", ASK) == ANSWER            # the daemon answers git itself
+
+    # Two connects overlap: one has its token in the keychain and isn't committed yet when another goes
+    # through whole. Each is a generation of its own, so git gets a login with its own token throughout.
+    staged, go_on = threading.Event(), threading.Event()
+
+    def held_up(secret):
+        if secret == OTHER.encode():
+            staged.set()
+            go_on.wait(WAIT)
+
+    monkeypatch.setattr(_HelpersItem, "staged", staticmethod(held_up))
+    slow = threading.Thread(target=_connect, args=(OTHER,))
+    slow.start()
+    assert staged.wait(WAIT)
+    _connect(TOKEN)
+    assert github_connect.credential() == ("octo", TOKEN)
+    go_on.set()
+    slow.join(WAIT)
+    assert github_connect.credential() == ("hubot", OTHER) and list(items.values()) == [OTHER.encode()]
+    _connect(TOKEN)
+
+    # A connect that fails, at the keychain or at the record, leaves the one before it whole, and takes
+    # back what it staged: also when it would have moved the token between the keychain and the file.
+    locked = mac_keychain.Refused(-25293, locked=True)
+    _fails_to_store(monkeypatch, _HelpersItem, "refuses", locked)
+    _fails_to_store(monkeypatch, os, "replace", _disk_full)
+    monkeypatch.setenv(github_connect.STORE_ENV, "file")
+    _fails_to_store(monkeypatch, os, "replace", _disk_full)
+    assert github_connect.credential() == ("octo", TOKEN) and list(items.values()) == [TOKEN.encode()]
+    # A keychain that won't let go of the old item leaves an orphan on a list; the next change removes it.
+    monkeypatch.setattr(_HelpersItem, "keeps", True)
+    assert _connect(OTHER)["storage"] == "file" and len(items) == 1 and len(github_connect._stale()) == 1
+    assert github_connect.credential() == ("hubot", OTHER)
+    monkeypatch.delenv(github_connect.STORE_ENV)
+    _fails_to_store(monkeypatch, _HelpersItem, "refuses", locked)
+    assert github_connect.credential() == ("hubot", OTHER)
+    monkeypatch.setattr(_HelpersItem, "keeps", False)
+    assert _connect(TOKEN)["storage"] == "keychain" and list(items.values()) == [TOKEN.encode()]
+    assert not github_connect._stale() and "token" not in github_connect._store().load()
 
     # Any other brindle process (git's helper in a pane, the CLI) holds no token: it passes git's question on.
     def daemon(path, body, seconds):
@@ -290,8 +397,8 @@ def test_keychain_item_reads_back_for_its_maker_and_a_locked_keychain_refuses_wi
             with pytest.raises(mac_keychain.Refused) as refused:
                 blocked()                           # returns at once: with asking off, no dialog can be up
             assert refused.value.locked
+        assert item.delete()                        # removing needs no unlocking: a disconnect while locked leaves nothing
         assert sec.SecKeychainUnlock(keychain, len(password), password, True) == 0
-        item.delete()
-        assert item.load() is None
+        assert item.load() is None and item.delete()
     finally:
         sec.SecKeychainDelete(keychain)

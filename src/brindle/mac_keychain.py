@@ -121,12 +121,16 @@ class Item:
             finally:
                 sec.SecKeychainSetUserInteractionAllowed(False)
 
-    def delete(self) -> None:
-        """Remove the item, if it's there and this program may. Never shows a dialog."""
+    def delete(self) -> bool:
+        """Remove the item, if it's there and this program may. Never shows a dialog, and
+        needs no unlocking: a locked keychain lets an item go. Whether it is gone: False
+        leaves one to remove later."""
         with _lock:
             sec = security()
             sec.SecKeychainSetUserInteractionAllowed(False)
             status, _, ref = self._find(want_data=False)
             if status == 0:
-                sec.SecKeychainItemDelete(ref)
+                status = sec.SecKeychainItemDelete(ref)
                 self._release(ref)
+                return status == 0
+            return status == NOT_FOUND
