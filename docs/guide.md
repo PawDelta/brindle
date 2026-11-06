@@ -481,6 +481,54 @@ knowing them helps when you tell the supervisor how to work.
 | `transfer_to_repo` | supervisor | move a scratch session's work into a repository |
 | `handover` | supervisor | hand the session to a new supervisor on another branch or worktree, with a note |
 
+## Connect GitHub
+
+brindle fetches from your repos on its own, and agents push from their panes.
+On macOS, git's keychain helper answers those with a dialog whenever the saved
+password was put there by another tool. Connecting GitHub gives brindle a
+sign-in of its own, so git never asks the keychain for github.com:
+
+```sh
+brindle github connect           # copy your GitHub CLI sign-in, if gh is signed in
+brindle github connect --token   # or paste a fine-grained token
+brindle github status
+brindle github disconnect
+```
+
+- **A copy of your GitHub CLI sign-in** is one step. brindle then has the same
+  access `gh` has: every repository you can reach, with no expiry. gh's own
+  keychain item is read once, when you ask; a locked keychain may ask you to
+  unlock it then.
+- **A fine-grained token** reaches only the repositories you pick, until it
+  expires. Give it Contents, Pull requests and Workflows read and write
+  (Metadata read comes with them). An organization may have to approve it.
+
+Once connected, brindle's own credential helper answers git for
+`https://github.com`, with your other helpers left out for that host: in
+background fetches, a clone, push or named-branch fetch brindle runs, and
+agents' panes. Other hosts, GitHub Enterprise Server and SSH remotes are
+untouched, and no git config file is edited. `gh` itself is left alone.
+
+**Where the token is kept.** Under the desktop app, in a keychain item that only
+brindle's signed helper (its daemon) makes and reads: macOS asks before giving
+it to any other program, and every other brindle process asks the daemon. A
+read never raises a dialog: while the keychain is locked brindle simply doesn't
+sign in, and fetches wait for it to be unlocked. Without the signed helper (a
+CLI install), or with `--file`, it is a 0600 file under `~/.brindle`, which
+anything running as you can read. `brindle github status` says which.
+
+**If GitHub stops taking it** (revoked, expired, replaced), brindle stops
+offering it and says to connect again. Disconnecting forgets brindle's copy and
+revokes nothing: delete a token on GitHub yourself.
+
+**What this doesn't protect.** Agents run as you. brindle's permission rules
+deny the commands it recognises as reading credentials, but they are rules, not
+a sandbox: a command they don't recognise can read the file, or ask brindle's
+daemon for the credential the way git in the agent's own pane has to. So choose
+by what a taken credential would be worth: a fine-grained token for chosen
+repositories is worth far less than a copy of gh's sign-in. Codex's own sandbox
+does deny its commands the file.
+
 ## Token usage and history
 
 Every Claude Code agent's token usage (input, cached, output, model) is read
