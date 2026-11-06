@@ -894,14 +894,46 @@ def summarize_untracked(files: list[str]) -> str:
     return f"Untracked files ({len(files)}):\n" + "\n".join(shown)
 
 
-def identity_args(path: str | Path) -> list[str]:
-    """``-c`` flags giving brindle's own commits a fallback author when git has
-    no identity for ``path`` (a new account). Empty when one is set anywhere
-    (repo, global, system, environment), so a person's identity is never
-    replaced; nothing is written to any config file."""
+FALLBACK_NAME = "brindle"
+FALLBACK_EMAIL = "brindle@localhost"
+
+
+def missing_identity(path: str | Path) -> list[str]:
+    """Which of "name" and "email" git has no value for at ``path`` (a new
+    account has neither). Each is looked up on its own, in config and the
+    environment, so a half-set identity keeps the half the person set."""
     if ok(["var", "GIT_COMMITTER_IDENT"], path):
         return []
-    return ["-c", "user.name=brindle", "-c", "user.email=brindle@localhost"]
+    def has(key: str, *env: str) -> bool:
+        return bool(run(["config", "--get", key], path, check=False).stdout.strip()
+                    or any(os.environ.get(e) for e in env))
+    missing = []
+    if not has("user.name", "GIT_COMMITTER_NAME", "GIT_AUTHOR_NAME"):
+        missing.append("name")
+    if not has("user.email", "GIT_COMMITTER_EMAIL", "GIT_AUTHOR_EMAIL", "EMAIL"):
+        missing.append("email")
+    return missing
+
+
+def identity_args(path: str | Path) -> list[str]:
+    """``-c`` flags giving brindle's own commits a fallback author for what git
+    has no identity for at ``path``. Never replaces a value the person set
+    (repo, global, system, environment); nothing is written to any config file."""
+    gaps = missing_identity(path)
+    return [*(["-c", f"user.name={FALLBACK_NAME}"] if "name" in gaps else []),
+            *(["-c", f"user.email={FALLBACK_EMAIL}"] if "email" in gaps else [])]
+
+
+def identity_env(path: str | Path) -> dict[str, str]:
+    """The same fallback as environment variables, for a worker's own git
+    commands: only for what is missing, so a set identity is untouched."""
+    gaps = missing_identity(path)
+    env = {}
+    if "name" in gaps:
+        env.update(GIT_AUTHOR_NAME=FALLBACK_NAME, GIT_COMMITTER_NAME=FALLBACK_NAME)
+    if "email" in gaps:
+        env.update(GIT_AUTHOR_EMAIL=FALLBACK_EMAIL, GIT_COMMITTER_EMAIL=FALLBACK_EMAIL)
+    return env
 
 
 def commit_all(path: str | Path, message: str) -> str | None:

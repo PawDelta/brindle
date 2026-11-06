@@ -1742,7 +1742,7 @@ def push_setup_branch(cwd: str, files: Mapping[str, str]) -> None:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(text, encoding="utf-8")
             git.run(["add", rel], cwd)
-        git.run(["commit", "-q", "-m", "Add brindle CI workflows"], cwd)
+        git.run([*git.identity_args(cwd), "commit", "-q", "-m", "Add brindle CI workflows"], cwd)
         committed = True
         git.run(["push", "-u", "origin", SETUP_BRANCH], cwd)
     finally:

@@ -174,7 +174,8 @@ def transfer(db: DB, scratch: Workspace, target: str, branch: str | None = None,
     root_commit = git.out(["rev-list", "--max-parents=0", BRANCH], scratch.path).splitlines()[-1]
     git.run(["fetch", "-q", "--no-tags", str(scratch.path), BRANCH], ws.path)
     tip = git.out(["rev-parse", "FETCH_HEAD"], ws.path)
-    proc = git.run(["cherry-pick", "--allow-empty", f"{root_commit}..{tip}"], ws.path, check=False)
+    proc = git.run([*git.identity_args(ws.path), "cherry-pick", "--allow-empty",
+                    f"{root_commit}..{tip}"], ws.path, check=False)
     if proc.returncode != 0:
         conflicts = git.out(["diff", "--name-only", "--diff-filter=U"], ws.path).splitlines()
         raise ScratchError(
