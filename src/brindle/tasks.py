@@ -760,6 +760,17 @@ def room_wait(repo_root: str | None = None, profile: str | None = None) -> str |
     return spawn.no_room(repo_root)
 
 
+def task_wait(db: DB, t: Task) -> str | None:
+    """Why task ``t``'s worker should not start now: no room on the machine
+    (``room_wait``), or its session must wait its turn for the person's
+    machine-wide worker limit (``fair_share``); None: it may start."""
+    if not agents.launches_process(t.profile, t.repo_root):
+        return None
+    from brindle import fair_share
+
+    return spawn.no_room(t.repo_root) or fair_share.wait_reason(db, t)
+
+
 def _note_long_wait(db: DB, t: Task, why: str) -> bool:
     """Tell ``t``'s supervisor, once, that it has waited for room longer than
     the repo's ``room_wait_max``: what waits, for how long and why. It never
@@ -903,7 +914,7 @@ def start_when_room(db: DB, task_id: str, poll: float = ROOM_POLL) -> bool:
         t = db.get_task(task_id)
         if t is None or t.state != "pending" or session_paused(db, t):
             return False
-        why = room_wait(t.repo_root, t.profile)
+        why = task_wait(db, t)
         if why is None:
             # Unless a dependency added since holds it: merging that starts it.
             return _start_if_ready(db, t, "room on the machine", check_room=False)
@@ -1266,7 +1277,7 @@ def _start_if_ready(db: DB, t: Task, dep_ref: str, check_room: bool = True) -> b
     except agents.AgentError as e:
         _cancel(db, t.id, str(e))
         return False
-    why = room_wait(t.repo_root, t.profile) if check_room else None
+    why = task_wait(db, t) if check_room else None
     if why:
         wait_for_room(db, t, why)
         return False
@@ -1417,7 +1428,7 @@ def requeue(db: DB, caller: Agent | None, caller_ws: Workspace, task_id: str,
     )
     if unmet:
         return f"Requeued task {old.id} as {new.id}, waiting on {', '.join(unmet)}."
-    why = room_wait(new.repo_root)
+    why = room_wait(new.repo_root) or task_wait(db, new)
     if why:
         wait_for_room(db, new, why)
         return (f"Requeued task {old.id} as {new.id}, waiting for room: {why}. "

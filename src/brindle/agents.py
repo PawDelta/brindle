@@ -3310,6 +3310,10 @@ def delegate(
     if why:
         raise AgentError(why)
     busy = admission(profile, caller_ws.repo_root) if admit else None
+    if admit and busy is None and launches_process(profile, caller_ws.repo_root):
+        from brindle import fair_share
+
+        busy = fair_share.start_reason(db, caller.id if caller else None, caller_ws.repo_root, profile)
     if busy:
         raise NoRoom(busy)
     def start_worker(ws: Workspace) -> Agent:
