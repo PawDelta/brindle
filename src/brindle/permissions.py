@@ -909,11 +909,11 @@ NEEDS_APPROVAL = ("brindle runs this agent without approval prompts, and no rule
                   "can allow it with `brindle permissions allow`.")
 ASK_SUPERVISOR = "tell your supervisor with send_message what you need and why"
 ASK_PERSON = "say what you need and why in your reply to the person running brindle"
-# An ask a rule makes, for an agent with no supervisor: no allow rule lifts it
-# (an ask beats an allow), and with the skip flag agy can't prompt.
+# An explicit ask needs the person's answer, either through the app or a
+# request-bound one-time approval from their terminal.
 PERSON_DECIDES = ("this is the person's own call ({why}), and brindle runs this agent without approval "
                   "prompts, so it can't ask them here and refused it. Don't look for another way to do it. "
-                  "Tell them what you need and why: they can run it themselves in a terminal, or open "
+                  "Tell them what you need and why: they can approve the exact request from their terminal, or open "
                   "the brindle app and have you try it again, and it then waits in the app's Inbox for their answer.")
 TOLD_SUPERVISOR = ("carry on with other work and retry it once your supervisor says it's allowed: "
                    "brindle has told your supervisor")
@@ -2622,8 +2622,9 @@ _CREDENTIAL_FILES = (".netrc", ".npmrc", ".git-credentials", ".docker/config.jso
 _OTHER_HOME = re.compile(r"^(?:/Users/[^/]+|/home/[^/]+|/var/root|/root)(?=/|$)")
 # A word that is a path under a home once its quotes are gone: ~user and path components.
 _TILDE_PATH = re.compile(r"~[A-Za-z0-9_.-]*(?:/[A-Za-z0-9_.\-*?\[\]+@%,]+)*/?")
-# What may touch a credential path: a listing, an existence or size test, metadata.
-_HARMLESS_CHECKS = frozenset({"ls", "test", "[", "[[", "stat"})
+# Existence tests reveal no contents; listings and metadata expose the stores
+# denied to providers' file tools by credential_paths(), on every preset.
+_HARMLESS_CHECKS = frozenset({"test", "[", "[["})
 # An option that makes a command print a secret it would otherwise keep
 # (gh auth status --show-token, aws ssm get-parameter --with-decryption).
 _SECRET_FLAG = re.compile(r"^--?(?:show|reveal|print|include|dump|export)-?"
@@ -5729,6 +5730,23 @@ def save_action(kind: str, pattern: str, decision: str, *, scope: str = "exact",
         raise ValueError(f"level must be one of {', '.join(LEVELS)}")
     action = _stamp(SavedAction(secrets.token_hex(4), kind, pattern, decision, scope, level, dict(request or {}),
                                 life, minutes, None, session, repo, time.time(), note))
+    with editing() as store:
+        store.saved.append(action)
+    return action
+
+
+def save_once(req: Request) -> SavedAction:
+    """A terminal answer to one exact request, including its agent and cwd.
+
+    Like an Inbox answer, it settles an ask once; policy denies still win.
+    Write its binding and use budget together, never an unbounded grant.
+    """
+    from brindle import permission_grants
+
+    action = SavedAction(secrets.token_hex(4), permission_grants.grant_kind(req),
+                         permission_grants.ask_key(req), "allow", request=req.to_dict(),
+                         repo=req.repo_root, created=time.time(), uses_left=1,
+                         binding={"request": request_digest(json.dumps(req.to_dict(), sort_keys=True), None)})
     with editing() as store:
         store.saved.append(action)
     return action
