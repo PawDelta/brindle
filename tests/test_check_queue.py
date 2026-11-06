@@ -168,6 +168,44 @@ def test_check_timeout_kills_group(monkeypatch):
     assert kw["start_new_session"] and len(killed) == 1
 
 
+def test_a_timeout_reruns_once_then_reads_as_a_timeout_not_a_failure(db, repo, monkeypatch):
+    ws = branch(db, repo, "one")
+    runs = []
+
+    def run(cmd, cwd, env, timeout, **kw):
+        runs.append(cmd)
+        return False, f"$ {cmd}\n(timed out after {timeout}s)"
+
+    monkeypatch.setattr(autopilot, "run_check", run)
+    ok, out = gates._run_queued(db, ws, "suite", {}, 5)
+    assert not ok and len(runs) == 2 and out.startswith("timed out, not a failure")
+    results = iter([(False, "(timed out after 5s)"), (True, "ok")])   # room came back: the rerun passes
+    monkeypatch.setattr(autopilot, "run_check", lambda *a, **k: next(results))
+    assert gates._run_queued(db, ws, "suite", {}, 5) == (True, "ok")
+
+
+def test_the_wait_for_room_is_bounded(db, repo, monkeypatch):
+    from brindle import spawn
+
+    ws = branch(db, repo, "one")
+    monkeypatch.setattr(spawn, "check_no_room", lambda root=None: "load")
+    monkeypatch.setattr(gates, "ROOM_WAIT_MAX", 0.0)
+    with gates._room_for_check(ws):   # never has room, still returns
+        pass
+
+
+def test_memory_pressure_level_two_alone_is_not_no_room(repo, monkeypatch):
+    from brindle import disk, spawn
+
+    monkeypatch.setattr(disk, "low_disk", lambda root=None: None)
+    monkeypatch.setattr(spawn, "_load", lambda: 0.0)
+    monkeypatch.setattr(spawn, "why", lambda: "pressure")
+    monkeypatch.setattr(spawn, "pressure", lambda: spawn.PRESSURE_WARN)
+    assert spawn.check_no_room(str(repo)) is None
+    monkeypatch.setattr(spawn, "pressure", lambda: spawn.PRESSURE_CRITICAL)
+    assert spawn.check_no_room(str(repo)) == "pressure"
+
+
 def test_check_summary_and_the_merge_gate_share_the_queue(db, repo, monkeypatch):
     configure(repo, check_concurrency=1, pre_commit=False)
     monkeypatch.setattr(gates, "SLOT_POLL", 0.01)

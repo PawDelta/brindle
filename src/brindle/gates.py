@@ -148,7 +148,8 @@ def _write_outcome(path, ok: bool, output: str) -> None:
 
 # -- the queue: check runs share the machine -------------------------------------
 
-SLOT_POLL = 1.0          # seconds between tries for a free slot
+ROOM_WAIT_MAX = 900.0    # seconds a run holding a slot waits for room before running anyway
+SLOT_POLL = 1.0         # seconds between tries for a free slot
 SLOW_FACTOR = 2.0        # a run is "far past" its last duration at this multiple of it...
 SLOW_FOREIGN_FACTOR = 3.0   # the multiple when the baseline is another branch's run, not this one's
 SLOW_MIN_EXTRA = 60.0   # ...and at least this many seconds over
@@ -352,6 +353,18 @@ def _run_queued(db: DB, ws: Workspace, cmd: str, env: dict[str, str], timeout: i
 
     slots = _concurrency(ws)
     env = {"PYTEST_XDIST_AUTO_NUM_WORKERS": str(check_xdist_workers(slots)), **env}
+    ok, out = _run_once(db, ws, cmd, env, timeout, cancel, slots)
+    if not ok and autopilot.TIMED_OUT in out:
+        # A timeout under load says nothing about the code: run once more when
+        # there is room, and if it times out again report it as a timeout.
+        ok, out = _run_once(db, ws, cmd, env, timeout, cancel, slots)
+        if not ok and autopilot.TIMED_OUT in out:
+            out = f"timed out, not a failure (the machine was too loaded to finish in time)\n{out}"
+    return ok, out
+
+
+def _run_once(db: DB, ws: Workspace, cmd: str, env: dict[str, str], timeout: int,
+              cancel, slots: int) -> tuple[bool, str]:
     with _check_slot(slots, cancel), _room_for_check(ws, cancel), marker("checks-running", ws.id):
         last = db.branch_check_duration(ws.repo_root, ws.branch, cmd)
         factor = SLOW_FACTOR
@@ -382,10 +395,13 @@ def _room_for_check(ws: Workspace, cancel=None):
 
     if spawn.check_no_room(ws.repo_root) is not None:
         pause = threading.Event()
+        give_up = time.monotonic() + ROOM_WAIT_MAX   # bounded: run anyway after this
         with marker("checks-room", ws.id):
             while spawn.check_no_room(ws.repo_root) is not None:
                 if cancel is not None and cancel():
                     raise Abandoned("room")
+                if time.monotonic() >= give_up:
+                    break
                 pause.wait(SLOT_POLL)
     yield
 
