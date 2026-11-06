@@ -1112,7 +1112,7 @@ export function Onboarding({ client, providers, openUrl, pickFolder, onDone }: O
     case "project":
       return (
         <Frame step="project" kicker="Ready" title="Pick a project" lede="The folder brindle works in: one on this Mac, or a repository to clone. Your first session starts there.">
-          <ProjectPicker client={client} pickFolder={pickFolder} onPicked={(repo) => void picked(repo.repo_root)} />
+          <ProjectPicker client={client} pickFolder={pickFolder} offerGithub openUrl={openUrl} onPicked={(repo) => void picked(repo.repo_root)} />
           <p className={fine}>
             macOS may ask for your permission when brindle opens a project: to let its engine, which can appear as python3, into a folder in Documents, Desktop or Downloads, or to install Apple's command line tools for git. brindle can't work in the project without them.
           </p>

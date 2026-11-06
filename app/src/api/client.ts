@@ -1112,6 +1112,19 @@ export interface DaemonConfig {
   fetch?: typeof fetch;
 }
 
+/* GET/POST/DELETE /github/connection. `expires_at` is an ISO date or unix seconds (the contract doesn't say), or null. */
+export interface GithubConnection {
+  connected: boolean;
+  login: string | null;
+  route: "gh" | "token" | null;
+  storage: "keychain" | "file" | null;
+  expires_at: string | number | null;
+  needs_reconnect: boolean;
+  gh_available: boolean;
+}
+
+export type GithubConnect = { route: "gh" } | { route: "token"; token: string };
+
 export class DaemonError extends Error {
   /* The engine's ServiceError code ("not_found", "conflict", ...), "unreachable"
      when no response came back, or "http" for a response without an error body. */
@@ -1170,6 +1183,21 @@ export class DaemonClient {
      only ever from a click. */
   installDeveloperTools() {
     return this.post<{ started: boolean }>("/developer-tools/install", {});
+  }
+
+  /* Connect GitHub (engine branch feat/connect-github): how brindle reaches private
+     repositories over HTTPS. Typed here by hand until api-schema.json has the routes.
+     POST throws a DaemonError coded github_token_invalid or github_gh_unavailable. */
+  githubConnection() {
+    return this.get<GithubConnection>("/github/connection");
+  }
+
+  connectGithub(body: GithubConnect) {
+    return this.post<GithubConnection>("/github/connection", body);
+  }
+
+  disconnectGithub() {
+    return this.delete<GithubConnection>("/github/connection", {});
   }
 
   /* A folder on this machine, as a repo brindle works in. */
