@@ -185,8 +185,11 @@ def create(local: bool = False, provider: str | None = None) -> Path:
     (root / ".brindle").mkdir()
     _config_path(root).write_text(json.dumps(_config(local, provider), indent=2) + "\n")
     (root / ".brindle" / "goals.md").write_text(GOALS)
-    git = ["git", "-c", "user.name=brindle demo", "-c", "user.email=demo@brindle.invalid"]
     subprocess.run(["git", "init", "-q", "-b", "main"], cwd=root, check=True)
+    # In the demo repo's own config (never the person's global one): a new
+    # account has no identity, and the workers' and merges' commits need one.
+    subprocess.run(["git", "config", "user.name", "brindle demo"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.email", "demo@brindle.invalid"], cwd=root, check=True)
     subprocess.run(["git", "add", "-A"], cwd=root, check=True)
-    subprocess.run([*git, "commit", "-q", "-m", "textkit: stubs and tests"], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "textkit: stubs and tests"], cwd=root, check=True)
     return root

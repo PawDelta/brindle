@@ -933,11 +933,21 @@ def summarize_untracked(files: list[str]) -> str:
     return f"Untracked files ({len(files)}):\n" + "\n".join(shown)
 
 
+def identity_args(path: str | Path) -> list[str]:
+    """``-c`` flags giving brindle's own commits a fallback author when git has
+    no identity for ``path`` (a new account). Empty when one is set anywhere
+    (repo, global, system, environment), so a person's identity is never
+    replaced; nothing is written to any config file."""
+    if ok(["var", "GIT_COMMITTER_IDENT"], path):
+        return []
+    return ["-c", "user.name=brindle", "-c", "user.email=brindle@localhost"]
+
+
 def commit_all(path: str | Path, message: str) -> str | None:
     run(["add", "-A"], path)
     if ok(["diff", "--cached", "--quiet"], path):
         return None
-    run(["commit", "-m", message], path)
+    run([*identity_args(path), "commit", "-m", message], path)
     return out(["rev-parse", "--short", "HEAD"], path)
 
 
@@ -980,9 +990,9 @@ def sync(path: str | Path, base: str, strategy: str = "rebase") -> str:
         background_fetch(path, ["origin", base, "--quiet", "--no-tags"])
     ref = base_ref(path, base)
     if strategy == "rebase":
-        proc = run(["rebase", ref], path, check=False)
+        proc = run([*identity_args(path), "rebase", ref], path, check=False)
     elif strategy == "merge":
-        proc = run(["merge", "--no-edit", ref], path, check=False)
+        proc = run([*identity_args(path), "merge", "--no-edit", ref], path, check=False)
     else:
         raise ValueError(f"unknown strategy {strategy!r}")
     if proc.returncode != 0:
@@ -1007,7 +1017,8 @@ def merge_local_base(path: str | Path, base: str, no_ff: bool = False) -> tuple[
     or a conflict. ``no_ff``: always a merge commit, even where HEAD could
     fast-forward."""
     before = out(["rev-parse", "HEAD"], path)
-    proc = run(["merge", "--no-edit", *(["--no-ff"] if no_ff else []), base], path, check=False)
+    proc = run([*identity_args(path), "merge", "--no-edit", *(["--no-ff"] if no_ff else []), base],
+               path, check=False)
     if proc.returncode != 0:
         conflicts = conflicting_files(path)
         run(["merge", "--abort"], path, check=False)
@@ -1015,6 +1026,17 @@ def merge_local_base(path: str | Path, base: str, no_ff: bool = False) -> tuple[
             raise GitError(f"merging {base} failed: {proc.stderr.strip() or proc.stdout.strip()}")
         return before, conflicts
     return out(["rev-parse", "HEAD"], path), []
+
+
+def _identity_hint(proc: subprocess.CompletedProcess) -> str:
+    """How to fix a merge that still failed on a missing identity (say, one
+    a hook or config blanked), in plain words."""
+    text = f"{proc.stderr}\n{proc.stdout}"
+    if "tell me who you are" in text or "empty ident name" in text or "unable to auto-detect" in text:
+        return ('\nGit has no name and email to put on the commit. Set them with '
+                '`git config user.name "Your Name"` and `git config user.email you@example.com` '
+                'in this repository, then merge again.')
+    return ""
 
 
 def merge_into(root: str | Path, target_path: str | Path, branch: str, squash: bool) -> None:
@@ -1027,18 +1049,20 @@ def merge_into(root: str | Path, target_path: str | Path, branch: str, squash: b
     with checkout_lock(target_path):
         if dirty_files(target_path, tracked_only=True):
             raise GitError(f"{target_path} has uncommitted changes; commit or stash them first")
+        who = identity_args(target_path)
         if squash:
             proc = _retry_transient(["merge", "--squash", branch], target_path)
             if proc.returncode == 0:
                 proc = _retry_transient(
-                    ["commit", "--no-edit", "-m", f"Squash merge {branch}"], target_path
+                    [*who, "commit", "--no-edit", "-m", f"Squash merge {branch}"], target_path
                 )
         else:
-            proc = _retry_transient(["merge", "--no-ff", "--no-edit", branch], target_path)
+            proc = _retry_transient([*who, "merge", "--no-ff", "--no-edit", branch], target_path)
         if proc.returncode != 0:
             run(["merge", "--abort"], target_path, check=False)
             raise GitError(
                 f"merging {branch} failed (aborted): {proc.stderr.strip() or proc.stdout.strip()}"
+                + _identity_hint(proc)
             )
 
 
