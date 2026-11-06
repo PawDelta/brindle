@@ -2329,9 +2329,9 @@ def connect_github(db: DB, params: dict, body: Body) -> Any:
     route = _get(body, "route", required=True)
     try:
         if route == "gh":
-            state = github_connect.connect_gh()
+            state = github_connect.connect_gh(local=True)
         elif route == "token":
-            state = github_connect.connect_token(token)
+            state = github_connect.connect_token(token, local=True)
         else:
             raise ServiceError("invalid", 'route must be "gh" or "token"')
     except github_connect.ConnectError as e:
@@ -2349,7 +2349,19 @@ def disconnect_github(db: DB, params: dict, body: Body) -> Any:
     from brindle import github_connect
     from brindle.service.dto import GitHubConnectionDTO
 
-    return GitHubConnectionDTO(**github_connect.disconnect()).to_json()
+    return GitHubConnectionDTO(**github_connect.disconnect(local=True)).to_json()
+
+
+def github_credential(db: DB, params: dict, body: Body) -> Any:
+    """git's credential helper, in another of brindle's processes, passing git's
+    question on (github_connect.answer): the daemon holds the token when it is in
+    the keychain. The one route here that answers with the token, as git needs it,
+    and the one an agent's processes may call, since git in a pane signs in this
+    way too: on the Unix socket only (daemon.auth). Its body is never logged."""
+    from brindle import github_connect
+
+    action, request = _get(body, "action", default=""), _get(body, "request", default="")
+    return {"answer": github_connect.answer(action, request, local=True)}
 
 
 def retest_key(db: DB, params: dict, body: Body) -> Any:
@@ -2666,6 +2678,7 @@ ROUTES = [
     _post("/keys/{name}/import", import_key),
     _post("/github/connection", connect_github),
     Route("/v1/github/connection", _endpoint(disconnect_github), methods=["DELETE"]),
+    _post("/github/credential", github_credential),
     _post("/terminals/{id}/input", terminal_input),
     _post("/terminals/shell", shell_terminal),
     Route("/v1/terminals/{id}", _endpoint(close_terminal), methods=["DELETE"]),

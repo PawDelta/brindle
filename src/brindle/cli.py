@@ -3397,6 +3397,8 @@ def github_status() -> None:
 def github_connect_cmd(
     gh: bool = typer.Option(False, "--gh", help="Copy your GitHub CLI sign-in (brindle gets the access gh has)."),
     token: bool = typer.Option(False, "--token", help="Paste a fine-grained token (asked for, or read from stdin)."),
+    file: bool = typer.Option(False, "--file", help="Keep it in a 0600 file under brindle's home, not the keychain: "
+                                                    "no dialog ever, and readable by anything running as you."),
 ) -> None:
     """Give brindle its own GitHub sign-in: a copy of the GitHub CLI's, or a token."""
     import getpass
@@ -3409,14 +3411,14 @@ def github_connect_cmd(
             "every repository you can reach. (No: paste a fine-grained token instead)", default=True)
     try:
         if gh:
-            state = github_connect.connect_gh()
+            state = github_connect.connect_gh(file=file)
         else:
             if sys.stdin.isatty():
                 typer.echo("Make a fine-grained token at https://github.com/settings/personal-access-tokens/new "
                            "for the repositories brindle should reach, with Contents, Pull requests and "
                            "Workflows read and write.")
             pasted = getpass.getpass("Token: ") if sys.stdin.isatty() else sys.stdin.readline()
-            state = github_connect.connect_token(pasted)
+            state = github_connect.connect_token(pasted, file=file)
     except github_connect.ConnectError as e:
         typer.echo(str(e), err=True)
         raise typer.Exit(1) from None
@@ -3428,7 +3430,11 @@ def github_disconnect() -> None:
     """Forget brindle's GitHub sign-in. Nothing is revoked on GitHub."""
     from brindle import github_connect
 
-    github_connect.disconnect()
+    try:
+        github_connect.disconnect()
+    except github_connect.ConnectError as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(1) from None
     typer.echo("GitHub: disconnected. A pasted token still exists on GitHub until you delete it there.")
 
 

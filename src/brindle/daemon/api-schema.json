@@ -7320,6 +7320,10 @@
       "path": "/v1/github/connection"
     },
     {
+      "method": "POST",
+      "path": "/v1/github/credential"
+    },
+    {
       "method": "GET",
       "path": "/v1/goal"
     },

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import base64
+import ctypes
 import functools
 import http.server
 import os
@@ -12,11 +14,13 @@ from pathlib import Path
 import pytest
 from conftest import sh
 
-from brindle import clone, git, github_connect, providers
-from brindle.daemon import routes_actions, routes_read
+from brindle import clone, git, github_connect, mac_keychain, providers
+from brindle.daemon import auth, holds, peer, routes_actions, routes_read
 from brindle.service.errors import ServiceError
 
 TOKEN = "not-a-real-token-just-a-fixture"
+ASK = "protocol=https\nhost=github.com\n"
+ANSWER = f"username=octo\npassword={TOKEN}\n"
 
 
 def _script(path: Path, body: str) -> Path:
@@ -143,3 +147,93 @@ def test_connection_routes_keep_the_token_and_refuse_what_github_wont_take(db, t
 
     assert routes_actions.disconnect_github(db, {}, {})["connected"] is False
     assert github_connect.credential() is None
+
+
+class _HelpersItem:
+    """The helper app's keychain item, as only that program sees it."""
+    secret: bytes | None = None
+    refuses: mac_keychain.Refused | None = None
+
+    def load(self):
+        if self.refuses:
+            raise self.refuses
+        return self.secret
+
+    def save(self, secret, ask):
+        type(self).secret = secret
+
+    def delete(self):
+        type(self).secret = None
+
+
+def test_under_the_app_only_the_helper_daemon_holds_the_token_and_the_rest_ask_it(db, monkeypatch, github_api):
+    is_helper = [True]
+    monkeypatch.setattr(github_connect, "is_helper", lambda: is_helper[0])
+    monkeypatch.setattr(github_connect, "_item", _HelpersItem)
+    monkeypatch.setattr(_HelpersItem, "secret", None)
+    got = routes_actions.connect_github(db, {}, {"route": "token", "token": TOKEN})
+    assert got["storage"] == "keychain" and _HelpersItem.secret == TOKEN.encode()
+    assert "token" not in github_connect._store().load()          # nothing secret on disk
+    assert github_connect.answer("get", ASK) == ANSWER            # the daemon answers git itself
+
+    # Any other brindle process (git's helper in a pane, the CLI) holds no token: it passes git's question on.
+    def daemon(path, body, seconds):
+        assert path == github_connect.CREDENTIAL_PATH
+        is_helper[0] = True
+        try:
+            return routes_actions.github_credential(db, {}, body)
+        finally:
+            is_helper[0] = False
+
+    monkeypatch.setattr(holds, "call", daemon)
+    is_helper[0] = False
+    assert github_connect.credential() is None and github_connect.git_helper() is not None
+    assert github_connect.answer("get", ASK) == ANSWER
+    # A daemon that isn't the helper can't read the item, and doesn't go asking itself.
+    assert routes_actions.github_credential(db, {}, {"action": "get", "request": ASK}) == {"answer": ""}
+
+    # That route takes git under an agent, with no token, on the Unix socket; never over TCP.
+    reached, sent = [], []
+
+    async def served(scope, receive, send):
+        reached.append(scope["path"])
+
+    async def send(message):
+        sent.append(message)
+
+    guard = auth.Guard(served, "the-daemons-token")
+    scope = {"type": "http", "path": github_connect.CREDENTIAL_PATH, "headers": []}
+    asyncio.run(guard({**scope, peer.PEER_PID: 4242}, None, send))
+    asyncio.run(guard(scope, None, send))
+    assert reached == [github_connect.CREDENTIAL_PATH] and sent[0]["status"] == 403
+
+    # A locked keychain is no answer for now, with nothing to redo; an item no longer the helper's needs a new connect.
+    monkeypatch.setattr(_HelpersItem, "refuses", mac_keychain.Refused(-25293, locked=True))
+    assert github_connect.answer("get", ASK) == "" and not github_connect.status()["needs_reconnect"]
+    monkeypatch.setattr(_HelpersItem, "refuses", mac_keychain.Refused(-25293, locked=False))
+    assert github_connect.answer("get", ASK) == "" and github_connect.status()["needs_reconnect"]
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="Security.framework is macOS's")
+def test_keychain_item_reads_back_for_its_maker_and_a_locked_keychain_refuses_without_asking(tmp_path):
+    # A keychain file of the test's own, never the person's: made here, deleted here.
+    sec, password, keychain = mac_keychain.security(), b"a-test-keychains-password", ctypes.c_void_p()
+    made = sec.SecKeychainCreate(str(tmp_path / "t.keychain-db").encode(), len(password), password, False, None,
+                                 ctypes.byref(keychain))
+    assert made == 0
+    try:
+        item = mac_keychain.Item("brindle-github-test", "connection", keychain)
+        assert item.load() is None
+        item.save(b"an-earlier-fixture", ask=False)
+        item.save(TOKEN.encode(), ask=False)        # replaced, not a second item
+        assert item.load() == TOKEN.encode()
+        assert sec.SecKeychainLock(keychain) == 0
+        for blocked in (item.load, lambda: item.save(b"while-locked", ask=False)):
+            with pytest.raises(mac_keychain.Refused) as refused:
+                blocked()                           # returns at once: with asking off, no dialog can be up
+            assert refused.value.locked
+        assert sec.SecKeychainUnlock(keychain, len(password), password, True) == 0
+        item.delete()
+        assert item.load() is None
+    finally:
+        sec.SecKeychainDelete(keychain)
