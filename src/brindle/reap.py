@@ -415,8 +415,8 @@ def contained(ws: Workspace) -> str | None:
         return (_patch_commit(base, mb, tip, cwd) if mb else None) or base
     if not mb:
         return None
-    probe = git.run(["commit-tree", f"{tip}^{{tree}}", "-p", mb, "-m", "brindle superseded probe"],
-                    cwd, check=False).stdout.strip()
+    probe = git.run([*git.identity_args(cwd), "commit-tree", f"{tip}^{{tree}}", "-p", mb,
+                     "-m", "brindle superseded probe"], cwd, check=False).stdout.strip()
     if not probe:
         return None
     cherry = git.run(["cherry", base, probe, mb], cwd, check=False).stdout.split("\n")

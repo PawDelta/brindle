@@ -280,6 +280,7 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
 
     # 3. Launches stopped on a startup prompt; workers stuck on a prompt
     # nobody is answering, or gone silent.
+    decline_environment_setups(db, panes)
     done.extend(settle_startups(db, now, panes))
     done.extend(note_stuck(db, now, panes))
     done.extend(note_idle_unreported(db, now, panes))
@@ -395,6 +396,31 @@ STUCK_AFTER = 90.0
 STARTUP_GRACE = 40.0
 
 
+def decline_environment_setups(db: DB, panes: dict[str, bool]) -> None:
+    """Dismiss Claude's environment upsell even in an interactive supervisor
+    with no queued delivery and no waiting hook."""
+    from brindle import prompt_answer
+
+    owners = agents.pane_owners(db, panes)
+    for a in db.list_agents():
+        if (a.provider != "claude" or a.headless or a.dismissed_at is not None
+                or a.status not in ("starting", "idle", "processing", "waiting")
+                or not agents.same_server(a, panes) or not agents.is_alive(a, panes)
+                or not agents.owns_pane(db, a, owners)):
+            continue
+        try:
+            screen = tmux.capture(a.tmux_window, lines=40, server=agents.server_of(a))
+        except tmux.TmuxError:
+            continue
+        if prompt_answer.decline_teach_auto_mode(db, a, screen):
+            continue
+        provider = agents.get_provider(a.provider)
+        if (db.mark(a.id, "teach-auto-mode") is not None and provider.input_ready(screen)
+                and provider.screen_state(screen) == "idle"):
+            db.set_mark(a.id, "teach-auto-mode", None)
+            agents.screen_status(db, a, samples=2, gap=0)
+
+
 def settle_startups(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
     """Every launch, worker or supervisor, whose CLI hasn't shown its input
     box STARTUP_GRACE seconds on (brindle.prompt_answer keeps them, whatever
@@ -463,6 +489,8 @@ def note_stuck(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
             screen = tmux.capture(a.tmux_window, lines=40, server=agents.server_of(a))
         except tmux.TmuxError:
             screen = ""
+        if prompt_answer.decline_teach_auto_mode(db, a, screen):
+            continue
         health = db.conn.execute("SELECT submitted_prompt FROM launch_health WHERE agent_id=?",
                                  (a.id,)).fetchone()
         brief = (health["submitted_prompt"] if health else None) or a.task or ""

@@ -2,6 +2,7 @@
 tool-permission request from the structured request its CLI hands the hook,
 allow / deny / ask, and learns only suggestions from what the person approves."""
 
+import dataclasses
 import json
 import os
 import time
@@ -9,12 +10,14 @@ import time
 import pytest
 from typer.testing import CliRunner
 
-from brindle import agents, codex_hook, cull, permissions, workspaces
+from brindle import agents, codex_hook, cull, permission_grants, permissions, workspaces
 from brindle.cli import app
 from brindle.config import POLICY_DEFAULT_KEY, forget_user, load_repo_config, set_local, set_user
 from brindle.daemon import routes_actions
 from brindle.db import DB, Agent
 from brindle.permissions import Request, Rule, decide
+from brindle.profiles import load_profile
+from brindle.providers import ClaudeCode, LaunchContext
 from brindle.service import permissions as svc
 
 from conftest import sh
@@ -53,29 +56,36 @@ def claude_payload(tool, tool_input, cwd=None):
 # -- who the policy is on for -----------------------------------------------------------------
 
 
-@pytest.mark.variant("Free-user regression: first CLI/daemon startup enables policy; upgrading preserves the existing opt-out")
-@pytest.mark.parametrize("first_run", ["cli", "daemon", "existing"])
-def test_new_free_user_gets_the_policy(repo, monkeypatch, first_run):
-    """Nothing of brindle's on this machine and no plan, from a first CLI command
-    or the app's daemon: the policy is on with Autonomous, and it answers a
-    supervisor on Claude and on Codex, which no mode or parent_id gate drops."""
-    if first_run == "existing":
-        DB()  # An installation predating first-run policy defaults already has a database.
-    monkeypatch.delenv("BRINDLE_NO_FIRST_RUN", raising=False)
+@pytest.mark.variant("the owner's decision: a home from before the default gets the rules; an explicit off or preset stays")
+@pytest.mark.parametrize("before, policy, source, preset", [
+    (lambda repo: None, "on", "default", "autonomous"),
+    (lambda repo: DB(), "on", "default", "autonomous"),
+    (lambda repo: permissions.apply_preset("secure"), "on", "default", "secure"),
+    (lambda repo: set_user(POLICY_DEFAULT_KEY, "on"), "on", "default", "autonomous"),
+    (lambda repo: set_user("permission_policy", "off"), "off", "user", "autonomous"),
+    (lambda repo: set_local(repo, "permission_policy", "off"), "off", "repo", "autonomous"),
+])
+def test_existing_free_user_gets_the_policy(repo, monkeypatch, before, policy, source, preset):
+    """On any plan or an unreadable license: on unless someone said off, a preset there
+    stays, and it's still no one's choice, so Codex falls back rather than refuse."""
+    monkeypatch.delenv("BRINDLE_POLICY_DEFAULT_OFF", raising=False)
     monkeypatch.setattr("brindle.permissions.DEFAULT_PRESET", "autonomous")
-    if first_run != "daemon":
-        assert CliRunner().invoke(app, ["--version"]).exit_code == 0
+    monkeypatch.setattr("brindle.pro.license.has", lambda *_: 1 / 0)
+    before(repo)
+    cfg = load_repo_config(repo)
+    assert (cfg.permission_policy, cfg.permission_policy_source) == (policy, source)
+    assert permissions.load_store().preset == preset
+    assert codex_hook.policy_chosen(str(repo)) == (source != "default")
+    assert svc.policy_dto(repo_root=str(repo)).policy_on == (policy == "on")
+
+
+def test_new_free_user_gets_the_policy(repo, monkeypatch):
+    """Nothing of brindle's on this machine and no plan, from the app's daemon: the
+    policy is on with Autonomous, and it answers a supervisor on Claude and on
+    Codex, which no mode or parent_id gate drops."""
+    monkeypatch.delenv("BRINDLE_POLICY_DEFAULT_OFF", raising=False)
+    monkeypatch.setattr("brindle.permissions.DEFAULT_PRESET", "autonomous")
     db = DB()
-    if first_run == "existing":
-        assert load_repo_config(repo).permission_policy == "off"
-        policy = svc.policy_dto()
-        assert (policy.policy_on, policy.policy_source) == (False, "default")
-        assert not [p.name for p in policy.presets if p.current]
-        routes_actions.patch_config(db, {}, {"scope": "user", "values": {"permission_policy": "on"}})
-        policy = svc.policy_dto()
-        assert (policy.policy_on, policy.policy_source) == (True, "user")
-        assert [p.name for p in policy.presets if p.current] == [policy.preset]
-        return
     assert load_repo_config(repo).permission_policy == "on"
     assert permissions.load_store().preset == "autonomous"
 
@@ -260,6 +270,93 @@ def test_paths_are_learned_relative_to_the_worktree(ws):
 
 
 # -- Claude Code's hook -----------------------------------------------------------------------
+
+
+ENV_PART = "env | grep -E '^GIT_(AUTHOR|COMMITTER)' ; "
+# Claude's prompt offered Yes for this while the Inbox card said a deny rule blocked it.
+ON_FRESH_ACCOUNT = ("""echo "--- config"; git config --show-origin --get-regexp '^user\\.' ; echo "--- env"; """
+                    + ENV_PART + """echo "--- log"; git log --all """
+                    """--format='%h %D | a=%an <%ae> | c=%cn <%ce> | %s' -n 10; echo "--- status"; """
+                    """git status --short; git branch -a; git worktree list""")
+
+
+@pytest.mark.parametrize("preset, policy, chosen, profile_mode, mode", [
+    # Nobody set the policy: on, whatever is in the home, and that's what stops the prompts.
+    ("autonomous", None, None, None, "default"),
+    ("autonomous", "on", None, None, "default"),
+    ("standard", "on", None, None, "default"),
+    ("autonomous", "off", None, None, "default"),
+    ("autonomous", "on", "bypassPermissions", None, "bypassPermissions"),
+    ("standard", "on", "auto", None, "auto"),
+    ("autonomous", "on", None, "auto", "auto"),     # the built-in developer profile
+    ("autonomous", "on", None, "acceptEdits", "acceptEdits"),
+])
+def test_autonomous_starts_claude_without_prompts(db, ws, monkeypatch, preset, policy, chosen, profile_mode, mode):
+    """On Autonomous the hooks answer what Claude Code would prompt for, a chosen mode
+    stays, and a mode with no prompt to fall back on never lets a failed check through."""
+    permissions.apply_preset(preset)
+    if policy:
+        set_local(ws.repo_root, "permission_policy", policy)
+    else:
+        monkeypatch.delenv("BRINDLE_POLICY_DEFAULT_OFF")
+    policy = policy or "on"
+    if chosen:
+        set_user("claude_permission_mode", chosen)
+    profile = dataclasses.replace(load_profile("supervisor"), permission_mode=profile_mode)
+    argv = ClaudeCode().command(LaunchContext("abc", profile, "go", cwd=ws.path))
+    assert argv[argv.index("--permission-mode") + 1] == mode
+
+    hook = json.loads(argv[argv.index("--settings") + 1])["hooks"]["PreToolUse"][0]["hooks"][0]
+    no_prompt = policy == "on" and mode in ("auto", "bypassPermissions")
+    assert (hook.get("onFailure") == "block") == no_prompt
+    assert hook["command"].endswith("|| exit 2") == no_prompt
+
+    a = worker(db, ws)
+
+    def payload(command):
+        return {"tool_name": "Bash", "tool_input": {"command": command}, "cwd": ws.path, "permission_mode": mode}
+
+    def pre_tool(command, agent=a.id):
+        out = agents.hook_main(db, agent, "pre-tool", json.dumps(payload(command)))
+        return json.loads(out)["hookSpecificOutput"]["permissionDecision"] if out else None
+
+    # auto keeps its classifier, so an allow is left to it; a prompting mode saves the prompt.
+    allowed = "allow" if policy == "on" and preset == "autonomous" and mode in ("default", "acceptEdits") else None
+    assert pre_tool("touch x") == allowed
+    if allowed:
+        # What PreToolUse can't settle (a protected path, a read outside) its PermissionRequest does, unheld.
+        for tool, tool_input in (("Write", {"file_path": ".git/x-note"}), ("Read", {"file_path": "/etc/hosts"})):
+            answer = json.loads(agents.hook_main(db, a.id, "permission-request", json.dumps(
+                claude_payload(tool, tool_input, cwd=ws.path))))
+            assert answer["hookSpecificOutput"]["decision"]["behavior"] == "allow"
+    # A compound whose parts are all allowed asks nobody on Autonomous, and the Inbox's read
+    # of a denied one agrees with the pane: with the rules off a prompt offers Yes, so it's an ask.
+    card = permission_grants._policy(permissions.from_claude(payload(ON_FRESH_ACCOUNT), ws.path, ws.repo_root, a.id),
+                                     ws.repo_root)
+    assert card.decision == ("deny" if policy == "on" else "ask")
+    if policy == "on":
+        assert pre_tool("cat ~/.ssh/id_rsa") == pre_tool(ON_FRESH_ACCOUNT) == "deny"
+        assert pre_tool("git push origin main") == "ask"
+        if preset == "autonomous":
+            assert pre_tool(ON_FRESH_ACCOUNT.replace(ENV_PART, "")) == allowed
+
+    # A person's own "ask" for what brindle can't verify, which no later prompt would catch here.
+    if no_prompt and preset == "autonomous":
+        permissions.set_groups({"shell": {"subcategories": {"unchecked": "ask"}}})
+        assert pre_tool("echo `\\whoami`") == "ask"
+
+    # A saved approval's use is spent where the call is decided: no PermissionRequest follows here.
+    if no_prompt:
+        permissions.save_once(permissions.from_claude(payload("git push origin main"), ws.path, ws.repo_root, a.id))
+        assert pre_tool("git push origin main") is None
+        assert pre_tool("git push origin main") == "ask"
+
+    monkeypatch.setattr(permissions, "decide", lambda *args, **kwargs: 1 / 0)
+    assert pre_tool("touch x") == ("deny" if no_prompt else None)
+    assert pre_tool("touch x", agent="gone") == ("deny" if mode in ("auto", "bypassPermissions") else None)
+    # Claude always sends JSON: anything else fails the hook, which the launch's onFailure blocks.
+    with pytest.raises(ValueError):
+        agents.hook_main(db, a.id, "pre-tool", "{not json")
 
 
 def test_malformed_input_gives_no_output(db, ws, monkeypatch):

@@ -224,6 +224,80 @@ def test_claude_paste_blocked(screen, interactive, want):
     assert ClaudeCode().paste_blocked(screen, interactive) == want
 
 
+@pytest.mark.parametrize("options", [
+    ["1. Yes", "2. Not now", "3. Don't show again"],
+    pytest.param(["1. Yes", "2. Don't show again", "3. Not now"],
+                 marks=pytest.mark.variant("decline label moves: never choose by menu position")),
+    ["1. Yes", "2. Not now"],
+    ["1. Yes", "2. More information"],
+])
+def test_teach_auto_mode_menu_is_declined_never_typed_into(db, ws, monkeypatch, options):
+    from brindle import cull, prompt_answer
+    from test_prompt_answer import Pane
+
+    question = ("Teach auto mode about your environment?\n\n"
+                "Auto mode works better when it knows your environment. Takes about a minute.")
+    for mode in ("assign", "interactive"):
+        aid = mode
+        fake_agent(db, ws, status="idle", mode=mode, parent="boss", agent_id=aid)
+        pane = Pane(question, options)
+        render = pane.render
+        monkeypatch.setattr(pane, "render", lambda: CLAUDE_IDLE if pane.chosen else
+                            render() + "\nEnter to confirm · Esc to cancel\n⏵⏵ auto mode on\n")
+        monkeypatch.setattr(tmux, "capture", lambda *a, **k: pane.render())
+        monkeypatch.setattr(tmux, "send_keys", pane.press)
+        monkeypatch.setattr(ClaudeCode, "hooks_disabled", lambda *a: None)
+        pasted, told = [], []
+        monkeypatch.setattr(tmux, "paste", lambda target, body, **k: pasted.append(body))
+        monkeypatch.setattr(agents, "send_message", lambda *a, **k: told.append(a))
+        monkeypatch.setattr(agents, "pane_owners", lambda *a: {})
+        monkeypatch.setattr(agents, "owns_pane", lambda *a: True)
+        monkeypatch.setattr(agents, "is_alive", lambda *a: True)
+        db.enqueue(aid, "queued message", None)
+        screen = pane.render()
+        assert ClaudeCode().paste_blocked(screen, mode == "interactive") is not None
+        assert not ClaudeCode().input_ready(screen)
+        assert not agents.flush(db, aid) and not pasted
+        monkeypatch.setattr(tmux, "capture", lambda *a, **k: screen)
+        for _ in range(2):  # a redraw has not arrived: only one key may go in
+            agents.screen_status(db, db.get_agent(aid), samples=2, gap=0)
+        declines = any("Not now" in o or "Don't show again" in o for o in options)
+        assert pane.keys == (["Down"] if declines else [])
+        assert not prompt_answer.at_turn_end(db, db.get_agent(aid))
+        cull.decline_environment_setups(db, {})
+        assert not cull.note_stuck(db, time.time(), {})
+        assert len(told) == (0 if declines else 1)
+        monkeypatch.setattr(tmux, "capture", lambda *a, **k: pane.render())
+        for _ in range(4):
+            cull.decline_environment_setups(db, {})
+        if declines:
+            expected = next((o for o in options if "Don't show again" in o), options[1])
+            assert pane.chosen == expected
+            assert pane.keys == ["Down"] * options.index(expected) + ["Enter"]
+            agents.flush(db, aid)
+            assert pasted == ["queued message"] and db.pending_count(aid) == 0
+            keys = []
+            monkeypatch.setattr(tmux, "send_keys", lambda *a, **k: keys.append(a))
+            for draft in ("", "Don't show again", "another draft", "\x1b[2mTry a task\x1b[0m", "first line\ncontinued draft"):
+                quoted_options = "\n".join(options) if draft == "another draft" else ""
+                quoted = question + "\n" + quoted_options + "\n" + CLAUDE_IDLE.replace("❯ ", "❯ " + draft)
+                monkeypatch.setattr(tmux, "capture", lambda *a, **k: quoted)
+                handled = prompt_answer.decline_teach_auto_mode(db, db.get_agent(aid), quoted)
+                assert keys == []
+                assert not handled
+                assert ClaudeCode().input_ready(quoted)
+                assert ClaudeCode().paste_blocked(quoted, False) is None
+        else:
+            assert pane.keys == [] and pane.chosen is None
+            assert not pasted and db.pending_count(aid) == 1
+            assert len(told) == 1
+            quoted_option = "9. Don't show again\n" + screen
+            monkeypatch.setattr(tmux, "capture", lambda *a, **k: quoted_option)
+            assert prompt_answer.decline_teach_auto_mode(db, db.get_agent(aid), quoted_option)
+            assert pane.keys == []
+        db.delete_agent(aid)
+
+
 def test_flush_keeps_message_queued_over_background_session_launcher(db, ws, monkeypatch):
     # A worker too: a blind paste there would start a NEW background session
     # instead of reaching this one.

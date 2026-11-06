@@ -28,6 +28,86 @@ REAL_PREFLIGHT = preflight.check
 REAL_ONBOARDED = providers.claude_onboarded
 
 
+def test_repo_git_identity_is_set_for_that_repo_only(db, world, tmp_path, monkeypatch):
+    from typer.testing import CliRunner
+
+    from brindle import git
+    from brindle.cli import app
+    from brindle.service import sessions as svc
+
+    home = tmp_path / "home"
+    home.mkdir()
+    global_config = home / ".gitconfig"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    for key in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "EMAIL"):
+        monkeypatch.delenv(key, raising=False)
+    for key in ("user.name", "user.email"):
+        git.run(["config", "--local", "--unset-all", key], world.repo_root, check=False)
+    started = []
+    real_start = svc.start
+    monkeypatch.setattr(svc, "start", lambda *a, **k: started.append(True) or {"id": "new"})
+    body = {"repo": world.repo_root}
+    code, reply = _send("POST", "/v1/sessions", body)
+    assert (code, reply["error"]["code"], started) == (409, "git_identity_missing", [])
+    monkeypatch.chdir(world.repo_root)
+    missing_checkout = tmp_path / "new-checkout"
+    for branch in ([], ["--branch", "new-session"], ["--branch", "new-session", "--worktree", str(missing_checkout)]):
+        assert CliRunner().invoke(app, ["start", "--no-attach", "--yes", *branch]).exit_code == 1
+    assert not missing_checkout.exists()
+    assert started == []
+    for name, email in [("", "me@example.com"), ("Me", "--global")]:
+        assert _send("POST", "/v1/repos/git-identity", {**body, "name": name, "email": email})[0] == 400
+        assert git.run(["config", "--get", "user.name"], world.repo_root, check=False).returncode == 1
+    assert _send("POST", "/v1/repos/git-identity", {**body, "name": "--Name", "email": "me@example.com"})[0] == 200
+    assert git.out(["config", "--local", "user.name"], world.repo_root) == "--Name"
+    assert git.out(["config", "--local", "user.email"], world.repo_root) == "me@example.com"
+    checkout = tmp_path / "checkout"
+    git.run(["worktree", "add", "--detach", str(checkout)], world.repo_root)
+    assert git.out(["config", "user.email"], checkout) == "me@example.com"
+    assert _send("POST", "/v1/repos/git-identity", {**body, "name": "Other", "email": "other@example.com"})[0] == 200
+    assert git.out(["config", "user.name"], world.repo_root) == "--Name"
+    assert git.out(["config", "user.email"], world.repo_root) == "me@example.com"
+    assert _send("POST", "/v1/sessions", body)[0] == 200 and started == [True]
+    assert not global_config.exists()
+    other = tmp_path / "other"
+    other.mkdir()
+    git.run(["init", "-q", "-b", "main"], other)
+    git.run(["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "--allow-empty", "-qm", "Initial commit"], other)
+    reached = []
+
+    def stop_before_launch(repo, *args, **kwargs):
+        reached.append(repo)
+        raise SystemExit(0)
+
+    with monkeypatch.context() as cli_patch:
+        cli_patch.setattr("brindle.cli._resolve_supervisor", stop_before_launch)
+        for cwd, target, expected in [(world.repo_root, other, 1), (other, world.repo_root, 0)]:
+            cli_patch.chdir(cwd)
+            result = CliRunner().invoke(app, ["start", "--no-attach", "--yes", "--worktree", str(target)])
+            assert result.exit_code == expected
+        assert reached == [world.repo_root]
+    git.run(["config", "--local", "--unset", "user.name"], world.repo_root)
+    git.run(["config", "--global", "user.name", "Global Name"], world.repo_root)
+    before = global_config.read_bytes()
+    assert _send("POST", "/v1/sessions", body)[0] == 200
+    assert _send("POST", "/v1/repos/git-identity", {**body, "name": "Other", "email": "other@example.com"})[0] == 200
+    assert git.run(["config", "--local", "--get", "user.name"], world.repo_root, check=False).returncode == 1
+    assert global_config.read_bytes() == before
+
+    # Once identity is settled, the existing running-session choice still holds the launch.
+    monkeypatch.setattr(svc, "start", real_start)
+    spawned = []
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id == "sup")
+    monkeypatch.setattr(agents, "spawn", lambda *a, **k: spawned.append(a))
+    code, reply = _send("POST", "/v1/sessions", body)
+    assert code == 409 and spawned == []
+    conflict = reply["conflict"]
+    assert [c["key"] for c in conflict["choices"]] == ["o", "a", "n", "p"]
+    assert [s["id"] for s in conflict["sessions"]] == ["sup"]
+
+
 def _send(method: str, path: str, body: dict | None = None, peer_pid: int | None = None,
           token: str | None = TOKEN) -> tuple[int, dict]:
     raw = json.dumps(body or {}).encode()
@@ -269,17 +349,6 @@ def test_an_edit_from_review_commits_on_the_workers_branch(db, repo, world, tmp_
     assert path in reply["stat"]
     assert reply["commit"] == sh("git rev-parse HEAD", wt)
     assert [e["workspace_id"] for e in edited] == ["proj/w-e"]
-
-
-def test_a_running_session_comes_back_as_a_409_with_the_choices(db, world, monkeypatch):
-    spawned = []
-    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id == "sup")
-    monkeypatch.setattr(agents, "spawn", lambda *a, **k: spawned.append(a))
-    code, reply = _send("POST", "/v1/sessions", {"repo": world.repo_root})
-    assert code == 409 and spawned == []
-    conflict = reply["conflict"]
-    assert [c["key"] for c in conflict["choices"]] == ["o", "a", "n", "p"]
-    assert [s["id"] for s in conflict["sessions"]] == ["sup"]
 
 
 @pytest.fixture

@@ -89,6 +89,25 @@ def sweeps(db, clock, n=2):
         cull.note_stuck(db, now, {})
 
 
+@pytest.mark.parametrize("options,cursor", [
+    (["1. Yes", "2. Not now", "3. Don't show again"], 0),
+    (["1. Yes"], 0),
+    (["1. Yes", "2. Don't show again"], -1),
+])
+def test_teach_auto_mode_startup_bypasses_classifier(db, launch, options, cursor):
+    pane, asked = launch("Teach auto mode about your environment?", options,
+                         {"kind": "setting_choice", "option": "Yes"}, provider="claude")
+    pane.cursor = cursor
+    prompt_answer.finish_launch(db, db.get_agent("w1"))
+    if len(options) > 1 and cursor >= 0:
+        assert pane.chosen == "3. Don't show again" and pane.keys == ["Down", "Down", "Enter"]
+        assert db.pending_count("boss") == 0
+    else:
+        assert pane.chosen is None and pane.keys == []
+        assert db.pending_count("boss") == 1
+    assert asked == []
+
+
 @pytest.mark.parametrize("question,options,mode,status,screen,provider", [
     ("Which storage should I use?", ["1. SQLite", "2. Postgres"], "assign", "idle",
      "• Which storage should I use?\n\n  1. SQLite\n  2. Postgres\n\n› \n  97% context left", "codex"),

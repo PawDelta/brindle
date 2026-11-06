@@ -139,6 +139,7 @@ def started(repo, monkeypatch):
         return Agent("a1", ws_.id, profile, "claude", None, "interactive", "starting", "w1", None, 0.0)
 
     monkeypatch.setattr(agents, "spawn", fake_spawn)
+    monkeypatch.setattr(git, "require_user_identity", lambda path: None)
     for name in ("_attach", "_cull_detached", "_local_models_detached", "_settings_sync_detached",
                  "_preflight", "_trust_codex_hook"):
         monkeypatch.setattr(cli, name, lambda *a, **kw: None)

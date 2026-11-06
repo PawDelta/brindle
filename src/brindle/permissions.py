@@ -500,6 +500,15 @@ def preset_rules(name: str) -> list[Rule]:
     return list(PRESETS[name][0]())
 
 
+def autonomous(cfg) -> bool:
+    """Whether the repo's policy is on and the person's store runs what no
+    rule covers: the Autonomous preset. With the policy off, presets do nothing."""
+    try:
+        return cfg.permission_policy == "on" and load_store().unmatched == "allow"
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def preset_unmatched(name: str) -> str:
     return PRESETS[name][1]
 

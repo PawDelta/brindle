@@ -18,7 +18,7 @@ from dataclasses import dataclass, fields
 from typing import Iterator
 
 from brindle import bus
-from brindle.config import db_path, record_first_run
+from brindle.config import db_path
 from brindle.redact import mask
 
 # Claude Code's own subagents (native_subagents table, see below). A crash
@@ -53,6 +53,13 @@ CREATE TABLE IF NOT EXISTS workspaces (
 );
 -- A suggested review cap is announced once for the branch's workspace,
 -- including when a replacement worker starts immediately or from the queue.
+-- Per-agent marks kept apart from agents (a released table gains no column).
+CREATE TABLE IF NOT EXISTS agent_marks (
+    agent_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    value TEXT NOT NULL,
+    PRIMARY KEY (agent_id, kind)
+);
 CREATE TABLE IF NOT EXISTS review_cap_notices (
     workspace_id TEXT PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE
 );
@@ -1171,8 +1178,6 @@ def migration_incompatibility() -> str | None:
 
 class DB:
     def __init__(self, path: str | None = None) -> None:
-        if path is None:
-            record_first_run()   # before this creates the file that says brindle has run here
         p = str(path) if path is not None else str(db_path())
         if p != ":memory:":
             from pathlib import Path
@@ -1825,6 +1830,21 @@ class DB:
             bus.publish_agent(self, "message.queued", agent_id, message_id=message_id,
                               sender_id=sender_id)
         return message_id
+
+    def mark(self, agent_id: str, kind: str) -> str | None:
+        """The value of ``agent_id``'s ``agent_marks`` row of ``kind``, if any."""
+        row = self.conn.execute("SELECT value FROM agent_marks WHERE agent_id=? AND kind=?",
+                                (agent_id, kind)).fetchone()
+        return row["value"] if row else None
+
+    def set_mark(self, agent_id: str, kind: str, value: str | None) -> None:
+        with self.tx() as c:
+            if value is None:
+                c.execute("DELETE FROM agent_marks WHERE agent_id=? AND kind=?", (agent_id, kind))
+            else:
+                c.execute("INSERT INTO agent_marks (agent_id, kind, value) VALUES (?,?,?) "
+                          "ON CONFLICT(agent_id, kind) DO UPDATE SET value=excluded.value",
+                          (agent_id, kind, value))
 
     def mark_delivered(self, message_id: int) -> None:
         with self.tx() as c:

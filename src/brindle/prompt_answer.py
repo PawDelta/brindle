@@ -540,6 +540,25 @@ class Startup:
         _remember(key, decision)
         return decision
 
+    def decline_teach_auto_mode(self, screen: str) -> str:
+        """Claude's known environment upsell bypasses model classification."""
+        from brindle.providers import ClaudeCode
+
+        if _tail(screen) == self.acted_on:
+            return "answering"
+        key = ClaudeCode.teach_auto_mode_key(screen)
+        if key is None:
+            _BLOCKED[self.target] = redact("\n".join(_tail(screen)))
+            return "blocked"
+        db, agent_id = _BOUND.get(self.target, (None, None))
+        agent = db.get_agent(agent_id) if db is not None else None
+        if agent is not None:
+            decline_teach_auto_mode(db, agent, screen)
+        else:
+            tmux.send_keys(self.target, key)
+        self.acted_on = _tail(screen)
+        return "answering"
+
     def step(self, screen: str) -> str:
         """Act on one capture of the pane: "answering" (a key went in),
         "blocked" (only the person can answer it; see take_blocked), or ""
@@ -580,6 +599,45 @@ class Startup:
         tmux.send_keys(self.target, key)
         self.acted_on = _tail(screen)
         return "answering"
+
+
+def decline_teach_auto_mode(db, agent, screen: str) -> bool:
+    """One verified key per redraw, serialized with delivery across processes.
+
+    This is the environment upsell only, never a permission or safety prompt.
+    A missing decline label leaves the pane and its queued messages untouched.
+    """
+    from brindle import agents
+    from brindle.providers import ClaudeCode
+
+    if agent.provider != "claude" or not ClaudeCode.teach_auto_mode_menu(screen):
+        return False
+    with agents.delivery_lock(agent.id):
+        fresh = db.get_agent(agent.id)
+        if (not fresh or fresh.provider != "claude" or fresh.tmux_window != agent.tmux_window
+                or agents.server_of(fresh) != agents.server_of(agent)
+                or fresh.status not in ("starting", "idle", "processing", "waiting")):
+            return True
+        server = agents.server_of(fresh)
+        try:
+            screen = tmux.capture(fresh.tmux_window, lines=40, server=server)
+        except tmux.TmuxError:
+            return True
+        if not ClaudeCode.teach_auto_mode_menu(screen):
+            return True  # re-read its status on the next sweep
+        key = ClaudeCode.teach_auto_mode_key(screen)
+        if key is None:
+            tell(db, fresh, "Environment setup has no identifiable decline option; delivery stays blocked.\n"
+                 + "\n".join(_tail(screen)))
+            return True
+        mark = fresh.tmux_window + ":" + _key(plain(screen))
+        if db.mark(fresh.id, "teach-auto-mode") != mark:
+            db.set_mark(fresh.id, "teach-auto-mode", mark)
+            try:
+                tmux.send_keys(fresh.tmux_window, key, server=server)
+            except tmux.TmuxError:
+                pass  # leave delivery blocked; never fall through to typing
+    return True
 
 
 def tell(db, agent, prompt: str) -> bool:
@@ -624,6 +682,8 @@ def at_turn_end(db, agent) -> bool:
         return False
     try:
         screen = tmux.capture(agent.tmux_window, lines=40, server=agents.server_of(agent))
+        if decline_teach_auto_mode(db, agent, screen):
+            return False
         row = db.conn.execute("SELECT submitted_prompt FROM launch_health WHERE agent_id=?",
                               (agent.id,)).fetchone()
         brief = (row["submitted_prompt"] if row else None) or agent.task or ""

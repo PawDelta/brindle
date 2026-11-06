@@ -191,7 +191,7 @@ def test_sleep_baseline_tracks_scope_expression_and_occurrences(tmp_path):
     assert old[0].key.startswith("sleep:test_sleep.py::test_old::")
 
 
-def test_main_budget_baseline_and_strict_mode(tmp_path, monkeypatch, capsys):
+def test_count_below_the_ceiling_needs_no_budget_edit(tmp_path, monkeypatch, capsys):
     tests = tmp_path / "tests"
     tests.mkdir()
     (tests / "test_sleep.py").write_text("import time\ndef test_old(): time.sleep(1)\n")
@@ -217,6 +217,10 @@ def test_main_budget_baseline_and_strict_mode(tmp_path, monkeypatch, capsys):
     assert quality.main([*root, "--budget", "2"]) == 1
     assert "total test count 3 exceeds budget 2" in capsys.readouterr().out
     assert quality.main([*root, "--budget", "3", "--strict"]) == 1
+
+    for collected, expected in [(3664, 0), (4001, 1)]:
+        count["n"] = collected
+        assert quality.main(root) == expected
 
     monkeypatch.setattr(quality.pytest, "main", lambda *a, **kw: 2)
     assert quality.main(root) == 1
