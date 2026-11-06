@@ -312,6 +312,12 @@ def test_interactive_supervisor_on_autonomous_needs_no_grants(db, ws, monkeypatc
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(antigravity, "tool_names", lambda: ["assign"])
     monkeypatch.setattr(permissions, "DEFAULT_PRESET", "autonomous")
+    # Default branch discovery is exercised separately; keep this policy
+    # decision test off git subprocesses while preserving per-repo branches.
+    monkeypatch.setattr(permissions, "default_branch", lambda root: {
+        ws.path: "main", str(tmp_path / "trunk-repo"): "trunk",
+        str(tmp_path / "develop-repo"): "develop",
+    }.get(root))
     permissions.store_path().unlink(missing_ok=True)
     add_agent(db, ws, agent_id="sup", window="")
 
@@ -360,7 +366,6 @@ def test_interactive_supervisor_on_autonomous_needs_no_grants(db, ws, monkeypatc
     # The default branch a push rule means is that of the repo it runs in, however it gets there.
     trunk = tmp_path / "trunk-repo"
     trunk.mkdir()
-    sh("git init -q -b trunk && git -c user.name=t -c user.email=t@example.com commit -q --allow-empty -m one", trunk)
     assert answer("run_command", {"CommandLine": "git push origin trunk", "Cwd": str(trunk)})["decision"] == "deny"
     assert answer("run_command", {"CommandLine": f"cd {trunk} && git push origin trunk"})["decision"] == "deny"
     assert answer("run_command", {"CommandLine": f"git -C {trunk} push origin trunk"})["decision"] == "deny"
@@ -368,7 +373,6 @@ def test_interactive_supervisor_on_autonomous_needs_no_grants(db, ws, monkeypatc
     # Each push is judged in its own repo: joined, they get what they get alone.
     develop = tmp_path / "develop-repo"
     develop.mkdir()
-    sh("git init -q -b develop && git -c user.name=t -c user.email=t@example.com commit -q --allow-empty -m one", develop)
     each = f"git -C {trunk} push origin develop && git -C {develop} push origin trunk"
     assert answer("run_command", {"CommandLine": each})["decision"] == "allow"
     held_back = f"git -C {trunk} push origin develop && git -C {develop} push origin develop"
