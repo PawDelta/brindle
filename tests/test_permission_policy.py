@@ -273,7 +273,7 @@ def test_paths_are_learned_relative_to_the_worktree(ws):
 
 
 ENV_PART = "env | grep -E '^GIT_(AUTHOR|COMMITTER)' ; "
-# As run on a fresh account: Claude's prompt offered Yes while the Inbox card said a deny rule blocked it.
+# Claude's prompt offered Yes for this while the Inbox card said a deny rule blocked it.
 ON_FRESH_ACCOUNT = ("""echo "--- config"; git config --show-origin --get-regexp '^user\\.' ; echo "--- env"; """
                     + ENV_PART + """echo "--- log"; git log --all """
                     """--format='%h %D | a=%an <%ae> | c=%cn <%ce> | %s' -n 10; echo "--- status"; """
@@ -335,7 +335,6 @@ def test_autonomous_starts_claude_without_prompts(db, ws, monkeypatch, preset, p
                                      ws.repo_root)
     assert card.decision == ("deny" if policy == "on" else "ask")
     if policy == "on":
-        # Whatever the mode, the policy's deny and its ask still decide.
         assert pre_tool("cat ~/.ssh/id_rsa") == pre_tool(ON_FRESH_ACCOUNT) == "deny"
         assert pre_tool("git push origin main") == "ask"
         if preset == "autonomous":
