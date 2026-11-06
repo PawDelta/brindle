@@ -98,6 +98,7 @@ import { openExternal, type OpenUrl } from "../../api/open";
 import { SETTINGS_TABS, type SettingsTab } from "../../routes";
 import { AccountPanel, UsagePanel } from "../Account";
 import { RepoSettings } from "./ProjectSettingsScreen";
+import { LoadingButton } from "../../components/LoadingButton";
 import { alert, button, card, field, h2, main, mono, notice, pill, quiet } from "../../components/ui";
 import { useProviders } from "../../store/providers";
 import { StoreContext, useAppState } from "../../store/useStore";
@@ -1409,9 +1410,9 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
                   <button type="button" className={quiet} disabled={saving} onClick={() => setUserDraft(userLoaded)}>
                     Discard
                   </button>
-                  <button type="button" className={button} disabled={saving || userMissing.length > 0} onClick={() => void saveUser()}>
-                    {saving ? "Saving…" : "Save your settings"}
-                  </button>
+                  <LoadingButton className={button} busy={saving} disabled={saving || userMissing.length > 0} onClick={() => saveUser()}>
+                    Save your settings
+                  </LoadingButton>
                 </div>
               )}
               {userMissing.length > 0 && userDirty.length > 0 && (
