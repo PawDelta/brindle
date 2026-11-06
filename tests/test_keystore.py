@@ -121,14 +121,17 @@ def test_keychain_read_cached(monkeypatch, record, external):
             assert keystore.KeychainStore(service, account).load() == {"value": "answered"}
     assert len(started) == 1 and not keystore._refused_marker().exists()
 
-    def no_room(self, args, stdin=None):
-        raise spawn.Busy("no room for it")
-
     now[0] += keystore.KEYCHAIN_READ_TTL
-    monkeypatch.setattr(keystore.KeychainStore, "_run", no_room)
-    with pytest.raises(spawn.Busy):     # never started: nothing asked, so nothing held back
-        keystore.KeychainStore(service, account).load()
-    assert not keystore._refused_marker().exists()
+    started.clear()
+    with monkeypatch.context() as m:
+        m.setattr(spawn.subprocess, "Popen", Security)
+        m.setattr(keystore.KeychainStore, "_run", real_run)
+        for seconds, abandoned in ((60, True), (0, False)):     # a request already over starts nothing...
+            with spawn.deadline(seconds) as request, pytest.raises(spawn.Busy):
+                if abandoned:
+                    request.stop("the client went away")
+                keystore.KeychainStore(service, account).load()
+    assert started == [] and not keystore._refused_marker().exists()     # ...so nothing asked, nothing held back
 
 
 def test_file_backend_refuses_loose_permissions(brindle_home):

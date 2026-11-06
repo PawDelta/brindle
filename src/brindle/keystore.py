@@ -162,8 +162,7 @@ class KeychainStore:
             # Run to an outcome: stopped when a client goes away, a dialog it was
             # waiting on would just come back at the next poll. A read cut short
             # isn't a refusal either, so nothing could be held back for it.
-            with spawn.no_deadline():
-                return spawn.read(["security", *args], timeout=STORE_LIMIT)
+            return spawn.read(["security", *args], timeout=STORE_LIMIT, to_its_end=True)
         return spawn.action(["security", *args], input=stdin, timeout=STORE_WRITE_LIMIT)
 
     def load(self) -> dict | None:
