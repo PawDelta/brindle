@@ -5625,24 +5625,30 @@ def api_error_kind(text: str) -> str:
     return next((label for pattern, label in API_ERROR_KINDS if pattern.search(low)), "API error")
 
 
+API_ERROR_MARK = "api-error-told"
+
+
+def api_error_stop(agent: Agent) -> str:
+    """Which stop of ``agent``'s an API-error notice is about: when it went
+    idle. Each new turn moves it, so each stop gets its own notice."""
+    return repr(agent.status_since or agent.created_at)
+
+
 def tell_parent_api_error(db: DB, agent: Agent, error: str) -> bool:
     """A worker's turn ended on an API error (Claude Code gave up on it, or
     never runs a hook after it) before the worker reported. Its CLI sits idle
-    at its prompt and nothing wakes it, so tell its supervisor now, once per
-    stop (the same claim as tell_parent_unreported, so the idle reminder
-    doesn't repeat it), naming only the error's kind. Returns whether the
-    supervisor was told."""
+    at its prompt and nothing wakes it, so tell its supervisor now, naming
+    only the error's kind. Once per stop, by a mark of its own: a generic
+    idle reminder sent first doesn't stand in for it (it can't say why the
+    worker stopped), while this one, sent first, stands in for that reminder.
+    Returns whether the supervisor was told."""
     if agent.mode not in ("assign", "handoff_detached") or not agent.parent_id or agent.result is not None:
         return False
     if db.get_agent(agent.parent_id) is None:
         return False
-    if agent.unreported_noted:
-        return False  # this stop was told already (a new prompt clears it)
-    claimed_at = time.time()
-    if not db.claim_unreported(agent.id, claimed_at, agent.unreported_noted,
-                               reopened_at=agent.reopened_at,
-                               status_since=agent.status_since or agent.created_at):
-        return False
+    won, previous = db.claim_mark(agent.id, API_ERROR_MARK, api_error_stop(agent))
+    if not won:
+        return False  # this stop was told already
     ws = db.get_workspace(agent.workspace_id)
     where = f" on branch `{ws.branch}` (workspace {ws.id})" if ws else ""
     body = (f"[brindle] Worker {agent.id} ({agent.profile}, {agent.provider}){where} stopped on an "
@@ -5656,8 +5662,12 @@ def tell_parent_api_error(db: DB, agent: Agent, error: str) -> bool:
         try:
             db.enqueue(agent.parent_id, body, agent.id)
         except Exception:  # noqa: BLE001
-            db.release_note(agent.id, claimed_at, agent.unreported_noted, field="unreported_noted")
+            db.set_mark(agent.id, API_ERROR_MARK, previous)
             return False
+    if not agent.unreported_noted:
+        # The idle reminder would only repeat this, less exactly.
+        db.claim_unreported(agent.id, time.time(), None, reopened_at=agent.reopened_at,
+                            status_since=agent.status_since or agent.created_at)
     return True
 
 

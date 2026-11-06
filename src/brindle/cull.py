@@ -284,13 +284,14 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
     decline_environment_setups(db, panes)
     done.extend(settle_startups(db, now, panes))
     done.extend(note_stuck(db, now, panes))
+    # Before the idle reminder: a stop on an API error is told with its kind.
+    done.extend(note_api_errors(db, now, panes))
     done.extend(note_idle_unreported(db, now, panes))
     done.extend(note_unreported_commits(db, now, panes))
     done.extend(note_reported_stuck(db, now, panes))
     done.extend(note_stalled(db, now, panes))
     done.extend(note_long_commands(db, now, panes))
     done.extend(note_silent(db, now, panes))
-    done.extend(note_api_errors(db, now, panes))
     done.extend(note_model_refused(db, now, panes))
 
     # 4. Sidebar locks of sessions that are over.
@@ -1047,7 +1048,8 @@ def note_api_errors(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
     for a in db.list_agents():
         if (a.mode not in agents.FORWARDING_MODES or not a.parent_id or a.result is not None
                 or a.dismissed_at is not None or a.provider != "claude" or a.headless
-                or a.status not in ("processing", "idle") or a.unreported_noted
+                or a.status not in ("processing", "idle")
+                or (a.status == "idle" and db.mark(a.id, agents.API_ERROR_MARK) == agents.api_error_stop(a))
                 or not agents.runs_process(a) or not agents.same_server(a, panes)
                 or not agents.is_alive(a, panes) or not agents.owns_pane(db, a, owners)):
             continue
