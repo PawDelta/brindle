@@ -74,7 +74,7 @@ def test_repo_git_identity_is_set_for_that_repo_only(db, world, tmp_path, monkey
     other = tmp_path / "other"
     other.mkdir()
     git.run(["init", "-q", "-b", "main"], other)
-    git.run(["commit", "--allow-empty", "-qm", "Initial commit"], other)
+    git.run(["-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "--allow-empty", "-qm", "Initial commit"], other)
     reached = []
 
     def stop_before_launch(repo, *args, **kwargs):
