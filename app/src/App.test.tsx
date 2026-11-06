@@ -251,6 +251,15 @@ describe("App", () => {
     fireEvent.click(link("Open Account"));
     expect(await screen.findByRole("region", { name: "Account" })).toBeTruthy();
     expect(link("Open Account").getAttribute("aria-current")).toBe("page");
+    // Clicked again from another of Settings' tabs, an entry opens its own tab again.
+    const selected = (name: string) => screen.getByRole("tab", { name }).getAttribute("aria-selected");
+    fireEvent.click(screen.getByRole("tab", { name: "Permissions" }));
+    fireEvent.click(link("Open Account"));
+    await waitFor(() => expect(selected("Account")).toBe("true"));
+    fireEvent.click(link("Settings"));
+    fireEvent.click(await screen.findByRole("tab", { name: "Storage" }));
+    fireEvent.click(link("Settings"));
+    await waitFor(() => expect(selected("General")).toBe("true"));
 
     // ⌘1 is the first live session, back from any page; ⌘N the composer.
     fireEvent.keyDown(window, { key: "1", metaKey: true });
@@ -298,17 +307,19 @@ describe("App", () => {
     await screen.findByRole("complementary", { name: "Sidebar" });
     fireEvent.click(await within(nav()).findByRole("button", { name: "Project settings for other" }));
     await screen.findByRole("region", { name: "Project settings" });
-    expect(screen.getByRole("radio", { name: /^other/ }).getAttribute("aria-checked")).toBe("true");
+    expect(screen.getByRole("tab", { name: "Project" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByRole("combobox", { name: "Repo" })).toHaveProperty("value", OTHER);
     fireEvent.click(screen.getByTestId("terminal-toggle"));
     await waitFor(() => expect(daemon.shells.map((s) => s.cwd)).toEqual([OTHER]));
-    // Settings opens on You; the switch's repo side is the current session's repo (here the second), with a menu for the others.
+    // Settings opens on General; its Project tab is the current session's repo (here the second), with a picker for the others.
     localStorage.setItem(LAST_SESSION_KEY, JSON.stringify({ root: "sup2", repo: OTHER }));
     fireEvent.click(link("Settings"));
-    fireEvent.click(await screen.findByRole("radio", { name: /^other/ }));
+    expect((await screen.findByRole("tab", { name: "General" })).getAttribute("aria-selected")).toBe("true");
+    fireEvent.click(screen.getByRole("tab", { name: "Project" }));
     await screen.findByRole("region", { name: "Project settings" });
-    fireEvent.click(screen.getByRole("radio", { name: /^other/ }));
-    fireEvent.click(screen.getByRole("menuitem", { name: "proj" }));
-    expect((await screen.findByRole("radio", { name: /^proj/ })).getAttribute("aria-checked")).toBe("true");
+    expect(screen.getByRole("combobox", { name: "Repo" })).toHaveProperty("value", OTHER);
+    fireEvent.change(screen.getByRole("combobox", { name: "Repo" }), { target: { value: REPO } });
+    await waitFor(() => expect(screen.getByRole("combobox", { name: "Repo" })).toHaveProperty("value", REPO));
     sync.stop();
   });
 
@@ -484,7 +495,7 @@ describe("App", () => {
     expect(screen.queryByTestId("engine-banner")).toBeNull();
 
     fireEvent.click(link("Settings"));
-    await screen.findByRole("region", { name: "Settings" });
+    fireEvent.click(await screen.findByRole("tab", { name: "About" }));
     const engineSection = screen.getByTestId("engine");
     fireEvent.click(within(engineSection).getByRole("button", { name: /Details/ }));
     expect(within(engineSection).getByTestId("connection").textContent).toBe("daemon · connected");
@@ -512,7 +523,7 @@ describe("App", () => {
     await waitFor(() => expect(screen.queryByTestId("engine-banner")).toBeNull());
     await waitFor(() => expect(screen.queryByTestId("inbox-badge")).toBeNull());
     fireEvent.click(link("Settings"));
-    await screen.findByRole("region", { name: "Settings" });
+    fireEvent.click(await screen.findByRole("tab", { name: "About" }));
     fireEvent.click(within(screen.getByTestId("engine")).getByRole("button", { name: /Details/ }));
     expect(within(screen.getByTestId("engine")).getByTestId("connection").textContent).toBe("daemon · connected");
     const after = daemon.requests.slice(before).filter((r) => r.method === "GET").map((r) => r.path);
@@ -625,9 +636,10 @@ describe("providers in the sidebar", () => {
     const problem = await within(nav()).findByTestId("provider-problem");
     expect(statusLine().lastElementChild).toBe(problem);
     expect(within(statusLine()).getByTestId("usage-reading")).toBeTruthy();
-    expect(problem.textContent).toBe("Codex signed out");
-    expect(problem.getAttribute("data-kind")).toBe("signed_out");
-    expect(problem.className).toContain("text-sap");
+    // Claude works, so Codex's missing sign-in is setup to do: quiet words, not a warning.
+    expect(problem.textContent).toBe("Set up Codex");
+    expect(problem.getAttribute("data-kind")).toBe("set_up");
+    expect(problem.className).not.toContain("text-sap");
     expect(within(statusLine()).queryByTestId("provider-problem-more")).toBeNull();
     expect(statusLine().className).toContain("whitespace-nowrap");
     // Clicking the words: Settings, scrolled to Providers, where the row has its Sign in.
@@ -642,7 +654,7 @@ describe("providers in the sidebar", () => {
     fireEvent.click(within(screen.getByTestId("provider-opencode")).getByRole("button", { name: "Install OpenCode" }));
     await screen.findByTestId("provider-install-opencode-failed");
     await waitFor(() => expect(within(statusLine()).getByTestId("provider-problem-more").textContent).toBe("+1"));
-    expect(within(statusLine()).getByTestId("provider-problem").textContent).toContain("Codex signed out");
+    expect(within(statusLine()).getByTestId("provider-problem").textContent).toContain("OpenCode install failed");
     fireEvent.click(link("Knowledge"));
     expect(within(statusLine()).getByTestId("provider-problem-more").textContent).toBe("+1");
     // Back through the words; the failed install let go, the sign-out is all that's left.

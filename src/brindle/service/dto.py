@@ -134,6 +134,8 @@ class AgentDTO(_DTO):
     # Set (instead of the rest) when another identity holds the session.
     locked: str | None = None
     tokens: str | None = None
+    # The model its transcript last ran on (the usage meter names it); absent until it has run.
+    model: str | None = None
     unread: int | None = None
     hooks_off: str | None = None
     parent_id: str | None = None

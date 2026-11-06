@@ -175,6 +175,8 @@ def agent_entry(db: DB, a: Agent, *, detail: bool = False,
         entry["failed_why"] = a.failed_why
     if u and u.total:
         entry["tokens"] = usage_mod.short_summary(u)
+    if u and u.model:
+        entry["model"] = u.model
     unread = db.unread_count(a.id)
     if unread:
         entry["unread"] = unread
