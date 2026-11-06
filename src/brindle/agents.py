@@ -5646,9 +5646,10 @@ def tell_parent_api_error(db: DB, agent: Agent, error: str) -> bool:
         return False
     if db.get_agent(agent.parent_id) is None:
         return False
-    won, previous = db.claim_mark(agent.id, API_ERROR_MARK, api_error_stop(agent))
+    stop = agent.status_since or agent.created_at
+    won, previous = db.claim_stop_mark(agent.id, API_ERROR_MARK, stop, agent.reopened_at)
     if not won:
-        return False  # this stop was told already
+        return False  # this stop was told already, or it isn't the worker's current one
     ws = db.get_workspace(agent.workspace_id)
     where = f" on branch `{ws.branch}` (workspace {ws.id})" if ws else ""
     body = (f"[brindle] Worker {agent.id} ({agent.profile}, {agent.provider}){where} stopped on an "
@@ -5662,7 +5663,7 @@ def tell_parent_api_error(db: DB, agent: Agent, error: str) -> bool:
         try:
             db.enqueue(agent.parent_id, body, agent.id)
         except Exception:  # noqa: BLE001
-            db.set_mark(agent.id, API_ERROR_MARK, previous)
+            db.release_stop_mark(agent.id, API_ERROR_MARK, stop, previous)
             return False
     if not agent.unreported_noted:
         # The idle reminder would only repeat this, less exactly.

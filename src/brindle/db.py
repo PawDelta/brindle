@@ -1978,6 +1978,43 @@ class DB:
                       (agent_id, kind, value))
         return True, row["value"] if row else None
 
+    def claim_stop_mark(self, agent_id: str, kind: str, status_since: float,
+                        reopened_at: float | None) -> tuple[bool, str | None]:
+        """``claim_mark`` for a notice about one stop of an idle agent, the
+        one its caller read (``status_since``, ``reopened_at``): won only if
+        that stop is still the agent's current one, with no result, and not
+        claimed yet. A stale read of an older stop neither sends its notice
+        nor overwrites a newer stop's mark. Returns whether it won and the
+        value it replaced (for ``release_stop_mark``)."""
+        value = repr(status_since)
+        with self.tx() as c:
+            current = c.execute(
+                "SELECT 1 FROM agents WHERE id=? AND status='idle' AND result IS NULL"
+                " AND COALESCE(status_since, created_at) IS ? AND reopened_at IS ?",
+                (agent_id, status_since, reopened_at)).fetchone()
+            if current is None:
+                return False, None
+            row = c.execute("SELECT value FROM agent_marks WHERE agent_id=? AND kind=?",
+                            (agent_id, kind)).fetchone()
+            if row and row["value"] == value:
+                return False, value
+            c.execute("INSERT INTO agent_marks (agent_id, kind, value) VALUES (?,?,?) "
+                      "ON CONFLICT(agent_id, kind) DO UPDATE SET value=excluded.value",
+                      (agent_id, kind, value))
+        return True, row["value"] if row else None
+
+    def release_stop_mark(self, agent_id: str, kind: str, status_since: float,
+                          previous: str | None) -> None:
+        """Undo a ``claim_stop_mark`` whose notice couldn't be sent, only
+        while the mark is still the one it claimed."""
+        with self.tx() as c:
+            if previous is None:
+                c.execute("DELETE FROM agent_marks WHERE agent_id=? AND kind=? AND value=?",
+                          (agent_id, kind, repr(status_since)))
+            else:
+                c.execute("UPDATE agent_marks SET value=? WHERE agent_id=? AND kind=? AND value=?",
+                          (previous, agent_id, kind, repr(status_since)))
+
     def release_note(self, agent_id: str, since: float, previous: float | None,
                      *, field: str = "stuck_noted") -> None:
         """Undo ``claim_note`` when the note couldn't be sent, unless a later one replaced it."""

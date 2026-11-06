@@ -125,6 +125,11 @@ def test_a_worker_left_processing_on_an_api_error_screen_is_reported(db, repo, m
     db.update_agent("w4", status="idle", status_since=now - cull.IDLE_UNREPORTED_AFTER - 60)
     sent = []
     monkeypatch.setattr(agents, "send_message", lambda db_, to, body, sender_id=None: sent.append((to, body)))
+    # A caller holding w3 as it was, after w3 ran another turn and stopped again:
+    # an older stop is neither told nor marked over the newer one.
+    stale = db.get_agent("w3")
+    db.update_agent("w3", status_since=stale.status_since + 1)
+    assert not agents.tell_parent_api_error(db, stale, "API Error: 529") and sent == []
     # The generic reminder, even sent first, doesn't stand in for the error's kind.
     assert cull.note_idle_unreported(db, now, {}) == ["told boss that worker w4 is idle without reporting"]
     assert cull.note_api_errors(db, now, {}) == [f"told boss that worker {w} stopped on an API error"
