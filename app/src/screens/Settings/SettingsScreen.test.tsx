@@ -119,6 +119,15 @@ describe("settings screen", () => {
       await waitFor(() => expect(shown(testId)).toBe(true));
       for (const [, other] of shows.filter(([t]) => t !== tab)) expect(shown(other)).toBe(false);
     }
+    // Project's panel stays mounted, hidden, with its own Plan first: General's label still works its own switch.
+    fireEvent.click(screen.getByRole("tab", { name: "General" }));
+    const mine = screen.getByTestId("your-settings");
+    const theirs = within(screen.getByTestId("project-settings")).getByRole("switch", { name: "Plan first", hidden: true });
+    const before = theirs.getAttribute("aria-checked");
+    fireEvent.click(within(mine).getByText("Plan first", { selector: "label" }));
+    expect(within(mine).getByRole("switch", { name: "Plan first" }).getAttribute("aria-checked")).toBe("true");
+    expect(theirs.getAttribute("aria-checked")).toBe(before);
+    expect(within(screen.getByTestId("user-save")).getByText(/1 change/)).toBeTruthy();
     stop();
   });
 

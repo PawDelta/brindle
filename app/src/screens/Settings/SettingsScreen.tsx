@@ -72,7 +72,7 @@
    worktrees, each with Clean, and Clean all, asked before anything goes.
    Last, About: the app's version and its license files (About.tsx). */
 
-import { useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useContext, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import type { ClaudePermissionMode, Config, DaemonClient, DebugState, DoctorCheck, KeyInfo, Meta, ProviderConnection, ProviderInstalled, UserSettings } from "../../api/client";
 import { debugState } from "../../api/debug";
 import { connected, factsOf, settingsNote, turnedOff } from "../../api/providers";
@@ -337,14 +337,14 @@ function Toggle({ id, label: name, checked, disabled, onChange }: { id: string; 
 /* One entry per line, kept as typed (spaces, a trailing newline) and read
    as the engine's list on each change; the text follows the draft only
    when the draft moves away from it (a discard, a reload). */
-function ListField({ s, value, disabled, onChange }: { s: Setting; value: unknown; disabled: boolean; onChange(value: unknown): void }) {
+function ListField({ id, s, value, disabled, onChange }: { id: string; s: Setting; value: unknown; disabled: boolean; onChange(value: unknown): void }) {
   const [text, setText] = useState(() => listText(value));
   useEffect(() => {
     setText((t) => (JSON.stringify(listOf(t)) === JSON.stringify(value) ? t : listText(value)));
   }, [value]);
   return (
     <textarea
-      id={`setting-${s.key}`}
+      id={id}
       className={`${field} min-h-16 w-full resize-y font-mono`}
       aria-label={s.label}
       value={text}
@@ -359,11 +359,11 @@ function ListField({ s, value, disabled, onChange }: { s: Setting; value: unknow
   );
 }
 
-function Field({ s, value, disabled, onChange }: { s: Setting; value: unknown; disabled: boolean; onChange(value: unknown): void }) {
-  const id = `setting-${s.key}`;
+/* `id`: the row's own (SettingRow's useId), so the same setting on two tabs (General's and Project's) keeps its label to its own control. */
+function Field({ id, s, value, disabled, onChange }: { id: string; s: Setting; value: unknown; disabled: boolean; onChange(value: unknown): void }) {
   switch (s.kind) {
     case "list":
-      return <ListField s={s} value={value} disabled={disabled} onChange={onChange} />;
+      return <ListField id={id} s={s} value={value} disabled={disabled} onChange={onChange} />;
     case "number":
       return (
         <>
@@ -400,6 +400,7 @@ function Field({ s, value, disabled, onChange }: { s: Setting; value: unknown; d
 }
 
 export function SettingRow({ s, value, dirty, disabled, onChange, override }: { s: Setting; value: unknown; dirty: boolean; disabled: boolean; onChange(value: unknown): void; override?: ReactNode }) {
+  const id = `setting-${s.key}-${useId()}`;
   return (
     <Row
       label={s.label}
@@ -413,7 +414,7 @@ export function SettingRow({ s, value, dirty, disabled, onChange, override }: { 
           s.blurb
         )
       }
-      htmlFor={`setting-${s.key}`}
+      htmlFor={id}
       wide={s.kind === "list"}
       badges={
         <>
@@ -423,7 +424,7 @@ export function SettingRow({ s, value, dirty, disabled, onChange, override }: { 
       }
       data={{ setting: s.key }}
     >
-      <Field s={s} value={value} disabled={disabled} onChange={onChange} />
+      <Field id={id} s={s} value={value} disabled={disabled} onChange={onChange} />
     </Row>
   );
 }
