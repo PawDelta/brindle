@@ -371,6 +371,11 @@ def _in_unasked_launch() -> bool:
 
 
 UNCHECKED = {"decision": "deny", "reason": "brindle couldn't check this call, and nothing after that check would stop it"}
+# An unasked launch whose repo turned the permission rules off afterwards: OpenCode still
+# asks nothing, and with the rules off brindle vouches for nothing, so every call is refused.
+POLICY_OFF = {"decision": "deny", "reason": "brindle's permission rules were turned off after this OpenCode "
+              "session started without prompts, so nothing checks its calls. Restart the session: with the "
+              "rules off, OpenCode asks before edits and commands"}
 
 
 def permission_config(profile, launch: Launch) -> dict:

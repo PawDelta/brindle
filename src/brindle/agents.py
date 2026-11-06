@@ -4489,6 +4489,10 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
             return opencode.UNCHECKED if opencode_unasked else None
         cfg = load_repo_config(ws.repo_root)
         policy = cfg.permission_policy == "on"
+        if opencode_unasked and not policy:
+            # Launched with the rules on and OpenCode's own asks off (opencode.Launch):
+            # turning the rules off since must not leave its calls unchecked.
+            return opencode.POLICY_OFF
         # Policy off: of the other CLIs only a Codex reviewer has the hook
         # (codex_hook.launch_flags). Nobody watches it, so it gets what its
         # allowed_tools cover and nothing else of brindle's: every other

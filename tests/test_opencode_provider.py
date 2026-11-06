@@ -216,6 +216,11 @@ def test_opencode_permission_mode_picks_what_opencode_asks(db, ws, monkeypatch, 
     for tool, args in (("apply_patch", {"patchText": 1}), ("apply_patch", {"patchText": hidden}), ("", {}), ("bash", {})):
         assert json.loads(call(None, tool=tool, args=args))["decision"] == "deny", tool
     assert call(None, tool="glob", args={"pattern": "*"}) == call(None, tool="todowrite", args={}) == ""
+    # The rules turned off after the launch: OpenCode still asks nothing, so nothing may pass unchecked.
+    set_local(ws.repo_root, "permission_policy", "off")
+    assert [json.loads(call(*c))["decision"] for c in (("touch x",), (None, "o1", "apply_patch", {"patchText": 1}))] \
+        == ["deny", "deny"]
+    set_local(ws.repo_root, "permission_policy", "on")
     monkeypatch.setattr(permissions, "decide", lambda *args, **kwargs: 1 / 0)
     assert json.loads(call("touch x"))["decision"] == "deny"
 
