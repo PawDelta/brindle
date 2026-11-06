@@ -633,9 +633,10 @@ export function Sidebar({ route, navigate, refresh, openUrl }: SidebarProps) {
   const workspaces = useAppState((s) => s.workspaces);
   const agent = useMemo(() => workspaces.flatMap((ws) => ws.agents ?? []).find((a) => a.id === selected?.root), [workspaces, selected]);
   // The meter names the model only with its own provider's usage; with none, the global most-used provider shows alone.
-  const own = agent?.model ? usage?.providers.find((p) => p.provider === agent.provider && weeklyWindow(p)) : undefined;
+  // The session's model always shows, with its own provider's weekly usage, or "—" when that provider reports none.
+  const model = agent?.model;
+  const own = agent && model ? (usage?.providers.find((p) => p.provider === agent.provider && weeklyWindow(p)) ?? { provider: agent.provider, known: false, limited: false, limited_until: null, updated_at: null, windows: [] }) : undefined;
   const shown = own ?? mostUsed;
-  const model = own ? agent?.model : undefined;
   const warning = !!shown && (shown.limited || planWindows(shown).some((window) => window.used >= WARN));
 
   // An open session's agents show.

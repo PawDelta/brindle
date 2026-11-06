@@ -128,6 +128,13 @@ describe("the sidebar's weekly usage reading", () => {
     expect(reading.dataset.provider).toBe("claude");
     expect(within(reading).getByRole("progressbar").getAttribute("aria-valuenow")).toBe("9");
     stop();
+    cleanup();
+    // A provider with no weekly reading keeps the session's model, with an empty meter, not another provider's.
+    const bare = app("normal", { workspaces: [{ ...root, agents: root.agents?.map((a) => ({ ...a, provider: "antigravity", model: "gemini-3-pro" })) }] });
+    expect((await screen.findByTestId("usage-model", {}, { timeout: 3000 })).textContent).toBe("Gemini 3 Pro");
+    expect(screen.getByTestId("usage-reading").dataset.provider).toBe("antigravity");
+    expect(screen.getByTestId("usage-reading").querySelector("[role=progressbar]")).toBeNull();
+    bare.stop();
   });
 
   it("a provider with no sign-in yet is quiet setup while another works, and a real sign-out stays a warning", async () => {
@@ -139,7 +146,11 @@ describe("the sidebar's weekly usage reading", () => {
     first.stop();
     cleanup();
     // Codex worked before and lost its sign-in while Claude still works: that is a real warning.
-    localStorage.setItem(SIGNED_IN_SEEN_KEY, JSON.stringify(["codex"]));
+    const working = app("normal", { providers: freshProviders({ claude: { path: "/bin/claude", version: "2" }, codex: { path: "/bin/codex", version: "1" } }) });
+    await waitFor(() => expect(localStorage.getItem(SIGNED_IN_SEEN_KEY)).toContain("codex"), { timeout: 3000 });
+    expect(screen.queryByTestId("provider-problem")).toBeNull();
+    working.stop();
+    cleanup();
     const lapsed = app("normal", { providers: freshProviders({ claude: { path: "/bin/claude", version: "2" }, ...codexOut }) });
     await waitFor(() => expect(screen.getByTestId("provider-problem").textContent).toBe("Codex signed out"), { timeout: 3000 });
     expect(screen.getByTestId("provider-problem").className).toContain("text-sap");
