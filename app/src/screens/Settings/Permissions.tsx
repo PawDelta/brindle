@@ -385,11 +385,19 @@ function GroupsView({ client, policy, report, busy, run, record, onOpen }: {
   const baselineOf = (id: string) => stored.get(id)?.baseline ?? policy.unmatched;
   const overrideOf = (id: string, sub: string) => stored.get(id)?.subcategories?.[sub] ?? "inherit";
 
+  const off = policy.policy_on === false;
+  // Nobody set it: a preset turns it on. Someone did (the person, a repo): that stays until they change it.
+  const staysOff = off && policy.policy_source !== "default";
   const usePreset = (name: string) =>
     void run(async () => {
       await client.setPermissionPreset(name as PermissionPreset);
       record("Policy", `${presetLabel(name)} preset chosen`, "Its rules replace the earlier preset's; your own and learned rules stay");
-    }, { text: `${presetLabel(name)} loaded. Every rule it added can be edited or removed.` });
+    }, { text: staysOff ? `${presetLabel(name)} saved. It isn't in force while the permission rules are off.` : `${presetLabel(name)} loaded. Every rule it added can be edited or removed.` });
+  const turnOn = () =>
+    void run(async () => {
+      await client.patchConfig({ scope: "user", values: { permission_policy: "on" } });
+      record("Policy", "Permission rules turned on", policy.preset ? `Using ${presetLabel(policy.preset)}` : "");
+    }, { text: "Permission rules on. brindle now answers your agents' requests from them." });
   const setBaseline = (g: { id: string; name: string }, level: string) =>
     void run(async () => {
       await client.setPermissionGroups({ [g.id]: { baseline: level } });
@@ -403,15 +411,31 @@ function GroupsView({ client, policy, report, busy, run, record, onOpen }: {
 
   return (
     <div className="flex flex-col gap-s2">
+      {off && (
+        <div role="status" className={`${card} flex flex-wrap items-center gap-s2 border-branch p-s2`} data-testid="policy-off">
+          <div className="min-w-0 flex-1">
+            <h3 className="text-sm font-semibold">Permission rules are off</h3>
+            <p className="text-xs text-ink-2">
+              {policy.policy_source === "repo" ? "This repo's config turns them off. " : policy.policy_source === "user" ? "Your settings turn them off. " : ""}
+              Your agents' own prompts decide what runs, so nothing below is in force.
+            </p>
+          </div>
+          {policy.policy_source !== "repo" && (
+            <button type="button" className={button} disabled={busy} onClick={turnOn}>
+              {policy.preset ? `Turn on with ${presetLabel(policy.preset)}` : "Turn on"}
+            </button>
+          )}
+        </div>
+      )}
       <div className={`${card} flex flex-col gap-s2 p-s2`}>
         <div className="flex flex-wrap items-baseline gap-x-s2">
           <div className="min-w-0 flex-1">
             <h3 className="text-sm font-semibold">Preset</h3>
-            <p className="text-xs text-ink-3">A starting point. Picking one replaces the preset's rules and keeps your own.</p>
+            <p className="text-xs text-ink-3">A starting point. Picking one replaces the preset's rules and keeps your own.{off && !staysOff ? " It also turns the rules on." : ""}</p>
           </div>
           <span className="text-sm">
-            <span className="font-medium" data-testid="preset-name">{presetLabel(policy.preset)}</span>
-            {customized && <span className="text-ink-3"> · customized</span>}
+            <span className="font-medium" data-testid="preset-name">{off ? "Not in force" : presetLabel(policy.preset)}</span>
+            {customized && !off && <span className="text-ink-3"> · customized</span>}
           </span>
         </div>
         <div className="grid gap-s2 sm:grid-cols-2 xl:grid-cols-4" data-testid="presets">

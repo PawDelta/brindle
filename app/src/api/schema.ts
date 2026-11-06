@@ -659,6 +659,8 @@ export interface PermissionGroupDTO {
 export interface PermissionPolicyDTO {
   groups?: PermissionGroupDTO[];
   org_controls?: OrgControlViewDTO[];
+  policy_on?: boolean;
+  policy_source?: string;
   preset: string | null;
   presets: PermissionPresetDTO[];
   prompt_counts?: {

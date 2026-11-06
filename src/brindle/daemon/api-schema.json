@@ -4725,6 +4725,16 @@
           "title": "Org Controls",
           "type": "array"
         },
+        "policy_on": {
+          "default": true,
+          "title": "Policy On",
+          "type": "boolean"
+        },
+        "policy_source": {
+          "default": "default",
+          "title": "Policy Source",
+          "type": "string"
+        },
         "preset": {
           "anyOf": [
             {
