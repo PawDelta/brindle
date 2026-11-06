@@ -76,7 +76,7 @@ ROUTES = ("gh", "token")
 STORE_ENV = "BRINDLE_GITHUB_STORE"
 REFUSED_FILE = "refused"            # holds the generation GitHub (or the keychain) no longer takes
 ITEMS_FILE = "items"                # every generation that may have a keychain item (see "the store")
-ABANDONED_SECONDS = 3600.0          # a staged item nobody published in this long was left by a connect that died
+STAGING_PREFIX = "staging-"         # a generation's staging lock file
 LOCK_FILE = "lock"
 _threads = threading.Lock()
 CONNECTION_PATH = "/v1/github/connection"
@@ -141,14 +141,21 @@ def _file_chosen(file: bool) -> bool:
 # * a removal that fails leaves an orphan to remove at a later change, never a record
 #   without its token.
 #
-# No keychain item is ever without something that names it. Before an item is made, its
-# generation goes on a list (ITEMS_FILE), and making it waits on that write. It comes off
-# the list only once its removal has succeeded. So whatever else fails on the way (a
-# publish, a removal, a later write of the list itself), a later change still finds the
-# item and removes it. An entry is the time its item was staged, or 0 once the item is to
-# go: a staged item nobody published within ABANDONED_SECONDS is one a connect left
-# behind, and a connect that comes back to find its entry at 0 gives up rather than
-# publish a token that is being removed.
+# No keychain item is ever without something that names it. Three things say what an item
+# is, and none of them is a guess about time:
+#
+# * the list (ITEMS_FILE): a generation goes on it before its item is made, making the
+#   item waits on that write, and it comes off only once the item's removal has succeeded;
+# * the record: the generation it names is the live one;
+# * the generation's staging lock: the connect that stages it holds that from before it
+#   is listed until it has published it or taken it back, however long a dialog keeps it.
+#   The system gives the lock back if the process dies.
+#
+# A listed generation that is not the live one and whose staging lock is free is in
+# nobody's use: an old one replaced, one disconnected, or one a connect left behind. That
+# is all clearing away removes, so whatever fails on the way (a publish, a removal, a write
+# of the list itself, the process), a later change still finds the item and removes it,
+# and never one a connect is still about to make or publish.
 #
 # Publishing, the memory of a refusal and that list change under one lock, across threads
 # and processes. Staging, which may wait at a keychain dialog, and reading don't take it.
@@ -243,9 +250,9 @@ def note_refused(record: dict) -> None:
 
 
 def _items() -> dict[str, float]:
-    """Every generation that may have a keychain item: when it was staged, or 0 once it is
-    to go. OSError when the list is there and can't be read: it is never taken for empty,
-    as the next write would then forget what it named."""
+    """Every generation that may have a keychain item, with when it was listed. OSError
+    when the list is there and can't be read: it is never taken for empty, as the next
+    write would then forget what it named."""
     try:
         listed = json.loads((_dir() / ITEMS_FILE).read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -257,50 +264,75 @@ def _items() -> dict[str, float]:
     return {g: at for g, at in listed.items() if isinstance(at, (int, float))}
 
 
-def _note_item(generation: str, at: float) -> None:
-    """Put ``generation`` on the list, staged at ``at`` or (0) to go. With the lock held.
-    OSError when that can't be written: the caller doesn't go on to what depended on it."""
-    listed = _items()
-    listed[generation] = at
-    _write(ITEMS_FILE, json.dumps(listed))
+def _list_item(generation: str) -> None:
+    """Put ``generation`` on the list, before its item is made. OSError when that can't be
+    written: the caller then makes no item."""
+    with _lock():
+        listed = _items()
+        listed[generation] = time.time()
+        _write(ITEMS_FILE, json.dumps(listed))
 
 
-def _clean_up(known: tuple[str, ...] = ()) -> None:
-    """Remove the keychain items no connection uses: those the list says are to go, those
-    staged so long ago that their connect must have died, and ``known``, which the caller
-    has just seen lose its last use (a generation replaced or disconnected, a staged one
-    whose publish failed). Never the committed one. Nothing here can break a connection,
-    and nothing it fails at is forgotten: an item leaves the list only after it is gone."""
-    live, victims = None, list(known)
+@contextlib.contextmanager
+def _staging(generation: str, wait: bool = True):
+    """The staging lock of ``generation``: held, for all of it, by the connect that lists,
+    makes and publishes (or takes back) its item. ``wait`` off is clearing away looking in:
+    it yields False when that connect is still at work, in any thread or process. Taken
+    before the lock on what is committed, never the other way round."""
+    if fcntl is None:       # no keychain items where there is no flock
+        yield True
+        return
+    folder = _dir()
+    folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd = os.open(folder / f"{STAGING_PREFIX}{generation}", os.O_RDWR | os.O_CREAT, 0o600)
     try:
-        with _lock():
-            # Read strictly: a record that can't be read now is not "no connection", and
-            # must not have its item taken for unused.
-            committed = _store().load()
-            if committed is not None and committed.get("storage") == "keychain":
-                live = _generation(committed)
-            listed = _items()
-            cutoff = time.time() - ABANDONED_SECONDS
-            condemned = [g for g, at in listed.items() if g != live and 0 < at <= cutoff]
-            condemned += [g for g in known if listed.get(g) != 0]
-            if condemned:
-                # On record first: a connect still holding one of these then won't publish it.
-                listed.update(dict.fromkeys(condemned, 0))
-                _write(ITEMS_FILE, json.dumps(listed))
-            victims = [g for g, at in listed.items() if at == 0]
-    except (OSError, keystore.CredentialError):
-        pass        # the record or the list can't be read or written now: only what the caller knows is unused
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
+        except BlockingIOError:
+            yield False
+            return
+        yield True
+    finally:
+        os.close(fd)        # which gives the lock back
+
+
+def _remove_item(generation: str) -> None:
+    """Remove ``generation``'s keychain item and, only once it is gone, take it off the
+    list. With its staging lock held. A removal that doesn't work leaves it listed."""
+    if not _item({"generation": generation}).delete():
+        return
+    with _lock():
+        listed = _items()
+        listed.pop(generation, None)
+        if listed:
+            _write(ITEMS_FILE, json.dumps(listed))
+        else:
+            (_dir() / ITEMS_FILE).unlink(missing_ok=True)
+    (_dir() / f"{STAGING_PREFIX}{generation}").unlink(missing_ok=True)
+
+
+def _clean_up() -> None:
+    """Remove the keychain items in nobody's use: each listed generation that is not the
+    live one and that no connect is staging. Nothing here can break a connection, and
+    nothing it fails at is forgotten: an item leaves the list only after it is gone."""
     if not is_helper():
         return      # the items are the helper's to remove: they stay listed for it
-    removed = [g for g in victims if g != live and _item({"generation": g}).delete()]
-    if removed:
-        with contextlib.suppress(OSError), _lock():
-            listed = _items()
-            left = {g: at for g, at in listed.items() if not (g in removed and at == 0)}
-            if left:
-                _write(ITEMS_FILE, json.dumps(left))
-            else:
-                (_dir() / ITEMS_FILE).unlink(missing_ok=True)
+    try:
+        with _lock():
+            listed = list(_items())
+    except OSError:
+        return
+    for generation in listed:
+        with contextlib.suppress(OSError, keystore.CredentialError), _staging(generation, wait=False) as free:
+            if not free:
+                continue        # its connect is still at work: it may yet make the item, or publish it
+            # Read strictly (a record that can't be read is not "no connection"), and with that
+            # connect out of the way: only it could have made this generation the live one.
+            committed = _store().load()
+            if (committed is not None and committed.get("storage") == "keychain"
+                    and _generation(committed) == generation):
+                continue
+            _remove_item(generation)
 
 
 def _expired(record: dict) -> bool:
@@ -489,44 +521,45 @@ def _connect(route: str, token: str, file: bool) -> dict:
               "expires_at": _expiry(headers.get("github-authentication-token-expiration"))}
     generation = _generation(record)
     staged = _item(record) if in_keychain else None
-    listed = False
     try:
-        # Stage: nothing reads this generation yet. Its item is on the list before it exists,
-        # so nothing that fails from here on can leave it unnamed. The person asked, so macOS
-        # may have them unlock the keychain, and no lock of brindle's is held while it does.
-        if staged is not None:
-            with _lock():
-                _note_item(generation, time.time())
-            listed = True
-            staged.save(token.encode(), ask=True)
-        else:
-            record["token"] = token
-        # Publish: from this rename on, this is the connection.
-        with _lock():
-            previous = _load()
-            replaced = (_generation(previous) if previous is not None and previous.get("storage") == "keychain"
-                        else None)
-            if staged is not None and _items().get(generation, 0) <= 0:
-                raise OSError("this connect was left so long that its keychain item was cleared away: connect again")
-            if replaced is not None:
-                _note_item(replaced, 0)     # to go, on record before the rename takes its last use away
-            with contextlib.suppress(OSError):
-                for abandoned in _dir().glob(".connection.*.tmp"):  # a write that died half way: no writer is in here now
-                    abandoned.unlink(missing_ok=True)
-            _store().save(record)
-            # Past the rename nothing may fail this connect: what was staged is the connection now.
-            with contextlib.suppress(OSError):
-                (_dir() / REFUSED_FILE).unlink(missing_ok=True)
+        # This connect's own lock on its generation, for as long as it may yet make or publish
+        # the item: clearing away, here or in another process, leaves the generation alone meanwhile.
+        with _staging(generation) if staged is not None else contextlib.nullcontext():
+            listed = False
+            try:
+                # Stage: nothing reads this generation yet. Its item is on the list before it
+                # exists. The person asked, so macOS may have them unlock the keychain, and the
+                # lock on what is committed is not held while it does.
+                if staged is not None:
+                    _list_item(generation)
+                    listed = True
+                    staged.save(token.encode(), ask=True)
+                else:
+                    record["token"] = token
+                # Publish: from this rename on, this is the connection.
+                with _lock():
+                    with contextlib.suppress(OSError):
+                        for abandoned in _dir().glob(".connection.*.tmp"):  # a write that died half way: no writer is in here now
+                            abandoned.unlink(missing_ok=True)
+                    _store().save(record)
+                    # Past the rename nothing may fail this connect: what was staged is the connection now.
+                    with contextlib.suppress(OSError):
+                        (_dir() / REFUSED_FILE).unlink(missing_ok=True)
+            except (mac_keychain.Refused, keystore.CredentialError, OSError):
+                # The connection before this one is as it was. Take back what was staged: now
+                # if that works, and if not, it stays on the list for a later change.
+                if listed:
+                    with contextlib.suppress(OSError):
+                        _remove_item(generation)
+                raise
     except (mac_keychain.Refused, keystore.CredentialError, OSError) as e:
-        # The connection before this one is as it was. Take back what was staged: now if that
-        # works, and if not, it is on the list for a later change.
-        _clean_up((generation,) if listed else ())
+        _clean_up()
         if isinstance(e, mac_keychain.Refused):
             raise ConnectError("not_stored", "the keychain didn't take the sign-in (locked, or its dialog was "
                                              "dismissed): unlock it and connect again") from None
         raise ConnectError("not_stored", f"couldn't keep the connection: {e}") from None
     # Only now the token of the generation before, if it has one of its own, and any left from earlier.
-    _clean_up((replaced,) if replaced is not None else ())
+    _clean_up()
     return status()
 
 
@@ -569,15 +602,12 @@ def disconnect(*, local: bool = False) -> dict:
     record = _load()
     if record is not None and record.get("storage") == "keychain" and not is_helper() and not local:
         return _daemon("DELETE")
-    gone = None
     with contextlib.suppress(keystore.CredentialError, OSError), _lock():
-        record = _load()
         _store().delete()       # from here on there is no connection
-        gone = record
         (_dir() / REFUSED_FILE).unlink(missing_ok=True)
-    # Only then its token, if it has one of its own, and only if the record did go: an
-    # orphan on the list if the token can't be removed now, never a record left without it.
-    _clean_up((_generation(gone),) if gone is not None and gone.get("storage") == "keychain" else ())
+    # Only then its token, if it has one of its own: still listed if it can't be removed
+    # now, and never removed while the record names it.
+    _clean_up()
     return status()
 
 

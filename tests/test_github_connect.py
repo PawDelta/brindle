@@ -257,7 +257,8 @@ class _HelpersItem:
     items: dict[str, bytes] = {}
     refuses: mac_keychain.Refused | None = None
     keeps = False                   # a keychain that won't remove an item now
-    staged = staticmethod(lambda secret: None)
+    arriving = staticmethod(lambda secret: None)    # a save, before its item exists: where a dialog would be
+    staged = staticmethod(lambda secret: None)      # and once it does
 
     def __init__(self, record):
         self.name = record["generation"]
@@ -270,6 +271,7 @@ class _HelpersItem:
     def save(self, secret, ask):
         if self.refuses:
             raise self.refuses
+        self.arriving(secret)
         self.items[self.name] = secret
         self.staged(secret)
 
@@ -321,42 +323,55 @@ def test_under_the_app_only_the_helper_daemon_holds_the_token_and_the_rest_ask_i
     monkeypatch.delenv(github_connect.STORE_ENV)
     assert github_connect.credential() == ("octo", TOKEN) and list(items.values()) == [TOKEN.encode()]
 
-    # The worst of it: a staged connect can't be published, and then nothing about clearing it away works
-    # either. The keychain won't remove the item and the list can't be written. The connection is untouched,
-    # and the item is still named on the list, written before the item was made.
+    # The worst of it. A connect is held at the keychain before its item exists, however long, while another
+    # change clears away around it. Then it makes the item, can't publish it, and nothing about taking it back
+    # works either: the keychain won't remove it and the list can't be written. The connection is untouched
+    # throughout, and the item stays named: listed before it was made, and left on the list by everyone else
+    # for as long as its connect was at work.
     disk_works, write = [True], github_connect._write
+    at_the_dialog, answered, outcome = threading.Event(), threading.Event(), []
 
     def list_write(name, text):
         if not disk_works[0]:
             raise OSError("disk full")
         write(name, text)
 
-    def disk_fills(secret):
-        disk_works[0] = False       # from the moment the item is in the keychain
+    def dialog(secret):
+        if secret == OTHER.encode():
+            at_the_dialog.set()
+            answered.wait(WAIT)
+
+    def connect_that_fails(token):
+        try:
+            _connect(token)
+        except ServiceError as refused:
+            outcome.append(refused.code)
 
     monkeypatch.setattr(github_connect, "_write", list_write)
-    monkeypatch.setattr(_HelpersItem, "staged", staticmethod(disk_fills))
-    monkeypatch.setattr(_HelpersItem, "keeps", True)
-    with pytest.raises(ServiceError):
-        _connect(OTHER)
-    assert github_connect.credential() == ("octo", TOKEN)
-    assert sorted(items.values()) == sorted([TOKEN.encode(), OTHER.encode()]) and len(github_connect._items()) == 2
-    # Things work again. The next change leaves it be, as it could be a connect still at the keychain's dialog;
-    # one after it is plainly abandoned removes it.
-    disk_works[0] = True
     monkeypatch.setattr(_HelpersItem, "staged", staticmethod(lambda secret: None))
-    monkeypatch.setattr(_HelpersItem, "keeps", False)
+    monkeypatch.setattr(_HelpersItem, "arriving", staticmethod(dialog))
+    slow = threading.Thread(target=connect_that_fails, args=(OTHER,))
+    slow.start()
+    assert at_the_dialog.wait(WAIT)
     _connect(TOKEN)
-    assert sorted(items.values()) == sorted([TOKEN.encode(), OTHER.encode()])
-    with monkeypatch.context() as later:
-        later.setattr(github_connect, "ABANDONED_SECONDS", 0)
-        _connect(TOKEN)
+    assert len(github_connect._items()) == 2 and list(items.values()) == [TOKEN.encode()]   # the one to come: still listed
+    with monkeypatch.context() as broken:
+        broken.setattr(keystore.FileStore, "save", _disk_full)
+        broken.setattr(_HelpersItem, "keeps", True)
+        disk_works[0] = False
+        answered.set()
+        slow.join(WAIT)
+    assert outcome == ["not_stored"] and github_connect.credential() == ("octo", TOKEN)
+    assert sorted(items.values()) == sorted([TOKEN.encode(), OTHER.encode()]) and len(github_connect._items()) == 2
+    # Things work again, and the next change removes it: nobody is staging it, and it isn't the live one.
+    disk_works[0] = True
+    _connect(TOKEN)
     assert list(items.values()) == [TOKEN.encode()] and list(github_connect._items()) == list(items)
 
-    # A keychain that won't remove the old item when a connect replaces it: listed to go, and the next change does.
+    # A keychain that won't remove the old item when a connect replaces it: still listed, and the next change does.
     monkeypatch.setenv(github_connect.STORE_ENV, "file")
     monkeypatch.setattr(_HelpersItem, "keeps", True)
-    assert _connect(OTHER)["storage"] == "file" and len(items) == 1 and list(github_connect._items().values()) == [0]
+    assert _connect(OTHER)["storage"] == "file" and len(items) == 1 and len(github_connect._items()) == 1
     assert github_connect.credential() == ("hubot", OTHER)
     monkeypatch.delenv(github_connect.STORE_ENV)
     monkeypatch.setattr(_HelpersItem, "keeps", False)
