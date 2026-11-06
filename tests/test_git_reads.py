@@ -189,19 +189,46 @@ def gh_with_private_origin(tmp_path, asks, monkeypatch):
     server.shutdown()
 
 
-@pytest.mark.parametrize("hosts, signs_in", [
-    pytest.param(_TOKEN_IN_FILE, True, id="token-in-gh-config"),
-    pytest.param(_TOKEN_IN_KEYCHAIN, False, id="token-in-keychain"),
-    pytest.param(_USERS.format(per_user=f"            oauth_token: {_FILE_TOKEN}\n", host=""), False, id="per-user-only",
+@pytest.mark.parametrize("hosts, signs_in, real_sandbox, moved_before_git_starts", [
+    pytest.param(_TOKEN_IN_FILE, True, False, False, id="token-in-gh-config"),
+    pytest.param(_TOKEN_IN_KEYCHAIN, False, False, False, id="token-in-keychain"),
+    pytest.param(_USERS.format(per_user=f"            oauth_token: {_FILE_TOKEN}\n", host=""), False, False, False, id="per-user-only",
                  marks=pytest.mark.variant("gh tries the keyring before a per-user file token")),
-    pytest.param(_USERS.format(per_user="", host='    oauth_token: ""\n'), False, id="empty-host-token",
+    pytest.param(_USERS.format(per_user="", host='    oauth_token: ""\n'), False, False, False, id="empty-host-token",
                  marks=pytest.mark.variant("an empty token falls through to the keyring")),
+    pytest.param(_TOKEN_IN_FILE, False, True, True, id="token-moved-to-keychain-after-the-check"),
+    pytest.param(f"{_TOKEN_IN_FILE}ghe.example.com:\n    user: me\n", True, True, False,
+                 id="unmigrated-keychain-host-beside-it"),
 ])
-def test_background_fetch_uses_signed_in_gh_for_github(tmp_path, asks, gh_with_private_origin, monkeypatch, hosts, signs_in):
+def test_background_fetch_uses_signed_in_gh_for_github(tmp_path, asks, gh_with_private_origin, monkeypatch, hosts,
+                                                     signs_in, real_sandbox, moved_before_git_starts):
     origin = gh_with_private_origin
     repo = origin.repo
     origin.hosts.write_text(hosts)
-    # Every platform's test: the real sandbox has its own test below.
+    if real_sandbox:
+        # However gh comes to want the keyring, the real sandbox must prevent access.
+        try:
+            sh("/usr/bin/sandbox-exec -p '(version 1)(allow default)' /usr/bin/true", tmp_path)
+        except subprocess.CalledProcessError:
+            pytest.skip("no sandbox-exec here, or this run is sandboxed already")
+        monkeypatch.setattr(git, "_GITHUB_HELPER", f"credential.{origin.url}.helper")
+        if moved_before_git_starts:
+            real_env = git._background_env
+
+            def token_moves(cwd):
+                origin.hosts.write_text(_TOKEN_IN_KEYCHAIN)  # `gh auth login` in another terminal
+                return real_env(cwd)
+
+            monkeypatch.setattr(git, "_background_env", token_moves)
+
+        assert git.background_fetch(repo, ["--quiet", "origin", "main"]) == signs_in
+        ran = origin.log.read_text()
+        assert "auth git-credential get" in ran  # gh did run, and wanted the keyring
+        assert "KEYRING-REACHED" not in ran and "config get" not in ran
+        assert not asks.seen.exists()
+        return
+
+    # Other platforms exercise authentication without Apple's sandbox.
     monkeypatch.setattr(git, "_SANDBOX_EXEC", str(_script(origin.bin / "sandbox-exec", 'shift 2\nexec "$@"')))
 
     def helper_for(host_url):
@@ -242,36 +269,6 @@ def test_background_fetch_uses_signed_in_gh_for_github(tmp_path, asks, gh_with_p
     monkeypatch.setattr(git, "_GITHUB_HELPER", "credential.https://github.com.helper")
     monkeypatch.setattr(git, "_SANDBOX_EXEC", str(tmp_path / "no-sandbox-exec"))
     assert helper_for("https://github.com") == ""
-
-
-@pytest.mark.parametrize("hosts, moved_before_git_starts, fetched", [
-    pytest.param(_TOKEN_IN_FILE, True, False, id="token-moved-to-keychain-after-the-check"),
-    pytest.param(f"{_TOKEN_IN_FILE}ghe.example.com:\n    user: me\n", False, True, id="unmigrated-keychain-host-beside-it"),
-])
-def test_gh_cannot_reach_the_keychain_from_a_background_call(asks, gh_with_private_origin, monkeypatch, tmp_path,
-                                                             hosts, moved_before_git_starts, fetched):
-    """However gh comes to want the keyring, whatever was true when brindle looked: the real sandbox."""
-    try:
-        sh("/usr/bin/sandbox-exec -p '(version 1)(allow default)' /usr/bin/true", tmp_path)
-    except subprocess.CalledProcessError:
-        pytest.skip("no sandbox-exec here, or this run is sandboxed already")
-    origin = gh_with_private_origin
-    origin.hosts.write_text(hosts)
-    monkeypatch.setattr(git, "_GITHUB_HELPER", f"credential.{origin.url}.helper")
-    if moved_before_git_starts:
-        real_env = git._background_env
-
-        def token_moves(cwd):
-            origin.hosts.write_text(_TOKEN_IN_KEYCHAIN)     # `gh auth login` in another terminal
-            return real_env(cwd)
-
-        monkeypatch.setattr(git, "_background_env", token_moves)
-
-    assert git.background_fetch(origin.repo, ["--quiet", "origin", "main"]) == fetched
-    ran = origin.log.read_text()
-    assert "auth git-credential get" in ran     # gh did run, and wanted the keyring
-    assert "KEYRING-REACHED" not in ran and "config get" not in ran
-    assert not asks.seen.exists()
 
 
 def test_agent_panes_sign_in_to_github_through_gh_without_the_keychain_helper(db, tmp_path, asks, monkeypatch):
