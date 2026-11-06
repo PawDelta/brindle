@@ -166,6 +166,7 @@ def worker(db, ws, agent_id, parent="boss"):
     return a
 
 
+@pytest.mark.slow("nine hooks on real threads and git: about 4s here, over 10s on a busy macOS runner")
 def test_pending_asks_group_by_general_form_and_one_decision_resolves_the_group(db, ws):
     db.add_agent(Agent("boss", ws.id, "supervisor", "claude", None, "interactive", "processing", "%b", None, time.time()))
     worker(db, ws, "w1"), worker(db, ws, "w2"), worker(db, ws, "w3")
