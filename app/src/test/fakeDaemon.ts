@@ -183,7 +183,7 @@ export interface DaemonData {
   /* The person's permission store (permissions.Store, GET /permissions):
      the preset, the unmatched setting, every rule and saved action, and
      per-rule prompt counts over the last day. */
-  policy: { preset: string | null; unmatched: string; rules: PermissionRuleDTO[]; saved: SavedActionDTO[]; prompts: Record<string, number>; groups?: Record<string, { baseline: string; subcategories: Record<string, string> }>; org_controls?: OrgControlViewDTO[] };
+  policy: { preset: string | null; unmatched: string; rules: PermissionRuleDTO[]; saved: SavedActionDTO[]; prompts: Record<string, number>; groups?: Record<string, { baseline: string; subcategories: Record<string, string> }>; org_controls?: OrgControlViewDTO[]; policy_on?: boolean; policy_source?: string };
   /* GET /permissions/asks: the requests hooks hold, grouped
      (permission_grants.groups). A decision takes its requests out of these
      and out of `inbox` (the hold's answer). */
@@ -1603,6 +1603,10 @@ export class FakeDaemon {
     const file = scope === "user" ? this.data.config.user : scope === "shared" ? this.data.config.repo : this.data.config.local;
     for (const [key, value] of entries) file[key] = value;
     for (const key of unset) delete file[key];
+    if (scope === "user" && "permission_policy" in (values as object)) {
+      this.data.policy.policy_on = file.permission_policy === "on";
+      this.data.policy.policy_source = "user";
+    }
     return json({ updated: [...entries.map(([k]) => k), ...unset].sort(), path: scope === "user" ? "/home/u/.brindle/config.json" : `${String(body.repo)}/.brindle/${scope === "shared" ? "config.json" : "config.local.json"}` });
   }
 
@@ -1740,9 +1744,11 @@ export class FakeDaemon {
     const p = this.data.policy;
     const now = Date.now() / 1000;
     return {
+      policy_on: p.policy_on ?? true,
+      policy_source: p.policy_source ?? "default",
       preset: p.preset,
       unmatched: p.unmatched,
-      presets: Object.entries(FAKE_PRESETS).map(([name, x]) => ({ name, description: x.description, unmatched: x.unmatched, current: name === p.preset })),
+      presets: Object.entries(FAKE_PRESETS).map(([name, x]) => ({ name, description: x.description, unmatched: x.unmatched, current: (p.policy_on ?? true) && name === p.preset })),
       rules: p.rules.map((r) => ({ ...r, prompts: p.prompts[r.id] ?? 0, expired: r.expires != null && r.expires <= now })),
       saved: p.saved.map((s) => ({ ...s, expired: s.expires != null && s.expires <= now })),
       prompt_counts: { ...p.prompts },
@@ -1867,6 +1873,7 @@ export class FakeDaemon {
       p.preset = String(body.preset);
       p.unmatched = preset.unmatched;
       p.rules = [...preset.rules(), ...p.rules.filter((r) => r.source !== "preset")];
+      if ((p.policy_source ?? "default") === "default") p.policy_on = true;   // permissions.choose_preset
       return json(this.policyDTO());
     }
     if (path === "/permissions/rules" && method === "POST") {

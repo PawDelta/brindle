@@ -17,7 +17,7 @@ from brindle import agents, git, identity_lock, tmux, workspaces
 from brindle import history as history_mod
 from brindle import keys_cmds, repo_cmds
 from brindle.usage import format_tokens
-from brindle.config import write_template
+from brindle.config import record_first_run, write_template
 from brindle.db import DB, Workspace
 from brindle.profiles import list_profiles, load_profile
 
@@ -906,6 +906,8 @@ def default(
     provider_alias: Annotated[Optional[str], typer.Option("--provider", hidden=True)] = None,
 ) -> None:
     """Bare `brindle`: a fresh supervisor chat here (a scratch session outside git)."""
+    # First: a command may write config.json or permissions.json before any database.
+    record_first_run()
     provider = provider or provider_alias
     global _group_supervisor
     _group_supervisor = provider if ctx.invoked_subcommand else None   # `-s codex start`
@@ -1734,12 +1736,44 @@ def permissions_preset(name: Optional[str] = typer.Argument(None, help="autonomo
             typer.echo(f"{mark} {preset:<11} unmatched: {unmatched:<5} {description}")
         return
     try:
-        store = perms.apply_preset(name)
+        store = perms.choose_preset(name)
     except ValueError as e:
         typer.echo(str(e))
         raise typer.Exit(2)
     typer.echo(f"preset {name}: {len(store.rules)} rules; unmatched actions {store.unmatched}")
+    _say_policy()
     _resync_agy()
+
+
+def _say_policy() -> None:
+    """Whether brindle's rules are in force here, and if not what keeps them off."""
+    from brindle.config import brindle_home, load_repo_config
+
+    repo = _here_repo()
+    cfg = load_repo_config(repo) if repo else load_repo_config(brindle_home(), user_only=True)
+    if cfg.permission_policy == "on":
+        typer.echo("permission policy: on" + (" in this repo" if repo else " for your repos"))
+    elif cfg.permission_policy_source == "repo":
+        typer.echo('permission policy: off in this repo: its .brindle config sets "permission_policy": "off", '
+                   "which wins here, so these rules aren't in force in it")
+    else:
+        why = "you set it off" if cfg.permission_policy_source == "user" else "not turned on"
+        typer.echo(f"permission policy: off ({why}), so these rules aren't in force; "
+                   "`brindle permissions policy on` turns it on")
+
+
+@permissions_app.command("policy")
+def permissions_policy(state: Optional[str] = typer.Argument(None, help="on or off.")) -> None:
+    """Show whether brindle answers from your rules, or turn that on or off for your repos."""
+    from brindle.config import set_user
+
+    if state not in (None, "on", "off"):
+        typer.echo("policy must be on or off")
+        raise typer.Exit(2)
+    if state:
+        set_user("permission_policy", state)
+        _resync_agy()
+    _say_policy()
 
 
 @permissions_app.command("reset")

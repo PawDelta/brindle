@@ -1253,6 +1253,7 @@ def _launch_resolved(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
         from brindle import codex_hook
 
         try:
+            codex_hook.tell_skipped(db, agent, ws.path)
             codex_hook.tell_untrusted(db, agent, ws.path)  # launched without the hook it couldn't trust
         except Exception:  # noqa: BLE001 - never stop a launch over this
             pass
