@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { ReactElement } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App, { landing } from "./App";
@@ -49,6 +49,96 @@ const surfaceTitle = () => screen.getByTestId("surface-title").textContent;
 
 describe("App", () => {
   beforeEach(() => localStorage.setItem(ONBOARDED_KEY, "1"));
+  it("shows starting until sessions are ready", async () => {
+    vi.useFakeTimers();
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root] });
+    const client = daemon.client();
+    const store = createAppStore();
+    const sync = startSync({ client, store, connect: daemon.connect });
+    let resuming = true;
+    const meta = client.meta.bind(client);
+    const metadata = vi.spyOn(client, "meta").mockImplementation(async () => ({ ...await meta(), resuming }));
+    daemon.data.workspaces = [{ ...root, agents: root.agents?.map((a) => ({ ...a, window: null })) }];
+    try {
+      renderApp(<App store={store} client={client} refresh={sync.refresh} />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+      expect(screen.getByTestId("starting")).toBeTruthy();
+      expect(screen.queryByTestId("terminal")).toBeNull();
+      resuming = false;
+      await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+      expect(screen.getByTestId("starting")).toBeTruthy();
+      daemon.data.workspaces = [root, { ...worker, agents: worker.agents?.map((a) => ({ ...a, provider: "subagent", window: null })) }];
+      let resolve!: (rows: Awaited<ReturnType<typeof client.snapshot>>) => void;
+      vi.spyOn(client, "snapshot").mockReturnValueOnce(new Promise((ok) => { resolve = ok; }));
+      await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+      // Reopening restores the connection string, but the old read stays stale.
+      await act(async () => {
+        store.dispatch({ type: "connection", state: "closed" });
+        store.dispatch({ type: "connection", state: "open" });
+        resuming = true;
+        resolve([root]);
+      });
+      expect(screen.getByTestId("starting")).toBeTruthy();
+      await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+      expect(screen.getByTestId("starting")).toBeTruthy();
+      // Recovery starts after an apparently ready check, before releasing the gate.
+      metadata.mockImplementationOnce(async () => ({ ...await meta(), resuming: false }));
+      await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+      expect(screen.getByTestId("starting")).toBeTruthy();
+      resuming = false;
+      await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+      expect(screen.queryByTestId("starting")).toBeNull();
+      expect(screen.getByTestId("terminal").textContent).toBe("sup1");
+      resuming = true;
+      daemon.drop();
+      await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+      expect(screen.queryByTestId("starting")).toBeNull();
+    } finally { sync.stop(); vi.useRealTimers(); }
+  });
+
+  it("keeps starting when a ready probe is followed by a failed store refresh", async () => {
+    vi.useFakeTimers();
+    const old = { ...root, agents: root.agents?.map((a) => ({ ...a, window: windowOf("old") })) };
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [old] });
+    const client = daemon.client();
+    const store = createAppStore();
+    const sync = startSync({ client, store, connect: daemon.connect });
+    try {
+      await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+      await sync.idle();
+      daemon.data.workspaces = [root];
+      const failed = vi.spyOn(client, "inbox").mockRejectedValue(new Error("offline"));
+      renderApp(<App store={store} client={client} refresh={sync.refresh} />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+      expect(store.getState().workspaces).toEqual([old]);
+      expect(screen.getByTestId("starting")).toBeTruthy();
+      failed.mockRestore();
+      await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+      expect(screen.queryByTestId("starting")).toBeNull();
+      expect(screen.getByTestId("terminal").dataset.target).toBe(windowOf("sup1"));
+    } finally { sync.stop(); vi.useRealTimers(); }
+  });
+
+  it("opens after the startup deadline and discards the pending response", async () => {
+    vi.useFakeTimers();
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root] });
+    const client = daemon.client();
+    let resolve!: (rows: Awaited<ReturnType<typeof client.snapshot>>) => void;
+    vi.spyOn(client, "snapshot").mockReturnValue(new Promise((ok) => { resolve = ok; }));
+    const store = createAppStore();
+    store.dispatch({ type: "snapshot", workspaces: [root], inbox: [] });
+    try {
+      renderApp(<App store={store} client={client} initialRoute={{ screen: "session", root: "sup1", repo: REPO }} />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+      expect(screen.queryByRole("complementary", { name: "Sidebar" })).toBeNull();
+      await act(async () => { await vi.advanceTimersByTimeAsync(30000); });
+      expect(screen.getByTestId("terminal").textContent).toBe("sup1");
+      await act(async () => { resolve([worker]); });
+      expect(store.getState().workspaces).toEqual([root]);
+      expect(screen.queryByTestId("starting")).toBeNull();
+    } finally { vi.useRealTimers(); }
+  });
+
   it.each([false, true])("resume paused: lists the goal and resumes into the session's chat pane (already selected: %s)", async (selected) => {
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session, paused], workspaces: [root] });
     const store = createAppStore();
@@ -695,6 +785,32 @@ describe("the sign-in gate", () => {
     await flush();
     expect(providersAsked(daemon)).toBe(0);
     sync.stop();
+  });
+
+  it("app opened from an agent says how to reopen it", async () => {
+    vi.useFakeTimers();
+    const daemon = new FakeDaemon();
+    const requests: string[] = [];
+    const client = new DaemonClient({ baseUrl: BASE_URL, token: TOKEN, fetch: async (input) => {
+      requests.push(String(input));
+      return new Response(JSON.stringify({ error: { code: "agent_caller", message: "refused: the caller runs under brindle agent w1" } }), { status: 403, headers: { "Content-Type": "application/json" } });
+    } });
+    const store = createAppStore();
+    const sync = startSync({ client, store, connect: daemon.connect });
+    try {
+      renderApp(<App store={store} client={client} refresh={sync.refresh} onAgentRefused={sync.stop} />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+      expect(screen.getByRole("alert").textContent).toContain("brindle was opened from an agent's terminal. Open it from the Dock");
+      expect(screen.queryByTestId("signin-gate")).toBeNull();
+      expect(sidebar()).toBeNull();
+      expect(screen.queryByRole("button")).toBeNull();
+      expect(store.getState().connection).toBe("closed");
+      const count = requests.length;
+      daemon.drop();
+      await act(async () => { await vi.advanceTimersByTimeAsync(60000); });
+      expect(requests).toHaveLength(count);
+      expect(requests.some((path) => path.endsWith("/providers/installed"))).toBe(false);
+    } finally { sync.stop(); vi.useRealTimers(); }
   });
 
   it("onboarded on this Mac with a CLI signed in, but signed out of brindle: still the gate, then the app once signed in", async () => {

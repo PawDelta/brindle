@@ -1731,8 +1731,30 @@ def permissions_allow(
     match: Optional[str] = typer.Argument(None, help="The command, path, URL or tool name (exact unless --prefix/--glob)."),
     prefix: bool = typer.Option(False, "--prefix", help="Match anything starting with MATCH."),
     glob: bool = typer.Option(False, "--glob", help="MATCH is a shell-style glob (* also crosses /)."),
+    once: bool = typer.Option(False, "--once", help="Approve the pending request ID exactly once."),
 ) -> None:
     """Allow requests that match. A bash allow never covers a command with shell metacharacters."""
+    if once:
+        from brindle import permissions as perms
+
+        if match is not None or prefix or glob:
+            _fail("--once takes one pending request ID, without a pattern or matching options")
+        db = DB()
+        # Serialize terminal answers so two invocations cannot approve the
+        # same pending request twice. Keep the request if saving fails.
+        with db.tx() as c:
+            row = c.execute("SELECT agent_id, request FROM permission_requests "
+                            "WHERE tool_use_id=? AND channel='terminal'", (kind,)).fetchone()
+            req = perms.Request.from_dict(json.loads(row["request"])) if row else None
+            if req is None:
+                _fail("no such pending permission request")
+            decision = perms.decide(req, saved=[])
+            if decision.decision == "deny":
+                _fail(f"this request is denied: {decision.reason}")
+            action = perms.save_once(req)
+            c.execute("DELETE FROM permission_requests WHERE agent_id=? AND tool_use_id=?", (row["agent_id"], kind))
+        typer.echo(f"{action.id}: allowed this exact request once")
+        return
     if match is None:
         match = kind
         kind = "bash"

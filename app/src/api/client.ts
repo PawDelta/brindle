@@ -322,6 +322,8 @@ export interface GoalEnabledAck {
 }
 
 export interface Meta {
+  /* The daemon is still bringing back sessions from its previous shutdown. */
+  resuming?: boolean;
   engine_version: string;
   api_version: string;
   pid: number;

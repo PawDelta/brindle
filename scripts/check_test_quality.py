@@ -27,7 +27,7 @@ MAX_PERMUTATIONS = 12
 # Freeze the collected suite, including this guardrail's tests. Raising this
 # ceiling is an explicit review decision, rather than an automatic baseline.
 # Recoverable worktree cleanup adds 12 restore, retention and failure cases.
-TEST_BUDGET = 3577
+TEST_BUDGET = 3629
 
 
 class Finding(NamedTuple):
