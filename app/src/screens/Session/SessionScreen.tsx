@@ -21,6 +21,7 @@ import type { AppStore } from "../../store/store";
 import { useAppState } from "../../store/useStore";
 import { AgentMenu, SessionMenu, closeSessionLabel, type CloseSessionItem } from "./AgentMenu";
 import { failure, type Notice } from "./notice";
+import { SessionRequest } from "./GoalPanel";
 import { ProviderSurface } from "./ProviderSurface";
 import { usePrReadiness, useSessionDiff } from "./review";
 import { ReviewSheet } from "./ReviewSheet";
@@ -183,6 +184,7 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
         closeSession={closeSession}
         onChat={showChanges ? closeSheet : undefined}
       />
+      {session?.request && <SessionRequest key={`${root}:${session.request}`} text={session.request} />}
       {pausedUnder && (
         <div role="status" className="flex items-center gap-s2 border-b border-line px-s2 py-1 text-sm text-ink-2">
           <span>This session was paused</span>
