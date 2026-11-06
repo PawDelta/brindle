@@ -1225,8 +1225,30 @@ What's inside the boundary is the worker's shell commands, their children and
   to loopback or link-local addresses, such as cloud metadata), local ports
   can be bound and reached, and of the Unix sockets only brindle's daemon
   socket is reachable, so `git push` gets the GitHub sign-in through brindle as
-  before. Docker, host tmux, the ssh agent, the keychain and `osascript` are
-  not reachable from a sandboxed command. A nested `sandbox-exec` fails.
+  before. Docker's socket, the host's tmux servers and the ssh agent are not
+  reachable from a sandboxed command unless you open them (below); the
+  keychain is reachable (both CLIs' sandboxes let `security` through), and so
+  is a plain `osascript -e`, though not Apple Events to other apps. A nested
+  `sandbox-exec` fails.
+
+**Opening a host service.** Each is its own switch in `~/.brindle/config.json`
+(`os_sandbox_allow`), nothing is open until you name it, and the defaults are
+still under review:
+
+```json
+"os_sandbox_allow": ["ssh_agent", {"docker": "/path/to/docker-proxy.sock"}, "host_tmux"]
+```
+
+`brindle permissions os-sandbox --allow ssh_agent --allow docker=/path/to/proxy.sock
+--disallow host_tmux` edits the same list. `ssh_agent` opens the socket in
+`$SSH_AUTH_SOCK` (every key it holds, for any host: a sandbox can't narrow an
+agent to git hosts). `docker` opens the daemon socket, which is host access; give
+it a path to open only a socket proxy instead, or run the proxy on a localhost
+port, which needs no allowance. `host_tmux` opens the tmux server brindle's own
+agents run in, or the socket path you give it. `apple_events` lets `osascript`
+drive other apps. Claude Code enforces these as exact socket paths; Antigravity's
+sandbox has no such settings, so its commands can't reach any of them, and
+`brindle doctor` says so when one is named.
 
 Claude Code's permission prompts and brindle's hook decisions still apply to
 every command (the sandbox doesn't auto-allow), and the unsandboxed second run

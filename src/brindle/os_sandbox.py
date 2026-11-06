@@ -51,6 +51,23 @@ from dataclasses import dataclass
 from brindle.config import brindle_home, user_settings
 
 USER_KEY = "os_sandbox"             # ~/.brindle/config.json: "off" turns the OS sandbox off for workers
+# ~/.brindle/config.json: host services a sandboxed command may reach, each
+# named separately: a list of names, or {name: value} with a narrower form
+# (see ALLOWANCES and allowances()). Nothing is allowed until the person says.
+ALLOW_KEY = "os_sandbox_allow"
+# What each name opens, and the narrower form its value may select. Claude
+# Code enforces these as exact Unix socket paths (sandbox.network.allowUnixSockets,
+# seen on 2.1.319) and allowAppleEvents; agy's sandbox has no such settings, so
+# there an allowance changes nothing (doctor says so). "keychain" is listed for
+# the record: both sandboxes reached securityd with no allowance (canaries of
+# 2026-11-06), so nothing is opened for it.
+ALLOWANCES = {
+    "ssh_agent": "the ssh agent at $SSH_AUTH_SOCK (every key it holds, for any host: the sandbox can't narrow it)",
+    "docker": "the Docker daemon socket (host access); a value names a proxy socket path to allow instead",
+    "host_tmux": "the tmux server brindle's agents run in; a value names another server's socket path",
+    "apple_events": "Apple Events (osascript driving apps); a plain `osascript -e` needs none",
+    "keychain": "the macOS keychain: already reachable from both sandboxes, nothing to open",
+}
 PROVIDERS = ("claude", "antigravity")
 LABEL = {"claude": "Claude", "antigravity": "Antigravity"}
 # The oldest CLI whose documented sandbox settings enforce what brindle relies
@@ -128,6 +145,82 @@ def wanted(cwd: str | None, provider: str, mode: str | None) -> bool:
     the person's switch not off."""
     return (provider in PROVIDERS and mode != "interactive" and bool(cwd)
             and switch() != "off" and policy_on(cwd))
+
+
+def allowances() -> dict[str, object]:
+    """The person's host-service allowances (ALLOW_KEY) as {name: value}:
+    True for a plain name, else the narrower form's value. A name not in
+    ALLOWANCES or a malformed entry raises OsSandboxRefused (the launch
+    fails closed rather than guessing what to open)."""
+    return parse_allowances(user_settings().get(ALLOW_KEY))
+
+
+def parse_allowances(raw: object) -> dict[str, object]:
+    """``raw``, an ALLOW_KEY value (a list of names and ``{name: path}``
+    entries, or one ``{name: path | true}`` object), as {name: value}."""
+    where = f"{ALLOW_KEY} in ~/.brindle/config.json"
+    if raw is None:
+        entries: list[tuple[object, object]] = []
+    elif isinstance(raw, dict):
+        entries = list(raw.items())
+    elif isinstance(raw, list):
+        entries = []
+        for entry in raw:
+            if isinstance(entry, str):
+                entries.append((entry, True))
+            elif isinstance(entry, dict) and len(entry) == 1:
+                entries.append(next(iter(entry.items())))
+            else:
+                raise OsSandboxRefused("claude", f"{where} has an entry that isn't a name or {{name: path}}",
+                                       "Fix that entry")
+    else:
+        raise OsSandboxRefused("claude", f"{where} isn't a list of names", "Make it one")
+    found: dict[str, object] = {}
+    for name, value in entries:
+        if value is False:
+            continue
+        if not isinstance(name, str) or name not in ALLOWANCES:
+            raise OsSandboxRefused("claude", f'{where} names "{name}", which brindle can\'t open '
+                                   f"(known: {', '.join(ALLOWANCES)})", "Fix that entry")
+        if value is not True and not isinstance(value, str):
+            raise OsSandboxRefused("claude", f'{where} gives "{name}" a value that isn\'t a path',
+                                   "Give it a path, or list the name alone")
+        found[name] = value
+    return found
+
+
+def tmux_socket(server: str | None = None) -> str:
+    """The socket of tmux server ``server`` (``tmux -L``; None for the default
+    server), as tmux places it: ``$TMUX_TMPDIR``/tmux-<uid>/<name>."""
+    base = os.environ.get("TMUX_TMPDIR") or "/tmp"
+    return os.path.join(base, f"tmux-{os.getuid()}", server or "default")
+
+
+def allowed_sockets(allow: dict[str, object] | None = None) -> list[str]:
+    """The Unix socket paths the allowances open (each with its resolved
+    alias): brindle's daemon socket always (git's sign-in), and what the person
+    named."""
+    from brindle import tmux
+    from brindle.daemon import lifecycle
+
+    allow = allowances() if allow is None else allow
+    paths = [str(lifecycle.socket_path())]
+    if "ssh_agent" in allow and (sock := os.environ.get("SSH_AUTH_SOCK")):
+        paths.append(sock)
+    if (value := allow.get("docker")) is not None:
+        if isinstance(value, str):
+            paths.append(value)
+        else:
+            paths.append("/var/run/docker.sock")
+            if (host := os.environ.get("DOCKER_HOST", "")).startswith("unix://"):
+                paths.append(host[len("unix://"):])
+    if (value := allow.get("host_tmux")) is not None:
+        paths.append(value if isinstance(value, str) else tmux_socket(tmux.current_server()))
+    seen: dict[str, None] = {}
+    for path in paths:
+        for alias in _aliases(path):
+            seen.setdefault(alias, None)
+    return list(seen)
 
 
 # -- what is protected --------------------------------------------------------------------
@@ -440,9 +533,8 @@ def claude_managed_conflict() -> tuple[str, str] | None:
 def claude_settings(cwd: str | None, profile) -> dict:
     """Claude Code's ``sandbox`` settings for a worker in ``cwd`` (see the
     module docstring). Raises OsSandboxRefused when it can't be required."""
-    from brindle.daemon import lifecycle
-
     require("claude")
+    allow = allowances()
     # A profile's add_dirs are the agent's to edit, by Bash too (providers.ClaudeCode.command).
     extra = [os.path.expanduser(d) for d in (getattr(profile, "add_dirs", None) or [])]
     return {
@@ -462,10 +554,12 @@ def claude_settings(cwd: str | None, profile) -> dict:
         # Outbound network stays open (the boundary is credentials, not the
         # internet; Claude's proxy still refuses hosts resolving to link-local or
         # loopback), tests may bind and reach local ports, and of the Unix sockets
-        # only brindle's daemon: git's credential helper asks it for the GitHub
-        # sign-in. Its routes check the peer and a token the sandbox can't read.
+        # brindle's daemon (git's credential helper asks it for the GitHub
+        # sign-in; its routes check the peer and a token the sandbox can't read)
+        # plus what the person's allowances name (allowed_sockets).
         "network": {"allowedDomains": ["*"], "allowLocalBinding": True,
-                    "allowUnixSockets": [str(lifecycle.socket_path())]},
+                    "allowUnixSockets": allowed_sockets(allow)},
+        "allowAppleEvents": "apple_events" in allow,
     }
 
 
@@ -536,4 +630,12 @@ def status(repo_root: str | None) -> list[tuple[str, str]]:
             lines.append(("ok", f"{LABEL[provider]} workers: commands sandboxed, credential stores denied"))
         else:
             lines.append(("fail", f"{LABEL[provider]} workers won't start: {problem[0]}. {problem[1]}, or {OFF_SWITCH}"))
+    try:
+        allow = allowances()
+    except OsSandboxRefused as e:
+        return [*lines, ("fail", f"{e.problem}. {e.fix}")]
+    opened = [n for n in allow if n != "keychain"]
+    if opened:
+        lines.append(("warn", f"allowed from Claude workers' commands ({ALLOW_KEY}): {', '.join(opened)}; "
+                              "Antigravity's sandbox has no setting for these, so its commands still can't reach them"))
     return lines or [("ok", "no Claude or Antigravity CLI installed to sandbox")]

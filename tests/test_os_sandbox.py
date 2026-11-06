@@ -197,6 +197,40 @@ def test_agy_worker_is_sandboxed_and_may_not_run_outside_it(db, ws, capable, mon
     assert os_sandbox.agy_env_denies() == ()       # agy itself needs it then
 
 
+@pytest.mark.parametrize("allow,sockets,apple", [
+    (None, [], False),
+    (["ssh_agent", {"docker": "{proxy}"}, "apple_events", "keychain"], ["{agent}", "{proxy}"], True),
+    ({"host_tmux": True, "docker": True}, ["{tmux}", "/var/run/docker.sock"], False),
+    pytest.param(["dockr"], None, False, marks=pytest.mark.variant("a misspelt allowance fails closed")),
+])
+def test_allowances_open_exactly_the_named_host_services(ws, capable, tmp_path, monkeypatch, allow, sockets, apple):
+    """Each host service is its own switch in the person's config; nothing is
+    open until named, and only Claude Code's socket allowlist enforces it."""
+    from brindle import tmux
+    from brindle.daemon import lifecycle
+
+    set_local(ws.repo_root, "permission_policy", "on")
+    agent = tmp_path / "agent.sock"
+    names = {"{proxy}": str(tmp_path / "docker-proxy.sock"), "{agent}": str(agent),
+             "{tmux}": os_sandbox.tmux_socket(tmux.current_server())}
+    fill = lambda v: names.get(v, v) if isinstance(v, str) else v  # noqa: E731
+    if isinstance(allow, list):
+        allow = [{k: fill(v) for k, v in e.items()} if isinstance(e, dict) else e for e in allow]
+    if allow is not None:
+        set_user(os_sandbox.ALLOW_KEY, allow)
+    monkeypatch.setenv("SSH_AUTH_SOCK", str(agent))
+    monkeypatch.delenv("DOCKER_HOST", raising=False)
+    if sockets is None:
+        with pytest.raises(os_sandbox.OsSandboxRefused, match="dockr"):
+            claude_settings(ws)
+        return
+    box = claude_settings(ws)["sandbox"]
+    expected = [str(lifecycle.socket_path()), *(fill(s) for s in sockets)]
+    opened = set(box["network"]["allowUnixSockets"])
+    assert set(expected) <= opened <= {a for p in expected for a in os_sandbox._aliases(p)}
+    assert box["allowAppleEvents"] is apple
+
+
 def test_protected_paths_cover_provider_sign_ins_relocated_stores_and_aliases(tmp_path, monkeypatch):
     """credential_paths is the one deny source: the CLIs' own sign-ins are in
     it, a store moved by an environment variable joins, and a store that is a

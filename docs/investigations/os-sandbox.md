@@ -62,6 +62,37 @@ path among their file allows breaks the sandbox's mounts), and the hook denies
 `BypassSandbox: true` (`os_sandbox.bypass_requested`). A sandbox configuration
 error therefore fails every command rather than running it outside.
 
+**Host services** (same day; `claude -p --model haiku` with and without the
+allowances, `agy --sandbox` with `allow: []`; Docker Desktop wasn't running, so
+its socket test is inconclusive):
+
+| service | Claude, no allowance | Claude, allowance | agy `--sandbox` |
+|---|---|---|---|
+| ssh agent (`ssh-add -l`) | `Error connecting to agent: Operation not permitted` | `allowUnixSockets: [$SSH_AUTH_SOCK]`: `The agent has no identities` (reached) | `Operation not permitted`; no setting to open it |
+| tmux server (`tmux -S /private/tmp/tmux-501/default ls`) | `Operation not permitted` | `allowUnixSockets: [that path]`: sessions listed | `Operation not permitted`; no setting |
+| Docker (`docker version`) | daemon not running: `connect: no such file or directory` (socket path inconclusive) | same | `~/.docker/config.json: operation not permitted` (deny honoured), daemon not running |
+| keychain (`security find-generic-password -s nope`) | reached: `could not be found in the keychain` (rc 44) | same | reached (rc 44) |
+| `osascript -e 'return 1'` | `1` (no Apple Event sent) | `1` | `1` |
+| `curl http://127.0.0.1:9` | connection refused (direct) | same | HTTP 400 from agy's proxy: localhost is proxied, not direct |
+
+What each sandbox can narrow, from the docs and the runs above:
+
+- Claude Code: exact Unix socket paths (`allowUnixSockets`, macOS; on Linux
+  only with the optional seccomp filter, else all sockets are open), Mach
+  service names (`allowMachLookup`, not needed for the keychain), Apple Events
+  on or off, outbound domains (`allowedDomains` with `*.example.com`, `*`;
+  `deniedDomains`; a proxy that refuses loopback/link-local resolution),
+  localhost binding on or off, per-path reads and writes with narrower-wins
+  and globs. It can't narrow an ssh agent to git hosts or Docker to a subset of
+  the API: those need a brindle-side proxy socket (then allowed by path) or a
+  localhost TCP proxy (reachable with `allowLocalBinding`).
+- Antigravity: per-path reads and writes (`read_file`/`write_file` rules as
+  mounts), and outbound domains only through `read_url` rules per the docs
+  (the run above had outbound open regardless). No Unix socket, Mach or Apple
+  Event settings: the ssh agent and tmux are blocked with no way to open them,
+  the keychain is reachable with no way to close it, and localhost goes through
+  its proxy.
+
 **The probe** (`os_sandbox.probe`, what `tests/test_os_sandbox.py` executes):
 `/usr/bin/sandbox-exec -p '(version 1)(allow default)(deny file-read*
 file-write* (subpath ...))'`, the primitive both CLIs use on macOS, with
