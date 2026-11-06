@@ -57,7 +57,7 @@ describe("App", () => {
     const sync = startSync({ client, store, connect: daemon.connect });
     let resuming = true;
     const meta = client.meta.bind(client);
-    vi.spyOn(client, "meta").mockImplementation(async () => ({ ...await meta(), resuming }));
+    const metadata = vi.spyOn(client, "meta").mockImplementation(async () => ({ ...await meta(), resuming }));
     daemon.data.workspaces = [{ ...root, agents: root.agents?.map((a) => ({ ...a, window: null })) }];
     try {
       renderApp(<App store={store} client={client} refresh={sync.refresh} />);
@@ -71,12 +71,21 @@ describe("App", () => {
       let resolve!: (rows: Awaited<ReturnType<typeof client.snapshot>>) => void;
       vi.spyOn(client, "snapshot").mockReturnValueOnce(new Promise((ok) => { resolve = ok; }));
       await act(async () => { await vi.advanceTimersByTimeAsync(500); });
-      // A disconnect during the read makes its ready windows stale.
+      // Reopening restores the connection string, but the old read stays stale.
       await act(async () => {
         store.dispatch({ type: "connection", state: "closed" });
+        store.dispatch({ type: "connection", state: "open" });
+        resuming = true;
         resolve([root]);
       });
       expect(screen.getByTestId("starting")).toBeTruthy();
+      await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+      expect(screen.getByTestId("starting")).toBeTruthy();
+      // Recovery starts after an apparently ready check, before releasing the gate.
+      metadata.mockImplementationOnce(async () => ({ ...await meta(), resuming: false }));
+      await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+      expect(screen.getByTestId("starting")).toBeTruthy();
+      resuming = false;
       await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
       expect(screen.queryByTestId("starting")).toBeNull();
       expect(nav()).toBeTruthy();

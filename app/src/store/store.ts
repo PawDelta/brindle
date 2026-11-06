@@ -15,6 +15,8 @@ export const RECENT_EVENTS = 50;
 
 export interface AppState {
   connection: StreamState | "idle";
+  /* Changes monotonically even when a reconnect returns to the same state. */
+  connectionGeneration: number;
   /* Shared identity, refreshed by the sidebar and Account page. */
   account: AccountDTO | null;
   /* The newest bus event id applied: what a reconnect resumes from. */
@@ -48,6 +50,7 @@ export type Action =
 
 export const initialState: AppState = {
   connection: "idle",
+  connectionGeneration: 0,
   account: null,
   lastEventId: 0,
   workspaces: [],
@@ -69,7 +72,8 @@ export function reduce(state: AppState, action: Action): AppState {
     case "app_update":
       return { ...state, appUpdate: action.status };
     case "connection":
-      return { ...state, connection: action.state };
+      return { ...state, connection: action.state,
+        connectionGeneration: state.connectionGeneration + Number(state.connection !== action.state) };
     case "snapshot":
       return { ...state, ...liveSnapshot(action.workspaces, action.inbox, state.pastWorkers), stale: false, synced: true, error: null };
     case "error":

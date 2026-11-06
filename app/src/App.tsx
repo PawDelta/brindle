@@ -378,8 +378,8 @@ function Startup({ client, refresh, children }: { client: DaemonClient | null; r
       setDone(true);
     }, STARTUP_WAIT);
     const check = async () => {
-      const { lastEventId, connection } = store.getState();
-      const unchanged = () => current && store.getState().lastEventId === lastEventId && store.getState().connection === connection;
+      const { lastEventId, connectionGeneration } = store.getState();
+      const unchanged = () => current && store.getState().lastEventId === lastEventId && store.getState().connectionGeneration === connectionGeneration;
       try {
         const meta = await client.meta();
         if (!unchanged()) return;
@@ -394,6 +394,9 @@ function Startup({ client, refresh, children }: { client: DaemonClient | null; r
             // Queue a fresh one before mounting terminals on the store's rows.
             await Promise.all([reload(), refresh?.()]);
             if (!unchanged()) return;
+            // Recovery can start in another daemon while the reads finish.
+            const latest = await client.meta();
+            if (!unchanged() || latest.resuming || latest.pid !== meta.pid) return;
             current = false;
             clearTimeout(deadline);
             setDone(true);
