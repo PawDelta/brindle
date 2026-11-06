@@ -495,9 +495,13 @@ def pre_tool_decision(db, agent_id: str | None, payload: object, strict: bool = 
                     allowed = answer in ("allow_once", "allow_always")
                     out = {"decision": "allow" if allowed else "deny",
                            "reason": f"brindle: the person {'allowed' if allowed else 'denied'} this in the brindle app"}
-            if (escalate and not answer and req is not None and out["decision"] == "deny"
+            if ((escalate or not agent.parent_id) and not answer and req is not None and out["decision"] == "deny"
                     and decision.decision != "deny"):
-                _escalate(db, agent, ws, req, rules, cfg.checks)
+                command = _escalate(db, agent, ws, req, rules, cfg.checks,
+                                    once=decision.rule is not None and decision.rule.decision == "ask")
+                if command and not agent.parent_id:
+                    out["reason"] += (" Show the person this exact command to run in their own terminal, "
+                                      "then make the same call again:\n" + command)
     else:
         out = output(decision, req, spaces)
     if req is not None and out["decision"] == "deny":
@@ -507,31 +511,37 @@ def pre_tool_decision(db, agent_id: str | None, payload: object, strict: bool = 
     return out
 
 
-def _escalate(db, agent, ws, req, rules, checks) -> None:
+def _escalate(db, agent, ws, req, rules, checks, *, once: bool = False) -> str | None:
     """A worker's call no rule allows, under brindle's hook: what a Claude
     worker would wait on the person for. agy has already been told no, so it
     becomes the worker's pending request (agents.pending_permission) and its
     supervisor is told once per request in a turn, with the commands that
     allow it (for a command, each part no rule covers yet: bash_grants),
     after which the worker's retry passes the hook; with no grants, that no
-    rule can and what to do instead. Never raises."""
+    rule can and what to do instead. Explicit asks get a one-time approval
+    command instead of an ineffective allow rule. With no supervisor, record
+    the request and return that command for the agent to show the person.
+    Never raises."""
     from brindle import agents, permissions
 
     request = json.dumps(req.to_dict(), sort_keys=True)
     key = "agy:" + hashlib.sha256(request.encode()).hexdigest()  # the whole request, not its summary
+    command = f"brindle permissions allow --once {shlex.quote(key)}" if once or not agent.parent_id else None
     try:
         if db.conn.execute("SELECT 1 FROM permission_requests WHERE agent_id=? AND tool_use_id=?",
                            (agent.id, key)).fetchone():
-            return
-        db.add_permission_request(agent.id, key, request, "no rule allows it")
+            return command
+        db.add_permission_request(agent.id, key, request, "approval required" if command else "no rule allows it")
+        if not agent.parent_id:
+            return command
         grants = (permissions.bash_grants(req, rules, checks, cd_root=ws.path) if req.kind == "bash"
                   else [req.target()])
         # The call's text is the worker's: it goes only inside fenced blocks,
         # after brindle's own words, and after -- so it's never an option.
         intro = (f"Worker {agent.id} ({agent.profile}) was refused a call no rule allows: it runs "
                  "without approval prompts. Only the user can allow it")
-        if grants and req.kind in permissions.KINDS:
-            allow = "\n".join(f"brindle permissions allow {req.kind} -- {shlex.quote(g)}" for g in grants)
+        if command or grants and req.kind in permissions.KINDS:
+            allow = command or "\n".join(f"brindle permissions allow {req.kind} -- {shlex.quote(g)}" for g in grants)
             how = (": if the worker needs it, ask them to run the commands below, then tell the "
                    f"worker to retry.\n\nTo allow it:\n{_fenced(allow)}")
         else:

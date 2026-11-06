@@ -7,18 +7,19 @@ from brindle.cli import app
 runner = CliRunner()
 
 
-def test_single_arg_allow():
-    """Verify `brindle permissions allow <command>` with a single argument defaults to bash."""
-    # We will test the CLI directly
-    # Since we can't test actual db writes easily without side-effects, we can test that it doesn't crash 
-    # and instead it tries to do something.
-    result = runner.invoke(app, ["permissions", "allow", "aws *"])
-    # It should not complain about missing 'match'
-    assert "Missing argument 'match'" not in result.stdout
-    # We expect it to try to add a rule, and since we run it, it might succeed and print something like
-    # rule-id: allow bash exact 'aws *'
-    # Actually wait, `aws *` exact match for bash rule. Let's verify output.
-    assert "allow bash exact 'aws *'" in result.stdout
+@pytest.mark.parametrize("args, code", [
+    (["aws *"], 0),
+    (["--once", "missing-request"], 1),
+    (["--once", "bash", "git push origin main"], 1),
+])
+def test_single_arg_allow(db, monkeypatch, args, code):
+    from brindle import permissions
+
+    monkeypatch.setattr("brindle.cli.DB", lambda: db)
+    assert runner.invoke(app, ["permissions", "allow", *args]).exit_code == code
+    store = permissions.load_store()
+    assert any(r.kind == "bash" and r.match == "aws *" and r.decision == "allow" for r in store.rules) == (code == 0)
+    assert store.saved == []
 
 
 def test_an_agent_cannot_change_the_permission_rules(monkeypatch):
@@ -263,11 +264,17 @@ def _bypass(command):
     _bypass("ls > ~/.ssh/authorized_keys"),    # a harmless check redirected into a store truncates it
     _bypass("test -e README.md > ~/.aws/credentials"),
     _bypass('for f in ~/.aws/credentials; do test -e README.md > "$f"; done'),    # a store bound by a loop
-    ("ls ~/.ssh", "allow"),
+    ("ls ~/.ssh", "deny"),
+    pytest.param("ls -a ~/.ssh | wc -l", "deny", marks=pytest.mark.variant("build 84 credential listing")),
+    pytest.param("ls -la ~/.ssh", "deny", marks=pytest.mark.variant("credential listing flags")),
+    pytest.param("find ~/.ssh", "deny", marks=pytest.mark.variant("credential discovery")),
+    pytest.param("du -sh ~/.ssh", "deny", marks=pytest.mark.variant("credential directory sizes")),
     ("test -e ~/.aws/credentials", "allow"),
-    ("stat ~/.ssh/id_rsa", "allow"),
-    pytest.param("for f in ~/.ssh/*; do ls $f; done", "allow",
-                 marks=pytest.mark.variant("a command made only of harmless checks may name a store")),
+    pytest.param("[ -e ~/.ssh ]", "allow", marks=pytest.mark.variant("credential existence check")),
+    ("stat ~/.ssh/id_rsa", "deny"),
+    pytest.param("stat ~/.ssh", "deny", marks=pytest.mark.variant("credential directory metadata")),
+    pytest.param("for f in ~/.ssh/*; do ls $f; done", "deny",
+                 marks=pytest.mark.variant("credential listing through a loop")),
     pytest.param("dd if=README.md", "allow", marks=pytest.mark.variant("non-credential input is safe")),
     pytest.param('TOKEN="$TOKEN" echo ready', "allow",
                  marks=pytest.mark.variant("assignment value does not print")),
