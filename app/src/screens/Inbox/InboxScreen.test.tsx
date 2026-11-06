@@ -272,7 +272,8 @@ describe("inbox", () => {
     // The prompt only the agent's window can take: no decision, the way to that window instead.
     const prompt = cards[1];
     expect(within(prompt).queryByRole("group", { name: "Decision" })).toBeNull();
-    fireEvent.click(within(prompt).getByRole("button", { name: /^Open / }));
+    // The way to the window comes with the agent's session, which the store syncs on its own.
+    fireEvent.click(await within(prompt).findByRole("button", { name: /^Open / }));
     expect(onOpen).toHaveBeenLastCalledWith("sup1", REPO, "sup1");
 
     fireEvent.click(within(held).getByRole("button", { name: "Allow once" }));
