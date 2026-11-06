@@ -933,11 +933,57 @@ def summarize_untracked(files: list[str]) -> str:
     return f"Untracked files ({len(files)}):\n" + "\n".join(shown)
 
 
+FALLBACK_NAME = "brindle"
+FALLBACK_EMAIL = "brindle@localhost"
+
+
+def missing_identity(path: str | Path, env: dict[str, str] | None = None) -> list[tuple[str, str]]:
+    """The (role, field) pairs, role "author" or "committer", field "name" or
+    "email", that git has no value for at ``path`` (a new account has none).
+    Each is resolved as git does (GIT_<ROLE>_<FIELD> in ``env``, default the
+    process's, then <role>.<field>, then user.<field>, and EMAIL for an email),
+    so whatever the person set, for either role, is kept."""
+    env = dict(os.environ) if env is None else env
+    # Read the config with that same environment: a worker's profile can point
+    # git at other config files or carry its own settings (GIT_CONFIG_*).
+    found = run_env(["config", "--get-regexp", r"^(user|author|committer)\.(name|email)$"],
+                    path, env, check=False).stdout
+    conf = {k.lower(): v.strip() for k, _, v in (line.partition(" ") for line in found.splitlines())}
+    missing = []
+    for role in ("author", "committer"):
+        for field in ("name", "email"):
+            have = (env.get(f"GIT_{role}_{field}".upper()) or conf.get(f"{role}.{field}")
+                    or conf.get(f"user.{field}") or (field == "email" and env.get("EMAIL")))
+            if not have:
+                missing.append((role, field))
+    return missing
+
+
+def _fallback(field: str) -> str:
+    return FALLBACK_NAME if field == "name" else FALLBACK_EMAIL
+
+
+def identity_args(path: str | Path) -> list[str]:
+    """``-c`` flags giving brindle's own commits a fallback for each part of
+    the identity git has no value for at ``path``. Never replaces a value the
+    person set (config or environment); nothing is written to any config file."""
+    return [a for role, field in missing_identity(path)
+            for a in ("-c", f"{role}.{field}={_fallback(field)}")]
+
+
+def identity_env(path: str | Path, env: dict[str, str] | None = None) -> dict[str, str]:
+    """The same fallback as environment variables, for a worker's own git
+    commands, judged against the worker's effective ``env``: only what is
+    missing, so an identity set anywhere (a profile's GIT_* lines too) stands."""
+    return {f"GIT_{role}_{field}".upper(): _fallback(field)
+            for role, field in missing_identity(path, {**os.environ, **(env or {})})}
+
+
 def commit_all(path: str | Path, message: str) -> str | None:
     run(["add", "-A"], path)
     if ok(["diff", "--cached", "--quiet"], path):
         return None
-    run(["commit", "-m", message], path)
+    run([*identity_args(path), "commit", "-m", message], path)
     return out(["rev-parse", "--short", "HEAD"], path)
 
 
@@ -980,9 +1026,9 @@ def sync(path: str | Path, base: str, strategy: str = "rebase") -> str:
         background_fetch(path, ["origin", base, "--quiet", "--no-tags"])
     ref = base_ref(path, base)
     if strategy == "rebase":
-        proc = run(["rebase", ref], path, check=False)
+        proc = run([*identity_args(path), "rebase", ref], path, check=False)
     elif strategy == "merge":
-        proc = run(["merge", "--no-edit", ref], path, check=False)
+        proc = run([*identity_args(path), "merge", "--no-edit", ref], path, check=False)
     else:
         raise ValueError(f"unknown strategy {strategy!r}")
     if proc.returncode != 0:
@@ -1007,7 +1053,8 @@ def merge_local_base(path: str | Path, base: str, no_ff: bool = False) -> tuple[
     or a conflict. ``no_ff``: always a merge commit, even where HEAD could
     fast-forward."""
     before = out(["rev-parse", "HEAD"], path)
-    proc = run(["merge", "--no-edit", *(["--no-ff"] if no_ff else []), base], path, check=False)
+    proc = run([*identity_args(path), "merge", "--no-edit", *(["--no-ff"] if no_ff else []), base],
+               path, check=False)
     if proc.returncode != 0:
         conflicts = conflicting_files(path)
         run(["merge", "--abort"], path, check=False)
@@ -1015,6 +1062,17 @@ def merge_local_base(path: str | Path, base: str, no_ff: bool = False) -> tuple[
             raise GitError(f"merging {base} failed: {proc.stderr.strip() or proc.stdout.strip()}")
         return before, conflicts
     return out(["rev-parse", "HEAD"], path), []
+
+
+def _identity_hint(proc: subprocess.CompletedProcess) -> str:
+    """How to fix a merge that still failed on a missing identity (say, one
+    a hook or config blanked), in plain words."""
+    text = f"{proc.stderr}\n{proc.stdout}"
+    if "tell me who you are" in text or "empty ident name" in text or "unable to auto-detect" in text:
+        return ('\nGit has no name and email to put on the commit. Set them with '
+                '`git config user.name "Your Name"` and `git config user.email you@example.com` '
+                'in this repository, then merge again.')
+    return ""
 
 
 def merge_into(root: str | Path, target_path: str | Path, branch: str, squash: bool) -> None:
@@ -1039,6 +1097,7 @@ def merge_into(root: str | Path, target_path: str | Path, branch: str, squash: b
             run(["merge", "--abort"], target_path, check=False)
             raise GitError(
                 f"merging {branch} failed (aborted): {proc.stderr.strip() or proc.stdout.strip()}"
+                + _identity_hint(proc)
             )
 
 
@@ -1057,12 +1116,13 @@ def _retry_transient(args: list[str], cwd: str | Path) -> subprocess.CompletedPr
     """Run a git command, retrying with backoff while it fails on the index
     lock. A merge that failed that way never started, so a retry can't touch
     the checkout's uncommitted changes; any other failure returns at once."""
-    proc = run(args, cwd, check=False)
+    who = identity_args(cwd)     # a new account has no author for the merge commit
+    proc = run([*who, *args], cwd, check=False)
     for delay in RETRY_DELAYS:
         if proc.returncode == 0 or not _is_transient(proc):
             break
         time.sleep(delay)
-        proc = run(args, cwd, check=False)
+        proc = run([*who, *args], cwd, check=False)
     return proc
 
 
