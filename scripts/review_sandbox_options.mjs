@@ -39,6 +39,15 @@ for (const light of [true, false]) {
   socket.dispatchEvent(new Event('input'));
   assert.equal(typeof JSON.parse(one('#owner-config').textContent).os_sandbox_allow[0], 'string');
   dockerAllowance.click();
+  const nativeConfiguration = one('#owner-config').textContent;
+  for (const mode of ['off', 'on']) {
+    one(`[data-agy-mode="${mode}"]`).click();
+    assert.equal(one('#agy-consequence').dataset.mode, mode);
+    assert.equal(one(`[data-agy-mode="${mode}"]`).getAttribute('aria-pressed'), 'true');
+    assert.equal(one('#agy-file-boundary').classList.contains('removed'), mode === 'off');
+    assert.equal(all('[data-agy-mode][aria-pressed="true"]').length, 1);
+    assert.equal(one('#owner-config').textContent, nativeConfiguration);
+  }
   for (const service of all('[data-component]')) {
     service.click();
     assert.equal(one('.pipes .active').dataset.pipe, service.dataset.component);
@@ -109,7 +118,7 @@ if (!process.argv.includes('--dom-only')) {
     await page.locator('#owner-provider').selectOption('claude');
     assert.equal(await page.locator('#docker-path').isEnabled(), true);
     // Check actual browser hit targets and focus; DOM checks cannot verify these.
-    for (const button of await page.locator('.service, button[data-preset], [data-choice]:enabled, [data-scenario]').all()) {
+    for (const button of await page.locator('.service, button[data-preset], [data-agy-mode], [data-choice]:enabled, [data-scenario]').all()) {
       await button.click();
       assert.equal(await button.getAttribute('aria-pressed'), 'true');
     }
@@ -119,12 +128,13 @@ if (!process.argv.includes('--dom-only')) {
       await detail.locator('summary').click();
       assert.equal(await detail.getAttribute('open'), '');
     }
-    for (const width of [375, 768, 1440]) {
+    for (const width of [375, 768, 1024, 1440]) {
       await page.setViewportSize({ width, height: 1100 });
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true, `Viewport overflow at ${width}px`);
     }
     await page.locator('details').evaluateAll(nodes => nodes.forEach(node => { node.open = false; }));
     await page.locator('button[data-preset="balanced"]').click();
+    await page.locator('[data-agy-mode="on"]').click();
     await page.locator('[data-component="tmux"]').click();
     await page.locator('#next').click();
     await page.locator('#next').click();
