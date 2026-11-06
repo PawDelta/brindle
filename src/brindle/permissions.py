@@ -1535,6 +1535,8 @@ def _git_invocations(command: str) -> list[tuple[list[str], str, list[str]]]:
     """(its -C folders, subcommand, its arguments) for every git invocation in ``command``."""
     argv = simple_argv(command)
     if argv is not None:
+        while argv and _ASSIGNMENT.match(argv[0]):
+            argv = argv[1:]
         segments = [argv]
     else:
         reader = _PartReader(Request("", "bash", "", command=command))
