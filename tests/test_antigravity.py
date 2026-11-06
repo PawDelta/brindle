@@ -375,6 +375,21 @@ def test_interactive_supervisor_on_autonomous_needs_no_grants(db, ws, monkeypatc
     assert answer("run_command", {"CommandLine": held_back})["decision"] == "deny"
     permissions.forget("d-push-default")    # the preset's git/push-protected group still asks there
     assert answer("run_command", {"CommandLine": "git push origin trunk", "Cwd": str(trunk)})["decision"] == "deny"
+    # An allow covers only what it names: one push never carries what's beside it.
+    permissions.apply_preset("standard")
+    permissions.forget("d-push-default")
+    allow = permissions.add_rule("bash", f"*{permissions.PUSH_ARROW}{permissions.DEFAULT_BRANCH}", "allow", "push")
+    to_trunk, to_develop = f"git -C {trunk} push origin trunk", f"git -C {develop} push origin develop"
+    for command, expected in [
+        (to_trunk, "allow"),
+        (f"{to_trunk} && {to_develop}", "allow"),
+        (f"git -C {develop} push origin feature", "deny"),
+        (f"{to_trunk} && git -C {develop} push origin feature", "deny"),
+        (f"{to_trunk} feature", "deny"),
+        (f"{to_trunk} && touch one.txt", "deny"),
+    ]:
+        assert answer("run_command", {"CommandLine": command})["decision"] == expected, command
+    permissions.forget(allow.id)
     permissions.apply_preset("autonomous")
     # ... and with one, the person's answer in its Inbox decides.
     held = []

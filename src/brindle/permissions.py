@@ -2300,7 +2300,11 @@ def _builtin_matches(rule: Rule, req: Request, checks: list[str]) -> bool:
     if rule.match_type == "git-push":
         return any(sub == "push" for sub, _ in _git_calls(command))
     if rule.match_type == "push":
-        return push_matches(rule.match, req, loose=rule.decision != "allow")
+        if rule.decision != "allow":
+            return push_matches(rule.match, req, loose=True)
+        # As for any allow: one simple command, all of it covered. A compound is read part by part.
+        pushes = pushes_in_repos(req) if simple_argv(command) is not None else []
+        return bool(pushes) and all(push_fits(rule.match, push, repo, loose=False) for push, repo in pushes)
     if rule.match_type == "git-force":
         return destructive_git(command)
     if rule.match_type == "rm-destructive":
