@@ -98,12 +98,21 @@ def test_fair_share_queued_tasks_start_round_robin_across_sessions(rows, monkeyp
     b1 = queued(rows, "b", at=3.0)
     # Older, but a dependency added since it began waiting holds it: it must not take a turn it can't use.
     queued(rows, "c", at=0.5, depends_on=[f"task:{b1.id}"])
-    # Nor may one on a branch brindle doesn't track as a task, which git says isn't merged yet.
+    # Nor may one on a branch brindle doesn't track as a task, which git says isn't merged yet,
+    # or can't tell (and that failure must not hold up anyone else's start).
     w = rows.get_workspace("w")
-    rows.add_workspace(Workspace("ext", w.repo_root, "ext", "worktree", "ext", "main", w.path + "-ext", None,
-                                 "s-ext", 1.0))
-    monkeypatch.setattr(tasks.git, "ok", lambda args, cwd=None: args[0] != "merge-base")
+    for branch in ("ext", "broken"):
+        rows.add_workspace(Workspace(branch, w.repo_root, branch, "worktree", branch, "main", f"{w.path}-{branch}",
+                                     None, f"s-{branch}", 1.0))
+
+    def ancestry(args, cwd=None):
+        if args[0] == "merge-base" and "broken" in args:
+            raise tasks.git.GitError("git is busy")
+        return args[0] != "merge-base"
+
+    monkeypatch.setattr(tasks.git, "ok", ancestry)
     queued(rows, "c", at=0.4, depends_on=["ext"])
+    queued(rows, "c", at=0.3, depends_on=["broken"])
     assert fair_share.order(rows) == [a1.id, b1.id, a2.id]
     assert tasks._claim_fair(rows, a1)[0]
     rows.add_agent(Agent("a1-worker", "w", "developer", "claude", "a", "assign", "processing", "@1", None, 1.0))

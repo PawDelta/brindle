@@ -90,7 +90,7 @@ def _runnable(db: DB, t: Task) -> bool:
     one brindle doesn't track as a task is judged by git ancestry, as its
     start judges it, so unknown readiness never takes a turn), its session
     not paused, and it starts a process of brindle's."""
-    from brindle import agents, tasks
+    from brindle import agents, git, tasks
 
     deps = tasks._loads(t.depends_on)
     if deps:
@@ -100,6 +100,8 @@ def _runnable(db: DB, t: Task) -> bool:
                                                       dependent_task_id=t.id, lock_identities=False):
                 return False
         except agents.AgentError:   # a cancelled dependency: it never starts
+            return False
+        except (git.GitError, OSError):   # readiness unknown (its worktree gone, git busy): no turn, others go on
             return False
     return not tasks.session_paused(db, t) and agents.launches_process(t.profile, t.repo_root)
 
