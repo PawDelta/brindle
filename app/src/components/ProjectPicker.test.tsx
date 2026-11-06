@@ -96,6 +96,22 @@ describe("ProjectPicker", () => {
     expect(daemon.clones).toHaveLength(2);
   });
 
+  it("a connect still in flight when the failed clone is dismissed does not clone again", async () => {
+    const daemon = new FakeDaemon();
+    daemon.privateRepos = [URL];
+    const { picked } = setup(daemon, null);
+    clone();
+    const failed = await screen.findByTestId("clone-failed");
+    fireEvent.click(within(failed).getByRole("button", { name: "Connect GitHub" }));
+    daemon.holdGithub = true;
+    fireEvent.click(await screen.findByRole("button", { name: "Use my GitHub CLI sign-in" }));
+    fireEvent.click(within(failed).getByRole("button", { name: "Dismiss" }));
+    await act(async () => daemon.releaseGithub());
+    expect(daemon.githubRoutes).toEqual(["gh"]);
+    expect(daemon.clones).toHaveLength(1);
+    expect(picked).not.toHaveBeenCalled();
+  });
+
   it("initializes a plain folder with one click after opening it", async () => {
     const daemon = new FakeDaemon();
     daemon.notGitFolders = ["/home/u/Downloads", "/home/u/New"];

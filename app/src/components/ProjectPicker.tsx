@@ -41,6 +41,8 @@ export function ProjectPicker({ client, pickFolder, onPicked, offerGithub = fals
   /* The first-launch card was skipped; a clone failure's Connect GitHub was pressed. */
   const [skipped, setSkipped] = useState(false);
   const [failureCard, setFailureCard] = useState(false);
+  /* Bumped when the failed clone is dismissed, retried or replaced: a connect that finishes later must not clone again. */
+  const generation = useRef(0);
   const [opening, setOpening] = useState(false);
   const [openError, setOpenError] = useState<string | null>(null);
   const [plainFolder, setPlainFolder] = useState<string | null>(null);
@@ -59,6 +61,7 @@ export function ProjectPicker({ client, pickFolder, onPicked, offerGithub = fals
     setPlainFolder(null);
     setToolsMissing(null);
     lastOpened.current = path;
+    generation.current++;
     clear();      // an earlier clone's failure is not what Try again retries now
     setOpening(true);
     try {
@@ -84,6 +87,7 @@ export function ProjectPicker({ client, pickFolder, onPicked, offerGithub = fals
   };
 
   const clone = (what = cloning.current) => {
+    generation.current++;
     if (!what) return;
     cloning.current = what;
     setToolsMissing(null);      // an earlier open's failure is not what Try again retries now
@@ -210,7 +214,13 @@ export function ProjectPicker({ client, pickFolder, onPicked, offerGithub = fals
           lines={job.progress}
           failure={{ headline: "Clone failed.", message: job.error ?? "" }}
           onRetry={() => clone()}
-          other={{ label: "Dismiss", onClick: clear }}
+          other={{
+            label: "Dismiss",
+            onClick: () => {
+              generation.current++;
+              clear();
+            },
+          }}
           extra={
             githubFailure && (
               <button type="button" className={button} onClick={() => setFailureCard(true)}>
@@ -226,10 +236,15 @@ export function ProjectPicker({ client, pickFolder, onPicked, offerGithub = fals
           openUrl={openUrl}
           skipLabel="Not now"
           onSkip={() => setFailureCard(false)}
-          onConnected={() => {
-            setFailureCard(false);
-            clone();
-          }}
+          onConnected={(() => {
+            const at = generation.current;
+            return () => {
+              // Dismissed, retried or replaced by another operation while connecting: no clone of the old failure.
+              if (generation.current !== at) return;
+              setFailureCard(false);
+              clone();
+            };
+          })()}
         />
       )}
     </div>

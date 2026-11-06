@@ -647,6 +647,9 @@ export class FakeDaemon {
      is refused (github_token_invalid), "gh" needs github.gh_available, and the requests' routes are kept in order. */
   github: GithubConnection = { connected: false, login: null, route: null, storage: null, expires_at: null, needs_reconnect: false, gh_available: true };
   readonly githubRoutes: string[] = [];
+  /* While true, POST /github/connection waits for releaseGithub(). */
+  holdGithub = false;
+  releaseGithub: () => void = () => undefined;
   /* Clone URLs that fail as git does without credentials until GitHub is connected. */
   privateRepos: string[] = [];
   /* Folders POST /repos/open refuses: not a git repository. */
@@ -2457,7 +2460,11 @@ export class FakeDaemon {
       return policy;
     }
     if (method === "POST" && /^\/sessions(\/|$)/.test(path)) return this.write(path, (body ?? {}) as Record<string, unknown>);
-    if (path === "/github/connection") return this.githubConnection(method, (body ?? {}) as Record<string, unknown>);
+    if (path === "/github/connection") {
+      const fields = (body ?? {}) as Record<string, unknown>;
+      if (method === "POST" && this.holdGithub) return new Promise<Response>((resolve) => (this.releaseGithub = () => resolve(this.githubConnection(method, fields))));
+      return this.githubConnection(method, fields);
+    }
     if (method === "POST" && path === "/demo") return this.startDemo();
     if (method === "DELETE" && path === "/demo") return this.cancelDemo();
     if (method === "PUT" || method === "DELETE") {
