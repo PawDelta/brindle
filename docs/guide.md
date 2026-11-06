@@ -883,7 +883,10 @@ a Claude Code worker (Codex and Antigravity: see below) is about to show a permi
 `PermissionRequest` hook hands brindle the structured request (the tool and its
 command, path or URL; brindle never reads the screen) and brindle answers
 **allow**, **deny**, or **ask**, which leaves the prompt to you as usual. Any
-error is ask.
+error is ask. What the policy allows is answered earlier, at `PreToolUse`, wherever
+Claude Code would otherwise prompt, so no prompt shows at all; its own deny and ask
+rules still apply. Workers can't use Claude Code's `AskUserQuestion`: nobody watches
+their panes, so they ask their supervisor with `send_message`.
 
 Nothing is built in. Every rule lives in `~/.brindle/permissions.json`, and
 you can edit or remove any of them, including the ones a **preset** seeded.
