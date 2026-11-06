@@ -18,6 +18,27 @@ for (const light of [true, false]) {
   const { document, Event } = dom.window;
   const one = selector => document.querySelector(selector);
   const all = selector => [...document.querySelectorAll(selector)];
+  // Native owner allowances must not imply unsupported Antigravity controls.
+  const provider = one('#owner-provider');
+  const dockerAllowance = one('[data-allow="docker"]');
+  dockerAllowance.click();
+  const socket = one('#docker-path');
+  socket.value = '/task/container-proxy.sock';
+  socket.dispatchEvent(new Event('input'));
+  assert.equal(JSON.parse(one('#owner-config').textContent).os_sandbox_allow[0].docker, socket.value);
+  const configuration = one('#owner-config').textContent;
+  provider.value = 'agy';
+  provider.dispatchEvent(new Event('change'));
+  assert(all('[data-allow], [data-socket-path]').every(control => control.disabled));
+  dockerAllowance.click();
+  assert.equal(one('#owner-config').textContent, configuration);
+  provider.value = 'claude';
+  provider.dispatchEvent(new Event('change'));
+  assert(!dockerAllowance.disabled);
+  socket.value = '';
+  socket.dispatchEvent(new Event('input'));
+  assert.equal(typeof JSON.parse(one('#owner-config').textContent).os_sandbox_allow[0], 'string');
+  dockerAllowance.click();
   for (const service of all('[data-component]')) {
     service.click();
     assert.equal(one('.pipes .active').dataset.pipe, service.dataset.component);
@@ -69,7 +90,7 @@ for (const light of [true, false]) {
   for (const link of all('a[href^="#"], use')) assert(document.getElementById(link.getAttribute('href').slice(1)));
   dom.window.close();
 }
-console.log('Passed DOM interactions: attack/defense paths, presets, matrix/settings synchronization, failure navigation, save preview, themes and internal anchors.');
+console.log('Passed DOM interactions: native owner allowances and unsupported-provider handling, attack/defense paths, presets, matrix/settings synchronization, failure navigation, save preview, themes and internal anchors.');
 
 if (!process.argv.includes('--dom-only')) {
   const browser = await chromium.launch({ headless: true });
@@ -81,6 +102,12 @@ if (!process.argv.includes('--dom-only')) {
     page.on('pageerror', error => errors.push(error.message));
     page.on('request', request => { if (/^https?:/.test(request.url())) network.push(request.url()); });
     await page.goto(pageUrl.href);
+    await page.locator('[data-allow="docker"]').check();
+    await page.locator('#docker-path').fill('/task/container-proxy.sock');
+    await page.locator('#owner-provider').selectOption('agy');
+    assert.equal(await page.locator('#docker-path').isDisabled(), true);
+    await page.locator('#owner-provider').selectOption('claude');
+    assert.equal(await page.locator('#docker-path').isEnabled(), true);
     // Check actual browser hit targets and focus; DOM checks cannot verify these.
     for (const button of await page.locator('.service, button[data-preset], [data-choice]:enabled, [data-scenario]').all()) {
       await button.click();
