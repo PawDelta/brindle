@@ -7,6 +7,30 @@ import pytest
 import yaml
 
 
+@pytest.mark.variant("release approval dependencies are outside Python coverage")
+def test_single_release_approval_precedes_credentials():
+    root = Path(__file__).resolve().parents[1]
+    jobs = yaml.safe_load((root / ".github/workflows/app-release.yml").read_text())["jobs"]
+    approval_jobs = [name for name, job in jobs.items() if job.get("environment") == "release-gate"]
+    assert approval_jobs == ["release-gate"]
+    gate = jobs["release-gate"]
+    assert gate["if"] == "github.event_name == 'push' && github.ref_type == 'tag'"
+    assert "secrets." not in yaml.safe_dump(gate)
+
+    def ancestors(name):
+        needs = jobs[name].get("needs", [])
+        needs = [needs] if isinstance(needs, str) else needs
+        return set(needs).union(*(ancestors(parent) for parent in needs))
+
+    for name, job in jobs.items():
+        environment = job.get("environment", "")
+        if "desktop-release" in environment:
+            assert "release-gate" in ancestors(name), name
+            assert "needs.release-gate.result == 'success'" in job["if"], name
+        if "secrets." in yaml.safe_dump(job):
+            assert "desktop-release" in environment or environment == "desktop-staff-release", name
+
+
 @pytest.mark.variant("release workflow and shell build assets are outside Python coverage")
 def test_intel_builds_on_apple_silicon():
     root = Path(__file__).resolve().parents[1]
