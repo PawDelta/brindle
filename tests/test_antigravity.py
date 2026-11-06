@@ -188,7 +188,7 @@ def test_paste_blocked():
     assert p.paste_blocked("> hello", interactive=False) is None
     assert p.paste_blocked("> \n───\n? for shortcuts      Gemini", interactive=True) is None
     assert p.paste_blocked("> hello world\n───\n? for shortcuts", interactive=True) == "typing"
-    assert p.paste_blocked(">\n" + "continued draft\n" * 40 + "───\n? for shortcuts", interactive=True) == "typing"
+    assert p.paste_blocked(">\n\n" + "continued draft\n" * 40 + "───\n? for shortcuts", interactive=True) == "typing"
     assert p.paste_blocked("\x1b[38;5;232m>\x1b[0m ", interactive=True) is None
     assert p.paste_blocked("\x1b[38;5;232m>\x1b[0m \x1b[1mhello\x1b[0m", interactive=True) == "typing"
 

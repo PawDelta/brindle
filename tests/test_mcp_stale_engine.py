@@ -29,6 +29,7 @@ def test_failed_report_is_redelivered_once(db, tmp_path, monkeypatch, finding):
     from brindle import agents, bus, cli, gates, git, identity_lock, inbox, pipeline, tmux, usage, workspaces
     from brindle.config import RepoConfig
     from brindle.db import Workspace
+    from test_codex_notify import CODEX_EMPTY_PANE
     from test_merge_order import add
 
     ws = Workspace("ws", str(tmp_path), "work", "worktree", "work", "main",
@@ -174,15 +175,16 @@ def test_failed_report_is_redelivered_once(db, tmp_path, monkeypatch, finding):
         def screen(*a, **k):
             if db.get_agent("boss").provider == "claude":
                 return "────\n❯ " + "".join(composer) + "\n────\n? for shortcuts\n"
-            return "› " + "".join(composer) + "\n? for shortcuts\n"
+            return "› " + "".join(composer) + "\n" + CODEX_EMPTY_PANE.split("\n", 1)[1]
 
         monkeypatch.setattr(tmux, "capture", screen)
         monkeypatch.setattr(inbox, "usable", lambda *a: False)
         piped = False
-        for route in ("idle", "midturn", "submit", "notice"):
+        for route in ("idle", "submit", "midturn", "codex-submit", "notice"):
+            submitting = route in ("submit", "codex-submit")
             notifications.clear()
             db.update_agent("boss", provider="claude" if route == "submit" else "codex",
-                            status="idle" if route in ("idle", "submit") else "processing")
+                            status="idle" if route == "idle" or submitting else "processing")
             monkeypatch.setattr(agents, "pulls_messages", lambda *a: route == "notice")
             monkeypatch.setattr(agents, "is_alive", lambda *a: False)
             call(route)
@@ -196,16 +198,16 @@ def test_failed_report_is_redelivered_once(db, tmp_path, monkeypatch, finding):
                 phase = "connect"
                 monkeypatch.setattr(inbox, "usable", lambda *a: True)
             else:
-                phase = {"idle": "paste-load", "midturn": "paste-lead", "submit": "paste-submit"}[route]
+                phase = "paste-submit" if submitting else {"idle": "paste-load", "midturn": "paste-lead"}[route]
             agents._notify_supervisor(db, db.get_agent("boss"))
             assert notifications == [] and not buffers
             pending = db.pending_count("boss")
             assert pending == 1
-            if route in ("idle", "submit"):
+            if route == "idle" or submitting:
                 assert db.get_agent("boss").status == "idle"  # release our status claim, too
             locked.clear()
             phase = "transport"
-            if route in ("midturn", "submit"):
+            if route == "midturn" or submitting:
                 # A changed draft is never ours to submit. Restoration must
                 # work from durable state, even through a fresh DB connection.
                 assert db.pop_pending("boss") is None
@@ -213,12 +215,17 @@ def test_failed_report_is_redelivered_once(db, tmp_path, monkeypatch, finding):
                 db.update_agent("boss", tmux_window="%replacement")
                 assert agents.flush(db, "boss") is False
                 db.update_agent("boss", tmux_window=pane)
-                composer.append(" unrelated draft")
-                with monkeypatch.context() as available:
-                    available.setattr(inbox, "usable", lambda *a: True)
-                    assert agents.flush(db, "boss") is False  # cannot bypass partial delivery via IPC
-                composer.pop()
-                if route == "submit":
+                # Blank rows and UI-like text inside a changed draft must not
+                # hide its remaining content from the recovery parser.
+                for addition in (" unrelated draft", "\n\nunrelated draft",
+                                 "\n────\nunrelated draft", "\n? for shortcuts\nunrelated draft"):
+                    composer.append(addition)
+                    with monkeypatch.context() as available:
+                        available.setattr(inbox, "usable", lambda *a: True)
+                        assert agents.flush(db, "boss") is False  # cannot bypass partial delivery via IPC
+                    assert not notifications and db.pending_count("boss") == 1
+                    composer.pop()
+                if submitting:
                     capture, start = tmux.capture, tmux._start
                     preparing = []
 
@@ -246,7 +253,7 @@ def test_failed_report_is_redelivered_once(db, tmp_path, monkeypatch, finding):
                 assert notifications == [] and db.pending_count("boss") == pending
             resumed = brindle_db.DB()
             try:
-                if route == "submit":
+                if submitting:
                     def interrupted(*a):
                         raise RuntimeError("lost after submission")
 

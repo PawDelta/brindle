@@ -218,7 +218,7 @@ CLAUDE_TYPING_WITH_INVERSE_CURSOR = (
     (CLAUDE_PLACEHOLDER_GREY_256, True, None),  # grey 256-colour placeholder
     (CLAUDE_PLACEHOLDER_TRUECOLOR_GREY, True, None),  # grey truecolor placeholder
     (CLAUDE_TYPING_WITH_INVERSE_CURSOR, True, "typing"),  # ignore the inverse-video cursor cell
-    ("❯\n" + "continued draft\n" * 40 + "────\n? for shortcuts", True, "typing"),   # a long draft, prompt far above
+    ("❯\n\n" + "continued draft\n" * 40 + "────\n? for shortcuts", True, "typing"),   # a long draft after a blank row
 ])
 def test_claude_paste_blocked(screen, interactive, want):
     assert ClaudeCode().paste_blocked(screen, interactive) == want

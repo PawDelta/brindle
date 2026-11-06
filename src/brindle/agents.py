@@ -2402,26 +2402,11 @@ def _partial_composer(agent: Agent, state: dict, stage: str) -> bool:
     An unsupported, collapsed or changed composer is left to the person.
     Capturing joined lines preserves text across terminal-width wrapping.
     """
-    from brindle import prompt_answer
-
     provider = get_provider(agent.provider)
-    marker = getattr(provider, "INPUT_LINE", None)
-    if marker is None:
-        return False
     screen = tmux.capture(agent.tmux_window, lines=200, escapes=True, server=server_of(agent))
     if provider.paste_blocked(screen, False) or provider.screen_state(screen) == "waiting":
         return False
-    lines = prompt_answer.plain(screen).splitlines()
-    prompts = [(i, match) for i, line in enumerate(lines) if (match := marker.match(line))]
-    if not prompts:
-        return False
-    start, match = prompts[-1]
-    borders = [getattr(provider, name, None) for name in ("BORDER", "INPUT_FOOTER", "FOOTER", "READY")]
-    end = next((i for i in range(start + 1, len(lines))
-                if any(pattern is not None and pattern.search(lines[i]) for pattern in borders)), None)
-    if end is None:
-        return False
-    draft = "\n".join([match.group(1).lstrip(), *lines[start + 1:end]]).rstrip()
+    draft = provider.composer_text(screen)
     expected = (state["lead"].replace("\n", " ") + " ") if state["lead"] else ""
     if stage == "body":
         expected += state["body"]
