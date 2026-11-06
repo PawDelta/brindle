@@ -547,12 +547,13 @@ it takes a few minutes, most of them the approval.
    "Use workflow from", pick a release tag (`app-v*`, usually the bad
    release's own): the job runs in `desktop-release`, which admits only
    `app-v*` tags, and the tag's commit must be on `main`. The tag must
-   carry this workflow, so it works from the first release made after it
-   landed.
+   carry this workflow's `release-gate` job; use a release made after the
+   approval split landed.
 2. Enter the version to go back to (`X.Y.Z`, a stable release published under
    `<X.Y.Z>/`, normally the one before the bad release) and run it.
-3. Approve the run in the `desktop-release` environment, as for a stable
-   publish.
+3. Approve the run in the `release-gate` environment, as for a stable
+   publish. The rollback job then uses `desktop-release` for credentials
+   without another approval.
 
 The job downloads `<X.Y.Z>/brindle_<X.Y.Z>_<arch>.app.tar.gz` and its `.sig`
 for both Macs from the site, and `scripts/feed_rollback.mjs` checks each
@@ -586,7 +587,7 @@ A signed build of a commit on `main` gives brindle staff an installable,
 updating app without a tag or version bump. Each push to `main` that touches
 the app runs `app-release.yml`:
 
-1. `release-gate` (`scripts/release_publish.mjs ci-gate`) refuses unless the
+1. `staff-gate` (`scripts/release_publish.mjs ci-gate`) refuses unless the
    commit is on `origin/main` and the newest `App` (`app.yml`) run for exactly
    that commit, pushed or dispatched on `main`, completed with success. The
    `CI` (`ci.yml`) run must also pass when one exists; CI skips app-only
@@ -652,9 +653,12 @@ an OIDC or S3 failure. Re-running all jobs after a completed Mac build can
 still collide with that build's artifact name; use the publish job alone for
 a publishing failure. Fix build failures with a new promotion/run.
 
-Configure `desktop-release` to admit only `app-v*` tags and require owner
-approval. The `stable-gate` job verifies each pushed tag's commit is on
-`main` before any tag build runs. Configure `desktop-staff-release` to admit
+Configure the secret-free `release-gate` environment to admit only `app-v*`
+tags and require owner approval. The `release-gate` job verifies each pushed
+tag's commit is on `main` before any tag build runs. Configure `desktop-release`
+to admit release tags (`v*` / `app-v*`) with no required reviewers: downstream
+jobs retain its secrets and OIDC subject after the single approval.
+Configure `desktop-staff-release` to admit
 `main` pushes. Provision the same Apple signing and notarization credentials
 there as in `desktop-release`, plus the separate staff updater key matching
 `src-tauri/staff-updater.pub`. Set
@@ -715,8 +719,10 @@ stop it (`brindle daemon stop`) and the app starts one that can.
 
 What the owner sets up, once. The Apple, Tauri and Azure secrets and the
 `TAURI_UPDATER_PUBKEY` variable live in the `desktop-release` GitHub
-environment (repository settings → Environments). The stable-gate job uses
-this environment and requires reviewer approval for pushed tags. Staff builds
+environment (repository settings → Environments), without required reviewers.
+The secret-free `release-gate` job uses the protected `release-gate` environment
+and requires reviewer approval once for pushed tags. Every production build
+and publish job depends on its success. Staff builds
 use the `desktop-staff-release` environment for staff updater signing and
 publishing; configure its secrets and AWS role for the staff feed. `macos`
 selects the environment by ref; `macos-publish`, `linux` and `windows` use

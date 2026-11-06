@@ -10,7 +10,7 @@ from brindle.pro._files import private_dir, read_private
 
 SWITCHES = ("store", "share", "assist", "prompt_analysis", "import_upload")
 STATES = ("off", "default_on", "enforced_on", "enforced_off")
-PLAN_DEFAULT_ON = frozenset({"store", "share", "assist", "import_upload"})   # on for paid plans; prompt_analysis is opt-in
+PLAN_DEFAULT_ON = frozenset()   # analysis-doc switches are opt-in unless an org enforces them
 MAX_CACHE = 1024 * 1024
 
 
