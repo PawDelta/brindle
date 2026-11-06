@@ -36,7 +36,7 @@ import { plain } from "./api/wording";
 import { DaemonContext } from "./api/context";
 import { checkEngine, type EngineStatus } from "./api/engine";
 import { openExternal, pickFolder as nativePicker, type OpenUrl, type PickFolder } from "./api/open";
-import type { SessionDTO } from "./api/schema";
+import type { SessionDTO, WorkspaceDTO } from "./api/schema";
 import type { About, AppUpdater, AppUpdates, CliLink, ReleaseBuildUpdater } from "./api/tauri";
 import { AppUpdateBanner, AppUpdateProvider } from "./components/AppUpdateBanner";
 import { UpgradeCard, useEngineUpgrade } from "./components/EngineUpgrade";
@@ -67,6 +67,8 @@ export interface AppProps {
   client: DaemonClient | null;
   /* Fetch the snapshot and inbox again (Sync.refresh). */
   refresh?: () => Promise<void>;
+  /* Stop background sync when this process cannot use the daemon. */
+  onAgentRefused?: () => void;
   /* Where to open; by default the last-used session, else the first live one, else the empty state. */
   initialRoute?: Route;
   /* Opens a page in the system browser; the shell's by default. */
@@ -351,9 +353,89 @@ function FirstLaunch(props: AppProps) {
   // The providers feed starts with the app itself: the first launch reads its own rows.
   return (
     <ProvidersProvider client={client}>
-      <Shell {...props} initialRoute={(gate.kind === "app" && gate.route) || props.initialRoute} />
+      <Startup client={client} refresh={props.refresh}>
+        <Shell {...props} initialRoute={(gate.kind === "app" && gate.route) || props.initialRoute} />
+      </Startup>
     </ProvidersProvider>
   );
+}
+
+const STARTUP_WAIT = 30000;
+const STARTUP_CHECK = 500;
+
+function waitingForPanes(workspaces: WorkspaceDTO[]): boolean {
+  return workspaces.flatMap((ws) => ws.agents ?? []).some((a) =>
+    a.provider !== "subagent" && !a.headless && !a.locked
+    && !["paused", "done", "failed", "closed", "rewound", "exited"].includes(a.status) && !a.window);
+}
+
+/* Mount the shell only once recovery has settled. Reconnects belong to its
+   banner, never to this launch gate. The deadline also bounds a hung read. */
+function Startup({ client, refresh, children }: { client: DaemonClient | null; refresh?: () => Promise<void>; children: ReactNode }) {
+  const store = useStore();
+  const [done, setDone] = useState(!client);
+  const [line, setLine] = useState("Connecting to brindle…");
+  const { reload } = useSessions();
+  useEffect(() => {
+    if (!client || done) return;
+    let current = true;
+    let next: ReturnType<typeof setTimeout>;
+    const deadline = setTimeout(() => {
+      current = false;
+      clearTimeout(next);
+      setDone(true);
+    }, STARTUP_WAIT);
+    const check = async () => {
+      const { lastEventId, connectionGeneration } = store.getState();
+      const unchanged = () => current && store.getState().lastEventId === lastEventId && store.getState().connectionGeneration === connectionGeneration;
+      try {
+        const meta = await client.meta();
+        if (!unchanged()) return;
+        setLine(meta.resuming ? "Bringing your sessions back…" : "Checking your sessions…");
+        if (!meta.resuming) {
+          const workspaces = await client.snapshot();
+          if (!unchanged()) return;
+          if (!waitingForPanes(workspaces)) {
+            // A snapshot read before recovery may still be in flight in sync.
+            // Queue a fresh one before mounting terminals on the store's rows.
+            const version = store.getState().snapshotVersion;
+            if (refresh) await Promise.all([reload(), refresh()]);
+            else {
+              const inbox = await client.inbox();
+              if (!unchanged()) return;
+              store.dispatch({ type: "snapshot", workspaces, inbox });
+              await reload();
+            }
+            if (!unchanged()) return;
+            // Recovery can start in another daemon while the reads finish.
+            const latest = await client.meta();
+            if (!unchanged() || latest.resuming || latest.pid !== meta.pid) return;
+            const applied = store.getState();
+            // Sync reports failures in the store and still resolves its promise.
+            // Only newly applied, ready rows may be used to mount terminals.
+            if (applied.snapshotVersion === version || applied.error || applied.stale || waitingForPanes(applied.workspaces)) return;
+            current = false;
+            clearTimeout(deadline);
+            setDone(true);
+            return;
+          }
+          setLine("Waiting for your sessions to open…");
+        }
+      } catch {
+        if (!unchanged()) return;
+        setLine("Waiting for brindle to answer… You’ll be let in shortly.");
+      } finally {
+        if (current) next = setTimeout(() => void check(), STARTUP_CHECK);
+      }
+    };
+    void check();
+    return () => {
+      current = false;
+      clearTimeout(next);
+      clearTimeout(deadline);
+    };
+  }, [client, done, reload, refresh, store]);
+  return done ? <>{children}</> : <Starting line={line} />;
 }
 
 /* The sign-in gate: the app needs a brindle account. Once the engine
@@ -367,9 +449,14 @@ function FirstLaunch(props: AppProps) {
    sign-out later (the Account page's, which puts the account it reads
    into the store) brings the gate back. A page with no engine has no
    account to ask about: it goes on to say so. */
-type Signed = { kind: "checking" } | { kind: "error"; error: string } | { kind: "out" } | { kind: "in" };
+type Signed = { kind: "checking" } | { kind: "error"; error: string } | { kind: "refused" } | { kind: "out" } | { kind: "in" };
 
-function SignInGate({ client, openUrl = openExternal, children }: { client: DaemonClient | null; openUrl?: OpenUrl; children: ReactNode }) {
+function SignInGate({ client, openUrl = openExternal, onAgentRefused, children }: {
+  client: DaemonClient | null;
+  openUrl?: OpenUrl;
+  onAgentRefused?: () => void;
+  children: ReactNode;
+}) {
   const store = useStore();
   const [signed, setSigned] = useState<Signed>(client ? { kind: "checking" } : { kind: "in" });
   /* Reads asked so far: Retry and a finished sign-in ask again. */
@@ -385,7 +472,17 @@ function SignInGate({ client, openUrl = openExternal, children }: { client: Daem
         store.dispatch({ type: "account", account: a });
         setSigned(a.signed_in ? { kind: "in" } : { kind: "out" });
       },
-      (e: unknown) => live && setSigned({ kind: "error", error: plain(e instanceof Error ? e.message : String(e)) }),
+      (e: unknown) => {
+        if (!live) return;
+        // Identity is checked against process ancestry. This launch cannot
+        // recover through sign-in or by clearing its inherited environment.
+        if (e instanceof DaemonError && e.code === "agent_caller") {
+          onAgentRefused?.();
+          setSigned({ kind: "refused" });
+        } else {
+          setSigned({ kind: "error", error: plain(e instanceof Error ? e.message : String(e)) });
+        }
+      },
     );
     return () => {
       live = false;
@@ -403,6 +500,15 @@ function SignInGate({ client, openUrl = openExternal, children }: { client: Daem
   }, [out, signed.kind]);
 
   if (signed.kind === "in" || !client) return <>{children}</>;
+  if (signed.kind === "refused") {
+    return (
+      <div className="flex h-full items-center justify-center p-s4">
+        <p className="max-w-prose text-ink-2" role="alert">
+          brindle was opened from an agent's terminal. Open it from the Dock
+        </p>
+      </div>
+    );
+  }
   if (checking) return <Starting />;
   const problem = signed.kind === "error" && (
     <div className={`${alert} flex flex-wrap items-center gap-s2`} role="alert" data-testid="signin-gate-failed">
@@ -424,13 +530,13 @@ export default function App(props: AppProps) {
   return (
     <StoreContext.Provider value={props.store}>
       <DaemonContext.Provider value={props.client}>
-        <SessionsProvider client={props.client}>
-          <UsageProvider client={props.client}>
-            <SignInGate client={props.client} openUrl={props.openUrl}>
+        <SignInGate client={props.client} openUrl={props.openUrl} onAgentRefused={props.onAgentRefused}>
+          <SessionsProvider client={props.client}>
+            <UsageProvider client={props.client}>
               <FirstLaunch {...props} />
-            </SignInGate>
-          </UsageProvider>
-        </SessionsProvider>
+            </UsageProvider>
+          </SessionsProvider>
+        </SignInGate>
       </DaemonContext.Provider>
     </StoreContext.Provider>
   );

@@ -58,7 +58,7 @@ function app() {
     sync = startSync({ client, store, connect });
     watchDebug(client);
   }
-  return <App store={store} client={client} refresh={sync?.refresh} initialRoute={initialRoute} installCli={cli} appUpdater={updater} appUpdates={updates} releaseBuildUpdater={releaseUpdater} readAbout={about} />;
+  return <App store={store} client={client} refresh={sync?.refresh} onAgentRefused={() => sync?.stop()} initialRoute={initialRoute} installCli={cli} appUpdater={updater} appUpdates={updates} releaseBuildUpdater={releaseUpdater} readAbout={about} />;
 }
 
 // In the app, the daemon is found (or started) first; when it can't be, the
