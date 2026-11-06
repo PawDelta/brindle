@@ -22,7 +22,9 @@ left its base decide what runs:
   through the tests that import its module (``Imports``); more tests than
   ``scoped_checks_max_files`` run only the branch's own and namesake tests.
   Only a changed file no import can name (outside any package) runs the full
-  suite, after a one-line note saying why.
+  suite, after a one-line note saying why. So does a selection that comes out
+  empty, after trying the changed modules' namesake tests (``tests/test_<module>.py``):
+  a scoped check never passes by running nothing.
 
 Every check on a worker's branch also gets ``BRINDLE_CHANGED_FILES`` (see
 ``changed_files``), so a script can narrow itself.
@@ -195,14 +197,18 @@ def command(ws: Workspace, cmd: str, scope: CheckScope | None, diff: tuple[str, 
         tests = pytest_targets(ws, base, changed)
     except Unscoped as why:
         return f"printf '%s\\n' {shlex.quote(FULL_NOTE.format(why=why))}; {cmd}"
-    if not tests:
-        return None
+    if not tests:   # nothing reaches the change: its namesake tests, else the full check, never a pass on nothing
+        tests = capped_targets(ws, changed)
+        if not tests:
+            why = "no test reaches the changed files and none is named after them"
+            return f"printf '%s\\n' {shlex.quote(FULL_NOTE.format(why=why))}; {cmd}"
     if max_files > 0 and len(tests) > max_files:
         tests = capped_targets(ws, changed)
-        note = shlex.quote(CAP_NOTE.format(max=max_files, tests=" ".join(tests) or "none"))
-        echo = f"printf '%s\\n' {note}"
-        # Nothing own or namesake to run: only the note, never a bare pytest.
-        return f"{echo}; {cmd} {_quoted(tests)} || [ $? -eq 5 ]" if tests else echo
+        if not tests:   # a cap that leaves no test to run falls back to the full check
+            why = "the change reaches more tests than scoped_checks_max_files and none is its own or a namesake"
+            return f"printf '%s\\n' {shlex.quote(FULL_NOTE.format(why=why))}; {cmd}"
+        note = shlex.quote(CAP_NOTE.format(max=max_files, tests=" ".join(tests)))
+        return f"printf '%s\\n' {note}; {cmd} {_quoted(tests)} || [ $? -eq 5 ]"
     return f"{cmd} {_quoted(tests)} || [ $? -eq 5 ]"   # 5: none of them selected
 
 
