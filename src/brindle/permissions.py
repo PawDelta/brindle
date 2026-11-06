@@ -2638,7 +2638,7 @@ def _credential_options(args: list[str], valued: set[str]) -> tuple[list[str], s
 
 # Credential-printing command paths, with each CLI's options that take a value and those that don't.
 _CLI_CREDENTIALS = {
-    "gh": ((("auth", "token"),),
+    "gh": ((("auth", "token"), ("auth", "git-credential")),
            {"-R", "--repo", "-h", "--hostname", "-u", "--user"},
            {"--help", "--secure-storage", "--insecure-storage", "-t", "--show-token", "-a", "--active"}),
     "gcloud": ((("auth", "print-access-token"), ("auth", "print-identity-token"),
@@ -2817,6 +2817,24 @@ def _credential_words(req: Request, part: ShellPart, words: list[str], depth: in
         # gh auth status -t is --show-token (the long form _SECRET_FLAG catches anywhere).
         return (program == "gh" and "-t" in _credential_options(args, valued)[1]
                 and _command_path(args, valued, flags, ("auth", "status")))
+    if program == "git":
+        # Inspect only the selected subcommand: push/fetch may use helpers internally.
+        valued = {"-c", "-C", "--git-dir", "--work-tree", "--namespace", "--config-env", "--super-prefix"}
+        index = 0
+        while index < len(args) and args[index].startswith("-"):
+            option = args[index]
+            index += 2 if option in valued else 1
+            if option == "--":
+                break
+        if index >= len(args):
+            return False
+        program, args = "git-" + args[index], args[index + 1:]
+        if program == "git-credential":
+            return _command_path(args, set(), set(), ("fill",))
+    if program.startswith("git-credential-"):
+        # Helpers define their own options. An option or an unclear action must
+        # fail closed; only a lone, known non-reading action is unambiguous.
+        return args not in (["store"], ["erase"], ["exit"])
     if program == "security":
         operands, options = _credential_options(args, {"-a", "-c", "-C", "-d", "-D", "-j", "-l", "-p", "-s", "-t"})
         return (bool(operands) and operands[0] in ("find-generic-password", "find-internet-password")

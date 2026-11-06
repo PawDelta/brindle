@@ -941,6 +941,7 @@ setting for what no rule covers (ask, allow or deny). A deny or ask also
 catches a part of a compound command however it's spelled (spacing, quotes,
 assignments, redirects, `$(...)`, patterns the shell expands); when brindle
 can't read the syntax and a deny or ask could match it, it asks.
+Every preset denies explicit Git credential retrieval (`git credential fill`, credential helpers with `get`) and `gh auth token` / `gh auth git-credential`; normal `git push` and `git fetch` still follow their usual rules.
 
 Add your own with `brindle permissions allow|deny KIND MATCH` (kinds: `read`,
 `write`, `edit`, `bash`, `fetch`, `mcp`, `other`; the match is exact unless
