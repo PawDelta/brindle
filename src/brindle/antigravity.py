@@ -427,7 +427,7 @@ def pre_tool_decision(db, agent_id: str | None, payload: object, strict: bool = 
     from brindle import os_sandbox
 
     if os_sandbox.bypass_requested(payload) and os_sandbox.wanted(ws.path, agent.provider, agent.mode):
-        # agy retries a command its sandbox stopped outside the sandbox, on its
+        # agy reruns a command its sandbox stopped outside the sandbox, on its
         # own under the skip flag: the one escape, denied whatever the rules say.
         return os_sandbox.bypass_denial()
     cfg = load_repo_config(ws.repo_root)

@@ -2138,7 +2138,7 @@ class Antigravity(Provider):
 
         if os_sandbox.wanted(ctx.cwd, self.name, ctx.mode):
             # Its commands run in agy's own sandbox with every credential store
-            # denied; the hook denies agy's own retry outside it
+            # denied; the hook denies agy's own second run outside it
             # (os_sandbox.bypass_requested). Refused when that can't be required.
             argv += os_sandbox.agy_flags(ctx.cwd)
         if ctx.profile.model:

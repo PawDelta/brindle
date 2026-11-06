@@ -172,7 +172,7 @@ def test_an_unavailable_or_conflicting_backend_refuses_the_launch(ws, tmp_path, 
 
 def test_agy_worker_is_sandboxed_and_may_not_run_outside_it(db, ws, capable, monkeypatch):
     """agy gets --sandbox and session settings denying every store; its own
-    retry outside the sandbox (BypassSandbox) is denied by the hook, and a
+    second run outside the sandbox (BypassSandbox) is denied by the hook, and a
     Gemini key agy ignores is kept out of the pane, since agy's sandbox
     leaves the command environment alone."""
     set_local(ws.repo_root, "permission_policy", "on")

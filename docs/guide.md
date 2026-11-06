@@ -1229,16 +1229,16 @@ What's inside the boundary is the worker's shell commands, their children and
   not reachable from a sandboxed command. A nested `sandbox-exec` fails.
 
 Claude Code's permission prompts and brindle's hook decisions still apply to
-every command (the sandbox doesn't auto-allow), and the unsandboxed retry Claude
-Code otherwise offers is off for the session; repository settings can't loosen
+every command (the sandbox doesn't auto-allow), and the unsandboxed second run
+Claude Code otherwise offers is off for the session; repository settings can't loosen
 any of it. Its file tools, hooks and MCP servers stay outside the sandbox under
 their existing rules (a worker's Read and Edit are denied the same stores).
 
 Antigravity's sandbox honours the same deny list but doesn't scrub the command
 environment, so under the Gemini-API route its commands see `GEMINI_API_KEY`
 (under its default Google sign-in there is nothing to see: the token is a
-denied file). agy retries a blocked command outside its sandbox on its own;
-brindle's hook denies every such retry, so the agent has to find another way or
+denied file). agy runs a blocked command again outside its sandbox on its own;
+brindle's hook denies every such attempt, so the agent has to find another way or
 tell its supervisor. If the sandbox can't be set up for a command (agy reports a
 configuration error), the command fails rather than running outside.
 

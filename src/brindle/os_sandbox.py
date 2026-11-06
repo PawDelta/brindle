@@ -10,7 +10,7 @@ workers the same boundary through each CLI's native command sandbox:
 
 * Claude Code: its ``sandbox`` settings, passed with ``--settings`` (a layer
   only managed settings outrank): the sandbox required (``failIfUnavailable``),
-  no unsandboxed retry (``allowUnsandboxedCommands: false``, which also makes
+  no unsandboxed second run (``allowUnsandboxedCommands: false``, which also makes
   repository settings unable to loosen it), brindle's permission decisions kept
   (``autoAllowBashIfSandboxed: false``), every credential store read- and
   write-denied, the CLI's own credentials scrubbed from command environments,
@@ -19,7 +19,7 @@ workers the same boundary through each CLI's native command sandbox:
   servers stay under their existing rules.
 * Antigravity (agy): ``--sandbox`` with session-only ``--settings`` denying the
   same stores to ``read_file``/``write_file`` (which the sandbox mounts honour).
-  agy retries a blocked command with ``BypassSandbox: true`` on its own, so
+  agy reruns a blocked command with ``BypassSandbox: true`` on its own, so
   brindle's PreToolUse hook denies every such call (bypass_requested). agy's
   sandbox doesn't scrub the command environment, so the pane of a sandboxed agy
   worker starts without a Gemini key agy itself ignores (agy_env_denies).
