@@ -39,6 +39,7 @@ import re
 import shlex
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 INSTALLER = os.path.expanduser("~/.opencode/bin/opencode")   # where opencode.ai/install puts it
@@ -329,50 +330,56 @@ def readonly_git(profile, command: str, cwd: str, repo_root: str, *, workdir: st
 UNASKED_ENV = "BRINDLE_OPENCODE_UNASKED"
 
 
-def launch_mode(profile) -> str | None:
-    """The permission_mode an OpenCode launch maps (permission_config): the
-    profile's, else the person's opencode_permission_mode "auto" as ``auto``.
-    "ask" leaves it unset, so OpenCode's own prompts stay."""
+@dataclass(frozen=True)
+class Launch:
+    """What one OpenCode launch's permissions follow, read once (launch_for), so
+    its permission block and its environment flags can never disagree.
+
+    - ``mode``: the permission_mode permission_config maps: the profile's, else
+      the person's opencode_permission_mode "auto" as ``auto``; "ask" leaves it
+      unset, so OpenCode's own prompts stay.
+    - ``policy``: the repo's permission_policy is on, so the plugin asks brindle
+      before every tool call (``BRINDLE_OPENCODE_POLICY=1``).
+    - ``unasked``: nothing of OpenCode's asks: the person chose "autonomous", the
+      profile sets no mode, and the policy is on. OpenCode has no hook that can
+      hold a request for the app, so on a config that asks, every edit and
+      command would wait at a prompt in its pane. As with agy
+      (antigravity.strict_on), brindle's plugin is then the gate, and it fails
+      closed (``BRINDLE_OPENCODE_UNASKED=1``). With the policy off brindle can
+      vouch for nothing, so OpenCode keeps asking."""
+
+    mode: str | None
+    policy: bool
+    unasked: bool
+
+
+def launch_for(profile, cwd: str | None) -> Launch:
+    """The Launch for ``profile`` in ``cwd``: one read of the person's setting and
+    one of the repo's policy."""
+    from brindle.codex_hook import policy_on
     from brindle.config import opencode_permission_mode
 
-    if profile.permission_mode:
-        return profile.permission_mode
-    return "auto" if opencode_permission_mode() == "auto" else None
-
-
-def unasked_launch(profile, cwd: str | None) -> bool:
-    """Whether an OpenCode agent starts with nothing of OpenCode's asking: the
-    person chose opencode_permission_mode "autonomous", its profile sets no mode,
-    and the permission policy is on. OpenCode has no hook that can hold a request
-    for the app, so on a config that asks, every edit and command would wait at a
-    prompt in its pane. As with agy (antigravity.strict_on), brindle's plugin is
-    then the gate, and it fails closed. With the policy off brindle can vouch for
-    nothing, so OpenCode keeps asking."""
-    from brindle.config import load_repo_config, opencode_permission_mode
-
-    if profile.permission_mode or not cwd or opencode_permission_mode() != "autonomous":
-        return False
-    try:
-        return load_repo_config(cwd).permission_policy == "on"
-    except Exception:  # noqa: BLE001 - never stop a launch over this; asking is the safe side
-        return False
+    chosen = opencode_permission_mode()
+    policy = policy_on(cwd)   # False if it can't be read: asking is the safe side
+    mode = profile.permission_mode or ("auto" if chosen == "auto" else None)
+    return Launch(mode, policy, unasked=not mode and chosen == "autonomous" and policy)
 
 
 def _in_unasked_launch() -> bool:
-    """Whether this hook runs for an agent unasked_launch started (the plugin's environment)."""
+    """Whether this hook runs for an agent started unasked (Launch.unasked; the plugin's environment)."""
     return os.environ.get(UNASKED_ENV) == "1"
 
 
 UNCHECKED = {"decision": "deny", "reason": "brindle couldn't check this call, and nothing after that check would stop it"}
 
 
-def permission_config(profile, unasked: bool = False) -> dict:
-    """The profile's permission_mode (launch_mode) and allowed_tools as OpenCode's
-    ``permission`` block. OpenCode takes the last rule that matches, so the
-    catch-all comes first. Reads, searches and brindle's MCP tools are left at
-    OpenCode's default (allow). The plugin validates scoped ``git -C`` reads.
+def permission_config(profile, launch: Launch) -> dict:
+    """The launch's permission_mode (Launch.mode) and the profile's allowed_tools
+    as OpenCode's ``permission`` block. OpenCode takes the last rule that matches,
+    so the catch-all comes first. Reads, searches and brindle's MCP tools are left
+    at OpenCode's default (allow). The plugin validates scoped ``git -C`` reads.
 
-    - ``unasked`` (unasked_launch): nothing asks, including what OpenCode asks
+    - ``launch.unasked``: nothing asks, including what OpenCode asks
       about by default (a .env read, a repeated call); the plugin decides.
     - ``bypassPermissions``: everything allowed.
     - ``dontAsk`` (nobody watches, e.g. a reviewer): only allowed_tools'
@@ -381,8 +388,8 @@ def permission_config(profile, unasked: bool = False) -> dict:
       OpenCode's own plan agent, which edits nothing); allowed_tools'
       commands run, others ask.
     - none / ``default``: as above, but edits ask too."""
-    mode = launch_mode(profile)
-    if unasked:
+    mode = launch.mode
+    if launch.unasked:
         return {"read": "allow", "edit": "allow", "bash": "allow", "webfetch": "allow",
                 "external_directory": "allow", "doom_loop": "allow"}
     if mode == "bypassPermissions":
@@ -402,8 +409,9 @@ def permission_config(profile, unasked: bool = False) -> dict:
     return perm
 
 
-def config(ctx) -> dict:
-    """``OPENCODE_CONFIG_CONTENT`` for the agent ``ctx`` launches."""
+def config(ctx, launch: Launch) -> dict:
+    """``OPENCODE_CONFIG_CONTENT`` for the agent ``ctx`` launches, with ``launch``'s
+    permissions (the same Launch its environment flags come from)."""
     from brindle.providers import DELIVERY_NOTE, mcp_server_spec
 
     spec = mcp_server_spec(ctx.agent_id)
@@ -415,7 +423,7 @@ def config(ctx) -> dict:
                             "timeout": 120000}},
         "plugin": [Path(write_plugin()).as_uri()],
         "instructions": [write_instructions(ctx.agent_id, instructions)],
-        "permission": permission_config(ctx.profile, unasked_launch(ctx.profile, ctx.cwd)),
+        "permission": permission_config(ctx.profile, launch),
         # brindle's panes are one agent each: an update prompt nobody answers helps no one.
         "autoupdate": False,
     }

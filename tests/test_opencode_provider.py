@@ -172,6 +172,12 @@ def test_opencode_permission_mode_picks_what_opencode_asks(db, ws, monkeypatch, 
         assert got["edit"] == edit and got["bash"]["*"] == ("deny" if mode == "dontAsk" else "ask")
         return
     assert got["bash"] == got["edit"] == got["doom_loop"] == "allow"
+    # Switched to Ask mid-launch: one read decides both, so an allow-everything block
+    # never goes out without the marker that makes the plugin fail closed.
+    reads = iter(["autonomous"])
+    monkeypatch.setattr("brindle.config.opencode_permission_mode", lambda: next(reads, "ask"))
+    argv = OpenCode().command(LaunchContext("o1", profile, None, cwd=ws.path))
+    assert f"{opencode.UNASKED_ENV}=1" in argv and _config(argv)["permission"]["bash"] == "allow"
 
     add_agent(db, ws)
     monkeypatch.setenv(opencode.UNASKED_ENV, "1")

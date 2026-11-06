@@ -4475,7 +4475,7 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
     Codex (#241). A request left to the person is held for the app's answer
     while the app is open (_hold_for_app; a Claude one is recorded with the
     policy off too). Never raises: any failure is ask, or a deny for an OpenCode
-    agent with nothing of its own to ask (opencode.unasked_launch)."""
+    agent with nothing of its own to ask (opencode.Launch.unasked)."""
     from brindle import opencode
 
     opencode_unasked = provider == "opencode" and os.environ.get(opencode.UNASKED_ENV) == "1"
@@ -4610,7 +4610,7 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
                 decision = permissions.deny_in_parts(reqs[0], checks=cfg.checks, rules=rules) or decision
             if decision.decision == "ask" and (decision.rule is not None or opencode_unasked):
                 # A rule asks explicitly (or anything asks, where nothing of OpenCode's
-                # would: opencode.unasked_launch), and this plugin can't hold a request for
+                # would: opencode.Launch.unasked), and this plugin can't hold a request for
                 # the person: it fails closed rather than let OpenCode's own config run it.
                 permissions.note_prompt(decision)
                 decision = permissions.Decision(
