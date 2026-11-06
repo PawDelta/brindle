@@ -199,6 +199,13 @@ def keys_list() -> None:
         typer.echo(f"{name}  ...{tail}")
 
 
+@app.command("unblock")
+def keys_unblock() -> None:
+    """Let brindle read the keychain again, after it was locked or its dialog cancelled."""
+    keystore.forget_refused()
+    typer.echo("brindle will read the keychain again")
+
+
 @app.command("unset")
 def keys_unset(name: str = typer.Argument(..., help="The variable to forget.")) -> None:
     """Remove a stored key."""
