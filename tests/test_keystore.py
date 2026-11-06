@@ -5,7 +5,7 @@ from subprocess import CompletedProcess, TimeoutExpired
 import pytest
 from typer.testing import CliRunner
 
-from brindle import keys_cmds, keystore
+from brindle import keys_cmds, keystore, spawn
 from brindle.keystore import CredentialError
 
 FAKE = "sk-ant-test-0123456789abcd"
@@ -23,6 +23,7 @@ def test_keychain_read_cached(monkeypatch, record, external):
 
     now, calls = [100.0], []
     stored = [record]
+    real_run = keystore.KeychainStore._run
 
     def run(self, args, stdin=None):
         calls.append(args[0])
@@ -96,6 +97,38 @@ def test_keychain_read_cached(monkeypatch, record, external):
     monkeypatch.setattr(keystore.KeychainStore, "_run", run)
     keystore.KeychainStore(service, account).save({"value": "replacement"})     # saving a key asks too
     assert keystore.KeychainStore(service, account).load() == {"value": "replacement"}
+
+    started = []
+
+    class Security:     # through the real spawn.read: the client goes away while the lookup waits (on a dialog, say)
+        pid, returncode = 2 ** 30, None
+
+        def __init__(self, argv, **kw):
+            started.append(argv)
+
+        def communicate(self, input=None, timeout=None):
+            if not request.stopped:
+                request.stop("the client went away")
+                raise TimeoutExpired("security", 1)
+            self.returncode = 0
+            return keystore._encode({"value": "answered"}), ""
+
+    now[0] += keystore.KEYCHAIN_READ_TTL
+    with monkeypatch.context() as m, spawn.deadline(60) as request:
+        m.setattr(spawn.subprocess, "Popen", Security)
+        m.setattr(keystore.KeychainStore, "_run", real_run)
+        for _ in range(2):     # it runs to its answer, so the next poll doesn't start it (and any dialog) over
+            assert keystore.KeychainStore(service, account).load() == {"value": "answered"}
+    assert len(started) == 1 and not keystore._refused_marker().exists()
+
+    def no_room(self, args, stdin=None):
+        raise spawn.Busy("no room for it")
+
+    now[0] += keystore.KEYCHAIN_READ_TTL
+    monkeypatch.setattr(keystore.KeychainStore, "_run", no_room)
+    with pytest.raises(spawn.Busy):     # never started: nothing asked, so nothing held back
+        keystore.KeychainStore(service, account).load()
+    assert not keystore._refused_marker().exists()
 
 
 def test_file_backend_refuses_loose_permissions(brindle_home):

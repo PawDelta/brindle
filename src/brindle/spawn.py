@@ -153,6 +153,19 @@ def current() -> Deadline | None:
     return _deadline.get()
 
 
+@contextlib.contextmanager
+def no_deadline() -> Iterator[None]:
+    """Reads started inside end only at their own ``timeout``: neither the
+    request's deadline nor its being abandoned stops them. For a read that
+    stopping would only start over, like a keychain lookup and the dialog it may
+    be waiting on. The request's other reads stop as usual."""
+    token = _deadline.set(None)
+    try:
+        yield
+    finally:
+        _deadline.reset(token)
+
+
 # Only work marked here (the heavy read lane, background sweeps) or asked to
 # `skip` waits for room. A request's own reads, the caller check and actions
 # start at once: on a machine whose load stays above its core count, making
