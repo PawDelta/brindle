@@ -13,9 +13,9 @@
    and sign-in items completable in the row. The pages behind the sidebar's foot: Knowledge (a repo's
    decisions and document sources), Agents (which model or custom agent runs
    each kind of work, what takes over at a limit, and making a custom
-   agent), Settings (keys, the repo's settings, permission
-   rules, doctor, the engine's update) and Account (the plan, sign-in,
-   spend). A provider's sign-in runs on the engine with a card that follows
+   agent) and Settings, one place in tabs (the plan, sign-in and spend,
+   usage, keys and providers, permission rules, storage, the repo's
+   settings, doctor and the engine's update). A provider's sign-in runs on the engine with a card that follows
    it (components/ProviderSignIn.tsx), and the engine's upgrade as a
    progress card (components/EngineUpgrade.tsx); the one terminal that is the
    person's own is the Terminal docked under the main column, a plain shell
@@ -42,10 +42,10 @@ import { AppUpdateBanner, AppUpdateProvider } from "./components/AppUpdateBanner
 import { UpgradeCard, useEngineUpgrade } from "./components/EngineUpgrade";
 import { EngineBanner } from "./components/EngineBanner";
 import { Sidebar } from "./components/Sidebar";
+import { Walkthrough } from "./components/Walkthrough";
 import { TerminalPanel, TerminalProvider, shellPlace } from "./components/TerminalPanel";
 import { alert, button } from "./components/ui";
-import { HOME, readLastSession, writeLastSession, type Route, type SessionRef, type SheetRef } from "./routes";
-import { AccountScreen } from "./screens/Account";
+import { HOME, readLastSession, settingsTab, writeLastSession, type Route, type SessionRef, type SheetRef } from "./routes";
 import { InboxScreen } from "./screens/Inbox";
 import { KnowledgeScreen } from "./screens/Knowledge";
 import { NewSession } from "./screens/New";
@@ -118,8 +118,10 @@ export function landing(repos: { repo_root: string }[], sessions: Record<string,
 /* Agents' "Connect …" links and the Inbox's rule links: each press asks Settings to scroll (and open the rule) again. */
 let providerAsks = 0;
 
-function Screen({ route, navigate, client, refresh, store, openUrl, pickFolder, installCli, appUpdater, appUpdates, releaseBuildUpdater, readAbout }: {
+function Screen({ route, visit, navigate, client, refresh, store, openUrl, pickFolder, installCli, appUpdater, appUpdates, releaseBuildUpdater, readAbout }: {
   route: Route;
+  /* Counts the navigations (Shell's), one to the open route included. */
+  visit: number;
   navigate(route: Route): void;
   client: DaemonClient;
   refresh: () => Promise<void>;
@@ -151,12 +153,30 @@ function Screen({ route, navigate, client, refresh, store, openUrl, pickFolder, 
       );
     case "agents":
       return <AgentsScreen client={client} onNavigate={(to) => navigate(to === "providers" ? { screen: "settings", section: "providers", ask: ++providerAsks } : { screen: "knowledge" })} />;
+    /* One Settings, in tabs: the older Account and Project settings routes open it on their tab. */
     case "settings":
-      return <SettingsScreen client={client} installCli={installCli} appUpdater={appUpdater} appUpdates={appUpdates} releaseBuildUpdater={releaseBuildUpdater} readAbout={readAbout} section={route.section} ask={route.ask} rule={route.rule} current={readLastSession()?.repo} />;
     case "project-settings":
-      return <SettingsScreen key={`repo:${route.repo}`} client={client} installCli={installCli} appUpdater={appUpdater} appUpdates={appUpdates} releaseBuildUpdater={releaseBuildUpdater} readAbout={readAbout} repo={route.repo} />;
     case "account":
-      return <AccountScreen client={client} openUrl={openUrl} onNavigate={(screen) => navigate({ screen })} section={route.section} ask={route.ask} />;
+      return (
+        <SettingsScreen
+          key={route.screen === "project-settings" ? `repo:${route.repo}` : route.screen}
+          client={client}
+          installCli={installCli}
+          appUpdater={appUpdater}
+          appUpdates={appUpdates}
+          releaseBuildUpdater={releaseBuildUpdater}
+          readAbout={readAbout}
+          openUrl={openUrl}
+          onNavigate={(screen) => navigate({ screen })}
+          tab={settingsTab(route) ?? undefined}
+          visit={visit}
+          section={route.screen === "settings" ? route.section : undefined}
+          ask={route.screen === "project-settings" ? undefined : route.ask}
+          rule={route.screen === "settings" ? route.rule : undefined}
+          repo={route.screen === "project-settings" ? route.repo : undefined}
+          current={readLastSession()?.repo}
+        />
+      );
     case "new":
       return <NewSession key={route.repo} client={client} onOpen={openSession} initialRepo={route.repo} pickFolder={pickFolder} refresh={refresh} onSignIn={() => navigate({ screen: "settings", section: "providers", ask: ++providerAsks })} />;
     case "inbox":
@@ -210,10 +230,16 @@ function Banner({ status, connection, onRetry, client, store }: { status: Engine
   );
 }
 
-function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, pickFolder = nativePicker, installCli, appUpdater, appUpdates, releaseBuildUpdater, readAbout }: AppProps) {
+/* `firstRun`: the app opens right after the first launch's setup, so the walkthrough offers itself. */
+function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, pickFolder = nativePicker, installCli, appUpdater, appUpdates, releaseBuildUpdater, readAbout, firstRun = false }: AppProps & { firstRun?: boolean }) {
   // Until the sessions are known the app shows the empty state, quietly; then it lands.
   const [route, setRoute] = useState<Route | null>(initialRoute ?? null);
-  const navigate = useCallback((to: Route) => setRoute(to), []);
+  /* Counts the navigations: one to the route already open still counts (Settings opens its tab again). */
+  const [visit, setVisit] = useState(0);
+  const navigate = useCallback((to: Route) => {
+    setVisit((n) => n + 1);
+    setRoute(to);
+  }, []);
   const { repos, sessions, error: feedError, reload } = useSessions();
   useEffect(() => {
     // A place the person already picked (the sidebar answers before the sessions do) stays.
@@ -258,12 +284,12 @@ function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, p
           <AppUpdateBanner openUrl={openUrl} />
           {/* The banner's upgrade follows the engine's terminal stream, which a page with no engine doesn't have. */}
           {client ? <Banner status={bannerStatus(engine, connection)} connection={connection} onRetry={check} client={client} store={store} /> : <EngineBanner status={bannerStatus(engine, connection)} connection={connection} onRetry={check} />}
-          <main className={`relative flex min-h-0 flex-1 flex-col ${fills ? "overflow-hidden" : "gap-s2 overflow-auto p-s3"}`}>
+          <main data-walkthrough="session-view" className={`relative flex min-h-0 flex-1 flex-col ${fills ? "overflow-hidden" : "gap-s2 overflow-auto p-s3"}`}>
             {error && <p className={`${alert} ${fills ? "m-s2 mb-0" : ""}`}>{error}</p>}
             {client ? (
               route ? (
                 <div className={`relative flex min-h-0 flex-1 flex-col ${shown.screen === "inbox" ? "gap-s2 p-s3" : ""}`}>
-                  <Screen route={route} navigate={navigate} client={client} refresh={refresh ?? noop} store={store} openUrl={openUrl} pickFolder={pickFolder} installCli={installCli} appUpdater={appUpdater} appUpdates={appUpdates} releaseBuildUpdater={releaseBuildUpdater} readAbout={readAbout} />
+                  <Screen route={route} visit={visit} navigate={navigate} client={client} refresh={refresh ?? noop} store={store} openUrl={openUrl} pickFolder={pickFolder} installCli={installCli} appUpdater={appUpdater} appUpdates={appUpdates} releaseBuildUpdater={releaseBuildUpdater} readAbout={readAbout} />
 </div>
               ) : feedError ? (
                 // Nothing to land on: the sessions couldn't be read (the engine itself may be fine). Ask again.
@@ -283,6 +309,7 @@ function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, p
           {/* Docked under the session (or whatever page is shown): the screen above gets shorter, nothing lies over it. */}
           <TerminalPanel />
         </div>
+        {client && <Walkthrough autoStart={firstRun} />}
       </div>
       </AppUpdateProvider>
     </TerminalProvider>
@@ -297,12 +324,14 @@ function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, p
    without the route (an older one: 404), whose banner speaks for it. Any
    other failure (the network, a 500) says so in Starting's place, with
    Retry: a first launch never skips its setup on a hiccup. */
-/* The flow done, the app opens on New session (no demo offer on the first launch). */
+/* The flow done, the app opens on New session (no demo offer on the first launch),
+   with the walkthrough (components/Walkthrough) over it once. */
 type Gate =
   | { kind: "checking"; error?: string }
   | { kind: "onboarding"; providers: ProviderInstalled[] }
   | { kind: "permissions" }
-  | { kind: "app"; route?: Route };
+  /* `fresh`: reached through the first launch's setup just now (the walkthrough offers itself). */
+  | { kind: "app"; route?: Route; fresh?: boolean };
 
 function FirstLaunch(props: AppProps) {
   const { client, openUrl = openExternal, pickFolder = nativePicker } = props;
@@ -332,7 +361,7 @@ function FirstLaunch(props: AppProps) {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [client, asked]);
-  const done = useCallback((route?: Route) => setGate({ kind: "app", route }), []);
+  const done = useCallback((route?: Route) => setGate({ kind: "app", route, fresh: true }), []);
   const permissionsDone = useCallback(() => {
     markOnboarded();
     done();
@@ -354,7 +383,7 @@ function FirstLaunch(props: AppProps) {
   return (
     <ProvidersProvider client={client}>
       <Startup client={client} refresh={props.refresh}>
-        <Shell {...props} initialRoute={(gate.kind === "app" && gate.route) || props.initialRoute} />
+        <Shell {...props} initialRoute={(gate.kind === "app" && gate.route) || props.initialRoute} firstRun={gate.kind === "app" && gate.fresh} />
       </Startup>
     </ProvidersProvider>
   );

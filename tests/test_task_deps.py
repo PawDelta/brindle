@@ -295,6 +295,29 @@ def dependency_rows(db, tmp_path, monkeypatch):
     return caller, boss, workspace, launched
 
 
+@pytest.mark.variant("Board incident: bare task IDs must dispatch like pinned task references, even after cleanup")
+@pytest.mark.parametrize("event", ["sweep", "merged", "removed"])
+def test_task_id_dependency_dispatches(db, dependency_rows, event):
+    caller, boss, workspace, launched = dependency_rows
+    upstream_ws = workspace("upstream", branch="feature", tracked=True)
+    [upstream] = db.list_tasks(boss.repo_root)
+    if event == "sweep":
+        tasks.on_merged(db, upstream_ws)
+        db.delete_workspace(upstream_ws.id)
+    pending = tasks.enqueue(db, caller, boss, "developer", "dependent", "assign",
+                            isolate=True, branch="dependent", done_when=None, files=None, depends_on=[upstream.id])
+    if event == "sweep":
+        assert tasks.sweep(db) == 1
+    else:
+        assert tasks.sweep(db) == 0
+        finish = tasks.on_merged if event == "merged" else tasks.on_removed_unmerged
+        finish(db, upstream_ws)
+    result = db.get_task(pending.id)
+    assert result.state == ("cancelled" if event == "removed" else "started")
+    assert launched == ([] if event == "removed" else [result.agent_id])
+    assert tasks.known_dependency(db, boss.repo_root, upstream.id)
+
+
 @pytest.mark.parametrize(("event", "upstream_kind"), [
     ("merged", "task"), ("removed", "task"), ("requeue_merged", "task"),
     ("requeue_removed", "worker"), ("requeue_pending", "workspace"),
@@ -383,6 +406,7 @@ def test_requeue_preserves_an_upstream_that_has_no_worker_yet(db, dependency_row
     [replacement] = db.list_tasks(boss.repo_root, state="pending")
     assert launched == []
     if finish == "cancelled":
+        assert tasks.set_dependencies(db, replacement.id, [upstream.id], tasks._loads(replacement.depends_on))
         tasks.cancel(db, caller, upstream.id)
         assert db.get_task(replacement.id).state == "cancelled" and launched == []
     else:
