@@ -273,6 +273,10 @@ def _bypass(command):
                  marks=pytest.mark.variant("look-alike: a home path built in pieces that is no store")),
     pytest.param("shopt -s dotglob; ls ./build/*", "allow",
                  marks=pytest.mark.variant("look-alike: dotglob over no home")),
+    pytest.param(("echo dotglob; cat ~/*/README.md", "shopt -s dotglob; shopt -u dotglob; cat ~/*/README.md"),
+                 "allow", marks=pytest.mark.variant("review: dotglob as a word, or turned off again")),
+    pytest.param(("cat '$HOME/$filename'", "grep -F '$HOME/$filename' README.md"), "allow",
+                 marks=pytest.mark.variant("review: single quotes keep $ literal")),
     _bypass('ls ~/.ssh > "$OUTPUT"'),    # a store named, a target only the run knows
     pytest.param('ls > "$OUTPUT"', "allow",
                  marks=pytest.mark.variant("no store named: an unresolved target is the policy's question")),

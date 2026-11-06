@@ -2824,9 +2824,10 @@ def _names_store_in_text(command: str) -> bool:
 # store. Its unknown pieces stand for anything (_UNKNOWN), a dot included.
 _UNKNOWN = "\0"
 _EXPANSION = re.compile(r"\$\((?:[^()]|\([^()]*\))*\)|`[^`]*`|\$\{[^}]*\}|\$(?:[A-Za-z_]\w*|[0-9@*#?$!-])")
-# Options that let a pattern's * select dot entries (bash, zsh).
-_DOTGLOB = re.compile(r"\bdotglob\b|\bglob_?dots\b|\bGLOBIGNORE=")
-# A path under a home in text the splitter can't read (an array's list, inline code).
+_LITERAL = "\1"    # a quoted or escaped * ? [: matches only itself, which no store name holds
+# An array's list (f=(~/.ss?/id_*)), which the splitter doesn't read.
+_ARRAY_LIST = re.compile(r"(?:^|[\s;&|(])[A-Za-z_]\w*\+?=\(([^)]*)\)")
+# A path under a home in inline code brindle can't resolve.
 _HOME_PATH_TEXT = (r"(?:(?<![\w$.~/-])~[A-Za-z0-9_.-]*|\$\{HOME\}|\$HOME(?!\w)|/Users/[^/\s'\"]+|/home/[^/\s'\"]+"
                    r"|/var/root|/root|%s)(/[^\s;|&()<>]*)")
 # What separates two pieces of an inline program's string: + (Python, JS, Ruby), . (Perl, PHP),
@@ -2872,11 +2873,41 @@ def _home_relative(text: str, cwd: str | None) -> str | None:
     return None
 
 
+def _word_shape(word: str) -> str:
+    """A word as written, as the shell reads it: quotes gone, $HOME and ${HOME}
+    the home, any other expansion _UNKNOWN, a quoted or escaped pattern
+    character _LITERAL; in single quotes ('$HOME/$f') everything is literal,
+    and only an unquoted leading ~ is a home."""
+    home = os.path.expanduser("~")
+    out: list[str] = []
+    i, quote = 0, None
+    while i < len(word):
+        c = word[i]
+        if quote == "'":
+            quote = None if c == "'" else quote
+            out.append("" if c == "'" else _LITERAL if c in "*?[" or c == "~" and not out else c)
+            i += 1
+        elif c == "\\" and i + 1 < len(word):
+            following = word[i + 1]
+            escaped = quote is None or following in '$`"\\'
+            out.append((_LITERAL if following in "*?[" else following) if escaped else c + following)
+            i += 2
+        elif c == "'" and quote is None or c == '"':
+            quote = None if quote == c else c
+            i += 1
+        elif c in "$`" and (found := _EXPANSION.match(word, i)):
+            out.append(home if _HOME_REFERENCE.fullmatch(found.group()) else _UNKNOWN)
+            i = found.end()
+        else:
+            out.append(_LITERAL if quote and c in "*?[" or c == "~" and (i or quote) and not out else c)
+            i += 1
+    return "".join(out)
+
+
 def _word_reaches_store(part: ShellPart, word: str, dotglob: bool) -> bool:
     """A word only the run resolves ($1, $(...), a pattern) that may name a store."""
-    text = _HOME_REFERENCE.sub(lambda _: os.path.expanduser("~"), word)
-    text = re.sub(r"[\"'\\]", "", _EXPANSION.sub(_UNKNOWN, text))
-    if _UNKNOWN not in text and not (dotglob and re.search(r"[*?\[]", text)):
+    text = _word_shape(word)
+    if _UNKNOWN not in text and not re.search(r"[*?\[]", text):
         return False
     places = [part.cwd] if part.cwd is not None else part.places
     return any((rel := _home_relative(path, place)) is not None and _reaches_store(rel, dotglob)
@@ -2886,15 +2917,41 @@ def _word_reaches_store(part: ShellPart, word: str, dotglob: bool) -> bool:
 def _part_reaches_store(part: ShellPart, dotglob: bool) -> bool:
     if not part.words or os.path.basename(part.words[0]) in _NAMES_NOTHING and not part.reads + part.writes:
         return False
-    return any(_word_reaches_store(part, word, dotglob) for word in [*part.unresolved, *part.written[1:]])
+    return any(_word_reaches_store(part, word, dotglob) for word in part.unresolved)
 
 
-def _text_reaches_store(text: str, dotglob: bool = False) -> bool:
-    """Whether text brindle can't split names a home path that may be a store."""
+def _dotglob_after(part: ShellPart, dotglob: bool) -> bool:
+    """Whether a pattern selects dot entries once ``part`` has run: bash's
+    shopt -s/-u dotglob, zsh's setopt/unsetopt globdots (NO_GLOBDOTS turns it off)."""
+    if not part.words:
+        return dotglob
+    program, args = os.path.basename(part.words[0]), part.words[1:]
+    names = [a.lower().replace("_", "") for a in args if not a.startswith("-")]
+    if program == "shopt" and "dotglob" in names:
+        options = "".join(a[1:] for a in args if a.startswith("-"))
+        return True if "s" in options else False if "u" in options else dotglob
+    if program in ("setopt", "unsetopt") and ("globdots" in names or "noglobdots" in names):
+        return (program == "setopt") == ("globdots" in names)
+    return dotglob
+
+
+def _arrays_reach_store(req: Request, command: str, dotglob: bool) -> bool:
+    """An array's list (which the splitter doesn't read) with a word that may be a store."""
+    where = ShellPart([], "", req.cwd or req.worktree or None)
+    for found in _ARRAY_LIST.finditer(command):
+        tokens = _script_tokens(found.group(1), credential_scan=True)
+        words = [t[1].raw for t in tokens if t[0] == "word"] if tokens is not None else found.group(1).split()
+        if any(_word_reaches_store(where, word, dotglob) for word in words):
+            return True
+    return False
+
+
+def _text_reaches_store(text: str) -> bool:
+    """Whether inline code names a home path that may be a store."""
     pattern = re.compile(_HOME_PATH_TEXT % re.escape(os.path.expanduser("~")))
     for found in pattern.finditer(text):
         rel = re.sub(r"[\"'\\]", "", _EXPANSION.sub(_UNKNOWN, found.group(1)))
-        if _reaches_store(rel, dotglob):
+        if _reaches_store(rel):
             return True
     return False
 
@@ -3178,10 +3235,15 @@ def prints_credentials(req: Request, depth: int = 0, *, plain: bool = False) -> 
     # A path only the run resolves (pieces, $1, $(...), an array's pattern, a glob
     # dotglob lets select dot entries) that could be a store: what it reads can't be
     # told, so it may be one (``plain`` leaves these out, for decide's message).
-    dotglob = bool(_DOTGLOB.search(req.command))
-    if not plain and (any(_part_reaches_store(part, dotglob) for part in reader.parts)
-                      or reader.unread and _text_reaches_store(req.command, dotglob)):
-        return True
+    if not plain:
+        dotglob = ever = False    # dotglob as each part runs (a subshell's shopt counts as lasting)
+        for part in reader.parts:
+            dotglob = _dotglob_after(part, dotglob)
+            ever |= dotglob
+            if _part_reaches_store(part, dotglob):
+                return True
+        if reader.unread and _arrays_reach_store(req, req.command, ever):
+            return True
     # Does the command name a store anywhere: a part's words or redirections, an
     # assignment's value, a loop's list? Then a word or target only the run knows
     # may be that store ($f, "${a[0]}", $(...)): fail closed, unless every part is
