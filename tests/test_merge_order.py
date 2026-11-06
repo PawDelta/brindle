@@ -179,6 +179,7 @@ def piped(db, repo, monkeypatch):
         return db_.get_agent(f"rev{len(started) - 1}")
 
     monkeypatch.setattr(agents, "request_review", fake_review)
+    monkeypatch.setattr(pipeline.autopilot, "_unavailable", lambda *a, **k: None)
     monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: True)
     monkeypatch.setattr(agents, "reconcile", lambda db_, a, **kw: a)
     monkeypatch.setattr(agents, "warm_checks", lambda ws_: None)

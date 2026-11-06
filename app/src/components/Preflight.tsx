@@ -12,6 +12,7 @@ import { useEffect, useState, type FormEvent } from "react";
 import { useDaemon } from "../api/context";
 import type { PreflightDTO, PreflightItem } from "../api/client";
 import { providerName } from "../store/overview";
+import { LoadingButton } from "./LoadingButton";
 import { ProviderSignIn } from "./ProviderSignIn";
 import { alert, button, card, field, main } from "./ui";
 
@@ -99,6 +100,35 @@ function Settle({ item, provider, onDone, label, repo }: { item: PreflightItem; 
   );
 }
 
+/* A consent the CLI asks for once: a real checkbox (mouse and keyboard) that records the agreement when ticked. */
+function ConsentBox({ item, provider, name, onDone, repo }: { item: PreflightItem; provider: string; name: string; onDone(next: PreflightDTO): void; repo?: string | null }) {
+  const client = useDaemon();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const agree = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      onDone(await client.settlePreflight(provider, item.id, item.action, repo));
+    } catch (e) {
+      setError(message(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <>
+      <label className="flex cursor-pointer items-center gap-s1">
+        <input type="checkbox" className="size-4 shrink-0" checked={false} disabled={busy} onChange={() => void agree()} />
+        <span className="text-xs font-medium uppercase tracking-wider text-ink-3">{KIND_LABEL.consent}</span>
+        <span className="text-sm font-medium">{item.label}</span>
+      </label>
+      <p className="basis-full pl-6 text-xs text-ink-3">Tick the box to confirm. brindle records your choice for {name} on this computer.</p>
+      {error && <span className="basis-full pl-6 text-sm text-sap">{error}</span>}
+    </>
+  );
+}
+
 const KIND_LABEL: Record<PreflightItem["kind"], string> = { signin: "Sign in", key: "API key", trust: "Trust", consent: "Consent", setup: "Install", off: "Turned off" };
 
 /* The other CLIs brindle finds installed and in use here, for a launch whose own CLI is missing or off. */
@@ -142,12 +172,18 @@ export function Preflight({ preflight, onRefresh, onLaunch, launchLabel = "Start
       <ul className="flex flex-col gap-s2">
         {items.map((item) => (
           <li key={item.id} className="flex flex-col gap-1" data-testid={`preflight-${item.kind}`} data-done={item.done}>
-            <div className="flex items-center gap-s1">
+            <div className="flex flex-wrap items-center gap-s1">
+              {item.kind === "consent" && !item.done ? (
+                <ConsentBox item={item} provider={provider} name={name} onDone={onRefresh} repo={repo} />
+              ) : (
+              <>
               <span className={`flex size-4 shrink-0 items-center justify-center rounded-full text-[10px] font-semibold ${item.done ? "bg-pass text-on-branch" : "border border-line-strong text-ink-3"}`} aria-hidden>
                 {item.done ? "✓" : ""}
               </span>
               <span className="text-xs font-medium uppercase tracking-wider text-ink-3">{KIND_LABEL[item.kind]}</span>
               <span className={`text-sm ${item.done ? "text-ink-3 line-through" : "font-medium"}`}>{item.label}</span>
+              </>
+              )}
             </div>
             {!item.done && item.detail && <p className="pl-6 text-sm text-ink-2">{item.detail}</p>}
             {!item.done && (
@@ -168,7 +204,6 @@ export function Preflight({ preflight, onRefresh, onLaunch, launchLabel = "Start
                 )}
                 {item.kind === "key" && <KeyField item={item} provider={provider} onDone={refresh} />}
                 {item.kind === "trust" && <Settle item={item} provider={provider} onDone={onRefresh} label="Trust this folder" repo={repo} />}
-                {item.kind === "consent" && <Settle item={item} provider={provider} onDone={onRefresh} label="Agree" repo={repo} />}
                 {/* Settled outside the card (installed, turned back on): asked again, it reads done. */}
                 {(item.kind === "setup" || item.kind === "off") && (
                   <button type="button" className={button} onClick={refresh}>
@@ -181,9 +216,9 @@ export function Preflight({ preflight, onRefresh, onLaunch, launchLabel = "Start
         ))}
       </ul>
       <div className="flex items-center gap-s1">
-        <button type="button" className={main} disabled={open.length > 0 || launching} onClick={onLaunch}>
+        <LoadingButton className={main} busy={launching} disabled={open.length > 0 || launching} onClick={onLaunch}>
           {launchLabel}
-        </button>
+        </LoadingButton>
         {instead.map((p) => (
           <button key={p} type="button" className={button} disabled={launching} onClick={() => onUseInstead?.(p)}>
             {launchLabel} on {providerName(p)} instead

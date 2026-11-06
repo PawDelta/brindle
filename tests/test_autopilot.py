@@ -667,7 +667,7 @@ def test_gate_runs_checks_and_refuses_dirty_work(db, worker_ws):
 
 @pytest.mark.parametrize("ends,start_load,start_level", [
     ("load falls", 25.0, 1),          # 2.5x cores: real trouble
-    ("memory pressure", 1.0, 2),      # pressure warn on an idle machine (old room rule: no wait)
+    ("warn pressure alone", 1.0, 2),  # level 2 on an idle machine: no wait
 ])
 def test_a_check_run_waits_for_room_visibly_then_runs(db, worker_ws, monkeypatch, ends, start_load, start_level):
     """With its slot, a check run waits for room, showing "checks waiting for
@@ -696,7 +696,7 @@ def test_a_check_run_waits_for_room_visibly_then_runs(db, worker_ws, monkeypatch
     monkeypatch.setattr(gates, "SLOT_POLL", 0)
     ok, _ = gates.run_checked(db, worker_ws, "touch ran.txt", {}, 60, cancel=cancel, full=True)
     waiting = f"checks waiting for room: the machine is busy (load {start_load:.1f} on 10 cores"
-    assert len(seen) == (2 if ends in ("load falls", "memory pressure") else 0)
+    assert len(seen) == (2 if ends == "load falls" else 0)
     assert all(s.startswith(waiting) and not done for s, done in seen), seen
     assert ok and ran.exists() and gates.checks_state(worker_ws) == "waiting for checks"
 

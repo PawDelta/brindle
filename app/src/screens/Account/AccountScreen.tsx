@@ -11,15 +11,15 @@
    card's header, and no comparison or banner. Nothing here
    decides what is allowed: a Pro feature's route refuses with not_entitled
    when the plan lacks it, and that refusal locks its card. Switching org
-   (POST /v1/account/switch-org) takes the org id, as the CLI does. Under
-   the plan and spend, Usage (./UsageSection.tsx, GET /v1/usage): each provider's
-   subscription windows, where the sidebar's reading near a limit leads. */
+   (POST /v1/account/switch-org) takes the org id, as the CLI does. Both are
+   tabs of Settings (screens/Settings): Account (AccountPanel) and Usage
+   (UsagePanel: ./UsageSection.tsx, GET /v1/usage, each provider's
+   subscription windows, where the sidebar's reading near a limit leads). */
 
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { DaemonError, type AccountInfo, type Cost, type DaemonClient } from "../../api/client";
 import type { OpenUrl } from "../../api/open";
 import { plain } from "../../api/wording";
-import { PageHeader } from "../../components/PageHeader";
 import { RepoSelect, useRepo } from "../../components/RepoSelect";
 import { alert, button, card, chip, field, h2, label, main, mono, notice, pill, quiet } from "../../components/ui";
 import { useSessions } from "../../store/sessions";
@@ -29,16 +29,12 @@ import { useJob } from "../Branch/useJob";
 import { UsageSection } from "./UsageSection";
 import { ACCOUNT_URL, PLANS, PLAN_GUIDE_URL, PLAN_LABEL, PRICING_URL, TIERS, UPGRADE_URL, dollars, entitled, nextPlan, paid, planHas, planOf, tierOf, tokens, when, type FeatureUse, type Plan, type TierFeature } from "./account";
 
-export interface AccountScreenProps {
+export interface AccountPanelProps {
   client: DaemonClient;
   /* Opens a page in the system browser (api/open.ts openExternal). */
   openUrl: OpenUrl;
-  /* Opens a screen of the app, where a plan's feature is used (Agents, Settings). */
+  /* Opens where a plan's feature is used: the Agents screen, or Settings' General tab. */
   onNavigate?(screen: "agents" | "settings"): void;
-  /* The section to scroll to on opening: "usage" from the sidebar's reading near a limit. */
-  section?: "usage";
-  /* A new value asks to scroll to `section` again, the page already open. */
-  ask?: number;
 }
 
 const message = (e: unknown) => plain(e instanceof Error ? e.message : String(e));
@@ -508,21 +504,26 @@ function Spend({ client, openUrl, signedIn, paying, revision }: { client: Daemon
   );
 }
 
-export function AccountScreen({ client, openUrl, onNavigate, section, ask }: AccountScreenProps) {
+/* Settings › Usage: the providers' own allowance, signed in or not, as it is
+   now, not as of the last minute's poll. Brought into view on opening, and
+   again on each new `ask` (the sidebar's reading clicked again). */
+export function UsagePanel({ ask }: { ask?: number }) {
+  const { reload } = useUsage();
+  const ref = useRef<HTMLElement>(null);
+  useEffect(() => {
+    void reload();
+  }, [reload]);
+  useEffect(() => {
+    ref.current?.scrollIntoView?.({ behavior: "smooth", block: "start" });
+  }, [ask]);
+  return <UsageSection ref={ref} />;
+}
+
+/* Settings › Account: the plan (or sign-in), the spend and what the plan includes. */
+export function AccountPanel({ client, openUrl, onNavigate }: AccountPanelProps) {
   const store = useStore();
   const spend = useRef<HTMLDivElement>(null);
-  const usageRef = useRef<HTMLElement>(null);
-  const { reload: reloadUsage } = useUsage();
-  // The page shows the usage as it is now, not as of the last minute's poll.
-  useEffect(() => {
-    void reloadUsage();
-  }, [reloadUsage]);
   const [account, setAccount] = useState<AccountInfo | null>(null);
-  // Again once the plan's cards above it have loaded and moved it down.
-  const placed = account !== null;
-  useEffect(() => {
-    if (section === "usage") usageRef.current?.scrollIntoView?.({ behavior: "smooth", block: "start" });
-  }, [section, ask, placed]);
   /* Where a plan's feature is used: a screen, the Spend card, or the site. */
   const use: UseFeature = (where) => {
     if ("url" in where) void openUrl(where.url).catch(() => undefined);
@@ -567,7 +568,7 @@ export function AccountScreen({ client, openUrl, onNavigate, section, ask }: Acc
         : "You're on the free plan: what it includes, what the paid plans add, and what brindle is spending.";
   return (
     <section className="flex flex-col gap-s2" aria-label="Account">
-      <PageHeader title="Account" lede={lede} />
+      <p className="text-sm text-ink-2">{lede}</p>
       {bar && bar.length > 0 && (
         <p className={notice} data-testid="org-bar">
           {bar.join(" · ")}
@@ -595,8 +596,6 @@ export function AccountScreen({ client, openUrl, onNavigate, section, ask }: Acc
           </div>
         </>
       )}
-      {/* Usage is the providers' own allowance, signed in or not. */}
-      <UsageSection ref={usageRef} />
       {account && (paying ? <PaidPlan plan={plan} features={account.features} openUrl={openUrl} onUse={use} /> : <Plans openUrl={openUrl} signedIn={account.signed_in} />)}
     </section>
   );

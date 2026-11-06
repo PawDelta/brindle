@@ -33,6 +33,7 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import type { DaemonClient } from "../../api/client";
 import { openExternal, type OpenUrl } from "../../api/open";
+import { LoadingButton } from "../../components/LoadingButton";
 import { Sheet } from "../../components/Sheet";
 import { button, field, label, main, mono, quiet } from "../../components/ui";
 import { useAppState } from "../../store/useStore";
@@ -131,9 +132,9 @@ export function ReviewSheet({ client, root, readiness, state, onClose, openUrl =
               <span className="text-ink-2" data-testid="pr-unpushed">
                 {opened.unpushed} new {opened.unpushed === 1 ? "commit" : "commits"} not on the PR
               </span>
-              <button type="button" className={button} disabled={push.busy} onClick={() => void push.start("Pushing to the PR", () => client.pushSessionPr(root))}>
-                {push.busy ? "Pushing…" : "Push"}
-              </button>
+              <LoadingButton className={button} busy={push.busy} disabled={push.busy} onClick={() => void push.start("Pushing to the PR", () => client.pushSessionPr(root))}>
+                Push
+              </LoadingButton>
             </>
           ) : (
             <span className="text-ink-2">Keep editing here: every edit goes onto the PR's branch, and waits for your Push.</span>
@@ -263,9 +264,9 @@ function PrStep({ client, root, diff, ready, openUrl, onClose }: { client: Daemo
           </>
         ) : (
           <>
-            <button type="button" className={main} disabled={!loaded || job.busy || !title.trim()} onClick={open} data-testid="open-pr">
-              {job.busy ? "Opening…" : "Open PR"} <kbd className="ml-1 font-mono text-[10px] opacity-80">⌘↵</kbd>
-            </button>
+            <LoadingButton className={main} busy={job.busy} disabled={!loaded || job.busy || !title.trim()} onClick={open} data-testid="open-pr">
+              Open PR <kbd className="ml-1 font-mono text-[10px] opacity-80">⌘↵</kbd>
+            </LoadingButton>
           </>
         )}
         <span className="flex-1" />
