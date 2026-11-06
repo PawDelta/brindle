@@ -98,6 +98,7 @@ from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Iterator
+from urllib.parse import unquote, urlsplit
 
 from brindle import spawn
 from brindle.config import CONFIG_DIR, config_root, brindle_home
@@ -1575,6 +1576,7 @@ class Push:
     destination: str
     force: bool = False
     delete: bool = False
+    target_defaults: tuple[str, ...] = ()
 
     def key(self) -> str:
         return f"{self.source}{PUSH_ARROW}{self.destination}{PUSH_AT}{self.remote}"
@@ -1682,7 +1684,11 @@ def push_fits(match: str, push: Push, repo_root: str, loose: bool) -> bool:
     if pattern is None:
         return False
     src_pat, dst_pat, remote_pat = pattern
-    return (_ref_matches(src_pat, push.source, repo_root, loose) and _ref_matches(dst_pat, push.destination, repo_root, loose)
+    destination_matches = _ref_matches(dst_pat, push.destination, repo_root, loose)
+    if dst_pat == DEFAULT_BRANCH:
+        destination_matches |= any(_ref_matches(branch, push.destination, repo_root, loose)
+                                   for branch in push.target_defaults)
+    return (_ref_matches(src_pat, push.source, repo_root, loose) and destination_matches
             and _ref_matches(remote_pat, push.remote, repo_root, loose))
 
 
@@ -1726,6 +1732,38 @@ def _push_git(folder: str, *args: str) -> str | None:
     return value
 
 
+def _push_targets(folder: str, pushes: list[Push]) -> list[Push]:
+    """Protect every effective destination's HEAD, without contacting a server.
+
+    Git expands pushurl and URL rewrites for us. A remote-tracking HEAD is
+    not sufficient proof: its URL may have changed since it was fetched.
+    Keep the source repo's existing protection as well as these defaults.
+    """
+    urls = _push_git(folder, "remote", "get-url", "--push", "--all", pushes[0].remote)
+    defaults = []
+    for url in (urls or "").splitlines():
+        if url.startswith("file://"):
+            try:
+                parsed = urlsplit(url)
+            except ValueError:
+                break
+            path = (unquote(parsed.path) if parsed.netloc in ("", "localhost")
+                    and not parsed.query and not parsed.fragment else "")
+        else:
+            path = url if ":" not in url else ""
+        if not path:
+            break
+        target = os.path.join(folder, os.path.expanduser(path))
+        head = _push_git(target, "symbolic-ref", "--quiet", "HEAD")
+        if not head or not head.startswith("refs/heads/"):
+            break
+        defaults.append(head.strip().removeprefix("refs/heads/"))
+    else:
+        if defaults:
+            return [replace(push, target_defaults=tuple(defaults)) for push in pushes]
+    return [replace(push, destination=UNKNOWN_REF) for push in pushes]
+
+
 def _resolve_push(req: Request, push: Push, folder: str) -> list[Push]:
     """Resolve omitted refspecs and HEAD using only the invoking worktree.
 
@@ -1757,7 +1795,7 @@ def _resolve_push(req: Request, push: Push, folder: str) -> list[Push]:
     if len(positional) > 1 and positional[1:] != ["HEAD"]:
         return unknown
     branch = _push_git(folder, "symbolic-ref", "--quiet", "HEAD")
-    raw = _push_git(folder, "config", "--null", "--list")
+    raw = _push_git(folder, "config", "--includes", "--null", "--list")
     if not branch or not branch.startswith("refs/heads/") or raw is None:
         return unknown
     branch = branch.strip().removeprefix("refs/heads/")
@@ -1780,7 +1818,7 @@ def _resolve_push(req: Request, push: Push, folder: str) -> list[Push]:
             "false", "no", "off", "0"):
         return unknown
     if len(positional) == 2:
-        return [replace(push, remote=remote, source=branch, destination=branch)]
+        return _push_targets(folder, [replace(push, remote=remote, source=branch, destination=branch)])
     specs = config.get(f"remote.{remote}.push")
     if specs is not None:
         resolved = []
@@ -1791,10 +1829,11 @@ def _resolve_push(req: Request, push: Push, folder: str) -> list[Push]:
             destination = _branch_name(dst) if colon else source
             # A non-branch namespace or a revision is not proof of a branch.
             if source == UNKNOWN_REF or any(
-                    ref.startswith("refs/") and not ref.startswith("refs/heads/") for ref in (src, dst)):
+                    ref.startswith(("heads/", "tags/", "remotes/"))
+                    or ref.startswith("refs/") and not ref.startswith("refs/heads/") for ref in (src, dst)):
                 destination = UNKNOWN_REF
             resolved.append(Push(remote, source, destination, push.force or force, push.delete or not src))
-        return resolved
+        return _push_targets(folder, resolved)
     mode = get("push.default", "simple")
     if mode == "current" or mode == "simple" and remote != (upstream_remote or "origin"):
         destination = branch
@@ -1807,7 +1846,7 @@ def _resolve_push(req: Request, push: Push, folder: str) -> list[Push]:
             return unknown
     else:
         return unknown
-    return [replace(push, remote=remote, source=branch, destination=destination)]
+    return _push_targets(folder, [replace(push, remote=remote, source=branch, destination=destination)])
 
 
 def pushes_in_repos(req: Request) -> list[tuple[Push, str]]:

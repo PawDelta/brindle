@@ -255,6 +255,41 @@ def test_autonomous_runs_everything_but_default_branch_pushes_and_destructive_ac
     ("cd unknown && git push", "feature", {}, "ask"),
     ("git switch main && git push", "feature", {}, "ask"),
     ("git -C . push origin HEAD", "feature", {}, "allow"),
+    ("git push", "feature", {"remote.origin.push": "HEAD:heads/main"}, "ask"),
+    ("git push", "feature", {"remote.origin.push": "HEAD:heads/release/desktop"}, "ask"),
+    ("git push", "feature", {"remote.origin.push": "heads/main"}, "ask"),
+    ("git push", "feature", {"remote.origin.push": "HEAD:refs/heads/main"}, "ask"),
+    ("git push", "stable", {"push.default": "current", "branch.stable.pushremote": "publish",
+                             "remote.publish.url": "/publish"}, "ask"),
+    ("git push", "stable", {"push.default": "current", "remote.origin.pushurl": "/publish"}, "ask"),
+    ("git push", "stable", {"push.default": "current", "url./publish.insteadof": "/origin"}, "ask"),
+    ("git push", "stable", {"push.default": "current", "url./publish.pushinsteadof": "/origin"}, "ask"),
+    ("git push", "stable", {"push.default": "current", "remote.origin.pushurl": ["/origin", "/publish"]}, "ask"),
+    ("git push", "feature", {"remote.origin.url": "https://example.com/repo.git"}, "ask"),
+    ("git push", "feature", {"remote.origin.url": "file:///origin"}, "allow"),
+    ("git push", "feature", {"remote.origin.url": "file://[invalid"}, "ask"),
+    ("git push", "feature", {"remote.origin.url": "/unreadable"}, "ask"),
+    ("git push", "feature", {"push.default": "upstream",
+                              "branch.feature.merge": ["refs/heads/feature", "refs/heads/main"]}, "ask"),
+    *[pytest.param(command, "feature", {}, "ask", marks=pytest.mark.variant("supervisor-requested push bypass"))
+      for command in (
+          "git config branch.feature.merge refs/heads/main && git push",
+          "git checkout main; git push",
+          "git branch -u origin/main && git push",
+          "git update-ref HEAD refs/heads/main && git push",
+          "git symbolic-ref HEAD refs/heads/main && git push",
+          "git --config-env=push.default=MODE push",
+          "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=push.default GIT_CONFIG_VALUE_0=matching git push",
+          "GIT_CONFIG_GLOBAL=/elsewhere git push",
+          "GIT_DIR=/elsewhere git push",
+          "GIT_WORK_TREE=/elsewhere git push",
+          "env GIT_CONFIG_COUNT=1 git push",
+          "git --git-dir=/elsewhere push",
+          "git -C /elsewhere push",
+          "git push --all",
+          "git push --mirror",
+          "git push --tags",
+      )],
 ])
 def test_bare_push_asks_only_for_a_protected_target(tmp_path, monkeypatch, command, branch, config, expected):
     from brindle import git
@@ -265,8 +300,20 @@ def test_bare_push_asks_only_for_a_protected_target(tmp_path, monkeypatch, comma
     reads = []
 
     def run(args, cwd, **kwargs):
-        assert os.path.realpath(cwd) == folder  # Resolve HEAD in the worktree, not the main checkout.
-        reads.append(tuple(args))
+        reads.append((str(cwd), *args))
+        if str(cwd) in ("/origin", "/publish"):
+            target = "main" if str(cwd) == "/origin" else "stable"
+            return subprocess.CompletedProcess(args, 0, f"refs/heads/{target}\n", "")
+        if os.path.realpath(cwd) != folder:  # A main-checkout or unresolved -C read cannot resolve this worktree.
+            return subprocess.CompletedProcess(args, 1, "", "")
+        if args[0] == "remote":
+            remote = args[-1]
+            urls = values.get(f"remote.{remote}.pushurl", values.get(f"remote.{remote}.url", ""))
+            urls = urls if isinstance(urls, list) else [urls]
+            for key, prefix in values.items():
+                if key.startswith("url.") and key.endswith((".insteadof", ".pushinsteadof")):
+                    urls = [key[4:key.rfind(".")] + url[len(prefix):] if url.startswith(prefix) else url for url in urls]
+            return subprocess.CompletedProcess(args, 0, "\n".join(urls), "")
         if args[0] == "symbolic-ref":
             # A same-named tag makes Git's --short output ambiguous.
             ref = ("heads/main" if branch == "main" else branch) if "--short" in args else f"refs/heads/{branch}"
