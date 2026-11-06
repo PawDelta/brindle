@@ -9,14 +9,18 @@ afterEach(() => {
 });
 
 it("opens once after setup, follows its control as it scrolls, advances step by step, and once dismissed stays closed until reopened", () => {
-  // jsdom lays nothing out: the first step's control reports where it is (the window is 1024×768).
+  // jsdom lays nothing out: the control and its scrolling column (y 80–600, under a banner) report where
+  // they are (the window is 1024×768).
   let at = { top: 100, left: 20, width: 80, height: 20 };
-  vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(() => DOMRect.fromRect({ x: at.left, y: at.top, width: at.width, height: at.height }));
+  vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+    if (this.dataset.testid === "scroller") return DOMRect.fromRect({ x: 0, y: 80, width: 1024, height: 520 });
+    return DOMRect.fromRect({ x: at.left, y: at.top, width: at.width, height: at.height });
+  });
   const step = () => screen.getByTestId("walkthrough").getAttribute("data-step");
   const ring = () => screen.queryByTestId("walkthrough-highlight") as HTMLElement | null;
   const { unmount } = render(
     <>
-      <div data-testid="scroller">
+      <div data-testid="scroller" style={{ overflowY: "auto" }}>
         <button type="button" data-walkthrough={STEPS[0].target}>
           New session
         </button>
@@ -25,13 +29,13 @@ it("opens once after setup, follows its control as it scrolls, advances step by 
     </>,
   );
   expect(step()).toBe(STEPS[0].target);
-  expect(ring()?.style.top).toBe("96px");
-  // A scrolling ancestor moves it: the ring follows; scrolled half out, it hugs the visible part.
-  at = { ...at, top: -10 };
+  expect([ring()?.style.top, ring()?.style.height]).toEqual(["96px", "28px"]);
+  // The column scrolls it half under its top edge: the ring follows and hugs the part still showing.
+  at = { ...at, top: 70 };
   fireEvent.scroll(screen.getByTestId("scroller"));
-  expect([ring()?.style.top, ring()?.style.height]).toEqual(["-4px", "18px"]);
-  // Scrolled wholly out of the window: no ring pointing off-screen, the card centred instead.
-  at = { ...at, top: -200 };
+  expect([ring()?.style.top, ring()?.style.height]).toEqual(["76px", "18px"]);
+  // Wholly behind the column's edge, though still in the window: no ring over the banner, the card centred.
+  at = { ...at, top: 40 };
   fireEvent.scroll(screen.getByTestId("scroller"));
   expect(ring()).toBeNull();
 

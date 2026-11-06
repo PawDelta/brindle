@@ -88,17 +88,34 @@ const PAD = 4;
 const CARD_W = 320;
 const GAP = 12;
 
+/* The part of the control a person can see: its box cut to the window and to
+   every ancestor that clips its overflow (a scrolling column under a banner);
+   null when nothing of it shows, and the card shows centred instead. */
 function measure(el: HTMLElement | null): Box | null {
   const r = el?.getBoundingClientRect();
-  // Not laid out, or scrolled wholly out of the window: the card shows centred instead.
-  if (!r || r.width === 0 || r.height === 0) return null;
-  const w = window.innerWidth;
-  const h = window.innerHeight;
-  if (r.bottom <= 0 || r.right <= 0 || r.top >= h || r.left >= w) return null;
-  // Partly scrolled out: the ring hugs the part still in the window.
-  const top = Math.max(r.top, 0) - PAD;
-  const left = Math.max(r.left, 0) - PAD;
-  return { top, left, width: Math.min(r.right, w) + PAD - left, height: Math.min(r.bottom, h) + PAD - top };
+  if (!el || !r || r.width === 0 || r.height === 0) return null;
+  let top = Math.max(r.top, 0);
+  let left = Math.max(r.left, 0);
+  let bottom = Math.min(r.bottom, window.innerHeight);
+  let right = Math.min(r.right, window.innerWidth);
+  for (let a = el.parentElement; a && a !== document.body && a !== document.documentElement; a = a.parentElement) {
+    // Each axis clips on its own.
+    const { overflowX, overflowY } = getComputedStyle(a);
+    const clipsX = overflowX !== "visible";
+    const clipsY = overflowY !== "visible";
+    if (!clipsX && !clipsY) continue;
+    const c = a.getBoundingClientRect();
+    if (clipsY) {
+      top = Math.max(top, c.top);
+      bottom = Math.min(bottom, c.bottom);
+    }
+    if (clipsX) {
+      left = Math.max(left, c.left);
+      right = Math.min(right, c.right);
+    }
+  }
+  if (bottom <= top || right <= left) return null;
+  return { top: top - PAD, left: left - PAD, width: right - left + PAD * 2, height: bottom - top + PAD * 2 };
 }
 
 /* The card beside its control: to the right when there's room (the sidebar's
