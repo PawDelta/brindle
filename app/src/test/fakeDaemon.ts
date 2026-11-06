@@ -608,6 +608,8 @@ export class FakeSocket implements WebSocketLike {
   }
 }
 
+const TOOLS_MESSAGE = "git needs Apple's Command Line Developer Tools, which aren't installed. Install them with `xcode-select --install` (or `brew install git`), then try again.";
+
 export class FakeDaemon {
   token = TOKEN;
   data: DaemonData;
@@ -642,6 +644,10 @@ export class FakeDaemon {
   cloneFails: Record<string, number> = {};
   /* Folders POST /repos/open refuses: not a git repository. */
   notGitFolders: string[] = [];
+  /* macOS without the Command Line Tools: open and clone fail with developer_tools_missing until the installer ran. */
+  toolsMissing = false;
+  /* POST /developer-tools/install calls (only ever from a click). */
+  toolsInstalls = 0;
   /* The clones started ({url, parent_dir}) and the folders opened, in order. */
   readonly clones: { url: string; parent_dir: string }[] = [];
   readonly opened: string[] = [];
@@ -1257,6 +1263,10 @@ export class FakeDaemon {
     const say = (line: string) => this.publish("job.progress", { payload: { job, line } });
     setTimeout(() => {
       say(`Cloning into '${name}'...`);
+      if (this.toolsMissing) {
+        this.publish("job.failed", { payload: { job, job_kind: "repo.clone", error: { code: "developer_tools_missing", message: TOOLS_MESSAGE } } });
+        return;
+      }
       if ((this.cloneFails[url] ?? 0) > 0) {
         this.cloneFails[url]--;
         const message = `remote: Repository not found.\nfatal: Authentication failed for '${url}/'`;
@@ -1303,6 +1313,7 @@ export class FakeDaemon {
   private openRepo(body: Record<string, unknown>): Response {
     const path = typeof body.path === "string" ? body.path.replace(/\/+$/, "") : "";
     if (!path) return error("invalid", "path is required", 400);
+    if (this.toolsMissing) return error("developer_tools_missing", TOOLS_MESSAGE, 409);
     if (this.notGitFolders.includes(path) && !body.init) return error("not_a_repo", `${path} is not a git repository`, 409);
     this.opened.push(path);
     const repo = this.data.repos.find((r) => r.repo_root === path) ?? { repo_root: path, name: path.split("/").at(-1) ?? path };
@@ -1456,6 +1467,11 @@ export class FakeDaemon {
     if ((m = path.match(/^\/keys\/([^/]+)\/import$/))) return this.importKey(m[1], body);
     if (path === "/repos/clone") return this.cloneRepo(body);
     if (path === "/repos/open") return this.openRepo(body);
+    if (path === "/developer-tools/install") {
+      this.toolsInstalls++;
+      this.toolsMissing = false;
+      return json({ started: true });
+    }
     if (path === "/terminals/shell") return this.openShell(body);
     if ((m = path.match(/^\/terminals\/([^/]+)\/input$/))) return this.terminalInput(m[1], body);
     if ((m = path.match(/^\/keys\/([^/]+)\/set$/))) {

@@ -48,6 +48,7 @@ export function ProjectPicker({ client, pickFolder, onPicked }: ProjectPickerPro
     setPlainFolder(null);
     setToolsMissing(null);
     lastOpened.current = path;
+    clear();      // an earlier clone's failure is not what Try again retries now
     setOpening(true);
     try {
       onPicked(await client.openRepo(path, init));
@@ -74,6 +75,7 @@ export function ProjectPicker({ client, pickFolder, onPicked }: ProjectPickerPro
   const clone = (what = cloning.current) => {
     if (!what) return;
     cloning.current = what;
+    setToolsMissing(null);      // an earlier open's failure is not what Try again retries now
     void start(`Clone ${what.url}`, () => client.cloneRepo(what.url, what.parent));
   };
   const submit = (e: FormEvent) => {

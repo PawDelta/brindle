@@ -84,4 +84,24 @@ describe("ProjectPicker", () => {
     expect(pickFolder).toHaveBeenCalledWith("Open a folder");
     expect(daemon.opened).toEqual(["/home/u/New"]);
   });
+
+  it("without the Command Line Tools, installs only on a click and Try again repeats the operation that failed last", async () => {
+    const daemon = new FakeDaemon();
+    daemon.toolsMissing = true;
+    const { picked } = setup(daemon, vi.fn(() => Promise.resolve("/home/u/Code")));
+    clone();
+    const panel = await screen.findByTestId("developer-tools-missing");
+    expect(panel.textContent).toContain("xcode-select --install");
+    // Then a folder, which fails the same way: Try again must retry the folder, not the older clone.
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Open a folder…" })); });
+    await screen.findByTestId("developer-tools-missing");
+    expect(screen.queryByTestId("clone-failed")).toBeNull();
+    expect(daemon.toolsInstalls).toBe(0);
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Install Command Line Tools" })); });
+    expect(daemon.toolsInstalls).toBe(1);
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Try again" })); });
+    await waitFor(() => expect(picked).toHaveBeenCalledWith({ repo_root: "/home/u/Code", name: "Code" }));
+    expect(daemon.clones).toHaveLength(1);
+    expect(screen.queryByTestId("developer-tools-missing")).toBeNull();
+  });
 });

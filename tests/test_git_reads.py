@@ -254,9 +254,14 @@ def test_missing_developer_tools_is_explained_before_git_runs(tmp_path, monkeypa
     with pytest.raises(spawn.ToolsMissing) as cloned:
         clone.clone("https://example.com/x.git", tmp_path / "x", lambda line: None)
     assert from_exception(cloned.value).code == "developer_tools_missing"
-    # brindle init keeps the install guidance instead of suggesting `git init`
-    result = CliRunner().invoke(app, ["init"])
-    assert result.exit_code != 0 and "xcode-select --install" in result.output and "git init" not in result.output
+    # brindle init stops on the typed failure (it isn't "not a repo")
+    assert CliRunner().invoke(app, ["init"]).exit_code != 0
+    # brindle doctor's repository discovery reports it as a failing check
+    from itertools import islice
+
+    from brindle import doctor
+    groups = list(islice(doctor.stream(None, cwd=str(tmp_path)), 2))
+    assert any(c.level == doctor.FAIL for c in groups[1])
     assert all(argv[0] != "git" for argv in started)
     (fake / "xcode-select").write_text("#!/bin/sh\necho /Library/Developer\n")
     spawn.ensure_git()

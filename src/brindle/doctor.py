@@ -670,6 +670,8 @@ def stream(repo_root: str | None, db: DB | None = None, disk: bool = False, cwd:
                 found.append(git.main_repo_root(cwd))
             except git.GitBusy:
                 raise      # the deadline stopped it: report that, not "no repo"
+            except git.GitToolsMissing as e:
+                return [Check(FAIL, "git", str(e))]     # not "no repo": git itself can't run
             except git.GitError:
                 pass
             return []
