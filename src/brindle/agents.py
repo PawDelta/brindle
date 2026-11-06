@@ -4435,7 +4435,7 @@ def _note_decision(db: DB, agent: Agent, ws: Workspace | None, kind: str, summar
 
 
 def permission_request_decision(db: DB, agent: Agent, payload: dict,
-                                provider: str = "claude") -> dict | None:
+                                provider: str = "claude", spend: bool = False) -> dict | None:
     """Claude Code's or Codex's PermissionRequest hook: brindle's permission
     policy (brindle.permissions) answers allow or deny, or None to let the CLI
     prompt the person as usual (ask). Off unless the repo or user config
@@ -4569,9 +4569,8 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
             if not reqs:
                 return None
             rules = [*permissions.all_rules(ws.repo_root), *profile_rules]
-            # In an unasked launch this is the only check: a saved use is spent here or never.
-            decision = permissions.decide_all(reqs, checks=cfg.checks, rules=rules, session=session,
-                                              spend=opencode_unasked)
+            # ``spend``: opencode.pre_tool's last step, in an unasked launch, where nothing else would.
+            decision = permissions.decide_all(reqs, checks=cfg.checks, rules=rules, session=session, spend=spend)
             if decision.decision == "ask" and len(reqs) == 1:
                 # A deny on one part of a compound command (cd x && <denied>) still denies.
                 decision = permissions.deny_in_parts(reqs[0], checks=cfg.checks, rules=rules) or decision

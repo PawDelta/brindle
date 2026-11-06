@@ -446,18 +446,30 @@ def handle_hook(db, agent_id: str, event: str, payload: dict) -> None:
 
 
 def pre_tool(db, agent_id: str, payload: dict) -> str:
-    """Policy denials win; scoped read-only git commands get one-call approval."""
+    """Policy denials win; scoped read-only git commands get one-call approval.
+    In an unasked launch nothing after this spends a saved use, so it's spent here,
+    once, and only when every check has passed."""
     from brindle import agents
 
     agent = db.get_agent(agent_id)
-    if agent is None and _in_unasked_launch():
-        return json.dumps(UNCHECKED)
-    answer = agents.permission_request_decision(db, agent, payload, provider="opencode") if agent else None
-    if answer or not agent or payload.get("tool") != "bash":
-        return json.dumps(answer) if answer else ""
+    if agent is None:
+        return json.dumps(UNCHECKED) if _in_unasked_launch() else ""
+    answer = _checks(db, agent, payload)
+    if _in_unasked_launch() and not (answer and answer.get("decision") == "deny"):
+        answer = agents.permission_request_decision(db, agent, payload, provider="opencode", spend=True) or answer
+    return json.dumps(answer) if answer else ""
+
+
+def _checks(db, agent, payload: dict) -> dict | None:
+    """The answer to an OpenCode tool call, spending nothing: it may check a call twice."""
+    from brindle import agents
+
+    answer = agents.permission_request_decision(db, agent, payload, provider="opencode")
+    if answer or payload.get("tool") != "bash":
+        return answer
     ws = db.get_workspace(agent.workspace_id)
     if ws is None:
-        return ""
+        return None
     from brindle.profiles import load_profile
 
     profile = load_profile(agent.profile, ws.repo_root)
@@ -474,13 +486,13 @@ def pre_tool(db, agent_id: str, payload: dict) -> str:
             normalized = {**payload, "args": {**args, "command": shlex.join(words)}}
             denied = agents.permission_request_decision(db, agent, normalized, provider="opencode")
             if denied:
-                return json.dumps(denied)
+                return denied
         answer = {"decision": "allow"}
         if (spelling := squeezed(command)) != command:
             answer["command"] = spelling
     elif profile.permission_mode == "dontAsk" and _GIT_REQUEST.search(command):
         answer = {"decision": "deny", "reason": "command is not an allowed read-only git request"}
-    return json.dumps(answer) if answer else ""
+    return answer
 
 
 def hook_main(db, agent_id: str | None, event: str, stdin_text: str) -> str:

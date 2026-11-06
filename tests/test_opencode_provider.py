@@ -181,7 +181,23 @@ def test_autonomous_starts_opencode_without_prompts(db, ws, monkeypatch, preset,
     permissions.save_once(permissions.from_opencode(
         {"tool": "bash", "args": {"command": push}}, ws.path, ws.repo_root, "o1")[0])
     assert [call(push) == "" for _ in range(2)] == [True, False]
-    hidden = "*** Begin Patch\n*** Update File : secret.txt\n*** End Patch"
+    # The read-only git path checks a call twice (as written, then respelled): still one use, spent
+    # only once every check has passed, so a deny on the respelling leaves the approval for later.
+    db.add_agent(Agent("o2", ws.id, "supervisor", "opencode", None, "assign", "processing", "@1", None, time.time()))
+
+    def saved_git(command):
+        permissions.add_rule("bash", command, "ask")
+        return permissions.save_once(permissions.from_opencode(
+            {"tool": "bash", "args": {"command": command}}, ws.path, ws.repo_root, "o2")[0])
+
+    saved_git("git branch --list")
+    decisions = [json.loads(call("git branch --list", "o2"))["decision"] for _ in range(2)]
+    assert decisions == ["allow", "deny"]
+    respelled = saved_git(f"git -C {ws.path} status")
+    permissions.add_rule("bash", "git status", "deny")
+    assert json.loads(call(f"git -C {ws.path} status", "o2"))["decision"] == "deny"
+    assert next(s for s in permissions.load_store().saved if s.id == respelled.id).uses_left == 1
+    hidden ="*** Begin Patch\n*** Update File : secret.txt\n*** End Patch"
     for tool, args in (("apply_patch", {"patchText": 1}), ("apply_patch", {"patchText": hidden}), ("", {}), ("bash", {})):
         assert json.loads(call(None, tool=tool, args=args))["decision"] == "deny", tool
     assert call(None, tool="glob", args={"pattern": "*"}) == call(None, tool="todowrite", args={}) == ""
