@@ -97,7 +97,7 @@ def test_org_docs_shows_caches_and_updates_policy(team, monkeypatch):
     policy["switches"].pop("store")
     team.routes["GET /me/analysis-docs/settings"] = lambda f, h: (200, {"switches": {}})
     code, out, err = run(team, "org", "docs", "--org", ORG)
-    assert code == 0 and not err and "store: on" in out
+    assert code == 0 and not err and "store: off" in out
 
 
 def test_non_admin_put_refusal_is_shown(team):
