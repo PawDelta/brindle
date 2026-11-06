@@ -338,6 +338,10 @@ h2.sub small { font-weight: 400; color: var(--ink-3); font-size: 13px; margin-le
 .th-r.ph[data-st="todo"] .n { color: var(--ink-3); font-weight: 400; }
 .braid { width: 16px; height: 16px; flex: none; color: var(--pass); display: block; background: var(--ground); border-radius: 50%; }
 .braid path { fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; }
+/* Folded, the live phase's line keeps a dot per thing moving inside it (running branch, failing red) */
+.th-r.ph .mv { display: inline-flex; gap: 4px; flex: none; }
+.th-r.ph .mv i { width: 6px; height: 6px; border-radius: 50%; display: block; }
+.th-r.ph .mv i[data-s="running"] { background: var(--branch); } .th-r.ph .mv i[data-s="failed"] { background: var(--fail); }
 .c.ph-on { border-color: var(--line-strong); }
 .c.ph-on::after { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--branch); }
 .c.ph-todo { border-style: dashed; }
@@ -391,8 +395,10 @@ button.toc-r:hover { background: var(--surface-2); }
 .toc.lg .toc-s { font-size: 11px; }
 .toc.lg .toc-r.ch { margin-top: 6px; }
 .toc.lg .toc-r.ch:first-child { margin-top: 0; }
-.toc .toc-err { font-family: var(--mono); font-size: 10.5px; color: var(--fail); padding: 0 6px 2px 30px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.toc.lg .toc-err { padding-left: 36px; }
+.toc .toc-err, .toc .toc-cmd { font-family: var(--mono); font-size: 10px; color: var(--ink-3); padding: 0 6px 2px 30px; margin-top: -2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.toc .toc-err { color: var(--fail); }
+.toc.lg .toc-err, .toc.lg .toc-cmd { padding-left: 36px; font-size: 10.5px; }
+.toc .toc-r.e.flat + .toc-cmd { padding-left: 30px; }
 
 /* ── Concept 3 · Folded list: today's rows under phase folds ──────────────── */
 .ol { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 1px; }
@@ -579,7 +585,10 @@ const gState = (g) => { const c = counts(g.items); if (c.passed === g.items.leng
 const activeGroup = (d) => groups(d).find((g) => gState(g) === "active") || groups(d)[0];
 const stateLine = (x) => x.s === "passed" ? `passed · ${x.when} · ${x.dur}` : x.s === "failed" ? `check failing · ${x.when}` : x.s === "running" ? `running · ${x.who} · ${mmss(elapsed)}` : "upcoming";
 const circle = (x, cls = "") => `<span class="c ${cls}" data-s="${x.s}" aria-hidden="true">${x.s === "passed" ? CHECK : x.n}</span>`;
-const sub = (x, full = false) => x.s === "passed" ? (full ? `${x.when} · ${x.dur}` : "") : x.s === "failed" ? `check failing · ${x.when}` : x.s === "running" ? `${x.who} · ${x.branch} · ${EL()}` : "";
+/* The small mono line under a row. The running one carries its check command (keep 6): in the sidebar after the worker and
+   the clock, in the panel (full) after the worker and the branch; the row's title tooltip holds the whole command either way. */
+const sub = (x, full = false) => x.s === "passed" ? (full ? `${x.when} · ${x.dur}` : "") : x.s === "failed" ? `check failing · ${x.when}` : x.s === "running" ? (full ? `${x.who} · ${x.branch} · ${esc(x.cmd)}` : `${x.who} · ${EL()} · ${esc(x.cmd)}`) : "";
+const tipOf = (x) => x.s === "running" || x.s === "failed" ? ` title="${esc(x.cmd)}"` : "";
 const metaOf = (x) => x.s === "passed" ? `${x.when} · ${x.dur}` : x.s === "failed" ? `failing · ${x.when}` : x.s === "running" ? `${x.who} · ${EL()}` : "";
 const ring = (passed, total, nowOne = true) => { const a = total ? (passed / total) * 100 : 0, b = total ? (Math.min(passed + (nowOne ? 1 : 0), total) / total) * 100 : 0; return `<span class="side-ring" style="background: conic-gradient(var(--pass) 0 ${a}%, var(--branch) ${a}% ${b}%, var(--line) ${b}% 100%)" aria-hidden="true"></span>`; };
 const head = (d, extra = "") => { const c = counts(d.items); return `<div class="ms-h">${ring(c.passed, d.items.length)}<span>${c.passed} of ${d.items.length} milestones complete</span>${extra ? `<span class="ph">${extra}</span>` : ""}</div>`; };
@@ -588,7 +597,7 @@ const foot = (d) => `<div class="foot"><span>Checked ${d.lastCheck}</span></div>
 const gpTop = (d) => { const c = counts(d.items); return `<div class="gp-top"><span class="lbl">Goal</span><span class="pill t-branch">In progress</span><span class="flex1"></span><span class="gp-sub">${c.passed} of ${d.items.length} milestones complete</span></div><h2 class="gp-title">${d.title}</h2>`; };
 const bar = (d) => { const c = counts(d.items); return `<div class="pbar" role="progressbar" aria-label="Progress"><i style="width:${Math.round((c.passed / d.items.length) * 100)}%"></i></div>`; };
 /* The row every concept keeps: circle, title, small mono line */
-const row = (x, { full = false, lg = false, live = false } = {}) => `<li class="m${lg ? " lg" : ""}" data-s="${x.s}" data-n="${x.n}">${circle(x)}<span class="t">${esc(x.title)}${sub(x, full) ? `<small>${sub(x, full)}</small>` : ""}</span>${lg ? `<span class="meta">${metaOf(x)}</span>` : ""}</li>${live && x.s === "running" ? `<li class="live js-live"></li>` : ""}`;
+const row = (x, { full = false, lg = false, live = false } = {}) => `<li class="m${lg ? " lg" : ""}" data-s="${x.s}" data-n="${x.n}"${tipOf(x)}>${circle(x)}<span class="t">${esc(x.title)}${sub(x, full) ? `<small>${sub(x, full)}</small>` : ""}</span>${lg ? `<span class="meta">${metaOf(x)}</span>` : ""}</li>${live && x.s === "running" ? `<li class="live js-live"></li>` : ""}`;
 /* The full list, for a panel's "All N milestones": grouped, two columns */
 const fullList = (d) => `<div class="ml">${groups(d).map((g) => `<div>${g.name ? `<div class="ml-gh">${g.name}<span class="k">${counts(g.items).passed}/${g.items.length}</span></div>` : ""}<ul class="rows ml-rows">${g.items.map((x) => row(x, { lg: true })).join("")}</ul></div>`).join("")}</div>`;
 const listFoot = (d, st, extra = "") => `<div class="gp-foot"><button class="quiet js-list" type="button" aria-expanded="${st.list}">${CHEV} All ${d.items.length} milestones</button><span class="flex1"></span><span>${extra ? extra + " · " : ""}checked ${d.lastCheck}</span></div><div class="clp${st.list ? " open" : ""}"><div>${st.list ? fullList(d) : ""}</div></div>`;
@@ -610,7 +619,7 @@ const CUR = {
 };
 
 /* ── 1 · Thread ───────────────────────────────────────────────────────────── */
-const thRow = (x, lg = false, extra = "") => `<li class="th-r${extra}" data-s="${x.s}" data-n="${x.n}" data-th="${x.s === "passed" ? "pass" : x.s === "todo" ? "todo" : "open"}">${circle(x)}<span class="t">${esc(x.title)}${sub(x, lg) ? `<small>${sub(x, lg)}</small>` : ""}</span>${lg ? `<span class="meta">${metaOf(x)}</span>` : ""}</li>`;
+const thRow = (x, lg = false, extra = "") => `<li class="th-r${extra}" data-s="${x.s}" data-n="${x.n}" data-th="${x.s === "passed" ? "pass" : x.s === "todo" ? "todo" : "open"}"${tipOf(x)}>${circle(x)}<span class="t">${esc(x.title)}${sub(x, lg) ? `<small>${sub(x, lg)}</small>` : ""}</span>${lg ? `<span class="meta">${metaOf(x)}</span>` : ""}</li>`;
 const stitchRow = (items, lg = false) => `<li class="th-r stitch" data-th="pass"><button class="js-stitch" type="button" aria-label="${items.length} passed, ${items[0].n} to ${items[items.length - 1].n}: lay them out"><span class="knots">${items.map((x) => `<i class="knot" data-n="${x.n}"></i>`).join("")}</span><span class="k"><b>${items[0].n}–${items[items.length - 1].n}</b> · ${items.length} passed${lg ? ` · ${items[items.length - 1].when}` : ""}</span></button></li>`;
 function threadList(d, st, lg = false) {
   const gs = groups(d), out = [];
@@ -624,7 +633,11 @@ function threadList(d, st, lg = false) {
       out.push(`<li class="th-r ph" data-th="todo" data-st="todo"><button class="js-phase" type="button" data-g="${g.i}" aria-expanded="${open}"><span class="c ph-todo" aria-hidden="true"></span><span class="n">${g.name}</span><span class="k">${g.items.length} upcoming</span></button></li>`);
       if (open) g.items.forEach((x) => out.push(thRow(x, lg)));
     } else {
-      out.push(`<li class="th-r ph" data-th="pass" data-st="active"><button class="js-phase" type="button" data-g="${g.i}" aria-expanded="true"><span class="c ph-on" aria-hidden="true"></span><span class="n">${g.name}</span><span class="k">${c.passed} of ${g.items.length}</span></button></li>`);
+      // The live phase is open unless folded; folded, its one line still says what is moving inside it.
+      const shown = !st.closed.has(g.i), moving = [c.running ? `${c.running} running` : "", c.failed ? `${c.failed} failing` : ""].filter(Boolean).join(", ");
+      const dots = !shown ? `<span class="mv" title="${moving}">${c.running ? '<i data-s="running"></i>' : ""}${c.failed ? '<i data-s="failed"></i>' : ""}</span>` : "";
+      out.push(`<li class="th-r ph" data-th="pass" data-st="active"><button class="js-phase" type="button" data-g="${g.i}" aria-expanded="${shown}"><span class="c ph-on" aria-hidden="true"></span><span class="n">${g.name}</span>${dots}<span class="k">${c.passed} of ${g.items.length}</span></button></li>`);
+      if (!shown) return;
       const passed = g.items.filter((x) => x.s === "passed"), open2 = g.items.filter((x) => x.s !== "passed");
       if (passed.length) { if (st.full.has(g.i) || passed.length < 3) passed.forEach((x) => out.push(thRow(x, lg))); else out.push(stitchRow(passed, lg)); }
       open2.forEach((x) => out.push(thRow(x, lg)));
@@ -651,7 +664,8 @@ const THREAD = {
 
 /* ── 2 · Contents ─────────────────────────────────────────────────────────── */
 const tocS = (x, lg) => x.s === "passed" ? `<span class="toc-s" data-s="passed">${lg ? `${x.when} · ${x.dur}` : "passed"}</span>` : x.s === "failed" ? `<span class="toc-s" data-s="failed">${lg ? `failing · ${x.when}` : "failing"}</span>` : x.s === "running" ? `<span class="toc-s" data-s="running">${lg ? `${x.who} · ${EL()}` : EL()}</span>` : `<span class="toc-s plain">—</span>`;
-const tocE = (x, lg) => `<li class="toc-r e" data-s="${x.s}" data-n="${x.n}"><span class="toc-n">${x.n}</span><span class="toc-t">${esc(x.title)}</span><span class="toc-l"></span>${tocS(x, lg)}</li>${x.s === "failed" && lg ? `<li class="toc-err">${esc(x.err)}</li>` : ""}`;
+/* An entry; the running one shows its check command on a line under it (keep 6), the failing one its error in the panel. */
+const tocE = (x, lg) => `<li class="toc-r e" data-s="${x.s}" data-n="${x.n}"${tipOf(x)}><span class="toc-n">${x.n}</span><span class="toc-t">${esc(x.title)}</span><span class="toc-l"></span>${tocS(x, lg)}</li>${x.s === "running" ? `<li class="toc-cmd" title="${esc(x.cmd)}">${esc(x.cmd)}</li>` : x.s === "failed" && lg ? `<li class="toc-err">${esc(x.err)}</li>` : ""}`;
 function tocList(d, st, lg = false) {
   if (!d.phases) return `<ul class="toc${lg ? " lg" : ""}" aria-label="Milestones">${d.items.map((x) => tocE(x, lg).replace('class="toc-r e"', 'class="toc-r e flat"')).join("")}</ul>`;
   return `<ul class="toc${lg ? " lg" : ""}" aria-label="Milestones">${groups(d).map((g) => {
