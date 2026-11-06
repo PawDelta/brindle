@@ -312,10 +312,18 @@ def test_interactive_supervisor_on_autonomous_needs_no_grants(db, ws, monkeypatc
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(antigravity, "tool_names", lambda: ["assign"])
     monkeypatch.setattr(permissions, "DEFAULT_PRESET", "autonomous")
+    roots = {
+        ws.path: ws.path,
+        str(tmp_path / "trunk-repo"): str(tmp_path / "trunk-repo"),
+        str(tmp_path / "develop-repo"): str(tmp_path / "develop-repo"),
+    }
+    from brindle import git
+
+    monkeypatch.setattr(git, "main_repo_root", lambda folder: roots.get(folder, ws.repo_root))
     # Default branch discovery is exercised separately; keep this policy
     # decision test off git subprocesses while preserving per-repo branches.
     monkeypatch.setattr(permissions, "default_branch", lambda root: {
-        ws.path: "main", str(tmp_path / "trunk-repo"): "trunk",
+        ws.repo_root: "main", str(tmp_path / "trunk-repo"): "trunk",
         str(tmp_path / "develop-repo"): "develop",
     }.get(root))
     permissions.store_path().unlink(missing_ok=True)
