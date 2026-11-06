@@ -18,7 +18,7 @@ from test_pro_team import ORG, login, run, team, team_claims  # noqa: F401
     ("default_on", "default_on", "off", "g", "store", False),
     ("off", "default_on", None, "g", "store", True),
     ("off", None, None, "g", "store", False),
-    (None, None, None, "g", "store", True),
+    (None, None, None, "g", "store", False),
     (None, None, None, "g", "prompt_analysis", False),
     pytest.param("off", "enforced_on", None, None, "store", False,
                  marks=pytest.mark.variant("missing group must not select an existing group")),
@@ -29,6 +29,11 @@ def test_precedence(enterprise, group_state, user, group, name, expected):
     policy = {"switches": {name: enterprise}, "groups": {"g": {"switches": {name: group_state}}}}
     assert ap.resolve_switch(name, {name: user}, group=group, policy=policy,
                              org=ORG, plan="pro") is expected
+
+
+def test_fresh_analysis_docs_settings_are_off_but_explicit_on_is_kept():
+    assert ap.resolve_switch("store", {}, org=None, plan="pro") is False
+    assert ap.resolve_switch("store", {"store": "on"}, org=None, plan="pro") is True
 
 
 def test_enforced_off_keeps_upload_local(tmp_path, remote, fixed_identity):
