@@ -908,6 +908,12 @@ NEEDS_APPROVAL = ("brindle runs this agent without approval prompts, and no rule
                   "can allow it with `brindle permissions allow`.")
 ASK_SUPERVISOR = "tell your supervisor with send_message what you need and why"
 ASK_PERSON = "say what you need and why in your reply to the person running brindle"
+# An ask a rule makes, for an agent with no supervisor: no allow rule lifts it
+# (an ask beats an allow), and with the skip flag agy can't prompt.
+PERSON_DECIDES = ("this is the person's own call ({why}), and brindle runs this agent without approval "
+                  "prompts, so it can't ask them here and refused it. Don't look for another way to do it. "
+                  "Tell them what you need and why: they can run it themselves in a terminal, or open "
+                  "the brindle app and have you try it again, and it then waits in the app's Inbox for their answer.")
 TOLD_SUPERVISOR = ("carry on with other work and retry it once your supervisor says it's allowed: "
                    "brindle has told your supervisor")
 
@@ -986,12 +992,14 @@ def _brindle_tools() -> set[str]:
     return {f"mcp_brindle_{n}" for n in names} | {f"mcp__brindle__{n}" for n in names}
 
 
-def agy_strict_ambiguity(payload: dict, worktree: str) -> str | None:
+def agy_strict_ambiguity(payload: dict, worktree: str, anywhere: bool = False) -> str | None:
     """Why brindle can't be sure it reads an agy call the way agy will, or
     None. Under agy_approvals "brindle" such a call is denied rather than
     guessed at: a JSON-encoded value (brindle decodes it, agy may not), a
     relative or ~ path (agy may resolve it against something other than
-    Cwd), more than one path, or a command run outside the worktree."""
+    Cwd), more than one path, or a command run outside the worktree
+    (``anywhere``: only a Cwd that isn't absolute, for an agent that may work
+    elsewhere)."""
     call = payload.get("toolCall") if isinstance(payload, dict) else None
     args = call.get("args") if isinstance(call, dict) and isinstance(call.get("args"), dict) else {}
     for name in (*AGY_PATH_ARGS, "Cwd", "CommandLine"):
@@ -1008,7 +1016,7 @@ def agy_strict_ambiguity(payload: dict, worktree: str) -> str | None:
     cwd = args.get("Cwd")
     if call.get("name") == "run_command" and isinstance(cwd, str) and cwd:
         real, root = os.path.realpath(cwd), os.path.realpath(worktree)
-        if not os.path.isabs(cwd) or (real != root and not _inside(real, worktree)):
+        if not os.path.isabs(cwd) or (not anywhere and real != root and not _inside(real, worktree)):
             return "the command runs outside the worktree"
     return None
 
@@ -1058,6 +1066,8 @@ def agy_strict_output(decision: Decision | None, req: Request | None = None,
             return {"decision": "allow", "reason": "brindle: acts only on the conversation"}
     why = decision.reason if decision is not None else "brindle couldn't read the request"
     why = why.removesuffix("; asking the user")  # nobody is asked here
+    if explicit and not has_supervisor:
+        return {"decision": "deny", "reason": "brindle: " + PERSON_DECIDES.format(why=why)}
     ask = TOLD_SUPERVISOR if escalated else ASK_SUPERVISOR if has_supervisor else ASK_PERSON
     return {"decision": "deny", "reason": "brindle: " + NEEDS_APPROVAL.format(why=why, ask=ask)}
 
@@ -1501,16 +1511,23 @@ def _segments(command: str) -> list[list[str]]:
 
 def _git_calls(command: str) -> list[tuple[str, list[str]]]:
     """(subcommand, its arguments) for every git invocation in ``command``."""
+    return [(sub, args) for _, sub, args in _git_invocations(command)]
+
+
+def _git_invocations(command: str) -> list[tuple[list[str], str, list[str]]]:
+    """(its -C folders, subcommand, its arguments) for every git invocation in ``command``."""
     calls = []
     for words in _segments(command):
         for i, w in enumerate(words):
             if os.path.basename(w) != "git":
                 continue
-            rest, j = words[i + 1:], 0
+            rest, j, folders = words[i + 1:], 0, []
             while j < len(rest) and rest[j].startswith("-"):
+                if rest[j] == "-C" and j + 1 < len(rest):
+                    folders.append(rest[j + 1])
                 j += 2 if rest[j] in ("-C", "-c") else 1  # global options
             if j < len(rest):
-                calls.append((rest[j], rest[j + 1:]))
+                calls.append((folders, rest[j], rest[j + 1:]))
             break
     return calls
 
@@ -1574,8 +1591,13 @@ def _branch_name(ref: str) -> str:
 
 def push_calls(command: str) -> list[Push]:
     """Every ``git push`` in ``command``, one per refspec."""
+    return [push for _, push in _pushes_with_folders(command)]
+
+
+def _pushes_with_folders(command: str) -> list[tuple[list[str], Push]]:
+    """push_calls, each with the -C folders of its git invocation."""
     out = []
-    for sub, args in _git_calls(command):
+    for folders, sub, args in _git_invocations(command):
         if sub != "push":
             continue
         positional, delete, force, everything, i = [], False, False, False, 0
@@ -1609,7 +1631,7 @@ def push_calls(command: str) -> list[Push]:
                 delete = delete or not left
             else:
                 src = dst = _branch_name(spec)
-            out.append(Push(remote, src, dst, forced, delete or src == "(delete)"))
+            out.append((folders, Push(remote, src, dst, forced, delete or src == "(delete)")))
     return out
 
 
@@ -1667,7 +1689,23 @@ def push_matches(match: str, req: Request, loose: bool) -> bool:
     """Whether any git push in ``req``'s command fits push pattern ``match``."""
     if not req.command:
         return False
-    return any(push_fits(match, push, req.repo_root, loose) for push in push_calls(req.command))
+    return any(push_fits(match, push, repo, loose) for push, repo in pushes_in_repos(req))
+
+
+def pushes_in_repos(req: Request) -> list[tuple[Push, str]]:
+    """Each push in ``req``'s command with the repo it runs in, where a push
+    pattern's default branch is read: its folder's (its Cwd, then git -C), not
+    only the session's. The session's when git can't tell."""
+    from brindle import git
+
+    def repo_of(folders: list[str]) -> str:
+        folder = os.path.join(req.cwd or req.worktree or "", *map(os.path.expanduser, folders))
+        try:
+            return git.main_repo_root(folder) if folder else req.repo_root
+        except Exception:  # noqa: BLE001 - not a repo, or a folder only the run knows
+            return req.repo_root
+
+    return [(push, repo_of(folders)) for folders, push in _pushes_with_folders(req.command or "")]
 
 
 # -- read-only commands ---------------------------------------------------------------------------
@@ -2262,7 +2300,11 @@ def _builtin_matches(rule: Rule, req: Request, checks: list[str]) -> bool:
     if rule.match_type == "git-push":
         return any(sub == "push" for sub, _ in _git_calls(command))
     if rule.match_type == "push":
-        return push_matches(rule.match, req, loose=rule.decision != "allow")
+        if rule.decision != "allow":
+            return push_matches(rule.match, req, loose=True)
+        # As for any allow: one simple command, all of it covered. A compound is read part by part.
+        pushes = pushes_in_repos(req) if simple_argv(command) is not None else []
+        return bool(pushes) and all(push_fits(rule.match, push, repo, loose=False) for push, repo in pushes)
     if rule.match_type == "git-force":
         return destructive_git(command)
     if rule.match_type == "rm-destructive":

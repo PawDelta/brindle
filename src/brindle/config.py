@@ -174,7 +174,8 @@ class RepoConfig:
     # "brindle": agy agents run with --dangerously-skip-permissions and
     # brindle's hook allows or denies every call (see brindle.antigravity).
     # "prompt": agy asks as usual. None (unset): "brindle" for agents brindle
-    # runs, "prompt" for an interactive one, where a person answers.
+    # runs and for an interactive one with the policy on and the Autonomous
+    # preset, "prompt" for any other interactive one, where a person answers.
     agy_approvals: str | None = None
     # A task whose files overlap a running one: "block", "warn" or "queue" (wait
     # for it to merge). None: block within a session, queue behind another session's.
