@@ -16,14 +16,14 @@ afterEach(() => {
 });
 
 /* `pickFolder` null: a browser tab, with no folder picker. */
-function setup(daemon = new FakeDaemon(), pickFolder: ((title: string) => Promise<string | null>) | null = vi.fn(() => Promise.resolve("/home/u/Code"))) {
+function setup(daemon = new FakeDaemon(), pickFolder: ((title: string) => Promise<string | null>) | null = vi.fn(() => Promise.resolve("/home/u/Code")), offerGithub = false) {
   const store = createAppStore();
   const client = daemon.client();
   sync = startSync({ client, store, connect: daemon.connect });
   const picked = vi.fn<(repo: Repo) => void>();
   render(
     <StoreContext.Provider value={store}>
-      <ProjectPicker client={client} pickFolder={pickFolder ?? undefined} onPicked={picked} />
+      <ProjectPicker client={client} pickFolder={pickFolder ?? undefined} onPicked={picked} offerGithub={offerGithub} openUrl={() => Promise.resolve()} />
     </StoreContext.Provider>,
   );
   return { daemon, picked, pickFolder };
@@ -67,6 +67,33 @@ describe("ProjectPicker", () => {
       { url: URL, parent_dir: "/home/u/Code" },
     ]);
     expect(screen.queryByTestId("clone-failed")).toBeNull();
+  });
+
+  it("offers Connect GitHub on the first launch (skippable), and a private clone that fails connects a token (a refused one is cleared and explained) and clones again", async () => {
+    const daemon = new FakeDaemon();
+    daemon.github.gh_available = false;
+    daemon.privateRepos = [URL];
+    const { picked } = setup(daemon, null, true);
+    await screen.findByRole("region", { name: "Connect GitHub" });
+    fireEvent.click(screen.getByRole("button", { name: "Skip for now" }));
+    expect(screen.queryByRole("region", { name: "Connect GitHub" })).toBeNull();
+
+    clone();
+    const failed = await screen.findByTestId("clone-failed");
+    fireEvent.click(within(failed).getByRole("button", { name: "Connect GitHub" }));
+    const token = await screen.findByLabelText("GitHub token");
+    expect(token.getAttribute("type")).toBe("password");
+    fireEvent.change(token, { target: { value: "bad-token" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save token" }));
+    await within(screen.getByRole("region", { name: "Connect GitHub" })).findByRole("alert");
+    expect((screen.getByLabelText("GitHub token") as HTMLInputElement).value).toBe("");
+    expect(picked).not.toHaveBeenCalled();
+
+    fireEvent.change(screen.getByLabelText("GitHub token"), { target: { value: "github_pat_ok" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save token" }));
+    await waitFor(() => expect(picked).toHaveBeenCalledWith({ repo_root: "~/Projects/proj", name: "proj" }));
+    expect(daemon.githubRoutes).toEqual(["token", "token"]);
+    expect(daemon.clones).toHaveLength(2);
   });
 
   it("initializes a plain folder with one click after opening it", async () => {

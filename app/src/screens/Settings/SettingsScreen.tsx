@@ -73,6 +73,7 @@ import type { Install } from "../../api/providersInstall";
 import type { About as AboutInfo, AppUpdater, AppUpdates, CliLink, ReleaseBuildUpdater } from "../../api/tauri";
 import { plain } from "../../api/wording";
 import { UpgradeCard, useEngineUpgrade } from "../../components/EngineUpgrade";
+import { GithubConnectCard, useGithub } from "../../components/GithubConnect";
 import { PageHeader } from "../../components/PageHeader";
 import { ProgressCard } from "../../components/ProgressCard";
 import { ago, ApiKeyPaste, CLOUD_NAME, CloudSetup, KEYS, MethodChoice, MODEL_PROVIDERS, ModelProviderPicker, PROVIDER_KEYS, ReadyNote, RenewLogin, useLock, type Lock, type Method } from "../../components/ProviderConnect";
@@ -218,6 +219,52 @@ function Row({ label: text, help, htmlFor, badges, wide = false, children, testI
       </div>
       {children && <div className={`flex min-w-0 flex-wrap items-center gap-s1 ${wide ? "" : "justify-end"}`}>{children}</div>}
     </div>
+  );
+}
+
+/* Unix seconds or an ISO date, as a date; the raw text when it is neither. */
+function expiry(at: string | number): string {
+  const d = new Date(typeof at === "number" ? at * 1000 : at);
+  return Number.isNaN(d.getTime()) ? String(at) : d.toLocaleDateString();
+}
+
+/* The GitHub connection: connected as @login (how, and when it expires), Connect / Reconnect
+   (the same card as the first launch) and Disconnect. */
+function GithubRow({ client }: { client: DaemonClient }) {
+  const gh = useGithub(client);
+  const [open, setOpen] = useState(false);
+  const c = gh.conn;
+  const how = c?.route === "gh" ? "through the GitHub CLI" : c?.route === "token" ? `with a token${c.storage === "keychain" ? " in your keychain" : c.storage === "file" ? " in a file" : ""}` : "";
+  return (
+    <>
+      <Row
+        label="GitHub"
+        help={
+          c?.connected
+            ? `Connected as @${c.login ?? "unknown"}${how ? ` ${how}` : ""}${c.expires_at != null ? ` · expires ${expiry(c.expires_at)}` : ""}${c.needs_reconnect ? " · needs to be connected again" : ""}`
+            : "Not connected. Optional: public repositories clone without it."
+        }
+        testId="github-row"
+        data={{ connected: String(!!c?.connected) }}
+      >
+        {c && (!c.connected || c.needs_reconnect) && (
+          <button type="button" className={button} disabled={gh.busy} onClick={() => setOpen(true)}>
+            {c.needs_reconnect ? "Reconnect" : "Connect"}
+          </button>
+        )}
+        {c?.connected && (
+          <button type="button" className={button} disabled={gh.busy} onClick={() => void gh.disconnect()}>
+            Disconnect
+          </button>
+        )}
+      </Row>
+      {!open && gh.error && (
+        <p className={`${alert} mx-s2`} role="alert">
+          {gh.error}
+        </p>
+      )}
+      {open && c && (!c.connected || c.needs_reconnect) && <GithubConnectCard gh={gh} skipLabel="Cancel" onSkip={() => setOpen(false)} onConnected={() => setOpen(false)} />}
+    </>
   );
 }
 
@@ -1384,6 +1431,10 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
         <Row label="Organization approvals" help="For an organization's admins: assign roles and set which approvals members may save." wide>
           <OrgApprovals client={client} />
         </Row>
+      </Section>
+
+      <Section id="github" title="GitHub" blurb="How brindle reaches your private repositories over HTTPS." testId="github">
+        <GithubRow client={client} />
       </Section>
 
       <Section
