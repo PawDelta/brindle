@@ -2,20 +2,21 @@
    fields, cards and headings match (styles.css carries the tokens). A screen
    adds its own layout classes beside these; it doesn't restate them. */
 
-/* A button: a hairline on no fill, the same in every role. */
-export const button =
-  "inline-flex items-center gap-1 rounded-md border border-line-strong bg-transparent px-s2 py-1 text-sm font-medium text-ink hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent";
-/* The one main action on a screen (Allow, Update brindle, Continue), in the
-   site's chip voice: mono, pass-green text on a pass hairline and a faint
-   tint. Green is kept for it, status dots and ticks; one per screen, every
-   other action is a plain button. */
-export const mainTone =
-  "border-pass/55 bg-pass/4 font-mono text-[13px] font-medium tracking-[-0.01em] text-pass hover:bg-pass-soft disabled:cursor-not-allowed disabled:opacity-45 disabled:hover:bg-pass/4";
-export const main = `inline-flex items-center gap-1 rounded-md border px-s2 py-1 ${mainTone}`;
-export const danger =
-  "inline-flex items-center gap-1 rounded-md border border-transparent bg-sap px-s2 py-1 text-sm font-medium text-on-sap hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50";
-/* A small, quiet action in a row (Open, Dismiss, Cancel). */
-export const quiet = "rounded-md px-s1 py-0.5 text-sm text-ink-2 hover:bg-surface-2 hover:text-ink disabled:opacity-50";
+/* Buttons, the Tinted scheme (styles.css .btn): every role shares one base
+   in Geist Sans 13px with its hover, pressed, focus and disabled states. A
+   slow action wraps it in LoadingButton.tsx. */
+/* A secondary action: a hairline on no fill. */
+export const button = "btn btn-secondary";
+/* The one main action on a screen (Allow, Update brindle, Continue): pass
+   text on a 12% pass wash and a 40% pass hairline. Green is kept for it,
+   status dots and ticks; one per screen, every other action is a plain
+   button. mainTone is the same, for a screen that sets its own padding. */
+export const mainTone = "btn btn-primary";
+export const main = mainTone;
+/* Something that can't be undone (Remove, Rewind): primary's shape in fail. */
+export const danger = "btn btn-destructive";
+/* A small, quiet action in a row (Open, Dismiss, Cancel): text only. */
+export const quiet = "btn btn-quiet";
 /* A field is an underline, not a box; focus turns the line branch. */
 export const field =
   "rounded-none border-0 border-b border-line-strong bg-transparent px-s1 py-1 text-sm text-ink placeholder:text-ink-3 focus:border-branch focus:outline-none";

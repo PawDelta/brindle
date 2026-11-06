@@ -10,6 +10,7 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { DaemonError, type DaemonClient } from "../../api/client";
 import type { OrgGrantPolicyDTO, OrgPermissionsDTO } from "../../api/schema";
+import { LoadingButton } from "../../components/LoadingButton";
 import { alert, button, card, field, panel, quiet } from "../../components/ui";
 import { RuleTarget, parseRule, ruleText } from "./RuleTarget";
 
@@ -258,7 +259,7 @@ function OrganizationPermissions({ client }: { client: DaemonClient }) {
         <OrgRules controls={draft.controls} onChange={(controls) => update("controls", controls)} />
       </fieldset>
       <div className="flex flex-wrap gap-s1">
-        <button type="submit" className={button} disabled={locked}>Save approval limits</button>
+        <LoadingButton type="submit" className={button} disabled={locked} onClick={(event) => { event.preventDefault(); if (!locked) return save(); }}>Save approval limits</LoadingButton>
         {role && <button type="button" className={button} disabled={locked} onClick={() => void save(true)}>Use inherited limits</button>}
         <button type="button" className={button} disabled={busy} onClick={() => void reload()}>Reload policy and keep drafts</button>
       </div>

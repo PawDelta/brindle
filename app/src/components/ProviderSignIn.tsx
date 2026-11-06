@@ -27,6 +27,7 @@ import { openExternal } from "../api/open";
 import { keptLink, PANE_DEAD, readPane, READ_SIZE, type PaneReading } from "../api/paneText";
 import { usePtyViews, type PtyViews, type PtyViewTarget } from "../api/ptyView";
 import { providerLabel } from "../api/providers";
+import { LoadingButton } from "./LoadingButton";
 import { PtyTerminal } from "./PtyTerminal";
 import { alert, button, field, quiet } from "./ui";
 
@@ -327,8 +328,14 @@ export function ProviderSignIn({ provider, loginContext, check, onDone, autoStar
       setCopyError(true);
     }
   };
+  const [sending, setSending] = useState(false);
   const answer = async (terminal: string, line: string) => {
-    if (await send(terminal, line)) setCode("");
+    setSending(true);
+    try {
+      if (await send(terminal, line)) setCode("");
+    } finally {
+      setSending(false);
+    }
   };
 
   useEffect(() => {
@@ -338,9 +345,9 @@ export function ProviderSignIn({ provider, loginContext, check, onDone, autoStar
 
   if (phase.kind === "idle") {
     return (
-      <button type="button" className={small ? `${button} px-s1 py-0.5 text-xs` : button} onClick={() => void begin()}>
+      <LoadingButton className={small ? `${button} px-s1 py-0.5 text-xs` : button} onClick={() => begin()}>
         Sign in to {name}
-      </button>
+      </LoadingButton>
     );
   }
   const terminal = "terminal" in phase ? phase.terminal : null;
@@ -394,9 +401,9 @@ export function ProviderSignIn({ provider, loginContext, check, onDone, autoStar
       {phase.kind === "choose" && (
         <div className="flex flex-wrap gap-s1" role="group" aria-label="Sign-in method">
           {phase.choices.map((c) => (
-            <button key={c.n} type="button" className={button} onClick={() => void answer(phase.terminal, c.n)}>
+            <LoadingButton key={c.n} className={button} disabled={sending} onClick={() => answer(phase.terminal, c.n)}>
               {c.label}
-            </button>
+            </LoadingButton>
           ))}
         </div>
       )}
@@ -409,9 +416,9 @@ export function ProviderSignIn({ provider, loginContext, check, onDone, autoStar
           }}
         >
           <input className={`${field} w-full font-mono`} aria-label="Code from the browser" placeholder="Paste the code from the browser" value={code} autoFocus onChange={(e) => setCode(e.target.value)} />
-          <button type="submit" className={button} disabled={!code.trim()}>
+          <LoadingButton type="submit" className={button} busy={sending} disabled={!code.trim()}>
             Continue
-          </button>
+          </LoadingButton>
         </form>
       )}
       {phase.kind === "failed" && (

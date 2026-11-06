@@ -26,6 +26,7 @@ import { openExternal, type OpenUrl } from "../api/open";
 import type { CloudOptionsDTO } from "../api/schema";
 import { plain } from "../api/wording";
 import { useJob } from "../screens/Branch/useJob";
+import { LoadingButton } from "./LoadingButton";
 import { alert, button, field, mono, quiet } from "./ui";
 
 export type Method = "sign_in" | "api_key" | "cloud";
@@ -342,9 +343,9 @@ export function ApiKeyPaste({ client, provider, expect, keys, repo, openUrl = op
           disabled={busy}
           onChange={(e) => setValue(e.target.value)}
         />
-        <button type="submit" className={button} disabled={busy || !value.trim() || mismatch}>
-          {busy ? "Checking…" : "Save"}
-        </button>
+        <LoadingButton type="submit" className={button} busy={busy} disabled={busy || !value.trim() || mismatch}>
+          Save
+        </LoadingButton>
         {onCancel && (
           <button type="button" className={quiet} disabled={busy} onClick={onCancel}>
             Cancel
@@ -502,9 +503,9 @@ function CloudSignIn({ client, provider, route, openUrl, save, label, locked = f
             Signed in through {CLOUD_NAME[route] ?? route}
           </span>
         ) : (
-          <button type="button" className={button} disabled={locked} onClick={() => void begin()}>
+          <LoadingButton className={button} disabled={locked} onClick={() => begin()}>
             {failed ? "Try again" : (label ?? cloud.signIn)}
-          </button>
+          </LoadingButton>
         )}
         {url && busy && (
           <button type="button" className={`${quiet} ${link}`} onClick={() => void openUrl(url).catch(() => undefined)}>
@@ -700,9 +701,9 @@ function CodexSignOut({ client, onDone }: { client: DaemonClient; onDone(connect
   const { job, busy, start } = useJob();
   return (
     <>
-      <button type="button" className={button} disabled={busy} onClick={() => void start("Sign out of ChatGPT", () => client.codexSignOut(), (result) => onDone(result as ProviderConnection))}>
-        {busy ? "Signing out…" : "Sign out of ChatGPT"}
-      </button>
+      <LoadingButton className={button} busy={busy} disabled={busy} onClick={() => void start("Sign out of ChatGPT", () => client.codexSignOut(), (result) => onDone(result as ProviderConnection))}>
+        Sign out of ChatGPT
+      </LoadingButton>
       {job?.status === "failed" && (
         <span className="text-fail" role="alert">
           {plain(job.error ?? "")}
