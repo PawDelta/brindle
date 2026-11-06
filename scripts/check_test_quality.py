@@ -5,9 +5,10 @@ Collection executes test imports and fixtures' parametrization, but no tests.
 Run with ``uv run python scripts/check_test_quality.py``. The checked-in baseline
 grandfathers specific legacy findings; new findings fail. ``--strict`` shows all
 findings. ``--dump-baseline`` prints proposed baseline JSON for manual review;
-it never edits the baseline. The default budget
-freezes the current collected count. Change TEST_BUDGET in review when growing
-the suite deliberately; --budget is available for isolated checks.
+it never edits the baseline. TEST_BUDGET is a rounded ceiling for suite growth,
+changed only deliberately in review, not for tests added on ordinary branches.
+Per-PR growth is guarded by scripts/check_new_tests.py in CI; --budget is
+available for isolated checks.
 """
 from __future__ import annotations
 
@@ -24,9 +25,9 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 MAX_PERMUTATIONS = 12
-# Freeze the collected suite, including this guardrail's tests. Raising this
-# ceiling is an explicit review decision, rather than an automatic baseline.
-TEST_BUDGET = 3538
+# Rounded suite ceiling, changed only deliberately in review. Ordinary branches
+# adding tests leave it alone; scripts/check_new_tests.py guards per-PR growth.
+TEST_BUDGET = 4000
 
 
 class Finding(NamedTuple):

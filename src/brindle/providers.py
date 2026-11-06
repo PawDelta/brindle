@@ -2157,8 +2157,6 @@ class OpenCode(Provider):
 
         if policy_on(ctx.cwd):   # the plugin asks brindle before each tool call
             argv.append("BRINDLE_OPENCODE_POLICY=1")
-        if opencode.unasked_launch(ctx.profile, ctx.cwd):
-            argv.append(f"{opencode.UNASKED_ENV}=1")
         argv.append(opencode.binary())
         model = opencode.model_arg(ctx.profile.model)
         if model:

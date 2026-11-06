@@ -9,7 +9,6 @@ import time
 import pytest
 
 from brindle import antigravity, opencode, permissions, pipeline, workspaces
-from brindle.config import set_local
 from brindle.db import Agent
 from brindle.profiles import load_profile
 from brindle.providers import DELIVERY_NOTE, LaunchContext, OpenCode, brindle_invocation
@@ -148,57 +147,6 @@ console.log(JSON.stringify([counts, replies.map(r => r.body.response)]));
             assert json.loads(result.stdout) == [[0, 0, 0, 0, 1, 1, 1], ["once"]]
             decisions = ["ask"]  # the changed command received no approval
         assert ("deny" if "deny" in decisions else "ask" if "ask" in decisions else "allow") == decision
-
-
-@pytest.mark.parametrize("preset, mode, unasked", [
-    ("autonomous", None, True),
-    ("standard", None, False),
-    ("autonomous", "dontAsk", False),
-])
-def test_autonomous_starts_opencode_without_prompts(db, ws, monkeypatch, preset, mode, unasked):
-    """Nothing of OpenCode's asks on Autonomous, a profile's mode wins, and a failed check stops the call."""
-    permissions.apply_preset(preset)
-    set_local(ws.repo_root, "permission_policy", "on")
-    profile = dataclasses.replace(load_profile("supervisor"), permission_mode=mode)
-    argv = OpenCode().command(LaunchContext("o1", profile, None, cwd=ws.path))
-    got = _config(argv)["permission"]
-    assert (f"{opencode.UNASKED_ENV}=1" in argv) == unasked
-    assert (got["bash"] == got["edit"] == got["doom_loop"] == "allow") if unasked else (got["bash"] != "allow")
-    if not unasked:
-        return
-
-    add_agent(db, ws)
-    monkeypatch.setenv(opencode.UNASKED_ENV, "1")
-    def call(command, agent="o1"):
-        return opencode.hook_main(db, agent, "opencode-pre-tool", json.dumps(
-            {"session_id": "s", "tool": "bash", "args": {"command": command}}))
-
-    assert call("touch x") == ""
-    assert json.loads(call("git push origin main"))["decision"] == "deny"
-    assert json.loads(call("touch x", "gone"))["decision"] == "deny"
-    monkeypatch.setattr(permissions, "decide", lambda *args, **kwargs: 1 / 0)
-    assert json.loads(call("touch x"))["decision"] == "deny"
-
-    node = shutil.which("node")  # the plugin itself: a hook process that fails stops the call here, and only here
-    if not node:
-        pytest.skip("Node is required to execute the OpenCode plugin")
-    program = """
-import { EventEmitter } from 'node:events';
-globalThis.fakeSpawn = () => { const p = new EventEmitter(); p.stdout = new EventEmitter();
-  p.stdin = {end() {queueMicrotask(() => p.emit('close', 1))}}; return p; };
-Object.assign(process.env, {BRINDLE_AGENT_ID: 'test', BRINDLE_OPENCODE_POLICY: '1', OPENCODE_CONFIG_CONTENT: '{}',
-                            BRINDLE_OPENCODE_UNASKED: process.argv[1]});
-let source = ''; for await (const chunk of process.stdin) source += chunk;
-const {Brindle} = await import('data:text/javascript;base64,' + Buffer.from(source).toString('base64'));
-const hooks = await Brindle({client: {}});
-await hooks['tool.execute.before']({sessionID:'s', callID:'c', tool:'edit'}, {args:{}}).then(
-  () => console.log('ran'), () => console.log('stopped'));
-"""
-    source = opencode.PLUGIN.replace('import { spawn } from "node:child_process"',
-                                     'const spawn = globalThis.fakeSpawn').replace("__BRINDLE__", '["fake"]')
-    ran = {flag: subprocess.run([node, "--input-type=module", "-e", program, flag], input=source, text=True,
-                                capture_output=True, check=True).stdout.strip() for flag in ("1", "")}
-    assert ran == {"1": "stopped", "": "ran"}
 
 
 def add_agent(db, ws, mode="assign", status="processing", profile="developer-opencode"):

@@ -4229,11 +4229,7 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
     allows what its profile's allowed_tools cover and leaves the rest to
     Codex (#241). A request left to the person is held for the app's answer
     while the app is open (_hold_for_app; a Claude one is recorded with the
-    policy off too). Never raises: any failure is ask, or a deny for an OpenCode
-    agent with nothing of its own to ask (opencode.unasked_launch)."""
-    from brindle import opencode
-
-    opencode_unasked = provider == "opencode" and os.environ.get(opencode.UNASKED_ENV) == "1"
+    policy off too). Never raises: any failure is ask."""
     try:
         from brindle import permissions
         from brindle.config import load_repo_config
@@ -4241,7 +4237,7 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
 
         ws = db.get_workspace(agent.workspace_id)
         if ws is None:
-            return opencode.UNCHECKED if opencode_unasked else None
+            return None
         cfg = load_repo_config(ws.repo_root)
         policy = cfg.permission_policy == "on"
         # Policy off: of the other CLIs only a Codex reviewer has the hook
@@ -4357,10 +4353,9 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
             if decision.decision == "ask" and len(reqs) == 1:
                 # A deny on one part of a compound command (cd x && <denied>) still denies.
                 decision = permissions.deny_in_parts(reqs[0], checks=cfg.checks, rules=rules) or decision
-            if decision.decision == "ask" and (decision.rule is not None or opencode_unasked):
-                # A rule asks explicitly (or anything asks, where nothing of OpenCode's
-                # would: opencode.unasked_launch), and this plugin can't hold a request for
-                # the person: it fails closed rather than let OpenCode's own config run it.
+            if decision.decision == "ask" and decision.rule is not None:
+                # A rule asks explicitly, and this plugin can't hold a request for the
+                # person: it fails closed rather than let OpenCode's own config run it.
                 permissions.note_prompt(decision)
                 decision = permissions.Decision(
                     "deny", f"{decision.reason.removesuffix('; asking the user')}, and OpenCode can't wait for "
@@ -4396,7 +4391,7 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
         return permissions.claude_output(decision)
     except Exception:  # noqa: BLE001 - a broken policy must fall through to the prompt
         log.exception("brindle: permission policy failed; leaving it to the user")
-        return opencode.UNCHECKED if opencode_unasked else None
+        return None
 
 
 def _supervising(db: DB, agent: Agent, cfg, decision, payload: dict) -> dict:
