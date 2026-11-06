@@ -758,11 +758,18 @@ export interface ConfigUpdated {
    person's own settings that are not a repo's. `claude_permission_mode`
    (config.claude_permission_mode): "default" holds Claude's permission
    requests for the Inbox; "auto" lets Claude approve most commands itself.
+   `opencode_permission_mode` (config.opencode_permission_mode), for OpenCode
+   sessions whose profile sets none: "ask" keeps OpenCode's own prompts;
+   "auto" lets edits run; "autonomous" asks nothing and brindle's rules decide
+   each call, refusing what they can't check (asking again with the rules off).
    A PATCH with any other value is refused (400). */
 export type ClaudePermissionMode = "default" | "auto";
+export type OpenCodePermissionMode = "ask" | "auto" | "autonomous";
 
 export interface UserSettings {
   claude_permission_mode: ClaudePermissionMode;
+  /* Absent from an engine older than this setting. */
+  opencode_permission_mode?: OpenCodePermissionMode;
 }
 
 /* GET and PUT /debug (staff-only debug logging, owner decision): whether
@@ -1589,7 +1596,7 @@ export class DaemonClient {
     return this.patch<ConfigUpdated>("/config", body);
   }
 
-  /* The person's own settings (~/.brindle/config.json's claude_permission_mode). */
+  /* The person's own settings (~/.brindle/config.json's claude_ and opencode_permission_mode). */
   userSettings() {
     return this.get<UserSettings>("/user-settings");
   }

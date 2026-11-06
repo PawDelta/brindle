@@ -800,7 +800,7 @@ export class FakeDaemon {
       profileDetails: {},
       orgs: {},
       config: { user: {}, repo: {}, local: {}, keys: [] },
-      userSettings: { claude_permission_mode: "default" },
+      userSettings: { claude_permission_mode: "default", opencode_permission_mode: "ask" },
       debug: { staff: false, enabled: false },
       debugLog: [],
       doctor: [],
@@ -1708,9 +1708,14 @@ export class FakeDaemon {
   private patchUserSettings(body: Record<string, unknown>): Response {
     const mode = body.claude_permission_mode;
     if (mode !== undefined && mode !== "default" && mode !== "auto") return error("invalid", "claude_permission_mode must be default or auto", 400);
-    const unknown = Object.keys(body).filter((k) => k !== "claude_permission_mode");
+    const opencode = body.opencode_permission_mode;
+    if (opencode !== undefined && opencode !== "ask" && opencode !== "auto" && opencode !== "autonomous") {
+      return error("invalid", "opencode_permission_mode must be ask, auto or autonomous", 400);
+    }
+    const unknown = Object.keys(body).filter((k) => k !== "claude_permission_mode" && k !== "opencode_permission_mode");
     if (unknown.length > 0) return error("invalid", `unknown setting(s): ${unknown.sort().join(", ")}`, 400);
     if (mode !== undefined) this.data.userSettings = { ...this.data.userSettings, claude_permission_mode: mode };
+    if (opencode !== undefined) this.data.userSettings = { ...this.data.userSettings, opencode_permission_mode: opencode };
     return json(this.data.userSettings);
   }
 

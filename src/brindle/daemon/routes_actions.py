@@ -1303,15 +1303,23 @@ PERMISSION_MODES = ("default", "auto")
 
 
 def patch_user_settings(db: DB, params: dict, body: Body) -> Any:
-    """``claude_permission_mode`` ("default" or "auto") into ~/.brindle/config.json;
-    its other keys are kept."""
+    """``claude_permission_mode`` ("default" or "auto") and/or
+    ``opencode_permission_mode`` ("ask", "auto" or "autonomous") into
+    ~/.brindle/config.json; its other keys are kept."""
     from brindle import config
 
-    mode = _get(body, "claude_permission_mode", required=True)
-    if mode not in PERMISSION_MODES:
-        raise ServiceError("invalid", f"claude_permission_mode must be one of: {', '.join(PERMISSION_MODES)}")
-    config.set_user("claude_permission_mode", mode)
-    return {"claude_permission_mode": config.claude_permission_mode()}
+    allowed = {"claude_permission_mode": PERMISSION_MODES,
+               "opencode_permission_mode": config.OPENCODE_PERMISSION_MODES}
+    changes = {key: _get(body, key) for key in allowed if body.get(key) is not None}
+    if not changes:
+        raise ServiceError("invalid", f"one of {', '.join(allowed)} is required")
+    for key, mode in changes.items():
+        if mode not in allowed[key]:
+            raise ServiceError("invalid", f"{key} must be one of: {', '.join(allowed[key])}")
+    for key, mode in changes.items():
+        config.set_user(key, mode)
+    return {"claude_permission_mode": config.claude_permission_mode(),
+            "opencode_permission_mode": config.opencode_permission_mode()}
 
 
 def put_debug(db: DB, params: dict, body: Body) -> Any:

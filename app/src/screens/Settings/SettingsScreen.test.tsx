@@ -630,6 +630,18 @@ describe("settings screen", () => {
     stop();
   });
 
+  it("offers OpenCode's Ask, Auto and Autonomous beside Claude's mode, and saves the one picked", async () => {
+    const { daemon, stop } = setup();
+    const group = await screen.findByRole("radiogroup", { name: "OpenCode permission mode" });
+    await waitFor(() => expect(within(group).getByRole("radio", { name: "Ask" }).getAttribute("aria-checked")).toBe("true"));
+    expect(within(group).getAllByRole("radio").map((b) => b.textContent)).toEqual(["Ask", "Auto", "Autonomous"]);
+    fireEvent.click(within(group).getByRole("radio", { name: "Autonomous" }));
+    await waitFor(() => expect(within(group).getByRole("radio", { name: "Autonomous" }).getAttribute("aria-checked")).toBe("true"));
+    expect(daemon.requests.find((r) => r.method === "PATCH" && r.path === "/user-settings")?.body).toEqual({ opencode_permission_mode: "autonomous" });
+    expect(within(screen.getByRole("radiogroup", { name: "Claude permission mode" })).getByRole("radio", { name: "Normal" }).getAttribute("aria-checked")).toBe("true");
+    stop();
+  });
+
   it("hides debug logging from anyone the daemon doesn't call staff", async () => {
     const { daemon, stop } = setup({ debug: { staff: false, enabled: true } });
     await screen.findByTestId("engine");

@@ -329,20 +329,32 @@ def readonly_git(profile, command: str, cwd: str, repo_root: str, *, workdir: st
 UNASKED_ENV = "BRINDLE_OPENCODE_UNASKED"
 
 
+def launch_mode(profile) -> str | None:
+    """The permission_mode an OpenCode launch maps (permission_config): the
+    profile's, else the person's opencode_permission_mode "auto" as ``auto``.
+    "ask" leaves it unset, so OpenCode's own prompts stay."""
+    from brindle.config import opencode_permission_mode
+
+    if profile.permission_mode:
+        return profile.permission_mode
+    return "auto" if opencode_permission_mode() == "auto" else None
+
+
 def unasked_launch(profile, cwd: str | None) -> bool:
     """Whether an OpenCode agent starts with nothing of OpenCode's asking: the
-    policy on with the Autonomous preset, and no mode of its profile's. OpenCode
-    has no hook that can hold a request for the app, so on a config that asks,
-    every edit and command would wait at a prompt in its pane. As with agy
-    (antigravity.strict_on), brindle's plugin is then the gate, and it fails closed."""
-    from brindle import permissions
-    from brindle.config import load_repo_config
+    person chose opencode_permission_mode "autonomous", its profile sets no mode,
+    and the permission policy is on. OpenCode has no hook that can hold a request
+    for the app, so on a config that asks, every edit and command would wait at a
+    prompt in its pane. As with agy (antigravity.strict_on), brindle's plugin is
+    then the gate, and it fails closed. With the policy off brindle can vouch for
+    nothing, so OpenCode keeps asking."""
+    from brindle.config import load_repo_config, opencode_permission_mode
 
-    if profile.permission_mode or not cwd:
+    if profile.permission_mode or not cwd or opencode_permission_mode() != "autonomous":
         return False
     try:
-        return permissions.autonomous(load_repo_config(cwd))
-    except Exception:  # noqa: BLE001 - never stop a launch over this
+        return load_repo_config(cwd).permission_policy == "on"
+    except Exception:  # noqa: BLE001 - never stop a launch over this; asking is the safe side
         return False
 
 
@@ -355,7 +367,7 @@ UNCHECKED = {"decision": "deny", "reason": "brindle couldn't check this call, an
 
 
 def permission_config(profile, unasked: bool = False) -> dict:
-    """The profile's permission_mode and allowed_tools as OpenCode's
+    """The profile's permission_mode (launch_mode) and allowed_tools as OpenCode's
     ``permission`` block. OpenCode takes the last rule that matches, so the
     catch-all comes first. Reads, searches and brindle's MCP tools are left at
     OpenCode's default (allow). The plugin validates scoped ``git -C`` reads.
@@ -369,7 +381,7 @@ def permission_config(profile, unasked: bool = False) -> dict:
       OpenCode's own plan agent, which edits nothing); allowed_tools'
       commands run, others ask.
     - none / ``default``: as above, but edits ask too."""
-    mode = profile.permission_mode
+    mode = launch_mode(profile)
     if unasked:
         return {"read": "allow", "edit": "allow", "bash": "allow", "webfetch": "allow",
                 "external_directory": "allow", "doom_loop": "allow"}
