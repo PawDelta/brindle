@@ -307,6 +307,8 @@ def test_dont_ask_refuses_an_uncovered_command_instead_of_prompting(db, ws, monk
     assert answer("w1", "touch should_not_exist.txt") == "ask"
 
 
+@pytest.mark.slow("two real agy launches (hook install, settings sync, git excludes) and ~15 strict hook "
+                  "decisions, each a full policy evaluation: ~7s on a loaded core, over the 10s guard at load 500")
 def test_interactive_supervisor_on_autonomous_needs_no_grants(db, ws, monkeypatch, tmp_path):
     # A new person: the policy on and a fresh store on the default preset. agy
     # prompted for everything its settings.json didn't allow, and reads no
