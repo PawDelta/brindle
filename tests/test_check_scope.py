@@ -38,7 +38,7 @@ CAPPED = check_scope.CAP_NOTE.format(max=2, tests="tests/test_agents.py")
 
 
 def run(tests):
-    return f"{PYTEST} {' '.join(tests)} || [ $? -eq 5 ]"
+    return f"{PYTEST} {' '.join(tests)}"
 
 
 @pytest.mark.parametrize("changed,max_files,ran", [
