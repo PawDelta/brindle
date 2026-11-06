@@ -14,6 +14,7 @@
 import { useState } from "react";
 import { createRoot } from "react-dom/client";
 import App from "../src/App";
+import { markOnboarded } from "../src/api/providers";
 import { PtyViewsProvider } from "../src/api/ptyView";
 import type { InboxItemDTO } from "../src/api/schema";
 import { field } from "../src/components/ui";
@@ -25,6 +26,8 @@ import { BRINDLE_HOME, ORGS, README_BASE, README_DIFF, README_FILE, data } from 
 import "./demo.css";
 import { RECORDING, mergedSession, mergedWorkers, recordingUsage, startRecording } from "./recording";
 
+// The demo is an app past its first launch (the real gate in App.tsx still runs).
+markOnboarded();
 const daemon = new FakeDaemon(structuredClone(data));
 // brindle's home is Sam's, so the scratch session under it reads as one (its ⋯ offers Move to a repo…).
 daemon.data.meta = { ...daemon.data.meta, db_path: `${BRINDLE_HOME}/brindle.db` };

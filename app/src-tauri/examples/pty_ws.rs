@@ -124,7 +124,10 @@ fn serve(stream: TcpStream, guard: &Guard) -> Result<(), String> {
     loop {
         match ws.read() {
             Ok(Message::Text(text)) => match serde_json::from_str::<Up>(&text) {
-                Ok(Up::Input { data }) => view.write(data.as_bytes()),
+                Ok(Up::Input { data }) => {
+                    // `write` reports whether the bytes were accepted; a dead pane just drops them.
+                    let _ = view.write(data.as_bytes());
+                }
                 Ok(Up::Resize { cols, rows }) => {
                     let _ = view.resize(cols, rows);
                 }
