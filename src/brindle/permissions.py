@@ -2819,13 +2819,22 @@ def _credential_words(req: Request, part: ShellPart, words: list[str], depth: in
                 and _command_path(args, valued, flags, ("auth", "status")))
     if program == "git":
         # Inspect only the selected subcommand: push/fetch may use helpers internally.
-        operands, _ = _credential_options(args, {"-c", "-C", "--git-dir", "--work-tree", "--namespace",
-                                                 "--config-env", "--super-prefix"})
-        return (operands[:2] == ["credential", "fill"]
-                or len(operands) >= 2 and operands[0].startswith("credential-") and operands[1] == "get")
+        valued = {"-c", "-C", "--git-dir", "--work-tree", "--namespace", "--config-env", "--super-prefix"}
+        index = 0
+        while index < len(args) and args[index].startswith("-"):
+            option = args[index]
+            index += 2 if option in valued else 1
+            if option == "--":
+                break
+        if index >= len(args):
+            return False
+        program, args = "git-" + args[index], args[index + 1:]
+        if program == "git-credential":
+            return _command_path(args, set(), set(), ("fill",))
     if program.startswith("git-credential-"):
-        operands, _ = _credential_options(args, set())
-        return operands[:1] == ["get"]
+        # Helpers define their own options. An option or an unclear action must
+        # fail closed; only a lone, known non-reading action is unambiguous.
+        return args not in (["store"], ["erase"], ["exit"])
     if program == "security":
         operands, options = _credential_options(args, {"-a", "-c", "-C", "-d", "-D", "-j", "-l", "-p", "-s", "-t"})
         return (bool(operands) and operands[0] in ("find-generic-password", "find-internet-password")
