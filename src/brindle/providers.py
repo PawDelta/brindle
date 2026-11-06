@@ -715,6 +715,14 @@ def _policy_on(cwd: str | None) -> bool:
         return False
 
 
+# Claude Code's modes that run a call without asking anyone, so a PreToolUse hook
+# that gives no answer lets it through: bypassPermissions runs it, and auto leaves
+# it to a classifier that doesn't know brindle's rules (it allows a push to the
+# default branch). Failing the hook alone isn't enough either: by default Claude
+# Code carries on after one that crashes or times out (_hook's ``fail_closed``).
+CLAUDE_UNASKED_MODES = ("auto", "bypassPermissions")
+
+
 def _credential_file_denies() -> list[str]:
     """Claude Code permission rules denying its file tools the credential
     stores brindle's hook denies shell commands (permissions.credential_paths):
@@ -844,7 +852,8 @@ class ClaudeCode(Provider):
     YES_SELECTED = re.compile(r"[❯>]\s*(\d+\.\s*)?Yes, I trust", re.I)
 
     @staticmethod
-    def _hook(event: str, agent_id: str, waiter: bool = False, timeout: int | None = None) -> list[dict]:
+    def _hook(event: str, agent_id: str, waiter: bool = False, timeout: int | None = None,
+              fail_closed: bool = False) -> list[dict]:
         # The agent's id (and where brindle keeps its state) go in the command
         # itself, not just the pane's environment: Claude Code may run the
         # session in a process its background daemon started earlier, whose
@@ -857,6 +866,11 @@ class ClaudeCode(Provider):
                                       [*brindle_invocation(), "_hook", name, "--agent", agent_id])
 
         hooks = [{"type": "command", "command": command(event), **({"timeout": timeout} if timeout else {})}]
+        if fail_closed:
+            # A hook that can't start, crashes or times out blocks the call
+            # (CLAUDE_UNASKED_MODES). onFailure needs Claude Code 2.1.295; before
+            # that it's ignored, and exit 2 still covers all but a timeout.
+            hooks[0].update(command=f"{hooks[0]['command']} || exit 2", onFailure="block")
         if waiter:
             # An interactive chat also gets brindle's mail through a
             # background waiter that wakes the model (brindle.wake), not
@@ -877,9 +891,11 @@ class ClaudeCode(Provider):
         return timeout
 
     def command(self, ctx: LaunchContext) -> list[str]:
+        from brindle import config as user_config
         from brindle import wake
 
         waiter = wake.applies(self.name, ctx.mode, bool(ctx.profile.headless))
+        start_mode = ctx.profile.permission_mode or user_config.claude_permission_mode()
         settings = {
             "hooks": {
                 "SessionStart": self._hook("session-start", ctx.agent_id, waiter=waiter),
@@ -905,7 +921,9 @@ class ClaudeCode(Provider):
                 # so only those agents run the hook on edit tools too.
                 # A profile's write or read scope (brindle Pro guardrails)
                 # puts the file tools it covers under the hook too.
-                "PreToolUse": [{"matcher": _pre_tool_matcher(ctx), **self._hook("pre-tool", ctx.agent_id)[0]}],
+                "PreToolUse": [{"matcher": _pre_tool_matcher(ctx),
+                                **self._hook("pre-tool", ctx.agent_id, fail_closed=(
+                                    start_mode in CLAUDE_UNASKED_MODES and _policy_on(ctx.cwd)))[0]}],
                 # When a tool would prompt, brindle's permission policy (off
                 # unless permission_policy is "on"; see brindle.permissions)
                 # may answer allow or deny from the structured request; no
@@ -1005,9 +1023,7 @@ class ClaudeCode(Provider):
         model = company_login.claude_model(p.model, ctx.cwd)
         if model:
             argv += ["--model", model]
-        from brindle import config as user_config
-
-        argv += ["--permission-mode", ctx.profile.permission_mode or user_config.claude_permission_mode()]
+        argv += ["--permission-mode", start_mode]
         if ctx.session_id and not ctx.resume:
             argv += ["--session-id", ctx.session_id]
         if ctx.resume:
@@ -2141,6 +2157,8 @@ class OpenCode(Provider):
 
         if policy_on(ctx.cwd):   # the plugin asks brindle before each tool call
             argv.append("BRINDLE_OPENCODE_POLICY=1")
+        if opencode.unasked_launch(ctx.profile, ctx.cwd):
+            argv.append(f"{opencode.UNASKED_ENV}=1")
         argv.append(opencode.binary())
         model = opencode.model_arg(ctx.profile.model)
         if model:

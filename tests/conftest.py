@@ -546,9 +546,9 @@ def brindle_home(tmp_path, monkeypatch, ambient_brindle_env):
     # rule covers. The tests' policy is Standard (asks), so a test that wants the
     # default behaviour says so (tests/test_permission_presets.py).
     monkeypatch.setattr("brindle.permissions.DEFAULT_PRESET", "standard")
-    # ... and this home is an existing install's, whose policy nobody turned on:
-    # a test of the new install's default says so (tests/test_permission_policy.py).
-    monkeypatch.setenv("BRINDLE_NO_FIRST_RUN", "1")
+    # ... and nobody turned this home's policy on: a test of the real default
+    # says so (tests/test_permission_policy.py).
+    monkeypatch.setenv("BRINDLE_POLICY_DEFAULT_OFF", "1")
     # Never touch the real ~/.claude.json (providers.trust_folder writes there).
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-config"))
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))

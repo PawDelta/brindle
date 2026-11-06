@@ -14,6 +14,7 @@ import pytest
 
 from brindle import permission_grants as grants
 from brindle import permissions
+from brindle.config import set_local
 from brindle.daemon.holds import HOLDS
 from brindle.db import Agent
 from brindle.permissions import Request, decide
@@ -389,6 +390,7 @@ def test_session_repos_count_as_checkout(db, ws, tmp_path):
 
 
 def test_allow_all_grants_within_each_policy_and_unblock_narrows_the_deny_that_blocks(db, ws):
+    set_local(ws.repo_root, "permission_policy", "on")     # a deny only blocks where the rules are in force
     db.add_agent(Agent("boss", ws.id, "supervisor", "claude", None, "interactive", "processing", "%b", None, time.time()))
     worker(db, ws, "w1"), worker(db, ws, "w2")
     hooks = [Hook(db, "w1", bash(ws, "git push origin fix:main")), Hook(db, "w2", bash(ws, "terraform apply prod")),
