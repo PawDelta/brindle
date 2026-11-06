@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from brindle import git, pool, workspaces
+from brindle import git, pool, trash, workspaces
 from brindle.db import DB
 
 from conftest import sh
@@ -64,6 +64,8 @@ def test_failed_claim_falls_back(db, repo, tmp_path, monkeypatch):
         assert db.pool_entries(str(repo), ready_only=False) == []
         assert len(attempted) == 1
         assert not Path(attempted[0][0]).exists()
+        [entry] = trash.entries()
+        assert entry["path"] == attempted[0][0]
         assert not git.branch_exists(str(repo), attempted[0][1])
         assert pool.fill(db, str(repo)) == 0
         assert len(attempted) == 1

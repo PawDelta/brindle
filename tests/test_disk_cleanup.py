@@ -25,6 +25,96 @@ from git_snapshots import fast_host_tools, repo, restore_or_build, workspaces_on
 DAY = 86400
 
 
+@pytest.mark.parametrize("action", ["restore", "expiry", "refused", "path", "cap", "empty",
+                                  "registration-failure", "moved", "deleted", "cross-volume", "restore-race",
+                                  "path-race"])
+def test_removed_worktree_goes_to_trash(db, repo, monkeypatch, action):
+    from brindle import trash
+
+    ws = workspaces.create(db, str(repo), "recover-me").workspace
+    path = Path(ws.path)
+    git.run(["commit", "--allow-empty", "-m", "unmerged work"], path)
+    (path / "staged.txt").write_text("staged version")
+    git.run(["add", "staged.txt"], path)
+    (path / "staged.txt").write_text("working version")
+    (path / "uncommitted.txt").write_text("precious work")
+    if action in {"registration-failure", "cross-volume"}:
+        move = trash._move
+        def fail(source, dest):
+            if dest.name != "admin":
+                return move(source, dest)
+            raise OSError("move failed")
+        if action == "cross-volume":
+            stat = Path.stat
+            def other_volume(p, *args, **kwargs):
+                values = list(stat(p, *args, **kwargs))
+                if p == trash.directory():
+                    values[2] += 1
+                return os.stat_result(values)
+            monkeypatch.setattr(Path, "stat", other_volume)
+        else:
+            monkeypatch.setattr(trash, "_move", fail)
+        with pytest.raises(workspaces.WorkspaceError):
+            workspaces.remove(db, ws, force=True)
+        assert (path / "uncommitted.txt").read_text() == "precious work"
+        assert git.worktree_for_branch(repo, ws.branch) == str(path)
+        assert not trash.entries()
+        return
+    workspaces.remove(db, ws, force=True, delete_branch=False)
+    entry = trash.entries()[0]
+    assert not path.exists()
+    assert git.worktree_for_branch(repo, ws.branch) is None
+    assert (trash.directory() / entry["id"] / "tree" / "uncommitted.txt").read_text() == "precious work"
+    assert next(c["size"] for c in disk.storage_report(db, str(repo))["categories"]
+                if c["name"] == "trash") >= entry["size"]
+    assert CliRunner().invoke(app, ["trash", "list"]).exit_code == 0
+    if action in {"refused", "path", "moved", "restore-race", "path-race"}:
+        if action == "path":
+            path.mkdir()
+        elif action == "moved":
+            # A different commit, without a process or checkout on the branch.
+            git.run(["commit", "--allow-empty", "-m", "moved"], repo)
+            git.run(["branch", "-f", ws.branch, "HEAD"], repo)
+        elif action in {"restore-race", "path-race"}:
+            copy = trash.shutil.copytree
+            def checkout_during_restore(source, dest, *args, **kwargs):
+                result = copy(source, dest, *args, **kwargs)
+                if Path(source) == trash.directory() / entry["id"] / "admin":
+                    if action == "path-race":
+                        path.rename(path.with_name("reservation"))
+                        path.mkdir()
+                    else:
+                        git.run(["worktree", "add", "--force", str(path.with_name("raced")), ws.branch], repo)
+                return result
+            monkeypatch.setattr(trash.shutil, "copytree", checkout_during_restore)
+        else:
+            git.add_worktree(repo, path.with_name("other"), ws.branch, "main")
+        with pytest.raises(trash.TrashError):
+            trash.restore(entry["id"])
+        assert trash.entries()
+        if action == "path-race":
+            assert path.is_dir()
+    elif action in {"expiry", "cap", "empty"}:
+        if action == "empty":
+            assert CliRunner().invoke(app, ["trash", "empty", "--yes"]).exit_code == 0
+        else:
+            trash.retain(now=entry["removed_at"] + (trash.RETENTION + 1 if action == "expiry" else 0),
+                         cap=0 if action == "cap" else trash.SIZE_CAP)
+        assert not trash.entries()
+    else:
+        if action == "deleted":
+            git.delete_branch(repo, ws.branch, force=True)
+            git.run(["prune", "--expire", "now"], repo)
+        result = CliRunner().invoke(app, ["trash", "restore", entry["id"]])
+        assert result.exit_code == 0, result.output
+        assert (path / "uncommitted.txt").read_text() == "precious work"
+        assert git.out(["show", ":staged.txt"], path) == "staged version"
+        assert (path / "staged.txt").read_text() == "working version"
+        assert "uncommitted.txt" in git.dirty_files(path)
+        assert git.worktree_for_branch(repo, ws.branch) == str(path)
+        assert git.out(["rev-parse", "HEAD"], path) == entry["sha"]
+
+
 def _settings(values: dict) -> None:
     path = config.user_config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -76,6 +166,8 @@ def _archived(repo: Path, branch: str) -> str:
 
 
 def test_upgrade_sweep_removes_merged_worktrees_whole_once_and_never_a_dirty_one(db, repo):
+    from brindle import trash
+
     done = _worktree(repo, "old-done", merge="squash")
     tip = sh("git rev-parse old-done", repo).strip()
     dirty = _worktree(repo, "old-wip", merge="merge")
@@ -85,6 +177,8 @@ def test_upgrade_sweep_removes_merged_worktrees_whole_once_and_never_a_dirty_one
     assert [r["path"] for r in disk.upgrade_sweep(db)] == [str(done)]
 
     assert not done.exists() and _archived(repo, "old-done") == tip
+    [entry] = trash.entries()
+    assert (trash.directory() / entry["id"] / "tree" / "target" / "debug" / "app").is_file()
     assert sh("git branch --list old-done", repo).strip() == ""
     assert (dirty / "wip.txt").is_file() and (dirty / "target" / "debug" / "app").is_file()
     assert disk.clean(db, path=str(dirty))["kept"][0]["reason"].endswith("uncommitted changes")
@@ -118,7 +212,8 @@ def test_dirty_or_live_abandoned_worktree_is_never_removed(db, repo, old_worktre
 
 @pytest.mark.parametrize("cleanup", ["post-merge", "retired"])
 @pytest.mark.parametrize("other", ["pane", "process", None])
-def test_automatic_cleanup_keeps_a_worktree_something_else_is_live_in(db, shipped, process_scan, cleanup, other):
+def test_automatic_cleanup_keeps_a_worktree_something_else_is_live_in(db, shipped, process_scan, cleanup, other,
+                                                                  monkeypatch):
     """The pipeline's post-merge removal and the sweep of retired workspaces
     go through workspaces.remove: a pane of another session or a detached
     process in the worktree (the scan, faked, shows it there) keeps it,
@@ -126,11 +221,11 @@ def test_automatic_cleanup_keeps_a_worktree_something_else_is_live_in(db, shippe
     ws = shipped
     db.add_agent(Agent("w1", ws.id, "developer", "claude", None, "assign", "done",
                        "@999", None, time.time() - 7200))
-    tmux.ensure_session(ws.tmux_session, ws.path, {})
+    monkeypatch.setattr(tmux, "list_sessions", lambda: [(ws.tmux_session, False), ("someone-else", False)])
+    monkeypatch.setattr(tmux, "session_panes", lambda name: [(999999, ws.path)]
+                        if name == "someone-else" and other == "pane" else [])
     held = None
-    if other == "pane":
-        tmux._tmux("new-session", "-d", "-s", "someone-else", "-c", ws.path, "/bin/sh")
-    elif other == "process":   # a dev server started by hand, outside any pane
+    if other == "process":   # a dev server started by hand, outside any pane
         held = subprocess.Popen(["/bin/sh", "-c", "read line"], cwd=ws.path, stdin=subprocess.PIPE,
                                 start_new_session=True)
         process_scan[held.pid] = os.path.realpath(ws.path)

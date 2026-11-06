@@ -421,6 +421,7 @@ your own status line prints, so what you see doesn't change.
 | `brindle commit / push / pr [WS]` | commit everything (`-m MSG`), push with upstream, open a PR |
 | `brindle merge [--squash] [WS]` | merge into the base locally |
 | `brindle rm WS [-f] [-D]` | remove the worktree; `-D` deletes the branch too, only if merged unless `-f` |
+| `brindle trash list\|restore ID\|empty` | list removed worktrees, restore one, or permanently empty the trash (`--yes` skips confirmation) |
 | `brindle doctor` | check that brindle has what it needs (tmux, the agent CLIs, native profiles' model endpoints, a writable home) and, in a repo, its config, checks and code map |
 | `brindle close AGENT` / `brindle close --exited` | hide an agent (or every stopped one) from the dashboard, stopping it if it's running; its worktree and branch stay |
 | `brindle send AGENT MSG` | message an agent; waits in its inbox until it's idle |
@@ -435,6 +436,15 @@ your own status line prints, so what you see doesn't change.
 | `brindle mcp` | the MCP server agents talk to (launched for them; you don't run it) |
 
 With no `WS` argument, commands act on the workspace you're in.
+
+Removed worktrees go to `$BRINDLE_HOME/trash` (normally `~/.brindle/trash`),
+including uncommitted files when removal is forced. Trash retains entries for
+30 days, with a 10 GiB cap that discards the oldest entries first. Storage shows
+its size. `brindle trash restore ID` restores the files and Git index at the
+original path, refusing an occupied path, a checked-out branch, or a branch
+that has moved. It restores the checkout; assign it again to register a new
+workspace. If trash and the worktree are on different volumes, removal refuses
+and leaves the original intact.
 
 ### Web UI
 
