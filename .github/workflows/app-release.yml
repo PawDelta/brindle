@@ -522,6 +522,31 @@ jobs:
           done
           assess app -t exec "$APP"
           assess DMG -t open --context context:primary-signature "$DMG"
+          # The engine's helper app (build_engine.sh): what macOS takes the
+          # daemon and every agent for. Its privacy grants are kept by its
+          # bundle id and team, so it must be signed as a bundle, by the app's team.
+          helper="$APP/Contents/Library/LoginItems/brindle.app"
+          codesign --verify --strict --verbose=2 "$helper"
+          team() { codesign -dv "$1" 2>&1 | sed -n 's/^TeamIdentifier=//p'; }
+          if [ -z "$(team "$APP")" ] || [ "$(team "$helper")" != "$(team "$APP")" ] \
+              || ! codesign -dv "$helper" 2>&1 | grep -q '^Info.plist entries='; then
+            codesign -dv "$helper" || true
+            echo "::error::the engine's helper app isn't signed as a bundle by the app's team"
+            exit 1
+          fi
+          # Under the hardened runtime macOS asks about an agent's Automation
+          # or microphone request only on behalf of code signed for it: the
+          # helper, and the app (the daemon is its child when launchd's job
+          # is switched off). Read from what was actually signed.
+          for code in "$APP" "$helper"; do
+            signed="$(codesign -d --entitlements - "$code" 2>/dev/null || true)"
+            for entitlement in com.apple.security.automation.apple-events com.apple.security.device.audio-input; do
+              case "$signed" in
+                *"$entitlement"*) ;;
+                *) echo "::error::$code isn't signed with $entitlement"; exit 1 ;;
+              esac
+            done
+          done
           echo "verified=true" >> "$GITHUB_OUTPUT"
 
       - name: Collect

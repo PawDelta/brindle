@@ -8,8 +8,9 @@ update. The pieces:
 |---|---|
 | `app/scripts/build_engine.sh` | builds the engine into `app/src-tauri/engine/` (git-ignored) |
 | `app/scripts/engine/brindle` | the launcher the engine runs brindle through |
-| `app/scripts/engine/engine.entitlements` | the hardened runtime's exceptions for the engine's python3 |
-| `app/src-tauri/tauri.macos.conf.json` | runs build_engine.sh before every macOS `tauri build`; bundles the engine as `Contents/Resources/engine` |
+| `app/scripts/engine/engine.entitlements` | the hardened runtime's exceptions for the engine's python3 and its helper app |
+| `app/scripts/engine/helper/` | the engine's helper app: `main.c` and its `Info.plist` (see "The helper app") |
+| `app/src-tauri/tauri.macos.conf.json` | runs build_engine.sh before every macOS `tauri build`; bundles the engine as `Contents/Resources/engine` and its helper as `Contents/Library/LoginItems/brindle.app` |
 | `app/src-tauri/src/engine.rs` | finds the engine; `install_cli` |
 | `app/src-tauri/src/daemon.rs` | `start()` launches the engine's `brindle daemon --idle-exit` |
 | `app/scripts/smoke_bundle.sh --engine` | builds the app and runs its engine from inside the .app under `env -i` |
@@ -24,7 +25,39 @@ Contents/Resources/engine/
                  brindle and its uv.lock-pinned dependencies in site-packages
   .stamp         the build's inputs; a build with the same ones does nothing
   BUILD          the build's id, a hash of .stamp (see "Which running daemon it uses")
+Contents/Library/LoginItems/brindle.app/
+  Contents/MacOS/brindle   the helper: the engine's Python, in its own process
+  Contents/Info.plist      its name (brindle) and usage strings
 ```
+
+**The helper app.** macOS takes what a process does to its *responsible
+process*. The daemon is a launchd job, so that is the daemon itself, and tmux
+and every agent's pane descend from it. As the engine's bare `python3` it had
+no name to show and no usage strings: privacy prompts and System Settings said
+"python3" (docs/investigations/macos-prompts.md). So the daemon's job runs the
+helper instead (`engine::launcher_exec`):
+
+- It is an app bundle of its own, `com.pawdelta.brindle.engine`, named
+  brindle, with a usage string for each thing an agent's work can make macOS
+  ask about. `LSBackgroundOnly`: it is never opened, and has no window or Dock
+  icon. Its folder is named as the bundle is, because macOS shows a bundle's
+  own name only when the two match.
+- It runs Python in its own process, from the engine's `libpython3.13.dylib`
+  (found by the bundle's layout, as the engine is). Exec'ing `python3` would
+  make the process `python3` again.
+- It takes exactly the launcher's command line, `-I -B [-X
+  brindle-build=<id>] -m brindle …`, and refuses anything else: what holds
+  brindle's privacy grants runs brindle, not any script it is handed.
+- `sys.executable` stays the engine's `python/bin/python3`, so everything
+  brindle starts by it (hooks, MCP servers, its own commands) is what the
+  launcher's brindle starts, and Codex sees one hook command whichever ran
+  first. Checked: with the argument check taken out, a test build printed the
+  same `sys.executable`, `sys.path`, flags, `brindle_invocation()` and hook
+  command as `python3 -I -B`.
+- Only the app's daemon goes through it. `brindle` in a terminal is still the
+  launcher and `python3`, which macOS takes to the terminal.
+- Its version is the engine's, not the app's, so an app update that leaves the
+  engine as it was leaves the helper (and `BUILD`) as it was.
 
 **Python, not a frozen binary.** python-build-standalone plus a wheel, rather
 than PyInstaller. brindle re-enters itself as `[sys.executable, "-P", "-m",
@@ -99,7 +132,7 @@ The app reads the running daemon's command line with `ps`:
 
 | The running daemon | What the app does |
 |---|---|
-| this engine's (the engine's `python/bin/python3`) with this build's `-X brindle-build=` | uses it |
+| this engine's (its helper app, as the app's job runs it, or the engine's `python/bin/python3`, as a person's `brindle daemon` does) with this build's `-X brindle-build=` | uses it |
 | this engine's path with another build's id, or none (from before an update, however the update put the new files in place) | stops it with SIGTERM, waits up to 2 s for it to exit (it removes its files; a daemon gives requests still running 1 s), kills it if it hasn't (the next daemon takes over its files), starts the engine's own. Meanwhile "Starting brindle…" says it's stopping the engine that ran before |
 | another install's, started by an app (`--idle-exit`: an older app's uv brindle, or a copy run from a staging place) | the same: stops it, then starts its own |
 | another install's, started by a person (`brindle daemon` in a terminal), or one whose command line `ps` can't give | leaves it running, and fails with `engine conflict: …`, naming it and how to stop it (`brindle daemon stop`) |
@@ -175,10 +208,33 @@ and seals the bundle's resources:
 
 1. every `.so` and `.dylib` (extension modules, libpython's), with
    `--options runtime --timestamp` and no entitlements;
-2. `python/bin/python3.13` and `bin/tmux`, the same, plus `engine.entitlements`.
+2. `python/bin/python3.13` and `bin/tmux`, the same, plus `engine.entitlements`;
+3. the helper app, as the bundle it is (its Info.plist bound, its identifier
+   `com.pawdelta.brindle.engine`), the same way but with
+   `helper/helper.entitlements` (below). Privacy grants are kept by that
+   identifier and the team, so they last across updates.
 
 The launcher is a shell script and needs no signature of its own: the app's
-seal covers it as a resource.
+seal covers it as a resource. The helper sits in `Contents/Library/LoginItems`,
+one of the places a bundle's signature takes nested code: Tauri's signing of
+the app records it there, and refuses one that isn't signed. So without an
+identity build_engine.sh still signs the helper, ad hoc and without the
+hardened runtime (whose library validation would refuse the unsigned
+libpython). The release's Gatekeeper step checks the helper is signed as a
+bundle by the app's team.
+
+**Entitlements for what macOS asks about** (`helper/helper.entitlements`,
+`src-tauri/entitlements.plist`). Under the hardened runtime a usage string
+isn't enough for Automation or the microphone: macOS asks the person only on
+behalf of code signed with the resource's entitlement, and otherwise refuses
+an agent's request without a prompt. So the helper is signed with
+`com.apple.security.automation.apple-events` and
+`com.apple.security.device.audio-input`, besides the engine's Python's own
+entitlement, and the app with the same two (`bundle.macOS.entitlements`), for
+when the daemon is its child. Files, folders and the local network need none.
+The engine's `python3` and tmux keep only `engine.entitlements`: neither is
+what macOS asks on behalf of. build_engine.sh, `smoke_bundle.sh` and the
+release's Gatekeeper step each read the two back from the actual signature.
 
 **Without a Developer ID the app is signed ad hoc.** tauri.macos.conf.json sets
 `signingIdentity` to `-`, which Tauri uses only when `APPLE_SIGNING_IDENTITY`
@@ -327,11 +383,16 @@ cargo test --manifest-path app/src-tauri/Cargo.toml
 - the engine's files, and that tmux runs under `env -i` and links only macOS's
   libraries;
 - that the app's declared minimum macOS covers every binary in it;
+- that the helper app is named brindle, carries usage strings, is signed with
+  its Info.plist bound, runs the engine's brindle under `env -i` and refuses
+  anything else;
+- that the app's and the helper's signatures carry the Automation and
+  microphone entitlements;
 - that its `bin/brindle daemon --idle-exit`, run from inside the .app under
   `env -i`, listens and answers `GET /v1/sessions` with 200 over its Unix
   socket;
 - that the release app under `env -i` (`--headless-check`) starts that same
-  engine's daemon and gets `GET /v1/meta` answered.
+  engine's daemon, through the helper, and gets `GET /v1/meta` answered.
 
 Each check runs with a fresh `HOME`, `BRINDLE_HOME` and `TMUX_TMPDIR` and a
 file credential store. Those homes contain no agents, so this works from inside

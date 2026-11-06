@@ -177,7 +177,10 @@ pub(crate) fn reuse(engine: &Path, build: Result<&str, &str>, command: &str) -> 
         Err(why) => return Reuse::Conflict(why.to_string()),
     };
     let words: Vec<&str> = command.split_whitespace().collect();
-    if command.starts_with(&crate::engine::python_command(engine)) {
+    // Its Python (a person's `brindle daemon`, an app from before the helper) or its
+    // helper app (this app's job): the same engine, told apart by build alike.
+    let helpers = crate::engine::helper_command(engine).is_some_and(|helper| command.starts_with(&helper));
+    if helpers || command.starts_with(&crate::engine::python_command(engine)) {
         let option = crate::engine::build_option(build);
         let this_build = words.windows(2).any(|w| w[0] == "-X" && w[1] == option);
         return if this_build { Reuse::Use } else { Reuse::Replace };
@@ -323,7 +326,9 @@ fn daemon_command(bin: &Path, path: &OsStr) -> Command {
 
 /// What a start runs: `daemon_command`, except that the bundled engine's
 /// launcher is skipped for what it would run (`engine::launcher_exec`), so a
-/// launchd job's program is the engine's signed Python, not a script.
+/// launchd job's program is signed code of the app's team, not a script: the
+/// engine's helper app, which macOS names brindle when the daemon, tmux or an
+/// agent's pane needs its permission (without one, the engine's Python).
 #[cfg_attr(windows, allow(dead_code))]
 pub(crate) fn start_command(bin: &Path, path: &OsStr, engine: Option<&Path>) -> Command {
     let direct = engine
@@ -737,7 +742,7 @@ fn daemon_plist(label: &str, cmd: &Command, log: &Path) -> String {
               \t<key>ProcessType</key>\n\t<string>Interactive</string>\n";
     // launchd.plist(5): an app that installs a legacy plist names itself here, for
     // Login Items. macOS honors it for a program with the app's Team ID, as the
-    // engine's Python has (`start_command`); not for a script, as in a dev build.
+    // engine's helper app has (`start_command`); not for a script, as in a dev build.
     plist += &format!("\t<key>AssociatedBundleIdentifiers</key>\n\t<string>{BUNDLE_ID}</string>\n");
     plist += "</dict>\n</plist>\n";
     plist
@@ -1993,6 +1998,39 @@ mod tests {
         // Why it is unknown (require_build's: no BUILD, or one unreadable now) is what the app says.
         let missing = "this brindle app's engine is incomplete (no …/engine/BUILD)";
         assert_eq!(reuse(engine, Err(missing), &own), Reuse::Conflict(missing.into()));
+    }
+
+    /// The program of the daemon's launchd job is what macOS judges the daemon,
+    /// tmux and every pane by: the engine's helper app when the bundle has one,
+    /// run as the launcher would run the engine's Python, and told as this
+    /// engine's daemon by the same build id.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_daemons_launchd_job_runs_the_engines_helper_app() {
+        let root = std::env::current_dir().unwrap().join("target/daemon-helper");
+        let _ = std::fs::remove_dir_all(&root);
+        let engine = engine_of_build(&root, Some("00b2"));
+        let helper = root.join("brindle.app/Contents/Library/LoginItems/brindle.app/Contents/MacOS/brindle");
+        std::fs::create_dir_all(helper.parent().unwrap()).unwrap();
+        std::fs::write(&helper, "").unwrap();
+
+        let cmd = start_command(&engine.join("bin/brindle"), OsStr::new("/usr/bin:/bin"), Some(&engine));
+        let plist = daemon_plist("the.label", &cmd, Path::new("/the/log"));
+        let program = format!(
+            "<key>ProgramArguments</key>\n\t<array>\n\t\t<string>{}</string>\n\t\t<string>-I</string>",
+            helper.display()
+        );
+        assert!(plist.contains(&program), "{plist}");
+
+        // As `ps` shows that job's daemon: this engine's, used when its build is this one's.
+        let args: Vec<_> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        let own = format!("{} {}", helper.display(), args.join(" "));
+        assert_eq!(reuse(&engine, Ok("00b2"), &own), Reuse::Use);
+        assert_eq!(reuse(&engine, Ok("00b3"), &own), Reuse::Replace);
+        // Another app's helper (a bundle staged elsewhere) isn't this engine's.
+        let staged = own.replace("daemon-helper", "staged");
+        assert_eq!(reuse(&engine, Ok("00b2"), &staged), Reuse::Replace);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A process `ps` shows as `argv0 … args` (a daemon's command line), and

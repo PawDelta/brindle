@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- What the engine's helper app is signed with (build_engine.sh). The first is
+     the engine's Python's own (engine.entitlements says why): the helper runs
+     that Python in its process. The other two are the hardened runtime's
+     resource access: macOS asks the person about Automation and the microphone
+     on the helper's behalf, as the responsible process of every agent, only if
+     the helper is signed for them. Its usage strings (Info.plist) alone would
+     leave an agent's request refused without a prompt. Files, folders and the
+     local network need no entitlement. The app carries the same two
+     (src-tauri/entitlements.plist), for when the daemon is its child. -->
+<plist version="1.0">
+<dict>
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+  <true/>
+  <key>com.apple.security.automation.apple-events</key>
+  <true/>
+  <key>com.apple.security.device.audio-input</key>
+  <true/>
+</dict>
+</plist>

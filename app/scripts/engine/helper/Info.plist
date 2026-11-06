@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- The engine's helper app (main.c beside this; build_engine.sh builds and signs
+     it, and gives it the engine's version): what macOS takes the daemon, tmux and
+     every agent's pane for, as they all descend from the daemon's launchd job.
+     Its name is what a privacy prompt and System Settings show, and these strings
+     are what the prompt says under it (docs/investigations/macos-prompts.md).
+     Never opened as an app: no window, no Dock icon. -->
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key>
+  <string>com.pawdelta.brindle.engine</string>
+  <key>CFBundleName</key>
+  <string>brindle</string>
+  <key>CFBundleDisplayName</key>
+  <string>brindle</string>
+  <key>CFBundleExecutable</key>
+  <string>brindle</string>
+  <key>CFBundleIconFile</key>
+  <string>icon.icns</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
+  <key>CFBundleDevelopmentRegion</key>
+  <string>English</string>
+  <key>CFBundleShortVersionString</key>
+  <string>0</string>
+  <key>CFBundleVersion</key>
+  <string>0</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>11.0</string>
+  <key>LSBackgroundOnly</key>
+  <true/>
+  <key>NSDesktopFolderUsageDescription</key>
+  <string>brindle and the agents it runs work on the projects you open. This is for one in your Desktop folder.</string>
+  <key>NSDocumentsFolderUsageDescription</key>
+  <string>brindle and the agents it runs work on the projects you open. This is for one in your Documents folder.</string>
+  <key>NSDownloadsFolderUsageDescription</key>
+  <string>brindle and the agents it runs work on the projects you open. This is for one in your Downloads folder.</string>
+  <key>NSRemovableVolumesUsageDescription</key>
+  <string>brindle and the agents it runs work on the projects you open. This is for one on a removable drive.</string>
+  <key>NSNetworkVolumesUsageDescription</key>
+  <string>brindle and the agents it runs work on the projects you open. This is for one on a network drive.</string>
+  <key>NSFileProviderDomainUsageDescription</key>
+  <string>brindle and the agents it runs work on the projects you open. This is for one in a cloud storage folder.</string>
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>An agent brindle runs is reaching a device on your local network, such as a development server.</string>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>An agent brindle runs wants to control another app. Allow it only if that is what you asked the agent to do.</string>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>An agent brindle runs listens through the microphone when you turn on its voice input.</string>
+</dict>
+</plist>
