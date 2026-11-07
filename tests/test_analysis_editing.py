@@ -25,7 +25,7 @@ def remote(backend, monkeypatch):
         "PUT /analysis-docs/d1/draft": [(200, {})],
         "POST /analysis-docs/d1/draft/publish": [(200, {"version": 2})],
         DROP: [(200, {})],
-        "GET /me/analysis-docs/settings": [(200, {"switches": {"assist": "on"}})],   # opt-in (PLAN_DEFAULT_ON)
+        "GET /me/analysis-docs/settings": lambda f, h: (200, {"switches": {"store": "on", "assist": "on"}}),  # opt-in
     })
     backend.version = 1
     monkeypatch.setattr(auth.UrllibTransport, "request",

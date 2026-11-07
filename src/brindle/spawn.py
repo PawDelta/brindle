@@ -413,7 +413,8 @@ def check_no_room(repo_root: str | None = None) -> str | None:
 
     if (low := disk.low_disk(repo_root)) is not None:
         return low
-    if pressure() < PRESSURE_WARN and _load() <= CHECK_LOAD_FACTOR * _cores():
+    # Level 2 (warn) alone is not "no room" for a run already holding a slot.
+    if pressure() < PRESSURE_CRITICAL and _load() <= CHECK_LOAD_FACTOR * _cores():
         return None
     if repo_root is not None:
         from brindle.config import load_repo_config
