@@ -83,6 +83,7 @@ class _Origin(http.server.SimpleHTTPRequestHandler):
         pass
 
 
+@pytest.mark.variant("credential fallback bypass: refused or expired GitHub tokens must not invoke the person's helper or askpass while connected")
 def test_connected_github_answers_git_without_the_keychain(brindle_home, tmp_path, monkeypatch, github_api):
     # The person's own helper and askpass stand for the keychain's and a dialog: a fake that notes being asked.
     asked = tmp_path / "asked"
