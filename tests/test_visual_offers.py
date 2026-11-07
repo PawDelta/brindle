@@ -136,6 +136,8 @@ def test_accept_and_explicit_ask_allow_one_publish(db, session):
     ("can you visualize the changes made that we are planning to release for 0.6.3?", "visual", True),
     ("Show me the release flow visually.", "visual", True),
     ("Visualize the flow and then delete the branch.", "visual", False),
+    ("Visualize the flow once I approve the approach.", "visual", False),
+    ("Can you visualize the flow tomorrow?", "visual", False),
 ])
 def test_complete_request_intent(db, session, text, scope, allowed):
     boss, _ = session

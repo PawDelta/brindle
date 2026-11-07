@@ -157,7 +157,8 @@ _OBJECT = re.compile(r"(?:\s+(?!(?:and|then|also|but|so|while|or|plus)\b)[\w'.,/
 _SHOW_VISUALLY = re.compile(r"(?:(?:can|could|would|will) you\s+)?(?:please\s+)?show\s+(?:me|us)"
                             r"(?:\s+(?!(?:and|then|also|but|so|while|or|plus)\b)[\w'.,/-]+){1,20}\s+visually[.!?]*", re.I)
 _QUALIFIED = re.compile(r"\b(?:if|unless|when|after|before|later|only|maybe|perhaps|not|never|"
-                        r"don't|do not|wait|until|provided|assuming)\b|[\"`“”]", re.I)
+                        r"don't|do not|wait|until|provided|assuming|once|tomorrow|tonight|soon|eventually|next|"
+                        r"approve[sd]?|approval|whenever|since|because)\b|[\"`“”]", re.I)
 _CONTEXT = re.compile(r"(?:compare|consider|examine|review)\s+(?:this|that|these|those|the)\s+"
                       r"(?:choices|options|layouts|designs|flow|pipeline|change|decision)[.!?]*", re.I)
 _CANCEL_REQUEST = re.compile(
