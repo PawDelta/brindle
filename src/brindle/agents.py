@@ -2420,7 +2420,10 @@ def _paste_message(db: DB, agent: Agent, text: str, lead: str | None,
                   or (state["stage"] in ("lead", "body") and not owned())
                   or (state["stage"] == "lead" and resume is None
                       and not _partial_composer(fresh, state, "lead"))):
-                if state["stage"] == "body":   # its Enter withheld: whatever goes in now, the person sent
+                # Stopped for good: after the body, its Enter withheld (whatever
+                # goes in now, the person sent); after the lead, its body never
+                # written (a turn from here can't carry it: note_turn_started).
+                if state["stage"] in ("lead", "body"):
                     try:
                         record(stopped=True)
                     except _PasteBlocked:
@@ -2527,7 +2530,9 @@ def _resume_pane_delivery(db: DB, agent: Agent, saved: str) -> bool:
                     db.set_mark(agent.id, "pane-delivery", None)
                 return _flush_messages(db, agent.id)
             # Stopped after the lead: the body never reached the composer and
-            # Enter was never pressed for it, so the whole message goes in, once.
+            # Enter was never pressed for it, so the whole message goes in, once,
+            # as a new attempt: the old one's mark (and what hooks noted on it) retired.
+            db.set_mark(agent.id, "pane-delivery", None)
             stage = None
         try:
             _paste_message(db, agent, state["body"], state["lead"], row["id"], resume=stage)
@@ -2803,8 +2808,11 @@ def note_turn_started(db: DB, agent_id: str) -> None:
             return
         state = json.loads(saved)
         # "lead" too, as in _acknowledge_submitted: the body may already be
-        # in, its write not yet recorded; that write keeps this field.
-        if state.get("stage") not in ("lead", "body") or state.get("turn_started"):
+        # in, its write not yet recorded; that write keeps this field. Not a
+        # "lead" one stopped for good: its body was never written.
+        stage = state.get("stage")
+        if (stage not in ("lead", "body") or state.get("turn_started")
+                or (stage == "lead" and state.get("stopped"))):
             return
         if db.replace_mark(agent_id, "pane-delivery", saved, json.dumps({**state, "turn_started": True})):
             return

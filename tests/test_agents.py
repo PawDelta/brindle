@@ -368,6 +368,7 @@ def test_paste_blocked_or_draft_holds_message_then_delivers_it_once(db, ws, monk
     # they send it (or a replacement) and its turn's hook runs before brindle's Enter is authorized
     ("enter", "sent"), ("enter", "agy sent"), ("enter", "agy replaced"),
     ("paste", "sent"), ("paste", "agy sent"),   # ... before the body's write is even recorded
+    ("lead", "agy sent"),   # stopped before its body: the turn they start can't carry it
 ])
 def test_person_typing_mid_paste_stops_it_and_message_goes_in_once_later(db, ws, monkeypatch, typed_after, then):
     # Real flush and tmux.paste over a fake terminal: the person starts a reply
@@ -450,7 +451,7 @@ def test_person_typing_mid_paste_stops_it_and_message_goes_in_once_later(db, ws,
         antigravity.handle_hook(db, "a1", "agy-stop", {})
     assert len(spoke) == (then in ("sent", "replaced", "agy sent", "agy replaced"))   # their turn, as theirs
     again = not (typed_after == "body" or in_flight) or then in ("cleared", "replaced", "agy cleared")
-    unresolved = then in ("agy sent", "agy replaced")
+    unresolved = then in ("agy sent", "agy replaced") and (typed_after == "body" or in_flight)
     # this flush counts it (Codex's turn-end notify already flushed it)
     acknowledged = then == "sent" and (typed_after == "body" or in_flight)
     assert agents.flush(db, "a1") is (again or acknowledged) and db.pending_count("a1") == 0
