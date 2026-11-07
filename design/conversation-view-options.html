@@ -346,6 +346,7 @@ h2.sub small { font-weight: 400; color: var(--ink-3); font-size: 13px; margin-le
 .vC .pdiff .dl { font-size: 11px; }
 .vC .pdiff .dl .g { width: 26px; }
 .vC .pdiff .dh .ed { color: var(--ink-3); font-weight: 400; }
+.vC .pdiff .dh.sel { box-shadow: inset 2px 0 0 var(--branch); background: var(--branch-soft); }
 .vC .pfoot { flex: none; border-top: 1px solid var(--line); padding: 7px 12px; font: 11px var(--mono); color: var(--ink-3); display: flex; justify-content: space-between; gap: 10px; }
 .vC .pfoot b { color: var(--ink-2); font-weight: 500; }
 
@@ -535,7 +536,8 @@ function diffBlock(ed, { gutter = true, label = "" } = {}) {
   const c = counts(ed);
   return `<div class="dh"><span class="fp">${ed.file}</span><span class="hk">${hunk(ed)}</span>${label ? `<span class="ed">${label}</span>` : ""}${pm(c.a, c.d)}</div>${diffLines(ed, gutter)}`;
 }
-const outBlock = (run, prompt = true) => `<div class="out">${prompt ? `<div><span class="p">$ </span>${esc(run.cmd)}</div>` : ""}${run.out.map(([c, t]) => `<div class="${c}">${esc(t)}</div>`).join("")}</div>`;
+/* The shell prompt line is shown only for a step that ran a command; a Grep or Read has none. */
+const outBlock = (run, prompt = true) => `<div class="out">${prompt && run.cmd ? `<div><span class="p">$ </span>${esc(run.cmd)}</div>` : ""}${run.out.map(([c, t]) => `<div class="${c}">${esc(t)}</div>`).join("")}</div>`;
 const askCmd = (a) => `<div class="ask-cmd"><span class="p">$ </span>${esc(a.cmd)}</div>`;
 const askActs = (size = "") => `<div class="ask-acts"><button class="b primary ${size}" type="button">Allow once</button><button class="b secondary ${size}" type="button">Deny</button><button class="b quiet ${size}" type="button">Allow pushes on this branch</button><span class="sp"></span><span class="ask-note">held <b>${S.held}</b></span></div>`;
 const askWhy = (a) => `Held by your rule <b>“${a.rule}”</b>. Answering here goes through brindle's permission hook, the same path as the Inbox. Nothing else in this tab writes to the session.`;
@@ -562,7 +564,7 @@ function renderA() {
         const rs = s.k === "edit" ? `<span class="rs">${(() => { const c = counts(s); return `+${c.a} −${c.d}`; })()}</span>` : `<span class="rs ${ok ? "ok" : "fail"}">${s.k === "run" ? (ok ? "✓ " + s.res : "✗ exit " + s.exit) : s.res}</span>`;
         const hasBody = s.k === "edit" || s.out;
         rows.push(`<div class="mg"><button class="mnote" type="button" data-tog="1:${s.id}" aria-expanded="${open}" ${hasBody ? "" : "disabled"}>${label}${rs}${hasBody ? CHEV : ""}</button></div>
-          <div class="bd" style="padding:0">${hasBody ? `<div class="clp ${open ? "open" : ""}"><div><div class="quiet-blk">${s.k === "edit" ? diffBlock(s, { gutter: false }) : outBlock(s)}</div></div></div>` : ""}</div>`);
+          <div class="bd" style="padding:0">${hasBody ? `<div class="clp ${open ? "open" : ""}" data-clp="1:${s.id}"><div><div class="quiet-blk">${s.k === "edit" ? diffBlock(s, { gutter: false }) : outBlock(s)}</div></div></div>` : ""}</div>`);
       }
     });
   });
@@ -590,7 +592,7 @@ function renderB() {
         const st = s.k === "edit" ? pm(counts(s).a, counts(s).d) : `<span class="st ${ok ? "ok" : "fail"}">${s.k === "run" ? (ok ? `✓ ${s.res} · ${s.dur}` : `✗ exit ${s.exit} · ${s.res} · ${s.dur}`) : s.res}</span>`;
         const hasBody = s.k === "edit" || s.out;
         rows.push(row(ts, ok ? "ok" : "fail", `<div class="tb ${ok ? "" : "fail"}"><button class="th" type="button" data-tog="2:${s.id}" aria-expanded="${open}" ${hasBody ? "" : "disabled"}>${hasBody ? CHEV : '<span style="width:10px"></span>'}<span class="nm">${nm}</span><span class="ar">${ar}</span>${st}</button>
-          ${hasBody ? `<div class="clp ${open ? "open" : ""}"><div>${s.k === "edit" ? `<div style="border-top:1px solid var(--line)">${diffBlock(s)}</div>` : outBlock(s, false)}</div></div>` : ""}</div>`));
+          ${hasBody ? `<div class="clp ${open ? "open" : ""}" data-clp="2:${s.id}"><div>${s.k === "edit" ? `<div style="border-top:1px solid var(--line)">${diffBlock(s)}</div>` : outBlock(s, false)}</div></div>` : ""}</div>`));
       }
       ts = "";
     });
@@ -615,11 +617,13 @@ function renderC() {
         group.push(`<button class="tcall ${fi === ST.selFile ? "sel" : ""}" type="button" data-file="${fi}"><span class="nm">Edit</span><span class="ar">${s.file}</span><span class="rs">${pm(c.a, c.d)}</span><span class="go">diff →</span></button>`);
       } else if (s.k === "run") {
         const ok = s.exit === 0;
-        group.push(`<button class="tcall" type="button" data-tog="3:${s.id}" aria-expanded="${isOpen(3, s)}"><span class="nm">Bash</span><span class="ar">${esc(s.cmd)}</span><span class="rs ${ok ? "ok" : "fail"}">${ok ? "✓ " + s.res : "✗ exit " + s.exit + " · " + s.res}</span><span class="go">${ok ? "output →" : "output ↓"}</span></button>`);
-        if (!ok) group.push(`<div class="clp ${isOpen(3, s) ? "open" : ""}" style="margin-left:-28px"><div><div class="inl"><div class="ih"><span class="dot"></span>failed · exit ${s.exit} · ${s.dur}<span class="flex1"></span><span class="t-3">also in the Output pane →</span></div>${outBlock(s)}</div></div></div>`);
+        /* A passing run goes to the Output pane (selected there); the failed one opens inline as well. */
+        const selRun = ST.ptab === "out" && ST.selRun === s.id;
+        group.push(`<button class="tcall ${selRun ? "sel" : ""}" type="button" ${ok ? `data-run="${s.id}"` : `data-tog="3:${s.id}" aria-expanded="${isOpen(3, s)}"`}><span class="nm">Bash</span><span class="ar">${esc(s.cmd)}</span><span class="rs ${ok ? "ok" : "fail"}">${ok ? "✓ " + s.res : "✗ exit " + s.exit + " · " + s.res}</span><span class="go">${ok ? "output →" : "output ↓"}</span></button>`);
+        if (!ok) group.push(`<div class="clp ${isOpen(3, s) ? "open" : ""}" data-clp="3:${s.id}" style="margin-left:-28px"><div><div class="inl"><div class="ih"><span class="dot"></span>failed · exit ${s.exit} · ${s.dur}<span class="flex1"></span><button class="b quiet" type="button" data-run="${s.id}" style="height:18px;padding:0 4px;font:11px var(--mono);color:var(--ink-3)">also in the Output pane →</button></div>${outBlock(s)}</div></div></div>`);
       } else {
-        group.push(`<button class="tcall" type="button" data-tog="3:${s.id}" aria-expanded="${isOpen(3, s)}"><span class="nm">${s.name}</span><span class="ar">${esc(s.arg)}</span><span class="rs ok">${s.res}</span>${s.out ? CHEV : ""}</button>`);
-        if (s.out) group.push(`<div class="clp ${isOpen(3, s) ? "open" : ""}" style="margin-left:-28px"><div><div class="inl" style="border-color:var(--line)">${outBlock(s, false)}</div></div></div>`);
+        group.push(`<button class="tcall" type="button" data-tog="3:${s.id}" aria-expanded="${isOpen(3, s)}" ${s.out ? "" : "disabled"}><span class="nm">${s.name}</span><span class="ar">${esc(s.arg)}</span><span class="rs ok">${s.res}</span>${s.out ? CHEV : ""}</button>`);
+        if (s.out) group.push(`<div class="clp ${isOpen(3, s) ? "open" : ""}" data-clp="3:${s.id}" style="margin-left:-28px"><div><div class="inl" style="border-color:var(--line)">${outBlock(s)}</div></div></div>`);
       }
     });
     flush();
@@ -630,7 +634,7 @@ function renderC() {
   const panelBody = ST.ptab === "diff"
     ? `<div class="flist">${FILES.map((f, i) => `<button class="frow ${i === ST.selFile ? "sel" : ""}" type="button" data-file="${i}"><span>${f.file}</span><span class="ed">${f.edits.length} edit${f.edits.length > 1 ? "s" : ""}</span>${pm(f.a, f.d)}</button>`).join("")}</div>
        <div class="pdiff">${sel.edits.map((e, i) => diffBlock(e, { label: `edit ${EDITS.indexOf(e) + 1} · ${S.turns.find((t) => t.steps.includes(e)).t}` })).join("")}</div>`
-    : `<div class="pdiff" style="border-top:0">${runs.map((r) => `<div class="dh"><span class="fp">${esc(r.cmd)}</span><span class="pm"><b class="${r.exit ? "t-fail" : "t-pass"}">${r.exit ? "✗ exit " + r.exit : "✓ " + r.res}</b></span></div>${outBlock(r, false)}`).join("")}</div>`;
+    : `<div class="pdiff" style="border-top:0">${runs.map((r) => `<div class="dh ${ST.selRun === r.id ? "sel" : ""}" data-runout="${r.id}"><span class="fp">${esc(r.cmd)}</span><span class="pm"><b class="${r.exit ? "t-fail" : "t-pass"}">${r.exit ? "✗ exit " + r.exit : "✓ " + r.res}</b></span></div>${outBlock(r, false)}`).join("")}</div>`;
   return `<div class="vC">
     <div class="conv">
       <div class="scroll">${items.join("")}</div>
@@ -661,7 +665,7 @@ function renderD() {
       const ar = s.k === "edit" ? s.file : s.k === "run" ? esc(s.cmd) : esc(s.arg);
       const rs = s.k === "edit" ? pm(counts(s).a, counts(s).d) : `<span class="rs ${ok ? "ok" : "fail"}">${s.k === "run" ? (ok ? "✓ " + s.res : "✗ exit " + s.exit + " · " + s.res) : s.res}</span>`;
       return `<button class="step" type="button" data-tog="4:${s.id}" aria-expanded="${open}" ${hasBody ? "" : "disabled"}>${hasBody ? CHEV : '<span style="width:10px"></span>'}<span class="nm">${nm}</span><span class="ar">${ar}</span>${s.k === "edit" ? `<span class="rs">${rs}</span>` : rs}</button>
-        ${hasBody ? `<div class="clp ${open ? "open" : ""}"><div><div class="det">${s.k === "edit" ? diffBlock(s) : outBlock(s)}</div></div></div>` : ""}`;
+        ${hasBody ? `<div class="clp ${open ? "open" : ""}" data-clp="4:${s.id}"><div><div class="det">${s.k === "edit" ? diffBlock(s) : outBlock(s)}</div></div></div>` : ""}`;
     }).join("");
     const summary = edits.length ? `<span class="t-3 mono" style="font-size:11px">${edits.length} edit${edits.length > 1 ? "s" : ""} · ${[...new Set(edits.map((e) => e.file))].length} file${new Set(edits.map((e) => e.file)).size > 1 ? "s" : ""} ${pm(edits.reduce((n, e) => n + counts(e).a, 0), edits.reduce((n, e) => n + counts(e).d, 0))}</span>` : "";
     cards.push(`<div class="card ${ask ? "ask" : ""}">
@@ -788,11 +792,18 @@ document.addEventListener("click", (e) => {
   if (tog) {
     const [dir, id] = tog.dataset.tog.split(":"); const s = step(id); const now = !isOpen(+dir, s);
     ST.open[tog.dataset.tog] = now; tog.setAttribute("aria-expanded", now);
-    const clp = tog.parentElement.querySelector(":scope > .clp") || tog.nextElementSibling?.classList.contains("clp") && tog.nextElementSibling || tog.closest(".mg")?.nextElementSibling?.querySelector(".clp");
+    /* Each toggle owns one disclosure, found by its id inside the same window (Both mode has two). */
+    const clp = tog.closest(".win").querySelector(`[data-clp="${tog.dataset.tog}"]`);
     if (clp) clp.classList.toggle("open", now);
     return;
   }
   const f = e.target.closest("[data-file]"); if (f) { ST.selFile = +f.dataset.file; ST.ptab = "diff"; renderFrames(); return; }
+  const r = e.target.closest("[data-run]");
+  if (r) {
+    ST.selRun = r.dataset.run; ST.ptab = "out"; renderFrames();
+    $$(`[data-runout="${ST.selRun}"], .tcall.sel`).forEach((el) => el.scrollIntoView({ block: "nearest" }));
+    return;
+  }
   const pt = e.target.closest("[data-ptab]"); if (pt) { ST.ptab = pt.dataset.ptab; renderFrames(); return; }
 });
 document.addEventListener("keydown", (e) => {
