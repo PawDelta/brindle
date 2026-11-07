@@ -57,6 +57,7 @@ import queue
 import shlex
 import signal
 import subprocess
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
@@ -149,10 +150,47 @@ def _stable_invocation() -> list[str]:
     return argv
 
 
+def _launcher() -> list[str]:
+    """A launcher at a fixed path (``<brindle home>/bin/codex-hook``) that runs
+    the brindle that wrote it last. Codex keeps one trusted hash per hook and
+    the hash covers the command, so every install on the machine (the app, one
+    run from a disk image, a uv CLI) must name the same command: each one
+    points the launcher at itself and none re-trusts over another. Without a
+    writable launcher, the install's own invocation."""
+    from brindle.config import brindle_home
+
+    argv = _stable_invocation()
+    launcher = brindle_home() / "bin" / "codex-hook"
+    body = "#!/bin/sh\nexec " + " ".join(shlex.quote(a) for a in argv) + ' "$@"\n'
+    tmp = None
+    try:
+        try:
+            if launcher.read_text() == body and os.access(launcher, os.X_OK):
+                return [str(launcher)]
+        except OSError:
+            pass
+        launcher.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=launcher.parent, prefix=".codex-hook.")
+        with os.fdopen(fd, "w") as f:
+            f.write(body)
+        os.chmod(tmp, 0o755)
+        os.replace(tmp, launcher)
+        tmp = None
+        return [str(launcher)]
+    except OSError:
+        return argv
+    finally:
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+
 def hook_command() -> str:
-    """The hook's command: the same for every agent, so one trust covers all."""
+    """The hook's command: the same for every agent and every install, so one trust covers all."""
     assigns = f"BRINDLE_HOME={shlex.quote(os.environ['BRINDLE_HOME'])} " if "BRINDLE_HOME" in os.environ else ""
-    return assigns + " ".join(shlex.quote(a) for a in [*_stable_invocation(), "_hook", EVENT])
+    return assigns + " ".join(shlex.quote(a) for a in [*_launcher(), "_hook", EVENT])
 
 
 def pre_tool_command(command: str) -> str:
@@ -286,7 +324,7 @@ def _forget_definition() -> None:
 
 # How long a hook Codex wouldn't take is left before keep_trusted asks again:
 # a Codex too old for hooks must not mean an app-server on every check.
-AFTER_FAILURE = 900.0
+AFTER_FAILURE = 60.0
 _failed_at: dict[tuple[str, str, str], float] = {}
 
 

@@ -930,7 +930,25 @@ def test_every_brindle_process_names_the_hook_the_same(tmp_path, monkeypatch):
     from_app = codex_hook.hook_command()
     monkeypatch.setattr("brindle.providers.brindle_invocation", lambda: [str(shim / "brindle")])
     assert codex_hook.hook_command() == from_app
-    assert str(script.resolve()) in from_app
+    assert str(script.resolve()) in (brindle_home() / "bin" / "codex-hook").read_text()
+
+
+def test_installs_at_different_paths_share_one_hook_definition(tmp_path, monkeypatch):
+    """Live: the /Applications app, one run from a mounted disk image and a uv
+    CLI each named their own binary in the hook, so each re-trusted over the others."""
+    def install(name):
+        exe = tmp_path / name / "bin" / "brindle"
+        exe.parent.mkdir(parents=True)
+        exe.write_text("#!/bin/sh\n")
+        exe.chmod(0o755)
+        monkeypatch.setattr("brindle.providers.brindle_invocation", lambda: [str(exe)])
+        return codex_hook.definition(), exe
+
+    first, first_exe = install("app")
+    second, second_exe = install("dmg")
+    assert first == second
+    assert str(second_exe) in (brindle_home() / "bin" / "codex-hook").read_text()   # runs the current brindle
+    assert str(first_exe) not in second
 
 
 def test_codex_hook_ignores_a_relocated_console_scripts_missing_interpreter(tmp_path, monkeypatch):
@@ -1049,7 +1067,7 @@ def test_unreadable_codex_trust_never_gets_reinstalled(ws, monkeypatch):
 
 def move_brindle(monkeypatch):
     """A reinstall: brindle's interpreter elsewhere, so a new hook command."""
-    monkeypatch.setattr(codex_hook, "_stable_invocation",
+    monkeypatch.setattr(codex_hook, "_launcher",
                         lambda: ["/new/venv/bin/python", "-m", "brindle"])
 
 
