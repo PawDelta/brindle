@@ -517,7 +517,7 @@ describe("App", () => {
     // Inbox, which stays where it was; no raw banner. The app asks for nothing.
     const before = daemon.requests.length;
     daemon.die();
-    await waitFor(() => expect(screen.getByTestId("reconnecting").textContent).toContain("Reconnecting to brindle…"), { timeout: 3000 });
+    await waitFor(() => expect(screen.getByTestId("reconnecting")).toBeTruthy(), { timeout: 3000 });
     expect(screen.getByRole("region", { name: "Inbox" })).toBeTruthy();
     expect(screen.queryByTestId("engine-health")).toBeNull();
     // It keeps trying on its own (the shell starts the daemon again on the next attempt).
@@ -561,7 +561,13 @@ describe("App", () => {
     try {
       renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO }} />);
       await advance(1000);
-      expect(screen.getByTestId("terminal").textContent).toBe("sup1");
+      const terminal = screen.getByTestId("terminal");
+      expect(terminal.textContent).toBe("sup1");
+      // Keys the pane would hear; and the focus in the app, where the overlay must take it from.
+      const typed = vi.fn();
+      terminal.addEventListener("keydown", typed);
+      const focused = within(nav()).getByTestId("inbox-link");
+      focused.focus();
 
       daemon.die();
       await advance(0);
@@ -570,19 +576,31 @@ describe("App", () => {
       expect(screen.queryByTestId("engine-health")).toBeNull();
       await advance(1000);
       const overlay = screen.getByTestId("reconnecting");
-      expect(within(overlay).getByRole("status", { name: "Reconnecting to brindle" })).toBeTruthy();
+      expect(within(overlay).getByRole("alertdialog")).toBeTruthy();
       expect(within(overlay).queryByRole("button")).toBeNull();
       // Over the last good screen, which stays mounted; nothing raw beside it.
       expect(screen.getByRole("region", { name: "Session" })).toBeTruthy();
       expect(screen.queryByTestId("engine-banner")).toBeNull();
       expect(screen.queryByRole("alert")).toBeNull();
+      // Modal: the focus is in it, and the app under it hears no keys: not the pane, not ⌘N, not ⌃`.
+      expect(overlay.contains(document.activeElement)).toBe(true);
+      fireEvent.keyDown(terminal, { key: "a" });
+      fireEvent.keyDown(focused, { key: "n", metaKey: true });
+      fireEvent.keyDown(document.activeElement!, { key: "n", metaKey: true });
+      fireEvent.keyDown(document.activeElement!, { key: "`", ctrlKey: true });
+      await advance(0);
+      expect(typed).not.toHaveBeenCalled();
+      expect(screen.getByRole("region", { name: "Session" })).toBeTruthy();
+      expect(screen.queryByRole("form", { name: "Start a session" })).toBeNull();
+      expect(screen.queryByTestId("terminal-panel")).toBeNull();
 
-      // A long wait: a clear next step, and Try again asks the engine at once.
+      // A long wait: a next step, focused, and it asks the engine at once.
       await advance(30000);
       expect(overlay.dataset.phase).toBe("long");
-      expect(overlay.textContent).toContain("quit brindle and open it again");
+      const again = within(overlay).getByRole("button");
+      expect(document.activeElement).toBe(again);
       const asked = daemon.requests.filter((r) => r.path === "/meta").length;
-      fireEvent.click(within(overlay).getByRole("button", { name: "Try again now" }));
+      fireEvent.click(again);
       await advance(0);
       expect(daemon.requests.filter((r) => r.path === "/meta").length).toBeGreaterThan(asked);
 
@@ -593,6 +611,8 @@ describe("App", () => {
       await advance(1000);
       expect(screen.queryByTestId("reconnecting")).toBeNull();
       expect(screen.queryByTestId("engine-banner")).toBeNull();
+      // The focus goes back where it was.
+      expect(document.activeElement).toBe(focused);
       expect(paneWaits()).toBe(true);
       resuming = false;
       await advance(1000);

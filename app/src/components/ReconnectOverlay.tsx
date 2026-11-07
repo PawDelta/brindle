@@ -9,7 +9,7 @@
    first connection that never opens, or a refused token, is the engine
    banner's (components/EngineBanner), not this. */
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { AppState } from "../store/store";
 import { button } from "./ui";
 
@@ -45,22 +45,77 @@ export function useReconnect(connection: AppState["connection"]): Reconnect {
   return phase;
 }
 
+/* The overlay while it shows: a global shortcut of the app's own checks for it and stands down. */
+export const RECONNECTING = '[data-testid="reconnecting"]';
+
+/* What an overlaid app must not hear: keys and pastes aimed anywhere but the overlay. */
+const HELD = ["keydown", "keypress", "keyup", "beforeinput", "paste"] as const;
+
+/* Shown, the overlay is modal: the app under it is inert (the Shell's), the focus moves into it
+   (onto Try again once that's offered), Tab stays there, and keys or pastes aimed at the app under
+   it (a terminal that had the focus, ⌘N's, ⌘V's window handlers) are held at the window before
+   they reach anything. Gone, the focus goes back where it was. */
 export function ReconnectOverlay({ phase, onRetry }: { phase: Reconnect; /* Ask the engine now (the shell starts it again when it can). */ onRetry(): void }) {
-  if (phase !== "shown" && phase !== "long") return null;
+  const visible = phase === "shown" || phase === "long";
+  const layer = useRef<HTMLDivElement>(null);
+  const box = useRef<HTMLElement>(null);
+  const tryAgain = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (!visible) return;
+    const before = document.activeElement instanceof HTMLElement && document.activeElement !== document.body ? document.activeElement : null;
+    const hold = (e: Event) => {
+      if (e.target instanceof Node && layer.current?.contains(e.target)) return;
+      e.stopPropagation();
+      // The shell's own menu shortcuts (⌘Q) keep their default; nothing reaches the page under the
+      // overlay either way, and a paste, held separately, has its default stopped.
+      if (!(e instanceof KeyboardEvent && e.metaKey)) e.preventDefault();
+    };
+    for (const kind of HELD) window.addEventListener(kind, hold, true);
+    return () => {
+      for (const kind of HELD) window.removeEventListener(kind, hold, true);
+      const now = document.activeElement;
+      if (before?.isConnected && (!now || now === document.body || !now.isConnected)) before.focus();
+    };
+  }, [visible]);
+  useEffect(() => {
+    if (phase === "long") tryAgain.current?.focus();
+    else if (phase === "shown") box.current?.focus();
+  }, [phase]);
+  if (!visible) return null;
   return (
-    <div className="absolute inset-0 z-50 flex items-center justify-center bg-canvas/70 backdrop-blur-[2px]" data-testid="reconnecting" data-phase={phase}>
-      <section className="flex max-w-sm flex-col items-center gap-s2 rounded-lg border border-line-strong bg-surface px-s4 py-s3 text-center shadow-lg" role="status" aria-live="polite" aria-label="Reconnecting to brindle">
+    <div
+      ref={layer}
+      className="absolute inset-0 z-50 flex items-center justify-center bg-canvas/70 backdrop-blur-[2px]"
+      data-testid="reconnecting"
+      data-phase={phase}
+      // Inside the overlay too, nothing goes on to the window's shortcuts; Tab has nowhere else to go.
+      onKeyDown={(e) => {
+        e.stopPropagation();
+        if (e.key === "Tab") e.preventDefault();
+      }}
+    >
+      <section
+        ref={box}
+        tabIndex={-1}
+        className="flex max-w-sm flex-col items-center gap-s2 rounded-lg border border-line-strong bg-surface px-s4 py-s3 text-center shadow-lg outline-none"
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby="reconnecting-title"
+        aria-describedby="reconnecting-why"
+      >
         <div className="flex items-center gap-s1">
           <span className="size-3 shrink-0 animate-spin rounded-full border-2 border-branch border-t-transparent" aria-hidden />
-          <h2 className="text-base font-semibold">Reconnecting to brindle…</h2>
+          <h2 id="reconnecting-title" className="text-base font-semibold">Reconnecting to brindle…</h2>
         </div>
         {phase === "shown" ? (
-          <p className="text-sm text-ink-2">The engine is restarting. Your sessions keep their place, and this screen comes back as soon as it answers.</p>
+          <p id="reconnecting-why" className="text-sm text-ink-2">The engine is restarting. Your sessions keep their place, and this screen comes back as soon as it answers.</p>
         ) : (
           <>
-            <p className="text-sm text-ink-2">The engine is taking longer than usual to come back. brindle keeps trying on its own.</p>
-            <p className="text-sm text-ink-2">If it doesn't come back, quit brindle and open it again.</p>
-            <button type="button" className={button} onClick={onRetry}>
+            <div id="reconnecting-why" className="flex flex-col gap-s1">
+              <p className="text-sm text-ink-2">The engine is taking longer than usual to come back. brindle keeps trying on its own.</p>
+              <p className="text-sm text-ink-2">If it doesn't come back, quit brindle and open it again.</p>
+            </div>
+            <button ref={tryAgain} type="button" className={button} onClick={onRetry}>
               Try again now
             </button>
           </>

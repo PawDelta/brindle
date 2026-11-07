@@ -276,6 +276,7 @@ function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, p
   // The engine answered before and now doesn't (a restart): the last screen stays, under the reconnect overlay.
   const reconnect = useReconnect(connection);
   const away = reconnect !== "none";
+  const held = reconnect === "shown" || reconnect === "long";
 
   // A session's view and the empty state keep their own height (the surface
   // fills it, a sheet lies over it), the Inbox too (its queue scrolls, a
@@ -292,10 +293,11 @@ function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, p
     <TerminalProvider client={client} here={here}>
       <AppUpdateProvider updates={appUpdates}>
       <div className="relative flex h-full bg-canvas text-ink">
-        <div className="contents" hidden={reading}>
+        {/* Under the reconnect overlay the app stays on screen but out of reach: no focus, no clicks. */}
+        <div className="contents" hidden={reading} inert={held}>
           <Sidebar route={shown} navigate={navigate} refresh={refresh ?? noop} openUrl={openUrl} />
         </div>
-        <div className="relative flex min-w-0 flex-1 flex-col">
+        <div className="relative flex min-w-0 flex-1 flex-col" inert={held}>
           <AppUpdateBanner openUrl={openUrl} />
           {/* The banner's upgrade follows the engine's terminal stream, which a page with no engine doesn't have.
               While the engine is away after having answered, the overlay speaks for it instead (no raw error strip). */}
