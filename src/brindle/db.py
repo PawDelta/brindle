@@ -156,6 +156,11 @@ CREATE TABLE IF NOT EXISTS milestone_phases (
     milestone_id INTEGER PRIMARY KEY REFERENCES milestones(id) ON DELETE CASCADE,
     phase TEXT NOT NULL
 );
+-- The person's per-goal doc request, outside the released autopilot table.
+CREATE TABLE IF NOT EXISTS goal_doc_requests (
+    root_id TEXT PRIMARY KEY REFERENCES autopilot(root_id) ON DELETE CASCADE,
+    requested INTEGER NOT NULL
+);
 -- Repos attached to a session (brindle Pro multi_repo; see brindle.repos):
 -- assign/handoff may put workers there by alias.
 CREATE TABLE IF NOT EXISTS session_repos (
@@ -976,6 +981,7 @@ class Autopilot:
     nudged_time: float | None = None   # when the last nudge was sent; never cleared, the backoff ignores it once progress moves past nudged_at
     proposal: str | None = None        # JSON {checks, rules, at}: checks awaiting the user's answer
     external_wait: str | None = None   # JSON {pid, until, path, note}: an outside job
+    analysis_doc: int | None = None    # the person requested a doc for this goal
 
 
 @dataclass
@@ -2518,6 +2524,9 @@ class DB:
         ap = _load(Autopilot, row) if row else None
         if ap:
             ap.enabled = 1  # Legacy off values no longer disable the goal driver.
+            request = self.conn.execute("SELECT requested FROM goal_doc_requests WHERE root_id=?",
+                                        (root_id,)).fetchone()
+            ap.analysis_doc = request["requested"] if request else None
         return ap
 
     def legacy_goal_owners(self) -> list[str]:
@@ -2535,9 +2544,15 @@ class DB:
             )
 
     def update_autopilot(self, root_id: str, **fields: object) -> None:
+        requested = fields.pop("analysis_doc", None)
         cols = ", ".join(f"{k}=?" for k in fields)
         with self.tx() as c:
-            c.execute(f"UPDATE autopilot SET {cols} WHERE root_id=?", (*fields.values(), root_id))
+            if fields:
+                c.execute(f"UPDATE autopilot SET {cols} WHERE root_id=?", (*fields.values(), root_id))
+            if requested is not None:
+                c.execute("INSERT INTO goal_doc_requests (root_id, requested) VALUES (?,?) "
+                          "ON CONFLICT(root_id) DO UPDATE SET requested=excluded.requested",
+                          (root_id, requested))
         if "proposal" in fields:
             # Both the app and the terminal can settle proposed checks.
             bus.publish_agent(self, "checks.changed", root_id)

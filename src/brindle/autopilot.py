@@ -105,6 +105,9 @@ to be asked each step.
 - Keep task briefs short: the goal in a sentence or two, the files, and the
   test that proves it done. Workers read the tests and code themselves;
   never paste them. Writing is the slowest thing you do.
+- Only request an analysis doc when the person explicitly asks for one for
+  that goal or task. Relay that request with analysis_doc=true on set_goal,
+  assign or handoff. Size, weight and milestone count never imply a request.
 - When a worker reports, brindle has its branch reviewed and, once approved and
   the checks pass, merges it and removes the worktree; you get one message
   per branch: merged, or "needs you" with the details. Don't request_review
@@ -677,7 +680,8 @@ def milestone_items(db: DB, root_id: str, milestones: list[dict]) -> list[tuple]
 
 
 def set_goal(db: DB, root_id: str, goal: str,
-             milestones: list[tuple], detail: str | None = None) -> None:
+             milestones: list[tuple], detail: str | None = None, *,
+             analysis_doc: bool | None = None) -> None:
     """Record the goal and its milestones, ``(title, check, detail[, profile[, repo[, phase]]])``.
     A milestone that keeps its title and check keeps its last result."""
     if not goal.strip():
@@ -689,14 +693,10 @@ def set_goal(db: DB, root_id: str, goal: str,
     _adopt_legacy(db, root_id)
     old = {(m.title, m.check_cmd): m for m in db.milestones(root_id)}
     ap = db.get_autopilot(root_id)
-    from brindle.pro import analysis_brief
-
-    # A goal that becomes large work (new, or grown to 3+ milestones) gets the
-    # server's brief once, whichever way it was set.
-    briefed = analysis_brief.large_work(milestones=len(old)) and ap is not None and ap.goal == goal.strip()
     fields: dict[str, object] = {}
     if ap is None or ap.goal != goal.strip():
         fields["audit_history"] = None
+        fields["analysis_doc"] = 0
     if ap is None or ap.goal != goal.strip() or not ap.goal_sha:
         root = db.get_agent(root_id)
         ws = db.get_workspace(root.workspace_id) if root else None
@@ -716,23 +716,42 @@ def set_goal(db: DB, root_id: str, goal: str,
     write_goals_file(db, root_id)
     knowledge.note(db, root_id, knowledge.INTENT,
                    {"summary": "\n".join([goal.strip(), *(m[0] for m in milestones)]), "paths": []})
-    if analysis_brief.large_work(milestones=len(milestones)) and not briefed:
-        brief = analysis_brief.server_brief(db, root_id, "\n".join([goal.strip(), *(m[0] for m in milestones)]), [])
+    if analysis_doc is not None:
+        set_goal_analysis_doc(db, root_id, analysis_doc)
+
+
+def set_goal_analysis_doc(db: DB, root_id: str, requested: bool) -> None:
+    """Record the person's choice; commission the doc now if already reached."""
+    from brindle.pro import analysis_brief
+
+    ap = db.get_autopilot(root_id)
+    if ap is None or not ap.goal:
+        raise AutopilotError("no goal is set up for this session")
+    db.update_autopilot(root_id, analysis_doc=int(requested))
+    bus.publish_agent(db, "autopilot.goal", root_id)
+    root = db.get_agent(root_id)
+    ws = db.get_workspace(root.workspace_id) if root else None
+    if ws and analysis_brief.large_work(requested=requested, branch=ws.branch) and not ap.analysis_doc:
+        text = "\n".join([ap.goal, *(m.title for m in db.milestones(root_id))])
+        brief = analysis_brief.server_brief(db, root_id, text, [])
+        if ap.state == "done":
+            brief = "\n\n".join(part for part in (_goal_doc_rule(db, root_id), brief) if part)
         if brief:
             db.enqueue(root_id, brief, None)
 
 
 def _goal_doc_rule(db: DB, root_id: str) -> str:
-    """For a goal of 3+ milestones, now reached: the rule to leave its analysis doc."""
+    """For a reached goal whose person requested a doc: the rule to write it."""
     from brindle.pro import analysis_brief
 
     try:
         root = db.get_agent(root_id)
         ws = db.get_workspace(root.workspace_id) if root else None
-        if ws is None or not analysis_brief.large_work(milestones=len(db.milestones(root_id)),
+        ap = db.get_autopilot(root_id)
+        if ws is None or ap is None or not analysis_brief.large_work(requested=bool(ap.analysis_doc),
                                                        branch=ws.branch):
             return ""
-        return ("This goal had 3+ milestones: before you tell the user, leave its analysis doc.\n\n"
+        return ("The person requested an analysis doc for this goal: write it before reporting.\n\n"
                 + analysis_brief.doc_rule(db, ws.repo_root, ws.branch))
     except Exception:  # noqa: BLE001 - extra guidance, never a reason to lose the verdict
         log.info("goal analysis doc rule not added", exc_info=True)

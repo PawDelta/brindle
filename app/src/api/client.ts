@@ -1376,6 +1376,10 @@ export class DaemonClient {
     return this.post<GoalEnabledAck>("/goal/enabled", { root, enabled });
   }
 
+  setGoalAnalysisDoc(root: string, analysis_doc: boolean) {
+    return this.post<{ analysis_doc: boolean }>("/goal/analysis-doc", { root, analysis_doc });
+  }
+
   inbox(repo?: string) {
     return this.get<InboxItemDTO[]>("/inbox", { repo });
   }

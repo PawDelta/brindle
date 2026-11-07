@@ -363,7 +363,7 @@ def decorate_worker_prompt(task: str, agent_id: str, ws: Workspace, done_when: s
                            analysis: str = "") -> str:
     """The prompt actually sent to a handoff/assign worker's CLI: the raw
     ``task``, the ``decisions`` block that covers its files, the ``analysis``
-    doc rule and brief (large work only), its finish line,
+    doc rule and brief (only when the person requested a doc), its finish line,
     the WORKER_FOOTER reminder to report, and (for an interactive Claude
     worker with a finish line) the ``/goal`` wrapper. Used at spawn time, and
     again by ``resume`` to rebuild it (decisions from the brief's receipt)
