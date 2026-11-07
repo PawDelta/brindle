@@ -161,14 +161,30 @@ def _launcher() -> list[str]:
 
     argv = _stable_invocation()
     launcher = brindle_home() / "bin" / "codex-hook"
-    body = "#!/bin/sh\nexec " + " ".join(shlex.quote(a) for a in argv) + ' "$@"\n'
+    # The installs it knows, newest first: at run time it execs the first that
+    # still exists, so a removed one (an ejected disk image) never breaks the
+    # others' running Codex sessions.
+    known = [argv]
+    old = ""
+    try:
+        old = launcher.read_text()
+        for line in old.splitlines():
+            if line.startswith("# install: "):
+                other = shlex.split(line[len("# install: "):])
+                if other and other != argv and os.access(other[0], os.X_OK):
+                    known.append(other)
+    except (OSError, ValueError):
+        pass
+    known = known[:4]
+    lines = ["#!/bin/sh"]
+    for a in known:
+        q = " ".join(shlex.quote(x) for x in a)
+        lines += [f"# install: {q}", f"[ -x {shlex.quote(a[0])} ] && exec {q} \"$@\""]
+    body = "\n".join([*lines, 'echo "brindle is not installed any more" >&2', "exit 127"]) + "\n"
     tmp = None
     try:
-        try:
-            if launcher.read_text() == body and os.access(launcher, os.X_OK):
-                return [str(launcher)]
-        except OSError:
-            pass
+        if old == body and os.access(launcher, os.X_OK):
+            return [str(launcher)]
         launcher.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=launcher.parent, prefix=".codex-hook.")
         with os.fdopen(fd, "w") as f:

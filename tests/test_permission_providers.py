@@ -939,16 +939,22 @@ def test_installs_at_different_paths_share_one_hook_definition(tmp_path, monkeyp
     def install(name):
         exe = tmp_path / name / "bin" / "brindle"
         exe.parent.mkdir(parents=True)
-        exe.write_text("#!/bin/sh\n")
+        exe.write_text(f"#!/bin/sh\necho {name}\n")
         exe.chmod(0o755)
         monkeypatch.setattr("brindle.providers.brindle_invocation", lambda: [str(exe)])
         return codex_hook.definition(), exe
 
+    def run_hook():
+        import subprocess
+        return subprocess.run([str(brindle_home() / "bin" / "codex-hook")], capture_output=True, text=True).stdout.strip()
+
     first, first_exe = install("app")
     second, second_exe = install("dmg")
     assert first == second
-    assert str(second_exe) in (brindle_home() / "bin" / "codex-hook").read_text()   # runs the current brindle
     assert str(first_exe) not in second
+    assert run_hook() == "dmg"   # the newest install
+    second_exe.unlink()          # the disk image is ejected: the app's running sessions still work
+    assert run_hook() == "app"
 
 
 def test_codex_hook_ignores_a_relocated_console_scripts_missing_interpreter(tmp_path, monkeypatch):
