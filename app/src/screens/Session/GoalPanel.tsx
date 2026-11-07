@@ -22,7 +22,7 @@
    Only the newest GET answers: a slower, older response is dropped, and so is
    any response that arrives after the panel has moved to another session. */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { BusEvent } from "../../api/events";
 import type { DaemonClient } from "../../api/client";
 import { openExternal, type OpenUrl } from "../../api/open";
@@ -176,6 +176,93 @@ export function checkState(m: MilestoneDTO): string | null {
   return m.state ?? (m.status === "passed" ? "passed" : null);
 }
 
+/* A goal's phases (each milestone's optional phase_name, from goals.md's `phase:` or set_goal's "phase"),
+   as folds over the list: consecutive milestones of one phase, a milestone naming none staying in the phase
+   above it (milestones before the first phase sit unfolded on top). Null when no milestone names a phase:
+   the list is drawn as it always was. A fold is done once all its milestones are; the first unfinished one,
+   and any later one with work done or running in it, is active (open until folded); the rest are upcoming. */
+export interface PhaseFold {
+  key: number;
+  name: string | null;
+  milestones: MilestoneDTO[];
+  state: "done" | "active" | "todo";
+}
+
+export function phaseFolds(milestones: MilestoneDTO[], isDone: (m: MilestoneDTO) => boolean): PhaseFold[] | null {
+  if (!milestones.some((m) => m.phase_name)) return null;
+  const folds: PhaseFold[] = [];
+  for (const m of milestones) {
+    const last = folds[folds.length - 1];
+    if (last && (!m.phase_name || m.phase_name === last.name)) last.milestones.push(m);
+    else folds.push({ key: m.position, name: m.phase_name ?? null, milestones: [m], state: "todo" });
+  }
+  let seenUnfinished = false;
+  for (const f of folds) {
+    if (f.milestones.every(isDone)) f.state = "done";
+    else {
+      const moving = f.milestones.some((m) => isDone(m) || m.status === "running");
+      f.state = !seenUnfinished || moving ? "active" : "todo";
+      seenUnfinished = true;
+    }
+  }
+  return folds;
+}
+
+/* "phase 3 of 4": where the goal is, by its named phases; empty with none, or once nothing is left. */
+function phaseWord(folds: PhaseFold[] | null): string {
+  const named = (folds ?? []).filter((f) => f.name !== null);
+  const at = named.findIndex((f) => f.state !== "done");
+  return at < 0 ? "" : `phase ${at + 1} of ${named.length}`;
+}
+
+const CHEV = (
+  <svg className="chev" viewBox="0 0 12 12" aria-hidden>
+    <path d="M4.5 3 7.5 6 4.5 9" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+);
+
+/* The milestones under their phase folds: a done phase is one line with its green count, the active one lists
+   every row (passed ones too, as they look today), an upcoming one is folded with its count. Any fold opens or
+   closes on a click. The full panel's fold line carries a tiny bar, one segment per milestone. */
+function PhaseFoldList({ folds, open, onToggle, isDone, large, rowsClass, row }: {
+  folds: PhaseFold[];
+  open: Record<number, boolean>;
+  onToggle(key: number, next: boolean): void;
+  isDone(m: MilestoneDTO): boolean;
+  large: boolean;
+  rowsClass: string;
+  row(m: MilestoneDTO): ReactNode;
+}) {
+  return (
+    <ul className={`ms-folds${large ? " lg" : ""}`} aria-label="Milestones">
+      {folds.map((f) => {
+        if (f.name === null) return <li key={f.key}><ul className={rowsClass}>{f.milestones.map(row)}</ul></li>;
+        const isOpen = open[f.key] ?? f.state === "active";
+        const passed = f.milestones.filter(isDone).length;
+        const n = f.milestones.length;
+        const count = f.state === "done" ? `✓ ${n} of ${n}` : f.state === "todo" ? `${n} upcoming` : `${passed} of ${n}`;
+        return (
+          <li key={f.key} data-st={f.state}>
+            <button type="button" className="ms-fold" data-st={f.state} data-testid="phase-fold" aria-expanded={isOpen} onClick={() => onToggle(f.key, !isOpen)}>
+              {CHEV}
+              <span className="n">{f.name}</span>
+              {large && (
+                <span className="bar-s" aria-hidden>
+                  {f.milestones.map((m) => (
+                    <i key={m.id} data-s={isDone(m) ? "passed" : m.status === "running" ? "running" : "todo"} />
+                  ))}
+                </span>
+              )}
+              <span className="k">{count}</span>
+            </button>
+            {isOpen && <ul className={`${rowsClass} ms-kids`}>{f.milestones.map(row)}</ul>}
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
 /* finished: the goal is Done, so every milestone reads done whatever its last check said. */
 function Milestone({ milestone, finished }: { milestone: MilestoneDTO; finished: boolean }) {
   const label = finished ? "Done" : checkLabel(milestone);
@@ -279,6 +366,9 @@ export function GoalPanel({ client, repo, root, store, compact = false, onReview
   const [actionError, setActionError] = useState<string | null>(null);
   // Beside a terminal the milestones fold away by default (it wants the room); in the sidebar they show.
   const [open, setOpen] = useState(compact);
+  // The phase folds the person opened or closed, by fold key; the rest keep their default (only the active phase open).
+  const [foldOpen, setFoldOpen] = useState<Record<number, boolean>>({});
+  const toggleFold = useCallback((key: number, next: boolean) => setFoldOpen((o) => ({ ...o, [key]: next })), []);
   const frame = compact ? "flex flex-col gap-1.5 px-1.5 pb-1.5 pt-1" : `${card} flex flex-col gap-1 px-s2 py-s1`;
   /* This session: its client, repo and root. Every continuation (a GET, an action's
      ack, its error or end) applies only while it is still the session on screen, so
@@ -318,6 +408,7 @@ export function GoalPanel({ client, repo, root, store, compact = false, onReview
     setLoadError(null);
     setActionError(null);
     setDocSummary(null);
+    setFoldOpen({});
     void refresh();
     let seen = store.getState().lastEventId;
     let stale = store.getState().stale;
@@ -379,6 +470,10 @@ export function GoalPanel({ client, repo, root, store, compact = false, onReview
   const shownError = actionError ?? loadError;
   // The milestone being worked on: the running one, else the first not yet passed; none once the goal is done.
   const current = finished ? undefined : (milestones.find((m) => m.status === "running") ?? milestones.find((m) => m.status !== "passed"));
+  const isDone = (m: MilestoneDTO) => finished || checkLabel(m) === "Done";
+  // The goal's phases as folds; null without any (the list as it always was).
+  const folds = phaseFolds(milestones, isDone);
+  const where = finished ? "" : phaseWord(folds);
   const phaseLabel = GOAL_PHASE_LABEL[phase];
   // The sidebar's count line names only the steps after In progress; Done is the green count itself.
   const showPhase = phase !== "in_progress" && phase !== "done";
@@ -445,7 +540,24 @@ export function GoalPanel({ client, repo, root, store, compact = false, onReview
     const donePct = finished ? 100 : total === 0 ? 0 : (passed / total) * 100;
     const nowPct = finished ? 100 : total === 0 ? 0 : (Math.min(passed + 1, total) / total) * 100;
     // Every unfinished milestone is in progress (the engine works them in parallel), so each one is lit.
-    const stateOf = (m: MilestoneDTO): "done" | "now" => (finished || checkLabel(m) === "Done" ? "done" : "now");
+    const stateOf = (m: MilestoneDTO): "done" | "now" => (isDone(m) ? "done" : "now");
+    const sideRow = (m: MilestoneDTO) => {
+      const state = stateOf(m);
+      const label = finished ? "Done" : checkLabel(m);
+      return (
+        <li key={m.id} className="m" data-state={state} data-testid="milestone" title={m.state_why ?? m.check_cmd ?? undefined}>
+          <span className="i" aria-hidden>
+            {state === "done" ? "✓" : m.position}
+          </span>
+          <span className="t">
+            {m.title}
+            {(label || (m.id === current?.id && (m.detail || m.check_cmd))) && (
+              <small>{[label, m.id === current?.id ? m.detail || m.check_cmd : null].filter(Boolean).join(" · ")}</small>
+            )}
+          </span>
+        </li>
+      );
+    };
     return (
       <section className={frame} aria-label="Goal" data-phase={phase}>
         <div className="flex items-center gap-s1 px-0.5 text-xs font-medium text-ink">
@@ -463,26 +575,13 @@ export function GoalPanel({ client, repo, root, store, compact = false, onReview
             )}
           </span>
           <span className="flex-1" />
+          {where && <span className="whitespace-nowrap font-normal text-ink-3" data-testid="goal-where">{where}</span>}
         </div>
-        {total > 0 ? (
+        {total > 0 && folds ? (
+          <PhaseFoldList folds={folds} open={foldOpen} onToggle={toggleFold} isDone={isDone} large={false} rowsClass="side-ms" row={sideRow} />
+        ) : total > 0 ? (
           <ul className="side-ms" aria-label="Milestones">
-            {milestones.map((m) => {
-              const state = stateOf(m);
-              const label = finished ? "Done" : checkLabel(m);
-              return (
-                <li key={m.id} className="m" data-state={state} data-testid="milestone" title={m.state_why ?? m.check_cmd ?? undefined}>
-                  <span className="i" aria-hidden>
-                    {state === "done" ? "✓" : m.position}
-                  </span>
-                  <span className="t">
-                    {m.title}
-                    {(label || (m.id === current?.id && (m.detail || m.check_cmd))) && (
-                      <small>{[label, m.id === current?.id ? m.detail || m.check_cmd : null].filter(Boolean).join(" · ")}</small>
-                    )}
-                  </span>
-                </li>
-              );
-            })}
+            {milestones.map(sideRow)}
           </ul>
         ) : (
           <p className="px-0.5 text-[11px] text-ink-3">{finished ? "brindle finished this goal." : "No milestones yet."}</p>
@@ -523,6 +622,7 @@ export function GoalPanel({ client, repo, root, store, compact = false, onReview
         </p>
       )}
       <div className="flex flex-wrap items-center gap-1">
+        {where && <span className="text-xs text-ink-3" data-testid="goal-where">{where}</span>}
         <span className="flex-1" />
         {/* A finished goal shows its milestones, unfolded: nothing to fold them for. */}
         {total > 0 && !finished && (
@@ -535,7 +635,19 @@ export function GoalPanel({ client, repo, root, store, compact = false, onReview
       {shownError && <p className={alert}>{shownError}</p>}
       {goal.note && <p className="text-sm text-ink-3">{goal.note}</p>}
       {(open || finished) &&
-        (total > 0 ? (
+        (total > 0 && folds ? (
+          <div className="border-t border-line pt-1">
+            <PhaseFoldList
+              folds={folds}
+              open={foldOpen}
+              onToggle={toggleFold}
+              isDone={isDone}
+              large
+              rowsClass="flex flex-col divide-y divide-line"
+              row={(m) => <Milestone key={m.id} milestone={m} finished={finished} />}
+            />
+          </div>
+        ) : total > 0 ? (
           <ul className="flex flex-col divide-y divide-line border-t border-line" aria-label="Milestones">
             {milestones.map((m) => (
               <Milestone key={m.id} milestone={m} finished={finished} />

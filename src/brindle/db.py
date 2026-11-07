@@ -149,6 +149,13 @@ CREATE TABLE IF NOT EXISTS milestones (
     state_why TEXT,                -- for failed: why the check couldn't run
     ever_passed INTEGER            -- 1 once any check passed (kept through later failures)
 );
+-- The phase a milestone sits in, when its goal names phases (goals.md `phase:`,
+-- set_goal's "phase"). A table of its own, not a column of milestones: released
+-- tables never gain columns (see session_repo_branches below).
+CREATE TABLE IF NOT EXISTS milestone_phases (
+    milestone_id INTEGER PRIMARY KEY REFERENCES milestones(id) ON DELETE CASCADE,
+    phase TEXT NOT NULL
+);
 -- Repos attached to a session (brindle Pro multi_repo; see brindle.repos):
 -- assign/handoff may put workers there by alias.
 CREATE TABLE IF NOT EXISTS session_repos (
@@ -974,6 +981,7 @@ class Milestone:
     state: str | None = None
     state_why: str | None = None
     ever_passed: int | None = None   # 1 once any check passed, whatever sha it ran at
+    phase_name: str | None = None    # the goal's phase this milestone sits in (goals.md `phase:`)
 
 
 _EXIT = re.compile(r"\(exit (-?\d+)\)\s*$")
@@ -2480,20 +2488,25 @@ class DB:
             c.execute("UPDATE autopilot SET progress=progress+1, nudges=0 WHERE root_id=?", (root_id,))
 
     def set_milestones(self, root_id: str, items: list[tuple]) -> None:
-        """Replace the session's milestones with ``(title, check_cmd, detail[, profile[, repo]])`` items."""
+        """Replace the session's milestones with ``(title, check_cmd, detail[, profile[, repo[, phase]]])`` items."""
         with self.tx() as c:
             c.execute("DELETE FROM milestones WHERE root_id=?", (root_id,))
             for i, (title, check, detail, *rest) in enumerate(items, start=1):
-                c.execute(
+                cur = c.execute(
                     "INSERT INTO milestones (root_id, position, title, check_cmd, detail, profile, repo) "
                     "VALUES (?,?,?,?,?,?,?)",
                     (root_id, i, title, check, detail, rest[0] if rest else None,
                      rest[1] if len(rest) > 1 else None),
                 )
+                if len(rest) > 2 and rest[2]:
+                    c.execute("INSERT INTO milestone_phases (milestone_id, phase) VALUES (?,?)",
+                              (cur.lastrowid, rest[2]))
 
     def milestones(self, root_id: str) -> list[Milestone]:
         rows = self.conn.execute(
-            "SELECT * FROM milestones WHERE root_id=? ORDER BY position", (root_id,)
+            "SELECT m.*, p.phase AS phase_name FROM milestones m "
+            "LEFT JOIN milestone_phases p ON p.milestone_id=m.id WHERE m.root_id=? ORDER BY m.position",
+            (root_id,),
         )
         return [_load(Milestone, r) for r in rows]
 
