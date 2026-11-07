@@ -587,16 +587,31 @@ describe("App", () => {
     cleanup();
 
     // The engine answers, but its event stream is down: the banner says so until it is back.
+    vi.useFakeTimers();
     const live = new FakeDaemon();
     const store2 = createAppStore();
     const sync2 = startSync({ client: live.client(), store: store2, connect: live.connect, backoff: () => 5 });
-    renderApp(<App store={store2} client={live.client()} refresh={sync2.refresh} />);
-    await waitFor(() => expect(store2.getState().connection).toBe("open"));
-    expect(screen.queryByTestId("engine-banner")).toBeNull();
-    live.drop();
-    await waitFor(() => expect(screen.getByTestId("engine-banner").textContent).toContain("the event stream dropped"));
-    await waitFor(() => expect(screen.queryByTestId("engine-banner")).toBeNull());
-    sync2.stop();
+    try {
+      renderApp(<App store={store2} client={live.client()} refresh={sync2.refresh} />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+      expect(store2.getState().connection).toBe("open");
+      expect(screen.getByRole("complementary", { name: "Sidebar" })).toBeTruthy();
+      expect(screen.queryByTestId("engine-banner")).toBeNull();
+      // Observe the closed state before allowing the scheduled reconnect to run.
+      await act(async () => {
+        live.drop();
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(store2.getState().connection).toBe("closed");
+      expect(screen.getByTestId("engine-banner").getAttribute("role")).toBe("alert");
+      await act(async () => { await vi.advanceTimersByTimeAsync(5); });
+      expect(store2.getState().connection).toBe("open");
+      expect(screen.queryByTestId("engine-banner")).toBeNull();
+    } finally {
+      sync2.stop();
+      cleanup();
+      vi.useRealTimers();
+    }
   });
 });
 
