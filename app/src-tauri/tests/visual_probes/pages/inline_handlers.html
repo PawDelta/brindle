@@ -1,0 +1,35 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>probe: on* handlers, javascript: URLs, style url(), SVG script</title>
+<style>
+  .leak { background-image: url("http://127.0.0.1:{{PORT}}/style-url.png"); }
+  .leak::after { content: url("http://127.0.0.1:{{PORT}}/content-url.png"); }
+</style>
+<p>Inline script runs (the policy allows it); what it does may not leave the page.</p>
+<script>{{PROBE}}</script>
+<img src="data:," onerror="attempt('onerror fetch', fetch(HTTP + '/onerror').then((r) => 'answered ' + r.status))" alt="">
+<body onload="attempt('onload fetch', fetch(HTTP + '/onload').then((r) => 'answered ' + r.status))">
+<div class="leak" style="background: url('http://127.0.0.1:{{PORT}}/inline-style.png')">styled</div>
+<a id="js" href="javascript:attempt('javascript: href', fetch(HTTP + '/javascript-href').then((r) => 'answered ' + r.status))">javascript:</a>
+<a id="jsnav" href="javascript:location.href = HTTP + '/javascript-nav?d=secret'">javascript: navigation</a>
+<iframe id="jsframe" src="javascript:'<script>fetch(&quot;http://127.0.0.1:{{PORT}}/javascript-frame&quot;)</script>'"></iframe>
+<svg width="1" height="1">
+  <script>attempt("svg script fetch", fetch(HTTP + "/svg-script").then((r) => "answered " + r.status));</script>
+  <a href="http://127.0.0.1:{{PORT}}/svg-link"><rect id="svglink" width="1" height="1"></rect></a>
+  <image href="http://127.0.0.1:{{PORT}}/svg-image.png" width="1" height="1" onload="leak('svg image loaded')"></image>
+</svg>
+<math><mi href="http://127.0.0.1:{{PORT}}/math">x</mi></math>
+<script>
+document.getElementById("js").click();
+document.getElementById("jsnav").click();
+document.getElementById("svglink").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+const style = document.createElement("style");
+style.textContent = "@import url('" + HTTP + "/late-import.css'); body { cursor: url('" + HTTP + "/late-cursor.cur'), auto; }";
+document.head.appendChild(style);
+document.body.insertAdjacentHTML("beforeend", "<img src='" + HTTP + "/inserted.png' onerror=\"attempt('inserted onerror', fetch(HTTP + '/inserted-onerror').then((r) => 'answered ' + r.status))\">");
+const here = location.href;
+setTimeout(() => {
+  if (!location.href.startsWith(here.split("#")[0])) leak("navigated to " + location.href);
+  done();
+}, 1500);
+</script>
