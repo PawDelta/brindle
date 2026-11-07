@@ -75,7 +75,13 @@ def visual_input(db: DB, params: dict, body: dict) -> Any:
     text = _get(body, "text", required=True)
     if len(text) > 32000:
         raise ServiceError("invalid", "input is too long", 400)
-    visual_offers.person_spoke(db, agent, text)
+    # Empty/unknown drafts and provider menu replies are observations, not messages.
+    if not text.strip() or text.strip().lower() in ("y", "yes", "n", "no") or text.strip().isdigit():
+        return {"observed": False}
+    expires_at = _get(body, "expires_at", (int, float))
+    if expires_at is not None and (isinstance(expires_at, bool) or not 0 < expires_at < float("inf")):
+        raise ServiceError("invalid", "expires_at must be a finite timestamp", 400)
+    visual_offers.person_spoke(db, agent, text, expires_at=expires_at)
     return {"observed": True}
 
 

@@ -155,6 +155,11 @@ _QUALIFIED = re.compile(r"\b(?:if|unless|when|after|before|later|only|maybe|perh
                         r"don't|do not|wait|until|provided|assuming)\b|[\"`“”]", re.I)
 _CONTEXT = re.compile(r"(?:compare|consider|examine|review)\s+(?:this|that|these|those|the)\s+"
                       r"(?:choices|options|layouts|designs|flow|pipeline|change|decision)[.!?]*", re.I)
+_CANCEL_REQUEST = re.compile(
+    r"^\s*(?:please\s+)?(?:(?:cancel|stop)\s+(?:(?:the|this|that)\s+)?|"
+    r"(?:don't|do not)\s+(?:make|create|show|draw|build|generate|render)\s+(?:(?:a|an|the)\s+)?)"
+    r"(?:visual|diagram|chart|mockup|planning document|planning doc|plan document|request)\b|"
+    r"^\s*(?:never mind|nevermind)[.!?]*\s*$", re.I)
 
 
 def request_intent(text: str) -> tuple[str | None, bool]:
@@ -180,7 +185,7 @@ def request_intent(text: str) -> tuple[str | None, bool]:
     return found[-1][0], context_clear and len(scopes) == 1 and all(clear for _, clear in found) and not _QUALIFIED.search(text)
 
 
-def person_spoke(db: DB, agent: Agent, text: str) -> None:
+def person_spoke(db: DB, agent: Agent, text: str, *, expires_at: float | None = None) -> None:
     """Called only for authenticated person input, never for agent messages."""
     if not visuals.enabled():
         return
@@ -189,10 +194,15 @@ def person_spoke(db: DB, agent: Agent, text: str) -> None:
         return
     scope, clear = request_intent(text)
     with db.tx() as c:
+        if expires_at is not None and time.time() >= expires_at:
+            raise ServiceError("stale", "this input observation expired", 409)
         c.execute("UPDATE visual_offers SET state='answered', changed_at=? WHERE root_id=? AND state='open'",
                   (time.time(), root.id))
         c.execute("DELETE FROM visual_requests WHERE root_id=?", (root.id,))
-        c.execute("DELETE FROM visual_grants WHERE root_id=?", (root.id,))
+        # A tool approval or ordinary follow-up does not cancel the person's
+        # still unused request. Only a new artifact request or explicit stop does.
+        if scope or _CANCEL_REQUEST.search(text):
+            c.execute("DELETE FROM visual_grants WHERE root_id=?", (root.id,))
         if scope and clear:
             _grant(c, root.id, scope)
         elif scope:

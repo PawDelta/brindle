@@ -1,15 +1,17 @@
 import type { DaemonClient } from "../../../api/client";
 import type { PtyViewOpener } from "../../../api/ptyView";
 
+const RECORD_WINDOW = 250;
+
 /* Observe the person's submitted input, never the terminal's output or agent deliveries.
    The native and WSL PTYs share this opener. Unknown editor operations (history,
-   completion, etc.) fold offers but cannot authorize publication from a guessed draft. */
-export function withVisualInput(client: Pick<DaemonClient, "visualInput">, agent: string, open: PtyViewOpener): PtyViewOpener {
+   completion, etc.) are not treated as chat submissions or guessed consent. */
+export function withVisualInput(client: Pick<DaemonClient, "visualInput">, agent: string, open: PtyViewOpener, enabled: () => boolean = () => true): PtyViewOpener {
   return (at, size, handlers) => {
     const view = open(at, size, handlers);
     let draft = "", pending = "", cursor = 0;
     let valid = true, paste = false, closed = false;
-    let writes = Promise.resolve();
+    let held: { release(): void } | null = null;
     const submitted = (data: string): string[] => {
       pending += data;
       const messages: string[] = [];
@@ -35,7 +37,8 @@ export function withVisualInput(client: Pick<DaemonClient, "visualInput">, agent
         const char = pending[0];
         pending = pending.slice(1);
         if (!paste && (char === "\r" || char === "\n")) {
-          messages.push(valid ? draft : "");
+          // Bare Enter and conventional menu answers are not chat submissions.
+          if (valid && draft.trim() && !/^(?:y|yes|n|no|\d+)$/i.test(draft.trim())) messages.push(draft);
           draft = ""; cursor = 0; valid = true;
         } else if (!paste && (char === "\x7f" || char === "\b")) {
           if (cursor) { draft = draft.slice(0, cursor - 1) + draft.slice(cursor); cursor--; }
@@ -57,16 +60,40 @@ export function withVisualInput(client: Pick<DaemonClient, "visualInput">, agent
     return {
       ...view,
       write(data) {
-        writes = writes.then(async () => {
-          if (closed) return;
-          for (const text of submitted(data)) {
-            // Record consent before forwarding Enter: a fast first tool must see it.
-            await client.visualInput(agent, text).catch(() => undefined);
-          }
+        if (closed) return;
+        // Later input, including Ctrl-C, always releases an earlier held Enter.
+        held?.release();
+        if (!enabled()) {
+          draft = pending = ""; cursor = 0; valid = true; paste = false;
+          view.write(data);
+          return;
+        }
+        const messages = submitted(data);
+        if (!messages.length) { view.write(data); return; }
+        const controller = new AbortController();
+        const expiresAt = (Date.now() + RECORD_WINDOW) / 1000;
+        let ended = false;
+        let alarm: ReturnType<typeof setTimeout>;
+        const release = () => {
+          if (ended) return;
+          ended = true;
+          clearTimeout(alarm);
+          controller.abort();
+          held = null;
           if (!closed) view.write(data);
-        }).catch(() => undefined);
+        };
+        held = { release };
+        alarm = setTimeout(release, RECORD_WINDOW);
+        // Native IPC may ignore AbortSignal. The engine checks this expiry
+        // inside its write transaction so a late request cannot grant consent.
+        void (async () => {
+          for (const text of messages) {
+            if (controller.signal.aborted) break;
+            await client.visualInput(agent, text, expiresAt, controller.signal);
+          }
+        })().catch(() => undefined).finally(release);
       },
-      close() { closed = true; view.close(); },
+      close() { closed = true; held?.release(); view.close(); },
     };
   };
 }

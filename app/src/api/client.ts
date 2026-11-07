@@ -322,6 +322,7 @@ export interface GoalEnabledAck {
 }
 
 export interface Meta {
+  visuals?: boolean;
   /* The daemon is still bringing back sessions from its previous shutdown. */
   resuming?: boolean;
   engine_version: string;
@@ -1551,8 +1552,11 @@ export class DaemonClient {
     return this.get<VisualOffer | null>(`${this.sessionPath(root)}/visual-offer`);
   }
 
-  visualInput(root: string, text: string) {
-    return this.post<{ observed: boolean }>(`${this.sessionPath(root)}/visual-input`, { text });
+  visualInput(root: string, text: string, expiresAt?: number, signal?: AbortSignal) {
+    return this.request<{ observed: boolean }>(this.url(`${this.sessionPath(root)}/visual-input`), {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text, expires_at: expiresAt }), signal,
+    });
   }
 
   resolveVisualOffer(root: string, offer: string, accept: boolean) {

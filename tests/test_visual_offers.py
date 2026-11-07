@@ -89,6 +89,7 @@ def test_accept_and_explicit_ask_allow_one_publish(db, session):
         assert client.get(path).json()["id"] == oid
         assert client.post(path, json={"offer": oid, "accept": True}).json()["accepted"]
         assert client.post(path, json={"offer": oid, "accept": True}).status_code == 409
+        assert client.post(f"/v1/sessions/{boss.id}/visual-input", json={"text": ""}).status_code == 200
         messages = db.conn.execute("SELECT body FROM inbox WHERE agent_id=?", (boss.id,)).fetchall()
         assert len(messages) == 1 and "Which layout?" in messages[0]["body"]
         with pytest.raises(ServiceError):
@@ -149,7 +150,19 @@ def test_codex_terminal_submission_folds_and_authorizes(db, session):
         with pytest.raises(ServiceError):
             offers.resolve(db, boss.id, oid, True)
         assert client.post(path, json={"text": "Make a visual"}).status_code == 200
+        assert client.post(path, json={"text": ""}).status_code == 200
+        assert client.post(path, json={"text": "y"}).json()["observed"] is False
+        assert client.post(path, json={"text": "Do not change permissions"}).status_code == 200
         visuals.publish(db, worker, "Codex request", "<p>yes</p>")
+        with pytest.raises(ServiceError):
+            visuals.publish(db, worker, "No second request", "<p>no</p>")
+        assert client.post(path, json={"text": "Make a visual", "expires_at": offers.time.time() - 1}).status_code == 409
+        with pytest.raises(ServiceError):
+            visuals.publish(db, worker, "Late recording", "<p>no</p>")
+        assert client.post(path, json={"text": "Make a visual"}).status_code == 200
+        assert client.post(path, json={"text": "Don't make a visual"}).status_code == 200
+        with pytest.raises(ServiceError):
+            visuals.publish(db, worker, "Cancelled request", "<p>no</p>")
 
 
 def test_initial_person_prompt_is_observed_before_provider_launch(db, repo, monkeypatch):

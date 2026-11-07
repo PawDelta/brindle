@@ -52,6 +52,28 @@ afterEach(() => {
 });
 
 describe("visuals", () => {
+  it.each(["interrupt", "deadline"])("recovers the PTY from pending consent recording on %s", async (how) => {
+    vi.useFakeTimers();
+    const bytes: string[] = [];
+    let signal: AbortSignal | undefined;
+    const open = withVisualInput({ visualInput: (_id, _text, _expiry, given) => { signal = given; return new Promise(() => {}); } }, "codex",
+      () => ({ write(data) { bytes.push(data); }, resize() {}, focus() {}, close() {} }));
+    const view = open({ server: null, target: "%1" }, { cols: 80, rows: 24 }, { onData() {}, onExit() {}, onError() {} });
+    try {
+      view.write("hello"); view.write("\r");
+      await act(async () => undefined);
+      if (how === "interrupt") {
+        view.write("\x03"); view.write("more");
+        await act(async () => undefined);
+        expect(bytes.join("")).toBe("hello\r\x03more");
+      } else {
+        await act(async () => vi.advanceTimersByTime(300));
+        expect(bytes.join("")).toBe("hello\r");
+      }
+      expect(signal?.aborted).toBe(true);
+    } finally { view.close(); vi.useRealTimers(); }
+  });
+
   it("observes Codex PTY submissions before forwarding Enter, including edits, pastes and uncertain history", async () => {
     const submitted: string[] = [], bytes: string[] = [];
     let recorded: (() => void) | undefined;
@@ -73,8 +95,9 @@ describe("visuals", () => {
     await act(async () => recorded?.());
     view.write("\x1b[A\r");
     await act(async () => undefined);
-    expect(submitted.at(-1)).toBe("");
-    await act(async () => recorded?.());
+    view.write("\r"); view.write("y\r");
+    await act(async () => undefined);
+    expect(submitted).toHaveLength(2);
     expect(bytes.join("")).toContain("\x1b[A\r");
     view.close();
   });

@@ -95,6 +95,13 @@ interface PaneCheck {
 export function ProviderSurface({ repo, agent: listedAgent, alive, sessionStatus, credentials, recovery }: ProviderSurfaceProps) {
   const [view, setView] = useState<TerminalView | null>(null);
   const client = useContext(DaemonContext);
+  const visualsEnabled = useRef(false);
+  useEffect(() => {
+    let current = true;
+    visualsEnabled.current = false;
+    client?.meta().then(meta => { if (current) visualsEnabled.current = meta.visuals === true; }, () => {});
+    return () => { current = false; visualsEnabled.current = false; };
+  }, [client]);
   const attempt = recovery.attempt;
   const [checked, setChecked] = useState<PaneCheck | null>(null);
   useEffect(() => {
@@ -174,7 +181,7 @@ export function ProviderSurface({ repo, agent: listedAgent, alive, sessionStatus
   // Claude and OpenCode have authenticated prompt-submit hooks. The other
   // CLIs need the shell's input observed before their native PTY write.
   const observedOpen = useMemo(() => ready && client && agent && !["claude", "opencode"].includes(agent.provider)
-    ? withVisualInput(client, agent.id, ready.open) : ready?.open, [ready?.open, client, agent?.id, agent?.provider]);
+    ? withVisualInput(client, agent.id, ready.open, () => visualsEnabled.current) : ready?.open, [ready?.open, client, agent?.id, agent?.provider]);
   const target = agent?.window ?? null;
   const left = agent && card && card.kind !== "starting" && !(card.kind === "ended" && card.locked) && !!target && !!ready && (alive === false || STOPPED.has(agent.status));
 

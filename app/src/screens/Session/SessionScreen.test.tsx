@@ -429,12 +429,15 @@ describe("SessionScreen", () => {
     sync.stop();
   });
 
-  it("records Codex person input before its PTY receives submission, without treating output as input", async () => {
+  it.each([true, false])("observes Codex input only with visuals available (%s), excluding output and permission replies", async (enabled) => {
     const submitted: string[] = [];
+    let bytesAtRecording: string | null = null;
     let release: () => void = () => {};
     const codex = { ...root, agents: root.agents!.map(a => ({ ...a, provider: "codex" })) };
     const { daemon, sync, term } = mount({ sup1: live }, { workspaces: [codex] }, daemon => async (input, init) => {
+      if (String(input).endsWith("/meta")) return Response.json({ ...(await (await daemon.fetch(input, init)).json()), visuals: enabled });
       if (String(input).endsWith("/visual-input")) {
+        bytesAtRecording = daemon.viewers("sup1")[0].written.join("");
         submitted.push(JSON.parse(String(init?.body)).text);
         await new Promise<void>(ok => { release = ok; });
         return Response.json({ observed: true });
@@ -446,13 +449,17 @@ describe("SessionScreen", () => {
       const [view] = daemon.viewers("sup1");
       term().type("Make a visual");
       term().type("\r");
-      await waitFor(() => expect(submitted).toHaveLength(1));
-      expect(view.written.join("")).toBe("Make a visual");
-      await act(async () => release());
+      if (enabled) {
+        await waitFor(() => expect(submitted).toHaveLength(1));
+        expect(bytesAtRecording).toBe("Make a visual");
+        await act(async () => release());
+      }
       await waitFor(() => expect(view.written.join("")).toBe("Make a visual\r"));
+      term().type("\r"); term().type("y\r");
+      await waitFor(() => expect(view.written.join("")).toBe("Make a visual\r\ry\r"));
       daemon.print("sup1", "Make a visual\r");
       await waitFor(() => expect(term().written).toContain("Make a visual"));
-      expect(submitted).toHaveLength(1);
+      expect(submitted).toHaveLength(enabled ? 1 : 0);
     } finally { sync.stop(); }
   });
 
