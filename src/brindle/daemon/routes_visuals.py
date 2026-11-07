@@ -108,7 +108,7 @@ def visual_page(db: DB, request: Request) -> Path:
 def answer(db: DB, params: dict, body: dict) -> Any:
     visuals.require_enabled()
     rev = body.get("rev")
-    return visuals.to_dto(visuals.answer(db, params["id"], rev, _get(body, "option", required=True),
+    return visuals.to_dto(visuals.answer(db, params["id"], rev, _get(body, "option"),
                                          _get(body, "note")))
 
 

@@ -322,7 +322,7 @@ def page(db: DB, visual_id: str, rev: Any) -> Path:
 # -- answers --------------------------------------------------------------------------
 
 
-def answer(db: DB, visual_id: str, rev: Any, option: Any, note: Any = None) -> dict:
+def answer(db: DB, visual_id: str, rev: Any, option: Any = None, note: Any = None) -> dict:
     """The person's answer to the revision on their screen (``rev``). The
     answer is claimed in the row first, so a second answer (a double click,
     another window) is refused instead of delivered twice; if the message
@@ -338,9 +338,11 @@ def answer(db: DB, visual_id: str, rev: Any, option: Any, note: Any = None) -> d
     if rev != v["rev"]:
         raise ServiceError("stale", f"the visual has a newer revision (r{v['rev']}); answer that one", 409,
                            rev=v["rev"])
-    if option not in {o["id"] for o in v["options"]}:
-        raise ServiceError("invalid", "not one of this revision's options", 400)
     note = _text(note, "note", MAX_NOTE)
+    if option is None and not note:
+        raise ServiceError("invalid", "an option or note is required", 400)
+    if option is not None and option not in {o["id"] for o in v["options"]}:
+        raise ServiceError("invalid", "not one of this revision's options", 400)
     # The note is stored, can be kept, and goes to the agent: never a secret.
     _refuse_secrets([("your note", note)])
     at = time.time()
@@ -355,7 +357,8 @@ def answer(db: DB, visual_id: str, rev: Any, option: Any, note: Any = None) -> d
             raise ServiceError("stale", f"the visual has a newer revision (r{now['rev']}); answer that one",
                                409, rev=now["rev"])
         raise ServiceError("answered", "this revision is already answered", 409)
-    message = f"The person answered visual {v['id']} (r{rev}): option {option}."
+    message = f"The person answered visual {v['id']} (r{rev})"
+    message += f": option {option}." if option is not None else ":"
     if note:
         message += f"\nTheir note: {note}"
     try:

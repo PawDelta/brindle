@@ -2748,8 +2748,15 @@
               "title": "Note"
             },
             "option": {
-              "title": "Option",
-              "type": "string"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Option"
             }
           },
           "required": [
@@ -7473,8 +7480,15 @@
           "title": "Note"
         },
         "option": {
-          "title": "Option",
-          "type": "string"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Option"
         }
       },
       "required": [
@@ -7505,8 +7519,15 @@
               "title": "Note"
             },
             "option": {
-              "title": "Option",
-              "type": "string"
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Option"
             }
           },
           "required": [
