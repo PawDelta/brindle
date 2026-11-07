@@ -200,8 +200,7 @@ jobs:
           CI_GATE_DEADLINE_MINUTES: ${{ vars.CI_GATE_DEADLINE_MINUTES }}
         run: node app/scripts/release_publish.mjs ci-gate
 
-  # One build per Mac architecture, both on Apple Silicon. The engine's native
-  # dependencies and helper follow the target; Rosetta runs the Intel checks.
+  # Staff builds only need Apple Silicon; tagged releases retain both arches.
   # Nothing is published from here: the
   # `macos-publish` job does that once both have passed (`release-publish`
   # for a release-branch build).
@@ -215,14 +214,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - arch: aarch64
-            target: aarch64-apple-darwin
-            runner: macos-latest
-          - arch: x86_64
-            target: x86_64-apple-darwin
-            runner: macos-latest
-    runs-on: ${{ matrix.runner }}
+        arch: ${{ fromJSON(needs.staff-gate.outputs.go == 'true' && '["aarch64"]' || '["aarch64","x86_64"]') }}
+    runs-on: macos-latest
     # Pushed tags use production signing; a release-branch push (past
     # staff-gate) uses the separately protected staff environment.
     environment: ${{ github.event_name == 'push' && (github.ref_type == 'tag' && 'desktop-release' || 'desktop-staff-release') || '' }}
@@ -231,7 +224,7 @@ jobs:
       contents: read
     env:
       ARCH: ${{ matrix.arch }}
-      TARGET: ${{ matrix.target }}
+      TARGET: ${{ matrix.arch }}-apple-darwin
       # Set for a release-branch build only: the version it is built with.
       RELEASE_VERSION: ${{ needs.staff-gate.outputs.version }}
       # build_engine.sh packs brindle from this checkout, at its HEAD (the tag).
@@ -295,9 +288,9 @@ jobs:
             app/src-tauri/target
             !app/src-tauri/target/release/bundle
             !app/src-tauri/target/*/release/bundle
-          key: cargo-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('app/src-tauri/Cargo.lock') }}
+          key: cargo-${{ runner.os }}-${{ matrix.arch }}-apple-darwin-${{ hashFiles('app/src-tauri/Cargo.lock') }}
           restore-keys: |
-            cargo-${{ runner.os }}-${{ matrix.target }}-
+            cargo-${{ runner.os }}-${{ matrix.arch }}-apple-darwin-
       - name: Install
         run: bash app/scripts/retry.sh npm --prefix app ci
 
@@ -415,7 +408,7 @@ jobs:
       # through $GITHUB_ENV. Tried twice: Tauri's own codesign --timestamp and
       # notarytool calls to Apple aren't retried, and a second build reuses
       # the first's compiled code and engine (build_engine.sh's stamp).
-      - name: Build (${{ matrix.target }})
+      - name: Build (${{ matrix.arch }}-apple-darwin)
         id: build
         working-directory: app
         env:
@@ -687,7 +680,9 @@ jobs:
             git fetch --force --no-tags origin "refs/tags/$REF_NAME:refs/tags/$REF_NAME" || echo "::warning::could not fetch tag $REF_NAME: generic notes"
           fi
           notes="$(node app/scripts/release_notes.mjs "$EVENT" "$REF_TYPE" "$RC" "$REF_NAME" "$notes")"
-          for arch in aarch64 x86_64; do
+          arches=(aarch64 x86_64)
+          if [ "$EVENT" = push ] && [ "$REF_TYPE" != tag ]; then arches=(aarch64); fi
+          for arch in "${arches[@]}"; do
             status="$dir/macos-$arch.status.json"
             [ -f "$status" ] || { echo "::error::no $arch build"; exit 1; }
             cat "$status"
@@ -711,10 +706,11 @@ jobs:
               --arg arm_url "$base/brindle_${VERSION}_aarch64.app.tar.gz" \
               --arg arm_sig "$(cat "$dir/$VERSION/brindle_${VERSION}_aarch64.app.tar.gz.sig")" \
               --arg x64_url "$base/brindle_${VERSION}_x86_64.app.tar.gz" \
-              --arg x64_sig "$(cat "$dir/$VERSION/brindle_${VERSION}_x86_64.app.tar.gz.sig")" \
-              '{version: $version, notes: $notes, pub_date: $date, platforms: {
-                 "darwin-aarch64": {signature: $arm_sig, url: $arm_url},
-                 "darwin-x86_64": {signature: $x64_sig, url: $x64_url}}}' > "$manifest"
+              --arg x64_sig "$(if [ "${#arches[@]}" -gt 1 ]; then cat "$dir/$VERSION/brindle_${VERSION}_x86_64.app.tar.gz.sig"; fi)" \
+              --arg include_x64 "${#arches[@]}" \
+              '{version: $version, notes: $notes, pub_date: $date, platforms: ({
+                 "darwin-aarch64": {signature: $arm_sig, url: $arm_url}} + (if $include_x64 == "2" then {
+                 "darwin-x86_64": {signature: $x64_sig, url: $x64_url}} else {} end))}' > "$manifest"
             cat "$manifest"
           else
             echo "::warning::not both builds have an updater bundle: no latest.json"
@@ -820,7 +816,7 @@ jobs:
           fi
           echo "Published brindle desktop $VERSION (macOS aarch64 + x86_64) to $SITE_DOWNLOADS/" >> "$GITHUB_STEP_SUMMARY"
 
-  # A release-branch build's publish: both Mac builds, each signed,
+  # A release-branch build's publish: its Apple Silicon Mac build, signed,
   # notarized, past Gatekeeper and carrying the build's version, go to their
   # own immutable release/<run>.<attempt>-<sha12>/; then release/latest.json
   # moves to them only if they are a later run, of a version no lower, at a

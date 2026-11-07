@@ -162,11 +162,11 @@ describe("a release-branch build's version, files and latest.json", () => {
     expect(out).toContain("the published 0.1.0 is not a release-branch build");
   });
 
-  /** Both Mac builds' collected files and status, as the macos job leaves them, for the identity `id`. */
+  /** The Apple Silicon build's collected files and status, as the macos job leaves them, for the identity `id`. */
   function builds(id: Record<string, string>, over: Record<string, Record<string, unknown>> = {}) {
     const dir = mkdtempSync(join(tmpdir(), "verify-"));
     mkdirSync(join(dir, id.name));
-    for (const arch of ["aarch64", "x86_64"]) {
+    for (const arch of ["aarch64"]) {
       const stem = join(dir, id.name, `brindle_${id.name}_${arch}`);
       for (const ext of [".dmg", ".app.tar.gz"]) writeFileSync(stem + ext, "");
       writeFileSync(`${stem}.app.tar.gz.sig`, `sig-${arch}\n`);
@@ -178,7 +178,7 @@ describe("a release-branch build's version, files and latest.json", () => {
 
   it.each([
     ["both builds signed, notarized and at the identity's version", {}, null],
-    ["an Info.plist that is not the identity's version", { x86_64: { plist_version: "0.1.0-rc.9" } }, "the x86_64 build's plist_version is 0.1.0-rc.9"],
+    ["an Info.plist that is not the identity's version", { aarch64: { plist_version: "0.1.0-rc.9" } }, "the aarch64 build's plist_version is 0.1.0-rc.9"],
     ["a binary built at another version", { aarch64: { app_version: "0.1.0-rc.9" } }, "the aarch64 build's app_version is 0.1.0-rc.9"],
     ["a build that is not notarized", { aarch64: { notarized: false } }, "the aarch64 build is not notarized"],
     // Re-running the publish job alone: release-gate's outputs (its path) are attempt 1's, this attempt is 2.
@@ -206,7 +206,8 @@ describe("a release-branch build's version, files and latest.json", () => {
     const latest = JSON.parse(readFileSync(join(dir, id.name, "latest.json"), "utf8"));
     expect(latest.version).toBe(id.version);
     expect(latest.notes).toContain(sha);
-    expect(latest.platforms["darwin-x86_64"]).toEqual({ signature: "sig-x86_64", url: `${site}/${id.path}/brindle_${id.name}_x86_64.app.tar.gz` });
+    expect(latest.platforms["darwin-aarch64"]).toEqual({ signature: "sig-aarch64", url: `${site}/${id.path}/brindle_${id.name}_aarch64.app.tar.gz` });
+    expect(latest.platforms["darwin-x86_64"]).toBeUndefined();
     expect(JSON.parse(readFileSync(join(dir, id.name, "build.json"), "utf8"))).toMatchObject({ version: id.version, package_version: pkg, commit: sha, run_attempt: "2" });
   });
 });
