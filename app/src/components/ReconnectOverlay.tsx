@@ -9,9 +9,14 @@
    first connection that never opens, or a refused token, is the engine
    banner's (components/EngineBanner), not this. */
 
-import { useEffect, useRef, useState, type RefObject } from "react";
+import { createContext, useEffect, useRef, useState, type RefObject } from "react";
 import type { AppState } from "../store/store";
 import { button } from "./ui";
+
+/* Whether the whole app is under the overlay. What the page's own layers can't cover (a
+   visual's native webview, which sits above the page: screens/Session/Visuals/NativeFrame)
+   reads it and steps aside, keeping its state, until the overlay goes. */
+export const AppCovered = createContext(false);
 
 /* How long a dropped stream goes unremarked; how long before a next step is offered. */
 export const RECONNECT_GRACE_MS = 1000;

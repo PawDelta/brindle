@@ -46,7 +46,7 @@ import type { About, AppUpdater, AppUpdates, CliLink, ReleaseBuildUpdater } from
 import { AppUpdateBanner, AppUpdateProvider } from "./components/AppUpdateBanner";
 import { UpgradeCard, useEngineUpgrade } from "./components/EngineUpgrade";
 import { EngineBanner } from "./components/EngineBanner";
-import { ReconnectOverlay, useReconnect } from "./components/ReconnectOverlay";
+import { AppCovered, ReconnectOverlay, useReconnect } from "./components/ReconnectOverlay";
 import { Sidebar } from "./components/Sidebar";
 import { Walkthrough, type WalkthroughStep } from "./components/Walkthrough";
 import { TerminalPanel, TerminalProvider, shellPlace } from "./components/TerminalPanel";
@@ -312,6 +312,8 @@ function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, p
   return (
     <TerminalProvider client={client} here={here}>
       <AppUpdateProvider updates={appUpdates}>
+      {/* A visual's native page sits above the page: under the overlay it steps aside too. */}
+      <AppCovered.Provider value={held}>
       <div className="relative flex h-full bg-canvas text-ink">
         {/* Under the reconnect overlay the app stays on screen but out of reach: no focus, no clicks. */}
         <div className="contents" hidden={reading} inert={held}>
@@ -349,8 +351,8 @@ function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, p
         </div>
         {client && <Walkthrough autoStart={firstRun} onStep={showWalkthroughStep} />}
         <ReconnectOverlay phase={reconnect} focusBefore={focusBefore} onRetry={check} />
-
       </div>
+      </AppCovered.Provider>
       </AppUpdateProvider>
     </TerminalProvider>
   );
