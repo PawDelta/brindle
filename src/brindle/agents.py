@@ -2463,6 +2463,10 @@ def _paste_message(db: DB, agent: Agent, text: str, lead: str | None,
     recorded = [resume is not None]
     baseline = [_INPUT_UNREAD]
     authorize(write=False)   # the caller's last look just read the screen; note the input it saw
+    if resume is not None and message_id is not None:
+        # A resumed attempt is live again, before any write: its body (or Enter)
+        # may go in from here, so a hook's turn evidence counts once more.
+        record(stopped=False)
     options = {"progress": progress, "resume": resume} if message_id is not None else {}
     tmux.paste(agent.tmux_window, text, lead=lead, server=server,
                authorize=authorize, **options)

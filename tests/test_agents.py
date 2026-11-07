@@ -369,6 +369,8 @@ def test_paste_blocked_or_draft_holds_message_then_delivers_it_once(db, ws, monk
     ("enter", "sent"), ("enter", "agy sent"), ("enter", "agy replaced"),
     ("paste", "sent"), ("paste", "agy sent"),   # ... before the body's write is even recorded
     ("lead", "agy sent"),   # stopped before its body: the turn they start can't carry it
+    # ... they delete only their reply, the body is resumed onto the lead, and they send mid-paste
+    ("lead", "agy resumed"),
 ])
 def test_person_typing_mid_paste_stops_it_and_message_goes_in_once_later(db, ws, monkeypatch, typed_after, then):
     # Real flush and tmux.paste over a fake terminal: the person starts a reply
@@ -437,10 +439,14 @@ def test_person_typing_mid_paste_stops_it_and_message_goes_in_once_later(db, ws,
 
     assert agents.flush(db, "a1") is False and submitted == [] and db.pending_count("a1") == 1
     assert ("WORKER REPORT" in s["composer"]) == (typed_after == "body")   # the body never lands on their text
+    if then == "agy resumed":
+        s["composer"], s["typed"], s["at"] = f"{lead} ", time.time() - 60, "paste"
+        assert agents.flush(db, "a1") is False and submitted == []
+        antigravity.handle_hook(db, "a1", "agy-stop", {})
     sent, s["composer"], s["typed"] = s["composer"], "", time.time() - 60   # a minute ago
     if then.endswith("replaced"):
         sent = "SOMETHING ELSE"
-    in_flight = typed_after in ("enter", "paste")   # their send and its hook came mid-paste
+    in_flight = typed_after in ("enter", "paste") or then == "agy resumed"   # their send and its hook came mid-paste
     if then in ("sent", "replaced", "agy sent", "agy replaced") and not in_flight:
         start_turn(sent)   # the report went in with their reply, or it didn't
     if then in ("sent", "replaced"):
@@ -449,9 +455,9 @@ def test_person_typing_mid_paste_stops_it_and_message_goes_in_once_later(db, ws,
         agents.handle_hook(db, "a1", "codex-notify", {"type": "agent-turn-complete", "input-messages": [sent]})
     elif then in ("agy sent", "agy replaced"):
         antigravity.handle_hook(db, "a1", "agy-stop", {})
-    assert len(spoke) == (then in ("sent", "replaced", "agy sent", "agy replaced"))   # their turn, as theirs
+    assert len(spoke) == (then in ("sent", "replaced", "agy sent", "agy replaced", "agy resumed"))   # theirs
     again = not (typed_after == "body" or in_flight) or then in ("cleared", "replaced", "agy cleared")
-    unresolved = then in ("agy sent", "agy replaced") and (typed_after == "body" or in_flight)
+    unresolved = then in ("agy sent", "agy replaced", "agy resumed") and (typed_after == "body" or in_flight)
     # this flush counts it (Codex's turn-end notify already flushed it)
     acknowledged = then == "sent" and (typed_after == "body" or in_flight)
     assert agents.flush(db, "a1") is (again or acknowledged) and db.pending_count("a1") == 0
