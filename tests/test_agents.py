@@ -422,17 +422,14 @@ def test_person_typing_mid_paste_stops_it_and_message_goes_in_once_later(db, ws,
     elif then == "agy sent":   # agy's real hooks for the turn it started
         antigravity.handle_hook(db, "a1", "agy-pre-invocation", {"invocationNum": 0})
         antigravity.handle_hook(db, "a1", "agy-stop", {})
-    again = typed_after != "body" or then == "cleared"
-    assert agents.flush(db, "a1") is (again or agy) and db.pending_count("a1") == 0
-    if agy:   # never typed in again, and not lost: unread mail with a one-line notice
-        [notice] = submitted
-        assert "WORKER REPORT" not in notice and "read_messages" in notice
-        assert [m.body for m in db.unread("a1")] == ["WORKER REPORT"]
-    else:
-        assert submitted == ([f"{lead} WORKER REPORT"] if again else [])
+    again = typed_after != "body" or then.endswith("cleared")
+    assert agents.flush(db, "a1") is again and db.pending_count("a1") == 0
+    assert submitted == ([f"{lead} WORKER REPORT"] if again else [])
+    # by no other way either: read_messages hands nothing over again
+    assert "WORKER REPORT" not in agents.render_unread(db, db.read_held("a1"))
     db.set_status("a1", "idle")   # that turn ended; the queue moves on
     db.enqueue("a1", "NEXT", None)
-    assert agents.flush(db, "a1") is True and submitted[-1] == f"{lead} NEXT" and len(submitted) == 1 + (again or agy)
+    assert agents.flush(db, "a1") is True and submitted[-1] == f"{lead} NEXT" and len(submitted) == 1 + again
 
 
 def test_reconcile_keeps_hook_status_when_screen_is_unclear(db, ws, monkeypatch):

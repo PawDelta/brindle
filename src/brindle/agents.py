@@ -2480,19 +2480,11 @@ def _resume_pane_delivery(db: DB, agent: Agent, saved: str) -> bool:
                 return False  # the person's text and this delivery's are still there: theirs to send or clear
             if state["stage"] != "lead":
                 # Stopped after the body, and the composer is empty with no
-                # turn running. Where the CLI reports its prompts, one carrying
-                # the body would have acknowledged it (_acknowledge_submitted),
-                # so it was cleared: the same row goes back in the queue, no
-                # second copy made. Where it doesn't (agy), sent and cleared
-                # look alike: the body is never typed in again, but kept for
-                # read_messages with a one-line notice, so it isn't lost.
-                if get_provider(agent.provider).reports_prompts:
-                    db.set_mark(agent.id, "pane-delivery", None)
-                else:
-                    db.hold_unread(row["id"], agent.id)
-                    claimed = db.claim_notice(agent.id)
-                    if claimed:
-                        db.enqueue(agent.id, unread_notice(db, claimed), None, notice=True)
+                # turn running. Sending it would have acknowledged it
+                # (_acknowledge_submitted: the prompt Claude Code, OpenCode or
+                # Codex reports, or the turn agy starts), so it was cleared:
+                # the same row goes back in the queue, no second copy made.
+                db.set_mark(agent.id, "pane-delivery", None)
                 return _flush_messages(db, agent.id)
             # Stopped after the lead: the body never reached the composer and
             # Enter was never pressed for it, so the whole message goes in, once.
@@ -2732,16 +2724,18 @@ def _composer_settled(agent: Agent) -> bool:
             and provider.screen_state(screen) != "busy")
 
 
-def _acknowledge_submitted(db: DB, agent_id: str, prompt: str) -> None:
+def _acknowledge_submitted(db: DB, agent_id: str, prompt: str | None) -> None:
     """A prompt the CLI took in (Claude Code's or OpenCode's prompt-submit,
-    Codex's turn inputs) carrying a stopped pane delivery's body: the person
-    sent it, their reply typed onto it, so it is delivered and its mark retired."""
+    Codex's turn inputs) carrying a pane delivery's body, or (``prompt`` None)
+    a turn started from a composer holding it whose CLI doesn't say what went
+    in (agy; while a delivery is stopped brindle starts none): the person sent
+    it, their reply typed onto it, so it is delivered and its mark retired."""
     saved = db.mark(agent_id, "pane-delivery")
-    if not saved or not prompt:
+    if not saved:
         return
     state = json.loads(saved)
     body = str(state.get("body") or "").strip()
-    if state.get("stage") in ("body", "submitted") and body and body in prompt:
+    if state.get("stage") in ("body", "submitted") and body and (prompt is None or body in prompt):
         db.mark_delivered(state["message_id"])
         db.set_mark(agent_id, "pane-delivery", None)
 
