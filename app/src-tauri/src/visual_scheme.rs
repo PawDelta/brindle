@@ -1009,7 +1009,7 @@ mod platform {
 /// webview, so the child is moved onto an overlay at its bounds instead.
 #[cfg(target_os = "linux")]
 mod platform {
-    use super::{content_rules, Armed, Bounds, Delivery, Sink, VisualRef};
+    use super::{content_rules, Armed, Bounds, Delivery, PreconnectSwitch, Sink, VisualRef};
     use glib::translate::ToGlibPtr;
     use gtk::prelude::*;
     use std::ffi::{c_char, c_void, CStr, CString};
@@ -1059,7 +1059,7 @@ mod platform {
                 if let Err(why) = overlay(&view, bounds) {
                     return armed(Err(why));
                 }
-                let Some(settings) = view.settings() else {
+                let Some(settings) = WebViewExt::settings(&view) else {
                     return armed(Err("the webview has no settings".into()));
                 };
                 let switch = GtkSwitch { settings, api: FeatureApi::lookup() };
