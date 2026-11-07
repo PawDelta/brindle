@@ -937,6 +937,7 @@ CREATE TABLE IF NOT EXISTS plans (
     split TEXT NOT NULL,           -- JSON [{id, title, after}]
     state TEXT NOT NULL,           -- open | redirected | approved
     decision TEXT,                 -- JSON {approved, picks, comments, note, at, rev}: the person's
+    claim TEXT,                    -- '<pid>:<nonce>' of the verdict being delivered (state 'deciding')
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
 );
@@ -1357,6 +1358,8 @@ class DB:
             self.conn.execute("ALTER TABLE visual_grants ADD COLUMN scope TEXT NOT NULL DEFAULT 'visual'")
             # Earlier grants did not distinguish conditional requests or artifact scope.
             self.conn.execute("UPDATE visual_grants SET remaining=0")
+        if "claim" not in {r["name"] for r in self.conn.execute("PRAGMA table_info(plans)")}:
+            self.conn.execute("ALTER TABLE plans ADD COLUMN claim TEXT")
         review_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(reviews)")}
         for col, kind in (("review_slot", "TEXT"), ("reviewer_created_at", "REAL")):
             if col not in review_cols:

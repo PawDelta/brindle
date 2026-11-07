@@ -3,6 +3,7 @@ queued behind an open plan through the real dispatch, and only the person
 approves or redirects."""
 
 import asyncio
+import os
 import time
 
 import pytest
@@ -96,6 +97,37 @@ def test_assign_queues_behind_open_plan_until_the_person_approves(db, session, m
         # A second approval (another window, a double click) and a sweep start nothing more.
         assert client.post(f"/v1/plans/{pid}/decide", json={"rev": 2, "approved": True}).status_code == 409
         assert tasks.sweep(db) == 0 and started == ["build the preset schema"]
+
+
+def test_a_verdict_in_flight_fences_out_others_until_its_process_is_gone(db, session, monkeypatch):
+    boss, started = session
+    visual_offers.person_spoke(db, boss, "Make a planning doc.")
+    pid = mcp_server.propose_plan(PLAN, DECISIONS).split()[2]
+    asyncio.run(mcp_server.assign("developer", "build the preset schema"))
+    deliver, clock = agents.send_message, time.time
+
+    def slow(*a, **k):
+        # An hour into this redirect's delivery, an approval comes in: refused, nothing starts.
+        monkeypatch.setattr(plans.time, "time", lambda: clock() + 3600)
+        with pytest.raises(ServiceError, match="already decided"):
+            plans.decide(db, pid, 1, True, person=True)
+        assert started == [] and tasks.sweep(db) == 0
+        return deliver(*a, **k)
+    monkeypatch.setattr(agents, "send_message", slow)
+    plans.decide(db, pid, 1, False, comments=[{"section": "s1", "text": "Repo file first."}], person=True)
+    monkeypatch.setattr(agents, "send_message", deliver)
+    assert plans.get(db, pid)["state"] == "redirected" and plans.get(db, pid)["visual"]["answer"]["option"] == "redirect"
+    assert [r["remaining"] for r in db.conn.execute("SELECT remaining FROM visual_grants")] == [1]
+
+    # A claim left by a process that died mid-delivery is taken over; a live one never is.
+    mcp_server.propose_plan(PLAN + "\n\nRevised.", DECISIONS, plan_id=pid)
+    db.conn.execute("UPDATE plans SET state='deciding', claim=? WHERE id=?", (f"{os.getpid()}:x", pid))
+    with pytest.raises(ServiceError, match="already decided"):
+        plans.decide(db, pid, 2, True, person=True)
+    db.conn.execute("UPDATE plans SET claim='999999:x' WHERE id=?", (pid,))
+    monkeypatch.setattr(plans.procs, "alive", lambda p: p != 999999)
+    assert plans.decide(db, pid, 2, True, person=True)["state"] == "approved"
+    assert started == ["build the preset schema"]
 
 
 def test_only_the_person_decides_and_only_when_they_asked(db, session):

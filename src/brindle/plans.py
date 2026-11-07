@@ -22,11 +22,13 @@ from __future__ import annotations
 
 import html as html_lib
 import json
+import os
 import re
+import secrets
 import time
 from typing import Any
 
-from brindle import bus, visual_offers, visuals
+from brindle import bus, procs, visual_offers, visuals
 from brindle.db import DB, Agent
 from brindle.service.errors import ServiceError
 
@@ -35,7 +37,6 @@ MAX_DECISIONS = 12
 MAX_WORKERS = 20
 MAX_COMMENTS = 50
 HOLDING = ("open", "deciding", "redirected")   # 'deciding': a verdict on its way to the supervisor
-CLAIM_LAPSES = 5 * 60   # seconds before a verdict claim whose delivery never finished may be claimed again
 
 _HEADING = re.compile(r"^##\s+(.*?)\s*#*\s*$")
 _TOP = re.compile(r"^#\s+(.*?)\s*#*\s*$")
@@ -80,6 +81,13 @@ def _title(markdown: str) -> str | None:
 
 
 # -- checks ------------------------------------------------------------------------------
+
+
+def _claimant_alive(claim: str | None) -> bool:
+    """Whether the process that claimed a verdict (``<pid>:<nonce>``) still
+    runs, so its delivery may still finish. An unreadable claim counts as alive."""
+    pid = (claim or "").partition(":")[0]
+    return not pid.isdigit() or procs.alive(int(pid))
 
 
 def _decisions(raw: Any) -> list[dict]:
@@ -337,30 +345,42 @@ def decide(db: DB, plan_id: str, rev: Any, approved: bool, picks: Any = None, co
     state = "approved" if approved else "redirected"
     # Claimed as 'deciding', which still holds the session's tasks: nothing
     # starts until the supervisor has the message and the verdict is final.
-    # A claim left behind by a process that died mid-delivery lapses.
+    # The claim names this process: only a claim whose process is gone (it
+    # died mid-delivery) may be taken over, never one merely slow.
+    claim = f"{os.getpid()}:{secrets.token_hex(8)}"
     with db.tx() as c:
-        claimed = c.execute("UPDATE plans SET state='deciding', decision=?, updated_at=? WHERE id=? AND rev=? AND "
-                            "(state='open' OR (state='deciding' AND updated_at<?))",
-                            (record, at, p["id"], rev, at - CLAIM_LAPSES)).rowcount == 1
+        claimed = c.execute("UPDATE plans SET state='deciding', decision=?, claim=?, updated_at=? WHERE id=? AND rev=?"
+                            " AND state='open'", (record, claim, at, p["id"], rev)).rowcount == 1
     if not claimed:
         now = _row(db, p["id"])
         if now["rev"] != rev:
             raise ServiceError("stale", f"the plan has a newer revision (r{now['rev']}); read that one", 409,
                                rev=now["rev"])
-        raise ServiceError("decided", "this revision is already decided", 409)
+        if now["state"] != "deciding" or _claimant_alive(now["claim"]):
+            raise ServiceError("decided", "this revision is already decided", 409)
+        with db.tx() as c:   # compare-and-swap: only that same dead claim
+            claimed = c.execute("UPDATE plans SET decision=?, claim=?, updated_at=? WHERE id=? AND rev=? AND "
+                                "state='deciding' AND claim IS ?", (record, claim, at, p["id"], rev,
+                                                                    now["claim"])).rowcount == 1
+        if not claimed:
+            raise ServiceError("decided", "this revision is already decided", 409)
     try:
         agents.send_message(db, p["root_id"], _message(p, approved, picks, comments, note, titles), person=True)
     except BaseException:
         with db.tx() as c:
-            c.execute("UPDATE plans SET state='open', decision=NULL WHERE id=? AND state='deciding' AND decision=?",
-                      (p["id"], record))
+            c.execute("UPDATE plans SET state='open', decision=NULL, claim=NULL WHERE id=? AND state='deciding' "
+                      "AND claim=?", (p["id"], claim))
         raise
     with db.tx() as c:
-        c.execute("UPDATE plans SET state=?, updated_at=? WHERE id=? AND state='deciding' AND decision=?",
-                  (state, time.time(), p["id"], record))
-        c.execute("UPDATE visuals SET answer=?, read_rev=MAX(read_rev, rev) WHERE id=?", (answer, p["id"]))
-        if not approved:
-            visual_offers._grant(c, p["root_id"], "plan")   # the one revision the redirect asks for
+        # Every side effect of the verdict only with the claim still ours.
+        finalized = c.execute("UPDATE plans SET state=?, claim=NULL, updated_at=? WHERE id=? AND state='deciding' "
+                              "AND claim=?", (state, time.time(), p["id"], claim)).rowcount == 1
+        if finalized:
+            c.execute("UPDATE visuals SET answer=?, read_rev=MAX(read_rev, rev) WHERE id=?", (answer, p["id"]))
+            if not approved:
+                visual_offers._grant(c, p["root_id"], "plan")   # the one revision the redirect asks for
+    if not finalized:
+        raise ServiceError("decided", "this revision was decided elsewhere meanwhile", 409)
     bus.publish(db, "visual.answered", repo_root=p["visual"]["repo_root"], root_id=p["root_id"], visual=p["id"],
                 rev=rev, option=state)
     if approved:
