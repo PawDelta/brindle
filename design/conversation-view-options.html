@@ -1,0 +1,816 @@
+<!doctype html>
+<html lang="en" class="sch-tinted">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>brindle · Conversation view, four directions</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+/* ── Tokens: app/src/styles.css, both themes, same names. .th-dark / .th-light pin a window to one theme. ── */
+:root, .th-dark {
+  --canvas: #080d0b; --canvas-2: #0a100d; --surface: #080d0b; --surface-2: #121a16;
+  --line: rgba(120, 150, 135, 0.16); --line-strong: rgba(130, 160, 145, 0.28);
+  --ink: #e8f0eb; --ink-2: #afbfb6; --ink-3: #889a90;
+  --fawn: #34d399;
+  --sap: #e8875a; --sap-soft: rgba(232, 135, 90, 0.12);
+  --pass: #34d399; --pass-soft: rgba(52, 211, 153, 0.12);
+  --branch: #a99be0; --branch-soft: rgba(169, 155, 224, 0.12);
+  --fail: #f08c88; --fail-soft: rgba(240, 140, 136, 0.12);
+  --on-fawn: #03160e; --on-branch: #15102a; --on-sap: #1a0f08;
+  --thread-in: #d7af87; --thread-top: #e8875a; --thread-mid: #a99be0; --thread-out: #34d399;
+  --shell-bg: #070b09; --shell-bg-2: color-mix(in srgb, var(--shell-bg), white 5%); --shell-ink: #e8f0eb; --shell-dim: #859a8e; --shell-acc: #34d399; --shell-bad: #f08c88; --shell-line: rgba(52, 96, 74, 0.5);
+  --sans: "Geist", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --r-sm: 2px; --r: 4px;
+  --page: #050807; --win-shadow: 0 40px 90px -20px rgba(0,0,0,.7), 0 0 0 1px rgba(255,255,255,.02);
+  --card-shadow: 0 1px 0 rgba(255,255,255,.03) inset, 0 18px 40px -24px rgba(0,0,0,.8);
+  color-scheme: dark;
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --canvas: #f4f6f6; --canvas-2: #eef1f1; --surface: #f4f6f6; --surface-2: #e9eded;
+    --line: rgba(20, 40, 36, 0.11); --line-strong: rgba(20, 40, 36, 0.22);
+    --ink: #0e1716; --ink-2: #3a4d4a; --ink-3: #4c615e;
+    --fawn: #046e50;
+    --sap: #9b4724; --sap-soft: rgba(155, 71, 36, 0.1);
+    --pass: #046e50; --pass-soft: rgba(4, 110, 80, 0.1);
+    --branch: #6350b3; --branch-soft: rgba(99, 80, 179, 0.1);
+    --fail: #a63e3a; --fail-soft: rgba(166, 62, 58, 0.1);
+    --on-fawn: #ffffff; --on-branch: #ffffff; --on-sap: #ffffff;
+    --thread-in: #86572a; --thread-top: #9b4724; --thread-mid: #6350b3; --thread-out: #046e50;
+    --page: #e4e9e8; --win-shadow: 0 40px 80px -30px rgba(14,23,22,.28), 0 2px 6px rgba(14,23,22,.06);
+    --card-shadow: 0 1px 2px rgba(14,23,22,.04), 0 16px 36px -26px rgba(14,23,22,.3);
+    color-scheme: light;
+  }
+}
+:root[data-theme="light"], .th-light {
+  --canvas: #f4f6f6; --canvas-2: #eef1f1; --surface: #f4f6f6; --surface-2: #e9eded;
+  --line: rgba(20, 40, 36, 0.11); --line-strong: rgba(20, 40, 36, 0.22);
+  --ink: #0e1716; --ink-2: #3a4d4a; --ink-3: #4c615e;
+  --fawn: #046e50;
+  --sap: #9b4724; --sap-soft: rgba(155, 71, 36, 0.1);
+  --pass: #046e50; --pass-soft: rgba(4, 110, 80, 0.1);
+  --branch: #6350b3; --branch-soft: rgba(99, 80, 179, 0.1);
+  --fail: #a63e3a; --fail-soft: rgba(166, 62, 58, 0.1);
+  --on-fawn: #ffffff; --on-branch: #ffffff; --on-sap: #ffffff;
+  --thread-in: #86572a; --thread-top: #9b4724; --thread-mid: #6350b3; --thread-out: #046e50;
+  --page: #e4e9e8; --win-shadow: 0 40px 80px -30px rgba(14,23,22,.28), 0 2px 6px rgba(14,23,22,.06);
+  --card-shadow: 0 1px 2px rgba(14,23,22,.04), 0 16px 36px -26px rgba(14,23,22,.3);
+  color-scheme: light;
+}
+
+/* ── Page ─────────────────────────────────────────────────────────────────── */
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body { background: var(--page); color: var(--ink); font-family: var(--sans); font-size: 14px; line-height: 1.5; -webkit-font-smoothing: antialiased; font-variant-numeric: tabular-nums; }
+button, input, select { font: inherit; color: inherit; }
+button { cursor: pointer; }
+:focus-visible { outline: 2px solid var(--branch); outline-offset: 2px; }
+.mono { font-family: var(--mono); }
+.flex1 { flex: 1; }
+.t-pass { color: var(--pass); } .t-branch { color: var(--branch); } .t-fail { color: var(--fail); } .t-sap { color: var(--sap); }
+.t-2 { color: var(--ink-2); } .t-3 { color: var(--ink-3); }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.topbar { position: sticky; top: 0; z-index: 20; display: flex; align-items: center; gap: 24px; padding: 12px 40px; background: color-mix(in srgb, var(--page) 82%, transparent); backdrop-filter: blur(14px) saturate(1.2); border-bottom: 1px solid var(--line); }
+.topbar nav { display: flex; gap: 4px; }
+.topbar nav a { color: var(--ink-3); text-decoration: none; font-size: 13px; padding: 4px 10px; border-radius: 6px; }
+.topbar nav a:hover { color: var(--ink); background: var(--surface-2); }
+.seg { display: inline-flex; padding: 2px; gap: 2px; border-radius: 7px; background: var(--surface-2); border: 1px solid var(--line); }
+.seg button { border: 0; background: transparent; padding: 3px 10px; border-radius: 5px; font-size: 12px; color: var(--ink-3); }
+.seg button[aria-pressed="true"] { background: var(--canvas); color: var(--ink); box-shadow: 0 1px 2px rgba(0,0,0,.12), 0 0 0 1px var(--line); }
+.page { max-width: 1340px; margin: 0 auto; padding: 0 40px 120px; }
+.sec { padding-top: 44px; scroll-margin-top: 56px; }
+.eyebrow { font-family: var(--mono); font-size: 12px; color: var(--ink-3); letter-spacing: 0.02em; }
+.sec h1 { margin: 6px 0 8px; font-size: 30px; font-weight: 600; letter-spacing: -0.025em; line-height: 1.15; }
+.sec .lede { margin: 0; max-width: 820px; color: var(--ink-2); font-size: 15px; }
+.sec .lede code, .req code { font-family: var(--mono); font-size: 12.5px; }
+h2.sub { margin: 34px 0 10px; font-size: 16px; font-weight: 600; letter-spacing: -0.01em; }
+h2.sub small { font-weight: 400; color: var(--ink-3); font-size: 13px; margin-left: 10px; }
+.logo { display: inline-flex; align-items: center; gap: 0.5em; font-weight: 600; letter-spacing: -0.01em; white-space: nowrap; line-height: 24px; }
+.logo-mark { flex: none; display: block; width: 1.98em; height: 1.375em; }
+.logo-word { letter-spacing: -0.02em; }
+.logo .lm-in { stroke: var(--thread-in); } .logo .lm-top { stroke: var(--thread-top); } .logo .lm-mid { stroke: var(--thread-mid); } .logo .lm-bot { stroke: var(--thread-out); }
+
+/* Direction cards */
+.tabs { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin: 28px 0 14px; }
+.tab { position: relative; text-align: left; border: 1px solid var(--line); background: var(--canvas); border-radius: 10px; padding: 12px 14px 13px; display: flex; flex-direction: column; gap: 4px; color: var(--ink-2); transition: border-color 160ms var(--ease), box-shadow 200ms var(--ease); }
+.tab:hover { border-color: var(--line-strong); }
+.tab[aria-selected="true"] { border-color: color-mix(in srgb, var(--branch) 55%, transparent); box-shadow: 0 0 0 3px var(--branch-soft), var(--card-shadow); color: var(--ink); }
+.tab .k { font-family: var(--mono); font-size: 11px; color: var(--ink-3); display: flex; align-items: center; gap: 8px; }
+.tab .k kbd { font: inherit; border: 1px solid var(--line-strong); border-radius: 4px; padding: 0 5px; line-height: 16px; }
+.tab b { font-size: 14px; font-weight: 600; color: var(--ink); letter-spacing: -0.01em; }
+.tab span.d { font-size: 12.5px; line-height: 1.45; }
+.tab .thumb { margin-top: 8px; height: 46px; border-radius: 5px; border: 1px solid var(--line); background: var(--canvas-2); position: relative; overflow: hidden; }
+.tab .thumb i { position: absolute; display: block; border-radius: 1px; background: var(--line-strong); }
+.optnote { display: flex; gap: 28px; flex-wrap: wrap; margin: 0 0 18px; font-size: 13px; color: var(--ink-2); }
+.optnote b { color: var(--ink); font-weight: 600; }
+.ld-ctrl { display: flex; flex-wrap: wrap; align-items: center; gap: 18px; margin: 0 0 14px; font-size: 13px; color: var(--ink-2); }
+.ld-ctrl label { display: flex; align-items: center; gap: 8px; }
+
+/* ── Buttons: the Tinted scheme (design-v3 .sch-tinted), the one the app wears ── */
+.b { position: relative; display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 28px; padding: 0 12px; border-radius: var(--r); border: 1px solid transparent; background: transparent; color: var(--ink); font: 500 13px/1 var(--sans); letter-spacing: -0.005em; white-space: nowrap; cursor: pointer; transition: background-color 120ms var(--ease), border-color 120ms var(--ease), color 120ms var(--ease); }
+.b.sm { height: 24px; padding: 0 9px; font-size: 12px; }
+.b.icon { width: 28px; padding: 0; }
+.b:disabled { opacity: .45; cursor: not-allowed; pointer-events: none; }
+.b.quiet { color: var(--ink-2); }
+.b.quiet:hover { background: var(--surface-2); color: var(--ink); }
+.b.primary { background: color-mix(in srgb, var(--pass) 12%, transparent); border-color: color-mix(in srgb, var(--pass) 40%, transparent); color: var(--pass); }
+.b.primary:hover { background: color-mix(in srgb, var(--pass) 14%, transparent); border-color: color-mix(in srgb, var(--pass) 62%, transparent); color: color-mix(in srgb, var(--pass) 85%, var(--ink)); }
+.b.primary:active { background: color-mix(in srgb, var(--pass) 18%, transparent); border-color: var(--pass); }
+.b.secondary { border-color: var(--line-strong); color: var(--ink); }
+.b.secondary:hover { background: var(--surface-2); border-color: color-mix(in srgb, var(--line-strong) 70%, var(--ink-3)); }
+.b.destructive { background: color-mix(in srgb, var(--fail) 12%, transparent); border-color: color-mix(in srgb, var(--fail) 40%, transparent); color: var(--fail); }
+.b.destructive:hover { background: color-mix(in srgb, var(--fail) 14%, transparent); border-color: color-mix(in srgb, var(--fail) 62%, transparent); color: color-mix(in srgb, var(--fail) 85%, var(--ink)); }
+
+/* ── The app window (design-v3 frame) ─────────────────────────────────────── */
+.framewrap { overflow-x: auto; padding: 4px 0 28px; display: flex; flex-direction: column; gap: 28px; }
+.frame-cap { width: 1240px; margin: 0 auto -20px; font-family: var(--mono); font-size: 11px; color: var(--ink-3); display: flex; gap: 10px; align-items: center; }
+.frame-cap::after { content: ""; flex: 1; height: 1px; background: var(--line-strong); }
+.win { width: 1240px; margin: 0 auto; border-radius: 12px; overflow: hidden; background: var(--canvas); color: var(--ink); box-shadow: var(--win-shadow); border: 1px solid var(--line-strong); display: flex; flex-direction: column; }
+.win-bar { height: 34px; flex: none; display: flex; align-items: center; gap: 8px; padding: 0 14px; background: var(--canvas-2); border-bottom: 1px solid var(--line); position: relative; }
+.win-bar i { width: 12px; height: 12px; border-radius: 50%; display: block; box-shadow: inset 0 0 0 0.5px rgba(0,0,0,.18); }
+.win-bar i:nth-child(1) { background: #ff5f57; } .win-bar i:nth-child(2) { background: #febc2e; } .win-bar i:nth-child(3) { background: #28c840; }
+.win-bar .ttl { position: absolute; left: 0; right: 0; text-align: center; font-size: 12px; color: var(--ink-3); pointer-events: none; }
+.win-body { display: flex; height: 1000px; }
+.side { width: 352px; flex: none; display: flex; flex-direction: column; gap: 10px; padding: 14px 12px 12px; background: var(--canvas-2); border-right: 1px solid var(--line); font-size: 13px; overflow: hidden; }
+.side-top { display: flex; align-items: center; gap: 8px; padding: 0 6px 4px; }
+.side-top .logo { font-size: 17px; }
+.inbox { margin: 0 4px; display: flex; align-items: center; gap: 8px; border-radius: var(--r); padding: 7px 10px 7px 8px; font-size: 12.5px; font-weight: 600; border: 0; background: transparent; text-align: left; color: var(--ink); }
+.inbox:hover { background: var(--surface-2); }
+.side-nb { color: var(--on-sap); background: var(--sap); border-radius: 999px; min-width: 20px; padding: 0 6px; text-align: center; font-family: var(--mono); font-size: 11px; font-weight: 700; line-height: 20px; }
+.ctx { display: flex; flex-direction: column; gap: 10px; min-height: 0; }
+.ctx-h { padding: 0 8px; }
+.ctx-title { display: flex; align-items: flex-start; gap: 4px; font-size: 12.5px; font-weight: 600; line-height: 1.35; }
+.ctx-title span { flex: 1; }
+.ctx-title i { font-style: normal; font-size: 11px; color: var(--ink-3); font-weight: 400; }
+.ctx-meta { font-size: 11px; color: var(--ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.need { margin: 0 4px; display: flex; align-items: flex-start; gap: 8px; padding: 6px 8px; border-radius: var(--r); font-size: 12px; color: var(--ink); background: var(--sap-soft); }
+.need .side-dot { margin-top: 5px; }
+.need small { display: block; font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.handle { position: relative; height: 14px; flex: none; display: flex; align-items: center; justify-content: center; cursor: row-resize; }
+.handle::before { content: ""; position: absolute; left: 8px; right: 8px; top: 50%; height: 1px; background: var(--line); }
+.handle i { position: relative; z-index: 1; display: block; width: 36px; height: 4px; border-radius: 2px; background: var(--line-strong); }
+.side-h { display: flex; align-items: center; gap: 8px; padding: 6px 8px 4px; font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--ink-3); }
+.tree { flex: 1; min-height: 0; overflow: hidden; display: flex; flex-direction: column; gap: 14px; -webkit-mask-image: linear-gradient(#000 calc(100% - 28px), transparent); mask-image: linear-gradient(#000 calc(100% - 28px), transparent); }
+.repo-h { padding: 0 8px 4px; font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--ink-3); }
+.srow { display: flex; align-items: flex-start; gap: 8px; border-radius: var(--r); padding: 5px 8px; }
+.srow.sel { background: var(--branch-soft); }
+.srow .nm { font-size: 13px; line-height: 1.35; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.srow .mt { display: block; font-size: 11.5px; color: var(--ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.srow .mt code { font-family: var(--mono); font-size: 11px; }
+.srow .fold { margin-left: auto; font-size: 11px; color: var(--ink-3); padding-top: 1px; }
+.side-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--ink-3); margin-top: 6px; }
+.side-dot[data-tone="work"] { background: var(--branch); }
+.side-dot[data-tone="wait"] { background: var(--sap); }
+.side-dot[data-tone="done"] { background: var(--pass); }
+.agents { margin: 0 0 4px 8px; padding: 0; list-style: none; border-left: 1px solid var(--line); display: flex; flex-direction: column; gap: 1px; }
+.agents li { display: flex; align-items: center; gap: 8px; padding: 3px 8px 3px 12px; font-size: 12px; color: var(--ink-2); white-space: nowrap; }
+.agents li .side-dot { margin-top: 0; width: 6px; height: 6px; }
+.agents li code { font-family: var(--mono); font-size: 11px; color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; }
+.paused { display: flex; align-items: center; gap: 8px; padding: 5px 8px; font-size: 11.5px; color: var(--ink-3); }
+.paused span { width: 18px; text-align: center; font-size: 11px; }
+.status { display: flex; align-items: center; justify-content: space-between; gap: 8px; border-top: 1px solid var(--line); padding: 8px 8px 0; font-size: 11.5px; color: var(--ink-3); white-space: nowrap; }
+.usage { display: flex; align-items: center; gap: 8px; font-family: var(--mono); font-size: 10.5px; }
+.usage .bar { width: 32px; height: 3px; border-radius: 2px; background: var(--line); overflow: hidden; }
+.usage .bar i { display: block; height: 100%; width: 41%; background: var(--ink-3); }
+.pages { height: 40px; flex: none; display: flex; align-items: center; gap: 4px; padding: 0 8px; font-size: 11.5px; color: var(--ink-3); white-space: nowrap; }
+.pages .av { width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center; border: 1px solid var(--line-strong); font-family: var(--mono); font-size: 10px; color: var(--ink-2); margin-right: 6px; }
+.pages .ttog { font-family: var(--mono); font-size: 11px; border: 1px solid var(--line-strong); border-radius: var(--r-sm); padding: 0 5px; }
+.main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.sbar { display: flex; align-items: center; gap: 16px; border-bottom: 1px solid var(--line); padding: 4px 16px; min-height: 37px; flex: none; }
+.sbar .who { font-size: 14px; font-weight: 600; }
+.sbar code { font-family: var(--mono); font-size: 12px; color: var(--ink-3); }
+.sbar .st { display: flex; align-items: center; gap: 4px; font-size: 12px; color: var(--ink-2); }
+.sbar .st b { font-family: var(--mono); font-weight: 400; color: var(--sap); }
+.sbar .acts { display: flex; align-items: center; gap: 8px; }
+/* The view tabs: Conversation beside Terminal (SessionScreen's tab strip). The Terminal tab carries the live dot, the Conversation tab a lock. */
+.vtabs { display: flex; align-items: center; gap: 2px; padding: 0 10px; border-bottom: 1px solid var(--line); height: 34px; flex: none; }
+.vtab { border: 0; background: transparent; padding: 0 10px; height: 34px; font-size: 12.5px; color: var(--ink-3); border-bottom: 2px solid transparent; display: inline-flex; gap: 7px; align-items: center; margin-bottom: -1px; }
+.vtab:hover { color: var(--ink-2); }
+.vtab[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--ink); }
+.vtab kbd { font: 10px/16px var(--mono); border: 1px solid var(--line); border-radius: 3px; padding: 0 4px; color: var(--ink-3); }
+.vtab .live { width: 6px; height: 6px; border-radius: 50%; background: var(--branch); }
+.vtab svg { width: 11px; height: 11px; }
+.vtabs .meta { margin-left: auto; font-family: var(--mono); font-size: 11px; color: var(--ink-3); display: flex; gap: 10px; }
+.vtabs .meta b { color: var(--ink-2); font-weight: 500; }
+
+/* ── Shared transcript vocabulary ─────────────────────────────────────────── */
+.chev { width: 10px; height: 10px; flex: none; transition: transform 240ms var(--ease); color: var(--ink-3); }
+[aria-expanded="true"] > .chev, [aria-expanded="true"] .chev { transform: rotate(90deg); }
+.clp { display: grid; grid-template-rows: 0fr; transition: grid-template-rows 300ms var(--ease), opacity 220ms var(--ease); opacity: 0; }
+.clp.open { grid-template-rows: 1fr; opacity: 1; }
+.clp > div { overflow: hidden; min-height: 0; }
+.dh { display: flex; align-items: center; gap: 10px; font: 11px/1 var(--mono); color: var(--ink-2); padding: 6px 10px; border-bottom: 1px solid var(--line); background: var(--canvas-2); }
+.dh .fp { font-weight: 500; color: var(--ink); }
+.dh .hk { color: var(--ink-3); }
+.dh .pm { margin-left: auto; display: flex; gap: 8px; }
+.dl { display: flex; font: 11.5px/1.65 var(--mono); white-space: pre; color: var(--ink); }
+.dl .g { width: 30px; flex: none; text-align: right; padding-right: 8px; color: var(--ink-3); opacity: .75; font-size: 10.5px; user-select: none; }
+.dl .sg { width: 16px; flex: none; text-align: center; color: var(--ink-3); user-select: none; }
+.dl .tx { flex: 1; padding-right: 12px; }
+.dl.a { background: var(--pass-soft); } .dl.a .sg { color: var(--pass); }
+.dl.d { background: var(--sap-soft); } .dl.d .sg { color: var(--sap); } .dl.d .tx { color: var(--ink-2); text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--sap) 55%, transparent); }
+.dl.c .tx { color: var(--ink-2); }
+.out { font: 11.5px/1.6 var(--mono); background: var(--shell-bg); color: var(--shell-ink); padding: 8px 12px; white-space: pre-wrap; word-break: break-word; }
+.out .d { color: var(--shell-dim); } .out .ok { color: var(--shell-acc); } .out .bad { color: var(--shell-bad); } .out .p { color: var(--shell-dim); user-select: none; }
+.pm .plus { color: var(--pass); } .pm .minus { color: var(--sap); }
+.st-ok { color: var(--pass); } .st-fail { color: var(--fail); } .st-wait { color: var(--sap); }
+.dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex: none; }
+.ask-acts { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ask-acts .sp { flex: 1; }
+.ask-note { font-size: 11.5px; color: var(--ink-3); line-height: 1.45; }
+.ask-note b { color: var(--ink-2); font-weight: 500; }
+.ask-cmd { font: 12px/1.5 var(--mono); background: var(--shell-bg); color: var(--shell-ink); border-radius: var(--r); padding: 7px 10px; }
+.ask-cmd .p { color: var(--shell-acc); }
+.lock { width: 11px; height: 11px; flex: none; }
+.ro { display: inline-flex; align-items: center; gap: 6px; color: var(--ink-3); font-size: 11.5px; white-space: nowrap; }
+.ro b { color: var(--ink-2); font-weight: 500; }
+.ro .b { height: 22px; padding: 0 8px; font-size: 11.5px; }
+
+/* ── Direction 1 · Document ───────────────────────────────────────────────── */
+.vA { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.vA .scroll { flex: 1; min-height: 0; overflow: auto; }
+.vA .doc { max-width: 940px; margin: 0 auto; padding: 30px 28px 26px; display: grid; grid-template-columns: 216px minmax(0, 1fr); column-gap: 26px; row-gap: 2px; align-items: start; }
+.vA .mg { font: 11px/1.5 var(--mono); color: var(--ink-3); text-align: right; padding-top: 6px; display: flex; flex-direction: column; align-items: flex-end; gap: 1px; min-width: 0; }
+.vA .mg .ts { opacity: .8; }
+.vA .mg .lab { font-family: var(--sans); font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-3); }
+.vA .mg .lab.you { color: var(--ink-2); }
+.vA .bd { font-size: 14.5px; line-height: 1.68; color: var(--ink); min-width: 0; padding: 2px 0 10px; }
+.vA .bd.you { font-weight: 500; font-size: 15.5px; letter-spacing: -0.005em; padding-bottom: 14px; }
+.vA .bd code, .vA .mg code { font-family: var(--mono); font-size: 12.5px; color: var(--ink-2); background: var(--surface-2); padding: 1px 5px; border-radius: 3px; }
+.vA .mg code { font-size: 10.5px; padding: 0 3px; background: transparent; }
+/* A tool is a margin note: one line, a button; its detail opens in the body column as a quiet block. */
+.vA .mnote { display: flex; align-items: baseline; justify-content: flex-end; gap: 6px; border: 0; background: transparent; padding: 1px 0; font: 11px/1.5 var(--mono); color: var(--ink-3); text-align: right; max-width: 100%; min-width: 0; }
+.vA .mnote:hover { color: var(--ink); }
+.vA .mnote .nm { font-weight: 600; color: var(--ink-2); }
+.vA .mnote .ar { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.vA .mnote .rs { color: var(--ink-3); flex: none; }
+.vA .mnote .rs.ok { color: var(--pass); } .vA .mnote .rs.fail { color: var(--fail); }
+.vA .mnote .chev { width: 9px; height: 9px; align-self: center; }
+.vA .mgroup { display: flex; flex-direction: column; align-items: flex-end; gap: 0; padding-top: 7px; }
+.vA .quiet-blk { border: 1px solid var(--line); border-radius: var(--r); overflow: hidden; margin: 6px 0 12px; }
+.vA .quiet-blk + .quiet-blk { margin-top: -6px; }
+.vA .quiet-blk .out { font-size: 11.5px; }
+.vA .ask { grid-column: 2; border-left: 2px solid var(--sap); padding: 10px 16px 12px; margin: 6px 0 10px; display: flex; flex-direction: column; gap: 9px; background: var(--canvas-2); border-radius: 0 var(--r) var(--r) 0; }
+.vA .ask h4 { margin: 0; font-size: 14px; font-weight: 600; }
+.vA .ask h4 code { background: transparent; padding: 0; color: var(--ink); }
+.vA .end { grid-column: 1 / -1; display: flex; align-items: center; gap: 10px; padding-top: 10px; margin-top: 6px; border-top: 1px solid var(--line); font: 11.5px var(--mono); color: var(--ink-3); }
+.vA .foot { flex: none; border-top: 1px solid var(--line); padding: 7px 20px; display: flex; align-items: center; gap: 14px; font-size: 12px; color: var(--ink-3); background: var(--canvas); }
+.vA .foot .ro { font-size: 12px; }
+.vA .foot .cost { margin-left: auto; font-family: var(--mono); font-size: 11px; display: flex; gap: 12px; }
+.vA .foot .cost b { color: var(--ink-2); font-weight: 500; }
+
+/* ── Direction 2 · Timeline ───────────────────────────────────────────────── */
+.vB { flex: 1; min-height: 0; display: flex; flex-direction: column; font-size: 12.5px; }
+.vB .tl { flex: 1; min-height: 0; overflow: auto; padding: 10px 0 12px; }
+.vB .row { display: grid; grid-template-columns: 54px 22px minmax(0, 1fr); align-items: start; padding: 1px 14px 1px 6px; }
+.vB .ts { font: 10.5px/22px var(--mono); color: var(--ink-3); text-align: right; padding-right: 8px; }
+.vB .ic { width: 22px; height: 22px; display: grid; place-items: center; position: relative; align-self: stretch; }
+.vB .row:not(:last-child) .ic::before { content: ""; position: absolute; top: 12px; bottom: -14px; left: 50%; width: 1px; background: var(--line); }
+.vB .ic i { position: relative; z-index: 1; width: 8px; height: 8px; border-radius: 50%; background: var(--canvas); box-shadow: inset 0 0 0 1.5px var(--line-strong); }
+.vB .ic i[data-s="user"] { background: var(--ink); box-shadow: none; }
+.vB .ic i[data-s="agent"] { background: var(--branch); box-shadow: none; }
+.vB .ic i[data-s="ok"] { box-shadow: inset 0 0 0 1.5px var(--pass); }
+.vB .ic i[data-s="fail"] { background: var(--fail); box-shadow: none; }
+.vB .ic i[data-s="ask"] { background: var(--sap); box-shadow: none; }
+.vB .ic i[data-s="ask"]::after { content: ""; position: absolute; inset: -4px; border-radius: 50%; border: 1px solid var(--sap); animation: ping 1.8s var(--ease) infinite; }
+@keyframes ping { 0% { transform: scale(.6); opacity: .8; } 100% { transform: scale(1.6); opacity: 0; } }
+.vB .msg { padding: 2px 0 6px 8px; line-height: 1.5; font-size: 13px; }
+.vB .msg.user { background: var(--surface-2); border-radius: var(--r); padding: 6px 10px; margin: 0 0 4px 2px; font-weight: 500; }
+.vB .msg code, .vB .th code { font-family: var(--mono); font-size: 11.5px; }
+.vB .tb { border: 1px solid var(--line); border-radius: var(--r); background: var(--canvas); overflow: hidden; margin: 1px 0 3px 2px; }
+.vB .tb.fail { border-color: color-mix(in srgb, var(--fail) 45%, transparent); }
+.vB .tb.ask { border-color: color-mix(in srgb, var(--sap) 60%, transparent); box-shadow: 0 0 0 3px var(--sap-soft); }
+.vB .th { display: flex; align-items: center; gap: 8px; padding: 3px 8px; font: 12px/18px var(--mono); border: 0; width: 100%; background: transparent; text-align: left; color: var(--ink-2); min-width: 0; }
+.vB .th:hover { background: var(--canvas-2); }
+.vB .th .nm { color: var(--ink); font-weight: 600; flex: none; }
+.vB .th .ar { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.vB .th .st { margin-left: auto; font-size: 11px; flex: none; }
+.vB .th .st.ok { color: var(--pass); } .vB .th .st.fail { color: var(--fail); } .vB .th .st.wait { color: var(--sap); }
+.vB .files { display: flex; gap: 2px; padding: 0 6px; background: var(--canvas-2); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.vB .files span { font: 11px/26px var(--mono); padding: 0 8px; color: var(--ink-3); border-bottom: 2px solid transparent; margin-bottom: -1px; }
+.vB .files span.on { color: var(--ink); border-bottom-color: var(--ink); }
+.vB .tb .dh { border-top: 1px solid var(--line); }
+.vB .tb .dh:first-child { border-top: 0; }
+.vB .askb { padding: 10px 12px 12px; display: flex; flex-direction: column; gap: 9px; border-top: 1px solid var(--line); font-family: var(--sans); }
+.vB .askb .why { font-size: 12px; color: var(--ink-2); }
+.vB .status { height: 26px; flex: none; display: flex; align-items: center; gap: 0; padding: 0 6px 0 10px; border-top: 1px solid var(--line); font: 11px var(--mono); color: var(--ink-3); background: var(--canvas-2); white-space: nowrap; }
+.vB .status > span { padding: 0 8px; display: inline-flex; align-items: center; gap: 6px; }
+.vB .status > span + span { border-left: 1px solid var(--line); }
+.vB .status b { color: var(--ink-2); font-weight: 500; }
+.vB .status .ro { font-size: 11px; }
+
+/* ── Direction 3 · Split ──────────────────────────────────────────────────── */
+.vC { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 420px; }
+.vC .conv { display: flex; flex-direction: column; min-height: 0; border-right: 1px solid var(--line); }
+.vC .scroll { flex: 1; min-height: 0; overflow: auto; padding: 16px 18px 12px; display: flex; flex-direction: column; gap: 8px; }
+.vC .bub { line-height: 1.55; font-size: 13.5px; }
+.vC .bub.user { align-self: flex-end; max-width: 82%; background: var(--surface-2); padding: 8px 12px; border-radius: 8px 8px 2px 8px; font-weight: 500; }
+.vC .bub.agent { max-width: 94%; display: flex; gap: 10px; }
+.vC .bub.agent .av { width: 18px; height: 18px; border-radius: 50%; background: var(--branch-soft); color: var(--branch); display: grid; place-items: center; font: 600 9px var(--mono); flex: none; margin-top: 3px; }
+.vC .bub code, .vC .tcall code { font-family: var(--mono); font-size: 12px; }
+.vC .tgroup { display: flex; flex-direction: column; gap: 2px; padding-left: 28px; }
+.vC .tcall { display: flex; align-items: center; gap: 8px; font: 12px/18px var(--mono); color: var(--ink-2); padding: 3px 8px; border-radius: var(--r); border: 1px solid transparent; background: transparent; text-align: left; width: 100%; min-width: 0; }
+.vC .tcall:hover { border-color: var(--line); background: var(--canvas-2); }
+.vC .tcall.sel { border-color: color-mix(in srgb, var(--branch) 55%, transparent); background: var(--branch-soft); color: var(--ink); }
+.vC .tcall .nm { font-weight: 600; color: var(--ink); flex: none; }
+.vC .tcall .ar { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.vC .tcall .rs { margin-left: auto; font-size: 11px; flex: none; }
+.vC .tcall .rs.ok { color: var(--pass); } .vC .tcall .rs.fail { color: var(--fail); }
+.vC .tcall .go { color: var(--ink-3); font-size: 11px; flex: none; }
+.vC .tcall.sel .go { color: var(--branch); }
+.vC .inl { margin: 2px 0 4px 28px; border: 1px solid color-mix(in srgb, var(--fail) 40%, transparent); border-radius: var(--r); overflow: hidden; }
+.vC .inl .ih { display: flex; align-items: center; gap: 8px; padding: 4px 10px; font: 11px var(--mono); color: var(--fail); background: var(--fail-soft); }
+.vC .pin { flex: none; border-top: 1px solid var(--line); padding: 12px 18px 12px; background: var(--canvas-2); display: flex; flex-direction: column; gap: 8px; }
+.vC .pin .ph { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; }
+.vC .pin .ph .dot { color: var(--sap); }
+.vC .pin .ph .t { margin-left: auto; font: 11px var(--mono); color: var(--ink-3); font-weight: 400; }
+.vC .rof { flex: none; border-top: 1px solid var(--line); padding: 6px 18px; display: flex; align-items: center; gap: 12px; }
+.vC .panel { display: flex; flex-direction: column; min-height: 0; background: var(--canvas-2); }
+.vC .ptabs { display: flex; gap: 2px; padding: 0 8px; height: 32px; align-items: center; border-bottom: 1px solid var(--line); flex: none; }
+.vC .ptab { border: 0; background: transparent; height: 32px; padding: 0 9px; font-size: 12px; color: var(--ink-3); border-bottom: 2px solid transparent; margin-bottom: -1px; display: inline-flex; gap: 6px; align-items: center; }
+.vC .ptab[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--ink); }
+.vC .ptab i { font-style: normal; font: 10.5px var(--mono); color: var(--ink-3); }
+.vC .ptab i.bad { color: var(--fail); }
+.vC .flist { padding: 8px 8px 6px; display: flex; flex-direction: column; gap: 1px; flex: none; }
+.vC .frow { display: flex; gap: 8px; align-items: center; padding: 4px 8px; font: 11.5px var(--mono); border-radius: var(--r); border: 0; background: transparent; text-align: left; color: var(--ink-2); width: 100%; }
+.vC .frow:hover { background: var(--surface-2); }
+.vC .frow.sel { background: var(--branch-soft); color: var(--ink); }
+.vC .frow .pm { margin-left: auto; display: flex; gap: 6px; font-size: 11px; }
+.vC .frow .ed { font-size: 10.5px; color: var(--ink-3); }
+.vC .pdiff { flex: 1; min-height: 0; overflow: auto; border-top: 1px solid var(--line); background: var(--canvas); }
+.vC .pdiff .dh { position: sticky; top: 0; z-index: 1; }
+.vC .pdiff .dl { font-size: 11px; }
+.vC .pdiff .dl .g { width: 26px; }
+.vC .pdiff .dh .ed { color: var(--ink-3); font-weight: 400; }
+.vC .pdiff .dh.sel { box-shadow: inset 2px 0 0 var(--branch); background: var(--branch-soft); }
+.vC .pfoot { flex: none; border-top: 1px solid var(--line); padding: 7px 12px; font: 11px var(--mono); color: var(--ink-3); display: flex; justify-content: space-between; gap: 10px; }
+.vC .pfoot b { color: var(--ink-2); font-weight: 500; }
+
+/* ── Direction 4 · Story ──────────────────────────────────────────────────── */
+.vD { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.vD .scroll { flex: 1; min-height: 0; overflow: auto; padding: 18px 22px 14px; display: flex; flex-direction: column; gap: 12px; }
+.vD .scroll > *, .vC .scroll > *, .vA .doc > * { flex: none; }
+.vD .asked { display: flex; gap: 14px; align-items: baseline; padding: 2px 4px 6px; }
+.vD .asked .lab { font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-3); flex: none; width: 92px; text-align: right; }
+.vD .asked .q { font-size: 15px; font-weight: 500; line-height: 1.5; letter-spacing: -0.005em; }
+.vD .asked .q code { font-family: var(--mono); font-size: 12.5px; }
+.vD .card { border: 1px solid var(--line); border-radius: 8px; background: var(--canvas); box-shadow: var(--card-shadow); overflow: hidden; }
+.vD .card.ask { border-color: color-mix(in srgb, var(--sap) 55%, transparent); box-shadow: 0 0 0 3px var(--sap-soft), var(--card-shadow); }
+.vD .ch { display: flex; align-items: center; gap: 10px; padding: 9px 14px; border-bottom: 1px solid var(--line); min-width: 0; }
+.vD .ch .n { font: 11px var(--mono); color: var(--ink-3); width: 46px; flex: none; }
+.vD .ch .o { font-weight: 600; font-size: 13.5px; letter-spacing: -0.005em; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vD .ch .sp { flex: 1; }
+.vD .pill { display: inline-flex; align-items: center; gap: 6px; font-size: 11.5px; font-weight: 500; white-space: nowrap; color: var(--ink-3); }
+.vD .pill::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.vD .pill[data-t="ok"] { color: var(--pass); } .vD .pill[data-t="fail"] { color: var(--fail); } .vD .pill[data-t="wait"] { color: var(--sap); } .vD .pill[data-t="info"] { color: var(--branch); }
+.vD .ch .c { font: 11px var(--mono); color: var(--ink-3); flex: none; width: 48px; text-align: right; }
+.vD .cb { padding: 11px 14px 12px; display: flex; flex-direction: column; gap: 8px; }
+.vD .sum { font-size: 13.5px; line-height: 1.55; }
+.vD .sum code, .vD .steps code { font-family: var(--mono); font-size: 12px; }
+.vD .steps { display: flex; flex-direction: column; gap: 1px; margin-top: 2px; }
+.vD .step { display: flex; align-items: center; gap: 8px; padding: 3px 8px; border-radius: var(--r); font: 12px/18px var(--mono); color: var(--ink-2); border: 0; background: transparent; text-align: left; width: 100%; min-width: 0; }
+.vD .step:hover { background: var(--canvas-2); }
+.vD .step .nm { color: var(--ink); font-weight: 600; flex: none; }
+.vD .step .ar { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.vD .step .rs { margin-left: auto; font-size: 11px; flex: none; color: var(--ink-3); }
+.vD .step .rs.ok { color: var(--pass); } .vD .step .rs.fail { color: var(--fail); }
+.vD .det { margin: 2px 0 6px 0; border: 1px solid var(--line); border-radius: var(--r); overflow: hidden; }
+.vD .det .dh + .dl { border-top: 0; }
+.vD .ask-b { display: flex; flex-direction: column; gap: 9px; }
+.vD .foot { flex: none; border-top: 1px solid var(--line); padding: 7px 18px; display: flex; align-items: center; gap: 14px; background: var(--canvas); }
+.vD .foot .cost { margin-left: auto; font: 11px var(--mono); color: var(--ink-3); display: flex; gap: 12px; }
+.vD .foot .cost b { color: var(--ink-2); font-weight: 500; }
+
+/* ── The Terminal tab, the same session in the pane (shared) ─────────────── */
+.vT { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 12px 16px 16px; gap: 10px; }
+.vT .hint { display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--ink-2); padding: 0 2px; }
+.vT .hint .live { width: 7px; height: 7px; border-radius: 50%; background: var(--branch); }
+.shell { background: var(--shell-bg); color: var(--shell-ink); border-radius: var(--r); font-family: var(--mono); font-size: 12.5px; line-height: 1.6; }
+.term { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+.term .tabs-s { display: flex; gap: 2px; background: var(--shell-bg-2); padding: 4px 6px 0; border-bottom: 1px solid var(--shell-line); }
+.term .tabs-s span { padding: 3px 12px; font-size: 11.5px; color: var(--shell-dim); border-radius: 3px 3px 0 0; }
+.term .tabs-s span.on { background: var(--shell-bg); color: var(--shell-ink); }
+.term pre { margin: 0; padding: 12px 16px; white-space: pre-wrap; font: inherit; flex: 1; overflow: hidden; }
+.term .a { color: var(--shell-acc); } .term .d { color: var(--shell-dim); } .term .bd { color: var(--shell-bad); } .term .w { color: var(--sap); }
+.term .cur { display: inline-block; width: 7px; height: 14px; background: #a4aba7; vertical-align: -2px; animation: blink 1.1s steps(1) infinite; }
+@keyframes blink { 50% { opacity: 0; } }
+
+/* ── The checklist under the frame ────────────────────────────────────────── */
+.req { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 8px; }
+.req th, .req td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.req th { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .06em; color: var(--ink-3); }
+.req td:first-child { color: var(--ink); font-weight: 500; white-space: nowrap; }
+.req td { color: var(--ink-2); }
+.req tr.hi td { background: var(--branch-soft); }
+.note { border-left: 2px solid var(--line-strong); padding: 6px 14px; color: var(--ink-2); font-size: 13px; margin: 18px 0 0; max-width: 820px; }
+.note b { color: var(--ink); }
+
+@media (max-width: 1100px) { .tabs { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 720px) { .tabs { grid-template-columns: 1fr; } .page, .topbar { padding-left: 16px; padding-right: 16px; } .topbar nav { display: none; } }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <span class="logo" style="font-size:15px"><svg class="logo-mark" viewBox="1.2 5.6 29.6 20.8" aria-hidden="true"><g fill="none" stroke-width="3" stroke-linecap="round"><path class="lm-mid" d="M9 16 H23"/><path class="lm-top" d="M8 16 C11 16 11.5 7.5 16 7.5 C20.5 7.5 21 16 24 16"/><path class="lm-bot" d="M8 16 C11 16 11.5 24.5 16 24.5 C20.5 24.5 21 16 24 16"/><path class="lm-in" stroke-width="4.8" d="M3.8 16 H9"/><path class="lm-bot" stroke-width="4.8" d="M23 16 H28.2"/></g></svg><span class="logo-word">brindle</span></span>
+  <span class="eyebrow">design · conversation view</span>
+  <nav><a href="#directions">Directions</a><a href="#frame">In the app</a><a href="#checklist">Checklist</a></nav>
+  <span class="flex1"></span>
+  <div class="seg" role="group" aria-label="Theme"><button data-theme-set="system" aria-pressed="true">System</button><button data-theme-set="light" aria-pressed="false">Light</button><button data-theme-set="dark" aria-pressed="false">Dark</button><button data-theme-set="both" aria-pressed="false">Both</button></div>
+</header>
+
+<main class="page">
+  <section class="sec" id="directions">
+    <div class="eyebrow">conversation view · 4 directions</div>
+    <h1>The same session, read four ways</h1>
+    <p class="lede">A read-only <b>Conversation</b> tab beside the <b>Terminal</b> tab, rendering the CLI's own transcript as messages, tool calls, diffs, approval cards and cost (the plan's option A in <span class="mono">design/api-key-ui-plan.html</span>). Every direction below shows one real session: a bugfix with two edits, a test run that fails, a second edit, the run that passes, and a push held by a rule. Each shows a collapsed and an expanded tool call, a two-file diff, the failed command, the pending Allow/Deny card, the cost, and how the tab relates to the Terminal tab. Use <span class="mono">1–4</span> or the cards; <span class="mono">T</span> flips to the Terminal tab and back. Tool blocks open and close on click.</p>
+    <div class="tabs" role="tablist" aria-label="Conversation view directions" id="dir-tabs"></div>
+    <div class="optnote" id="dir-note"></div>
+  </section>
+
+  <section class="sec" id="frame" style="padding-top:10px">
+    <div class="ld-ctrl">
+      <label>Tab <span class="seg" role="group" aria-label="View tab"><button data-view="conv" aria-pressed="true">Conversation</button><button data-view="term" aria-pressed="false">Terminal</button></span></label>
+      <span class="t-3" style="font-size:12px">The frame is design-v3's; buttons wear the Tinted scheme the app ships. "Both" in the theme switch stacks a dark and a light window.</span>
+    </div>
+    <div class="framewrap" id="frames"></div>
+  </section>
+
+  <section class="sec" id="checklist" style="padding-top:12px">
+    <h2 class="sub">Where each direction puts the required pieces <small>the row for the chosen direction is highlighted</small></h2>
+    <table class="req" id="req"></table>
+    <div class="note"><b>Names and data.</b> The tab is called Conversation, never after the CLI, and it doesn't copy the TUI's look (design/chat-view-tos.html, flag 3). The header says the session is signed in with an API key and nothing more: no variable names, no key fragments, no account identifiers. Tool output passes through the daemon's mask before it reaches the view.</div>
+  </section>
+</main>
+
+<script>
+const $ = (s, el = document) => el.querySelector(s);
+const $$ = (s, el = document) => [...el.querySelectorAll(s)];
+const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+const LOCK = '<svg class="lock" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.3" aria-hidden="true"><rect x="2" y="5.2" width="8" height="5.6" rx="1.2"/><path d="M4 5V3.6a2 2 0 0 1 4 0V5"/></svg>';
+const CHEV = '<svg class="chev" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="M3.5 2l3 3-3 3"/></svg>';
+
+/* ── One session, shared by every direction ─────────────────────────────────
+   A bugfix on pawdelta-web: the login redirect drops the query string. Two edits, a failing run,
+   a third edit, a passing run, a commit, and a push held by the rule "push asks first". */
+const S = {
+  id: "a3f9c21e", repo: "pawdelta-web", branch: "fix/login-redirect", model: "sonnet", login: "API key",
+  cost: { session: 0.71, budget: 10, tin: "61.4k", tout: "4.8k", ctx: 29 },
+  held: "0:42",
+  turns: [
+    { t: "14:02", cost: 0.09, outcome: "Found the cause", tone: "info",
+      user: "After signing in, <code>/login?next=/billing%3Ftab%3Dinvoices</code> lands on <code>/billing</code> without the tab. Fix it and add a regression test.",
+      steps: [
+        { k: "say", id: "s1", text: "I'll find where the redirect target is built after sign-in." },
+        { k: "tool", id: "grep", name: "Grep", arg: "next_url", res: "3 matches · 2 files", ok: true,
+          out: [["", "auth/redirect.py:38:def next_url(request):"], ["", "auth/views.py:71:    return redirect(next_url(request))"], ["", "tests/test_redirect.py:9:from auth.redirect import next_url"]] },
+        { k: "tool", id: "rd1", name: "Read", arg: "auth/redirect.py", res: "52 lines", ok: true },
+        { k: "tool", id: "rd2", name: "Read", arg: "tests/test_redirect.py", res: "38 lines", ok: true },
+        { k: "say", id: "s2", text: "The target is built in <code>auth/redirect.py</code>: <code>next_url</code> keeps only <code>urlparse(target).path</code>, so the query is gone before the safety check runs. I'll return the whole target once it passes <code>is_safe_next</code>, and add a test with a query string." },
+      ] },
+    { t: "14:03", cost: 0.31, outcome: "Edited two files · the new test fails", tone: "fail",
+      steps: [
+        { k: "edit", id: "e1", file: "auth/redirect.py", o: 38, n: 38, open: true, lines: [
+          ["c", "def next_url(request):"], ["c", '    target = request.GET.get("next", "")'],
+          ["d", "    path = urlparse(target).path"], ["d", '    return path if is_safe_next(path, request) else "/"'],
+          ["a", "    if not is_safe_next(target, request):"], ["a", '        return "/"'], ["a", "    return target"] ] },
+        { k: "edit", id: "e2", file: "tests/test_redirect.py", o: 36, n: 36, lines: [
+          ["c", '    assert r["Location"] == "/"'], ["a", ""], ["a", ""],
+          ["a", "def test_next_keeps_query_string(client, user):"], ["a", "    client.force_login(user)"],
+          ["a", '    r = client.get("/login/?next=/billing%3Ftab%3Dinvoices")'], ["a", "    assert r.status_code == 302"],
+          ["a", '    assert r["Location"] == "/billing?tab=invoices"'] ] },
+        { k: "run", id: "r1", cmd: "uv run pytest tests/test_redirect.py -q", exit: 1, dur: "1.12s", res: "1 failed · 3 passed", open: true, out: [
+          ["d", "...F                                                       [100%]"],
+          ["bad", "FAILED tests/test_redirect.py::test_next_keeps_query_string"],
+          ["", "    assert r[\"Location\"] == \"/billing?tab=invoices\""],
+          ["bad", "E   AssertionError: assert '/' == '/billing?tab=invoices'"],
+          ["d", "1 failed, 3 passed in 1.12s"], ["bad", "exit 1"] ] },
+        { k: "say", id: "s3", text: "Still dropped, one layer down: <code>is_safe_next</code> refuses any target containing <code>?</code>, an old guard against <code>//evil.example?x</code>. Replacing the substring check with a parse: no scheme, no host, a path that starts with a single slash. The query stays." },
+      ] },
+    { t: "14:05", cost: 0.24, outcome: "Fixed the guard · 4 tests pass", tone: "ok",
+      steps: [
+        { k: "edit", id: "e3", file: "auth/redirect.py", o: 22, n: 22, lines: [
+          ["c", "def is_safe_next(target, request):"],
+          ["d", '    if not target.startswith("/") or "?" in target or target.startswith("//"):'], ["d", "        return False"], ["d", "    return True"],
+          ["a", "    parts = urlparse(target)"], ["a", "    if parts.scheme or parts.netloc:"], ["a", "        return False"],
+          ["a", '    return parts.path.startswith("/") and not parts.path.startswith("//")'] ] },
+        { k: "run", id: "r2", cmd: "uv run pytest tests/test_redirect.py -q", exit: 0, dur: "0.94s", res: "4 passed", out: [["d", "....                                                       [100%]"], ["ok", "4 passed in 0.94s"]] },
+        { k: "say", id: "s4", text: "Fixed. The redirect keeps the full <code>next</code> target, and the guard checks host and scheme instead of looking for a question mark. Committing on <code>fix/login-redirect</code> and pushing so the PR can open." },
+      ] },
+    { t: "14:06", cost: 0.07, outcome: "Waiting for you: a push", tone: "wait",
+      steps: [
+        { k: "run", id: "r3", cmd: 'git commit -am "fix: keep the query string on the login redirect"', exit: 0, dur: "0.2s", res: "7c2e41a", out: [["", "[fix/login-redirect 7c2e41a] fix: keep the query string on the login redirect"], ["d", " 2 files changed, 12 insertions(+), 5 deletions(-)"]] },
+        { k: "ask", id: "ask", tool: "Bash", cmd: "git push -u origin fix/login-redirect", rule: "push asks first" },
+      ] },
+  ],
+};
+const steps = () => S.turns.flatMap((t) => t.steps);
+const step = (id) => steps().find((s) => s.id === id);
+const counts = (ed) => ({ a: ed.lines.filter((l) => l[0] === "a").length, d: ed.lines.filter((l) => l[0] === "d").length });
+const EDITS = steps().filter((s) => s.k === "edit");
+const FILES = [...new Set(EDITS.map((e) => e.file))].map((f) => { const es = EDITS.filter((e) => e.file === f); return { file: f, edits: es, a: es.reduce((n, e) => n + counts(e).a, 0), d: es.reduce((n, e) => n + counts(e).d, 0) }; });
+const TOTAL = { a: FILES.reduce((n, f) => n + f.a, 0), d: FILES.reduce((n, f) => n + f.d, 0) };
+
+/* ── Page state ─────────────────────────────────────────────────────────── */
+const ST = { dir: 2, view: "conv", theme: "system", open: {}, selFile: 0, ptab: "diff" };
+const hash = new URLSearchParams(location.hash.slice(1));
+if (hash.get("d")) ST.dir = +hash.get("d");
+if (hash.get("t")) ST.theme = hash.get("t");
+if (hash.get("v")) ST.view = hash.get("v");
+const isOpen = (dir, s) => { const k = `${dir}:${s.id}`; return k in ST.open ? ST.open[k] : !!s.open; };
+
+/* ── Shared pieces ──────────────────────────────────────────────────────── */
+const pm = (a, d) => `<span class="pm"><b class="plus">+${a}</b><b class="minus">−${d}</b></span>`;
+function diffLines(ed, gutter) {
+  let o = ed.o, n = ed.n;
+  return ed.lines.map(([t, s]) => {
+    const on = t === "a" ? "" : o++, nn = t === "d" ? "" : n++;
+    return `<div class="dl ${t}">${gutter ? `<span class="g">${on}</span><span class="g">${nn}</span>` : ""}<span class="sg">${t === "a" ? "+" : t === "d" ? "−" : ""}</span><span class="tx">${esc(s)}</span></div>`;
+  }).join("");
+}
+const hunk = (ed) => { const c = counts(ed); const ol = ed.lines.filter((l) => l[0] !== "a").length, nl = ed.lines.filter((l) => l[0] !== "d").length; return `@@ -${ed.o},${ol} +${ed.n},${nl} @@`; };
+function diffBlock(ed, { gutter = true, label = "" } = {}) {
+  const c = counts(ed);
+  return `<div class="dh"><span class="fp">${ed.file}</span><span class="hk">${hunk(ed)}</span>${label ? `<span class="ed">${label}</span>` : ""}${pm(c.a, c.d)}</div>${diffLines(ed, gutter)}`;
+}
+/* The shell prompt line is shown only for a step that ran a command; a Grep or Read has none. */
+const outBlock = (run, prompt = true) => `<div class="out">${prompt && run.cmd ? `<div><span class="p">$ </span>${esc(run.cmd)}</div>` : ""}${run.out.map(([c, t]) => `<div class="${c}">${esc(t)}</div>`).join("")}</div>`;
+const askCmd = (a) => `<div class="ask-cmd"><span class="p">$ </span>${esc(a.cmd)}</div>`;
+const askActs = (size = "") => `<div class="ask-acts"><button class="b primary ${size}" type="button">Allow once</button><button class="b secondary ${size}" type="button">Deny</button><button class="b quiet ${size}" type="button">Allow pushes on this branch</button><span class="sp"></span><span class="ask-note">held <b>${S.held}</b></span></div>`;
+const askWhy = (a) => `Held by your rule <b>“${a.rule}”</b>. Answering here goes through brindle's permission hook, the same path as the Inbox. Nothing else in this tab writes to the session.`;
+const roCue = (btn = true) => `<span class="ro">${LOCK}<b>Read-only.</b> The agent runs in the Terminal tab.${btn ? ` <button class="b quiet sm" type="button" data-goto="term">Open terminal</button>` : ""}</span>`;
+const money = (n) => `$${n.toFixed(2)}`;
+
+/* ── Direction 1 · Document ─────────────────────────────────────────────── */
+function renderA() {
+  const rows = [];
+  S.turns.forEach((turn, ti) => {
+    if (turn.user) rows.push(`<div class="mg"><span class="lab you">You</span><span class="ts">${turn.t}</span></div><div class="bd you">${turn.user}</div>`);
+    let first = true;
+    turn.steps.forEach((s) => {
+      if (s.k === "say") {
+        rows.push(`<div class="mg">${first ? `<span class="lab">Agent</span><span class="ts">${turn.t}</span>` : ""}</div><div class="bd">${s.text}</div>`);
+        first = false;
+      } else if (s.k === "ask") {
+        rows.push(`<div class="mg"><span class="lab" style="color:var(--sap)">Needs you</span><span class="ts">${turn.t} · ${S.held}</span></div>
+          <div class="ask"><h4>Allow <code>${s.tool}</code> to push the branch?</h4>${askCmd(s)}<div class="ask-note">${askWhy(s)}</div>${askActs()}</div>`);
+      } else {
+        const open = isOpen(1, s);
+        const ok = s.k === "run" ? s.exit === 0 : true;
+        const label = s.k === "edit" ? `<span class="nm">Edit</span><span class="ar">${s.file}</span>` : s.k === "run" ? `<span class="nm">Run</span><span class="ar">${esc(s.cmd.replace(/^uv run /, ""))}</span>` : `<span class="nm">${s.name}</span><span class="ar">${esc(s.arg)}</span>`;
+        const rs = s.k === "edit" ? `<span class="rs">${(() => { const c = counts(s); return `+${c.a} −${c.d}`; })()}</span>` : `<span class="rs ${ok ? "ok" : "fail"}">${s.k === "run" ? (ok ? "✓ " + s.res : "✗ exit " + s.exit) : s.res}</span>`;
+        const hasBody = s.k === "edit" || s.out;
+        rows.push(`<div class="mg"><button class="mnote" type="button" data-tog="1:${s.id}" aria-expanded="${open}" ${hasBody ? "" : "disabled"}>${label}${rs}${hasBody ? CHEV : ""}</button></div>
+          <div class="bd" style="padding:0">${hasBody ? `<div class="clp ${open ? "open" : ""}" data-clp="1:${s.id}"><div><div class="quiet-blk">${s.k === "edit" ? diffBlock(s, { gutter: false }) : outBlock(s)}</div></div></div>` : ""}</div>`);
+      }
+    });
+  });
+  rows.push(`<div class="end">${S.turns.length} turns · ${FILES.length} files changed ${pm(TOTAL.a, TOTAL.d)} · ${money(S.cost.session)} so far</div>`);
+  return `<div class="vA"><div class="scroll"><div class="doc">${rows.join("")}</div></div>
+    <div class="foot">${roCue()}<span class="cost"><span><b>${money(S.cost.session)}</b> of $${S.cost.budget}</span><span>${S.cost.tin} in · ${S.cost.tout} out</span><span>context <b>${S.cost.ctx}%</b></span></span></div></div>`;
+}
+
+/* ── Direction 2 · Timeline ─────────────────────────────────────────────── */
+function renderB() {
+  const row = (ts, s, body) => `<div class="row"><div class="ts">${ts}</div><div class="ic"><i data-s="${s}"></i></div><div>${body}</div></div>`;
+  const rows = [];
+  S.turns.forEach((turn) => {
+    let ts = turn.t;
+    if (turn.user) { rows.push(row(ts, "user", `<div class="msg user">${turn.user}</div>`)); ts = ""; }
+    turn.steps.forEach((s) => {
+      if (s.k === "say") { rows.push(row(ts, "agent", `<div class="msg">${s.text}</div>`)); }
+      else if (s.k === "ask") {
+        rows.push(row(ts, "ask", `<div class="tb ask"><div class="th" style="cursor:default"><span class="nm">${s.tool}</span><span class="ar">${esc(s.cmd)}</span><span class="st wait">● waiting for you · ${S.held}</span></div>
+          <div class="askb">${askCmd(s)}<div class="why">${askWhy(s)}</div>${askActs("sm")}</div></div>`));
+      } else {
+        const open = isOpen(2, s), ok = s.k === "run" ? s.exit === 0 : true;
+        const nm = s.k === "edit" ? "Edit" : s.k === "run" ? "Bash" : s.name;
+        const ar = s.k === "edit" ? s.file : s.k === "run" ? esc(s.cmd) : esc(s.arg);
+        const st = s.k === "edit" ? pm(counts(s).a, counts(s).d) : `<span class="st ${ok ? "ok" : "fail"}">${s.k === "run" ? (ok ? `✓ ${s.res} · ${s.dur}` : `✗ exit ${s.exit} · ${s.res} · ${s.dur}`) : s.res}</span>`;
+        const hasBody = s.k === "edit" || s.out;
+        rows.push(row(ts, ok ? "ok" : "fail", `<div class="tb ${ok ? "" : "fail"}"><button class="th" type="button" data-tog="2:${s.id}" aria-expanded="${open}" ${hasBody ? "" : "disabled"}>${hasBody ? CHEV : '<span style="width:10px"></span>'}<span class="nm">${nm}</span><span class="ar">${ar}</span>${st}</button>
+          ${hasBody ? `<div class="clp ${open ? "open" : ""}" data-clp="2:${s.id}"><div>${s.k === "edit" ? `<div style="border-top:1px solid var(--line)">${diffBlock(s)}</div>` : outBlock(s, false)}</div></div>` : ""}</div>`));
+      }
+      ts = "";
+    });
+  });
+  return `<div class="vB"><div class="tl">${rows.join("")}</div>
+    <div class="status"><span>${roCue(false)}</span><span>${LOCK} <button class="b quiet" type="button" data-goto="term" style="height:20px;padding:0 6px;font:11px var(--mono)">Terminal ⌘2</button></span><span class="flex1"></span><span><b>${money(S.cost.session)}</b> / $${S.cost.budget}</span><span>${S.cost.tin} in · ${S.cost.tout} out</span><span>ctx <b>${S.cost.ctx}%</b></span><span>${FILES.length} files ${pm(TOTAL.a, TOTAL.d)}</span><span>${S.model} · ${S.login}</span></div></div>`;
+}
+
+/* ── Direction 3 · Split ────────────────────────────────────────────────── */
+function renderC() {
+  const sel = FILES[ST.selFile];
+  const items = [];
+  S.turns.forEach((turn) => {
+    if (turn.user) items.push(`<div class="bub user">${turn.user}</div>`);
+    let group = [];
+    const flush = () => { if (group.length) { items.push(`<div class="tgroup">${group.join("")}</div>`); group = []; } };
+    turn.steps.forEach((s) => {
+      if (s.k === "say") { flush(); items.push(`<div class="bub agent"><span class="av">AI</span><div>${s.text}</div></div>`); }
+      else if (s.k === "ask") { flush(); }
+      else if (s.k === "edit") {
+        const fi = FILES.findIndex((f) => f.file === s.file), c = counts(s);
+        group.push(`<button class="tcall ${fi === ST.selFile ? "sel" : ""}" type="button" data-file="${fi}"><span class="nm">Edit</span><span class="ar">${s.file}</span><span class="rs">${pm(c.a, c.d)}</span><span class="go">diff →</span></button>`);
+      } else if (s.k === "run") {
+        const ok = s.exit === 0;
+        /* A passing run goes to the Output pane (selected there); the failed one opens inline as well. */
+        const selRun = ST.ptab === "out" && ST.selRun === s.id;
+        group.push(`<button class="tcall ${selRun ? "sel" : ""}" type="button" ${ok ? `data-run="${s.id}"` : `data-tog="3:${s.id}" aria-expanded="${isOpen(3, s)}"`}><span class="nm">Bash</span><span class="ar">${esc(s.cmd)}</span><span class="rs ${ok ? "ok" : "fail"}">${ok ? "✓ " + s.res : "✗ exit " + s.exit + " · " + s.res}</span><span class="go">${ok ? "output →" : "output ↓"}</span></button>`);
+        if (!ok) group.push(`<div class="clp ${isOpen(3, s) ? "open" : ""}" data-clp="3:${s.id}" style="margin-left:-28px"><div><div class="inl"><div class="ih"><span class="dot"></span>failed · exit ${s.exit} · ${s.dur}<span class="flex1"></span><button class="b quiet" type="button" data-run="${s.id}" style="height:18px;padding:0 4px;font:11px var(--mono);color:var(--ink-3)">also in the Output pane →</button></div>${outBlock(s)}</div></div></div>`);
+      } else {
+        group.push(`<button class="tcall" type="button" data-tog="3:${s.id}" aria-expanded="${isOpen(3, s)}" ${s.out ? "" : "disabled"}><span class="nm">${s.name}</span><span class="ar">${esc(s.arg)}</span><span class="rs ok">${s.res}</span>${s.out ? CHEV : ""}</button>`);
+        if (s.out) group.push(`<div class="clp ${isOpen(3, s) ? "open" : ""}" data-clp="3:${s.id}" style="margin-left:-28px"><div><div class="inl" style="border-color:var(--line)">${outBlock(s)}</div></div></div>`);
+      }
+    });
+    flush();
+  });
+  const ask = step("ask");
+  const runs = steps().filter((s) => s.k === "run");
+  const failed = runs.filter((r) => r.exit !== 0).length;
+  const panelBody = ST.ptab === "diff"
+    ? `<div class="flist">${FILES.map((f, i) => `<button class="frow ${i === ST.selFile ? "sel" : ""}" type="button" data-file="${i}"><span>${f.file}</span><span class="ed">${f.edits.length} edit${f.edits.length > 1 ? "s" : ""}</span>${pm(f.a, f.d)}</button>`).join("")}</div>
+       <div class="pdiff">${sel.edits.map((e, i) => diffBlock(e, { label: `edit ${EDITS.indexOf(e) + 1} · ${S.turns.find((t) => t.steps.includes(e)).t}` })).join("")}</div>`
+    : `<div class="pdiff" style="border-top:0">${runs.map((r) => `<div class="dh ${ST.selRun === r.id ? "sel" : ""}" data-runout="${r.id}"><span class="fp">${esc(r.cmd)}</span><span class="pm"><b class="${r.exit ? "t-fail" : "t-pass"}">${r.exit ? "✗ exit " + r.exit : "✓ " + r.res}</b></span></div>${outBlock(r, false)}`).join("")}</div>`;
+  return `<div class="vC">
+    <div class="conv">
+      <div class="scroll">${items.join("")}</div>
+      <div class="pin"><div class="ph"><span class="dot"></span>Allow <span class="mono">${ask.tool}</span> to push the branch?<span class="t">held ${S.held}</span></div>${askCmd(ask)}<div class="ask-note">${askWhy(ask)}</div>${askActs()}</div>
+      <div class="rof">${roCue()}</div>
+    </div>
+    <div class="panel">
+      <div class="ptabs"><button class="ptab" type="button" role="tab" aria-selected="${ST.ptab === "diff"}" data-ptab="diff">Changes <i>${FILES.length} files ${pm(TOTAL.a, TOTAL.d)}</i></button><button class="ptab" type="button" role="tab" aria-selected="${ST.ptab === "out"}" data-ptab="out">Output <i class="${failed ? "bad" : ""}">${runs.length} runs · ${failed} failed</i></button></div>
+      ${panelBody}
+      <div class="pfoot"><span><b>${money(S.cost.session)}</b> of $${S.cost.budget} · ctx <b>${S.cost.ctx}%</b></span><span>${S.model} · ${S.login}</span></div>
+    </div></div>`;
+}
+
+/* ── Direction 4 · Story ────────────────────────────────────────────────── */
+function renderD() {
+  const cards = [];
+  const first = S.turns[0];
+  cards.push(`<div class="asked"><span class="lab">You asked</span><div class="q">${first.user}</div></div>`);
+  S.turns.forEach((turn, i) => {
+    const says = turn.steps.filter((s) => s.k === "say");
+    const tools = turn.steps.filter((s) => s.k !== "say" && s.k !== "ask");
+    const ask = turn.steps.find((s) => s.k === "ask");
+    const edits = tools.filter((s) => s.k === "edit");
+    const sum = says.length ? says[says.length - 1].text : "";
+    const stepRows = tools.map((s) => {
+      const open = isOpen(4, s), ok = s.k === "run" ? s.exit === 0 : true, hasBody = s.k === "edit" || s.out;
+      const nm = s.k === "edit" ? "Edit" : s.k === "run" ? "Bash" : s.name;
+      const ar = s.k === "edit" ? s.file : s.k === "run" ? esc(s.cmd) : esc(s.arg);
+      const rs = s.k === "edit" ? pm(counts(s).a, counts(s).d) : `<span class="rs ${ok ? "ok" : "fail"}">${s.k === "run" ? (ok ? "✓ " + s.res : "✗ exit " + s.exit + " · " + s.res) : s.res}</span>`;
+      return `<button class="step" type="button" data-tog="4:${s.id}" aria-expanded="${open}" ${hasBody ? "" : "disabled"}>${hasBody ? CHEV : '<span style="width:10px"></span>'}<span class="nm">${nm}</span><span class="ar">${ar}</span>${s.k === "edit" ? `<span class="rs">${rs}</span>` : rs}</button>
+        ${hasBody ? `<div class="clp ${open ? "open" : ""}" data-clp="4:${s.id}"><div><div class="det">${s.k === "edit" ? diffBlock(s) : outBlock(s)}</div></div></div>` : ""}`;
+    }).join("");
+    const summary = edits.length ? `<span class="t-3 mono" style="font-size:11px">${edits.length} edit${edits.length > 1 ? "s" : ""} · ${[...new Set(edits.map((e) => e.file))].length} file${new Set(edits.map((e) => e.file)).size > 1 ? "s" : ""} ${pm(edits.reduce((n, e) => n + counts(e).a, 0), edits.reduce((n, e) => n + counts(e).d, 0))}</span>` : "";
+    cards.push(`<div class="card ${ask ? "ask" : ""}">
+      <div class="ch"><span class="n">${turn.t}</span><span class="o">${turn.outcome}</span><span class="sp"></span>${summary}<span class="pill" data-t="${turn.tone}">${turn.tone === "ok" ? "passed" : turn.tone === "fail" ? "failed, then fixed" : turn.tone === "wait" ? "needs you" : "step " + (i + 1)}</span><span class="c">${money(turn.cost)}</span></div>
+      <div class="cb">${sum ? `<div class="sum">${sum}</div>` : ""}${stepRows ? `<div class="steps">${stepRows}</div>` : ""}
+      ${ask ? `<div class="ask-b">${askCmd(ask)}<div class="ask-note">${askWhy(ask)}</div>${askActs()}</div>` : ""}</div></div>`);
+  });
+  return `<div class="vD"><div class="scroll">${cards.join("")}</div>
+    <div class="foot">${roCue()}<span class="cost"><span><b>${money(S.cost.session)}</b> of $${S.cost.budget}</span><span>${S.turns.length} turns</span><span>${FILES.length} files ${pm(TOTAL.a, TOTAL.d)}</span><span>ctx <b>${S.cost.ctx}%</b></span></span></div></div>`;
+}
+
+/* ── The Terminal tab (shared): the pane, live ──────────────────────────── */
+function renderT() {
+  return `<div class="vT"><div class="hint"><span class="live"></span><b>Live.</b> This is the agent's own pane; type here. The Conversation tab shows the same session as messages, read-only. <span class="flex1"></span><button class="b quiet sm" type="button" data-goto="conv">Back to Conversation ⌘1</button></div>
+    <div class="shell term"><div class="tabs-s"><span class="on">agent</span><span>shell</span></div><pre><span class="d">›</span> After signing in, /login?next=/billing%3Ftab%3Dinvoices lands on /billing without the tab. Fix it and add a regression test.
+
+<span class="a">●</span> The target is built in auth/redirect.py: next_url keeps only urlparse(target).path, so the query is gone before the safety check runs.
+  <span class="d">⎿  Edit auth/redirect.py · +3 −2</span>
+  <span class="d">⎿  Edit tests/test_redirect.py · +7</span>
+  <span class="d">⎿  Bash uv run pytest tests/test_redirect.py -q</span>
+     <span class="bd">1 failed, 3 passed in 1.12s · exit 1</span>
+
+<span class="a">●</span> Still dropped, one layer down: is_safe_next refuses any target containing "?". Replacing the substring check with a parse.
+  <span class="d">⎿  Edit auth/redirect.py · +4 −3</span>
+  <span class="d">⎿  Bash uv run pytest tests/test_redirect.py -q</span>
+     <span class="a">4 passed in 0.94s</span>
+  <span class="d">⎿  Bash git commit -am "fix: keep the query string on the login redirect"</span>
+
+<span class="w">●</span> Bash <span class="d">git push -u origin fix/login-redirect</span>
+  <span class="w">brindle: held by your rule "push asks first" · answer in the Inbox, the Conversation tab, or here</span>
+  <span class="d">Allow once? [y/n/a]</span> <span class="cur"></span></pre></div></div>`;
+}
+
+/* ── The frame ──────────────────────────────────────────────────────────── */
+const DIRS = [
+  { key: "1", name: "Document", pitch: "A calm transcript: prose first, every tool a quiet margin note that opens in place.", best: "reading what happened, and why, after the fact", trade: "tool detail is one click away, so a dense tool-heavy turn reads as a wall of margin notes",
+    render: renderA, where: { msg: "Prose in the body column, You and Agent labelled in the margin", tool: "Margin note (collapsed); its diff or output opens in the body column", diff: "One quiet block per edit, no gutter; totals in the end line", fail: "Margin note in fail red, output block opens under it", ask: "A sap-ruled card in the body column, margin says Needs you", cost: "Footer: session total of budget, tokens, context", term: "Footer: lock, “Read-only. The agent runs in the Terminal tab”, Open terminal" },
+    thumb: '<i style="left:8%;top:14%;width:14%;height:2px"></i><i style="left:28%;top:14%;width:60%;height:2px"></i><i style="left:28%;top:26%;width:52%;height:2px"></i><i style="left:12%;top:42%;width:10%;height:2px;opacity:.6"></i><i style="left:28%;top:42%;width:40%;height:10px;opacity:.35"></i><i style="left:28%;top:72%;width:58%;height:2px"></i>' },
+  { key: "2", name: "Timeline", pitch: "A dense IDE-style log: every event on a rail with its time, tool blocks fold, diffs with gutters and output inline.", best: "watching a long run, scanning for the red dot", trade: "the busiest of the four; prose has to compete with tool chrome",
+    render: renderB, where: { msg: "Rows on the rail; the request on a surface, agent prose plain", tool: "A bordered block with a mono header; chevron folds it", diff: "Inside the Edit block, file header with hunk, line numbers both sides", fail: "Red dot on the rail, red hairline, exit code in the header, output below", ask: "Sap dot pinging on the rail, sap-ringed block with the buttons", cost: "Status bar: total of budget, tokens, context, files, model", term: "Status bar: lock, read-only, Terminal ⌘2" },
+    thumb: '<i style="left:6%;top:12%;width:1px;height:76%"></i><i style="left:4%;top:12%;width:5px;height:5px;border-radius:50%;background:var(--branch)"></i><i style="left:14%;top:12%;width:70%;height:2px"></i><i style="left:4%;top:34%;width:5px;height:5px;border-radius:50%;background:var(--fail)"></i><i style="left:14%;top:30%;width:70%;height:14px;opacity:.35"></i><i style="left:4%;top:70%;width:5px;height:5px;border-radius:50%;background:var(--sap)"></i><i style="left:14%;top:68%;width:70%;height:10px;opacity:.5"></i>' },
+  { key: "3", name: "Split", pitch: "Conversation on the left, the live changes and output on the right; click a call, the right pane shows its diff.", best: "reviewing the code while the agent talks about it", trade: "needs width; the right pane is empty for a turn with no edits",
+    render: renderC, where: { msg: "Bubbles on the left: yours right-aligned on a surface, the agent's with a mark", tool: "One mono row per call; the failed run opens inline, reads open in place", diff: "Right pane, Changes: file list with totals, the selected file's hunks with gutters", fail: "Fail-ruled inline block under the call, and the Output tab's count turns red", ask: "Pinned above the footer on the left, so it never scrolls away", cost: "Right pane footer: total of budget and context", term: "Left footer: lock, read-only, Open terminal" },
+    thumb: '<i style="left:58%;top:0;width:1px;height:100%"></i><i style="left:30%;top:12%;width:24%;height:8px;opacity:.5"></i><i style="left:6%;top:36%;width:44%;height:2px"></i><i style="left:6%;top:46%;width:36%;height:2px"></i><i style="left:6%;top:70%;width:48%;height:12px;opacity:.5;background:var(--sap)"></i><i style="left:64%;top:14%;width:28%;height:2px"></i><i style="left:64%;top:30%;width:30%;height:4px;background:var(--pass);opacity:.5"></i><i style="left:64%;top:42%;width:30%;height:4px;background:var(--sap);opacity:.5"></i><i style="left:64%;top:54%;width:30%;height:4px;background:var(--pass);opacity:.5"></i>' },
+  { key: "4", name: "Story", pitch: "Each phase of the work is a card with its outcome and cost; the steps and diffs fold inside.", best: "a glance at what happened and where it stands", trade: "grouping is a judgement the view makes; a long turn becomes a long card",
+    render: renderD, where: { msg: "The request heads the page; each card leads with the agent's summary", tool: "Compact step rows inside the card; chevron opens the detail", diff: "Card header counts edits and files; each Edit step opens its hunk", fail: "Card titled “the new test fails”, pill “failed, then fixed”, run step red", ask: "The last card, sap-ringed, pill “needs you”, buttons inside", cost: "Per card in the header; session total in the footer", term: "Footer: lock, read-only, Open terminal" },
+    thumb: '<i style="left:6%;top:8%;width:88%;height:16px;opacity:.3;border-radius:3px"></i><i style="left:6%;top:36%;width:88%;height:16px;opacity:.3;border-radius:3px"></i><i style="left:6%;top:64%;width:88%;height:20px;opacity:.5;border-radius:3px;background:var(--sap)"></i><i style="left:10%;top:13%;width:30%;height:2px"></i><i style="left:10%;top:41%;width:36%;height:2px"></i><i style="left:76%;top:13%;width:14%;height:2px;background:var(--pass)"></i>' },
+];
+
+function sidebar() {
+  return `<aside class="side" aria-label="Sidebar">
+    <div class="side-top"><span class="logo"><svg class="logo-mark" viewBox="1.2 5.6 29.6 20.8" aria-hidden="true"><g fill="none" stroke-width="3" stroke-linecap="round"><path class="lm-mid" d="M9 16 H23"/><path class="lm-top" d="M8 16 C11 16 11.5 7.5 16 7.5 C20.5 7.5 21 16 24 16"/><path class="lm-bot" d="M8 16 C11 16 11.5 24.5 16 24.5 C20.5 24.5 21 16 24 16"/><path class="lm-in" stroke-width="4.8" d="M3.8 16 H9"/><path class="lm-bot" stroke-width="4.8" d="M23 16 H28.2"/></g></svg><span class="logo-word">brindle</span></span><span class="flex1"></span><button class="b quiet sm" type="button"><span style="font-size:14px;line-height:1">+</span> New session</button></div>
+    <button class="inbox" type="button"><span class="flex1">Inbox</span><span class="side-nb">1</span></button>
+    <section class="ctx" aria-label="Session context">
+      <div class="ctx-h"><div class="ctx-title"><span>Login redirect drops the query string</span><i>✎</i></div><div class="ctx-meta"><span class="mono">${S.id}</span> · ${S.repo} · manual · 1 agent · ${S.model}</div></div>
+      <div class="need"><span class="side-dot" data-tone="wait"></span><span style="min-width:0;flex:1">Needs you: a push<small>Bash · git push -u origin ${S.branch} · ${S.held}</small></span></div>
+    </section>
+    <div class="handle" aria-hidden="true"><i></i></div>
+    <div class="side-h">Sessions</div>
+    <div class="tree">
+      <div><div class="repo-h">${S.repo}</div>
+        <div class="srow sel"><span class="side-dot" data-tone="wait"></span><span style="min-width:0;flex:1"><span class="nm">Login redirect drops the query string</span><span class="mt"><code>${S.id}</code> · manual · 1 agent · waiting</span></span><span class="fold">▾</span></div>
+        <ul class="agents"><li><span class="side-dot" data-tone="wait"></span>claude<code>${S.model} · ${S.branch}</code></li></ul>
+        <div class="srow"><span class="side-dot" data-tone="done"></span><span style="min-width:0;flex:1"><span class="nm">Release notes for 0.6.2</span><span class="mt"><code>c07e19aa</code> · autopilot · merged</span></span><span class="fold">▸</span></div></div>
+      <div><div class="repo-h">brindle</div>
+        <div class="srow"><span class="side-dot" data-tone="work"></span><span style="min-width:0;flex:1"><span class="nm">Permission checker reads safe shell forms</span><span class="mt"><code>5be20d14</code> · autopilot · 4 agents · 2 working</span></span><span class="fold">▸</span></div>
+        <div class="paused"><span>▸</span>Paused · 2</div></div>
+    </div>
+    <div class="status"><span class="usage">Claude <span class="bar"><i></i></span> 41% · resets Thu</span><span>v0.6.2</span></div>
+    <nav class="pages"><span class="av">HL</span>Knowledge <span>·</span> Agents <span>·</span> Settings<span class="flex1"></span><span>?</span><span class="ttog">&gt;_</span></nav>
+  </aside>`;
+}
+function windowHTML(theme) {
+  const d = DIRS[ST.dir - 1];
+  const conv = ST.view === "conv";
+  return `<div class="win ${theme ? "th-" + theme : ""}" aria-label="brindle app window (mockup) · ${d.name}${theme ? " · " + theme : ""}">
+    <div class="win-bar"><i></i><i></i><i></i><span class="ttl">brindle</span></div>
+    <div class="win-body">${sidebar()}
+      <div class="main">
+        <header class="sbar"><span class="who">Claude</span><code>${S.id} · ${S.branch}</code><span class="st"><b>●</b> waiting for you <span class="t-3">· ${S.held}</span></span><span class="flex1"></span><span class="acts"><button class="b secondary" type="button">Pause</button><button class="b quiet icon" type="button" aria-label="More">⋯</button></span></header>
+        <div class="vtabs" role="tablist">
+          <button class="vtab" role="tab" type="button" aria-selected="${conv}" data-goto="conv">${LOCK}Conversation<kbd>⌘1</kbd></button>
+          <button class="vtab" role="tab" type="button" aria-selected="${!conv}" data-goto="term"><span class="live"></span>Terminal<kbd>⌘2</kbd></button>
+          <span class="meta"><span>${S.model} · signed in with an <b>${S.login}</b></span></span>
+        </div>
+        ${conv ? d.render() : renderT()}
+      </div></div></div>`;
+}
+function renderFrames() {
+  const d = DIRS[ST.dir - 1];
+  $("#frames").innerHTML = ST.theme === "both"
+    ? `<div class="frame-cap">${d.name} · dark</div>${windowHTML("dark")}<div class="frame-cap">${d.name} · light</div>${windowHTML("light")}`
+    : windowHTML("");
+  /* The view follows the newest event, as the real tab would: open on the pending card. */
+  $$(".vA .scroll, .vB .tl, .vC .scroll, .vD .scroll").forEach((el) => { el.scrollTop = el.scrollHeight; });
+  $$("#dir-tabs .tab").forEach((t) => t.setAttribute("aria-selected", +t.dataset.dir === ST.dir));
+  $("#dir-note").innerHTML = `<span><b>Direction ${ST.dir} · ${d.name}</b> · ${d.pitch}</span><span><b>Best for</b> · ${d.best}</span><span><b>Trade-off</b> · ${d.trade}</span>`;
+  $$("[data-view]").forEach((b) => b.setAttribute("aria-pressed", b.dataset.view === ST.view));
+  $$("#req tr[data-dir]").forEach((r) => r.classList.toggle("hi", +r.dataset.dir === ST.dir));
+  const h = new URLSearchParams({ d: ST.dir, t: ST.theme, v: ST.view });
+  history.replaceState(null, "", "#" + h.toString());
+}
+function renderTabs() {
+  $("#dir-tabs").innerHTML = DIRS.map((o, i) => `<button class="tab" role="tab" type="button" aria-selected="${i + 1 === ST.dir}" data-dir="${i + 1}"><span class="k"><kbd>${o.key}</kbd>Direction ${i + 1}</span><b>${o.name}</b><span class="d">${o.pitch}</span><span class="thumb" aria-hidden="true">${o.thumb}</span></button>`).join("");
+  const KEYS = [["msg", "Messages"], ["tool", "Tool call, collapsed and expanded"], ["diff", "Multi-file diff"], ["fail", "Failed command"], ["ask", "Pending permission (Allow / Deny)"], ["cost", "Cost"], ["term", "Relation to the Terminal tab"]];
+  $("#req").innerHTML = `<thead><tr><th>Direction</th>${KEYS.map(([, l]) => `<th>${l}</th>`).join("")}</tr></thead><tbody>${DIRS.map((d, i) => `<tr data-dir="${i + 1}"><td>${i + 1} · ${d.name}</td>${KEYS.map(([k]) => `<td>${d.where[k]}</td>`).join("")}</tr>`).join("")}</tbody>`;
+}
+function setTheme(t) {
+  ST.theme = t;
+  if (t === "light" || t === "dark") document.documentElement.dataset.theme = t; else delete document.documentElement.dataset.theme;
+  $$("[data-theme-set]").forEach((b) => b.setAttribute("aria-pressed", b.dataset.themeSet === t));
+  renderFrames();
+}
+
+/* ── Wiring ─────────────────────────────────────────────────────────────── */
+renderTabs();
+setTheme(ST.theme);
+document.addEventListener("click", (e) => {
+  const tab = e.target.closest("#dir-tabs .tab"); if (tab) { ST.dir = +tab.dataset.dir; renderFrames(); return; }
+  const th = e.target.closest("[data-theme-set]"); if (th) { setTheme(th.dataset.themeSet); return; }
+  const vw = e.target.closest("[data-view]"); if (vw) { ST.view = vw.dataset.view; renderFrames(); return; }
+  const go = e.target.closest("[data-goto]"); if (go) { ST.view = go.dataset.goto; renderFrames(); return; }
+  const tog = e.target.closest("[data-tog]");
+  if (tog) {
+    const [dir, id] = tog.dataset.tog.split(":"); const s = step(id); const now = !isOpen(+dir, s);
+    ST.open[tog.dataset.tog] = now; tog.setAttribute("aria-expanded", now);
+    /* Each toggle owns one disclosure, found by its id inside the same window (Both mode has two). */
+    const clp = tog.closest(".win").querySelector(`[data-clp="${tog.dataset.tog}"]`);
+    if (clp) clp.classList.toggle("open", now);
+    return;
+  }
+  const f = e.target.closest("[data-file]"); if (f) { ST.selFile = +f.dataset.file; ST.ptab = "diff"; renderFrames(); return; }
+  const r = e.target.closest("[data-run]");
+  if (r) {
+    ST.selRun = r.dataset.run; ST.ptab = "out"; renderFrames();
+    $$(`[data-runout="${ST.selRun}"], .tcall.sel`).forEach((el) => el.scrollIntoView({ block: "nearest" }));
+    return;
+  }
+  const pt = e.target.closest("[data-ptab]"); if (pt) { ST.ptab = pt.dataset.ptab; renderFrames(); return; }
+});
+document.addEventListener("keydown", (e) => {
+  if (e.target.matches("input, textarea")) return;
+  if ("1234".includes(e.key)) { ST.dir = +e.key; renderFrames(); }
+  if (e.key === "t" || e.key === "T") { ST.view = ST.view === "conv" ? "term" : "conv"; renderFrames(); }
+});
+</script>
+</body>
+</html>
