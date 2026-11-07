@@ -354,6 +354,13 @@ function Banner({ item, actions, who, branch, sessionTitle, repo, isNew, onDone,
         Review &amp; open PR
       </button>
     );
+  } else if (item.kind === "visual" && onGo) {
+    // A visual decision opens its reader (goTo), not the session it belongs to.
+    acts = (
+      <button type="button" className={`${button} text-xs`} onClick={onGo}>
+        Open visual
+      </button>
+    );
   } else {
     acts = <span className="text-[11px] text-ink-3">{item.kind === "review" || item.kind === "merge_failed" ? "handled in its session" : "answered in its session"}</span>;
   }
@@ -384,8 +391,8 @@ function Banner({ item, actions, who, branch, sessionTitle, repo, isNew, onDone,
       <div className="col-span-2 mt-1 flex flex-wrap items-center gap-1.5">
         {acts}
         <span className="flex-1" />
-        {onGo && item.kind !== "doc" && (
-          <button type="button" className={`${LINK} whitespace-nowrap`} onClick={onGo}>
+        {onGo && item.kind !== "doc" && item.kind !== "visual" && (
+          <button type="button" className={`${button} text-xs whitespace-nowrap`} onClick={onGo}>
             Go to session ›
           </button>
         )}
