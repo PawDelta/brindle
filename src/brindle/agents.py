@@ -504,6 +504,8 @@ def spawn(
     if why:
         raise AgentError(why)
     db.add_agent(agent)
+    if session_root and mode in ("handoff", "assign"):
+        pilot.consider_analysis_offer(db, session_root)    # another worker may make the goal large
     if person_prompt and raw_task and parent_id is None and mode == "interactive":
         from brindle import visual_offers
 
