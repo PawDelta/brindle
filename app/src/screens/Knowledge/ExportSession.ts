@@ -175,9 +175,14 @@ export class ExportSession {
 
   /* The docx becomes a Google Doc in the person's Drive (drive.file: only files this app makes). */
   async uploadToGoogle(name: string, docx: Uint8Array<ArrayBuffer>): Promise<Uploaded> {
+    return this.upload(name, DOCX, docx, true);
+  }
+
+  /* Drive accepts HTML and markdown too; conversion creates a Google Doc. */
+  async upload(name: string, mime: string, bytes: Uint8Array<ArrayBuffer>, convert: boolean): Promise<Uploaded> {
     const edge = `brindle${random(12)}`;
-    const head = `--${edge}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify({ name, mimeType: "application/vnd.google-apps.document" })}\r\n--${edge}\r\nContent-Type: ${DOCX}\r\n\r\n`;
-    const body = new Blob([head, docx, `\r\n--${edge}--`]);
+    const head = `--${edge}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify({ name, mimeType: convert ? "application/vnd.google-apps.document" : mime })}\r\n--${edge}\r\nContent-Type: ${mime}\r\n\r\n`;
+    const body = new Blob([head, bytes, `\r\n--${edge}--`]);
     const res = await this.call("google", "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,webViewLink", {
       method: "POST",
       headers: { "Content-Type": `multipart/related; boundary=${edge}` },
@@ -194,12 +199,12 @@ export class ExportSession {
   }
 
   /* The docx into `folder` (a path in the site's default library, "" for its root). */
-  async uploadToSharePoint(siteId: string, folder: string, name: string, docx: Uint8Array<ArrayBuffer>): Promise<Uploaded> {
+  async uploadToSharePoint(siteId: string, folder: string, name: string, bytes: Uint8Array<ArrayBuffer>, mime = DOCX): Promise<Uploaded> {
     const path = [...folder.split("/"), name].filter(Boolean).map(encodeURIComponent).join("/");
     const res = await this.call("microsoft", `https://graph.microsoft.com/v1.0/sites/${encodeURIComponent(siteId)}/drive/root:/${path}:/content`, {
       method: "PUT",
-      headers: { "Content-Type": DOCX },
-      body: new Blob([docx]),
+      headers: { "Content-Type": mime },
+      body: new Blob([bytes]),
     });
     const got = (await res.json()) as { webUrl?: string };
     return { url: got.webUrl ?? null };

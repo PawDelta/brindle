@@ -720,8 +720,8 @@ async def handoff(
     `plan_first` config). Use it for large or risky tasks.
 
     analysis_doc: the worker leaves an analysis doc of its work. Off by
-    default whatever the weight; ask only for work worth documenting (never
-    for merge or sync chores).
+    default whatever the weight; pass true only when the person explicitly
+    requested a doc for this task (never for merge or sync chores).
     """
     def run(req: _Request):
         db = DB()
@@ -851,8 +851,8 @@ async def assign(
     `plan_first` config). Use it for large or risky tasks.
 
     analysis_doc: the worker leaves an analysis doc of its work. Off by
-    default whatever the weight; ask only for work worth documenting (never
-    for merge or sync chores).
+    default whatever the weight; pass true only when the person explicitly
+    requested a doc for this task (never for merge or sync chores).
     """
     def run(req: _Request):
         db = DB()
@@ -1570,7 +1570,8 @@ def _session(db: DB) -> tuple[str, Workspace] | str:
 
 
 @mcp.tool()
-def set_goal(goal: str, milestones: list[dict[str, str]], detail: str | None = None) -> str:
+def set_goal(goal: str, milestones: list[dict[str, str]], detail: str | None = None,
+             analysis_doc: bool | None = None) -> str:
     """Autopilot: record what we're building. milestones is an ordered list of
     {"title": ..., "check": ..., "detail": ..., "profile": ..., "repo": ...}. The optional
     profile names the default worker profile for `assign` while that milestone
@@ -1582,7 +1583,9 @@ def set_goal(goal: str, milestones: list[dict[str, str]], detail: str | None = N
     "phase" names the phase a milestone belongs to; the app folds consecutive
     milestones of one phase together.
     Replaces any earlier goal; milestones that keep their title and check keep
-    their last result."""
+    their last result. Pass analysis_doc=true only when the person explicitly
+    asked for a doc for this goal. Omission preserves the choice for the same
+    goal; a new goal defaults to no doc, regardless of milestone count."""
     db = DB()
     found = _session(db)
     if isinstance(found, str):
@@ -1590,7 +1593,7 @@ def set_goal(goal: str, milestones: list[dict[str, str]], detail: str | None = N
     root_id, _ = found
     try:
         items = autopilot.milestone_items(db, root_id, milestones)
-        autopilot.set_goal(db, root_id, goal, items, detail)
+        autopilot.set_goal(db, root_id, goal, items, detail, analysis_doc=analysis_doc)
     except autopilot.AutopilotError as e:
         return str(e)
     text = autopilot.progress(db, root_id)

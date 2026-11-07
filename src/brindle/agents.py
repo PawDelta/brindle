@@ -34,7 +34,7 @@ from brindle.model_availability import ModelAvailabilityChecker, PROVISIONING_TI
 from brindle.pro import route_health
 from brindle.redact import mask
 from brindle.profiles import load_profile, local_fallback, missing_add_dirs
-from brindle.providers import LaunchContext, get_provider, unusable
+from brindle.providers import LaunchContext, Provider, get_provider, unusable
 from brindle.sidebar_follow import (
     SIDEBAR_COLUMNS,
     SIDEBAR_DISMISSED,
@@ -363,7 +363,7 @@ def decorate_worker_prompt(task: str, agent_id: str, ws: Workspace, done_when: s
                            analysis: str = "") -> str:
     """The prompt actually sent to a handoff/assign worker's CLI: the raw
     ``task``, the ``decisions`` block that covers its files, the ``analysis``
-    doc rule and brief (large work only), its finish line,
+    doc rule and brief (only when the person requested a doc), its finish line,
     the WORKER_FOOTER reminder to report, and (for an interactive Claude
     worker with a finish line) the ``/goal`` wrapper. Used at spawn time, and
     again by ``resume`` to rebuild it (decisions from the brief's receipt)
@@ -2427,19 +2427,70 @@ def _paste_message(db: DB, agent: Agent, text: str, lead: str | None,
         identity_lock.ensure(fresh)
         return fresh
 
-    def authorize():
+    def authorize(write=True):
         fresh = current()
+        if message_id is not None and fresh.mode == "interactive":
+            if not write:
+                baseline[0] = _pane_input(fresh)
+            # Immediately before each write (tmux.paste's): any key the person
+            # pressed since this delivery began, however long the writes took,
+            # or the pane's clients changing, stops it (brindle's own keys are
+            # no client's input). A first write needs a composer holding
+            # nothing; the body, one holding exactly the lead (a resumed one
+            # is matched below). Enter is guarded by the input alone: a
+            # collapsed paste can't be matched as text.
+            elif (_typed_lately(fresh, since=baseline[0])
+                  or (state["stage"] is None and _composer_taken(fresh))
+                  or (state["stage"] in ("lead", "body") and not owned())
+                  or (state["stage"] == "lead" and resume is None
+                      and not _partial_composer(fresh, state, "lead"))):
+                # Stopped for good: after the body, its Enter withheld (whatever
+                # goes in now, the person sent); after the lead, its body never
+                # written (a turn from here can't carry it: note_turn_started).
+                if state["stage"] in ("lead", "body"):
+                    try:
+                        record(stopped=True)
+                    except _PasteBlocked:
+                        pass   # its mark is gone or another's: nothing of this delivery to note
+                raise _PasteBlocked
         if resume is not None and state["stage"] == resume:
             if not _partial_composer(fresh, state, resume):
                 raise _PasteBlocked
             current()  # the composer capture can itself block across an identity or pane change
 
+    def record(**fields):
+        # Merged into the mark as hooks left it (db.record_pane_delivery), and
+        # created only by this delivery's first write, never after it retired.
+        merged = db.record_pane_delivery(message_id, agent.id, json.dumps({**state, **fields}),
+                                         create=not recorded[0])
+        if merged is None:
+            raise _PasteBlocked
+        recorded[0] = True
+        # Hooks' fields join; "stage" stays what brindle itself wrote (an
+        # acknowledged mark's "submitted" is owned()'s to see, not Enter's).
+        state.update({k: v for k, v in merged.items() if k != "stage"})
+
+    def owned():
+        # Not if a hook has said the person sent the composer (acknowledged)
+        # or a turn began from it since: Enter, or more text, is never brindle's then.
+        saved = db.mark(agent.id, "pane-delivery")
+        if saved is None:
+            return not recorded[0]
+        mark = json.loads(saved)
+        return (mark.get("message_id") == message_id and mark.get("stage") != "submitted"
+                and not mark.get("turn_started"))
+
     def progress(stage):
         state["stage"] = stage
-        if not db.record_pane_delivery(message_id, agent.id, json.dumps(state)):
-            raise _PasteBlocked
+        record()
 
-    authorize()
+    recorded = [resume is not None]
+    baseline = [_INPUT_UNREAD]
+    authorize(write=False)   # the caller's last look just read the screen; note the input it saw
+    if resume is not None and message_id is not None:
+        # A resumed attempt is live again, before any write: its body (or Enter)
+        # may go in from here, so a hook's turn evidence counts once more.
+        record(stopped=False)
     options = {"progress": progress, "resume": resume} if message_id is not None else {}
     tmux.paste(agent.tmux_window, text, lead=lead, server=server,
                authorize=authorize, **options)
@@ -2481,10 +2532,36 @@ def _resume_pane_delivery(db: DB, agent: Agent, saved: str) -> bool:
             or agent.status not in ("idle", "processing")
             or (agent.status == "processing" and not get_provider(agent.provider).types_midturn)):
         return False
+    if state["stage"] == "submitted":
+        # It went in: brindle's own Enter, or the person's send a hook
+        # acknowledged. Delivered, once (this flush's delivery), and the queue goes on.
+        db.mark_delivered(row["id"])
+        db.set_mark(agent.id, "pane-delivery", None)
+        _flush_messages(db, agent.id)
+        return True
     if state["stage"] != "submitted":
         stage = "body" if _partial_composer(agent, state, "body") else "lead"
         if stage == "lead" and (state["stage"] != "lead" or not _partial_composer(agent, state, "lead")):
-            return False
+            if not _composer_settled(agent):
+                return False  # the person's text and this delivery's are still there: theirs to send or clear
+            if state["stage"] != "lead":
+                # Stopped after the body, and the composer is empty with no
+                # turn running. A prompt carrying it would have acknowledged
+                # it (_acknowledge_submitted: Claude Code, OpenCode, Codex), and
+                # agy starting no turn since means nothing went in: cleared,
+                # so the same row goes back in the queue, no second copy made.
+                # Once agy started a turn, sent and cleared-then-replaced look
+                # alike: kept unresolved, neither retyped, offered nor counted.
+                if state.get("turn_started"):
+                    db.retain_unresolved(row["id"], agent.id)
+                else:
+                    db.set_mark(agent.id, "pane-delivery", None)
+                return _flush_messages(db, agent.id)
+            # Stopped after the lead: the body never reached the composer and
+            # Enter was never pressed for it, so the whole message goes in, once,
+            # as a new attempt: the old one's mark (and what hooks noted on it) retired.
+            db.set_mark(agent.id, "pane-delivery", None)
+            stage = None
         try:
             _paste_message(db, agent, state["body"], state["lead"], row["id"], resume=stage)
         except _PasteBlocked:
@@ -2584,6 +2661,11 @@ def _delivery_held(db: DB, agent: Agent | None) -> bool:
             or (wake.enabled(agent) and wake.live(agent)))
 
 
+# A chat the person pressed a key in this recently is theirs: a queued message
+# waits for the next flush (a turn's end, the hook's hand-over, or cull's sweep).
+TYPED_WITHIN = 5.0
+
+
 class _PasteBlocked(Exception):
     """Raised inside a delivery's protected block when the pane became blocked."""
 
@@ -2662,6 +2744,108 @@ def _flush_midturn(db: DB, agent_id: str) -> bool:
     return True
 
 
+_INPUT_UNREAD = object()   # a pane's input time that couldn't be read
+_ANY = object()            # _typed_lately with no baseline to compare
+
+
+def _pane_input(agent: Agent):
+    """tmux.pane_input for ``agent``'s pane, or _INPUT_UNREAD."""
+    try:
+        return tmux.pane_input(agent.tmux_window, server=server_of(agent))
+    except tmux.TmuxError:
+        return _INPUT_UNREAD
+
+
+def _typed_lately(agent: Agent, since=_ANY) -> bool:
+    """Whether the person pressed a key in ``agent``'s pane within
+    TYPED_WITHIN, or (given ``since``, its input time when a delivery began)
+    at all since then: keys reach tmux before a loaded CLI draws them, so the
+    screen alone can show an empty composer that is taking input. An
+    unanswerable server fails closed."""
+    typed = _pane_input(agent)
+    if typed is _INPUT_UNREAD or (since is not _ANY and typed != since):
+        return True   # also a client gone from the pane, or a new one: the source moved
+    return typed is not None and time.time() - typed < TYPED_WITHIN
+
+
+def _composer_screen(agent: Agent) -> tuple[Provider, str] | None:
+    try:
+        screen = tmux.capture(agent.tmux_window, lines=40, escapes=True, server=server_of(agent))
+    except tmux.TmuxError:
+        return None
+    return get_provider(agent.provider), screen
+
+
+def _composer_taken(agent: Agent) -> bool:
+    """Whether the composer holds anything (or can't be read), at the moment
+    of a write: unlike _paste_blocked, never presses a key to clear a view."""
+    read = _composer_screen(agent)
+    return read is None or read[0].paste_blocked(read[1], True) is not None
+
+
+def _composer_settled(agent: Agent) -> bool:
+    """Whether the person is done with a stopped delivery's text: no key
+    pressed lately, the composer recognized and empty, no turn running on
+    screen (one they started by sending it, whose prompt acknowledges it)."""
+    if _typed_lately(agent):
+        return False
+    read = _composer_screen(agent)
+    if read is None:
+        return False
+    provider, screen = read
+    return (provider.composer_text(screen) is not None and provider.paste_blocked(screen, True) is None
+            and provider.screen_state(screen) != "busy")
+
+
+def _acknowledge_submitted(db: DB, agent_id: str, prompt: str) -> bool:
+    """A prompt the CLI took in (Claude Code's or OpenCode's prompt-submit,
+    Codex's turn inputs) carrying a delivery whose body is in the composer,
+    Enter not yet recorded: it went in, so it is delivered and its mark
+    retired. Returns whether the person sent it (one brindle had stopped,
+    their reply typed onto it)."""
+    for _ in range(3):   # the mark changed under us (brindle's own write, a hook): read it again
+        saved = db.mark(agent_id, "pane-delivery")
+        if not saved or not prompt:
+            return False
+        state = json.loads(saved)
+        body = str(state.get("body") or "").strip()
+        # "lead" too: the body can be in the composer before its write is
+        # recorded (paste-buffer done, progress("body") not yet), and a prompt
+        # carrying it is proof it was. The merge keeps "submitted" over that write.
+        if state.get("stage") not in ("lead", "body") or not body or body not in prompt:
+            return False
+        # The mark itself carries it ("submitted": the next flush counts it
+        # delivered), so a paste still in flight sees it and presses no
+        # Enter, and its failure cleanup can't put the row back in the queue.
+        if db.replace_mark(agent_id, "pane-delivery", saved, json.dumps({**state, "stage": "submitted"})):
+            # Only one brindle stopped is theirs to have sent: an unstopped one at
+            # this stage is brindle's own Enter, its hook ahead of "submitted".
+            return bool(state.get("stopped"))
+    return False
+
+
+def note_turn_started(db: DB, agent_id: str) -> None:
+    """A turn began, from a CLI that doesn't say what went in (agy). While a
+    delivery is stopped brindle starts none, so the person sent whatever the
+    composer held then: with or without this delivery's body, no one can
+    tell. Its outcome becomes unresolved (see _resume_pane_delivery), never
+    counted delivered nor typed in again."""
+    for _ in range(3):   # as in _acknowledge_submitted
+        saved = db.mark(agent_id, "pane-delivery")
+        if not saved:
+            return
+        state = json.loads(saved)
+        # "lead" too, as in _acknowledge_submitted: the body may already be
+        # in, its write not yet recorded; that write keeps this field. Not a
+        # "lead" one stopped for good: its body was never written.
+        stage = state.get("stage")
+        if (stage not in ("lead", "body") or state.get("turn_started")
+                or (stage == "lead" and state.get("stopped"))):
+            return
+        if db.replace_mark(agent_id, "pane-delivery", saved, json.dumps({**state, "turn_started": True})):
+            return
+
+
 def _paste_blocked(agent: Agent) -> bool:
     """Whether pasting into ``agent``'s pane right now would land somewhere
     other than its chat: over text the person is mid-typing (interactive
@@ -2673,6 +2857,8 @@ def _paste_blocked(agent: Agent) -> bool:
     provider = get_provider(agent.provider)
     interactive = agent.mode == "interactive"
     server = server_of(agent)
+    if interactive and _typed_lately(agent):
+        return True  # before the screen is read or a background view is escaped
     try:
         screen = tmux.capture(agent.tmux_window, lines=40, escapes=True, server=server)
     except tmux.TmuxError:
@@ -5161,17 +5347,20 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
             processes.detach([*brindle_invocation(), "_flush", agent_id, "--delay",
                           str(get_provider(agent.provider).ready_delay)])
     elif event == "prompt-submit":
-        db.set_status(agent_id, "processing")
-        from brindle import launch_health
-        launch_health.accepted(db, agent)
         # Queued messages (worker results) are typed into an idle chat too;
         # only a prompt brindle didn't deliver is the user speaking.
         prompt = str(payload.get("prompt", ""))
         # brindle's own reminders also arrive as prompts, possibly wrapped or
         # sent without being recorded as delivered (the unread-mail one): any
-        # prompt carrying brindle's tag is not the user speaking.
-        if (agent.mode == "interactive" and "[brindle" not in prompt
-                and not db.recently_delivered(agent_id, prompt)):
+        # prompt carrying brindle's tag is not the user speaking. Judged before
+        # an acknowledgement below marks anything delivered; sending a stopped
+        # delivery with their reply typed onto it is the user speaking, though.
+        person = "[brindle" not in prompt and not db.recently_delivered(agent_id, prompt)
+        person = _acknowledge_submitted(db, agent_id, prompt) or person
+        db.set_status(agent_id, "processing")
+        from brindle import launch_health
+        launch_health.accepted(db, agent)
+        if agent.mode == "interactive" and person:
             from brindle import autopilot as pilot
 
             pilot.user_spoke(db, agent)
@@ -5250,6 +5439,9 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
         except OSError:
             pass
         if payload.get("type") == "agent-turn-complete":
+            inputs = payload.get("input-messages")
+            if isinstance(inputs, list):
+                _acknowledge_submitted(db, agent_id, "\n".join(str(m) for m in inputs))
             db.set_status(agent_id, "idle")
             snapshot_turn(db, agent)
             analysis_docs_turn(db, agent)

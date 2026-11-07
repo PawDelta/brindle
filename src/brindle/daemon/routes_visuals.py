@@ -127,6 +127,15 @@ def mark_read(db: DB, params: dict, body: dict) -> Any:
     return visuals.to_dto(visuals.mark_read(db, params["id"]))
 
 
+def snapshot(db: DB, params: dict, body: dict) -> Any:
+    from brindle import visual_export
+
+    return visual_export.snapshot(db, params["id"], body.get("rev"),
+                                  _get(body, "html", default=""),
+                                  _get(body, "destination", default="download"),
+                                  markdown=_get(body, "markdown"))
+
+
 @_json
 def kept_list(db: DB, request: Request) -> Any:
     visuals.require_enabled()
@@ -154,6 +163,7 @@ ROUTES = [
     Route("/v1/visuals/{id}/keep", _endpoint(keep), methods=["POST"]),
     Route("/v1/visuals/{id}/keep", _endpoint(unkeep), methods=["DELETE"]),
     Route("/v1/visuals/{id}/read", _endpoint(mark_read), methods=["POST"]),
+    Route("/v1/visuals/{id}/snapshot", _endpoint(snapshot), methods=["POST"]),
     Route("/v1/kept-visuals", kept_list),
     Route("/v1/kept-visuals/{id}", kept_one),
     Route("/v1/kept-visuals/{id}/html", kept_page),

@@ -2439,6 +2439,11 @@ export class FakeDaemon {
       goal.enabled = body.enabled;
       return json({ enabled: goal.enabled });
     }
+    if (path === "/goal/analysis-doc") {
+      if (typeof body.analysis_doc !== "boolean") return error("invalid", "analysis_doc is required", 400);
+      goal.analysis_doc = body.analysis_doc;
+      return json({ analysis_doc: goal.analysis_doc });
+    }
     return error("not_found", `no route ${path}`, 404);
   }
 

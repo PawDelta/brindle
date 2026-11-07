@@ -1386,6 +1386,10 @@ export class DaemonClient {
     return this.post<GoalEnabledAck>("/goal/enabled", { root, enabled });
   }
 
+  setGoalAnalysisDoc(root: string, analysis_doc: boolean) {
+    return this.post<{ analysis_doc: boolean }>("/goal/analysis-doc", { root, analysis_doc });
+  }
+
   inbox(repo?: string) {
     return this.get<InboxItemDTO[]>("/inbox", { repo });
   }
@@ -1581,6 +1585,10 @@ export class DaemonClient {
   /* The person's answer to the revision on screen; a newer revision makes this a 409. */
   answerVisual(id: string, rev: number, option: string, note: string) {
     return this.post<VisualDTO>(`/visuals/${encodeURIComponent(id)}/answer`, { rev, option, note });
+  }
+
+  exportVisual(id: string, rev: number, html: string, destination: ExportDestination = "download", markdown?: string) {
+    return this.post<{ filename: string; mime: string; content_b64: string }>(`/visuals/${encodeURIComponent(id)}/snapshot`, { rev, html, destination, markdown });
   }
 
   keepVisual(id: string) {

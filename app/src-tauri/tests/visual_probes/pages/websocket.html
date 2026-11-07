@@ -1,0 +1,21 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>probe: WebSocket</title>
+<p>WebSockets to the listener, plain and TLS.</p>
+<script>{{PROBE}}</script>
+<script>
+function socket(url) {
+  return new Promise((resolve, reject) => {
+    try {
+      const s = new WebSocket(url);
+      s.onopen = () => { s.close(); resolve("opened"); };
+      s.onerror = () => reject();
+      s.onclose = () => reject();
+    } catch (e) { reject(e); }
+  });
+}
+attempt("ws", socket(WS + "/ws"));
+attempt("wss", socket("wss://127.0.0.1:" + PORT + "/wss"));
+attempt("ws with token", socket(WS + "/v1/events?token=stolen"));
+done();
+</script>

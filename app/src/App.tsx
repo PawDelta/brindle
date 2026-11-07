@@ -52,7 +52,6 @@ import { NewSession } from "./screens/New";
 import { BrindleSignIn, Onboarding, Permissions, Starting, markOnboarded, onboarded, readOnboarded } from "./screens/Onboarding";
 import { AgentsScreen } from "./screens/Agents";
 import { SessionScreen } from "./screens/Session";
-import { setFocus, sidebarMode, useFocus } from "./screens/Session/Visuals/focus";
 import { SettingsScreen } from "./screens/Settings";
 import { isPaused } from "./store/overview";
 import { SessionsProvider, useCloseSession, useSessions } from "./store/sessions";
@@ -273,9 +272,9 @@ function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, p
   // sheet lies over it); the pages scroll.
   const shown = route ?? HOME;
   const fills = shown.screen === "session" || shown.screen === "new" || shown.screen === "inbox";
-  // A visual open in the session: the sidebar slims to its rail, or with Focus hides to an edge handle.
-  const focused = useFocus();
-  const mode = sidebarMode(shown.screen === "session" && shown.sheet?.kind === "visual", focused);
+  // A visual open in the session takes the whole window (design/visualizer-build-plan-amendments.md
+  // item 1): the sidebar hides, still mounted, so Back finds it as it was (folds, scroll, split).
+  const reading = shown.screen === "session" && shown.sheet?.kind === "visual";
   // Where a shell of the person's own starts: the open session's worktree, else the repo's root.
   const workspaces = useAppState((s) => s.workspaces);
   const here = useMemo(() => shellPlace(shown, repos ?? [], workspaces, shown.screen === "session" ? sessions[shown.repo]?.find((s) => s.id === shown.root) : null), [shown, repos, workspaces, sessions]);
@@ -283,7 +282,9 @@ function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, p
     <TerminalProvider client={client} here={here}>
       <AppUpdateProvider updates={appUpdates}>
       <div className="flex h-full bg-canvas text-ink">
-        <Sidebar route={shown} navigate={navigate} refresh={refresh ?? noop} openUrl={openUrl} mode={mode} onShow={() => setFocus(false)} />
+        <div className="contents" hidden={reading}>
+          <Sidebar route={shown} navigate={navigate} refresh={refresh ?? noop} openUrl={openUrl} />
+        </div>
         <div className="relative flex min-w-0 flex-1 flex-col">
           <AppUpdateBanner openUrl={openUrl} />
           {/* The banner's upgrade follows the engine's terminal stream, which a page with no engine doesn't have. */}

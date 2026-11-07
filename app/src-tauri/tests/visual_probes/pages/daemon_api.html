@@ -1,0 +1,20 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>probe: the daemon's API</title>
+<p>The daemon listens on 127.0.0.1 (here, the listener stands in). A visual never reaches it, token or not.</p>
+<script>{{PROBE}}</script>
+<script>
+attempt("GET /v1/meta", fetch(HTTP + "/v1/meta", { headers: { Authorization: "Bearer stolen" } }).then((r) => "answered " + r.status));
+attempt("GET /v1/sessions", fetch(HTTP + "/v1/sessions").then((r) => "answered " + r.status));
+attempt("POST /v1/visuals/.../answer", fetch(HTTP + "/v1/visuals/probe/answer", { method: "POST", body: "{}", mode: "no-cors" }).then(() => "answered"));
+attempt("localhost by name", fetch("http://localhost:" + PORT + "/v1/meta").then((r) => "answered " + r.status));
+attempt("IPv6 loopback", fetch("http://[::1]:" + PORT + "/v1/meta").then((r) => "answered " + r.status));
+attempt("the app's own IPC route", fetch("ipc://localhost/set_inbox_count", { method: "POST", body: "{}" }).then((r) => "answered " + r.status));
+attempt("the app's page", fetch("tauri://localhost/index.html").then((r) => "answered " + r.status));
+attempt("the app's page (Windows spelling)", fetch("http://tauri.localhost/index.html").then((r) => "answered " + r.status));
+attempt("a file", fetch("file:///etc/hosts").then((r) => "answered " + r.status));
+attempt("WebSocket /v1/events", new Promise((resolve, reject) => {
+  try { const s = new WebSocket(WS + "/v1/events"); s.onopen = () => { s.close(); resolve("opened"); }; s.onerror = () => reject(); } catch (e) { reject(e); }
+}));
+done();
+</script>
