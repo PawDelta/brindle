@@ -156,9 +156,10 @@ _REFERENT = re.compile(r"(?:\s+(?:(?:of|for|about|showing)\s+)?(?:this|that|thes
 _OBJECT = re.compile(r"(?:\s+(?!(?:and|then|also|but|so|while|or|plus)\b)[\w'.,/-]+){1,20}[.!?]*", re.I)
 _SHOW_VISUALLY = re.compile(r"(?:(?:can|could|would|will) you\s+)?(?:please\s+)?show\s+(?:me|us)"
                             r"(?:\s+(?!(?:and|then|also|but|so|while|or|plus)\b)[\w'.,/-]+){1,20}\s+visually[.!?]*", re.I)
+# A deferral or approval clause inside an object phrase (not a subject word like "approval flow").
+_DEFERRED = re.compile(r"\b(?:once|tomorrow|tonight|soon|eventually|whenever|(?:I|we|you|they)\s+approve[sd]?)\b", re.I)
 _QUALIFIED = re.compile(r"\b(?:if|unless|when|after|before|later|only|maybe|perhaps|not|never|"
-                        r"don't|do not|wait|until|provided|assuming|once|tomorrow|tonight|soon|eventually|next|"
-                        r"approve[sd]?|approval|whenever|since|because)\b|[\"`“”]", re.I)
+                        r"don't|do not|wait|until|provided|assuming)\b|[\"`“”]", re.I)
 _CONTEXT = re.compile(r"(?:compare|consider|examine|review)\s+(?:this|that|these|those|the)\s+"
                       r"(?:choices|options|layouts|designs|flow|pipeline|change|decision)[.!?]*", re.I)
 _CANCEL_REQUEST = re.compile(
@@ -182,7 +183,7 @@ def request_intent(text: str) -> tuple[str | None, bool]:
             scope = "plan" if (match["artifact"] or "").lower().startswith(("planning", "plan ")) else "visual"
             rest = sentence[match.end():]
             clear = _REFERENT.fullmatch(rest) is not None or (
-                match["visualize"] is not None and _OBJECT.fullmatch(rest) is not None)
+                match["visualize"] is not None and _OBJECT.fullmatch(rest) is not None and not _DEFERRED.search(rest))
             found.append((scope, clear))
         elif _SHOW_VISUALLY.fullmatch(sentence):
             found.append(("visual", True))
