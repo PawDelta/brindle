@@ -118,8 +118,10 @@ describe("app-release publish gate", () => {
   it("builds both Mac architectures on Apple Silicon and publishes only after both, with one bundle each in latest.json", () => {
     const text = readFileSync(workflow, "utf8");
     expect(text).not.toContain("universal-apple-darwin");
-    expect(text).toMatch(/target: aarch64-apple-darwin\n\s+runner: macos-latest\n/);
-    expect(text).toMatch(/target: x86_64-apple-darwin\n\s+runner: macos-latest\n/);
+    // Releases build both Macs; a staff build (staff-gate's go) builds Apple Silicon only.
+    expect(text).toContain(`arch: \${{ fromJSON(needs.staff-gate.outputs.go == 'true' && '["aarch64"]' || '["aarch64","x86_64"]') }}`);
+    expect(text).toContain("TARGET: ${{ matrix.arch }}-apple-darwin");
+    expect(text).toMatch(/name: macos \(\$\{\{ matrix\.arch \}\}\)\n[\s\S]*?runs-on: macos-latest\n/);
     const publish = text.slice(text.indexOf("\n  macos-publish:\n"), text.indexOf("\n  linux:\n"));
     expect(publish).toContain("    needs: [release-gate, macos]\n");
     expect(publish).toContain('"darwin-aarch64": {signature: $arm_sig, url: $arm_url}');
