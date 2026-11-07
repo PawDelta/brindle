@@ -138,7 +138,7 @@ table.heat{border-collapse:separate;border-spacing:0;width:100%;min-width:960px;
 .dim .ev{font-size:11.5px;color:var(--ink-3);margin:8px 0 0;line-height:1.5}
 .br .nm a{color:inherit;text-decoration:none}
 .br .nm a:hover{color:var(--branch);text-decoration:underline}
-.hn{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:10px;margin-top:12px}
+.hn{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,300px),1fr));gap:10px;margin-top:12px}
 .hn .card{border:1px solid var(--line);border-radius:var(--r);padding:12px 14px;background:var(--surface-2)}
 .hn .card h3{font-size:14px;margin:0}
 .hn .card .m{font:11.5px var(--mono);color:var(--ink-3);margin:2px 0 6px}
@@ -289,10 +289,18 @@ ol.srcs li em{color:var(--ink-3);font-style:normal}
 
   <section id="community">
     <h2>What HN says</h2>
-    <p class="sub">Six threads, read Nov 6, 2026. Usernames are HN handles; each line is a paraphrase. Reddit couldn't be read (it blocks our fetcher), so no Reddit evidence is used. Items marked <span class="u">?</span> came from a summary of a long thread, not verbatim text.</p>
+    <p class="sub">Six HN threads and a set of Reddit discussions, read Nov 6, 2026. Usernames are HN handles; each line is a paraphrase. Reddit blocks our fetcher, so the Reddit card uses excerpts indexed by web search from a third-party snapshot mirror, without usernames: treat it as unverified. Items marked <span class="u">?</span> came from a summary of a long thread, not verbatim text.</p>
     <details>
-      <summary>6 threads · review is the bottleneck · tmux splits people · VMs over worktrees · "open-source it before you get acquired"</summary>
+      <summary>HN + Reddit · review is the bottleneck · tracking sessions burns attention · tmux splits people · VMs over worktrees · "open-source it before you get acquired"</summary>
       <div class="hn">
+        <div class="card"><h3>Reddit: r/ClaudeCode and r/ClaudeAI on running parallel sessions<span class="u">?</span></h3><div class="m">Snapshots Jan 28 – May 30, 2026 · indexed excerpts via web search, not opened on reddit.com</div><ul>
+          <li>A poster says auto mode ended the permission prompts but made them "the middleware" between sessions, so they had one Claude act as a PM that spawns and monitors worker sessions.</li>
+          <li>Several cap themselves at 2–3 sessions: switching between them, and tracking which one is stuck, erodes focus.</li>
+          <li>A poster hit dev-server port clashes past 3 sessions ("every dev server wants 3000").</li>
+          <li>Others say the bottleneck becomes how fast you can review and test what's produced; one notes Claude already has agent teams and subagents natively.</li>
+          <li>A poster running 6–9 sessions found tmux grids unreadable and liked Conductor and Superset.</li></ul>
+          <div class="for">Backs: the wedge (a supervisor plus review), isolation (brindle's per-worktree port block), UI, platform risk</div>
+          <div class="m" style="margin-top:6px">Snapshots: <a href="https://reddit.sentinel-team.org/posts/1qpb90n/snapshots/2026-01-28T15%3A35%3A30.958312Z" target="_blank" rel="noopener">1qpb90n</a> · <a href="https://reddit.sentinel-team.org/posts/1s91fr1/snapshots/2026-04-03T23%3A00%3A15.436463Z" target="_blank" rel="noopener">1s91fr1</a> · <a href="https://reddit.sentinel-team.org/posts/1smdfm1/snapshots/2026-04-18T04%3A07%3A17.675088Z" target="_blank" rel="noopener">1smdfm1</a> · <a href="https://reddit.sentinel-team.org/posts/1sros25/snapshots/2026-04-25T02%3A30%3A13.962987Z" target="_blank" rel="noopener">1sros25</a> · <a href="https://reddit.sentinel-team.org/posts/1tp19x7/snapshots/2026-05-30T02%3A41%3A26.708778Z" target="_blank" rel="noopener">1tp19x7</a>. Also found by our reviewer, not opened here: <a href="https://www.reddit.com/r/ClaudeCode/comments/1vm8u30/how_do_you_actually_manage_multiple_parallel/" target="_blank" rel="noopener">r/ClaudeCode, Aug 12, 2026</a> · <a href="https://www.reddit.com/r/ClaudeAI/comments/1vwgeg9/running_multiple_agents_in_parallel_is_bringing/" target="_blank" rel="noopener">r/ClaudeAI, Aug 23, 2026</a>.</div></div>
         <div class="card"><h3><a href="https://news.ycombinator.com/item?id=50369503" target="_blank" rel="noopener">Conductor is joining Meta</a></h3><div class="m">~Nov 4, 2026 · 214 pts · 225 comments</div><ul>
           <li>markerz quotes the announcement: signups closed Nov 4, Cloud read-only Nov 13, the local app winds down in early 2027.</li>
           <li>sksum suggests open-sourcing the core; BowBun asks why it wasn't open source<span class="u">?</span>.</li>
@@ -355,7 +363,7 @@ ol.srcs li em{color:var(--ink-3);font-style:normal}
       <summary>Sources (all read Nov 6, 2026 unless noted)</summary>
       <ol class="srcs" id="srclist"></ol>
     </details>
-    <p class="foot">Method: product sites, docs, READMEs and HN threads were read live on Nov 6, 2026. Stars, licenses and releases come from the GitHub GraphQL API on the same day; each repo's source entry records the observed values and links its releases page. Third-party reviews and HN mirrors are marked <span class="u">?</span>. Where a page didn't state something, the cell says "not stated" and scores it missing. brindle's claims come from README.md, docs/guide.md, src/brindle/gates.py and the internal usage read. This is research only: no code was changed.</p>
+    <p class="foot">Method: product sites, docs, READMEs and HN threads were read live on Nov 6, 2026. Reddit blocks our fetcher, so Reddit evidence is search-indexed excerpts from a third-party snapshot mirror, marked unverified. Stars, licenses and releases come from the GitHub GraphQL API on the same day; each repo's source entry records the observed values and links its releases page. Third-party reviews and HN mirrors are marked <span class="u">?</span>. Where a page didn't state something, the cell says "not stated" and scores it missing. brindle's claims come from README.md, docs/guide.md, src/brindle/gates.py and the internal usage read. This is research only: no code was changed.</p>
   </section>
 </div>
 <div class="tip" id="tip" role="tooltip"></div>
@@ -415,6 +423,9 @@ const SRC = {
   "gc-agent":["GitHub docs: Copilot coding agent / Copilot in the cloud","https://docs.github.com/en/copilot/concepts/agents/coding-agent"],
   "gc-plans":["github.com/features/copilot/plans","https://github.com/features/copilot/plans"],
   "du-gh":["github.com/dagger/container-use · 4,087★, Apache-2.0, v0.4.2 on Aug 19, 2025 (GitHub API)","https://github.com/dagger/container-use/releases"],
+  "rd-pm":["Reddit thread on managing parallel Claude Code sessions (mirror snapshot, Jan 28, 2026; excerpts via search)","https://reddit.sentinel-team.org/posts/1qpb90n/snapshots/2026-01-28T15%3A35%3A30.958312Z",1],
+  "rd-focus":["Reddit thread on parallel agents and context switching (mirror snapshot, Apr 18, 2026; excerpts via search)","https://reddit.sentinel-team.org/posts/1smdfm1/snapshots/2026-04-18T04%3A07%3A17.675088Z",1],
+  "rd-ports":["Reddit thread on running many sessions (mirror snapshot, May 30, 2026; excerpts via search)","https://reddit.sentinel-team.org/posts/1tp19x7/snapshots/2026-05-30T02%3A41%3A26.708778Z",1],
   "hn-herdr1":["HN: 'Herdr: One terminal to rule them all' (~Jul 2026, 404 pts, 178 comments)","https://news.ycombinator.com/item?id=48756578"],
   "hn-herdr2":["HN: 'Herdr has released native app' (~Oct 29, 2026, 367 pts, 271 comments)","https://news.ycombinator.com/item?id=50298436"],
   "hn-superset":["HN: 'Launch HN: Superset (YC P26)' (~Jun 2026, 108 pts, 135 comments)","https://news.ycombinator.com/item?id=48236770"],
@@ -425,8 +436,8 @@ const SRC_IDS = Object.keys(SRC);
 
 const DIMS = [
   {k:"prov", l:"Providers", w:"oh-my-pi (60+ model providers). Paradev, herdr and Emdash run any CLI.", b:"Strong: 4 CLIs plus open-weight models, and it can mix them in one pipeline (a Codex reviewer on a Claude worker). Few others route a review to a different vendor automatically.", s:"par"},
-  {k:"iso", l:"Isolation", w:"Codex, Cursor, Devin and Copilot run in cloud VMs or sandboxes. Paradev Team adds cloud sandboxes, and Sculptor uses containers. HN power users increasingly run agents in VMs or containers.", b:"Local worktrees on a freshly fetched base, with a port block and services per worktree. No containers or cloud runs, so it's behind anything with a sandbox.", s:"behind"},
-  {k:"rev", l:"Review gates", w:"brindle. It's the only tool where an agent's merge is blocked until a reviewer agent approves the exact commit and the configured checks pass, and a milestone is only done when its check exits 0.", b:"Leads, with the owner's own evidence: 1,567 reviews, 47% sent back. Scope: review is on by default in goal (autopilot) sessions and otherwise only if the repo enables it, and a person's brindle merge isn't gated. GitHub rulesets with Copilot review come closest. Bugbot and Codex auto-review are advisory. HN users name review as the bottleneck once they run 5–10 agents.", s:"lead"},
+  {k:"iso", l:"Isolation", w:"Codex, Cursor, Devin and Copilot run in cloud VMs or sandboxes. Paradev Team adds cloud sandboxes, and Sculptor uses containers. HN power users increasingly run agents in VMs or containers.", b:"Local worktrees on a freshly fetched base, with a port block and services per worktree, which answers a real complaint (Reddit users report dev-server port clashes past 3 sessions). No containers or cloud runs, so it's behind anything with a sandbox.", s:"behind"},
+  {k:"rev", l:"Review gates", w:"brindle. It's the only tool where an agent's merge is blocked until a reviewer agent approves the exact commit and the configured checks pass, and a milestone is only done when its check exits 0.", b:"Leads, with the owner's own evidence: 1,567 reviews, 47% sent back. Scope: review is on by default in goal (autopilot) sessions and otherwise only if the repo enables it, and a person's brindle merge isn't gated. GitHub rulesets with Copilot review come closest. Bugbot and Codex auto-review are advisory. HN and Reddit users name review, and tracking which session needs them, as the bottleneck once they run more than a few agents.", s:"lead"},
   {k:"perm", l:"Permissions", w:"Codex, with its OS sandbox and approval modes. The cloud tools sandbox by VM.", b:"The most thorough of the local orchestrators: structured hook decisions, compound-command parsing, presets, and a supervisor that answers routine asks. But in its own words it 'isn't a sandbox'. Claude Squad just offers --autoyes.", s:"par"},
   {k:"cost", l:"Cost / routing", w:"brindle. It routes tasks by weight to profiles, local Ollama workers included, pauses at the usage limit and resumes, and has budgets and cost reports.", b:"Leads. oh-my-pi routes between models but has no budgets. The vendors give you plan limits, and Cursor and Devin bill extra usage.", s:"lead"},
   {k:"ui", l:"UI", w:"Paradev (desktop, mobile, CLI, SDK and MCP), herdr (native on all 3 OSes) and Nimbalyst (3 OSes plus a mobile companion).", b:"Desktop app on macOS and Linux, a tmux TUI and a local web UI. No Windows app. HN is split on tmux: some call tmux plus scripts enough, others want status views and apps.", s:"behind"},
@@ -438,16 +449,16 @@ const DIMS = [
 ];
 const DSRC = {
   prov:["omp-gh","pd-home","hd-home","b-readme"],
-  iso:["cu-cloud","dv-price","gc-agent","pd-price","sc-site","hn-setup","hn-simon"],
-  rev:["b-gates","b-pipeline","b-readme","gc-agent","cu-price","cx-price","hn-superset","hn-simon"],
+  iso:["cu-cloud","dv-price","gc-agent","pd-price","sc-site","hn-setup","hn-simon","rd-ports"],
+  rev:["b-gates","b-pipeline","b-readme","gc-agent","cu-price","cx-price","hn-superset","hn-simon","rd-ports","rd-pm"],
   perm:["cx-app","b-guide","cs-gh"],
   cost:["b-guide","omp-gh","cu-price","dv-price"],
-  ui:["pd-price","hd-home","nb-gh","b-readme","hn-herdr1","hn-superset","cd-meta"],
+  ui:["pd-price","hd-home","nb-gh","b-readme","hn-herdr1","hn-superset","rd-focus","rd-ports"],
   team:["gc-plans","cu-price","dv-price","pd-price","b-guide","b-usage"],
   price:["hd-home","cs-gh","omp-gh","em-gh","b-guide","pd-price"],
   inst:["cu-cloud","hd-home","em-gh","b-readme","b-usage"],
   mat:["cx-gh","hd-gh","omp-gh","gh-brindle","b-usage"],
-  risk:["cc-wt","cc-av","cc-web","b-tos","vk-bye","cd-meta","cd-sa"],
+  risk:["cc-wt","cc-av","cc-web","b-tos","vk-bye","cd-meta","cd-sa","rd-focus"],
 };
 
 // score, text, sources, unverified flag
