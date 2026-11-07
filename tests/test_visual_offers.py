@@ -137,12 +137,12 @@ def test_accept_and_explicit_ask_allow_one_publish(db, session):
     ("Show me the release flow visually.", "visual", True),
     ("Visualize the flow and then delete the branch.", "visual", False),
     ("Visualize the flow once I approve the approach.", "visual", False),
-    ("Can you visualize the flow tomorrow?", "visual", False),
-    ("Can you visualize the approval flow since 0.6.2?", "visual", True),
-    ("Show me the flow once I approve visually.", "visual", False),
-    ("Show me the flow tomorrow visually.", "visual", False),
-    ("Can you visualize the flow next week?", "visual", False),
-    ("Show me the next release visually.", "visual", True),
+    pytest.param("Can you visualize the flow tomorrow?", "visual", False, marks=pytest.mark.variant("tomorrow deferral reported in review")),
+    pytest.param("Can you visualize the approval flow since 0.6.2?", "visual", True, marks=pytest.mark.variant("subject words approval/since must not count as deferral")),
+    pytest.param("Show me the flow once I approve visually.", "visual", False, marks=pytest.mark.variant("deferral inside the show-visually form")),
+    pytest.param("Show me the flow tomorrow visually.", "visual", False, marks=pytest.mark.variant("tomorrow inside the show-visually form")),
+    pytest.param("Can you visualize the flow next week?", "visual", False, marks=pytest.mark.variant("temporal next week is a deferral")),
+    pytest.param("Show me the next release visually.", "visual", True, marks=pytest.mark.variant("next in a subject phrase is not a deferral")),
 ])
 def test_complete_request_intent(db, session, text, scope, allowed):
     boss, _ = session
