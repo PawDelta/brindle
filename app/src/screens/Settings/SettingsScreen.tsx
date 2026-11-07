@@ -1415,6 +1415,7 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
         )}
       </Pane>
       <Pane id="general" {...panes}>
+        <VisualsSetting client={client} field="visuals_enabled" />
         <VisualsSetting client={client} />
       <div className="border-t border-line">
         <Row label="Appearance">

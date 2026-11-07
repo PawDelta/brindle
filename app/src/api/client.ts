@@ -834,6 +834,8 @@ export interface VisualOffer {
 
 export interface UserSettings {
   visuals?: "on" | "off";
+  /* The visuals feature itself (on unless turned off); `visuals` above is only the offers. */
+  visuals_enabled?: "on" | "off";
   claude_permission_mode: ClaudePermissionMode;
   /* Absent from an engine older than this setting. */
   opencode_permission_mode?: OpenCodePermissionMode;

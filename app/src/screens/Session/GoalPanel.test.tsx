@@ -94,8 +94,9 @@ describe("GoalPanel", () => {
     const views = daemon.ptyViews();
     render(<PtyViewsProvider value={views}><App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: APP_ROOT, repo: REPO }} /></PtyViewsProvider>);
     try {
-      const context = await screen.findByTestId("session-context");
-      const title = await within(context).findByRole("button", { name: appSession.goal! });
+      // The shell shows before the sessions are read: the context pane is replaced once they are.
+      const title = await waitFor(() => within(screen.getByTestId("session-context")).getByRole("button", { name: appSession.goal! }));
+      const context = screen.getByTestId("session-context");
       vi.useFakeTimers();
       await act(async () => fireEvent.dblClick(title));
       expect(daemon.clipboard).toBe(request);

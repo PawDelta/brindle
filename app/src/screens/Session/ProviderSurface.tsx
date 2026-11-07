@@ -29,6 +29,7 @@ import { Preflight } from "../../components/Preflight";
 import { PtyTerminal, type TerminalView } from "../../components/PtyTerminal";
 import { button, card as cardClass, main, quiet } from "../../components/ui";
 import { providerName } from "../../store/overview";
+import { PanesReadyContext } from "../../store/panes";
 import type { Recovery } from "./useContinue";
 import { withVisualInput } from "./Visuals/terminalInput";
 
@@ -54,7 +55,9 @@ type Card =
   | { kind: "ended"; title: string; why: string | null; locked?: boolean }
   /* `unshowable`: the pane runs but can't be shown here (tmux too old): no Restart. */
   | { kind: "failed"; title: string; why: string; unshowable?: boolean }
-  | { kind: "disconnected" };
+  | { kind: "disconnected" }
+  /* The engine is still bringing its sessions back (store/panes.ts): the pane follows. */
+  | { kind: "returning" };
 
 /* The card the surface shows instead of a pane, or null for a live pane.
    `unshowable`: why a live pane can't be shown here (the pty view's status). */
@@ -139,11 +142,15 @@ export function ProviderSurface({ repo, agent: listedAgent, alive, sessionStatus
   // A pane can return outside Continue too (another app window or the CLI).
   // Forget an old stream's failure when its lifecycle changes, without reopening
   // a healthy terminal on every snapshot refresh.
-  const lifecycle = JSON.stringify([agent?.id, agent?.status, agent?.window, agent?.tmux_server, alive, recovery.attempt]);
-  const [seen, setSeen] = useState({ lifecycle, attempt });
+  // Panes ready again after the engine was away (store/panes.ts): whatever the old view said is
+  // forgotten, and the pane opens afresh on the rows read since.
+  const panes = useContext(PanesReadyContext);
+  const epoch = panes.epoch;
+  const lifecycle = JSON.stringify([agent?.id, agent?.status, agent?.window, agent?.tmux_server, alive, recovery.attempt, epoch]);
+  const [seen, setSeen] = useState({ lifecycle, attempt, epoch });
   if (seen.lifecycle !== lifecycle) {
-    setSeen({ lifecycle, attempt });
-    if (view?.kind === "error" || view?.kind === "closed" || (checked && STOPPED.has(checked.found.status)) || attempt !== seen.attempt) setView(null);
+    setSeen({ lifecycle, attempt, epoch });
+    if (view?.kind === "error" || view?.kind === "closed" || (checked && STOPPED.has(checked.found.status)) || attempt !== seen.attempt || epoch !== seen.epoch) setView(null);
     setLeftView(null);
     setShowLeft(finished);
   }
@@ -161,7 +168,11 @@ export function ProviderSurface({ repo, agent: listedAgent, alive, sessionStatus
     opened.current = true;
     if (unshowable) recheck?.();
   }, [unshowable, recheck]);
-  const card = surfaceCard(agent, alive, sessionStatus, view, credentials, unshowable);
+  // The engine is still bringing its sessions back (a launch, or a new daemon after a restart): the
+  // rows may name windows from before, so no pane yet, and none of the cards a missing window or a
+  // closed view would bring. What it finished or failed with still shows.
+  const returning = !panes.ready && !!agent && !agent.locked && agent.status !== "done" && agent.status !== "failed";
+  const card: Card | null = returning ? { kind: "returning" } : surfaceCard(agent, alive, sessionStatus, view, credentials, unshowable);
   const name = agent ? providerName(agent.provider) : "the session";
   const { resume, busy, notice, preflight, setPreflight } = recovery;
 
@@ -183,7 +194,7 @@ export function ProviderSurface({ repo, agent: listedAgent, alive, sessionStatus
   const observedOpen = useMemo(() => ready && client && agent && !["claude", "opencode"].includes(agent.provider)
     ? withVisualInput(client, agent.id, ready.open, () => visualsEnabled.current) : ready?.open, [ready?.open, client, agent?.id, agent?.provider]);
   const target = agent?.window ?? null;
-  const left = agent && card && card.kind !== "starting" && !(card.kind === "ended" && card.locked) && !!target && !!ready && (alive === false || STOPPED.has(agent.status));
+  const left = agent && card && card.kind !== "starting" && card.kind !== "returning" && !(card.kind === "ended" && card.locked) && !!target && !!ready && (alive === false || STOPPED.has(agent.status));
 
   return (
     <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-md bg-shell-bg" data-testid="provider-surface" data-card={card?.kind ?? "live"}>
@@ -191,7 +202,7 @@ export function ProviderSurface({ repo, agent: listedAgent, alive, sessionStatus
       {/* Mounted under the "starting" card too: the card leaves once this view is live, and an agent
           that stays "starting" while it waits on a startup prompt (trust, permission) is shown by it. */}
       {agent && (live || card?.kind === "starting") && ready && target && (
-        <PtyTerminal key={`${agent.id}:${recovery.attempt}:${reconnects}`} at={{ server: agent.tmux_server ?? null, target }} open={observedOpen!} copy={ready.copy} paste={ready.paste} onView={setView} />
+        <PtyTerminal key={`${agent.id}:${recovery.attempt}:${reconnects}:${epoch}`} at={{ server: agent.tmux_server ?? null, target }} open={observedOpen!} copy={ready.copy} paste={ready.paste} onView={setView} />
       )}
       {/* The engine's preflight items, from either Continue, whatever this pane shows: over a live
           worker's pane (the supervisor's chat is what the continue brings back) as a strip, else as the surface. */}
@@ -202,12 +213,21 @@ export function ProviderSurface({ repo, agent: listedAgent, alive, sessionStatus
       )}
       {card && !preflight && (
         <div className={`${card.kind === "starting" && ready && target ? "absolute inset-0 z-10" : left && showLeft ? "shrink-0" : "flex-1"} flex items-start justify-center overflow-auto bg-canvas p-s4`}>
-            <section className={`${cardClass} flex w-full max-w-xl flex-col gap-s2 px-s3 py-s2`} aria-label={card.kind === "starting" ? `Starting ${name}` : card.kind === "disconnected" ? "Disconnected" : card.title} data-testid="state-card" data-kind={card.kind}>
+            <section className={`${cardClass} flex w-full max-w-xl flex-col gap-s2 px-s3 py-s2`} aria-label={card.kind === "starting" ? `Starting ${name}` : card.kind === "returning" ? `Bringing ${name} back` : card.kind === "disconnected" ? "Disconnected" : card.title} data-testid="state-card" data-kind={card.kind}>
               {card.kind === "starting" && (
                 <div className="flex items-center gap-s1">
                   <span className="size-3 shrink-0 animate-spin rounded-full border-2 border-branch border-t-transparent" aria-hidden />
                   <h2 className="text-base font-semibold">Starting {name}…</h2>
                 </div>
+              )}
+              {card.kind === "returning" && (
+                <>
+                  <div className="flex items-center gap-s1">
+                    <span className="size-3 shrink-0 animate-spin rounded-full border-2 border-branch border-t-transparent" aria-hidden />
+                    <h2 className="text-base font-semibold">Bringing {name} back…</h2>
+                  </div>
+                  <p className="text-sm text-ink-2">brindle is reopening your sessions. The conversation shows here in a moment; everything else already works.</p>
+                </>
               )}
               {card.kind === "disconnected" && (
                 <>

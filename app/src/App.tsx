@@ -24,13 +24,18 @@
    at the top of the main column (components/AppUpdateBanner.tsx), set aside
    into a pill in the sidebar's foot. The engine banner sits above
    the screen when the engine isn't one the app can simply use, or its
-   event stream is down (components/EngineBanner.tsx). Before all of it, on
+   event stream is down (components/EngineBanner.tsx); when an engine that
+   answered goes away (a restart), the last screen stays under a calm
+   reconnect overlay instead, until it answers again
+   (components/ReconnectOverlay.tsx). The shell shows as soon as the
+   account is known: only agents' panes wait for the engine to bring its
+   sessions back (usePanesReady below). Before all of it, on
    a first launch, the full-window flow that connects the first provider
    (screens/Onboarding: no sidebar), until one is connected and signed in.
    And before that, on every launch, the sign-in gate (SignInGate below):
    nothing but brindle's sign-in until the account reads signed in. */
 
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { DaemonError, type DaemonClient, type ProviderInstalled } from "./api/client";
 import { plain } from "./api/wording";
 import { DaemonContext } from "./api/context";
@@ -41,6 +46,7 @@ import type { About, AppUpdater, AppUpdates, CliLink, ReleaseBuildUpdater } from
 import { AppUpdateBanner, AppUpdateProvider } from "./components/AppUpdateBanner";
 import { UpgradeCard, useEngineUpgrade } from "./components/EngineUpgrade";
 import { EngineBanner } from "./components/EngineBanner";
+import { AppCovered, ReconnectOverlay, useReconnect } from "./components/ReconnectOverlay";
 import { Sidebar } from "./components/Sidebar";
 import { Walkthrough, type WalkthroughStep } from "./components/Walkthrough";
 import { TerminalPanel, TerminalProvider, shellPlace } from "./components/TerminalPanel";
@@ -55,6 +61,7 @@ import { SessionScreen } from "./screens/Session";
 import { SettingsScreen } from "./screens/Settings";
 import { isPaused } from "./store/overview";
 import { SessionsProvider, useCloseSession, useSessions } from "./store/sessions";
+import { PanesReadyContext, type PanesReady } from "./store/panes";
 import { ProvidersProvider } from "./store/providers";
 import { UsageProvider } from "./store/usage";
 import type { AppState, AppStore } from "./store/store";
@@ -286,6 +293,10 @@ function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, p
   }, [check, connection]);
 
   const noop = useCallback(() => Promise.resolve(), []);
+  // The engine answered before and now doesn't (a restart): the last screen stays, under the reconnect overlay.
+  const { phase: reconnect, focusBefore } = useReconnect(connection);
+  const away = reconnect !== "none";
+  const held = reconnect === "shown" || reconnect === "long";
 
   // A session's view and the empty state keep their own height (the surface
   // fills it, a sheet lies over it), the Inbox too (its queue scrolls, a
@@ -301,16 +312,20 @@ function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, p
   return (
     <TerminalProvider client={client} here={here}>
       <AppUpdateProvider updates={appUpdates}>
-      <div className="flex h-full bg-canvas text-ink">
-        <div className="contents" hidden={reading}>
+      {/* A visual's native page sits above the page: under the overlay it steps aside too. */}
+      <AppCovered.Provider value={held}>
+      <div className="relative flex h-full bg-canvas text-ink">
+        {/* Under the reconnect overlay the app stays on screen but out of reach: no focus, no clicks. */}
+        <div className="contents" hidden={reading} inert={held}>
           <Sidebar route={shown} navigate={navigate} refresh={refresh ?? noop} openUrl={openUrl} />
         </div>
-        <div className="relative flex min-w-0 flex-1 flex-col">
+        <div className="relative flex min-w-0 flex-1 flex-col" inert={held}>
           <AppUpdateBanner openUrl={openUrl} />
-          {/* The banner's upgrade follows the engine's terminal stream, which a page with no engine doesn't have. */}
-          {client ? <Banner status={bannerStatus(engine, connection)} connection={connection} onRetry={check} client={client} store={store} /> : <EngineBanner status={bannerStatus(engine, connection)} connection={connection} onRetry={check} />}
+          {/* The banner's upgrade follows the engine's terminal stream, which a page with no engine doesn't have.
+              While the engine is away after having answered, the overlay speaks for it instead (no raw error strip). */}
+          {away ? null : client ? <Banner status={bannerStatus(engine, connection)} connection={connection} onRetry={check} client={client} store={store} /> : <EngineBanner status={bannerStatus(engine, connection)} connection={connection} onRetry={check} />}
           <main data-walkthrough="session-view" className={`relative flex min-h-0 flex-1 flex-col ${fills ? "overflow-hidden" : "gap-s2 overflow-auto p-s3"}`}>
-            {error && <p className={`${alert} ${fills ? "m-s2 mb-0" : ""}`}>{error}</p>}
+            {error && !away && <p className={`${alert} ${fills ? "m-s2 mb-0" : ""}`}>{error}</p>}
             {client ? (
               route ? (
                 <div className={`relative flex min-h-0 flex-1 flex-col ${shown.screen === "inbox" ? "gap-s2 p-s3" : ""}`}>
@@ -335,7 +350,9 @@ function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, p
           <TerminalPanel />
         </div>
         {client && <Walkthrough autoStart={firstRun} onStep={showWalkthroughStep} />}
+        <ReconnectOverlay phase={reconnect} focusBefore={focusBefore} onRetry={check} />
       </div>
+      </AppCovered.Provider>
       </AppUpdateProvider>
     </TerminalProvider>
   );
@@ -407,9 +424,9 @@ function FirstLaunch(props: AppProps) {
   // The providers feed starts with the app itself: the first launch reads its own rows.
   return (
     <ProvidersProvider client={client}>
-      <Startup client={client} refresh={props.refresh}>
+      <PanesGate client={client} refresh={props.refresh}>
         <Shell {...props} initialRoute={(gate.kind === "app" && gate.route) || props.initialRoute} firstRun={gate.kind === "app" && gate.fresh} />
-      </Startup>
+      </PanesGate>
     </ProvidersProvider>
   );
 }
@@ -423,29 +440,56 @@ function waitingForPanes(workspaces: WorkspaceDTO[]): boolean {
     && !["paused", "done", "failed", "closed", "rewound", "exited"].includes(a.status) && !a.window);
 }
 
-/* Mount the shell only once recovery has settled. Reconnects belong to its
-   banner, never to this launch gate. The deadline also bounds a hung read. */
-function Startup({ client, refresh, children }: { client: DaemonClient | null; refresh?: () => Promise<void>; children: ReactNode }) {
+/* Whether agents' panes may be shown yet (store/panes.ts): not until the
+   engine's recovery has settled and the store holds rows read after it.
+   Nothing else waits on this: the shell shows at once, from what the store
+   and the sessions feed already have (a launch whose engine spends twenty
+   seconds bringing sessions back used to sit behind "Starting" for all of
+   them). Asked again whenever the event stream comes back after a drop: a
+   new daemon (another pid, or one resuming) hides the panes until it has
+   settled in turn; a blip of the same one leaves them be. The deadline
+   bounds a hung read. */
+function usePanesReady(client: DaemonClient | null, refresh?: () => Promise<void>): PanesReady {
   const store = useStore();
-  const [done, setDone] = useState(!client);
-  const [line, setLine] = useState("Connecting to brindle…");
   const { reload } = useSessions();
+  const [panes, setPanes] = useState<PanesReady>({ ready: !client, epoch: 0 });
+  // Rounds of asking: one at the start, one more each time the stream reopens after a drop.
+  const connection = useAppState((s) => s.connection);
+  const [round, setRound] = useState(0);
+  const dropped = useRef(false);
   useEffect(() => {
-    if (!client || done) return;
+    if (connection === "closed") dropped.current = true;
+    else if (connection === "open" && dropped.current) {
+      dropped.current = false;
+      setRound((n) => n + 1);
+    }
+  }, [connection]);
+  // The daemon the panes were last shown from.
+  const shownFrom = useRef<number | null>(null);
+  useEffect(() => {
+    if (!client) return;
     let current = true;
+    let first = true;
     let next: ReturnType<typeof setTimeout>;
-    const deadline = setTimeout(() => {
+    const settle = (pid: number | null) => {
       current = false;
       clearTimeout(next);
-      setDone(true);
-    }, STARTUP_WAIT);
+      clearTimeout(deadline);
+      if (pid !== null) shownFrom.current = pid;
+      setPanes((p) => (p.ready ? p : { ready: true, epoch: p.epoch + 1 }));
+    };
+    const hide = () => setPanes((p) => (p.ready ? { ...p, ready: false } : p));
+    const deadline = setTimeout(() => settle(null), STARTUP_WAIT);
     const check = async () => {
-      const { lastEventId, connectionGeneration } = store.getState();
-      const unchanged = () => current && store.getState().lastEventId === lastEventId && store.getState().connectionGeneration === connectionGeneration;
+      const { connectionGeneration } = store.getState();
+      // A read from before the stream dropped and came back may be the old daemon's.
+      const unchanged = () => current && store.getState().connectionGeneration === connectionGeneration;
       try {
         const meta = await client.meta();
         if (!unchanged()) return;
-        setLine(meta.resuming ? "Bringing your sessions back…" : "Checking your sessions…");
+        if (first && round > 0 && meta.pid === shownFrom.current && !meta.resuming) return settle(meta.pid);
+        first = false;
+        hide();
         if (!meta.resuming) {
           const workspaces = await client.snapshot();
           if (!unchanged()) return;
@@ -468,16 +512,12 @@ function Startup({ client, refresh, children }: { client: DaemonClient | null; r
             // Sync reports failures in the store and still resolves its promise.
             // Only newly applied, ready rows may be used to mount terminals.
             if (applied.snapshotVersion === version || applied.error || applied.stale || waitingForPanes(applied.workspaces)) return;
-            current = false;
-            clearTimeout(deadline);
-            setDone(true);
+            settle(meta.pid);
             return;
           }
-          setLine("Waiting for your sessions to open…");
         }
       } catch {
-        if (!unchanged()) return;
-        setLine("Waiting for brindle to answer… You’ll be let in shortly.");
+        // Not answering yet: ask again shortly.
       } finally {
         if (current) next = setTimeout(() => void check(), STARTUP_CHECK);
       }
@@ -488,8 +528,13 @@ function Startup({ client, refresh, children }: { client: DaemonClient | null; r
       clearTimeout(next);
       clearTimeout(deadline);
     };
-  }, [client, done, reload, refresh, store]);
-  return done ? <>{children}</> : <Starting line={line} />;
+  }, [client, round, reload, refresh, store]);
+  return panes;
+}
+
+function PanesGate({ client, refresh, children }: { client: DaemonClient | null; refresh?: () => Promise<void>; children: ReactNode }) {
+  const panes = usePanesReady(client, refresh);
+  return <PanesReadyContext.Provider value={panes}>{children}</PanesReadyContext.Provider>;
 }
 
 /* The sign-in gate: the app needs a brindle account. Once the engine
