@@ -78,12 +78,17 @@ try {
           await settle();
           await shot("3-kept");
         } else {
+          const box = (p) => p.$eval('[data-testid="visual-sandbox"]', (el) => JSON.stringify(el.getBoundingClientRect()));
           const exporting = async (p) => {
             await p.click('[data-testid="visuals-button"]');
             await p.click('[data-testid="visual-row-v_8f2c"]');
             await p.waitForSelector('[data-testid="visual-reader"]');
+            const before = await box(p);
             await p.click('[data-testid="visual-export"]');
             await p.waitForSelector('[data-testid="export-menu"]', { timeout: 5000 });
+            // The menu overlays the page: the frame's layout box must not move when it opens.
+            const after = await box(p);
+            if (before !== after) throw new Error(`Export menu moved the frame: ${before} -> ${after}`);
           };
           await exporting(page);
           await settle();

@@ -99,14 +99,13 @@ describe("visuals", () => {
     await waitFor(() => expect(native.invoke).toHaveBeenCalledWith("visual_post", { label: delivery.label, message: expect.objectContaining({ type: "brindle.theme", vars: expect.objectContaining({ "--canvas": "#123456" }) }) }));
     document.documentElement.style.setProperty("--canvas", "#abcdef");
     await waitFor(() => expect(native.invoke).toHaveBeenCalledWith("visual_post", { label: delivery.label, message: expect.objectContaining({ vars: expect.objectContaining({ "--canvas": "#abcdef" }) }) }));
-    const box = () => { const { x, y, width, height } = screen.getByTestId("visual-sandbox").getBoundingClientRect(); return [x, y, width, height]; };
-    const sandbox = box();
     fireEvent.click(screen.getByRole("button", { name: "Export" }));
     await waitFor(() => expect(native.invoke).toHaveBeenCalledWith("visual_snapshot", { label: delivery.label }));
     deliver("visual:message", { ...delivery, message: { type: "brindle.snapshot", html: "<html><body>Flow</body></html>" } });
-    await screen.findByRole("group", { name: "Export as" });
-    // The menu overlays the page: opening it doesn't move the frame's layout box, and the native page steps aside so it shows.
-    expect(box()).toEqual(sandbox);
+    const menu = await screen.findByRole("group", { name: "Export as" });
+    // The menu is an overlay: its wrapper is absolutely positioned under the Export button. The layout box is checked in the browser (app/shots/visuals-shots.mjs), since jsdom has no layout.
+    expect(menu.closest(".absolute")).not.toBeNull();
+    // The native page steps aside so the menu shows.
     await waitFor(() => expect(native.invoke).toHaveBeenCalledWith("visual_set_bounds", { label: delivery.label, bounds: { ...bounds, width: 0, height: 0 } }));
     fireEvent.click(screen.getByRole("button", { name: "Export" }));
     await waitFor(() => expect(native.invoke).toHaveBeenLastCalledWith("visual_set_bounds", { label: delivery.label, bounds }));
