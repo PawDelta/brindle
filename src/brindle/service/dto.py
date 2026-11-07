@@ -251,6 +251,7 @@ class MilestoneDTO(_DTO):
     state_why: str | None = None
     label: str | None = None       # plain words for state: "not done yet", "regressed", "couldn't run: <why>"
     phase: str = "in_progress"     # done | in_review | in_progress (autopilot.milestone_phases)
+    phase_name: str | None = None  # the goal's phase it is grouped under (goals.md `phase:`); None: no phases
 
     @classmethod
     def from_row(cls, m: Milestone, phase: str = "in_progress") -> MilestoneDTO:

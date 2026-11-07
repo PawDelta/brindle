@@ -2152,6 +2152,18 @@
               "title": "Phase",
               "type": "string"
             },
+            "phase_name": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Phase Name"
+            },
             "position": {
               "title": "Position",
               "type": "integer"
@@ -2756,6 +2768,18 @@
           "default": "in_progress",
           "title": "Phase",
           "type": "string"
+        },
+        "phase_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Phase Name"
         },
         "position": {
           "title": "Position",

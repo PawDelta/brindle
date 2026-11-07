@@ -197,7 +197,7 @@ def handover_to(db: DB, old_root_id: str, dest: Workspace, note: str | None = No
     if ap and ap.goal:
         old_ms = db.milestones(old_root_id)
         pilot.set_goal(db, new.id, ap.goal,
-                       [(m.title, m.check_cmd, m.detail, m.profile, m.repo) for m in old_ms], ap.detail)
+                       [(m.title, m.check_cmd, m.detail, m.profile, m.repo, m.phase_name) for m in old_ms], ap.detail)
         for prev, m in zip(old_ms, db.milestones(new.id)):
             if prev.status != "pending":
                 db.record_check(m.id, prev.status == "passed", prev.output or "", prev.checked_sha,

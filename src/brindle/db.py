@@ -149,6 +149,13 @@ CREATE TABLE IF NOT EXISTS milestones (
     state_why TEXT,                -- for failed: why the check couldn't run
     ever_passed INTEGER            -- 1 once any check passed (kept through later failures)
 );
+-- The phase a milestone sits in, when its goal names phases (goals.md `phase:`,
+-- set_goal's "phase"). A table of its own, not a column of milestones: released
+-- tables never gain columns (see session_repo_branches below).
+CREATE TABLE IF NOT EXISTS milestone_phases (
+    milestone_id INTEGER PRIMARY KEY REFERENCES milestones(id) ON DELETE CASCADE,
+    phase TEXT NOT NULL
+);
 -- Repos attached to a session (brindle Pro multi_repo; see brindle.repos):
 -- assign/handoff may put workers there by alias.
 CREATE TABLE IF NOT EXISTS session_repos (
@@ -545,6 +552,12 @@ CREATE TABLE IF NOT EXISTS review_mcp_retries (
 );
 -- A dead process gets one replacement for this commit, even after its row is removed.
 CREATE TABLE IF NOT EXISTS review_death_restarts (
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    sha TEXT NOT NULL,
+    PRIMARY KEY (workspace_id, sha)
+);
+-- A conflict handoff belongs to the branch, including across replacement workers.
+CREATE TABLE IF NOT EXISTS pipeline_conflicts (
     workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
     sha TEXT NOT NULL,
     PRIMARY KEY (workspace_id, sha)
@@ -968,6 +981,7 @@ class Milestone:
     state: str | None = None
     state_why: str | None = None
     ever_passed: int | None = None   # 1 once any check passed, whatever sha it ran at
+    phase_name: str | None = None    # the goal's phase this milestone sits in (goals.md `phase:`)
 
 
 _EXIT = re.compile(r"\(exit (-?\d+)\)\s*$")
@@ -1978,6 +1992,43 @@ class DB:
                       (agent_id, kind, value))
         return True, row["value"] if row else None
 
+    def claim_stop_mark(self, agent_id: str, kind: str, status_since: float,
+                        reopened_at: float | None) -> tuple[bool, str | None]:
+        """``claim_mark`` for a notice about one stop of an idle agent, the
+        one its caller read (``status_since``, ``reopened_at``): won only if
+        that stop is still the agent's current one, with no result, and not
+        claimed yet. A stale read of an older stop neither sends its notice
+        nor overwrites a newer stop's mark. Returns whether it won and the
+        value it replaced (for ``release_stop_mark``)."""
+        value = repr(status_since)
+        with self.tx() as c:
+            current = c.execute(
+                "SELECT 1 FROM agents WHERE id=? AND status='idle' AND result IS NULL"
+                " AND COALESCE(status_since, created_at) IS ? AND reopened_at IS ?",
+                (agent_id, status_since, reopened_at)).fetchone()
+            if current is None:
+                return False, None
+            row = c.execute("SELECT value FROM agent_marks WHERE agent_id=? AND kind=?",
+                            (agent_id, kind)).fetchone()
+            if row and row["value"] == value:
+                return False, value
+            c.execute("INSERT INTO agent_marks (agent_id, kind, value) VALUES (?,?,?) "
+                      "ON CONFLICT(agent_id, kind) DO UPDATE SET value=excluded.value",
+                      (agent_id, kind, value))
+        return True, row["value"] if row else None
+
+    def release_stop_mark(self, agent_id: str, kind: str, status_since: float,
+                          previous: str | None) -> None:
+        """Undo a ``claim_stop_mark`` whose notice couldn't be sent, only
+        while the mark is still the one it claimed."""
+        with self.tx() as c:
+            if previous is None:
+                c.execute("DELETE FROM agent_marks WHERE agent_id=? AND kind=? AND value=?",
+                          (agent_id, kind, repr(status_since)))
+            else:
+                c.execute("UPDATE agent_marks SET value=? WHERE agent_id=? AND kind=? AND value=?",
+                          (previous, agent_id, kind, repr(status_since)))
+
     def release_note(self, agent_id: str, since: float, previous: float | None,
                      *, field: str = "stuck_noted") -> None:
         """Undo ``claim_note`` when the note couldn't be sent, unless a later one replaced it."""
@@ -2437,20 +2488,25 @@ class DB:
             c.execute("UPDATE autopilot SET progress=progress+1, nudges=0 WHERE root_id=?", (root_id,))
 
     def set_milestones(self, root_id: str, items: list[tuple]) -> None:
-        """Replace the session's milestones with ``(title, check_cmd, detail[, profile[, repo]])`` items."""
+        """Replace the session's milestones with ``(title, check_cmd, detail[, profile[, repo[, phase]]])`` items."""
         with self.tx() as c:
             c.execute("DELETE FROM milestones WHERE root_id=?", (root_id,))
             for i, (title, check, detail, *rest) in enumerate(items, start=1):
-                c.execute(
+                cur = c.execute(
                     "INSERT INTO milestones (root_id, position, title, check_cmd, detail, profile, repo) "
                     "VALUES (?,?,?,?,?,?,?)",
                     (root_id, i, title, check, detail, rest[0] if rest else None,
                      rest[1] if len(rest) > 1 else None),
                 )
+                if len(rest) > 2 and rest[2]:
+                    c.execute("INSERT INTO milestone_phases (milestone_id, phase) VALUES (?,?)",
+                              (cur.lastrowid, rest[2]))
 
     def milestones(self, root_id: str) -> list[Milestone]:
         rows = self.conn.execute(
-            "SELECT * FROM milestones WHERE root_id=? ORDER BY position", (root_id,)
+            "SELECT m.*, p.phase AS phase_name FROM milestones m "
+            "LEFT JOIN milestone_phases p ON p.milestone_id=m.id WHERE m.root_id=? ORDER BY m.position",
+            (root_id,),
         )
         return [_load(Milestone, r) for r in rows]
 

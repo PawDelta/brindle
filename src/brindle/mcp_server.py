@@ -463,7 +463,14 @@ def _reply(caller: Agent, t: Task, mode: str, profile: str, branch: str | None, 
         text += wait.format(worker.id)
         warnings = [*warnings, *tasks._launch_warnings(worker, wws)]
     else:
-        text = _queued_text(now, profile, branch, not agents.launches_process(profile, now.repo_root))
+        subagent = not agents.launches_process(profile, now.repo_root)
+        if not now.waiting and not subagent:   # its start hasn't looked yet: say if its session waits its turn
+            from dataclasses import replace
+
+            from brindle import fair_share
+
+            now = replace(now, waiting=fair_share.wait_reason(db, now))
+        text = _queued_text(now, profile, branch, subagent)
         text += wait.format(t.id)
     return _remind_goal(db, caller, text + notes + "".join(f"\nWarning: {w}" for w in warnings) + tail)
 
@@ -1478,7 +1485,9 @@ def set_goal(goal: str, milestones: list[dict[str, str]], detail: str | None = N
     brindle runs from the root of your checkout; it must exit 0 only when that
     milestone is done (e.g. "uv run pytest tests/test_settings.py -q"). A check
     for a repo attached to the session runs in that repo's checkout: give its
-    alias as "repo", or write the check as "@<alias>: <command>".
+    alias as "repo", or write the check as "@<alias>: <command>". The optional
+    "phase" names the phase a milestone belongs to; the app folds consecutive
+    milestones of one phase together.
     Replaces any earlier goal; milestones that keep their title and check keep
     their last result."""
     db = DB()

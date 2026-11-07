@@ -100,6 +100,46 @@ def test_no_next_profile_when_the_tier_is_used_up():
 
 
 
+def test_a_worker_left_processing_on_an_api_error_screen_is_reported(db, repo, monkeypatch):
+    """No StopFailure hook ran: the pane shows the turn ended on a 529 and
+    nothing since, while the status still says 'processing'."""
+    (repo / ".brindle").mkdir(exist_ok=True)
+    ws = workspaces.adopt_root(db, str(repo))
+    now = time.time()
+    db.add_agent(Agent("boss", ws.id, "supervisor", "claude", None, "interactive", "processing",
+                       "@0", None, now))
+    for w in ("w1", "w2", "w3", "w4"):
+        db.add_agent(Agent(w, ws.id, "developer", "claude", "boss", "assign", "processing", "@" + w[1], None, now))
+    error = screen('API Error: 529 {"type":"error","error":{"type":"overloaded_error"}}')
+    screens = {"@1": error, "@2": screen("Done with the first file."), "@3": error, "@4": error}
+    monkeypatch.setattr(tmux, "capture", lambda target, **kw: screens[target])
+    monkeypatch.setattr(tmux, "window_activity", lambda target, **kw: now - 120)
+    monkeypatch.setattr(agents, "pane_owners", lambda db_, panes=None: {})
+    for name in ("runs_process", "same_server", "is_alive", "owns_pane"):
+        monkeypatch.setattr(agents, name, lambda *a, **kw: True)
+    monkeypatch.setattr(agents, "command_running", lambda db_, a: False)
+    monkeypatch.setattr(cull, "_last_edit", lambda ws_: 0.0)
+    # The dashboard's one-read reconcile has already moved w3 to idle; w4 has
+    # been idle past the idle reminder's threshold (a sweep missed it: a restart).
+    assert agents.screen_status(db, db.get_agent("w3"), samples=1) == "idle"
+    db.update_agent("w4", status="idle", status_since=now - cull.IDLE_UNREPORTED_AFTER - 60)
+    sent = []
+    monkeypatch.setattr(agents, "send_message", lambda db_, to, body, sender_id=None: sent.append((to, body)))
+    # A caller holding w3 as it was, after w3 ran another turn and stopped again:
+    # an older stop is neither told nor marked over the newer one.
+    stale = db.get_agent("w3")
+    db.update_agent("w3", status_since=stale.status_since + 1)
+    assert not agents.tell_parent_api_error(db, stale, "API Error: 529") and sent == []
+    # The generic reminder, even sent first, doesn't stand in for the error's kind.
+    assert cull.note_idle_unreported(db, now, {}) == ["told boss that worker w4 is idle without reporting"]
+    assert cull.note_api_errors(db, now, {}) == [f"told boss that worker {w} stopped on an API error"
+                                                 for w in ("w1", "w3", "w4")]
+    assert [db.get_agent(w).status for w in ("w1", "w2", "w3")] == ["idle", "processing", "idle"]
+    assert all(to == "boss" and "overloaded (529)" in body for to, body in sent[1:])
+    assert cull.note_api_errors(db, now, {}) == []   # once per stop
+    assert cull.note_idle_unreported(db, now + cull.IDLE_UNREPORTED_AFTER, {}) == []   # stands in for it
+
+
 def test_a_supervisor_is_told_about_a_refused_worker_and_about_an_alias_fallback(db, repo, monkeypatch):
     (repo / ".brindle").mkdir(exist_ok=True)
     ws = workspaces.adopt_root(db, str(repo))
