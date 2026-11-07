@@ -123,7 +123,8 @@ struct Report {
     unexpected: Vec<String>,
     /// Script errors the page saw (shown; a page's own bug, not a leak).
     errors: Vec<String>,
-    /// The request blocker couldn't be armed: the page never loaded.
+    /// The request blocker couldn't be armed, or the own page failed to
+    /// load: the page is not showing, and this is why.
     failed: Option<String>,
 }
 
@@ -134,11 +135,13 @@ enum Until {
     Started,
 }
 
-/// What a silent page can still tell: its script errors and attempt count.
+/// What a silent page can still tell: its script errors and attempt count,
+/// and the start of its text (a webview's own error page says why it's there).
 const DIAGNOSTIC: &str = "JSON.stringify({ ready: document.readyState, href: location.href, \
     errors: typeof errors === 'undefined' ? 'no _probe.js ran' : errors, \
     attempts: typeof attempts === 'undefined' ? -1 : attempts.length, \
-    leaks: typeof leaks === 'undefined' ? [] : leaks })";
+    leaks: typeof leaks === 'undefined' ? [] : leaks, \
+    text: document.body ? document.body.innerText.slice(0, 200) : null })";
 
 /// Collect the deliveries for `label` until `until` is met or the deadline passes.
 fn collect(rx: &Receiver<Delivery>, label: &str, own_url: &str, until: Until) -> Report {
@@ -249,8 +252,8 @@ fn run_probes(app: tauri::AppHandle, rx: Receiver<Delivery>, listener: Listener)
             println!("      the page reported an error: {error}");
         }
         if let Some(why) = &report.failed {
-            println!("      the blocker couldn't be armed, the page never loaded: {why}");
-            failures.push(format!("{name}: the blocker couldn't be armed: {why}"));
+            println!("      the page is not showing: {why}");
+            failures.push(format!("{name}: the page is not showing: {why}"));
         }
         report
     };
