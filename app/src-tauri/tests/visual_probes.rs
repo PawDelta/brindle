@@ -105,7 +105,7 @@ fn page(dir: &Path, name: &str, port: u16, probe_js: &str) -> String {
     let html = std::fs::read_to_string(dir.join(format!("{name}.html"))).unwrap_or_else(|e| panic!("{name}.html: {e}"));
     html.replace("{{PROBE}}", probe_js)
         .replace("{{PORT}}", &port.to_string())
-        .replace("{{ORIGIN}}", &visual_scheme::origin())
+        .replace("{{ORIGIN}}", &visual_scheme::page_origin())
 }
 
 /// What one probe told the harness.
@@ -123,6 +123,8 @@ struct Report {
     unexpected: Vec<String>,
     /// Script errors the page saw (shown; a page's own bug, not a leak).
     errors: Vec<String>,
+    /// The request blocker couldn't be armed: the page never loaded.
+    failed: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -148,7 +150,7 @@ fn collect(rx: &Receiver<Delivery>, label: &str, own_url: &str, until: Until) ->
             Until::Loaded => report.loaded,
             Until::Started => report.started,
         };
-        if met {
+        if met || report.failed.is_some() {
             return report;
         }
         let Some(remaining) = DEADLINE.checked_sub(start.elapsed()) else { return report };
@@ -175,6 +177,7 @@ fn collect(rx: &Receiver<Delivery>, label: &str, own_url: &str, until: Until) ->
             Delivery::Loaded { label: from, url, .. } if from == label && url == own_url => report.loaded = true,
             Delivery::Loaded { .. } => {}
             Delivery::Blocked { label: from, .. } if from == label => report.denied += 1,
+            Delivery::Failed { label: from, why, .. } if from == label => report.failed = Some(why),
             other => report.unexpected.push(format!("{other:?}")),
         }
     }
@@ -245,6 +248,10 @@ fn run_probes(app: tauri::AppHandle, rx: Receiver<Delivery>, listener: Listener)
         for error in &report.errors {
             println!("      the page reported an error: {error}");
         }
+        if let Some(why) = &report.failed {
+            println!("      the blocker couldn't be armed, the page never loaded: {why}");
+            failures.push(format!("{name}: the blocker couldn't be armed: {why}"));
+        }
         report
     };
 
@@ -264,22 +271,45 @@ fn run_probes(app: tauri::AppHandle, rx: Receiver<Delivery>, listener: Listener)
     }
     let _ = visual_scheme::close(&app, &sandbox, &VisualRef::Revision { id: "probe".into(), rev: REDIRECT_REV }.label());
 
-    // A visual that never yields: the app's own webview still answers.
+    // A visual that never yields: first the visual itself must stop answering
+    // (the loop has taken hold), then the app's own webview must still answer.
+    let busy = VisualRef::Revision { id: "probe".into(), rev: BUSY_REV };
     let report = probe(BUSY_REV, "busy_loop", Until::Started, &mut failures);
     if !report.started {
-        println!("      busy_loop: no start message (the page may have hung before it left); checking the main webview anyway");
+        failures.push("busy_loop: the page never said it started".into());
+    } else if let Some(child) = app.get_webview(&busy.label()) {
+        let since = Instant::now();
+        let mut hung = false;
+        while since.elapsed() < DEADLINE {
+            let (tx, answered) = mpsc::channel();
+            if child.eval_with_callback("1 + 1", move |value| {
+                let _ = tx.send(value);
+            }).is_err() {
+                break;
+            }
+            if answered.recv_timeout(Duration::from_secs(3)).is_err() {
+                hung = true;
+                break;
+            }
+        }
+        if !hung {
+            failures.push("busy_loop: the visual kept answering; its busy loop never took hold".into());
+        } else {
+            let (tx, answered) = mpsc::channel();
+            main.eval_with_callback("1 + 1", move |value| {
+                let _ = tx.send(value);
+            })
+            .expect("eval on the main webview");
+            match answered.recv_timeout(DEADLINE) {
+                Ok(value) if value.trim() == "2" => println!("ok    busy_loop: the visual hung and the main webview still answered"),
+                Ok(value) => failures.push(format!("busy_loop: the main webview answered {value:?}, not 2")),
+                Err(_) => failures.push("busy_loop: the main webview did not answer while the visual spun: it froze".into()),
+            }
+        }
+    } else {
+        failures.push("busy_loop: the visual's webview is gone".into());
     }
-    let (tx, answered) = mpsc::channel();
-    main.eval_with_callback("1 + 1", move |value| {
-        let _ = tx.send(value);
-    })
-    .expect("eval on the main webview");
-    match answered.recv_timeout(DEADLINE) {
-        Ok(value) if value.trim() == "2" => println!("ok    busy_loop: the main webview answered while the visual spun"),
-        Ok(value) => failures.push(format!("busy_loop: the main webview answered {value:?}, not 2")),
-        Err(_) => failures.push("busy_loop: the main webview did not answer while the visual spun: it froze".into()),
-    }
-    let _ = visual_scheme::close(&app, &sandbox, &VisualRef::Revision { id: "probe".into(), rev: BUSY_REV }.label());
+    let _ = visual_scheme::close(&app, &sandbox, &busy.label());
     failures
 }
 
@@ -300,8 +330,11 @@ fn main() {
     let sandbox = Sandbox::new(move |delivery| {
         let _ = tx.send(delivery);
     });
+    // The app's own commands, under the app's own guard: what a hostile page's
+    // invoke runs into (host_ipc.html).
+    let builder = tauri::Builder::default().invoke_handler(brindle_desktop_lib::invoke_handler());
     // The source: the probe pages by revision, a redirect for one, and nothing else.
-    let builder = visual_scheme::register(tauri::Builder::default(), sandbox, move |_app, visual| match visual {
+    let builder = visual_scheme::register(builder, sandbox, move |_app, visual| match visual {
         VisualRef::Revision { id, rev } if id == "probe" && *rev == REDIRECT_REV => Ok(Upstream {
             status: 302,
             body: format!("<a href=\"http://127.0.0.1:{port}/redirected\">moved</a>").into_bytes(),

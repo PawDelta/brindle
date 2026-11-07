@@ -18,9 +18,11 @@
 //!   WebView2 resource filter on Windows;
 //! - WebRTC, which no header reaches: the injected prelude deletes
 //!   `RTCPeerConnection` and its kin in every frame before page script runs;
-//! - the app's own IPC: the child's label matches no capability
-//!   (capabilities/default.json names the `main` webview, not the window), so
-//!   every `invoke` is refused by Tauri's ACL;
+//! - the app's own IPC: every command is refused unless the asking webview is
+//!   `main` (lib.rs `only_main`, before dispatch: Tauri skips its ACL on the
+//!   app's own commands for local origins, and a custom scheme is one), and
+//!   the child's label matches no capability (capabilities/default.json names
+//!   the `main` webview, not the window), so plugin commands fail the ACL too;
 //! - another visual's page, or the daemon: a request on the scheme is served
 //!   only when the asking webview is bound to exactly the id and revision in
 //!   the path, with no path beyond them, and the daemon is reachable only
@@ -59,14 +61,24 @@ pub const MESSAGE_EVENT: &str = "visual:message";
 pub const BLOCKED_EVENT: &str = "visual:blocked";
 /// The event for a visual's page having loaded (or failed to).
 pub const LOADED_EVENT: &str = "visual:loaded";
+/// The event for a visual whose request blocker couldn't be put in place: its
+/// page is never loaded (the webview stays blank), and the reader shows why.
+pub const FAILED_EVENT: &str = "visual:failed";
 
-/// The origin the scheme's pages live at, as the platform spells it.
-pub fn origin() -> String {
+/// The origin a page sees itself at, as the platform's webview spells it:
+/// what the page's URL, its policy and the request blocker use.
+pub fn page_origin() -> String {
     if cfg!(windows) {
         format!("http://{SCHEME}.localhost")
     } else {
-        format!("{SCHEME}://localhost")
+        handler_origin()
     }
+}
+
+/// The origin requests reach the scheme handler at, on every platform: wry
+/// undoes Windows' `http://<scheme>.localhost` spelling before the handler.
+pub fn handler_origin() -> String {
+    format!("{SCHEME}://localhost")
 }
 
 /// What a visual webview shows: a revision of a session's visual, or a kept one.
@@ -96,7 +108,7 @@ impl VisualRef {
 
     /// The page's URL in the child webview.
     pub fn url(&self) -> Url {
-        Url::parse(&format!("{}{}", origin(), self.path())).expect("a visual URL")
+        Url::parse(&format!("{}{}", page_origin(), self.path())).expect("a visual URL")
     }
 
     /// The child webview's label: one per open revision.
@@ -144,11 +156,13 @@ pub enum Ask {
     Message(VisualRef),
 }
 
-/// Parse a request's method and URL: the path is `/<id>/r<n>` or
-/// `/kept/<id>`, optionally followed by `/message` for a POST, with nothing
-/// else: no `..`, no further segment, no query. Only the scheme's own origin.
+/// Parse a request's method and URL as the handler receives it: the path is
+/// `/<id>/r<n>` or `/kept/<id>`, optionally followed by `/message` for a
+/// POST, with nothing else: no `..`, no further segment, no query. Only the
+/// handler's origin (Windows' page spelling never reaches it, see
+/// [`handler_origin`]; arriving unreverted it would be a spoof).
 pub fn parse_request(method: &str, url: &Url) -> Result<Ask, String> {
-    if origin_of(url) != origin() || !url.username().is_empty() || url.password().is_some() {
+    if origin_of(url) != handler_origin() || !url.username().is_empty() || url.password().is_some() {
         return Err(format!("not the scheme's origin: {}", origin_of(url)));
     }
     if url.query().is_some() {
@@ -207,7 +221,7 @@ pub fn csp() -> String {
          img-src data: blob:; font-src data:; media-src data: blob:; connect-src {origin}; \
          form-action 'none'; base-uri 'none'; frame-ancestors 'none'; frame-src 'none'; \
          child-src 'none'; worker-src 'none'; object-src 'none'; sandbox allow-scripts",
-        origin = origin()
+        origin = page_origin()
     )
 }
 
@@ -220,7 +234,7 @@ pub fn content_rules() -> String {
     let allow = |prefix: &str| {
         format!(r#"{{"trigger":{{"url-filter":"^{prefix}"}},"action":{{"type":"ignore-previous-rules"}}}}"#)
     };
-    let own = format!("{}/", regex_escape(&origin()));
+    let own = format!("{}/", regex_escape(&page_origin()));
     let rules = [block, allow(&own), allow("data:"), allow("blob:"), allow("about:")];
     format!("[{}]", rules.join(",\n"))
 }
@@ -239,7 +253,7 @@ fn regex_escape(text: &str) -> String {
 /// Whether the blocker lets a request through: the scheme's own origin and
 /// inline data only. What [`content_rules`] says, for WebView2's filter.
 pub fn request_allowed(url: &str) -> bool {
-    let own = format!("{}/", origin());
+    let own = format!("{}/", page_origin());
     url.starts_with(&own) || url.starts_with("data:") || url.starts_with("blob:") || url.starts_with("about:")
 }
 
@@ -304,6 +318,8 @@ pub enum Delivery {
     Blocked { label: String, visual: VisualRef, target: String },
     /// The page finished loading `url` (the own page, or `about:blank` first).
     Loaded { label: String, visual: VisualRef, url: String },
+    /// The platform's request blocker couldn't be armed: the page stays blank.
+    Failed { label: String, visual: VisualRef, why: String },
 }
 
 type Sink = Arc<dyn Fn(Delivery) + Send + Sync>;
@@ -367,25 +383,16 @@ impl Sandbox {
             Ok(ask) => ask,
             Err(why) => return refuse(StatusCode::FORBIDDEN, &why),
         };
-        let (target, snapshot_wanted) = {
-            let Ok(mut bound) = self.bound.lock() else {
-                return refuse(StatusCode::INTERNAL_SERVER_ERROR, "the sandbox's state is poisoned");
-            };
-            let Some(open) = bound.get_mut(label) else {
-                return refuse(StatusCode::FORBIDDEN, "not an open visual's webview");
-            };
-            let asked = match &ask {
-                Ask::Page(v) | Ask::Message(v) => v,
-            };
-            if *asked != open.visual {
-                return refuse(StatusCode::FORBIDDEN, "not this visual's page");
-            }
-            let wanted = open.snapshot_wanted;
-            if matches!(ask, Ask::Message(_)) {
-                open.snapshot_wanted = false;
-            }
-            (open.visual.clone(), wanted)
+        let target = match self.visual_of(label) {
+            Some(open) => open,
+            None => return refuse(StatusCode::FORBIDDEN, "not an open visual's webview"),
         };
+        let asked = match &ask {
+            Ask::Page(v) | Ask::Message(v) => v,
+        };
+        if *asked != target {
+            return refuse(StatusCode::FORBIDDEN, "not this visual's page");
+        }
         match ask {
             Ask::Page(_) => match fetch(app, &target) {
                 Ok(upstream) => page_response(upstream),
@@ -404,12 +411,31 @@ impl Sandbox {
                 if !FORWARDED.contains(&kind) {
                     return refuse(StatusCode::BAD_REQUEST, "not a message type the host takes");
                 }
-                if kind == "brindle.snapshot" && !snapshot_wanted {
+                // Only a valid snapshot consumes the host's ask: an answer or an Esc
+                // arriving meanwhile (each request has its own thread) leaves it standing.
+                if kind == "brindle.snapshot" && !self.take_snapshot_ask(label) {
                     return refuse(StatusCode::FORBIDDEN, "the host asked for no snapshot");
                 }
                 self.deliver(Delivery::Message { label: label.to_string(), visual: target, message });
                 hardened(Response::builder().status(StatusCode::NO_CONTENT)).body(Vec::new()).expect("a response")
             }
+        }
+    }
+
+    /// Note that the host wants one snapshot from the webview `label`.
+    pub fn want_snapshot(&self, label: &str) -> Result<(), String> {
+        let mut bound = self.bound.lock().map_err(|e| e.to_string())?;
+        let open = bound.get_mut(label).ok_or_else(|| format!("{label} is not an open visual"))?;
+        open.snapshot_wanted = true;
+        Ok(())
+    }
+
+    /// Consume the host's ask for a snapshot, if one stands.
+    fn take_snapshot_ask(&self, label: &str) -> bool {
+        let Ok(mut bound) = self.bound.lock() else { return false };
+        match bound.get_mut(label) {
+            Some(open) => std::mem::replace(&mut open.snapshot_wanted, false),
+            None => false,
         }
     }
 }
@@ -547,7 +573,7 @@ pub fn open<R: Runtime>(
             return Err(format!("couldn't open the visual: {e}"));
         }
     };
-    arm(&webview, &visual, bounds);
+    arm(&webview, sandbox, &visual, bounds);
     Ok(webview)
 }
 
@@ -595,24 +621,47 @@ pub fn post<R: Runtime>(app: &AppHandle<R>, sandbox: &Sandbox, label: &str, mess
 /// Ask the page for its rendered DOM: one `brindle.snapshot` message will be
 /// relayed; any other is dropped.
 pub fn request_snapshot<R: Runtime>(app: &AppHandle<R>, sandbox: &Sandbox, label: &str) -> Result<(), String> {
-    {
-        let mut bound = sandbox.bound.lock().map_err(|e| e.to_string())?;
-        let open = bound.get_mut(label).ok_or_else(|| format!("{label} is not an open visual"))?;
-        open.snapshot_wanted = true;
-    }
+    sandbox.want_snapshot(label)?;
     post(app, sandbox, label, &serde_json::json!({ "type": "brindle.snapshot.request" }))
 }
 
+/// What arming the blocker came to: the page may load, or it must not.
+type Armed = Box<dyn FnOnce(Result<(), String>) + Send>;
+
 /// Put the platform's request blocker on the webview, then load the page.
-/// Nothing but `about:blank` is shown until the blocker is in place.
-fn arm<R: Runtime>(webview: &Webview<R>, visual: &VisualRef, bounds: Bounds) {
+/// Nothing but `about:blank` is shown until the blocker is in place; when it
+/// can't be (a WebKit without the preconnect switch, a refused rule list),
+/// the page is never loaded and the host is told (`Delivery::Failed`).
+fn arm<R: Runtime>(webview: &Webview<R>, sandbox: &Sandbox, visual: &VisualRef, bounds: Bounds) {
     let url = visual.url();
     let target = webview.clone();
-    let navigate: Box<dyn FnOnce() + Send> = Box::new(move || {
-        let _ = target.navigate(url);
+    let sink = sandbox.sink.clone();
+    let visual = visual.clone();
+    let armed: Armed = Box::new(move |outcome| match outcome {
+        Ok(()) => {
+            let _ = target.navigate(url);
+        }
+        Err(why) => {
+            eprintln!("visual {}: no request blocker, the page stays blank: {why}", visual.path());
+            sink(Delivery::Failed { label: visual.label(), visual, why });
+        }
     });
-    if let Err(e) = platform::arm(webview, bounds, navigate) {
-        eprintln!("visual {}: no request blocker, the page stays blank: {e}", visual.path());
+    // Called once: by the platform, or here when the platform never got to.
+    let once = Arc::new(Mutex::new(Some(armed)));
+    let inside = once.clone();
+    let outcome = platform::arm(
+        webview,
+        bounds,
+        Box::new(move |result| {
+            if let Some(armed) = inside.lock().ok().and_then(|mut a| a.take()) {
+                armed(result);
+            }
+        }),
+    );
+    if let Err(e) = outcome {
+        if let Some(armed) = once.lock().ok().and_then(|mut a| a.take()) {
+            armed(Err(format!("the webview handle couldn't be reached: {e}")));
+        }
     }
 }
 
@@ -624,6 +673,7 @@ pub fn deliver_to_main<R: Runtime>(app: Arc<OnceLock<AppHandle<R>>>) -> impl Fn(
             Delivery::Message { .. } => MESSAGE_EVENT,
             Delivery::Blocked { .. } => BLOCKED_EVENT,
             Delivery::Loaded { .. } => LOADED_EVENT,
+            Delivery::Failed { .. } => FAILED_EVENT,
         };
         if let Some(app) = app.get() {
             let _ = app.emit_to(EventTarget::labeled("main"), event, &delivery);
@@ -683,7 +733,7 @@ pub fn visual_snapshot<R: Runtime>(app: AppHandle<R>, sandbox: State<'_, Sandbox
 /// controller, compiled by WebKit's store, then the page loads.
 #[cfg(target_os = "macos")]
 mod platform {
-    use super::{content_rules, Bounds};
+    use super::{content_rules, Armed, Bounds};
     use block2::RcBlock;
     use objc2::rc::Retained;
     use objc2::runtime::AnyObject;
@@ -697,66 +747,62 @@ mod platform {
     /// `<link rel=preconnect>` opens a connection with no request, so neither
     /// CSP nor the rule list sees it. WebKit keeps it behind a feature flag
     /// (`LinkPreconnect`, on by default), reachable through WKPreferences'
-    /// private feature list: off for this webview's preferences.
-    unsafe fn disable_preconnect(webview: &WKWebView) {
+    /// private feature list: off for this webview's preferences, or an error,
+    /// on which the page is never loaded.
+    unsafe fn disable_preconnect(webview: &WKWebView) -> Result<(), String> {
         let preferences = webview.configuration().preferences();
         let prefs: &AnyObject = &preferences;
         let class = WKPreferences::class();
         let answers: bool = msg_send![class, respondsToSelector: sel!(_features)];
         let sets: bool = msg_send![prefs, respondsToSelector: sel!(_setEnabled:forFeature:)];
         if !answers || !sets {
-            eprintln!("visual: this WebKit has no feature list; link preconnect stays on");
-            return;
+            return Err("this WebKit has no feature list to switch link preconnect off".into());
         }
         let features: Retained<NSArray<AnyObject>> = msg_send![class, _features];
-        let mut found = false;
         for feature in features.iter() {
             let feature: &AnyObject = &feature;
             let key: Option<Retained<NSString>> = msg_send![feature, key];
             if key.is_some_and(|k| k.to_string() == "LinkPreconnect") {
                 let _: () = msg_send![prefs, _setEnabled: false, forFeature: feature];
-                found = true;
+                return Ok(());
             }
         }
-        if !found {
-            eprintln!("visual: this WebKit lists no LinkPreconnect feature; link preconnect stays on");
-        }
+        Err("this WebKit lists no LinkPreconnect feature to switch off".into())
     }
 
-    pub fn arm<R: Runtime>(webview: &Webview<R>, _bounds: Bounds, navigate: Box<dyn FnOnce() + Send>) -> Result<(), String> {
+    pub fn arm<R: Runtime>(webview: &Webview<R>, _bounds: Bounds, armed: Armed) -> Result<(), String> {
         webview
             .with_webview(move |platform| {
                 let Some(mtm) = MainThreadMarker::new() else {
-                    eprintln!("visual: the webview handle came off the main thread; the page stays blank");
-                    return;
+                    return armed(Err("the webview handle came off the main thread".into()));
                 };
                 // SAFETY: Tauri hands the webview's own WKWebView, alive while the webview is.
-                if let Some(view) = unsafe { Retained::retain(platform.inner().cast::<WKWebView>()) } {
-                    unsafe { disable_preconnect(&view) };
+                let Some(view) = (unsafe { Retained::retain(platform.inner().cast::<WKWebView>()) }) else {
+                    return armed(Err("no WKWebView behind the webview".into()));
+                };
+                if let Err(why) = unsafe { disable_preconnect(&view) } {
+                    return armed(Err(why));
                 }
                 // SAFETY: Tauri hands the webview's own WKUserContentController, alive while the webview is.
-                let controller: Retained<WKUserContentController> =
-                    match unsafe { Retained::retain(platform.controller().cast::<WKUserContentController>()) } {
-                        Some(controller) => controller,
-                        None => return,
-                    };
+                let Some(controller) = (unsafe { Retained::retain(platform.controller().cast::<WKUserContentController>()) })
+                else {
+                    return armed(Err("no user content controller behind the webview".into()));
+                };
                 // SAFETY: the default store exists on the main thread.
                 let Some(store) = (unsafe { WKContentRuleListStore::defaultStore(mtm) }) else {
-                    return;
+                    return armed(Err("WebKit has no content rule list store".into()));
                 };
-                let navigate = Rc::new(RefCell::new(Some(navigate)));
+                let armed = Rc::new(RefCell::new(Some(armed)));
                 let block = RcBlock::new(move |list: *mut WKContentRuleList, error: *mut NSError| {
+                    let Some(armed) = armed.borrow_mut().take() else { return };
                     if list.is_null() {
                         // SAFETY: WebKit hands an NSError when it hands no list.
                         let why = unsafe { error.as_ref() }.map(|e| e.localizedDescription().to_string());
-                        eprintln!("visual: WebKit refused the content rules, the page stays blank: {why:?}");
-                        return;
+                        return armed(Err(format!("WebKit refused the content rules: {why:?}")));
                     }
                     // SAFETY: a non-null list from WebKit, valid for the call.
                     unsafe { controller.addContentRuleList(&*list) };
-                    if let Some(navigate) = navigate.borrow_mut().take() {
-                        navigate();
-                    }
+                    armed(Ok(()));
                 });
                 // SAFETY: both strings outlive the call; WebKit retains the block.
                 unsafe {
@@ -777,19 +823,19 @@ mod platform {
 /// all but the scheme's own origin and inline data, then the page loads.
 #[cfg(target_os = "windows")]
 mod platform {
-    use super::{request_allowed, Bounds};
+    use super::{request_allowed, Armed, Bounds};
     use tauri::{Runtime, Webview};
     use webview2_com::Microsoft::Web::WebView2::Win32::COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL;
     use webview2_com::WebResourceRequestedEventHandler;
     use windows::core::{HSTRING, PWSTR};
     use windows::Win32::System::Com::CoTaskMemFree;
 
-    pub fn arm<R: Runtime>(webview: &Webview<R>, _bounds: Bounds, navigate: Box<dyn FnOnce() + Send>) -> Result<(), String> {
+    pub fn arm<R: Runtime>(webview: &Webview<R>, _bounds: Bounds, armed: Armed) -> Result<(), String> {
         webview
             .with_webview(move |platform| {
                 let environment = platform.environment();
                 // SAFETY: COM calls on the controller Tauri hands, on its thread.
-                let armed = unsafe {
+                let installed = unsafe {
                     (|| -> windows::core::Result<()> {
                         let core = platform.controller().CoreWebView2()?;
                         core.AddWebResourceRequestedFilter(&HSTRING::from("*"), COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL)?;
@@ -819,10 +865,7 @@ mod platform {
                         )
                     })()
                 };
-                match armed {
-                    Ok(()) => navigate(),
-                    Err(e) => eprintln!("visual: WebView2 refused the request filter, the page stays blank: {e}"),
-                }
+                armed(installed.map_err(|e| format!("WebView2 refused the request filter: {e}")));
             })
             .map_err(|e| e.to_string())
     }
@@ -836,30 +879,31 @@ mod platform {
 /// webview, so the child is moved onto an overlay at its bounds instead.
 #[cfg(target_os = "linux")]
 mod platform {
-    use super::{content_rules, Bounds};
+    use super::{content_rules, Armed, Bounds};
     use glib::translate::ToGlibPtr;
     use gtk::prelude::*;
     use std::ffi::{c_void, CString};
     use tauri::{Runtime, Webview};
     use webkit2gtk::WebViewExt;
 
-    pub fn arm<R: Runtime>(webview: &Webview<R>, bounds: Bounds, navigate: Box<dyn FnOnce() + Send>) -> Result<(), String> {
+    pub fn arm<R: Runtime>(webview: &Webview<R>, bounds: Bounds, armed: Armed) -> Result<(), String> {
         webview
             .with_webview(move |platform| {
                 let view = platform.inner();
-                overlay(&view, bounds);
+                if let Err(why) = overlay(&view, bounds) {
+                    return armed(Err(why));
+                }
                 let Some(manager) = view.user_content_manager() else {
-                    eprintln!("visual: the webview has no user content manager; the page stays blank");
-                    return;
+                    return armed(Err("the webview has no user content manager".into()));
                 };
                 let Some(storage) = dirs_cache() else {
-                    eprintln!("visual: no cache directory for the content filter; the page stays blank");
-                    return;
+                    return armed(Err("no cache directory for the content filter".into()));
                 };
-                let Ok(path) = CString::new(storage) else { return };
-                let Ok(identifier) = CString::new("brindle-visual") else { return };
+                let (Ok(path), Ok(identifier)) = (CString::new(storage), CString::new("brindle-visual")) else {
+                    return armed(Err("the content filter's path isn't a C string".into()));
+                };
                 let rules = glib::Bytes::from_owned(content_rules().into_bytes());
-                let done: Box<Done> = Box::new(Done { manager, navigate: Some(navigate) });
+                let done: Box<Done> = Box::new(Done { manager, armed: Some(armed) });
                 // SAFETY: the store, rules and identifier live through the call; WebKit copies
                 // what it keeps and calls `saved` once, which frees `done`.
                 unsafe {
@@ -880,7 +924,7 @@ mod platform {
 
     struct Done {
         manager: webkit2gtk::UserContentManager,
-        navigate: Option<Box<dyn FnOnce() + Send>>,
+        armed: Option<Armed>,
     }
 
     unsafe extern "C" fn saved(
@@ -889,6 +933,7 @@ mod platform {
         data: *mut c_void,
     ) {
         let mut done: Box<Done> = Box::from_raw(data as *mut Done);
+        let Some(armed) = done.armed.take() else { return };
         let mut error: *mut glib::ffi::GError = std::ptr::null_mut();
         let filter = webkit2gtk_sys::webkit_user_content_filter_store_save_finish(
             store as *mut webkit2gtk_sys::WebKitUserContentFilterStore,
@@ -897,14 +942,11 @@ mod platform {
         );
         if filter.is_null() {
             let why: glib::Error = glib::translate::from_glib_full(error);
-            eprintln!("visual: WebKitGTK refused the content rules, the page stays blank: {why}");
-            return;
+            return armed(Err(format!("WebKitGTK refused the content rules: {why}")));
         }
         webkit2gtk_sys::webkit_user_content_manager_add_filter(done.manager.to_glib_none().0, filter);
         webkit2gtk_sys::webkit_user_content_filter_unref(filter);
-        if let Some(navigate) = done.navigate.take() {
-            navigate();
-        }
+        armed(Ok(()));
     }
 
     fn dirs_cache() -> Option<String> {
@@ -916,31 +958,43 @@ mod platform {
         dir.to_str().map(str::to_string)
     }
 
-    /// Lift the child out of the window's box onto a `gtk::Overlay` over the
-    /// main webview, at its bounds. The box keeps one overlay for all visuals.
-    fn overlay(child: &webkit2gtk::WebView, bounds: Bounds) {
-        let Some(parent) = child.parent() else { return };
-        if parent.is::<gtk::Overlay>() {
-            // A second visual: the overlay is already there.
-        } else if let Ok(vbox) = parent.downcast::<gtk::Box>() {
+    /// Lift the child out of the window's box (where Tauri packs every child,
+    /// under the main webview) onto a `gtk::Overlay` over the main webview, at
+    /// its bounds. The first visual makes the overlay around the main webview;
+    /// every later one (and a reopen) joins the overlay already in the box.
+    fn overlay(child: &webkit2gtk::WebView, bounds: Bounds) -> Result<(), String> {
+        let Some(parent) = child.parent() else {
+            return Err("the visual's widget has no parent".into());
+        };
+        if !parent.is::<gtk::Overlay>() {
+            let vbox = parent
+                .downcast::<gtk::Box>()
+                .map_err(|w| format!("the visual's widget is in a {}, not the window's box", w.type_().name()))?;
             let own: &gtk::Widget = child.upcast_ref();
-            let Some(main) = vbox.children().into_iter().find(|w| w.is::<webkit2gtk::WebView>() && w != own) else {
-                return;
+            let siblings = vbox.children();
+            let overlay = match siblings.iter().find_map(|w| w.clone().downcast::<gtk::Overlay>().ok()) {
+                Some(overlay) => overlay,
+                None => {
+                    let main = siblings
+                        .into_iter()
+                        .find(|w| w.is::<webkit2gtk::WebView>() && w != own)
+                        .ok_or("no main webview beside the visual to lay it over")?;
+                    vbox.remove(&main);
+                    let overlay = gtk::Overlay::new();
+                    overlay.add(&main);
+                    vbox.pack_start(&overlay, true, true, 0);
+                    overlay
+                }
             };
             vbox.remove(child);
-            vbox.remove(&main);
-            let overlay = gtk::Overlay::new();
-            overlay.add(&main);
-            vbox.pack_start(&overlay, true, true, 0);
             overlay.add_overlay(child);
             overlay.show_all();
-        } else {
-            return;
         }
         child.set_halign(gtk::Align::Start);
         child.set_valign(gtk::Align::Start);
         place_at(child, bounds);
         child.show();
+        Ok(())
     }
 
     fn place_at(child: &webkit2gtk::WebView, bounds: Bounds) {
@@ -956,12 +1010,13 @@ mod platform {
 
 #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 mod platform {
-    use super::Bounds;
+    use super::{Armed, Bounds};
     use tauri::{Runtime, Webview};
 
     /// No blocker known for this platform: the page is never loaded.
-    pub fn arm<R: Runtime>(_webview: &Webview<R>, _bounds: Bounds, _navigate: Box<dyn FnOnce() + Send>) -> Result<(), String> {
-        Err("no request blocker for this platform".into())
+    pub fn arm<R: Runtime>(_webview: &Webview<R>, _bounds: Bounds, armed: Armed) -> Result<(), String> {
+        armed(Err("no request blocker for this platform".into()));
+        Ok(())
     }
 
     pub fn place<R: Runtime>(_webview: &Webview<R>, _bounds: Bounds) {}
@@ -971,8 +1026,15 @@ mod platform {
 mod tests {
     use super::*;
 
+    /// A URL as the handler receives it (the page spelling, where it differs,
+    /// is undone by wry before the handler).
     fn url(path: &str) -> Url {
-        Url::parse(&format!("{}{path}", origin())).unwrap()
+        Url::parse(&format!("{}{path}", handler_origin())).unwrap()
+    }
+
+    /// A URL as the page sees it (what the hooks and the blocker get).
+    fn page_url(path: &str) -> Url {
+        Url::parse(&format!("{}{path}", page_origin())).unwrap()
     }
 
     #[test]
@@ -1007,9 +1069,67 @@ mod tests {
         for (method, path) in refused {
             assert!(parse_request(method, &url(path)).is_err(), "{method} {path} was accepted");
         }
-        // Another origin on the same scheme, as Windows would spell a spoof.
-        let other = Url::parse(&format!("{}/v_8f2c/r2", origin().replace("localhost", "evil.localhost"))).unwrap();
+        // Another host on the scheme.
+        let other = Url::parse(&format!("{}/v_8f2c/r2", handler_origin().replace("localhost", "evil.localhost"))).unwrap();
         assert!(parse_request("GET", &other).is_err());
+        // Windows' page spelling never reaches the handler (wry undoes it): arriving as is, it's a spoof.
+        assert!(parse_request("GET", &Url::parse("http://brindle-visual.localhost/v_8f2c/r2").unwrap()).is_err());
+        // The handler's form is the same on every platform, whatever the page's.
+        assert_eq!(
+            parse_request("GET", &Url::parse("brindle-visual://localhost/v_8f2c/r2").unwrap()),
+            Ok(Ask::Page(v("v_8f2c", 2)))
+        );
+    }
+
+    /// A scheme request through the real handler, as a webview would send it.
+    fn request(method: &str, path: &str, body: &str) -> Request<Vec<u8>> {
+        Request::builder()
+            .method(method)
+            .uri(format!("{}{path}", handler_origin()))
+            .body(body.as_bytes().to_vec())
+            .unwrap()
+    }
+
+    #[test]
+    fn a_snapshot_is_relayed_once_asked_and_an_answer_in_between_leaves_the_ask_standing() {
+        let app = tauri::test::mock_app();
+        let delivered: Arc<Mutex<Vec<Delivery>>> = Default::default();
+        let log = delivered.clone();
+        let sandbox = Sandbox::new(move |d| log.lock().unwrap().push(d));
+        let visual = VisualRef::Revision { id: "v_1".into(), rev: 1 };
+        let label = visual.label();
+        sandbox.bind(&label, &visual).unwrap();
+        let no_pages = |_: &AppHandle<tauri::test::MockRuntime>, _: &VisualRef| Err::<Upstream, String>("no pages here".into());
+        let post = |body: &str| sandbox.handle(app.handle(), &label, request("POST", "/v_1/r1/message", body), &no_pages).status();
+
+        // Unasked: dropped, whatever the page dispatched to itself.
+        assert_eq!(post(r#"{"type":"brindle.snapshot","html":"<p>unasked</p>"}"#), StatusCode::FORBIDDEN);
+        sandbox.want_snapshot(&label).unwrap();
+        // An answer, an Esc and a malformed POST arrive first: the ask stands.
+        assert_eq!(post(r#"{"type":"choice","option":"B"}"#), StatusCode::NO_CONTENT);
+        assert_eq!(post(r#"{"type":"brindle.esc"}"#), StatusCode::NO_CONTENT);
+        assert_eq!(post("not json"), StatusCode::BAD_REQUEST);
+        assert_eq!(post(r#"{"type":"brindle.exec","cmd":"rm"}"#), StatusCode::BAD_REQUEST);
+        assert_eq!(post(r#"{"type":"brindle.snapshot","html":"<p>asked</p>"}"#), StatusCode::NO_CONTENT);
+        // Once.
+        assert_eq!(post(r#"{"type":"brindle.snapshot","html":"<p>again</p>"}"#), StatusCode::FORBIDDEN);
+        // Another webview (the app's own) asking for this visual's page, or this webview for another's: refused before any fetch.
+        let page = |from: &str, path: &str| sandbox.handle(app.handle(), from, request("GET", path, ""), &no_pages).status();
+        assert_eq!(page("main", "/v_1/r1"), StatusCode::FORBIDDEN);
+        assert_eq!(page(&label, "/v_2/r1"), StatusCode::FORBIDDEN);
+        assert_eq!(page(&label, "/v_1/r2"), StatusCode::FORBIDDEN);
+        assert_eq!(page(&label, "/v_1/r1"), StatusCode::BAD_GATEWAY);
+
+        let kinds: Vec<String> = delivered
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|d| match d {
+                Delivery::Message { message, .. } => message["type"].as_str().unwrap().to_string(),
+                other => format!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(kinds, ["choice", "brindle.esc", "brindle.snapshot"]);
     }
 
     #[test]
@@ -1017,12 +1137,12 @@ mod tests {
         let own = VisualRef::Revision { id: "v_8f2c".into(), rev: 2 };
         assert!(allow_navigation(&Url::parse("about:blank").unwrap(), &own));
         assert!(allow_navigation(&own.url(), &own));
-        assert!(allow_navigation(&url("/v_8f2c/r2#b"), &own));
+        assert!(allow_navigation(&page_url("/v_8f2c/r2#b"), &own));
         for denied in [
-            url("/v_8f2c/r3"),
-            url("/other/r2"),
-            url("/kept/v_8f2c"),
-            url("/v_8f2c/r2?x=1"),
+            page_url("/v_8f2c/r3"),
+            page_url("/other/r2"),
+            page_url("/kept/v_8f2c"),
+            page_url("/v_8f2c/r2?x=1"),
             Url::parse("http://127.0.0.1:4242/leak").unwrap(),
             Url::parse("tauri://localhost/index.html").unwrap(),
             Url::parse("javascript:fetch('http://x')").unwrap(),
@@ -1031,10 +1151,10 @@ mod tests {
             assert!(!allow_navigation(&denied, &own), "{denied} was allowed");
         }
         // The platform blocker's view of the same.
-        assert!(request_allowed(&format!("{}/v_8f2c/r2/message", origin())));
+        assert!(request_allowed(&format!("{}/v_8f2c/r2/message", page_origin())));
         assert!(request_allowed("data:image/png;base64,AA=="));
         assert!(!request_allowed("http://127.0.0.1:4242/leak"));
-        assert!(!request_allowed(&format!("{}.evil.com/v_8f2c/r2", origin())));
+        assert!(!request_allowed(&format!("{}.evil.com/v_8f2c/r2", page_origin())));
 
         // A redirect from the daemon is refused, not followed; an error is text; all carry the policy.
         let redirect = page_response(Upstream { status: 302, body: b"<a href=http://x>go</a>".to_vec() });
@@ -1052,6 +1172,6 @@ mod tests {
         assert_eq!(page.headers().get(header::CONTENT_TYPE).unwrap(), "text/html; charset=utf-8");
         assert_eq!(stale.headers().get(header::CONTENT_TYPE).unwrap(), "text/plain; charset=utf-8");
         // The content rules allow exactly the origin, escaped for WebKit's regex.
-        assert!(content_rules().contains(&format!("^{}/", origin().replace('.', "\\."))));
+        assert!(content_rules().contains(&format!("^{}/", page_origin().replace('.', "\\."))));
     }
 }

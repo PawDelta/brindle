@@ -35,7 +35,7 @@ pub mod visual_scheme;
 mod wsl;
 
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, Runtime};
 
 const TRAY_ID: &str = "inbox";
 
@@ -174,6 +174,80 @@ pub fn context() -> tauri::Context {
     tauri::generate_context!()
 }
 
+/// The webview the app's page runs in: the only one that may call commands.
+const MAIN_WEBVIEW: &str = "main";
+
+/// Every command is the app's page's alone. Tauri checks its ACL on the app's
+/// own commands only when the app ships a permission manifest (it doesn't),
+/// and a page on a registered custom scheme counts as a local origin: so a
+/// visual's child webview (visual_scheme) would otherwise reach
+/// `daemon_request` and the rest through the injected IPC. The check is
+/// here, before any command is dispatched, by webview label.
+pub fn only_main<R: Runtime>(
+    commands: impl Fn(tauri::ipc::Invoke<R>) -> bool + Send + Sync + 'static,
+) -> impl Fn(tauri::ipc::Invoke<R>) -> bool + Send + Sync + 'static {
+    move |invoke| {
+        if invoke.message.webview().label() != MAIN_WEBVIEW {
+            let command = invoke.message.command().to_string();
+            invoke
+                .resolver
+                .reject(format!("{command}: only the app's page may call commands"));
+            return true;
+        }
+        commands(invoke)
+    }
+}
+
+/// The app's commands, guarded: what the app runs, and what the visual probe
+/// suite (tests/visual_probes.rs) puts its hostile pages against.
+pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync + 'static {
+    only_main(tauri::generate_handler![
+        set_inbox_count,
+        open_url,
+        oauth::oauth_listen,
+        oauth::oauth_wait,
+        oauth::oauth_cancel,
+        oauth::provider_http,
+        open_local_path,
+        daemon::daemon_connect,
+        daemon::daemon_start_step,
+        daemon::daemon_request,
+        daemon::daemon_stream_open,
+        daemon::daemon_stream_send,
+        daemon::daemon_stream_close,
+        engine::install_cli,
+        setup::setup_detect,
+        setup::setup_install_start,
+        setup::setup_install_attach,
+        setup::setup_install_write,
+        setup::setup_install_resize,
+        pty_view::pty_view_status,
+        pty_view::pty_view_copy,
+        pty_view::pty_view_paste,
+        pty_view::pty_view_open,
+        pty_view::pty_view_write,
+        pty_view::pty_view_resize,
+        pty_view::pty_view_focus,
+        pty_view::pty_view_close,
+        updates::app_update_install,
+        updates::app_release_build_install,
+        updates::app_return_to_stable,
+        updates::app_stable_check,
+        updates::app_restart,
+        updates::app_update_status,
+        updates::app_update_check,
+        updates::app_update_dismiss,
+        updates::app_update_later,
+        updates::app_update_now,
+        about::about_read,
+        visual_scheme::visual_open,
+        visual_scheme::visual_close,
+        visual_scheme::visual_set_bounds,
+        visual_scheme::visual_post,
+        visual_scheme::visual_snapshot,
+    ])
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg(unix)]
@@ -234,51 +308,7 @@ pub fn run() {
         Ok(visual_scheme::Upstream { status, body: body.into_bytes() })
     });
     builder
-        .invoke_handler(tauri::generate_handler![
-            set_inbox_count,
-            open_url,
-            oauth::oauth_listen,
-            oauth::oauth_wait,
-            oauth::oauth_cancel,
-            oauth::provider_http,
-            open_local_path,
-            daemon::daemon_connect,
-            daemon::daemon_start_step,
-            daemon::daemon_request,
-            daemon::daemon_stream_open,
-            daemon::daemon_stream_send,
-            daemon::daemon_stream_close,
-            engine::install_cli,
-            setup::setup_detect,
-            setup::setup_install_start,
-            setup::setup_install_attach,
-            setup::setup_install_write,
-            setup::setup_install_resize,
-            pty_view::pty_view_status,
-            pty_view::pty_view_copy,
-            pty_view::pty_view_paste,
-            pty_view::pty_view_open,
-            pty_view::pty_view_write,
-            pty_view::pty_view_resize,
-            pty_view::pty_view_focus,
-            pty_view::pty_view_close,
-            updates::app_update_install,
-            updates::app_release_build_install,
-            updates::app_return_to_stable,
-            updates::app_stable_check,
-            updates::app_restart,
-            updates::app_update_status,
-            updates::app_update_check,
-            updates::app_update_dismiss,
-            updates::app_update_later,
-            updates::app_update_now,
-            about::about_read,
-            visual_scheme::visual_open,
-            visual_scheme::visual_close,
-            visual_scheme::visual_set_bounds,
-            visual_scheme::visual_post,
-            visual_scheme::visual_snapshot,
-        ])
+        .invoke_handler(invoke_handler())
         .setup(move |app| {
             let _ = visuals_app.set(app.handle().clone());
             let mut tray = TrayIconBuilder::with_id(TRAY_ID)
@@ -313,6 +343,67 @@ pub fn run() {
                 daemon::stop_app_daemon();
             }
         });
+}
+
+#[cfg(test)]
+mod ipc_tests {
+    use super::*;
+    use tauri::ipc::{CallbackFn, InvokeBody};
+    use tauri::test::{get_ipc_response, mock_builder, mock_context, noop_assets, MockRuntime, INVOKE_KEY};
+    use tauri::webview::{InvokeRequest, WebviewBuilder};
+    use tauri::{LogicalPosition, LogicalSize, WebviewUrl, WebviewWindowBuilder};
+
+    /// The same guard the app runs, around a real command, dispatched as the
+    /// IPC does: the app's page reaches the command, a visual's webview in the
+    /// same window is refused before it.
+    #[test]
+    fn only_the_main_webview_reaches_a_command() {
+        let app = mock_builder()
+            .manage(visual_scheme::Sandbox::new(|_| {}))
+            .invoke_handler(only_main(tauri::generate_handler![visual_scheme::visual_set_bounds]))
+            .build(mock_context(noop_assets()))
+            .unwrap();
+        let main = WebviewWindowBuilder::new(&app, "main", WebviewUrl::default()).build().unwrap();
+        let visual = app
+            .get_window("main")
+            .unwrap()
+            .add_child(
+                WebviewBuilder::new("visual:v_1:r1", WebviewUrl::default()),
+                LogicalPosition::new(0.0, 0.0),
+                LogicalSize::new(10.0, 10.0),
+            )
+            .unwrap();
+        struct Asking(tauri::Webview<MockRuntime>);
+        impl AsRef<tauri::Webview<MockRuntime>> for Asking {
+            fn as_ref(&self) -> &tauri::Webview<MockRuntime> {
+                &self.0
+            }
+        }
+        let ask = |webview: &tauri::Webview<MockRuntime>| {
+            get_ipc_response(
+                &Asking(webview.clone()),
+                InvokeRequest {
+                    cmd: "visual_set_bounds".into(),
+                    callback: CallbackFn(0),
+                    error: CallbackFn(1),
+                    url: "tauri://localhost".parse().unwrap(),
+                    body: InvokeBody::Json(serde_json::json!({
+                        "label": "visual:nobody:r1",
+                        "bounds": { "x": 0, "y": 0, "width": 10, "height": 10 },
+                    })),
+                    headers: Default::default(),
+                    invoke_key: INVOKE_KEY.into(),
+                },
+            )
+            .map_err(|e| e.to_string())
+        };
+        // The app's page: the command ran (and answered for itself).
+        let from_main = ask(&main.as_ref().clone()).unwrap_err();
+        assert!(from_main.contains("is not an open visual"), "{from_main}");
+        // The visual's webview, same window, same local origin: stopped at the door.
+        let from_visual = ask(&visual).unwrap_err();
+        assert!(from_visual.contains("only the app's page may call commands"), "{from_visual}");
+    }
 }
 
 #[cfg(all(test, unix))]
