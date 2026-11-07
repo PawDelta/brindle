@@ -141,7 +141,14 @@ function Screen({ route, visit, navigate, client, refresh, store, openUrl, pickF
   releaseBuildUpdater?: AppProps["releaseBuildUpdater"];
   readAbout?: AppProps["readAbout"];
 }) {
-  const openSession = (root: string, repo: string, agent?: string, sheet?: SheetRef) => navigate({ screen: "session", root, repo, agent, sheet });
+  const openSession = (root: string, repo: string, agent?: string, sheet?: SheetRef) => navigate({
+    screen: "session",
+    root,
+    repo,
+    agent,
+    sheet,
+    visualFrom: route.screen === "inbox" && sheet?.kind === "visual" ? route : undefined,
+  });
   const closeSession = useCloseSession(navigate);
   const docsFrom = route.screen === "knowledge" ? route.from : undefined;
   switch (route.screen) {
@@ -199,7 +206,13 @@ function Screen({ route, visit, navigate, client, refresh, store, openUrl, pickF
           store={store}
           agent={route.agent ?? route.root}
           sheet={route.sheet ?? null}
-          onSelect={(agent, sheet) => navigate({ ...route, agent, sheet: sheet ?? undefined })}
+          onSelect={(agent, sheet) => {
+            if (route.sheet?.kind === "visual" && !sheet && route.visualFrom) {
+              navigate(route.visualFrom);
+            } else {
+              navigate({ ...route, agent, sheet: sheet ?? undefined, visualFrom: sheet?.kind === "visual" ? route.visualFrom : undefined });
+            }
+          }}
           openUrl={openUrl}
           onOpen={openSession}
           onCloseSession={closeSession}

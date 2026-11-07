@@ -517,6 +517,43 @@ describe("visuals", () => {
     }
   });
 
+  it("opens an Inbox visual in its session and returns there after Esc, Back and an answer", async () => {
+    const session: SessionDTO = { id: "sup1", workspace_id: "proj", profile: "supervisor", status: "idle", mode: "interactive", created_at: now, goal: "Ship it" };
+    const item: InboxItemDTO = { kind: "visual", agent_id: "sup1", root_id: "sup1", workspace_id: "proj", visual_id: visual.id, reason: "asks you to choose" };
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root], inbox: [item] });
+    const client = daemon.client();
+    let row = visual;
+    vi.spyOn(client, "visuals").mockImplementation(async () => [answered, row]);
+    vi.spyOn(client, "markVisualRead").mockImplementation(async () => (row = { ...row, unread: false }));
+    vi.spyOn(client, "answerVisual").mockImplementation(async (_id, _rev, option, note) => {
+      row = { ...row, answer: { option, note, at: now } };
+      daemon.data.inbox = [];
+      daemon.publish("visual.answered", { root_id: "sup1" });
+      return row;
+    });
+    const store = createAppStore();
+    const sync = startSync({ client, store, connect: daemon.connect });
+    try {
+      render(<PtyViewsProvider value={standInViews}><App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "inbox", session: "sup1" }} /></PtyViewsProvider>);
+      for (const leave of ["Escape", "Back", "Answer"]) {
+        const card = (await screen.findAllByTestId("inbox-card"))[0];
+        fireEvent.click(within(card).getByRole("button", { name: "Go to session ›" }));
+        await waitFor(() => expect(screen.getByTestId("visual-frame").dataset.src).toBe("brindle-visual://v_8f2c/r2"));
+        expect(screen.queryByRole("complementary", { name: "Sidebar" })).toBeNull();
+        if (leave === "Answer") {
+          fireEvent.click(screen.getByRole("radio", { name: "B · Gate on CI" }));
+          fireEvent.click(screen.getByTestId("visual-send"));
+          await waitFor(() => expect(store.getState().inbox).toEqual([]));
+        }
+        if (leave === "Escape") fireEvent.keyDown(window, { key: "Escape" });
+        else fireEvent.click(screen.getByTestId("visual-back"));
+        expect(await screen.findByTestId("inbox-session")).toBeTruthy();
+        expect(screen.queryByTestId("visual-reader")).toBeNull();
+      }
+      expect(screen.queryByTestId("inbox-card")).toBeNull();
+    } finally { sync.stop(); }
+  });
+
   const open: VisualSource = { kind: "session", id: visual.id, rev: visual.rev };
   it.each([
     ["another visual's choice", { ...open, id: "v_other" }, { type: "choice", option: "B" }, { picked: false, back: false }],
