@@ -948,30 +948,39 @@ def test_installs_at_different_paths_share_one_hook_definition(tmp_path, monkeyp
         import subprocess
         return subprocess.run([str(brindle_home() / "bin" / "codex-hook")], capture_output=True, text=True).stdout.strip()
 
-    import brindle.providers as providers
+    import threading
 
-    real_lock = providers._config_lock
-    first_exe = tmp_path / "app" / "bin" / "brindle"
-    first_exe.parent.mkdir(parents=True)
-    first_exe.write_text("#!/bin/sh\necho app\n")
-    first_exe.chmod(0o755)
-    busy = []
-
-    def other_install_finishes_first(name):
-        # Another process's whole update lands before this one may take the lock.
-        if not busy:
-            busy.append(1)
-            codex_hook._write_launcher([str(first_exe)], brindle_home() / "bin" / "codex-hook")
-        return real_lock(name)
-
-    monkeypatch.setattr(providers, "_config_lock", other_install_finishes_first)
+    first, first_exe = install("app")
     second, second_exe = install("dmg")
-    monkeypatch.setattr("brindle.providers.brindle_invocation", lambda: [str(first_exe)])
-    first = codex_hook.definition()
     assert first == second
     assert str(first_exe) not in second
-    assert run_hook() in ("app", "dmg")
-    second_exe.unlink()          # the disk image is ejected: the app's running sessions still work
+
+    # Two installs register at the same moment: the dmg's writer has read the
+    # launcher and is about to replace it when the app's whole update runs.
+    # Unlocked, the dmg's write drops the app; locked, the app waits its turn.
+    (brindle_home() / "bin" / "codex-hook").unlink()
+    dmg_has_read, app_done = threading.Event(), threading.Event()
+    real_mkstemp = codex_hook.tempfile.mkstemp
+
+    def mkstemp_after_read(*args, **kwargs):
+        if threading.current_thread().name == "dmg":
+            dmg_has_read.set()
+            app_done.wait(1)   # never set while the app is held back by the lock
+        return real_mkstemp(*args, **kwargs)
+
+    def app_registers():
+        dmg_has_read.wait()
+        codex_hook._launcher([str(first_exe)])
+        app_done.set()
+
+    monkeypatch.setattr(codex_hook.tempfile, "mkstemp", mkstemp_after_read)
+    writers = [threading.Thread(target=codex_hook._launcher, args=([str(second_exe)],), name="dmg"),
+               threading.Thread(target=app_registers, name="app")]
+    for w in writers:
+        w.start()
+    for w in writers:
+        w.join()
+    second_exe.unlink()   # the disk image is ejected: the app's running sessions still work
     assert run_hook() == "app"
 
 

@@ -150,7 +150,7 @@ def _stable_invocation() -> list[str]:
     return argv
 
 
-def _launcher() -> list[str]:
+def _launcher(argv: list[str] | None = None) -> list[str]:
     """A launcher at a fixed path (``<brindle home>/bin/codex-hook``) that runs
     the brindle that wrote it last. Codex keeps one trusted hash per hook and
     the hash covers the command, so every install on the machine (the app, one
@@ -160,7 +160,7 @@ def _launcher() -> list[str]:
     from brindle.config import brindle_home
     from brindle.providers import _config_lock
 
-    argv = _stable_invocation()
+    argv = argv or _stable_invocation()
     launcher = brindle_home() / "bin" / "codex-hook"
     try:
         # Read, merge and replace as one step: two installs updating at once
