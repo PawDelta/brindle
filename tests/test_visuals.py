@@ -72,6 +72,7 @@ def test_an_answer_reaches_the_supervisor_once_and_only_for_the_revision_on_scre
     assert (v["rev"], v["unread"], v["by"]) == (1, True, "w1")
     [item] = [i for i in inbox.items(db, None, panes={}) if i.kind == "visual"]
     assert (item.visual_id, item.root_id) == (v["id"], boss.id)
+    assert client.post(f"/v1/visuals/{v['id']}/read").json()["unread"] is False
 
     # A new revision arrives while r1 is on screen: r1's answer is refused, not read against r2.
     mcp_server.publish_visual("Release flow", "<p>r2</p>", "Which flow now?",
@@ -94,6 +95,8 @@ def test_removing_a_session_deletes_its_visuals_but_not_the_kept_one(db, session
     kept = visuals.publish(db, boss, "Keep me", "<p>kept</p>")
     gone = visuals.publish(db, boss, "Drop me", "<p>gone</p>")
     assert client.post(f"/v1/visuals/{kept['id']}/keep").json()["kept"] is True
+    client.post(f"/v1/visuals/{gone['id']}/keep")
+    assert client.delete(f"/v1/visuals/{gone['id']}/keep").json()["kept"] is False
 
     db.delete_workspace(ws.id)
 
