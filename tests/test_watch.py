@@ -6,6 +6,22 @@ from brindle import watch
 from brindle.db import DB
 
 
+def test_background_cull_keeps_one_sweep_in_flight(monkeypatch):
+    import threading
+    from unittest.mock import Mock
+
+    thread = Mock()
+    thread.is_alive.return_value = True
+    monkeypatch.setattr(threading, "Thread", lambda **kwargs: thread)
+    monkeypatch.setattr(watch, "_cull_thread", None, raising=False)
+    watch._cull_in_background()
+    watch._cull_in_background()
+    assert thread.start.call_count == 1
+    thread.is_alive.return_value = False
+    watch._cull_in_background()
+    assert thread.start.call_count == 2
+
+
 @pytest.mark.parametrize("newer_schema", [False, True], ids=["older", "newer"])
 def test_old_databases_are_migrated(tmp_path, newer_schema):
     path = tmp_path / "old.db"
