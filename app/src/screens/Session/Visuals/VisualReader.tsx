@@ -105,7 +105,9 @@ export function VisualReader({ client, visual, loading, onBack, asking, onAnswer
   const key = visual ? `${visual.id}:${visual.rev}` : "";
   const options = visual?.options ?? [];
   const choose = (option: string) => {
-    if (visual && !visual.answer && options.some((o) => o.id === option)) setPicked({ key, option });
+    if (visual && !visual.answer && options.some((o) => o.id === option)) {
+      setPicked((current) => current?.key === key && current.option === option ? null : { key, option });
+    }
   };
   const source: VisualSource | null = visual ? { kind: "session", id: visual.id, rev: visual.rev } : null;
   if (visual?.kind === "plan" && client.plan && client.decidePlan) {

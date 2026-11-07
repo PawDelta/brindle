@@ -147,7 +147,6 @@ function Screen({ route, visit, navigate, client, refresh, store, openUrl, pickF
     repo,
     agent,
     sheet,
-    visualFrom: route.screen === "inbox" && sheet?.kind === "visual" ? route : undefined,
   });
   const closeSession = useCloseSession(navigate);
   const docsFrom = route.screen === "knowledge" ? route.from : undefined;
@@ -206,13 +205,7 @@ function Screen({ route, visit, navigate, client, refresh, store, openUrl, pickF
           store={store}
           agent={route.agent ?? route.root}
           sheet={route.sheet ?? null}
-          onSelect={(agent, sheet) => {
-            if (route.sheet?.kind === "visual" && !sheet && route.visualFrom) {
-              navigate(route.visualFrom);
-            } else {
-              navigate({ ...route, agent, sheet: sheet ?? undefined, visualFrom: sheet?.kind === "visual" ? route.visualFrom : undefined });
-            }
-          }}
+          onSelect={(agent, sheet) => navigate({ ...route, agent, sheet: sheet ?? undefined })}
           openUrl={openUrl}
           onOpen={openSession}
           onCloseSession={closeSession}
