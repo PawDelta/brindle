@@ -160,7 +160,8 @@ CREATE TABLE IF NOT EXISTS milestone_phases (
 CREATE TABLE IF NOT EXISTS goal_doc_requests (
     root_id TEXT PRIMARY KEY REFERENCES autopilot(root_id) ON DELETE CASCADE,
     requested INTEGER NOT NULL,
-    offer TEXT                  -- brindle's one-time doc offer: open | accepted | dismissed
+    offer TEXT,                 -- brindle's one-time doc offer: open:<id> | accepted | dismissed
+    goal_at REAL                -- when this goal began: only workers assigned since count toward its offer
 );
 -- Repos attached to a session (brindle Pro multi_repo; see brindle.repos):
 -- assign/handoff may put workers there by alias.
@@ -1030,6 +1031,7 @@ class Autopilot:
     proposal: str | None = None        # JSON {checks, rules, at}: checks awaiting the user's answer
     external_wait: str | None = None   # JSON {pid, until, path, note}: an outside job
     analysis_doc: int | None = None    # the person requested a doc for this goal
+    analysis_goal_at: float | None = None  # when the current goal began (workers since count toward its offer)
     analysis_offer: str | None = None  # the doc offer: open | accepted | dismissed (None: never made)
 
 
@@ -1419,6 +1421,8 @@ class DB:
             self.conn.execute("ALTER TABLE tasks ADD COLUMN weight TEXT")
         if "offer" not in {r["name"] for r in self.conn.execute("PRAGMA table_info(goal_doc_requests)")}:
             self.conn.execute("ALTER TABLE goal_doc_requests ADD COLUMN offer TEXT")
+        if "goal_at" not in {r["name"] for r in self.conn.execute("PRAGMA table_info(goal_doc_requests)")}:
+            self.conn.execute("ALTER TABLE goal_doc_requests ADD COLUMN goal_at REAL")
         if "analysis_doc" not in task_cols:
             self.conn.execute("ALTER TABLE tasks ADD COLUMN analysis_doc INTEGER")
         if "waiting" not in task_cols:
@@ -2586,10 +2590,11 @@ class DB:
         ap = _load(Autopilot, row) if row else None
         if ap:
             ap.enabled = 1  # Legacy off values no longer disable the goal driver.
-            request = self.conn.execute("SELECT requested, offer FROM goal_doc_requests WHERE root_id=?",
+            request = self.conn.execute("SELECT requested, offer, goal_at FROM goal_doc_requests WHERE root_id=?",
                                         (root_id,)).fetchone()
             ap.analysis_doc = request["requested"] if request else None
             ap.analysis_offer = request["offer"] if request else None
+            ap.analysis_goal_at = request["goal_at"] if request else None
         return ap
 
     def legacy_goal_owners(self) -> list[str]:
@@ -2609,6 +2614,7 @@ class DB:
     def update_autopilot(self, root_id: str, **fields: object) -> None:
         requested = fields.pop("analysis_doc", None)
         offer = fields.pop("analysis_offer", "keep")
+        goal_at = fields.pop("analysis_goal_at", None)
         cols = ", ".join(f"{k}=?" for k in fields)
         with self.tx() as c:
             if fields:
@@ -2620,16 +2626,41 @@ class DB:
             if offer != "keep":
                 c.execute("INSERT INTO goal_doc_requests (root_id, requested, offer) VALUES (?,0,?) "
                           "ON CONFLICT(root_id) DO UPDATE SET offer=excluded.offer", (root_id, offer))
+            if goal_at is not None:
+                c.execute("INSERT INTO goal_doc_requests (root_id, requested, goal_at) VALUES (?,0,?) "
+                          "ON CONFLICT(root_id) DO UPDATE SET goal_at=excluded.goal_at", (root_id, goal_at))
         if "proposal" in fields:
             # Both the app and the terminal can settle proposed checks.
             bus.publish_agent(self, "checks.changed", root_id)
 
-    def settle_analysis_offer(self, root_id: str, offer: str, state: str) -> bool:
-        """Atomically move exactly the offer the person saw to ``state``;
-        False when it was replaced or already answered."""
+    def open_analysis_offer(self, root_id: str, goal: str, offer: str) -> bool:
+        """Open ``offer`` only if ``goal`` is still the session's goal and it has
+        never been offered, answered or requested: one atomic write, so a
+        delayed evaluation cannot overwrite an answer or a newer goal's state."""
         with self.tx() as c:
-            return c.execute("UPDATE goal_doc_requests SET offer=? WHERE root_id=? AND offer=?",
-                             (state, root_id, offer)).rowcount == 1
+            row = c.execute("SELECT goal FROM autopilot WHERE root_id=?", (root_id,)).fetchone()
+            if row is None or row["goal"] != goal:
+                return False
+            c.execute("INSERT OR IGNORE INTO goal_doc_requests (root_id, requested) VALUES (?,0)", (root_id,))
+            return c.execute("UPDATE goal_doc_requests SET offer=? WHERE root_id=? AND offer IS NULL "
+                             "AND requested=0", (offer, root_id)).rowcount == 1
+
+    def answer_analysis_offer(self, root_id: str, offer: str, accept: bool) -> dict | None:
+        """Settle exactly the offer the person saw and, on acceptance, turn the
+        doc on, in one transaction. Returns the goal it belonged to (its text,
+        milestone titles, state and whether a doc was already requested), or
+        None when the offer was replaced or already answered."""
+        with self.tx() as c:
+            prev = c.execute("SELECT requested FROM goal_doc_requests WHERE root_id=? AND offer=?",
+                             (root_id, offer)).fetchone()
+            if prev is None:
+                return None
+            c.execute("UPDATE goal_doc_requests SET offer=?, requested=? WHERE root_id=?",
+                      ("accepted" if accept else "dismissed", int(accept), root_id))
+            ap = c.execute("SELECT goal, state FROM autopilot WHERE root_id=?", (root_id,)).fetchone()
+            titles = [r["title"] for r in c.execute(
+                "SELECT title FROM milestones WHERE root_id=? ORDER BY position", (root_id,))]
+        return {"goal": ap["goal"], "state": ap["state"], "titles": titles, "was_requested": bool(prev["requested"])}
 
     def set_external_wait(self, root_id: str, wait: str) -> None:
         """A repeated declaration must leave the existing wait intact."""

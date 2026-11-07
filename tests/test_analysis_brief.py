@@ -269,3 +269,43 @@ def test_no_brief_request_when_assist_is_off_by_policy_or_air_gap(entry, why, db
         ab.brief_context(db, boss.repo_root, "feat/x", "a1", "speed up the cache", [], large=True, client=client)
     assert "POST /analysis-docs/brief" not in backend.paths()
     assert backend.calls == [] if why == "airgap" else True
+
+
+def test_alias_and_path_of_one_attached_repo_are_one_repository(db, boss, goal_env, tmp_path):
+    web = tmp_path / "web"
+    web.mkdir()
+    db.add_session_repo("boss", "web", str(web))
+    autopilot.set_goal(db, "boss", "Small goal", _plan(1, "web") + _plan(1, str(web)))
+    assert _offer(db) is None
+
+
+def test_workers_of_an_earlier_goal_do_not_count_for_a_new_goal(db, boss, goal_env):
+    autopilot.set_goal(db, "boss", "Big goal", _plan(1))
+    for i in range(3):
+        db.add_agent(Agent(f"w{i}", boss.id, "developer", "claude", "boss", "assign", "done", "", None,
+                           time.time()))
+    autopilot.consider_analysis_offer(db, "boss")
+    assert _offer(db)
+    autopilot.set_goal(db, "boss", "Fix a typo", _plan(1))
+    assert _offer(db) is None
+
+
+def test_accepting_a_replaced_goals_offer_never_enables_the_new_goal(db, goal_env, monkeypatch):
+    autopilot.set_goal(db, "boss", "Goal A", _plan(4))
+    a = _offer(db)
+    real = db.answer_analysis_offer
+    # Goal B replaces A at the boundary between the answer's check and its effect.
+    monkeypatch.setattr(db, "answer_analysis_offer", lambda *x: (
+        autopilot.set_goal(db, "boss", "Goal B", _plan(1)), real(*x))[1])
+    with pytest.raises(autopilot.AutopilotError):
+        autopilot.resolve_analysis_offer(db, "boss", True, a)
+    assert db.get_autopilot("boss").analysis_doc == 0
+
+
+def test_a_stale_evaluation_cannot_reopen_a_dismissed_offer(db, goal_env):
+    autopilot.set_goal(db, "boss", "Goal A", _plan(4))
+    first = _offer(db)
+    autopilot.resolve_analysis_offer(db, "boss", False, first)
+    assert db.open_analysis_offer("boss", "Goal A", "open:late") is False    # a delayed second evaluation
+    assert db.open_analysis_offer("boss", "Goal OLD", "open:late") is False   # or one for a replaced goal
+    assert _offer(db) is None and db.get_autopilot("boss").analysis_offer == "dismissed"

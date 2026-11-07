@@ -699,6 +699,7 @@ def set_goal(db: DB, root_id: str, goal: str,
         fields["audit_history"] = None
         fields["analysis_doc"] = 0
         fields["analysis_offer"] = None     # a new goal gets its own, single offer
+        fields["analysis_goal_at"] = time.time()
     if ap is None or ap.goal != goal.strip() or not ap.goal_sha:
         root = db.get_agent(root_id)
         ws = db.get_workspace(root.workspace_id) if root else None
@@ -723,6 +724,21 @@ def set_goal(db: DB, root_id: str, goal: str,
     consider_analysis_offer(db, root_id)
 
 
+def _repo_identities(db: DB, root_id: str, milestones: list[Milestone]) -> set[str]:
+    """The distinct repositories the milestones run in: an omitted ref is the
+    root checkout; an alias or a path resolves to its attached repo's root."""
+    from brindle import repos
+
+    root = db.get_agent(root_id)
+    ws = db.get_workspace(root.workspace_id) if root else None
+    own = os.path.realpath(ws.repo_root) if ws else ""
+    found = set()
+    for ref in {m.repo or "" for m in milestones}:
+        att = repos.resolve_attached(db, root_id, ref) if ref else None
+        found.add(os.path.realpath(att.repo_root) if att else own if not ref else ref)
+    return found
+
+
 def consider_analysis_offer(db: DB, root_id: str) -> None:
     """Open the one analysis-doc offer if this goal now deserves it: large, by
     milestones, repos (an omitted repo is the root checkout) or workers, or
@@ -735,11 +751,13 @@ def consider_analysis_offer(db: DB, root_id: str) -> None:
         if ap is None or not ap.goal or ap.analysis_offer is not None or ap.analysis_doc:
             return
         milestones = db.milestones(root_id)
-        workers = db.conn.execute("SELECT COUNT(*) FROM agents WHERE parent_id=? "
-                                  "AND mode IN ('assign','handoff','handoff_detached')", (root_id,)).fetchone()[0]
+        workers = db.conn.execute("SELECT COUNT(*) FROM agents WHERE parent_id=? AND created_at>=? "
+                                  "AND mode IN ('assign','handoff','handoff_detached')",
+                                  (root_id, ap.analysis_goal_at or 0)).fetchone()[0]
         text = "\n".join([ap.goal, ap.detail or "", *(m.title for m in milestones)])
-        if analysis_brief.deserves_offer(len(milestones), len({m.repo or "" for m in milestones}), text, workers):
-            db.update_autopilot(root_id, analysis_offer="open:" + secrets.token_hex(4))
+        if analysis_brief.deserves_offer(len(milestones), len(_repo_identities(db, root_id, milestones)),
+                                         text, workers) \
+                and db.open_analysis_offer(root_id, ap.goal, "open:" + secrets.token_hex(4)):
             bus.publish_agent(db, "autopilot.goal", root_id)
     except Exception:  # noqa: BLE001 - an offer is never a reason to fail a plan or a spawn
         log.info("analysis offer not evaluated", exc_info=True)
@@ -757,12 +775,19 @@ def set_goal_analysis_doc(db: DB, root_id: str, requested: bool) -> None:
         fields["analysis_offer"] = "accepted" if requested else "dismissed"
     db.update_autopilot(root_id, **fields)
     bus.publish_agent(db, "autopilot.goal", root_id)
+    if requested and not ap.analysis_doc:
+        _commission_doc(db, root_id, ap.goal, [m.title for m in db.milestones(root_id)], ap.state)
+
+
+def _commission_doc(db: DB, root_id: str, goal: str, titles: list[str], state: str) -> None:
+    """Brief the supervisor on the doc for exactly the goal that was accepted."""
+    from brindle.pro import analysis_brief
+
     root = db.get_agent(root_id)
     ws = db.get_workspace(root.workspace_id) if root else None
-    if ws and analysis_brief.large_work(requested=requested, branch=ws.branch) and not ap.analysis_doc:
-        text = "\n".join([ap.goal, *(m.title for m in db.milestones(root_id))])
-        brief = analysis_brief.server_brief(db, root_id, text, [])
-        if ap.state == "done":
+    if ws and analysis_brief.large_work(requested=True, branch=ws.branch):
+        brief = analysis_brief.server_brief(db, root_id, "\n".join([goal, *titles]), [])
+        if state == "done":
             brief = "\n\n".join(part for part in (_goal_doc_rule(db, root_id), brief) if part)
         if brief:
             db.enqueue(root_id, brief, None)
@@ -772,12 +797,12 @@ def resolve_analysis_offer(db: DB, root_id: str, accept: bool, offer_id: str) ->
     """The person's answer to the one-time analysis doc offer they saw
     (``offer_id``): settled atomically, so an answer to an older goal's offer
     can never change a newer goal."""
-    if not db.settle_analysis_offer(root_id, "open:" + offer_id, "accepted" if accept else "dismissed"):
+    done = db.answer_analysis_offer(root_id, "open:" + offer_id, accept)
+    if done is None:
         raise AutopilotError("this offer is no longer open")
-    if accept:
-        set_goal_analysis_doc(db, root_id, True)
-    else:
-        bus.publish_agent(db, "autopilot.goal", root_id)
+    bus.publish_agent(db, "autopilot.goal", root_id)
+    if accept and not done["was_requested"]:
+        _commission_doc(db, root_id, done["goal"], done["titles"], done["state"])
 
 
 def _goal_doc_rule(db: DB, root_id: str) -> str:
