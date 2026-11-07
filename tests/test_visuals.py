@@ -50,7 +50,7 @@ def client():
 def test_publish_refuses_each_bad_page(db, session, monkeypatch, caller, html, options, enabled, refused):
     ws, boss, worker = session
     if not enabled:
-        monkeypatch.delenv("BRINDLE_VISUALS")
+        monkeypatch.setenv("BRINDLE_VISUALS", "0")
     who = db.get_agent(caller) if caller else None
     if refused:
         with pytest.raises(ServiceError) as e:
@@ -162,3 +162,12 @@ def test_a_page_is_served_only_for_known_revisions_and_with_the_csp(db, session,
     if status == 200:
         assert got.text == "<p>page</p>"
         assert got.headers["content-security-policy"] == visuals.CSP
+
+
+@pytest.mark.variant("incident: staff build 96 shipped visuals hidden because nothing set the old opt-in flag")
+def test_visuals_are_on_unless_switched_off(monkeypatch):
+    # The staff build shipped with visuals hidden: nothing set the old opt-in flag.
+    monkeypatch.delenv("BRINDLE_VISUALS", raising=False)
+    assert visuals.enabled()
+    monkeypatch.setenv("BRINDLE_VISUALS", "0")
+    assert not visuals.enabled()
