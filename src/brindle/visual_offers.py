@@ -151,6 +151,11 @@ _REQUEST = re.compile(
     r"(?P<artifact>visual(?:ization)?|diagram|chart|mockup|planning doc(?:ument)?|plan document)\b)", re.I)
 _REFERENT = re.compile(r"(?:\s+(?:(?:of|for|about|showing)\s+)?(?:this|that|these|those|it)"
                        r"(?:\s+(?:layout|change|choices|options|flow|pipeline|decision))?)?[.!?]*", re.I)
+# "visualize the changes for 0.6.3" / "show me the flow visually": a plain object phrase,
+# no joining word that could add a second instruction.
+_OBJECT = re.compile(r"(?:\s+(?!(?:and|then|also|but|so|while|or|plus)\b)[\w'.,/-]+){1,20}[.!?]*", re.I)
+_SHOW_VISUALLY = re.compile(r"(?:(?:can|could|would|will) you\s+)?(?:please\s+)?show\s+(?:me|us)"
+                            r"(?:\s+(?!(?:and|then|also|but|so|while|or|plus)\b)[\w'.,/-]+){1,20}\s+visually[.!?]*", re.I)
 _QUALIFIED = re.compile(r"\b(?:if|unless|when|after|before|later|only|maybe|perhaps|not|never|"
                         r"don't|do not|wait|until|provided|assuming)\b|[\"`“”]", re.I)
 _CONTEXT = re.compile(r"(?:compare|consider|examine|review)\s+(?:this|that|these|those|the)\s+"
@@ -174,7 +179,12 @@ def request_intent(text: str) -> tuple[str | None, bool]:
         match = _REQUEST.match(sentence)
         if match:
             scope = "plan" if (match["artifact"] or "").lower().startswith(("planning", "plan ")) else "visual"
-            found.append((scope, _REFERENT.fullmatch(sentence[match.end():]) is not None))
+            rest = sentence[match.end():]
+            clear = _REFERENT.fullmatch(rest) is not None or (
+                match["visualize"] is not None and _OBJECT.fullmatch(rest) is not None)
+            found.append((scope, clear))
+        elif _SHOW_VISUALLY.fullmatch(sentence):
+            found.append(("visual", True))
         elif sentence:
             # Unknown discourse may be an example, quotation, or instruction
             # to defer. Recognize the request but let the person confirm it.

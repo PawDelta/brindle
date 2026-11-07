@@ -563,6 +563,11 @@ def visuals_setting() -> str:
     return "on" if user_settings().get("visuals") == "on" else "off"
 
 
+def visuals_enabled_setting() -> bool:
+    """The visuals capability as a person setting: on unless set to "off"."""
+    return user_settings().get("visuals_enabled") != "off"
+
+
 def supervisor_pick() -> str | None:
     """The supervisor CLI this person last picked (in the picker or with
     ``-s``), or None before the first pick."""

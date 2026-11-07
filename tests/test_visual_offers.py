@@ -133,6 +133,9 @@ def test_accept_and_explicit_ask_allow_one_publish(db, session):
     ("Create a planning document once I approve the approach.", "plan", False),
     ("Please visualize this layout.", "visual", True),
     ("I am quoting a sentence.\nMake a visual.", "visual", False),
+    ("can you visualize the changes made that we are planning to release for 0.6.3?", "visual", True),
+    ("Show me the release flow visually.", "visual", True),
+    ("Visualize the flow and then delete the branch.", "visual", False),
 ])
 def test_complete_request_intent(db, session, text, scope, allowed):
     boss, _ = session

@@ -170,3 +170,41 @@ def test_visuals_are_on_unless_switched_off(monkeypatch):
     assert visuals.enabled()
     monkeypatch.setenv("BRINDLE_VISUALS", "0")
     assert not visuals.enabled()
+
+
+def test_the_visuals_setting_flips_the_feature_and_every_running_agents_tools_live(monkeypatch):
+    import asyncio
+
+    from mcp import Client
+
+    from brindle import config
+
+    monkeypatch.delenv("BRINDLE_VISUALS", raising=False)
+    monkeypatch.delenv("BRINDLE_AGENT_ID", raising=False)
+    async def tool_names(client):
+        return {t.name for t in (await client.list_tools()).tools} & set(mcp_server.VISUAL_TOOLS)
+
+    async def flow():
+        async with Client(mcp_server.mcp) as client, client.listen(tools_list_changed=True) as events:
+            assert await tool_names(client) == set(mcp_server.VISUAL_TOOLS)
+            ticks = asyncio.Queue()
+
+            waiting = asyncio.Event()
+
+            async def wait(_):
+                waiting.set()
+                await ticks.get()
+            watcher = asyncio.create_task(mcp_server._watch_visuals(wait))
+            await waiting.wait()                  # the watcher has read the setting: on
+            config.set_user("visuals_enabled", "off")
+            assert not visuals.enabled()          # same process, no restart
+            ticks.put_nowait(None)
+            await asyncio.wait_for(anext(aiter(events)), 5)    # tools/list_changed arrived
+            assert await tool_names(client) == set()
+            config.set_user("visuals_enabled", "on")
+            assert await tool_names(client) == set(mcp_server.VISUAL_TOOLS)
+            watcher.cancel()
+        monkeypatch.setenv("BRINDLE_VISUALS", "0")      # the override beats the setting
+        assert not visuals.enabled()
+
+    asyncio.run(flow())
