@@ -1,6 +1,6 @@
 """The personal analysis-doc library client (brindle Pro).
 
-Docs are free-form files written for large work in the branch's docs folder
+Docs are free-form files written on the person's request in the branch's docs folder
 outside the repo (:func:`brindle.pro.analysis_brief.docs_dir`). When the
 branch merges they are uploaded together, with their source, to ``POST
 /analysis-docs`` with scope ``user``, from a small bounded queue drained by

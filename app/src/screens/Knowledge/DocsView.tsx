@@ -1,4 +1,4 @@
-/* Knowledge › Docs: the analysis docs agents wrote for large work, from
+/* Knowledge › Docs: the analysis docs people requested, from
    brindle Pro's library through the daemon (GET /v1/analysis-docs and its
    topics; nothing is kept on disk). On top, the results panel
    (GET /v1/analysis-docs/results, worked out on this machine): review rounds
@@ -587,7 +587,7 @@ export function DocsView({ client, repo, session: initialSession, doc, pickFolde
       {listing.state === "unavailable" && (
         <div className={`${card} flex flex-col gap-1 px-s2 py-s2 text-sm`} data-testid="docs-unavailable">
           <h2 className={h2}>Docs live in brindle Pro's library</h2>
-          <p className="text-ink-2">Large work leaves a doc of what was built, decided and left open. With brindle Pro it's stored encrypted in your library and briefs the next related task. On the free plan the docs are written to ~/.brindle/docs and show up under Imported.</p>
+          <p className="text-ink-2">When you explicitly request an analysis doc for a goal or task, it records what was built, decided and left open. With brindle Pro it's stored encrypted in your library and briefs the next related task. On the free plan the docs are written to ~/.brindle/docs and show up under Imported.</p>
           <p className="text-xs text-ink-3">{listing.error}</p>
         </div>
       )}
@@ -612,7 +612,7 @@ export function DocsView({ client, repo, session: initialSession, doc, pickFolde
           </nav>
           <div className="flex min-w-0 flex-col gap-s1">
             {listing.state === "loading" && <p className="text-sm text-ink-3">Loading…</p>}
-            {listing.state === "loaded" && docs.length === 0 && <p className="text-sm text-ink-2">No docs here yet. Large work (a goal with several milestones, or a heavy task) leaves one when its branch merges.</p>}
+            {listing.state === "loaded" && docs.length === 0 && <p className="text-sm text-ink-2">No docs here yet. Request an analysis doc for a goal or task to have one written.</p>}
             {listing.state === "loaded" && docs.length > 0 && shown.length === 0 && <p className="text-sm text-ink-2">No doc matches.</p>}
             {shown.length > 0 && !shown.some((d) => d.category) && <ul className="flex flex-col gap-s1">{shown.map(docCard)}</ul>}
             {shown.some((d) => d.category) && byCategory(shown).map(([name, list]) => {

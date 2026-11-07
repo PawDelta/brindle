@@ -432,6 +432,7 @@ export interface GitHubConnectionDTO {
  * via the `definition` "GoalDTO".
  */
 export interface GoalDTO {
+  analysis_doc?: boolean;
   detail?: string | null;
   enabled: boolean;
   goal?: string | null;

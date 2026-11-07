@@ -128,6 +128,13 @@ describe("GoalPanel", () => {
     expect(screen.getByText("2. Screen renders")).toBeTruthy();
     expect(screen.getByText("npm run build")).toBeTruthy();
     expect(daemon.requests.find((r) => r.path === "/goal")?.query).toMatchObject({ repo: REPO, root: ROOT });
+    const docChoice = screen.getByRole("checkbox", { name: "Write an analysis doc for this goal" }) as HTMLInputElement;
+    for (const requested of [true, false]) {
+      fireEvent.click(docChoice);
+      await waitFor(() => expect(docChoice.checked).toBe(requested));
+      await waitFor(() => expect(docChoice.disabled).toBe(false));
+      expect(daemon.data.goal?.analysis_doc).toBe(requested);
+    }
 
     expect(screen.queryByRole("switch")).toBeNull();
     sync.stop();
