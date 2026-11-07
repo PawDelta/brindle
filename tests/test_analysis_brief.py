@@ -1,4 +1,4 @@
-"""What large work gets from the analysis-doc library: nothing for small work;
+"""What requested docs get from the analysis-doc library: nothing without a request;
 otherwise the rule and a docs folder, plus the server's block, verbatim and
 fenced, recorded in the task's receipt (Pro), or the folder as a Knowledge
 source (free tier). Reached through assign, requeue, a fresh resume and a goal,
@@ -37,13 +37,13 @@ def boss(db, tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("kwargs, large", [
     ({"weight": "heavy"}, False),   # weight alone never asks
-    ({"requested": True}, True), ({"milestones": 2}, False), ({"milestones": 3}, True),
+    ({"requested": True}, True), ({"milestones": 2}, False), ({"milestones": 3}, False),
     ({"requested": True, "branch": "merge/x"}, False), ({"milestones": 3, "branch": "sync-main"}, False),
     pytest.param({"requested": True, "branch": "team/alice/merge/main"}, False,
                  marks=pytest.mark.variant("branch_prefix puts the namespace in front of the chore name")),
 ])
-@pytest.mark.variant("large_work is one expression, so line coverage cannot see these cases: weight no longer asks, 2 vs 3 milestones, chore branches at any prefix depth")
-def test_large_work_needs_a_request_or_a_three_milestone_goal(kwargs, large):
+@pytest.mark.variant("large_work is one expression: weight and milestone counts never ask, chore branches at any prefix depth")
+def test_large_work_needs_an_explicit_request(kwargs, large):
     assert ab.large_work(**kwargs) is large
 
 
@@ -118,7 +118,8 @@ def test_reviewer_gets_the_doc_block_only_when_it_names_a_changed_file(block, sh
     assert "Flag as a blocker" not in out
 
 
-def test_goal_is_briefed_once_and_told_to_leave_a_doc_when_audit_approves(db, boss, backend, monkeypatch):
+@pytest.mark.parametrize("requested", [False, True])
+def test_goal_doc_requires_a_request_and_is_briefed_once(requested, db, boss, backend, monkeypatch):
     monkeypatch.setattr(autopilot, "_commit", lambda ws, tracked_only=False: "abc123")
     backend.routes["POST /analysis-docs/brief"] = [(200, {"block": "known: the cache", "cited": []})]
     backend.routes["GET /me/analysis-docs/settings"] = [(200, {"switches": {"assist": "on"}})]
@@ -126,13 +127,48 @@ def test_goal_is_briefed_once_and_told_to_leave_a_doc_when_audit_approves(db, bo
     login_as(backend, credentials.default_store(), features=("analysis_docs",))
     db.add_autopilot("boss")
     milestones = [("API", "true", None), ("UI", "true", None), ("Docs", "true", None)]
-    autopilot.set_goal(db, "boss", "Settings page", milestones)
+    autopilot.set_goal(db, "boss", "Settings page", milestones, analysis_doc=requested)
     autopilot.set_goal(db, "boss", "Settings page", milestones)   # the same goal again: no second brief
+    autopilot.set_goal(db, "boss", "Settings page", milestones, analysis_doc=requested)
     queued = [r[0] for r in db.conn.execute("SELECT body FROM inbox WHERE agent_id='boss'")]
-    assert len(queued) == 1 and "\nknown: the cache\n" in queued[0]
+    assert len(queued) == int(requested)
+    if requested:
+        assert "\nknown: the cache\n" in queued[0]
     db.update_autopilot("boss", audit_sha="abc123")
     out = autopilot.record_audit(db, "boss", True, "all there")
-    assert f"{FOLDER}{ab.docs_dir(boss.repo_root, boss.branch)}" in out
+    assert (f"{FOLDER}{ab.docs_dir(boss.repo_root, boss.branch)}" in out) is requested
+    if not requested:
+        from brindle.daemon import routes_actions
+
+        monkeypatch.setattr(ab, "_entitled", lambda store=None: None)  # free tier: no reference brief
+        for _ in range(2):
+            routes_actions.goal_analysis_doc(db, {}, {"root": "boss", "analysis_doc": True})
+        queued = [r[0] for r in db.conn.execute("SELECT body FROM inbox WHERE agent_id='boss'")]
+        assert len(queued) == 1 and f"{FOLDER}{ab.docs_dir(boss.repo_root, boss.branch)}" in queued[0]
+        assert db.get_autopilot("boss").state == "done"
+    autopilot.set_goal(db, "boss", "Another goal", milestones)
+    assert autopilot._goal_doc_rule(db, "boss") == ""
+
+
+@pytest.mark.parametrize("via", ["app", "cli", "tool"])
+def test_person_can_request_and_cancel_a_goal_doc(via, db, boss, monkeypatch):
+    from typer.testing import CliRunner
+    from brindle import cli
+    from brindle.daemon import routes_actions
+
+    monkeypatch.setattr(autopilot, "_commit", lambda ws, tracked_only=False: "abc123")
+    monkeypatch.setattr(cli, "_session_root", lambda db: "boss")
+    db.add_autopilot("boss")
+    autopilot.set_goal(db, "boss", "Settings", [("API", "true", None)])
+    for requested in (True, False):
+        if via == "app":
+            routes_actions.goal_analysis_doc(db, {}, {"root": "boss", "analysis_doc": requested})
+        elif via == "cli":
+            result = CliRunner().invoke(cli.app, ["goal", "--analysis-doc" if requested else "--no-analysis-doc"])
+            assert result.exit_code == 0, result.output
+        else:
+            mcp_server.set_goal("Settings", [{"title": "API", "check": "true"}], analysis_doc=requested)
+        assert bool(autopilot._goal_doc_rule(db, "boss")) is requested
 
 
 @pytest.mark.parametrize("entry, why", [("goal", "own"), ("task", "group"),
@@ -154,7 +190,8 @@ def test_no_brief_request_when_assist_is_off_by_policy_or_air_gap(entry, why, db
     if entry == "goal":
         monkeypatch.setattr(autopilot, "_commit", lambda ws, tracked_only=False: "abc123")
         db.add_autopilot("boss")
-        autopilot.set_goal(db, "boss", "Settings page", [("API", "true", None), ("UI", "true", None)])
+        autopilot.set_goal(db, "boss", "Settings page", [("API", "true", None), ("UI", "true", None)],
+                           analysis_doc=True)
     elif entry == "review":
         assert ab.review_context(db, boss.repo_root, "speed up the cache", ["a.py"], client=client) == ("", [])
     else:

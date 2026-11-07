@@ -39,6 +39,8 @@ export interface VisualFrameProps {
   title: string;
   /* An increment asks the shell to post the current rendered outerHTML. */
   snapshotRequest?: number;
+  /* A menu is open over the page: the native page steps aside (no room) so the menu shows. */
+  covered?: boolean;
   /* A message the page posted, and the visual the host saw it come from. */
   onMessage(data: unknown, from: VisualSource): void;
 }

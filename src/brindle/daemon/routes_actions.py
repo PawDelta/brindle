@@ -1094,7 +1094,8 @@ def _autopilot_root(db: DB, body: Body) -> tuple[Agent, Workspace]:
 def set_goal(db: DB, params: dict, body: Body) -> Any:
     root, _ = _autopilot_root(db, body)
     items = autopilot.milestone_items(db, root.id, _get(body, "milestones", list, required=True))
-    autopilot.set_goal(db, root.id, _get(body, "goal", required=True), items, _get(body, "detail"))
+    autopilot.set_goal(db, root.id, _get(body, "goal", required=True), items, _get(body, "detail"),
+                       analysis_doc=_get(body, "analysis_doc", bool))
     return {"progress": autopilot.progress(db, root.id)}
 
 
@@ -1115,6 +1116,13 @@ def enable_goal(db: DB, params: dict, body: Body) -> Any:
     _get(body, "enabled", bool, required=True)
     autopilot.set_enabled(db, root.id, True)
     return {"enabled": True}
+
+
+def goal_analysis_doc(db: DB, params: dict, body: Body) -> Any:
+    root, _ = _autopilot_root(db, body)
+    requested = _get(body, "analysis_doc", bool, required=True)
+    autopilot.set_goal_analysis_doc(db, root.id, requested)
+    return {"analysis_doc": requested}
 
 
 # -- decisions, coordinator, config, permissions -----------------------------------
@@ -2647,6 +2655,7 @@ ROUTES = [
     _post("/goal", set_goal),
     _post("/goal/check", check_goal),
     _post("/goal/enabled", enable_goal),
+    _post("/goal/analysis-doc", goal_analysis_doc),
     _post("/decisions", record_decision),
     _post("/coordinator/undo", coordinator_undo),
     _post("/kb/sources", add_kb_source),

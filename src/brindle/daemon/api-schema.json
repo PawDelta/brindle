@@ -2236,6 +2236,11 @@
         }
       },
       "properties": {
+        "analysis_doc": {
+          "default": false,
+          "title": "Analysis Doc",
+          "type": "boolean"
+        },
         "detail": {
           "anyOf": [
             {
@@ -7697,6 +7702,10 @@
     {
       "method": "POST",
       "path": "/v1/goal"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/goal/analysis-doc"
     },
     {
       "method": "POST",

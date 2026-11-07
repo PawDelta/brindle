@@ -306,6 +306,7 @@ class MilestoneDTO(_DTO):
 class GoalDTO(_DTO):
     root_id: str
     enabled: bool
+    analysis_doc: bool = False
     goal: str | None = None
     detail: str | None = None
     state: str
@@ -321,7 +322,8 @@ class GoalDTO(_DTO):
                        phases: dict[int, str] | None = None,
                        goal_phase: tuple[str, str | None] = ("in_progress", None)) -> GoalDTO:
         phases = phases or {}
-        return cls(root_id=ap.root_id, enabled=bool(ap.enabled), goal=ap.goal, detail=ap.detail,
+        return cls(root_id=ap.root_id, enabled=bool(ap.enabled), analysis_doc=bool(ap.analysis_doc),
+                   goal=ap.goal, detail=ap.detail,
                    state=ap.state, note=ap.note, progress=ap.progress,
                    usage_resets_at=ap.usage_resets_at,
                    goal_phase=goal_phase[0], pr_url=goal_phase[1],
