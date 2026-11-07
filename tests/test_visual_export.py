@@ -17,6 +17,9 @@ from test_visuals import SECRET, client, session  # noqa: F401 - shared visuals 
     pytest.param('<svg><script>alert(1)</script></svg>', marks=pytest.mark.variant("SVG script bypass")),
     '<iframe srcdoc="<script>alert(1)</script>"></iframe>',
     pytest.param('<meta http-equiv="refresh" content="0;url=https://evil.test">', marks=pytest.mark.variant("refresh bypass")),
+    pytest.param('<html onclick="alert(1)"><head><meta http-equiv="Content-Security-Policy" '
+                 'content="default-src *"></head><body onload="alert(1)"></body></html>',
+                 marks=pytest.mark.variant("root attributes and metadata bypass")),
     '<img src="https://evil.test/tracker"><img src="data:image/svg+xml;base64,AAAA">',
     '<svg><path fill="url(https://evil.test)" d="M0 0"></path></svg>',
     '<style>@import "https://evil.test";</style>',
@@ -50,26 +53,49 @@ def test_snapshot_strips_active_content(db, session, client, hostile):
     assert directives["img-src"] == ["data:"]
     assert directives["style-src"] == ["'unsafe-inline'"]
     assert directives["base-uri"] == directives["form-action"] == ["'none'"]
-    assert html.index("<meta") < html.index("<body>")
+    assert html.index("<meta") < html.index("<body")
     assert safe in html
-    assert not any(s in html for s in ("<script", "onclick", "javascript:", "url(", "srcdoc", "refresh", "evil.test", "bad--"))
+    assert not any(s in html for s in ("<script", "onclick", "onload", "javascript:", "url(", "srcdoc", "refresh", "evil.test", "bad--"))
 
 
-def test_snapshot_preserves_safe_class_styling(db, session, client):
+@pytest.mark.parametrize("layout", ["class", "mixed", "roots"])
+def test_snapshot_preserves_safe_class_styling(db, session, client, layout):
     _, boss, _ = session
     v = visuals.publish(db, boss, "Options", "<p>initial</p>")
-    rendered = ('<html><head><style>.options {display:grid;grid-template-columns:repeat(2, 1fr);gap:12px}'
-                '#picked.selected {background:green;color:white}</style></head><body>'
-                '<div class="options"><p>A</p><p id="picked" class="selected">B ✓</p></div></body></html>')
+    selector = "body.options" if layout == "roots" else ".options"
+    grid = f"{selector}{{display:grid;grid-template-columns:repeat(2, 1fr);gap:12px}}"
+    unsupported = ('@import "https://evil.test"; @media (max-width:600px) {'
+                   '.options {display:block}}'
+                   '@supports (display:grid) {.ignored {font-family:"}/*";}}'
+                   '/* ignored { } */') if layout == "mixed" else ""
+    rules = grid + unsupported + '#picked.selected {background:green;color:white}'
+    children = '<p>A</p><p id="picked" class="selected">B ✓</p>'
+    if layout == "roots":
+        rules += 'html.page {font-size:16px} body.options > p {background:green}'
+        rendered = (f'<html class="page"><head><style>{rules}</style></head>'
+                    f'<body class="options" style="color:white">{children}</body></html>')
+    else:
+        rendered = f'<html><head><style>{rules}</style></head><body><div class="options">{children}</div></body></html>'
     got = client.post(f"/v1/visuals/{v['id']}/snapshot", json={"rev": 1, "html": rendered})
     assert got.status_code == 200
     html = base64.b64decode(got.json()["content_b64"]).decode()
-    assert '<div class="options">' in html
+    if layout == "roots":
+        assert '<html class="page">' in html
+        assert f'<body class="options" style="color:white">{children}</body>' in html
+        assert 'html.page{font-size:16px}' in html
+        assert 'body.options > p{background:green}' in html
+    else:
+        assert '<div class="options">' in html
     assert '<p id="picked" class="selected">B ✓</p>' in html
-    assert ".options{display:grid;grid-template-columns:repeat(2, 1fr);gap:12px}" in html
+    assert grid in html
     assert "#picked.selected{background:green;color:white}" in html
-    assert html.count("<html>") == html.count("<body>") == 1
-    assert html.index("Content-Security-Policy") < html.index("<style>") < html.index("<body>")
+    assert "evil.test" not in html and "display:block" not in html
+    tags = []
+    parser = HTMLParser()
+    parser.handle_starttag = lambda tag, attrs: tags.append(tag)
+    parser.feed(html)
+    assert tags.count("html") == tags.count("body") == 1
+    assert html.index("Content-Security-Policy") < html.index("<style>") < html.index("<body")
 
 
 @pytest.mark.parametrize("case,status", [

@@ -50,12 +50,53 @@ def _declarations(css: str) -> str:
 
 def _stylesheet(css: str) -> str:
     """Only flat type/class/id rules; discard at-rules and complex selectors."""
-    css = re.sub(r"/\*.*?(?:\*/|\Z)", "", css, flags=re.S).strip()
-    if not re.fullmatch(r"(?:[^{}]*\{[^{}]*\})*", css):
-        return ""
+    rules = []
+    start = opening = depth = 0
+    quote = ""
+    escaped = nested = comment = skip = False
+    # Scan complete top-level blocks, never promoting a nested rule out of
+    # its condition. Strings and escapes cannot close an unsupported block.
+    for index, char in enumerate(css):
+        if skip:
+            skip = False
+            continue
+        if comment:
+            if css.startswith("*/", index):
+                comment, skip = False, True
+            continue
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if quote:
+            if char == quote:
+                quote = ""
+            continue
+        if css.startswith("/*", index):
+            comment = skip = True
+            continue
+        if char in {"'", '"'}:
+            quote = char
+        elif char == "{":
+            if depth == 0:
+                opening, nested = index, False
+            else:
+                nested = True
+            depth += 1
+        elif char == "}":
+            if depth:
+                depth -= 1
+                if depth == 0 and not nested:
+                    rules.append((css[start:opening], css[opening + 1:index]))
+            if depth == 0:
+                start = index + 1
+        elif char == ";" and depth == 0:
+            start = index + 1
     safe = []
-    for selector, declarations in re.findall(r"([^{}]+)\{([^{}]*)\}", css):
-        selector = selector.strip()
+    for selector, declarations in rules:
+        selector = re.sub(r"/\*.*?(?:\*/|\Z)", "", selector, flags=re.S).strip()
         declarations = _declarations(declarations)
         if declarations and re.fullmatch(r"[A-Za-z0-9_#., >+~*\-]+", selector):
             safe.append(f"{selector}{{{declarations}}}")
@@ -70,6 +111,7 @@ class _Snapshot(HTMLParser):
         self.hidden: list[str] = []
         self.styles: list[str] = []
         self.style: list[str] | None = None
+        self.root_attrs: dict[str, str] = {}
 
     def handle_starttag(self, tag, attrs):
         if self.hidden or tag in DROP:
@@ -79,8 +121,7 @@ class _Snapshot(HTMLParser):
         if tag == "style":
             self.style = []
             return
-        tag = {"html": "div", "body": "div"}.get(tag, tag)
-        if tag not in TAGS:
+        if tag not in TAGS and tag not in {"html", "body"}:
             return
         safe = []
         for key, value in attrs:
@@ -99,6 +140,9 @@ class _Snapshot(HTMLParser):
             # SVG names are case sensitive in standalone HTML.
             key = "viewBox" if key == "viewbox" else key
             safe.append(f' {key}="{escape(value, quote=True)}"')
+        if tag in {"html", "body"}:
+            self.root_attrs.setdefault(tag, "".join(safe))
+            return
         self.out.append(f"<{tag}{''.join(safe)}>")
         if tag not in VOID:
             self.stack.append(tag)
@@ -112,7 +156,6 @@ class _Snapshot(HTMLParser):
             self.styles.append(_stylesheet("".join(self.style)))
             self.style = None
             return
-        tag = {"html": "div", "body": "div"}.get(tag, tag)
         if tag in self.stack:
             while self.stack:
                 top = self.stack.pop()
@@ -138,9 +181,9 @@ def sanitise(html: str, answer: dict | None = None) -> str:
         body += f'<footer>You picked {escape(answer["option"])} · {escape(answer["note"])}</footer>'
     styles = "".join(parser.styles)
     # No untrusted document wrappers or metadata can precede this policy.
-    return ('<!doctype html><html><head><meta charset="utf-8">'
+    return (f'<!doctype html><html{parser.root_attrs.get("html", "")}><head><meta charset="utf-8">'
             f'<meta http-equiv="Content-Security-Policy" content="{escape(CSP, quote=True)}">'
-            f'<style>{styles}</style></head><body>{body}</body></html>')
+            f'<style>{styles}</style></head><body{parser.root_attrs.get("body", "")}>{body}</body></html>')
 
 
 def snapshot(db: DB, visual_id: str, rev: int, html: str, destination: str = "download",
