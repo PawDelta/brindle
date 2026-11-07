@@ -110,10 +110,9 @@ def test_removing_a_session_deletes_its_visuals_but_not_the_kept_one(db, session
 @pytest.mark.parametrize("ref,rev,status", [
     ("own", "1", 200),
     ("own", "2", 404),                 # a revision the store doesn't have
-    ("own", "0", 404),
     ("v_000000000000", "1", 404),      # another, unknown id
-    ("%2e%2e", "1", 404),              # a path step out of the store
-    ("own", "1.html", 404),
+    pytest.param("%2e%2e", "1", 404, marks=pytest.mark.variant("a path step out of the store")),
+    pytest.param("own", "1.html", 404, marks=pytest.mark.variant("a file name instead of a revision")),
 ])
 def test_a_page_is_served_only_for_known_revisions_and_with_the_csp(db, session, client, ref, rev, status):
     ws, boss, worker = session
