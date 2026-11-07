@@ -137,6 +137,15 @@ def test_goal_doc_requires_a_request_and_is_briefed_once(requested, db, boss, ba
     db.update_autopilot("boss", audit_sha="abc123")
     out = autopilot.record_audit(db, "boss", True, "all there")
     assert (f"{FOLDER}{ab.docs_dir(boss.repo_root, boss.branch)}" in out) is requested
+    if not requested:
+        from brindle.daemon import routes_actions
+
+        monkeypatch.setattr(ab, "_entitled", lambda store=None: None)  # free tier: no reference brief
+        for _ in range(2):
+            routes_actions.goal_analysis_doc(db, {}, {"root": "boss", "analysis_doc": True})
+        queued = [r[0] for r in db.conn.execute("SELECT body FROM inbox WHERE agent_id='boss'")]
+        assert len(queued) == 1 and f"{FOLDER}{ab.docs_dir(boss.repo_root, boss.branch)}" in queued[0]
+        assert db.get_autopilot("boss").state == "done"
     autopilot.set_goal(db, "boss", "Another goal", milestones)
     assert autopilot._goal_doc_rule(db, "boss") == ""
 

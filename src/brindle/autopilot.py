@@ -721,7 +721,7 @@ def set_goal(db: DB, root_id: str, goal: str,
 
 
 def set_goal_analysis_doc(db: DB, root_id: str, requested: bool) -> None:
-    """Record the person's choice for this goal; brief once when opted in."""
+    """Record the person's choice; commission the doc now if already reached."""
     from brindle.pro import analysis_brief
 
     ap = db.get_autopilot(root_id)
@@ -734,6 +734,8 @@ def set_goal_analysis_doc(db: DB, root_id: str, requested: bool) -> None:
     if ws and analysis_brief.large_work(requested=requested, branch=ws.branch) and not ap.analysis_doc:
         text = "\n".join([ap.goal, *(m.title for m in db.milestones(root_id))])
         brief = analysis_brief.server_brief(db, root_id, text, [])
+        if ap.state == "done":
+            brief = "\n\n".join(part for part in (_goal_doc_rule(db, root_id), brief) if part)
         if brief:
             db.enqueue(root_id, brief, None)
 
