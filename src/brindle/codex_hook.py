@@ -57,6 +57,7 @@ import queue
 import shlex
 import signal
 import subprocess
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
@@ -149,10 +150,74 @@ def _stable_invocation() -> list[str]:
     return argv
 
 
+def _launcher(argv: list[str] | None = None) -> list[str]:
+    """A launcher at a fixed path (``<brindle home>/bin/codex-hook``) that runs
+    the brindle that wrote it last. Codex keeps one trusted hash per hook and
+    the hash covers the command, so every install on the machine (the app, one
+    run from a disk image, a uv CLI) must name the same command: each one
+    points the launcher at itself and none re-trusts over another. Without a
+    writable launcher, the install's own invocation."""
+    from brindle.config import brindle_home
+    from brindle.providers import _config_lock
+
+    argv = argv or _stable_invocation()
+    launcher = brindle_home() / "bin" / "codex-hook"
+    try:
+        # Read, merge and replace as one step: two installs updating at once
+        # would each keep only their own entry.
+        with _config_lock("codex-hook-launcher.lock"):
+            return _write_launcher(argv, launcher)
+    except OSError:
+        return argv
+
+
+def _write_launcher(argv: list[str], launcher: Path) -> list[str]:
+    # The installs it knows, newest first: at run time it execs the first that
+    # still exists, so a removed one (an ejected disk image) never breaks the
+    # others' running Codex sessions.
+    known = [argv]
+    old = ""
+    try:
+        old = launcher.read_text()
+        for line in old.splitlines():
+            if line.startswith("# install: "):
+                other = shlex.split(line[len("# install: "):])
+                if other and other != argv and os.access(other[0], os.X_OK):
+                    known.append(other)
+    except (OSError, ValueError):
+        pass
+    known = known[:4]
+    lines = ["#!/bin/sh"]
+    for a in known:
+        q = " ".join(shlex.quote(x) for x in a)
+        lines += [f"# install: {q}", f"[ -x {shlex.quote(a[0])} ] && exec {q} \"$@\""]
+    body = "\n".join([*lines, 'echo "brindle is not installed any more" >&2', "exit 127"]) + "\n"
+    tmp = None
+    try:
+        if old == body and os.access(launcher, os.X_OK):
+            return [str(launcher)]
+        launcher.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=launcher.parent, prefix=".codex-hook.")
+        with os.fdopen(fd, "w") as f:
+            f.write(body)
+        os.chmod(tmp, 0o755)
+        os.replace(tmp, launcher)
+        tmp = None
+        return [str(launcher)]
+    except OSError:
+        return argv
+    finally:
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+
 def hook_command() -> str:
-    """The hook's command: the same for every agent, so one trust covers all."""
+    """The hook's command: the same for every agent and every install, so one trust covers all."""
     assigns = f"BRINDLE_HOME={shlex.quote(os.environ['BRINDLE_HOME'])} " if "BRINDLE_HOME" in os.environ else ""
-    return assigns + " ".join(shlex.quote(a) for a in [*_stable_invocation(), "_hook", EVENT])
+    return assigns + " ".join(shlex.quote(a) for a in [*_launcher(), "_hook", EVENT])
 
 
 def pre_tool_command(command: str) -> str:
@@ -286,7 +351,7 @@ def _forget_definition() -> None:
 
 # How long a hook Codex wouldn't take is left before keep_trusted asks again:
 # a Codex too old for hooks must not mean an app-server on every check.
-AFTER_FAILURE = 900.0
+AFTER_FAILURE = 60.0
 _failed_at: dict[tuple[str, str, str], float] = {}
 
 

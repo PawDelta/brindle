@@ -930,7 +930,72 @@ def test_every_brindle_process_names_the_hook_the_same(tmp_path, monkeypatch):
     from_app = codex_hook.hook_command()
     monkeypatch.setattr("brindle.providers.brindle_invocation", lambda: [str(shim / "brindle")])
     assert codex_hook.hook_command() == from_app
-    assert str(script.resolve()) in from_app
+    assert str(script.resolve()) in (brindle_home() / "bin" / "codex-hook").read_text()
+
+
+def test_installs_at_different_paths_share_one_hook_definition(tmp_path, monkeypatch):
+    """Live: the /Applications app, one run from a mounted disk image and a uv
+    CLI each named their own binary in the hook, so each re-trusted over the others."""
+    def install(name):
+        exe = tmp_path / name / "bin" / "brindle"
+        exe.parent.mkdir(parents=True)
+        exe.write_text(f"#!/bin/sh\necho {name}\n")
+        exe.chmod(0o755)
+        monkeypatch.setattr("brindle.providers.brindle_invocation", lambda: [str(exe)])
+        return codex_hook.definition(), exe
+
+    def run_hook():
+        import subprocess
+        return subprocess.run([str(brindle_home() / "bin" / "codex-hook")], capture_output=True, text=True).stdout.strip()
+
+    import threading
+
+    first, first_exe = install("app")
+    second, second_exe = install("dmg")
+    assert first == second
+    assert str(first_exe) not in second
+
+    # Two installs register at the same moment: the dmg's writer has read the
+    # launcher and is about to replace it when the app's whole update runs.
+    # Unlocked, the dmg's write drops the app; locked, the app waits its turn.
+    (brindle_home() / "bin" / "codex-hook").unlink()
+    import fcntl
+
+    dmg_has_read, app_met_the_dmg = threading.Event(), threading.Event()
+    advanced = []
+    real_mkstemp, real_flock = codex_hook.tempfile.mkstemp, fcntl.flock
+
+    def mkstemp_after_read(*args, **kwargs):
+        if threading.current_thread().name == "dmg":
+            dmg_has_read.set()
+            # Released only by the app writer's own progress (below); the limit is a failure guard.
+            advanced.append(app_met_the_dmg.wait(30))
+        return real_mkstemp(*args, **kwargs)
+
+    def flock_probing_contention(fd, op):
+        if threading.current_thread().name == "app" and op == fcntl.LOCK_EX:
+            try:
+                return real_flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:   # the real lock is held by the dmg writer
+                app_met_the_dmg.set()
+        return real_flock(fd, op)
+
+    def app_registers():
+        dmg_has_read.wait()
+        codex_hook._launcher([str(first_exe)])
+        app_met_the_dmg.set()   # without a lock it completed its whole update instead
+
+    monkeypatch.setattr(codex_hook.tempfile, "mkstemp", mkstemp_after_read)
+    monkeypatch.setattr(fcntl, "flock", flock_probing_contention)
+    writers = [threading.Thread(target=codex_hook._launcher, args=([str(second_exe)],), name="dmg"),
+               threading.Thread(target=app_registers, name="app")]
+    for w in writers:
+        w.start()
+    for w in writers:
+        w.join()
+    assert advanced == [True]
+    second_exe.unlink()   # the disk image is ejected: the app's running sessions still work
+    assert run_hook() == "app"
 
 
 def test_codex_hook_ignores_a_relocated_console_scripts_missing_interpreter(tmp_path, monkeypatch):
@@ -1049,7 +1114,7 @@ def test_unreadable_codex_trust_never_gets_reinstalled(ws, monkeypatch):
 
 def move_brindle(monkeypatch):
     """A reinstall: brindle's interpreter elsewhere, so a new hook command."""
-    monkeypatch.setattr(codex_hook, "_stable_invocation",
+    monkeypatch.setattr(codex_hook, "_launcher",
                         lambda: ["/new/venv/bin/python", "-m", "brindle"])
 
 
