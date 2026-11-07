@@ -30,6 +30,14 @@ const DEADLINE: Duration = Duration::from_secs(20);
 /// the question to a silent page, and room for a slow runner.
 const STEP_ALLOWANCE: Duration = Duration::from_secs(60);
 
+/// Starting the app: a cold Windows runner's first WebView2 can take longer
+/// than any probe step (main's run 42401930042 passed 60s while building it).
+const STARTUP_ALLOWANCE: Duration = Duration::from_secs(240);
+
+fn allowance(step: &str) -> Duration {
+    if step == "starting" || step == "building the app" { STARTUP_ALLOWANCE } else { STEP_ALLOWANCE }
+}
+
 /// Where the driver tells the watchdog which step it is on.
 static STEPS: Mutex<Option<Sender<String>>> = Mutex::new(None);
 
@@ -51,10 +59,10 @@ fn watchdog() {
     std::thread::spawn(move || {
         let mut current = "starting".to_string();
         loop {
-            match rx.recv_timeout(STEP_ALLOWANCE) {
+            match rx.recv_timeout(allowance(&current)) {
                 Ok(next) => current = next,
                 Err(mpsc::RecvTimeoutError::Timeout) => {
-                    eprintln!("visual sandbox: {current} did not finish within {}s; the run is stuck there", STEP_ALLOWANCE.as_secs());
+                    eprintln!("visual sandbox: {current} did not finish within {}s; the run is stuck there", allowance(&current).as_secs());
                     std::process::exit(1);
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => return,

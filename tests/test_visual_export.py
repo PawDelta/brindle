@@ -119,7 +119,7 @@ def test_snapshot_checks_identity_revision_secrets_and_destination(db, session, 
     if case == "unknown":
         v["id"] = "v_missing"
     if case in {"disabled", "plan_disabled"}:
-        monkeypatch.delenv("BRINDLE_VISUALS")
+        monkeypatch.setenv("BRINDLE_VISUALS", "0")
     if case == "too_big":
         body["html"] = "x" * (visuals.MAX_BYTES + 1)
     if case == "missing":
