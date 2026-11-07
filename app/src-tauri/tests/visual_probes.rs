@@ -231,7 +231,14 @@ fn run_probes(app: tauri::AppHandle, rx: Receiver<Delivery>, listener: Listener)
     let window = app.get_window("main").expect("the main window");
     let main = app.get_webview("main").expect("the main webview");
     // The app's page is a build stub: a blank page keeps the harness's own traffic out of the count.
-    let _ = main.navigate("about:blank".parse().unwrap());
+    let m = main.clone();
+    window
+        .run_on_main_thread(move || {
+            eprintln!("DIAG main navigate: before");
+            let _ = m.navigate("about:blank".parse().unwrap());
+            eprintln!("DIAG main navigate: after");
+        })
+        .unwrap();
 
     // The listener must be real for "zero hits" to mean anything.
     step("checking the listener");

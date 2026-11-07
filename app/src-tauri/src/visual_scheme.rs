@@ -703,7 +703,16 @@ fn arm<R: Runtime>(webview: &Webview<R>, sink: Sink, visual: &VisualRef, bounds:
         sink,
         visual,
         move || {
-            let _ = target.navigate(url);
+            // From a thread of its own, so the load reaches the event loop as a
+            // message of its own and runs on a later turn of it. On Windows the
+            // blocker is armed synchronously, inside the dispatch that built the
+            // webview, and a Navigate made from inside that dispatch never
+            // returns: WebView2 won't run it re-entrantly (the probe suite hung
+            // there, and the app would have frozen on opening a visual). From
+            // the main thread Tauri runs a task at once, so the hop is needed.
+            std::thread::spawn(move || {
+                let _ = target.navigate(url);
+            });
         },
         |armed| platform::arm(webview, bounds, armed),
     );
