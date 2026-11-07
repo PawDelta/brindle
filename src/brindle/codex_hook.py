@@ -158,9 +158,20 @@ def _launcher() -> list[str]:
     points the launcher at itself and none re-trusts over another. Without a
     writable launcher, the install's own invocation."""
     from brindle.config import brindle_home
+    from brindle.providers import _config_lock
 
     argv = _stable_invocation()
     launcher = brindle_home() / "bin" / "codex-hook"
+    try:
+        # Read, merge and replace as one step: two installs updating at once
+        # would each keep only their own entry.
+        with _config_lock("codex-hook-launcher.lock"):
+            return _write_launcher(argv, launcher)
+    except OSError:
+        return argv
+
+
+def _write_launcher(argv: list[str], launcher: Path) -> list[str]:
     # The installs it knows, newest first: at run time it execs the first that
     # still exists, so a removed one (an ejected disk image) never breaks the
     # others' running Codex sessions.

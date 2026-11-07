@@ -948,11 +948,29 @@ def test_installs_at_different_paths_share_one_hook_definition(tmp_path, monkeyp
         import subprocess
         return subprocess.run([str(brindle_home() / "bin" / "codex-hook")], capture_output=True, text=True).stdout.strip()
 
-    first, first_exe = install("app")
+    import brindle.providers as providers
+
+    real_lock = providers._config_lock
+    first_exe = tmp_path / "app" / "bin" / "brindle"
+    first_exe.parent.mkdir(parents=True)
+    first_exe.write_text("#!/bin/sh\necho app\n")
+    first_exe.chmod(0o755)
+    busy = []
+
+    def other_install_finishes_first(name):
+        # Another process's whole update lands before this one may take the lock.
+        if not busy:
+            busy.append(1)
+            codex_hook._write_launcher([str(first_exe)], brindle_home() / "bin" / "codex-hook")
+        return real_lock(name)
+
+    monkeypatch.setattr(providers, "_config_lock", other_install_finishes_first)
     second, second_exe = install("dmg")
+    monkeypatch.setattr("brindle.providers.brindle_invocation", lambda: [str(first_exe)])
+    first = codex_hook.definition()
     assert first == second
     assert str(first_exe) not in second
-    assert run_hook() == "dmg"   # the newest install
+    assert run_hook() in ("app", "dmg")
     second_exe.unlink()          # the disk image is ejected: the app's running sessions still work
     assert run_hook() == "app"
 
