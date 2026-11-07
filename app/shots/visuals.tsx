@@ -8,7 +8,7 @@ import App from "../src/App";
 import { PtyViewsProvider } from "../src/api/ptyView";
 import { THEME_KEY, applyTheme } from "../src/components/ThemeToggle";
 import { markOnboarded } from "../src/api/providers";
-import type { VisualDTO } from "../src/api/client";
+import { DaemonError, type VisualDTO } from "../src/api/client";
 import { createAppStore } from "../src/store/store";
 import { startSync } from "../src/store/sync";
 import { FakeDaemon } from "../src/test/fakeDaemon";
@@ -20,7 +20,9 @@ const theme = params.get("theme") === "light" ? "light" : "dark";
 localStorage.setItem(THEME_KEY, theme);
 applyTheme(theme);
 markOnboarded();
-localStorage.removeItem("brindle.visuals.focus");
+// Off Pro (?free=1) the analysis-docs routes answer 402, as the engine does when not entitled.
+const free = params.get("free") === "1";
+const notEntitled = () => Promise.reject(new DaemonError("not_entitled", "brindle Pro is needed for this.", 402));
 
 const now = Date.now() / 1000;
 let rows: VisualDTO[] = [
@@ -44,8 +46,8 @@ Object.assign(client, {
   },
   keepVisual: async (id: string) => (rows = rows.map((v) => (v.id === id ? { ...v, kept: true } : v))).find((v) => v.id === id)!,
   unkeepVisual: async (id: string) => (rows = rows.map((v) => (v.id === id ? { ...v, kept: false } : v))).find((v) => v.id === id)!,
-  docPolicy: async () => ({ export_destinations: ["download", "google_docs", "sharepoint"] }),
-  docExportConfig: async () => ({ google_client_id: "preview-google", microsoft_client_id: "preview-microsoft" }),
+  docPolicy: async () => (free ? notEntitled() : { export_destinations: ["download", "google_docs", "sharepoint"] }),
+  docExportConfig: async () => (free ? notEntitled() : { google_client_id: "preview-google", microsoft_client_id: "preview-microsoft" }),
   exportDoc: async () => ({ filename: "doc.md", mime: "text/markdown" }),
   exportVisual: async () => ({ filename: "visual.html", mime: "text/html", content_b64: "" }),
 });
