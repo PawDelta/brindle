@@ -136,21 +136,33 @@ function cardPlace(box: Box | null): CSSProperties {
   return { left: clampX(box.left), top: below + 180 <= h ? below : clampY(box.top - GAP - 180) };
 }
 
-export function Walkthrough({ autoStart = false }: { autoStart?: boolean }) {
-  const [step, setStep] = useState<number | null>(() => (autoStart && !readWalkthroughDone() ? 0 : null));
+export function Walkthrough({ autoStart = false, onStep }: { autoStart?: boolean; onStep?: (step: WalkthroughStep) => boolean | void }) {
+  // A fresh cursor also restarts navigation when Help is pressed on the first step.
+  const [cursor, setCursor] = useState<{ index: number } | null>(() => (autoStart && !readWalkthroughDone() ? { index: 0 } : null));
+  const step = cursor?.index ?? null;
   const [box, setBox] = useState<Box | null>(null);
   const next = useRef<HTMLButtonElement>(null);
+  const navigated = useRef<typeof cursor>(null);
 
   useEffect(() => {
-    const open = () => setStep(0);
+    const open = () => setCursor({ index: 0 });
     window.addEventListener(OPEN_EVENT, open);
     return () => window.removeEventListener(OPEN_EVENT, open);
   }, []);
 
   const close = useCallback(() => {
     markWalkthroughDone();
-    setStep(null);
+    setCursor(null);
   }, []);
+
+  // App owns the pages: reveal the step's page even if its target isn't mounted yet.
+  // Only an explicitly deferred step can revisit when its initial data arrives.
+  // Ordinary feed updates must preserve the person's subsequent tab/agent selection.
+  useLayoutEffect(() => {
+    if (cursor && navigated.current !== cursor && onStep?.(STEPS[cursor.index]) !== false) {
+      navigated.current = cursor;
+    }
+  }, [cursor, onStep]);
 
   // Follow the control: it can mount late (the composer once the projects load), move, resize, or
   // scroll with any scrolling ancestor (a scroll doesn't bubble: the capture phase sees every one).
@@ -181,7 +193,7 @@ export function Walkthrough({ autoStart = false }: { autoStart?: boolean }) {
       window.removeEventListener("scroll", update, true);
       watch.disconnect();
     };
-  }, [step]);
+  }, [step, cursor]);
 
   useEffect(() => {
     if (step === null) return;
@@ -228,11 +240,11 @@ export function Walkthrough({ autoStart = false }: { autoStart?: boolean }) {
           </button>
           <span className="flex-1" />
           {step > 0 && (
-            <button type="button" className={quiet} onClick={() => setStep(step - 1)}>
+            <button type="button" className={quiet} onClick={() => setCursor({ index: step - 1 })}>
               Back
             </button>
           )}
-          <button ref={next} type="button" className={main} onClick={() => (last ? close() : setStep(step + 1))}>
+          <button ref={next} type="button" className={main} onClick={() => (last ? close() : setCursor({ index: step + 1 }))}>
             {last ? "Done" : "Next"}
           </button>
         </div>

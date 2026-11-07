@@ -84,30 +84,46 @@ function holdingClient(daemon: FakeDaemon, path: string) {
 const unfold = () => fireEvent.click(screen.getByRole("button", { name: /^Milestones \(/ }));
 
 describe("GoalPanel", () => {
-  it("copies the complete original request from the session header by double-click or button", async () => {
+  it("copies the complete request from the goal by double-click or keyboard, with transient feedback on success and failure", async () => {
     const request = "Build a goal screen.\n" + "Keep the original request readable and copyable. ".repeat(20);
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [{ ...appSession, request }], workspaces: [root], goal: { ...structuredClone(goal), root_id: APP_ROOT } });
     const client = daemon.client();
     const store = createAppStore();
     const sync = startSync({ client, store, connect: daemon.connect });
     localStorage.setItem(ONBOARDED_KEY, "1");
-    render(<PtyViewsProvider value={daemon.ptyViews()}><App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: APP_ROOT, repo: REPO }} /></PtyViewsProvider>);
+    const views = daemon.ptyViews();
+    render(<PtyViewsProvider value={views}><App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: APP_ROOT, repo: REPO }} /></PtyViewsProvider>);
     try {
-      const original = await screen.findByTestId("session-request");
-      expect(original.textContent).toBe(request);
-      expect(original.className).toContain("line-clamp-3");
-      fireEvent.dblClick(original);
-      await waitFor(() => expect(daemon.clipboard).toBe(request));
-      fireEvent.click(screen.getByRole("button", { name: "Show full request" }));
-      expect(original.className).not.toContain("line-clamp-3");
-      daemon.clipboard = "";
+      // The shell shows before the sessions are read: the context pane is replaced once they are.
+      const title = await waitFor(() => within(screen.getByTestId("session-context")).getByRole("button", { name: appSession.goal! }));
+      const context = screen.getByTestId("session-context");
       vi.useFakeTimers();
-      await act(async () => fireEvent.click(screen.getByRole("button", { name: "Copy original request" })));
+      await act(async () => fireEvent.dblClick(title));
       expect(daemon.clipboard).toBe(request);
-      const feedback = screen.getByTestId("session-request").parentElement!.querySelector('[role="status"]')!;
+      expect(screen.queryByTestId("session-request")).toBeNull();
+      expect(screen.queryByText(request)).toBeNull();
+      expect(title.title).not.toBe("");
+      const feedback = within(context).getByRole("status");
       expect(feedback.textContent).not.toBe("");
       act(() => vi.advanceTimersByTime(2000));
-      expect(feedback.textContent).toBe("");
+      expect(within(context).queryByRole("status")).toBeNull();
+      daemon.clipboard = "";
+      title.focus();
+      await act(async () => fireEvent.keyDown(title, { key: "Enter" }));
+      expect(daemon.clipboard).toBe(request);
+      const copied = within(context).getByRole("status").textContent;
+      act(() => vi.advanceTimersByTime(2000));
+      let rejectCopy!: (reason: Error) => void;
+      const pendingCopy = vi.fn(() => new Promise<void>((_, reject) => { rejectCopy = reject; }));
+      views.copy = pendingCopy;
+      await act(async () => fireEvent.dblClick(title));
+      expect(within(context).queryByRole("status")).toBeNull();
+      await act(async () => fireEvent.dblClick(title));
+      expect(pendingCopy).toHaveBeenCalledTimes(1);
+      await act(async () => rejectCopy(new Error("clipboard unavailable")));
+      expect(within(context).getByRole("status").textContent).not.toBe(copied);
+      act(() => vi.advanceTimersByTime(2000));
+      expect(within(context).queryByRole("status")).toBeNull();
     } finally {
       vi.useRealTimers();
       sync.stop();

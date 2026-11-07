@@ -26,6 +26,7 @@ import type { SessionDTO, WorkspaceDTO } from "../api/schema";
 import { plain } from "../api/wording";
 import { readLastSession, type Route } from "../routes";
 import { PtyTerminal } from "./PtyTerminal";
+import { RECONNECTING } from "./ReconnectOverlay";
 
 /* Where a shell opened now would start: the repo (its root and name), the
    folder, and that folder in words. */
@@ -251,6 +252,8 @@ export function TerminalProvider({ client, here, children }: { client: DaemonCli
   useEffect(() => {
     const key = (e: KeyboardEvent) => {
       if (!e.ctrlKey || e.metaKey || e.altKey || (e.key !== "`" && e.code !== "Backquote")) return;
+      // Not under the reconnect overlay: the app beneath it is on hold.
+      if (document.querySelector(RECONNECTING)) return;
       e.preventDefault();
       e.stopPropagation();
       toggle();

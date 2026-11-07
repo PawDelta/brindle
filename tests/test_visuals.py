@@ -164,6 +164,7 @@ def test_a_page_is_served_only_for_known_revisions_and_with_the_csp(db, session,
         assert got.headers["content-security-policy"] == visuals.CSP
 
 
+@pytest.mark.variant("incident: staff build 96 shipped visuals hidden because nothing set the old opt-in flag")
 def test_visuals_are_on_unless_switched_off(monkeypatch):
     # The staff build shipped with visuals hidden: nothing set the old opt-in flag.
     monkeypatch.delenv("BRINDLE_VISUALS", raising=False)
