@@ -333,7 +333,7 @@ fn placement_on_linux(app: &tauri::AppHandle, window: &tauri::Window, sandbox: &
         width: bounds.width as i32,
         height: bounds.height as i32,
     };
-    let mut check = |step: &str, visual: &VisualRef, bounds: Bounds| {
+    let check = |step: &str, visual: &VisualRef, bounds: Bounds, failures: &mut Vec<String>| {
         let placed = app
             .get_webview(&visual.label())
             .ok_or_else(|| "no webview".to_string())
@@ -353,13 +353,13 @@ fn placement_on_linux(app: &tauri::AppHandle, window: &tauri::Window, sandbox: &
         }
     };
     open(&first, a, failures);
-    check("the first visual", &first, a);
+    check("the first visual", &first, a, failures);
     open(&second, b, failures);
-    check("a second visual beside it", &second, b);
-    check("the first, with a second beside it", &first, a);
+    check("a second visual beside it", &second, b, failures);
+    check("the first, with a second beside it", &first, a, failures);
     let _ = visual_scheme::close(app, sandbox, &first.label());
     open(&first, c, failures);
-    check("the first, reopened after a close", &first, c);
+    check("the first, reopened after a close", &first, c, failures);
     let _ = visual_scheme::close(app, sandbox, &first.label());
     let _ = visual_scheme::close(app, sandbox, &second.label());
 }

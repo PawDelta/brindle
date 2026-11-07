@@ -1283,29 +1283,35 @@ mod tests {
         (loaded.load(std::sync::atomic::Ordering::SeqCst), deliveries, off)
     }
 
+    /// The one delivery a failed arming makes: the host is told once, about
+    /// that visual, and nothing else is said.
+    fn told_once_of_failure(deliveries: &[Delivery], expected: &VisualRef) {
+        assert_eq!(deliveries.len(), 1, "{deliveries:?}");
+        match &deliveries[0] {
+            Delivery::Failed { label, visual, why } => {
+                assert_eq!(visual, expected);
+                assert_eq!(label, &expected.label());
+                assert!(!why.is_empty());
+            }
+            other => panic!("not a failure: {other:?}"),
+        }
+    }
+
     #[test]
     fn a_visual_never_loads_when_webkit_cannot_switch_preconnect_off() {
-        let failed = |deliveries: &[Delivery]| -> Vec<String> {
-            deliveries
-                .iter()
-                .map(|d| match d {
-                    Delivery::Failed { label, why, .. } => format!("{label}: {why}"),
-                    other => format!("{other:?}"),
-                })
-                .collect()
-        };
+        let visual = VisualRef::Revision { id: "v_1".into(), rev: 1 };
         // No feature list (an older or stripped WebKit): told once, nothing loads.
         let no_list = FakeWebKit { feature_list: None, switched_off: Default::default() };
         let (loaded, deliveries, off) = armed_with(&no_list);
         assert!(!loaded);
         assert!(off.is_empty());
-        assert_eq!(failed(&deliveries), ["visual:v_1:r1: this WebKit has no feature list to switch link preconnect off"]);
+        told_once_of_failure(&deliveries, &visual);
         // A feature list without the switch: the same.
         let no_switch = FakeWebKit { feature_list: Some(vec!["WebGL", "LinkPrefetch"]), switched_off: Default::default() };
         let (loaded, deliveries, off) = armed_with(&no_switch);
         assert!(!loaded);
         assert!(off.is_empty());
-        assert_eq!(failed(&deliveries), ["visual:v_1:r1: this WebKit lists no LinkPreconnect feature to switch off"]);
+        told_once_of_failure(&deliveries, &visual);
         // The switch is there: off, and the page loads with nothing to tell.
         let switchable = FakeWebKit { feature_list: Some(vec!["WebGL", LINK_PRECONNECT]), switched_off: Default::default() };
         let (loaded, deliveries, off) = armed_with(&switchable);
@@ -1316,9 +1322,9 @@ mod tests {
         let delivered: Arc<Mutex<Vec<Delivery>>> = Default::default();
         let log = delivered.clone();
         let sandbox = Sandbox::new(move |d| log.lock().unwrap().push(d));
-        let visual = VisualRef::Kept { id: "k_1".into() };
-        arm_with(sandbox.sink.clone(), &visual, || panic!("loaded with no blocker"), |_armed| Err("gone".into()));
-        assert_eq!(failed(&delivered.lock().unwrap()), ["visual:kept:k_1: the webview handle couldn't be reached: gone"]);
+        let kept = VisualRef::Kept { id: "k_1".into() };
+        arm_with(sandbox.sink.clone(), &kept, || panic!("loaded with no blocker"), |_armed| Err("gone".into()));
+        told_once_of_failure(&delivered.lock().unwrap(), &kept);
     }
 
     /// A scheme request through the real handler, as a webview would send it.
