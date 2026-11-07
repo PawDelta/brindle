@@ -37,8 +37,27 @@ export function NativeFrame({ source, title, onMessage, snapshotRequest = 0 }: V
     const from: VisualSource = rev === null ? { kind: "kept", id } : { kind: "session", id, rev };
     const expected = rev === null ? `visual:kept:${id}` : `visual:${id}:r${rev}`;
     let disposed = false;
+    let failed = false;
+    let closing: Promise<unknown> | undefined;
     setError(null);
-    const fail = (e: unknown) => { if (!disposed) setError(String(e)); };
+    // The native surface covers this DOM, including errors. Remove it before reporting failure.
+    // A blocker can fail while visual_open is still returning, so share its eventual close
+    // with unmount cleanup and serialize the next reader behind it.
+    function close() {
+      if (!closing) {
+        closing = lifecycle.then(async () => {
+          const label = await opened.catch(() => null);
+          if (label) await invoke("visual_close", { label });
+        });
+        lifecycle = closing.catch(() => {});
+      }
+      return closing;
+    }
+    function fail(e: unknown) {
+      if (disposed || failed) return;
+      failed = true;
+      void close().then(() => { if (!disposed) setError(String(e)); }).catch(() => {});
+    }
     const bounds = () => {
       const { x, y, width, height } = element.getBoundingClientRect();
       return { x, y, width, height };
@@ -46,7 +65,7 @@ export function NativeFrame({ source, title, onMessage, snapshotRequest = 0 }: V
     const matches = (delivery: Delivery) => {
       const visual = delivery.visual;
       const actual: VisualSource = visual.kind === "revision" ? { kind: "session", id: visual.id, rev: visual.rev } : visual;
-      return !disposed && delivery.label === expected && sameSource(actual, from);
+      return !disposed && !failed && delivery.label === expected && sameSource(actual, from);
     };
     const listeners = [
       listen<Delivery>("visual:message", ({ payload }) => { if (matches(payload)) posted.current(payload.message, from); }),
@@ -63,7 +82,7 @@ export function NativeFrame({ source, title, onMessage, snapshotRequest = 0 }: V
     let sends: Promise<unknown> = opened;
     const send = (command: string, args: Record<string, unknown> = {}) => {
       sends = sends.then(() => opened).then((label) => {
-        if (!disposed && label) return invoke(command, { label, ...args });
+        if (!disposed && !failed && label) return invoke(command, { label, ...args });
       }).catch(fail);
     };
     const layout = () => send("visual_set_bounds", { bounds: bounds() });
@@ -88,10 +107,7 @@ export function NativeFrame({ source, title, onMessage, snapshotRequest = 0 }: V
       window.removeEventListener("resize", layout);
       window.removeEventListener("scroll", layout, true);
       for (const listener of listeners) void listener.then((unlisten) => unlisten(), () => {});
-      lifecycle = lifecycle.then(async () => {
-        const label = await opened;
-        if (label) await invoke("visual_close", { label });
-      }).catch(() => {});
+      void close().catch(() => {});
     };
   }, [kind, id, rev]);
   useEffect(() => { if (snapshotRequest > 0) snapshot.current?.(); }, [snapshotRequest]);

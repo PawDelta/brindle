@@ -12,12 +12,13 @@ export function ExportButton({ client, source, repo, onRequestSnapshot }: {
   const [open, setOpen] = useState(false);
   const [said, setSaid] = useState("");
   return (
-    <div className="relative">
+    <div className="flex min-w-0 flex-col items-end">
       <button type="button" className={button} aria-expanded={open} onClick={() => {
         if (!open) onRequestSnapshot?.();
         setOpen(!open);
       }}>Export ▾</button>
-      {open && <div className="absolute right-0 top-full z-20 mt-1 min-w-64">
+      {/* Reserve header space: a native visual surface covers any DOM overlay below it. */}
+      {open && <div className="mt-1 w-64 max-w-full">
         {source ? <ExportMenu key={`${source.kind}:${source.id}:${"rev" in source ? source.rev : ""}`} client={client} source={source} repo={repo} onSaid={setSaid} /> : <p role="status" className="bg-surface p-s2 text-sm">Preparing snapshot…</p>}
         {said && <p role="status" className="bg-surface p-s2 text-sm">{said}</p>}
       </div>}
