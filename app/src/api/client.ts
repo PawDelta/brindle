@@ -346,7 +346,7 @@ export interface VisualOption {
 }
 
 export interface VisualAnswer {
-  option: string;
+  option: string | null;
   note: string;
   at: number;
 }
@@ -1600,7 +1600,7 @@ export class DaemonClient {
   }
 
   /* The person's answer to the revision on screen; a newer revision makes this a 409. */
-  answerVisual(id: string, rev: number, option: string, note: string) {
+  answerVisual(id: string, rev: number, option: string | undefined, note: string) {
     return this.post<VisualDTO>(`/visuals/${encodeURIComponent(id)}/answer`, { rev, option, note });
   }
 
