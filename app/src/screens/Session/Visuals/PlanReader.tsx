@@ -6,7 +6,7 @@
    and comments go back to the supervisor, who publishes a new revision). Drafts belong to the
    revision on screen: a new revision is a fresh read, and a verdict on an older one is a 409. */
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { DaemonError, type Plan, type VisualDTO } from "../../../api/client";
 import { LoadingButton } from "../../../components/LoadingButton";
 import { button, field, label, main, mono } from "../../../components/ui";
@@ -17,6 +17,10 @@ import { BackButton, KeepButton, message, useEscBack } from "./chrome";
 import { ExportButton } from "./ExportButton";
 
 type Client = VisualsClient & PlansClient & Partial<ExportClient>;
+
+/* How far along a plan is: its revision, then decided or not. Revisions only grow and a decided
+   revision never reopens, so a response with less progress than the one on screen is stale. */
+const progress = (p: Plan) => p.rev * 2 + (p.state === "open" ? 0 : 1);
 
 export function PlanReader({ client, visual, repo, onBack, asking, onChanged }: {
   client: Client;
@@ -34,25 +38,26 @@ export function PlanReader({ client, visual, repo, onBack, asking, onChanged }: 
   // Read again whenever the session's row says the plan changed (a revision, a verdict).
   const changed = `${visual.id}:${visual.rev}:${visual.answer?.at ?? ""}`;
   const seq = useRef(0);
+  const selected = useRef(visual.id);
+  selected.current = visual.id;
+  // Reads and verdict replies can land in any order: the plan on screen only ever moves forward
+  // (a newer revision, or this revision decided), and only for the plan still open here.
+  const accept = useCallback((p: Plan) => {
+    if (p.id !== selected.current) return;
+    setPlan((now) => (now && now.id === p.id && progress(now) > progress(p) ? now : p));
+  }, []);
   useEffect(() => {
     const mine = ++seq.current;
     client.plan(visual.id).then(
       (p) => {
-        if (mine === seq.current) {
-          setPlan(p);
-          setError(null);
-        }
+        accept(p);
+        if (mine === seq.current) setError(null);
       },
       (e) => {
         if (mine === seq.current) setError(message(e));
       },
     );
-  }, [client, visual.id, changed]);
-  // A verdict's reply, unless a read begun after it already landed.
-  const decided = (p: Plan) => {
-    seq.current++;
-    setPlan(p);
-  };
+  }, [client, visual.id, changed, accept]);
   const shown = plan && plan.id === visual.id ? plan : null;
   const exportClient = client.exportVisual && client.exportDoc && client.docPolicy && client.docExportConfig ? (client as ExportClient) : undefined;
   return (
@@ -72,7 +77,7 @@ export function PlanReader({ client, visual, repo, onBack, asking, onChanged }: 
             <span>rendered by brindle from the plan's markdown</span>
             <span className="truncate">{`${visual.id} · r${shown?.rev ?? visual.rev} · ${visual.by}`}</span>
           </div>
-          {shown ? <PlanBody key={`${shown.id}:${shown.rev}`} client={client} plan={shown} by={visual.by} onDecided={decided} /> : <p className="p-s3 text-sm text-ink-3">{error ?? "Loading…"}</p>}
+          {shown ? <PlanBody key={`${shown.id}:${shown.rev}`} client={client} plan={shown} by={visual.by} onDecided={accept} /> : <p className="p-s3 text-sm text-ink-3">{error ?? "Loading…"}</p>}
         </div>
       </div>
     </div>
@@ -130,7 +135,8 @@ function PlanBody({ client, plan, by, onDecided }: { client: PlansClient; plan: 
             <section aria-label="Key decisions" className="flex flex-col gap-s1">
               <h3 className={label}>Key decisions</h3>
               {plan.decisions.map((d) => {
-                const chosen = picks[d.id] ?? d.mine ?? null;
+                // Decided: what the person sent; open: their draft; else the supervisor's pick.
+                const chosen = (open ? picks[d.id] : plan.verdict?.picks?.[d.id]) ?? d.mine ?? null;
                 return (
                   <div key={d.id} className="flex flex-col gap-1">
                     <p className="text-sm font-medium">{d.title}</p>

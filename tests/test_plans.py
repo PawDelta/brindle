@@ -50,7 +50,7 @@ def messages(db) -> list[str]:
     return [r["body"] for r in db.conn.execute("SELECT body FROM inbox WHERE agent_id='boss' ORDER BY id")]
 
 
-def test_assign_queues_behind_open_plan_until_the_person_approves(db, session):
+def test_assign_queues_behind_open_plan_until_the_person_approves(db, session, monkeypatch):
     boss, started = session
     visual_offers.person_spoke(db, boss, "Make a planning doc.")
     out = mcp_server.propose_plan(PLAN, DECISIONS, [{"id": "w1", "title": "Schema"}])
@@ -78,6 +78,19 @@ def test_assign_queues_behind_open_plan_until_the_person_approves(db, session):
             mcp_server.propose_plan(PLAN, DECISIONS, plan_id=pid)
 
         assert client.post(f"/v1/plans/{pid}/decide", json={"rev": 1, "approved": True}).status_code == 409
+
+        # An approval whose message can't be delivered starts nothing, even
+        # with a sweep running while it's on its way, and leaves the plan open.
+        deliver = agents.send_message
+
+        def fail(*a, **k):
+            assert tasks.sweep(db) == 0
+            raise agents.AgentError("the supervisor's inbox is gone")
+        monkeypatch.setattr(agents, "send_message", fail)
+        assert client.post(f"/v1/plans/{pid}/decide", json={"rev": 2, "approved": True}).status_code >= 400
+        assert started == [] and plans.get(db, pid)["state"] == "open"
+        monkeypatch.setattr(agents, "send_message", deliver)
+
         assert client.post(f"/v1/plans/{pid}/decide", json={"rev": 2, "approved": True}).json()["state"] == "approved"
         assert started == ["build the preset schema"]
         # A second approval (another window, a double click) and a sweep start nothing more.

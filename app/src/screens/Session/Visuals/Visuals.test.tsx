@@ -536,14 +536,17 @@ describe("visuals", () => {
       decisions: [{ id: "d1", title: "Where presets live", mine: "org", options: [{ id: "org", label: "Org policy" }, { id: "repo", label: "A file in each repo" }] }],
     };
     const reads: ((p: Plan) => void)[] = [];
+    const replies: ((p: Plan) => void)[] = [];
     const sent: PlanVerdict[] = [];
     const fake: VisualsClient & PlansClient = {
       visuals: async () => [], answerVisual: async () => visual, keepVisual: async () => visual, unkeepVisual: async () => visual, markVisualRead: async () => ({}),
       plan: () => new Promise<Plan>((ok) => { reads.push(ok); }),
-      decidePlan: async (_id, verdict) => { sent.push(verdict); return { ...plan, state: "redirected", verdict: { approved: false, picks: verdict.picks, comments: verdict.comments, at: now, rev: 1 } }; },
+      decidePlan: (_id, verdict) => { sent.push(verdict); return new Promise<Plan>((ok) => { replies.push(ok); }); },
     };
+    const redirected: Plan = { ...plan, state: "redirected", verdict: { approved: false, picks: { d1: "repo" }, comments: [{ section: "s1", text: "Repo file first." }], at: now, rev: 1 } };
     const row: VisualDTO = { ...visual, id: plan.id, kind: "plan", title: plan.title, rev: 1, question: undefined, options: undefined, unread: false };
-    const view = render(<VisualReader client={fake} visual={row} onBack={() => {}} onAnswered={() => {}} />);
+    const reader = (v: VisualDTO) => <VisualReader client={fake} visual={v} onBack={() => {}} onAnswered={() => {}} />;
+    const view = render(reader(row));
     await act(async () => reads[0](plan));
     // brindle's own rendering: the agent's raw HTML stays text, and there's no frame.
     expect(screen.getByText(/onerror=alert/)).toBeTruthy();
@@ -554,11 +557,27 @@ describe("visuals", () => {
     fireEvent.click(within(screen.getByRole("region", { name: "Goal" })).getByRole("button", { name: "Comment" }));
     fireEvent.change(screen.getByLabelText("Comment on Goal"), { target: { value: "Repo file first." } });
     // Another change to the row starts a read that is still out when the verdict lands.
-    view.rerender(<VisualReader client={fake} visual={{ ...row, answer: { option: "x", note: "", at: now } }} onBack={() => {}} onAnswered={() => {}} />);
+    view.rerender(reader({ ...row, answer: { option: "x", note: "", at: now } }));
     await act(async () => fireEvent.click(redirect));
     expect(sent).toEqual([{ rev: 1, approved: false, picks: { d1: "repo" }, comments: [{ section: "s1", text: "Repo file first." }], note: "" }]);
+    await act(async () => replies[0](redirected));
     await act(async () => reads[1](plan));
     expect(screen.getByTestId("plan-decided").textContent).toContain("Repo file first.");
     expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
+    // The other order: a newer revision is read while an older verdict's reply is still out.
+    view.rerender(reader({ ...row, rev: 2 }));
+    await act(async () => reads[2]({ ...plan, rev: 2 }));
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Approve" })));
+    view.rerender(reader({ ...row, rev: 3 }));
+    await act(async () => reads[3]({ ...plan, rev: 3 }));
+    await act(async () => replies[1]({ ...plan, rev: 2, state: "approved", verdict: { approved: true, at: now, rev: 2 } }));
+    expect(screen.getByText("plan · rev 3")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Approve" })).toBeTruthy();
+    // Reopened later, a decided plan shows the alternative the person sent, not the supervisor's.
+    view.unmount();
+    render(reader(row));
+    await act(async () => reads[4](redirected));
+    expect(screen.getByRole("radio", { name: "A file in each repo" }).getAttribute("aria-checked")).toBe("true");
+    expect(screen.getByRole("radio", { name: /Org policy/ }).getAttribute("aria-checked")).toBe("false");
   });
 });

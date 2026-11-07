@@ -34,7 +34,8 @@ MAX_MARKDOWN = 256 * 1024
 MAX_DECISIONS = 12
 MAX_WORKERS = 20
 MAX_COMMENTS = 50
-HOLDING = ("open", "redirected")
+HOLDING = ("open", "deciding", "redirected")   # 'deciding': a verdict on its way to the supervisor
+CLAIM_LAPSES = 5 * 60   # seconds before a verdict claim whose delivery never finished may be claimed again
 
 _HEADING = re.compile(r"^##\s+(.*?)\s*#*\s*$")
 _TOP = re.compile(r"^#\s+(.*?)\s*#*\s*$")
@@ -173,9 +174,10 @@ def to_dto(db: DB, p: dict) -> dict:
     from brindle.service.dto import PlanDTO
 
     lede, parts = sections(p["markdown"])
-    return PlanDTO(id=p["id"], session=p["root_id"], title=p["visual"]["title"], rev=p["rev"], state=p["state"],
+    return PlanDTO(id=p["id"], session=p["root_id"], title=p["visual"]["title"], rev=p["rev"],
+                   state="open" if p["state"] == "deciding" else p["state"],
                    markdown=p["markdown"], lede=lede, sections=parts, decisions=p["decisions"], split=p["split"],
-                   verdict=p["decision"], queued=_queued(db, p["root_id"]) if p["state"] in HOLDING else 0,
+                   verdict=None if p["state"] == "deciding" else p["decision"], queued=_queued(db, p["root_id"]) if p["state"] in HOLDING else 0,
                    created_at=p["created_at"]).to_json()
 
 
@@ -299,9 +301,12 @@ def decide(db: DB, plan_id: str, rev: Any, approved: bool, picks: Any = None, co
     """The person's verdict on the revision on their screen (``rev``):
     approve, or redirect with their picks and per-section comments. Only the
     person (the app, through the daemon's guarded route) decides: anyone
-    else is refused. The verdict is claimed in the row first, so a second
-    click is refused instead of delivered twice; if the message can't be
-    delivered, the claim (and a redirect's grant) is undone."""
+    else is refused. The verdict is claimed in the row first ('deciding',
+    which still holds the session's tasks), so a second click is refused
+    instead of delivered twice; if the message can't be delivered, the claim
+    is undone and the plan is open again, with nothing started. Only once
+    the message is delivered is the verdict final: an approval then releases
+    the queued tasks, a redirect grants the one revision it asks for."""
     from brindle import agents, tasks
 
     visuals.require_enabled()
@@ -313,7 +318,7 @@ def decide(db: DB, plan_id: str, rev: Any, approved: bool, picks: Any = None, co
         raise ServiceError("invalid", "rev (the revision on screen) is required", 400)
     if rev != p["rev"]:
         raise ServiceError("stale", f"the plan has a newer revision (r{p['rev']}); read that one", 409, rev=p["rev"])
-    if p["state"] != "open":
+    if p["state"] not in ("open", "deciding"):   # a lapsed 'deciding' claim may be taken again below
         raise ServiceError("decided", "this revision is already decided", 409)
     _lede, parts = sections(p["markdown"])
     titles = {s["id"]: s["title"] for s in parts}
@@ -330,13 +335,13 @@ def decide(db: DB, plan_id: str, rev: Any, approved: bool, picks: Any = None, co
     record = json.dumps(verdict)
     answer = json.dumps({"option": "approve" if approved else "redirect", "note": note, "at": at, "rev": rev})
     state = "approved" if approved else "redirected"
+    # Claimed as 'deciding', which still holds the session's tasks: nothing
+    # starts until the supervisor has the message and the verdict is final.
+    # A claim left behind by a process that died mid-delivery lapses.
     with db.tx() as c:
-        claimed = c.execute("UPDATE plans SET state=?, decision=?, updated_at=? WHERE id=? AND rev=? AND state='open'",
-                            (state, record, at, p["id"], rev)).rowcount == 1
-        if claimed:
-            c.execute("UPDATE visuals SET answer=?, read_rev=MAX(read_rev, rev) WHERE id=?", (answer, p["id"]))
-            if not approved:
-                visual_offers._grant(c, p["root_id"], "plan")   # the one revision the redirect asks for
+        claimed = c.execute("UPDATE plans SET state='deciding', decision=?, updated_at=? WHERE id=? AND rev=? AND "
+                            "(state='open' OR (state='deciding' AND updated_at<?))",
+                            (record, at, p["id"], rev, at - CLAIM_LAPSES)).rowcount == 1
     if not claimed:
         now = _row(db, p["id"])
         if now["rev"] != rev:
@@ -347,11 +352,15 @@ def decide(db: DB, plan_id: str, rev: Any, approved: bool, picks: Any = None, co
         agents.send_message(db, p["root_id"], _message(p, approved, picks, comments, note, titles), person=True)
     except BaseException:
         with db.tx() as c:
-            c.execute("UPDATE plans SET state='open', decision=NULL WHERE id=? AND decision=?", (p["id"], record))
-            c.execute("UPDATE visuals SET answer=NULL WHERE id=? AND answer=?", (p["id"], answer))
-            if not approved:
-                c.execute("DELETE FROM visual_grants WHERE root_id=? AND scope='plan'", (p["root_id"],))
+            c.execute("UPDATE plans SET state='open', decision=NULL WHERE id=? AND state='deciding' AND decision=?",
+                      (p["id"], record))
         raise
+    with db.tx() as c:
+        c.execute("UPDATE plans SET state=?, updated_at=? WHERE id=? AND state='deciding' AND decision=?",
+                  (state, time.time(), p["id"], record))
+        c.execute("UPDATE visuals SET answer=?, read_rev=MAX(read_rev, rev) WHERE id=?", (answer, p["id"]))
+        if not approved:
+            visual_offers._grant(c, p["root_id"], "plan")   # the one revision the redirect asks for
     bus.publish(db, "visual.answered", repo_root=p["visual"]["repo_root"], root_id=p["root_id"], visual=p["id"],
                 rev=rev, option=state)
     if approved:
