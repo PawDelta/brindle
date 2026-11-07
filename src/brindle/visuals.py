@@ -56,8 +56,9 @@ PAGE_HEADERS = {"Content-Security-Policy": CSP, "X-Content-Type-Options": "nosni
 
 
 def enabled() -> bool:
-    """The visuals capability: off until the feature ships (BRINDLE_VISUALS=1 turns it on)."""
-    return os.environ.get("BRINDLE_VISUALS", "").strip().lower() in ("1", "on", "true", "yes")
+    """The visuals capability: on now that the sandbox probes pass on macOS, Windows
+    and Linux; BRINDLE_VISUALS=0 turns it off."""
+    return os.environ.get("BRINDLE_VISUALS", "").strip().lower() not in ("0", "off", "false", "no")
 
 
 def require_enabled() -> None:
