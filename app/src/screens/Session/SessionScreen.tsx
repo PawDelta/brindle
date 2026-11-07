@@ -34,6 +34,7 @@ import { useContinue, type Recovery } from "./useContinue";
 import { VisualLinkContext } from "./Visuals/link";
 import { VisualReader } from "./Visuals/VisualReader";
 import { VisualsButton } from "./Visuals/VisualsButton";
+import { OfferChip } from "./Visuals/OfferChip";
 import { useVisuals } from "./Visuals/useVisuals";
 
 export interface SessionScreenProps {
@@ -210,7 +211,7 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
       {/* An open visual takes the whole window; the session's own chrome waits, mounted, for Back. */}
       <div className="contents" hidden={showVisual}>
       <SessionBar
-        visuals={<VisualsButton visuals={visuals.visuals} onOpen={openVisual} />}
+        visuals={<><OfferChip client={client} root={root} /><VisualsButton visuals={visuals.visuals} onOpen={openVisual} /></>}
         client={client}
         root={root}
         repo={repo}

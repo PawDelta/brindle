@@ -15,6 +15,9 @@ import { VisualFrame, type VisualFrameProps, type VisualSource } from "./frame";
 import { StoreContext } from "../../../store/useStore";
 import { VisualReader } from "./VisualReader";
 import { useVisuals } from "./useVisuals";
+import { OfferChip } from "./OfferChip";
+import { VisualsSetting } from "../../Settings/VisualsSetting";
+import { withVisualInput } from "./terminalInput";
 
 vi.mock("../../../components/PtyTerminal", () => import("../../../test/panes"));
 const native = vi.hoisted(() => ({
@@ -63,6 +66,217 @@ afterEach(() => {
 });
 
 describe("visuals", () => {
+  it("refreshes context after direct messages without replaying a superseded submission", async () => {
+    vi.useFakeTimers();
+    let context = 1, lastSequence = 0, registrations = 0;
+    let invalidatedAt = 0;
+    let granted = false, hold = false, holdBeforeSnapshot = false;
+    let resolveSnapshot: (() => void) | undefined;
+    const seen: string[] = [];
+    const open = withVisualInput({
+      beginVisualInput: async () => { registrations++; return { generation: 1 }; },
+      refreshVisualInput: async (_id, _observer, _expires, _signal, submittedAt) => {
+        if (hold && holdBeforeSnapshot) { hold = false; await new Promise<void>(ok => { resolveSnapshot = ok; }); }
+        const snapshot = context;
+        if (hold) { hold = false; await new Promise<void>(ok => { resolveSnapshot = ok; }); }
+        if (submittedAt <= invalidatedAt) throw new Error("superseded submission");
+        return { generation: snapshot };
+      },
+      visualInput: async (_id, text, _expires, _signal, observation) => {
+        seen.push(text);
+        if (observation?.generation !== context || observation.sequence <= lastSequence || observation.submitted_at <= invalidatedAt) throw new Error("superseded");
+        lastSequence = observation.sequence;
+        granted = text === "Make a visual";
+        return { observed: true };
+      },
+    }, "codex", () => ({ write() {}, resize() {}, focus() {}, close() {} }));
+    const view = open({ server: null, target: "%1" }, { cols: 80, rows: 24 }, { onData() {}, onExit() {}, onError() {} });
+    try {
+      view.write("Make a visual\r");
+      await act(async () => undefined);
+      expect(granted).toBe(true);
+      context++; // Direct person message: same terminal, new message context.
+      view.write("Don't make a visual\r");
+      await act(async () => undefined);
+      expect(granted).toBe(false);
+      expect(registrations).toBe(1);
+      view.write("Make a visual\r");
+      await act(async () => undefined);
+      hold = true;
+      view.write("Don't make a visual\r");
+      await act(async () => undefined);
+      view.write("Make a visual\r");
+      await act(async () => undefined);
+      await act(async () => resolveSnapshot?.());
+      expect(granted).toBe(true);
+      expect(seen).toHaveLength(4);
+      hold = holdBeforeSnapshot = true;
+      view.write("Make a visual\r");
+      await act(async () => undefined);
+      await act(async () => vi.advanceTimersByTime(10));
+      invalidatedAt = Date.now() / 1000;
+      context++; granted = false; // A later direct cancellation precedes refresh processing.
+      await act(async () => resolveSnapshot?.());
+      expect(granted).toBe(false);
+      expect(seen).toHaveLength(4);
+      await act(async () => vi.advanceTimersByTime(10));
+      view.write("Make a visual\r");
+      await act(async () => undefined);
+      expect(granted).toBe(true);
+    } finally { view.close(); vi.useRealTimers(); }
+  });
+
+  it.each(["interrupt", "deadline", "cancellation"])("recovers the PTY from pending consent recording on %s", async (how) => {
+    vi.useFakeTimers();
+    const bytes: string[] = [];
+    let signal: AbortSignal | undefined;
+    const observations: { generation: number; sequence: number }[] = [];
+    const open = withVisualInput({ beginVisualInput: async () => ({ generation: 1 }), refreshVisualInput: async () => ({ generation: 1 }), visualInput: (_id, _text, _expiry, given, observation) => {
+      signal ??= given; observations.push(observation!); return new Promise(() => {});
+    } }, "codex",
+      () => ({ write(data) { bytes.push(data); }, resize() {}, focus() {}, close() {} }));
+    const view = open({ server: null, target: "%1" }, { cols: 80, rows: 24 }, { onData() {}, onExit() {}, onError() {} });
+    try {
+      view.write("hello"); view.write("\r");
+      await act(async () => undefined);
+      if (how === "interrupt") {
+        view.write("\x03"); view.write("more");
+        await act(async () => undefined);
+        expect(bytes.join("")).toBe("hello\r\x03more");
+      } else if (how === "deadline") {
+        await act(async () => vi.advanceTimersByTime(300));
+        expect(bytes.join("")).toBe("hello\r");
+      } else {
+        view.write("Don't make a visual\r");
+        await act(async () => undefined);
+        expect(observations.map(o => o.sequence)).toEqual([1, 2]);
+        expect(observations[1].generation).toBe(observations[0].generation);
+        expect(bytes.join("")).toBe("hello\r");
+      }
+      expect(signal?.aborted).toBe(true);
+    } finally { view.close(); vi.useRealTimers(); }
+  });
+
+  it("observes Codex PTY submissions before forwarding Enter, including edits, pastes and uncertain history", async () => {
+    const submitted: string[] = [], bytes: string[] = [];
+    let recorded: (() => void) | undefined;
+    const open = withVisualInput({ beginVisualInput: async () => ({ generation: 1 }), refreshVisualInput: async () => ({ generation: 1 }), visualInput: async (_id, text) => {
+      submitted.push(text);
+      await new Promise<void>(ok => { recorded = ok; });
+      return { observed: true };
+    } }, "codex", () => ({ write(data) { bytes.push(data); }, resize() {}, focus() {}, close() {} }));
+    const view = open({ server: null, target: "%1" }, { cols: 80, rows: 24 }, { onData() {}, onExit() {}, onError() {} });
+    view.write("Make a visualx");
+    view.write("\x7f\r");
+    await act(async () => undefined);
+    expect(submitted).toEqual(["Make a visual"]);
+    expect(bytes.join("")).not.toContain("\r");
+    await act(async () => recorded?.());
+    view.write("\x1b[200~Compare choices.\nPlease make a visual.\x1b[201~\r");
+    await act(async () => undefined);
+    expect(submitted.at(-1)).toBe("Compare choices.\nPlease make a visual.");
+    await act(async () => recorded?.());
+    view.write("\x1b[A\r");
+    await act(async () => undefined);
+    view.write("\r"); view.write("y\r");
+    await act(async () => undefined);
+    expect(submitted).toHaveLength(3);
+    expect(submitted.at(-1)).toBe("y");
+    await act(async () => recorded?.());
+    view.write("2\r");
+    await act(async () => undefined);
+    expect(submitted.at(-1)).toBe("2");
+    await act(async () => recorded?.());
+    expect(bytes.join("")).toContain("\x1b[A\r");
+    view.write("Make a visual");
+    view.write("\n"); // Ctrl+J inserts a draft newline rather than submitting.
+    await act(async () => undefined);
+    expect(submitted).toHaveLength(4);
+    expect(bytes.at(-1)).toBe("\n");
+    view.write("only if I ask later\r");
+    await act(async () => undefined);
+    expect(submitted).toHaveLength(5);
+    expect(submitted.at(-1)).toBe("Make a visual\nonly if I ask later");
+    await act(async () => recorded?.());
+    for (const edit of ["\x1b[H", "\x05"]) {
+      view.write(`Make a visual\n${edit}only if I ask later\r`);
+      await act(async () => undefined);
+      expect(submitted).toHaveLength(5);
+    }
+    view.close();
+  });
+
+  it("drops stale offer reads across sessions, dismisses and expires offers", async () => {
+    vi.useFakeTimers();
+    const store = createAppStore();
+    const offer = { id: "o_1", kind: "layout", counts: {}, expires_at: Date.now() / 1000 + 5 };
+    let oldRead: (value: typeof offer) => void = () => undefined;
+    const decisions: boolean[] = [];
+    const client = {
+      visualOffer: async (root: string) => root === "old" ? new Promise<typeof offer>(ok => { oldRead = ok; }) : root === "empty" ? null : root === "confirm" ? { ...offer, id: "r_1", confirmation: "plan" as const, expires_at: Date.now() / 1000 + 1800 } : offer,
+      resolveVisualOffer: async (_root: string, _id: string, accept: boolean) => { decisions.push(accept); return { accepted: accept }; },
+    };
+    const chip = (root: string) => <StoreContext.Provider value={store}><OfferChip client={client} root={root} /></StoreContext.Provider>;
+    try {
+      const view = render(chip("old"));
+      view.rerender(chip("empty"));
+      await act(async () => { oldRead(offer); });
+      await act(async () => vi.advanceTimersByTime(2000));
+      expect(screen.queryByRole("button")).toBeNull();
+      view.rerender(chip("current"));
+      await act(async () => undefined);
+      await act(async () => vi.advanceTimersByTime(2000));
+      await act(async () => fireEvent.click(screen.getByRole("button", { name: "Not now" })));
+      expect(decisions).toEqual([false]);
+      view.rerender(chip("expiry"));
+      await act(async () => undefined);
+      await act(async () => vi.advanceTimersByTime(2000));
+      expect(screen.queryByRole("button")).toBeNull();
+      view.rerender(chip("confirm"));
+      await act(async () => undefined);
+      await act(async () => vi.advanceTimersByTime(2000));
+      await act(async () => fireEvent.click(screen.getByRole("button", { name: "Create the planning document now?" })));
+      expect(decisions).toEqual([false, true]);
+      expect(screen.queryByRole("button")).toBeNull();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("delays offers while typing, preserves focus and permits keyboard acceptance; setting saves independently", async () => {
+    vi.useFakeTimers();
+    const store = createAppStore();
+    const accepted: boolean[] = [];
+    const offer = { id: "o_1", kind: "options", counts: { options: 3, attributes: 4 }, expires_at: Date.now() / 1000 + 1800 };
+    let mode: "on" | "off" = "off";
+    const client = {
+      visualOffer: async () => offer,
+      resolveVisualOffer: async (_root: string, _offer: string, accept: boolean) => { accepted.push(accept); return { accepted: accept }; },
+      userSettings: async () => ({ claude_permission_mode: "default" as const, visuals: mode }),
+      patchUserSettings: async (body: { visuals?: "on" | "off" }) => { mode = body.visuals!; return client.userSettings(); },
+    };
+    try {
+      render(<StoreContext.Provider value={store}><textarea aria-label="chat" /><OfferChip client={client} root="sup1" /><VisualsSetting client={client} /></StoreContext.Provider>);
+      await act(async () => undefined);
+      const chat = screen.getByRole("textbox");
+      chat.focus();
+      await act(async () => vi.advanceTimersByTime(1500));
+      fireEvent.keyDown(chat, { key: "a" });
+      await act(async () => vi.advanceTimersByTime(1500));
+      expect(screen.queryByRole("button", { name: "Make a visual?" })).toBeNull();
+      await act(async () => vi.advanceTimersByTime(500));
+      expect(document.activeElement).toBe(chat);
+      const chip = screen.getByRole("button", { name: "Make a visual?" });
+      chip.focus();
+      fireEvent.keyDown(chip, { key: "Tab" });
+      expect(document.activeElement).toBe(chip);
+      await act(async () => fireEvent.click(chip));
+      expect(accepted).toEqual([true]);
+      expect(screen.queryByRole("button", { name: "Make a visual?" })).toBeNull();
+      await act(async () => fireEvent.click(screen.getByRole("switch", { name: "Visuals" })));
+      expect(mode).toBe("on");
+      expect(screen.getByRole("switch").getAttribute("aria-checked")).toBe("true");
+    } finally { vi.useRealTimers(); }
+  });
+
   it("hosts the native page at the content bounds, relays choices and theme, and closes across reader lifecycles", async () => {
     native.enabled = true;
     vi.stubGlobal("matchMedia", () => ({ addEventListener() {}, removeEventListener() {} }));

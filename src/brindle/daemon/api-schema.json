@@ -8004,6 +8004,18 @@
       "path": "/v1/sessions"
     },
     {
+      "method": "POST",
+      "path": "/v1/sessions/{id:path}/visual-input"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/sessions/{id:path}/visual-offer"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/sessions/{id:path}/visual-offer"
+    },
+    {
       "method": "GET",
       "path": "/v1/sessions/{id:path}/visuals"
     },

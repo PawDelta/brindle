@@ -3,7 +3,7 @@ import time
 import pytest
 from starlette.testclient import TestClient
 
-from brindle import agents, mcp_server, visuals
+from brindle import agents, mcp_server, visual_offers, visuals
 from brindle.daemon.app import build_app
 from brindle.db import Agent, Workspace
 from brindle.service import inbox
@@ -19,6 +19,8 @@ SECRET = "api_key = " + "Zq8vR2mK7pX4tL9w" + "B3nY6cH1"   # secret-shaped, not a
 def session(db, tmp_path, monkeypatch):
     """A supervisor (headless, so a message is queued in the db) and its worker."""
     monkeypatch.setenv("BRINDLE_VISUALS", "1")
+    # These tests exercise page storage and revisions; consent is covered in test_visual_offers.
+    monkeypatch.setattr(visual_offers, "consume", lambda c, root, kind: None)
     monkeypatch.setattr(agents, "is_alive", lambda agent, panes=None: True)
     repo = tmp_path / "repo"
     ws = Workspace("ws1", str(repo), "main", "main", "main", None, str(repo), None, "brindle-ws1", time.time())

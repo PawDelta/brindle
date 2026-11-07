@@ -12,7 +12,7 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
@@ -89,7 +89,7 @@ class _Server(MCPServer):
                 if coordinator.refusal(agent, t.name) is None and t.name not in hidden]
 
 
-VISUAL_TOOLS = ("publish_visual", "list_visuals")   # hidden while the visuals capability is off
+VISUAL_TOOLS = ("publish_visual", "list_visuals", "offer_visual")   # hidden while the capability is off
 
 
 mcp = _Server(
@@ -158,9 +158,33 @@ class VisualOption(BaseModel):
 
 
 @mcp.tool()
+def offer_visual(question: str, kind: Literal["options", "comparison", "flow", "diff", "layout"],
+                 options: int = 0, attributes: int = 0,
+                 rows: int = 0, columns: int = 0, steps: int = 0, branches: int = 0, lines: int = 0) -> dict:
+    """Offer a visual alongside a choice asked in text (supervisors only).
+    kind: options (3+, or 2 with 3+ attributes), comparison (4x3+), flow
+    (5+ steps or a branch), diff (over 12 lines), layout (a UI choice).
+    Never use for permission, approval, status, a short answer, or an answered
+    question. Refusals return immediately. Wait for acceptance before making HTML.
+    """
+    from brindle import visual_offers
+    from brindle.service.errors import ServiceError
+
+    db = DB()
+    caller, _ = _caller(db)
+    try:
+        return visual_offers.offer(db, caller, question, kind, options=options, attributes=attributes,
+                                   rows=rows, columns=columns, steps=steps, branches=branches, lines=lines)
+    except ServiceError as e:
+        raise ToolError(e.message) from e
+
+
+@mcp.tool()
 def publish_visual(title: str, html: str, question: str | None = None,
                    options: list[VisualOption] | None = None, visual_id: str | None = None) -> str:
     """Show the person a page in the app: a self-contained HTML document
+    only after the person explicitly requested one or accepted an offer.
+    Each request permits one publication, regardless of the Visuals setting.
     (inline script and style only; it gets no network, no remote images or
     fonts). Workers' visuals go to their supervisor's session. To ask a
     choice, pass the question and 2-12 options; the person answers with one

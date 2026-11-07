@@ -322,6 +322,7 @@ export interface GoalEnabledAck {
 }
 
 export interface Meta {
+  visuals?: boolean;
   /* The daemon is still bringing back sessions from its previous shutdown. */
   resuming?: boolean;
   engine_version: string;
@@ -808,7 +809,16 @@ export interface ConfigUpdated {
 export type ClaudePermissionMode = "default" | "auto";
 export type OpenCodePermissionMode = "ask" | "auto" | "autonomous";
 
+export interface VisualOffer {
+  id: string;
+  kind: string;
+  counts: Record<string, number>;
+  expires_at: number;
+  confirmation?: "visual" | "plan";
+}
+
 export interface UserSettings {
+  visuals?: "on" | "off";
   claude_permission_mode: ClaudePermissionMode;
   /* Absent from an engine older than this setting. */
   opencode_permission_mode?: OpenCodePermissionMode;
@@ -1540,6 +1550,36 @@ export class DaemonClient {
   async visuals(root: string): Promise<VisualDTO[]> {
     const got = await this.get<VisualDTO[] | { visuals?: VisualDTO[] }>(`${this.sessionPath(root)}/visuals`);
     return Array.isArray(got) ? got : (got.visuals ?? []);
+  }
+
+  visualOffer(root: string) {
+    return this.get<VisualOffer | null>(`${this.sessionPath(root)}/visual-offer`);
+  }
+
+  beginVisualInput(root: string, expiresAt: number, signal?: AbortSignal) {
+    return this.request<{ generation: number }>(this.url(`${this.sessionPath(root)}/visual-input`), {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ begin: true, expires_at: expiresAt }), signal,
+    });
+  }
+
+  visualInput(root: string, text: string, expiresAt?: number, signal?: AbortSignal,
+              observation?: { generation: number; sequence: number; submitted_at: number }) {
+    return this.request<{ observed: boolean }>(this.url(`${this.sessionPath(root)}/visual-input`), {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text, expires_at: expiresAt, ...observation }), signal,
+    });
+  }
+
+  refreshVisualInput(root: string, observer: number, expiresAt: number, signal: AbortSignal | undefined, submittedAt: number) {
+    return this.request<{ generation: number }>(this.url(`${this.sessionPath(root)}/visual-input`), {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ refresh: observer, expires_at: expiresAt, submitted_at: submittedAt }), signal,
+    });
+  }
+
+  resolveVisualOffer(root: string, offer: string, accept: boolean) {
+    return this.post<{ accepted: boolean }>(`${this.sessionPath(root)}/visual-offer`, { offer, accept });
   }
 
   /* The person's answer to the revision on screen; a newer revision makes this a 409. */

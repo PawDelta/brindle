@@ -558,6 +558,11 @@ def user_settings() -> dict:
 SUPERVISOR_KEY = "supervisor"      # ~/.brindle/config.json: the CLI the person last picked for the supervisor
 
 
+def visuals_setting() -> str:
+    """Whether brindle may offer a visual; publication always needs a request."""
+    return "on" if user_settings().get("visuals") == "on" else "off"
+
+
 def supervisor_pick() -> str | None:
     """The supervisor CLI this person last picked (in the picker or with
     ``-s``), or None before the first pick."""

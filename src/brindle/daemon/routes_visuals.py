@@ -16,7 +16,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
-from brindle import visuals
+from brindle import visuals, visual_offers
 from brindle.daemon.routes_actions import _endpoint, _get
 from brindle.daemon.routes_read import _json
 from brindle.db import DB
@@ -53,6 +53,51 @@ def session_visuals(db: DB, request: Request) -> Any:
         raise ServiceError("not_found", f"no session {root}", 404)
     visuals._unlocked(root)
     return [visuals.to_dto(v) for v in visuals.for_session(db, root)]
+
+
+@_json
+def session_offer(db: DB, request: Request) -> Any:
+    return visual_offers.current(db, request.path_params["id"])
+
+
+def resolve_offer(db: DB, params: dict, body: dict) -> Any:
+    return visual_offers.resolve(db, params["id"], _get(body, "offer", required=True),
+                                 _get(body, "accept", bool, required=True))
+
+
+def visual_input(db: DB, params: dict, body: dict) -> Any:
+    """Authenticated shell input, observed before the PTY receives its submit key."""
+    root = params["id"]
+    visuals._unlocked(root)
+    agent = db.get_agent(root)
+    if agent is None:
+        raise ServiceError("not_found", "no such session", 404)
+    expires_at = _get(body, "expires_at", (int, float))
+    if expires_at is not None and (isinstance(expires_at, bool) or not 0 < expires_at < float("inf")):
+        raise ServiceError("invalid", "expires_at must be a finite timestamp", 400)
+    if _get(body, "begin", bool):
+        return {"generation": visual_offers.begin_input(db, agent, expires_at)}
+    submitted_at = _get(body, "submitted_at", (int, float), required=True)
+    if isinstance(submitted_at, bool) or not 0 < submitted_at < float("inf"):
+        raise ServiceError("invalid", "submitted_at must be a finite timestamp", 400)
+    observer = _get(body, "refresh", int)
+    if observer is not None:
+        return {"generation": visual_offers.refresh_input(db, agent, observer, submitted_at, expires_at)}
+    text = _get(body, "text", required=True)
+    if len(text) > 32000:
+        raise ServiceError("invalid", "input is too long", 400)
+    # Bare Enter/unknown drafts convey no chat answer. Short answers may be
+    # either chat or menu input: fold an offer without changing publication consent.
+    if not text.strip():
+        return {"observed": False}
+    generation = _get(body, "generation", int, required=True)
+    sequence = _get(body, "sequence", int, required=True)
+    if generation < 1 or sequence < 1:
+        raise ServiceError("invalid", "generation and sequence must be positive integers", 400)
+    fold_only = text.strip().lower() in ("y", "yes", "n", "no") or text.strip().isdigit()
+    visual_offers.person_spoke(db, agent, text, expires_at=expires_at,
+                               observation=(generation, sequence), submitted_at=submitted_at, fold_only=fold_only)
+    return {"observed": True}
 
 
 @_page
@@ -109,6 +154,9 @@ def kept_page(db: DB, request: Request) -> Path:
 
 
 ROUTES = [
+    Route("/v1/sessions/{id:path}/visual-input", _endpoint(visual_input), methods=["POST"]),
+    Route("/v1/sessions/{id:path}/visual-offer", session_offer),
+    Route("/v1/sessions/{id:path}/visual-offer", _endpoint(resolve_offer), methods=["POST"]),
     Route("/v1/sessions/{id:path}/visuals", session_visuals),
     Route("/v1/visuals/{id}/r/{n}", visual_page),
     Route("/v1/visuals/{id}/answer", _endpoint(answer), methods=["POST"]),

@@ -350,7 +350,7 @@ def launch(db: DB, ws: Workspace, *, provider: str | None = None, prompt: str | 
            watch: bool = True, autopilot: bool | None = None) -> Started:
     """Start the supervisor chat in ``ws`` with the goal driver always on."""
     a = agents.spawn(db, ws, agents.SUPERVISOR, prompt=prompt, provider_name=provider,
-                     watch_pane=watch, background_setup=True, autopilot=True)
+                     watch_pane=watch, background_setup=True, autopilot=True, person_prompt=True)
     return Started(a, ws, True)
 
 

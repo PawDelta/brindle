@@ -864,6 +864,37 @@ CREATE TABLE IF NOT EXISTS kb_embeddings (
     model TEXT NOT NULL,
     vector BLOB NOT NULL
 );
+-- Offers and one-use requests from the person (brindle.visual_offers).
+CREATE TABLE IF NOT EXISTS visual_offers (
+    id TEXT PRIMARY KEY,
+    root_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    question_hash TEXT NOT NULL,
+    question TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    counts TEXT NOT NULL,
+    state TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    changed_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS visual_grants (
+    root_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
+    remaining INTEGER NOT NULL,
+    explicit INTEGER NOT NULL,
+    scope TEXT NOT NULL DEFAULT 'visual'
+);
+CREATE TABLE IF NOT EXISTS visual_input_state (
+    root_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
+    generation INTEGER NOT NULL,
+    sequence INTEGER NOT NULL,
+    observer INTEGER NOT NULL,
+    invalidated_at REAL NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS visual_requests (
+    root_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
+    id TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    created_at REAL NOT NULL
+);
 -- Visuals an agent published into a session (brindle.visuals owns these):
 -- the current revision's question and options, the person's answer to it.
 -- Deleted with their session; a kept copy is a kept_visuals row instead.
@@ -1299,6 +1330,17 @@ class DB:
 
     def _migrate(self) -> None:
         """Bring databases created by older versions up to the current schema."""
+        input_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(visual_input_state)")}
+        if "observer" not in input_cols:
+            self.conn.execute("ALTER TABLE visual_input_state ADD COLUMN observer INTEGER NOT NULL DEFAULT 0")
+            self.conn.execute("UPDATE visual_input_state SET observer=generation")
+        if "invalidated_at" not in input_cols:
+            self.conn.execute("ALTER TABLE visual_input_state ADD COLUMN invalidated_at REAL NOT NULL DEFAULT 0")
+        grant_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(visual_grants)")}
+        if "scope" not in grant_cols:
+            self.conn.execute("ALTER TABLE visual_grants ADD COLUMN scope TEXT NOT NULL DEFAULT 'visual'")
+            # Earlier grants did not distinguish conditional requests or artifact scope.
+            self.conn.execute("UPDATE visual_grants SET remaining=0")
         review_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(reviews)")}
         for col, kind in (("review_slot", "TEXT"), ("reviewer_created_at", "REAL")):
             if col not in review_cols:
