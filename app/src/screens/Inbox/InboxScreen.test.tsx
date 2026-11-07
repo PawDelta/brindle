@@ -156,6 +156,18 @@ describe("inbox", () => {
     sync.stop();
   });
 
+  it("a visual decision's card has Open visual, which opens the visual, and no Go to session; another card's Go to session is a tinted button", async () => {
+    const visualItem: InboxItemDTO = { kind: "visual", agent_id: "sup1", root_id: "sup1", workspace_id: "proj", visual_id: "v_8f2c", reason: "asks you to choose" };
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], inbox: [visualItem, question] });
+    const { sync, onOpen } = mount(daemon);
+    await screen.findByRole("region", { name: "Ship ls --json" });
+    expect(within(card("visual")).queryByRole("button", { name: "Go to session ›" })).toBeNull();
+    fireEvent.click(within(card("visual")).getByRole("button", { name: "Open visual" }));
+    expect(onOpen).toHaveBeenLastCalledWith("sup1", REPO, "sup1", { kind: "visual", id: "v_8f2c" });
+    expect(within(card("question")).getByRole("button", { name: "Go to session ›" }).className).toContain("btn-secondary");
+    sync.stop();
+  });
+
   it("starts a sign-in from its card", async () => {
     // As the engine's permission-items branch emits a lapsed sign-in: no detail, the sign-in route named on the
     // item; the worker is on Codex (its record), so the sign-in must be Codex's, never Claude's.
