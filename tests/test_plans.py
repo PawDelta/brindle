@@ -3,7 +3,7 @@ queued behind an open plan through the real dispatch, and only the person
 approves or redirects."""
 
 import asyncio
-import os
+import sqlite3
 import time
 
 import pytest
@@ -12,7 +12,7 @@ from starlette.testclient import TestClient
 
 from brindle import agents, mcp_server, plans, tasks, visual_offers
 from brindle.daemon.app import build_app
-from brindle.db import Agent, Workspace
+from brindle.db import DB, Agent, Workspace
 from brindle.service.errors import ServiceError
 
 TOKEN = "t" * 43
@@ -80,17 +80,18 @@ def test_assign_queues_behind_open_plan_until_the_person_approves(db, session, m
 
         assert client.post(f"/v1/plans/{pid}/decide", json={"rev": 1, "approved": True}).status_code == 409
 
-        # An approval whose message can't be delivered starts nothing, even
-        # with a sweep running while it's on its way, and leaves the plan open.
-        deliver = agents.send_message
+        # An approval that fails before its message is queued starts nothing,
+        # even with a sweep (another connection) running meanwhile, and leaves the plan open.
+        queue, other, swept = plans._queue_message, DB(), []
 
-        def fail(*a, **k):
-            assert tasks.sweep(db) == 0
-            raise agents.AgentError("the supervisor's inbox is gone")
-        monkeypatch.setattr(agents, "send_message", fail)
-        assert client.post(f"/v1/plans/{pid}/decide", json={"rev": 2, "approved": True}).status_code >= 400
-        assert started == [] and plans.get(db, pid)["state"] == "open"
-        monkeypatch.setattr(agents, "send_message", deliver)
+        def fail(c, root, text):
+            swept.append(tasks.sweep(other))
+            raise sqlite3.OperationalError("database is locked")
+        monkeypatch.setattr(plans, "_queue_message", fail)
+        with pytest.raises(sqlite3.OperationalError):
+            plans.decide(db, pid, 2, True, person=True)
+        assert swept == [0] and started == [] and plans.get(db, pid)["state"] == "open"
+        monkeypatch.setattr(plans, "_queue_message", queue)
 
         assert client.post(f"/v1/plans/{pid}/decide", json={"rev": 2, "approved": True}).json()["state"] == "approved"
         assert started == ["build the preset schema"]
@@ -99,33 +100,38 @@ def test_assign_queues_behind_open_plan_until_the_person_approves(db, session, m
         assert tasks.sweep(db) == 0 and started == ["build the preset schema"]
 
 
-def test_a_verdict_in_flight_fences_out_others_until_its_process_is_gone(db, session, monkeypatch):
+def test_a_failed_verdict_leaves_nothing_behind_and_a_failed_push_loses_nothing(db, session, monkeypatch):
     boss, started = session
     visual_offers.person_spoke(db, boss, "Make a planning doc.")
     pid = mcp_server.propose_plan(PLAN, DECISIONS).split()[2]
     asyncio.run(mcp_server.assign("developer", "build the preset schema"))
-    deliver, clock = agents.send_message, time.time
+    redirect = {"comments": [{"section": "s1", "text": "Repo file first."}], "person": True}
+    grants = lambda: [r["remaining"] for r in db.conn.execute("SELECT remaining FROM visual_grants")]  # noqa: E731
 
-    def slow(*a, **k):
-        # An hour into this redirect's delivery, an approval comes in: refused, nothing starts.
-        monkeypatch.setattr(plans.time, "time", lambda: clock() + 3600)
-        with pytest.raises(ServiceError, match="already decided"):
-            plans.decide(db, pid, 1, True, person=True)
-        assert started == [] and tasks.sweep(db) == 0
-        return deliver(*a, **k)
-    monkeypatch.setattr(agents, "send_message", slow)
-    plans.decide(db, pid, 1, False, comments=[{"section": "s1", "text": "Repo file first."}], person=True)
-    monkeypatch.setattr(agents, "send_message", deliver)
-    assert plans.get(db, pid)["state"] == "redirected" and plans.get(db, pid)["visual"]["answer"]["option"] == "redirect"
-    assert [r["remaining"] for r in db.conn.execute("SELECT remaining FROM visual_grants")] == [1]
+    # One failure inside the verdict's transaction: none of it lands, and the
+    # same process can decide again at once.
+    queue = plans._queue_message
 
-    # A claim left by a process that died mid-delivery is taken over; a live one never is.
-    mcp_server.propose_plan(PLAN + "\n\nRevised.", DECISIONS, plan_id=pid)
-    db.conn.execute("UPDATE plans SET state='deciding', claim=? WHERE id=?", (f"{os.getpid()}:x", pid))
+    def locked(c, root, text):
+        raise sqlite3.OperationalError("database is locked")
+    monkeypatch.setattr(plans, "_queue_message", locked)
+    with pytest.raises(sqlite3.OperationalError):
+        plans.decide(db, pid, 1, False, **redirect)
+    assert plans.get(db, pid)["state"] == "open" and plans.get(db, pid)["visual"]["answer"] is None
+    assert grants() == [0] and messages(db) == []
+    monkeypatch.setattr(plans, "_queue_message", queue)
+
+    # The push to the supervisor's terminal failing after it doesn't undo the verdict: the message stays queued.
+    def unreachable(db_, agent_id):
+        raise agents.AgentError("not running")
+    monkeypatch.setattr(agents, "flush", unreachable)
+    assert plans.decide(db, pid, 1, False, **redirect)["state"] == "redirected"
+    assert plans.get(db, pid)["visual"]["answer"]["option"] == "redirect" and grants() == [1]
+    assert len(messages(db)) == 1 and "Repo file first." in messages(db)[0]
     with pytest.raises(ServiceError, match="already decided"):
-        plans.decide(db, pid, 2, True, person=True)
-    db.conn.execute("UPDATE plans SET claim='999999:x' WHERE id=?", (pid,))
-    monkeypatch.setattr(plans.procs, "alive", lambda p: p != 999999)
+        plans.decide(db, pid, 1, True, person=True)
+
+    mcp_server.propose_plan(PLAN + "\n\nRevised.", DECISIONS, plan_id=pid)
     assert plans.decide(db, pid, 2, True, person=True)["state"] == "approved"
     assert started == ["build the preset schema"]
 
