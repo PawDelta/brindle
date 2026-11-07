@@ -146,7 +146,7 @@ def test_snapshot_checks_identity_revision_secrets_and_destination(db, session, 
             assert "B · ship &lt;it&gt;" in content
             assert content.index("B · ship &lt;it&gt;") < content.index("</body>")
         elif case == "answer_free_text":
-            assert "You picked · ship &lt;it&gt;" in content
+            assert "<footer>You picked ship &lt;it&gt;</footer>" in content
         elif case.startswith("plan"):
             assert content == body["markdown"] and got.json()["filename"].endswith(".md")
         else:
