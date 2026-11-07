@@ -15,7 +15,7 @@
 use std::io::Read;
 use std::net::{TcpListener, TcpStream, UdpSocket};
 use std::path::Path;
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -24,6 +24,44 @@ use tauri::Manager;
 
 /// How long one probe may take to report. A page that never does fails.
 const DEADLINE: Duration = Duration::from_secs(20);
+
+/// How long one step of the run (opening a probe, waiting for its page, the
+/// exit) may take before the watchdog fails the run: the probe's deadline,
+/// the question to a silent page, and room for a slow runner.
+const STEP_ALLOWANCE: Duration = Duration::from_secs(60);
+
+/// Where the driver tells the watchdog which step it is on.
+static STEPS: Mutex<Option<Sender<String>>> = Mutex::new(None);
+
+/// The driver has moved on to the step `name`; the watchdog's clock restarts.
+fn step(name: impl Into<String>) {
+    if let Some(steps) = STEPS.lock().unwrap().as_ref() {
+        let _ = steps.send(name.into());
+    }
+}
+
+/// Fail the run, naming the step, when one outlasts its allowance. On its own
+/// thread, with its own exit: a webview that never comes up holds the main
+/// thread, and Tauri's exit needs the main thread, so neither the deadline in
+/// `collect` nor `AppHandle::exit` could end the run from there. A probe that
+/// hangs is then a failure naming the probe, not a job that runs to its limit.
+fn watchdog() {
+    let (tx, rx) = mpsc::channel::<String>();
+    *STEPS.lock().unwrap() = Some(tx);
+    std::thread::spawn(move || {
+        let mut current = "starting".to_string();
+        loop {
+            match rx.recv_timeout(STEP_ALLOWANCE) {
+                Ok(next) => current = next,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    eprintln!("visual sandbox: {current} did not finish within {}s; the run is stuck there", STEP_ALLOWANCE.as_secs());
+                    std::process::exit(1);
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => return,
+            }
+        }
+    });
+}
 
 /// Where the visual sits in the window.
 const BOUNDS: Bounds = Bounds { x: 24.0, y: 24.0, width: 720.0, height: 480.0 };
@@ -189,12 +227,14 @@ fn collect(rx: &Receiver<Delivery>, label: &str, own_url: &str, until: Until) ->
 /// Run every probe in order; the failures, as lines.
 fn run_probes(app: tauri::AppHandle, rx: Receiver<Delivery>, listener: Listener) -> Vec<String> {
     let mut failures = Vec::new();
+    step("blanking the main webview");
     let window = app.get_window("main").expect("the main window");
     let main = app.get_webview("main").expect("the main webview");
     // The app's page is a build stub: a blank page keeps the harness's own traffic out of the count.
     let _ = main.navigate("about:blank".parse().unwrap());
 
     // The listener must be real for "zero hits" to mean anything.
+    step("checking the listener");
     TcpStream::connect(("127.0.0.1", listener.port)).expect("connect to the listener");
     let seen = Instant::now();
     while listener.hits.lock().unwrap().is_empty() {
@@ -208,13 +248,16 @@ fn run_probes(app: tauri::AppHandle, rx: Receiver<Delivery>, listener: Listener)
         let visual = VisualRef::Revision { id: "probe".into(), rev };
         let label = visual.label();
         let before = listener.hits.lock().unwrap().len();
+        step(format!("{name}: opening the visual"));
         if let Err(e) = visual_scheme::open(&window, &sandbox, visual.clone(), BOUNDS) {
             failures.push(format!("{name}: couldn't open: {e}"));
             return Report::default();
         }
+        step(format!("{name}: waiting for the page"));
         let report = collect(&rx, &label, visual.url().as_str(), until);
         if until == Until::Done && report.leaks.is_none() {
             // The page never spoke: ask it what happened before it goes.
+            step(format!("{name}: asking the silent page"));
             if let Some(child) = app.get_webview(&label) {
                 let (tx, told) = mpsc::channel();
                 let _ = child.eval_with_callback(DIAGNOSTIC, move |value| {
@@ -264,6 +307,7 @@ fn run_probes(app: tauri::AppHandle, rx: Receiver<Delivery>, listener: Listener)
         if report.leaks.is_none() {
             failures.push(format!("{name}: the page never said it was done"));
         }
+        step(format!("{name}: closing the visual"));
         let _ = visual_scheme::close(&app, &sandbox, &VisualRef::Revision { id: "probe".into(), rev }.label());
     }
 
@@ -272,6 +316,7 @@ fn run_probes(app: tauri::AppHandle, rx: Receiver<Delivery>, listener: Listener)
     if !report.loaded {
         failures.push("redirect: the refusal never loaded".into());
     }
+    step("redirect: closing the visual");
     let _ = visual_scheme::close(&app, &sandbox, &VisualRef::Revision { id: "probe".into(), rev: REDIRECT_REV }.label());
 
     // A visual that never yields: first the visual itself must stop answering
@@ -281,6 +326,7 @@ fn run_probes(app: tauri::AppHandle, rx: Receiver<Delivery>, listener: Listener)
     if !report.started {
         failures.push("busy_loop: the page never said it started".into());
     } else if let Some(child) = app.get_webview(&busy.label()) {
+        step("busy_loop: waiting for the visual to stop answering");
         let since = Instant::now();
         let mut hung = false;
         while since.elapsed() < DEADLINE {
@@ -298,6 +344,7 @@ fn run_probes(app: tauri::AppHandle, rx: Receiver<Delivery>, listener: Listener)
         if !hung {
             failures.push("busy_loop: the visual kept answering; its busy loop never took hold".into());
         } else {
+            step("busy_loop: asking the main webview");
             let (tx, answered) = mpsc::channel();
             main.eval_with_callback("1 + 1", move |value| {
                 let _ = tx.send(value);
@@ -312,10 +359,25 @@ fn run_probes(app: tauri::AppHandle, rx: Receiver<Delivery>, listener: Listener)
     } else {
         failures.push("busy_loop: the visual's webview is gone".into());
     }
+    step("busy_loop: closing the visual");
     let _ = visual_scheme::close(&app, &sandbox, &busy.label());
 
+    step("placement");
     placement_on_linux(&app, &window, &sandbox, &mut failures);
     failures
+}
+
+/// Print the outcome; the process's exit code.
+fn summarize(failures: &[String]) -> i32 {
+    if failures.is_empty() {
+        println!("visual sandbox: every probe made zero requests");
+        return 0;
+    }
+    eprintln!("visual sandbox: {} failures", failures.len());
+    for failure in failures {
+        eprintln!("  {failure}");
+    }
+    1
 }
 
 /// Linux lays children out itself (Tauri packs them under the main webview):
@@ -407,10 +469,13 @@ fn main() {
         },
         _ => Ok(Upstream { status: 404, body: b"no such visual".to_vec() }),
     });
-    let outcome: Arc<Mutex<Option<Vec<String>>>> = Default::default();
+    // The exit code, once the probes have run and reported.
+    let outcome: Arc<Mutex<Option<i32>>> = Default::default();
     let driver_outcome = outcome.clone();
     let rx = Mutex::new(Some(rx));
     let listener = Mutex::new(Some(listener));
+    watchdog();
+    step("building the app");
     // The window exists once the app runs; setup is the first hook after it.
     let app = builder
         .setup(move |app| {
@@ -420,8 +485,10 @@ fn main() {
             std::thread::spawn(move || {
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_probes(handle.clone(), rx, listener)));
                 let failures = outcome.unwrap_or_else(|_| vec!["the probe driver panicked (see above)".into()]);
-                let code = if failures.is_empty() { 0 } else { 1 };
-                *driver_outcome.lock().unwrap() = Some(failures);
+                let code = summarize(&failures);
+                *driver_outcome.lock().unwrap() = Some(code);
+                // Through the event loop: the watchdog ends the run if that never comes back.
+                step("exiting");
                 handle.exit(code);
             });
             Ok(())
@@ -430,16 +497,11 @@ fn main() {
         .expect("the probe app");
     app.run(move |_, event| {
         if let tauri::RunEvent::Exit = event {
-            let failures = outcome.lock().unwrap().take().unwrap_or_else(|| vec!["the probes never ran".into()]);
-            if failures.is_empty() {
-                println!("visual sandbox: every probe made zero requests");
-            } else {
-                eprintln!("visual sandbox: {} failures", failures.len());
-                for failure in &failures {
-                    eprintln!("  {failure}");
-                }
-                std::process::exit(1);
-            }
+            let code = outcome.lock().unwrap().unwrap_or_else(|| {
+                eprintln!("visual sandbox: the probes never ran");
+                1
+            });
+            std::process::exit(code);
         }
     });
 }

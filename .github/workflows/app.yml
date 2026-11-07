@@ -131,7 +131,9 @@ jobs:
       matrix:
         os: [macos-latest, windows-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 40
+    # The suite runs in under a minute; the harness's own watchdog fails a
+    # hung probe by name after 60s, so this only guards the build.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

@@ -599,7 +599,7 @@ fn build_child<R: Runtime>(window: &Window<R>, visual: &VisualRef, bounds: Bound
                 });
             }
         });
-    let builder = platform::configure(builder)?;
+    let builder = platform::configure(window, builder)?;
     let webview = window
         .add_child(builder, LogicalPosition::new(bounds.x, bounds.y), LogicalSize::new(bounds.width, bounds.height))
         .map_err(|e| e.to_string())?;
@@ -700,7 +700,16 @@ fn arm<R: Runtime>(webview: &Webview<R>, sink: Sink, visual: &VisualRef, bounds:
         sink,
         visual,
         move || {
-            let _ = target.navigate(url);
+            // From a thread of its own, so the load reaches the event loop as a
+            // message of its own and runs on a later turn of it. On Windows the
+            // blocker is armed synchronously, inside the dispatch that built the
+            // webview, and a Navigate made from inside that dispatch never
+            // returns: WebView2 won't run it re-entrantly (the probe suite hung
+            // there, and the app would have frozen on opening a visual). From
+            // the main thread Tauri runs a task at once, so the hop is needed.
+            std::thread::spawn(move || {
+                let _ = target.navigate(url);
+            });
         },
         |armed| platform::arm(webview, bounds, armed),
     );
@@ -825,7 +834,7 @@ mod platform {
     /// the app's page and other visuals included), and no storage. wry
     /// leaves a supplied configuration's data store as it is, so the
     /// builder's `incognito` wouldn't reach it: set here.
-    pub fn configure<R: Runtime>(builder: WebviewBuilder<R>) -> Result<WebviewBuilder<R>, String> {
+    pub fn configure<R: Runtime>(_window: &tauri::Window<R>, builder: WebviewBuilder<R>) -> Result<WebviewBuilder<R>, String> {
         let mtm = MainThreadMarker::new().ok_or("a visual's webview is built on the main thread")?;
         // SAFETY: fresh WebKit objects, made and used on the main thread.
         let configuration = unsafe {
@@ -952,9 +961,29 @@ mod platform {
     use windows::core::{HSTRING, PWSTR};
     use windows::Win32::System::Com::CoTaskMemFree;
 
-    /// WebView2 gives each webview its own renderer by site; nothing to configure.
-    pub fn configure<R: Runtime>(builder: tauri::webview::WebviewBuilder<R>) -> Result<tauri::webview::WebviewBuilder<R>, String> {
-        Ok(builder)
+    /// The switches the visuals' browser process starts with, beneath the
+    /// request filter: wry's own (a replacement string loses them), then no
+    /// name resolves (an IP spelled out included) and every connection is
+    /// routed to a proxy that resolves to nothing, loopback too. The filter
+    /// answers requests; a `<link rel=preconnect>` is a connection with no
+    /// request, which only the network stack sees, and Chromium opens it
+    /// whatever CSP says (the markup_loads probe caught two).
+    pub const BROWSER_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection \
+        --host-resolver-rules=\"MAP * ~NOTFOUND\" \
+        --proxy-server=\"http://brindle-visual-sink.invalid:9\" --proxy-bypass-list=\"<-loopback>\"";
+
+    /// The visuals' own browser process: WebView2 ties browser switches to
+    /// the user data folder (one folder, one process, one set of switches),
+    /// and the app's own webview must keep reaching the daemon, so visuals
+    /// get a folder of their own under the app's, and with it the switches
+    /// above. The in-memory profile (`incognito`) keeps it empty.
+    pub fn configure<R: Runtime>(
+        window: &tauri::Window<R>,
+        builder: tauri::webview::WebviewBuilder<R>,
+    ) -> Result<tauri::webview::WebviewBuilder<R>, String> {
+        use tauri::Manager;
+        let folder = window.path().app_local_data_dir().map_err(|e| e.to_string())?.join("visuals-webview");
+        Ok(builder.data_directory(folder).additional_browser_args(BROWSER_ARGS))
     }
 
     pub fn arm<R: Runtime>(webview: &Webview<R>, _bounds: Bounds, armed: Armed) -> Result<(), String> {
@@ -1019,7 +1048,10 @@ mod platform {
     /// WebKitGTK runs each web view in its own web process by default, and the
     /// child must share the app's WebContext (the one the scheme is registered
     /// on, see `build_child`); nothing to configure.
-    pub fn configure<R: Runtime>(builder: tauri::webview::WebviewBuilder<R>) -> Result<tauri::webview::WebviewBuilder<R>, String> {
+    pub fn configure<R: Runtime>(
+        _window: &tauri::Window<R>,
+        builder: tauri::webview::WebviewBuilder<R>,
+    ) -> Result<tauri::webview::WebviewBuilder<R>, String> {
         Ok(builder)
     }
 
@@ -1326,7 +1358,10 @@ mod platform {
     use super::{Armed, Bounds};
     use tauri::{Runtime, Webview};
 
-    pub fn configure<R: Runtime>(builder: tauri::webview::WebviewBuilder<R>) -> Result<tauri::webview::WebviewBuilder<R>, String> {
+    pub fn configure<R: Runtime>(
+        _window: &tauri::Window<R>,
+        builder: tauri::webview::WebviewBuilder<R>,
+    ) -> Result<tauri::webview::WebviewBuilder<R>, String> {
         Ok(builder)
     }
 
