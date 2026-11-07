@@ -103,13 +103,12 @@ describe("visuals", () => {
     await waitFor(() => expect(native.invoke).toHaveBeenCalledWith("visual_snapshot", { label: delivery.label }));
     deliver("visual:message", { ...delivery, message: { type: "brindle.snapshot", html: "<html><body>Flow</body></html>" } });
     const menu = await screen.findByRole("group", { name: "Export as" });
-    expect(menu.closest("header")).toBeTruthy();
-    // Native children cover DOM overlays: destinations must participate in header layout.
-    expect(menu.closest(".absolute, .fixed")).toBeNull();
-    bounds = { ...bounds, y: bounds.y + 80, height: bounds.height - 80 };
-    await act(async () => layouts.forEach((layout) => layout()));
-    expect(native.invoke).toHaveBeenCalledWith("visual_set_bounds", { label: delivery.label, bounds });
+    // The menu is an overlay: its wrapper is absolutely positioned under the Export button. The layout box is checked in the browser (app/shots/visuals-shots.mjs), since jsdom has no layout.
+    expect(menu.closest(".absolute")).not.toBeNull();
+    // The native page steps aside so the menu shows.
+    await waitFor(() => expect(native.invoke).toHaveBeenCalledWith("visual_set_bounds", { label: delivery.label, bounds: { ...bounds, width: 0, height: 0 } }));
     fireEvent.click(screen.getByRole("button", { name: "Export" }));
+    await waitFor(() => expect(native.invoke).toHaveBeenLastCalledWith("visual_set_bounds", { label: delivery.label, bounds }));
     fireEvent.click(screen.getByTestId("visual-back"));
     await waitFor(() => expect(native.invoke).toHaveBeenCalledWith("visual_close", { label: delivery.label }));
     expect(native.events.size).toBe(0);
