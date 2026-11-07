@@ -660,7 +660,8 @@ pub fn request_snapshot<R: Runtime>(app: &AppHandle<R>, sandbox: &Sandbox, label
 pub type Armed = Box<dyn FnOnce(Result<(), String>) + Send>;
 
 /// WebKit's switch for `<link rel=preconnect>`, behind a seam: the webview's
-/// preferences in the app (macOS), a stand-in in tests. A preconnect opens a
+/// preferences in the app (WKPreferences on macOS, WebKitSettings on Linux),
+/// a stand-in in tests. A preconnect opens a
 /// connection with no request, so neither CSP nor the rule list sees it;
 /// WebKit keeps it behind the `LinkPreconnect` feature flag, on by default.
 pub trait PreconnectSwitch {
@@ -1011,7 +1012,7 @@ mod platform {
     use super::{content_rules, Armed, Bounds, Delivery, Sink, VisualRef};
     use glib::translate::ToGlibPtr;
     use gtk::prelude::*;
-    use std::ffi::{c_void, CString};
+    use std::ffi::{c_char, c_void, CStr, CString};
     use tauri::{Runtime, Url, Webview};
     use webkit2gtk::WebViewExt;
 
@@ -1058,6 +1059,15 @@ mod platform {
                 if let Err(why) = overlay(&view, bounds) {
                     return armed(Err(why));
                 }
+                let Some(settings) = view.settings() else {
+                    return armed(Err("the webview has no settings".into()));
+                };
+                let switch = GtkSwitch { settings, api: FeatureApi::lookup() };
+                if let Err(why) = super::disable_preconnect(&switch) {
+                    let near: Vec<String> =
+                        switch.feature_keys().into_iter().filter(|k| k.to_lowercase().contains("preconnect")).collect();
+                    return armed(Err(format!("{why} (features named like it: {near:?})")));
+                }
                 let Some(manager) = view.user_content_manager() else {
                     return armed(Err("the webview has no user content manager".into()));
                 };
@@ -1085,6 +1095,108 @@ mod platform {
                 }
             })
             .map_err(|e| e.to_string())
+    }
+
+    /// WebKit's feature list through WebKitSettings (WebKitGTK 2.42: the
+    /// same features WKPreferences lists on macOS, by the same keys). The
+    /// Rust binding stops short of it, and linking it would refuse an older
+    /// WebKitGTK outright, so the entry points are looked up at run time: an
+    /// older WebKitGTK has no feature list, and a visual is never loaded there.
+    #[derive(Clone, Copy)]
+    struct FeatureApi {
+        all_features: unsafe extern "C" fn() -> *mut c_void,
+        length: unsafe extern "C" fn(*mut c_void) -> usize,
+        get: unsafe extern "C" fn(*mut c_void, usize) -> *mut c_void,
+        identifier: unsafe extern "C" fn(*mut c_void) -> *const c_char,
+        set_enabled: unsafe extern "C" fn(*mut webkit2gtk_sys::WebKitSettings, *mut c_void, glib::ffi::gboolean),
+        list_unref: unsafe extern "C" fn(*mut c_void),
+    }
+
+    impl FeatureApi {
+        fn lookup() -> Option<Self> {
+            // SAFETY: a handle on the program itself, and symbol lookups by
+            // NUL-terminated names; each symbol is cast to the signature
+            // WebKitGTK's headers declare for it.
+            unsafe {
+                let program = libc::dlopen(std::ptr::null(), libc::RTLD_NOW);
+                if program.is_null() {
+                    return None;
+                }
+                let symbol = |name: &[u8]| {
+                    let address = libc::dlsym(program, name.as_ptr() as *const c_char);
+                    if address.is_null() {
+                        None
+                    } else {
+                        Some(address)
+                    }
+                };
+                let api = (|| {
+                    Some(FeatureApi {
+                        all_features: std::mem::transmute(symbol(b"webkit_settings_get_all_features\0")?),
+                        length: std::mem::transmute(symbol(b"webkit_feature_list_get_length\0")?),
+                        get: std::mem::transmute(symbol(b"webkit_feature_list_get\0")?),
+                        identifier: std::mem::transmute(symbol(b"webkit_feature_get_identifier\0")?),
+                        set_enabled: std::mem::transmute(symbol(b"webkit_settings_set_feature_enabled\0")?),
+                        list_unref: std::mem::transmute(symbol(b"webkit_feature_list_unref\0")?),
+                    })
+                })();
+                libc::dlclose(program);
+                api
+            }
+        }
+
+        /// The features, by identifier, handed to `with` while the list is alive.
+        fn with_features<T>(&self, with: impl FnOnce(&[(String, *mut c_void)]) -> T) -> T {
+            // SAFETY: the list is ours until unref'd, and its features live as long as it.
+            unsafe {
+                let list = (self.all_features)();
+                let mut features = Vec::new();
+                if !list.is_null() {
+                    for index in 0..(self.length)(list) {
+                        let feature = (self.get)(list, index);
+                        let identifier = (self.identifier)(feature);
+                        if !feature.is_null() && !identifier.is_null() {
+                            features.push((CStr::from_ptr(identifier).to_string_lossy().into_owned(), feature));
+                        }
+                    }
+                }
+                let out = with(&features);
+                if !list.is_null() {
+                    (self.list_unref)(list);
+                }
+                out
+            }
+        }
+    }
+
+    struct GtkSwitch {
+        settings: webkit2gtk::Settings,
+        api: Option<FeatureApi>,
+    }
+
+    impl super::PreconnectSwitch for GtkSwitch {
+        fn has_feature_list(&self) -> bool {
+            self.api.is_some()
+        }
+
+        fn feature_keys(&self) -> Vec<String> {
+            match self.api {
+                Some(api) => api.with_features(|features| features.iter().map(|(key, _)| key.clone()).collect()),
+                None => Vec::new(),
+            }
+        }
+
+        fn switch_off(&self, key: &str) {
+            let Some(api) = self.api else { return };
+            api.with_features(|features| {
+                for (name, feature) in features {
+                    if name.as_str() == key {
+                        // SAFETY: a live feature of the list, on the webview's own settings.
+                        unsafe { (api.set_enabled)(self.settings.to_glib_none().0, *feature, glib::ffi::GFALSE) };
+                    }
+                }
+            });
+        }
     }
 
     struct Done {
