@@ -5,8 +5,8 @@
 
    The page is in a labelled "sandboxed · no network" border, so nothing it draws passes for
    brindle's own. A choice it posts only highlights an option in the answer bar; the answer goes
-   from the bar's Send, a real click on host chrome, and only with one of the tool call's own
-   option ids. Messages from any other visual, or an older revision, are dropped. */
+   from the bar's Send, a real click on host chrome, with an option id or the person's own
+   text. Messages from any other visual, or an older revision, are dropped. */
 
 import { useEffect, useRef, useState, type ComponentType, type ReactNode } from "react";
 import { DaemonError, type VisualDTO } from "../../../api/client";
@@ -105,7 +105,7 @@ export function VisualReader({ client, visual, loading, onBack, asking, onAnswer
   const key = visual ? `${visual.id}:${visual.rev}` : "";
   const options = visual?.options ?? [];
   const choose = (option: string) => {
-    if (visual && !visual.answer && options.some((o) => o.id === option)) {
+    if (visual && !visual.answer && (option === "" || options.some((o) => o.id === option))) {
       setPicked((current) => current?.key === key && current.option === option ? null : { key, option });
     }
   };
@@ -122,7 +122,7 @@ export function VisualReader({ client, visual, loading, onBack, asking, onAnswer
       meta={visual ? `${visual.id} · r${visual.rev} · ${visual.by}` : ""}
       onBack={onBack}
       asking={asking}
-      onChoice={choose}
+      onChoice={(option) => { if (options.some((o) => o.id === option)) choose(option); }}
       Frame={Frame}
       repo={repo}
       exportClient={client.exportVisual && client.exportDoc && client.docPolicy && client.docExportConfig ? client as ExportClient : undefined}
@@ -139,15 +139,19 @@ function AnswerBar({ client, visual, picked, onPick, onAnswered }: { client: Vis
   const [note, setNote] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const noteInput = useRef<HTMLTextAreaElement>(null);
   const options = visual.options ?? [];
+  // Empty ids cannot be published; this host-only choice carries no option to the engine.
+  const ownWords = picked === "";
+  const canSend = picked !== null && (!ownWords || !!note.trim());
   const answered = visual.answer ? options.find((o) => o.id === visual.answer!.option) : null;
   const send = async () => {
-    if (!picked) return;
+    if (!canSend || sending) return;
     setSending(true);
     setError(null);
     try {
       // The revision on screen: the bar is keyed by it, so a newer one is a new bar.
-      onAnswered(await client.answerVisual(visual.id, visual.rev, picked, note.trim()));
+      onAnswered(await client.answerVisual(visual.id, visual.rev, picked || undefined, note.trim()));
     } catch (e) {
       setError(e instanceof DaemonError && e.status === 409 ? "The agent changed this visual since you opened it. Read the new version and answer again." : `Couldn't send the answer: ${message(e)}`);
     } finally {
@@ -159,20 +163,30 @@ function AnswerBar({ client, visual, picked, onPick, onAnswered }: { client: Vis
       {visual.question && <p className="text-sm text-ink-2">{visual.question}</p>}
       {visual.answer ? (
         <p className="text-sm" role="status" data-testid="visual-answered">
-          You picked <span className="font-semibold">{answered?.label ?? visual.answer.option}</span>
+          {visual.answer.option == null ? "You answered" : <>You picked <span className="font-semibold">{answered?.label ?? visual.answer.option}</span></>}
           {visual.answer.note && <span className="text-ink-2"> · {visual.answer.note}</span>}
         </p>
       ) : (
-        <div className="flex flex-wrap items-center gap-s1">
+        <div className="flex flex-wrap items-center gap-s1" onKeyDown={(e) => {
+          // Enter submits from the note, the free-text box and a chosen option; Shift+Enter (a newline in the note) and Enter confirming an IME composition are left alone.
+          if (e.key !== "Enter" || e.shiftKey || e.nativeEvent.isComposing) return;
+          // An unchecked option's Enter picks it natively (even when another option is chosen); only the chosen one sends.
+          if (e.target instanceof HTMLButtonElement && e.target.getAttribute("role") === "radio" && e.target.getAttribute("aria-checked") !== "true") return;
+          e.preventDefault();
+          void send();
+        }}>
           <div role="radiogroup" aria-label="Options" className="flex flex-wrap gap-1">
             {options.map((o) => (
               <button key={o.id} type="button" role="radio" aria-checked={picked === o.id} title={o.detail} className={`${button} ${picked === o.id ? "border-branch bg-branch-soft" : ""}`} onClick={() => onPick(o.id)}>
                 {o.label}
               </button>
             ))}
+            <button type="button" role="radio" aria-checked={ownWords} className={`${button} ${ownWords ? "border-branch bg-branch-soft" : ""}`} onClick={() => { onPick(""); noteInput.current?.focus(); }}>
+              Something else…
+            </button>
           </div>
-          <input className={`${field} min-w-40 flex-1`} aria-label="Add a note" placeholder="Add a note (optional)" value={note} onChange={(e) => setNote(e.target.value)} />
-          <LoadingButton className={main} busy={sending} disabled={!picked || sending} data-testid="visual-send" onClick={() => void send()}>
+          <textarea ref={noteInput} rows={1} className={`${field} min-w-40 flex-1 resize-none`} aria-label={ownWords ? "Your answer" : "Add a note"} placeholder={ownWords ? "Your answer" : "Add a note (optional)"} value={note} onChange={(e) => setNote(e.target.value)} />
+          <LoadingButton className={main} busy={sending} disabled={!canSend || sending} data-testid="visual-send" onClick={() => void send()}>
             Send answer
           </LoadingButton>
         </div>

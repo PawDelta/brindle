@@ -1833,6 +1833,86 @@ def milestone_phases(db: DB, root_id: str) -> dict[int, str]:
             "in_review" if in_review and m is current else "in_progress" for m in ms}
 
 
+STAGES = ("working", "checks", "review", "merging")   # a branch's way from its brief to its merge
+ESTIMATE_RUNS = 5        # report-to-merge runs on record before the sidebar says how long is left
+ESTIMATE_DAYS = 14
+
+
+def goal_activity(db: DB, root_id: str, now: float | None = None) -> dict:
+    """What session ``root_id`` is doing now, for the sidebar's goal summary.
+
+    ``stage``: the earliest stage any of its branches is at (``STAGES``; a
+    milestone check counts as checks; a busy supervisor with neither is
+    working), None when nothing runs or the session is paused. Commits made
+    since the session started, in its checkout and its live branches'
+    worktrees: ``commits_last_hour`` and ``last_commit_at``. ``eta_seconds``:
+    once every branch has reported, the repo's median report-to-merge time
+    (the ``stage_timings`` rollup) less how long the newest report has
+    waited; None with fewer than ``ESTIMATE_RUNS`` runs on record, or while a
+    branch is still being written."""
+    from brindle import agents, git
+
+    now = time.time() if now is None else now
+    ap = db.get_autopilot(root_id)
+    tree = agents.tree(db, root_id)
+    if not tree:
+        return {"stage": None, "commits_last_hour": 0, "last_commit_at": None, "eta_seconds": None}
+    boss = tree[0]
+    closed = ("paused", "done")
+    reviewed = {a.workspace_id for a in tree[1:] if a.mode == "review" and a.status not in closed
+                and a.result is None and not agents.review_moot(db, a)}
+    stages, reports, paths = set(), [], set()
+    for a in tree[1:]:
+        if a.mode == "review" or a.mode not in agents.REPORTING_MODES:
+            continue
+        if a.pipeline == "ready":
+            stages.add("merging")
+        elif a.pipeline == "reviewing":
+            stages.add("review" if a.workspace_id in reviewed else "checks")
+        elif a.status not in closed and (a.result is None or a.status in BUSY or a.pipeline):
+            stages.add("working")
+        else:
+            continue
+        if a.pipeline in ("ready", "reviewing") and a.reviewing_since:
+            reports.append(a.reviewing_since)
+        ws = db.get_workspace(a.workspace_id)
+        if ws is not None:
+            paths.add(ws.path)
+    if ap is not None and checking(ap):
+        stages.add("checks")
+    if not stages and boss.status in ("starting", "processing"):
+        stages.add("working")      # the supervisor doing the work itself
+    # A paused session starts nothing until its resume: its branches keep their pipeline state, but nothing runs.
+    stage = None if boss.status == "paused" else next((s for s in STAGES if s in stages), None)
+
+    home = db.get_workspace(boss.workspace_id)
+    if home is not None:
+        paths.add(home.path)
+    commits: dict[str, float] = {}
+    for path in paths:
+        try:
+            log = git.out(["log", f"--since=@{int(boss.created_at)}", "--format=%H %ct", "-n", "500", "HEAD"], path)
+        except (git.GitError, OSError):
+            continue
+        for line in log.splitlines():
+            sha, _, at = line.partition(" ")
+            if at.isdigit():
+                commits[sha] = float(at)
+
+    eta = None
+    if stage in ("checks", "review", "merging") and reports and home is not None:
+        cutoff = time.strftime("%Y-%m-%d", time.gmtime(now - ESTIMATE_DAYS * 86400))
+        samples = [s for row in db.conn.execute(
+            "SELECT samples FROM stage_timings WHERE repo_root = ? AND stage = 'report_to_merge' AND day >= ?",
+            (home.repo_root, cutoff)) for s in json.loads(row["samples"])]
+        if len(samples) >= ESTIMATE_RUNS:
+            import statistics
+
+            eta = max(60.0, statistics.median(samples) - (now - max(reports)))
+    return {"stage": stage, "commits_last_hour": sum(at > now - 3600 for at in commits.values()),
+            "last_commit_at": max(commits.values(), default=None), "eta_seconds": eta}
+
+
 def counts(db: DB, root_id: str) -> tuple[int, int]:
     ms = db.milestones(root_id)
     return sum(m.status == "passed" for m in ms), len(ms)

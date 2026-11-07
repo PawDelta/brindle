@@ -1,7 +1,8 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { useState } from "react";
 import App from "../../../App";
-import type { Plan, PlanVerdict, VisualDTO } from "../../../api/client";
+import { DaemonClient, type Plan, type PlanVerdict, type VisualDTO } from "../../../api/client";
 import { ONBOARDED_KEY } from "../../../api/providers";
 import { PtyViewsProvider } from "../../../api/ptyView";
 import type { InboxItemDTO, SessionDTO } from "../../../api/schema";
@@ -529,7 +530,7 @@ describe("visuals", () => {
     vi.spyOn(client, "visuals").mockImplementation(async () => [answered, row]);
     vi.spyOn(client, "markVisualRead").mockImplementation(async () => (row = { ...row, unread: false }));
     vi.spyOn(client, "answerVisual").mockImplementation(async (_id, _rev, option, note) => {
-      row = { ...row, answer: { option, note, at: now } };
+      row = { ...row, answer: { option: option ?? null, note, at: now } };
       daemon.data.inbox = [];
       daemon.publish("visual.answered", { root_id: "sup1" });
       return row;
@@ -538,8 +539,8 @@ describe("visuals", () => {
     const sync = startSync({ client, store, connect: daemon.connect });
     try {
       render(<PtyViewsProvider value={standInViews}><App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "inbox", session: "sup1" }} /></PtyViewsProvider>);
-      const card = (await screen.findAllByTestId("inbox-card"))[0];
-      fireEvent.click(within(card).getByRole("button", { name: "Go to session ›" }));
+      const card = (await screen.findAllByTestId("inbox-card")).find((candidate) => candidate.dataset.kind === "visual")!;
+      fireEvent.click(within(card).getByRole("button", { name: "Open visual" }));
       await waitFor(() => expect(screen.getByTestId("visual-frame").dataset.src).toBe("brindle-visual://v_8f2c/r2"));
       expect(screen.queryByRole("complementary", { name: "Sidebar" })).toBeNull();
       if (leave === "Answer") {
@@ -557,6 +558,86 @@ describe("visuals", () => {
     } finally { sync.stop(); }
   });
 
+  it("sends a note-only answer from the free-text choice", async () => {
+    let sent: unknown;
+    const client = new DaemonClient({ baseUrl: "http://daemon/v1", token: "test", fetch: async (url, init) => {
+      if (String(url).endsWith("/answer")) sent = JSON.parse(init!.body as string);
+      return new Response(JSON.stringify({ ...visual, answer: { option: null, note: "Stage it first", at: now } }));
+    } });
+    function Reader() {
+      const [row, setRow] = useState(visual);
+      return <VisualReader client={client} visual={row} onBack={() => {}} onAnswered={setRow} Frame={() => <div />} />;
+    }
+    render(<Reader />);
+    fireEvent.click(screen.getByRole("radio", { name: "B · Gate on CI" }));
+    fireEvent.click(screen.getByRole("radio", { name: "Something else…" }));
+    const send = screen.getByTestId("visual-send") as HTMLButtonElement;
+    expect(send.disabled).toBe(true);
+    fireEvent.change(screen.getByRole("textbox", { name: "Your answer" }), { target: { value: "  Stage it first  " } });
+    fireEvent.click(send);
+    await screen.findByTestId("visual-answered");
+    expect(sent).toEqual({ rev: 2, note: "Stage it first" });
+    expect(screen.getByTestId("visual-answered").textContent).toContain("Stage it first");
+  });
+
+  it("submits the answer on Enter from the note, the free-text box or a chosen option, keeping Shift+Enter newlines", async () => {
+    const sent: unknown[] = [];
+    const client = new DaemonClient({ baseUrl: "http://daemon/v1", token: "test", fetch: async (url, init) => {
+      if (String(url).endsWith("/answer")) sent.push(JSON.parse(init!.body as string));
+      return new Response(JSON.stringify({ ...visual, answer: { option: "B", note: "", at: now } }));
+    } });
+    function Reader() {
+      const [row, setRow] = useState(visual);
+      return <VisualReader client={client} visual={row} onBack={() => {}} onAnswered={setRow} Frame={() => <div />} />;
+    }
+    // A chosen option A with focus moved to an unchosen B: Enter leaves the answer to the native pick, so nothing is sent yet.
+    render(<Reader />);
+    fireEvent.click(screen.getByRole("radio", { name: "A · Tag first" }));
+    const other = screen.getByRole("radio", { name: "B · Gate on CI" });
+    other.focus();
+    // fireEvent.keyDown returns false when the handler cancels the event; a browser then skips the native pick.
+    expect(fireEvent.keyDown(other, { key: "Enter" })).toBe(true);
+    fireEvent.click(other); // the native activation an uncanceled Enter produces on a focused radio
+    expect(other.getAttribute("aria-checked")).toBe("true");
+    expect(screen.getByRole("radio", { name: "A · Tag first" }).getAttribute("aria-checked")).toBe("false");
+    expect(sent).toEqual([]);
+    cleanup();
+
+    // A chosen option, Enter from its focused button with no note: exactly one answer, the option stays chosen.
+    render(<Reader />);
+    const option = screen.getByRole("radio", { name: "B · Gate on CI" });
+    fireEvent.click(option);
+    option.focus();
+    fireEvent.keyDown(option, { key: "Enter" });
+    await screen.findByTestId("visual-answered");
+    expect(sent).toEqual([{ rev: 2, option: "B", note: "" }]);
+    cleanup();
+
+    // Enter from the note with an option: a Shift+Enter newline stays in the text and is sent with it.
+    sent.length = 0;
+    render(<Reader />);
+    fireEvent.click(screen.getByRole("radio", { name: "B · Gate on CI" }));
+    const note = screen.getByRole("textbox", { name: "Add a note" });
+    fireEvent.change(note, { target: { value: "Line one\nLine two" } });
+    fireEvent.keyDown(note, { key: "Enter", shiftKey: true });
+    fireEvent.keyDown(note, { key: "Enter", isComposing: true });
+    expect(sent).toEqual([]);
+    fireEvent.keyDown(note, { key: "Enter" });
+    await waitFor(() => expect(sent).toEqual([{ rev: 2, option: "B", note: "Line one\nLine two" }]));
+    cleanup();
+
+    // Enter from the free-text box with no option chosen sends nothing.
+    sent.length = 0;
+    render(<Reader />);
+    fireEvent.click(screen.getByRole("radio", { name: "Something else…" }));
+    const own = screen.getByRole("textbox", { name: "Your answer" });
+    fireEvent.keyDown(own, { key: "Enter" });
+    expect(sent).toEqual([]);
+    fireEvent.change(own, { target: { value: "Stage it" } });
+    fireEvent.keyDown(own, { key: "Enter" });
+    await waitFor(() => expect(sent).toEqual([{ rev: 2, option: undefined, note: "Stage it" }]));
+  });
+
   const open: VisualSource = { kind: "session", id: visual.id, rev: visual.rev };
   it.each([
     ["another visual's choice", { ...open, id: "v_other" }, { type: "choice", option: "B" }, { picked: false, back: false }],
@@ -567,7 +648,7 @@ describe("visuals", () => {
   ] as const)("%s", async (_name, from, data, want) => {
     let post: VisualFrameProps["onMessage"] = () => undefined;
     const Frame = ({ onMessage }: VisualFrameProps) => ((post = onMessage), <div data-testid="visual-frame" />);
-    const sent: { rev: number; option: string; note: string }[] = [];
+    const sent: { rev: number; option: string | undefined; note: string }[] = [];
     // The engine's rows, and list reads it can hold: each answers with the rows as they were when asked.
     let rows: VisualDTO[] = [{ ...visual, unread: false }];
     let hold = false;
@@ -579,7 +660,7 @@ describe("visuals", () => {
       },
       answerVisual: async (_id, rev, option, note) => {
         sent.push({ rev, option, note });
-        rows = rows.map((v) => ({ ...v, answer: { option, note, at: now } }));
+        rows = rows.map((v) => ({ ...v, answer: { option: option ?? null, note, at: now } }));
         return rows[0];
       },
       keepVisual: async () => rows[0],

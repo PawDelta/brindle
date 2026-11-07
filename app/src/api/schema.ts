@@ -440,15 +440,19 @@ export interface GitHubConnectionDTO {
 export interface GoalDTO {
   analysis_doc?: boolean;
   analysis_offer?: string | null;
+  commits_last_hour?: number;
   detail?: string | null;
   enabled: boolean;
+  eta_seconds?: number | null;
   goal?: string | null;
   goal_phase?: string;
+  last_commit_at?: number | null;
   milestones?: MilestoneDTO[];
   note?: string | null;
   pr_url?: string | null;
   progress: number;
   root_id: string;
+  stage?: string | null;
   state: string;
   usage_resets_at?: number | null;
 }
@@ -560,7 +564,7 @@ export interface KeptVisualDTO {
 export interface VisualAnswerDTO {
   at: number;
   note?: string | null;
-  option: string;
+  option: string | null;
 }
 /**
  * This interface was referenced by `ApiSchema`'s JSON-Schema

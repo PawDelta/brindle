@@ -317,16 +317,24 @@ body {
 @media (prefers-reduced-motion: reduce) {
   .side-nb[data-pulse], .inbox-new { animation: none; }
 }
-.side-ring { width: 16px; height: 16px; border-radius: 50%; display: grid; place-items: center; flex: none; }
-.side-ring::after { content: ""; width: 9px; height: 9px; border-radius: 50%; background: var(--canvas-2); }
+/* The sidebar's goal summary: the active step's stage colour (GoalPanel's st-<stage>), a thin bar, the activity line, short steps. */
+.st-working { --st: var(--group-1); }
+.st-checks { --st: var(--group-6); }
+.st-review { --st: var(--group-7); }
+.st-merging { --st: var(--pass); }
+.side-bar { display: flex; height: 3px; margin: 0 2px; border-radius: 2px; background: var(--line); overflow: hidden; }
+.side-bar .d { background: var(--pass); }
+.side-bar .n { background: var(--st); }
+.side-act { display: flex; justify-content: space-between; gap: 8px; padding: 0 2px; font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); white-space: nowrap; }
 .side-ms { display: flex; flex-direction: column; gap: 1px; }
-.side-ms .m { display: flex; align-items: flex-start; gap: 8px; padding: 4px 6px; border-radius: var(--r); font-size: 12px; color: var(--ink); }
-.side-ms .m .i { width: 16px; height: 16px; border-radius: 8px; display: grid; place-items: center; font-size: 9px; flex: none; margin-top: 1px; border: 1px solid var(--line-strong); color: var(--ink-3); }
-.side-ms .m[data-state="done"] .i { background: var(--pass); border-color: var(--pass); color: var(--surface); }
-.side-ms .m[data-state="now"] .i { border-color: var(--ink-2); color: var(--ink); }
-.side-ms .m[data-state="todo"] { color: var(--ink-3); }
-.side-ms .m .t { flex: 1; min-width: 0; line-height: 1.35; }
-.side-ms .m .t small { display: block; font-family: var(--mono); font-size: 10px; color: var(--ink-3); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.side-ms .m { display: flex; align-items: center; gap: 7px; padding: 2px 6px; border-radius: var(--r); font-size: 12px; color: var(--ink-2); }
+.side-ms .m .i { width: 10px; flex: none; text-align: center; font-size: 10px; color: var(--ink-3); }
+.side-ms .m[data-state="done"] { color: var(--ink-3); }
+.side-ms .m[data-state="done"] .i { color: var(--pass); }
+.side-ms .m[data-active] { color: var(--ink); font-weight: 500; }
+.side-ms .m[data-active] .i { color: var(--st, var(--ink)); }
+.side-ms .m .t { flex: 1; min-width: 0; line-height: 1.35; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.side-ms .m .tag { flex: none; font-family: var(--mono); font-size: 10px; font-weight: 400; color: var(--st); }
 /* A goal's phase folds over those rows (GoalPanel's PhaseFoldList): one line per phase, a green count once done. */
 .ms-folds { display: flex; flex-direction: column; gap: 1px; }
 .ms-folds .ms-kids { padding-left: 18px; }

@@ -244,7 +244,7 @@ class VisualOptionDTO(_DTO):
 
 
 class VisualAnswerDTO(_DTO):
-    option: str
+    option: str | None
     note: str | None = None
     at: float
 
@@ -375,14 +375,21 @@ class GoalDTO(_DTO):
     usage_resets_at: float | None = None
     goal_phase: str = "in_progress"  # in_progress | in_review | ready_for_pr | pr_open | done (session_review.goal_phase)
     pr_url: str | None = None        # the session's PR, from pr_open on
+    # What runs now (autopilot.goal_activity): the active step's stage, working | checks | review |
+    # merging (None: nothing runs), the session's commits, and seconds left when history allows.
+    stage: str | None = None
+    commits_last_hour: int = 0
+    last_commit_at: float | None = None
+    eta_seconds: float | None = None
     milestones: list[MilestoneDTO] = []
 
     @classmethod
     def from_autopilot(cls, ap: Autopilot, milestones: list[Milestone],
                        phases: dict[int, str] | None = None,
-                       goal_phase: tuple[str, str | None] = ("in_progress", None)) -> GoalDTO:
+                       goal_phase: tuple[str, str | None] = ("in_progress", None),
+                       activity: dict | None = None) -> GoalDTO:
         phases = phases or {}
-        return cls(root_id=ap.root_id, enabled=bool(ap.enabled), analysis_doc=bool(ap.analysis_doc),
+        return cls(**(activity or {}), root_id=ap.root_id, enabled=bool(ap.enabled), analysis_doc=bool(ap.analysis_doc),
                    analysis_offer=(ap.analysis_offer or "")[5:] if (ap.analysis_offer or "").startswith("open:") else None,
                    goal=ap.goal, detail=ap.detail,
                    state=ap.state, note=ap.note, progress=ap.progress,
