@@ -2417,22 +2417,47 @@ def _paste_message(db: DB, agent: Agent, text: str, lead: str | None,
             # collapsed paste can't be matched as text.
             elif (_typed_lately(fresh, since=baseline[0])
                   or (state["stage"] is None and _composer_taken(fresh))
+                  or (state["stage"] in ("lead", "body") and not owned())
                   or (state["stage"] == "lead" and resume is None
                       and not _partial_composer(fresh, state, "lead"))):
                 if state["stage"] == "body":   # its Enter withheld: whatever goes in now, the person sent
-                    state["stopped"] = True
-                    db.record_pane_delivery(message_id, agent.id, json.dumps(state))
+                    try:
+                        record(stopped=True)
+                    except _PasteBlocked:
+                        pass   # its mark is gone or another's: nothing of this delivery to note
                 raise _PasteBlocked
         if resume is not None and state["stage"] == resume:
             if not _partial_composer(fresh, state, resume):
                 raise _PasteBlocked
             current()  # the composer capture can itself block across an identity or pane change
 
+    def record(**fields):
+        # Merged into the mark as hooks left it (db.record_pane_delivery), and
+        # created only by this delivery's first write, never after it retired.
+        merged = db.record_pane_delivery(message_id, agent.id, json.dumps({**state, **fields}),
+                                         create=not recorded[0])
+        if merged is None:
+            raise _PasteBlocked
+        recorded[0] = True
+        # Hooks' fields join; "stage" stays what brindle itself wrote (an
+        # acknowledged mark's "submitted" is owned()'s to see, not Enter's).
+        state.update({k: v for k, v in merged.items() if k != "stage"})
+
+    def owned():
+        # Not if a hook has said the person sent the composer (acknowledged)
+        # or a turn began from it since: Enter, or more text, is never brindle's then.
+        saved = db.mark(agent.id, "pane-delivery")
+        if saved is None:
+            return not recorded[0]
+        mark = json.loads(saved)
+        return (mark.get("message_id") == message_id and mark.get("stage") != "submitted"
+                and not mark.get("turn_started"))
+
     def progress(stage):
         state["stage"] = stage
-        if not db.record_pane_delivery(message_id, agent.id, json.dumps(state)):
-            raise _PasteBlocked
+        record()
 
+    recorded = [resume is not None]
     baseline = [_INPUT_UNREAD]
     authorize(write=False)   # the caller's last look just read the screen; note the input it saw
     options = {"progress": progress, "resume": resume} if message_id is not None else {}
@@ -2476,6 +2501,13 @@ def _resume_pane_delivery(db: DB, agent: Agent, saved: str) -> bool:
             or agent.status not in ("idle", "processing")
             or (agent.status == "processing" and not get_provider(agent.provider).types_midturn)):
         return False
+    if state["stage"] == "submitted":
+        # It went in: brindle's own Enter, or the person's send a hook
+        # acknowledged. Delivered, once (this flush's delivery), and the queue goes on.
+        db.mark_delivered(row["id"])
+        db.set_mark(agent.id, "pane-delivery", None)
+        _flush_messages(db, agent.id)
+        return True
     if state["stage"] != "submitted":
         stage = "body" if _partial_composer(agent, state, "body") else "lead"
         if stage == "lead" and (state["stage"] != "lead" or not _partial_composer(agent, state, "lead")):
@@ -2738,18 +2770,22 @@ def _acknowledge_submitted(db: DB, agent_id: str, prompt: str) -> bool:
     Enter not yet recorded: it went in, so it is delivered and its mark
     retired. Returns whether the person sent it (one brindle had stopped,
     their reply typed onto it)."""
-    saved = db.mark(agent_id, "pane-delivery")
-    if not saved or not prompt:
-        return False
-    state = json.loads(saved)
-    body = str(state.get("body") or "").strip()
-    if state.get("stage") != "body" or not body or body not in prompt:
-        return False
-    db.mark_delivered(state["message_id"])
-    db.set_mark(agent_id, "pane-delivery", None)
-    # Only one brindle stopped is theirs to have sent: an unstopped one at
-    # this stage is brindle's own Enter, its hook ahead of "submitted".
-    return bool(state.get("stopped"))
+    for _ in range(3):   # the mark changed under us (brindle's own write, a hook): read it again
+        saved = db.mark(agent_id, "pane-delivery")
+        if not saved or not prompt:
+            return False
+        state = json.loads(saved)
+        body = str(state.get("body") or "").strip()
+        if state.get("stage") != "body" or not body or body not in prompt:
+            return False
+        # The mark itself carries it ("submitted": the next flush counts it
+        # delivered), so a paste still in flight sees it and presses no
+        # Enter, and its failure cleanup can't put the row back in the queue.
+        if db.replace_mark(agent_id, "pane-delivery", saved, json.dumps({**state, "stage": "submitted"})):
+            # Only one brindle stopped is theirs to have sent: an unstopped one at
+            # this stage is brindle's own Enter, its hook ahead of "submitted".
+            return bool(state.get("stopped"))
+    return False
 
 
 def note_turn_started(db: DB, agent_id: str) -> None:
@@ -2758,12 +2794,15 @@ def note_turn_started(db: DB, agent_id: str) -> None:
     composer held then: with or without this delivery's body, no one can
     tell. Its outcome becomes unresolved (see _resume_pane_delivery), never
     counted delivered nor typed in again."""
-    saved = db.mark(agent_id, "pane-delivery")
-    if not saved:
-        return
-    state = json.loads(saved)
-    if state.get("stage") == "body" and not state.get("turn_started"):
-        db.replace_mark(agent_id, "pane-delivery", saved, json.dumps({**state, "turn_started": True}))
+    for _ in range(3):   # as in _acknowledge_submitted
+        saved = db.mark(agent_id, "pane-delivery")
+        if not saved:
+            return
+        state = json.loads(saved)
+        if state.get("stage") != "body" or state.get("turn_started"):
+            return
+        if db.replace_mark(agent_id, "pane-delivery", saved, json.dumps({**state, "turn_started": True})):
+            return
 
 
 def _paste_blocked(agent: Agent) -> bool:

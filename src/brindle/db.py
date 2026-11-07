@@ -2180,19 +2180,40 @@ class DB:
             c.execute("UPDATE inbox SET delivered_at=NULL WHERE id=? AND agent_id=?",
                       (message_id, agent_id))
 
-    def record_pane_delivery(self, message_id: int, agent_id: str, state: str) -> bool:
+    PANE_STAGES = (None, "lead", "body", "submitted")
+
+    def record_pane_delivery(self, message_id: int, agent_id: str, state: str,
+                             create: bool = True) -> dict | None:
         """A partial external write is pending, owned by its durable pane mark.
 
         Publish both together so even a process exit before the caller unwinds
         leaves the message visible and unavailable to ordinary queue readers.
+        ``state`` is merged into the delivery's current mark, which hooks add
+        to meanwhile (an acknowledgement, a turn started): their fields kept,
+        its stage never moved back. A mark that is gone is never recreated
+        unless ``create`` (a delivery's first write), nor one for another
+        message replaced. Returns the merged state, or None.
         """
+        new = json.loads(state)
         with self.tx() as c:
+            row = c.execute("SELECT value FROM agent_marks WHERE agent_id=? AND kind='pane-delivery'",
+                            (agent_id,)).fetchone()
+            if row is None and not create:
+                return None
+            merged = new
+            if row is not None:
+                old = json.loads(row["value"])
+                if old.get("message_id") != message_id:
+                    return None
+                stage = max(old.get("stage"), new.get("stage"), key=self.PANE_STAGES.index)
+                merged = {**old, **new, "stage": stage}
             if not c.execute("UPDATE inbox SET delivered_at=NULL WHERE id=? AND agent_id=?",
                              (message_id, agent_id)).rowcount:
-                return False
+                return None
             c.execute("INSERT INTO agent_marks (agent_id, kind, value) VALUES (?,'pane-delivery',?)"
-                      " ON CONFLICT(agent_id, kind) DO UPDATE SET value=excluded.value", (agent_id, state))
-        return True
+                      " ON CONFLICT(agent_id, kind) DO UPDATE SET value=excluded.value",
+                      (agent_id, json.dumps(merged)))
+        return merged
 
     def retry_pending(self, message_id: int, agent_id: str, idle_since: float) -> None:
         """Release the caller's failed delivery claim without creating a second message.

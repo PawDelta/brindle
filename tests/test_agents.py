@@ -365,6 +365,8 @@ def test_paste_blocked_or_draft_holds_message_then_delivers_it_once(db, ws, monk
     # keys pressed after the lead, but the next write comes over TYPED_WITHIN later
     ("lead-late", "sent"),
     ("lead-switch", "cleared"),   # then the person's client moves to another pane
+    # they send it (or a replacement) and its turn's hook runs before brindle's Enter is authorized
+    ("enter", "sent"), ("enter", "agy sent"), ("enter", "agy replaced"),
 ])
 def test_person_typing_mid_paste_stops_it_and_message_goes_in_once_later(db, ws, monkeypatch, typed_after, then):
     # Real flush and tmux.paste over a fake terminal: the person starts a reply
@@ -389,7 +391,18 @@ def test_person_typing_mid_paste_stops_it_and_message_goes_in_once_later(db, ws,
             s["at"] = None
             s["composer"] += "MY UNSENT REPLY"
 
+    def start_turn(prompt):   # the CLI's real hook for a turn the person started
+        if agy:
+            antigravity.handle_hook(db, "a1", "agy-pre-invocation", {"invocationNum": 0})
+        else:
+            agents.handle_hook(db, "a1", "prompt-submit", {"prompt": prompt})
+
     def tmux_call(*args, input=None, authorize=None, **k):
+        if args[0] == "send-keys" and args[-1] == "Enter" and s["at"] == "enter":
+            s["at"], s["typed"] = None, time.time()
+            s["composer"] += "MY UNSENT REPLY"
+            start_turn("SOMETHING ELSE" if then.endswith("replaced") else s["composer"])
+            s["composer"] = ""
         if authorize is not None:
             authorize()
         out = ""
@@ -420,18 +433,20 @@ def test_person_typing_mid_paste_stops_it_and_message_goes_in_once_later(db, ws,
     sent, s["composer"], s["typed"] = s["composer"], "", time.time() - 60   # a minute ago
     if then.endswith("replaced"):
         sent = "SOMETHING ELSE"
-    if then in ("sent", "replaced"):   # the report went in with their reply, or it didn't
-        agents.handle_hook(db, "a1", "prompt-submit", {"prompt": sent})
+    if then in ("sent", "replaced", "agy sent", "agy replaced") and typed_after != "enter":
+        start_turn(sent)   # the report went in with their reply, or it didn't
+    if then in ("sent", "replaced"):
         db.set_status("a1", "idle")
     elif then == "codex turn":
         agents.handle_hook(db, "a1", "codex-notify", {"type": "agent-turn-complete", "input-messages": [sent]})
-    elif then in ("agy sent", "agy replaced"):   # agy's real hooks for the turn it started
-        antigravity.handle_hook(db, "a1", "agy-pre-invocation", {"invocationNum": 0})
+    elif then in ("agy sent", "agy replaced"):
         antigravity.handle_hook(db, "a1", "agy-stop", {})
     assert len(spoke) == (then in ("sent", "replaced", "agy sent", "agy replaced"))   # their turn, as theirs
-    again = typed_after != "body" or then in ("cleared", "replaced", "agy cleared")
+    again = typed_after not in ("body", "enter") or then in ("cleared", "replaced", "agy cleared")
     unresolved = then in ("agy sent", "agy replaced")
-    assert agents.flush(db, "a1") is again and db.pending_count("a1") == 0
+    # this flush counts it (Codex's turn-end notify already flushed it)
+    acknowledged = then == "sent" and typed_after in ("body", "enter")
+    assert agents.flush(db, "a1") is (again or acknowledged) and db.pending_count("a1") == 0
     assert submitted == ([f"{lead} WORKER REPORT"] if again else [])
     # by no other way either: read_messages hands nothing over again
     assert "WORKER REPORT" not in agents.render_unread(db, db.read_held("a1"))
