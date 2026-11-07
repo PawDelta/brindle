@@ -105,6 +105,9 @@ to be asked each step.
 - Keep task briefs short: the goal in a sentence or two, the files, and the
   test that proves it done. Workers read the tests and code themselves;
   never paste them. Writing is the slowest thing you do.
+- Only request an analysis doc when the person explicitly asks for one for
+  that goal or task. Relay that request with analysis_doc=true on set_goal,
+  assign or handoff. Size, weight and milestone count never imply a request.
 - When a worker reports, brindle has its branch reviewed and, once approved and
   the checks pass, merges it and removes the worktree; you get one message
   per branch: merged, or "needs you" with the details. Don't request_review
@@ -133,6 +136,10 @@ to be asked each step.
 """
 
 DELEGATIONS = ("conservative", "balanced", "fast")
+PLAN_SPLIT_REMINDER = (
+    "Which parts of this plan need no result from the rest? Start those workers now, "
+    "with `assign`, and approve the rest."
+)
 
 # The repo's "delegation": how readily a supervisor hands work to workers.
 # Delegating buys wall-clock time with tokens: a worker plus its review costs
@@ -153,14 +160,18 @@ what the same change costs in your own chat. Do small things directly: a fix,
 a change of a few files in one area, anything you'd finish in about five
 minutes, or work whose code you've already read. Delegate when a request has
 two or more independent parts that can run side by side, or a piece that
-would take more than about ten minutes; give each part its own worker.""",
+would take more than about ten minutes; give each part its own worker.
+For a plan-first worker's proposal, ask which parts need no result from the
+rest, start those workers with `assign`, and approve the rest.""",
     "fast": """## Delegation rule: fast (save time)
 
 The person prefers speed to token cost. Split any request with more than one
 independent part into parallel workers straight away, up to the worker limit,
 and delegate any single piece of more than a few minutes, so your own chat
 stays free to plan, answer and merge. Do only trivial edits yourself (a typo,
-a one-line config change), or what you must do before workers can start.""",
+a one-line config change), or what you must do before workers can start.
+For a plan-first worker's proposal, ask which parts need no result from the
+rest, start those workers with `assign`, and approve the rest.""",
 }
 
 
@@ -220,10 +231,11 @@ class AutopilotError(RuntimeError):
 class Plan:
     goal: str
     detail: str | None
-    milestones: list[tuple]   # (title, check, detail[, profile[, repo]])
+    milestones: list[tuple]   # (title, check, detail[, profile[, repo[, phase]]])
 
 
 PROFILE_RE = re.compile(r"^\s*profile:\s*`?([\w.-]+)`?\s*$", re.I)
+PHASE_RE = re.compile(r"^\s*phase:\s*(\S.*?)\s*$", re.I)
 REPO_RE = re.compile(r"^\s*repo:\s*`?([\w.-]+)`?\s*$", re.I)
 CHECK_RE = re.compile(r"^\s*check(?:@([\w.-]+))?:\s*`?(.+?)`?\s*$", re.I)
 FENCED_CHECK_RE = re.compile(r"^\s*check(?:@([\w.-]+))?:\s*$", re.I)   # the command is the fenced block below
@@ -248,8 +260,9 @@ def _fences(lines: list[str]) -> dict[int, tuple[int, int]]:
 def parse_goals(text: str) -> Plan | None:
     """``# Goal`` then ``## Milestone`` sections, each with an optional
     ``check: <command>`` line (``check@<alias>: <command>`` runs it in a repo
-    attached to the session; so does a ``repo: <alias>`` line) and a
-    ``profile: <name>`` line. A bare ``check:`` line followed by a fenced
+    attached to the session; so does a ``repo: <alias>`` line), a
+    ``profile: <name>`` line and a ``phase: <name>`` line (the app folds
+    consecutive milestones of one phase together). A bare ``check:`` line followed by a fenced
     block takes the block as the command (any number of lines). A detail
     line starting with a backslash is that line without it, so detail can
     hold text that would otherwise read as a heading or a field. Returns None
@@ -272,12 +285,15 @@ def parse_goals(text: str) -> Plan | None:
                 goal = m.group(1)
             continue
         if m := re.match(r"^##\s+(.+?)\s*$", line):
-            milestones.append([m.group(1), None, [], None, None])
+            milestones.append([m.group(1), None, [], None, None, None])
             continue
         if milestones and STATUS_RE.match(line):
             continue   # written by sync_goals_file: information only, never read back
         if milestones and milestones[-1][3] is None and (m := PROFILE_RE.match(line)):
             milestones[-1][3] = m.group(1)
+            continue
+        if milestones and milestones[-1][5] is None and (m := PHASE_RE.match(line)):
+            milestones[-1][5] = m.group(1)
             continue
         if milestones and milestones[-1][4] is None and (m := REPO_RE.match(line)):
             milestones[-1][4] = m.group(1)
@@ -296,16 +312,18 @@ def parse_goals(text: str) -> Plan | None:
     if not goal:
         return None
     clean = lambda lines: "\n".join(lines).strip() or None  # noqa: E731
-    return Plan(goal, clean(detail_lines), [_item(t, c, clean(d), p, r) for t, c, d, p, r in milestones])
+    return Plan(goal, clean(detail_lines), [_item(t, c, clean(d), p, r, ph) for t, c, d, p, r, ph in milestones])
 
 
 def _item(title: str, check: str | None, detail: str | None,
-          profile: str | None, repo: str | None) -> tuple:
+          profile: str | None, repo: str | None, phase: str | None = None) -> tuple:
     item: tuple = (title, check or None, detail)
-    if profile or repo:
+    if profile or repo or phase:
         item += (profile or None,)
-    if repo:
-        item += (repo,)
+    if repo or phase:
+        item += (repo or None,)
+    if phase:
+        item += (phase,)
     return item
 
 
@@ -314,7 +332,7 @@ def _escaped(detail: str) -> list[str]:
     other than detail text behind a backslash."""
     def special(line: str) -> bool:
         return (line.startswith(("\\", "#")) or any(r.match(line) for r in (
-            FENCE_RE, STATUS_RE, PROFILE_RE, REPO_RE, CHECK_RE, FENCED_CHECK_RE)))
+            FENCE_RE, STATUS_RE, PROFILE_RE, PHASE_RE, REPO_RE, CHECK_RE, FENCED_CHECK_RE)))
     return ["\\" + line if special(line) else line for line in detail.splitlines()]
 
 
@@ -339,7 +357,10 @@ def render_goals(plan: Plan, statuses: list[str]) -> str:
         title, check, detail = item[:3]
         profile = item[3] if len(item) > 3 else None
         repo = item[4] if len(item) > 4 else None
+        phase = item[5] if len(item) > 5 else None
         out += [f"## {title}", status]
+        if phase:
+            out.append(f"phase: {phase}")
         if check:
             out += _check_lines(check, repo)
         elif repo:
@@ -394,7 +415,8 @@ def _db_plan(db: DB, root_id: str) -> Plan | None:
     if not ap or not ap.goal:
         return None
     return Plan(ap.goal, (ap.detail or "").strip() or None,
-                [_item(m.title, m.check_cmd, m.detail, m.profile, m.repo) for m in db.milestones(root_id)])
+                [_item(m.title, m.check_cmd, m.detail, m.profile, m.repo, m.phase_name)
+                 for m in db.milestones(root_id)])
 
 
 def write_goals_file(db: DB, root_id: str) -> None:
@@ -637,7 +659,7 @@ def set_enabled(db: DB, root_id: str, on: bool) -> None:
 
 def milestone_items(db: DB, root_id: str, milestones: list[dict]) -> list[tuple]:
     """``set_goal``'s milestones from their JSON form, {"title", "check",
-    "detail", "profile", "repo"}; a check may name its repo as "@<alias>: <command>"."""
+    "detail", "profile", "repo", "phase"}; a check may name its repo as "@<alias>: <command>"."""
     from brindle import repos
 
     items = []
@@ -650,14 +672,17 @@ def milestone_items(db: DB, root_id: str, milestones: list[dict]) -> list[tuple]
         if repo_alias and repos.resolve_attached(db, root_id, repo_alias) is None:
             raise AutopilotError(f"Milestone {title!r} names repo {repo_alias!r}, which isn't attached "
                                  "to this session (list_repos shows what is).")
-        items.append((title, check, (str(m.get("detail") or "").strip() or None),
-                      (str(m.get("profile") or "").strip() or None), repo_alias))
+        item = (title, check, (str(m.get("detail") or "").strip() or None),
+                (str(m.get("profile") or "").strip() or None), repo_alias)
+        phase = " ".join(str(m.get("phase") or "").split())
+        items.append(item + (phase,) if phase else item)
     return items
 
 
 def set_goal(db: DB, root_id: str, goal: str,
-             milestones: list[tuple], detail: str | None = None) -> None:
-    """Record the goal and its milestones, ``(title, check, detail[, profile[, repo]])``.
+             milestones: list[tuple], detail: str | None = None, *,
+             analysis_doc: bool | None = None) -> None:
+    """Record the goal and its milestones, ``(title, check, detail[, profile[, repo[, phase]]])``.
     A milestone that keeps its title and check keeps its last result."""
     if not goal.strip():
         raise AutopilotError("the goal needs a title")
@@ -668,14 +693,10 @@ def set_goal(db: DB, root_id: str, goal: str,
     _adopt_legacy(db, root_id)
     old = {(m.title, m.check_cmd): m for m in db.milestones(root_id)}
     ap = db.get_autopilot(root_id)
-    from brindle.pro import analysis_brief
-
-    # A goal that becomes large work (new, or grown to 3+ milestones) gets the
-    # server's brief once, whichever way it was set.
-    briefed = analysis_brief.large_work(milestones=len(old)) and ap is not None and ap.goal == goal.strip()
     fields: dict[str, object] = {}
     if ap is None or ap.goal != goal.strip():
         fields["audit_history"] = None
+        fields["analysis_doc"] = 0
     if ap is None or ap.goal != goal.strip() or not ap.goal_sha:
         root = db.get_agent(root_id)
         ws = db.get_workspace(root.workspace_id) if root else None
@@ -695,23 +716,42 @@ def set_goal(db: DB, root_id: str, goal: str,
     write_goals_file(db, root_id)
     knowledge.note(db, root_id, knowledge.INTENT,
                    {"summary": "\n".join([goal.strip(), *(m[0] for m in milestones)]), "paths": []})
-    if analysis_brief.large_work(milestones=len(milestones)) and not briefed:
-        brief = analysis_brief.server_brief(db, root_id, "\n".join([goal.strip(), *(m[0] for m in milestones)]), [])
+    if analysis_doc is not None:
+        set_goal_analysis_doc(db, root_id, analysis_doc)
+
+
+def set_goal_analysis_doc(db: DB, root_id: str, requested: bool) -> None:
+    """Record the person's choice; commission the doc now if already reached."""
+    from brindle.pro import analysis_brief
+
+    ap = db.get_autopilot(root_id)
+    if ap is None or not ap.goal:
+        raise AutopilotError("no goal is set up for this session")
+    db.update_autopilot(root_id, analysis_doc=int(requested))
+    bus.publish_agent(db, "autopilot.goal", root_id)
+    root = db.get_agent(root_id)
+    ws = db.get_workspace(root.workspace_id) if root else None
+    if ws and analysis_brief.large_work(requested=requested, branch=ws.branch) and not ap.analysis_doc:
+        text = "\n".join([ap.goal, *(m.title for m in db.milestones(root_id))])
+        brief = analysis_brief.server_brief(db, root_id, text, [])
+        if ap.state == "done":
+            brief = "\n\n".join(part for part in (_goal_doc_rule(db, root_id), brief) if part)
         if brief:
             db.enqueue(root_id, brief, None)
 
 
 def _goal_doc_rule(db: DB, root_id: str) -> str:
-    """For a goal of 3+ milestones, now reached: the rule to leave its analysis doc."""
+    """For a reached goal whose person requested a doc: the rule to write it."""
     from brindle.pro import analysis_brief
 
     try:
         root = db.get_agent(root_id)
         ws = db.get_workspace(root.workspace_id) if root else None
-        if ws is None or not analysis_brief.large_work(milestones=len(db.milestones(root_id)),
+        ap = db.get_autopilot(root_id)
+        if ws is None or ap is None or not analysis_brief.large_work(requested=bool(ap.analysis_doc),
                                                        branch=ws.branch):
             return ""
-        return ("This goal had 3+ milestones: before you tell the user, leave its analysis doc.\n\n"
+        return ("The person requested an analysis doc for this goal: write it before reporting.\n\n"
                 + analysis_brief.doc_rule(db, ws.repo_root, ws.branch))
     except Exception:  # noqa: BLE001 - extra guidance, never a reason to lose the verdict
         log.info("goal analysis doc rule not added", exc_info=True)
@@ -1236,6 +1276,9 @@ class CheckCancelled(Exception):
 
 KILL_WAIT = 5.0     # seconds to wait for a killed check's pipes to close
 CANCEL_POLL = 1.0  # seconds between looks at ``cancel`` while a check runs
+
+
+TIMED_OUT = "(timed out after"   # what run_check's output carries when it killed a run on its timeout
 
 
 def run_check(cmd: str, cwd: str, env: dict[str, str], timeout: int,

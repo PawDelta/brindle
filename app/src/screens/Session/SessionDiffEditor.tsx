@@ -1,6 +1,7 @@
 /* Shared session diff editor for the Changes tab and Review & open PR. */
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { DaemonError, type DaemonClient, type FileContent } from "../../api/client";
+import { LoadingButton } from "../../components/LoadingButton";
 import { button, field, label, mono, quiet } from "../../components/ui";
 import { useAppState } from "../../store/useStore";
 import { BUSY } from "../Branch/DiffView";
@@ -535,9 +536,9 @@ export function EditBox({ ariaLabel, text, setText, busy, saveable = true, error
           </>
         ) : (
           <>
-            <button type="button" className={`${button} px-s1 py-0.5 text-xs`} disabled={busy || !saveable} onClick={onSave}>
+            <LoadingButton className={`${button} px-s1 py-0.5 text-xs`} busy={busy} disabled={busy || !saveable} onClick={onSave}>
               Save <kbd className="ml-1 font-mono text-[10px] opacity-80">⌘S</kbd>
-            </button>
+            </LoadingButton>
             <button type="button" className={`${quiet} text-xs`} disabled={busy} onClick={onDone}>
               Discard <kbd className="ml-1 font-mono text-[10px] opacity-80">esc</kbd>
             </button>

@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../App";
-import { ONBOARDED_KEY } from "../api/providers";
+import { ONBOARDED_KEY, SIGNED_IN_SEEN_KEY } from "../api/providers";
 import { DaemonContext } from "../api/context";
 import type { SessionDTO } from "../api/schema";
 import type { Route } from "../routes";
@@ -10,7 +10,7 @@ import { createAppStore } from "../store/store";
 import { startSync } from "../store/sync";
 import { UsageProvider } from "../store/usage";
 import { StoreContext } from "../store/useStore";
-import { FakeDaemon, type DaemonData } from "../test/fakeDaemon";
+import { FakeDaemon, freshProviders, type DaemonData } from "../test/fakeDaemon";
 import { REPO, root } from "../test/fixtures";
 import { PtyViewsProvider } from "../api/ptyView";
 import { standInViews } from "../test/panes";
@@ -114,10 +114,81 @@ describe("the sidebar's weekly usage reading", () => {
 
     fireEvent.click(reading);
     const usage = await screen.findByTestId("usage");
-    expect(screen.getByRole("region", { name: "Account" })).toBeTruthy();
+    expect(screen.getByRole("tab", { name: "Usage" }).getAttribute("aria-selected")).toBe("true");
     await waitFor(() => expect(scrolled.mock.contexts).toContain(usage));
     expect(within(usage).getByRole("article", { name: "Claude" }).getAttribute("data-state")).toBe("warn");
     stop();
+  });
+
+  it("names the model the current session runs on beside the provider", async () => {
+    const { stop } = app("normal", { workspaces: [{ ...root, agents: root.agents?.map((a) => ({ ...a, model: "claude-opus-4-7" })) }] });
+    expect((await screen.findByTestId("usage-model", {}, { timeout: 3000 })).textContent).toBe("Claude Opus 4 7");
+    // The meter beside the model is the session's own provider's (Claude 9%), not the fuller Codex (41%).
+    const reading = screen.getByTestId("usage-reading");
+    expect(reading.dataset.provider).toBe("claude");
+    expect(within(reading).getByRole("progressbar").getAttribute("aria-valuenow")).toBe("9");
+    stop();
+    cleanup();
+
+    // Two sessions in one mounted sidebar: switching moves model, provider and meter together. The second runs on
+    // Antigravity, which the engine reports limited with no weekly window: its model shows, an empty meter, the warning kept.
+    const sup2: SessionDTO = { ...session, id: "sup2", goal: "Other work" };
+    const agents = [
+      { ...root.agents![0], model: "claude-opus-4-7" },
+      { ...root.agents![0], id: "sup2", provider: "antigravity", profile: "antigravity", model: "gemini-3-pro" },
+    ];
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session, sup2], workspaces: [{ ...root, agents }], usage: usageScenario("several") });
+    const store = createAppStore();
+    const client = daemon.client();
+    const sync = startSync({ client, store, connect: daemon.connect });
+    const tree = (root: string) => (
+      <DaemonContext.Provider value={client}>
+        <StoreContext.Provider value={store}>
+          <SessionsProvider client={client}>
+            <UsageProvider client={client} pollMs={60_000}>
+              <Sidebar route={{ screen: "session", root, repo: REPO, agent: root }} navigate={vi.fn()} refresh={sync.refresh} />
+            </UsageProvider>
+          </SessionsProvider>
+        </StoreContext.Provider>
+      </DaemonContext.Provider>
+    );
+    const view = render(tree("sup1"));
+    expect((await screen.findByTestId("usage-model", {}, { timeout: 3000 })).textContent).toBe("Claude Opus 4 7");
+    expect(screen.getByTestId("usage-reading").dataset.provider).toBe("claude");
+    expect(within(screen.getByTestId("usage-reading")).getByRole("progressbar").getAttribute("aria-valuenow")).toBe("63");
+    view.rerender(tree("sup2"));
+    await waitFor(() => expect(screen.getByTestId("usage-model").textContent).toBe("Gemini 3 Pro"));
+    const second = screen.getByTestId("usage-reading");
+    expect(second.dataset.provider).toBe("antigravity");
+    expect(second.querySelector("[role=progressbar]")).toBeNull();
+    expect(second.className).toContain("text-sap");
+    sync.stop();
+  });
+
+  it("a provider with no sign-in yet is quiet setup while another works, and a real sign-out stays a warning", async () => {
+    const codexOut = { codex: { path: "/bin/codex", version: "1", signed_in: false } };
+    const first = app("normal", { providers: freshProviders({ claude: { path: "/bin/claude", version: "2" }, ...codexOut }) });
+    const quiet = await screen.findByTestId("provider-problem", {}, { timeout: 3000 });
+    expect(quiet.textContent).toBe("Set up Codex");
+    expect(quiet.className).not.toContain("text-sap");
+    first.stop();
+    cleanup();
+    // Codex worked before and lost its sign-in while Claude still works: that is a real warning.
+    const working = app("normal", { providers: freshProviders({ claude: { path: "/bin/claude", version: "2" }, codex: { path: "/bin/codex", version: "1" } }) });
+    await waitFor(() => expect(localStorage.getItem(SIGNED_IN_SEEN_KEY)).toContain("codex"), { timeout: 3000 });
+    expect(screen.queryByTestId("provider-problem")).toBeNull();
+    working.stop();
+    cleanup();
+    const lapsed = app("normal", { providers: freshProviders({ claude: { path: "/bin/claude", version: "2" }, ...codexOut }) });
+    await waitFor(() => expect(screen.getByTestId("provider-problem").textContent).toBe("Codex signed out"), { timeout: 3000 });
+    expect(screen.getByTestId("provider-problem").className).toContain("text-sap");
+    lapsed.stop();
+    cleanup();
+    localStorage.removeItem(SIGNED_IN_SEEN_KEY);
+    const second = app("normal", { providers: freshProviders({ claude: { path: "/bin/claude", version: "2", signed_in: false }, ...codexOut }) });
+    await waitFor(() => expect(screen.getByTestId("provider-problem").textContent).toContain("Claude Code signed out"), { timeout: 3000 });
+    expect(screen.getByTestId("provider-problem").className).toContain("text-sap");
+    second.stop();
   });
 
   it("clicked again with Account already open, scrolls back to Usage", async () => {
@@ -126,8 +197,6 @@ describe("the sidebar's weekly usage reading", () => {
     const { stop } = app("near");
     fireEvent.click(await screen.findByTestId("usage-reading"));
     const usage = await screen.findByTestId("usage");
-    // Once the plan's cards have loaded above it, the scrolls settle.
-    await screen.findByTestId("plan");
     await waitFor(() => expect(scrolled.mock.contexts).toContain(usage));
     const before = scrolled.mock.calls.length;
     fireEvent.click(screen.getByTestId("usage-reading"));

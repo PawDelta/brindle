@@ -4,6 +4,7 @@ import shlex
 import subprocess
 import sys
 import time
+from types import SimpleNamespace
 
 import pytest
 from typer.testing import CliRunner
@@ -188,7 +189,7 @@ def test_paste_blocked():
     assert p.paste_blocked("> hello", interactive=False) is None
     assert p.paste_blocked("> \n───\n? for shortcuts      Gemini", interactive=True) is None
     assert p.paste_blocked("> hello world\n───\n? for shortcuts", interactive=True) == "typing"
-    assert p.paste_blocked(">\n" + "continued draft\n" * 40 + "───\n? for shortcuts", interactive=True) == "typing"
+    assert p.paste_blocked(">\n\n" + "continued draft\n" * 40 + "───\n? for shortcuts", interactive=True) == "typing"
     assert p.paste_blocked("\x1b[38;5;232m>\x1b[0m ", interactive=True) is None
     assert p.paste_blocked("\x1b[38;5;232m>\x1b[0m \x1b[1mhello\x1b[0m", interactive=True) == "typing"
 
@@ -307,6 +308,7 @@ def test_dont_ask_refuses_an_uncovered_command_instead_of_prompting(db, ws, monk
     assert answer("w1", "touch should_not_exist.txt") == "ask"
 
 
+@pytest.mark.slow("builds a real agy launch plan with per-repo policy lookups; two launches, ~20 policy decisions and six CLI runs; 7-17s on a loaded host")
 def test_interactive_supervisor_on_autonomous_needs_no_grants(db, ws, monkeypatch, tmp_path):
     # A new person: the policy on and a fresh store on the default preset. agy
     # prompted for everything its settings.json didn't allow, and reads no
@@ -316,6 +318,8 @@ def test_interactive_supervisor_on_autonomous_needs_no_grants(db, ws, monkeypatc
     monkeypatch.setenv("BRINDLE_AGENT_ID", "sup")
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(antigravity, "tool_names", lambda: ["assign"])
+    # Model the launch flag here; parent-process discovery has its own test.
+    monkeypatch.setattr(antigravity, "_launched_with_skip_flag", lambda: True)
     monkeypatch.setattr(permissions, "DEFAULT_PRESET", "autonomous")
     roots = {
         ws.path: ws.path,
@@ -331,8 +335,23 @@ def test_interactive_supervisor_on_autonomous_needs_no_grants(db, ws, monkeypatc
         ws.repo_root: "main", str(tmp_path / "trunk-repo"): "trunk",
         str(tmp_path / "develop-repo"): "develop",
     }.get(root))
+    # No agy process runs this hook here: the real `ps` walk up the ancestors
+    # finds none and says "can't tell" (None), at about 100ms a call.
+    monkeypatch.setattr(antigravity, "_launched_with_skip_flag", lambda: None)
     permissions.store_path().unlink(missing_ok=True)
     add_agent(db, ws, agent_id="sup", window="")
+    # The hook's ancestors as agy runs it, read through a fake ps: a shell, then
+    # the agy launch() starts with the skip flag. No real process table is walked.
+    agy_pid = "4242"
+
+    def ps(argv, **_):
+        pid = argv[-1]
+        if "ppid=" in argv:
+            return SimpleNamespace(stdout=f"{agy_pid if pid != agy_pid else 1}\n")
+        command = f"/bin/agy {antigravity.SKIP_FLAG}" if pid == agy_pid else "/bin/sh -c brindle _hook"
+        return SimpleNamespace(stdout=command + "\n")
+
+    monkeypatch.setattr(antigravity, "subprocess", SimpleNamespace(run=ps))
 
     def launch(**ctx):
         argv = Antigravity().command(LaunchContext("sup", load_profile("supervisor"), None, cwd=ws.path,

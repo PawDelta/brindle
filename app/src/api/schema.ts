@@ -24,9 +24,11 @@ export interface ApiSchema {
   ConnectionReadyDTO: ConnectionReadyDTO;
   DecisionDTO: DecisionDTO;
   GcloudOptionsDTO: GcloudOptionsDTO;
+  GitHubConnectionDTO: GitHubConnectionDTO;
   GoalDTO: GoalDTO;
   InboxActionDTO: InboxActionDTO;
   InboxItemDTO: InboxItemDTO;
+  KeptVisualDTO: KeptVisualDTO;
   MilestoneDTO: MilestoneDTO;
   NativeSubagentDTO: NativeSubagentDTO;
   OrgApprovalPolicyDTO: OrgApprovalPolicyDTO;
@@ -48,6 +50,12 @@ export interface ApiSchema {
   PermissionPolicyDTO: PermissionPolicyDTO;
   PermissionPresetDTO: PermissionPresetDTO;
   PermissionRuleDTO: PermissionRuleDTO;
+  PlanCommentDTO: PlanCommentDTO;
+  PlanDTO: PlanDTO;
+  PlanDecisionDTO: PlanDecisionDTO;
+  PlanSectionDTO: PlanSectionDTO;
+  PlanVerdictDTO: PlanVerdictDTO;
+  PlanWorkerDTO: PlanWorkerDTO;
   PreflightActionDTO: PreflightActionDTO;
   PreflightItemDTO: PreflightItemDTO;
   ProfileDTO: ProfileDTO;
@@ -66,6 +74,9 @@ export interface ApiSchema {
   SavedActionDTO: SavedActionDTO;
   SessionDTO: SessionDTO;
   StoppedAgentDTO: StoppedAgentDTO;
+  VisualAnswerDTO: VisualAnswerDTO;
+  VisualDTO: VisualDTO;
+  VisualOptionDTO: VisualOptionDTO;
   WorkspaceDTO: WorkspaceDTO;
 }
 /**
@@ -118,6 +129,7 @@ export interface AgentDTO {
   id: string;
   locked?: string | null;
   mode: string;
+  model?: string | null;
   parent_id?: string | null;
   pending?: number | null;
   profile: string;
@@ -403,10 +415,30 @@ export interface DecisionDTO {
   topic: string;
 }
 /**
+ * brindle's own GitHub sign-in (brindle.github_connect), as every
+ * /v1/github/connection route answers. ``route``: how the person connected (a
+ * copy of the GitHub CLI's sign-in, or a token they pasted). ``needs_reconnect``:
+ * GitHub no longer takes it. ``gh_available``: a copy of gh's sign-in can be
+ * offered. Never the token.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "GitHubConnectionDTO".
+ */
+export interface GitHubConnectionDTO {
+  connected: boolean;
+  expires_at?: number | null;
+  gh_available?: boolean;
+  login?: string | null;
+  needs_reconnect?: boolean;
+  route?: ("gh" | "token") | null;
+  storage?: ("keychain" | "file") | null;
+}
+/**
  * This interface was referenced by `ApiSchema`'s JSON-Schema
  * via the `definition` "GoalDTO".
  */
 export interface GoalDTO {
+  analysis_doc?: boolean;
   detail?: string | null;
   enabled: boolean;
   goal?: string | null;
@@ -431,6 +463,7 @@ export interface MilestoneDTO {
   label?: string | null;
   output?: string | null;
   phase?: string;
+  phase_name?: string | null;
   position: number;
   profile?: string | null;
   repo?: string | null;
@@ -466,6 +499,7 @@ export interface InboxItemDTO {
   request_id?: string | null;
   root_id?: string | null;
   section?: string | null;
+  visual_id?: string | null;
   workspace_id?: string | null;
 }
 /**
@@ -503,6 +537,29 @@ export interface PermissionChoiceDTO {
   choice: string;
   label: string;
   rule?: string | null;
+}
+/**
+ * A kept visual: outlives its session. Its page: /v1/kept-visuals/{id}/html.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "KeptVisualDTO".
+ */
+export interface KeptVisualDTO {
+  answer?: VisualAnswerDTO | null;
+  from_session_name: string;
+  id: string;
+  kept_at: number;
+  repo: string;
+  title: string;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "VisualAnswerDTO".
+ */
+export interface VisualAnswerDTO {
+  at: number;
+  note?: string | null;
+  option: string;
 }
 /**
  * This interface was referenced by `ApiSchema`'s JSON-Schema
@@ -707,6 +764,94 @@ export interface PermissionRuleDTO {
   prompts?: number;
   repo_root?: string | null;
   source: string;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PlanCommentDTO".
+ */
+export interface PlanCommentDTO {
+  section: string;
+  text: string;
+}
+/**
+ * A planning doc (brindle.plans): markdown brindle renders itself, split
+ * into its ``##`` sections. ``state``: open (the person hasn't decided),
+ * redirected (their comments went back; a new revision is coming) or
+ * approved. While open or redirected, the session's assign calls queue.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PlanDTO".
+ */
+export interface PlanDTO {
+  created_at: number;
+  decisions: PlanDecisionDTO[];
+  id: string;
+  lede: string;
+  markdown: string;
+  queued: number;
+  rev: number;
+  sections: PlanSectionDTO[];
+  session: string;
+  split: PlanWorkerDTO[];
+  state: "open" | "redirected" | "approved";
+  title: string;
+  verdict?: PlanVerdictDTO | null;
+}
+/**
+ * A decision that shapes the plan: its alternatives and the supervisor's pick.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PlanDecisionDTO".
+ */
+export interface PlanDecisionDTO {
+  challenge?: string | null;
+  id: string;
+  mine?: string | null;
+  options: VisualOptionDTO[];
+  title: string;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "VisualOptionDTO".
+ */
+export interface VisualOptionDTO {
+  detail?: string | null;
+  id: string;
+  label: string;
+}
+/**
+ * One ``##`` section of a plan's markdown: what a comment anchors to.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PlanSectionDTO".
+ */
+export interface PlanSectionDTO {
+  id: string;
+  markdown: string;
+  title: string;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PlanWorkerDTO".
+ */
+export interface PlanWorkerDTO {
+  after?: string[];
+  id: string;
+  title: string;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PlanVerdictDTO".
+ */
+export interface PlanVerdictDTO {
+  approved: boolean;
+  at: number;
+  comments?: PlanCommentDTO[];
+  note?: string | null;
+  picks?: {
+    [k: string]: string;
+  };
+  rev: number;
 }
 /**
  * This interface was referenced by `ApiSchema`'s JSON-Schema
@@ -974,9 +1119,32 @@ export interface SessionDTO {
   mode: string;
   name?: string | null;
   profile: string;
+  request?: string | null;
   status: string;
   status_since?: number | null;
   workspace_id: string;
+}
+/**
+ * A visual in a session (brindle.visuals). ``rev``: its current revision,
+ * served at /v1/visuals/{id}/r/{rev}; an answer names the revision it read.
+ * ``unread``: a revision the person hasn't opened yet.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "VisualDTO".
+ */
+export interface VisualDTO {
+  answer?: VisualAnswerDTO | null;
+  by: string;
+  created_at: number;
+  id: string;
+  kept: boolean;
+  kind: "visual" | "plan";
+  options?: VisualOptionDTO[] | null;
+  question?: string | null;
+  rev: number;
+  session: string;
+  title: string;
+  unread: boolean;
 }
 /**
  * This interface was referenced by `ApiSchema`'s JSON-Schema

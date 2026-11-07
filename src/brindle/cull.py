@@ -48,6 +48,7 @@ import os
 import re
 import signal
 import time
+from contextlib import ExitStack
 from pathlib import Path
 
 from brindle import agents, git, procs, tmux
@@ -283,7 +284,10 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
     decline_environment_setups(db, panes)
     done.extend(settle_startups(db, now, panes))
     done.extend(note_stuck(db, now, panes))
+    # Before the idle reminder: a stop on an API error is told with its kind.
+    done.extend(note_api_errors(db, now, panes))
     done.extend(note_idle_unreported(db, now, panes))
+    done.extend(note_unreported_commits(db, now, panes))
     done.extend(note_reported_stuck(db, now, panes))
     done.extend(note_stalled(db, now, panes))
     done.extend(note_long_commands(db, now, panes))
@@ -360,7 +364,14 @@ def note_dead_panes(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
         cause = exit_cause(*exits[a.tmux_window])
         # Only from the status it was read in, and only once: a hook that
         # moved it since, or another sweep that got there first, wins.
-        status = db.claim_exited(a.id, a.status, f"exited: {cause}")
+        with ExitStack() as hold:
+            if a.mode == "review":
+                hold.enter_context(agents.review_dispatch_lock(a.workspace_id))
+                current = db.get_agent(a.id)
+                if (current is None or current.tmux_window != a.tmux_window
+                        or current.tmux_server != a.tmux_server or agents.alive_or_starting(current)):
+                    continue
+            status = db.claim_exited(a.id, a.status, f"exited: {cause}")
         if status is None:
             continue
         db.end_native_subagents(a.id)
@@ -372,6 +383,11 @@ def note_dead_panes(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
         if not a.parent_id:
             continue
         ws = db.get_workspace(a.workspace_id)
+        if a.mode == "review" and ws is not None:
+            from brindle import pipeline
+
+            if pipeline.on_reviewer_dead(db, a, ws):
+                continue
         where = f" on branch `{ws.branch}`" if ws else ""
         who = "Reviewer" if a.mode == "review" else "Worker"
         body = (f"{who} {a.id} ({a.profile}, {a.provider}){where} stopped before it reported: "
@@ -379,6 +395,11 @@ def note_dead_panes(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
                 "worktree and branch are untouched. Resume it with `brindle continue` (which "
                 "restarts a live session's failed workers), or rewind it to an earlier turn "
                 "with rewind_agent.")
+        if a.mode == "review":
+            from brindle import launch_health
+
+            if error := launch_health.last_error(a):
+                body += f" Last pane error: {error}"
         try:
             agents.send_message(db, a.parent_id, body, sender_id=a.id)
         except agents.AgentError:
@@ -548,8 +569,6 @@ def note_idle_unreported(db: DB, now: float, panes: dict[str, bool]) -> list[str
     report, so it counts as unreported while it hasn't reported again since
     the review that asked for fixes (committing doesn't count), and its spell
     starts no earlier than that review."""
-    from brindle.providers import get_provider
-
     done = []
     owners = agents.pane_owners(db, panes)
     for a in db.list_agents():
@@ -561,16 +580,9 @@ def note_idle_unreported(db: DB, now: float, panes: dict[str, bool]) -> list[str
                 or not agents.runs_process(a) or not agents.same_server(a, panes)
                 or not agents.is_alive(a, panes) or not agents.owns_pane(db, a, owners)):
             continue
-        since = max(a.status_since or a.created_at, fix_round or 0)
-        provider = get_provider(a.provider)
-        if not (provider.uses_hooks and provider.announces_turns):
-            last = tmux.window_activity(a.tmux_window, server=agents.server_of(a))
-            if last is None:
-                continue  # no telling whether a later turn is running
-            since = max(since, last)
-        # Still changing files (a script or a background command editing its
-        # worktree) isn't idle. Commits don't count: see _fix_round_since.
-        since = max(since, _last_edit(db.get_workspace(a.workspace_id)))
+        since = _idle_since(db, a, fix_round or 0)
+        if since is None:
+            continue  # no telling whether a later turn is running
         if now - since < IDLE_UNREPORTED_AFTER or a.stuck_noted == since:
             continue
         won, previous = db.claim_note(a.id, since)
@@ -585,6 +597,100 @@ def note_idle_unreported(db: DB, now: float, panes: dict[str, bool]) -> list[str
                 db.release_note(a.id, since, previous)
         if sent:
             done.append(f"told {a.parent_id} that worker {a.id} is idle without reporting")
+    return done
+
+
+def _idle_since(db: DB, a: Agent, floor: float = 0) -> float | None:
+    """When ``a``, which its hooks report idle, last showed any sign of work, or
+    None when there's no telling. A provider with no hook for a turn starting
+    (Codex) stays 'idle' through later turns, so its pane's last output counts;
+    files changing in its worktree (a script or a background command) count
+    too. Commits don't: see _fix_round_since."""
+    from brindle.providers import get_provider
+
+    since = max(a.status_since or a.created_at, floor)
+    provider = get_provider(a.provider)
+    if not (provider.uses_hooks and provider.announces_turns):
+        last = tmux.window_activity(a.tmux_window, server=agents.server_of(a))
+        if last is None:
+            return None
+        since = max(since, last)
+    return max(since, _last_edit(db.get_workspace(a.workspace_id)))
+
+
+# How long a report may sit received or accepted, undelivered, before the
+# supervisor is told (a report that is being handled takes seconds).
+REPORT_GRACE = 120.0
+
+
+def _tell_once(db: DB, a: Agent, key: str, body: str) -> bool:
+    """Tell ``a``'s supervisor ``body``, once per ``key`` (a mark of its own in
+    agent_marks, so one notice never stands in for another): claimed in the
+    database first, and let go if the send fails."""
+    won, previous = db.claim_mark(a.id, key, "told")
+    if not won:
+        return False
+    sent = False
+    try:
+        agents.send_message(db, a.parent_id, body, sender_id=a.id)
+        sent = True
+    except agents.AgentError:
+        pass
+    finally:
+        if not sent:
+            db.set_mark(a.id, key, previous)
+    return sent
+
+
+def note_unreported_commits(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
+    """Tell each supervisor, once, about a worker whose report may have been
+    lost (a broken MCP connection, then back to waiting, with nobody told the
+    branch is ready): a report stuck received or accepted in the outbox past
+    REPORT_GRACE, or, for a worker idle at its prompt, commits no delivered
+    report covers (a branch with no report at all included)."""
+    from brindle import gates
+
+    done = []
+    for row in db.outbox_stuck(now - REPORT_GRACE):
+        a = db.get_agent(row["agent_id"])
+        if (a is None or not a.parent_id or a.dismissed_at is not None
+                or a.mode not in agents.FORWARDING_MODES):
+            continue
+        ws = db.get_workspace(a.workspace_id)
+        where = f"{ws.branch} (worker {a.id}, workspace {ws.id})" if ws else f"worker {a.id}"
+        if _tell_once(db, a, f"report:{row['id']}:{row['state']}", (
+                f"{where} has a report that was {row['state']} but not delivered; the worker may "
+                f"have failed to report. Ask it to call report_result again, or workspace_diff "
+                f"to review the branch.")):
+            done.append(f"told {a.parent_id} that worker {a.id} has an undelivered report")
+    owners = agents.pane_owners(db, panes)
+    for a in db.list_agents():
+        if (a.mode not in agents.FORWARDING_MODES or not a.parent_id
+                or a.dismissed_at is not None or a.status != "idle"
+                or not agents.runs_process(a) or not agents.same_server(a, panes)
+                or not agents.is_alive(a, panes) or not agents.owns_pane(db, a, owners)):
+            continue
+        since = _idle_since(db, a)
+        if since is None or now - since < IDLE_UNREPORTED_AFTER or agents.command_running(db, a):
+            continue
+        ws = db.get_workspace(a.workspace_id)
+        if ws is None or not os.path.isdir(ws.path) or not ws.base_branch:
+            continue
+        reported = db.outbox_last_delivered_head(a.id)
+        try:
+            head = gates.head(ws)
+            if head == reported:
+                continue
+            span = f"{reported}..HEAD" if reported and git.ok(["merge-base", "--is-ancestor", reported, "HEAD"], ws.path) \
+                else f"{ws.base_branch}..HEAD"
+            covered = len(git.run(["rev-list", span], ws.path).stdout.split())
+        except git.GitError:
+            continue
+        if covered and _tell_once(db, a, f"commits:{head}", (
+                f"{ws.branch} has {covered} unreported commits; the worker may have failed to "
+                f"report (worker {a.id}, workspace {ws.id}). Ask it to call report_result again, "
+                f"or workspace_diff to review the branch.")):
+            done.append(f"told {a.parent_id} that worker {a.id} has unreported commits")
     return done
 
 
@@ -915,6 +1021,55 @@ def note_silent(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
         if not _send_note(db, a, last, body):
             continue
         done.append(f"told {a.parent_id} that worker {a.id} has gone silent")
+    return done
+
+
+# How long a worker's pane must have shown a turn ended on an API error, with
+# nothing new, before a sweep takes it that no hook will say so: Claude Code's
+# own attempts redraw the pane, and its StopFailure hook runs within seconds.
+API_ERROR_GRACE = 60.0
+
+
+def note_api_errors(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
+    """A Claude Code worker whose pane shows its last turn ended on an API
+    error (529 Overloaded, a 5xx, ...) and has printed nothing since for
+    API_ERROR_GRACE, and whose supervisor hasn't been told about this stop:
+    its StopFailure hook never ran, so it would sit there forever. It may
+    still say 'processing', or a screen read (agents.reconcile, which the
+    dashboard runs) may have moved it to 'idle' already. Mark it idle (the
+    screen shows its prompt) and tell its supervisor once per stop
+    (agents.tell_parent_api_error). A model the account refuses is
+    note_model_refused's."""
+    from brindle import model_access
+    from brindle.providers import ClaudeCode
+
+    done = []
+    owners = agents.pane_owners(db, panes)
+    for a in db.list_agents():
+        if (a.mode not in agents.FORWARDING_MODES or not a.parent_id or a.result is not None
+                or a.dismissed_at is not None or a.provider != "claude" or a.headless
+                or a.status not in ("processing", "idle")
+                or (a.status == "idle" and db.mark(a.id, agents.API_ERROR_MARK) == agents.api_error_stop(a))
+                or not agents.runs_process(a) or not agents.same_server(a, panes)
+                or not agents.is_alive(a, panes) or not agents.owns_pane(db, a, owners)):
+            continue
+        activity = tmux.window_activity(a.tmux_window, server=agents.server_of(a))
+        if activity is None or now - activity < API_ERROR_GRACE:
+            continue
+        try:
+            screen = tmux.capture(a.tmux_window, lines=40, server=agents.server_of(a))
+        except tmux.TmuxError:
+            continue
+        error = ClaudeCode.api_error(screen)
+        if not error or model_access.classify(error):
+            continue
+        if a.status == "processing":
+            db.set_status(a.id, "idle", only_if="processing")
+        current = db.get_agent(a.id)
+        if current is None or current.status != "idle":
+            continue   # a hook moved it first
+        if agents.tell_parent_api_error(db, current, error):
+            done.append(f"told {a.parent_id} that worker {a.id} stopped on an API error")
     return done
 
 

@@ -79,6 +79,38 @@ agent_app = typer.Typer(no_args_is_help=True, help="Manage agents.")
 app.add_typer(agent_app, name="agent")
 app.add_typer(repo_cmds.app, name="repo")
 app.add_typer(keys_cmds.app, name="keys")
+trash_app = typer.Typer(no_args_is_help=True, help="Recover removed worktrees.")
+app.add_typer(trash_app, name="trash")
+
+
+@trash_app.command("list")
+def trash_list():
+    from brindle import disk, trash
+
+    for entry in trash.entries():
+        typer.echo(f"{entry['id']}  {disk.human(entry['size'])}  {entry['path']}")
+
+
+@trash_app.command("restore")
+def trash_restore(ident: str):
+    from brindle import trash
+
+    try:
+        typer.echo(trash.restore(ident))
+    except (OSError, git.GitError) as e:
+        _fail(str(e))
+
+
+@trash_app.command("empty")
+def trash_empty(yes: bool = typer.Option(False, "--yes", "-y")):
+    from brindle import trash
+
+    if not yes:
+        typer.confirm("Permanently empty the worktree trash?", abort=True)
+    try:
+        typer.echo(f"Removed {len(trash.empty())} trash entry(s)")
+    except (OSError, git.GitError) as e:
+        _fail(str(e))
 
 
 def _fail(msg: str) -> None:
@@ -1032,6 +1064,8 @@ def _tell_supervisors_about_delegation(db: DB) -> None:
 @app.command("autopilot", hidden=True)
 def autopilot_cmd(
     action: Optional[str] = typer.Argument(None, help="check runs the milestone checks now. Omit to show progress."),
+    analysis_doc: Optional[bool] = typer.Option(None, "--analysis-doc/--no-analysis-doc",
+                                               help="Request or cancel an analysis doc for this goal."),
 ) -> None:
     """Show the goal's progress or run its milestone checks."""
     from brindle import autopilot as pilot
@@ -1039,6 +1073,11 @@ def autopilot_cmd(
     db = DB()
     root_id = _session_root(db)
     root = db.get_agent(root_id)
+    if analysis_doc is not None:
+        try:
+            pilot.set_goal_analysis_doc(db, root_id, analysis_doc)
+        except pilot.AutopilotError as e:
+            _fail(str(e))
     if action in ("on", "off"):
         typer.echo("brindle's goal driver is always on; on/off is deprecated and ignored. Pause the session to stop it.")
         return
@@ -2795,7 +2834,7 @@ def services_cmd(
 @app.command()
 def rm(
     workspace: str,
-    force: bool = typer.Option(False, "--force", "-f", help="Discard uncommitted changes; ignore teardown failure."),
+    force: bool = typer.Option(False, "--force", "-f", help="Trash uncommitted changes too; ignore teardown failure."),
     delete_branch: Optional[bool] = typer.Option(None, "--delete-branch/--keep-branch", "-D/-K", help="Delete the branch (only if merged, unless --force), or keep it. Default: delete it once fully merged into its base."),
 ) -> None:
     """Stop a workspace's agents and remove its worktree; a fully merged branch goes too.
@@ -3407,6 +3446,74 @@ def cloud_credential_cmd(cloud: str = typer.Argument(..., help="aws, gcp or azur
     raise typer.Exit(cloud_credential.run(cloud, org))
 
 
+github_app = typer.Typer(no_args_is_help=True,
+                         help="Connect GitHub: brindle keeps its own sign-in, so git never asks the keychain.")
+
+
+@github_app.command("status")
+def github_status() -> None:
+    """Whether brindle has its own GitHub sign-in, and of what kind."""
+    from brindle import github_connect
+
+    typer.echo(f"GitHub: {github_connect.describe(github_connect.status())}")
+
+
+@github_app.command("connect")
+def github_connect_cmd(
+    gh: bool = typer.Option(False, "--gh", help="Copy your GitHub CLI sign-in (brindle gets the access gh has)."),
+    token: bool = typer.Option(False, "--token", help="Paste a fine-grained token (asked for, or read from stdin)."),
+    file: bool = typer.Option(False, "--file", help="Keep it in a 0600 file under brindle's home, not the keychain: "
+                                                    "no dialog ever, and readable by anything running as you."),
+) -> None:
+    """Give brindle its own GitHub sign-in: a copy of the GitHub CLI's, or a token."""
+    import getpass
+
+    from brindle import github_connect
+
+    if not gh and not token:
+        gh = github_connect.gh_available() and sys.stdin.isatty() and typer.confirm(
+            "Copy your GitHub CLI sign-in? brindle then has the same access to GitHub that gh has: "
+            "every repository you can reach. (No: paste a fine-grained token instead)", default=True)
+    try:
+        if gh:
+            state = github_connect.connect_gh(file=file)
+        else:
+            if sys.stdin.isatty():
+                typer.echo("Make a fine-grained token at https://github.com/settings/personal-access-tokens/new "
+                           "for the repositories brindle should reach, with Contents, Pull requests and "
+                           "Workflows read and write.")
+            pasted = getpass.getpass("Token: ") if sys.stdin.isatty() else sys.stdin.readline()
+            state = github_connect.connect_token(pasted, file=file)
+    except github_connect.ConnectError as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(1) from None
+    typer.echo(f"GitHub: {github_connect.describe(state)}")
+
+
+@github_app.command("disconnect")
+def github_disconnect() -> None:
+    """Forget brindle's GitHub sign-in. Nothing is revoked on GitHub."""
+    from brindle import github_connect
+
+    try:
+        github_connect.disconnect()
+    except github_connect.ConnectError as e:
+        typer.echo(str(e), err=True)
+        raise typer.Exit(1) from None
+    typer.echo("GitHub: disconnected. A pasted token still exists on GitHub until you delete it there.")
+
+
+app.add_typer(github_app, name="github")
+
+
+@app.command("_github-credential", hidden=True)
+def github_credential_cmd(action: str = typer.Argument("")) -> None:
+    """git's credential helper for github.com, answering from brindle's GitHub connection."""
+    from brindle import github_connect
+
+    raise typer.Exit(github_connect.main([action]))
+
+
 @app.command("_sync-settings", hidden=True)
 def sync_settings_cmd() -> None:
     """Pull synced settings (brindle Pro); detached from `brindle`."""
@@ -3446,23 +3553,24 @@ def review_after_checks_cmd(workspace_id: str, caller: Optional[str] = typer.Opt
     prompt (or, when a check fails, send the worker the failing output and
     start none). Started detached from start_review, so the review still starts
     even if the MCP server that asked for it has exited."""
-    from brindle import gates
-    from brindle.config import load_repo_config
+    from brindle import gates, pipeline
 
     db = _helper_db()
     ws = db.get_workspace(workspace_id)
     if ws is None:
         return
+    # Older or explicit helpers may omit --report. Bind before doing any
+    # checks, never to whichever report happens to own the branch on failure.
+    if report is None:
+        with agents.review_dispatch_lock(ws.id):
+            report = pipeline.review_claim(db, ws)
     try:
         agents.review_after_checks(db, caller, ws, profile, focus, workspaces.config_for(db, ws),
                                    request_id=request_id, second=second, slot=slot, report=report)
     except (agents.AgentError, ValueError) as e:
-        from brindle import pipeline
-
-        worker = pipeline.piped_worker(db, ws)
-        if worker and worker.pipeline == "reviewing":
-            db.update_agent(worker.id, pipeline=None)   # nothing is reviewing it after all
-        if db.get_agent(caller) if caller else None:
+        if report is not None:
+            pipeline.review_start_failed(db, ws, report, str(e))
+        elif db.get_agent(caller) if caller else None:
             gates.tell(db, caller, f"[brindle] No reviewer could start on `{ws.branch}` after its "
                                    f"checks ({e}). Review it yourself with workspace_diff, then "
                                    "merge_workspace.")

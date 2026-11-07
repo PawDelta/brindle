@@ -1,6 +1,7 @@
 """Cloning a repo for the desktop app's project picker: the user's own
 ``git clone``, with their git credentials and SSH keys exactly as a terminal
-would use them. brindle never sees or stores a credential."""
+would use them. The one exception is github.com over HTTPS for someone who
+connected GitHub to brindle (brindle.github_connect): that connection signs in."""
 
 from __future__ import annotations
 
@@ -19,7 +20,8 @@ ALLOW_FILE_URLS = False
 
 _SCP = re.compile(r"^git@[^\s/:@-][^\s/:@]*:[^\s:]\S*$")      # git@<host>:<path>, never a relative local path
 _AUTH_FAILURE = re.compile(r"authentication failed|permission denied|could not read (?:username|password)|"
-                           r"terminal prompts disabled|access denied|invalid username or password", re.I)
+                           r"terminal prompts disabled|access denied|invalid username or password|"
+                           r"told us to quit", re.I)      # the last: brindle's GitHub connection, needing a reconnect
 TAIL = 20
 
 
@@ -46,12 +48,14 @@ def repo_name(url: str) -> str:
 
 
 def destination(url: str, parent_dir: str) -> Path:
-    """Where ``url`` would be cloned: refused unless ``parent_dir`` is a folder
-    and nothing is at the destination yet."""
+    """Where ``url`` would be cloned: create a missing parent folder, and
+    refuse an existing destination."""
     parent = Path(parent_dir).expanduser()
-    if not parent.is_dir():
-        raise ServiceError("invalid", f"not a folder: {parent_dir}")
     dest = parent / repo_name(validate_url(url))
+    try:
+        parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise ServiceError("invalid", f"can't create clone folder: {parent_dir}") from exc
     if dest.exists() or dest.is_symlink():
         raise ServiceError("exists", f"{dest} already exists", 409)
     return dest
@@ -61,8 +65,12 @@ def clone(url: str, dest: Path, on_line: Callable[[str], None]) -> str:
     """Run ``git clone --progress`` into ``dest``, passing each progress line
     (git ends them with CR or LF) to ``on_line``. Returns the path; a failure
     raises a ServiceError carrying git's own message."""
+    from brindle import git
+
     env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}      # no prompt to hang on: fail with git's message
-    proc = spawn.start(["git", "clone", "--progress", "--", url, str(dest)], stdin=subprocess.DEVNULL,
+    # Someone who connected GitHub to brindle signs in to github.com with that, not git's keychain helper.
+    proc = spawn.start(["git", *git.connected_github_config(), "clone", "--progress", "--", url, str(dest)],
+                       stdin=subprocess.DEVNULL,
                        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, env=env)
     lines: list[str] = []
     buf = b""

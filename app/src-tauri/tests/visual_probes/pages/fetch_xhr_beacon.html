@@ -1,0 +1,46 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>probe: fetch, XHR, beacon, EventSource, workers, modules</title>
+<p>Every scripted request API, aimed at the listener.</p>
+<script>{{PROBE}}</script>
+<script>
+attempt("fetch", fetch(HTTP + "/fetch").then((r) => "answered " + r.status));
+attempt("fetch no-cors", fetch(HTTP + "/fetch-no-cors", { mode: "no-cors" }).then((r) => "answered (opaque " + r.type + ")"));
+attempt("fetch POST", fetch(HTTP + "/fetch-post", { method: "POST", body: "secret" }).then((r) => "answered " + r.status));
+attempt("fetch keepalive", fetch(HTTP + "/fetch-keepalive", { keepalive: true, mode: "no-cors" }).then(() => "answered"));
+attempt("XHR", new Promise((resolve, reject) => {
+  const x = new XMLHttpRequest();
+  x.onload = () => resolve("answered " + x.status);
+  x.onerror = () => reject();
+  try { x.open("GET", HTTP + "/xhr"); x.send(); } catch (e) { reject(e); }
+}));
+// sendBeacon answers "queued" before the policy drops it: the listener decides.
+try { navigator.sendBeacon(HTTP + "/beacon", "secret"); } catch (_) {}
+attempt("EventSource", new Promise((resolve, reject) => {
+  try {
+    const s = new EventSource(HTTP + "/events");
+    s.onopen = () => { s.close(); resolve("opened"); };
+    s.onerror = () => { s.close(); reject(); };
+  } catch (e) { reject(e); }
+}));
+attempt("dynamic import", import(HTTP + "/module.js").then(() => "loaded"));
+attempt("Worker", new Promise((resolve, reject) => {
+  try { const w = new Worker(HTTP + "/worker.js"); w.onerror = () => reject(); w.onmessage = () => resolve("ran"); } catch (e) { reject(e); }
+}));
+attempt("SharedWorker", new Promise((resolve, reject) => {
+  try { const w = new SharedWorker(HTTP + "/shared.js"); w.onerror = () => reject(); w.port.onmessage = () => resolve("ran"); } catch (e) { reject(e); }
+}));
+// The getter itself throws in a sandboxed document.
+attempt("serviceWorker", new Promise((resolve, reject) => {
+  try { navigator.serviceWorker.register(HTTP + "/sw.js").then(() => resolve("registered"), reject); } catch (e) { reject(e); }
+}));
+attempt("blob-wrapped worker", new Promise((resolve, reject) => {
+  try {
+    const code = "fetch('" + HTTP + "/from-worker').then(() => postMessage('answered'), () => postMessage(''))";
+    const w = new Worker(URL.createObjectURL(new Blob([code], { type: "text/javascript" })));
+    w.onerror = () => reject();
+    w.onmessage = (e) => (e.data ? resolve("worker " + e.data) : reject());
+  } catch (e) { reject(e); }
+}));
+done();
+</script>

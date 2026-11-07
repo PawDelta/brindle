@@ -14,19 +14,27 @@
 # Credentials as the workflow's signing setup exports them: APPLE_API_KEY_PATH,
 # APPLE_API_KEY and APPLE_API_ISSUER, else APPLE_ID, APPLE_PASSWORD and
 # APPLE_TEAM_ID. NOTARY_TRIES (default 5) and NOTARY_PAUSE (seconds, default
-# 30, times the try) set the retries. STAPLE_TRIES (default 12) and STAPLE_PAUSE
-# (default 30, times the try) allow 33 minutes for Apple's ticket service.
+# 30, times the try) set submission backoff. STAPLE_TRIES (default 12) and
+# STAPLE_PAUSE (default 30) allow 33 minutes for ticket propagation. With
+# --staple-only APP, only attach and validate the already accepted app's ticket.
 set -uo pipefail
 
+staple_only=false
+if [ "${1:-}" = "--staple-only" ]; then
+  staple_only=true
+  shift
+fi
 dmg="${1:?usage: notarize_dmg.sh DMG}"
 name="$(basename "$dmg")"
 tries="${NOTARY_TRIES:-5}" pause="${NOTARY_PAUSE:-30}"
 
 codesign --verify --strict --verbose=2 "$dmg" || { echo "::error::$name isn't validly signed"; exit 1; }
+if [ "$staple_only" = false ]; then
 if [ -n "${APPLE_API_KEY_PATH:-}" ]; then
   auth=(--key "$APPLE_API_KEY_PATH" --key-id "$APPLE_API_KEY" --issuer "$APPLE_API_ISSUER")
 else
   auth=(--apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" --team-id "$APPLE_TEAM_ID")
+fi
 fi
 field() { jq -r ".$1 // empty" <<<"$2" 2>/dev/null || true; }
 again() {  # what, attempt, detail
@@ -34,6 +42,7 @@ again() {  # what, attempt, detail
   [ "$2" = "$tries" ] || sleep $((pause * $2))
 }
 
+if [ "$staple_only" = false ]; then
 id=""
 for attempt in $(seq 1 "$tries"); do
   out="$(xcrun notarytool submit "$dmg" "${auth[@]}" --output-format json)"
@@ -62,6 +71,7 @@ if [ "$status" != Accepted ]; then
   echo "::error::notarization of $name ($id) ended '${status:-no answer}' after $tries tries"
   xcrun notarytool log "$id" "${auth[@]}" || true
   exit 1
+fi
 fi
 
 tries="${STAPLE_TRIES:-12}" pause="${STAPLE_PAUSE:-30}"

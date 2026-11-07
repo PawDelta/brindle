@@ -398,6 +398,14 @@ def _clipboard_check() -> list[Check]:
                   "no pbcopy, wl-copy or xclip: mouse selection copies only within tmux")]
 
 
+def _github_check() -> list[Check]:
+    """brindle's own GitHub sign-in (brindle.github_connect): one GitHub stopped taking is a warning."""
+    from brindle import github_connect
+
+    state = github_connect.status()
+    return [Check(WARN if state["needs_reconnect"] else OK, "GitHub", github_connect.describe(state))]
+
+
 def _sidebar_check() -> list[Check]:
     return [Check(OK, "sidebar",
                   "`brindle sidebar` (or prefix S in tmux) brings a lost sidebar back to the session you're in")]
@@ -456,6 +464,7 @@ def _steps(repo_root: str | None, db: DB | None) -> list[tuple[str, object, floa
         ("self-serve", _self_serve_checks, CHECK_SECONDS),
         ("sign-in pause", _signin_pause_checks, CHECK_SECONDS),
         ("gh", tool("gh", False, "only needed for `brindle pr` and `brindle new --pr`"), CHECK_SECONDS),
+        ("GitHub", _github_check, CHECK_SECONDS),
         ("pre-commit", tool("pre-commit", False, "only needed if the repo uses pre-commit hooks"),
          CHECK_SECONDS),
         ("graphify", tool("graphify", False, "only needed for the code map agents can query"),

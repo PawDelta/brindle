@@ -22,6 +22,8 @@ import type {
   PermissionLimitsDTO,
   PermissionPolicyDTO,
   PermissionRuleDTO,
+  PlanCommentDTO,
+  PlanDTO,
   PreflightItemDTO,
   ProfileDTO,
   ProviderConnectionDTO,
@@ -322,12 +324,70 @@ export interface GoalEnabledAck {
 }
 
 export interface Meta {
+  visuals?: boolean;
+  /* The daemon is still bringing back sessions from its previous shutdown. */
+  resuming?: boolean;
   engine_version: string;
   api_version: string;
   pid: number;
   db_path: string;
   tmux: boolean;
   airgap: boolean;
+}
+
+/* The visualizer's wave-1 contract (design/visualizer-build-plan.html §4; brindle/visuals.py,
+   daemon/routes_visuals.py): a page an agent published into a session, its options when it asks
+   the person to choose, and the person's answer once given. `rev` is the revision on screen; an
+   answer names it, and a newer revision makes an older one's answer a 409. */
+export interface VisualOption {
+  id: string;
+  label: string;
+  detail?: string;
+}
+
+export interface VisualAnswer {
+  option: string;
+  note: string;
+  at: number;
+}
+
+export interface VisualDTO {
+  id: string;
+  session: string;
+  title: string;
+  /* The agent that published it. */
+  by: string;
+  kind: "visual" | "plan";
+  rev: number;
+  question?: string;
+  options?: VisualOption[];
+  answer?: VisualAnswer | null;
+  kept: boolean;
+  unread: boolean;
+  created_at: number;
+}
+
+/* Knowledge › Kept visuals: a copy kept from a session, readable after the session is gone. */
+export interface KeptVisualDTO {
+  id: string;
+  title: string;
+  from_session_name: string;
+  repo: string;
+  answer?: VisualAnswer | null;
+  kept_at: number;
+}
+
+/* A planning doc (brindle/plans.py): markdown the app renders itself, by section. */
+export type Plan = PlanDTO;
+export type PlanComment = PlanCommentDTO;
+
+/* The person's verdict on the plan revision on screen: approve, or redirect with what to change. */
+export interface PlanVerdict {
+  rev: number;
+  approved: boolean;
+  picks: Record<string, string>;
+  comments: PlanComment[];
+  note: string;
 }
 
 export type Repo = RepoDTO;
@@ -756,11 +816,27 @@ export interface ConfigUpdated {
    person's own settings that are not a repo's. `claude_permission_mode`
    (config.claude_permission_mode): "default" holds Claude's permission
    requests for the Inbox; "auto" lets Claude approve most commands itself.
+   `opencode_permission_mode` (config.opencode_permission_mode), for OpenCode
+   sessions whose profile sets none: "ask" keeps OpenCode's own prompts;
+   "auto" lets edits run; "autonomous" asks nothing and brindle's rules decide
+   each call, refusing what they can't check (asking again with the rules off).
    A PATCH with any other value is refused (400). */
 export type ClaudePermissionMode = "default" | "auto";
+export type OpenCodePermissionMode = "ask" | "auto" | "autonomous";
+
+export interface VisualOffer {
+  id: string;
+  kind: string;
+  counts: Record<string, number>;
+  expires_at: number;
+  confirmation?: "visual" | "plan";
+}
 
 export interface UserSettings {
+  visuals?: "on" | "off";
   claude_permission_mode: ClaudePermissionMode;
+  /* Absent from an engine older than this setting. */
+  opencode_permission_mode?: OpenCodePermissionMode;
 }
 
 /* GET and PUT /debug (staff-only debug logging, owner decision): whether
@@ -1112,6 +1188,19 @@ export interface DaemonConfig {
   fetch?: typeof fetch;
 }
 
+/* GET/POST/DELETE /github/connection. `expires_at` is an ISO date or unix seconds (the contract doesn't say), or null. */
+export interface GithubConnection {
+  connected: boolean;
+  login: string | null;
+  route: "gh" | "token" | null;
+  storage: "keychain" | "file" | null;
+  expires_at: string | number | null;
+  needs_reconnect: boolean;
+  gh_available: boolean;
+}
+
+export type GithubConnect = { route: "gh" } | { route: "token"; token: string };
+
 export class DaemonError extends Error {
   /* The engine's ServiceError code ("not_found", "conflict", ...), "unreachable"
      when no response came back, or "http" for a response without an error body. */
@@ -1170,6 +1259,21 @@ export class DaemonClient {
      only ever from a click. */
   installDeveloperTools() {
     return this.post<{ started: boolean }>("/developer-tools/install", {});
+  }
+
+  /* Connect GitHub (engine branch feat/connect-github): how brindle reaches private
+     repositories over HTTPS. Typed here by hand until api-schema.json has the routes.
+     POST throws a DaemonError coded github_token_invalid or github_gh_unavailable. */
+  githubConnection() {
+    return this.get<GithubConnection>("/github/connection");
+  }
+
+  connectGithub(body: GithubConnect) {
+    return this.post<GithubConnection>("/github/connection", body);
+  }
+
+  disconnectGithub() {
+    return this.delete<GithubConnection>("/github/connection", {});
   }
 
   /* A folder on this machine, as a repo brindle works in. */
@@ -1295,6 +1399,10 @@ export class DaemonClient {
   /* Autopilot on or off for the session's goal. */
   setGoalEnabled(root: string, enabled: boolean) {
     return this.post<GoalEnabledAck>("/goal/enabled", { root, enabled });
+  }
+
+  setGoalAnalysisDoc(root: string, analysis_doc: boolean) {
+    return this.post<{ analysis_doc: boolean }>("/goal/analysis-doc", { root, analysis_doc });
   }
 
   inbox(repo?: string) {
@@ -1453,6 +1561,82 @@ export class DaemonClient {
     return this.delete<{ left: number }>(`/kb/sources/${encodeURIComponent(id)}/library?repo=${encodeURIComponent(repo)}`, {});
   }
 
+  /* A session's visuals, newest first. An engine without the visualizer answers 404. */
+  async visuals(root: string): Promise<VisualDTO[]> {
+    const got = await this.get<VisualDTO[] | { visuals?: VisualDTO[] }>(`${this.sessionPath(root)}/visuals`);
+    return Array.isArray(got) ? got : (got.visuals ?? []);
+  }
+
+  visualOffer(root: string) {
+    return this.get<VisualOffer | null>(`${this.sessionPath(root)}/visual-offer`);
+  }
+
+  beginVisualInput(root: string, expiresAt: number, signal?: AbortSignal) {
+    return this.request<{ generation: number }>(this.url(`${this.sessionPath(root)}/visual-input`), {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ begin: true, expires_at: expiresAt }), signal,
+    });
+  }
+
+  visualInput(root: string, text: string, expiresAt?: number, signal?: AbortSignal,
+              observation?: { generation: number; sequence: number; submitted_at: number }) {
+    return this.request<{ observed: boolean }>(this.url(`${this.sessionPath(root)}/visual-input`), {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text, expires_at: expiresAt, ...observation }), signal,
+    });
+  }
+
+  refreshVisualInput(root: string, observer: number, expiresAt: number, signal: AbortSignal | undefined, submittedAt: number) {
+    return this.request<{ generation: number }>(this.url(`${this.sessionPath(root)}/visual-input`), {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ refresh: observer, expires_at: expiresAt, submitted_at: submittedAt }), signal,
+    });
+  }
+
+  resolveVisualOffer(root: string, offer: string, accept: boolean) {
+    return this.post<{ accepted: boolean }>(`${this.sessionPath(root)}/visual-offer`, { offer, accept });
+  }
+
+  /* The person's answer to the revision on screen; a newer revision makes this a 409. */
+  answerVisual(id: string, rev: number, option: string, note: string) {
+    return this.post<VisualDTO>(`/visuals/${encodeURIComponent(id)}/answer`, { rev, option, note });
+  }
+
+  exportVisual(id: string, rev: number, html: string, destination: ExportDestination = "download", markdown?: string) {
+    return this.post<{ filename: string; mime: string; content_b64: string }>(`/visuals/${encodeURIComponent(id)}/snapshot`, { rev, html, destination, markdown });
+  }
+
+  keepVisual(id: string) {
+    return this.post<VisualDTO>(`/visuals/${encodeURIComponent(id)}/keep`, {});
+  }
+
+  unkeepVisual(id: string) {
+    return this.delete<VisualDTO>(`/visuals/${encodeURIComponent(id)}/keep`, {});
+  }
+
+  markVisualRead(id: string) {
+    return this.post<unknown>(`/visuals/${encodeURIComponent(id)}/read`, {});
+  }
+
+  /* A planning doc: the visual of kind "plan" with the same id. */
+  plan(id: string) {
+    return this.get<Plan>(`/plans/${encodeURIComponent(id)}`);
+  }
+
+  /* Approve or redirect the revision on screen; a newer revision, or a second verdict, is a 409. */
+  decidePlan(id: string, verdict: PlanVerdict) {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/decide`, verdict);
+  }
+
+  async keptVisuals(): Promise<KeptVisualDTO[]> {
+    const got = await this.get<KeptVisualDTO[] | { visuals?: KeptVisualDTO[] }>("/kept-visuals");
+    return Array.isArray(got) ? got : (got.visuals ?? []);
+  }
+
+  keptVisual(id: string) {
+    return this.get<KeptVisualDTO>(`/kept-visuals/${encodeURIComponent(id)}`);
+  }
+
   /* The analysis-doc library (brindle Pro), through the daemon; nothing is kept on disk.
      A plan without it throws DaemonError "not_entitled". */
   async docs(query: DocsQuery = {}): Promise<{ docs: AnalysisDoc[] }> {
@@ -1559,7 +1743,7 @@ export class DaemonClient {
     return this.patch<ConfigUpdated>("/config", body);
   }
 
-  /* The person's own settings (~/.brindle/config.json's claude_permission_mode). */
+  /* The person's own settings (~/.brindle/config.json's claude_ and opencode_permission_mode). */
   userSettings() {
     return this.get<UserSettings>("/user-settings");
   }

@@ -213,8 +213,12 @@ def test_queued_reports_only_dispatch_the_latest_review(db, ws, boss, monkeypatc
     def checks(*args, **kwargs):
         checked.append(gates.head(ws))
         if supersede == "during checks" and len(checked) == 1:
+            previous = db.get_agent("worker").reviewing_since
+            # Receipt deduplication and review dispatch must see the same new commit.
             monkeypatch.setattr(gates, "head", lambda _: "new-sha")
+            monkeypatch.setattr(agents, "_branch_head", lambda _: "new-sha")
             report()
+            assert db.get_agent("worker").reviewing_since != previous
             assert kwargs["cancel"]()
         return "PASS"
 

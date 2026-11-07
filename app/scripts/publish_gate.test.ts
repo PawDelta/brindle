@@ -5,10 +5,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { gunzipSync } from "node:zlib";
 
 const gate = fileURLToPath(new URL("./publish_gate.sh", import.meta.url));
 const retry = fileURLToPath(new URL("./retry.sh", import.meta.url));
 const notarizeDmg = fileURLToPath(new URL("./notarize_dmg.sh", import.meta.url));
+const packageMacos = fileURLToPath(new URL("./package_macos.sh", import.meta.url));
 const buildEngine = fileURLToPath(new URL("./build_engine.sh", import.meta.url));
 const workflow = fileURLToPath(new URL("../../.github/workflows/app-release.yml", import.meta.url));
 const engineWorkflow = (name: string) => fileURLToPath(new URL(`../../.github/workflows/${name}`, import.meta.url));
@@ -113,13 +115,13 @@ describe("app-release publish gate", () => {
     }
   });
 
-  it("builds each Mac architecture on its own runner and publishes only after both, with one bundle each in latest.json", () => {
+  it("builds both Mac architectures on Apple Silicon and publishes only after both, with one bundle each in latest.json", () => {
     const text = readFileSync(workflow, "utf8");
     expect(text).not.toContain("universal-apple-darwin");
     expect(text).toMatch(/target: aarch64-apple-darwin\n\s+runner: macos-latest\n/);
-    expect(text).toMatch(/target: x86_64-apple-darwin\n\s+runner: macos-15-intel\n/);
+    expect(text).toMatch(/target: x86_64-apple-darwin\n\s+runner: macos-latest\n/);
     const publish = text.slice(text.indexOf("\n  macos-publish:\n"), text.indexOf("\n  linux:\n"));
-    expect(publish).toContain("    needs: [stable-gate, macos]\n");
+    expect(publish).toContain("    needs: [release-gate, macos]\n");
     expect(publish).toContain('"darwin-aarch64": {signature: $arm_sig, url: $arm_url}');
     expect(publish).toContain('"darwin-x86_64": {signature: $x64_sig, url: $x64_url}');
     const build = text.slice(text.indexOf("\n  macos:\n"), text.indexOf("\n  macos-publish:\n"));
@@ -167,19 +169,19 @@ describe("app-release publish gate", () => {
     ];
     for (const [env, staffFile, key] of keys) expect(updaterKey(env, staffFile), JSON.stringify(env)).toBe(key);
     // A scheduled run builds no release (and so signs and publishes nothing): only the nightly smoke runs.
-    // A release-branch push builds the Macs only, once release-gate says so, and publishes them only from release-publish.
-    // A pushed tag builds only past stable-gate: its commit on main (the staff channel's source), approved in desktop-release.
-    const release = "(github.event_name == 'push' && github.ref_type == 'tag' && needs.stable-gate.result == 'success') || (github.event_name == 'workflow_dispatch' && !inputs.nightly)";
+    // A release-branch push builds the Macs only, once staff-gate says so, and publishes them only from release-publish.
+    // A pushed tag builds only past release-gate: its commit on main, approved in the secret-free release-gate environment.
+    const release = "(github.event_name == 'push' && github.ref_type == 'tag' && needs.release-gate.result == 'success') || (github.event_name == 'workflow_dispatch' && !inputs.nightly)";
     for (const name of ["macos", "macos-publish", "linux", "windows"]) {
       expect(job(name), name).toContain(release.split(" || ")[0]);
-      expect(job(name), name).toMatch(/\n {4}needs: (stable-gate|\[.*\bstable-gate\b.*\])\n/);
+      expect(job(name), name).toMatch(/\n {4}needs: (release-gate|\[.*\brelease-gate\b.*\])\n/);
     }
-    expect(job("stable-gate")).toContain("if: github.event_name == 'push' && github.ref_type == 'tag'\n");
-    expect(job("stable-gate")).toContain("environment: desktop-release\n");
-    expect(jobOf(text, "stable-gate")).toContain('git merge-base --is-ancestor "$GITHUB_SHA" origin/main');
+    expect(job("release-gate")).toContain("if: github.event_name == 'push' && github.ref_type == 'tag'\n");
+    expect(job("release-gate")).toContain("environment: release-gate\n");
+    expect(jobOf(text, "release-gate")).toContain('git merge-base --is-ancestor "$GITHUB_SHA" origin/main');
     for (const name of ["macos-publish", "linux", "windows"]) expect(job(name), name).toContain(release);
-    expect(job("macos")).toContain("|| needs.release-gate.outputs.go == 'true')");
-    expect(job("release-gate")).toContain("if: github.event_name == 'push' && github.ref == 'refs/heads/main'");
+    expect(job("macos")).toContain("|| needs.staff-gate.outputs.go == 'true')");
+    expect(job("staff-gate")).toContain("if: github.event_name == 'push' && github.ref == 'refs/heads/main'");
     expect(job("nightly")).toContain("if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.nightly)");
     expect(text).toContain('[ "$REF_NAME" != "app-v$version" ]');
     const channel = text.match(/^\s+(case "\$version" in .*esac)$/m)?.[1] ?? "";
@@ -259,13 +261,21 @@ describe("app-release retries (app/docs/release-failures.md)", () => {
    * notarize_dmg.sh against a fake xcrun: the first `submitFails` uploads and `stapleFails` staples fail as a
    * dropped connection does, and each `notarytool wait` answers the next of `waits` ("none": no answer at all).
    */
-  function notarize(opts: { submitFails?: number; waits?: string[]; stapleFails?: number; env?: Record<string, string> }) {
+  function notarize(opts: { submitFails?: number; waits?: string[]; stapleFails?: number; stapleOnly?: boolean; packageAfter?: boolean; env?: Record<string, string> }) {
     const fake = mkdtempSync(join(tmpdir(), "notarize-"));
     const script = (name: string, body: string) => {
       writeFileSync(join(fake, name), `#!/usr/bin/env bash\n${body}\n`);
       chmodSync(join(fake, name), 0o755);
     };
-    script("codesign", "exit 0");
+    script("codesign", 'echo "codesign $*" >> "$FAKE/calls"');
+    script("mktemp", 'mkdir -p "$FAKE/package"; echo "$FAKE/package"');
+    script("hdiutil", `echo "hdiutil $*" >> "$FAKE/calls"
+if [ "$1" = create ]; then
+  [ "$(cat "$PACKAGE_CONTENTS/brindle.app/ticket")" = stapled ] || exit 1
+  touch "\${@: -1}"
+fi`);
+    script("ditto", 'mkdir -p "$2"; cp -R "$1/." "$2/"');
+    script("tauri", 'echo "tauri $*" >> "$FAKE/calls"; touch "\${@: -1}.sig"');
     script(
       "xcrun",
       `echo "$*" >> "$FAKE/calls"
@@ -277,7 +287,8 @@ case "$1 $2" in
     [ "$s" != none ] || { echo "The network connection was lost." >&2; exit 1; }
     echo "{\\"id\\": \\"$3\\", \\"status\\": \\"$s\\"}" ;;
   "notarytool log") echo "the log of $3" ;;
-  "stapler staple") [ "$(count staple)" -gt "$STAPLE_FAILS" ] || { echo "The staple and validate action failed! Error 68." >&2; exit 68; } ;;
+  "stapler staple") [ "$(count staple)" -gt "$STAPLE_FAILS" ] || { echo "The staple and validate action failed! Error 68." >&2; exit 68; }
+    if [ -d "$3" ]; then echo stapled > "$3/ticket"; fi ;;
 esac`,
     );
     const env = {
@@ -293,15 +304,31 @@ esac`,
       APPLE_API_KEY_PATH: "/k/AuthKey_K.p8",
       APPLE_API_KEY: "K",
       APPLE_API_ISSUER: "I",
+      APPLE_ID: "",
+      APPLE_PASSWORD: "",
+      APPLE_TEAM_ID: "",
       ...opts.env,
     };
-    const run = spawnSync("bash", [notarizeDmg, "/out/brindle_0.1.0_x86_64.dmg"], { env, encoding: "utf8" });
+    const app = join(fake, "brindle.app");
+    mkdirSync(app);
+    writeFileSync(join(app, "ticket"), "unstapled");
+    const bundle = join(fake, "bundle");
+    mkdirSync(join(bundle, "macos"), { recursive: true });
+    const run = spawnSync("bash", ["-c", 'bash "$1" "${@:2}" && if [ "$PACKAGE_AFTER" = true ]; then bash "$PACKAGE_SCRIPT"; fi',
+      "test", notarizeDmg, ...(opts.stapleOnly ? ["--staple-only", app] : ["/out/brindle_0.1.0_x86_64.dmg"])], {
+      env: { ...env, PACKAGE_AFTER: String(opts.packageAfter ?? false), PACKAGE_SCRIPT: packageMacos,
+        APP: app, BUNDLE: bundle, DMG: join(fake, "release.dmg"), VERSION: "0.1.0", UPDATER: "true",
+        APPLE_SIGNING_IDENTITY: "Developer ID", TAURI_CLI: join(fake, "tauri"),
+        RUNNER_TEMP: fake, PACKAGE_CONTENTS: join(fake, "package/contents") }, encoding: "utf8",
+    });
     let calls: string[] = [];
     try {
       calls = readFileSync(join(fake, "calls"), "utf8").trim().split("\n");
     } catch {}
     const of = (what: string) => calls.filter((c) => c.startsWith(what));
-    return { status: run.status, out: run.stdout, calls, of };
+    const archive = opts.packageAfter && run.status === 0
+      ? gunzipSync(readFileSync(join(bundle, "macos/brindle.app.tar.gz"))).toString() : "";
+    return { status: run.status, out: run.stdout + run.stderr, calls, of, archive };
   }
 
   it("notarizes and staples the DMG through dropped connections at every call to Apple", () => {
@@ -313,6 +340,17 @@ esac`,
     expect(run.of("stapler staple /out/brindle_0.1.0_x86_64.dmg")).toHaveLength(4);
     expect(run.of("stapler validate /out/brindle_0.1.0_x86_64.dmg")).toHaveLength(1);
     expect(run.of("notarytool submit")[0]).toContain("--key /k/AuthKey_K.p8 --key-id K --issuer I");
+    const recovered = notarize({ stapleOnly: true, stapleFails: 2, packageAfter: true,
+      env: { APPLE_API_KEY_PATH: "", APPLE_API_KEY: "", APPLE_API_ISSUER: "" } });
+    expect(recovered.status, recovered.out).toBe(0);
+    expect(recovered.of("notarytool")).toHaveLength(0);
+    expect(recovered.of("stapler staple")).toHaveLength(3);
+    expect(recovered.of("hdiutil create")).toHaveLength(1);
+    expect(recovered.archive).toContain("stapled\n");
+    expect(recovered.archive).not.toContain("unstapled");
+    expect(recovered.of("tauri signer sign --app-version 0.1.0")).toHaveLength(1);
+    expect(recovered.calls.findIndex(c => c.startsWith("hdiutil create")))
+      .toBeGreaterThan(recovered.calls.findIndex(c => c.startsWith("stapler validate")));
   });
 
   it("fails at once, with Apple's log, when Apple rejects the DMG", () => {
@@ -336,6 +374,12 @@ esac`,
     const staple = notarize({ stapleFails: 99 });
     expect(staple.status).toBe(1);
     expect(staple.of("stapler staple")).toHaveLength(5);
+    const app = notarize({ stapleOnly: true, stapleFails: 99, packageAfter: true,
+      env: { APPLE_API_KEY_PATH: "", APPLE_API_KEY: "", APPLE_API_ISSUER: "" } });
+    expect(app.status).toBe(1);
+    expect(app.of("stapler staple")).toHaveLength(5);
+    expect(app.of("notarytool")).toHaveLength(0);
+    expect(app.of("hdiutil create")).toHaveLength(0);
     // An Apple ID instead of an API key.
     const id = notarize({ env: { APPLE_API_KEY_PATH: "", APPLE_ID: "a@b", APPLE_PASSWORD: "p", APPLE_TEAM_ID: "T" } });
     expect(id.status).toBe(0);
@@ -352,7 +396,7 @@ esac`,
     // Apple: notarytool only through notarize_dmg.sh, each stapler call and spctl in a retry loop.
     expect(lines.filter((line) => line.includes("notarytool") && !line.trim().startsWith("#"))).toEqual([]);
     const step = (name: string) => text.slice(text.indexOf(`- name: ${name}\n`), text.indexOf("\n      - ", text.indexOf(`- name: ${name}\n`) + 1));
-    expect(step("Staple the app")).toMatch(/for attempt in [^;]+; do\n\s+if xcrun stapler validate/);
+    expect(step("Staple the app")).toContain('bash app/scripts/notarize_dmg.sh --staple-only "$APP"');
     expect(step("Gatekeeper")).toMatch(/for attempt in 1 2 3; do\n\s+out="\$\(spctl -a -vvv/);
     expect(step("Gatekeeper")).toMatch(/for attempt in 1 2 3 4 5; do\n\s+if xcrun stapler validate "\$APP"/);
     for (const curl of lines.filter((line) => /\bcurl /.test(line))) expect(curl).toContain("--retry 5 --retry-all-errors");

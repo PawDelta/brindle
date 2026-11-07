@@ -184,12 +184,16 @@ approximate. The 62 MB of site-packages is
 mostly cryptography, pydantic-core and their bytecode. The build already drops
 what the engine never uses: Tk, IDLE, ensurepip and pip, headers, man pages.
 
-**One architecture per build.** build_engine.sh builds for the Mac it runs on
-and refuses a different `TAURI_ENV_TARGET_TRIPLE`. A universal app would need
+**One architecture per build.** build_engine.sh follows `TAURI_ENV_TARGET_TRIPLE`
+(the host architecture when unset). Its Python download, tmux and static
+dependencies, and helper app all use that target. Intel builds on Apple
+Silicon need Rosetta to install Python packages and run the relocated engine
+and helper checks. A universal app would need
 two engines, built on (or cross-built for) each architecture and joined with
 `lipo` file by file, which would double the size. So the release ships separate
 arm64 and x86_64 downloads: `app-release.yml` builds `aarch64-apple-darwin`
-on an Apple Silicon runner and `x86_64-apple-darwin` on an Intel one, and
+and `x86_64-apple-darwin` on Apple Silicon runners, with `lipo -archs` checking
+the bundled app, Python, tmux and helper before publication, and
 `latest.json` points each architecture at its own updater bundle (see the
 README's "Releases").
 

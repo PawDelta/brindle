@@ -1,0 +1,38 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>probe: navigation</title>
+<p>Every way to leave the page carrying data: the host's navigation hook denies each, and the page stays.</p>
+<a id="link" href="http://127.0.0.1:{{PORT}}/link?d=secret">link</a>
+<a id="blank" href="http://127.0.0.1:{{PORT}}/link-blank?d=secret" target="_blank">new tab</a>
+<form id="get" action="http://127.0.0.1:{{PORT}}/form-get" method="get"><input name="d" value="secret"></form>
+<form id="post" action="http://127.0.0.1:{{PORT}}/form-post" method="post"><input name="d" value="secret"></form>
+<form id="other" action="{{ORIGIN}}/other/r1" method="get"></form>
+<base href="http://127.0.0.1:{{PORT}}/base/">
+<a id="relative" href="relative?d=secret">relative to the base</a>
+<script>{{PROBE}}</script>
+<script>
+const stillHere = () => location.href;
+const here = stillHere();
+document.getElementById("link").click();
+document.getElementById("blank").click();
+document.getElementById("relative").click();
+document.getElementById("get").submit();
+document.getElementById("post").submit();
+document.getElementById("other").submit();
+try { const w = window.open(HTTP + "/open?d=secret"); if (w) leak("window.open returned a window"); } catch (_) {}
+try { const w = window.open(ORIGIN + "/other/r1"); if (w) leak("window.open to another visual returned a window"); } catch (_) {}
+try { location.assign(HTTP + "/assign?d=secret"); } catch (_) {}
+try { location.replace(HTTP + "/replace?d=secret"); } catch (_) {}
+try { location.href = HTTP + "/href?d=secret"; } catch (_) {}
+try { location.href = ORIGIN + "/other/r1"; } catch (_) {}
+try { location.href = ORIGIN + "/kept/other"; } catch (_) {}
+try { location.href = "tauri://localhost/index.html"; } catch (_) {}
+try { location.href = "http://tauri.localhost/index.html"; } catch (_) {}
+try { history.pushState({}, "", HTTP + "/pushed"); } catch (_) {}
+// A fragment of the own page is the one navigation allowed.
+location.hash = "here";
+setTimeout(() => {
+  if (!stillHere().startsWith(here)) leak("navigated to " + stillHere());
+  done();
+}, 1500);
+</script>

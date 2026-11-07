@@ -498,9 +498,24 @@ def _report_only(worker: Agent, ws: Workspace) -> bool:
     return not git.dirty_files(ws.path, tracked_only=True)
 
 
-def on_report(db: DB, worker: Agent, ws: Workspace, result: str) -> bool:
+def on_report(db: DB, worker: Agent, ws: Workspace, result: str, outbox_id: int | None = None) -> bool:
     """Start the review of a reported branch. Returns whether the pipeline
     took the report (so the caller doesn't forward it to the supervisor)."""
+    with agents.review_dispatch_lock(ws.id):
+        if outbox_id is None:
+            row = agents._receive_report(db, worker.id, ws, result)
+            db.outbox_accept(row["id"], worker.id, row["payload"])
+            outbox_id = row["id"]
+        return _on_report(db, worker, ws, result, outbox_id)
+
+
+def _on_report(db: DB, worker: Agent, ws: Workspace, result: str, outbox_id: int) -> bool:
+    row = db.outbox_get(outbox_id)
+    if row["state"] in ("delivered", "superseded"):
+        return bool(row["delivery"] and row["delivery"].startswith("review "))
+    if row["fallback"] is not None:
+        _report_fallback(db, worker, ws, result, row)
+        return True
     try:
         cfg = load_repo_config(ws.repo_root, branch=ws.base_branch)
     except ValueError:
@@ -514,18 +529,23 @@ def on_report(db: DB, worker: Agent, ws: Workspace, result: str) -> bool:
         return False   # nothing to review or merge: the report goes straight to the supervisor
     dirty = git.dirty_files(ws.path, tracked_only=True)   # untracked scratch files don't travel with the branch
     if dirty:
-        db.update_agent(worker.id, pipeline=None)
-        _escalate(db, ws, worker)
         shown = ", ".join(dirty[:5]) + (f" and {len(dirty) - 5} more" if len(dirty) > 5 else "")
-        _tell(db, parent.id,
-              agents.condense(
-                  f"[brindle pipeline] {worker.id} reported on `{ws.branch}` but left uncommitted "
-                  f"changes ({shown}), so it can't be reviewed or merged. "
-                  f"Its report: {agents.first_line(result)}", result), worker.id)
+        text = agents.condense(
+            f"[brindle pipeline] {worker.id} reported on `{ws.branch}` but left uncommitted "
+            f"changes ({shown}), so it can't be reviewed or merged. "
+            f"Its report: {agents.first_line(result)}", result)
+        # The report's one delivery: the supervisor's message and the worker leaving
+        # the pipeline are stored together; the rest happens after, from that.
+        if db.outbox_deliver(outbox_id, message=agents._report_message(db, parent, text, worker.id),
+                             agent_fields={"pipeline": None}):
+            _escalate(db, ws, worker)
+            agents._notify_supervisor(db, parent)
         return True
     # Before the check run starts: it reads this report's claim (see review_claim).
     report = time.time()
-    db.update_agent(worker.id, pipeline="reviewing", reviewing_since=report, merge_failed=None)
+    claim = dict(pipeline="reviewing", reviewing_since=report, merge_failed=None)
+    if not db.outbox_deliver(outbox_id, agent_fields=claim):
+        return True   # this report was handled already: its claim and review stand
     _start_review(db, cfg, parent, worker, ws, result, report)
     return True
 
@@ -541,7 +561,9 @@ def review_state(db: DB, ws: Workspace, *, head_reader=None) -> str | None:
     if worker is None:
         return None
     merged = db.merged_sha(ws.id)
-    if not (worker.pipeline or worker.merge_failed or merged or db.last_review(ws.id)):
+    failures = [a for a in db.list_agents(ws.id) if a.mode == "review" and a.failed_why
+                and a.failed_why.startswith("review: ")]
+    if not (worker.pipeline or worker.merge_failed or merged or failures or db.last_review(ws.id)):
         return None   # an ordinary idle worker needs no git inspection on redraw
     try:
         sha = head_reader() if head_reader is not None else gates.head(ws)
@@ -552,6 +574,9 @@ def review_state(db: DB, ws: Workspace, *, head_reader=None) -> str | None:
     if worker.merge_failed and not worker.pipeline:
         why = " ".join(worker.merge_failed.split())
         return "merge failed: " + (why if len(why) <= 200 else why[:199] + "…")
+    for a in failures:
+        if a.review_sha == sha:
+            return "needs you: " + a.failed_why.removeprefix("review: ")
     checks = gates.checks_state(ws)
     if worker.pipeline == "ready":
         merging = f"merging, {checks}" if gates.marked("merge-run", ws.id) else "waiting to merge"
@@ -580,6 +605,20 @@ def _start_review(db: DB, cfg: RepoConfig, parent: Agent, worker: Agent, ws: Wor
     identity (its ``reviewing_since``), captured by the caller once and
     handed to every start: none looks it up later, so none can mistake a
     branch the checks have since sent back for a fresh one."""
+    with agents.review_dispatch_lock(ws.id):
+        _start_report_review(db, cfg, parent, worker, ws, result, report)
+
+
+def _start_report_review(db: DB, cfg: RepoConfig, parent: Agent, worker: Agent, ws: Workspace,
+                         result: str, report: float) -> None:
+    if not still_claimed(db, ws, report):
+        return
+    pending = db.conn.execute("SELECT * FROM report_outbox WHERE agent_id=? AND delivery=?"
+                              " AND state='accepted' AND fallback IS NOT NULL",
+                              (worker.id, f"review {report}")).fetchone()
+    if pending is not None:
+        _report_fallback(db, worker, ws, result, pending)
+        return
     try:
         second = second_profile(db, cfg, worker, ws)
         # With a second review both calls carry a concrete profile, so the
@@ -594,13 +633,38 @@ def _start_review(db: DB, cfg: RepoConfig, parent: Agent, worker: Agent, ws: Wor
                     agents.close(db, started.id)   # don't leave a lone first review running
                 raise
     except agents.AgentError as e:
-        db.update_agent(worker.id, pipeline=None)
+        review_start_failed(db, ws, report, str(e))
+
+
+def review_start_failed(db: DB, ws: Workspace, report: float, reason: str) -> None:
+    """Both immediate and detached launch failures belong to the captured report.
+
+    Keep its claim until the fallback commits. A helper that lost ownership
+    while unwinding must neither clear a newer review nor notify its parent.
+    """
+    with agents.review_dispatch_lock(ws.id):
+        worker = piped_worker(db, ws)
+        if worker is None or worker.pipeline != "reviewing" or worker.reviewing_since != report:
+            return   # an overlapping report or verdict now owns the branch
+        row = db.outbox_review_failed(worker.id, report, reason)
+        if row is not None:
+            _report_fallback(db, worker, ws, row["payload"], row)
+
+
+def _report_fallback(db: DB, worker: Agent, ws: Workspace, result: str, row) -> None:
+    """A failed review start is still the same report's delivery. Its claim
+    stays in place until the supervisor's message and pipeline exit commit."""
+    parent = db.get_agent(worker.parent_id) if worker.parent_id else None
+    if parent is None:
+        return
+    text = agents.condense(
+        f"[brindle pipeline] {worker.id} reported on `{ws.branch}`, but no reviewer could "
+        f"start ({row['fallback']}). Review it yourself with workspace_diff, then merge_workspace. "
+        f"Its report: {agents.first_line(result)}", result)
+    if db.outbox_deliver(row["id"], message=agents._report_message(db, parent, text, worker.id),
+                         agent_fields={"pipeline": None}):
         _escalate(db, ws, worker)
-        _tell(db, parent.id,
-              agents.condense(
-                  f"[brindle pipeline] {worker.id} reported on `{ws.branch}`, but no reviewer could "
-                  f"start ({e}). Review it yourself with workspace_diff, then merge_workspace. "
-                  f"Its report: {agents.first_line(result)}", result), worker.id)
+        agents._notify_supervisor(db, parent)
 
 
 def restart_review(db: DB, worker: Agent, ws: Workspace, since: float) -> bool:
@@ -858,6 +922,89 @@ def _supervisor_review_summary(ws: Workspace, worker: Agent, reviewer: Agent,
     return "\n\n".join(parts)
 
 
+def on_reviewer_dead(db: DB, reviewer: Agent, ws: Workspace) -> bool:
+    """Replace a piped branch's dead reviewer once, without waking its supervisor.
+
+    Share the dispatch lock with explicit requests and check helpers, including
+    the gap before the replacement's agent row exists. Read fresh rows inside
+    the lock so a second detector cannot spend another attempt or escalate a
+    stop that is already being handled.
+    """
+    from brindle import launch_health, redact, tmux
+    from brindle.profiles import profile_names
+
+    with agents.review_dispatch_lock(ws.id):
+        worker = piped_worker(db, ws)
+        if worker is None or worker.pipeline != "reviewing":
+            # Once escalated, later detectors must not send a second alarm.
+            current = db.get_agent(reviewer.id)
+            return bool(current and current.failed_why and current.failed_why.startswith("review: "))
+        current = db.get_agent(reviewer.id)
+        if current is None or current.result is not None:
+            return True
+        if (current.status in ("paused", "done")
+                or current.tmux_window != reviewer.tmux_window or current.tmux_server != reviewer.tmux_server
+                or agents.alive_or_starting(current)):
+            return True  # the observed process has been resumed or replaced
+        reviewer = current
+        try:
+            sha = gates.head(ws)
+        except git.GitError:
+            return False  # no branch remains to restart a review on
+        if reviewer.review_sha != sha or db.reviews_at(ws.id, sha):
+            db.update_agent(reviewer.id, status="done")
+            return True
+        others = [a for a in db.list_agents(ws.id) if a.mode == "review" and a.id != reviewer.id]
+        if any(a.result is None and a.review_sha == sha and agents.alive_or_starting(a)
+               and not a.unreported_noted for a in others):
+            db.update_agent(reviewer.id, status="done")
+            return True
+        profiles = {reviewer.profile, *profile_names(ws.repo_root), *(a.profile for a in others)}
+        report = review_claim(db, ws)
+        if any(agents._review_pending(ws.id, profile, sha, report) for profile in profiles):
+            db.update_agent(reviewer.id, status="done")
+            return True
+        # An explicit dispatcher may have claimed a slot before creating its row.
+        if db.conn.execute("SELECT 1 FROM review_claims WHERE workspace_id=? AND sha=? "
+                           "AND agent_id IS NULL AND claimed_at>?",
+                           (ws.id, sha, time.time() - agents.LAUNCH_GRACE)).fetchone():
+            return True
+        try:
+            cfg = load_repo_config(ws.repo_root, branch=ws.base_branch)
+        except ValueError:
+            cfg = RepoConfig()
+        error = launch_health.last_error(reviewer) or "No error text remains in the dead pane."
+        claimed = db.conn.execute("INSERT OR IGNORE INTO review_death_restarts (workspace_id, sha) "
+                                  "VALUES (?,?)", (ws.id, sha)).rowcount
+        if claimed:
+            parent = db.get_agent(worker.parent_id) if worker.parent_id else None
+            db.update_agent(reviewer.id, unreported_noted=int(time.time()))
+            try:
+                replacement = agents.request_review(
+                    db, parent, ws, reviewer.profile, cfg=cfg,
+                    check_summary=_cached_check_summary(db, ws, cfg, reviewer),
+                    second=bool(_review_slot(db, reviewer)), slot=db.review_slot(reviewer.id),
+                    expected_sha=sha,
+                )
+                if replacement is not None:
+                    db.set_result(reviewer.id, f"Replaced by reviewer {replacement.id} after process exit.")
+                    db.update_agent(reviewer.id, status="done")
+                return True
+            except agents.ReviewHeadMoved:
+                return True
+            except (agents.AgentError, tmux.TmuxError, OSError) as exc:
+                error += " Replacement could not start: " + redact.mask(str(exc))[:1000]
+        detail = (f"Reviewer {reviewer.id} exited without a verdict after automatic recovery. "
+                  f"Last pane error: {error} Fix the CLI installation, login or routing, then "
+                  f"request_review(\"{ws.id}\"). Review is still required before merging.")
+        db.update_agent(reviewer.id, status="failed", failed_why="review: " + detail,
+                        unreported_noted=int(time.time()))
+        db.update_agent(worker.id, pipeline=None)
+        _escalate(db, ws, worker)
+        _tell(db, worker.parent_id, f"[brindle pipeline] `{ws.branch}` needs you. {detail}", reviewer.id)
+        return True
+
+
 def on_reviewer_unreported(db: DB, reviewer: Agent, ws: Workspace) -> bool:
     """A reviewer of a piped branch stopped without a verdict, which would
     leave its worker in ``pipeline='reviewing'`` for good. Escalates only as
@@ -877,6 +1024,8 @@ def on_reviewer_unreported(db: DB, reviewer: Agent, ws: Workspace) -> bool:
     worker = piped_worker(db, ws)
     if worker is None or worker.pipeline != "reviewing":
         return False
+    if reviewer.review_sha and os.path.isdir(ws.path) and not agents.is_alive(reviewer):
+        return on_reviewer_dead(db, reviewer, ws)
     if agents.command_running(db, reviewer) or (
         agents.is_alive(reviewer) and agents.transcript_active(reviewer)
     ):
@@ -1110,6 +1259,11 @@ def _on_review(db: DB, reviewer: Agent, ws: Workspace, approved: bool,
             return True, False
         if second_review_pending(db, cfg, worker, ws):
             return True, False   # the other reviewer's verdict decides; both must approve
+        # An approval replay must not interrupt conflict resolution or repeat
+        # an escalation. Only a new conflicting commit gets another notice.
+        if db.conn.execute("SELECT 1 FROM pipeline_conflicts WHERE workspace_id=? AND sha=?",
+                           (ws.id, recorded.sha)).fetchone():
+            return True, False
         db.update_agent(worker.id, pipeline="ready")
         return True, True
     _send_back(db, ws, worker, cfg, summary, has_supervisor_action(summary),
@@ -1475,6 +1629,21 @@ def _retry_on_heavy(db: DB, worker: Agent, ws: Workspace, cfg: RepoConfig, why: 
     return True
 
 
+def _conflict_needs_you(db: DB, worker: Agent, ws: Workspace, files: list[str],
+                        report: str, why: str) -> None:
+    """A conflict with no usable worker belongs to the supervisor."""
+    db.update_agent(worker.id, pipeline=None, merge_failed=f"Conflict in {', '.join(files)}: {why}")
+    _escalate(db, ws, worker)
+    _tell(db, worker.parent_id,
+          agents.condense(
+              f"[brindle pipeline] `{ws.branch}` was approved, but merging `{ws.base_branch}` "
+              f"into it conflicts in: {', '.join(files)}, and its worker cannot resolve it "
+              f"({why}). This needs you: resolve it (in {ws.path}: `git merge {ws.base_branch}`, "
+              f"resolve, commit) or assign someone, then request_review and "
+              f"merge_workspace(\"{ws.id}\"). Worker: {agents.first_line(report)}",
+              f"Worker's report:\n{report}"), worker.id)
+
+
 def _resolve_conflict(db: DB, worker: Agent, ws: Workspace, cfg: RepoConfig,
                       files: list[str], report: str) -> None:
     """``ws``'s branch conflicts with its base. A protected path goes to the
@@ -1483,6 +1652,12 @@ def _resolve_conflict(db: DB, worker: Agent, ws: Workspace, cfg: RepoConfig,
     way the branch leaves 'ready': its next report starts a fresh review."""
     parent_id = worker.parent_id
     base = ws.base_branch
+    # _on_review and this handler run under the branch's merge lock. Keep
+    # the receipt in the DB so another sweep/process sees the same handoff.
+    sha = gates.head(ws)
+    with db.tx() as c:
+        c.execute("INSERT OR IGNORE INTO pipeline_conflicts (workspace_id, sha) VALUES (?,?)",
+                  (ws.id, sha))
     guarded = conflicts.protected(files, cfg.protected_paths)
     if guarded:
         db.update_agent(worker.id, pipeline=None)
@@ -1501,6 +1676,12 @@ def _resolve_conflict(db: DB, worker: Agent, ws: Workspace, cfg: RepoConfig,
         return
     task = resolution_task(ws, files, cfg)
     if agents.is_alive(worker):
+        # A pane can remain alive while its configured profile cannot run.
+        # Queuing it more instructions would leave the conflict unattended.
+        problem = autopilot._unavailable(worker.profile, cfg, ws.repo_root)
+        if problem:
+            _conflict_needs_you(db, worker, ws, files, report, problem)
+            return
         db.update_agent(worker.id, pipeline="resolving")
         try:
             agents.send_message(db, worker.id, task, sender_id=None)
@@ -1518,6 +1699,9 @@ def _resolve_conflict(db: DB, worker: Agent, ws: Workspace, cfg: RepoConfig,
                  "markers left, the tests covering the conflicting files pass, and report_result "
                  "was called")
     try:
+        problem = autopilot._unavailable(profile, cfg, ws.repo_root)
+        if problem:
+            raise agents.AgentError(problem)
         resolver, _ws = agents.delegate(db, parent, ws, profile, task, "assign", isolate=False,
                                         done_when=done_when, plan_first=False)
     except agents.NoRoom as e:
@@ -1530,18 +1714,7 @@ def _resolve_conflict(db: DB, worker: Agent, ws: Workspace, cfg: RepoConfig,
               f"({e}); list_tasks shows it waiting. Nothing to do unless that fails.", worker.id)
         return
     except agents.AgentError as e:
-        db.update_agent(worker.id, pipeline=None)
-        _escalate(db, ws, worker)
-        _tell(db, parent_id,
-              agents.condense(
-                  f"[brindle pipeline] `{ws.branch}` was approved, but merging `{base}` into it "
-                  f"conflicts in: {', '.join(files)}, its worker {worker.id} has finished, and no "
-                  f"worker could be started to resolve it ({e}). This needs you: resolve it (in "
-                  f"{ws.path}: `git merge {base}`, resolve, commit) or assign someone, then "
-                  f"request_review and merge_workspace(\"{ws.id}\"). Worker: "
-                  f"{agents.first_line(report)}",
-                  f"Worker's report:\n{report}"),
-              worker.id)
+        _conflict_needs_you(db, worker, ws, files, report, str(e))
         return
     db.update_agent(worker.id, pipeline=None)
     db.update_agent(resolver.id, pipeline="resolving")

@@ -32,8 +32,9 @@ from brindle.config import RepoConfig
 from brindle.db import DB, Agent, Workspace, request_subagent
 from brindle.model_availability import ModelAvailabilityChecker, PROVISIONING_TIMEOUT, provisioning_context
 from brindle.pro import route_health
+from brindle.redact import mask
 from brindle.profiles import load_profile, local_fallback, missing_add_dirs
-from brindle.providers import LaunchContext, get_provider, unusable
+from brindle.providers import LaunchContext, Provider, get_provider, unusable
 from brindle.sidebar_follow import (
     SIDEBAR_COLUMNS,
     SIDEBAR_DISMISSED,
@@ -318,9 +319,10 @@ def agent_env(ws: Workspace, agent_id: str, agent: Agent | None = None,
     # so a few of them don't each start one per core. Passed explicitly, since
     # a pane can inherit an older tmux environment; a profile's value still wins.
     env.setdefault("PYTEST_XDIST_AUTO_NUM_WORKERS", os.environ.get("PYTEST_XDIST_AUTO_NUM_WORKERS", "2"))
-    # An agent's own `git push` to GitHub signs in through gh, not git's keychain
-    # helper, whose dialog nobody in a pane can answer (see git.pane_git_config).
-    if _KEYCHAIN_HELPER_PLATFORM and (config := git.pane_git_config()):
+    # An agent's own `git push` to GitHub signs in through brindle's GitHub connection,
+    # else (where git's helper is the keychain's) through gh: not git's keychain helper,
+    # whose dialog nobody in a pane can answer (see git.pane_git_config).
+    if config := git.pane_git_config(gh=_KEYCHAIN_HELPER_PLATFORM):
         env.setdefault("GIT_CONFIG_PARAMETERS", config)
     if os.path.isdir(ws.path):
         # An account with no git identity: fill only what is still missing once
@@ -361,7 +363,7 @@ def decorate_worker_prompt(task: str, agent_id: str, ws: Workspace, done_when: s
                            analysis: str = "") -> str:
     """The prompt actually sent to a handoff/assign worker's CLI: the raw
     ``task``, the ``decisions`` block that covers its files, the ``analysis``
-    doc rule and brief (large work only), its finish line,
+    doc rule and brief (only when the person requested a doc), its finish line,
     the WORKER_FOOTER reminder to report, and (for an interactive Claude
     worker with a finish line) the ``/goal`` wrapper. Used at spawn time, and
     again by ``resume`` to rebuild it (decisions from the brief's receipt)
@@ -397,6 +399,7 @@ def spawn(
     mode: str = "interactive",
     watch_pane: bool = False,
     background_setup: bool = False,
+    person_prompt: bool = False,
     done_when: str | None = None,
     autopilot: bool = False,
     plan_first: bool = False,
@@ -501,6 +504,10 @@ def spawn(
     if why:
         raise AgentError(why)
     db.add_agent(agent)
+    if person_prompt and raw_task and parent_id is None and mode == "interactive":
+        from brindle import visual_offers
+
+        visual_offers.person_spoke(db, agent, raw_task)
     if agent.weight:
         db.update_agent(agent_id, weight=agent.weight)
     if plan_first and provider.launches_process and mode in ("handoff", "assign"):
@@ -639,6 +646,25 @@ def _profile_for(db: DB, agent: Agent, ws: Workspace, m=_UNREAD):
     if agent.profile == SUPERVISOR and agent.mode == "interactive":
         profile = _with_supervisor_choice(profile, agent.provider, ws.repo_root)
     profile = _with_kind_overrides(db, profile, agent, ws.repo_root)
+    from brindle import visuals
+
+    if visuals.enabled():
+        profile = replace(profile, prompt=profile.prompt + "\n\n" +
+                          "Make visuals only after the person explicitly asks or accepts an offer. "
+                          "Planning documents require an explicit ask. Workers may publish into their "
+                          "supervisor's session, but only supervisors may offer. Ask the choice in text "
+                          "as usual; offer_visual never blocks it. Offer only for a pending choice: "
+                          "3+ options (or 2 differing on 3+ attributes), a comparison of 4+ rows by "
+                          "3+ columns, a flow of 5+ steps or a branch, a diff over 12 lines, or a UI "
+                          "layout choice. Never offer for yes/no, go-ahead, <=3 short lines, status, "
+                          "permission, plan approval, worker questions, or a question already answered "
+                          "in chat. Declare kind and counts honestly. Respect refusals: one open offer, "
+                          "15 minutes apart, four per day, no repeated question; two dismissals silence "
+                          "offers for 24 hours. The Visuals setting controls offers only. "
+                          "Plan only when asked: call propose_plan only after the person explicitly asked "
+                          "for a planning doc, never because a request looks large. While a plan is open, "
+                          "your assign calls queue until the person approves it; a redirect arrives as "
+                          "their comments: revise with propose_plan(plan_id=...).")
     # The profile's rule packs: their text joins the prompt here, for every
     # provider; their mechanical rules are checked by brindle.rule_checks.
     # So do its guardrails (write and read scope), which that check enforces.
@@ -1124,6 +1150,31 @@ def consent_identity(db: DB, repo: str, profile: str, provider: str, session: st
 def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
             resume: str | None, watch_pane: bool, background_setup: bool = False,
             model_checked: bool = False) -> None:
+    """Serialize reviewer launches with death recovery before running preflight."""
+    _gate_check()
+    try:
+        upgrade.check_launch()
+    except upgrade.StaleInstall as e:
+        raise AgentError(str(e)) from e
+    if agent.mode == "review":
+        # Recovery and resume share the whole launch, including preflight. A
+        # stale resume must not revive a reviewer recovery has already replaced.
+        with review_dispatch_lock(ws.id):
+            current = db.get_agent(agent.id)
+            if (current is None or current.result != agent.result
+                    or current.tmux_window != agent.tmux_window
+                    or current.tmux_server != agent.tmux_server
+                    or (resume is not None and alive_or_starting(current))):
+                raise AgentError(f"Reviewer {agent.id}'s launch has already been handled.")
+            return _launch_checked(db, agent, ws, prompt=prompt, resume=resume, watch_pane=watch_pane,
+                                   background_setup=background_setup, model_checked=model_checked)
+    return _launch_checked(db, agent, ws, prompt=prompt, resume=resume, watch_pane=watch_pane,
+                           background_setup=background_setup, model_checked=model_checked)
+
+
+def _launch_checked(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
+                    resume: str | None, watch_pane: bool, background_setup: bool = False,
+                    model_checked: bool = False) -> None:
     """Start (or restart) ``agent``'s CLI in a new tmux window of ``ws``.
     In air-gap mode (``brindle.airgap``) only a local profile is launched,
     whatever the mode: a worker, a reviewer, a subagent or the chat itself.
@@ -1134,11 +1185,6 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
 
     Within a gated resume (resume's ``gate``), the preflight checks the gate
     and the launch itself holds it (_gate_commit)."""
-    _gate_check()
-    try:
-        upgrade.check_launch()
-    except upgrade.StaleInstall as e:
-        raise AgentError(str(e)) from e
     from brindle import preflight, provider_homes
 
     # A provider the person turned off in brindle never starts, and nothing
@@ -2163,6 +2209,10 @@ def send_message(db: DB, to_id: str, body: str, sender_id: str | None = None,
 
     agent = get(db, to_id)
     identity_lock.ensure(agent)
+    if person:
+        from brindle import visual_offers
+
+        visual_offers.person_spoke(db, agent, body)
     if not person and runs_process(agent) and is_alive(agent) and pulls_messages(db, agent):
         # Keep the message unread and deliver only a notice, once for everything unread.
         db.enqueue_held(agent.id, body, sender_id)
@@ -2212,8 +2262,7 @@ def _send_message(db: DB, agent: Agent, body: str, sender_id: str | None,
         db.enqueue(agent.id, text, sender_id)
         return "delivered" if agent.status == "idle" else "queued"
     if not provider.uses_hooks:
-        tmux.paste(agent.tmux_window, text, lead=message_lead(db, agent, sender_id),
-                   server=server_of(agent))
+        _paste_message(db, agent, text, message_lead(db, agent, sender_id))
         if not (condensed or notice):
             # Direct deliveries need the same durable history as queued ones,
             # including supervisor spec updates used by the next reviewer.
@@ -2361,6 +2410,178 @@ def _sync_hooks_off(db: DB, agent: Agent, why: str | None) -> None:
         agent.hooks_off = why
 
 
+def _paste_message(db: DB, agent: Agent, text: str, lead: str | None,
+                   message_id: int | None = None, resume: str | None = None) -> None:
+    """Authorize at the transport boundary, after capture/formatting/preparation.
+
+    The delivery lock orders messages, but does not serialize sign-in changes.
+    Every queued delivery, including notices and later flushes, checks again.
+    """
+    from brindle import identity_lock
+
+    server = server_of(agent)
+    state = {"message_id": message_id, "pane": agent.tmux_window, "server": server,
+             "provider": agent.provider, "body": text, "lead": lead, "stage": resume}
+
+    def current():
+        fresh = get(db, agent.id)
+        if (fresh.tmux_window != state["pane"] or server_of(fresh) != server
+                or fresh.provider != state["provider"]):
+            raise _PasteBlocked
+        identity_lock.ensure(fresh)
+        return fresh
+
+    def authorize(write=True):
+        fresh = current()
+        if message_id is not None and fresh.mode == "interactive":
+            if not write:
+                baseline[0] = _pane_input(fresh)
+            # Immediately before each write (tmux.paste's): any key the person
+            # pressed since this delivery began, however long the writes took,
+            # or the pane's clients changing, stops it (brindle's own keys are
+            # no client's input). A first write needs a composer holding
+            # nothing; the body, one holding exactly the lead (a resumed one
+            # is matched below). Enter is guarded by the input alone: a
+            # collapsed paste can't be matched as text.
+            elif (_typed_lately(fresh, since=baseline[0])
+                  or (state["stage"] is None and _composer_taken(fresh))
+                  or (state["stage"] in ("lead", "body") and not owned())
+                  or (state["stage"] == "lead" and resume is None
+                      and not _partial_composer(fresh, state, "lead"))):
+                # Stopped for good: after the body, its Enter withheld (whatever
+                # goes in now, the person sent); after the lead, its body never
+                # written (a turn from here can't carry it: note_turn_started).
+                if state["stage"] in ("lead", "body"):
+                    try:
+                        record(stopped=True)
+                    except _PasteBlocked:
+                        pass   # its mark is gone or another's: nothing of this delivery to note
+                raise _PasteBlocked
+        if resume is not None and state["stage"] == resume:
+            if not _partial_composer(fresh, state, resume):
+                raise _PasteBlocked
+            current()  # the composer capture can itself block across an identity or pane change
+
+    def record(**fields):
+        # Merged into the mark as hooks left it (db.record_pane_delivery), and
+        # created only by this delivery's first write, never after it retired.
+        merged = db.record_pane_delivery(message_id, agent.id, json.dumps({**state, **fields}),
+                                         create=not recorded[0])
+        if merged is None:
+            raise _PasteBlocked
+        recorded[0] = True
+        # Hooks' fields join; "stage" stays what brindle itself wrote (an
+        # acknowledged mark's "submitted" is owned()'s to see, not Enter's).
+        state.update({k: v for k, v in merged.items() if k != "stage"})
+
+    def owned():
+        # Not if a hook has said the person sent the composer (acknowledged)
+        # or a turn began from it since: Enter, or more text, is never brindle's then.
+        saved = db.mark(agent.id, "pane-delivery")
+        if saved is None:
+            return not recorded[0]
+        mark = json.loads(saved)
+        return (mark.get("message_id") == message_id and mark.get("stage") != "submitted"
+                and not mark.get("turn_started"))
+
+    def progress(stage):
+        state["stage"] = stage
+        record()
+
+    recorded = [resume is not None]
+    baseline = [_INPUT_UNREAD]
+    authorize(write=False)   # the caller's last look just read the screen; note the input it saw
+    if resume is not None and message_id is not None:
+        # A resumed attempt is live again, before any write: its body (or Enter)
+        # may go in from here, so a hook's turn evidence counts once more.
+        record(stopped=False)
+    options = {"progress": progress, "resume": resume} if message_id is not None else {}
+    tmux.paste(agent.tmux_window, text, lead=lead, server=server,
+               authorize=authorize, **options)
+    if message_id is not None and resume is None:
+        db.mark_delivered(message_id)
+        db.set_mark(agent.id, "pane-delivery", None)
+
+
+def _partial_composer(agent: Agent, state: dict, stage: str) -> bool:
+    """Match the complete known draft, never a substring or transcript echo.
+
+    An unsupported, collapsed or changed composer is left to the person.
+    Capturing joined lines preserves text across terminal-width wrapping.
+    """
+    provider = get_provider(agent.provider)
+    screen = tmux.capture(agent.tmux_window, lines=200, escapes=True, server=server_of(agent))
+    if provider.paste_blocked(screen, False) or provider.screen_state(screen) == "waiting":
+        return False
+    draft = provider.composer_text(screen)
+    expected = (state["lead"].replace("\n", " ") + " ") if state["lead"] else ""
+    if stage == "body":
+        expected += state["body"]
+    return draft == expected.rstrip()
+
+
+def _resume_pane_delivery(db: DB, agent: Agent, saved: str) -> bool:
+    """Resume the same queued message before any other transport can take it."""
+    from brindle import identity_lock
+
+    state = json.loads(saved)
+    row = db.conn.execute("SELECT * FROM inbox WHERE id=? AND agent_id=?",
+                          (state["message_id"], agent.id)).fetchone()
+    if row is None:
+        db.set_mark(agent.id, "pane-delivery", None)
+        return False
+    identity_lock.ensure(agent)
+    if (agent.tmux_window != state["pane"] or server_of(agent) != state["server"]
+            or agent.provider != state["provider"] or row["body"] != state["body"]
+            or agent.status not in ("idle", "processing")
+            or (agent.status == "processing" and not get_provider(agent.provider).types_midturn)):
+        return False
+    if state["stage"] == "submitted":
+        # It went in: brindle's own Enter, or the person's send a hook
+        # acknowledged. Delivered, once (this flush's delivery), and the queue goes on.
+        db.mark_delivered(row["id"])
+        db.set_mark(agent.id, "pane-delivery", None)
+        _flush_messages(db, agent.id)
+        return True
+    if state["stage"] != "submitted":
+        stage = "body" if _partial_composer(agent, state, "body") else "lead"
+        if stage == "lead" and (state["stage"] != "lead" or not _partial_composer(agent, state, "lead")):
+            if not _composer_settled(agent):
+                return False  # the person's text and this delivery's are still there: theirs to send or clear
+            if state["stage"] != "lead":
+                # Stopped after the body, and the composer is empty with no
+                # turn running. A prompt carrying it would have acknowledged
+                # it (_acknowledge_submitted: Claude Code, OpenCode, Codex), and
+                # agy starting no turn since means nothing went in: cleared,
+                # so the same row goes back in the queue, no second copy made.
+                # Once agy started a turn, sent and cleared-then-replaced look
+                # alike: kept unresolved, neither retyped, offered nor counted.
+                if state.get("turn_started"):
+                    db.retain_unresolved(row["id"], agent.id)
+                else:
+                    db.set_mark(agent.id, "pane-delivery", None)
+                return _flush_messages(db, agent.id)
+            # Stopped after the lead: the body never reached the composer and
+            # Enter was never pressed for it, so the whole message goes in, once,
+            # as a new attempt: the old one's mark (and what hooks noted on it) retired.
+            db.set_mark(agent.id, "pane-delivery", None)
+            stage = None
+        try:
+            _paste_message(db, agent, state["body"], state["lead"], row["id"], resume=stage)
+        except _PasteBlocked:
+            return False
+    db.mark_delivered(row["id"])
+    db.set_mark(agent.id, "pane-delivery", None)
+    return True
+
+
+def _send_to_inbox(db: DB, agent: Agent, text: str, sender: str) -> bool:
+    from brindle import identity_lock, inbox
+
+    identity_lock.ensure(get(db, agent.id))
+    return inbox.send(agent, text, sender=sender)
+
+
 def _deliver_to_inbox(db: DB, agent: Agent, message_id: int, text: str,
                       sender_id: str | None) -> bool:
     """Send a queued message through Claude Code's own inbox (see
@@ -2372,7 +2593,7 @@ def _deliver_to_inbox(db: DB, agent: Agent, message_id: int, text: str,
         return False
     sender = db.get_agent(sender_id) if sender_id else None
     who = f"brindle {sender.profile} {sender.id}" if sender else "brindle"
-    if not inbox.send(agent, text, sender=who):
+    if not _send_to_inbox(db, agent, text, who):
         return False
     db.mark_delivered(message_id)
     return True
@@ -2384,6 +2605,11 @@ def flush(db: DB, agent_id: str) -> bool:
     CLI that holds mid-turn input: see _flush_midturn). A chat with a live
     waiter (brindle.wake) is left to it, and one that runs a waiter never
     uses the inbox. Returns True if something was delivered."""
+    with delivery_lock(agent_id):
+        return _flush_messages(db, agent_id)
+
+
+def _flush_messages(db: DB, agent_id: str) -> bool:
     from brindle import inbox
     from brindle import launch_health
     from brindle import wake
@@ -2391,24 +2617,30 @@ def flush(db: DB, agent_id: str) -> bool:
     agent = db.get_agent(agent_id)
     if _delivery_held(db, agent):
         return False
+    partial = db.mark(agent_id, "pane-delivery")
+    if partial is not None:
+        return _resume_pane_delivery(db, agent, partial)
     if not wake.enabled(agent) and inbox.usable(agent):
         delivered = False
         while (msg := db.pop_pending(agent_id)) is not None:
-            baseline = launch_health.before_delivery(db, agent)
-            if inbox.send(agent, msg.body, sender="brindle"):
+            try:
+                baseline = launch_health.before_delivery(db, agent)
+                sent = _send_to_inbox(db, agent, msg.body, "brindle")
+            except BaseException:
+                db.release_pending(msg.id, agent_id)
+                raise
+            if sent:
                 delivered = True
                 launch_health.delivered(db, agent, baseline)
             else:
-                db.enqueue(agent_id, msg.body, msg.sender_id,  # back in the queue, for the pane
-                           notice=msg.noticed_at is not None)
+                db.release_pending(msg.id, agent_id)
                 break
         if delivered:
             return True
     # One paste into the pane at a time, whichever path: the idle claim alone
     # leaves the agent busy for a second sender's mid-turn paste while the
     # first is still typing, reordering or merging the two.
-    with delivery_lock(agent_id):
-        return _flush_pane(db, agent_id)
+    return _flush_pane(db, agent_id)
 
 
 def delivery_lock(agent_id: str):
@@ -2431,6 +2663,11 @@ def _delivery_held(db: DB, agent: Agent | None) -> bool:
 
     return (agent is None or agent.headless or login_pause.holding(db, agent.id)
             or (wake.enabled(agent) and wake.live(agent)))
+
+
+# A chat the person pressed a key in this recently is theirs: a queued message
+# waits for the next flush (a turn's end, the hook's hand-over, or cull's sweep).
+TYPED_WITHIN = 5.0
 
 
 class _PasteBlocked(Exception):
@@ -2466,7 +2703,7 @@ def _flush_pane(db: DB, agent_id: str) -> bool:
         lead = message_lead(db, agent, msg.sender_id)
         if _paste_blocked(agent):  # last look, after preparation: a draft may have appeared
             raise _PasteBlocked
-        tmux.paste(agent.tmux_window, msg.body, lead=lead, server=server_of(agent))
+        _paste_message(db, agent, msg.body, lead, msg.id)
     except BaseException as exc:
         # pop_pending claimed this row before the external send. Release the
         # same row and our idle claim so the next flush can try it once more.
@@ -2502,13 +2739,115 @@ def _flush_midturn(db: DB, agent_id: str) -> bool:
         lead = message_lead(db, agent, msg.sender_id)
         if _paste_blocked(agent):  # last look before pasting: a draft may have appeared
             raise _PasteBlocked
-        tmux.paste(agent.tmux_window, msg.body, lead=lead, server=server_of(agent))
+        _paste_message(db, agent, msg.body, lead, msg.id)
     except BaseException as exc:
         db.release_pending(msg.id, agent_id)  # back in the queue for the turn-end flush
         if isinstance(exc, _PasteBlocked):
             return False
         raise
     return True
+
+
+_INPUT_UNREAD = object()   # a pane's input time that couldn't be read
+_ANY = object()            # _typed_lately with no baseline to compare
+
+
+def _pane_input(agent: Agent):
+    """tmux.pane_input for ``agent``'s pane, or _INPUT_UNREAD."""
+    try:
+        return tmux.pane_input(agent.tmux_window, server=server_of(agent))
+    except tmux.TmuxError:
+        return _INPUT_UNREAD
+
+
+def _typed_lately(agent: Agent, since=_ANY) -> bool:
+    """Whether the person pressed a key in ``agent``'s pane within
+    TYPED_WITHIN, or (given ``since``, its input time when a delivery began)
+    at all since then: keys reach tmux before a loaded CLI draws them, so the
+    screen alone can show an empty composer that is taking input. An
+    unanswerable server fails closed."""
+    typed = _pane_input(agent)
+    if typed is _INPUT_UNREAD or (since is not _ANY and typed != since):
+        return True   # also a client gone from the pane, or a new one: the source moved
+    return typed is not None and time.time() - typed < TYPED_WITHIN
+
+
+def _composer_screen(agent: Agent) -> tuple[Provider, str] | None:
+    try:
+        screen = tmux.capture(agent.tmux_window, lines=40, escapes=True, server=server_of(agent))
+    except tmux.TmuxError:
+        return None
+    return get_provider(agent.provider), screen
+
+
+def _composer_taken(agent: Agent) -> bool:
+    """Whether the composer holds anything (or can't be read), at the moment
+    of a write: unlike _paste_blocked, never presses a key to clear a view."""
+    read = _composer_screen(agent)
+    return read is None or read[0].paste_blocked(read[1], True) is not None
+
+
+def _composer_settled(agent: Agent) -> bool:
+    """Whether the person is done with a stopped delivery's text: no key
+    pressed lately, the composer recognized and empty, no turn running on
+    screen (one they started by sending it, whose prompt acknowledges it)."""
+    if _typed_lately(agent):
+        return False
+    read = _composer_screen(agent)
+    if read is None:
+        return False
+    provider, screen = read
+    return (provider.composer_text(screen) is not None and provider.paste_blocked(screen, True) is None
+            and provider.screen_state(screen) != "busy")
+
+
+def _acknowledge_submitted(db: DB, agent_id: str, prompt: str) -> bool:
+    """A prompt the CLI took in (Claude Code's or OpenCode's prompt-submit,
+    Codex's turn inputs) carrying a delivery whose body is in the composer,
+    Enter not yet recorded: it went in, so it is delivered and its mark
+    retired. Returns whether the person sent it (one brindle had stopped,
+    their reply typed onto it)."""
+    for _ in range(3):   # the mark changed under us (brindle's own write, a hook): read it again
+        saved = db.mark(agent_id, "pane-delivery")
+        if not saved or not prompt:
+            return False
+        state = json.loads(saved)
+        body = str(state.get("body") or "").strip()
+        # "lead" too: the body can be in the composer before its write is
+        # recorded (paste-buffer done, progress("body") not yet), and a prompt
+        # carrying it is proof it was. The merge keeps "submitted" over that write.
+        if state.get("stage") not in ("lead", "body") or not body or body not in prompt:
+            return False
+        # The mark itself carries it ("submitted": the next flush counts it
+        # delivered), so a paste still in flight sees it and presses no
+        # Enter, and its failure cleanup can't put the row back in the queue.
+        if db.replace_mark(agent_id, "pane-delivery", saved, json.dumps({**state, "stage": "submitted"})):
+            # Only one brindle stopped is theirs to have sent: an unstopped one at
+            # this stage is brindle's own Enter, its hook ahead of "submitted".
+            return bool(state.get("stopped"))
+    return False
+
+
+def note_turn_started(db: DB, agent_id: str) -> None:
+    """A turn began, from a CLI that doesn't say what went in (agy). While a
+    delivery is stopped brindle starts none, so the person sent whatever the
+    composer held then: with or without this delivery's body, no one can
+    tell. Its outcome becomes unresolved (see _resume_pane_delivery), never
+    counted delivered nor typed in again."""
+    for _ in range(3):   # as in _acknowledge_submitted
+        saved = db.mark(agent_id, "pane-delivery")
+        if not saved:
+            return
+        state = json.loads(saved)
+        # "lead" too, as in _acknowledge_submitted: the body may already be
+        # in, its write not yet recorded; that write keeps this field. Not a
+        # "lead" one stopped for good: its body was never written.
+        stage = state.get("stage")
+        if (stage not in ("lead", "body") or state.get("turn_started")
+                or (stage == "lead" and state.get("stopped"))):
+            return
+        if db.replace_mark(agent_id, "pane-delivery", saved, json.dumps({**state, "turn_started": True})):
+            return
 
 
 def _paste_blocked(agent: Agent) -> bool:
@@ -2522,6 +2861,8 @@ def _paste_blocked(agent: Agent) -> bool:
     provider = get_provider(agent.provider)
     interactive = agent.mode == "interactive"
     server = server_of(agent)
+    if interactive and _typed_lately(agent):
+        return True  # before the screen is read or a background view is escaped
     try:
         screen = tmux.capture(agent.tmux_window, lines=40, escapes=True, server=server)
     except tmux.TmuxError:
@@ -2612,19 +2953,110 @@ def report_result(db: DB, agent_id: str, result: str, forward: bool = True,
     the result is then only recorded in the history. A first result waits
     while an analysis doc the agent read has a newer version it hasn't read
     (unless the caller already checked: ``docs_checked``)."""
-    from brindle import history, pipeline, pricing, usage as usage_mod
-
     if removed and db.get_agent(agent_id) is None:
         agent, ws = removed
     else:
         agent = get(db, agent_id)
         ws = db.get_workspace(agent.workspace_id)
-    first = agent.result is None
-    if first and not removed and not docs_checked:
-        stale = stale_analysis_docs(db, agent.id)
-        if stale:
-            return stale
-    db.set_result(agent.id, result)
+    if removed:   # a reviewer the pipeline already removed: only recorded
+        db.set_result(agent.id, result)
+        return _handle_report(db, agent, ws, result, agent.result is None, forward, removed)
+    # The report goes through the outbox (db.report_outbox): received, then
+    # accepted into agents.result, then delivered. Each step is one
+    # transaction, and a repeat call resumes at the step the last one reached.
+    row = _receive_report(db, agent.id, ws, result)
+    if row["state"] in ("delivered", "superseded"):
+        return "result already recorded"
+    first = bool(row["is_first"])
+    if row["state"] in ("received", "rejected"):
+        if first and not docs_checked:
+            stale = stale_analysis_docs(db, agent.id)
+            if stale:   # not accepted: agents.result is never touched
+                if db.outbox_reject(row["id"]):
+                    return stale
+                row = db.outbox_get(row["id"])   # another call moved it on: follow its state
+                if row["state"] in ("delivered", "superseded"):
+                    return "result already recorded"
+        if db.outbox_accept(row["id"], agent.id, row["payload"]):
+            agent = get(db, agent.id)
+        else:
+            row = db.outbox_get(row["id"])
+            if row["state"] in ("delivered", "superseded"):
+                return "result already recorded"
+    return _handle_report(db, agent, ws, row["payload"], first, forward, removed, outbox_id=row["id"])
+
+
+def _receive_report(db: DB, agent_id: str, ws: Workspace | None, result: str):
+    payload = mask(result)
+    digest = hashlib.sha256(payload.encode()).hexdigest()[:16]
+    row = db.outbox_receive(agent_id, digest, payload)   # before any git or document work
+    return db.outbox_bind(row["id"], _branch_head(ws) if ws else "")
+
+
+def _holds_for(db: DB, agent: Agent) -> bool:
+    """Whether a message to ``agent`` waits unread for read_messages (see send_message)."""
+    return bool(runs_process(agent) and pulls_messages(db, agent))
+
+
+def _report_message(db: DB, parent: Agent, body: str, sender_id: str) -> tuple:
+    """A report as the inbox row(s) ``send_message`` would leave for ``parent``:
+    held for read_messages, or a one-line pointer to the kept full text for an
+    interactive supervisor, or the formatted text."""
+    if _holds_for(db, parent):
+        return (parent.id, body, sender_id, True, None)
+    if parent.mode == "interactive" and parent.provider != "shell":
+        return (parent.id, body, sender_id, False, lambda mid: one_line(db, mid, body, sender_id))
+    return (parent.id, format_message(db, body, sender_id), sender_id, False, None)
+
+
+def _notify_supervisor(db: DB, parent: Agent) -> None:
+    """Tell a supervisor its inbox has a report: the one-line notice for unread
+    messages, or the queue flushed into an idle one. The message itself is
+    already stored, so a failure here loses nothing."""
+    from brindle import identity_lock
+
+    with delivery_lock(parent.id):
+        try:
+            parent = get(db, parent.id)
+            identity_lock.ensure(parent)
+            _notify_report(db, parent)
+        except (AgentError, tmux.TmuxError):
+            log.warning("brindle: couldn't notify %s of a report", parent.id, exc_info=True)
+
+
+def _notify_report(db: DB, parent: Agent) -> None:
+    from brindle import identity_lock
+
+    try:
+        if _holds_for(db, parent):
+            claimed = db.claim_notice(parent.id) if is_alive(parent) else None
+            if claimed is not None:
+                try:
+                    identity_lock.ensure(get(db, parent.id))
+                    _send_message(db, parent, unread_notice(db, claimed), None, notice=True)
+                except BaseException:
+                    db.reset_notice(parent.id)
+                    raise
+        elif is_alive(parent):
+            identity_lock.ensure(get(db, parent.id))
+            flush(db, parent.id)
+    except (AgentError, tmux.TmuxError):
+        log.warning("brindle: couldn't notify %s of a report", parent.id, exc_info=True)
+
+
+def _branch_head(ws: Workspace) -> str:
+    try:
+        return git.out(["rev-parse", "HEAD"], ws.path)
+    except git.GitError:
+        return ""
+
+
+def _handle_report(db: DB, agent: Agent, ws: Workspace | None, result: str, first: bool,
+                   forward: bool, removed: tuple[Agent, Workspace] | None,
+                   outbox_id: int | None = None) -> str:
+    """What follows recording a report: usage, history, the pipeline, the supervisor."""
+    from brindle import history, pipeline, pricing, usage as usage_mod
+
     if ws:
         bus.publish_agent(db, "agent.reported", agent.id, workspace_id=ws.id,
                           repo_root=ws.repo_root, mode=agent.mode, first=first)
@@ -2656,17 +3088,22 @@ def report_result(db: DB, agent_id: str, result: str, forward: bool = True,
         if first:
             pipeline.note_reported(db, ws, agent)
         warm_checks(ws)
-        if forward and pipeline.on_report(db, agent, ws, forwarded):
+        if forward and pipeline.on_report(db, agent, ws, forwarded, outbox_id=outbox_id):
             return ("result recorded. brindle is having your branch reviewed; it will merge it, "
                     "or send you the review's findings to fix.")
-    if forward and agent.mode in FORWARDING_MODES and agent.parent_id and db.get_agent(agent.parent_id):
+    if forward and agent.mode in FORWARDING_MODES and agent.parent_id:
+        parent = db.get_agent(agent.parent_id)
+        if parent is None:
+            return "result recorded"   # no supervisor to tell: the report stays accepted, undelivered
         where = f" on branch `{ws.branch}` (workspace {ws.id})" if ws else ""
-        send_message(
-            db, agent.parent_id,
-            condense(f"Assigned task finished{where}: {first_line(result)}", forwarded),
-            sender_id=agent.id,
-        )
+        body = condense(f"Assigned task finished{where}: {first_line(result)}", forwarded)
+        if outbox_id is None:
+            send_message(db, agent.parent_id, body, sender_id=agent.id)
+        elif db.outbox_deliver(outbox_id, message=_report_message(db, parent, body, agent.id)):
+            _notify_supervisor(db, parent)   # outside the transaction, from the stored row
         return "result recorded and sent to your supervisor"
+    if outbox_id is not None:
+        db.outbox_deliver(outbox_id, nothing=True)   # no one to tell
     return "result recorded"
 
 
@@ -3086,18 +3523,34 @@ def delegate(
     why = model_problem(profile, caller_ws)
     if why:
         raise AgentError(why)
+    from brindle import fair_share
+
     busy = admission(profile, caller_ws.repo_root) if admit else None
+    # A direct start (no queued task claimed its slot) takes the machine-wide fair share's turn itself.
+    fair = admit and busy is None and launches_process(profile, caller_ws.repo_root)
+    if fair:
+        busy = fair_share.start_reason(db, caller.id if caller else None, caller_ws.repo_root, profile)
     if busy:
         raise NoRoom(busy)
     def start_worker(ws: Workspace) -> Agent:
         # Startup dialogs are handled by the detached _after-launch helper, so
         # handoff/assign return as soon as the window exists instead of polling
         # the new pane for up to 30 seconds.
-        return spawn(
-            db, ws, profile, prompt=task, parent_id=caller.id if caller else None, mode=mode,
-            done_when=done_when, background_setup=True, plan_first=bool(plan_first), files=files,
-            weight=weight, analysis_doc=analysis_doc, **({"detached": True} if detached else {}),
-        )
+        def launch() -> Agent:
+            return spawn(
+                db, ws, profile, prompt=task, parent_id=caller.id if caller else None, mode=mode,
+                done_when=done_when, background_setup=True, plan_first=bool(plan_first), files=files,
+                weight=weight, analysis_doc=analysis_doc, **({"detached": True} if detached else {}),
+            )
+
+        if not fair:
+            return launch()
+        # Decided again, and the worker's row made (it counts from then on), under the machine-wide lock.
+        with fair_share.machine_lock():
+            why = fair_share.start_reason(db, caller.id if caller else None, caller_ws.repo_root, profile)
+            if why:
+                raise NoRoom(why)
+            return launch()
 
     if isolate:
         from brindle import pipeline
@@ -3628,6 +4081,13 @@ def review_after_checks(db: DB, caller_id: str | None, ws: Workspace, profile: s
                 if summary and gates.summary_failed(summary):
                     pipeline.on_checks_failed(db, ws, sha, since, text, caller)
                     return None
+                if summary and gates.summary_timed_out(summary):
+                    # Inconclusive: no review of unchecked code, and no failure sent to the worker.
+                    if to_id := gates.supervisor_id(db, ws):
+                        gates.tell(db, to_id, f"[brindle] checks on `{ws.branch}` timed out, not a "
+                                              "failure; no review was started. Request the review "
+                                              "again once the machine is quieter.")
+                    return None
                 piped = caller or pipeline.piped_worker(db, ws)
                 if since is not None and piped is not None and session_paused(db, piped):
                     return None   # its result is cached by commit: the sweep starts this review again after the resume
@@ -3905,6 +4365,10 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
     # replace that verdict in the same role (gates.standing_reviews).
     if reviewer is not None:
         db.update_agent(reviewer.id, review_slot=profile if second else "")
+        for old in db.list_agents(ws.id):
+            if old.id != reviewer.id and old.review_sha == sha and (old.failed_why or "").startswith("review: "):
+                db.update_agent(old.id, status="done", failed_why=None)
+                db.set_result(old.id, f"Replaced by reviewer {reviewer.id}.")
         if cited:   # the docs its brief cites, pinned at the versions it got
             knowledge.record_receipt(db, reviewer.id, cited)
             analysis_brief.record_session_citations(db, reviewer.id, cited)
@@ -3957,9 +4421,24 @@ def submit_plan(db: DB, agent_id: str, plan: str) -> str:
     if not agent.parent_id:
         raise AgentError("no supervisor to send the plan to")
     db.update_agent(agent.id, plan_state="proposed", plan_text=plan.strip())
+
+    supervisor = db.get_agent(agent.parent_id)
+    supervisor_ws = db.get_workspace(supervisor.workspace_id) if supervisor else None
+    reminder = ""
+    if supervisor_ws:
+        from brindle.autopilot import PLAN_SPLIT_REMINDER
+        from brindle.config import load_repo_config
+
+        delegation = load_repo_config(supervisor_ws.repo_root).delegation
+        if delegation in {"fast", "balanced"}:
+            reminder = PLAN_SPLIT_REMINDER
+    reminder_line = f"\n{reminder}" if reminder else ""
+
     send_message(db, agent.parent_id,
                  f"Worker {agent.id} proposes this plan and is waiting for your decision "
-                 f"(approve_plan agent_id={agent.id}):\n\n{plan.strip()}", sender_id=agent.id)
+                 f"(approve_plan agent_id={agent.id}):"
+                 f"{reminder_line}\n\n{plan.strip()}",
+                 sender_id=agent.id)
     return "Plan sent. Stop now and wait for your supervisor's decision; don't edit files until it's approved."
 
 
@@ -4224,7 +4703,7 @@ def _note_decision(db: DB, agent: Agent, ws: Workspace | None, kind: str, summar
 
 
 def permission_request_decision(db: DB, agent: Agent, payload: dict,
-                                provider: str = "claude") -> dict | None:
+                                provider: str = "claude", spend: bool = False, also: list[dict] = ()) -> dict | None:
     """Claude Code's or Codex's PermissionRequest hook: brindle's permission
     policy (brindle.permissions) answers allow or deny, or None to let the CLI
     prompt the person as usual (ask). Off unless the repo or user config
@@ -4232,7 +4711,11 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
     allows what its profile's allowed_tools cover and leaves the rest to
     Codex (#241). A request left to the person is held for the app's answer
     while the app is open (_hold_for_app; a Claude one is recorded with the
-    policy off too). Never raises: any failure is ask."""
+    policy off too). Never raises: any failure is ask, or a deny for an OpenCode
+    agent with nothing of its own to ask (opencode.Launch.unasked)."""
+    from brindle import opencode
+
+    opencode_unasked = provider == "opencode" and os.environ.get(opencode.UNASKED_ENV) == "1"
     try:
         from brindle import permissions
         from brindle.config import load_repo_config
@@ -4240,9 +4723,13 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
 
         ws = db.get_workspace(agent.workspace_id)
         if ws is None:
-            return None
+            return opencode.UNCHECKED if opencode_unasked else None
         cfg = load_repo_config(ws.repo_root)
         policy = cfg.permission_policy == "on"
+        if opencode_unasked and not policy:
+            # Launched with the rules on and OpenCode's own asks off (opencode.Launch):
+            # turning the rules off since must not leave its calls unchecked.
+            return opencode.POLICY_OFF
         # Policy off: of the other CLIs only a Codex reviewer has the hook
         # (codex_hook.launch_flags). Nobody watches it, so it gets what its
         # allowed_tools cover and nothing else of brindle's: every other
@@ -4349,16 +4836,23 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
             # Asked before every tool call, not only those OpenCode would prompt
             # for, so only a deny is answered (and recorded): the rest is OpenCode's own.
             reqs = permissions.from_opencode(payload, worktree=ws.path, repo_root=ws.repo_root, agent=agent.id)
+            for other in also:   # the same call in its other forms: one answer, each saved use spent once
+                reqs = [*(reqs or []), *(permissions.from_opencode(
+                    other, worktree=ws.path, repo_root=ws.repo_root, agent=agent.id) or [])]
+            if opencode_unasked and (not reqs or any(permissions.unread(r) for r in reqs)):
+                return opencode.UNCHECKED
             if not reqs:
                 return None
             rules = [*permissions.all_rules(ws.repo_root), *profile_rules]
-            decision = permissions.decide_all(reqs, checks=cfg.checks, rules=rules, session=session)
+            # ``spend``, ``also``: opencode.pre_tool's last step, in an unasked launch, where nothing else would.
+            decision = permissions.decide_all(reqs, checks=cfg.checks, rules=rules, session=session, spend=spend)
             if decision.decision == "ask" and len(reqs) == 1:
                 # A deny on one part of a compound command (cd x && <denied>) still denies.
                 decision = permissions.deny_in_parts(reqs[0], checks=cfg.checks, rules=rules) or decision
-            if decision.decision == "ask" and decision.rule is not None:
-                # A rule asks explicitly, and this plugin can't hold a request for the
-                # person: it fails closed rather than let OpenCode's own config run it.
+            if decision.decision == "ask" and (decision.rule is not None or opencode_unasked):
+                # A rule asks explicitly (or anything asks, where nothing of OpenCode's
+                # would: opencode.Launch.unasked), and this plugin can't hold a request for
+                # the person: it fails closed rather than let OpenCode's own config run it.
                 permissions.note_prompt(decision)
                 decision = permissions.Decision(
                     "deny", f"{decision.reason.removesuffix('; asking the user')}, and OpenCode can't wait for "
@@ -4394,7 +4888,7 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
         return permissions.claude_output(decision)
     except Exception:  # noqa: BLE001 - a broken policy must fall through to the prompt
         log.exception("brindle: permission policy failed; leaving it to the user")
-        return None
+        return opencode.UNCHECKED if opencode_unasked else None
 
 
 def _supervising(db: DB, agent: Agent, cfg, decision, payload: dict) -> dict:
@@ -4857,20 +5351,26 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
             processes.detach([*brindle_invocation(), "_flush", agent_id, "--delay",
                           str(get_provider(agent.provider).ready_delay)])
     elif event == "prompt-submit":
-        db.set_status(agent_id, "processing")
-        from brindle import launch_health
-        launch_health.accepted(db, agent)
         # Queued messages (worker results) are typed into an idle chat too;
         # only a prompt brindle didn't deliver is the user speaking.
         prompt = str(payload.get("prompt", ""))
         # brindle's own reminders also arrive as prompts, possibly wrapped or
         # sent without being recorded as delivered (the unread-mail one): any
-        # prompt carrying brindle's tag is not the user speaking.
-        if (agent.mode == "interactive" and "[brindle" not in prompt
-                and not db.recently_delivered(agent_id, prompt)):
+        # prompt carrying brindle's tag is not the user speaking. Judged before
+        # an acknowledgement below marks anything delivered; sending a stopped
+        # delivery with their reply typed onto it is the user speaking, though.
+        person = "[brindle" not in prompt and not db.recently_delivered(agent_id, prompt)
+        person = _acknowledge_submitted(db, agent_id, prompt) or person
+        db.set_status(agent_id, "processing")
+        from brindle import launch_health
+        launch_health.accepted(db, agent)
+        if agent.mode == "interactive" and person:
             from brindle import autopilot as pilot
 
             pilot.user_spoke(db, agent)
+            from brindle import visual_offers
+
+            visual_offers.person_spoke(db, agent, prompt)
     elif event == "notification":
         text = str(payload.get("message", "")).lower()
         if "permission" in text or "approval" in text:
@@ -4943,6 +5443,9 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
         except OSError:
             pass
         if payload.get("type") == "agent-turn-complete":
+            inputs = payload.get("input-messages")
+            if isinstance(inputs, list):
+                _acknowledge_submitted(db, agent_id, "\n".join(str(m) for m in inputs))
             db.set_status(agent_id, "idle")
             snapshot_turn(db, agent)
             analysis_docs_turn(db, agent)
@@ -5041,10 +5544,17 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
         else:
             db.set_status(agent_id, "idle")
             db.clear_permission_requests(agent_id)
-            if is_rate_limit:
+            # An overloaded API (529) is the provider's capacity, not this
+            # account's usage: it pauses nothing, and its worker is reported.
+            overloaded = bool(re.search(r"\b(529|overloaded|overloaded_error)\b", err_fields))
+            if is_rate_limit and not overloaded:
                 from brindle import autopilot as pilot
 
                 pilot.limit_reached(db, agent)
+            current = db.get_agent(agent_id)
+            # Not paused for a usage limit; agy's own stop tells its parent itself.
+            if current is not None and current.status == "idle" and current.provider == "claude":
+                tell_parent_api_error(db, current, err_fields)
     elif event == "subagent-start":
         # A crash can skip SubagentStop, so this doesn't touch agent.status:
         # the sidebar hides a subagent that's been "running" too long instead.
@@ -5344,6 +5854,72 @@ def tell_parent_unreported(db: DB, agent: Agent, *, remind: bool = False) -> boo
     finally:
         if not sent:
             db.release_note(agent.id, claimed_at, agent.unreported_noted, field="unreported_noted")
+
+
+# What kind of API error a turn ended on, as its supervisor is told it: a
+# fixed label, never the error text (which can quote request ids or headers).
+API_ERROR_KINDS = (
+    (re.compile(r"\b529\b|overloaded"), "overloaded (529)"),
+    (re.compile(r"\b429\b|rate.?limit|usage.?limit|resource.?exhausted"), "rate limited (429)"),
+    (re.compile(r"\b40[13]\b|unauthori[sz]ed|authentication|forbidden"), "authentication refused (401/403)"),
+    (re.compile(r"\b5\d\d\b|internal server error|bad gateway|service unavailable|api_error"),
+     "server error (5xx)"),
+    (re.compile(r"timed? ?out|timeout"), "request timed out"),
+    (re.compile(r"connection|network|econnreset|socket"), "connection error"),
+)
+
+
+def api_error_kind(text: str) -> str:
+    """The kind of API error ``text`` describes, as a fixed label."""
+    low = (text or "").lower()
+    return next((label for pattern, label in API_ERROR_KINDS if pattern.search(low)), "API error")
+
+
+API_ERROR_MARK = "api-error-told"
+
+
+def api_error_stop(agent: Agent) -> str:
+    """Which stop of ``agent``'s an API-error notice is about: when it went
+    idle. Each new turn moves it, so each stop gets its own notice."""
+    return repr(agent.status_since or agent.created_at)
+
+
+def tell_parent_api_error(db: DB, agent: Agent, error: str) -> bool:
+    """A worker's turn ended on an API error (Claude Code gave up on it, or
+    never runs a hook after it) before the worker reported. Its CLI sits idle
+    at its prompt and nothing wakes it, so tell its supervisor now, naming
+    only the error's kind. Once per stop, by a mark of its own: a generic
+    idle reminder sent first doesn't stand in for it (it can't say why the
+    worker stopped), while this one, sent first, stands in for that reminder.
+    Returns whether the supervisor was told."""
+    if agent.mode not in ("assign", "handoff_detached") or not agent.parent_id or agent.result is not None:
+        return False
+    if db.get_agent(agent.parent_id) is None:
+        return False
+    stop = agent.status_since or agent.created_at
+    won, previous = db.claim_stop_mark(agent.id, API_ERROR_MARK, stop, agent.reopened_at)
+    if not won:
+        return False  # this stop was told already, or it isn't the worker's current one
+    ws = db.get_workspace(agent.workspace_id)
+    where = f" on branch `{ws.branch}` (workspace {ws.id})" if ws else ""
+    body = (f"[brindle] Worker {agent.id} ({agent.profile}, {agent.provider}){where} stopped on an "
+            f"API error before reporting: {api_error_kind(error)}. Its CLI is idle at its prompt and "
+            "won't go on by itself. send_message it to run the turn again, assign the task to "
+            "another profile, or remove_workspace if the work is abandoned. "
+            f"What brindle sees: {liveness(db, agent, ws)}.")
+    try:
+        send_message(db, agent.parent_id, body, sender_id=agent.id)
+    except (AgentError, tmux.TmuxError):
+        try:
+            db.enqueue(agent.parent_id, body, agent.id)
+        except Exception:  # noqa: BLE001
+            db.release_stop_mark(agent.id, API_ERROR_MARK, stop, previous)
+            return False
+    if not agent.unreported_noted:
+        # The idle reminder would only repeat this, less exactly.
+        db.claim_unreported(agent.id, time.time(), None, reopened_at=agent.reopened_at,
+                            status_since=agent.status_since or agent.created_at)
+    return True
 
 
 def _tell_parent_unreported(db: DB, agent: Agent, ws: Workspace | None) -> bool:

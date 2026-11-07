@@ -166,8 +166,11 @@ def worker(db, ws, agent_id, parent="boss"):
     return a
 
 
-@pytest.mark.slow("nine hooks on real threads and git: about 4s here, over 10s on a busy macOS runner")
-def test_pending_asks_group_by_general_form_and_one_decision_resolves_the_group(db, ws):
+def test_pending_asks_group_by_general_form_and_one_decision_resolves_the_group(db, ws, monkeypatch):
+    # All pushes use this checkout; repository discovery is outside the
+    # grouping and hold-delivery behavior exercised below.
+    monkeypatch.setattr("brindle.git.main_repo_root", lambda path: ws.repo_root)
+    monkeypatch.setattr("brindle.git.default_branch", lambda root: "main")
     db.add_agent(Agent("boss", ws.id, "supervisor", "claude", None, "interactive", "processing", "%b", None, time.time()))
     worker(db, ws, "w1"), worker(db, ws, "w2"), worker(db, ws, "w3")
     hooks = [Hook(db, "w1", write(ws, "src/auth/login.ts")), Hook(db, "w2", write(ws, "src/auth/session.ts")),

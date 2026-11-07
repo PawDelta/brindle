@@ -13,9 +13,9 @@
    and sign-in items completable in the row. The pages behind the sidebar's foot: Knowledge (a repo's
    decisions and document sources), Agents (which model or custom agent runs
    each kind of work, what takes over at a limit, and making a custom
-   agent), Settings (keys, the repo's settings, permission
-   rules, doctor, the engine's update) and Account (the plan, sign-in,
-   spend). A provider's sign-in runs on the engine with a card that follows
+   agent) and Settings, one place in tabs (the plan, sign-in and spend,
+   usage, keys and providers, permission rules, storage, the repo's
+   settings, doctor and the engine's update). A provider's sign-in runs on the engine with a card that follows
    it (components/ProviderSignIn.tsx), and the engine's upgrade as a
    progress card (components/EngineUpgrade.tsx); the one terminal that is the
    person's own is the Terminal docked under the main column, a plain shell
@@ -36,16 +36,16 @@ import { plain } from "./api/wording";
 import { DaemonContext } from "./api/context";
 import { checkEngine, type EngineStatus } from "./api/engine";
 import { openExternal, pickFolder as nativePicker, type OpenUrl, type PickFolder } from "./api/open";
-import type { SessionDTO } from "./api/schema";
+import type { SessionDTO, WorkspaceDTO } from "./api/schema";
 import type { About, AppUpdater, AppUpdates, CliLink, ReleaseBuildUpdater } from "./api/tauri";
 import { AppUpdateBanner, AppUpdateProvider } from "./components/AppUpdateBanner";
 import { UpgradeCard, useEngineUpgrade } from "./components/EngineUpgrade";
 import { EngineBanner } from "./components/EngineBanner";
 import { Sidebar } from "./components/Sidebar";
+import { Walkthrough } from "./components/Walkthrough";
 import { TerminalPanel, TerminalProvider, shellPlace } from "./components/TerminalPanel";
 import { alert, button } from "./components/ui";
-import { HOME, readLastSession, writeLastSession, type Route, type SessionRef, type SheetRef } from "./routes";
-import { AccountScreen } from "./screens/Account";
+import { HOME, readLastSession, settingsTab, writeLastSession, type Route, type SessionRef, type SheetRef } from "./routes";
 import { InboxScreen } from "./screens/Inbox";
 import { KnowledgeScreen } from "./screens/Knowledge";
 import { NewSession } from "./screens/New";
@@ -67,6 +67,8 @@ export interface AppProps {
   client: DaemonClient | null;
   /* Fetch the snapshot and inbox again (Sync.refresh). */
   refresh?: () => Promise<void>;
+  /* Stop background sync when this process cannot use the daemon. */
+  onAgentRefused?: () => void;
   /* Where to open; by default the last-used session, else the first live one, else the empty state. */
   initialRoute?: Route;
   /* Opens a page in the system browser; the shell's by default. */
@@ -116,8 +118,10 @@ export function landing(repos: { repo_root: string }[], sessions: Record<string,
 /* Agents' "Connect …" links and the Inbox's rule links: each press asks Settings to scroll (and open the rule) again. */
 let providerAsks = 0;
 
-function Screen({ route, navigate, client, refresh, store, openUrl, pickFolder, installCli, appUpdater, appUpdates, releaseBuildUpdater, readAbout }: {
+function Screen({ route, visit, navigate, client, refresh, store, openUrl, pickFolder, installCli, appUpdater, appUpdates, releaseBuildUpdater, readAbout }: {
   route: Route;
+  /* Counts the navigations (Shell's), one to the open route included. */
+  visit: number;
   navigate(route: Route): void;
   client: DaemonClient;
   refresh: () => Promise<void>;
@@ -149,12 +153,30 @@ function Screen({ route, navigate, client, refresh, store, openUrl, pickFolder, 
       );
     case "agents":
       return <AgentsScreen client={client} onNavigate={(to) => navigate(to === "providers" ? { screen: "settings", section: "providers", ask: ++providerAsks } : { screen: "knowledge" })} />;
+    /* One Settings, in tabs: the older Account and Project settings routes open it on their tab. */
     case "settings":
-      return <SettingsScreen client={client} installCli={installCli} appUpdater={appUpdater} appUpdates={appUpdates} releaseBuildUpdater={releaseBuildUpdater} readAbout={readAbout} section={route.section} ask={route.ask} rule={route.rule} current={readLastSession()?.repo} />;
     case "project-settings":
-      return <SettingsScreen key={`repo:${route.repo}`} client={client} installCli={installCli} appUpdater={appUpdater} appUpdates={appUpdates} releaseBuildUpdater={releaseBuildUpdater} readAbout={readAbout} repo={route.repo} />;
     case "account":
-      return <AccountScreen client={client} openUrl={openUrl} onNavigate={(screen) => navigate({ screen })} section={route.section} ask={route.ask} />;
+      return (
+        <SettingsScreen
+          key={route.screen === "project-settings" ? `repo:${route.repo}` : route.screen}
+          client={client}
+          installCli={installCli}
+          appUpdater={appUpdater}
+          appUpdates={appUpdates}
+          releaseBuildUpdater={releaseBuildUpdater}
+          readAbout={readAbout}
+          openUrl={openUrl}
+          onNavigate={(screen) => navigate({ screen })}
+          tab={settingsTab(route) ?? undefined}
+          visit={visit}
+          section={route.screen === "settings" ? route.section : undefined}
+          ask={route.screen === "project-settings" ? undefined : route.ask}
+          rule={route.screen === "settings" ? route.rule : undefined}
+          repo={route.screen === "project-settings" ? route.repo : undefined}
+          current={readLastSession()?.repo}
+        />
+      );
     case "new":
       return <NewSession key={route.repo} client={client} onOpen={openSession} initialRepo={route.repo} pickFolder={pickFolder} refresh={refresh} onSignIn={() => navigate({ screen: "settings", section: "providers", ask: ++providerAsks })} />;
     case "inbox":
@@ -208,10 +230,16 @@ function Banner({ status, connection, onRetry, client, store }: { status: Engine
   );
 }
 
-function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, pickFolder = nativePicker, installCli, appUpdater, appUpdates, releaseBuildUpdater, readAbout }: AppProps) {
+/* `firstRun`: the app opens right after the first launch's setup, so the walkthrough offers itself. */
+function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, pickFolder = nativePicker, installCli, appUpdater, appUpdates, releaseBuildUpdater, readAbout, firstRun = false }: AppProps & { firstRun?: boolean }) {
   // Until the sessions are known the app shows the empty state, quietly; then it lands.
   const [route, setRoute] = useState<Route | null>(initialRoute ?? null);
-  const navigate = useCallback((to: Route) => setRoute(to), []);
+  /* Counts the navigations: one to the route already open still counts (Settings opens its tab again). */
+  const [visit, setVisit] = useState(0);
+  const navigate = useCallback((to: Route) => {
+    setVisit((n) => n + 1);
+    setRoute(to);
+  }, []);
   const { repos, sessions, error: feedError, reload } = useSessions();
   useEffect(() => {
     // A place the person already picked (the sidebar answers before the sessions do) stays.
@@ -244,6 +272,9 @@ function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, p
   // sheet lies over it); the pages scroll.
   const shown = route ?? HOME;
   const fills = shown.screen === "session" || shown.screen === "new" || shown.screen === "inbox";
+  // A visual open in the session takes the whole window (design/visualizer-build-plan-amendments.md
+  // item 1): the sidebar hides, still mounted, so Back finds it as it was (folds, scroll, split).
+  const reading = shown.screen === "session" && shown.sheet?.kind === "visual";
   // Where a shell of the person's own starts: the open session's worktree, else the repo's root.
   const workspaces = useAppState((s) => s.workspaces);
   const here = useMemo(() => shellPlace(shown, repos ?? [], workspaces, shown.screen === "session" ? sessions[shown.repo]?.find((s) => s.id === shown.root) : null), [shown, repos, workspaces, sessions]);
@@ -251,17 +282,19 @@ function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, p
     <TerminalProvider client={client} here={here}>
       <AppUpdateProvider updates={appUpdates}>
       <div className="flex h-full bg-canvas text-ink">
-        <Sidebar route={shown} navigate={navigate} refresh={refresh ?? noop} openUrl={openUrl} />
+        <div className="contents" hidden={reading}>
+          <Sidebar route={shown} navigate={navigate} refresh={refresh ?? noop} openUrl={openUrl} />
+        </div>
         <div className="relative flex min-w-0 flex-1 flex-col">
           <AppUpdateBanner openUrl={openUrl} />
           {/* The banner's upgrade follows the engine's terminal stream, which a page with no engine doesn't have. */}
           {client ? <Banner status={bannerStatus(engine, connection)} connection={connection} onRetry={check} client={client} store={store} /> : <EngineBanner status={bannerStatus(engine, connection)} connection={connection} onRetry={check} />}
-          <main className={`relative flex min-h-0 flex-1 flex-col ${fills ? "overflow-hidden" : "gap-s2 overflow-auto p-s3"}`}>
+          <main data-walkthrough="session-view" className={`relative flex min-h-0 flex-1 flex-col ${fills ? "overflow-hidden" : "gap-s2 overflow-auto p-s3"}`}>
             {error && <p className={`${alert} ${fills ? "m-s2 mb-0" : ""}`}>{error}</p>}
             {client ? (
               route ? (
                 <div className={`relative flex min-h-0 flex-1 flex-col ${shown.screen === "inbox" ? "gap-s2 p-s3" : ""}`}>
-                  <Screen route={route} navigate={navigate} client={client} refresh={refresh ?? noop} store={store} openUrl={openUrl} pickFolder={pickFolder} installCli={installCli} appUpdater={appUpdater} appUpdates={appUpdates} releaseBuildUpdater={releaseBuildUpdater} readAbout={readAbout} />
+                  <Screen route={route} visit={visit} navigate={navigate} client={client} refresh={refresh ?? noop} store={store} openUrl={openUrl} pickFolder={pickFolder} installCli={installCli} appUpdater={appUpdater} appUpdates={appUpdates} releaseBuildUpdater={releaseBuildUpdater} readAbout={readAbout} />
 </div>
               ) : feedError ? (
                 // Nothing to land on: the sessions couldn't be read (the engine itself may be fine). Ask again.
@@ -281,6 +314,7 @@ function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, p
           {/* Docked under the session (or whatever page is shown): the screen above gets shorter, nothing lies over it. */}
           <TerminalPanel />
         </div>
+        {client && <Walkthrough autoStart={firstRun} />}
       </div>
       </AppUpdateProvider>
     </TerminalProvider>
@@ -295,12 +329,14 @@ function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, p
    without the route (an older one: 404), whose banner speaks for it. Any
    other failure (the network, a 500) says so in Starting's place, with
    Retry: a first launch never skips its setup on a hiccup. */
-/* The flow done, the app opens on New session (no demo offer on the first launch). */
+/* The flow done, the app opens on New session (no demo offer on the first launch),
+   with the walkthrough (components/Walkthrough) over it once. */
 type Gate =
   | { kind: "checking"; error?: string }
   | { kind: "onboarding"; providers: ProviderInstalled[] }
   | { kind: "permissions" }
-  | { kind: "app"; route?: Route };
+  /* `fresh`: reached through the first launch's setup just now (the walkthrough offers itself). */
+  | { kind: "app"; route?: Route; fresh?: boolean };
 
 function FirstLaunch(props: AppProps) {
   const { client, openUrl = openExternal, pickFolder = nativePicker } = props;
@@ -330,7 +366,7 @@ function FirstLaunch(props: AppProps) {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [client, asked]);
-  const done = useCallback((route?: Route) => setGate({ kind: "app", route }), []);
+  const done = useCallback((route?: Route) => setGate({ kind: "app", route, fresh: true }), []);
   const permissionsDone = useCallback(() => {
     markOnboarded();
     done();
@@ -351,9 +387,89 @@ function FirstLaunch(props: AppProps) {
   // The providers feed starts with the app itself: the first launch reads its own rows.
   return (
     <ProvidersProvider client={client}>
-      <Shell {...props} initialRoute={(gate.kind === "app" && gate.route) || props.initialRoute} />
+      <Startup client={client} refresh={props.refresh}>
+        <Shell {...props} initialRoute={(gate.kind === "app" && gate.route) || props.initialRoute} firstRun={gate.kind === "app" && gate.fresh} />
+      </Startup>
     </ProvidersProvider>
   );
+}
+
+const STARTUP_WAIT = 30000;
+const STARTUP_CHECK = 500;
+
+function waitingForPanes(workspaces: WorkspaceDTO[]): boolean {
+  return workspaces.flatMap((ws) => ws.agents ?? []).some((a) =>
+    a.provider !== "subagent" && !a.headless && !a.locked
+    && !["paused", "done", "failed", "closed", "rewound", "exited"].includes(a.status) && !a.window);
+}
+
+/* Mount the shell only once recovery has settled. Reconnects belong to its
+   banner, never to this launch gate. The deadline also bounds a hung read. */
+function Startup({ client, refresh, children }: { client: DaemonClient | null; refresh?: () => Promise<void>; children: ReactNode }) {
+  const store = useStore();
+  const [done, setDone] = useState(!client);
+  const [line, setLine] = useState("Connecting to brindle…");
+  const { reload } = useSessions();
+  useEffect(() => {
+    if (!client || done) return;
+    let current = true;
+    let next: ReturnType<typeof setTimeout>;
+    const deadline = setTimeout(() => {
+      current = false;
+      clearTimeout(next);
+      setDone(true);
+    }, STARTUP_WAIT);
+    const check = async () => {
+      const { lastEventId, connectionGeneration } = store.getState();
+      const unchanged = () => current && store.getState().lastEventId === lastEventId && store.getState().connectionGeneration === connectionGeneration;
+      try {
+        const meta = await client.meta();
+        if (!unchanged()) return;
+        setLine(meta.resuming ? "Bringing your sessions back…" : "Checking your sessions…");
+        if (!meta.resuming) {
+          const workspaces = await client.snapshot();
+          if (!unchanged()) return;
+          if (!waitingForPanes(workspaces)) {
+            // A snapshot read before recovery may still be in flight in sync.
+            // Queue a fresh one before mounting terminals on the store's rows.
+            const version = store.getState().snapshotVersion;
+            if (refresh) await Promise.all([reload(), refresh()]);
+            else {
+              const inbox = await client.inbox();
+              if (!unchanged()) return;
+              store.dispatch({ type: "snapshot", workspaces, inbox });
+              await reload();
+            }
+            if (!unchanged()) return;
+            // Recovery can start in another daemon while the reads finish.
+            const latest = await client.meta();
+            if (!unchanged() || latest.resuming || latest.pid !== meta.pid) return;
+            const applied = store.getState();
+            // Sync reports failures in the store and still resolves its promise.
+            // Only newly applied, ready rows may be used to mount terminals.
+            if (applied.snapshotVersion === version || applied.error || applied.stale || waitingForPanes(applied.workspaces)) return;
+            current = false;
+            clearTimeout(deadline);
+            setDone(true);
+            return;
+          }
+          setLine("Waiting for your sessions to open…");
+        }
+      } catch {
+        if (!unchanged()) return;
+        setLine("Waiting for brindle to answer… You’ll be let in shortly.");
+      } finally {
+        if (current) next = setTimeout(() => void check(), STARTUP_CHECK);
+      }
+    };
+    void check();
+    return () => {
+      current = false;
+      clearTimeout(next);
+      clearTimeout(deadline);
+    };
+  }, [client, done, reload, refresh, store]);
+  return done ? <>{children}</> : <Starting line={line} />;
 }
 
 /* The sign-in gate: the app needs a brindle account. Once the engine
@@ -367,9 +483,14 @@ function FirstLaunch(props: AppProps) {
    sign-out later (the Account page's, which puts the account it reads
    into the store) brings the gate back. A page with no engine has no
    account to ask about: it goes on to say so. */
-type Signed = { kind: "checking" } | { kind: "error"; error: string } | { kind: "out" } | { kind: "in" };
+type Signed = { kind: "checking" } | { kind: "error"; error: string } | { kind: "refused" } | { kind: "out" } | { kind: "in" };
 
-function SignInGate({ client, openUrl = openExternal, children }: { client: DaemonClient | null; openUrl?: OpenUrl; children: ReactNode }) {
+function SignInGate({ client, openUrl = openExternal, onAgentRefused, children }: {
+  client: DaemonClient | null;
+  openUrl?: OpenUrl;
+  onAgentRefused?: () => void;
+  children: ReactNode;
+}) {
   const store = useStore();
   const [signed, setSigned] = useState<Signed>(client ? { kind: "checking" } : { kind: "in" });
   /* Reads asked so far: Retry and a finished sign-in ask again. */
@@ -385,7 +506,17 @@ function SignInGate({ client, openUrl = openExternal, children }: { client: Daem
         store.dispatch({ type: "account", account: a });
         setSigned(a.signed_in ? { kind: "in" } : { kind: "out" });
       },
-      (e: unknown) => live && setSigned({ kind: "error", error: plain(e instanceof Error ? e.message : String(e)) }),
+      (e: unknown) => {
+        if (!live) return;
+        // Identity is checked against process ancestry. This launch cannot
+        // recover through sign-in or by clearing its inherited environment.
+        if (e instanceof DaemonError && e.code === "agent_caller") {
+          onAgentRefused?.();
+          setSigned({ kind: "refused" });
+        } else {
+          setSigned({ kind: "error", error: plain(e instanceof Error ? e.message : String(e)) });
+        }
+      },
     );
     return () => {
       live = false;
@@ -403,6 +534,15 @@ function SignInGate({ client, openUrl = openExternal, children }: { client: Daem
   }, [out, signed.kind]);
 
   if (signed.kind === "in" || !client) return <>{children}</>;
+  if (signed.kind === "refused") {
+    return (
+      <div className="flex h-full items-center justify-center p-s4">
+        <p className="max-w-prose text-ink-2" role="alert">
+          brindle was opened from an agent's terminal. Open it from the Dock
+        </p>
+      </div>
+    );
+  }
   if (checking) return <Starting />;
   const problem = signed.kind === "error" && (
     <div className={`${alert} flex flex-wrap items-center gap-s2`} role="alert" data-testid="signin-gate-failed">
@@ -424,13 +564,13 @@ export default function App(props: AppProps) {
   return (
     <StoreContext.Provider value={props.store}>
       <DaemonContext.Provider value={props.client}>
-        <SessionsProvider client={props.client}>
-          <UsageProvider client={props.client}>
-            <SignInGate client={props.client} openUrl={props.openUrl}>
+        <SignInGate client={props.client} openUrl={props.openUrl} onAgentRefused={props.onAgentRefused}>
+          <SessionsProvider client={props.client}>
+            <UsageProvider client={props.client}>
               <FirstLaunch {...props} />
-            </SignInGate>
-          </UsageProvider>
-        </SessionsProvider>
+            </UsageProvider>
+          </SessionsProvider>
+        </SignInGate>
       </DaemonContext.Provider>
     </StoreContext.Provider>
   );

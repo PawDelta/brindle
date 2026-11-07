@@ -1,13 +1,20 @@
-/* Settings: this machine's brindle, in sections (About last) with a switch at
-   the top: "You" and the repo's name (the session's, or one picked from the
-   switch's menu when there are several). The repo side is RepoSettings
-   (ProjectSettingsScreen.tsx): the same rows with where each value comes
-   from. The You side has a small nav: Your settings (editable, saved to
-   ~/.brindle/config.json for every project), Permissions (how Claude's permission
-   requests are handled, your permission rules), Providers (one row per
-   provider CLI, with how it connects, its state and its buttons) and
-   Engine & health (the engine's version and update, the command-line tool,
-   and the doctor as a short health list with a fix where the app has one).
+/* Settings: everything the person sets, in one place behind the sidebar's
+   account entry, as tabs (routes.ts SETTINGS_TABS; the older Account and
+   Project settings routes open it on their tab): Account (the plan,
+   sign-in and spend: screens/Account AccountPanel), Usage (UsagePanel),
+   General (appearance, Your settings, editable and saved to
+   ~/.brindle/config.json for every project, the doc library's switches and
+   the team's export destination), Workers & providers (one row per provider
+   CLI, with how it connects, its state and its buttons, and GitHub),
+   Permissions (how Claude's permission requests are handled, your
+   permission rules, the organization's approvals), Storage, Project (the
+   repo's own: RepoSettings in ProjectSettingsScreen.tsx, the same rows with
+   where each value comes from, for the session's repo or one picked) and
+   About (Engine & health: the engine's version and update, the
+   command-line tool, and the doctor as a short health list with a fix
+   where the app has one; Staff only; the app's About). A tab's panel mounts on
+   its first visit and stays (hidden) after, so work started in it carries on;
+   the config, doctor and providers are read once for the screen.
 
    Providers (design/connect/ step 8, with the owner's final model): brindle
    detects each CLI (GET /v1/providers/installed) and uses it as-is; the CLI
@@ -65,14 +72,16 @@
    worktrees, each with Clean, and Clean all, asked before anything goes.
    Last, About: the app's version and its license files (About.tsx). */
 
-import { useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import type { ClaudePermissionMode, Config, DaemonClient, DebugState, DoctorCheck, KeyInfo, Meta, ProviderConnection, ProviderInstalled, UserSettings } from "../../api/client";
+import { useCallback, useContext, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
+import type { ClaudePermissionMode, Config, DaemonClient, DebugState, DoctorCheck, KeyInfo, Meta, OpenCodePermissionMode, ProviderConnection, ProviderInstalled, UserSettings } from "../../api/client";
 import { debugState } from "../../api/debug";
 import { connected, factsOf, settingsNote, turnedOff } from "../../api/providers";
+import { VisualsSetting } from "./VisualsSetting";
 import type { Install } from "../../api/providersInstall";
 import type { About as AboutInfo, AppUpdater, AppUpdates, CliLink, ReleaseBuildUpdater } from "../../api/tauri";
 import { plain } from "../../api/wording";
 import { UpgradeCard, useEngineUpgrade } from "../../components/EngineUpgrade";
+import { GithubConnectCard, useGithub } from "../../components/GithubConnect";
 import { PageHeader } from "../../components/PageHeader";
 import { ProgressCard } from "../../components/ProgressCard";
 import { ago, ApiKeyPaste, CLOUD_NAME, CloudSetup, KEYS, MethodChoice, MODEL_PROVIDERS, ModelProviderPicker, PROVIDER_KEYS, ReadyNote, RenewLogin, useLock, type Lock, type Method } from "../../components/ProviderConnect";
@@ -85,8 +94,12 @@ import { TeamDestination } from "./TeamDestination";
 import { OrgApprovals } from "./OrgApprovals";
 import { Permissions } from "./Permissions";
 import { ReleaseBuildUpdate } from "./ReleaseBuildUpdate";
-import { NO_REPO, useRepo } from "../../components/RepoSelect";
+import { NO_REPO, RepoSelect, useRepo } from "../../components/RepoSelect";
+import { openExternal, type OpenUrl } from "../../api/open";
+import { SETTINGS_TABS, type SettingsTab } from "../../routes";
+import { AccountPanel, UsagePanel } from "../Account";
 import { RepoSettings } from "./ProjectSettingsScreen";
+import { LoadingButton } from "../../components/LoadingButton";
 import { alert, button, card, field, h2, main, mono, notice, pill, quiet } from "../../components/ui";
 import { useProviders } from "../../store/providers";
 import { StoreContext, useAppState } from "../../store/useStore";
@@ -130,48 +143,84 @@ export interface SettingsScreenProps {
   /* About's updates for a build that updates by itself: last checked, Check
      now, Restart to update (the shell's, api/tauri.ts AppUpdates). */
   appUpdates?: AppUpdates;
-  /* The section to scroll to on opening: "providers" from the sidebar's problem line, "permissions" or "storage" from the Inbox. */
+  /* The tab to open on (routes.ts settingsTab): General when none is named. */
+  tab?: SettingsTab;
+  /* Counts the app's navigations: a new value opens `tab` again, the screen already
+     open on another (the sidebar's entry clicked again). */
+  visit?: number;
+  /* The section to scroll to on opening, on its own tab: "providers" from the sidebar's problem line, "permissions" or "storage" from the Inbox. */
   section?: "providers" | "permissions" | "storage";
-  /* A new value asks to scroll to `section` again, the page already open. */
+  /* A new value asks to open `tab` and scroll to `section` again, the page already open. */
   ask?: number;
   /* A permission rule to open in its editor (the Inbox's "Open the deny rule"). */
   rule?: string;
-  /* The repo to open the switch on (the sidebar's repo header, the old project-settings route): its view, not You's. */
+  /* The repo the Project tab shows (the sidebar's repo header, the old project-settings route). */
   repo?: string;
-  /* The current session's repo: the one the switch starts on when no route names one. */
+  /* The current session's repo: the one the Project tab starts on when no route names one. */
   current?: string;
+  /* Opens a page in the system browser (the Account tab's billing, plans and sign-in). */
+  openUrl?: OpenUrl;
+  /* Opens the Agents screen, where some of a plan's features are used (the Account tab). */
+  onNavigate?(screen: "agents"): void;
 }
 
 export const message = (e: unknown) => plain(e instanceof Error ? e.message : String(e));
 
-const SECTIONS = [
-  { id: "your-settings", label: "Your settings" },
-  { id: "permissions", label: "Permissions" },
-  { id: "providers", label: "Providers" },
-  { id: "engine", label: "Engine & health" },
-  { id: "storage", label: "Storage" },
-  { id: "about", label: "About" },
-];
+/* Each tab's one line under the title. Account's is the panel's own (it follows the plan). */
+const LEDE: Record<SettingsTab, string> = {
+  account: "Your brindle plan, sign-in and what brindle is spending.",
+  usage: "Each provider's subscription windows: how much is used and when it resets.",
+  general: "Your settings apply to every project; a project can override them.",
+  providers: "How brindle reaches each model and your repositories.",
+  permissions: "How Claude's permission requests are handled, your rules, and your organization's limits.",
+  storage: "What brindle keeps on this machine.",
+  project: "This repo's settings: what the team sets, what is just for you, and what follows your own.",
+  about: "The engine's version and health, and this app.",
+};
 
-/* The staff section sits before About, and is in the nav only for staff. */
-const STAFF = { id: "staff", label: "Staff only" };
-
-/* The small in-page nav: one button per section, scrolling to it. */
-function SectionNav({ staff }: { staff: boolean }) {
-  const shown = staff ? [...SECTIONS.slice(0, -1), STAFF, ...SECTIONS.slice(-1)] : SECTIONS;
+/* A tab's panel: mounted on the tab's first visit and kept after, hidden while
+   another tab is open, so what runs in it (an app update, a provider's
+   sign-in, an unsaved rule) outlives a look at another tab. */
+function Pane({ id, tab, seen, children }: { id: SettingsTab; tab: SettingsTab; seen: ReadonlySet<SettingsTab>; children: ReactNode }) {
+  if (!seen.has(id)) return null;
+  const open = tab === id;
   return (
-    <nav aria-label="Settings sections" className="flex flex-wrap gap-1">
-      {shown.map((s) => (
+    <div id={`settings-panel-${id}`} role="tabpanel" aria-labelledby={`settings-tab-${id}`} hidden={!open} className={open ? "flex min-h-0 flex-col gap-s3" : "hidden"}>
+      {children}
+    </div>
+  );
+}
+
+/* The tabs: one button each, the open one marked; arrow keys move between them. */
+function TabBar({ tab, onTab }: { tab: SettingsTab; onTab(tab: SettingsTab): void }) {
+  const move = (step: number) => {
+    const i = SETTINGS_TABS.findIndex((t) => t.id === tab);
+    const next = SETTINGS_TABS[(i + step + SETTINGS_TABS.length) % SETTINGS_TABS.length].id;
+    onTab(next);
+    document.getElementById(`settings-tab-${next}`)?.focus();
+  };
+  return (
+    <div role="tablist" aria-label="Settings" className="flex flex-wrap gap-1 border-b border-line">
+      {SETTINGS_TABS.map((t) => (
         <button
-          key={s.id}
+          key={t.id}
+          id={`settings-tab-${t.id}`}
           type="button"
-          className={`${quiet} rounded-sm border border-line px-s2 text-xs`}
-          onClick={() => document.getElementById(s.id)?.scrollIntoView?.({ behavior: "smooth", block: "start" })}
+          role="tab"
+          aria-selected={tab === t.id}
+          aria-controls={`settings-panel-${t.id}`}
+          tabIndex={tab === t.id ? 0 : -1}
+          className={`-mb-px border-b-2 px-s2 py-1 text-sm ${tab === t.id ? "border-pass font-medium text-ink" : "border-transparent text-ink-2 hover:text-ink"}`}
+          onClick={() => onTab(t.id)}
+          onKeyDown={(e) => {
+            if (e.key === "ArrowRight") move(1);
+            else if (e.key === "ArrowLeft") move(-1);
+          }}
         >
-          {s.label}
+          {t.label}
         </button>
       ))}
-    </nav>
+    </div>
   );
 }
 
@@ -221,6 +270,52 @@ function Row({ label: text, help, htmlFor, badges, wide = false, children, testI
   );
 }
 
+/* Unix seconds or an ISO date, as a date; the raw text when it is neither. */
+function expiry(at: string | number): string {
+  const d = new Date(typeof at === "number" ? at * 1000 : at);
+  return Number.isNaN(d.getTime()) ? String(at) : d.toLocaleDateString();
+}
+
+/* The GitHub connection: connected as @login (how, and when it expires), Connect / Reconnect
+   (the same card as the first launch) and Disconnect. */
+function GithubRow({ client }: { client: DaemonClient }) {
+  const gh = useGithub(client);
+  const [open, setOpen] = useState(false);
+  const c = gh.conn;
+  const how = c?.route === "gh" ? "through the GitHub CLI" : c?.route === "token" ? `with a token${c.storage === "keychain" ? " in your keychain" : c.storage === "file" ? " in a file" : ""}` : "";
+  return (
+    <>
+      <Row
+        label="GitHub"
+        help={
+          c?.connected
+            ? `Connected as @${c.login ?? "unknown"}${how ? ` ${how}` : ""}${c.expires_at != null ? ` · expires ${expiry(c.expires_at)}` : ""}${c.needs_reconnect ? " · needs to be connected again" : ""}`
+            : "Not connected. Optional: public repositories clone without it."
+        }
+        testId="github-row"
+        data={{ connected: String(!!c?.connected) }}
+      >
+        {c && (!c.connected || c.needs_reconnect) && (
+          <button type="button" className={button} disabled={gh.busy} onClick={() => setOpen(true)}>
+            {c.needs_reconnect ? "Reconnect" : "Connect"}
+          </button>
+        )}
+        {c?.connected && (
+          <button type="button" className={button} disabled={gh.busy} onClick={() => void gh.disconnect()}>
+            Disconnect
+          </button>
+        )}
+      </Row>
+      {!open && gh.error && (
+        <p className={`${alert} mx-s2`} role="alert">
+          {gh.error}
+        </p>
+      )}
+      {open && c && (!c.connected || c.needs_reconnect) && <GithubConnectCard gh={gh} skipLabel="Cancel" onSkip={() => setOpen(false)} onConnected={() => setOpen(false)} />}
+    </>
+  );
+}
+
 const Edited = () => <span className={`${pill} text-ink-2`}>edited</span>;
 
 /* On or off, as a switch. */
@@ -244,14 +339,14 @@ function Toggle({ id, label: name, checked, disabled, onChange }: { id: string; 
 /* One entry per line, kept as typed (spaces, a trailing newline) and read
    as the engine's list on each change; the text follows the draft only
    when the draft moves away from it (a discard, a reload). */
-function ListField({ s, value, disabled, onChange }: { s: Setting; value: unknown; disabled: boolean; onChange(value: unknown): void }) {
+function ListField({ id, s, value, disabled, onChange }: { id: string; s: Setting; value: unknown; disabled: boolean; onChange(value: unknown): void }) {
   const [text, setText] = useState(() => listText(value));
   useEffect(() => {
     setText((t) => (JSON.stringify(listOf(t)) === JSON.stringify(value) ? t : listText(value)));
   }, [value]);
   return (
     <textarea
-      id={`setting-${s.key}`}
+      id={id}
       className={`${field} min-h-16 w-full resize-y font-mono`}
       aria-label={s.label}
       value={text}
@@ -266,11 +361,11 @@ function ListField({ s, value, disabled, onChange }: { s: Setting; value: unknow
   );
 }
 
-function Field({ s, value, disabled, onChange }: { s: Setting; value: unknown; disabled: boolean; onChange(value: unknown): void }) {
-  const id = `setting-${s.key}`;
+/* `id`: the row's own (SettingRow's useId), so the same setting on two tabs (General's and Project's) keeps its label to its own control. */
+function Field({ id, s, value, disabled, onChange }: { id: string; s: Setting; value: unknown; disabled: boolean; onChange(value: unknown): void }) {
   switch (s.kind) {
     case "list":
-      return <ListField s={s} value={value} disabled={disabled} onChange={onChange} />;
+      return <ListField id={id} s={s} value={value} disabled={disabled} onChange={onChange} />;
     case "number":
       return (
         <>
@@ -307,6 +402,7 @@ function Field({ s, value, disabled, onChange }: { s: Setting; value: unknown; d
 }
 
 export function SettingRow({ s, value, dirty, disabled, onChange, override }: { s: Setting; value: unknown; dirty: boolean; disabled: boolean; onChange(value: unknown): void; override?: ReactNode }) {
+  const id = `setting-${s.key}-${useId()}`;
   return (
     <Row
       label={s.label}
@@ -320,7 +416,7 @@ export function SettingRow({ s, value, dirty, disabled, onChange, override }: { 
           s.blurb
         )
       }
-      htmlFor={`setting-${s.key}`}
+      htmlFor={id}
       wide={s.kind === "list"}
       badges={
         <>
@@ -330,7 +426,7 @@ export function SettingRow({ s, value, dirty, disabled, onChange, override }: { 
       }
       data={{ setting: s.key }}
     >
-      <Field s={s} value={value} disabled={disabled} onChange={onChange} />
+      <Field id={id} s={s} value={value} disabled={disabled} onChange={onChange} />
     </Row>
   );
 }
@@ -362,11 +458,31 @@ export function RestOfConfig({ lines, testId, note }: { lines: [string, string][
   );
 }
 
-/* The person's choice of how Claude's permission requests are handled,
-   saved the moment it is picked (PATCH /v1/user-settings). */
-const MODES: { value: ClaudePermissionMode; label: string; blurb: string }[] = [
-  { value: "default", label: "Normal", blurb: "Claude's held permission requests show up in the Inbox for you to answer." },
-  { value: "auto", label: "Auto", blurb: "Claude approves most commands itself; only what it can't decide reaches you." },
+/* The person's choice of how each CLI's permission requests are handled,
+   saved the moment it is picked (PATCH /v1/user-settings). One row per CLI
+   that has the setting; a profile's own permission_mode still wins. */
+type ModeKey = "claude_permission_mode" | "opencode_permission_mode";
+type ModeChoice = { value: ClaudePermissionMode | OpenCodePermissionMode; label: string; blurb: string };
+const MODE_ROWS: { key: ModeKey; name: string; testId: string; modes: ModeChoice[] }[] = [
+  {
+    key: "claude_permission_mode",
+    name: "Claude",
+    testId: "permission-mode",
+    modes: [
+      { value: "default", label: "Normal", blurb: "Claude's held permission requests show up in the Inbox for you to answer." },
+      { value: "auto", label: "Auto", blurb: "Claude approves most commands itself; only what it can't decide reaches you." },
+    ],
+  },
+  {
+    key: "opencode_permission_mode",
+    name: "OpenCode",
+    testId: "opencode-permission-mode",
+    modes: [
+      { value: "ask", label: "Ask", blurb: "OpenCode asks in its own pane before edits and commands its profile doesn't allow." },
+      { value: "auto", label: "Auto", blurb: "OpenCode edits files without asking; commands its profile doesn't allow still ask." },
+      { value: "autonomous", label: "Autonomous", blurb: "OpenCode asks nothing: brindle's rules decide each call and refuse what they'd ask about or can't check. With the rules off, OpenCode asks." },
+    ],
+  },
 ];
 
 function PermissionMode({ client }: { client: DaemonClient }) {
@@ -384,50 +500,59 @@ function PermissionMode({ client }: { client: DaemonClient }) {
       live = false;
     };
   }, [client]);
-  const pick = async (mode: ClaudePermissionMode) => {
-    if (!settings || saving || settings.claude_permission_mode === mode) return;
+  const pick = async (key: ModeKey, mode: ModeChoice["value"]) => {
+    if (!settings || saving || settings[key] === mode) return;
     setSaving(true);
     setError(null);
     try {
-      setSettings(await client.patchUserSettings({ claude_permission_mode: mode }));
+      setSettings(await client.patchUserSettings({ [key]: mode }));
     } catch (e) {
       setError(message(e));
     } finally {
       setSaving(false);
     }
   };
-  const current = settings?.claude_permission_mode;
+  // An engine older than a setting doesn't return it: that row isn't offered.
+  const rows = MODE_ROWS.filter((r) => r.key === "claude_permission_mode" || !settings || settings[r.key] !== undefined);
   return (
-    <Row
-      label="Claude permission mode"
-      help={unavailable ? `Not offered by this engine: ${unavailable}` : (MODES.find((m) => m.value === current)?.blurb ?? "How Claude's permission requests are handled.")}
-      testId="permission-mode"
-      data={{ mode: current }}
-    >
-      {!unavailable && (
-        <div role="radiogroup" aria-label="Claude permission mode" className="inline-flex rounded-md border border-line p-0.5">
-          {MODES.map((m) => (
-            <button
-              key={m.value}
-              type="button"
-              role="radio"
-              aria-checked={current === m.value}
-              disabled={saving || !settings}
-              title={m.blurb}
-              className={`rounded-sm px-s2 py-0.5 text-sm disabled:opacity-50 ${current === m.value ? "bg-pass-soft font-medium text-pass" : "text-ink-2 hover:bg-surface-2"}`}
-              onClick={() => void pick(m.value)}
-            >
-              {m.label}
-            </button>
-          ))}
-        </div>
-      )}
+    <>
+      {rows.map((r) => {
+        const current = settings?.[r.key];
+        return (
+          <Row
+            key={r.key}
+            label={`${r.name} permission mode`}
+            help={unavailable ? `Not offered by this engine: ${unavailable}` : (r.modes.find((m) => m.value === current)?.blurb ?? `How ${r.name}'s permission requests are handled.`)}
+            testId={r.testId}
+            data={{ mode: current }}
+          >
+            {!unavailable && (
+              <div role="radiogroup" aria-label={`${r.name} permission mode`} className="inline-flex rounded-md border border-line p-0.5">
+                {r.modes.map((m) => (
+                  <button
+                    key={m.value}
+                    type="button"
+                    role="radio"
+                    aria-checked={current === m.value}
+                    disabled={saving || !settings}
+                    title={m.blurb}
+                    className={`rounded-sm px-s2 py-0.5 text-sm disabled:opacity-50 ${current === m.value ? "bg-pass-soft font-medium text-pass" : "text-ink-2 hover:bg-surface-2"}`}
+                    onClick={() => void pick(r.key, m.value)}
+                  >
+                    {m.label}
+                  </button>
+                ))}
+              </div>
+            )}
+          </Row>
+        );
+      })}
       {error && (
         <p role="alert" className={`${alert} w-full`}>
           Could not save: {error}
         </p>
       )}
-    </Row>
+    </>
   );
 }
 
@@ -1018,56 +1143,7 @@ function HealthRow({ c, busy, onFix }: { c: DoctorCheck; busy: boolean; onFix(fi
   );
 }
 
-/* The switch at the top: You, or the repo (a menu to pick another when there are several). */
-function ScopeSwitch({ view, onView, repo, repos, onRepo, disabled }: { view: "you" | "repo"; onView(v: "you" | "repo"): void; repo: string | null; repos: ReturnType<typeof useRepo>["repos"]; onRepo(repo: string): void; disabled: boolean }) {
-  const name = repos?.find((r) => r.repo_root === repo)?.name ?? repo?.split("/").filter(Boolean).pop();
-  const choices: { id: "you" | "repo"; label: string }[] = [{ id: "you", label: "You" }, ...(repo ? [{ id: "repo" as const, label: name ?? repo }] : [])];
-  const [open, setOpen] = useState(false);
-  const several = !!repos && repos.length > 1;
-  return (
-    <div className="relative flex flex-wrap items-center gap-s1">
-      <div role="radiogroup" aria-label="Settings for" className="inline-flex rounded-md border border-line p-0.5">
-        {choices.map((c) => (
-          <button
-            key={c.id}
-            type="button"
-            role="radio"
-            aria-checked={view === c.id}
-            aria-haspopup={c.id === "repo" && several ? "menu" : undefined}
-            aria-expanded={c.id === "repo" && several ? open : undefined}
-            disabled={disabled}
-            className={`rounded-sm px-s2 py-0.5 text-sm disabled:opacity-50 ${view === c.id ? "bg-pass-soft font-medium text-pass" : "text-ink-2 hover:bg-surface-2"}`}
-            // The repo segment, already chosen, opens the menu of repos.
-            onClick={() => (c.id === "repo" && several && view === "repo" ? setOpen((o) => !o) : (setOpen(false), onView(c.id)))}
-          >
-            {c.label}
-            {c.id === "repo" && several ? " ▾" : ""}
-          </button>
-        ))}
-      </div>
-      {open && several && (
-        <div role="menu" aria-label="Repo" className={`${card} absolute left-0 top-full z-10 mt-1 flex min-w-40 flex-col p-0.5`}>
-          {repos!.map((r) => (
-            <button
-              key={r.repo_root}
-              type="button"
-              role="menuitem"
-              className={`rounded-sm px-s2 py-0.5 text-left text-sm hover:bg-surface-2 ${r.repo_root === repo ? "font-medium" : ""}`}
-              onClick={() => {
-                setOpen(false);
-                onRepo(r.repo_root);
-              }}
-            >
-              {r.name}
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-export function SettingsScreen({ client, installCli, appUpdater, appUpdates, releaseBuildUpdater, readAbout, section, ask, rule, repo: routed, current }: SettingsScreenProps) {
+export function SettingsScreen({ client, installCli, appUpdater, appUpdates, releaseBuildUpdater, readAbout, tab: routedTab, visit, section, ask, rule, repo: routed, current, openUrl = openExternal, onNavigate }: SettingsScreenProps) {
   const store = useContext(StoreContext);
   if (!store) throw new Error("SettingsScreen needs a <StoreContext.Provider>");
   const connection = useAppState((state) => state.connection);
@@ -1076,17 +1152,22 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
   const { repos, setRepo } = pick;
   /* The repo a route names is the one on screen from the first paint, before the repos are known. */
   const repo = pick.repo ?? routed ?? current ?? null;
-  const [view, setView] = useState<"you" | "repo">(routed ? "repo" : "you");
-  /* Start on the repo the route names, else the current session's; only a route opens its view. */
+  /* The tab a route asks for (or the one its section lives on); the person's clicks after that. */
+  const wanted: SettingsTab = routedTab ?? section ?? (routed ? "project" : "general");
+  const [tab, setTab] = useState<SettingsTab>(wanted);
+  // Every navigation here (a new `visit`) opens its tab again, even one to the same route.
+  useEffect(() => {
+    setTab(wanted);
+  }, [wanted, ask, visit]);
+  /* The tabs opened so far: their panels stay mounted (Pane). */
+  const [seen, setSeen] = useState<ReadonlySet<SettingsTab>>(() => new Set([wanted]));
+  if (!seen.has(tab)) setSeen(new Set(seen).add(tab));
+  const panes = { tab, seen };
+  /* Start on the repo the route names, else the current session's. */
   useEffect(() => {
     const first = routed ?? current;
     if (first) setRepo(first);
-    if (routed) setView("repo");
   }, [routed, current, setRepo]);
-  /* A section asked for (the sidebar's problem line, the Inbox) lives on You's side. */
-  useEffect(() => {
-    if (section) setView("you");
-  }, [section, ask]);
   const [config, setConfig] = useState<Config | null>(null);
   const [checks, setChecks] = useState<DoctorCheck[] | null>(null);
   const [doctorError, setDoctorError] = useState<string | null>(null);
@@ -1267,8 +1348,8 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
   // Opened from the sidebar's problem line: scrolled to Providers, again once the sections above it have loaded.
   const placed = config !== null;
   useEffect(() => {
-    if (section) document.getElementById(section)?.scrollIntoView?.({ behavior: "smooth", block: "start" });
-  }, [section, ask, placed, view]);
+    if (section && tab === section) document.getElementById(section)?.scrollIntoView?.({ behavior: "smooth", block: "start" });
+  }, [section, ask, placed, tab]);
   const install = async () => {
     if (!installCli) return;
     setCliState("installing");
@@ -1297,29 +1378,16 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
   // What the person set for every repo that has no row here (permission_policy_default is brindle's, not theirs).
   const yourLines = userLines(config?.user ?? {}).filter(([k]) => !shown.includes(k) && k !== "permission_policy_default");
   const yourRow = (s: Setting) => <SettingRow key={s.key} s={s} value={userDraft[s.key]} dirty={userDirty.includes(s.key)} disabled={saving} onChange={(v) => editUser(s.key, v)} />;
-  const repoView = view === "repo" && !!repo;
+  /* What a tab needs a repo for (the config and doctor are read for it), when there is none yet. */
+  const noRepo = repos && repos.length === 0 && <p className="text-ink-3">{NO_REPO}</p>;
 
   return (
     <section className="flex min-h-0 flex-col gap-s3" aria-label="Settings">
-      <PageHeader title="Settings" lede={repoView ? "This repo's settings: what the team sets, what is just for you, and what follows your own." : "Your settings apply to every project; a project can override them. Below: permissions, sign-ins and engine health."}>
-        <ScopeSwitch view={repoView ? "repo" : "you"} onView={setView} repo={repo} repos={repos} onRepo={setRepo} disabled={saving} />
-      </PageHeader>
-      {repoView && (
-        <section className="flex min-h-0 flex-col gap-s3" aria-label="Project settings" data-testid="project-settings">
-          <RepoSettings key={repo} client={client} repo={repo} />
-        </section>
-      )}
-      {!repoView && <SectionNav staff={staff} />}
-      {!repoView && (
-      <div className="border-t border-line">
-        <Row label="Appearance">
-          <ThemeToggle choices />
-        </Row>
-      </div>
-      )}
-      {!repoView && repos && repos.length === 0 && <p className="text-ink-3">{NO_REPO}</p>}
-      {!repoView && <>
-      {loadError && (
+      <PageHeader title="Settings" lede={LEDE[tab]} />
+      <TabBar tab={tab} onTab={setTab} />
+      <div className="flex min-h-0 flex-col gap-s3" data-tab={tab}>
+      {tab !== "account" && tab !== "usage" && tab !== "project" && noRepo}
+      {tab !== "account" && tab !== "usage" && tab !== "project" && loadError && (
         <div role="alert" className={`${alert} flex items-center justify-between gap-s2`}>
           <span>Could not load settings: {loadError}</span>
           <button type="button" className={button} onClick={() => void loadConfig()}>
@@ -1327,6 +1395,32 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
           </button>
         </div>
       )}
+      <Pane id="account" {...panes}>
+        <AccountPanel client={client} openUrl={openUrl} onNavigate={(to) => (to === "settings" ? setTab("general") : onNavigate?.(to))} />
+      </Pane>
+      <Pane id="usage" {...panes}>
+        <UsagePanel ask={ask} />
+      </Pane>
+      <Pane id="project" {...panes}>
+        {repo ? (
+          <section className="flex min-h-0 flex-col gap-s3" aria-label="Project settings" data-testid="project-settings">
+            <div className="flex flex-wrap items-center gap-s1 text-sm text-ink-2">
+              <span>Settings for</span>
+              {repos && repos.length > 1 ? <RepoSelect {...pick} repo={repo} /> : <span className="font-medium text-ink">{repos?.find((r) => r.repo_root === repo)?.name ?? repo.split("/").filter(Boolean).pop()}</span>}
+            </div>
+            <RepoSettings key={repo} client={client} repo={repo} />
+          </section>
+        ) : (
+          noRepo
+        )}
+      </Pane>
+      <Pane id="general" {...panes}>
+        <VisualsSetting client={client} />
+      <div className="border-t border-line">
+        <Row label="Appearance">
+          <ThemeToggle choices />
+        </Row>
+      </div>
       {config && (
         <Section id="your-settings" title="Your settings" blurb="Saved to ~/.brindle/config.json and applied to every project, unless a repo sets one itself." testId="your-settings">
           {common.map(yourRow)}
@@ -1347,9 +1441,9 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
                   <button type="button" className={quiet} disabled={saving} onClick={() => setUserDraft(userLoaded)}>
                     Discard
                   </button>
-                  <button type="button" className={button} disabled={saving || userMissing.length > 0} onClick={() => void saveUser()}>
-                    {saving ? "Saving…" : "Save your settings"}
-                  </button>
+                  <LoadingButton className={button} busy={saving} disabled={saving || userMissing.length > 0} onClick={() => saveUser()}>
+                    Save your settings
+                  </LoadingButton>
                 </div>
               )}
               {userMissing.length > 0 && userDirty.length > 0 && (
@@ -1372,20 +1466,27 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
         </Section>
       )}
 
-      {config && (
-        <Section id="you" title="How Claude asks you" blurb="Whether Claude's held requests wait for you in the Inbox or Claude decides most itself." testId="user-settings">
-          <PermissionMode client={client} />
-        </Section>
-      )}
+      <DocSwitches client={client} />
+      <TeamDestination client={client} />
+      </Pane>
 
-      <Permissions client={client} rule={rule} ask={ask} />
+      <Pane id="permissions" {...panes}>
+          {config && (
+            <Section id="you" title="How your agents ask you" blurb="For each CLI, whether its requests wait for you or it decides more itself. A profile's own permission mode wins." testId="user-settings">
+              <PermissionMode client={client} />
+            </Section>
+          )}
 
-      <Section id="organization" title="Organization" blurb="Your organization's members, their roles, and the approval limits it sets." testId="org-approvals">
-        <Row label="Organization approvals" help="For an organization's admins: assign roles and set which approvals members may save." wide>
-          <OrgApprovals client={client} />
-        </Row>
-      </Section>
+          <Permissions client={client} rule={rule} ask={ask} />
 
+          <Section id="organization" title="Organization" blurb="Your organization's members, their roles, and the approval limits it sets." testId="org-approvals">
+            <Row label="Organization approvals" help="For an organization's admins: assign roles and set which approvals members may save." wide>
+              <OrgApprovals client={client} />
+            </Row>
+          </Section>
+      </Pane>
+
+      <Pane id="providers" {...panes}>
       <Section
         id="providers"
         title="Providers"
@@ -1504,6 +1605,16 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
         )}
       </Section>
 
+      <Section id="github" title="GitHub" blurb="How brindle reaches your private repositories over HTTPS." testId="github">
+        <GithubRow client={client} />
+      </Section>
+      </Pane>
+
+      <Pane id="storage" {...panes}>
+        <Storage client={client} />
+      </Pane>
+
+      <Pane id="about" {...panes}>
       <Section
         id="engine"
         title="Engine & health"
@@ -1605,12 +1716,6 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
         )}
       </Section>
 
-      <Storage client={client} />
-
-      <DocSwitches client={client} />
-
-      <TeamDestination client={client} />
-
       {staff && (
         <Section id="staff" title="Staff only" blurb="Internal tools for Brindle staff. Not shown to customers." staff testId="staff-only">
           <DebugLogging client={client} />
@@ -1619,7 +1724,8 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
       )}
 
       <About read={readAbout} updates={appUpdates} status={updateStatus} engine={meta?.engine_version} />
-      </>}
+      </Pane>
+      </div>
     </section>
   );
 }

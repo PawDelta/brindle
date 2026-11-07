@@ -94,6 +94,12 @@ def test_requests_need_the_token_and_no_foreign_origin(headers, status):
     code, body = _get("/v1/meta", headers)
     assert code == status
     assert ("api_version" in body) == (status == 200)
+    if status == 200:
+        app = build_app(TOKEN)
+        for resuming in (True, False):
+            app.state.resuming = resuming
+            code, body = asyncio.run(_read_request(app, "/v1/meta", headers))
+            assert code == 200 and body["resuming"] is resuming
 
 
 @pytest.mark.variant("a token sent in the URL must never open the socket, only the first frame")
@@ -991,7 +997,7 @@ def test_analysis_doc_session_summary_counts_local_session_records(db, seeded, m
         if path == "/analysis-docs/manual-only":
             return {"doc_id": "manual-only", "version": 3}
         if path == "/me/analysis-docs/settings":
-            return {"switches": {}}
+            return {"switches": {"store": "on", "assist": "on"}}   # doc analysis is opt-in
         assert path == "/analysis-docs/brief"
         return {"block": "A brief", "cited": [{"doc_id": "worker-cited", "version": 4}]}
 

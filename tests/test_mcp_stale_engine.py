@@ -21,6 +21,314 @@ from brindle import mcp_server, mcp_stdio, upgrade
 from brindle.db import DB, SCHEMA_VERSION
 
 
+@pytest.mark.parametrize("finding", ["identity-lock", "reviewer-fallback"])
+def test_failed_report_is_redelivered_once(db, tmp_path, monkeypatch, finding):
+    """A single receipt survives each failed stage, including both review findings."""
+    from contextlib import contextmanager
+    from functools import partial
+    from brindle import agents, bus, cli, gates, git, identity_lock, inbox, pipeline, tmux, usage, workspaces
+    from brindle.config import RepoConfig
+    from brindle.db import Workspace
+    from test_codex_notify import CODEX_EMPTY_PANE
+    from test_merge_order import add
+
+    ws = Workspace("ws", str(tmp_path), "work", "worktree", "work", "main",
+                   str(tmp_path), None, "fake", 1)
+    db.add_workspace(ws)
+    add(db, ws, "boss", "interactive", "supervisor", status="paused")
+    add(db, ws, "worker", "assign", parent="boss")
+    monkeypatch.setenv("BRINDLE_AGENT_ID", "worker")
+    piped = finding == "reviewer-fallback"
+    dirty, locked, notifications = [], [], []
+    monkeypatch.setattr(pipeline, "load_repo_config", lambda *a, **k: RepoConfig(pipeline=piped))
+    monkeypatch.setattr(git, "ahead_behind", lambda *a: (0, 1))
+    monkeypatch.setattr(git, "dirty_files", lambda *a, **k: dirty)
+    monkeypatch.setattr(usage, "agent_usage", lambda *a: None)
+    monkeypatch.setattr(agents, "stale_analysis_docs", lambda *a: None)
+    monkeypatch.setattr(pipeline, "note_reported", lambda *a: None)
+    monkeypatch.setattr(agents, "is_alive", lambda *a: phase == "notify")
+    monkeypatch.setattr(identity_lock, "locked_by", lambda aid: "other identity" if aid == "boss" and locked else None)
+    original_condense, original_lock = agents.condense, agents.delivery_lock
+
+    def condense(*a, **k):
+        if phase == "dirty":
+            locked.append(True)  # identity changes during escalation preparation
+        if phase == "fallback-interrupted":
+            raise RuntimeError("lost while preparing fallback")
+        return original_condense(*a, **k)
+
+    @contextmanager
+    def lock(agent_id):
+        with original_lock(agent_id):
+            if phase == "identity":
+                locked.append(True)  # identity changes while waiting for the delivery lock
+            yield
+
+    publish = bus.publish_agent
+
+    def published(db_, kind, *a, **k):
+        publish(db_, kind, *a, **k)
+        if phase == "notify" and kind == "message.queued":
+            locked.append(True)  # changed after durable queueing, before notification
+
+    monkeypatch.setattr(git, "out", lambda *a, **k: "head")
+    monkeypatch.setattr(agents, "warm_checks", lambda *a: None)
+    monkeypatch.setattr(agents, "condense", condense)
+    monkeypatch.setattr(agents, "delivery_lock", lock)
+    monkeypatch.setattr(bus, "publish_agent", published)
+
+    def call(result="done"):
+        return asyncio.run(mcp_server.mcp.call_tool("report_result", {"result": result}))
+
+    if finding == "identity-lock":
+        for phase in ("identity", "dirty"):
+            locked.clear()
+            if phase == "dirty":
+                piped = True
+                dirty.append("work.py")
+            with pytest.raises(ToolError):
+                call()
+            rows = db.conn.execute("SELECT * FROM report_outbox WHERE canonical_id IS NULL").fetchall()
+            assert len(rows) == 1 and rows[0]["state"] == "accepted"
+            assert db.get_agent("worker").result == "done" and db.pending_count("boss") == 0
+        locked.clear()
+        phase = "notify"
+        call()
+        locked.clear()
+        call()
+        call()
+        assert db.pending_count("boss") == 1 and notifications == []
+        assert db.outbox_get(rows[0]["id"])["state"] == "delivered"
+        assert db.get_agent("worker").pipeline is None
+        # A later flush of the durable report must authorize after preparation,
+        # even when it wasn't initiated by report_result itself.
+        phase = "connect"
+        db.update_agent("boss", status="idle")
+        monkeypatch.setattr(agents, "is_alive", lambda *a: True)
+        monkeypatch.setattr(inbox, "usable", lambda *a: True)
+        closed = []
+
+        class Socket:
+            def settimeout(self, value):
+                pass
+
+            def connect(self, path):
+                if phase == "connect":
+                    locked.append(True)
+
+            def sendall(self, payload):
+                notifications.append(bool(locked))
+
+            def close(self):
+                closed.append(True)
+
+        monkeypatch.setattr(inbox, "socket", SimpleNamespace(socket=lambda *a: Socket(), AF_UNIX=1, SOCK_STREAM=1))
+        pending_id = db.conn.execute("SELECT id FROM inbox WHERE delivered_at IS NULL").fetchone()[0]
+        agents._notify_supervisor(db, db.get_agent("boss"))
+        assert notifications == [] and closed == [True] and db.pending_count("boss") == 1
+        assert not db.message_delivered(pending_id)
+        with pytest.raises(agents.AgentError):
+            agents.flush(db, "boss")
+        assert notifications == [] and db.pending_count("boss") == 1
+        locked.clear()
+        phase = "transport"
+        assert agents.flush(db, "boss")
+        assert notifications == [False] and db.message_delivered(pending_id)
+
+        # Pane delivery (idle and mid-turn) and pull notices share that guard.
+        def debounce():
+            if phase == "paste-submit":
+                assert db.pending_count("boss") == 1 and db.pop_pending("boss") is None
+                locked.append(True)
+
+        monkeypatch.setattr(tmux, "paste", partial(tmux.paste, debounce=debounce))
+        db.update_agent("boss", tmux_server="fake-transport")
+        buffers, composer, completed = {}, [], []
+
+        def transport(argv, **kwargs):
+            index = next(i for i, arg in enumerate(argv)
+                         if arg in ("load-buffer", "paste-buffer", "delete-buffer", "send-keys"))
+            command, *args = argv[index:]
+            if command == "load-buffer":
+                buffers[args[1]] = kwargs["input"]
+                if phase == "paste-load":
+                    locked.append(True)
+            elif command in ("paste-buffer", "delete-buffer"):
+                body = buffers.pop(args[args.index("-b") + 1], "")
+                if command == "paste-buffer":
+                    assert not locked
+                    composer.append(body)
+            elif command == "send-keys":
+                assert not locked
+                if "-l" in args:
+                    composer.append(args[-1])
+                    if phase == "paste-lead":
+                        locked.append(True)
+                elif args[-1] == "Enter":
+                    completed.append("".join(composer))
+                    composer.clear()
+                    notifications.append(False)
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(tmux, "subprocess", SimpleNamespace(run=transport, TimeoutExpired=subprocess.TimeoutExpired))
+
+        def screen(*a, **k):
+            if db.get_agent("boss").provider == "claude":
+                return "────\n❯ " + "".join(composer) + "\n────\n? for shortcuts\n"
+            return "› " + "".join(composer) + "\n" + CODEX_EMPTY_PANE.split("\n", 1)[1]
+
+        monkeypatch.setattr(tmux, "capture", screen)
+        monkeypatch.setattr(inbox, "usable", lambda *a: False)
+        piped = False
+        for route in ("idle", "submit", "midturn", "codex-submit", "notice"):
+            submitting = route in ("submit", "codex-submit")
+            notifications.clear()
+            db.update_agent("boss", provider="claude" if route == "submit" else "codex",
+                            status="idle" if route == "idle" or submitting else "processing")
+            monkeypatch.setattr(agents, "pulls_messages", lambda *a: route == "notice")
+            monkeypatch.setattr(agents, "is_alive", lambda *a: False)
+            call(route)
+            expected = (agents.message_lead(db, db.get_agent("boss"), "worker") + " "
+                        + db.conn.execute("SELECT body FROM inbox WHERE agent_id='boss'"
+                                          " AND delivered_at IS NULL ORDER BY id DESC LIMIT 1").fetchone()[0])
+            monkeypatch.setattr(agents, "is_alive", lambda *a: True)
+            if route == "notice":
+                # The notice uses _deliver_to_inbox instead of flush's inbox path.
+                db.update_agent("boss", provider="claude")
+                phase = "connect"
+                monkeypatch.setattr(inbox, "usable", lambda *a: True)
+            else:
+                phase = "paste-submit" if submitting else {"idle": "paste-load", "midturn": "paste-lead"}[route]
+            agents._notify_supervisor(db, db.get_agent("boss"))
+            assert notifications == [] and not buffers
+            pending = db.pending_count("boss")
+            assert pending == 1
+            if route == "idle" or submitting:
+                assert db.get_agent("boss").status == "idle"  # release our status claim, too
+            locked.clear()
+            phase = "transport"
+            if route == "midturn" or submitting:
+                # A changed draft is never ours to submit. Restoration must
+                # work from durable state, even through a fresh DB connection.
+                assert db.pop_pending("boss") is None
+                pane = db.get_agent("boss").tmux_window
+                db.update_agent("boss", tmux_window="%replacement")
+                assert agents.flush(db, "boss") is False
+                db.update_agent("boss", tmux_window=pane)
+                # Blank rows and UI-like text inside a changed draft must not
+                # hide its remaining content from the recovery parser.
+                for addition in (" unrelated draft", "\n\nunrelated draft",
+                                 "\n────\nunrelated draft", "\n? for shortcuts\nunrelated draft"):
+                    composer.append(addition)
+                    with monkeypatch.context() as available:
+                        available.setattr(inbox, "usable", lambda *a: True)
+                        assert agents.flush(db, "boss") is False  # cannot bypass partial delivery via IPC
+                    assert not notifications and db.pending_count("boss") == 1
+                    composer.pop()
+                if submitting:
+                    capture, start = tmux.capture, tmux._start
+                    preparing = []
+
+                    def during_write(*a, **k):
+                        preparing.append(True)
+                        return start(*a, **k)
+
+                    def changed_identity(*a, **k):
+                        screen = capture(*a, **k)
+                        if preparing:
+                            locked.append(True)
+                        return screen
+
+                    with monkeypatch.context() as raced:
+                        raced.setattr(tmux, "_start", during_write)
+                        raced.setattr(tmux, "capture", changed_identity)
+                        with pytest.raises(agents.AgentError):
+                            agents.flush(db, "boss")
+                    locked.clear()
+            if route == "notice":
+                monkeypatch.setattr(inbox, "usable", lambda *a: True)
+                # The queued notice keeps its claim; another notification must
+                # not duplicate it while the report itself is still unread.
+                agents._notify_supervisor(db, db.get_agent("boss"))
+                assert notifications == [] and db.pending_count("boss") == pending
+            resumed = brindle_db.DB()
+            try:
+                if submitting:
+                    def interrupted(*a):
+                        raise RuntimeError("lost after submission")
+
+                    with monkeypatch.context() as interrupted_store:
+                        interrupted_store.setattr(resumed, "mark_delivered", interrupted)
+                        with pytest.raises(RuntimeError):
+                            agents.flush(resumed, "boss")
+                    assert not composer and db.pending_count("boss") == 1
+                assert agents.flush(resumed, "boss")
+            finally:
+                resumed.conn.close()
+            assert notifications == [False]
+            assert db.mark("boss", "pane-delivery") is None
+            if route != "notice":
+                assert completed[-1] == expected
+                assert not composer
+            if route == "notice":
+                assert len(db.read_held("boss")) == 1
+            assert db.pending_count("boss") == 0
+    else:
+        # Run the actual detached helper through its check and reviewer launch.
+        phase = "detached"
+        cfg = RepoConfig(checks=["suite"], review_profile="reviewer")
+        queued = []
+        db.update_agent("boss", status="processing")
+        monkeypatch.setattr(pipeline, "load_repo_config", lambda *a, **k: cfg)
+        monkeypatch.setattr(workspaces, "config_for", lambda *a: cfg)
+        monkeypatch.setattr(cli, "_helper_db", lambda: db)
+        monkeypatch.setattr(agents, "_detach", queued.append)
+        monkeypatch.setattr(gates, "head", lambda *a: "head")
+        monkeypatch.setattr(gates, "check_summary", lambda *a, **k: "PASS `suite`")
+        monkeypatch.setattr(git, "paths", lambda *a, **k: [])
+
+        def fail_launch(*a, **k):
+            if phase == "identity":
+                locked.append(True)
+            if phase == "stale-helper":
+                agents.report_result(db, "worker", "newer report")
+            raise agents.AgentError("reviewer unavailable after checks")
+
+        def finish(argv):
+            opt = lambda name: argv[argv.index(name) + 1] if name in argv else None
+            cli.review_after_checks_cmd(ws.id, "boss", opt("--profile"), None,
+                                        request_id=opt("--request-id"), slot=opt("--review-slot"),
+                                        report=float(opt("--report")))
+
+        monkeypatch.setattr(agents, "spawn", fail_launch)
+        for fault in ("identity", "fallback-interrupted", "stale-helper"):
+            phase = "detached"
+            call(fault)
+            claim = db.get_agent("worker").reviewing_since
+            phase = fault
+            if fault == "stale-helper":
+                finish(queued[-1])
+                assert db.get_agent("worker").reviewing_since != claim
+                assert db.get_agent("worker").pipeline == "reviewing"
+                assert db.pending_count("boss") == 2
+                continue
+            with pytest.raises((agents.AgentError, RuntimeError)):
+                finish(queued[-1])
+            row = db.conn.execute("SELECT * FROM report_outbox ORDER BY id DESC LIMIT 1").fetchone()
+            assert row["state"] == "accepted" and row["fallback"]
+            assert db.get_agent("worker").pipeline == "reviewing"
+            assert db.get_agent("worker").reviewing_since == claim
+            assert db.pending_count("boss") == (0 if fault == "identity" else 1)
+            phase = "recover"
+            locked.clear()
+            worker = db.get_agent("worker")
+            pipeline.restart_review(db, worker, ws, worker.reviewing_since)
+            call(fault)
+            call(fault)
+            assert db.outbox_get(row["id"])["state"] == "delivered"
+            assert db.get_agent("worker").pipeline is None
+
+
 @pytest.mark.parametrize("migration, incompatible", [
     ("ALTER TABLE workspaces ADD COLUMN from_a_newer_engine TEXT", None),
     ("ALTER TABLE workspaces ADD COLUMN from_a_newer_engine TEXT NOT NULL DEFAULT ''", None),

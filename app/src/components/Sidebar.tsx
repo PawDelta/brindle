@@ -47,14 +47,16 @@ import { AppUpdatePill } from "./AppUpdateBanner";
 import { cliStatus, formatAge, isPaused, type CliStatus } from "../store/overview";
 import { planWindows, providerName, WARN } from "../screens/Account/usage";
 import { useSessions } from "../store/sessions";
-import { providerProblems, type ProviderProblem } from "../api/providers";
+import { providerProblems, rememberSignedIn, type ProviderProblem } from "../api/providers";
 import { useProviders } from "../store/providers";
 import { useUsage } from "../store/usage";
+import { prettyModel } from "../screens/Agents/agents";
 import { useAppState, useStore } from "../store/useStore";
 import Logo from "./Logo";
 import { Preflight } from "./Preflight";
 import { SessionContext } from "./SessionContext";
 import { TerminalToggle } from "./TerminalPanel";
+import { openWalkthrough } from "./Walkthrough";
 
 export interface SidebarProps {
   route: Route;
@@ -84,7 +86,7 @@ function WeeklyMeter({ provider }: { provider: ProviderUsage }) {
 let usageAsks = 0;
 /* No reading is not a fault: a new user has none yet, and the first load may still be out.
    Only a failed load says "unavailable"; otherwise a neutral "Usage" opens the same page. */
-function UsageReading({ provider, warning, failed, navigate }: { provider?: ProviderUsage; warning: boolean; failed: boolean } & Pick<SidebarProps, "navigate">) {
+function UsageReading({ provider, model, warning, failed, navigate }: { provider?: ProviderUsage; model?: string | null; warning: boolean; failed: boolean } & Pick<SidebarProps, "navigate">) {
   const window = provider && weeklyWindow(provider);
   return (
     <button
@@ -99,6 +101,7 @@ function UsageReading({ provider, warning, failed, navigate }: { provider?: Prov
       {provider ? (
         <>
           <span>{providerName(provider.provider)}</span>
+          {model && <span data-testid="usage-model">{prettyModel(model)}</span>}
           <WeeklyMeter provider={provider} />
           {window?.resets_at != null && <span className="truncate">· resets {new Date(window.resets_at * 1000).toLocaleDateString("en-US", { weekday: "short" })}</span>}
         </>
@@ -135,6 +138,7 @@ function AccountButton({ route, navigate }: Pick<SidebarProps, "route" | "naviga
     <button
       type="button"
       aria-label="Open Account"
+      data-walkthrough="profile"
       aria-current={route.screen === "account" ? "page" : undefined}
       title={account?.signed_in ? name || email || "Signed in" : "Sign in"}
       className={`flex size-7 shrink-0 items-center justify-center rounded-full border border-line-strong font-mono text-[10px] ${account?.signed_in ? "text-ink-2" : "text-ink-3"} hover:bg-surface-2`}
@@ -162,7 +166,7 @@ function ProviderProblemLine({ problems, navigate }: { problems: ProviderProblem
   return (
     <button
       type="button"
-      className="group ml-auto inline-flex min-w-0 flex-[0_1_auto] items-baseline gap-1 font-mono text-[10.5px] font-medium text-sap"
+      className={`group ml-auto inline-flex min-w-0 flex-[0_1_auto] items-baseline gap-1 font-mono text-[10.5px] ${first.kind === "set_up" ? "text-ink-3" : "font-medium text-sap"}`}
       aria-label={`${first.text}: open Settings › Providers`}
       data-testid="provider-problem"
       data-provider={first.provider}
@@ -539,6 +543,7 @@ function InboxEntry({ route, navigate }: Pick<SidebarProps, "route" | "navigate"
       className={`mx-1 flex items-center gap-s1 rounded-md border border-transparent py-[7px] pl-2 pr-[10px] text-left text-[12.5px] ${on ? "bg-surface-2" : "hover:bg-surface-2"} ${total > 0 ? "font-semibold text-ink" : "font-medium text-ink-3"}`}
       aria-current={on ? "page" : undefined}
       data-testid="inbox-link"
+      data-walkthrough="inbox"
       onClick={() => navigate({ screen: "inbox" })}
     >
       <span className="flex-1">Inbox</span>
@@ -602,6 +607,11 @@ function Handle({ height, onChange }: { height: number; onChange(next: number): 
   );
 }
 
+/* Two session routes that differ only in the sheet over the chat: the same session, repo and
+   selected agent (none selected is the root, as the session screen reads it), another sheet. */
+const sheetOnly = (a: Extract<Route, { screen: "session" }>, b: Extract<Route, { screen: "session" }>) =>
+  a.root === b.root && a.repo === b.repo && (a.agent ?? a.root) === (b.agent ?? b.root) && JSON.stringify(a.sheet ?? null) !== JSON.stringify(b.sheet ?? null);
+
 export function Sidebar({ route, navigate, refresh, openUrl }: SidebarProps) {
   const { repos, sessions, error: feedError, closeError, close, after } = useSessions();
   const [cursor, setCursor] = useState<string | null>(null);
@@ -612,9 +622,8 @@ export function Sidebar({ route, navigate, refresh, openUrl }: SidebarProps) {
   const noRefresh = useCallback(() => Promise.resolve(), []);
   const { usage, error: usageError } = useUsage();
   const mostUsed = usage?.providers.filter((provider) => weeklyWindow(provider)).sort((a, b) => weeklyWindow(b)!.used - weeklyWindow(a)!.used)[0];
-  const warning = !!mostUsed && (mostUsed.limited || planWindows(mostUsed).some((window) => window.used >= WARN));
   const { rows: providerRows, installs } = useProviders();
-  const problems = useMemo(() => providerProblems(providerRows, installs), [providerRows, installs]);
+  const problems = useMemo(() => providerProblems(providerRows, installs, rememberSignedIn(providerRows)), [providerRows, installs]);
 
   // The live sessions in reading order (⌘1-9), and the paused ones after them.
   const live = useMemo(() => (repos ?? []).flatMap((repo) => (sessions[repo.repo_root] ?? []).filter((s) => !isPaused(s)).map((session) => ({ session, repo: repo.repo_root }))), [repos, sessions]);
@@ -628,9 +637,25 @@ export function Sidebar({ route, navigate, refresh, openUrl }: SidebarProps) {
     return listed(here) ?? listed(readLastSession()) ?? (all[0] ? { root: all[0].session.id, repo: all[0].repo } : null);
   }, [route, all]);
 
-  // An open session's agents show.
+  // The model the selected session's own agent last ran on, from the agents the snapshot already lists.
+  const workspaces = useAppState((s) => s.workspaces);
+  const agent = useMemo(() => workspaces.flatMap((ws) => ws.agents ?? []).find((a) => a.id === selected?.root), [workspaces, selected]);
+  // The meter names the model only with its own provider's usage; with none, the global most-used provider shows alone.
+  // The session's model always shows, with its own provider's weekly usage, or "—" when that provider reports none.
+  const model = agent?.model;
+  const own = agent && model ? (usage?.providers.find((p) => p.provider === agent.provider) ?? { provider: agent.provider, known: false, limited: false, limited_until: null, updated_at: null, windows: [] }) : undefined;
+  const shown = own ?? mostUsed;
+  const warning = !!shown && (shown.limited || planWindows(shown).some((window) => window.used >= WARN));
+
+  // An open session's agents show, on each navigation to it; a sheet opening or closing over the
+  // session (a visual, Review changes) isn't one, so Back finds the tree folded as it was left.
+  const lastRoute = useRef(route);
   useEffect(() => {
-    if (route.screen === "session") setFolded((f) => (f.has(route.root) ? new Set([...f].filter((id) => id !== route.root)) : f));
+    const was = lastRoute.current;
+    lastRoute.current = route;
+    if (route.screen !== "session") return;
+    if (was.screen === "session" && sheetOnly(was, route)) return;
+    setFolded((f) => (f.has(route.root) ? new Set([...f].filter((id) => id !== route.root)) : f));
   }, [route]);
 
   const resize = useCallback((next: number) => {
@@ -734,9 +759,10 @@ export function Sidebar({ route, navigate, refresh, openUrl }: SidebarProps) {
         <span className="flex-1" />
         <button
           type="button"
-          className={`flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11.5px] text-ink-3 hover:bg-surface hover:text-ink ${route.screen === "new" ? "bg-branch-soft text-ink" : ""}`}
+          className={`flex items-center gap-1 rounded-md border px-2 py-0.5 text-[11.5px] font-medium hover:text-ink ${route.screen === "new" ? "border-branch/40 bg-branch-soft text-ink" : "border-branch/30 bg-branch-soft/50 text-ink-2 hover:bg-branch-soft"}`}
           aria-current={route.screen === "new" ? "page" : undefined}
           title="New session (⌘N)"
+          data-walkthrough="new-session"
           onClick={() => navigate({ screen: "new" })}
         >
           <span className="text-sm leading-none" aria-hidden>
@@ -746,6 +772,7 @@ export function Sidebar({ route, navigate, refresh, openUrl }: SidebarProps) {
         </button>
       </div>
       <InboxEntry route={route} navigate={navigate} />
+      <div className="mx-2 h-px shrink-0 bg-line" role="separator" data-testid="inbox-divider" />
       <SessionContext session={selected} route={route} navigate={navigate} refresh={refresh ?? noRefresh} openUrl={openUrl} style={{ height: split }} />
       <Handle height={split} onChange={resize} />
       <div className="side-h">Sessions</div>
@@ -823,7 +850,7 @@ export function Sidebar({ route, navigate, refresh, openUrl }: SidebarProps) {
         {repos && repos.length > 0 && live.length === 0 && <p className="px-s1 text-xs text-ink-3">Nothing running. Start a session, or continue a recent one.</p>}
       </nav>
       <div className="flex min-h-4 items-center justify-between gap-2 whitespace-nowrap border-t border-line px-s1 pt-s1" data-testid="status-line">
-        <UsageReading provider={mostUsed} warning={warning} failed={usageError != null} navigate={navigate} />
+        <UsageReading provider={shown} model={model} warning={warning} failed={usageError != null} navigate={navigate} />
         <ProviderProblemLine problems={problems} navigate={navigate} />
         <AppUpdatePill />
       </div>
@@ -835,6 +862,18 @@ export function Sidebar({ route, navigate, refresh, openUrl }: SidebarProps) {
         <span aria-hidden className="text-ink-3">·</span>
         {page({ screen: "settings" }, "Settings")}
         <span className="flex-1" />
+        <button
+          type="button"
+          className={FOOT_LINK}
+          aria-label="Show the walkthrough"
+          title="Show the walkthrough"
+          onClick={() => {
+            navigate({ screen: "new" });
+            openWalkthrough();
+          }}
+        >
+          ?
+        </button>
         <TerminalToggle />
       </nav>
     </aside>

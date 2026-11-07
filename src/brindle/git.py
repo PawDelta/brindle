@@ -128,6 +128,11 @@ def ok(args: list[str], cwd: str | Path) -> bool:
 # beforehand is both silent itself and still true by the time gh reads it.
 # What the person asked for (`git push`, `brindle pr`, a named PR's branch) goes
 # through ``run``, with their normal credentials.
+#
+# Someone who connected GitHub to brindle (brindle.github_connect) has neither
+# problem: brindle's own helper answers for github.com, from brindle's own store,
+# in these calls, in what the person asked for (connected_github_config) and in
+# agents' panes. gh's helper is then left out of all three.
 
 _GITHUB_HELPER = "credential.https://github.com.helper"
 GH_LOOKUP_SECONDS = 5.0
@@ -147,7 +152,8 @@ _FETCH_REFUSED = "brindle-fetch-refused"
 # git's and ssh's words for "not without credentials" (LC_ALL=C: see _background_env),
 # as opposed to offline or no such repo.
 _REFUSED = re.compile(r"terminal prompts disabled|could not read (username|password)|authentication failed"
-                      r"|permission denied|host key verification failed|returned error: 40[13]", re.IGNORECASE)
+                      r"|permission denied|host key verification failed|returned error: 40[13]"
+                      r"|told us to quit", re.IGNORECASE)    # the last: brindle's own helper, with nothing to give
 _SHELL_WORD = re.compile(r"""'[^']*'|"[^"]*"|\S+""")
 
 
@@ -208,11 +214,30 @@ def _github_helper_entries(helper: str) -> tuple[str, str]:
     return f"{_GITHUB_HELPER}=", f"{_GITHUB_HELPER}={helper}"
 
 
-def pane_git_config() -> str | None:
+def _connected_github_helper() -> str | None:
+    """brindle's own GitHub connection as a git helper, for as long as the person
+    is connected: one GitHub stopped taking answers nothing, and still keeps every
+    other helper out (github_connect.git_helper). Looking is a read of brindle's
+    own store: no keychain item of git's or gh's, and no process started."""
+    from brindle import github_connect
+
+    return github_connect.git_helper()
+
+
+def connected_github_config() -> list[str]:
+    """``-c`` words that sign git in to github.com through brindle's connection
+    alone, for what the person asked for (a clone, a push, a branch they named).
+    Empty without a connection: their own helpers apply, as they always did."""
+    helper = _connected_github_helper()
+    return [word for entry in _github_helper_entries(helper) for word in ("-c", entry)] if helper else []
+
+
+def pane_git_config(gh: bool = True) -> str | None:
     """``GIT_CONFIG_PARAMETERS`` for an agent's pane: github.com signs in through
-    gh alone (when gh is signed in), the person's other helpers for that host
+    brindle's own connection when there is one, else (with ``gh``) through gh
+    alone when gh is signed in. The person's other helpers for that host are
     cleared, as a helper still listed would also be told to store and erase
-    what gh gave it: the keychain dialog over again, and their entry overwritten.
+    what it was given: the keychain dialog over again, and their entry overwritten.
     Every other host keeps the person's helpers; their config isn't edited.
 
     Not GIT_CONFIG_COUNT and its GIT_CONFIG_KEY_<n>: a name with KEY in it is
@@ -220,8 +245,9 @@ def pane_git_config() -> str | None:
     run at all with a count whose key went missing.
 
     gh reads its token through `security`, so a locked keychain can still ask
-    here: an agent's push is one at a time, not a poll."""
-    helper = gh_credential_helper()
+    here: an agent's push is one at a time, not a poll. brindle's connection
+    reads no keychain item."""
+    helper = _connected_github_helper() or (gh_credential_helper() if gh else None)
     if helper is None:
         return None
     entries = _github_helper_entries(helper)
@@ -288,17 +314,21 @@ def _background_gh_helper(cwd: str | Path) -> str | None:
 def background(args: list[str], cwd: str | Path,
                timeout: int | float | None = None) -> subprocess.CompletedProcess | None:
     """``git <args>``, a network call brindle starts on its own: it can't raise a
-    credential dialog. Every helper is cleared; github.com over HTTPS may get gh's
-    (_background_gh_helper), and git only asks it for that host. None when git
-    couldn't run or finish; a failure is the caller's to read."""
-    helper = _background_gh_helper(cwd)
+    credential dialog. Every helper is cleared; github.com over HTTPS gets brindle's
+    own connection when there is one, else maybe gh's (_background_gh_helper), and
+    git only asks it for that host. None when git couldn't run or finish; a failure
+    is the caller's to read."""
+    connected = _connected_github_helper()
+    gh = None if connected else _background_gh_helper(cwd)
+    helper = connected or gh
     config = ["credential.helper=", *(_github_helper_entries(helper) if helper else ())]
     try:
         proc = run_env([*(word for entry in config for word in ("-c", entry)), *args], cwd, _background_env(cwd),
                        check=False, timeout=timeout, no_terminal=True)
     except GitError:
         return None
-    if helper and proc.returncode != 0 and _REFUSED.search(proc.stderr or ""):
+    # A connection GitHub refuses goes on record by git itself (the helper's erase), and answers nothing after.
+    if gh and proc.returncode != 0 and _REFUSED.search(proc.stderr or ""):
         _gh_refused[str(cwd)] = time.monotonic()
     return proc
 
@@ -645,8 +675,9 @@ def fetch_remote_branch(root: str | Path, branch: str, remote: str = "origin") -
     """Fetch ``branch`` from ``remote`` into ``refs/remotes/<remote>/<branch>``.
     Unlike ``resolve_start_point``'s fetch, failure here is fatal: the caller
     needs that exact branch, which the person named: their normal credentials
-    apply. Returns the remote-tracking ref name."""
-    run(["fetch", "--quiet", "--no-tags", remote,
+    apply (brindle's GitHub connection, when they made one). Returns the
+    remote-tracking ref name."""
+    run([*connected_github_config(), "fetch", "--quiet", "--no-tags", remote,
          f"+refs/heads/{branch}:refs/remotes/{remote}/{branch}"], root)
     return f"{remote}/{branch}"
 
@@ -740,11 +771,19 @@ def _add_exclude(root: str | Path, pattern: str) -> None:
 
 
 def remove_worktree(root: str | Path, path: str | Path, force: bool = False) -> None:
-    args = ["worktree", "remove", str(path)]
-    if force:
-        args[2:2] = ["--force", "--force"]
-    run(args, root)
-    run(["worktree", "prune"], root, check=False)
+    from brindle import trash
+
+    if os.path.lexists(path):
+        try:
+            trash.put(root, path, force=force)
+        except OSError as e:
+            raise GitError(f"worktree kept: {e}") from e
+        try:
+            trash.retain()
+        except (OSError, GitError):
+            pass  # Removal succeeded; the hourly sweep can apply retention later.
+    else:
+        run(["worktree", "prune"], root, check=False)
 
 
 def list_worktrees(root: str | Path) -> list[dict[str, str]]:
@@ -1133,11 +1172,13 @@ def checkout_lock(path: str | Path, timeout: float | None = None):
 
 
 def push(path: str | Path, branch: str, sha: str | None = None) -> None:
-    """Push ``branch``; with ``sha``, exactly that commit to it."""
+    """Push ``branch``; with ``sha``, exactly that commit to it. Signed in to
+    github.com through brindle's connection when the person made one."""
+    signed_in = connected_github_config()
     if sha is None:
-        run(["push", "--set-upstream", "origin", branch], path)
+        run([*signed_in, "push", "--set-upstream", "origin", branch], path)
         return
-    run(["push", "origin", f"{sha}:refs/heads/{branch}"], path)
+    run([*signed_in, "push", "origin", f"{sha}:refs/heads/{branch}"], path)
     run(["branch", "--set-upstream-to", f"origin/{branch}", branch], path, check=False)
 
 
