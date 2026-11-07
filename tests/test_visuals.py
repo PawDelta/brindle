@@ -121,6 +121,13 @@ def test_removing_a_session_deletes_its_visuals_but_not_the_kept_one(db, session
     ws, boss, worker = session
     kept = visuals.publish(db, boss, "Keep me", "<p>kept</p>")
     gone = visuals.publish(db, boss, "Drop me", "<p>gone</p>")
+    # A session named with something secret-shaped: Keep refuses before writing anything.
+    db.update_agent(boss.id, name=SECRET)
+    leak = client.post(f"/v1/visuals/{kept['id']}/keep")
+    assert leak.status_code == 400 and leak.json()["error"]["code"] == "secret" and SECRET not in leak.text
+    assert client.get("/v1/kept-visuals").json() == []
+    assert not visuals.kept_path(ws.repo_root, kept["id"]).exists()
+    db.update_agent(boss.id, name=None)
     assert client.post(f"/v1/visuals/{kept['id']}/keep").json()["kept"] is True
     client.post(f"/v1/visuals/{gone['id']}/keep")
     assert client.delete(f"/v1/visuals/{gone['id']}/keep").json()["kept"] is False

@@ -387,8 +387,10 @@ def keep(db: DB, visual_id: str) -> dict:
     _unlocked(v["root_id"])
     html = page(db, v["id"], str(v["rev"])).read_text(encoding="utf-8")
     # Everything the kept copy stores, scanned again before anything is written.
+    # The session's name is resolved once, scanned, and that same value stored.
+    name = _session_name(db, v["root_id"])
     _refuse_secrets([("the page", html), ("the title", v["title"]),
-                     ("the answer's note", (v["answer"] or {}).get("note"))])
+                     ("the answer's note", (v["answer"] or {}).get("note")), ("the session's name", name)])
     _private_dir(kept_root(v["repo_root"]).parent)
     _write_atomic(kept_path(v["repo_root"], v["id"]), html.encode("utf-8"))
     now = time.time()
@@ -397,7 +399,7 @@ def keep(db: DB, visual_id: str) -> dict:
         c.execute("INSERT INTO kept_visuals (id, title, from_session, from_session_name, repo, rev, answer,"
                   " kept_at) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET title=excluded.title,"
                   " rev=excluded.rev, answer=excluded.answer",
-                  (v["id"], v["title"], v["root_id"], _session_name(db, v["root_id"]), v["repo_root"],
+                  (v["id"], v["title"], v["root_id"], name, v["repo_root"],
                    v["rev"], answer, now))
         c.execute("UPDATE visuals SET kept_at=COALESCE(kept_at, ?) WHERE id=?", (now, v["id"]))
     bus.publish(db, "visual.kept", repo_root=v["repo_root"], root_id=v["root_id"], visual=v["id"], kept=True)
