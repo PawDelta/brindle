@@ -834,6 +834,8 @@ export interface VisualOffer {
 
 export interface UserSettings {
   visuals?: "on" | "off";
+  /* The visuals feature itself (on unless turned off); `visuals` above is only the offers. */
+  visuals_enabled?: "on" | "off";
   claude_permission_mode: ClaudePermissionMode;
   /* Absent from an engine older than this setting. */
   opencode_permission_mode?: OpenCodePermissionMode;
@@ -1401,8 +1403,8 @@ export class DaemonClient {
     return this.post<GoalEnabledAck>("/goal/enabled", { root, enabled });
   }
 
-  setGoalAnalysisDoc(root: string, analysis_doc: boolean) {
-    return this.post<{ analysis_doc: boolean }>("/goal/analysis-doc", { root, analysis_doc });
+  resolveAnalysisOffer(root: string, offer: string, accept: boolean) {
+    return this.post<{ accepted: boolean }>("/goal/analysis-offer", { root, offer, accept });
   }
 
   inbox(repo?: string) {

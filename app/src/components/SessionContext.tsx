@@ -19,7 +19,7 @@ import type { Route, SessionRef } from "../routes";
 import type { AppStore } from "../store/store";
 import { useGoal } from "../screens/Session/GoalPanel";
 import { useSessionDiff } from "../screens/Session/review";
-import { GoalPanel } from "../screens/Session/GoalPanel";
+import { GoalPanel, SessionGoal } from "../screens/Session/GoalPanel";
 import { agentIds, sessionTree } from "../screens/Session/tree";
 import { isPaused, liveWorkers, sessionAge } from "../store/overview";
 import { useCloseSession, useSessions } from "../store/sessions";
@@ -113,9 +113,9 @@ function Context({ client, session, route, navigate, openUrl, style }: Pick<Sess
           />
         ) : (
           <div className="flex items-start gap-1">
-            <button type="button" className={`block min-w-0 flex-1 text-left text-[12.5px] font-semibold leading-[1.35] ${here ? "text-ink" : "text-ink/90 hover:text-ink"}`} title={here ? undefined : "Open the session"} onClick={() => navigate({ screen: "session", root, repo, agent: root })}>
+            <SessionGoal key={`${repo}:${root}:${row?.request}`} text={row?.request} className={`block w-full text-left text-[12.5px] font-semibold leading-[1.35] ${here ? "text-ink" : "text-ink/90 hover:text-ink"}`} onOpen={() => navigate({ screen: "session", root, repo, agent: root })}>
               {row?.name || row?.goal || goal?.goal || <span className="italic text-ink-3">No goal set</span>}
-            </button>
+            </SessionGoal>
             <button type="button" className="text-[11px] text-ink-3 hover:text-ink" aria-label="Rename session" title="Rename session" onClick={() => setRenaming(true)}>
               ✎
             </button>

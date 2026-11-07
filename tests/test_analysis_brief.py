@@ -150,6 +150,79 @@ def test_goal_doc_requires_a_request_and_is_briefed_once(requested, db, boss, ba
     assert autopilot._goal_doc_rule(db, "boss") == ""
 
 
+def _offer(db):
+    from brindle.service.dto import GoalDTO
+
+    return GoalDTO.from_autopilot(db.get_autopilot("boss"), []).analysis_offer
+
+
+def _plan(count, repo=None):
+    return [(f"M{i}", "true", None, None, repo) for i in range(count)]
+
+
+@pytest.fixture
+def goal_env(db, boss, monkeypatch):
+    monkeypatch.setattr(autopilot, "_commit", lambda ws, tracked_only=False: "abc123")
+    monkeypatch.setattr(ab, "_entitled", lambda store=None: None)
+    db.add_autopilot("boss")
+
+
+@pytest.mark.parametrize("milestones, goal, offered", [
+    (_plan(2), "Fix the typo", False), (_plan(4), "Fix the typo", True),
+    (_plan(3), "Redesign the sync architecture", True),
+    # An omitted repo is the root checkout: with one attached repo that is two repos.
+    (_plan(1) + _plan(1, "web"), "Fix the typo", True), (_plan(2, "web"), "Fix the typo", False)])
+def test_large_goal_is_offered_a_doc_once_and_yes_turns_it_on(milestones, goal, offered, db, goal_env):
+    from brindle.daemon import routes_actions
+
+    autopilot.set_goal(db, "boss", goal, milestones)
+    assert (_offer(db) is not None) is offered
+    if not offered:
+        return
+    first = _offer(db)
+    autopilot.set_goal(db, "boss", goal, milestones)    # the same goal again keeps the one offer
+    assert _offer(db) == first
+    routes_actions.goal_analysis_offer(db, {}, {"root": "boss", "accept": True, "offer": first})
+    assert (_offer(db), db.get_autopilot("boss").analysis_doc) == (None, 1)
+    autopilot.set_goal(db, "boss", goal, milestones)    # answered: never asked again for this goal
+    assert _offer(db) is None
+    with pytest.raises(autopilot.AutopilotError):
+        autopilot.resolve_analysis_offer(db, "boss", True, first)
+
+
+@pytest.mark.variant("race: the goal grows between showing the offer and the answer")
+def test_an_answer_belongs_to_the_offer_it_saw_and_a_grown_plan_is_offered(db, goal_env):
+    autopilot.set_goal(db, "boss", "Goal A", _plan(2))
+    assert _offer(db) is None
+    autopilot.set_goal(db, "boss", "Goal A", _plan(4))        # the plan grew: now it deserves one
+    a = _offer(db)
+    assert a
+    autopilot.set_goal(db, "boss", "Goal B", _plan(4))        # replaced before A's answer arrived
+    b = _offer(db)
+    assert b and b != a
+    with pytest.raises(autopilot.AutopilotError):
+        autopilot.resolve_analysis_offer(db, "boss", True, a)
+    assert (_offer(db), db.get_autopilot("boss").analysis_doc) == (b, 0)
+    autopilot.resolve_analysis_offer(db, "boss", False, b)    # Not now: off, and a chat request still wins
+    assert (_offer(db), db.get_autopilot("boss").analysis_doc) == (None, 0)
+    autopilot.set_goal(db, "boss", "Goal B", _plan(4), analysis_doc=True)
+    assert db.get_autopilot("boss").analysis_doc == 1
+
+
+@pytest.mark.variant("input variant: a goal with few milestones that grows through its workers")
+def test_several_workers_make_a_small_goal_deserve_an_offer(db, boss, goal_env):
+    autopilot.set_goal(db, "boss", "Small goal", _plan(1))
+    for i in range(3):
+        assert _offer(db) is None
+        db.add_agent(Agent(f"w{i}", boss.id, "developer", "claude", "boss", "assign", "working", "", None, time.time()))
+        autopilot.consider_analysis_offer(db, "boss")
+    offer = _offer(db)
+    assert offer
+    db.add_agent(Agent("w3", boss.id, "developer", "claude", "boss", "assign", "working", "", None, time.time()))
+    autopilot.consider_analysis_offer(db, "boss")
+    assert _offer(db) == offer
+
+
 @pytest.mark.parametrize("via", ["app", "cli", "tool"])
 def test_person_can_request_and_cancel_a_goal_doc(via, db, boss, monkeypatch):
     from typer.testing import CliRunner
@@ -198,3 +271,50 @@ def test_no_brief_request_when_assist_is_off_by_policy_or_air_gap(entry, why, db
         ab.brief_context(db, boss.repo_root, "feat/x", "a1", "speed up the cache", [], large=True, client=client)
     assert "POST /analysis-docs/brief" not in backend.paths()
     assert backend.calls == [] if why == "airgap" else True
+
+
+def test_alias_and_path_of_one_attached_repo_are_one_repository(db, boss, goal_env, tmp_path):
+    web = tmp_path / "web"
+    web.mkdir()
+    db.add_session_repo("boss", "web", str(web))
+    autopilot.set_goal(db, "boss", "Small goal", _plan(1, "web") + _plan(1, str(web)))
+    assert _offer(db) is None
+
+
+@pytest.mark.variant("identity boundary: workers of a replaced goal must not count for the new one")
+def test_workers_of_an_earlier_goal_do_not_count_for_a_new_goal(db, boss, goal_env):
+    autopilot.set_goal(db, "boss", "Big goal", _plan(1))
+    for i in range(3):
+        db.add_agent(Agent(f"w{i}", boss.id, "developer", "claude", "boss", "assign", "done", "", None,
+                           time.time()))
+    autopilot.consider_analysis_offer(db, "boss")
+    assert _offer(db)
+    autopilot.set_goal(db, "boss", "Fix a typo", _plan(1))
+    assert _offer(db) is None
+
+
+@pytest.mark.variant("race: the goal is replaced after the offer was accepted")
+def test_goal_replaced_after_acceptance_still_gets_its_own_doc_instruction(db, boss, goal_env, monkeypatch):
+    autopilot.set_goal(db, "boss", "Goal A", _plan(4))
+    a = _offer(db)
+    db.update_autopilot("boss", state="done")
+    real = autopilot._commission_doc
+
+    def replaced_first(*args):    # B replaces A after the answer committed, before the briefing
+        autopilot.set_goal(db, "boss", "Goal B", _plan(1))
+        return real(*args)
+
+    monkeypatch.setattr(autopilot, "_commission_doc", replaced_first)
+    autopilot.resolve_analysis_offer(db, "boss", True, a)
+    assert db.get_autopilot("boss").analysis_doc == 0       # B stays unrequested
+    [queued] = [r[0] for r in db.conn.execute("SELECT body FROM inbox WHERE agent_id='boss'")]
+    assert 'the goal "Goal A"' in queued and FOLDER in queued
+
+
+def test_a_stale_evaluation_cannot_reopen_a_dismissed_offer(db, goal_env):
+    autopilot.set_goal(db, "boss", "Goal A", _plan(4))
+    first = _offer(db)
+    autopilot.resolve_analysis_offer(db, "boss", False, first)
+    assert db.open_analysis_offer("boss", "Goal A", "open:late") is False    # a delayed second evaluation
+    assert db.open_analysis_offer("boss", "Goal OLD", "open:late") is False   # or one for a replaced goal
+    assert _offer(db) is None and db.get_autopilot("boss").analysis_offer == "dismissed"

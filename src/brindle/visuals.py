@@ -56,9 +56,13 @@ PAGE_HEADERS = {"Content-Security-Policy": CSP, "X-Content-Type-Options": "nosni
 
 
 def enabled() -> bool:
-    """The visuals capability: on now that the sandbox probes pass on macOS, Windows
-    and Linux; BRINDLE_VISUALS=0 turns it off."""
-    return os.environ.get("BRINDLE_VISUALS", "").strip().lower() not in ("0", "off", "false", "no")
+    """The visuals capability, read at call time: the ``visuals_enabled`` person
+    setting (on by default); BRINDLE_VISUALS=0 overrides it off."""
+    from brindle import config
+
+    if os.environ.get("BRINDLE_VISUALS", "").strip().lower() in ("0", "off", "false", "no"):
+        return False
+    return config.visuals_enabled_setting()
 
 
 def require_enabled() -> None:

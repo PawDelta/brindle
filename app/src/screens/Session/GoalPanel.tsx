@@ -34,13 +34,18 @@ import { isGoalActivity, usePrReadiness, type Readiness } from "./review";
 
 const GOAL_JOBS = new Set(["goal.check", "session.pr"]);
 
-/* The person's full startup request, kept separate from the evolving goal title.
-   Keyed by session and text by the caller, so copy feedback cannot cross sessions. */
-export function SessionRequest({ text }: { text: string }) {
+/* Copy the full startup request from the goal title. Keyed by session and text
+   by the caller, so pending copies and feedback cannot cross sessions. */
+export function SessionGoal({ text, children, className, onOpen }: {
+  text?: string | null;
+  children: ReactNode;
+  className: string;
+  onOpen(): void;
+}) {
   const views = usePtyViews();
-  const [expanded, setExpanded] = useState(false);
   const [feedback, setFeedback] = useState<"copied" | "error" | null>(null);
   const live = useRef(false);
+  const copying = useRef(false);
   useEffect(() => {
     live.current = true;
     return () => { live.current = false; };
@@ -51,6 +56,8 @@ export function SessionRequest({ text }: { text: string }) {
     return () => window.clearTimeout(timer);
   }, [feedback]);
   const copy = async () => {
+    if (!text || copying.current) return;
+    copying.current = true;
     setFeedback(null);
     try {
       if (views) await views.copy(text);
@@ -58,21 +65,26 @@ export function SessionRequest({ text }: { text: string }) {
       if (live.current) setFeedback("copied");
     } catch {
       if (live.current) setFeedback("error");
+    } finally {
+      copying.current = false;
     }
   };
   return (
-    <div className="shrink-0 border-b border-line px-s2 py-s1">
-      <div className="flex items-center gap-s1 text-xs text-ink-3">
-        <span>Original request</span>
-        <button type="button" className={quiet} aria-label="Copy original request" title="Copy original request" onClick={() => void copy()}>
-          ⧉
-        </button>
-        <span role="status">{feedback === "copied" ? "Copied" : feedback === "error" ? "Couldn't copy" : ""}</span>
-      </div>
-      <p data-testid="session-request" className={`whitespace-pre-wrap break-words text-sm text-ink-2 ${expanded ? "max-h-64 overflow-auto" : "line-clamp-3"}`} title="Double-click to copy the full request" onDoubleClick={() => void copy()}>{text}</p>
-      <button type="button" className={`${quiet} text-xs`} aria-expanded={expanded} onClick={() => setExpanded((value) => !value)}>
-        {expanded ? "Show less" : "Show full request"}
+    <div className="relative min-w-0 flex-1">
+      <button type="button" className={className} title={text ? "Double-click to copy the goal" : "Open the session"}
+        onClick={onOpen} onDoubleClick={() => void copy()}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && text) {
+            e.preventDefault();
+            e.stopPropagation();
+            void copy();
+          }
+        }}>
+        {children}
       </button>
+      {feedback && <span role="status" className="pointer-events-none absolute left-0 top-full z-10 mt-1 whitespace-nowrap rounded border border-line bg-surface px-2 py-1 text-xs font-normal text-ink shadow-sm">
+        {feedback === "copied" ? "Goal copied to clipboard" : "Couldn't copy"}
+      </span>}
     </div>
   );
 }
@@ -517,30 +529,27 @@ export function GoalPanel({ client, repo, root, store, compact = false, onReview
         {docSummary.total} {docSummary.total === 1 ? "doc" : "docs"} · writing {docSummary.writing}, using {docSummary.using} →
       </button>
     ) : null;
-  const docChoice = !finished ? (
-    <label className="flex items-center gap-s1 text-xs text-ink-2">
-      <input
-        type="checkbox"
-        checked={goal.analysis_doc ?? false}
-        disabled={docSaving}
-        onChange={(event) => {
-          const requested = event.currentTarget.checked;
-          setDocSaving(true);
-          setActionError(null);
-          void client.setGoalAnalysisDoc(root, requested).then(
-            () => {
-              if (activeSession.current === session) void refresh();
-            },
-            (e: unknown) => {
-              if (activeSession.current === session) setActionError(message(e));
-            },
-          ).finally(() => {
-            if (activeSession.current === session) setDocSaving(false);
-          });
-        }}
-      />
-      Write an analysis doc for this goal
-    </label>
+  /* brindle's one-time offer of an analysis doc for a large goal: a small question, the same shape as the visual offer. */
+  const answerDocOffer = (offer: string, accept: boolean) => {
+    setDocSaving(true);
+    setActionError(null);
+    void client.resolveAnalysisOffer(root, offer, accept).then(
+      () => {
+        if (activeSession.current === session) void refresh();
+      },
+      (e: unknown) => {
+        if (activeSession.current === session) setActionError(message(e));
+      },
+    ).finally(() => {
+      if (activeSession.current === session) setDocSaving(false);
+    });
+  };
+  const docChoice = !finished && goal.analysis_offer ? (
+    <div className="inline-flex items-center gap-s1 self-start rounded-full border border-dashed border-line px-s2 text-xs text-ink-2" data-testid="analysis-offer">
+      <span>Write an analysis doc for this goal?</span>
+      <button type="button" disabled={docSaving} onClick={() => answerDocOffer(goal.analysis_offer!, true)}>Yes</button>
+      <button type="button" disabled={docSaving} onClick={() => answerDocOffer(goal.analysis_offer!, false)}>Not now</button>
+    </div>
   ) : null;
   /* Done's step: close the session, one click, nothing asked. Beside the status in the full view; in the sidebar
      a quiet text button under the milestones, aligned with their names. */

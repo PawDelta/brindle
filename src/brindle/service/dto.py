@@ -366,6 +366,7 @@ class GoalDTO(_DTO):
     root_id: str
     enabled: bool
     analysis_doc: bool = False
+    analysis_offer: str | None = None   # id of the analysis doc offer brindle is making for this goal
     goal: str | None = None
     detail: str | None = None
     state: str
@@ -382,6 +383,7 @@ class GoalDTO(_DTO):
                        goal_phase: tuple[str, str | None] = ("in_progress", None)) -> GoalDTO:
         phases = phases or {}
         return cls(root_id=ap.root_id, enabled=bool(ap.enabled), analysis_doc=bool(ap.analysis_doc),
+                   analysis_offer=(ap.analysis_offer or "")[5:] if (ap.analysis_offer or "").startswith("open:") else None,
                    goal=ap.goal, detail=ap.detail,
                    state=ap.state, note=ap.note, progress=ap.progress,
                    usage_resets_at=ap.usage_resets_at,

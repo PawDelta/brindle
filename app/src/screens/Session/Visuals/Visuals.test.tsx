@@ -364,6 +364,58 @@ describe("visuals", () => {
     view.unmount();
   });
 
+  it("an open native visual steps aside under the reconnect overlay and comes back, the same page, once the engine answers", async () => {
+    native.enabled = true;
+    vi.stubGlobal("matchMedia", () => ({ addEventListener() {}, removeEventListener() {} }));
+    vi.stubGlobal("ResizeObserver", class { observe() {} disconnect() {} });
+    const bounds = { x: 0, y: 40, width: 900, height: 600 };
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(() => ({ ...bounds, top: bounds.y, left: bounds.x, right: bounds.width, bottom: bounds.y + bounds.height, toJSON() {} }));
+    native.invoke.mockReset().mockImplementation(async (command) => command === "visual_open" ? "visual:v_8f2c:r2" : undefined);
+    const session: SessionDTO = { id: "sup1", workspace_id: "proj", profile: "supervisor", status: "idle", mode: "interactive", created_at: now - 600, goal: "Ship it" };
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root] });
+    const client = daemon.client();
+    vi.spyOn(client, "visuals").mockResolvedValue([visual]);
+    vi.spyOn(client, "markVisualRead").mockResolvedValue({ ...visual, unread: false });
+    vi.useFakeTimers();
+    const store = createAppStore();
+    // The stream comes back on the first try after a drop, a second later (the overlay's grace).
+    const sync = startSync({ client, store, connect: daemon.connect, backoff: () => 1000 });
+    const advance = (ms: number) => act(async () => { await vi.advanceTimersByTimeAsync(ms); });
+    const label = "visual:v_8f2c:r2";
+    const lastBounds = () => native.invoke.mock.calls.filter(([command]) => command === "visual_set_bounds").at(-1)?.[1];
+    try {
+      render(
+        <PtyViewsProvider value={standInViews}>
+          <App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO, sheet: { kind: "visual", id: visual.id } }} />
+        </PtyViewsProvider>,
+      );
+      await advance(1000);
+      expect(native.invoke).toHaveBeenCalledWith("visual_open", { id: visual.id, rev: 2, bounds });
+      expect(lastBounds()).toEqual({ label, bounds });
+
+      // The engine drops: under the overlay the native page takes no room, so it can't show or take input over it.
+      daemon.die();
+      await advance(0);
+      expect(screen.queryByTestId("reconnecting")).toBeNull();
+      expect(lastBounds()).toEqual({ label, bounds });
+      await advance(1000);
+      expect(screen.getByTestId("reconnecting")).toBeTruthy();
+      expect(lastBounds()).toEqual({ label, bounds: { ...bounds, width: 0, height: 0 } });
+
+      // Back: the same page takes its room again on the next attempt; it was never closed or opened afresh.
+      daemon.revive();
+      await advance(1000);
+      expect(store.getState().connection).toBe("open");
+      expect(screen.queryByTestId("reconnecting")).toBeNull();
+      expect(lastBounds()).toEqual({ label, bounds });
+      expect(native.invoke.mock.calls.filter(([command]) => command === "visual_open")).toHaveLength(1);
+      expect(native.invoke).not.toHaveBeenCalledWith("visual_close", expect.anything());
+    } finally {
+      sync.stop();
+      vi.useRealTimers();
+    }
+  });
+
   it("opens from the header over the whole window with the sidebar hidden, and Esc or Back returns to the same sidebar and terminal", async () => {
     const session: SessionDTO = { id: "sup1", workspace_id: "proj", profile: "supervisor", status: "idle", mode: "interactive", created_at: now - 600, goal: "Ship it" };
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root] });
@@ -393,10 +445,11 @@ describe("visuals", () => {
       const aside = sidebar();
       // The person folds the open session's agents away; Back must find them still folded.
       fireEvent.click(await within(aside).findByRole("button", { name: "Hide sup1's agents" }));
-      // The header's count is the visuals still open; the decided one is folded away in the list.
+      // The header uses an icon without exposing the old count text or an unread dot.
       const entry = await screen.findByTestId("visuals-button");
-      expect(entry.textContent).toContain("1");
-      expect(within(entry).getByLabelText("unread")).toBeTruthy();
+      expect(entry.querySelector("svg")).toBeTruthy();
+      expect(entry.textContent).toBe("");
+      expect(within(entry).queryByLabelText("unread")).toBeNull();
       needUser(1, "Which database should the cache use?");
       ask(supervisorAsks);
       fireEvent.click(entry);
@@ -415,8 +468,10 @@ describe("visuals", () => {
       expect(screen.getByTestId("terminal")).toBe(terminal);
       expect(screen.queryByRole("complementary", { name: "Sidebar" })).toBeNull();
       expect(screen.queryByRole("button", { name: /Visuals/ })).toBeNull();
-      // Opened, it's read: the header's dot goes, with no event on the bus to say so.
+      // Opening marks it read, though the header remains icon-only either way.
       await waitFor(() => expect(within(screen.getByTestId("visuals-button")).queryByLabelText("unread")).toBeNull());
+      expect(screen.getByTestId("visuals-button").querySelector("svg")).toBeTruthy();
+      expect(screen.getByTestId("visuals-button").textContent).toBe("");
       expect(read).toHaveBeenCalledTimes(1);
       // The ask there at opening badges nothing, read again or not; the supervisor asking anew (the same row) does.
       expect(screen.queryByTestId("visual-back-asking")).toBeNull();
@@ -463,6 +518,43 @@ describe("visuals", () => {
     } finally {
       sync.stop();
     }
+  });
+
+  it("opens an Inbox visual in its session and returns there after Esc, Back and an answer", async () => {
+    const session: SessionDTO = { id: "sup1", workspace_id: "proj", profile: "supervisor", status: "idle", mode: "interactive", created_at: now, goal: "Ship it" };
+    const item: InboxItemDTO = { kind: "visual", agent_id: "sup1", root_id: "sup1", workspace_id: "proj", visual_id: visual.id, reason: "asks you to choose" };
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root], inbox: [item] });
+    const client = daemon.client();
+    let row = visual;
+    vi.spyOn(client, "visuals").mockImplementation(async () => [answered, row]);
+    vi.spyOn(client, "markVisualRead").mockImplementation(async () => (row = { ...row, unread: false }));
+    vi.spyOn(client, "answerVisual").mockImplementation(async (_id, _rev, option, note) => {
+      row = { ...row, answer: { option, note, at: now } };
+      daemon.data.inbox = [];
+      daemon.publish("visual.answered", { root_id: "sup1" });
+      return row;
+    });
+    const store = createAppStore();
+    const sync = startSync({ client, store, connect: daemon.connect });
+    try {
+      render(<PtyViewsProvider value={standInViews}><App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "inbox", session: "sup1" }} /></PtyViewsProvider>);
+      for (const leave of ["Escape", "Back", "Answer"]) {
+        const card = (await screen.findAllByTestId("inbox-card"))[0];
+        fireEvent.click(within(card).getByRole("button", { name: "Go to session ›" }));
+        await waitFor(() => expect(screen.getByTestId("visual-frame").dataset.src).toBe("brindle-visual://v_8f2c/r2"));
+        expect(screen.queryByRole("complementary", { name: "Sidebar" })).toBeNull();
+        if (leave === "Answer") {
+          fireEvent.click(screen.getByRole("radio", { name: "B · Gate on CI" }));
+          fireEvent.click(screen.getByTestId("visual-send"));
+          await waitFor(() => expect(store.getState().inbox).toEqual([]));
+        }
+        if (leave === "Escape") fireEvent.keyDown(window, { key: "Escape" });
+        else fireEvent.click(screen.getByTestId("visual-back"));
+        expect(await screen.findByTestId("inbox-session")).toBeTruthy();
+        expect(screen.queryByTestId("visual-reader")).toBeNull();
+      }
+      expect(screen.queryByTestId("inbox-card")).toBeNull();
+    } finally { sync.stop(); }
   });
 
   const open: VisualSource = { kind: "session", id: visual.id, rev: visual.rev };
