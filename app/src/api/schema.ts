@@ -452,6 +452,7 @@ export interface MilestoneDTO {
   label?: string | null;
   output?: string | null;
   phase?: string;
+  phase_name?: string | null;
   position: number;
   profile?: string | null;
   repo?: string | null;

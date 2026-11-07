@@ -296,6 +296,39 @@ describe("GoalPanel", () => {
     expect(sidebar.getAllByTestId("milestone").map((li) => li.dataset.state)).toEqual(["done", "now", "now"]);
     expect(sidebar.queryByRole("progressbar")).toBeNull();
     expect(sidebar.getByTestId("goal-line").textContent).toContain("1 of 3 milestones complete");
+    // A goal without phases is the plain list, as it always was: no folds, no "phase n of m".
+    expect(sidebar.queryByTestId("phase-fold")).toBeNull();
+    expect(sidebar.queryByTestId("goal-where")).toBeNull();
+  });
+
+  /* Phases fold the list: a done phase is one line with its green count, the active one lists all its rows
+     (its passed one too), an upcoming one folds to a count; any fold opens and closes on a click. */
+  it.each([true, false])("folds the milestones by phase, the active one open (compact: %s)", async (compact) => {
+    const base = goal.milestones![0];
+    const ms = (n: number, phase_name: string | null, passed: boolean): MilestoneDTO => ({
+      ...base, id: n, position: n, title: `M${n}`, phase_name, status: passed ? "passed" : "pending", state: passed ? "passed" : "not_done",
+    });
+    const milestones = [ms(1, "Build", true), ms(2, null, true), ms(3, "Polish", true), ms(4, "Polish", false), ms(5, "Ship", false)];
+    const daemon = new FakeDaemon({ goal: { ...structuredClone(goal), milestones } });
+    const view = render(<GoalPanel client={daemon.client()} repo={REPO} root={ROOT} store={createAppStore()} compact={compact} />);
+    await waitFor(() => expect(view.getByRole("region", { name: "Goal" }).dataset.phase).toBe("in_progress"));
+    if (!compact) unfold();
+    const folds = () => view.getAllByTestId("phase-fold");
+    const rows = () => view.queryAllByTestId("milestone").map((li) => li.textContent!.match(/M\d/)![0]);
+    expect(folds().map((b) => [b.dataset.st, b.querySelector(".n")!.textContent, b.querySelector(".k")!.textContent, b.getAttribute("aria-expanded")])).toEqual([
+      ["done", "Build", "✓ 2 of 2", "false"],
+      ["active", "Polish", "1 of 2", "true"],
+      ["todo", "Ship", "1 upcoming", "false"],
+    ]);
+    expect(rows()).toEqual(["M3", "M4"]);
+    expect(view.getByTestId("goal-where").textContent).toBe("phase 2 of 3");
+    // Only the panel's fold line carries the tiny per-phase bar, one segment per milestone.
+    expect([...folds()[1].querySelectorAll(".bar-s i")].map((i) => (i as HTMLElement).dataset.s)).toEqual(compact ? [] : ["passed", "todo"]);
+    fireEvent.click(folds()[0]);
+    expect(rows()).toEqual(["M1", "M2", "M3", "M4"]);
+    fireEvent.click(folds()[1]);
+    expect(rows()).toEqual(["M1", "M2"]);
+    expect(folds()[1].getAttribute("aria-expanded")).toBe("false");
   });
 
   /* One row per goal phase: the panel's one status in both views, and the step that phase has (PR open's link,
