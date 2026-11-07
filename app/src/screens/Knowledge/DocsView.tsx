@@ -18,6 +18,7 @@ import { DaemonError, type AnalysisDoc, type AnalysisDocDetail, type DaemonClien
 import type { PickFolder } from "../../api/open";
 import { plain } from "../../api/wording";
 import { alert, button, card, field, h2, label, notice, pill, quiet } from "../../components/ui";
+import { ChevronDownIcon, ShareIcon } from "../../components/icons";
 import { ExportMenu, type ExportClient } from "./ExportMenu";
 import { Markdown } from "./Markdown";
 
@@ -295,8 +296,10 @@ export function Reader({ client, repo, id, targets, titles, pickFolder, onBack, 
           <button type="button" className={button} disabled={!doc || busy} aria-expanded={menu === "share"} onClick={() => setMenu(menu === "share" ? null : "share")}>
             Share
           </button>
-          <button type="button" className={button} disabled={!doc || busy} aria-expanded={menu === "export"} onClick={() => setMenu(menu === "export" ? null : "export")}>
-            Export ▾
+          <button type="button" className={`${button} pl-2.5 pr-2`} disabled={!doc || busy} aria-haspopup="true" aria-expanded={menu === "export"} onClick={() => setMenu(menu === "export" ? null : "export")}>
+            <ShareIcon size={15} className="text-ink-2" />
+            Export
+            <ChevronDownIcon size={14} className={`text-ink-3 transition-transform duration-150 ${menu === "export" ? "rotate-180" : ""}`} />
           </button>
           <button type="button" className={`${quiet} text-sap`} disabled={!doc || busy} onClick={() => setMenu(menu === "delete" ? null : "delete")}>
             Delete

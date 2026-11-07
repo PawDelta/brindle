@@ -1,6 +1,7 @@
-/* An open visual, in the chat's place (design/visualizer-build-plan.html §1 a, §2). The terminal
-   stays mounted behind it, hidden: it keeps streaming, and its scrollback and draft survive. Back
-   or Esc returns; Esc pressed inside the page reaches the host as the page's brindle.esc.
+/* An open visual takes the whole window (design/visualizer-build-plan-amendments.md item 1): the
+   sidebar and the session's bar hide, and the terminal stays mounted behind, hidden: it keeps
+   streaming, and its scrollback and draft survive. Back or Esc returns to the session as it was;
+   Esc pressed inside the page reaches the host as the page's brindle.esc.
 
    The page is in a labelled "sandboxed · no network" border, so nothing it draws passes for
    brindle's own. A choice it posts only highlights an option in the answer bar; the answer goes
@@ -13,7 +14,7 @@ import { plain } from "../../../api/wording";
 import { LoadingButton } from "../../../components/LoadingButton";
 import { button, field, main, mono } from "../../../components/ui";
 import type { VisualsClient } from "./client";
-import { setFocus, useFocus } from "./focus";
+import { ArrowLeftIcon, BookmarkIcon } from "../../../components/icons";
 import { VisualFrame, frameMessage, sameSource, type VisualFrameProps, type VisualSource } from "./frame";
 import { ExportButton } from "./ExportButton";
 import type { ExportClient } from "../../Knowledge/ExportMenu";
@@ -21,12 +22,10 @@ import type { ExportClient } from "../../Knowledge/ExportMenu";
 const message = (e: unknown) => plain(e instanceof Error ? e.message : String(e));
 
 /* The reader's frame and chrome, the session's and Knowledge's (read-only) alike. */
-export function ReaderChrome({ title, source, missing, meta, actions, onBack, asking, onChoice, footer, focusable = true, Frame = VisualFrame, exportClient, repo }: {
+export function ReaderChrome({ title, source, missing, meta, actions, onBack, backLabel = "Back", asking, onChoice, footer, Frame = VisualFrame, exportClient, repo }: {
   exportClient?: ExportClient;
   repo?: string;
   title: string;
-  /* Focus (and ⌘.) hides the sidebar: only where the sidebar steps aside, a session's reader. */
-  focusable?: boolean;
   source: VisualSource | null;
   /* What shows with no source: still loading, or gone (the default). */
   missing?: string;
@@ -34,21 +33,19 @@ export function ReaderChrome({ title, source, missing, meta, actions, onBack, as
   meta: string;
   actions?: ReactNode;
   onBack(): void;
+  /* Back's own words, where "Back" alone wouldn't say where to. */
+  backLabel?: string;
   /* The agent asked something new while this was open: a sap badge on Back. */
   asking?: boolean;
   onChoice?(option: string): void;
   footer?: ReactNode;
   Frame?: ComponentType<VisualFrameProps>;
 }) {
-  const focused = useFocus();
   const [snapshot, setSnapshot] = useState<{ source: VisualSource; html: string } | null>(null);
   const [snapshotRequest, setSnapshotRequest] = useState(0);
   const back = useRef(onBack);
   back.current = onBack;
-  const focusedRef = useRef(focused);
-  focusedRef.current = focused;
-  const focusableRef = useRef(focusable);
-  focusableRef.current = focusable;
+  const [exporting, setExporting] = useState(false);
   useEffect(() => {
     // Esc goes back, unless a field or menu took it first.
     const esc = (e: KeyboardEvent) => {
@@ -58,18 +55,8 @@ export function ReaderChrome({ title, source, missing, meta, actions, onBack, as
       if (typing) (typing as HTMLElement).blur();
       else back.current();
     };
-    // ⌘. (Ctrl+. off a Mac) turns Focus on and off.
-    const dot = (e: KeyboardEvent) => {
-      if (!focusableRef.current || e.key !== "." || !(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return;
-      e.preventDefault();
-      setFocus(!focusedRef.current);
-    };
     window.addEventListener("keydown", esc);
-    window.addEventListener("keydown", dot);
-    return () => {
-      window.removeEventListener("keydown", esc);
-      window.removeEventListener("keydown", dot);
-    };
+    return () => window.removeEventListener("keydown", esc);
   }, []);
   const posted = (data: unknown, from: VisualSource) => {
     if (!source || !sameSource(from, source)) return;
@@ -80,21 +67,21 @@ export function ReaderChrome({ title, source, missing, meta, actions, onBack, as
   };
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col" data-testid="visual-reader">
-      <header className="flex flex-wrap items-center gap-s1 border-b border-line px-s2 py-1">
-        <button type="button" className={`${button} relative`} onClick={onBack} title="Back (esc)" data-testid="visual-back">
-          ← Back <kbd className="font-mono text-[10.5px] text-ink-3">Esc</kbd>
-          {asking && <span className="absolute -right-1 -top-1 size-2 rounded-full bg-sap" aria-label="the agent asks something new" data-testid="visual-back-asking" />}
+      {/* One toolbar: Back (Esc) and the title on the left, the visual's own actions on the right. */}
+      <header className="flex flex-wrap items-center gap-x-2 gap-y-1 px-s2 pt-2.5">
+        <button type="button" className={`${button} relative pl-2 pr-2`} onClick={onBack} title={`${backLabel} (Esc)`} data-testid="visual-back">
+          <ArrowLeftIcon size={15} className="text-ink-2" />
+          {backLabel}
+          <kbd className="ml-0.5 rounded-[3px] border border-line bg-surface-2 px-1 font-mono text-[10px] font-medium leading-4 text-ink-3">Esc</kbd>
+          {asking && <span className="absolute -right-1 -top-1 size-2.5 rounded-full bg-sap ring-2 ring-canvas" aria-label="the agent asks something new" data-testid="visual-back-asking" />}
         </button>
-        <h2 className="min-w-0 flex-1 truncate text-sm font-semibold">{title}</h2>
+        <span className="mx-1 h-5 w-px bg-line" aria-hidden />
+        <h2 className="min-w-0 flex-1 truncate text-[15px] font-semibold tracking-[-0.01em]">{title}</h2>
         {actions}
         {exportClient && source?.kind === "session" && <ExportButton key={`${source.id}:${source.rev}`} client={exportClient} repo={repo}
+          open={exporting} onOpenChange={setExporting}
           source={snapshot && sameSource(snapshot.source, source) ? { kind: "visual", id: source.id, rev: source.rev, html: snapshot.html } : null}
           onRequestSnapshot={() => { setSnapshot(null); setSnapshotRequest((n) => n + 1); }} />}
-        {focusable && (
-          <button type="button" className={button} aria-pressed={focused} title="Hide the sidebar (⌘.)" data-testid="visual-focus" onClick={() => setFocus(!focused)}>
-            {focused ? "Focus ✓" : "Focus"}
-          </button>
-        )}
       </header>
       <div className="flex min-h-0 flex-1 flex-col p-s2">
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-line-strong" data-testid="visual-sandbox">
@@ -102,7 +89,7 @@ export function ReaderChrome({ title, source, missing, meta, actions, onBack, as
             <span>sandboxed · no network</span>
             <span className="truncate">{meta}</span>
           </div>
-          {source ? <Frame key={JSON.stringify(source)} source={source} title={title} onMessage={posted} snapshotRequest={snapshotRequest} /> : <p className="p-s3 text-sm text-ink-3">{missing ?? "This visual isn't here any more."}</p>}
+          {source ? <Frame key={JSON.stringify(source)} source={source} title={title} onMessage={posted} snapshotRequest={snapshotRequest} covered={exporting} /> : <p className="p-s3 text-sm text-ink-3">{missing ?? "This visual isn't here any more."}</p>}
         </div>
       </div>
       {footer}
@@ -171,8 +158,9 @@ export function VisualReader({ client, visual, loading, onBack, asking, onAnswer
         visual && (
           <>
             {keepError && <span className="text-xs text-sap">{keepError}</span>}
-            <LoadingButton className={button} busy={keeping} disabled={keeping} aria-pressed={visual.kept} title="Keep a copy in Knowledge › Kept visuals" data-testid="visual-keep" onClick={() => void keep()}>
-              {visual.kept ? "Kept ✓" : "Keep"}
+            <LoadingButton className={`${button} pl-2.5 ${visual.kept ? "border-branch/45 bg-branch-soft" : ""}`} busy={keeping} disabled={keeping} aria-pressed={visual.kept} title={visual.kept ? "Kept in Knowledge › Kept visuals (click to remove)" : "Keep a copy in Knowledge › Kept visuals"} data-testid="visual-keep" onClick={() => void keep()}>
+              <BookmarkIcon size={15} filled={visual.kept} className={visual.kept ? "text-branch" : "text-ink-2"} />
+              {visual.kept ? "Kept" : "Keep"}
             </LoadingButton>
           </>
         )
