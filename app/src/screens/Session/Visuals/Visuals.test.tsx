@@ -590,6 +590,15 @@ describe("visuals", () => {
       const [row, setRow] = useState(visual);
       return <VisualReader client={client} visual={row} onBack={() => {}} onAnswered={setRow} Frame={() => <div />} />;
     }
+    // A chosen option A with focus moved to an unchosen B: Enter leaves the answer to the native pick, so nothing is sent yet.
+    render(<Reader />);
+    fireEvent.click(screen.getByRole("radio", { name: "A · Tag first" }));
+    const other = screen.getByRole("radio", { name: "B · Gate on CI" });
+    other.focus();
+    fireEvent.keyDown(other, { key: "Enter" });
+    expect(sent).toEqual([]);
+    cleanup();
+
     // A chosen option, Enter from its focused button with no note: exactly one answer, the option stays chosen.
     render(<Reader />);
     const option = screen.getByRole("radio", { name: "B · Gate on CI" });

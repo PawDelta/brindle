@@ -170,8 +170,8 @@ function AnswerBar({ client, visual, picked, onPick, onAnswered }: { client: Vis
         <div className="flex flex-wrap items-center gap-s1" onKeyDown={(e) => {
           // Enter submits from the note, the free-text box and a chosen option; Shift+Enter (a newline in the note) and Enter confirming an IME composition are left alone.
           if (e.key !== "Enter" || e.shiftKey || e.nativeEvent.isComposing) return;
-          // An unchosen option's Enter picks it natively; once something is chosen, Enter sends instead of toggling it.
-          if (picked === null && e.target instanceof HTMLButtonElement && e.target.getAttribute("role") === "radio") return;
+          // An unchecked option's Enter picks it natively (even when another option is chosen); only the chosen one sends.
+          if (e.target instanceof HTMLButtonElement && e.target.getAttribute("role") === "radio" && e.target.getAttribute("aria-checked") !== "true") return;
           e.preventDefault();
           void send();
         }}>
