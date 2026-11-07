@@ -178,7 +178,12 @@ function AnswerBar({ client, visual, picked, onPick, onAnswered }: { client: Vis
               Something else…
             </button>
           </div>
-          <input ref={noteInput} className={`${field} min-w-40 flex-1`} aria-label={ownWords ? "Your answer" : "Add a note"} placeholder={ownWords ? "Your answer" : "Add a note (optional)"} value={note} onChange={(e) => setNote(e.target.value)} />
+          <input ref={noteInput} className={`${field} min-w-40 flex-1`} aria-label={ownWords ? "Your answer" : "Add a note"} placeholder={ownWords ? "Your answer" : "Add a note (optional)"} value={note} onChange={(e) => setNote(e.target.value)} onKeyDown={(e) => {
+            // Enter submits; Shift+Enter is left alone, and so is Enter that confirms an IME composition.
+            if (e.key !== "Enter" || e.shiftKey || e.nativeEvent.isComposing) return;
+            e.preventDefault();
+            void send();
+          }} />
           <LoadingButton className={main} busy={sending} disabled={!canSend || sending} data-testid="visual-send" onClick={() => void send()}>
             Send answer
           </LoadingButton>

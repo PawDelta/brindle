@@ -580,6 +580,30 @@ describe("visuals", () => {
     expect(screen.getByTestId("visual-answered").textContent).toContain("Stage it first");
   });
 
+  it("submits the answer on Enter from the note field, but not on Shift+Enter, IME composition or with no option", async () => {
+    const sent: unknown[] = [];
+    const client = new DaemonClient({ baseUrl: "http://daemon/v1", token: "test", fetch: async (url, init) => {
+      if (String(url).endsWith("/answer")) sent.push(JSON.parse(init!.body as string));
+      return new Response(JSON.stringify({ ...visual, answer: { option: "B", note: "", at: now } }));
+    } });
+    function Reader() {
+      const [row, setRow] = useState(visual);
+      return <VisualReader client={client} visual={row} onBack={() => {}} onAnswered={setRow} Frame={() => <div />} />;
+    }
+    render(<Reader />);
+    const note = () => screen.getByRole("textbox", { name: "Add a note" });
+    fireEvent.keyDown(note(), { key: "Enter" });
+    expect(sent).toEqual([]);
+    fireEvent.click(screen.getByRole("radio", { name: "B · Gate on CI" }));
+    fireEvent.change(note(), { target: { value: "Ship it" } });
+    fireEvent.keyDown(note(), { key: "Enter", shiftKey: true });
+    fireEvent.keyDown(note(), { key: "Enter", isComposing: true });
+    expect(sent).toEqual([]);
+    fireEvent.keyDown(note(), { key: "Enter" });
+    await screen.findByTestId("visual-answered");
+    expect(sent).toEqual([{ rev: 2, option: "B", note: "Ship it" }]);
+  });
+
   const open: VisualSource = { kind: "session", id: visual.id, rev: visual.rev };
   it.each([
     ["another visual's choice", { ...open, id: "v_other" }, { type: "choice", option: "B" }, { picked: false, back: false }],
