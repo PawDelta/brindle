@@ -103,7 +103,7 @@ def _runnable(db: DB, t: Task) -> bool:
             return False
         except (git.GitError, OSError):   # readiness unknown (its worktree gone, git busy): no turn, others go on
             return False
-    return not tasks.session_paused(db, t) and agents.launches_process(t.profile, t.repo_root)
+    return not tasks.held(db, t) and agents.launches_process(t.profile, t.repo_root)
 
 
 def queued(db: DB) -> list[Task]:

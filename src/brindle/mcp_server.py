@@ -89,7 +89,7 @@ class _Server(MCPServer):
                 if coordinator.refusal(agent, t.name) is None and t.name not in hidden]
 
 
-VISUAL_TOOLS = ("publish_visual", "list_visuals", "offer_visual")   # hidden while the capability is off
+VISUAL_TOOLS = ("publish_visual", "list_visuals", "offer_visual", "propose_plan")   # hidden while the capability is off
 
 
 mcp = _Server(
@@ -205,6 +205,46 @@ def publish_visual(title: str, html: str, question: str | None = None,
         raise ToolError(e.message) from e
     asks = " The person's answer arrives as a message." if v["options"] else ""
     return f"Published {v['id']} r{v['rev']} (brindle://visual/{v['id']}).{asks}"
+
+
+class PlanDecision(BaseModel):
+    id: str = Field(description="1-32 letters, digits, _ or -")
+    title: str = Field(description="the decision, in a line")
+    options: list[VisualOption] = Field(description="2-12 alternatives you weighed, yours among them")
+    mine: str | None = Field(default=None, description="the option id you'd pick")
+    challenge: str | None = Field(default=None, description="your own strongest argument against your pick")
+
+
+class PlanWorker(BaseModel):
+    id: str = Field(description="1-32 letters, digits, _ or -, e.g. w1")
+    title: str
+    after: list[str] = Field(default_factory=list, description="ids of workers listed earlier that must merge first")
+
+
+@mcp.tool()
+def propose_plan(markdown: str, decisions: list[PlanDecision] | None = None,
+                 split: list[PlanWorker] | None = None, title: str | None = None,
+                 plan_id: str | None = None) -> str:
+    """Supervisors: show the person a planning doc, ONLY when they explicitly
+    asked for one (never on your own because a request is large). markdown:
+    the plan (goal, split, decisions with your challenge to each, what's hard
+    to undo, open questions), one ## heading per section: the person comments
+    per section. brindle renders it itself. While it's open, every assign in
+    this session is queued and starts only once the person approves; their
+    approval or redirect (their picks and comments) arrives as a message from
+    them. plan_id: publish the revision a redirect asked for."""
+    from brindle import plans
+    from brindle.service.errors import ServiceError
+
+    db = DB()
+    caller, _ = _caller(db)
+    dump = lambda items: [i.model_dump() if isinstance(i, BaseModel) else i for i in items or []]  # noqa: E731
+    try:
+        p = plans.propose(db, caller, markdown, dump(decisions), dump(split), title, plan_id)
+    except ServiceError as e:
+        raise ToolError(e.message) from e
+    return (f"Proposed plan {p['id']} r{p['rev']} (brindle://visual/{p['id']}). Assign calls queue behind it "
+            "until the person approves; their decision arrives as a message.")
 
 
 @mcp.tool()
@@ -651,6 +691,8 @@ def _room_duplicate(db: DB, caller: Agent, ws: Workspace, task: str, branch: str
         state = "queued by a request still being answered"
     elif t.state != "pending":
         state = "being started right now"
+    elif tasks.plan_holds(db, t):
+        state = "waiting for the person to approve the session's plan"
     elif deps:
         state = f"waiting on {', '.join(deps)}"
     else:
@@ -895,6 +937,22 @@ async def assign(
             return _remind_goal(db, caller,
                                 f"Queued task {t.id} until {', '.join(unmet)} merge{'s' if len(unmet) == 1 else ''}."
                                 + "".join(f"\nprofile: {w}" for w in why))
+        from brindle import plans
+
+        plan = plans.holding(db, autopilot.root_of(db, caller.id))
+        if plan:
+            # Queued and released like any other (start=True): its start finds
+            # the plan holding it, so an approval landing before the release
+            # still starts it, and one after starts it from the queue.
+            t = req.enqueue(
+                db, caller, ws, profile, task, "assign", isolate=isolate, branch=branch,
+                done_when=done_when, files=files, depends_on=depends_on, plan_first=plan_first,
+                weight=effective_weight, analysis_doc=analysis_doc, start=True,
+            )
+            savings.record(db, ws.repo_root, decision, task_id=t.id)
+            return _remind_goal(db, caller, f"Queued task {t.id} behind plan {plan['id']}: it starts when the "
+                                "person approves the plan. Don't assign it again."
+                                + "".join(f"\nprofile: {w}" for w in why))
         reply, warning = _route_clash(
             req, db, caller, ws, profile, task, "assign", isolate=isolate, branch=branch,
             done_when=done_when, files=files, depends_on=depends_on, plan_first=plan_first,
@@ -971,9 +1029,19 @@ def approve_plan(agent_id: str, feedback: str = "", approved: bool = True) -> st
     """Decide on the plan a plan-first worker proposed with submit_plan. With
     approved=false (or feedback) the worker revises it and submits again; the
     worker is sent your decision and feedback. Only the worker's supervisor
-    may decide."""
+    may decide. A planning doc (propose_plan) is the person's to decide, not yours."""
     db = DB()
     caller, _ = _caller(db)
+    from brindle import visuals
+
+    if visuals.ID.fullmatch(agent_id or ""):
+        from brindle import plans
+        from brindle.service.errors import ServiceError
+
+        try:   # an agent is never the person: refused, whatever it passes
+            plans.decide(db, agent_id, None, approved, note=feedback, person=False)
+        except ServiceError as e:
+            return f"Not decided: {e.message}."
     try:
         return agents.approve_plan(db, caller.id if caller else None, agent_id, feedback, approved)
     except agents.AgentError as e:

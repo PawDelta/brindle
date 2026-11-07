@@ -925,6 +925,22 @@ CREATE TABLE IF NOT EXISTS kept_visuals (
     answer TEXT,
     kept_at REAL NOT NULL
 );
+-- Planning docs (brindle.plans): a plan is a visuals row of kind 'plan' with
+-- this row beside it. While one is open or redirected, the session's queued
+-- tasks wait; the person's approval releases them. Deleted with the session.
+CREATE TABLE IF NOT EXISTS plans (
+    id TEXT PRIMARY KEY,           -- the plan's visual id
+    root_id TEXT NOT NULL,         -- the session (its root agent)
+    rev INTEGER NOT NULL,
+    markdown TEXT NOT NULL,        -- the current revision, as the supervisor wrote it
+    decisions TEXT NOT NULL,       -- JSON [{id, title, options, mine, challenge}]
+    split TEXT NOT NULL,           -- JSON [{id, title, after}]
+    state TEXT NOT NULL,           -- open | redirected | approved
+    decision TEXT,                 -- JSON {approved, picks, comments, note, at, rev}: the person's
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS plans_root ON plans(root_id, state);
 """
 
 

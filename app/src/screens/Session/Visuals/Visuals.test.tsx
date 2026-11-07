@@ -1,7 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../../../App";
-import type { VisualDTO } from "../../../api/client";
+import type { Plan, PlanVerdict, VisualDTO } from "../../../api/client";
 import { ONBOARDED_KEY } from "../../../api/providers";
 import { PtyViewsProvider } from "../../../api/ptyView";
 import type { InboxItemDTO, SessionDTO } from "../../../api/schema";
@@ -10,7 +10,7 @@ import { startSync } from "../../../store/sync";
 import { FakeDaemon } from "../../../test/fakeDaemon";
 import { REPO, question, root, waiting } from "../../../test/fixtures";
 import { standInViews } from "../../../test/panes";
-import type { VisualsClient } from "./client";
+import type { PlansClient, VisualsClient } from "./client";
 import { VisualFrame, type VisualFrameProps, type VisualSource } from "./frame";
 import { StoreContext } from "../../../store/useStore";
 import { VisualReader } from "./VisualReader";
@@ -526,5 +526,58 @@ describe("visuals", () => {
     await act(async () => held.forEach((answer) => answer()));
     expect(screen.getByTestId("visual-answered")).toBeTruthy();
     expect(screen.queryByTestId("visual-send")).toBeNull();
+  });
+
+  it("renders a plan itself, sends per-section comments and picks on Redirect, and drops a read older than the verdict", async () => {
+    const plan: Plan = {
+      id: "v_p1", session: "sup1", title: "Org presets", rev: 1, state: "open", markdown: "…", created_at: now, queued: 2,
+      lede: "One page. <img src=x onerror=alert(1)>", split: [{ id: "w1", title: "Schema", after: [] }],
+      sections: [{ id: "s1", title: "Goal", markdown: "Presets per org." }, { id: "s2", title: "Risks", markdown: "A migration." }],
+      decisions: [{ id: "d1", title: "Where presets live", mine: "org", options: [{ id: "org", label: "Org policy" }, { id: "repo", label: "A file in each repo" }] }],
+    };
+    const reads: ((p: Plan) => void)[] = [];
+    const replies: ((p: Plan) => void)[] = [];
+    const sent: PlanVerdict[] = [];
+    const fake: VisualsClient & PlansClient = {
+      visuals: async () => [], answerVisual: async () => visual, keepVisual: async () => visual, unkeepVisual: async () => visual, markVisualRead: async () => ({}),
+      plan: () => new Promise<Plan>((ok) => { reads.push(ok); }),
+      decidePlan: (_id, verdict) => { sent.push(verdict); return new Promise<Plan>((ok) => { replies.push(ok); }); },
+    };
+    const redirected: Plan = { ...plan, state: "redirected", verdict: { approved: false, picks: { d1: "repo" }, comments: [{ section: "s1", text: "Repo file first." }], at: now, rev: 1 } };
+    const row: VisualDTO = { ...visual, id: plan.id, kind: "plan", title: plan.title, rev: 1, question: undefined, options: undefined, unread: false };
+    const reader = (v: VisualDTO) => <VisualReader client={fake} visual={v} onBack={() => {}} onAnswered={() => {}} />;
+    const view = render(reader(row));
+    await act(async () => reads[0](plan));
+    // brindle's own rendering: the agent's raw HTML stays text, and there's no frame.
+    expect(screen.getByText(/onerror=alert/)).toBeTruthy();
+    expect(document.querySelector("img, iframe")).toBeNull();
+    const redirect = screen.getByRole("button", { name: "Redirect" }) as HTMLButtonElement;
+    expect(redirect.disabled).toBe(true);
+    fireEvent.click(screen.getByRole("radio", { name: "A file in each repo" }));
+    fireEvent.click(within(screen.getByRole("region", { name: "Goal" })).getByRole("button", { name: "Comment" }));
+    fireEvent.change(screen.getByLabelText("Comment on Goal"), { target: { value: "Repo file first." } });
+    // Another change to the row starts a read that is still out when the verdict lands.
+    view.rerender(reader({ ...row, answer: { option: "x", note: "", at: now } }));
+    await act(async () => fireEvent.click(redirect));
+    expect(sent).toEqual([{ rev: 1, approved: false, picks: { d1: "repo" }, comments: [{ section: "s1", text: "Repo file first." }], note: "" }]);
+    await act(async () => replies[0](redirected));
+    await act(async () => reads[1](plan));
+    expect(screen.getByTestId("plan-decided").textContent).toContain("Repo file first.");
+    expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
+    // The other order: a newer revision is read while an older verdict's reply is still out.
+    view.rerender(reader({ ...row, rev: 2 }));
+    await act(async () => reads[2]({ ...plan, rev: 2 }));
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Approve" })));
+    view.rerender(reader({ ...row, rev: 3 }));
+    await act(async () => reads[3]({ ...plan, rev: 3 }));
+    await act(async () => replies[1]({ ...plan, rev: 2, state: "approved", verdict: { approved: true, at: now, rev: 2 } }));
+    expect(screen.getByText("plan · rev 3")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Approve" })).toBeTruthy();
+    // Reopened later, a decided plan shows the alternative the person sent, not the supervisor's.
+    view.unmount();
+    render(reader(row));
+    await act(async () => reads[4](redirected));
+    expect(screen.getByRole("radio", { name: "A file in each repo" }).getAttribute("aria-checked")).toBe("true");
+    expect(screen.getByRole("radio", { name: /Org policy/ }).getAttribute("aria-checked")).toBe("false");
   });
 });

@@ -5,6 +5,9 @@ import type { DaemonClient } from "../../../api/client";
 
 export type VisualsClient = Pick<DaemonClient, "visuals" | "answerVisual" | "keepVisual" | "unkeepVisual" | "markVisualRead">;
 
+/* A planning doc's reads and the person's verdict (brindle/plans.py). */
+export type PlansClient = Pick<DaemonClient, "plan" | "decidePlan">;
+
 export type KeptVisualsClient = Pick<DaemonClient, "keptVisuals">;
 
 /* An id as the engine makes them (v_8f2c): letters, digits, _ and -, nothing a path could use. */

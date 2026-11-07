@@ -50,6 +50,12 @@ export interface ApiSchema {
   PermissionPolicyDTO: PermissionPolicyDTO;
   PermissionPresetDTO: PermissionPresetDTO;
   PermissionRuleDTO: PermissionRuleDTO;
+  PlanCommentDTO: PlanCommentDTO;
+  PlanDTO: PlanDTO;
+  PlanDecisionDTO: PlanDecisionDTO;
+  PlanSectionDTO: PlanSectionDTO;
+  PlanVerdictDTO: PlanVerdictDTO;
+  PlanWorkerDTO: PlanWorkerDTO;
   PreflightActionDTO: PreflightActionDTO;
   PreflightItemDTO: PreflightItemDTO;
   ProfileDTO: ProfileDTO;
@@ -761,6 +767,94 @@ export interface PermissionRuleDTO {
 }
 /**
  * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PlanCommentDTO".
+ */
+export interface PlanCommentDTO {
+  section: string;
+  text: string;
+}
+/**
+ * A planning doc (brindle.plans): markdown brindle renders itself, split
+ * into its ``##`` sections. ``state``: open (the person hasn't decided),
+ * redirected (their comments went back; a new revision is coming) or
+ * approved. While open or redirected, the session's assign calls queue.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PlanDTO".
+ */
+export interface PlanDTO {
+  created_at: number;
+  decisions: PlanDecisionDTO[];
+  id: string;
+  lede: string;
+  markdown: string;
+  queued: number;
+  rev: number;
+  sections: PlanSectionDTO[];
+  session: string;
+  split: PlanWorkerDTO[];
+  state: "open" | "redirected" | "approved";
+  title: string;
+  verdict?: PlanVerdictDTO | null;
+}
+/**
+ * A decision that shapes the plan: its alternatives and the supervisor's pick.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PlanDecisionDTO".
+ */
+export interface PlanDecisionDTO {
+  challenge?: string | null;
+  id: string;
+  mine?: string | null;
+  options: VisualOptionDTO[];
+  title: string;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "VisualOptionDTO".
+ */
+export interface VisualOptionDTO {
+  detail?: string | null;
+  id: string;
+  label: string;
+}
+/**
+ * One ``##`` section of a plan's markdown: what a comment anchors to.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PlanSectionDTO".
+ */
+export interface PlanSectionDTO {
+  id: string;
+  markdown: string;
+  title: string;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PlanWorkerDTO".
+ */
+export interface PlanWorkerDTO {
+  after?: string[];
+  id: string;
+  title: string;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PlanVerdictDTO".
+ */
+export interface PlanVerdictDTO {
+  approved: boolean;
+  at: number;
+  comments?: PlanCommentDTO[];
+  note?: string | null;
+  picks?: {
+    [k: string]: string;
+  };
+  rev: number;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
  * via the `definition` "PreflightActionDTO".
  */
 export interface PreflightActionDTO {
@@ -1051,15 +1145,6 @@ export interface VisualDTO {
   session: string;
   title: string;
   unread: boolean;
-}
-/**
- * This interface was referenced by `ApiSchema`'s JSON-Schema
- * via the `definition` "VisualOptionDTO".
- */
-export interface VisualOptionDTO {
-  detail?: string | null;
-  id: string;
-  label: string;
 }
 /**
  * This interface was referenced by `ApiSchema`'s JSON-Schema

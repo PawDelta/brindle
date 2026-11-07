@@ -24,6 +24,7 @@ import secrets
 import shutil
 import tempfile
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -225,10 +226,12 @@ def _session(db: DB, caller: Agent | None) -> tuple[Agent, Workspace]:
 
 
 def publish(db: DB, caller: Agent | None, title: str, html: str, question: str | None = None,
-            options: list[dict] | None = None, visual_id: str | None = None, kind: str = "visual") -> dict:
+            options: list[dict] | None = None, visual_id: str | None = None, kind: str = "visual",
+            extra: Callable[[Any, str, int], None] | None = None) -> dict:
     """Publish a new visual into ``caller``'s session, or (``visual_id``) a
     new revision of one of that session's visuals. A new revision is a new
-    question: an answer to an earlier one is cleared."""
+    question: an answer to an earlier one is cleared. ``extra(c, id, rev)``
+    writes what goes with the row (a plan's own row) in its transaction."""
     require_enabled()
     root, ws = _session(db, caller)
     title = _text(title, "title", MAX_TITLE, required=True)
@@ -259,9 +262,9 @@ def publish(db: DB, caller: Agent | None, title: str, html: str, question: str |
         if visual_id is None:
             vid, rev = "v_" + secrets.token_hex(6), 1
         else:
-            row = c.execute("SELECT root_id, rev FROM visuals WHERE id=?", (visual_id,)).fetchone() \
+            row = c.execute("SELECT root_id, rev, kind FROM visuals WHERE id=?", (visual_id,)).fetchone() \
                 if isinstance(visual_id, str) and ID.fullmatch(visual_id) else None
-            if row is None or row["root_id"] != root.id:
+            if row is None or row["root_id"] != root.id or row["kind"] != kind:
                 raise ServiceError("not_found", "no such visual in this session", 404)
             vid, rev = visual_id, row["rev"] + 1
             if rev > MAX_REVISIONS:
@@ -278,6 +281,8 @@ def publish(db: DB, caller: Agent | None, title: str, html: str, question: str |
                 c.execute("UPDATE visuals SET title=?, rev=?, question=?, options=?, answer=NULL,"
                           " by_agent=?, updated_at=? WHERE id=?",
                           (title, rev, question, opts, caller.id, now, vid))
+            if extra is not None:
+                extra(c, vid, rev)
         except BaseException:
             path.unlink(missing_ok=True)
             raise
@@ -469,6 +474,7 @@ def forget_sessions(db: DB, repo_root: str, root_ids: list[str]) -> None:
         with db.tx() as c:
             gone = [r["id"] for r in c.execute("SELECT id FROM visuals WHERE root_id=?", (root_id,))]
             c.execute("DELETE FROM visuals WHERE root_id=?", (root_id,))
+            c.execute("DELETE FROM plans WHERE root_id=?", (root_id,))
         shutil.rmtree(store_root(repo_root) / root_id, ignore_errors=True)
         for vid in gone:
             bus.publish(db, "visual.removed", repo_root=repo_root, root_id=root_id, visual=vid)

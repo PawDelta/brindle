@@ -22,6 +22,8 @@ import type {
   PermissionLimitsDTO,
   PermissionPolicyDTO,
   PermissionRuleDTO,
+  PlanCommentDTO,
+  PlanDTO,
   PreflightItemDTO,
   ProfileDTO,
   ProviderConnectionDTO,
@@ -373,6 +375,19 @@ export interface KeptVisualDTO {
   repo: string;
   answer?: VisualAnswer | null;
   kept_at: number;
+}
+
+/* A planning doc (brindle/plans.py): markdown the app renders itself, by section. */
+export type Plan = PlanDTO;
+export type PlanComment = PlanCommentDTO;
+
+/* The person's verdict on the plan revision on screen: approve, or redirect with what to change. */
+export interface PlanVerdict {
+  rev: number;
+  approved: boolean;
+  picks: Record<string, string>;
+  comments: PlanComment[];
+  note: string;
 }
 
 export type Repo = RepoDTO;
@@ -1601,6 +1616,16 @@ export class DaemonClient {
 
   markVisualRead(id: string) {
     return this.post<unknown>(`/visuals/${encodeURIComponent(id)}/read`, {});
+  }
+
+  /* A planning doc: the visual of kind "plan" with the same id. */
+  plan(id: string) {
+    return this.get<Plan>(`/plans/${encodeURIComponent(id)}`);
+  }
+
+  /* Approve or redirect the revision on screen; a newer revision, or a second verdict, is a 409. */
+  decidePlan(id: string, verdict: PlanVerdict) {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/decide`, verdict);
   }
 
   async keptVisuals(): Promise<KeptVisualDTO[]> {

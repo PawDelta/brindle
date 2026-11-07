@@ -842,6 +842,8 @@ def start_now(db: DB, caller: Agent | None, task_id: str) -> str:
     caller_ws = db.get_workspace(t.caller_ws_id)
     if not caller_ws or session_paused(db, t):
         raise ValueError(f"Task {task_id} can't start now (its session is paused or gone).")
+    if plan_holds(db, t):
+        raise ValueError(f"Task {task_id} waits on the session's plan: it starts when the person approves it.")
     try:
         unmet = unmet_dependencies(db, caller_ws, _loads(t.depends_on), caller_id=t.caller_id,
                                    dependent_task_id=t.id)
@@ -917,7 +919,7 @@ def start_when_room(db: DB, task_id: str, poll: float = ROOM_POLL) -> bool:
     pause = threading.Event()
     while True:
         t = db.get_task(task_id)
-        if t is None or t.state != "pending" or session_paused(db, t):
+        if t is None or t.state != "pending" or held(db, t):
             return False
         why = task_wait(db, t)
         if why is None:
@@ -940,17 +942,33 @@ def session_paused(db: DB, t: Task) -> bool:
     return any(a is not None and a.status == "paused" for a in (caller, root))
 
 
-def on_resumed(db: DB, root_id: str) -> None:
-    """Session ``root_id`` was resumed: start its queued tasks that can
-    start now, and give each one still waiting for room its helper back
-    (the old one ended at the pause)."""
+def plan_holds(db: DB, t: Task) -> bool:
+    """Whether ``t`` waits on its session's planning doc (brindle.plans):
+    while the person hasn't approved it, nothing the session assigned
+    starts, whatever wakes the task; their approval starts it (``on_resumed``)."""
+    if not t.caller_id:
+        return False
+    from brindle import autopilot, plans
+
+    return plans.holding(db, autopilot.root_of(db, t.caller_id)) is not None
+
+
+def held(db: DB, t: Task) -> bool:
+    """Whether ``t``'s session holds it: paused, or waiting on its plan."""
+    return session_paused(db, t) or plan_holds(db, t)
+
+
+def on_resumed(db: DB, root_id: str, why: str = "the session's resume") -> None:
+    """Session ``root_id`` was resumed (or ``why``: the person approved its
+    plan): start its queued tasks that can start now, and give each one
+    still waiting for room its helper back (the old one ended at the pause)."""
     from brindle import autopilot
 
     for t in db.list_tasks(state="pending"):
         if not t.caller_id or autopilot.root_of(db, t.caller_id) != root_id:
             continue
         deps = _loads(t.depends_on)
-        if _start_if_ready(db, t, ", ".join(deps) if deps else "the session's resume"):
+        if _start_if_ready(db, t, ", ".join(deps) if deps else why):
             continue
         now = db.get_task(t.id)
         if now is not None and now.state == "pending" and now.waiting is not None:
@@ -1289,8 +1307,10 @@ def _start_if_ready(db: DB, t: Task, dep_ref: str, check_room: bool = True) -> b
     start that fails cancels it too, with the reason sent to its caller
     (``requeue`` makes a new one). Returns whether it started."""
     caller_ws = db.get_workspace(t.caller_ws_id)
-    if not caller_ws or session_paused(db, t):
-        return False   # a paused session's tasks stay queued; resuming it starts them (on_resumed)
+    if not caller_ws or held(db, t):
+        # A paused session's tasks stay queued, and so do those behind its
+        # open plan: resuming it, or the person's approval, starts them (on_resumed).
+        return False
     try:
         if unmet_dependencies(db, caller_ws, _loads(t.depends_on), caller_id=t.caller_id,
                               dependent_task_id=t.id):

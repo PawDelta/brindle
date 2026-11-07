@@ -660,7 +660,11 @@ def _profile_for(db: DB, agent: Agent, ws: Workspace, m=_UNREAD):
                           "permission, plan approval, worker questions, or a question already answered "
                           "in chat. Declare kind and counts honestly. Respect refusals: one open offer, "
                           "15 minutes apart, four per day, no repeated question; two dismissals silence "
-                          "offers for 24 hours. The Visuals setting controls offers only.")
+                          "offers for 24 hours. The Visuals setting controls offers only. "
+                          "Plan only when asked: call propose_plan only after the person explicitly asked "
+                          "for a planning doc, never because a request looks large. While a plan is open, "
+                          "your assign calls queue until the person approves it; a redirect arrives as "
+                          "their comments: revise with propose_plan(plan_id=...).")
     # The profile's rule packs: their text joins the prompt here, for every
     # provider; their mechanical rules are checked by brindle.rule_checks.
     # So do its guardrails (write and read scope), which that check enforces.
