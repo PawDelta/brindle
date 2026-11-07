@@ -99,7 +99,7 @@ def test_snapshot_preserves_safe_class_styling(db, session, client, layout):
 
 
 @pytest.mark.parametrize("case,status", [
-    ("answer", 200), ("answer_secret", 400), ("secret", 400), ("stale", 409), ("unknown", 404),
+    ("answer", 200), ("answer_free_text", 200), ("answer_secret", 400), ("secret", 400), ("stale", 409), ("unknown", 404),
     ("disabled", 404), ("too_big", 400), ("invalid", 400), ("missing", 400),
     ("free", 402), ("denied", 403), ("google_docs", 200), ("sharepoint", 200),
     ("plan", 200), ("plan_disabled", 200), ("wrong_kind", 400),
@@ -108,8 +108,9 @@ def test_snapshot_checks_identity_revision_secrets_and_destination(db, session, 
     _, boss, _ = session
     v = visuals.publish(db, boss, "Release", "<p>initial</p>", kind="plan" if case.startswith("plan") else "visual")
     body = {"rev": 1, "html": "<p>rendered</p>"}
-    if case in {"answer", "answer_secret"}:
-        answer = {"option": "B", "note": SECRET if case == "answer_secret" else "ship <it>"}
+    if case in {"answer", "answer_free_text", "answer_secret"}:
+        answer = {"option": None if case == "answer_free_text" else "B",
+                  "note": SECRET if case == "answer_secret" else "ship <it>"}
         db.conn.execute("UPDATE visuals SET answer=? WHERE id=?", (json.dumps(answer), v["id"]))
         db.conn.commit()
     if case == "secret":
@@ -144,6 +145,8 @@ def test_snapshot_checks_identity_revision_secrets_and_destination(db, session, 
         if case == "answer":
             assert "B · ship &lt;it&gt;" in content
             assert content.index("B · ship &lt;it&gt;") < content.index("</body>")
+        elif case == "answer_free_text":
+            assert "You picked · ship &lt;it&gt;" in content
         elif case.startswith("plan"):
             assert content == body["markdown"] and got.json()["filename"].endswith(".md")
         else:
