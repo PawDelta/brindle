@@ -112,6 +112,25 @@ def test_an_unedited_file_resumes_to_the_same_goal(db, repo):
     assert [(m.check_cmd, m.status) for m in db.milestones("boss")] == [("true\nfalse", "passed")]
 
 
+def test_milestone_phases_round_trip_through_the_goal_file(db, repo):
+    from brindle.service.dto import MilestoneDTO
+
+    ws = workspaces.adopt_root(db, str(repo))
+    add_agent(db, ws, "boss")
+    db.add_autopilot("boss")
+    items = autopilot.milestone_items(db, "boss", [
+        {"title": "API", "check": "true", "phase": " Build  it "},
+        {"title": "UI", "check": "true", "detail": "phase: not a phase"},
+        {"title": "Ship", "check": "true", "phase": "Release"}])
+    autopilot.set_goal(db, "boss", "Phased", items)
+    autopilot.write_goals_file(db, "boss")
+    assert "## API\nstatus: pending\nphase: Build it\n" in goals(repo)
+    autopilot.reload_goals_file(db, "boss")
+    ms = db.milestones("boss")
+    assert [(m.phase_name, m.detail) for m in ms] == [("Build it", None), (None, "phase: not a phase"), ("Release", None)]
+    assert MilestoneDTO.from_row(ms[0]).phase_name == "Build it"
+
+
 def test_a_sync_failure_is_logged_not_raised(db, repo, monkeypatch, caplog):
     ws = load(db, repo)
     monkeypatch.setattr(autopilot, "rewrite_goals", lambda *a: 1 / 0)

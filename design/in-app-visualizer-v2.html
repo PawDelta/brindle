@@ -1,0 +1,1807 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>In-app visuals v2</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+/* ── Tokens: copied from app/src/styles.css (both themes, same names) ─────── */
+:root {
+  --canvas: #080d0b; --canvas-2: #0a100d; --surface: #080d0b; --surface-2: #121a16;
+  --line: rgba(120, 150, 135, 0.16); --line-strong: rgba(130, 160, 145, 0.28);
+  --ink: #e8f0eb; --ink-2: #afbfb6; --ink-3: #889a90;
+  --sap: #e8875a; --sap-soft: rgba(232, 135, 90, 0.12);
+  --pass: #34d399; --pass-soft: rgba(52, 211, 153, 0.12);
+  --branch: #a99be0; --branch-soft: rgba(169, 155, 224, 0.12);
+  --fail: #f08c88; --fail-soft: rgba(240, 140, 136, 0.12);
+  --on-sap: #1a0f08; --on-branch: #15102a;
+  --thread-in: #d7af87; --thread-top: #e8875a; --thread-mid: #a99be0; --thread-out: #34d399;
+  --group-1: #6ea8fe; --group-2: #f2a65a; --group-4: #5ccfc4;
+  --shell-bg: #070b09; --shell-bg-2: color-mix(in srgb, var(--shell-bg), white 5%); --shell-ink: #e8f0eb; --shell-dim: #859a8e; --shell-acc: #34d399; --shell-bad: #f08c88; --shell-line: rgba(52, 96, 74, 0.5);
+  --sans: "Geist", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --r-sm: 2px; --r: 4px;
+  /* page-only (the mockup's own frame, not app tokens) */
+  --page: #050807; --win-shadow: 0 40px 90px -20px rgba(0,0,0,.7), 0 0 0 1px rgba(255,255,255,.02);
+  --lift: 0 18px 40px -24px rgba(0,0,0,.8);
+  color-scheme: dark;
+}
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --canvas: #f4f6f6; --canvas-2: #eef1f1; --surface: #f4f6f6; --surface-2: #e9eded;
+    --line: rgba(20, 40, 36, 0.11); --line-strong: rgba(20, 40, 36, 0.22);
+    --ink: #0e1716; --ink-2: #3a4d4a; --ink-3: #4c615e;
+    --sap: #9b4724; --sap-soft: rgba(155, 71, 36, 0.1);
+    --pass: #046e50; --pass-soft: rgba(4, 110, 80, 0.1);
+    --branch: #6350b3; --branch-soft: rgba(99, 80, 179, 0.1);
+    --fail: #a63e3a; --fail-soft: rgba(166, 62, 58, 0.1);
+    --on-sap: #ffffff; --on-branch: #ffffff;
+    --thread-in: #86572a; --thread-top: #9b4724; --thread-mid: #6350b3; --thread-out: #046e50;
+    --group-1: #2f6fbf; --group-2: #b8621b; --group-4: #1f8a80;
+    --page: #e6eaea; --win-shadow: 0 40px 80px -30px rgba(14,23,22,.28), 0 2px 6px rgba(14,23,22,.06);
+    --lift: 0 16px 36px -26px rgba(14,23,22,.3);
+    color-scheme: light;
+  }
+}
+:root[data-theme="light"] {
+  --canvas: #f4f6f6; --canvas-2: #eef1f1; --surface: #f4f6f6; --surface-2: #e9eded;
+  --line: rgba(20, 40, 36, 0.11); --line-strong: rgba(20, 40, 36, 0.22);
+  --ink: #0e1716; --ink-2: #3a4d4a; --ink-3: #4c615e;
+  --sap: #9b4724; --sap-soft: rgba(155, 71, 36, 0.1);
+  --pass: #046e50; --pass-soft: rgba(4, 110, 80, 0.1);
+  --branch: #6350b3; --branch-soft: rgba(99, 80, 179, 0.1);
+  --fail: #a63e3a; --fail-soft: rgba(166, 62, 58, 0.1);
+  --on-sap: #ffffff; --on-branch: #ffffff;
+  --thread-in: #86572a; --thread-top: #9b4724; --thread-mid: #6350b3; --thread-out: #046e50;
+  --group-1: #2f6fbf; --group-2: #b8621b; --group-4: #1f8a80;
+  --page: #e6eaea; --win-shadow: 0 40px 80px -30px rgba(14,23,22,.28), 0 2px 6px rgba(14,23,22,.06);
+  --lift: 0 16px 36px -26px rgba(14,23,22,.3);
+  color-scheme: light;
+}
+
+/* ── Page ─────────────────────────────────────────────────────────────── */
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body { background: var(--page); color: var(--ink); font-family: var(--sans); font-size: 14px; line-height: 1.5; -webkit-font-smoothing: antialiased; font-variant-numeric: tabular-nums; }
+button, input, select { font: inherit; color: inherit; }
+button { cursor: pointer; }
+:focus-visible { outline: 2px solid var(--branch); outline-offset: 2px; }
+.mono { font-family: var(--mono); }
+.flex1 { flex: 1; }
+.t-2 { color: var(--ink-2); } .t-3 { color: var(--ink-3); } .t-pass { color: var(--pass); } .t-branch { color: var(--branch); } .t-sap { color: var(--sap); } .t-fail { color: var(--fail); }
+.topbar { position: sticky; top: 0; z-index: 30; display: flex; align-items: center; gap: 24px; padding: 12px 40px; background: color-mix(in srgb, var(--page) 82%, transparent); backdrop-filter: blur(14px) saturate(1.2); border-bottom: 1px solid var(--line); }
+.topbar nav { display: flex; gap: 4px; flex-wrap: wrap; }
+.topbar nav a { color: var(--ink-3); text-decoration: none; font-size: 13px; padding: 4px 10px; border-radius: 6px; white-space: nowrap; }
+.topbar nav a:hover { color: var(--ink); background: var(--surface-2); }
+.seg { display: inline-flex; padding: 2px; gap: 2px; border-radius: 7px; background: var(--surface-2); border: 1px solid var(--line); }
+.seg button { border: 0; background: transparent; padding: 3px 10px; border-radius: 5px; font-size: 12px; color: var(--ink-3); white-space: nowrap; }
+.seg button[aria-pressed="true"] { background: var(--canvas); color: var(--ink); box-shadow: 0 1px 2px rgba(0,0,0,.12), 0 0 0 1px var(--line); }
+.page { max-width: 1400px; margin: 0 auto; padding: 0 40px 120px; }
+.sec { padding-top: 64px; scroll-margin-top: 56px; }
+.eyebrow { font-family: var(--mono); font-size: 12px; color: var(--ink-3); letter-spacing: 0.02em; }
+.sec h1 { margin: 6px 0 8px; font-size: 30px; font-weight: 600; letter-spacing: -0.025em; line-height: 1.15; }
+.sec h2 { margin: 6px 0 8px; font-size: 24px; font-weight: 600; letter-spacing: -0.02em; line-height: 1.2; }
+.sec .lede { margin: 0; max-width: 820px; color: var(--ink-2); font-size: 15px; }
+.facts { display: grid; grid-template-columns: repeat(4, 1fr); gap: 28px; margin: 28px 0 0; padding: 18px 0 0; border-top: 1px solid var(--line); }
+.facts div { font-size: 13px; color: var(--ink-2); }
+.facts b { display: block; color: var(--ink); font-weight: 600; font-size: 13.5px; margin-bottom: 3px; }
+.changed { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; margin-top: 18px; padding: 12px 16px; border-radius: 8px; background: var(--canvas-2); border: 1px solid var(--line); font-size: 12.5px; color: var(--ink-2); }
+.changed b { font-family: var(--mono); font-size: 10.5px; font-weight: 500; text-transform: uppercase; letter-spacing: .06em; margin-right: 8px; }
+.changed .rm b { color: var(--fail); } .changed .ad b { color: var(--pass); }
+.logo { display: inline-flex; align-items: center; gap: 0.5em; font-weight: 600; letter-spacing: -0.01em; white-space: nowrap; line-height: 24px; }
+.logo-mark { flex: none; display: block; width: 1.98em; height: 1.375em; }
+.logo-word { letter-spacing: -0.02em; }
+.logo .lm-in { stroke: var(--thread-in); } .logo .lm-top { stroke: var(--thread-top); } .logo .lm-mid { stroke: var(--thread-mid); } .logo .lm-bot { stroke: var(--thread-out); }
+
+/* demo controls above the window */
+.demo-ctl { display: flex; align-items: center; gap: 12px; width: 1320px; margin: 26px auto 12px; font-size: 12.5px; color: var(--ink-3); }
+.demo-ctl .hint { font-size: 12.5px; color: var(--ink-3); text-align: right; }
+.demo-ctl .hint b { color: var(--ink-2); font-weight: 500; }
+.demo-ctl .lab-l { font-size: 12px; color: var(--ink-3); }
+.lnk { border: 0; background: none; padding: 0; color: var(--branch); font-size: 12.5px; }
+.lnk:hover { text-decoration: underline; }
+.framewrap { overflow-x: auto; padding: 4px 0 30px; }
+
+/* ── The app window ─────────────────────────────────────────────────────── */
+.win { width: 1320px; margin: 0 auto; border-radius: 12px; overflow: hidden; background: var(--canvas); box-shadow: var(--win-shadow); border: 1px solid var(--line-strong); display: flex; flex-direction: column; }
+.win-bar { height: 34px; flex: none; display: flex; align-items: center; gap: 8px; padding: 0 14px; background: var(--canvas-2); border-bottom: 1px solid var(--line); position: relative; }
+.win-bar i { width: 12px; height: 12px; border-radius: 50%; display: block; box-shadow: inset 0 0 0 0.5px rgba(0,0,0,.18); }
+.win-bar i:nth-child(1) { background: #ff5f57; } .win-bar i:nth-child(2) { background: #febc2e; } .win-bar i:nth-child(3) { background: #28c840; }
+.win-bar .ttl { position: absolute; left: 0; right: 0; text-align: center; font-size: 12px; color: var(--ink-3); pointer-events: none; }
+.win-body { display: flex; height: 820px; }
+
+/* Sidebar (components/Sidebar.tsx) */
+.side { width: 352px; flex: none; display: flex; flex-direction: column; gap: 10px; padding: 14px 12px 12px; background: var(--canvas-2); border-right: 1px solid var(--line); font-size: 13px; overflow: hidden; }
+.side-top { display: flex; align-items: center; gap: 8px; padding: 0 6px 4px; }
+.side-top .logo { font-size: 17px; }
+.newbtn { display: flex; align-items: center; gap: 4px; border: 0; background: transparent; border-radius: var(--r); padding: 2px 6px; font-size: 11.5px; color: var(--ink-3); }
+.newbtn:hover { background: var(--surface); color: var(--ink); }
+.entries { display: flex; flex-direction: column; gap: 1px; }
+.entry { margin: 0 4px; display: flex; align-items: center; gap: 8px; border-radius: var(--r); padding: 7px 10px 7px 8px; font-size: 12.5px; font-weight: 600; border: 0; background: transparent; text-align: left; color: var(--ink); }
+.entry:hover, .entry[aria-current="page"] { background: var(--surface-2); }
+.side-nb { color: var(--on-sap); background: var(--sap); border-radius: 999px; min-width: 20px; padding: 0 6px; text-align: center; font-family: var(--mono); font-size: 11px; font-weight: 700; line-height: 20px; }
+.kbd { font-family: var(--mono); font-size: 10px; color: var(--ink-3); border: 1px solid var(--line-strong); border-radius: 3px; padding: 0 4px; line-height: 15px; font-weight: 400; }
+.ctx { display: flex; flex-direction: column; gap: 10px; min-height: 0; padding: 4px 0 0; }
+.ctx-h { padding: 0 8px; }
+.ctx-title { font-size: 12.5px; font-weight: 600; line-height: 1.35; }
+.ctx-meta { font-size: 11px; color: var(--ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.side-ms { display: flex; flex-direction: column; gap: 1px; padding: 0 2px; }
+.side-ms .m { display: flex; align-items: flex-start; gap: 8px; padding: 4px 6px; border-radius: var(--r); font-size: 12px; color: var(--ink); }
+.side-ms .m .i { width: 16px; height: 16px; border-radius: 8px; display: grid; place-items: center; font-size: 9px; flex: none; margin-top: 1px; border: 1px solid var(--line-strong); color: var(--ink-3); }
+.side-ms .m[data-state="done"] .i { background: var(--pass); border-color: var(--pass); color: var(--surface); }
+.side-ms .m[data-state="now"] .i { border-color: var(--ink-2); color: var(--ink); }
+.side-ms .m[data-state="todo"] { color: var(--ink-3); }
+.side-ms .m .t { flex: 1; min-width: 0; line-height: 1.35; }
+.side-ms .m .t small { display: block; font-family: var(--mono); font-size: 10px; color: var(--ink-3); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.handle { position: relative; height: 14px; flex: none; display: flex; align-items: center; justify-content: center; }
+.handle::before { content: ""; position: absolute; left: 8px; right: 8px; top: 50%; height: 1px; background: var(--line); }
+.handle i { position: relative; z-index: 1; display: block; width: 36px; height: 4px; border-radius: 2px; background: var(--line-strong); }
+.side-h { display: flex; align-items: center; gap: 8px; padding: 6px 8px 4px; font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--ink-3); }
+.tree { flex: 1; min-height: 0; overflow: hidden; display: flex; flex-direction: column; gap: 14px; }
+.repo-h { padding: 0 8px 4px; font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--ink-3); }
+.srow { display: flex; align-items: flex-start; gap: 8px; border-radius: var(--r); padding: 5px 8px; border: 0; background: transparent; width: 100%; text-align: left; color: var(--ink); }
+.srow:hover { background: color-mix(in srgb, var(--surface-2) 60%, transparent); }
+.srow.sel { background: var(--branch-soft); }
+.srow .nm { font-size: 13px; line-height: 1.35; display: block; }
+.srow .mt { display: block; font-size: 11.5px; color: var(--ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.srow .mt code { font-family: var(--mono); font-size: 11px; }
+.srow .fold { margin-left: auto; font-size: 11px; color: var(--ink-3); padding-top: 1px; }
+.side-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--ink-3); margin-top: 6px; }
+.side-dot[data-tone="work"] { background: var(--branch); }
+.side-dot[data-tone="wait"] { background: var(--sap); }
+.side-dot[data-tone="done"] { background: var(--pass); }
+.agents { margin: 0 0 4px 8px; padding: 0; list-style: none; border-left: 1px solid var(--line); display: flex; flex-direction: column; gap: 1px; }
+.agents li { display: flex; align-items: center; gap: 8px; padding: 3px 8px 3px 10px; font-size: 12px; font-family: var(--mono); color: var(--ink); white-space: nowrap; }
+.agents li .side-dot { margin-top: 0; }
+.agents li span:last-child { margin-left: auto; font-family: var(--sans); font-size: 11px; color: var(--ink-3); }
+.paused { display: flex; align-items: center; gap: 8px; padding: 5px 8px; font-size: 11.5px; color: var(--ink-3); }
+.paused span { width: 18px; text-align: center; font-size: 11px; }
+.status { display: flex; align-items: center; justify-content: space-between; gap: 8px; border-top: 1px solid var(--line); padding: 8px 8px 0; font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); white-space: nowrap; }
+.usage { display: inline-flex; align-items: center; gap: 4px; }
+.usage .bar { display: flex; width: 32px; height: 3px; border-radius: 2px; background: var(--line); overflow: hidden; }
+.usage .bar i { display: block; height: 100%; width: 41%; background: currentColor; }
+.pages { height: 40px; flex: none; display: flex; align-items: center; gap: 4px; padding: 0 8px; font-size: 11.5px; color: var(--ink-3); white-space: nowrap; }
+.pages .av { width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center; border: 1px solid var(--line-strong); font-family: var(--mono); font-size: 10px; color: var(--ink-2); margin-right: 4px; }
+.pages .ttog { font-family: var(--mono); font-size: 11px; border: 1px solid var(--line-strong); border-radius: var(--r-sm); padding: 0 5px; }
+
+/* Main column */
+.main { flex: 1; min-width: 0; display: flex; flex-direction: column; position: relative; }
+.btn { display: inline-flex; align-items: center; gap: 6px; border-radius: var(--r); border: 1px solid var(--line-strong); background: transparent; padding: 4px 16px; font-size: 14px; font-weight: 500; color: var(--ink); line-height: 20px; white-space: nowrap; }
+.btn:hover { background: var(--surface-2); }
+.btn.sm { font-size: 13px; padding: 0 8px; height: 24px; line-height: 22px; }
+.btn.danger { color: var(--fail); border-color: color-mix(in srgb, var(--fail) 55%, transparent); }
+.btn-main { display: inline-flex; align-items: center; gap: 6px; border-radius: var(--r); padding: 4px 16px; line-height: 20px; border: 1px solid color-mix(in srgb, var(--pass) 55%, transparent); background: color-mix(in srgb, var(--pass) 4%, transparent); font-family: var(--mono); font-size: 13px; font-weight: 500; letter-spacing: -0.01em; color: var(--pass); white-space: nowrap; }
+.btn-main:hover { background: var(--pass-soft); }
+.btn-main:disabled { opacity: .45; cursor: not-allowed; background: transparent; }
+.btn-main.sm { padding: 0 10px; height: 26px; }
+.btn-dots { border: 0; background: transparent; color: var(--ink-3); font-size: 16px; padding: 0 6px; border-radius: var(--r); line-height: 24px; }
+.btn-dots:hover { background: var(--surface-2); color: var(--ink); }
+.quiet { border: 0; background: transparent; border-radius: var(--r); padding: 2px 8px; font-size: 12px; color: var(--ink-2); display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.quiet:hover { background: var(--surface-2); color: var(--ink); }
+.link { border: 0; background: none; padding: 0; color: var(--branch); font-size: 11.5px; white-space: nowrap; }
+.link:hover { text-decoration: underline; }
+.ico { width: 14px; height: 14px; flex: none; }
+
+/* ── A visual's viewer (host chrome around the sandboxed frame) ──────────── */
+.vhead { display: flex; align-items: flex-start; gap: 12px; padding: 10px 14px 10px 16px; }
+.vhead .b { min-width: 0; flex: 1; }
+.vhead h5 { margin: 0; font-size: 14.5px; font-weight: 600; letter-spacing: -0.01em; line-height: 1.3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.vmeta { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 11.5px; color: var(--ink-3); margin-top: 2px; }
+.vmeta code { font-family: var(--mono); font-size: 11px; }
+.vmeta .dot { opacity: .6; }
+.vacts { display: flex; align-items: center; gap: 4px; padding-top: 1px; }
+.frame-wrap { flex: 1; min-height: 0; margin: 0 14px 0 16px; position: relative; display: flex; flex-direction: column; border: 1px solid var(--line-strong); border-radius: 6px; overflow: hidden; background: var(--canvas-2); }
+.frame-wrap iframe { flex: 1; border: 0; width: 100%; height: 100%; display: block; background: transparent; }
+.prov { display: flex; align-items: center; gap: 8px; height: 26px; flex: none; padding: 0 10px; border-bottom: 1px solid var(--line); font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); background: var(--canvas); }
+.prov > span { white-space: nowrap; }
+.prov .lock { display: inline-flex; align-items: center; gap: 5px; }
+.prov .r { margin-left: auto; display: flex; gap: 12px; }
+.frame-wrap.decided iframe { opacity: .78; }
+.banner { display: flex; align-items: center; gap: 10px; flex: none; padding: 7px 12px; font-size: 12px; border-bottom: 1px solid var(--line); background: var(--canvas); color: var(--ink-2); }
+.banner b { font-weight: 600; color: var(--ink); }
+.st-new { width: 6px; height: 6px; border-radius: 50%; background: var(--branch); flex: none; display: inline-block; }
+.st-ok { color: var(--pass); font-size: 11px; flex: none; }
+.st-bad { color: var(--fail); font-family: var(--mono); font-weight: 600; font-size: 11px; flex: none; }
+
+/* answer bar: host chrome, trusted */
+.abar { flex: none; margin: 10px 14px 14px 16px; display: flex; flex-direction: column; gap: 8px; padding: 12px 14px 12px 16px; border-radius: 6px; border: 1px solid var(--line-strong); background: var(--canvas-2); position: relative; transition: box-shadow 260ms var(--ease), border-color 260ms var(--ease); }
+.abar::before { content: ""; position: absolute; left: 0; top: 10px; bottom: 10px; width: 2px; border-radius: 2px; background: var(--branch); opacity: .8; }
+.abar.glow { border-color: color-mix(in srgb, var(--branch) 60%, transparent); box-shadow: 0 0 0 4px var(--branch-soft); }
+.abar .q { display: flex; align-items: baseline; gap: 10px; }
+.abar .k { font-family: var(--mono); font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--branch); white-space: nowrap; }
+.abar .qt { font-size: 13.5px; font-weight: 600; line-height: 1.35; }
+.abar .hint { margin-left: auto; font-size: 11px; color: var(--ink-3); white-space: nowrap; }
+.abar .row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.ochip { display: inline-flex; align-items: center; gap: 7px; height: 28px; padding: 0 10px 0 6px; border-radius: var(--r); border: 1px solid var(--line-strong); background: transparent; font-size: 12.5px; color: var(--ink); white-space: nowrap; transition: border-color 160ms, background 160ms; }
+.ochip:hover { background: var(--surface-2); }
+.ochip .l { font-family: var(--mono); font-size: 10.5px; font-weight: 600; width: 18px; height: 18px; border-radius: 3px; display: grid; place-items: center; background: var(--surface-2); color: var(--ink-2); }
+.ochip[aria-checked="true"] { border-color: var(--branch); background: var(--branch-soft); }
+.ochip[aria-checked="true"] .l { background: var(--branch); color: var(--on-branch); }
+.note { flex: 1; min-width: 120px; border: 0; border-bottom: 1px solid var(--line-strong); background: transparent; padding: 3px 4px; font-size: 12.5px; outline: none; color: var(--ink); margin: 0 6px; }
+.note::placeholder { color: var(--ink-3); }
+.note:focus { border-color: var(--branch); }
+.abar.sent { flex-direction: row; align-items: center; gap: 10px; }
+.abar.sent::before { background: var(--pass); }
+.abar.sent .tick { width: 18px; height: 18px; border-radius: 50%; background: var(--pass); color: var(--canvas); display: grid; place-items: center; font-size: 11px; font-weight: 700; flex: none; }
+.abar.sent .s { font-size: 13px; }
+.abar.sent .s b { font-weight: 600; }
+.abar.sent .s span { color: var(--ink-3); }
+.flowback { position: absolute; right: 22px; bottom: 22px; z-index: 5; display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-radius: 6px; background: var(--canvas); border: 1px solid var(--line-strong); box-shadow: var(--lift); font-size: 12.5px; animation: up 380ms var(--ease) both; }
+.flowback .pd { width: 8px; height: 8px; border-radius: 50%; background: var(--pass); }
+@keyframes up { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+
+/* failed render */
+.fail-box { flex: 1; display: grid; place-items: center; padding: 30px; }
+.fail-card { max-width: 440px; text-align: left; display: flex; flex-direction: column; gap: 10px; }
+.fail-card .k { font-family: var(--mono); font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--fail); }
+.fail-card h6 { margin: 0; font-size: 15px; font-weight: 600; }
+.fail-card pre { margin: 0; font-family: var(--mono); font-size: 11.5px; line-height: 1.55; padding: 9px 11px; border-radius: var(--r); background: var(--shell-bg); color: var(--shell-dim); white-space: pre-wrap; }
+.fail-card pre b { color: var(--shell-bad); font-weight: 500; }
+.fail-card .acts { display: flex; gap: 6px; margin-top: 2px; }
+
+/* ── Session view ─────────────────────────────────────────────────────── */
+.sv { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.sbar { display: flex; align-items: center; gap: 14px; border-bottom: 1px solid var(--line); padding: 4px 12px 4px 16px; min-height: 37px; flex: none; position: relative; z-index: 4; background: var(--canvas); }
+.sbar .who { font-size: 14px; font-weight: 600; white-space: nowrap; }
+.sbar code { font-family: var(--mono); font-size: 12px; color: var(--ink-3); }
+.sbar .st { display: flex; align-items: center; gap: 4px; font-size: 12px; color: var(--ink-2); white-space: nowrap; }
+.sbar .st b { font-family: var(--mono); font-weight: 400; color: var(--branch); }
+.sv-body { flex: 1; min-height: 0; display: flex; position: relative; }
+.termwrap { flex: 1; min-width: 0; display: flex; padding: 16px; }
+.shell { background: var(--shell-bg); color: var(--shell-ink); border-radius: var(--r); font-family: var(--mono); font-size: 12.5px; line-height: 1.6; }
+.term { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+.term .tabs-s { display: flex; gap: 2px; background: var(--shell-bg-2); padding: 4px 6px 0; border-bottom: 1px solid var(--shell-line); }
+.term .tabs-s span { padding: 3px 12px; font-size: 11.5px; color: var(--shell-dim); border-radius: 3px 3px 0 0; display: inline-flex; align-items: center; gap: 6px; }
+.term .tabs-s span.on { background: var(--shell-bg); color: var(--shell-ink); }
+.term pre { margin: 0; padding: 12px 16px; white-space: pre-wrap; font: inherit; flex: 1; overflow: hidden; }
+.sv .term pre { overflow: auto; }
+.term .a { color: var(--shell-acc); } .term .d { color: var(--shell-dim); } .term .b { color: var(--shell-bad); }
+.term .vl { color: #c4b8f2; text-decoration: underline; text-decoration-color: rgba(196,184,242,.45); text-underline-offset: 3px; cursor: pointer; border-radius: 2px; }
+.term .vl:hover { background: rgba(169,155,224,.16); text-decoration-color: #c4b8f2; }
+.term .dl { display: block; border-left: 2px solid #34d399; padding-left: 10px; margin: 2px 0; animation: up 420ms var(--ease) both; }
+.term .nl { display: block; animation: up 420ms var(--ease) both; }
+.term .cur { display: inline-block; width: 7px; height: 14px; background: #a4aba7; vertical-align: -2px; animation: blink 1.1s steps(1) infinite; }
+@keyframes blink { 50% { opacity: 0; } }
+.panel { width: 548px; flex: none; border-left: 1px solid var(--line-strong); display: flex; flex-direction: column; background: var(--canvas); min-height: 0; animation: slide 300ms var(--ease) both; }
+@keyframes slide { from { transform: translateX(28px); opacity: 0; } to { transform: none; opacity: 1; } }
+.sv-body.wide .termwrap { flex: none; width: 300px; }
+.sv-body.wide .panel { flex: 1; width: auto; }
+
+/* ── v2: the session's Visuals button, its panel, the decided fold, Keep ── */
+.vbwrap { position: relative; display: inline-flex; }
+.vbtn { display: inline-flex; align-items: center; gap: 6px; height: 26px; padding: 0 9px 0 8px; border-radius: var(--r); border: 1px solid var(--line-strong); background: transparent; font-size: 12.5px; font-weight: 500; color: var(--ink-2); white-space: nowrap; }
+.vbtn:hover { background: var(--surface-2); color: var(--ink); }
+.vbtn[aria-pressed="true"], .vbtn.on { border-color: color-mix(in srgb, var(--branch) 70%, transparent); background: var(--branch-soft); color: var(--ink); }
+.vbtn .n { font-family: var(--mono); font-size: 11px; color: var(--ink); }
+.vbtn .nw { width: 6px; height: 6px; border-radius: 50%; background: var(--branch); }
+.vbtn .nw.pulse { animation: dotpulse 900ms var(--ease) 3; }
+@keyframes dotpulse { 0% { box-shadow: 0 0 0 0 var(--branch); } 100% { box-shadow: 0 0 0 7px transparent; } }
+.vico { width: 14px; height: 14px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.4; }
+.vp-head { display: flex; align-items: center; gap: 8px; height: 40px; flex: none; padding: 0 8px 0 16px; border-bottom: 1px solid var(--line); }
+.vp-t { display: inline-flex; align-items: center; gap: 7px; font-size: 13px; font-weight: 600; white-space: nowrap; }
+.vp-m { font-size: 11px; color: var(--ink-3); font-family: var(--mono); white-space: nowrap; }
+.vlist { flex: none; display: flex; flex-direction: column; gap: 1px; padding: 6px 8px 4px; }
+.vrow { display: grid; grid-template-columns: 14px minmax(0,1fr) auto; align-items: center; gap: 8px; height: 30px; padding: 0 8px; border: 0; border-radius: var(--r); background: transparent; text-align: left; color: var(--ink-2); font-size: 12.5px; width: 100%; }
+.vrow:hover { background: color-mix(in srgb, var(--surface-2) 60%, transparent); color: var(--ink); }
+.vrow[aria-current="true"] { background: var(--branch-soft); color: var(--ink); }
+.vrow .g { display: grid; place-items: center; }
+.vrow .tt { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.vrow.unread .tt { color: var(--ink); font-weight: 600; }
+.vrow .mm { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--ink-3); white-space: nowrap; font-family: var(--mono); }
+.vrow .ask { color: var(--sap); font-size: 10.5px; }
+.vrow.done .tt { color: var(--ink-3); }
+.vrow.done[aria-current="true"] .tt { color: var(--ink-2); }
+.vrow.fresh { animation: rowin 900ms var(--ease) both; }
+@keyframes rowin { from { opacity: 0; transform: translateY(-4px); background: var(--branch-soft); } to { opacity: 1; transform: none; } }
+.vfold { display: flex; align-items: center; gap: 8px; height: 28px; padding: 0 8px; margin-top: 2px; border: 0; border-top: 1px dashed var(--line-strong); border-radius: 0; background: transparent; width: 100%; text-align: left; font-size: 12px; color: var(--ink-2); }
+.vfold:hover { color: var(--ink); background: color-mix(in srgb, var(--surface-2) 40%, transparent); }
+.vfold > span:nth-child(2) { white-space: nowrap; font-weight: 500; }
+.vfold .t-3 { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 11.5px; }
+.vfold .chev { font-size: 10px; color: var(--ink-3); }
+.vfold.bump { animation: foldin 1100ms var(--ease); }
+@keyframes foldin { 0% { background: var(--pass-soft); } 100% { background: transparent; } }
+.vfolded { display: flex; flex-direction: column; gap: 1px; }
+.vfolded .vrow { height: 28px; }
+.vlife { display: flex; align-items: center; gap: 6px; margin: 0 16px 6px; padding-top: 6px; border-top: 1px solid var(--line); font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); white-space: nowrap; }
+.keep { display: inline-flex; align-items: center; gap: 5px; height: 24px; padding: 0 8px; border-radius: var(--r); border: 1px solid var(--line-strong); background: transparent; font-size: 12px; color: var(--ink-2); white-space: nowrap; }
+.keep:hover { background: var(--surface-2); color: var(--ink); }
+.keep[aria-pressed="true"] { color: var(--ink); border-color: color-mix(in srgb, var(--branch) 60%, transparent); }
+.bm { width: 12px; height: 12px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linejoin: round; }
+.bm.on { fill: var(--branch); stroke: var(--branch); }
+.keepnote { display: flex; align-items: center; gap: 8px; margin: 0 14px 10px 16px; padding: 6px 10px; border-radius: var(--r); background: var(--branch-soft); font-size: 12px; color: var(--ink-2); animation: up 300ms var(--ease) both; }
+.keepnote b { color: var(--ink); font-weight: 600; }
+.keepnote .link { margin-left: auto; }
+.vempty { flex: 1; display: grid; place-items: center; font-size: 12.5px; color: var(--ink-3); }
+
+/* arrival: the callout under the button (variant A) and the corner toast (variant B) */
+.callout { position: absolute; top: calc(100% + 10px); right: -8px; z-index: 20; width: 318px; padding: 10px 12px; border-radius: 7px; background: var(--canvas); border: 1px solid var(--line-strong); box-shadow: var(--lift), 0 0 0 4px var(--branch-soft); display: flex; flex-direction: column; gap: 4px; text-align: left; animation: drop 320ms var(--ease) both; font-family: var(--sans); }
+.callout::before { content: ""; position: absolute; top: -6px; right: 40px; width: 10px; height: 10px; background: var(--canvas); border-left: 1px solid var(--line-strong); border-top: 1px solid var(--line-strong); transform: rotate(45deg); }
+@keyframes drop { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
+.co-h { display: flex; align-items: center; gap: 8px; font-size: 11px; }
+.co-t { font-size: 13px; font-weight: 600; line-height: 1.35; color: var(--ink); }
+.co-m { font-size: 11.5px; color: var(--ink-3); }
+.co-a { display: flex; align-items: center; gap: 8px; margin-top: 4px; font-size: 11.5px; }
+.co-x { border: 0; background: transparent; color: var(--ink-3); width: 20px; height: 20px; border-radius: 3px; display: grid; place-items: center; font-size: 13px; padding: 0; flex: none; }
+.co-x:hover { background: var(--surface-2); color: var(--ink); }
+.toast { position: absolute; right: 16px; bottom: 16px; z-index: 20; width: 380px; display: grid; grid-template-columns: 24px minmax(0,1fr) auto auto; align-items: center; gap: 2px 10px; padding: 10px 8px 12px 12px; border-radius: 7px; background: var(--canvas); border: 1px solid var(--line-strong); box-shadow: var(--lift); overflow: hidden; animation: up 340ms var(--ease) both; font-family: var(--sans); text-align: left; }
+.toast .ti { width: 24px; height: 24px; border-radius: 5px; display: grid; place-items: center; background: var(--branch-soft); color: var(--branch); }
+.toast .tz-t { font-size: 11.5px; color: var(--ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.toast .tz-t b { color: var(--ink-2); font-weight: 600; }
+.toast .tz-s { font-size: 13px; font-weight: 600; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.toast .tz-bar { position: absolute; left: 0; bottom: 0; height: 2px; width: 100%; background: var(--branch); opacity: .7; animation: drain var(--life, 8s) linear both; }
+@keyframes drain { from { width: 100%; } to { width: 0; } }
+.toast:hover .tz-bar { animation-play-state: paused; }
+.anno { font-family: var(--mono); font-size: 10.5px; color: var(--sap); border: 1px dashed color-mix(in srgb, var(--sap) 60%, transparent); border-radius: 3px; padding: 1px 6px; white-space: nowrap; }
+
+/* ── Inbox card replica (screens/Inbox/InboxScreen.tsx) ─────────────────── */
+.ibx-card { position: relative; border-top: 1px solid var(--line); display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 4px 16px; padding: 11px 6px 12px 18px; }
+.ibx-card::before { content: ""; position: absolute; left: 0; top: 10px; bottom: 10px; width: 2px; border-radius: 2px; background: var(--branch); opacity: .8; }
+.ibx-gh { display: flex; align-items: baseline; gap: 10px; padding: 0 2px 8px; }
+.ibx-gh h4 { margin: 0; font-size: 13.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ibx-gh span { font-size: 11.5px; color: var(--ink-3); white-space: nowrap; }
+.ibx-k { display: flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--branch); }
+.newmark { border-radius: 999px; background: var(--sap); padding: 0 6px; font-size: 10px; text-transform: none; letter-spacing: 0; font-weight: 600; line-height: 16px; color: var(--on-sap); }
+.ibx-t { font-size: 13.5px; font-weight: 600; line-height: 1.35; }
+.ibx-d { font-size: 12.5px; color: var(--ink-2); line-height: 1.45; }
+.ibx-r { grid-column: 2; grid-row: 1 / span 3; display: flex; flex-direction: column; align-items: flex-end; gap: 2px; font-size: 11.5px; color: var(--ink-3); white-space: nowrap; }
+.ibx-r .mono { color: var(--ink-2); }
+.ibx-acts { grid-column: 1 / span 2; display: flex; align-items: center; gap: 6px; margin-top: 4px; flex-wrap: wrap; }
+.act { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 8px; border-radius: var(--r); border: 1px solid var(--line-strong); background: transparent; font-size: 12.5px; font-weight: 500; white-space: nowrap; color: var(--ink); }
+.act:hover { background: var(--surface-2); }
+.act.ghost { border-color: transparent; color: var(--ink-3); padding: 0 4px; font-family: var(--mono); font-size: 12px; }
+.act.ghost:hover { color: var(--ink); }
+.thumb { grid-column: 1; margin-top: 4px; display: flex; gap: 6px; padding: 8px; border-radius: 5px; border: 1px solid var(--line); background: var(--canvas-2); width: 100%; }
+.thumb div { flex: 1; border-radius: 3px; border: 1px solid var(--line-strong); padding: 6px; display: flex; flex-direction: column; gap: 4px; }
+.thumb div.rec { border-color: color-mix(in srgb, var(--branch) 60%, transparent); }
+.thumb i { display: block; height: 3px; border-radius: 2px; background: var(--line-strong); }
+.thumb i.s { width: 40%; } .thumb i.m { width: 70%; }
+.thumb b { font-family: var(--mono); font-size: 8.5px; color: var(--ink-3); font-weight: 600; }
+.thumb .fl { display: flex; gap: 2px; align-items: center; }
+.thumb .fl span { width: 9px; height: 5px; border-radius: 1px; background: var(--line-strong); }
+.thumb .fl span.g { background: var(--sap); }
+.tip { position: absolute; z-index: 3; display: flex; align-items: center; gap: 8px; padding: 6px 9px; border-radius: 5px; background: var(--canvas); border: 1px solid var(--line-strong); box-shadow: var(--lift); font-size: 11.5px; color: var(--ink-2); white-space: nowrap; font-family: var(--sans); }
+.tip b { color: var(--ink); font-weight: 600; }
+
+/* ── 2 · Entry alternatives ─────────────────────────────────────────────── */
+.alts4 { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 20px; margin-top: 28px; }
+.altc { display: flex; flex-direction: column; gap: 12px; border-top: 1px solid var(--line-strong); padding-top: 14px; min-width: 0; }
+.altc.rec { border-top: 2px solid var(--pass); padding-top: 13px; }
+.altc .n { display: flex; align-items: center; gap: 8px; font-family: var(--mono); font-size: 11px; color: var(--ink-3); }
+.recb { font-family: var(--mono); font-size: 10px; font-weight: 500; color: var(--pass); border: 1px solid color-mix(in srgb, var(--pass) 55%, transparent); border-radius: 3px; padding: 0 6px; line-height: 16px; white-space: nowrap; }
+.altc h3 { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: -0.01em; line-height: 1.3; }
+.stage { border-radius: 10px; background: var(--canvas); border: 1px solid var(--line-strong); box-shadow: var(--lift); overflow: hidden; height: 286px; position: relative; }
+/* each alternative is drawn at app size and shown at 78% */
+.zoom { position: absolute; left: 0; top: 0; width: calc(100% / 0.78); height: calc(100% / 0.78); transform: scale(0.78); transform-origin: 0 0; display: flex; flex-direction: column; }
+.zoom .sbar { gap: 10px; padding: 4px 10px 4px 14px; }
+.zoom .sbar .who { font-size: 13px; }
+.mini-body { flex: 1; min-height: 0; display: flex; }
+.mini-body .tm { flex: 1; min-width: 0; margin: 10px; padding: 10px 12px; border-radius: var(--r); font-size: 11.5px; line-height: 1.6; overflow: hidden; white-space: pre-wrap; opacity: .6; }
+.mini-body .tm.lit { opacity: 1; }
+.mini-pn { width: 230px; flex: none; border-left: 1px solid var(--line-strong); background: var(--canvas); display: flex; flex-direction: column; }
+.mini-pn .vp-head { height: 34px; padding: 0 8px 0 12px; }
+.mini-pn .vlist { padding: 4px 6px 2px; }
+.mini-pn .vrow { height: 27px; font-size: 12px; padding: 0 6px; gap: 6px; }
+.mini-pn .vfold { height: 26px; font-size: 11.5px; }
+.mini-fr { flex: 1; margin: 6px 10px 10px; border: 1px solid var(--line-strong); border-radius: 5px; background: var(--canvas-2); padding: 10px; display: flex; flex-direction: column; gap: 7px; min-height: 0; }
+.mini-fr i { display: block; height: 5px; border-radius: 3px; background: var(--line-strong); }
+.mini-fr .opts3 { flex: 1; display: flex; gap: 5px; }
+.mini-fr .opts3 div { flex: 1; border: 1px solid var(--line-strong); border-radius: 4px; }
+.mini-fr .opts3 div.on { border-color: var(--branch); box-shadow: 0 0 0 2px var(--branch-soft); }
+.vtab-on { color: var(--shell-ink) !important; }
+.vtab-on b { font-weight: 500; color: var(--shell-ink); }
+.vtab-on .nw { width: 6px; height: 6px; border-radius: 50%; background: #a99be0; display: inline-block; }
+.tabbody { flex: 1; min-height: 0; display: flex; background: var(--canvas-2); color: var(--ink); font-family: var(--sans); border-top: 0; }
+.tabbody .vlist { width: 176px; border-right: 1px solid var(--line); padding: 6px 6px; }
+.tabbody .vrow { height: 27px; font-size: 12px; padding: 0 6px; gap: 6px; }
+.rchip { display: inline-flex; align-items: center; gap: 4px; height: 19px; padding: 0 5px 0 4px; border-radius: 3px; border: 1px solid var(--line-strong); font-family: var(--mono); font-size: 10.5px; color: var(--ink-2); flex: none; margin: 1px 0 0 auto; }
+.rchip .vico { width: 11px; height: 11px; }
+.rchip .nw { width: 5px; height: 5px; border-radius: 50%; background: var(--branch); }
+.rchip.ask { border-color: color-mix(in srgb, var(--sap) 55%, transparent); color: var(--sap); }
+.switcher { border-radius: 8px; border: 1px solid var(--line-strong); background: var(--canvas); box-shadow: var(--lift); overflow: hidden; }
+.switcher .in { display: flex; align-items: center; gap: 8px; padding: 9px 12px; border-bottom: 1px solid var(--line); font-size: 13px; }
+.switcher .in .q { color: var(--ink); }
+.switcher .in .caret { width: 1px; height: 15px; background: var(--branch); animation: blink 1.1s steps(1) infinite; }
+.switcher .gh { padding: 7px 12px 3px; font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .08em; color: var(--ink-3); }
+.switcher .rr { display: flex; align-items: center; gap: 8px; padding: 6px 12px; font-size: 12.5px; color: var(--ink-2); white-space: nowrap; }
+.switcher .rr > span:nth-child(2) { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.switcher .rr.on { background: var(--branch-soft); color: var(--ink); }
+.switcher .rr em { font-style: normal; background: color-mix(in srgb, var(--branch) 26%, transparent); color: var(--ink); border-radius: 2px; }
+.switcher .rr .r { margin-left: auto; font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); }
+.switcher .ft { display: flex; gap: 14px; padding: 7px 12px; border-top: 1px solid var(--line); font-size: 11px; color: var(--ink-3); }
+.fits { display: grid; grid-template-columns: 54px 1fr; gap: 6px 10px; margin: 0; font-size: 12.5px; color: var(--ink-2); }
+.fits dt { font-family: var(--mono); font-size: 11px; color: var(--ink-3); padding-top: 2px; }
+.fits dd { margin: 0; }
+.fits dt.y { color: var(--pass); } .fits dt.no { color: var(--fail); }
+.why { margin-top: 26px; display: grid; grid-template-columns: 1.15fr 1fr 1fr; gap: 28px; padding: 16px 20px; border-radius: 8px; background: var(--canvas-2); border: 1px solid var(--line); }
+.why h4 { margin: 0 0 6px; font-size: 13.5px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+.why p { margin: 0; font-size: 13px; color: var(--ink-2); }
+
+/* ── 3 · Arrival ───────────────────────────────────────────────────────── */
+.vars { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; margin-top: 28px; }
+.varc { display: flex; flex-direction: column; gap: 12px; border-top: 1px solid var(--line-strong); padding-top: 14px; min-width: 0; }
+.varc.rec { border-top: 2px solid var(--pass); padding-top: 13px; }
+.varc .n { display: flex; align-items: center; gap: 8px; font-family: var(--mono); font-size: 11px; color: var(--ink-3); }
+.varc h3 { margin: 0; font-size: 16px; font-weight: 600; letter-spacing: -0.01em; }
+.mockwin { border-radius: 10px; border: 1px solid var(--line-strong); background: var(--canvas); box-shadow: var(--lift); display: flex; flex-direction: column; position: relative; overflow: hidden; }
+.mockwin.tall { height: 356px; }
+.mockwin .sbar { border-radius: 10px 10px 0 0; }
+.mockwin.open { overflow: visible; }
+.mbody { flex: 1; min-height: 0; margin: 12px; display: flex; flex-direction: column; border-radius: var(--r); overflow: hidden; }
+.mbody pre { flex: 1; overflow: hidden; font-size: 12px; }
+.compose { display: flex; align-items: center; gap: 8px; padding: 8px 16px 11px; border-top: 1px solid var(--shell-line); }
+.compose .p { color: var(--shell-dim); }
+.compose input, .compose .draft { flex: 1; min-width: 0; border: 0; background: transparent; outline: none; font: inherit; font-size: 12.5px; color: var(--shell-ink); caret-color: var(--shell-acc); padding: 0; }
+.compose input::placeholder { color: var(--shell-dim); }
+.compose .draft::after { content: ""; display: inline-block; width: 7px; height: 14px; background: #a4aba7; vertical-align: -2px; margin-left: 1px; animation: blink 1.1s steps(1) infinite; }
+.spec { display: grid; grid-template-columns: 96px 1fr; gap: 7px 14px; margin: 0; font-size: 13px; color: var(--ink-2); }
+.spec dt { font-family: var(--mono); font-size: 11px; color: var(--ink-3); padding-top: 2px; }
+.spec dd { margin: 0; }
+.spec dd b { color: var(--ink); font-weight: 600; }
+.spec dt.no { color: var(--fail); } .spec dt.y { color: var(--pass); }
+.lab { display: grid; grid-template-columns: minmax(0, 1fr) 400px; gap: 36px; margin-top: 34px; align-items: start; }
+.lab-h { display: flex; align-items: baseline; gap: 14px; }
+.lab-h h3 { margin: 0; font-size: 16px; font-weight: 600; }
+.labsteps { margin: 12px 0 0; padding: 0; list-style: none; display: flex; flex-direction: column; }
+.labsteps li { display: grid; grid-template-columns: 46px 1fr; gap: 10px; padding: 9px 8px 9px 0; border-top: 1px solid var(--line); font-size: 13px; color: var(--ink-2); transition: color 200ms, background 200ms; }
+.labsteps li span:first-child { font-family: var(--mono); font-size: 11px; color: var(--ink-3); padding-top: 2px; padding-left: 8px; }
+.labsteps li.on { color: var(--ink); background: linear-gradient(90deg, var(--branch-soft), transparent 80%); }
+.labsteps li.on span:first-child { color: var(--branch); }
+.labsteps li.done span:first-child { color: var(--pass); }
+.labsteps li b { color: var(--ink); font-weight: 600; }
+.lab-focus { margin-top: 10px; min-height: 20px; font-family: var(--mono); font-size: 11.5px; color: var(--pass); }
+.alongside { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; margin-top: 34px; }
+.alongside h3 { margin: 0 0 4px; font-size: 15px; font-weight: 600; }
+.alongside p.s { margin: 0 0 12px; font-size: 13px; color: var(--ink-2); }
+.cardbox { border-radius: 10px; border: 1px solid var(--line-strong); background: var(--canvas); box-shadow: var(--lift); padding: 14px 16px 6px; }
+
+/* ── 4 · List states ───────────────────────────────────────────────────── */
+.states { display: grid; grid-template-columns: 1fr 1fr; gap: 28px 28px; margin-top: 28px; }
+.state { display: flex; flex-direction: column; gap: 12px; border-top: 1px solid var(--line-strong); padding-top: 14px; min-width: 0; }
+.state h3 { margin: 0; font-size: 15px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+.state ul { margin: 0; padding-left: 18px; font-size: 12.5px; color: var(--ink-2); display: flex; flex-direction: column; gap: 3px; }
+.mock { border-radius: 8px; border: 1px solid var(--line-strong); background: var(--canvas); box-shadow: var(--lift); overflow: hidden; }
+.mock-row { display: grid; grid-template-columns: 1fr 1fr; }
+.mock-row > div + div { border-left: 1px solid var(--line); }
+.mock .cap { padding: 8px 14px 0; font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); }
+
+/* ── 5 · Lifetime ──────────────────────────────────────────────────────── */
+.life { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0; margin-top: 28px; }
+.lstep { position: relative; padding: 0 22px 0 0; display: flex; flex-direction: column; gap: 8px; }
+.lstep .num { display: flex; align-items: center; gap: 10px; font-family: var(--mono); font-size: 11px; color: var(--ink-3); }
+.lstep .num i { width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; font-style: normal; border: 1px solid var(--line-strong); color: var(--ink-2); background: var(--canvas); flex: none; }
+.lstep .num::after { content: ""; flex: 1; height: 1px; background: var(--line-strong); }
+.lstep:last-child .num::after { display: none; }
+.lstep.gone .num i { border-color: var(--fail); color: var(--fail); }
+.lstep.kept .num i { border-color: var(--branch); background: var(--branch); color: var(--on-branch); }
+.lstep h4 { margin: 0; font-size: 13.5px; font-weight: 600; }
+.lstep p { margin: 0; font-size: 12.5px; color: var(--ink-2); }
+.lstep code, .arch code, .risk code, .qs code { font-family: var(--mono); font-size: 11.5px; color: var(--ink); background: var(--surface-2); padding: 0 4px; border-radius: 3px; }
+.life2 { display: grid; grid-template-columns: 460px 1fr; gap: 28px; margin-top: 32px; align-items: start; }
+.life2 h3 { margin: 0 0 4px; font-size: 15px; font-weight: 600; }
+.life2 p.s { margin: 0 0 12px; font-size: 13px; color: var(--ink-2); }
+.dlg { border-radius: 10px; border: 1px solid var(--line-strong); background: var(--canvas); box-shadow: var(--win-shadow); padding: 18px 20px 16px; display: flex; flex-direction: column; gap: 10px; }
+.dlg h4 { margin: 0; font-size: 15px; font-weight: 600; line-height: 1.35; }
+.dlg p { margin: 0; font-size: 12.5px; color: var(--ink-2); }
+.dlg .sec-l { font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .08em; color: var(--ink-3); margin-top: 4px; }
+.dlg label { display: grid; grid-template-columns: 16px minmax(0,1fr) auto; gap: 8px; align-items: center; padding: 5px 0; border-top: 1px solid var(--line); font-size: 12.5px; color: var(--ink); }
+.dlg label input { margin: 0; accent-color: var(--branch); }
+.dlg label span:nth-child(2) { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dlg label small { font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); white-space: nowrap; }
+.dlg label small.k { color: var(--branch); }
+.dlg label small.a { color: var(--sap); }
+.dlg .acts { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
+.kn { border-radius: 10px; border: 1px solid var(--line-strong); background: var(--canvas); box-shadow: var(--lift); overflow: hidden; display: flex; flex-direction: column; height: 400px; }
+.kn-head { display: flex; align-items: flex-end; gap: 16px; padding: 16px 20px 0; }
+.kn-head h4 { margin: 0; font-size: 19px; font-weight: 600; letter-spacing: -0.015em; }
+.kn-tabs { display: flex; gap: 18px; padding: 10px 20px 0; border-bottom: 1px solid var(--line); font-size: 12.5px; color: var(--ink-3); }
+.kn-tabs span { padding-bottom: 8px; display: inline-flex; gap: 6px; align-items: center; }
+.kn-tabs span i { font-style: normal; font-family: var(--mono); font-size: 10.5px; }
+.kn-tabs span.on { color: var(--ink); box-shadow: inset 0 -2px 0 var(--branch); }
+.kn-body { flex: 1; min-height: 0; display: grid; grid-template-columns: 330px 1fr; }
+.kn-list { border-right: 1px solid var(--line); padding: 8px; display: flex; flex-direction: column; gap: 2px; overflow: hidden; }
+.kitem { display: grid; grid-template-columns: 14px 1fr; gap: 8px; padding: 7px 8px; border-radius: var(--r); font-size: 12.5px; color: var(--ink-2); }
+.kitem.on { background: var(--branch-soft); color: var(--ink); }
+.kitem .bm { margin-top: 3px; }
+.kitem b { display: block; font-weight: 600; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.kitem small { display: block; font-size: 11px; color: var(--ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.kitem small.ans { font-family: var(--mono); font-size: 10.5px; color: var(--pass); }
+.kn-view { display: flex; flex-direction: column; min-width: 0; padding: 12px 14px; gap: 10px; }
+.kn-view .frame-wrap { margin: 0; }
+
+/* ── Architecture ─────────────────────────────────────────────────────── */
+.diagram { margin-top: 28px; border-radius: 10px; border: 1px solid var(--line-strong); background: var(--canvas); box-shadow: var(--lift); padding: 18px 18px 8px; }
+.diagram svg { display: block; width: 100%; height: auto; }
+.dg-lane { fill: var(--canvas-2); }
+.dg-lane.alt { fill: color-mix(in srgb, var(--canvas-2) 60%, var(--canvas)); }
+.dg-lt { fill: var(--ink-3); font: 600 10.5px var(--sans); letter-spacing: .08em; text-transform: uppercase; }
+.dg-n { fill: var(--canvas); stroke: var(--line-strong); stroke-width: 1; }
+.dg-n.key { stroke: var(--branch); }
+.dg-n.trust { stroke: var(--pass); }
+.dg-n.untrust { stroke: var(--sap); stroke-dasharray: 4 3; fill: var(--sap-soft); }
+.dg-t { fill: var(--ink); font: 600 12.5px var(--sans); }
+.dg-s { fill: var(--ink-3); font: 400 10.5px var(--mono); }
+.dg-a { stroke: var(--ink-3); stroke-width: 1.25; fill: none; marker-end: url(#ah); }
+.dg-a.ret { stroke: var(--pass); marker-end: url(#ahp); }
+.dg-a.keep { stroke: var(--branch); marker-end: url(#ahb); }
+.dg-a.dash { stroke-dasharray: 3 3; }
+.dg-al { fill: var(--ink-2); font: 500 10.5px var(--mono); }
+.dg-al.ret { fill: var(--pass); }
+.dg-al.keep { fill: var(--branch); }
+.dg-num { fill: var(--canvas); stroke: var(--line-strong); }
+.dg-numt { fill: var(--ink-2); font: 600 9.5px var(--mono); text-anchor: middle; }
+.dg-leg { display: flex; gap: 22px; padding: 10px 4px 6px; font-size: 11.5px; color: var(--ink-3); flex-wrap: wrap; }
+.dg-leg span { display: inline-flex; align-items: center; gap: 7px; }
+.dg-leg i { width: 14px; height: 10px; border-radius: 2px; border: 1px solid var(--line-strong); display: inline-block; }
+.dg-leg i.k { border-color: var(--branch); } .dg-leg i.t { border-color: var(--pass); } .dg-leg i.u { border: 1px dashed var(--sap); background: var(--sap-soft); }
+.dg-leg i.ar { border: 0; height: 0; border-top: 1.5px solid var(--pass); width: 18px; border-radius: 0; }
+.dg-leg i.kp { border: 0; height: 0; border-top: 1.5px dashed var(--branch); width: 18px; border-radius: 0; }
+.arch { display: grid; grid-template-columns: repeat(3, 1fr); gap: 28px; margin-top: 30px; }
+.arch h3 { margin: 0 0 8px; font-size: 14px; font-weight: 600; }
+.arch p, .arch li { font-size: 13px; color: var(--ink-2); }
+.arch p { margin: 0 0 8px; }
+.arch ul { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; }
+.codeblk { margin: 0; font-family: var(--mono); font-size: 11.5px; line-height: 1.6; padding: 12px 14px; border-radius: 6px; background: var(--shell-bg); color: var(--shell-ink); white-space: pre; overflow: auto; }
+.codeblk .c { color: var(--shell-dim); } .codeblk .k { color: #c4b8f2; } .codeblk .s { color: var(--shell-acc); }
+.risk { margin-top: 30px; width: 100%; border-collapse: collapse; font-size: 13px; }
+.risk th { text-align: left; font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .08em; color: var(--ink-3); padding: 0 16px 8px 0; border-bottom: 1px solid var(--line-strong); }
+.risk td { vertical-align: top; padding: 10px 16px 10px 0; border-bottom: 1px solid var(--line); color: var(--ink-2); }
+.risk td:first-child { color: var(--ink); font-weight: 500; width: 22%; }
+.risk td:nth-child(2) { width: 30%; }
+.two { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; margin-top: 30px; }
+.two h3 { margin: 0 0 10px; font-size: 14px; font-weight: 600; }
+.repl { display: flex; flex-direction: column; gap: 0; }
+.repl div { display: grid; grid-template-columns: 1fr 22px 1fr; gap: 8px; align-items: baseline; padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 13px; color: var(--ink-2); }
+.repl div span:nth-child(2) { color: var(--ink-3); text-align: center; }
+.repl div span:last-child { color: var(--ink); }
+.qs { margin: 0; padding: 0; list-style: none; counter-reset: q; display: flex; flex-direction: column; }
+.qs li { counter-increment: q; display: grid; grid-template-columns: 26px 1fr; gap: 6px; padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 13px; color: var(--ink-2); }
+.qs li::before { content: counter(q); font-family: var(--mono); font-size: 11px; color: var(--branch); padding-top: 2px; }
+.qs li b { color: var(--ink); font-weight: 600; }
+.qs li small { display: block; color: var(--ink-3); font-size: 12px; margin-top: 2px; }
+
+/* ── Planning docs ─────────────────────────────────────────────────── */
+.plan-grid { display: grid; grid-template-columns: 340px 1fr; gap: 40px; margin-top: 28px; align-items: start; }
+.when { display: flex; flex-direction: column; gap: 18px; }
+.when h3 { margin: 0 0 6px; font-size: 14px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+.when ul { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 5px; }
+.when li { display: grid; grid-template-columns: 14px 1fr; gap: 8px; font-size: 13px; color: var(--ink-2); }
+.when li::before { font-family: var(--mono); font-size: 12px; }
+.when .on li::before { content: "+"; color: var(--pass); }
+.when .off li::before { content: "·"; color: var(--ink-3); }
+.when .sayit { font-size: 12.5px; color: var(--ink-3); border-left: 2px solid var(--line-strong); padding: 2px 0 2px 12px; }
+.when .sayit b { color: var(--ink-2); font-weight: 500; }
+.when .chat { border-radius: 8px; overflow: hidden; border: 1px solid var(--shell-line); }
+.when .chat pre { margin: 0; padding: 12px 14px; font: 11.5px/1.6 var(--mono); white-space: pre-wrap; }
+.gate-steps { display: flex; flex-direction: column; gap: 0; }
+.gate-steps div { display: grid; grid-template-columns: 22px 1fr; gap: 10px; padding: 7px 0; border-top: 1px solid var(--line); font-size: 13px; color: var(--ink-2); }
+.gate-steps div b { color: var(--ink); font-weight: 600; }
+.gate-steps div span:first-child { font-family: var(--mono); font-size: 11px; color: var(--branch); padding-top: 2px; }
+.pwin { border-radius: 12px; overflow: hidden; background: var(--canvas); box-shadow: var(--win-shadow); border: 1px solid var(--line-strong); display: flex; flex-direction: column; height: 1040px; }
+.pdoc-wrap { flex: 1; min-height: 0; display: flex; overflow: hidden; }
+.pdoc { flex: 1; min-width: 0; overflow: auto; padding: 26px 0 30px 48px; }
+.pdoc article { max-width: 600px; }
+.pdoc .ey { font-family: var(--mono); font-size: 11px; color: var(--ink-3); letter-spacing: .02em; }
+.pdoc h4 { margin: 6px 0 4px; font-size: 21px; font-weight: 600; letter-spacing: -0.02em; line-height: 1.25; }
+.pdoc .by { font-size: 12px; color: var(--ink-3); display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.pdoc h5 { margin: 24px 0 8px; font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .08em; color: var(--ink-3); display: flex; align-items: center; gap: 8px; }
+.pdoc h5 .ct { font-family: var(--mono); font-weight: 400; letter-spacing: 0; text-transform: none; }
+.pdoc p { margin: 0 0 8px; font-size: 14px; line-height: 1.6; color: var(--ink-2); }
+.pdoc p b { color: var(--ink); font-weight: 600; }
+.split { display: flex; flex-direction: column; border-top: 1px solid var(--line); }
+.split div { display: grid; grid-template-columns: 26px 1fr auto; gap: 10px; align-items: baseline; padding: 7px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
+.split div .w { font-family: var(--mono); font-size: 11px; color: var(--branch); }
+.split div .dep { font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); white-space: nowrap; }
+.split div.cut { opacity: .45; text-decoration: line-through; text-decoration-color: var(--ink-3); }
+.dec { position: relative; padding: 12px 0 14px; border-top: 1px solid var(--line); }
+.dec:last-of-type { border-bottom: 1px solid var(--line); }
+.dec .dh { display: flex; align-items: baseline; gap: 10px; }
+.dec .dh .n { font-family: var(--mono); font-size: 11px; color: var(--ink-3); }
+.dec .dh .t { font-size: 14px; font-weight: 600; line-height: 1.4; flex: 1; }
+.dec .alts { display: flex; gap: 6px; flex-wrap: wrap; margin: 8px 0 0 21px; }
+.alt { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 9px; border-radius: var(--r); border: 1px solid var(--line-strong); background: transparent; font-size: 12px; color: var(--ink-2); }
+.alt:hover { color: var(--ink); background: var(--surface-2); }
+.alt[aria-pressed="true"] { border-color: var(--branch); background: var(--branch-soft); color: var(--ink); }
+.alt .m { font-family: var(--mono); font-size: 9.5px; color: var(--ink-3); }
+.chal { margin: 10px 0 0 21px; padding: 8px 12px; border-radius: var(--r); background: var(--sap-soft); font-size: 13px; color: var(--ink-2); line-height: 1.5; }
+.chal .k { font-family: var(--mono); font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--sap); margin-right: 6px; }
+.dec.hl { background: linear-gradient(90deg, var(--branch-soft), transparent 70%); }
+.dec.hl::before { content: ""; position: absolute; left: -16px; top: 12px; bottom: 14px; width: 2px; border-radius: 2px; background: var(--branch); }
+.risk-l { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 6px; }
+.risk-l li { display: grid; grid-template-columns: 84px 1fr; gap: 10px; font-size: 13px; color: var(--ink-2); }
+.risk-l li span:first-child { font-family: var(--mono); font-size: 10.5px; padding-top: 2px; }
+.risk-l .hard { color: var(--fail); } .risk-l .soft { color: var(--ink-3); }
+.oq { display: flex; flex-direction: column; gap: 10px; }
+.oq div { font-size: 13.5px; color: var(--ink); }
+.oq input { display: block; width: 100%; margin-top: 4px; border: 0; border-bottom: 1px solid var(--line-strong); background: transparent; padding: 3px 2px; font-size: 13px; outline: none; color: var(--ink); }
+.oq input::placeholder { color: var(--ink-3); }
+.oq input:focus { border-color: var(--branch); }
+.margin { width: 268px; flex: none; border-left: 1px solid var(--line); padding: 26px 16px; display: flex; flex-direction: column; gap: 12px; overflow: auto; background: var(--canvas-2); }
+.margin .mh { font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .08em; color: var(--ink-3); display: flex; }
+.cmt { border-radius: 6px; border: 1px solid var(--line-strong); background: var(--canvas); padding: 9px 11px; display: flex; flex-direction: column; gap: 6px; font-size: 12.5px; color: var(--ink-2); }
+.cmt .on { font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); }
+.cmt .who { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--ink-3); }
+.cmt .who b { color: var(--ink); font-weight: 600; }
+.cmt .av2 { width: 18px; height: 18px; border-radius: 50%; border: 1px solid var(--line-strong); display: grid; place-items: center; font-family: var(--mono); font-size: 8.5px; color: var(--ink-2); }
+.cmt .av2.sup { border-color: var(--branch); color: var(--branch); }
+.cmt .reply { border-top: 1px solid var(--line); padding-top: 6px; }
+.addc { border: 1px dashed var(--line-strong); background: transparent; border-radius: 6px; padding: 8px; font-size: 12px; color: var(--ink-3); text-align: left; }
+.addc:hover { color: var(--ink); border-color: var(--branch); }
+.pgate { flex: none; display: flex; align-items: center; gap: 12px; padding: 12px 18px; border-top: 1px solid var(--line-strong); background: var(--canvas-2); }
+.pgate .s { font-size: 13px; color: var(--ink-2); }
+.pgate .s b { color: var(--ink); font-weight: 600; }
+.pgate .k { font-family: var(--mono); font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--branch); white-space: nowrap; }
+.pgate.ok .k { color: var(--pass); }
+.pgate .starts { display: flex; gap: 6px; }
+.pgate .starts span { white-space: nowrap; display: inline-flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 11px; color: var(--ink-2); animation: up 420ms var(--ease) both; }
+.pgate .starts span .side-dot { margin: 0; }
+.pgate label { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ink-2); white-space: nowrap; }
+.pgate label input { margin: 0; accent-color: var(--branch); }
+html.shot .topbar { position: static; }
+[hidden] { display: none !important; }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <span class="logo" style="font-size:15px"><svg class="logo-mark" viewBox="1.2 5.6 29.6 20.8" aria-hidden="true"><g fill="none" stroke-width="3" stroke-linecap="round"><path class="lm-mid" d="M9 16 H23"/><path class="lm-top" d="M8 16 C11 16 11.5 7.5 16 7.5 C20.5 7.5 21 16 24 16"/><path class="lm-bot" d="M8 16 C11 16 11.5 24.5 16 24.5 C20.5 24.5 21 16 24 16"/><path class="lm-in" stroke-width="4.8" d="M3.8 16 H9"/><path class="lm-bot" stroke-width="4.8" d="M23 16 H28.2"/></g></svg><span class="logo-word">brindle</span></span>
+  <span class="eyebrow">design · in-app visuals · v2</span>
+  <nav><a href="#place">1 · In the session</a><a href="#ways">2 · Ways in</a><a href="#arrive">3 · Arrival</a><a href="#list">4 · The list</a><a href="#life">5 · Lifetime</a><a href="#plan">6 · Planning docs</a><a href="#arch">7 · Architecture</a></nav>
+  <span class="flex1"></span>
+  <div class="seg" role="group" aria-label="Theme"><button data-theme-set="system" aria-pressed="true">System</button><button data-theme-set="light" aria-pressed="false">Light</button><button data-theme-set="dark" aria-pressed="false">Dark</button></div>
+</header>
+
+<main class="page">
+  <!-- ═══ 1 · Inside the session ═══ -->
+  <section class="sec" id="place">
+    <div class="eyebrow">1 · where visuals live</div>
+    <h1>A session's visuals live in the session</h1>
+    <p class="lede">When a decision is hard to read in a terminal, the agent publishes a <b>visual</b>: an HTML page that belongs to its session. It shows up as a link in the agent's chat and behind a small <b>Visuals</b> button in the session's header, which opens them beside the chat. You pick an option, Send, and the agent gets your answer as a message. There's no Visuals slot in the sidebar and no search: a session only ever has a handful.</p>
+    <div class="facts">
+      <div><b>A button, not a place</b>“Visuals 2” in the session header counts the open ones; a branch dot means one is unread. It opens a panel beside the chat.</div>
+      <div><b>A short list</b>Open visuals are rows at the top of the panel. Decided ones fold into a single “N decided” line you can expand.</div>
+      <div><b>Gone with the session, unless kept</b>They're stored with the session and cleared when it's removed. Keep one and it stays, in Knowledge › Kept visuals.</div>
+      <div><b>A link and a callout</b>A new one prints a link in the chat and drops a small callout under the button. Neither takes focus or touches your draft.</div>
+    </div>
+    <div class="changed">
+      <div class="rm"><b>dropped from v1</b>the sidebar Visuals entry, the cross-session Visuals place and its tabs, search and filters, the visuals finder, auto-open, the 30-day retention.</div>
+      <div class="ad"><b>new in v2</b>the header button and panel list, the decided fold, Keep and Knowledge › Kept visuals, the arrival callout, a keep list when you remove a session.</div>
+    </div>
+    <div class="demo-ctl">
+      <span class="lab-l">Arrival popup</span>
+      <div class="seg" role="group" aria-label="Arrival popup"><button data-variant="callout" aria-pressed="true">Callout (recommended)</button><button data-variant="toast" aria-pressed="false">Corner toast</button></div>
+      <button class="lnk" type="button" id="sim">Simulate a new visual</button>
+      <span class="t-3">·</span>
+      <button class="lnk" type="button" id="reset">Reset</button>
+      <span class="flex1"></span>
+      <span class="hint" id="hint">Try it: <b>pick B in the visual</b>, then <b>Send answer</b>; it folds into “decided”. Close the panel, then <b>simulate a new visual</b>.</span>
+    </div>
+    <div class="framewrap">
+      <div class="win" aria-label="brindle app window (mockup)">
+        <div class="win-bar"><i></i><i></i><i></i><span class="ttl">brindle</span></div>
+        <div class="win-body">
+          <aside class="side" aria-label="Sidebar">
+            <div class="side-top">
+              <span class="logo"><svg class="logo-mark" viewBox="1.2 5.6 29.6 20.8" aria-hidden="true"><g fill="none" stroke-width="3" stroke-linecap="round"><path class="lm-mid" d="M9 16 H23"/><path class="lm-top" d="M8 16 C11 16 11.5 7.5 16 7.5 C20.5 7.5 21 16 24 16"/><path class="lm-bot" d="M8 16 C11 16 11.5 24.5 16 24.5 C20.5 24.5 21 16 24 16"/><path class="lm-in" stroke-width="4.8" d="M3.8 16 H9"/><path class="lm-bot" stroke-width="4.8" d="M23 16 H28.2"/></g></svg><span class="logo-word">brindle</span></span>
+              <span class="flex1"></span>
+              <button class="newbtn" type="button"><span style="font-size:14px;line-height:1">+</span> New session</button>
+            </div>
+            <div class="entries">
+              <button class="entry" type="button"><span class="flex1">Inbox</span><span class="side-nb" id="inbox-n">2</span></button>
+            </div>
+            <section class="ctx" aria-label="Session context">
+              <div class="ctx-h">
+                <div class="ctx-title">Ship the one-approval release flow</div>
+                <div class="ctx-meta"><span class="mono">a3c91e07</span> · brindle · autopilot · 2 working</div>
+              </div>
+              <div class="side-ms">
+                <div class="m" data-state="done"><span class="i">✓</span><span class="t">Feed gate merged<small>pytest tests/test_feed.py · passed</small></span></div>
+                <div class="m" data-state="now"><span class="i">2</span><span class="t">Release flow with one approval<small id="ms2">waiting on your choice of flow</small></span></div>
+                <div class="m" data-state="todo"><span class="i">3</span><span class="t">Changelog sync on tag</span></div>
+              </div>
+            </section>
+            <div class="handle" aria-hidden="true"><i></i></div>
+            <div class="side-h">Sessions</div>
+            <div class="tree">
+              <div>
+                <div class="repo-h">brindle</div>
+                <button class="srow sel" type="button"><span class="side-dot" data-tone="work"></span><span style="min-width:0;flex:1"><span class="nm">Ship the one-approval release flow</span><span class="mt"><code>a3c91e07</code> · autopilot · 4 agents · 2 working</span></span><span class="fold">▾</span></button>
+                <ul class="agents">
+                  <li><span class="side-dot" data-tone="work"></span>a3c91e07 · supervisor<span>working</span></li>
+                  <li><span class="side-dot" data-tone="work"></span>e1f07a2c · developer<span>working</span></li>
+                  <li><span class="side-dot" data-tone="done"></span>9d24b6f1 · reviewer<span>done</span></li>
+                </ul>
+                <button class="srow" type="button"><span class="side-dot"></span><span style="min-width:0;flex:1"><span class="nm">Knowledge map ranks decisions first</span><span class="mt"><code>5be20d14</code> · manual · 1 agent</span></span><span class="fold">▸</span></button>
+                <div class="paused"><span>▸</span>Paused · 2</div>
+              </div>
+              <div>
+                <div class="repo-h">pawdelta-web</div>
+                <button class="srow" type="button"><span class="side-dot" data-tone="wait"></span><span style="min-width:0;flex:1"><span class="nm">Release notes for 0.6.2</span><span class="mt"><code>c07e19aa</code> · autopilot · 1 agent</span></span><span class="fold">▸</span></button>
+              </div>
+            </div>
+            <div class="status"><span class="usage">Claude <span class="bar"><i></i></span>41% · resets Mon</span><span>v0.6.1</span></div>
+            <nav class="pages"><span class="av">HL</span>Knowledge <span>·</span> Agents <span>·</span> Settings<span class="flex1"></span><span>?</span>&nbsp;<span class="ttog">&gt;_</span></nav>
+          </aside>
+          <div class="main" id="main"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══ 2 · Ways in ═══ -->
+  <section class="sec" id="ways">
+    <div class="eyebrow">2 · four ways to reach them, side by side</div>
+    <h2>Where the way in sits, with no sidebar slot</h2>
+    <p class="lede">Each of these opens the same visual. They differ in where the count lives and whether the chat stays in view while you answer. The chat link and, for a visual that asks you, the Inbox card exist whichever one we pick (section 3).</p>
+    <div class="alts4">
+      <div class="altc rec">
+        <div class="n">a · header button <span class="flex1"></span><span class="recb">recommended</span></div>
+        <h3>A Visuals button with a count in the session header</h3>
+        <div class="stage"><div class="zoom">
+          <div class="sbar"><span class="who">Claude · supervisor</span><code>a3c91e07</code><span class="flex1"></span><span class="vbtn on"><svg class="vico" viewBox="0 0 16 16"><rect x="2" y="3" width="12" height="10" rx="1.5"/><path d="M2 6h12M7 6v7"/></svg>Visuals<span class="n">2</span><span class="nw"></span></span><span class="btn-dots">⋯</span></div>
+          <div class="mini-body">
+            <div class="tm shell lit"><span style="color:var(--shell-acc)">●</span> Milestone 2 needs a call from you. I drew three flows.
+
+  <span style="color:#c4b8f2;text-decoration:underline;text-underline-offset:3px">◧ Release flow: where the one approval sits</span>
+
+<span style="color:var(--shell-acc)">●</span> Meanwhile e1f07a2c keeps going on the changelog sync.
+
+<span style="color:var(--shell-dim)">›</span></div>
+            <div class="mini-pn">
+              <div class="vp-head"><span class="vp-t">Visuals</span><span class="vp-m">2 open</span><span class="flex1"></span><span class="btn-dots">×</span></div>
+              <div class="vlist">
+                <div class="vrow unread" aria-current="true"><span class="g"><span class="st-new"></span></span><span class="tt">Release flow</span><span class="mm"><span class="ask">asks</span></span></div>
+                <div class="vrow"><span class="g"></span><span class="tt">Merge order</span><span class="mm">40m</span></div>
+                <div class="vfold"><span class="st-ok">✓</span><span>2 decided</span><span class="flex1"></span><span class="chev">▸</span></div>
+              </div>
+              <div class="mini-fr"><i style="width:55%"></i><i style="width:80%;opacity:.6"></i><div class="opts3"><div></div><div class="on"></div><div></div></div></div>
+            </div>
+          </div>
+        </div></div>
+        <dl class="fits">
+          <dt class="y">good</dt><dd>One home, in the session, always in view. Opens beside the chat, so you watch the agent react to your answer. Works for one visual or six.</dd>
+          <dt class="no">cost</dt><dd>The chat narrows while the panel is open (a Wider toggle gives the visual the room). Off-session, the count isn't visible.</dd>
+        </dl>
+      </div>
+      <div class="altc">
+        <div class="n">b · a tab beside chat and shell</div>
+        <h3>Visuals as a third tab next to chat and shell</h3>
+        <div class="stage"><div class="zoom">
+          <div class="sbar"><span class="who">Claude · supervisor</span><code>a3c91e07</code><span class="flex1"></span><span class="btn-dots">⋯</span></div>
+          <div style="flex:1;min-height:0;display:flex;padding:12px">
+            <div class="shell term" style="flex:1">
+              <div class="tabs-s"><span>chat</span><span>shell</span><span class="on vtab-on">◧ visuals <b>2</b><i class="nw"></i></span></div>
+              <div class="tabbody">
+                <div class="vlist">
+                  <div class="vrow unread" aria-current="true"><span class="g"><span class="st-new"></span></span><span class="tt">Release flow</span><span class="mm"><span class="ask">asks</span></span></div>
+                  <div class="vrow"><span class="g"></span><span class="tt">Merge order</span><span class="mm"></span></div>
+                  <div class="vfold" style="font-size:11.5px"><span class="st-ok">✓</span><span>2 decided</span><span class="flex1"></span><span class="chev">▸</span></div>
+                </div>
+                <div class="mini-fr" style="margin:10px"><i style="width:45%"></i><i style="width:70%;opacity:.6"></i><div class="opts3"><div></div><div class="on"></div><div></div></div><i style="height:20px;border-radius:4px;background:var(--surface-2)"></i></div>
+              </div>
+            </div>
+          </div>
+        </div></div>
+        <dl class="fits">
+          <dt class="y">good</dt><dd>Uses a pattern people already know in this pane, and gives the visual the full width. The count sits in the tab.</dd>
+          <dt class="no">cost</dt><dd>The chat is hidden while you read and answer; you switch back to see the agent pick it up. An app-styled page inside the terminal frame.</dd>
+        </dl>
+      </div>
+      <div class="altc">
+        <div class="n">c · a chip on the session's row</div>
+        <h3>A small chip on the session's row in the sidebar tree</h3>
+        <div class="stage"><div class="zoom" style="background:var(--canvas-2);padding:16px 14px;gap:4px">
+          <div class="side-h" style="padding-top:0">Sessions</div>
+          <div class="repo-h">brindle</div>
+          <div class="srow sel"><span class="side-dot" data-tone="work"></span><span style="min-width:0;flex:1"><span class="nm">Ship the one-approval release flow</span><span class="mt"><code>a3c91e07</code> · autopilot · 4 agents</span></span><span class="rchip ask"><svg class="vico" viewBox="0 0 16 16"><rect x="2" y="3" width="12" height="10" rx="1.5"/><path d="M2 6h12M7 6v7"/></svg>2<span class="nw"></span></span></div>
+          <div class="srow"><span class="side-dot"></span><span style="min-width:0;flex:1"><span class="nm">Knowledge map ranks decisions first</span><span class="mt"><code>5be20d14</code> · manual · 1 agent</span></span><span class="rchip"><svg class="vico" viewBox="0 0 16 16"><rect x="2" y="3" width="12" height="10" rx="1.5"/><path d="M2 6h12M7 6v7"/></svg>1</span></div>
+          <div class="paused" style="padding-left:8px"><span>▸</span>Paused · 2</div>
+          <div class="repo-h" style="margin-top:10px">pawdelta-web</div>
+          <div class="srow"><span class="side-dot" data-tone="wait"></span><span style="min-width:0;flex:1"><span class="nm">Release notes for 0.6.2</span><span class="mt"><code>c07e19aa</code> · autopilot · 1 agent</span></span><span class="rchip"><svg class="vico" viewBox="0 0 16 16"><rect x="2" y="3" width="12" height="10" rx="1.5"/><path d="M2 6h12M7 6v7"/></svg>1</span></div>
+          <div class="tip" style="left:14px;top:300px">Click a chip: the session opens <b>with its visuals</b></div>
+        </div></div>
+        <dl class="fits">
+          <dt class="y">good</dt><dd>Seen from anywhere in the app, so you notice a new visual on another session without an Inbox card.</dd>
+          <dt class="no">cost</dt><dd>One more mark on every row of a tree that already carries dots, counts and agents. Still needs a home inside the session (a or b) for when you're there.</dd>
+        </dl>
+      </div>
+      <div class="altc">
+        <div class="n">d · the ⌘K palette</div>
+        <h3>The app's ⌘K palette lists this session's visuals</h3>
+        <div class="stage"><div class="zoom" style="background:var(--canvas-2);padding:22px 18px">
+          <div class="switcher">
+            <div class="in"><svg class="ico t-3" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M3 4h10M3 8h10M3 12h6"/></svg><span class="q">vis</span><span class="caret"></span><span class="flex1"></span><span class="kbd">esc</span></div>
+            <div class="gh">Visuals in this session</div>
+            <div class="rr on"><svg class="vico" viewBox="0 0 16 16"><rect x="2" y="3" width="12" height="10" rx="1.5"/><path d="M2 6h12M7 6v7"/></svg><span>Release flow: where the one approval sits</span><span class="r">asks</span></div>
+            <div class="rr"><svg class="vico" viewBox="0 0 16 16"><rect x="2" y="3" width="12" height="10" rx="1.5"/><path d="M2 6h12M7 6v7"/></svg><span>Merge order for four branches</span><span class="r">40m</span></div>
+            <div class="rr"><span class="st-ok" style="width:14px;text-align:center">✓</span><span>2 decided</span><span class="r">▸</span></div>
+            <div class="gh">Commands</div>
+            <div class="rr"><span style="width:14px"></span><span>Show <em>vis</em>uals beside the chat</span><span class="r">⌘⇧V</span></div>
+            <div class="ft"><span>↑↓ move</span><span>↵ open beside the chat</span></div>
+          </div>
+        </div></div>
+        <dl class="fits">
+          <dt class="y">good</dt><dd>Fast from the keyboard, costs no space at all, and needs nothing new on screen.</dd>
+          <dt class="no">cost</dt><dd>Invisible: nothing tells you a visual exists until you go looking. A shortcut on top of a home, not a home.</dd>
+        </dl>
+      </div>
+    </div>
+    <div class="why">
+      <div><h4><span class="recb">recommended</span> a · the header button</h4><p>Visuals are the session's own, so their way in belongs in the session, not the sidebar. The button keeps the count in view while you work there, and the panel opens beside the chat: you answer and see the supervisor pick it up in the same glance. It's also where the arrival callout points (section 3).</p></div>
+      <div><h4>Take from the others</h4><p><b style="font-weight:600;color:var(--ink)">d</b> comes cheaply as one command, “Show visuals beside the chat” (⌘⇧V), not a finder. <b style="font-weight:600;color:var(--ink)">b</b>'s full width survives as the panel's <span class="mono" style="font-size:12px">Wider</span> toggle, used for plans.</p></div>
+      <div><h4>Leave out</h4><p><b style="font-weight:600;color:var(--ink)">c</b>, for now. Off-session, a visual that asks you is already an Inbox card with the sap badge; one that asks nothing can wait until you're back. Add the chip later if people miss read-only visuals.</p></div>
+    </div>
+  </section>
+
+  <!-- ═══ 3 · Arrival ═══ -->
+  <section class="sec" id="arrive">
+    <div class="eyebrow">3 · how a new visual reaches you</div>
+    <h2>A link in the chat, and a small callout you click to open</h2>
+    <p class="lede">The agent's chat always gets a link: you're usually reading it already, and it says what the visual is for in the agent's own words. On top of that, a small popup tells you it's there in case the chat has scrolled on. Two placements, side by side. Both are <b>status</b>, not dialogs: they never take focus, never move the caret, and nothing you type goes into them.</p>
+    <div class="vars">
+      <div class="varc rec">
+        <div class="n">variant a <span class="flex1"></span><span class="recb">recommended</span></div>
+        <h3>Callout from the Visuals button</h3>
+        <div class="mockwin tall open">
+          <div class="sbar"><span class="who">Claude · supervisor</span><code>a3c91e07</code><span class="st"><b>●</b> working</span><span class="flex1"></span>
+            <span class="vbwrap"><span class="vbtn"><svg class="vico" viewBox="0 0 16 16"><rect x="2" y="3" width="12" height="10" rx="1.5"/><path d="M2 6h12M7 6v7"/></svg>Visuals<span class="n">3</span><span class="nw"></span></span>
+              <div class="callout" role="status" style="animation:none"><div class="co-h"><span class="ibx-k">new visual</span><span class="t-3">supervisor · just now</span><span class="flex1"></span><span class="co-x">×</span></div><div class="co-t">Changelog sync: on tag, or on publish?</div><div class="co-m">2 options · asks you · in your Inbox too</div><div class="co-a"><span class="act">Open</span><span class="t-3">or the link in the chat</span><span class="flex1"></span><span class="kbd">⌘⇧V</span></div></div>
+            </span><span class="btn-dots">⋯</span></div>
+          <div class="mbody shell term"><pre><span class="d">● Release flow decided: Gate on CI. Assigning
+  e1f07a2c → feat/release-gate-ci.
+
+● e1f07a2c opened the branch; CI is running.</span>
+
+<span class="a">●</span> Changelog sync can run on tag or on publish.
+  Drew both; which do you want?
+
+  <span class="vl">◧ Changelog sync: on tag, or on publish?</span>
+  <span class="d">  brindle · 2 options · asks you</span>
+
+<span class="a">●</span> Waiting on that before I wire the job.</pre>
+            <div class="compose"><span class="p">›</span><span class="draft">also bump the changelog date</span></div>
+          </div>
+        </div>
+        <dl class="spec">
+          <dt>where</dt><dd>Hangs from the session's Visuals button, top right, over the chat's top edge. Never over the composer or the answer bar.</dd>
+          <dt>says</dt><dd><b>New visual</b> · who · the title · “2 options · asks you” (or “read only”) · <b>Open</b>. The title is the tool call's, not page text.</dd>
+          <dt>goes away</dt><dd>× · Open · clicking the chat link · opening the panel. Untouched, it folds back into the button's dot after 12 s (hover holds it). A second arrival replaces it: “2 new visuals”.</dd>
+          <dt>while typing</dt><dd>Held until 2 s after your last key, then slides in. Not in the Tab order; Esc only closes it when focus is already in it, so Esc in the terminal stays the terminal's. ⌘⇧V opens the newest.</dd>
+          <dt>elsewhere</dt><dd>Only on the session's own screen. On another screen nothing pops: a visual that asks you is an Inbox card, the rest wait on the button.</dd>
+          <dt>panel open</dt><dd>No callout: the row slides into the list with a dot.</dd>
+        </dl>
+      </div>
+      <div class="varc">
+        <div class="n">variant b</div>
+        <h3>Corner toast, bottom right of the window</h3>
+        <div class="mockwin tall">
+          <div class="sbar"><span class="who">Claude · supervisor</span><code>a3c91e07</code><span class="st"><b>●</b> working</span><span class="flex1"></span><span class="vbtn"><svg class="vico" viewBox="0 0 16 16"><rect x="2" y="3" width="12" height="10" rx="1.5"/><path d="M2 6h12M7 6v7"/></svg>Visuals<span class="n">3</span><span class="nw"></span></span><span class="btn-dots">⋯</span></div>
+          <div class="mbody shell term"><pre><span class="d">● Release flow decided: Gate on CI. Assigning
+  e1f07a2c → feat/release-gate-ci.
+
+● e1f07a2c opened the branch; CI is running.</span>
+
+<span class="a">●</span> Changelog sync can run on tag or on publish.
+  Drew both; which do you want?
+
+  <span class="vl">◧ Changelog sync: on tag, or on publish?</span>
+  <span class="d">  brindle · 2 options · asks you</span>
+
+<span class="a">●</span> Waiting on that before I wire the job.</pre>
+            <div class="compose"><span class="p">›</span><span class="draft">also bump the changelog date</span></div>
+          </div>
+          <div class="toast" role="status" style="animation:none;bottom:62px;right:24px;--life:8s"><span class="ti"><svg class="vico" viewBox="0 0 16 16"><rect x="2" y="3" width="12" height="10" rx="1.5"/><path d="M2 6h12M7 6v7"/></svg></span><div style="min-width:0"><div class="tz-t"><b>supervisor</b> drew a visual · Ship the one-approval…</div><div class="tz-s">Changelog sync: on tag, or on publish?</div></div><span class="act">Open</span><span class="co-x">×</span><i class="tz-bar" style="animation:none;width:62%"></i></div>
+        </div>
+        <dl class="spec">
+          <dt>where</dt><dd>Bottom right of the window, on any screen, up to two stacked. On the session screen it sits just above the composer row.</dd>
+          <dt>says</dt><dd><b>who</b> drew a visual · which session · the title · <b>Open</b> · ×. A draining line shows when it'll go.</dd>
+          <dt>goes away</dt><dd>× · Open · after 8 s untouched (hover holds it).</dd>
+          <dt>while typing</dt><dd>Same rules as a: held until you pause, no focus, nothing typed into it.</dd>
+          <dt class="no">but</dt><dd>It lands next to where you're typing, and off-session it doubles the Inbox card for anything that asks you. It also doesn't point at where the visual lives.</dd>
+        </dl>
+      </div>
+    </div>
+
+    <div class="lab">
+      <div>
+        <div class="mockwin" style="height:330px;overflow:visible" id="labwin">
+          <div class="sbar"><span class="who">Claude · supervisor</span><code>a3c91e07</code><span class="st"><b>●</b> working</span><span class="flex1"></span><span class="anno" id="lab-held" hidden>held · you're typing</span>
+            <span class="vbwrap"><span class="vbtn" id="lab-vb"><svg class="vico" viewBox="0 0 16 16"><rect x="2" y="3" width="12" height="10" rx="1.5"/><path d="M2 6h12M7 6v7"/></svg>Visuals<span class="n">2</span></span><span id="lab-co"></span></span><span class="btn-dots">⋯</span></div>
+          <div class="mbody shell term"><pre id="lab-pre"><span class="a">●</span> Release flow decided: Gate on CI. Assigning
+  e1f07a2c → <span class="d">feat/release-gate-ci</span>.
+<span id="lab-new" hidden>
+<span class="nl"><span class="a">●</span> Changelog sync can run on tag or on publish.
+  Drew both; which do you want?
+
+  <span class="vl">◧ Changelog sync: on tag, or on publish?</span>
+  <span class="d">  brindle · 2 options · asks you</span></span></span></pre>
+            <div class="compose"><span class="p">›</span><input id="lab-in" aria-label="Chat draft" spellcheck="false" autocomplete="off" placeholder="Type to the supervisor"></div>
+          </div>
+        </div>
+      </div>
+      <div>
+        <div class="lab-h"><h3>While you're typing</h3><span class="flex1"></span><button class="lnk" id="lab-play" type="button">▸ Play</button></div>
+        <ol class="labsteps" id="lab-steps">
+          <li><span>0.0 s</span><span>You're typing a reply to the supervisor.</span></li>
+          <li><span>1.0 s</span><span>A visual arrives mid-word. The link prints above your draft; the <b>callout is held</b>.</span></li>
+          <li><span>+2 s</span><span>You stop. After 2 s with no keys the callout slides in under the button. <b>Focus doesn't move.</b></span></li>
+          <li><span>after</span><span>Your draft is exactly as typed and Enter still sends it. Open with a click on the callout or the link, or ⌘⇧V.</span></li>
+        </ol>
+        <div class="lab-focus" id="lab-focus" aria-live="polite"></div>
+      </div>
+    </div>
+
+    <div class="alongside">
+      <div>
+        <h3>The chat link, every time</h3>
+        <p class="s">The tool returns a <span class="mono" style="font-size:12px">brindle://visual/…</span> link; the agent prints it with a line on why, and the app's terminal makes it clickable. A click opens the panel on that visual and clears the callout.</p>
+        <div class="shell term" style="border-radius:8px;border:1px solid var(--shell-line)"><pre style="font-size:12px"><span class="a">●</span> Milestone 2 needs a call from you: where
+  the one approval sits. I drew three flows.
+
+  <span class="vl">◧ Release flow: where the one approval sits</span>
+  <span class="d">  brindle · 3 options · asks you · ⌘⇧V</span>
+
+<span class="a">●</span> Meanwhile e1f07a2c keeps going on the
+  changelog sync; it doesn't depend on this.</pre></div>
+      </div>
+      <div>
+        <h3>And an Inbox card, only if it asks you</h3>
+        <p class="s">Counted once with everything else in <span class="mono" style="font-size:12px">Inbox · N</span>, so a visual waiting on you is never lost when you're on another session. Answer from the card, or open it in its session.</p>
+        <div class="cardbox">
+          <div class="ibx-gh"><h4>Ship the one-approval release flow</h4><span>a3c91e07 · brindle</span></div>
+          <article class="ibx-card">
+            <div class="ibx-k">question · visual <span class="newmark">new</span></div>
+            <div class="ibx-t">When should the changelog entry be written?</div>
+            <div class="ibx-d">Two triggers drawn side by side, with where the entry lands in each.</div>
+            <div class="thumb" aria-hidden="true"><div class="rec"><b>A</b><span class="fl"><span></span><span></span><span class="g"></span><span></span></span><i class="m"></i><i class="s"></i></div><div><b>B</b><span class="fl"><span></span><span></span><span></span><span class="g"></span></span><i class="m"></i><i class="s"></i></div></div>
+            <div class="ibx-r"><span class="mono">supervisor</span><span>Ship the one-approval release…</span><span class="mono" style="font-size:11px">just now</span></div>
+            <div class="ibx-acts"><span class="act"><svg class="ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="2" y="3" width="12" height="10" rx="1.5"/><path d="M2 6h12"/></svg>Open in its session</span><span class="t-3" style="font-size:11px;margin-left:4px">or answer</span><span class="act ghost">A</span><span class="act ghost">B</span></div>
+          </article>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══ 4 · The list ═══ -->
+  <section class="sec" id="list">
+    <div class="eyebrow">4 · the list in the panel</div>
+    <h2>Open ones stay in view; decided ones fold into one line</h2>
+    <p class="lede">A session has a few visuals, so the panel's list is plain rows: no search, no filters, no grouping. The same small vocabulary as before: a branch dot for unread, <span class="t-sap mono" style="font-size:13px">asks</span> while it waits on you, a green ✓ once decided.</p>
+    <div class="states">
+      <div class="state">
+        <h3><span class="st-ok">✓</span> Decided ones fold</h3>
+        <div class="mock mock-row">
+          <div>
+            <div class="cap">folded (default)</div>
+            <div class="vlist">
+              <div class="vrow unread"><span class="g"><span class="st-new"></span></span><span class="tt">Changelog sync: on tag, or on publish?</span><span class="mm"><span class="ask">asks</span></span></div>
+              <div class="vrow" aria-current="true"><span class="g"></span><span class="tt">Merge order for four branches</span><span class="mm">40m</span></div>
+              <div class="vfold"><span class="st-ok">✓</span><span>3 decided</span><span class="t-3">· Release flow, Rule wording, Feed gate</span><span class="flex1"></span><span class="chev">▸</span></div>
+            </div>
+          </div>
+          <div>
+            <div class="cap">expanded</div>
+            <div class="vlist">
+              <div class="vrow unread"><span class="g"><span class="st-new"></span></span><span class="tt">Changelog sync: on tag, or on publish?</span><span class="mm"><span class="ask">asks</span></span></div>
+              <div class="vrow"><span class="g"></span><span class="tt">Merge order for four branches</span><span class="mm">40m</span></div>
+              <div class="vfold"><span class="st-ok">✓</span><span>3 decided</span><span class="flex1"></span><span class="chev">▾</span></div>
+              <div class="vrow done"><span class="g"><span class="st-ok">✓</span></span><span class="tt">Release flow: where the one approval sits</span><span class="mm">chose B</span></div>
+              <div class="vrow done"><span class="g"><span class="st-ok">✓</span></span><span class="tt">Learned-rule wording</span><span class="mm">chose B</span></div>
+              <div class="vrow done"><span class="g"><span class="st-ok">✓</span></span><span class="tt">Feed gate: which tests block</span><span class="mm">chose B <svg class="bm on" viewBox="0 0 16 16"><path d="M4 2.5h8v11l-4-3-4 3z"/></svg></span></div>
+            </div>
+          </div>
+        </div>
+        <ul><li>Sending an answer moves the row into the fold at once; the one you're looking at stays open in the viewer, locked, with your answer above it.</li><li>The fold stays shut across relaunches. Read-only visuals (a merge order) never fold: there's nothing to decide.</li></ul>
+      </div>
+      <div class="state">
+        <h3><svg class="bm on" viewBox="0 0 16 16" style="width:14px;height:14px"><path d="M4 2.5h8v11l-4-3-4 3z"/></svg> Keep</h3>
+        <div class="mock">
+          <div class="vhead"><div class="b"><h5>Feed gate: which tests block the merge</h5><div class="vmeta"><span>supervisor</span><span class="dot">·</span><span>rev 1 · 3h ago</span><span class="dot">·</span><span class="st-ok">✓ decided</span></div></div><div class="vacts"><span class="keep" aria-pressed="true"><svg class="bm on" viewBox="0 0 16 16"><path d="M4 2.5h8v11l-4-3-4 3z"/></svg>Kept</span><span class="btn-dots">⋯</span></div></div>
+          <div class="keepnote" style="animation:none"><svg class="bm on" viewBox="0 0 16 16"><path d="M4 2.5h8v11l-4-3-4 3z"/></svg><span><b>Kept.</b> It stays in Knowledge › Kept visuals after this session is removed.</span><span class="link">Undo</span></div>
+          <div class="vlife" style="margin-bottom:12px"><span>stored with this session · cleared when it's removed</span><span class="flex1"></span><span>1 kept</span></div>
+        </div>
+        <ul><li>Keep sits in the viewer's header on every visual, open or decided. It's brindle's own button, outside the page: only you keep, never the agent.</li><li>Kept ones show a small bookmark in the list; the line under the list counts them.</li></ul>
+      </div>
+      <div class="state">
+        <h3><span class="mono t-3" style="font-size:12px">rev 3</span> A new revision replaces it in place</h3>
+        <div class="mock">
+          <div class="vlist"><div class="vrow unread fresh" style="animation:none;background:var(--branch-soft)"><span class="g"><span class="st-new"></span></span><span class="tt">Release notes 0.6.2, draft</span><span class="mm">rev 3 · now</span></div></div>
+          <div class="banner" style="border-top:1px solid var(--line)"><span class="mono t-3" style="font-size:11px">rev 3</span><span><b>Updated while you had rev 2 open.</b> Your pick (B) still exists, so it carried over.</span><span class="flex1"></span><span class="link">See rev 2</span></div>
+        </div>
+        <ul><li>One row per visual: an agent's new revision (<span class="mono">replaces=</span>) takes the row and marks it unread. Earlier revisions are under ⋯, read-only.</li><li>If your pick isn't among the new options, the bar clears it and says so.</li></ul>
+      </div>
+      <div class="state">
+        <h3><span class="st-bad">!</span> It won't render</h3>
+        <div class="mock">
+          <div class="fail-box" style="padding:16px 16px 18px">
+            <div class="fail-card">
+              <div class="k">didn't render</div>
+              <h6>This page tried to load from the network</h6>
+              <pre>refused: <b>https://cdn.example.com/chart.js</b>
+visuals can't reach the network (CSP)</pre>
+              <div class="acts"><button class="act" type="button">Ask the agent to fix it</button><button class="act ghost" type="button" style="font-family:var(--sans)">View source</button></div>
+            </div>
+          </div>
+        </div>
+        <ul><li>Its row shows a red <span class="t-fail mono">!</span>. Too big, blocked, or not loaded in 5 s: one plain line, the cause, a way to ask for a fix.</li><li>Engine offline: the last copy shows read-only; answers wait and send on reconnect.</li></ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══ 5 · Lifetime ═══ -->
+  <section class="sec" id="life">
+    <div class="eyebrow">5 · lifetime</div>
+    <h2>Stored with the session, cleared with it, unless you keep one</h2>
+    <p class="lede">A visual is working material for a session, so it lives exactly as long as the session does. Pausing or finishing a session keeps them; removing it clears them. The few worth more than that, you keep.</p>
+    <div class="life">
+      <div class="lstep"><div class="num"><i>1</i></div><h4>Published</h4><p>Stored under its session: a row keyed by the session id, files in <code>.brindle/visuals/&lt;session&gt;/</code>. Up to 20 revisions.</p></div>
+      <div class="lstep"><div class="num"><i>2</i></div><h4>The session runs, pauses, finishes</h4><p>Nothing changes. Reopen a paused or finished session and its visuals are there as you left them, fold and all.</p></div>
+      <div class="lstep gone"><div class="num"><i>3</i></div><h4>The session is removed</h4><p>Its visuals are deleted with its worktrees, and their Inbox cards close. The answers you sent stay in the agent's chat log.</p></div>
+      <div class="lstep kept"><div class="num"><i><svg class="bm" viewBox="0 0 16 16" style="stroke:var(--on-branch);width:11px;height:11px"><path d="M4 2.5h8v11l-4-3-4 3z"/></svg></i></div><h4>Kept ones stay</h4><p>Their last revision and your answer move to <code>.brindle/kept/</code>, read-only, in Knowledge › Kept visuals until you remove them there.</p></div>
+    </div>
+    <div class="life2">
+      <div>
+        <h3>The last chance to keep one</h3>
+        <p class="s">Removing a session lists its visuals with a Keep box each, so nothing goes by surprise. Ones you already kept are ticked.</p>
+        <div class="dlg" role="dialog" aria-label="Remove session (mockup)">
+          <h4>Remove “Ship the one-approval release flow”?</h4>
+          <p>Its worktrees and its 5 visuals go with it. Tick any visual you want to keep.</p>
+          <div class="sec-l">Visuals</div>
+          <div>
+            <label><input type="checkbox" checked><span>Feed gate: which tests block the merge</span><small class="k">kept</small></label>
+            <label><input type="checkbox"><span>Release flow: where the one approval sits</span><small>chose B</small></label>
+            <label><input type="checkbox"><span>Learned-rule wording, before and after</span><small>chose B</small></label>
+            <label><input type="checkbox"><span>Merge order for four branches</span><small>read only</small></label>
+            <label><input type="checkbox"><span>Changelog sync: on tag, or on publish?</span><small class="a">asks · card closes</small></label>
+          </div>
+          <div class="acts"><button class="btn sm" type="button">Cancel</button><button class="btn sm danger" type="button">Remove session · keep 1</button></div>
+        </div>
+      </div>
+      <div>
+        <h3>Where kept ones are later: Knowledge › Kept visuals</h3>
+        <p class="s">Beside the repo's decisions and docs, since a kept visual is usually the picture behind a decision. Each says where it came from and what you chose; ⌘K finds them under “Kept visuals”.</p>
+        <div class="kn">
+          <div class="kn-head"><h4>Knowledge</h4><span class="t-3" style="font-size:12.5px;padding-bottom:3px">brindle</span></div>
+          <div class="kn-tabs"><span>Decisions <i>18</i></span><span>Docs <i>6</i></span><span class="on"><svg class="bm" viewBox="0 0 16 16"><path d="M4 2.5h8v11l-4-3-4 3z"/></svg>Kept visuals <i>3</i></span></div>
+          <div class="kn-body">
+            <div class="kn-list">
+              <div class="kitem on"><svg class="bm on" viewBox="0 0 16 16"><path d="M4 2.5h8v11l-4-3-4 3z"/></svg><span><b>Feed gate: which tests block the merge</b><small>from Ship the one-approval release flow · removed</small><small class="ans">chose B · Everything · kept Nov 4</small></span></div>
+              <div class="kitem"><svg class="bm on" viewBox="0 0 16 16"><path d="M4 2.5h8v11l-4-3-4 3z"/></svg><span><b>Plan: org-wide permission presets</b><small>from Permission presets · running</small><small class="ans">approved rev 2 · kept Oct 29</small></span></div>
+              <div class="kitem"><svg class="bm on" viewBox="0 0 16 16"><path d="M4 2.5h8v11l-4-3-4 3z"/></svg><span><b>Knowledge map layout, final</b><small>from Knowledge map ranks decisions first</small><small class="ans" style="color:var(--ink-3)">read only · kept Oct 12</small></span></div>
+            </div>
+            <div class="kn-view">
+              <div class="banner" style="border:1px solid var(--line);border-radius:6px"><svg class="bm on" viewBox="0 0 16 16"><path d="M4 2.5h8v11l-4-3-4 3z"/></svg><span><b>From a removed session.</b> Read-only; you chose B.</span><span class="flex1"></span><span class="link">Remove from kept</span></div>
+              <div class="frame-wrap"><div class="prov"><span class="lock">sandboxed · no network</span><span class="r"><span>v_5d01 · r1</span></span></div>
+                <div style="padding:14px;display:flex;flex-direction:column;gap:9px;opacity:.8"><i style="display:block;height:7px;width:52%;border-radius:3px;background:var(--line-strong)"></i><i style="display:block;height:5px;width:80%;border-radius:3px;background:var(--line)"></i><div style="display:flex;gap:8px;height:120px"><div style="flex:1;border:1px solid var(--line-strong);border-radius:5px"></div><div style="flex:1;border:1px solid var(--branch);border-radius:5px;box-shadow:0 0 0 3px var(--branch-soft)"></div></div></div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══ 6 · Planning docs ═══ -->
+  <section class="sec" id="plan">
+    <div class="eyebrow">6 · planning docs for large requests</div>
+    <h2>Before a big fan-out, the supervisor writes a plan and argues with it</h2>
+    <p class="lede">Hand a supervisor something large and, before it starts any worker, it drafts a short planning doc: the goal, how it would split the work, the decisions that shape it with the alternatives it weighed and its own challenge to each, what's hard to undo, and what it doesn't know. It's a visual in the session, opened <b>wide</b> in the panel. You read it like a document, answer and comment where you have something to say, then approve or redirect. Workers start only after that. Small tasks never see one.</p>
+    <div class="plan-grid">
+      <div class="when">
+        <div class="on"><h3><span class="t-pass mono" style="font-size:12px">offered</span> when the request is large</h3>
+          <ul><li>It would start three or more workers, or touch more than one repo</li><li>A step is hard to undo: a migration, a public API, a release, a deletion</li><li>The goal leaves real choices open (where state lives, what to cut)</li><li>You asked for one: “plan this first”</li></ul></div>
+        <div class="off"><h3><span class="t-3 mono" style="font-size:12px">skipped</span> and it goes straight out</h3>
+          <ul><li>One worker, a clear finish line</li><li>A bug with a reproducing test, a rename, docs</li><li>You said “just do it”, or the repo turns plans off</li></ul></div>
+        <div class="sayit">The supervisor offers, it doesn't insist. <b>“Skip the plan”</b> in the chat starts the work anyway; a plan is never more than a page.</div>
+        <div class="chat shell"><pre><span style="color:var(--shell-dim)">you ›</span> Add org-wide permission presets,
+  with the settings UI and docs.
+
+<span style="color:var(--shell-acc)">●</span> This is big: four workers and a
+  settings migration. I wrote a one-page
+  plan first; nothing starts until
+  you've read it.
+
+  <span style="color:#c4b8f2;text-decoration:underline;text-underline-offset:3px">◧ Plan: org-wide permission presets</span>
+  <span style="color:var(--shell-dim)">  3 decisions · 2 questions</span></pre></div>
+        <div class="gate-steps">
+          <div><span>1</span><span><b>Drafted, nothing assigned.</b> The session's milestone reads “Plan · waiting on your read”; assign calls queue behind it.</span></div>
+          <div><span>2</span><span><b>You react in place.</b> Pick among a decision's alternatives, comment on any section, answer the open questions.</span></div>
+          <div><span>3</span><span><b>Redirect</b> sends your comments; the supervisor replies in the margin and publishes rev 2 in the same row.</span></div>
+          <div><span>4</span><span><b>Approve</b> sends the plan's last revision with your answers, and the queued workers start. “Keep the plan” is ticked, so it outlives the session.</span></div>
+        </div>
+      </div>
+      <div class="pwin" id="pwin" aria-label="A planning doc open wide in the session's Visuals panel (mockup)">
+        <div class="win-bar"><i></i><i></i><i></i><span class="ttl">brindle · Permission presets · Visuals, wide</span></div>
+        <div class="vp-head" style="height:42px"><span class="vp-t"><svg class="vico" viewBox="0 0 16 16"><rect x="2" y="3" width="12" height="10" rx="1.5"/><path d="M2 6h12M7 6v7"/></svg>Plan: org-wide permission presets</span><span class="st-new"></span><span class="vp-m" style="margin-left:6px">rendered by brindle from markdown · comments are brindle's</span><span class="flex1"></span><button class="keep" type="button" id="p-keep" aria-pressed="false"><svg class="bm" viewBox="0 0 16 16"><path d="M4 2.5h8v11l-4-3-4 3z"/></svg>Keep</button><button class="quiet" type="button">Beside the chat</button></div>
+        <div class="pdoc-wrap">
+          <div class="pdoc"><article>
+            <div class="ey">plan · rev <span id="p-rev">1</span> · drafted before any worker starts</div>
+            <h4>Org-wide permission presets</h4>
+            <div class="by"><span>supervisor</span><span>·</span><span class="mono" style="font-size:11px">a3c91e07</span><span>·</span><span>4 min read</span></div>
+
+            <h5>Goal</h5>
+            <p>An admin sets a permission preset once for the org, and every repo's agents start from it. A repo can tighten the preset, <b>never widen it</b>. Done when a fresh repo in an org with a preset shows it in Settings › Permissions and the engine enforces it.</p>
+
+            <h5>Proposed split <span class="ct" id="p-split-n">4 workers · 2 start together</span></h5>
+            <div class="split">
+              <div><span class="w">w1</span><span>Preset schema and the settings migration</span><span class="dep">first</span></div>
+              <div><span class="w">w2</span><span>Engine: resolve org → repo, deny wins</span><span class="dep">with w1</span></div>
+              <div id="p-w3"><span class="w">w3</span><span>Org admin page on pawdelta-web</span><span class="dep">after w2</span></div>
+              <div><span class="w">w4</span><span>Settings › Permissions shows the inherited preset; docs</span><span class="dep">after w2</span></div>
+            </div>
+
+            <h5>Key decisions <span class="ct">pick one, or leave mine</span></h5>
+            <div class="dec hl">
+              <div class="dh"><span class="n">1</span><span class="t">Presets live in the org policy the cloud serves, not in each repo.</span></div>
+              <div class="alts" data-dec="d1"><button class="alt" type="button" aria-pressed="true" data-alt="org">Org policy <span class="m">mine</span></button><button class="alt" type="button" aria-pressed="false" data-alt="repo">A file in each repo</button><button class="alt" type="button" aria-pressed="false" data-alt="both">Both, repo overrides</button></div>
+              <div class="chal"><span class="k">my challenge</span>A repo file ships in a day and needs no admin page (w3 disappears). Org policy only pays off if admins run more than a handful of repos. Do they, yet?</div>
+            </div>
+            <div class="dec">
+              <div class="dh"><span class="n">2</span><span class="t">Migrate existing allowlists into the preset automatically.</span></div>
+              <div class="alts" data-dec="d2"><button class="alt" type="button" aria-pressed="false" data-alt="auto">Automatic <span class="m">mine</span></button><button class="alt" type="button" aria-pressed="true" data-alt="dry">Dry run, then ask</button><button class="alt" type="button" aria-pressed="false" data-alt="none">Don't migrate</button></div>
+              <div class="chal"><span class="k">my challenge</span>Hard to undo: a wrong merge widens what agents may run, silently. A dry run costs one more Inbox card and makes the change visible.</div>
+            </div>
+            <div class="dec">
+              <div class="dh"><span class="n">3</span><span class="t">Deny wins over allow at every level.</span></div>
+              <div class="alts" data-dec="d3"><button class="alt" type="button" aria-pressed="true" data-alt="deny">Deny wins <span class="m">mine</span></button><button class="alt" type="button" aria-pressed="false" data-alt="near">Nearest level wins</button></div>
+              <div class="chal"><span class="k">my challenge</span>Nearest-wins is what people expect from config files, but it lets a repo undo an org deny, which is the thing this feature exists to stop. Keeping mine.</div>
+            </div>
+
+            <h5>Risks and what's hard to undo</h5>
+            <ul class="risk-l">
+              <li><span class="hard">hard to undo</span><span>The settings migration rewrites <span class="mono" style="font-size:12px">permissions.json</span> in every repo. A backup goes next to it first.</span></li>
+              <li><span class="hard">hard to undo</span><span>The <span class="mono" style="font-size:12px">policy</span> field in the cloud API becomes public once the app reads it.</span></li>
+              <li><span class="soft">reversible</span><span>The Settings page change, the docs.</span></li>
+            </ul>
+
+            <h5>Open questions</h5>
+            <div class="oq">
+              <div>Should a repo be able to see which org rule blocked a command?<input placeholder="Answer here, or leave it to me"></div>
+              <div>Is Enterprise the only plan with org presets?<input placeholder="Answer here, or leave it to me" value="Pro too, behind the same flag"></div>
+            </div>
+          </article></div>
+          <aside class="margin">
+            <div class="mh"><span class="flex1">Comments</span><span class="mono" id="p-cn" style="font-weight:400;letter-spacing:0">1</span></div>
+            <div class="cmt">
+              <span class="on">on 1 · presets live in…</span>
+              <div class="who"><span class="av2">HL</span><b>You</b><span>· just now</span></div>
+              <div>Only 3 orgs have more than 2 repos. Repo file first; org policy can come later.</div>
+              <div class="reply" id="p-reply" hidden><div class="who"><span class="av2 sup">S</span><b>supervisor</b><span>· rev 2</span></div><div style="margin-top:4px">Agreed. Moved org policy to a follow-up; w3 is gone, so three workers, two in parallel.</div></div>
+            </div>
+            <div class="cmt" id="p-c2" hidden>
+              <span class="on">on 2 · migrate allowlists</span>
+              <div class="who"><span class="av2">HL</span><b>You</b><span>· just now</span></div>
+              <div>Dry run. Show me the diff as a card.</div>
+            </div>
+            <button class="addc" type="button" id="p-add">+ Comment on a section</button>
+          </aside>
+        </div>
+        <div class="pgate" id="pgate"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══ 7 · Architecture ═══ -->
+  <section class="sec" id="arch">
+    <div class="eyebrow">7 · architecture sketch</div>
+    <h2>One MCP tool, a store under the session, a sandboxed frame, a message back</h2>
+    <p class="lede">Agents already reach brindle through its MCP server, and answers already reach agents as delivered messages. A visual adds one tool, one table keyed by session, one route for files and one for answers; the app adds a button, a panel and a frame. Keep adds a second, small store that doesn't belong to any session.</p>
+    <div class="diagram">
+      <svg viewBox="0 0 1300 470" role="img" aria-label="Architecture: agent publishes, engine stores under the session, app renders in a sandbox, answer returns as a message; Keep copies to a kept store">
+        <defs>
+          <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 1 L9 5 L0 9 z" style="fill:var(--ink-3)"/></marker>
+          <marker id="ahp" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 1 L9 5 L0 9 z" style="fill:var(--pass)"/></marker>
+          <marker id="ahb" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 1 L9 5 L0 9 z" style="fill:var(--branch)"/></marker>
+        </defs>
+        <rect class="dg-lane" x="0" y="0" width="1300" height="124" rx="6"/>
+        <rect class="dg-lane alt" x="0" y="136" width="1300" height="160" rx="6"/>
+        <rect class="dg-lane" x="0" y="308" width="1300" height="162" rx="6"/>
+        <text class="dg-lt" x="16" y="22">Agent · provider CLI</text>
+        <text class="dg-lt" x="16" y="158">brindle engine · daemon</text>
+        <text class="dg-lt" x="16" y="330">brindle app · webview</text>
+
+        <!-- agent lane -->
+        <rect class="dg-n key" x="40" y="44" width="220" height="60" rx="5"/>
+        <text class="dg-t" x="56" y="69">Supervisor or worker</text>
+        <text class="dg-s" x="56" y="88">writes flows.html, calls tool</text>
+        <rect class="dg-n" x="1040" y="44" width="230" height="60" rx="5"/>
+        <text class="dg-t" x="1056" y="69">Agent's chat</text>
+        <text class="dg-s" x="1056" y="88">link printed · "Chose B" back</text>
+
+        <!-- engine lane -->
+        <rect class="dg-n" x="40" y="180" width="220" height="80" rx="5"/>
+        <text class="dg-t" x="56" y="205">MCP · publish_visual</text>
+        <text class="dg-s" x="56" y="224">checks size ≤ 2 MB, options,</text>
+        <text class="dg-s" x="56" y="240">session; scans for secrets</text>
+        <rect class="dg-n key" x="310" y="180" width="260" height="80" rx="5"/>
+        <text class="dg-t" x="326" y="205">Visuals store, per session</text>
+        <text class="dg-s" x="326" y="224">visuals(id, session, rev, …)</text>
+        <text class="dg-s" x="326" y="240">deleted with the session</text>
+        <rect class="dg-n" x="620" y="180" width="180" height="80" rx="5"/>
+        <text class="dg-t" x="636" y="205">Inbox item</text>
+        <text class="dg-s" x="636" y="224">kind question, visual id</text>
+        <text class="dg-s" x="636" y="240">only when it asks</text>
+        <rect class="dg-n" x="850" y="180" width="200" height="80" rx="5"/>
+        <text class="dg-t" x="866" y="205">Answer route</text>
+        <text class="dg-s" x="866" y="224">POST /v1/visuals/{id}/answer</text>
+        <text class="dg-s" x="866" y="240">option id + your note</text>
+
+        <!-- app lane -->
+        <rect class="dg-n key" x="40" y="352" width="220" height="80" rx="5"/>
+        <text class="dg-t" x="56" y="377">Knowledge › Kept visuals</text>
+        <text class="dg-s" x="56" y="396">reads kept_visuals(id, from…)</text>
+        <text class="dg-s" x="56" y="412">outlives the session</text>
+        <rect class="dg-n" x="310" y="352" width="260" height="80" rx="5"/>
+        <text class="dg-t" x="326" y="377">Session header · Visuals panel</text>
+        <text class="dg-s" x="326" y="396">button count, list, fold, Keep</text>
+        <text class="dg-s" x="326" y="412">live from bus: visual.*</text>
+        <rect class="dg-n untrust" x="620" y="340" width="210" height="112" rx="5"/>
+        <text class="dg-t" x="636" y="369">Sandboxed frame</text>
+        <text class="dg-s" x="636" y="388">brindle-visual://&lt;id&gt;/r2</text>
+        <text class="dg-s" x="636" y="404">sandbox=allow-scripts</text>
+        <text class="dg-s" x="636" y="420">CSP: default-src 'none'</text>
+        <text class="dg-s" x="636" y="436">+ host denies all navigation</text>
+        <rect class="dg-n trust" x="870" y="352" width="180" height="80" rx="5"/>
+        <text class="dg-t" x="886" y="377">Answer bar</text>
+        <text class="dg-s" x="886" y="396">host chrome; options</text>
+        <text class="dg-s" x="886" y="412">from the tool call</text>
+
+        <!-- arrows -->
+        <path class="dg-a" d="M220 104 V176"/>
+        <text class="dg-al" x="236" y="148">publish_visual(…)</text>
+        <path class="dg-a" d="M260 220 H306"/>
+        <path class="dg-a" d="M570 220 H616"/>
+        <text class="dg-al" x="574" y="210">if q</text>
+        <path class="dg-a" d="M440 260 V348"/>
+        <text class="dg-al" x="450" y="310">visual.published</text>
+        <path class="dg-a keep dash" d="M340 260 V300 H150 V348"/>
+        <text class="dg-al keep" x="160" y="292">Keep (your click)</text>
+        <path class="dg-a" d="M570 392 H616"/>
+        <text class="dg-al" x="573" y="384">open</text>
+        <path class="dg-a" d="M830 392 H866"/>
+        <text class="dg-al" x="838" y="464">postMessage {choice}</text>
+        <path class="dg-a" d="M848 392 V452" style="marker-end:none;stroke-dasharray:2 3"/>
+        <path class="dg-a ret" d="M960 352 V264"/>
+        <text class="dg-al ret" x="970" y="310">Send (your click)</text>
+        <path class="dg-a ret dash" d="M850 236 H804"/>
+        <text class="dg-al ret" x="806" y="252">resolve</text>
+        <path class="dg-a ret" d="M1050 220 H1155 V108"/>
+        <text class="dg-al ret" x="1066" y="210">send_message</text>
+        <path class="dg-a" d="M1155 44 V30 H240 V40" style="stroke-dasharray:3 4;opacity:.55"/>
+        <text class="dg-al" x="540" y="24" style="opacity:.75">agent carries on; may publish rev 3 (replaces=…)</text>
+
+        <!-- step numbers -->
+        <g><circle class="dg-num" cx="220" cy="144" r="9"/><text class="dg-numt" x="220" y="147.5">1</text></g>
+        <g><circle class="dg-num" cx="283" cy="220" r="9"/><text class="dg-numt" x="283" y="223.5">2</text></g>
+        <g><circle class="dg-num" cx="593" cy="230" r="9"/><text class="dg-numt" x="593" y="233.5">3</text></g>
+        <g><circle class="dg-num" cx="440" cy="290" r="9"/><text class="dg-numt" x="440" y="293.5">4</text></g>
+        <g><circle class="dg-num" cx="593" cy="402" r="9"/><text class="dg-numt" x="593" y="405.5">5</text></g>
+        <g><circle class="dg-num" cx="848" cy="404" r="9"/><text class="dg-numt" x="848" y="407.5">6</text></g>
+        <g><circle class="dg-num" cx="960" cy="296" r="9"/><text class="dg-numt" x="960" y="299.5">7</text></g>
+        <g><circle class="dg-num" cx="1155" cy="160" r="9"/><text class="dg-numt" x="1155" y="163.5">8</text></g>
+      </svg>
+      <div class="dg-leg"><span><i class="k"></i>new pieces</span><span><i class="u"></i>untrusted: the agent's HTML</span><span><i class="t"></i>trusted: brindle's own chrome</span><span><i class="ar"></i>the answer's path back</span><span><i class="kp"></i>Keep: the one way out of the session</span></div>
+    </div>
+
+    <div class="arch">
+      <div>
+        <h3>The tool</h3>
+<pre class="codeblk"><span class="k">publish_visual</span>(
+  title: str,
+  html: str | path: str,      <span class="c"># one of; a file in the worktree</span>
+  session: str = <span class="s">"mine"</span>,     <span class="c"># default: the caller's root</span>
+  question: str | None,
+  options: [{id, label, detail}] | None,
+  replaces: str | None,       <span class="c"># new rev, same row</span>
+) -&gt; {id, rev, link: <span class="s">"brindle://visual/v_8f2c"</span>}</pre>
+        <p style="margin-top:10px">Also <code>list_visuals()</code>, for an agent to find its own session's; there's no listing across sessions. No polling for answers: they arrive as a delivered message, like a supervisor's. Agents can't keep, unkeep or delete: those are the person's.</p>
+        <p>Plans: <code>propose_plan(markdown, decisions, split)</code>. brindle renders the markdown itself (trusted, no frame), so picks and comments anchor to its sections. While it waits, the session's <code>assign</code> calls queue behind it, as with <code>depends_on</code>; approve and redirect reuse <code>approve_plan</code>'s approved / feedback shape, from the person to the supervisor.</p>
+      </div>
+      <div>
+        <h3>Rendering</h3>
+        <ul>
+          <li>Served by the daemon on its own scheme, <code>brindle-visual://</code>, never from the app's origin, with a CSP header: <code>default-src 'none'; script-src/style-src 'unsafe-inline'; img-src data: blob:</code>.</li>
+          <li><code>&lt;iframe sandbox="allow-scripts"&gt;</code> without <code>allow-same-origin</code>, forms, popups, modals or top navigation: an opaque origin with no storage.</li>
+          <li><b>CSP and the sandbox are not enough on their own:</b> a sandboxed frame may still navigate itself (<code>location.href = "https://…?d=…"</code>, a meta refresh, a link it clicks), and <code>default-src</code> doesn't govern that, nor WebRTC. So the host denies by default: the webview's navigation and request hooks (Tauri's protocol handler and <code>on_navigation</code>; WebView2 <code>NavigationStarting</code> / <code>WebResourceRequested</code>; WebKitGTK <code>decide-policy</code>) let a visual frame load only <code>brindle-visual://&lt;id&gt;/r&lt;n&gt;</code> and its own <code>data:</code> / <code>blob:</code> URLs. Every other navigation, subresource and redirect is refused, and the attempt marks the visual failed. <code>RTCPeerConnection</code> is removed before the page's script runs.</li>
+          <li><b>Proved before it's built on:</b> a suite of hostile probe pages runs in each shipped webview against a local listener that must see zero requests, and stays as a CI test for the shell.</li>
+          <li>brindle prepends its token sheet and sends the theme on change, so a page written against the tokens matches the app in light and dark.</li>
+          <li>Only the open visual is mounted; the panel's other rows are just rows.</li>
+        </ul>
+      </div>
+      <div>
+        <h3>Answers and lifetime</h3>
+        <ul>
+          <li>The frame's only channel is <code>postMessage({type:"choice", option})</code>. The host checks the source window and that the id is one of the tool call's options, then highlights it. Nothing is sent until you click Send.</li>
+          <li>The engine records the answer, resolves the Inbox item and delivers <code>Chose B · Gate on CI</code> plus your note, quoted as yours. The row moves into the panel's decided fold.</li>
+          <li><b>Session-scoped:</b> rows keyed by session id, files in <code>.brindle/visuals/&lt;session&gt;/&lt;id&gt;/r&lt;n&gt;.html</code>. Pause and finish keep them; <code>remove</code> deletes them in the same step as the worktrees, closing their Inbox cards. No time-based pruning.</li>
+          <li><b>Keep</b> copies the last revision, your answer, and the session's name and repo to <code>.brindle/kept/visuals/&lt;id&gt;.html</code> and a <code>kept_visuals</code> row, so nothing points back at the session. Unkeep deletes the copy. Kept ones are read-only.</li>
+          <li>Arrival: the engine emits <code>visual.published</code> with the session; the app shows the callout only if that session is on screen with the panel shut, and holds it while a key went to the chat in the last 2 s.</li>
+        </ul>
+      </div>
+    </div>
+
+    <table class="risk">
+      <thead><tr><th>Risk: agents write this HTML</th><th>What could happen</th><th>Mitigation</th></tr></thead>
+      <tbody>
+        <tr><td>Data leaving the machine</td><td>A page fetches, beacons or embeds a remote image carrying repo contents.</td><td>A CSP header from the daemon with no connect, img, font or frame sources, and an opaque-origin sandbox. A violation marks the visual failed and says what it tried.</td></tr>
+        <tr><td>Navigating away with the data</td><td>The frame navigates itself to a URL carrying repo contents, or a <code>brindle-visual</code> response redirects out.</td><td>A host-level policy that denies by default: a visual frame may load only its own <code>brindle-visual://&lt;id&gt;</code> URLs; everything else, redirects included, is refused. The probe suite proves it on every shipped webview and stays in CI.</td></tr>
+        <tr><td>Forged answers</td><td>A page posts a choice on load, or makes a fake “Send” the person clicks.</td><td>Posts only highlight; the send button is host chrome outside the frame, needs a real click, and only offers the tool call's options.</td></tr>
+        <tr><td>Impersonating brindle</td><td>A page draws a sign-in box or a fake permission prompt, or a fake “Keep”.</td><td>The frame always sits inside a labelled border; it can't open dialogs or navigate the window. Keep, Send and the callout are brindle's own, outside the frame; the callout's text is the tool call's title, never page text.</td></tr>
+        <tr><td>Stealing your typing</td><td>A popup takes focus while you type a reply, and keys land in it, or Enter opens it.</td><td>The callout is <code>role="status"</code>, not a dialog: no focus, out of the Tab order, held until 2 s after your last key in the chat. It has no text field to receive keys.</td></tr>
+        <tr><td>Injection back into the agent</td><td>Page text tries to reach the agent as instructions.</td><td>Only the option id and the person's own note travel back, wrapped as brindle's delivered message from the person.</td></tr>
+        <tr><td>Secrets on the page</td><td>An agent pastes a token into a visual; kept, it would outlive the session.</td><td>The tool runs the existing secret scan before storing; Keep runs it again and refuses with the finding. Files stay under the repo's <code>.brindle/</code>, never synced to the cloud.</td></tr>
+        <tr><td>Losing something you needed</td><td>You remove a session and a visual you wanted goes with it.</td><td>The remove dialog lists every visual with a Keep box. Answers you sent stay in the agent's chat log, and any decision the agent recorded from one stays in Knowledge.</td></tr>
+      </tbody>
+    </table>
+
+    <div class="two">
+      <div>
+        <h3>What it replaces</h3>
+        <div class="repl">
+          <div><span>Design options published as claude.ai artifacts</span><span>→</span><span>a visual in the session, with the choice as an answer</span></div>
+          <div><span>Rule comparisons and proposals as artifacts, a link pasted into chat</span><span>→</span><span>a visual and its chat link; no account or browser hop</span></div>
+          <div><span>“Reply A, B or C in the terminal”</span><span>→</span><span>an Inbox card that answers from the card or the page</span></div>
+          <div><span>Kept as is: artifacts for pages meant for people outside (site pages, release notes, anything shared)</span><span>·</span><span>a kept visual can be shared out as an artifact later, by the person</span></div>
+        </div>
+      </div>
+      <div>
+        <h3>Open questions for you</h3>
+        <ol class="qs">
+          <li><span><b>Header button, or a tab beside chat and shell?</b><small>Proposed: the button (a). The tab (b) if you'd rather visuals take the full width and hide the chat.</small></span></li>
+          <li><span><b>Callout or corner toast?</b><small>Proposed: the callout, only on the session's own screen; elsewhere asks go to the Inbox and nothing pops.</small></span></li>
+          <li><span><b>Where kept visuals live.</b> Knowledge › Kept visuals, or a page of their own?<small>Proposed: Knowledge, beside decisions; ⌘K finds them.</small></span></li>
+          <li><span><b>Keep plans by default?</b><small>Proposed: Approve on a plan offers “Keep the plan”, ticked.</small></span></li>
+          <li><span><b>Send, or one click?</b> Here a pick proposes and Send confirms, because the page is untrusted.<small>Proposed: keep it, only for picks made inside the page; the Inbox card's A / B stay one click.</small></span></li>
+          <li><span><b>No network, ever?</b> Charts want libraries.<small>Proposed: no network; brindle ships a few vetted libraries on <code>brindle-visual://lib/</code> later, if agents keep needing them.</small></span></li>
+          <li><span><b>Who may ask?</b> Workers too, or only supervisors?<small>Proposed: anyone may publish; a worker's visual lands in its supervisor's session panel.</small></span></li>
+        </ol>
+      </div>
+    </div>
+  </section>
+</main>
+
+<script>
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const ICON = `<svg class="vico" viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="3" width="12" height="10" rx="1.5"/><path d="M2 6h12M7 6v7"/></svg>`;
+const BM = (on) => `<svg class="bm${on ? " on" : ""}" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2.5h8v11l-4-3-4 3z"/></svg>`;
+const IDLE_MS = 2000;      // a popup waits this long after your last key
+const CALLOUT_MS = 12000;  // an untouched callout folds back into the button's dot
+const TOAST_MS = 8000;
+const FLOW_MS = 4200;
+
+/* ── Theme ─────────────────────────────────────────────────────────────── */
+function setTheme(t) {
+  const el = document.documentElement;
+  t === "system" ? el.removeAttribute("data-theme") : el.setAttribute("data-theme", t);
+  $$("[data-theme-set]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.themeSet === t)));
+  pushTheme();
+}
+$$("[data-theme-set]").forEach((b) => b.addEventListener("click", () => setTheme(b.dataset.themeSet)));
+matchMedia("(prefers-color-scheme: light)").addEventListener("change", () => pushTheme());
+const TOKENS = ["--canvas", "--canvas-2", "--surface-2", "--line", "--line-strong", "--ink", "--ink-2", "--ink-3", "--sap", "--sap-soft", "--pass", "--pass-soft", "--branch", "--branch-soft", "--fail", "--fail-soft", "--on-branch"];
+function themeVars() {
+  const cs = getComputedStyle(document.documentElement);
+  const vars = {};
+  for (const k of TOKENS) vars[k] = cs.getPropertyValue(k).trim();
+  return { vars, scheme: cs.colorScheme || "dark" };
+}
+function pushTheme() {
+  const t = themeVars();
+  $$("iframe[data-v]").forEach((f) => f.contentWindow && f.contentWindow.postMessage({ type: "brindle.theme", ...t }, "*"));
+}
+
+/* ── Data: one session's visuals ───────────────────────────────────────── */
+const RELEASE = [
+  { id: "a", label: "Tag first", detail: "merge, tag, then approve publish", flow: ["PR", "merge", "tag", "approve", "publish"], gate: 3, pro: ["Fastest hotfix path"], con: ["A tag exists before anyone approves"] },
+  { id: "b", label: "Gate on CI", detail: "one approval after CI", flow: ["PR", "CI green", "approve", "merge + tag", "publish"], gate: 2, pro: ["One approval covers it all", "Nothing public before it"], con: ["Waits on CI when it flakes"], rec: true },
+  { id: "c", label: "Two approvals", detail: "approve merge, approve publish", flow: ["PR", "approve", "merge", "tag", "approve", "publish"], gate: [1, 4], pro: ["Safest"], con: ["Two waits on you per release"] },
+];
+const FEED = [
+  { id: "a", label: "Fast tests only", detail: "unit tests block; slow ones run after", flow: ["PR", "unit", "merge", "slow"], gate: 2, pro: ["Merges in ~3 min"], con: ["A slow failure lands after merge"] },
+  { id: "b", label: "Everything", detail: "every suite blocks the merge", flow: ["PR", "unit", "slow", "merge"], gate: 3, pro: ["Nothing red on main"], con: ["~14 min per merge"], rec: true },
+];
+const CHANGELOG = [
+  { id: "a", label: "On tag", detail: "write the entry when the tag is cut", flow: ["merge", "tag", "changelog", "publish"], gate: 2, pro: ["Entry exists before publish", "Reviewed in the tag PR"], con: ["A cancelled publish leaves an entry"], rec: true },
+  { id: "b", label: "On publish", detail: "write it once the release is live", flow: ["merge", "tag", "publish", "changelog"], gate: 3, pro: ["Only real releases get one"], con: ["The site lags the release by a run"] },
+];
+const V = [
+  { id: "v_8f2c", short: "Release flow", title: "Release flow: where the one approval sits", by: "supervisor", age: "4m", rev: 2, kind: "options", unread: true, question: "Which release flow should 0.6.2 ship with?", options: RELEASE, sub: "3 options · asks you", lede: "Each flow from PR to publish. The orange step is where you approve. Pick one here, then send it from brindle's bar below." },
+  { id: "v_77ab", short: "Merge order", title: "Merge order for four branches", by: "supervisor", age: "40m", rev: 1, kind: "order", sub: "read only" },
+  { id: "v_31d0", short: "Rule wording", title: "Learned-rule wording, before and after", by: "reviewer 9d24b6f1", age: "1h", rev: 1, kind: "diff", decided: "b", question: "Which wording should the rule use?", options: [{ id: "a", label: "Keep current" }, { id: "b", label: "Re-read state right before acting" }] },
+  { id: "v_5d01", short: "Feed gate", title: "Feed gate: which tests block the merge", by: "supervisor", age: "3h", rev: 1, kind: "options", decided: "b", question: "Which tests should block the merge?", options: FEED, lede: "Orange is the merge. Pick one here, then send it from the bar below." },
+];
+const NEWV = { id: "v_a9e4", short: "Changelog sync", title: "Changelog sync: on tag, or on publish?", by: "supervisor", age: "now", rev: 1, kind: "options", unread: true, question: "When should the changelog entry be written?", options: CHANGELOG, sub: "2 options · asks you", lede: "Orange is when the entry is written. Pick one here, then send it from the bar below." };
+const AFTER = {
+  v_8f2c: (o) => `Going with ${o.label}. Assigning e1f07a2c\n  → <span class="d">feat/release-gate-ci</span>.`,
+  v_a9e4: (o) => `Changelog entry ${o.label.toLowerCase()}. Wiring the job\n  into feat/release-gate-ci.`,
+};
+
+/* ── State ─────────────────────────────────────────────────────────────── */
+const FRESH = () => ({ panel: true, wide: false, active: "v_8f2c", fold: false, picks: {}, picked: {}, sent: {}, notes: {}, kept: { v_5d01: true }, arrived: false, pop: null, variant: "callout", log: [], fresh: null, bump: false, pulse: false });
+const S = FRESH();
+const vis = () => (S.arrived ? [...V, NEWV] : V);
+const byId = (id) => vis().find((v) => v.id === id);
+const isDecided = (v) => !!(v.decided || S.sent[v.id]);
+const asks = (v) => !!v.question && !isDecided(v);
+const openV = () => vis().filter((v) => !isDecided(v));
+const decV = () => vis().filter(isDecided);
+const answerOf = (v) => v.options.find((o) => o.id === (S.sent[v.id] || v.decided));
+/* the Inbox: one card per visual that asks you, plus a branch review in another session */
+const inboxCount = () => vis().filter(asks).length + 1;
+
+/* ── The visual's own page (untrusted HTML, rendered sandboxed) ────────── */
+function pageCss() {
+  return `:root{--canvas:#080d0b;--canvas-2:#0a100d;--surface-2:#121a16;--line:rgba(120,150,135,.16);--line-strong:rgba(130,160,145,.28);--ink:#e8f0eb;--ink-2:#afbfb6;--ink-3:#889a90;--sap:#e8875a;--sap-soft:rgba(232,135,90,.12);--pass:#34d399;--pass-soft:rgba(52,211,153,.12);--branch:#a99be0;--branch-soft:rgba(169,155,224,.12);--fail:#f08c88;--fail-soft:rgba(240,140,136,.12);--on-branch:#15102a;--mono:"Geist Mono",ui-monospace,Menlo,monospace}
+*{box-sizing:border-box}html,body{margin:0}body{background:var(--canvas-2);color:var(--ink);font:13px/1.5 "Geist",ui-sans-serif,system-ui,sans-serif;-webkit-font-smoothing:antialiased;padding:18px 18px 22px}
+.ey{font:500 10.5px var(--mono);letter-spacing:.06em;text-transform:uppercase;color:var(--ink-3)}h1{margin:4px 0 4px;font-size:17px;font-weight:600;letter-spacing:-.015em}p.l{margin:0 0 14px;color:var(--ink-2);font-size:12.5px;max-width:560px}
+.opts{display:grid;gap:9px}.on2{white-space:nowrap}
+.o{position:relative;border:1px solid var(--line-strong);border-radius:6px;padding:11px 10px 10px;display:flex;flex-direction:column;gap:8px;background:var(--canvas);transition:border-color .2s,box-shadow .2s;min-width:0}
+.o.on{border-color:var(--branch);box-shadow:0 0 0 3px var(--branch-soft)}.o.lock{opacity:.7}
+.oh{display:flex;align-items:center;gap:7px;flex-wrap:wrap;row-gap:4px}.lt{font:600 10.5px var(--mono);width:18px;height:18px;border-radius:3px;display:grid;place-items:center;background:var(--surface-2);color:var(--ink-2)}.o.on .lt{background:var(--branch);color:var(--on-branch)}
+.on2{font-size:13px;font-weight:600}.rec{margin-left:auto;font:500 9.5px var(--mono);color:var(--pass);border:1px solid color-mix(in srgb,var(--pass) 50%,transparent);border-radius:3px;padding:0 5px}
+.dt{font-size:11.5px;color:var(--ink-3);margin-top:-4px}
+.fl{display:flex;flex-direction:column;gap:3px;padding:7px 8px;border-radius:4px;background:var(--canvas-2);border:1px solid var(--line)}.fs{display:flex;align-items:center;gap:6px;font:11px var(--mono);color:var(--ink-2)}.fs i{width:7px;height:7px;border-radius:50%;border:1.5px solid var(--line-strong);flex:none}.fs.g{color:var(--sap)}.fs.g i{border-color:var(--sap);background:var(--sap-soft)}
+ul{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:2px;font-size:11.5px;color:var(--ink-2)}li{display:flex;gap:6px}li::before{font:600 11px var(--mono);flex:none;width:9px}li.p::before{content:"+";color:var(--pass)}li.c::before{content:"−";color:var(--fail)}
+button.ch{margin-top:auto;height:26px;border-radius:4px;border:1px solid var(--line-strong);background:transparent;color:var(--ink);font:500 12px "Geist",system-ui,sans-serif;cursor:pointer}button.ch:hover{background:var(--surface-2)}.o.on button.ch{border-color:var(--branch);color:var(--branch)}button.ch:disabled{cursor:default;opacity:.6}
+.tbl{margin-top:14px;border-top:1px solid var(--line);font-size:12px}.tr{display:grid;grid-template-columns:130px repeat(3,1fr);gap:10px;padding:6px 0;border-bottom:1px solid var(--line);color:var(--ink-2)}.tr b{color:var(--ink-3);font-weight:500}
+.diff{border:1px solid var(--line-strong);border-radius:6px;overflow:hidden;font:12px/1.6 var(--mono)}.diff div{padding:4px 12px}.diff .m{background:var(--fail-soft);color:var(--ink-2)}.diff .p{background:var(--pass-soft);color:var(--ink)}.diff .m::before{content:"− ";color:var(--fail)}.diff .p::before{content:"+ ";color:var(--pass)}
+.ord{display:flex;flex-direction:column;gap:6px;counter-reset:o}.ord div{display:grid;grid-template-columns:22px 1fr auto;gap:10px;align-items:center;padding:8px 10px;border:1px solid var(--line);border-radius:5px;background:var(--canvas);font-size:12.5px}.ord div::before{counter-increment:o;content:counter(o);font:600 11px var(--mono);color:var(--branch)}.ord code{font:11px var(--mono);color:var(--ink-3)}`;
+}
+function pageBody(v) {
+  if (v.kind === "options") {
+    const card = (o) => {
+      const gates = Array.isArray(o.gate) ? o.gate : [o.gate];
+      const flow = o.flow.map((f, i) => `<div class="fs${gates.includes(i) ? " g" : ""}"><i></i>${f}</div>`).join("");
+      return `<div class="o" data-o="${o.id}"><div class="oh"><span class="lt">${o.id.toUpperCase()}</span><span class="on2">${o.label}</span>${o.rec ? '<span class="rec">recommended</span>' : ""}</div><div class="dt">${o.detail}</div><div class="fl">${flow}</div><ul>${o.pro.map((p) => `<li class="p">${p}</li>`).join("")}${o.con.map((c) => `<li class="c">${c}</li>`).join("")}</ul><button class="ch" data-choose="${o.id}">Choose ${o.id.toUpperCase()}</button></div>`;
+    };
+    const tbl = v.id === "v_8f2c" ? `<div class="tbl"><div class="tr"><b></b><b>A</b><b>B</b><b>C</b></div><div class="tr"><b>Approvals per release</b><span>1</span><span>1</span><span>2</span></div><div class="tr"><b>Public before approval</b><span>tag</span><span>nothing</span><span>nothing</span></div></div>` : "";
+    return `<div class="ey">${v.by} · option sheet</div><h1>${v.title}</h1><p class="l">${v.lede}</p><div class="opts" style="grid-template-columns:repeat(${v.options.length},minmax(0,1fr))">${v.options.map(card).join("")}</div>${tbl}`;
+  }
+  if (v.kind === "diff") return `<div class="ey">${v.by} · rule wording</div><h1>${v.title}</h1><p class="l">Rule 801c9de5, learned from three reviews. B is the reviewer's suggestion.</p><div class="diff"><div class="m">Check ownership before destructive actions.</div><div class="p">Immediately before each destructive action, re-read ownership,</div><div class="p">attachment, activity and dirty-worktree state; skip if it changed.</div></div><div style="display:flex;gap:10px;margin-top:14px"><button class="ch" data-choose="a" style="padding:0 12px">Keep current</button><button class="ch" data-choose="b" style="padding:0 12px">Use B</button></div>`;
+  return `<div class="ey">${v.by} · merge plan</div><h1>${v.title}</h1><p class="l">Each branch after the ones it depends on. Nothing to decide: for reading.</p><div class="ord"><div><span>feat/feed-gate</span><code>merged</code></div><div><span>feat/release-gate-ci</span><code>after 1</code></div><div><span>fix/changelog-sync</span><code>after 2</code></div><div><span>chore/notes-0.6.2</span><code>after 3</code></div></div>`;
+}
+function pageScript() {
+  return `<script>
+const root=document.documentElement;let locked=false;
+function mark(id){document.querySelectorAll('.o').forEach(o=>o.classList.toggle('on',o.dataset.o===id));}
+addEventListener('message',e=>{const d=e.data||{};
+ if(d.type==='brindle.theme'){for(const k in d.vars)root.style.setProperty(k,d.vars[k]);root.style.colorScheme=d.scheme;}
+ if(d.type==='brindle.selected'){mark(d.option);}
+ if(d.type==='brindle.locked'){locked=true;document.querySelectorAll('.o').forEach(o=>o.classList.add('lock'));document.querySelectorAll('button.ch').forEach(b=>b.disabled=true);}
+});
+document.querySelectorAll('[data-choose]').forEach(b=>b.addEventListener('click',()=>{if(locked)return;mark(b.dataset.choose);parent.postMessage({type:'choice',option:b.dataset.choose},'*');}));
+<\/script>`;
+}
+function srcdoc(v) {
+  const csp = "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:";
+  return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><style>${pageCss()}</style></head><body>${pageBody(v)}${pageScript()}</body></html>`;
+}
+function frame(v) {
+  const f = document.createElement("iframe");
+  f.setAttribute("sandbox", "allow-scripts");
+  f.setAttribute("title", v.title);
+  f.dataset.v = v.id;
+  f.srcdoc = srcdoc(v);
+  f.addEventListener("load", () => {
+    f.contentWindow.postMessage({ type: "brindle.theme", ...themeVars() }, "*");
+    const sel = S.sent[v.id] || v.decided || S.picks[v.id];
+    if (sel) f.contentWindow.postMessage({ type: "brindle.selected", option: sel }, "*");
+    if (isDecided(v)) f.contentWindow.postMessage({ type: "brindle.locked" }, "*");
+  });
+  return f;
+}
+/* The host's only listener: a choice from a frame it mounted, for an option the tool call declared. */
+addEventListener("message", (e) => {
+  const f = $$("iframe[data-v]").find((x) => x.contentWindow === e.source);
+  if (!f || !e.data || e.data.type !== "choice") return;
+  const v = byId(f.dataset.v);
+  if (!v || !v.options || !v.options.some((o) => o.id === e.data.option) || isDecided(v)) return;
+  S.picks[v.id] = e.data.option;
+  S.picked[v.id] = true;
+  renderBar();
+});
+
+/* ── Host chrome ───────────────────────────────────────────────────────── */
+const glyph = (v) => (isDecided(v) ? `<span class="st-ok">✓</span>` : v.unread ? `<span class="st-new"></span>` : "");
+const row = (v) => `<button class="vrow${v.unread ? " unread" : ""}${S.fresh === v.id ? " fresh" : ""}${isDecided(v) ? " done" : ""}" type="button" data-open="${v.id}" aria-current="${S.active === v.id}" title="${esc(v.title)}"><span class="g">${glyph(v)}</span><span class="tt">${v.title}</span><span class="mm">${isDecided(v) ? `chose ${answerOf(v).id.toUpperCase()}` : asks(v) ? '<span class="ask">asks</span>' : v.age}${S.kept[v.id] ? " " + BM(true) : ""}</span></button>`;
+function bar(v) {
+  if (!v.question) return "";
+  if (isDecided(v)) {
+    const o = answerOf(v);
+    const note = S.notes[v.id] ? ` · “${esc(S.notes[v.id])}”` : "";
+    return `<div class="abar sent"><span class="tick">✓</span><span class="s"><b>Answered ${o.id.toUpperCase()} · ${o.label}</b> <span>${S.sent[v.id] ? `· sent to ${v.by.split(" ")[0]} just now${note}` : "· sent " + v.age + " ago"}</span></span><span class="flex1"></span><button class="quiet" type="button">Change answer</button></div>`;
+  }
+  const pick = S.picks[v.id];
+  const chips = v.options.map((o) => `<button type="button" class="ochip" role="radio" aria-checked="${pick === o.id}" data-pick="${o.id}" data-for="${v.id}"><span class="l">${o.id.toUpperCase()}</span>${o.label}</button>`).join("");
+  return `<div class="abar${S.picked[v.id] ? " glow" : ""}">
+    <div class="q"><span class="k">asks you</span><span class="qt">${v.question}</span><span class="hint">${S.picked[v.id] ? "picked in the visual" : ""}</span></div>
+    <div class="row" role="radiogroup" aria-label="${esc(v.question)}">${chips}<input class="note" data-note="${v.id}" placeholder="Add a note (optional)" value="${esc(S.notes[v.id] || "")}"><button type="button" class="btn-main sm" data-send="${v.id}" ${pick ? "" : "disabled"}>Send answer</button></div>
+  </div>`;
+}
+function head(v) {
+  const k = !!S.kept[v.id];
+  return `<div class="vhead"><div class="b"><h5>${v.title}</h5><div class="vmeta"><span>${v.by}</span><span class="dot">·</span><span>rev ${v.rev} · ${v.age === "now" ? "just now" : v.age + " ago"}</span>${isDecided(v) ? '<span class="dot">·</span><span class="st-ok">✓ decided</span>' : ""}</div></div><div class="vacts"><button class="keep" type="button" data-keep="${v.id}" aria-pressed="${k}" title="Keep it after this session is removed">${BM(k)}${k ? "Kept" : "Keep"}</button><button class="btn-dots" type="button" aria-label="More">⋯</button></div></div>`;
+}
+const keepnote = (v) => `<div class="keepnote">${BM(true)}<span><b>Kept.</b> It stays in Knowledge › Kept visuals after this session is removed.</span><button class="link" type="button" data-keep="${v.id}">Undo</button></div>`;
+const prov = (v) => `<div class="prov"><span class="lock"><svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="7" width="10" height="7" rx="1.5"/><path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2"/></svg>sandboxed · no network</span><span class="r"><span>${v.id} · r${v.rev}</span><span>↻</span></span></div>`;
+const body = (v) => `<div class="frame-wrap${isDecided(v) ? " decided" : ""}" data-slot="${v.id}">${prov(v)}</div>`;
+function panelHtml() {
+  const o = openV(), d = decV(), v = byId(S.active);
+  const kept = vis().filter((x) => S.kept[x.id]).length;
+  const fold = d.length ? `<button class="vfold${S.bump ? " bump" : ""}" type="button" data-fold aria-expanded="${S.fold}"><span class="st-ok">✓</span><span>${d.length} decided</span><span class="t-3">${S.fold ? "" : "· " + d.map((x) => x.short).join(", ")}</span><span class="flex1"></span><span class="chev">${S.fold ? "▾" : "▸"}</span></button>` : "";
+  return `<aside class="panel" aria-label="Visuals in this session">
+    <div class="vp-head"><span class="vp-t">${ICON}Visuals</span><span class="vp-m">${o.length} open${d.length ? ` · ${d.length} decided` : ""}</span><span class="flex1"></span><button class="quiet" type="button" data-wide>${S.wide ? "Beside the chat" : "Wider"}</button><button class="btn-dots" type="button" data-close aria-label="Close the panel">×</button></div>
+    <div class="vlist">${o.map(row).join("")}${fold}${S.fold ? `<div class="vfolded">${d.map(row).join("")}</div>` : ""}</div>
+    <div class="vlife"><span>stored with this session · cleared when it's removed</span><span class="flex1"></span><span>${kept} kept</span></div>
+    ${v ? head(v) + (S.kept[v.id] ? keepnote(v) : "") + body(v) + `<div id="bar">${bar(v)}</div>` : `<div class="vempty">Pick a visual above.</div>`}
+  </aside>`;
+}
+const btnInner = () => `${ICON}Visuals<span class="n">${openV().length}</span>${vis().some((v) => v.unread) ? `<span class="nw${S.pulse ? " pulse" : ""}"></span>` : ""}`;
+function calloutHtml() {
+  if (!S.pop || S.variant !== "callout") return "";
+  const v = byId(S.pop);
+  return `<div class="callout" role="status" aria-live="polite">
+    <div class="co-h"><span class="ibx-k">new visual</span><span class="t-3">${v.by} · just now</span><span class="flex1"></span><button class="co-x" type="button" data-popx tabindex="-1" aria-label="Dismiss">×</button></div>
+    <div class="co-t">${v.title}</div>
+    <div class="co-m">${v.sub}${asks(v) ? " · in your Inbox too" : ""}</div>
+    <div class="co-a"><button class="act" type="button" data-popopen tabindex="-1">Open</button><span class="t-3">or the link in the chat</span><span class="flex1"></span><span class="kbd">⌘⇧V</span></div>
+  </div>`;
+}
+function toastHtml() {
+  if (!S.pop || S.variant !== "toast") return "";
+  const v = byId(S.pop);
+  return `<div class="toast" role="status" aria-live="polite" style="--life:${TOAST_MS / 1000}s"><span class="ti">${ICON}</span><div style="min-width:0"><div class="tz-t"><b>${v.by}</b> drew a visual · Ship the one-approval release flow</div><div class="tz-s">${v.title}</div></div><button class="act" type="button" data-popopen tabindex="-1">Open</button><button class="co-x" type="button" data-popx tabindex="-1" aria-label="Dismiss">×</button><i class="tz-bar"></i></div>`;
+}
+
+/* The supervisor's chat: its lines, a link per visual it drew, and what you sent. */
+const vlink = (v) => `  <span class="vl" data-openv="${v.id}">◧ ${v.title}</span>\n  <span class="d">  brindle · ${v.sub}</span>`;
+function termText() {
+  return `<span class="d">· 2 earlier visuals, both decided</span>
+
+<span class="a">●</span> Feed gate merged into brindle/session-3.
+  Milestone 1's check passes.
+
+<span class="a">●</span> Drew the merge order for the four
+  branches; nothing to decide.
+
+${vlink(V[1])}
+
+<span class="a">●</span> Milestone 2 needs a call from you: where
+  the one approval sits. I drew three flows.
+
+${vlink(V[0])}
+
+<span class="a">●</span> Meanwhile e1f07a2c keeps going on the
+  changelog sync; it doesn't depend on this.
+${S.log.join("")}
+<span class="d">›</span> <span class="cur"></span>`;
+}
+const ARRIVAL = () => `\n<span class="nl"><span class="a">●</span> Changelog sync can run on tag or on
+  publish. Drew both; which do you want?
+
+${vlink(NEWV)}</span>`;
+function sessionView() {
+  return `<div class="sv">
+    <header class="sbar"><span class="who">Claude · supervisor</span><code>a3c91e07</code><span class="st"><b>●</b> working <span class="t-3">· 2 min ago</span></span><span class="flex1"></span>
+      <span class="vbwrap"><button class="vbtn" type="button" id="vbtn" data-vbtn aria-pressed="${S.panel}" title="${openV().length} open · ${decV().length} decided">${btnInner()}</button><span id="co-slot">${calloutHtml()}</span></span>
+      <button class="btn sm" type="button">Pause</button><button class="btn-dots" type="button" aria-label="More">⋯</button></header>
+    <div class="sv-body${S.panel && S.wide ? " wide" : ""}">
+      <div class="termwrap"><div class="shell term"><div class="tabs-s"><span class="on">chat</span><span>shell</span></div><pre id="term">${termText()}</pre></div></div>
+      ${S.panel ? panelHtml() : ""}
+    </div>
+    <div id="toast-slot">${toastHtml()}</div>
+    <div id="flow-slot"></div>
+  </div>`;
+}
+
+/* ── Render ────────────────────────────────────────────────────────────── */
+function render() {
+  const v = byId(S.active);
+  if (S.panel && v) v.unread = false;
+  $("#main").innerHTML = sessionView();
+  $$("[data-slot]").forEach((slot) => slot.appendChild(frame(byId(slot.dataset.slot))));
+  const t = $("#term"); t.scrollTop = t.scrollHeight;
+  sidebar();
+  S.fresh = null; S.bump = false;
+}
+function renderBar() { const b = $("#bar"); if (b) b.innerHTML = bar(byId(S.active)); }
+/* Only the popups and the button: the chat and the frame keep their state. */
+function renderPop() {
+  $("#co-slot").innerHTML = calloutHtml();
+  $("#toast-slot").innerHTML = toastHtml();
+  $("#vbtn").innerHTML = btnInner();
+}
+function sidebar() {
+  $("#inbox-n").textContent = inboxCount();
+  const o = S.sent.v_8f2c && RELEASE.find((x) => x.id === S.sent.v_8f2c);
+  $("#ms2").textContent = o ? `you chose ${o.id.toUpperCase()} · e1f07a2c on it` : "waiting on your choice of flow";
+}
+function setHint(html) { $("#hint").innerHTML = html; }
+
+let popT, flowT;
+function schedulePop() {
+  clearTimeout(popT);
+  if (new URLSearchParams(location.search).get("shot")) return;
+  popT = setTimeout(() => { S.pop = null; S.pulse = true; renderPop(); S.pulse = false; setHint("The popup folded back into the button's <b>dot</b>; the link is still in the chat."); }, S.variant === "toast" ? TOAST_MS : CALLOUT_MS);
+}
+document.addEventListener("pointerover", (e) => { if (e.target.closest(".callout, .toast")) clearTimeout(popT); });
+document.addEventListener("pointerout", (e) => { const p = e.target.closest("#main .callout, #main .toast"); if (p && !p.contains(e.relatedTarget)) schedulePop(); });
+
+function arrive() {
+  S.arrived = true;
+  NEWV.unread = true;
+  S.log.push(ARRIVAL());
+  if (S.panel) { S.fresh = NEWV.id; S.pop = null; setHint("Panel open, so <b>no popup</b>: the row slides into the list with a dot."); }
+  else { S.pop = NEWV.id; schedulePop(); setHint(S.variant === "callout" ? "The callout hangs from the Visuals button. <b>Open</b> it, click the chat link, or wait 12 s." : "The toast sits bottom right and drains in 8 s. <b>Open</b> it or click the chat link."); }
+  render();
+}
+function unarrive() {
+  S.arrived = false; S.pop = null;
+  S.log = S.log.filter((x) => !x.includes(NEWV.id));
+  delete S.sent[NEWV.id]; delete S.picks[NEWV.id]; delete S.picked[NEWV.id]; delete S.kept[NEWV.id];
+  if (S.active === NEWV.id) S.active = "v_8f2c";
+}
+function openVisual(id) {
+  S.panel = true; S.active = id; S.pop = null; clearTimeout(popT);
+  render();
+}
+function send(id) {
+  const v = byId(id);
+  if (!S.picks[id] || isDecided(v)) return;
+  const note = $(`[data-note="${id}"]`);
+  if (note) S.notes[id] = note.value.trim();
+  S.sent[id] = S.picks[id];
+  v.unread = false;
+  const o = answerOf(v);
+  S.log.push(`\n<span class="dl"><span class="d">brindle delivered this message from you
+(visual ${v.id}, rev ${v.rev}):</span>
+<span class="a">Chose ${o.id.toUpperCase()} · ${o.label}</span>${S.notes[id] ? `\n<span class="d">note:</span> ${esc(S.notes[id])}` : ""}</span>${AFTER[id] ? `<span class="a">●</span> ${AFTER[id](o)}\n` : ""}`);
+  S.bump = true;
+  render();
+  $$("iframe[data-v]").forEach((f) => f.dataset.v === id && f.contentWindow.postMessage({ type: "brindle.locked" }, "*"));
+  $("#flow-slot").innerHTML = `<div class="flowback"><span class="pd"></span><span>Sent to <b>${v.by.split(" ")[0]}</b> · it's in the chat, and the visual folded into <b>${decV().length} decided</b></span></div>`;
+  clearTimeout(flowT); flowT = setTimeout(() => { const s = $("#flow-slot"); if (s) s.innerHTML = ""; }, FLOW_MS);
+  setHint("Answered: the row moved into the <b>decided</b> line; the open one stays in the viewer.");
+}
+
+document.addEventListener("click", (e) => {
+  const t = e.target.closest("button, [data-openv]");
+  if (!t || !t.closest(".win, .demo-ctl")) return;
+  const d = t.dataset;
+  if (d.vbtn !== undefined) { S.panel = !S.panel; S.pop = null; clearTimeout(popT); render(); }
+  else if (d.close !== undefined) { S.panel = false; render(); }
+  else if (d.wide !== undefined) { S.wide = !S.wide; render(); }
+  else if (d.open) { S.active = d.open; render(); }
+  else if (d.fold !== undefined) { S.fold = !S.fold; render(); }
+  else if (d.keep) { S.kept[d.keep] = !S.kept[d.keep]; render(); }
+  else if (d.pick) { S.picks[d.for] = d.pick; S.picked[d.for] = false; $$(`iframe[data-v="${d.for}"]`).forEach((f) => f.contentWindow.postMessage({ type: "brindle.selected", option: d.pick }, "*")); renderBar(); }
+  else if (d.send) send(d.send);
+  else if (d.openv) openVisual(d.openv);
+  else if (d.popopen !== undefined) openVisual(S.pop);
+  else if (d.popx !== undefined) { S.pop = null; clearTimeout(popT); renderPop(); }
+  else if (d.variant) {
+    S.variant = d.variant;
+    $$("[data-variant]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.variant === S.variant)));
+    if (S.pop) { renderPop(); schedulePop(); }
+  }
+  else if (t.id === "sim") {
+    if (S.arrived) { unarrive(); render(); }
+    if (S.panel) setHint("The panel is open, so the new one will just slide into the list. <b>Close the panel</b> first to see the popup.");
+    setTimeout(arrive, 450);
+  }
+  else if (t.id === "reset") { clearTimeout(popT); Object.assign(S, FRESH()); V[0].unread = true; NEWV.unread = true; setHint("Try it: <b>pick B in the visual</b>, then <b>Send answer</b>; it folds into “decided”. Close the panel, then <b>simulate a new visual</b>."); render(); }
+});
+document.addEventListener("input", (e) => { if (e.target.matches("[data-note]")) S.notes[e.target.dataset.note] = e.target.value; });
+
+/* ── The typing lab: the callout waits for a pause and never takes focus ── */
+const DRAFT = "also bump the changelog date, and keep the hotfix path";
+const LAB_CALLOUT = `<div class="callout" role="status" aria-live="polite"><div class="co-h"><span class="ibx-k">new visual</span><span class="t-3">supervisor · just now</span><span class="flex1"></span><button class="co-x" type="button" tabindex="-1" data-labx aria-label="Dismiss">×</button></div><div class="co-t">Changelog sync: on tag, or on publish?</div><div class="co-m">2 options · asks you · in your Inbox too</div><div class="co-a"><button class="act" type="button" tabindex="-1" data-labx>Open</button><span class="t-3">or the link in the chat</span><span class="flex1"></span><span class="kbd">⌘⇧V</span></div></div>`;
+const L = { typer: null, wait: null, last: 0 };
+function labStep(i) { $$("#lab-steps li").forEach((li, j) => { li.className = j < i ? "done" : j === i ? "on" : ""; }); }
+function labReset() {
+  clearInterval(L.typer); clearTimeout(L.wait);
+  $("#lab-in").value = ""; $("#lab-co").innerHTML = ""; $("#lab-new").hidden = true; $("#lab-held").hidden = true; $("#lab-focus").textContent = "";
+  $("#lab-vb").innerHTML = `${ICON}Visuals<span class="n">2</span>`;
+  labStep(-1);
+}
+function labShow() {
+  $("#lab-held").hidden = true;
+  $("#lab-co").innerHTML = LAB_CALLOUT;
+  labStep(2);
+}
+function labCheck() {
+  const idle = Date.now() - L.last;
+  if (idle < IDLE_MS) { L.wait = setTimeout(labCheck, IDLE_MS - idle + 20); return; }
+  labShow();
+  L.wait = setTimeout(() => {
+    const inp = $("#lab-in");
+    $("#lab-focus").textContent = (document.activeElement === inp ? "✓ focus is still in your draft · " : "✓ ") + `draft: ${inp.value.length} characters, exactly as typed`;
+    labStep(3);
+  }, 900);
+}
+function labPlay() {
+  labReset();
+  const inp = $("#lab-in");
+  inp.focus();
+  let i = 0;
+  labStep(0);
+  L.typer = setInterval(() => {
+    inp.value = DRAFT.slice(0, ++i);
+    L.last = Date.now();
+    if (i === 14) {
+      labStep(1);
+      $("#lab-new").hidden = false;
+      $("#lab-held").hidden = false;
+      $("#lab-vb").innerHTML = `${ICON}Visuals<span class="n">3</span><span class="nw"></span>`;
+      labCheck();
+    }
+    if (i >= DRAFT.length) clearInterval(L.typer);
+  }, 75);
+}
+$("#lab-in").addEventListener("keydown", () => { L.last = Date.now(); });
+$("#lab-play").addEventListener("click", labPlay);
+document.addEventListener("click", (e) => { if (e.target.closest("[data-labx]")) $("#lab-co").innerHTML = ""; });
+
+/* ── The planning doc ──────────────────────────────────────────────────── */
+const P = { rev: 1, phase: "draft", c2: false, keep: true };
+const MINE = { d1: "org", d2: "auto", d3: "deny" };
+function planGate() {
+  const changed = $$("#pwin .alts").filter((g) => g.querySelector('[aria-pressed="true"]').dataset.alt !== MINE[g.dataset.dec]).length;
+  const answered = $$("#pwin .oq input").filter((i) => i.value.trim()).length;
+  const comments = 1 + (P.c2 ? 1 : 0);
+  const workers = P.rev === 2 ? 3 : 4;
+  $("#p-cn").textContent = comments;
+  $("#p-rev").textContent = P.rev;
+  $("#p-reply").hidden = P.rev < 2;
+  $("#p-c2").hidden = !P.c2;
+  $("#p-add").hidden = P.c2;
+  $("#p-w3").classList.toggle("cut", P.rev === 2);
+  $("#p-split-n").textContent = `${workers} workers · 2 start together`;
+  const kept = P.phase === "approved" && P.keep;
+  const kb = $("#p-keep");
+  kb.setAttribute("aria-pressed", String(kept));
+  kb.innerHTML = `${BM(kept)}${kept ? "Kept" : "Keep"}`;
+  const g = $("#pgate");
+  g.classList.toggle("ok", P.phase === "approved");
+  if (P.phase === "approved") {
+    g.innerHTML = `<span class="k">approved · rev ${P.rev}</span><span class="s"><b>Your answers went to the supervisor.</b> Workers starting:</span><span class="starts"><span><span class="side-dot" data-tone="work"></span>w1 · schema</span><span><span class="side-dot" data-tone="work"></span>w2 · engine</span>${P.rev === 1 ? '<span><span class="side-dot"></span>w3 · queued</span>' : ""}<span><span class="side-dot"></span>w4 · queued</span></span><span class="flex1"></span>${kept ? '<span class="t-3" style="font-size:12px;white-space:nowrap">kept in Knowledge</span>' : ""}<button class="quiet" type="button" data-plan="reset">Reset</button>`;
+    return;
+  }
+  g.innerHTML = `<span class="k">${P.rev === 2 ? "rev 2 · took your comments" : "plan · waits on you"}</span><span class="s"><b>Nothing has started.</b> ${comments} comment${comments === 1 ? "" : "s"} · ${changed} decision${changed === 1 ? "" : "s"} changed · ${answered} of 2 answered</span><span class="flex1"></span><label><input type="checkbox" data-plan-keep ${P.keep ? "checked" : ""}> Keep the plan</label>${P.rev === 1 ? '<button class="btn sm" type="button" data-plan="redirect">Redirect with comments</button>' : ""}<button class="btn-main sm" type="button" data-plan="approve">Approve · start ${workers}</button>`;
+}
+document.addEventListener("click", (e) => {
+  const alt = e.target.closest("#pwin .alt");
+  if (alt) { $$("button", alt.parentElement).forEach((b) => b.setAttribute("aria-pressed", String(b === alt))); planGate(); return; }
+  const b = e.target.closest("[data-plan], #p-add, #p-keep");
+  if (!b) return;
+  if (b.id === "p-add") P.c2 = true;
+  else if (b.id === "p-keep") P.keep = !P.keep;
+  else if (b.dataset.plan === "redirect") { P.rev = 2; const repo = $('#pwin [data-dec="d1"] [data-alt="repo"]'); $$('#pwin [data-dec="d1"] button').forEach((x) => x.setAttribute("aria-pressed", String(x === repo))); }
+  else if (b.dataset.plan === "approve") P.phase = "approved";
+  else if (b.dataset.plan === "reset") { P.rev = 1; P.phase = "draft"; P.c2 = false; P.keep = true; }
+  planGate();
+});
+document.addEventListener("change", (e) => { if (e.target.matches("[data-plan-keep]")) { P.keep = e.target.checked; planGate(); } });
+document.addEventListener("input", (e) => { if (e.target.closest("#pwin .oq")) planGate(); });
+planGate();
+
+/* URL presets, for screenshots: ?theme=light&shot=1&panel=0&pop=callout|toast&sent=1&fold=1&keep=1&wide=1&lab=done&plan=approved */
+const q = new URLSearchParams(location.search);
+if (q.get("shot")) document.documentElement.classList.add("shot");
+if (q.get("panel") === "0") S.panel = false;
+if (q.get("wide")) S.wide = true;
+if (q.get("fold")) S.fold = true;
+if (q.get("keep")) S.kept.v_8f2c = true;
+if (q.get("sent")) { S.picks.v_8f2c = "b"; S.sent.v_8f2c = "b"; S.notes.v_8f2c = "keep the hotfix path"; S.log.push(`\n<span class="dl"><span class="d">brindle delivered this message from you\n(visual v_8f2c, rev 2):</span>\n<span class="a">Chose B · Gate on CI</span>\n<span class="d">note:</span> keep the hotfix path</span><span class="a">●</span> ${AFTER.v_8f2c(RELEASE[1])}\n`); }
+if (q.get("pop")) { S.variant = q.get("pop"); S.arrived = true; S.log.push(ARRIVAL()); if (S.panel) S.fresh = NEWV.id; else S.pop = NEWV.id; $$("[data-variant]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.variant === S.variant))); }
+if (q.get("plan") === "approved") { P.rev = 2; P.c2 = true; P.phase = "approved"; planGate(); }
+render();
+if (q.get("lab") === "done") { $("#lab-in").value = DRAFT; $("#lab-new").hidden = false; $("#lab-vb").innerHTML = `${ICON}Visuals<span class="n">3</span><span class="nw"></span>`; labShow(); labStep(3); $("#lab-focus").textContent = `✓ focus is still in your draft · draft: ${DRAFT.length} characters, exactly as typed`; }
+if (q.get("theme")) setTheme(q.get("theme"));
+</script>
+</body>
+</html>
