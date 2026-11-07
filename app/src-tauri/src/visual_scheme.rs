@@ -534,9 +534,33 @@ pub fn open<R: Runtime>(
     let visual = visual.checked()?;
     let label = visual.label();
     sandbox.bind(&label, &visual)?;
+    // Built on the main thread: the platform's webview configuration (on
+    // macOS, the visual's own process pool) exists only there, and that is
+    // where Tauri adds a child anyway.
+    let (tx, rx) = std::sync::mpsc::channel();
+    let (on_main, for_main, sink) = (window.clone(), visual.clone(), sandbox.sink.clone());
+    let dispatched = window
+        .run_on_main_thread(move || {
+            let _ = tx.send(build_child(&on_main, &for_main, bounds, sink));
+        })
+        .map_err(|e| e.to_string());
+    let built = dispatched.and_then(|()| rx.recv().map_err(|_| "the main thread never answered".to_string()));
+    match built {
+        Ok(Ok(webview)) => Ok(webview),
+        Ok(Err(e)) | Err(e) => {
+            sandbox.unbind(&label);
+            Err(format!("couldn't open the visual: {e}"))
+        }
+    }
+}
+
+/// On the main thread: the child webview with its hooks and the platform's
+/// configuration, added to the window, then armed.
+fn build_child<R: Runtime>(window: &Window<R>, visual: &VisualRef, bounds: Bounds, sink: Sink) -> Result<Webview<R>, String> {
+    let label = visual.label();
     let blank = Url::parse("about:blank").expect("about:blank");
-    let for_navigation = (visual.clone(), sandbox.sink.clone());
-    let for_window = (visual.clone(), sandbox.sink.clone());
+    let for_navigation = (visual.clone(), sink.clone());
+    let for_window = (visual.clone(), sink.clone());
     let for_loaded = visual.clone();
     let builder = WebviewBuilder::new(&label, WebviewUrl::External(blank))
         .initialization_script_for_all_frames(prelude(&visual))
@@ -566,14 +590,11 @@ pub fn open<R: Runtime>(
                 });
             }
         });
-    let webview = match window.add_child(builder, LogicalPosition::new(bounds.x, bounds.y), LogicalSize::new(bounds.width, bounds.height)) {
-        Ok(webview) => webview,
-        Err(e) => {
-            sandbox.unbind(&label);
-            return Err(format!("couldn't open the visual: {e}"));
-        }
-    };
-    arm(&webview, sandbox, &visual, bounds);
+    let builder = platform::configure(builder)?;
+    let webview = window
+        .add_child(builder, LogicalPosition::new(bounds.x, bounds.y), LogicalSize::new(bounds.width, bounds.height))
+        .map_err(|e| e.to_string())?;
+    arm(&webview, sink, visual, bounds);
     Ok(webview)
 }
 
@@ -626,21 +647,65 @@ pub fn request_snapshot<R: Runtime>(app: &AppHandle<R>, sandbox: &Sandbox, label
 }
 
 /// What arming the blocker came to: the page may load, or it must not.
-type Armed = Box<dyn FnOnce(Result<(), String>) + Send>;
+pub type Armed = Box<dyn FnOnce(Result<(), String>) + Send>;
+
+/// WebKit's switch for `<link rel=preconnect>`, behind a seam: the webview's
+/// preferences in the app (macOS), a stand-in in tests. A preconnect opens a
+/// connection with no request, so neither CSP nor the rule list sees it;
+/// WebKit keeps it behind the `LinkPreconnect` feature flag, on by default.
+pub trait PreconnectSwitch {
+    /// Whether this WebKit exposes its feature list and the setter for it.
+    fn has_feature_list(&self) -> bool;
+    /// The keys of the features it lists.
+    fn feature_keys(&self) -> Vec<String>;
+    /// Switch the feature `key` off for these preferences.
+    fn switch_off(&self, key: &str);
+}
+
+/// The feature WebKit keeps link preconnect behind.
+pub const LINK_PRECONNECT: &str = "LinkPreconnect";
+
+/// Switch link preconnect off through `switch`, or say why it can't be: a
+/// visual is never loaded then.
+pub fn disable_preconnect(switch: &dyn PreconnectSwitch) -> Result<(), String> {
+    if !switch.has_feature_list() {
+        return Err("this WebKit has no feature list to switch link preconnect off".into());
+    }
+    if switch.feature_keys().iter().any(|key| key == LINK_PRECONNECT) {
+        switch.switch_off(LINK_PRECONNECT);
+        return Ok(());
+    }
+    Err("this WebKit lists no LinkPreconnect feature to switch off".into())
+}
 
 /// Put the platform's request blocker on the webview, then load the page.
 /// Nothing but `about:blank` is shown until the blocker is in place; when it
 /// can't be (a WebKit without the preconnect switch, a refused rule list),
 /// the page is never loaded and the host is told (`Delivery::Failed`).
-fn arm<R: Runtime>(webview: &Webview<R>, sandbox: &Sandbox, visual: &VisualRef, bounds: Bounds) {
+fn arm<R: Runtime>(webview: &Webview<R>, sink: Sink, visual: &VisualRef, bounds: Bounds) {
     let url = visual.url();
     let target = webview.clone();
-    let sink = sandbox.sink.clone();
+    arm_with(
+        sink,
+        visual,
+        move || {
+            let _ = target.navigate(url);
+        },
+        |armed| platform::arm(webview, bounds, armed),
+    );
+}
+
+/// Arm through `platform`, then `load` the page on success. On any failure,
+/// the platform's or arming's own, nothing loads and the host is told once.
+fn arm_with(
+    sink: Sink,
+    visual: &VisualRef,
+    load: impl FnOnce() + Send + 'static,
+    platform: impl FnOnce(Armed) -> Result<(), String>,
+) {
     let visual = visual.clone();
     let armed: Armed = Box::new(move |outcome| match outcome {
-        Ok(()) => {
-            let _ = target.navigate(url);
-        }
+        Ok(()) => load(),
         Err(why) => {
             eprintln!("visual {}: no request blocker, the page stays blank: {why}", visual.path());
             sink(Delivery::Failed { label: visual.label(), visual, why });
@@ -649,15 +714,11 @@ fn arm<R: Runtime>(webview: &Webview<R>, sandbox: &Sandbox, visual: &VisualRef, 
     // Called once: by the platform, or here when the platform never got to.
     let once = Arc::new(Mutex::new(Some(armed)));
     let inside = once.clone();
-    let outcome = platform::arm(
-        webview,
-        bounds,
-        Box::new(move |result| {
-            if let Some(armed) = inside.lock().ok().and_then(|mut a| a.take()) {
-                armed(result);
-            }
-        }),
-    );
+    let outcome = platform(Box::new(move |result| {
+        if let Some(armed) = inside.lock().ok().and_then(|mut a| a.take()) {
+            armed(result);
+        }
+    }));
     if let Err(e) = outcome {
         if let Some(armed) = once.lock().ok().and_then(|mut a| a.take()) {
             armed(Err(format!("the webview handle couldn't be reached: {e}")));
@@ -739,35 +800,80 @@ mod platform {
     use objc2::runtime::AnyObject;
     use objc2::{msg_send, sel, ClassType, MainThreadMarker};
     use objc2_foundation::{NSArray, NSError, NSString};
-    use objc2_web_kit::{WKContentRuleList, WKContentRuleListStore, WKPreferences, WKUserContentController, WKWebView};
+    use objc2_web_kit::{
+        WKContentRuleList, WKContentRuleListStore, WKPreferences, WKProcessPool, WKUserContentController, WKWebView,
+        WKWebViewConfiguration, WKWebsiteDataStore,
+    };
     use std::cell::RefCell;
     use std::rc::Rc;
+    use tauri::webview::WebviewBuilder;
     use tauri::{Runtime, Webview};
 
-    /// `<link rel=preconnect>` opens a connection with no request, so neither
-    /// CSP nor the rule list sees it. WebKit keeps it behind a feature flag
-    /// (`LinkPreconnect`, on by default), reachable through WKPreferences'
-    /// private feature list: off for this webview's preferences, or an error,
-    /// on which the page is never loaded.
-    unsafe fn disable_preconnect(webview: &WKWebView) -> Result<(), String> {
-        let preferences = webview.configuration().preferences();
-        let prefs: &AnyObject = &preferences;
-        let class = WKPreferences::class();
-        let answers: bool = msg_send![class, respondsToSelector: sel!(_features)];
-        let sets: bool = msg_send![prefs, respondsToSelector: sel!(_setEnabled:forFeature:)];
-        if !answers || !sets {
-            return Err("this WebKit has no feature list to switch link preconnect off".into());
-        }
-        let features: Retained<NSArray<AnyObject>> = msg_send![class, _features];
-        for feature in features.iter() {
-            let feature: &AnyObject = &feature;
-            let key: Option<Retained<NSString>> = msg_send![feature, key];
-            if key.is_some_and(|k| k.to_string() == "LinkPreconnect") {
-                let _: () = msg_send![prefs, _setEnabled: false, forFeature: feature];
-                return Ok(());
+    /// The visual's own WebKit configuration: its own process pool, so its
+    /// web content process is nobody else's (a visual that hangs hangs alone,
+    /// the app's page and other visuals included), and no storage. wry
+    /// leaves a supplied configuration's data store as it is, so the
+    /// builder's `incognito` wouldn't reach it: set here.
+    pub fn configure<R: Runtime>(builder: WebviewBuilder<R>) -> Result<WebviewBuilder<R>, String> {
+        let mtm = MainThreadMarker::new().ok_or("a visual's webview is built on the main thread")?;
+        // SAFETY: fresh WebKit objects, made and used on the main thread.
+        let configuration = unsafe {
+            let configuration = WKWebViewConfiguration::new(mtm);
+            configuration.setProcessPool(&WKProcessPool::new(mtm));
+            configuration.setWebsiteDataStore(&WKWebsiteDataStore::nonPersistentDataStore(mtm));
+            configuration
+        };
+        Ok(builder.with_webview_configuration(configuration))
+    }
+
+    /// WebKit's feature list, through WKPreferences' private API: the class
+    /// method `+_features` lists `_WKFeature`s, each with a `key`, and
+    /// `-_setEnabled:forFeature:` switches one for these preferences.
+    struct WkSwitch {
+        preferences: Retained<WKPreferences>,
+    }
+
+    impl WkSwitch {
+        /// The features, by `key`, paired with the objects the setter wants.
+        fn features(&self) -> Vec<(String, Retained<AnyObject>)> {
+            // SAFETY: a class method that answers an NSArray of objects answering `key`.
+            unsafe {
+                let features: Retained<NSArray<AnyObject>> = msg_send![WKPreferences::class(), _features];
+                features
+                    .iter()
+                    .filter_map(|feature| {
+                        let key: Option<Retained<NSString>> = msg_send![&*feature, key];
+                        key.map(|k| (k.to_string(), feature))
+                    })
+                    .collect()
             }
         }
-        Err("this WebKit lists no LinkPreconnect feature to switch off".into())
+    }
+
+    impl super::PreconnectSwitch for WkSwitch {
+        fn has_feature_list(&self) -> bool {
+            let prefs: &AnyObject = &self.preferences;
+            // SAFETY: respondsToSelector: on live objects.
+            unsafe {
+                let lists: bool = msg_send![WKPreferences::class(), respondsToSelector: sel!(_features)];
+                let sets: bool = msg_send![prefs, respondsToSelector: sel!(_setEnabled:forFeature:)];
+                lists && sets
+            }
+        }
+
+        fn feature_keys(&self) -> Vec<String> {
+            self.features().into_iter().map(|(key, _)| key).collect()
+        }
+
+        fn switch_off(&self, key: &str) {
+            let prefs: &AnyObject = &self.preferences;
+            for (name, feature) in self.features() {
+                if name == key {
+                    // SAFETY: the setter the feature list comes with, on these preferences.
+                    let _: () = unsafe { msg_send![prefs, _setEnabled: false, forFeature: &*feature] };
+                }
+            }
+        }
     }
 
     pub fn arm<R: Runtime>(webview: &Webview<R>, _bounds: Bounds, armed: Armed) -> Result<(), String> {
@@ -780,7 +886,9 @@ mod platform {
                 let Some(view) = (unsafe { Retained::retain(platform.inner().cast::<WKWebView>()) }) else {
                     return armed(Err("no WKWebView behind the webview".into()));
                 };
-                if let Err(why) = unsafe { disable_preconnect(&view) } {
+                // SAFETY: the configuration and preferences of a live WKWebView.
+                let preferences = unsafe { view.configuration().preferences() };
+                if let Err(why) = super::disable_preconnect(&WkSwitch { preferences }) {
                     return armed(Err(why));
                 }
                 // SAFETY: Tauri hands the webview's own WKUserContentController, alive while the webview is.
@@ -829,6 +937,11 @@ mod platform {
     use webview2_com::WebResourceRequestedEventHandler;
     use windows::core::{HSTRING, PWSTR};
     use windows::Win32::System::Com::CoTaskMemFree;
+
+    /// WebView2 gives each webview its own renderer by site; nothing to configure.
+    pub fn configure<R: Runtime>(builder: tauri::webview::WebviewBuilder<R>) -> Result<tauri::webview::WebviewBuilder<R>, String> {
+        Ok(builder)
+    }
 
     pub fn arm<R: Runtime>(webview: &Webview<R>, _bounds: Bounds, armed: Armed) -> Result<(), String> {
         webview
@@ -885,6 +998,11 @@ mod platform {
     use std::ffi::{c_void, CString};
     use tauri::{Runtime, Webview};
     use webkit2gtk::WebViewExt;
+
+    /// WebKitGTK runs each web view in its own web process by default; nothing to configure.
+    pub fn configure<R: Runtime>(builder: tauri::webview::WebviewBuilder<R>) -> Result<tauri::webview::WebviewBuilder<R>, String> {
+        Ok(builder)
+    }
 
     pub fn arm<R: Runtime>(webview: &Webview<R>, bounds: Bounds, armed: Armed) -> Result<(), String> {
         webview
@@ -1006,12 +1124,52 @@ mod platform {
     pub fn place<R: Runtime>(webview: &Webview<R>, bounds: Bounds) {
         let _ = webview.with_webview(move |platform| place_at(&platform.inner(), bounds));
     }
+
+    /// Where the child's widget sits: on the overlay, at which margins and size.
+    pub fn placement_of(child: &webkit2gtk::WebView) -> super::Placement {
+        let (width, height) = child.size_request();
+        super::Placement {
+            in_overlay: child.parent().is_some_and(|p| p.is::<gtk::Overlay>()),
+            x: child.margin_start(),
+            y: child.margin_top(),
+            width,
+            height,
+        }
+    }
+}
+
+/// Where a visual's widget sits in the window on Linux (the probe suite
+/// checks it): on the overlay over the main webview, at its bounds.
+#[cfg(target_os = "linux")]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct Placement {
+    pub in_overlay: bool,
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+/// Ask the webview's widget where it sits (Linux).
+#[cfg(target_os = "linux")]
+pub fn placement<R: Runtime>(webview: &Webview<R>) -> Result<Placement, String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    webview
+        .with_webview(move |platform| {
+            let _ = tx.send(platform::placement_of(&platform.inner()));
+        })
+        .map_err(|e| e.to_string())?;
+    rx.recv_timeout(std::time::Duration::from_secs(10)).map_err(|_| "the widget never answered".to_string())
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 mod platform {
     use super::{Armed, Bounds};
     use tauri::{Runtime, Webview};
+
+    pub fn configure<R: Runtime>(builder: tauri::webview::WebviewBuilder<R>) -> Result<tauri::webview::WebviewBuilder<R>, String> {
+        Ok(builder)
+    }
 
     /// No blocker known for this platform: the page is never loaded.
     pub fn arm<R: Runtime>(_webview: &Webview<R>, _bounds: Bounds, armed: Armed) -> Result<(), String> {
@@ -1079,6 +1237,88 @@ mod tests {
             parse_request("GET", &Url::parse("brindle-visual://localhost/v_8f2c/r2").unwrap()),
             Ok(Ask::Page(v("v_8f2c", 2)))
         );
+    }
+
+    /// A WebKit as a test sees it: with or without the feature list, and
+    /// listing whatever features it is given.
+    struct FakeWebKit {
+        feature_list: Option<Vec<&'static str>>,
+        switched_off: Mutex<Vec<String>>,
+    }
+
+    impl PreconnectSwitch for FakeWebKit {
+        fn has_feature_list(&self) -> bool {
+            self.feature_list.is_some()
+        }
+        fn feature_keys(&self) -> Vec<String> {
+            self.feature_list.iter().flatten().map(|k| k.to_string()).collect()
+        }
+        fn switch_off(&self, key: &str) {
+            self.switched_off.lock().unwrap().push(key.to_string());
+        }
+    }
+
+    /// Arm a visual through the real completion path, with a WebKit that
+    /// does or doesn't offer the preconnect switch: what loaded, what the
+    /// host was told, what was switched off.
+    fn armed_with(webkit: &FakeWebKit) -> (bool, Vec<Delivery>, Vec<String>) {
+        let delivered: Arc<Mutex<Vec<Delivery>>> = Default::default();
+        let log = delivered.clone();
+        let sandbox = Sandbox::new(move |d| log.lock().unwrap().push(d));
+        let visual = VisualRef::Revision { id: "v_1".into(), rev: 1 };
+        let loaded = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let did_load = loaded.clone();
+        arm_with(
+            sandbox.sink.clone(),
+            &visual,
+            move || did_load.store(true, std::sync::atomic::Ordering::SeqCst),
+            // The macOS platform step, up to the rule list: the preconnect switch decides.
+            |armed| {
+                armed(disable_preconnect(webkit));
+                Ok(())
+            },
+        );
+        let off = webkit.switched_off.lock().unwrap().clone();
+        let deliveries = delivered.lock().unwrap().clone();
+        (loaded.load(std::sync::atomic::Ordering::SeqCst), deliveries, off)
+    }
+
+    #[test]
+    fn a_visual_never_loads_when_webkit_cannot_switch_preconnect_off() {
+        let failed = |deliveries: &[Delivery]| -> Vec<String> {
+            deliveries
+                .iter()
+                .map(|d| match d {
+                    Delivery::Failed { label, why, .. } => format!("{label}: {why}"),
+                    other => format!("{other:?}"),
+                })
+                .collect()
+        };
+        // No feature list (an older or stripped WebKit): told once, nothing loads.
+        let no_list = FakeWebKit { feature_list: None, switched_off: Default::default() };
+        let (loaded, deliveries, off) = armed_with(&no_list);
+        assert!(!loaded);
+        assert!(off.is_empty());
+        assert_eq!(failed(&deliveries), ["visual:v_1:r1: this WebKit has no feature list to switch link preconnect off"]);
+        // A feature list without the switch: the same.
+        let no_switch = FakeWebKit { feature_list: Some(vec!["WebGL", "LinkPrefetch"]), switched_off: Default::default() };
+        let (loaded, deliveries, off) = armed_with(&no_switch);
+        assert!(!loaded);
+        assert!(off.is_empty());
+        assert_eq!(failed(&deliveries), ["visual:v_1:r1: this WebKit lists no LinkPreconnect feature to switch off"]);
+        // The switch is there: off, and the page loads with nothing to tell.
+        let switchable = FakeWebKit { feature_list: Some(vec!["WebGL", LINK_PRECONNECT]), switched_off: Default::default() };
+        let (loaded, deliveries, off) = armed_with(&switchable);
+        assert!(loaded);
+        assert_eq!(off, [LINK_PRECONNECT]);
+        assert!(deliveries.is_empty(), "{deliveries:?}");
+        // The platform never got to arm at all (no webview handle): told once, nothing loads.
+        let delivered: Arc<Mutex<Vec<Delivery>>> = Default::default();
+        let log = delivered.clone();
+        let sandbox = Sandbox::new(move |d| log.lock().unwrap().push(d));
+        let visual = VisualRef::Kept { id: "k_1".into() };
+        arm_with(sandbox.sink.clone(), &visual, || panic!("loaded with no blocker"), |_armed| Err("gone".into()));
+        assert_eq!(failed(&delivered.lock().unwrap()), ["visual:kept:k_1: the webview handle couldn't be reached: gone"]);
     }
 
     /// A scheme request through the real handler, as a webview would send it.

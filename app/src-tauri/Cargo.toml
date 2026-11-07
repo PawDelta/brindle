@@ -43,7 +43,7 @@ libc = "0.2"
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = ["NSString", "NSError", "NSArray"] }
-objc2-web-kit = { version = "0.3", features = ["block2", "WKContentRuleList", "WKContentRuleListStore", "WKUserContentController", "WKWebView", "WKWebViewConfiguration", "WKPreferences"] }
+objc2-web-kit = { version = "0.3", features = ["block2", "WKContentRuleList", "WKContentRuleListStore", "WKUserContentController", "WKWebView", "WKWebViewConfiguration", "WKPreferences", "WKProcessPool", "WKWebsiteDataStore"] }
 block2 = "0.6"
 
 [target.'cfg(target_os = "windows")'.dependencies]

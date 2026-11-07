@@ -310,7 +310,63 @@ fn run_probes(app: tauri::AppHandle, rx: Receiver<Delivery>, listener: Listener)
         failures.push("busy_loop: the visual's webview is gone".into());
     }
     let _ = visual_scheme::close(&app, &sandbox, &busy.label());
+
+    placement_on_linux(&app, &window, &sandbox, &mut failures);
     failures
+}
+
+/// Linux lays children out itself (Tauri packs them under the main webview):
+/// two visuals open at once, and one reopened after a close, must each sit
+/// on the overlay over the main webview at the bounds asked for.
+#[cfg(target_os = "linux")]
+fn placement_on_linux(app: &tauri::AppHandle, window: &tauri::Window, sandbox: &Sandbox, failures: &mut Vec<String>) {
+    use visual_scheme::Placement;
+    let first = VisualRef::Revision { id: "probe".into(), rev: 1 };
+    let second = VisualRef::Revision { id: "probe".into(), rev: 2 };
+    let a = Bounds { x: 10.0, y: 20.0, width: 300.0, height: 200.0 };
+    let b = Bounds { x: 400.0, y: 40.0, width: 320.0, height: 240.0 };
+    let c = Bounds { x: 30.0, y: 60.0, width: 200.0, height: 100.0 };
+    let want = |bounds: Bounds| Placement {
+        in_overlay: true,
+        x: bounds.x as i32,
+        y: bounds.y as i32,
+        width: bounds.width as i32,
+        height: bounds.height as i32,
+    };
+    let mut check = |step: &str, visual: &VisualRef, bounds: Bounds| {
+        let placed = app
+            .get_webview(&visual.label())
+            .ok_or_else(|| "no webview".to_string())
+            .and_then(|webview| visual_scheme::placement(&webview));
+        match placed {
+            Ok(placement) if placement == want(bounds) => println!("ok    placement, {step}: {placement:?}"),
+            Ok(placement) => {
+                println!("FAIL  placement, {step}: {placement:?}, wanted {:?}", want(bounds));
+                failures.push(format!("placement, {step}: {placement:?}"));
+            }
+            Err(e) => failures.push(format!("placement, {step}: {e}")),
+        }
+    };
+    let open = |visual: &VisualRef, bounds: Bounds, failures: &mut Vec<String>| {
+        if let Err(e) = visual_scheme::open(window, sandbox, visual.clone(), bounds) {
+            failures.push(format!("placement: couldn't open {}: {e}", visual.path()));
+        }
+    };
+    open(&first, a, failures);
+    check("the first visual", &first, a);
+    open(&second, b, failures);
+    check("a second visual beside it", &second, b);
+    check("the first, with a second beside it", &first, a);
+    let _ = visual_scheme::close(app, sandbox, &first.label());
+    open(&first, c, failures);
+    check("the first, reopened after a close", &first, c);
+    let _ = visual_scheme::close(app, sandbox, &first.label());
+    let _ = visual_scheme::close(app, sandbox, &second.label());
+}
+
+#[cfg(not(target_os = "linux"))]
+fn placement_on_linux(_app: &tauri::AppHandle, _window: &tauri::Window, _sandbox: &Sandbox, _failures: &mut Vec<String>) {
+    println!("      placement: the platform lays children out itself; nothing to check here");
 }
 
 fn main() {
