@@ -73,6 +73,7 @@ def test_an_answer_reaches_the_supervisor_once_and_only_for_the_revision_on_scre
     [item] = [i for i in inbox.items(db, None, panes={}) if i.kind == "visual"]
     assert (item.visual_id, item.root_id) == (v["id"], boss.id)
     assert client.post(f"/v1/visuals/{v['id']}/read").json()["unread"] is False
+    assert client.post(f"/v1/visuals/{v['id']}/keep").json()["kept"] is True     # r1 is kept
 
     # A new revision arrives while r1 is on screen: r1's answer is refused, not read against r2.
     mcp_server.publish_visual("Release flow", "<p>r2</p>", "Which flow now?",
@@ -80,6 +81,10 @@ def test_an_answer_reaches_the_supervisor_once_and_only_for_the_revision_on_scre
     stale = client.post(f"/v1/visuals/{v['id']}/answer", json={"rev": 1, "option": "B"})
     assert stale.status_code == 409 and stale.json()["error"]["rev"] == 2
 
+    # A note that looks like a secret is refused before anything is recorded or sent.
+    leak = client.post(f"/v1/visuals/{v['id']}/answer", json={"rev": 2, "option": "C", "note": SECRET})
+    assert leak.status_code == 400 and leak.json()["error"]["code"] == "secret"
+    assert SECRET not in leak.text
     got = client.post(f"/v1/visuals/{v['id']}/answer", json={"rev": 2, "option": "C", "note": "ship it"})
     assert got.status_code == 200 and got.json()["answer"]["option"] == "C"
     again = client.post(f"/v1/visuals/{v['id']}/answer", json={"rev": 2, "option": "B"})
@@ -88,6 +93,28 @@ def test_an_answer_reaches_the_supervisor_once_and_only_for_the_revision_on_scre
     assert f"answered visual {v['id']} (r2): option C" in body and "ship it" in body
     assert not [i for i in inbox.items(db, None, panes={}) if i.kind == "visual"]
     assert "answered: option C" in mcp_server.list_visuals()
+    # The kept copy is still r1, so r2's answer isn't stamped on it.
+    assert client.get(f"/v1/kept-visuals/{v['id']}").json()["answer"] is None
+
+
+def test_a_revision_published_meanwhile_keeps_its_page(db, session, monkeypatch):
+    ws, boss, worker = session
+    v = visuals.publish(db, boss, "First", "<p>r1</p>")
+    real = visuals._private_dir
+    interleaved = []
+
+    def winner_publishes_first(path):
+        # Between the loser's checks and its write, another publisher's r2 lands.
+        if not interleaved:
+            interleaved.append(None)
+            interleaved[0] = visuals.publish(db, worker, "Winner", "<p>winner</p>", visual_id=v["id"])
+        return real(path)
+
+    monkeypatch.setattr(visuals, "_private_dir", winner_publishes_first)
+    loser = visuals.publish(db, boss, "Later", "<p>later</p>", visual_id=v["id"])
+    assert (interleaved[0]["rev"], loser["rev"]) == (2, 3)
+    assert visuals.page_path(ws.repo_root, boss.id, v["id"], 2).read_text() == "<p>winner</p>"
+    assert visuals.page_path(ws.repo_root, boss.id, v["id"], 3).read_text() == "<p>later</p>"
 
 
 def test_removing_a_session_deletes_its_visuals_but_not_the_kept_one(db, session, client):

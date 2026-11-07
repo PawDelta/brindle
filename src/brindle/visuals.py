@@ -245,37 +245,39 @@ def publish(db: DB, caller: Agent | None, title: str, html: str, question: str |
     _refuse_secrets([("the page", html), ("the title", title), ("the question", question),
                      *((f"option {o['id']}", f"{o['label']}\n{o['detail'] or ''}") for o in options or [])])
 
-    now = time.time()
-    if visual_id is None:
-        vid, rev = "v_" + secrets.token_hex(6), 1
-    else:
-        current = get(db, visual_id)
-        if current["root_id"] != root.id:
-            raise ServiceError("not_found", "no such visual in this session", 404)
-        vid, rev = current["id"], current["rev"] + 1
-        if rev > MAX_REVISIONS:
-            raise ServiceError("too_many_revisions", f"a visual may have at most {MAX_REVISIONS} "
-                               "revisions; publish a new one", 400)
     _private_dir(store_root(ws.repo_root))
-    path = page_path(ws.repo_root, root.id, vid, rev)
-    _write_atomic(path, data)
     opts = json.dumps(options) if options else None
-    try:
-        with db.tx() as c:
+    # The revision is allocated, its page installed and its row written under
+    # one write transaction (BEGIN IMMEDIATE serializes writers across
+    # processes), so two publishers never pick the same r<n>. A failure
+    # removes only the page this call installed, before the lock is let go.
+    with db.tx() as c:
+        now = time.time()
+        if visual_id is None:
+            vid, rev = "v_" + secrets.token_hex(6), 1
+        else:
+            row = c.execute("SELECT root_id, rev FROM visuals WHERE id=?", (visual_id,)).fetchone() \
+                if isinstance(visual_id, str) and ID.fullmatch(visual_id) else None
+            if row is None or row["root_id"] != root.id:
+                raise ServiceError("not_found", "no such visual in this session", 404)
+            vid, rev = visual_id, row["rev"] + 1
+            if rev > MAX_REVISIONS:
+                raise ServiceError("too_many_revisions", f"a visual may have at most {MAX_REVISIONS} "
+                                   "revisions; publish a new one", 400)
+        path = page_path(ws.repo_root, root.id, vid, rev)
+        _write_atomic(path, data)
+        try:
             if rev == 1:
                 c.execute("INSERT INTO visuals (id, root_id, repo_root, by_agent, kind, title, rev, question,"
                           " options, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                           (vid, root.id, ws.repo_root, caller.id, kind, title, rev, question, opts, now, now))
             else:
-                cur = c.execute("UPDATE visuals SET title=?, rev=?, question=?, options=?, answer=NULL,"
-                                " by_agent=?, updated_at=? WHERE id=? AND rev=?",
-                                (title, rev, question, opts, caller.id, now, vid, rev - 1))
-                if cur.rowcount == 0:
-                    raise ServiceError("stale", "another revision of this visual was published "
-                                       "meanwhile; list_visuals shows it", 409)
-    except BaseException:
-        path.unlink(missing_ok=True)
-        raise
+                c.execute("UPDATE visuals SET title=?, rev=?, question=?, options=?, answer=NULL,"
+                          " by_agent=?, updated_at=? WHERE id=?",
+                          (title, rev, question, opts, caller.id, now, vid))
+        except BaseException:
+            path.unlink(missing_ok=True)
+            raise
     bus.publish(db, "visual.published", repo_root=ws.repo_root, root_id=root.id, agent_id=caller.id,
                 visual=vid, rev=rev)
     return get(db, vid)
@@ -326,6 +328,8 @@ def answer(db: DB, visual_id: str, rev: Any, option: Any, note: Any = None) -> d
     if option not in {o["id"] for o in v["options"]}:
         raise ServiceError("invalid", "not one of this revision's options", 400)
     note = _text(note, "note", MAX_NOTE)
+    # The note is stored, can be kept, and goes to the agent: never a secret.
+    _refuse_secrets([("your note", note)])
     at = time.time()
     record = json.dumps({"option": option, "note": note, "at": at, "rev": rev})
     with db.tx() as c:
@@ -348,7 +352,9 @@ def answer(db: DB, visual_id: str, rev: Any, option: Any, note: Any = None) -> d
             c.execute("UPDATE visuals SET answer=NULL WHERE id=? AND answer=?", (v["id"], record))
         raise
     with db.tx() as c:
-        c.execute("UPDATE kept_visuals SET answer=? WHERE id=?", (record, v["id"]))
+        # Only a kept copy of this same revision takes the answer: a copy of
+        # an earlier revision keeps what it was saved with until Keep again.
+        c.execute("UPDATE kept_visuals SET answer=? WHERE id=? AND rev=?", (record, v["id"], rev))
     bus.publish(db, "visual.answered", repo_root=v["repo_root"], root_id=v["root_id"], visual=v["id"],
                 rev=rev, option=option)
     return get(db, v["id"])
@@ -380,7 +386,9 @@ def keep(db: DB, visual_id: str) -> dict:
     v = get(db, visual_id)
     _unlocked(v["root_id"])
     html = page(db, v["id"], str(v["rev"])).read_text(encoding="utf-8")
-    _refuse_secrets([("the page", html)])
+    # Everything the kept copy stores, scanned again before anything is written.
+    _refuse_secrets([("the page", html), ("the title", v["title"]),
+                     ("the answer's note", (v["answer"] or {}).get("note"))])
     _private_dir(kept_root(v["repo_root"]).parent)
     _write_atomic(kept_path(v["repo_root"], v["id"]), html.encode("utf-8"))
     now = time.time()
