@@ -123,11 +123,16 @@ def test_only_the_parent_may_approve(db, repo, boss, sent):
         agents.approve_plan(db, "boss", "w1")
 
 
-def test_mcp_tools_report_errors_as_text(db, repo, boss, monkeypatch, sent):
+def test_plan_approval_reminds_to_split(db, repo, boss, monkeypatch, sent):
     planner(db, boss, plan_state="proposed")
     monkeypatch.setenv("BRINDLE_AGENT_ID", "w1")
     assert "supervisor" in mcp_server.approve_plan("w1")
-    assert "Plan sent" in mcp_server.submit_plan("again")
+    for delegation, expected in (("fast", True), ("balanced", True), ("conservative", False)):
+        (repo / ".brindle" / "config.json").write_text(
+            f'{{"pipeline": false, "delegation": "{delegation}"}}'
+        )
+        assert "Plan sent" in mcp_server.submit_plan("again")
+        assert (autopilot.PLAN_SPLIT_REMINDER in sent[-1][1]) is expected
     monkeypatch.setenv("BRINDLE_AGENT_ID", "boss")
     assert "Approved" in mcp_server.approve_plan("w1")
 

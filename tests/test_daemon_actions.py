@@ -2249,7 +2249,8 @@ def cloning(world, repo, monkeypatch):
     return f"file://{repo.parent / 'origin.git'}"
 
 
-def test_a_clone_streams_git_progress_and_finishes_with_the_path(db, cloning, tmp_path):
+@pytest.mark.parametrize("parent_exists", [True, False])
+def test_a_clone_streams_git_progress_and_finishes_with_the_path(db, cloning, tmp_path, parent_exists):
     from brindle import git
 
     # The picker's other path: opening a plain folder only initializes it after confirmation.
@@ -2268,8 +2269,11 @@ def test_a_clone_streams_git_progress_and_finishes_with_the_path(db, cloning, tm
     head = git.run(["rev-parse", "HEAD"], folder).stdout
     assert _send("POST", "/v1/repos/open", {"path": str(folder), "init": True})[0] == 200
     assert git.run(["rev-parse", "HEAD"], folder).stdout == head
+    code, reply = _send("POST", "/v1/repos/clone", {"url": cloning, "parent_dir": str(folder / "notes.txt")})
+    assert (code, reply["error"]["code"]) == (400, "invalid")
     parent = tmp_path / "projects"
-    parent.mkdir()
+    if parent_exists:
+        parent.mkdir()
     code, reply = _send("POST", "/v1/repos/clone", {"url": cloning, "parent_dir": str(parent)})
     assert code == 202, reply
     done = bus.tail(db, kinds=("job.done", "job.failed"))
@@ -2444,12 +2448,19 @@ def test_user_settings_round_trip_validates_and_keeps_other_keys(db, world, monk
     path.parent.mkdir()
     path.write_text(json.dumps({"delegation": "fast"}))
 
-    assert _send("GET", "/v1/user-settings") == (200, {"claude_permission_mode": "default"})
+    assert _send("GET", "/v1/user-settings") == (200, {"claude_permission_mode": "default",
+                                                        "opencode_permission_mode": "ask", "visuals": "off"})
     assert _send("PATCH", "/v1/user-settings", {"claude_permission_mode": "yolo"})[0] == 400
     assert _send("PATCH", "/v1/user-settings", {})[0] == 400
+    # One bad value refuses the whole change.
+    assert _send("PATCH", "/v1/user-settings", {"claude_permission_mode": "auto",
+                                                "opencode_permission_mode": "default"})[0] == 400
     assert _send("PATCH", "/v1/user-settings", {"claude_permission_mode": "auto"})[0] == 200
-    assert _send("GET", "/v1/user-settings") == (200, {"claude_permission_mode": "auto"})
-    assert json.loads(path.read_text()) == {"delegation": "fast", "claude_permission_mode": "auto"}
+    assert _send("PATCH", "/v1/user-settings", {"opencode_permission_mode": "autonomous"})[0] == 200
+    assert _send("GET", "/v1/user-settings") == (200, {"claude_permission_mode": "auto",
+                                                        "opencode_permission_mode": "autonomous", "visuals": "off"})
+    assert json.loads(path.read_text()) == {"delegation": "fast", "claude_permission_mode": "auto",
+                                            "opencode_permission_mode": "autonomous"}
     assert not list(path.parent.glob("*.tmp"))
 
 
@@ -2486,6 +2497,7 @@ def test_a_new_session_runs_on_a_usable_cli_or_starts_nothing(db, world, tmp_pat
     from brindle.pro import managed_models, team_policy
     from brindle.service import sessions as svc
 
+    monkeypatch.setattr(routes_actions.git, "missing_user_identity", lambda path: [])
     _provider_setup(tmp_path, monkeypatch)
     bins = {"codex": "BRINDLE_CODEX_BIN", "opencode": "BRINDLE_OPENCODE_BIN"}
     if "missing" in state:

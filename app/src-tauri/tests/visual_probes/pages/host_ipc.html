@@ -1,0 +1,27 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>probe: the app's IPC</title>
+<p>Tauri injects its IPC into every webview; the capability names the main webview, so every call from here is refused.</p>
+<script>{{PROBE}}</script>
+<script>
+const internals = window.__TAURI_INTERNALS__;
+if (!internals) leak("no __TAURI_INTERNALS__: this page is not in a Tauri webview, nothing was tested");
+function invoke(cmd, args) {
+  return Promise.resolve().then(() => internals.invoke(cmd, args || {})).then((v) => "allowed, answered " + JSON.stringify(v).slice(0, 60));
+}
+attempt("open_url", invoke("open_url", { url: HTTP + "/open-url" }));
+attempt("set_inbox_count", invoke("set_inbox_count", { count: 7 }));
+attempt("daemon_request", invoke("daemon_request", { method: "GET", path: "/v1/meta" }));
+attempt("open_local_path", invoke("open_local_path", { path: "/" }));
+attempt("visual_open", invoke("visual_open", { id: "other", rev: 1, bounds: { x: 0, y: 0, width: 10, height: 10 } }));
+attempt("visual_close", invoke("visual_close", { label: "main" }));
+attempt("plugin:event|emit", invoke("plugin:event|emit", { event: "visual:message", payload: { forged: true } }));
+attempt("plugin:event|listen", invoke("plugin:event|listen", { event: "visual:message", target: { kind: "Any" }, handler: 1 }));
+attempt("plugin:webview|create_webview_window", invoke("plugin:webview|create_webview_window", { options: { label: "leak", url: HTTP + "/window" } }));
+attempt("plugin:window|set_title", invoke("plugin:window|set_title", { label: "main", value: "owned" }));
+attempt("plugin:notification|notify", invoke("plugin:notification|notify", { options: { title: "fake", body: "sign in again" } }));
+attempt("plugin:dialog|open", invoke("plugin:dialog|open", { options: {} }));
+attempt("plugin:app|version", invoke("plugin:app|version"));
+attempt("plugin:path|resolve_directory", invoke("plugin:path|resolve_directory", { directory: 11 }));
+done();
+</script>

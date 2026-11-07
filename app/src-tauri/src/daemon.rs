@@ -528,6 +528,16 @@ fn start_daemon(cmd: Command, _home: &Path, log: &Path) -> Result<Daemon, String
 #[cfg(target_os = "macos")]
 fn start_daemon(cmd: Command, home: &Path, log: &Path) -> Result<Daemon, String> {
     let label = launchd_label(home, std::process::id());
+    // Old idle jobs are housekeeping: neither launchctl nor a failed bootout
+    // should hold up this start. Each candidate is checked again in the worker.
+    let current = label.clone();
+    if let Err(why) = std::thread::Builder::new().spawn(move || {
+        if let Err(why) = cleanup_idle_predecessors(&current, launchctl) {
+            eprintln!("couldn't clean up idle daemon jobs: {why}");
+        }
+    }) {
+        eprintln!("couldn't start idle daemon job cleanup: {why}");
+    }
     if launchd_disabled(&label)? {
         return start_app_child(cmd, log);
     }
@@ -580,6 +590,33 @@ fn launchd_plan(job: Option<&LaunchdJob>) -> Plan {
         Some(LaunchdJob { pid: Some(pid), .. }) => Plan::Adopt(*pid),
         Some(_) => Plan::Reload,
     }
+}
+
+/// Remove only this home's older idle jobs. A fresh print immediately before
+/// bootout protects a job that started running after the initial plan.
+#[cfg(target_os = "macos")]
+fn cleanup_idle_predecessors(label: &str, mut ctl: impl FnMut(&[&str]) -> Result<String, String>) -> Result<(), String> {
+    let Some((family, _)) = label.rsplit_once('.') else { return Ok(()) };
+    let listing = ctl(&["print", &launchd_domain()])?;
+    for candidate in listing.lines().filter_map(|line| line.split_whitespace().last()) {
+        let Some((prefix, app)) = candidate.rsplit_once('.') else { continue };
+        if candidate == label || prefix != family || app.parse::<u32>().is_err() {
+            continue;
+        }
+        let service = launchd_service(candidate);
+        let Ok(text) = ctl(&["print", &service]) else { continue };
+        if launchd_plan(Some(&parse_launchd_job(&text))) != Plan::Reload {
+            continue;
+        }
+        // Do not trust the planning read: a daemon may now have a pid.
+        let Ok(text) = ctl(&["print", &service]) else { continue };
+        if parse_launchd_job(&text).pid.is_none() {
+            if let Err(why) = ctl(&["bootout", &service]) {
+                eprintln!("couldn't remove idle daemon job {candidate}: {why}");
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Whether the person has switched the daemon's job `label` off (System
@@ -2222,6 +2259,42 @@ mod tests {
         let n = unsafe { libc::proc_pidinfo(pid as libc::c_int, PROC_PIDCOALITIONINFO, 0, (&mut info as *mut Coalitions).cast(), size) };
         assert!(n > 0, "proc_pidinfo({pid}) failed");
         info.ids[1]
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn idle_predecessors() {
+        let home = Path::new("/test/idle-predecessors");
+        let labels = (1..=6).map(|pid| launchd_label(home, pid)).collect::<Vec<_>>();
+        let other = launchd_label(Path::new("/test/other-home"), 1);
+        let mut loaded = labels.iter().chain([&other]).cloned().collect::<std::collections::BTreeSet<_>>();
+        let mut reads = std::collections::HashMap::<String, usize>::new();
+        cleanup_idle_predecessors(&labels[0], |args| {
+            if args == ["print", &launchd_domain()] {
+                return Ok(loaded.iter().map(|label| format!("0 0 {label}\n")).collect());
+            }
+            let label = args[1].rsplit('/').next().unwrap();
+            assert!(loaded.contains(label));
+            match args[0] {
+                "print" => {
+                    let count = reads.entry(label.to_owned()).or_default();
+                    *count += 1;
+                    // One already running; another starts between planning and bootout.
+                    let running = label == labels[2] || (label == labels[3] && *count == 2);
+                    Ok(if running { "pid = 7\n" } else { "runs = 1\n" }.into())
+                }
+                "bootout" => {
+                    if label == labels[4] {
+                        return Err("bootout refused".into());
+                    }
+                    loaded.remove(label);
+                    Ok(String::new())
+                }
+                _ => panic!("unexpected launchctl command"),
+            }
+        }).unwrap();
+        assert!(!loaded.contains(&labels[1]), "idle predecessor remains loaded");
+        assert_eq!(loaded, [labels[0].clone(), labels[2].clone(), labels[3].clone(), labels[4].clone(), other].into());
     }
 
     /// The app's daemon on macOS is launchd's job, in a coalition of its own

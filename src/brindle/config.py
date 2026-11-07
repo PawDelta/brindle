@@ -558,6 +558,11 @@ def user_settings() -> dict:
 SUPERVISOR_KEY = "supervisor"      # ~/.brindle/config.json: the CLI the person last picked for the supervisor
 
 
+def visuals_setting() -> str:
+    """Whether brindle may offer a visual; publication always needs a request."""
+    return "on" if user_settings().get("visuals") == "on" else "off"
+
+
 def supervisor_pick() -> str | None:
     """The supervisor CLI this person last picked (in the picker or with
     ``-s``), or None before the first pick."""
@@ -571,6 +576,18 @@ def claude_permission_mode() -> str:
     opted into another mode (e.g. "auto") with ``claude_permission_mode``."""
     mode = user_settings().get("claude_permission_mode")
     return mode if isinstance(mode, str) and mode else "default"
+
+
+OPENCODE_PERMISSION_MODES = ("ask", "auto", "autonomous")
+
+
+def opencode_permission_mode() -> str:
+    """How OpenCode sessions whose profile sets no ``permission_mode`` ask
+    (brindle.opencode): "ask" (the default) keeps OpenCode's own prompts for
+    edits and commands; "auto" lets edits run; "autonomous" asks nothing and
+    brindle's plugin decides each call, failing closed. Anything else is "ask"."""
+    mode = user_settings().get("opencode_permission_mode")
+    return mode if mode in OPENCODE_PERMISSION_MODES else "ask"
 
 
 _USER_WRITE = threading.Lock()

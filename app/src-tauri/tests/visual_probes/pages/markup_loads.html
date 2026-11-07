@@ -1,0 +1,45 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>probe: every markup load</title>
+<link rel="stylesheet" href="http://127.0.0.1:{{PORT}}/style.css">
+<link rel="preload" as="script" href="http://127.0.0.1:{{PORT}}/preload.js">
+<link rel="prefetch" href="http://127.0.0.1:{{PORT}}/prefetch">
+<link rel="preconnect" href="http://127.0.0.1:{{PORT}}/">
+<link rel="dns-prefetch" href="http://127.0.0.1:{{PORT}}/">
+<link rel="icon" href="http://127.0.0.1:{{PORT}}/favicon.ico">
+<link rel="manifest" href="http://127.0.0.1:{{PORT}}/manifest.json">
+<style>
+  @import url("http://127.0.0.1:{{PORT}}/import.css");
+  @font-face { font-family: Leak; src: url("http://127.0.0.1:{{PORT}}/font.woff2") format("woff2"); }
+  body { font-family: Leak, sans-serif; background: url("http://127.0.0.1:{{PORT}}/bg.png"); }
+  .cursor { cursor: url("http://127.0.0.1:{{PORT}}/cursor.cur"), auto; }
+  .list { list-style-image: url("http://127.0.0.1:{{PORT}}/bullet.png"); }
+</style>
+<p class="cursor">Every element that loads something, aimed at the listener.</p>
+<ul class="list"><li>one</li></ul>
+<img src="http://127.0.0.1:{{PORT}}/img.png" alt="">
+<img srcset="http://127.0.0.1:{{PORT}}/img-2x.png 2x" src="data:," alt="">
+<picture><source srcset="http://127.0.0.1:{{PORT}}/picture.png"><img src="data:," alt=""></picture>
+<input type="image" src="http://127.0.0.1:{{PORT}}/input.png" alt="">
+<video src="http://127.0.0.1:{{PORT}}/video.mp4" poster="http://127.0.0.1:{{PORT}}/poster.png" preload="auto"></video>
+<audio src="http://127.0.0.1:{{PORT}}/audio.mp3" preload="auto"></audio>
+<video><track src="http://127.0.0.1:{{PORT}}/track.vtt" default></video>
+<object data="http://127.0.0.1:{{PORT}}/object.swf"></object>
+<embed src="http://127.0.0.1:{{PORT}}/embed.pdf">
+<iframe src="http://127.0.0.1:{{PORT}}/frame.html"></iframe>
+<svg width="1" height="1">
+  <image href="http://127.0.0.1:{{PORT}}/svg-image.png" width="1" height="1"></image>
+  <use href="http://127.0.0.1:{{PORT}}/sprite.svg#icon"></use>
+  <script href="http://127.0.0.1:{{PORT}}/svg-script.js"></script>
+</svg>
+<script src="http://127.0.0.1:{{PORT}}/script.js"></script>
+<script type="module" src="http://127.0.0.1:{{PORT}}/module.js"></script>
+<a href="http://127.0.0.1:{{PORT}}/ping" ping="http://127.0.0.1:{{PORT}}/ping-attr" id="ping">ping</a>
+<script>{{PROBE}}</script>
+<script>
+// Markup loads have no promise; done() waits before posting.
+document.getElementById("ping").click();
+const img = new Image();
+img.src = HTTP + "/image-object.png";
+done();
+</script>

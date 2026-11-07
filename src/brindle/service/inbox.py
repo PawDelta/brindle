@@ -77,6 +77,8 @@ def needs_you(agent: dict, ws: dict) -> str | None:
     if agent["status"] == "waiting":
         return "needs you"
     if agent["status"] == "failed":
+        if (agent.get("failed_why") or "").startswith("review: "):
+            return agent["failed_why"].removeprefix("review: ")
         return FAILED.get(agent.get("failed_why"), FAILED_UNKNOWN)
     if ws.get("asking") == agent["id"]:
         return "has a question"
@@ -207,6 +209,8 @@ def items(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None) -
             if reason and not asking:
                 kind = _kind(a, ws, reason)
                 out.append(InboxItemDTO(kind=kind, reason=reason, **link,
+                                        detail=row.failed_why.removeprefix("review: ")
+                                        if (row.failed_why or "").startswith("review: ") else None,
                                         action=_sign_in(row.provider) if kind == "credentials" else None))
             # Only a plan agents.approve_plan would take: a plan-first worker with a supervisor.
             if row.plan_state == "proposed" and row.plan_first and row.parent_id is not None:
@@ -233,7 +237,8 @@ def items(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None) -
                 out.append(InboxItemDTO(kind="login", reason="cloud login expired",
                                         **{**link, "agent_id": login.agent_id or a["id"]},
                                         detail=login.refresh_cmd))
-    all_items = (out + _idle_items(db, repo_root) + _doc_items(db, repo_root, shown) + _setup_items()
+    all_items = (out + _idle_items(db, repo_root) + _doc_items(db, repo_root, shown) + _visual_items(db, repo_root)
+                 + _setup_items()
                  + _org_blocks(db, repo_root) + _org_notices())
     # Requests can outlive the live snapshot (notably document requests).
     # Paused sessions keep theirs, but dismissed/replaced workers do not ask
@@ -254,6 +259,21 @@ def _idle_items(db: DB, repo_root: str | None) -> list[InboxItemDTO]:
             continue
         out.append(InboxItemDTO(kind="idle_stopped", reason="stopped while idle; `brindle continue` resumes it",
                                 detail=detail, agent_id=a.id, workspace_id=ws.id, root_id=a.id))
+    return out
+
+
+def _visual_items(db: DB, repo_root: str | None) -> list[InboxItemDTO]:
+    """A visual's open question, until the person answers it (brindle.visuals)."""
+    from brindle import visuals
+
+    out = []
+    for v in visuals.open_questions(db, repo_root):
+        root = db.get_agent(v["root_id"])
+        if root is None or identity_lock.locked_by(root.id):
+            continue
+        out.append(InboxItemDTO(kind="visual", reason="asks you to choose", detail=v["title"],
+                                visual_id=v["id"], agent_id=root.id, workspace_id=root.workspace_id,
+                                root_id=root.id))
     return out
 
 

@@ -13,6 +13,7 @@ import re
 import shutil
 import subprocess
 import textwrap
+import threading
 import time
 import traceback
 from dataclasses import dataclass, field
@@ -34,13 +35,29 @@ HOME_SECONDS = 3.0       # how often a sidebar checks it isn't stranded (agents.
 # side (pane liveness, who is attached, "ago" ages) is re-read this often instead.
 IDLE_SECONDS = 10.0
 
+_cull_lock = threading.Lock()
+_cull_thread: threading.Thread | None = None
+
 
 def _cull_in_background() -> None:
-    import threading
-
+    """Keep at most one sweep running in this watch process."""
     from brindle import cull
 
-    threading.Thread(target=lambda: cull.sweep_quietly(DB()), daemon=True).start()
+    global _cull_thread
+
+    def sweep() -> None:
+        db = DB()
+        try:
+            cull.sweep_quietly(db)
+        finally:
+            db.conn.close()
+
+    with _cull_lock:
+        if _cull_thread is not None and _cull_thread.is_alive():
+            return
+        thread = threading.Thread(target=sweep, daemon=True)
+        thread.start()
+        _cull_thread = thread
 
 # Styles are names, mapped to curses attributes (or ANSI for --once) later.
 STATUS_STYLE = {

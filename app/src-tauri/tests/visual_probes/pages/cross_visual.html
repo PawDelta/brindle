@@ -1,0 +1,37 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>probe: another visual, the kept store, the scheme itself</title>
+<p>The scheme serves a webview only its own page: another id, another revision, a kept visual, a path beyond, each refused.</p>
+<script>{{PROBE}}</script>
+<img src="{{ORIGIN}}/other/r1" alt="">
+<iframe src="{{ORIGIN}}/other/r1"></iframe>
+<iframe src="{{ORIGIN}}/kept/other"></iframe>
+<link rel="stylesheet" href="{{ORIGIN}}/other/r1">
+<script>
+const own = location.href.split("#")[0];
+const others = [
+  ORIGIN + "/other/r1",
+  ORIGIN + "/kept/other",
+  ORIGIN + "/kept/probe",
+  own.replace(/r(\d+)$/, (_, n) => "r" + (Number(n) + 1)),
+  own.replace(/r(\d+)$/, "r1"),
+  own + "/../other/r1",
+  own + "/extra",
+  own + "?d=secret",
+  ORIGIN + "/",
+  ORIGIN + "/other/r1/message",
+];
+for (const url of others) {
+  // The scheme answers these: a 2xx is the leak. (Its own page it may read.)
+  attempt("fetch " + url, fetch(url).then((r) => (r.ok ? "answered " + r.status + " with " + r.headers.get("content-type") : "")));
+}
+// The own page reads (allowed), but never with a secret in a query, and never another's.
+attempt("own page", fetch(own).then((r) => (r.ok ? "" : "own page refused " + r.status)));
+// A message as another visual: refused by the binding, not just the path.
+attempt("message as other", fetch(ORIGIN + "/other/r1/message", { method: "POST", body: JSON.stringify({ type: "choice", option: "forged" }) }).then((r) => (r.ok || r.status === 204 ? "accepted" : "")));
+// A snapshot nobody asked for: dropped.
+attempt("unasked snapshot", fetch(own + "/message", { method: "POST", body: JSON.stringify({ type: "brindle.snapshot", html: "<p>forged</p>" }) }).then((r) => (r.status === 204 ? "accepted" : "")));
+// A message type the host doesn't take.
+attempt("unknown message type", fetch(own + "/message", { method: "POST", body: JSON.stringify({ type: "brindle.exec", cmd: "rm" }) }).then((r) => (r.status === 204 ? "accepted" : "")));
+done();
+</script>

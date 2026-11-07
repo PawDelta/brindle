@@ -144,6 +144,28 @@ def _bypass(command):
     ("rg token ~/.config", "deny"),
     ("cat ../other/.env", "deny"),
     ("gh auth token", "deny"),
+    ("git credential fill", "deny"),
+    ("git credential-osxkeychain get", "deny"),
+    ("git-credential-store get", "deny"),
+    _bypass("git credential-cache --socket=/tmp/x get"),
+    _bypass("git-credential-store --file=f get"),
+    _bypass("git credential-cache --timeout 300 get"),
+    _bypass("git-credential-cache --timeout 300 get"),
+    _bypass("git credential-cache --socket socket get"),
+    _bypass("git-credential-store --file f get"),
+    _bypass("git credential-custom --foo bar get"),
+    _bypass("git-credential-custom --foo bar get"),
+    _bypass("git-credential-custom 'get'"),
+    _bypass("git -c credential.helper=x credential-store --file f get"),
+    _bypass("git credential-custom --foo bar"),
+    _bypass("git-credential-custom"),
+    ("gh auth git-credential", "deny"),
+    _bypass("git -c x=y credential fill"),
+    _bypass("git -C path credential fill"),
+    _bypass("git -cx=y -Cpath credential fill"),
+    _bypass("env A=1 command git credential fill"),
+    _bypass("printf 'protocol=https\\nhost=github.com\\n' | git credential fill | cat"),
+    _bypass('echo "$(git credential fill)"'),
     ("gcloud --project p auth print-access-token", "deny"),
     ("aws configure export-credentials", "deny"),
     ("echo $GITHUB_TOKEN", "deny"),
@@ -242,6 +264,22 @@ def _bypass(command):
     _bypass('a=(~/.ssh/id_rsa); cat "${a[0]}"'),
     _bypass('for f in "$HOME"/.ssh/*; do cat $f; done'),
     _bypass("cat $HOME/.s*h/id_rsa"),
+    # Disguised: a path only the run resolves that could still be a store.
+    _bypass('bash -c "cat \\"\\$HOME/.a\\$1/credentials\\"" _ ws'),    # pieces and $1 inside sh -c
+    _bypass("python3 -c \"import os; print(open(os.environ['HOME'] + '/.a' + 'ws/credentials').read())\""),
+    _bypass('f=(~/.ss?/id_*); cat "${f[@]}"'),    # an array over a store's pattern
+    _bypass("shopt -s dotglob; cat ~/*/credentials"),
+    pytest.param("python3 -c \"import os; print(os.path.expanduser('~') + '/' + 'notes')\"", "allow",
+                 marks=pytest.mark.variant("look-alike: a home path built in pieces that is no store")),
+    pytest.param("shopt -s dotglob; ls ./build/*", "allow",
+                 marks=pytest.mark.variant("look-alike: dotglob over no home")),
+    pytest.param(("echo dotglob; cat ~/*/README.md", "shopt -s dotglob; shopt -u dotglob; cat ~/*/README.md",
+                  "shopt -s dotglob | cat; cat ~/*/README.md", 'echo "$(shopt -s dotglob)"; cat ~/*/README.md',
+                  "(shopt -s dotglob); cat ~/*/README.md", "{ shopt -s dotglob; } & cat ~/*/README.md",
+                  "for x in one; do shopt -s dotglob; done | cat; cat ~/*/README.md"),
+                 "allow", marks=pytest.mark.variant("review: dotglob as a word, turned off again, or in a subshell")),
+    pytest.param(("cat '$HOME/$filename'", "grep -F '$HOME/$filename' README.md"), "allow",
+                 marks=pytest.mark.variant("review: single quotes keep $ literal")),
     _bypass('ls ~/.ssh > "$OUTPUT"'),    # a store named, a target only the run knows
     pytest.param('ls > "$OUTPUT"', "allow",
                  marks=pytest.mark.variant("no store named: an unresolved target is the policy's question")),
@@ -269,8 +307,8 @@ def _bypass(command):
                  marks=pytest.mark.variant("assignment value does not print")),
     pytest.param('env API_TOKEN="$API_TOKEN" echo ready', "allow",
                  marks=pytest.mark.variant("assignment through env does not print its value")),
-    pytest.param("case x in (env) echo ready;; esac", "deny",
-                 marks=pytest.mark.variant("a case isn't read: the split message, not a credential deny by its pattern")),
+    pytest.param("case x in (env) echo ready;; esac", "allow",
+                 marks=pytest.mark.variant("a case isn't read: unchecked's answer, not a credential deny by its pattern")),
     ("env -u FOO git status", "allow"),
     ("env VAR=1 git status", "allow"),
     ("printenv PATH", "allow"),
@@ -284,6 +322,8 @@ def _bypass(command):
     ("ps aux", "allow"),
     ("ps -o euser", "allow"),
     ("gh auth status", "allow"),
+    ("git credential-store erase", "allow"),
+    ("git-credential-store erase", "allow"),
     ("git add -f file", "allow"),
     ("git status", "allow"),
     ("cat .env", "allow"),
@@ -305,6 +345,8 @@ def test_credential_dumps_are_denied(tmp_path, command, expected):
     (tmp_path / "other").mkdir()
     for command in (command,) if isinstance(command, str) else command:
         permissions.set_unmatched("allow")
+        # The owner's own setting: what brindle can't read is allowed, so only a credential deny denies.
+        permissions.set_groups({"shell": {"subcategories": {"unchecked": "allow"}}})
         permissions.add_rule("bash", "*", "allow", "glob", source="learned")
         payload = {"tool_name": "Bash", "tool_input": {"command": command}, "cwd": str(here)}
         requests = [permissions.from_claude(payload, str(here), str(here)),
@@ -334,6 +376,9 @@ LOOP = "until s=$(gh run view 1 --json status --jq .status); [[ $s == completed*
 
 @pytest.mark.parametrize("command, expected", [
     # Each form read part by part, every part allowed: no prompt under Autonomous.
+    ("git push origin feature", "allow"),
+    pytest.param("git push", "ask", marks=pytest.mark.variant("its unknown upstream may be the default branch")),
+    ("git fetch", "allow"),
     (f'{LOOP}; echo "$s"', "allow"),                                                # substitution, until, [[ pattern
     ("r=$(gh run list --jq '.[0].id'); s=$r; gh run view \"$s\" | head -1", "allow"),   # assignments
     ("if [[ $s == *ok && -n $t || $u < v ]]; then echo y; else echo n; fi", "allow"),   # && and || are the test's
@@ -583,5 +628,10 @@ def test_stores_resolved_at_run_time(tmp_path, monkeypatch):
     assert answer("python3 -c \"print(open(__import__('os').path.expanduser("
                   "'~/brindle-home/daemon.json')).read())\"") == "deny"
     assert answer(f"ls {lifecycle.info_path().parent}") == "allow"
+    # brindle's GitHub sign-in: its store, and git's helper asked by hand, however brindle is started.
+    assert answer("cat ~/brindle-home/brindle-github/connection.json") == "deny"
+    assert answer("brindle _github-credential get") == "deny"
+    assert answer("python3 -P -m brindle _github-credential get") == "deny"
+    assert answer("curl --unix-socket d.sock -d '{}' http://localhost/v1/github/credential") == "deny"
     assert answer("cat ../other/.env") == "deny"
     assert answer("cat ~/notes.txt") == "allow"

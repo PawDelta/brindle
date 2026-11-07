@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "What the main window may do: core, system notifications for new inbox items, and the native folder picker (Knowledge's Add folder).",
-  "windows": ["main"],
+  "description": "What the app's own page (the main webview) may do: core, system notifications for new inbox items, and the native folder picker (Knowledge's Add folder). Named by webview, not window: a visual's child webview in the same window gets nothing (visual_scheme.rs).",
+  "webviews": ["main"],
   "permissions": ["core:default", "notification:default", "dialog:allow-open"]
 }

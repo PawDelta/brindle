@@ -302,7 +302,9 @@ or put the goal in `.brindle/goals.md`, and it works like a project manager:
    key): the worker reads the code, then calls `submit_plan` with a short plan
    and waits. The plan reaches the supervisor as a message; `approve_plan`
    approves it, or (`approved=false`, with feedback) sends it back for a
-   revision. For Claude workers brindle's PreToolUse hook refuses Edit, Write
+   revision. Before deciding, check which parts need no result from the rest;
+   start those workers with `assign` and approve the rest. For Claude workers
+   brindle's PreToolUse hook refuses Edit, Write
    and NotebookEdit until the plan is approved; other CLIs are only told to
    wait. brindle doesn't count a worker waiting on approval as stalled, and
    reminds the supervisor about plans awaiting a decision.
@@ -419,6 +421,7 @@ your own status line prints, so what you see doesn't change.
 | `brindle commit / push / pr [WS]` | commit everything (`-m MSG`), push with upstream, open a PR |
 | `brindle merge [--squash] [WS]` | merge into the base locally |
 | `brindle rm WS [-f] [-D]` | remove the worktree; `-D` deletes the branch too, only if merged unless `-f` |
+| `brindle trash list\|restore ID\|empty` | list removed worktrees, restore one, or permanently empty the trash (`--yes` skips confirmation) |
 | `brindle doctor` | check that brindle has what it needs (tmux, the agent CLIs, native profiles' model endpoints, a writable home) and, in a repo, its config, checks and code map |
 | `brindle close AGENT` / `brindle close --exited` | hide an agent (or every stopped one) from the dashboard, stopping it if it's running; its worktree and branch stay |
 | `brindle send AGENT MSG` | message an agent; waits in its inbox until it's idle |
@@ -433,6 +436,15 @@ your own status line prints, so what you see doesn't change.
 | `brindle mcp` | the MCP server agents talk to (launched for them; you don't run it) |
 
 With no `WS` argument, commands act on the workspace you're in.
+
+Removed worktrees go to `$BRINDLE_HOME/trash` (normally `~/.brindle/trash`),
+including uncommitted files when removal is forced. Trash retains entries for
+30 days, with a 10 GiB cap that discards the oldest entries first. Storage shows
+its size. `brindle trash restore ID` restores the files and Git index at the
+original path, refusing an occupied path, a checked-out branch, or a branch
+that has moved. It restores the checkout; assign it again to register a new
+workspace. If trash and the worktree are on different volumes, removal refuses
+and leaves the original intact.
 
 ### Web UI
 
@@ -480,6 +492,57 @@ knowing them helps when you tell the supervisor how to work.
 | `need_user` | supervisor | ask you a question (a decision, a denied action, a stalled external job such as a CI run no runner picks up); only the steps that depend on it wait, the rest keeps going; `answered=true` once you've replied |
 | `transfer_to_repo` | supervisor | move a scratch session's work into a repository |
 | `handover` | supervisor | hand the session to a new supervisor on another branch or worktree, with a note |
+
+## Connect GitHub
+
+brindle fetches from your repos on its own, and agents push from their panes.
+On macOS, git's keychain helper answers those with a dialog whenever the saved
+password was put there by another tool. Connecting GitHub gives brindle a
+sign-in of its own, so git never asks the keychain for github.com:
+
+```sh
+brindle github connect           # copy your GitHub CLI sign-in, if gh is signed in
+brindle github connect --token   # or paste a fine-grained token
+brindle github status
+brindle github disconnect
+```
+
+- **A copy of your GitHub CLI sign-in** is one step. brindle then has the same
+  access `gh` has: every repository you can reach, with no expiry. gh's own
+  keychain item is read once, when you ask; a locked keychain may ask you to
+  unlock it then.
+- **A fine-grained token** reaches only the repositories you pick, until it
+  expires. Give it Contents, Pull requests and Workflows read and write
+  (Metadata read comes with them). An organization may have to approve it.
+
+Once connected, brindle's own credential helper answers git for
+`https://github.com`, with your other helpers left out for that host: in
+background fetches, a clone, push or named-branch fetch brindle runs, and
+agents' panes. Other hosts, GitHub Enterprise Server and SSH remotes are
+untouched, and no git config file is edited. `gh` itself is left alone.
+
+**Where the token is kept.** Under the desktop app, in a keychain item that only
+brindle's signed helper (its daemon) makes and reads: macOS asks before giving
+it to any other program, and every other brindle process asks the daemon. A
+read never raises a dialog: while the keychain is locked brindle simply doesn't
+sign in, and fetches wait for it to be unlocked. Without the signed helper (a
+CLI install), or with `--file`, it is a 0600 file under `~/.brindle`, which
+anything running as you can read. `brindle github status` says which.
+
+**If GitHub stops taking it** (revoked, expired, replaced), brindle says to
+connect again, and until you do, git gets no sign-in for github.com from
+brindle: fetches and pushes there fail plainly. Your own helpers are not brought
+back for that host, since that would raise the keychain dialog again or use
+another account without saying so. Disconnecting is what gives them back. It
+forgets brindle's copy and revokes nothing: delete a token on GitHub yourself.
+
+**What this doesn't protect.** Agents run as you. brindle's permission rules
+deny the commands it recognises as reading credentials, but they are rules, not
+a sandbox: a command they don't recognise can read the file, or ask brindle's
+daemon for the credential the way git in the agent's own pane has to. So choose
+by what a taken credential would be worth: a fine-grained token for chosen
+repositories is worth far less than a copy of gh's sign-in. Codex's own sandbox
+does deny its commands the file; git under it gets the sign-in from the daemon.
 
 ## Token usage and history
 
@@ -668,6 +731,7 @@ Goal driving, merge gates and cleanup:
 | Key | Default | |
 |---|---|---|
 | `claude_permission_mode` | `"default"` | the `--permission-mode` for Claude Code sessions whose profile sets no `permission_mode`; the default holds permission requests for the brindle app, set `"auto"` to opt into auto mode. Only read from `~/.brindle/config.json` |
+| `opencode_permission_mode` | `"ask"` | how OpenCode sessions whose profile sets no `permission_mode` ask: `"ask"` keeps OpenCode's own prompts, `"auto"` lets edits run, `"autonomous"` asks nothing and brindle's plugin decides each call, failing closed (needs `permission_policy` on; see OpenCode below). Only read from `~/.brindle/config.json` |
 | `auto_update` | `false` | run `uv tool upgrade brindle` in the background at session start when PyPI has a newer version; restart to use it. Can also be set in `~/.brindle/config.json` for every repo |
 | `scoped_checks` | unset (acts as `"off"`) | `"infer"` narrows a bare pytest check (`pytest ...`, `python -m pytest ...`, `uv run pytest ...`, options only) on a worker's branch to the tests `graphify affected` reaches plus the touched test files, when the repo has a stored graph; it runs in full when the mapping fails or `conftest.py`, `pyproject.toml`, `setup.cfg`, `pytest.ini`, `tox.ini` or a lockfile changed. A pytest command that already names test paths (`pytest tests/`) and every other command always run in full. `"off"` narrows nothing. It becomes the default next release; until you set it, brindle tells you once |
 | `scoped_checks_max_files` | `40` | with `scoped_checks`, a worker's branch whose selected tests exceed this many files runs only its own changed test files and each changed module's namesake tests (`tests/test_<module>.py`, `tests/test_<module>_*.py`) instead, and the check output carries a one-line note saying so. The session branch and the full run before a PR (`gates.pr_checked`) always run everything. `0`: no cap |
@@ -941,6 +1005,7 @@ setting for what no rule covers (ask, allow or deny). A deny or ask also
 catches a part of a compound command however it's spelled (spacing, quotes,
 assignments, redirects, `$(...)`, patterns the shell expands); when brindle
 can't read the syntax and a deny or ask could match it, it asks.
+Every preset denies explicit Git credential retrieval (`git credential fill`, credential helpers with `get`) and `gh auth token` / `gh auth git-credential`; normal `git push` and `git fetch` still follow their usual rules.
 
 Add your own with `brindle permissions allow|deny KIND MATCH` (kinds: `read`,
 `write`, `edit`, `bash`, `fetch`, `mcp`, `other`; the match is exact unless
@@ -1685,7 +1750,7 @@ events, so a worker's status never depends on reading its screen.
 |---|---|
 | `model` | `--model`. Use OpenCode's `provider/model` form (`anthropic/claude-sonnet-4-5`, `opencode/big-pickle`); a bare `claude-…`, `gpt-…` or `gemini-…` name gets its provider added. With no model, OpenCode's own default. |
 | `allowed_tools` | Each `Bash(cmd:*)` becomes an allowed `bash` pattern; any other command asks. |
-| `permission_mode` | `bypassPermissions`: everything runs. `dontAsk`: only `allowed_tools` commands run, edits and web fetches are refused. `acceptEdits`/`auto`: edits run. `plan`: OpenCode's `plan` agent. Unset: edits ask too. |
+| `permission_mode` | `bypassPermissions`: everything runs. `dontAsk`: only `allowed_tools` commands run, edits and web fetches are refused. `acceptEdits`/`auto`: edits run. `plan`: OpenCode's `plan` agent. Unset: your `opencode_permission_mode` (below) decides; with it on Ask, edits ask too. |
 | `add_dirs`, `worker_extra_read_dirs` | Allowed as external directories. |
 
 A `dontAsk` OpenCode worker (the built-in reviewer, for one) can't read outside
@@ -1696,10 +1761,22 @@ its worktree or its `add_dirs`: with nobody to ask, anything else is refused.
 call and stops the ones the policy denies (as for Claude Code and Codex
 workers); calls the policy allows or asks about are left to the profile's
 permissions above, so the policy can narrow what an OpenCode worker does but
-never widens it. The exception is Autonomous with a profile that sets no
-`permission_mode`: OpenCode then asks about nothing, since nothing can hold its
-prompt for the app, and the plugin is the gate. What the policy would ask you is
-refused, and so is a call the plugin couldn't check.
+never widens it.
+
+For a profile that sets no `permission_mode`, `opencode_permission_mode` in
+`~/.brindle/config.json` (Settings → How your agents ask you → OpenCode
+permission mode) picks how OpenCode asks:
+
+| Mode | OpenCode |
+|---|---|
+| `ask` (default) | OpenCode's own prompt, in its pane, for edits and for commands `allowed_tools` doesn't cover. |
+| `auto` | Edits run without asking, as `permission_mode: auto`; other commands still ask. |
+| `autonomous` | OpenCode asks about nothing, since nothing can hold its prompt for the app, and the plugin is the gate. Needs `permission_policy` on; with it off brindle can vouch for nothing, so OpenCode asks as under `ask`. |
+
+Under `autonomous`, what the policy would ask you is refused unless a saved
+approval covers it, which spends a use, and a call the plugin couldn't check or
+read (a patch whose files it can't all name, a hook that didn't answer) is
+refused too.
 
 ### Cheap workers
 

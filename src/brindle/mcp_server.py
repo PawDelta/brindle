@@ -12,7 +12,7 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
@@ -81,8 +81,15 @@ class _Server(MCPServer):
         return result
 
     async def list_tools(self):
+        from brindle import visuals
+
         agent = _calling_agent()
-        return [t for t in await super().list_tools() if coordinator.refusal(agent, t.name) is None]
+        hidden = () if visuals.enabled() else VISUAL_TOOLS
+        return [t for t in await super().list_tools()
+                if coordinator.refusal(agent, t.name) is None and t.name not in hidden]
+
+
+VISUAL_TOOLS = ("publish_visual", "list_visuals", "offer_visual", "propose_plan")   # hidden while the capability is off
 
 
 mcp = _Server(
@@ -142,6 +149,132 @@ def request_doc_read(doc: int | str, why: str, section: str | None = None) -> st
     except ServiceError as e:
         raise ToolError(str(e)) from e
     return f"Document read requested: {request}."
+
+
+class VisualOption(BaseModel):
+    id: str = Field(description="1-32 letters, digits, _ or -; what the person's answer names")
+    label: str
+    detail: str | None = None
+
+
+@mcp.tool()
+def offer_visual(question: str, kind: Literal["options", "comparison", "flow", "diff", "layout"],
+                 options: int = 0, attributes: int = 0,
+                 rows: int = 0, columns: int = 0, steps: int = 0, branches: int = 0, lines: int = 0) -> dict:
+    """Offer a visual alongside a choice asked in text (supervisors only).
+    kind: options (3+, or 2 with 3+ attributes), comparison (4x3+), flow
+    (5+ steps or a branch), diff (over 12 lines), layout (a UI choice).
+    Never use for permission, approval, status, a short answer, or an answered
+    question. Refusals return immediately. Wait for acceptance before making HTML.
+    """
+    from brindle import visual_offers
+    from brindle.service.errors import ServiceError
+
+    db = DB()
+    caller, _ = _caller(db)
+    try:
+        return visual_offers.offer(db, caller, question, kind, options=options, attributes=attributes,
+                                   rows=rows, columns=columns, steps=steps, branches=branches, lines=lines)
+    except ServiceError as e:
+        raise ToolError(e.message) from e
+
+
+@mcp.tool()
+def publish_visual(title: str, html: str, question: str | None = None,
+                   options: list[VisualOption] | None = None, visual_id: str | None = None) -> str:
+    """Show the person a page in the app: a self-contained HTML document
+    only after the person explicitly requested one or accepted an offer.
+    Each request permits one publication, regardless of the Visuals setting.
+    (inline script and style only; it gets no network, no remote images or
+    fonts). Workers' visuals go to their supervisor's session. To ask a
+    choice, pass the question and 2-12 options; the person answers with one
+    option id (and maybe a note), which arrives as a message from them.
+    visual_id: publish a new revision of one of this session's visuals (it
+    asks again: an earlier answer is cleared). At most 2 MB per page, 20
+    revisions; a page or text that looks like a secret is refused."""
+    from brindle import visuals
+    from brindle.service.errors import ServiceError
+
+    db = DB()
+    caller, _ = _caller(db)
+    try:
+        v = visuals.publish(db, caller, title, html, question,
+                            [o.model_dump() if isinstance(o, BaseModel) else o for o in options or []],
+                            visual_id)
+    except ServiceError as e:
+        raise ToolError(e.message) from e
+    asks = " The person's answer arrives as a message." if v["options"] else ""
+    return f"Published {v['id']} r{v['rev']} (brindle://visual/{v['id']}).{asks}"
+
+
+class PlanDecision(BaseModel):
+    id: str = Field(description="1-32 letters, digits, _ or -")
+    title: str = Field(description="the decision, in a line")
+    options: list[VisualOption] = Field(description="2-12 alternatives you weighed, yours among them")
+    mine: str | None = Field(default=None, description="the option id you'd pick")
+    challenge: str | None = Field(default=None, description="your own strongest argument against your pick")
+
+
+class PlanWorker(BaseModel):
+    id: str = Field(description="1-32 letters, digits, _ or -, e.g. w1")
+    title: str
+    after: list[str] = Field(default_factory=list, description="ids of workers listed earlier that must merge first")
+
+
+@mcp.tool()
+def propose_plan(markdown: str, decisions: list[PlanDecision] | None = None,
+                 split: list[PlanWorker] | None = None, title: str | None = None,
+                 plan_id: str | None = None) -> str:
+    """Supervisors: show the person a planning doc, ONLY when they explicitly
+    asked for one (never on your own because a request is large). markdown:
+    the plan (goal, split, decisions with your challenge to each, what's hard
+    to undo, open questions), one ## heading per section: the person comments
+    per section. brindle renders it itself. While it's open, every assign in
+    this session is queued and starts only once the person approves; their
+    approval or redirect (their picks and comments) arrives as a message from
+    them. plan_id: publish the revision a redirect asked for."""
+    from brindle import plans
+    from brindle.service.errors import ServiceError
+
+    db = DB()
+    caller, _ = _caller(db)
+    dump = lambda items: [i.model_dump() if isinstance(i, BaseModel) else i for i in items or []]  # noqa: E731
+    try:
+        p = plans.propose(db, caller, markdown, dump(decisions), dump(split), title, plan_id)
+    except ServiceError as e:
+        raise ToolError(e.message) from e
+    return (f"Proposed plan {p['id']} r{p['rev']} (brindle://visual/{p['id']}). Assign calls queue behind it "
+            "until the person approves; their decision arrives as a message.")
+
+
+@mcp.tool()
+def list_visuals() -> str:
+    """This session's visuals, newest first: id, revision, title and the person's answer, if any."""
+    from brindle import visuals
+    from brindle.service.errors import ServiceError
+
+    db = DB()
+    caller, _ = _caller(db)
+    try:
+        visuals.require_enabled()
+        root = autopilot.root_of(db, caller.id) if caller else None
+        if root is None:
+            raise ServiceError("invalid", "not running as a brindle agent; no session", 400)
+        found = visuals.for_session(db, root)
+    except ServiceError as e:
+        raise ToolError(e.message) from e
+    if not found:
+        return "No visuals in this session."
+    lines = []
+    for v in found:
+        state = "no question"
+        if v["answer"]:
+            a = v["answer"]
+            state = f"answered: option {a['option']}" + (f" (note: {a['note']})" if a["note"] else "")
+        elif v["options"]:
+            state = "open: " + ", ".join(o["id"] for o in v["options"])
+        lines.append(f"{v['id']} r{v['rev']} · {v['title']} · {state}" + (" · kept" if v["kept_at"] else ""))
+    return "\n".join(lines)
 
 
 @mcp.tool()
@@ -463,7 +596,14 @@ def _reply(caller: Agent, t: Task, mode: str, profile: str, branch: str | None, 
         text += wait.format(worker.id)
         warnings = [*warnings, *tasks._launch_warnings(worker, wws)]
     else:
-        text = _queued_text(now, profile, branch, not agents.launches_process(profile, now.repo_root))
+        subagent = not agents.launches_process(profile, now.repo_root)
+        if not now.waiting and not subagent:   # its start hasn't looked yet: say if its session waits its turn
+            from dataclasses import replace
+
+            from brindle import fair_share
+
+            now = replace(now, waiting=fair_share.wait_reason(db, now))
+        text = _queued_text(now, profile, branch, subagent)
         text += wait.format(t.id)
     return _remind_goal(db, caller, text + notes + "".join(f"\nWarning: {w}" for w in warnings) + tail)
 
@@ -551,6 +691,8 @@ def _room_duplicate(db: DB, caller: Agent, ws: Workspace, task: str, branch: str
         state = "queued by a request still being answered"
     elif t.state != "pending":
         state = "being started right now"
+    elif tasks.plan_holds(db, t):
+        state = "waiting for the person to approve the session's plan"
     elif deps:
         state = f"waiting on {', '.join(deps)}"
     else:
@@ -620,8 +762,8 @@ async def handoff(
     `plan_first` config). Use it for large or risky tasks.
 
     analysis_doc: the worker leaves an analysis doc of its work. Off by
-    default whatever the weight; ask only for work worth documenting (never
-    for merge or sync chores).
+    default whatever the weight; pass true only when the person explicitly
+    requested a doc for this task (never for merge or sync chores).
     """
     def run(req: _Request):
         db = DB()
@@ -751,8 +893,8 @@ async def assign(
     `plan_first` config). Use it for large or risky tasks.
 
     analysis_doc: the worker leaves an analysis doc of its work. Off by
-    default whatever the weight; ask only for work worth documenting (never
-    for merge or sync chores).
+    default whatever the weight; pass true only when the person explicitly
+    requested a doc for this task (never for merge or sync chores).
     """
     def run(req: _Request):
         db = DB()
@@ -794,6 +936,22 @@ async def assign(
             savings.record(db, ws.repo_root, decision, task_id=t.id)
             return _remind_goal(db, caller,
                                 f"Queued task {t.id} until {', '.join(unmet)} merge{'s' if len(unmet) == 1 else ''}."
+                                + "".join(f"\nprofile: {w}" for w in why))
+        from brindle import plans
+
+        plan = plans.holding(db, autopilot.root_of(db, caller.id))
+        if plan:
+            # Queued and released like any other (start=True): its start finds
+            # the plan holding it, so an approval landing before the release
+            # still starts it, and one after starts it from the queue.
+            t = req.enqueue(
+                db, caller, ws, profile, task, "assign", isolate=isolate, branch=branch,
+                done_when=done_when, files=files, depends_on=depends_on, plan_first=plan_first,
+                weight=effective_weight, analysis_doc=analysis_doc, start=True,
+            )
+            savings.record(db, ws.repo_root, decision, task_id=t.id)
+            return _remind_goal(db, caller, f"Queued task {t.id} behind plan {plan['id']}: it starts when the "
+                                "person approves the plan. Don't assign it again."
                                 + "".join(f"\nprofile: {w}" for w in why))
         reply, warning = _route_clash(
             req, db, caller, ws, profile, task, "assign", isolate=isolate, branch=branch,
@@ -871,9 +1029,19 @@ def approve_plan(agent_id: str, feedback: str = "", approved: bool = True) -> st
     """Decide on the plan a plan-first worker proposed with submit_plan. With
     approved=false (or feedback) the worker revises it and submits again; the
     worker is sent your decision and feedback. Only the worker's supervisor
-    may decide."""
+    may decide. A planning doc (propose_plan) is the person's to decide, not yours."""
     db = DB()
     caller, _ = _caller(db)
+    from brindle import visuals
+
+    if visuals.ID.fullmatch(agent_id or ""):
+        from brindle import plans
+        from brindle.service.errors import ServiceError
+
+        try:   # an agent is never the person: refused, whatever it passes
+            plans.decide(db, agent_id, None, approved, note=feedback, person=False)
+        except ServiceError as e:
+            return f"Not decided: {e.message}."
     try:
         return agents.approve_plan(db, caller.id if caller else None, agent_id, feedback, approved)
     except agents.AgentError as e:
@@ -1470,7 +1638,8 @@ def _session(db: DB) -> tuple[str, Workspace] | str:
 
 
 @mcp.tool()
-def set_goal(goal: str, milestones: list[dict[str, str]], detail: str | None = None) -> str:
+def set_goal(goal: str, milestones: list[dict[str, str]], detail: str | None = None,
+             analysis_doc: bool | None = None) -> str:
     """Autopilot: record what we're building. milestones is an ordered list of
     {"title": ..., "check": ..., "detail": ..., "profile": ..., "repo": ...}. The optional
     profile names the default worker profile for `assign` while that milestone
@@ -1478,9 +1647,13 @@ def set_goal(goal: str, milestones: list[dict[str, str]], detail: str | None = N
     brindle runs from the root of your checkout; it must exit 0 only when that
     milestone is done (e.g. "uv run pytest tests/test_settings.py -q"). A check
     for a repo attached to the session runs in that repo's checkout: give its
-    alias as "repo", or write the check as "@<alias>: <command>".
+    alias as "repo", or write the check as "@<alias>: <command>". The optional
+    "phase" names the phase a milestone belongs to; the app folds consecutive
+    milestones of one phase together.
     Replaces any earlier goal; milestones that keep their title and check keep
-    their last result."""
+    their last result. Pass analysis_doc=true only when the person explicitly
+    asked for a doc for this goal. Omission preserves the choice for the same
+    goal; a new goal defaults to no doc, regardless of milestone count."""
     db = DB()
     found = _session(db)
     if isinstance(found, str):
@@ -1488,7 +1661,7 @@ def set_goal(goal: str, milestones: list[dict[str, str]], detail: str | None = N
     root_id, _ = found
     try:
         items = autopilot.milestone_items(db, root_id, milestones)
-        autopilot.set_goal(db, root_id, goal, items, detail)
+        autopilot.set_goal(db, root_id, goal, items, detail, analysis_doc=analysis_doc)
     except autopilot.AutopilotError as e:
         return str(e)
     text = autopilot.progress(db, root_id)

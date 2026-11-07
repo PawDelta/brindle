@@ -134,6 +134,8 @@ class AgentDTO(_DTO):
     # Set (instead of the rest) when another identity holds the session.
     locked: str | None = None
     tokens: str | None = None
+    # The model its transcript last ran on (the usage meter names it); absent until it has run.
+    model: str | None = None
     unread: int | None = None
     hooks_off: str | None = None
     parent_id: str | None = None
@@ -171,13 +173,14 @@ class SessionDTO(_DTO):
     created_at: float
     status_since: float | None = None
     goal: str | None = None
+    request: str | None = None   # full startup prompt, before the goal is derived
     name: str | None = None      # the person's name for the session; shown instead of the goal
 
     @classmethod
     def from_agent(cls, a: Agent, goal: str | None = None) -> SessionDTO:
         return cls(id=a.id, workspace_id=a.workspace_id, profile=a.profile, status=a.status,
                    mode=a.mode, created_at=a.created_at, status_since=a.status_since, goal=goal,
-                   name=a.name)
+                   name=a.name, request=a.task)
 
 
 class PermissionChoiceDTO(_DTO):
@@ -231,6 +234,108 @@ class InboxItemDTO(_DTO):
     fix: str | None = None         # a setup item's: what the app's fix button repairs (codex_hook_trust)
     permission: PermissionDTO | None = None
     action: InboxActionDTO | None = None
+    visual_id: str | None = None   # a visual's open question: GET /v1/sessions/{root_id}/visuals
+
+
+class VisualOptionDTO(_DTO):
+    id: str
+    label: str
+    detail: str | None = None
+
+
+class VisualAnswerDTO(_DTO):
+    option: str
+    note: str | None = None
+    at: float
+
+
+class VisualDTO(_DTO):
+    """A visual in a session (brindle.visuals). ``rev``: its current revision,
+    served at /v1/visuals/{id}/r/{rev}; an answer names the revision it read.
+    ``unread``: a revision the person hasn't opened yet."""
+
+    id: str
+    session: str
+    title: str
+    by: str
+    kind: Literal["visual", "plan"]
+    rev: int
+    question: str | None = None
+    options: list[VisualOptionDTO] | None = None
+    answer: VisualAnswerDTO | None = None
+    kept: bool
+    unread: bool
+    created_at: float
+
+
+class PlanSectionDTO(_DTO):
+    """One ``##`` section of a plan's markdown: what a comment anchors to."""
+
+    id: str
+    title: str
+    markdown: str
+
+
+class PlanDecisionDTO(_DTO):
+    """A decision that shapes the plan: its alternatives and the supervisor's pick."""
+
+    id: str
+    title: str
+    options: list[VisualOptionDTO]
+    mine: str | None = None
+    challenge: str | None = None
+
+
+class PlanWorkerDTO(_DTO):
+    id: str
+    title: str
+    after: list[str] = []
+
+
+class PlanCommentDTO(_DTO):
+    section: str
+    text: str
+
+
+class PlanVerdictDTO(_DTO):
+    approved: bool
+    picks: dict[str, str] = {}
+    comments: list[PlanCommentDTO] = []
+    note: str | None = None
+    at: float
+    rev: int
+
+
+class PlanDTO(_DTO):
+    """A planning doc (brindle.plans): markdown brindle renders itself, split
+    into its ``##`` sections. ``state``: open (the person hasn't decided),
+    redirected (their comments went back; a new revision is coming) or
+    approved. While open or redirected, the session's assign calls queue."""
+
+    id: str
+    session: str
+    title: str
+    rev: int
+    state: Literal["open", "redirected", "approved"]
+    markdown: str
+    lede: str
+    sections: list[PlanSectionDTO]
+    decisions: list[PlanDecisionDTO]
+    split: list[PlanWorkerDTO]
+    verdict: PlanVerdictDTO | None = None
+    queued: int
+    created_at: float
+
+
+class KeptVisualDTO(_DTO):
+    """A kept visual: outlives its session. Its page: /v1/kept-visuals/{id}/html."""
+
+    id: str
+    title: str
+    from_session_name: str
+    repo: str
+    answer: VisualAnswerDTO | None = None
+    kept_at: float
 
 
 class MilestoneDTO(_DTO):
@@ -248,6 +353,7 @@ class MilestoneDTO(_DTO):
     state_why: str | None = None
     label: str | None = None       # plain words for state: "not done yet", "regressed", "couldn't run: <why>"
     phase: str = "in_progress"     # done | in_review | in_progress (autopilot.milestone_phases)
+    phase_name: str | None = None  # the goal's phase it is grouped under (goals.md `phase:`); None: no phases
 
     @classmethod
     def from_row(cls, m: Milestone, phase: str = "in_progress") -> MilestoneDTO:
@@ -259,6 +365,7 @@ class MilestoneDTO(_DTO):
 class GoalDTO(_DTO):
     root_id: str
     enabled: bool
+    analysis_doc: bool = False
     goal: str | None = None
     detail: str | None = None
     state: str
@@ -274,7 +381,8 @@ class GoalDTO(_DTO):
                        phases: dict[int, str] | None = None,
                        goal_phase: tuple[str, str | None] = ("in_progress", None)) -> GoalDTO:
         phases = phases or {}
-        return cls(root_id=ap.root_id, enabled=bool(ap.enabled), goal=ap.goal, detail=ap.detail,
+        return cls(root_id=ap.root_id, enabled=bool(ap.enabled), analysis_doc=bool(ap.analysis_doc),
+                   goal=ap.goal, detail=ap.detail,
                    state=ap.state, note=ap.note, progress=ap.progress,
                    usage_resets_at=ap.usage_resets_at,
                    goal_phase=goal_phase[0], pr_url=goal_phase[1],
@@ -422,6 +530,21 @@ class AccountDTO(_DTO):
     email: str | None = None
     plan: str | None = None
     orgs: list[AccountOrgDTO] = []
+
+
+class GitHubConnectionDTO(_DTO):
+    """brindle's own GitHub sign-in (brindle.github_connect), as every
+    /v1/github/connection route answers. ``route``: how the person connected (a
+    copy of the GitHub CLI's sign-in, or a token they pasted). ``needs_reconnect``:
+    GitHub no longer takes it. ``gh_available``: a copy of gh's sign-in can be
+    offered. Never the token."""
+    connected: bool
+    login: str | None = None
+    route: Literal["gh", "token"] | None = None
+    storage: Literal["keychain", "file"] | None = None
+    expires_at: float | None = None
+    needs_reconnect: bool = False
+    gh_available: bool = False
 
 
 class ActionTerminalDTO(_DTO):

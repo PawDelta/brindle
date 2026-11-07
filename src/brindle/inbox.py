@@ -81,6 +81,8 @@ def usable(agent: Agent) -> bool:
 
 def send(agent: Agent, text: str, sender: str = "brindle", timeout: float = 3.0) -> bool:
     """Deliver ``text`` to the agent's inbox. False if it couldn't be."""
+    from brindle import identity_lock
+
     if not usable(agent):
         return False
     frames = [
@@ -88,12 +90,18 @@ def send(agent: Agent, text: str, sender: str = "brindle", timeout: float = 3.0)
         {"type": "user", "message": {"content": text}, "from": sender,
          "priority": "next", "uuid": str(uuid.uuid4())},
     ]
+    payload = "".join(json.dumps(f) + "\n" for f in frames).encode()
     try:
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.settimeout(timeout)
-        s.connect(agent.inbox_socket)
-        s.sendall("".join(json.dumps(f) + "\n" for f in frames).encode())
-        s.close()
+        try:
+            s.settimeout(timeout)
+            s.connect(agent.inbox_socket)
+            # Connection can block across an identity change. No content,
+            # including the auth frame, leaves until this final check passes.
+            identity_lock.ensure(agent)
+            s.sendall(payload)
+        finally:
+            s.close()
     except OSError:
         return False
     return True

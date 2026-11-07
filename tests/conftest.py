@@ -215,14 +215,23 @@ def test_tmux_server(monkeypatch):
             _REAL_RUN([binary, "-u", "-L", name, "-f", os.devnull, "new-session", "-d", "-s",
                        "brindle-test-keeper", "/bin/sh"], capture_output=True)
 
-    def start(base, args, input=None):
+    def start(base, args, input=None, **kwargs):
         if (not started and base[-2:] == ["-L", name] and not tmux._is_read(args)
                 and args[:1] != ("kill-server",)):
             keeper()
-        return real_start(base, args, input)
+        return real_start(base, args, input, **kwargs)
 
     monkeypatch.setattr(tmux, "_start", start)
     _START_TEST_SERVER[:] = [keeper]
+
+
+@pytest.fixture(autouse=True)
+def nobody_typing(monkeypatch):
+    """No person pressed a key in any agent's pane lately (tmux.pane_input):
+    a fake agent's pane is on the default server, which tests never ask."""
+    from brindle import tmux
+
+    monkeypatch.setattr(tmux, "pane_input", lambda *a, **k: None, raising=False)
 
 
 @pytest.fixture(scope="session", autouse=True)

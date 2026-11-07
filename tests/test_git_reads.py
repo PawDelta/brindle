@@ -61,6 +61,8 @@ def asks(tmp_path, monkeypatch):
 @pytest.mark.variant(
     "credential-dialog guard: real HTTP/SSH fetches must bypass credential helpers and askpass, "
     "and SSH must lose its controlling terminal even when launched from a PTY; Python coverage cannot see those prompts")
+@pytest.mark.slow("a dozen real git fetches over a local HTTP server and SSH, each under sandbox-exec: "
+                  "~6s on a quiet core, over the 10s guard once the machine's load passes its core count")
 def test_background_fetch_never_asks_for_credentials(tmp_path, asks, monkeypatch):
     public = tmp_path / "public"
     repo = tmp_path / "repo"

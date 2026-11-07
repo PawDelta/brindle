@@ -1,8 +1,7 @@
 # The desktop app's release, on an app-v<version> tag (the version in
 # app/package.json). The `macos` job builds once per architecture, each on
-# a runner of that architecture (aarch64-apple-darwin on Apple Silicon,
-# x86_64-apple-darwin on Intel: the bundled engine is built for the runner's
-# own architecture only), with the Tauri CLI, signed with the Developer ID when
+# Apple Silicon runner (including the Intel engine and tmux cross-build),
+# with the Tauri CLI, signed with the Developer ID when
 # the Apple secrets are set and its updater bundle signed with the minisign key
 # when TAURI_SIGNING_PRIVATE_KEY is set. With notarization credentials, Tauri
 # notarizes the .app; the job then notarizes and staples the DMG as well, and
@@ -43,14 +42,15 @@
 # Secrets: the jobs that read the Apple, Tauri, Azure or AWS secrets (macos,
 # macos-publish, linux, windows) run in the `desktop-release` GitHub environment, which
 # holds the Apple, Tauri and Azure secrets and the TAURI_UPDATER_PUBKEY variable,
-# admits only app-v* tags and needs the owner's approval. The release role's
+# admits only app-v* tags, with no required reviewers. The release role's
 # OIDC trust accepts that environment's subject.
 # Staff builds use desktop-staff-release and AWS_DESKTOP_STAFF_RELEASE_ROLE_ARN
 # instead. Its role writes only release/*; GitHub must reject staff refs in
 # desktop-release even if a pushed workflow requests it (app/README.md).
 #
-# Stable gate: a pushed app-v* tag builds nothing until `stable-gate` finds its
-# commit on main (the staff channel builds main) and a desktop-release reviewer approves.
+# Release gate: a pushed app-v* tag builds nothing until `release-gate` finds its
+# commit on main (the staff channel builds main) and a release-gate reviewer approves.
+# Only that job uses the protected release-gate environment; it holds no secrets.
 #
 # Release candidates: an app-v<X.Y.Z>-rc<N> tag (package.json version
 # X.Y.Z-rc<N>, e.g. 0.2.0-rc.1) publishes under brindle/downloads/desktop/rc/<version>/
@@ -62,7 +62,7 @@
 #
 # Staff builds: a push to main that touches the app (the
 # paths app.yml runs for) builds the Macs only, at that commit, once
-# `release-gate` has found it on main with the newest matching App run passed,
+# `staff-gate` has found it on main with the newest matching App run passed,
 # and the newest matching CI run passed when one exists. The build carries
 # the version <package.json version>+release.<run>.<sha12>, its updater
 # bundle signed with the staff key (app/src-tauri/staff-updater.pub), and
@@ -136,13 +136,41 @@ env:
   AWS_MAX_ATTEMPTS: "8"
 
 jobs:
+  # One approval for the whole tag release, before any production credentials.
+  # Configure release-gate with required reviewers and app-v* tags only;
+  # desktop-release retains secrets and OIDC trust but has no reviewers.
+  release-gate:
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    environment: release-gate
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read   # this run's approvals, for the summary
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0   # origin/main, to check the commit is on it
+          persist-credentials: false
+      - name: On main, approved
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$GITHUB_SHA ($GITHUB_REF_NAME) is not on main: land it there (the staff channel) first"
+            exit 1
+          fi
+          approvers="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/approvals" \
+            --jq '[.[] | select(.state == "approved") | .user.login] | join(", ")' || echo "unknown")"
+          echo "Release gate: $GITHUB_REF_NAME at $GITHUB_SHA is on main; approved by ${approvers:-nobody recorded}" >> "$GITHUB_STEP_SUMMARY"
+
   # A main push builds staff only once the newest App run, and CI's run when
   # ci.yml ran, for exactly that commit passed. They start on the same push,
   # so this waits for them, up to the CI_GATE_DEADLINE_MINUTES variable
   # (default 45; keep it under this job's 60-minute limit). A failure, or
   # still running at the deadline, fails this job and nothing builds: re-run
   # it once those checks have passed.
-  release-gate:
+  staff-gate:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -172,49 +200,17 @@ jobs:
           CI_GATE_DEADLINE_MINUTES: ${{ vars.CI_GATE_DEADLINE_MINUTES }}
         run: node app/scripts/release_publish.mjs ci-gate
 
-  # A pushed app-v* tag builds only a commit main already has (the staff
-  # channel builds main), and only once a desktop-release reviewer has
-  # approved this job; otherwise no tag job runs. No bypass: an emergency fix
-  # lands on main like anything else.
-  stable-gate:
-    if: github.event_name == 'push' && github.ref_type == 'tag'
-    runs-on: ubuntu-latest
-    environment: desktop-release
-    timeout-minutes: 10
-    permissions:
-      contents: read
-      actions: read   # this run's approvals, for the summary
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0   # origin/main, to check the commit is on it
-          persist-credentials: false
-      - name: On main, approved
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
-            echo "::error::$GITHUB_SHA ($GITHUB_REF_NAME) is not on main: land it there (the staff channel) first"
-            exit 1
-          fi
-          approvers="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/approvals" \
-            --jq '[.[] | select(.state == "approved") | .user.login] | join(", ")' || echo "unknown")"
-          echo "Stable gate: $GITHUB_REF_NAME at $GITHUB_SHA is on main; approved by ${approvers:-nobody recorded}" >> "$GITHUB_STEP_SUMMARY"
-
-  # One build per Mac architecture, each on a runner of that architecture:
-  # build_engine.sh builds the bundled engine for the machine it runs on only
-  # (app/docs/bundled-engine.md, "One architecture per build"), so a
-  # universal build would carry an engine for one of them only.
-  # macos-15-intel is GitHub's x86_64 image (macos-13, the older Intel label,
-  # was retired in December 2025). Nothing is published from here: the
+  # One build per Mac architecture, both on Apple Silicon. The engine's native
+  # dependencies and helper follow the target; Rosetta runs the Intel checks.
+  # Nothing is published from here: the
   # `macos-publish` job does that once both have passed (`release-publish`
   # for a release-branch build).
   macos:
-    needs: [release-gate, stable-gate]
+    needs: [staff-gate, release-gate]
     if: >-
-      !cancelled() && ((github.event_name == 'push' && github.ref_type == 'tag' && needs.stable-gate.result == 'success')
+      !cancelled() && ((github.event_name == 'push' && github.ref_type == 'tag' && needs.release-gate.result == 'success')
       || (github.event_name == 'workflow_dispatch' && !inputs.nightly)
-      || needs.release-gate.outputs.go == 'true')
+      || needs.staff-gate.outputs.go == 'true')
     name: macos (${{ matrix.arch }})
     strategy:
       fail-fast: false
@@ -225,10 +221,10 @@ jobs:
             runner: macos-latest
           - arch: x86_64
             target: x86_64-apple-darwin
-            runner: macos-15-intel
+            runner: macos-latest
     runs-on: ${{ matrix.runner }}
     # Pushed tags use production signing; a release-branch push (past
-    # release-gate) uses the separately protected staff environment.
+    # staff-gate) uses the separately protected staff environment.
     environment: ${{ github.event_name == 'push' && (github.ref_type == 'tag' && 'desktop-release' || 'desktop-staff-release') || '' }}
     timeout-minutes: 90
     permissions:
@@ -237,7 +233,7 @@ jobs:
       ARCH: ${{ matrix.arch }}
       TARGET: ${{ matrix.target }}
       # Set for a release-branch build only: the version it is built with.
-      RELEASE_VERSION: ${{ needs.release-gate.outputs.version }}
+      RELEASE_VERSION: ${{ needs.staff-gate.outputs.version }}
       # build_engine.sh packs brindle from this checkout, at its HEAD (the tag).
       BRINDLE_SRC: ${{ github.workspace }}
       BRINDLE_REF: HEAD
@@ -249,7 +245,7 @@ jobs:
         env:
           REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
-          RELEASE_NAME: ${{ needs.release-gate.outputs.name }}
+          RELEASE_NAME: ${{ needs.staff-gate.outputs.name }}
         run: |
           version="$(node -p "require('./app/package.json').version")"
           if [ "$REF_TYPE" = tag ] && [ "$REF_NAME" != "app-v$version" ]; then
@@ -259,20 +255,20 @@ jobs:
           # A release candidate (app-v*-rc*) publishes under rc/<version>/ only.
           case "$version" in *-rc*) rc=true path="rc/$version" ;; *) rc=false path="$version" ;; esac
           # The files' names: the version, or for a release-branch build its
-          # identity without the '+' (release-gate's name).
+          # identity without the '+' (staff-gate's name).
           name="$version"
           if [ -n "$RELEASE_VERSION" ]; then version="$RELEASE_VERSION" name="$RELEASE_NAME" rc=false path=""; fi
           { echo "version=$version"; echo "rc=$rc"; echo "path=$path"; echo "name=$name"; } >> "$GITHUB_OUTPUT"
 
-      # The runner must be the architecture it builds: build_engine.sh refuses
-      # any other target.
       - name: Runner architecture
         run: |
-          machine="$(uname -m)"
-          [ "$machine" = arm64 ] && machine=aarch64
-          if [ "$machine" != "$ARCH" ]; then
-            echo "::error::runner is $(uname -m), this job builds $TARGET"
+          if [ "$(uname -m)" != arm64 ]; then
+            echo "::error::expected an Apple Silicon runner"
             exit 1
+          fi
+          if [ "$ARCH" = x86_64 ]; then
+            softwareupdate --install-rosetta --agree-to-license
+            arch -x86_64 /usr/bin/true
           fi
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
@@ -441,24 +437,41 @@ jobs:
           fi
           { echo "dir=$bundle"; echo "app=$bundle/macos/brindle.app"; echo "dmg=${dmgs[0]}"; } >> "$GITHUB_OUTPUT"
 
+      - name: Binary architectures
+        env:
+          APP: ${{ steps.bundle.outputs.app }}
+        run: |
+          expected="$ARCH"
+          [ "$expected" != aarch64 ] || expected=arm64
+          for binary in \
+            "$APP/Contents/MacOS/brindle-desktop" \
+            "$APP/Contents/Resources/engine/bin/tmux" \
+            "$APP/Contents/Resources/engine/python/bin/python3" \
+            "$APP/Contents/Library/LoginItems/brindle.app/Contents/MacOS/brindle"; do
+            actual="$(lipo -archs "$binary")"
+            echo "$binary: $actual"
+            [ "$actual" = "$expected" ] || { echo "::error::expected $expected, found $actual in $binary"; exit 1; }
+          done
+
       # Tauri staples the .app straight after notarization, but Apple's ticket
       # is sometimes not downloadable yet, and Tauri carries on without one
       # (rc.4's Intel build: "Accepted", then "does not have a ticket stapled").
-      # Retry until the ticket is there; fail if it never comes.
+      # Allow 33 minutes of backoff for ticket propagation; exhaustion fails the job.
       - name: Staple the app
         if: steps.signing.outputs.notarized == 'true'
         env:
           APP: ${{ steps.bundle.outputs.app }}
-        run: |
-          for attempt in 1 2 3 4 5 6 7 8 9 10; do
-            if xcrun stapler validate "$APP" >/dev/null 2>&1; then
-              echo "ticket stapled (attempt $attempt)"
-              exit 0
-            fi
-            xcrun stapler staple "$APP" || true
-            sleep 30
-          done
-          xcrun stapler validate "$APP" || { echo "::error::no notarization ticket for the .app after 10 tries"; exit 1; }
+        run: bash app/scripts/notarize_dmg.sh --staple-only "$APP"
+
+      - name: Package the stapled app
+        if: steps.signing.outputs.notarized == 'true'
+        env:
+          APP: ${{ steps.bundle.outputs.app }}
+          DMG: ${{ steps.bundle.outputs.dmg }}
+          BUNDLE: ${{ steps.bundle.outputs.dir }}
+          VERSION: ${{ steps.version.outputs.version }}
+          UPDATER: ${{ steps.signing.outputs.updater }}
+        run: bash app/scripts/package_macos.sh
 
       # Tauri notarizes only the .app. The DMG around it needs its own
       # submission and ticket, or Gatekeeper rejects the download itself
@@ -495,6 +508,8 @@ jobs:
         env:
           APP: ${{ steps.bundle.outputs.app }}
           DMG: ${{ steps.bundle.outputs.dmg }}
+          BUNDLE: ${{ steps.bundle.outputs.dir }}
+          UPDATER: ${{ steps.signing.outputs.updater }}
         run: |
           assess() {  # what, spctl args...
             local what="$1" out attempt; shift
@@ -522,6 +537,27 @@ jobs:
           done
           assess app -t exec "$APP"
           assess DMG -t open --context context:primary-signature "$DMG"
+          # Verify the regenerated artifacts themselves before publication.
+          packaged="$(mktemp -d "$RUNNER_TEMP/stapled-bundles.XXXXXX")"
+          mounted=false
+          cleanup_bundles() {
+            if [ "$mounted" = true ]; then hdiutil detach "$packaged/mount"; fi
+            rm -rf "$packaged"
+          }
+          trap cleanup_bundles EXIT
+          if [ "$UPDATER" = true ]; then
+            mkdir "$packaged/updater"
+            tar -xzf "$BUNDLE/macos/brindle.app.tar.gz" -C "$packaged/updater"
+            xcrun stapler validate "$packaged/updater/brindle.app" \
+              || { echo "::error::updater contains an unstapled app; refusing publication"; exit 1; }
+          fi
+          mkdir "$packaged/mount"
+          hdiutil attach "$DMG" -readonly -nobrowse -mountpoint "$packaged/mount"
+          mounted=true
+          xcrun stapler validate "$packaged/mount/brindle.app" \
+            || { echo "::error::DMG contains an unstapled app; refusing publication"; exit 1; }
+          hdiutil detach "$packaged/mount"
+          mounted=false
           # The engine's helper app (build_engine.sh): what macOS takes the
           # daemon and every agent for. Its privacy grants are kept by its
           # bundle id and team, so it must be signed as a bundle, by the app's team.
@@ -594,11 +630,11 @@ jobs:
   # (and their Gatekeeper checks) have passed.
   macos-publish:
     # Never for a release-branch build (release-publish is its publish).
-    # needs.macos.result: macos's own needs (release-gate) is skipped here.
+    # needs.macos.result: macos's own needs (staff-gate) is skipped here.
     if: >-
       !cancelled() && needs.macos.result == 'success'
-      && ((github.event_name == 'push' && github.ref_type == 'tag' && needs.stable-gate.result == 'success') || (github.event_name == 'workflow_dispatch' && !inputs.nightly))
-    needs: [stable-gate, macos]
+      && ((github.event_name == 'push' && github.ref_type == 'tag' && needs.release-gate.result == 'success') || (github.event_name == 'workflow_dispatch' && !inputs.nightly))
+    needs: [release-gate, macos]
     runs-on: ubuntu-latest
     environment: ${{ github.event_name == 'push' && 'desktop-release' || '' }}
     timeout-minutes: 20
@@ -791,9 +827,9 @@ jobs:
   # descendant of the commit it names, written with an S3 conditional put so
   # an older or concurrent run can never put it back.
   release-publish:
-    needs: [release-gate, macos]
+    needs: [staff-gate, macos]
     if: >-
-      !cancelled() && needs.macos.result == 'success' && needs.release-gate.outputs.go == 'true'
+      !cancelled() && needs.macos.result == 'success' && needs.staff-gate.outputs.go == 'true'
       && github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment: desktop-staff-release
@@ -802,8 +838,8 @@ jobs:
       contents: read
       id-token: write   # the release-branch role, through GitHub's OIDC
     env:
-      VERSION: ${{ needs.release-gate.outputs.version }}
-      NAME: ${{ needs.release-gate.outputs.name }}
+      VERSION: ${{ needs.staff-gate.outputs.version }}
+      NAME: ${{ needs.staff-gate.outputs.name }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -813,7 +849,7 @@ jobs:
         with:
           node-version: 22
 
-      # This attempt's own directory, not release-gate's: re-running this job
+      # This attempt's own directory, not staff-gate's: re-running this job
       # alone keeps the gate's outputs from the attempt it first ran in.
       - name: Identity
         id: identity
@@ -821,7 +857,7 @@ jobs:
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          pattern: brindle-desktop-macos-*-${{ needs.release-gate.outputs.name }}
+          pattern: brindle-desktop-macos-*-${{ needs.staff-gate.outputs.name }}
           path: ${{ runner.temp }}/desktop
           merge-multiple: true
 
@@ -833,7 +869,7 @@ jobs:
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: brindle-desktop-release-${{ needs.release-gate.outputs.name }}-attempt-${{ github.run_attempt }}
+          name: brindle-desktop-release-${{ needs.staff-gate.outputs.name }}-attempt-${{ github.run_attempt }}
           path: ${{ steps.collect.outputs.dir }}
           if-no-files-found: error
 
@@ -918,9 +954,9 @@ jobs:
           echo "Published brindle desktop $VERSION (release build, macOS) to $SITE_DOWNLOADS/$DEST_PATH/ and release/latest.json" >> "$GITHUB_STEP_SUMMARY"
 
   linux:
-    needs: stable-gate
+    needs: release-gate
     if: >-
-      !cancelled() && ((github.event_name == 'push' && github.ref_type == 'tag' && needs.stable-gate.result == 'success') || (github.event_name == 'workflow_dispatch' && !inputs.nightly))
+      !cancelled() && ((github.event_name == 'push' && github.ref_type == 'tag' && needs.release-gate.result == 'success') || (github.event_name == 'workflow_dispatch' && !inputs.nightly))
     runs-on: ubuntu-22.04
     environment: ${{ github.event_name == 'push' && 'desktop-release' || '' }}
     timeout-minutes: 60
@@ -1077,9 +1113,9 @@ jobs:
           echo "Published brindle desktop $VERSION (Linux) to $SITE_DOWNLOADS/" >> "$GITHUB_STEP_SUMMARY"
 
   windows:
-    needs: stable-gate
+    needs: release-gate
     if: >-
-      !cancelled() && ((github.event_name == 'push' && github.ref_type == 'tag' && needs.stable-gate.result == 'success') || (github.event_name == 'workflow_dispatch' && !inputs.nightly))
+      !cancelled() && ((github.event_name == 'push' && github.ref_type == 'tag' && needs.release-gate.result == 'success') || (github.event_name == 'workflow_dispatch' && !inputs.nightly))
     runs-on: windows-latest
     # Only a pushed app-v* tag runs in the environment that holds the secrets.
     environment: ${{ github.event_name == 'push' && 'desktop-release' || '' }}

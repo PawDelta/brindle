@@ -168,6 +168,39 @@ def test_check_timeout_kills_group(monkeypatch):
     assert kw["start_new_session"] and len(killed) == 1
 
 
+def test_a_timeout_reruns_once_then_reads_as_a_timeout_not_a_failure(db, repo, monkeypatch):
+    ws = branch(db, repo, "one")
+    runs = []
+
+    def run(cmd, cwd, env, timeout, **kw):
+        runs.append(cmd)
+        return False, f"$ {cmd}\n(timed out after {timeout}s)"
+
+    monkeypatch.setattr(autopilot, "run_check", run)
+    configure(repo, pre_commit=False)
+    cfg = load_repo_config(str(repo))
+    cfg.checks = ["suite", "later"]
+    summary = gates.check_summary(db, ws, cfg)
+    assert len(runs) == 2   # the run, and its one rerun
+    assert gates.summary_timed_out(summary) and not gates.summary_failed(summary)
+    assert "SKIP `later`" in summary   # an unfinished check is never taken as a pass
+    r = gates.run(db, ws, cfg, review_required=False)
+    assert not r.ok
+    results = iter([(False, "(timed out after 5s)"), (True, "ok")])   # room came back: the rerun passes
+    monkeypatch.setattr(autopilot, "run_check", lambda *a, **k: next(results))
+    assert gates._run_queued(db, ws, "suite", {}, 5) == (True, "ok")
+
+
+def test_the_wait_for_room_is_bounded(db, repo, monkeypatch):
+    from brindle import spawn
+
+    ws = branch(db, repo, "one")
+    monkeypatch.setattr(spawn, "check_no_room", lambda root=None: "load")
+    monkeypatch.setattr(gates, "ROOM_WAIT_MAX", 0.0)
+    with gates._room_for_check(ws):   # never has room, still returns
+        pass
+
+
 def test_check_summary_and_the_merge_gate_share_the_queue(db, repo, monkeypatch):
     configure(repo, check_concurrency=1, pre_commit=False)
     monkeypatch.setattr(gates, "SLOT_POLL", 0.01)

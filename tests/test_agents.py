@@ -218,7 +218,7 @@ CLAUDE_TYPING_WITH_INVERSE_CURSOR = (
     (CLAUDE_PLACEHOLDER_GREY_256, True, None),  # grey 256-colour placeholder
     (CLAUDE_PLACEHOLDER_TRUECOLOR_GREY, True, None),  # grey truecolor placeholder
     (CLAUDE_TYPING_WITH_INVERSE_CURSOR, True, "typing"),  # ignore the inverse-video cursor cell
-    ("❯\n" + "continued draft\n" * 40 + "────\n? for shortcuts", True, "typing"),   # a long draft, prompt far above
+    ("❯\n\n" + "continued draft\n" * 40 + "────\n? for shortcuts", True, "typing"),   # a long draft after a blank row
 ])
 def test_claude_paste_blocked(screen, interactive, want):
     assert ClaudeCode().paste_blocked(screen, interactive) == want
@@ -313,13 +313,31 @@ def test_flush_keeps_message_queued_over_background_session_launcher(db, ws, mon
     assert db.pending_count("a1") == 1
 
 
-@pytest.mark.parametrize("provider,fault", [("claude", "unreadable"), ("claude", "draft"), ("codex", "draft")])
+_REAL_PANE_INPUT = getattr(tmux, "pane_input", None)   # before conftest's nobody_typing
+
+
+@pytest.mark.parametrize("provider,fault", [("claude", "unreadable"), ("claude", "draft"), ("codex", "draft"),
+                                            ("claude", "typed")])
 def test_paste_blocked_or_draft_holds_message_then_delivers_it_once(db, ws, monkeypatch, provider, fault):
     fake_agent(db, ws, status="processing" if provider == "codex" else "idle", mode="interactive")
     db.update_agent("a1", provider=provider)
     db.enqueue("a1", "queued message", None)
     clean, draft = {"claude": (CLAUDE_IDLE, CLAUDE_TYPING_WITH_INVERSE_CURSOR), "codex": ("› \n? for shortcuts\n", "› hello\n? for shortcuts\n")}[provider]
     s, pasted = {"screen": None if fault == "unreadable" else clean, "arm": fault == "draft"}, []
+    # "typed": the person is typing a reply into the chat, but the loaded CLI
+    # hasn't drawn their keys yet; tmux saw them (the person's own client).
+    s["typed"] = time.time() if fault == "typed" else None
+    if fault == "typed":
+        from types import SimpleNamespace
+        real_tmux = tmux._tmux
+
+        def tmux_call(*args, **k):
+            if args[0] != "list-clients":
+                return real_tmux(*args, **k)
+            rows = f"%9\t{int(time.time())}\n@0\t{int(s['typed'])}\n"   # another pane's keys don't count
+            return SimpleNamespace(returncode=0, stdout=rows, stderr="")
+        monkeypatch.setattr(tmux, "pane_input", _REAL_PANE_INPUT, raising=False)
+        monkeypatch.setattr(tmux, "_tmux", tmux_call)
 
     def capture(*a, **k):
         if s["screen"] is None:
@@ -334,7 +352,123 @@ def test_paste_blocked_or_draft_holds_message_then_delivers_it_once(db, ws, monk
     monkeypatch.setattr(agents, "message_lead", prepare_lead)
     assert agents.flush(db, "a1") is False and not pasted and db.pending_count("a1") == 1
     s["screen"] = clean   # the draft is sent or cleared
+    s["typed"] = s["typed"] and time.time() - 60
     assert agents.flush(db, "a1") is True and pasted == ["queued message"]
+
+
+@pytest.mark.parametrize("typed_after,then", [
+    ("load-buffer", "cleared"), ("lead", "cleared"), ("body", "cleared"), ("body", "sent"),
+    ("body", "codex turn"),   # Codex reports what went in only when the turn ends
+    ("body", "replaced"),   # cleared, then something else sent before the next flush
+    # agy reports no prompt text: once it starts a turn, sent and replaced look alike
+    ("body", "agy sent"), ("body", "agy replaced"), ("body", "agy cleared"),
+    # keys pressed after the lead, but the next write comes over TYPED_WITHIN later
+    ("lead-late", "sent"),
+    ("lead-switch", "cleared"),   # then the person's client moves to another pane
+    # they send it (or a replacement) and its turn's hook runs before brindle's Enter is authorized
+    ("enter", "sent"), ("enter", "agy sent"), ("enter", "agy replaced"),
+    ("paste", "sent"), ("paste", "agy sent"),   # ... before the body's write is even recorded
+    ("lead", "agy sent"),   # stopped before its body: the turn they start can't carry it
+    # ... they delete only their reply, the body is resumed onto the lead, and they send mid-paste
+    ("lead", "agy resumed"),
+])
+def test_person_typing_mid_paste_stops_it_and_message_goes_in_once_later(db, ws, monkeypatch, typed_after, then):
+    # Real flush and tmux.paste over a fake terminal: the person starts a reply
+    # after brindle's last look, while the paste is under way, then sends or
+    # clears whatever the composer holds.
+    from types import SimpleNamespace
+    from brindle import antigravity, autopilot
+
+    agy = then.startswith("agy")
+    fake_agent(db, ws, status="idle", mode="interactive")
+    db.update_agent("a1", provider="antigravity" if agy else "claude")
+    monkeypatch.setattr(antigravity, "_flush_soon", lambda *a, **k: None)
+    spoke = []
+    monkeypatch.setattr(autopilot, "user_spoke", lambda db_, a: spoke.append(a.id))
+    db.enqueue("a1", "WORKER REPORT", None)
+    s = {"composer": "", "typed": time.time() - 60, "at": typed_after}   # their client, idle a minute
+    submitted = []
+
+    def person_types(point):
+        if s["at"] in (point, point + "-late", point + "-switch"):
+            s["typed"] = None if s["at"].endswith("-switch") else time.time() - (6 if s["at"].endswith("-late") else 0)
+            s["at"] = None
+            s["composer"] += "MY UNSENT REPLY"
+
+    def start_turn(prompt):   # the CLI's real hook for a turn the person started
+        if agy:
+            antigravity.handle_hook(db, "a1", "agy-pre-invocation", {"invocationNum": 0})
+        else:
+            agents.handle_hook(db, "a1", "prompt-submit", {"prompt": prompt})
+
+    def person_sends(point):   # they type, send it (or a replacement), and its turn's hook runs
+        if s["at"] == point:
+            s["at"], s["typed"] = None, time.time()
+            s["composer"] += "MY UNSENT REPLY"
+            start_turn("SOMETHING ELSE" if then.endswith("replaced") else s["composer"])
+            s["composer"] = ""
+
+    def tmux_call(*args, input=None, authorize=None, **k):
+        if args[0] == "send-keys" and args[-1] == "Enter":
+            person_sends("enter")
+        if authorize is not None:
+            authorize()
+        out = ""
+        if args[0] == "capture-pane":
+            out = (f"────\n> {s['composer']}\n────\n? for shortcuts\n" if agy
+                   else CLAUDE_IDLE.replace("❯ ", "❯ " + s["composer"]))
+        elif args[0] == "list-clients" and s["typed"]:
+            out = f"@0\t{int(s['typed'])}\n"
+        elif args[0] == "load-buffer":
+            s["buffer"] = input
+            person_types("load-buffer")
+        elif args[0] == "send-keys" and "-l" in args:
+            s["composer"] += args[-1]
+            person_types("lead")
+        elif args[0] == "paste-buffer":
+            s["composer"] += s.pop("buffer")
+            person_types("body")
+            person_sends("paste")   # the body is in, its write not yet recorded
+        elif args[0] == "send-keys" and args[-1] == "Enter":
+            submitted.append(s["composer"])
+            s["composer"] = ""
+        return SimpleNamespace(returncode=0, stdout=out, stderr="")
+    monkeypatch.setattr(tmux, "pane_input", _REAL_PANE_INPUT, raising=False)
+    monkeypatch.setattr(tmux, "_tmux", tmux_call)
+    lead = agents.message_lead(db, db.get_agent("a1"), None)
+
+    assert agents.flush(db, "a1") is False and submitted == [] and db.pending_count("a1") == 1
+    assert ("WORKER REPORT" in s["composer"]) == (typed_after == "body")   # the body never lands on their text
+    if then == "agy resumed":
+        s["composer"], s["typed"], s["at"] = f"{lead} ", time.time() - 60, "paste"
+        assert agents.flush(db, "a1") is False and submitted == []
+        antigravity.handle_hook(db, "a1", "agy-stop", {})
+    sent, s["composer"], s["typed"] = s["composer"], "", time.time() - 60   # a minute ago
+    if then.endswith("replaced"):
+        sent = "SOMETHING ELSE"
+    in_flight = typed_after in ("enter", "paste") or then == "agy resumed"   # their send and its hook came mid-paste
+    if then in ("sent", "replaced", "agy sent", "agy replaced") and not in_flight:
+        start_turn(sent)   # the report went in with their reply, or it didn't
+    if then in ("sent", "replaced"):
+        db.set_status("a1", "idle")
+    elif then == "codex turn":
+        agents.handle_hook(db, "a1", "codex-notify", {"type": "agent-turn-complete", "input-messages": [sent]})
+    elif then in ("agy sent", "agy replaced"):
+        antigravity.handle_hook(db, "a1", "agy-stop", {})
+    assert len(spoke) == (then in ("sent", "replaced", "agy sent", "agy replaced", "agy resumed"))   # theirs
+    again = not (typed_after == "body" or in_flight) or then in ("cleared", "replaced", "agy cleared")
+    unresolved = then in ("agy sent", "agy replaced", "agy resumed") and (typed_after == "body" or in_flight)
+    # this flush counts it (Codex's turn-end notify already flushed it)
+    acknowledged = then == "sent" and (typed_after == "body" or in_flight)
+    assert agents.flush(db, "a1") is (again or acknowledged) and db.pending_count("a1") == 0
+    assert submitted == ([f"{lead} WORKER REPORT"] if again else [])
+    # by no other way either: read_messages hands nothing over again
+    assert "WORKER REPORT" not in agents.render_unread(db, db.read_held("a1"))
+    kept = db.get_message("a1", 1)   # agy's unknowable case: kept, never counted delivered
+    assert (kept.held == 2 and kept.delivered_at is None) == unresolved
+    db.set_status("a1", "idle")   # that turn ended; the queue moves on
+    db.enqueue("a1", "NEXT", None)
+    assert agents.flush(db, "a1") is True and submitted[-1] == f"{lead} NEXT" and len(submitted) == 1 + again
 
 
 def test_reconcile_keeps_hook_status_when_screen_is_unclear(db, ws, monkeypatch):
@@ -357,8 +491,9 @@ def test_find_running_reuses_a_live_interactive_agent(db, ws, monkeypatch):
 
 
 def test_handoff_wait_is_bounded_and_detaches(db, ws, monkeypatch):
+    """A detached handoff's reports survive interruptions, then collection drains them."""
     (Path(ws.repo_root) / ".brindle").mkdir(exist_ok=True)
-    (Path(ws.repo_root) / ".brindle" / "config.json").write_text('{"pipeline": false}')
+    (Path(ws.repo_root) / ".brindle" / "config.json").write_text('{"pipeline": true}')
     from brindle import mcp_server
 
     fake_agent(db, ws, status="processing", agent_id="boss")
@@ -370,17 +505,111 @@ def test_handoff_wait_is_bounded_and_detaches(db, ws, monkeypatch):
     assert "still running" in out and "wait_for_worker" in out
     assert db.get_agent("w1").mode == "handoff_detached"
 
-    # Finishing later forwards the result to the supervisor's inbox...
-    agents.report_result(db, "w1", "done later")
-    assert db.pending_count("boss") == 1
+    # Finishing later forwards each accepted report exactly once, even when
+    # interrupted before delivery or interleaved with a concurrent report.
+    broken = {"git": False, "docs": False, "pre": False, "notify": False}
+    at = {"head": "h1"}
+    inner = []
+    during_docs = []   # (what the interleaved call reports, what the outer call's check then says)
+    during_head = []
+    read_docs, warm_checks, notify_parent = agents.stale_analysis_docs, agents.warm_checks, agents._notify_supervisor
+
+    def git_head(ws_):
+        if broken["git"]:
+            raise RuntimeError("interrupted at the first git call")
+        if during_head:   # a duplicate call that starts while this one reads the head
+            during_head.pop()()
+        return at["head"]
+
+    def docs(db_, agent_id):
+        if broken["docs"]:
+            raise RuntimeError("interrupted after receipt")
+        if during_docs:   # a second call runs to the end while this one checks documents
+            text, verdict = during_docs.pop()
+            agents.report_result(db, "w1", text)
+            return verdict
+        return read_docs(db_, agent_id)
+
+    def warm(ws_):
+        if broken["pre"]:
+            raise RuntimeError("interrupted after accept")
+        if inner:   # a concurrent duplicate call, mid-flight
+            inner.pop()()
+        warm_checks(ws_)
+
+    def notify(db_, parent):
+        if broken["notify"]:
+            raise RuntimeError("interrupted after dispatch")
+        notify_parent(db_, parent)
+
+    def states():
+        return [r["state"] for r in db.conn.execute("SELECT state FROM report_outbox WHERE canonical_id IS NULL ORDER BY id")]
+
+    def messages():
+        return db.conn.execute("SELECT count(*) FROM inbox WHERE agent_id='boss' AND COALESCE(held, 0)=0").fetchone()[0]
+
+    monkeypatch.setattr(agents, "warm_checks", warm)
+    monkeypatch.setattr(agents, "stale_analysis_docs", docs)
+    monkeypatch.setattr(agents, "_branch_head", git_head)
+    monkeypatch.setattr(agents, "_notify_supervisor", notify)
+
+    broken["git"] = True                                   # the first git call hangs
+    with pytest.raises(RuntimeError):
+        agents.report_result(db, "w1", "done")
+    assert states() == ["received"] and db.get_agent("w1").result is None
+    broken.update(git=False, docs=True)                    # after receipt
+    with pytest.raises(RuntimeError):
+        agents.report_result(db, "w1", "done")
+    assert states() == ["received"] and db.get_agent("w1").result is None   # nothing reads it yet
+    broken.update(docs=False, pre=True)                    # after accept
+    with pytest.raises(RuntimeError):
+        agents.report_result(db, "w1", "done")
+    assert states() == ["accepted"] and db.get_agent("w1").result == "done" and messages() == 0
+    broken["pre"] = False
+    inner.append(lambda: agents.report_result(db, "w1", "done"))   # a duplicate call, concurrently
+    agents.report_result(db, "w1", "done")
+    assert states() == ["delivered"] and messages() == 1
     assert [(e["kind"], e["agent_id"], e["payload"].get("sender_id"))
             for e in bus.tail(db, kinds=("agent.result", "message.queued"))] == [
         ("agent.result", "w1", None), ("message.queued", "boss", "w1")]
-    # ...and if the supervisor collects it directly, the duplicate is dropped.
+    agents.report_result(db, "w1", "done")
+    at["head"] = "h2"                                      # the same summary at a new head
+    broken["notify"] = True                                # after dispatch
+    with pytest.raises(RuntimeError):
+        agents.report_result(db, "w1", "done")
+    assert states() == ["delivered", "delivered"] and messages() == 2
+    agents.report_result(db, "w1", "done")
+    assert messages() == 2
+    # A duplicate that starts while the head is read, for a head already reported: its
+    # receipt is folded into the delivered row (kept, never deleted) and both calls follow it.
+    during_head.append(lambda: agents.report_result(db, "w1", "done"))
+    agents.report_result(db, "w1", "done")
+    assert states() == ["delivered", "delivered"] and messages() == 2
+    h2 = db.conn.execute("SELECT id FROM report_outbox WHERE head='h2' AND canonical_id IS NULL").fetchone()[0]
+    folded = db.conn.execute("SELECT state FROM report_outbox WHERE canonical_id=?", (h2,)).fetchall()
+    assert folded and all(r["state"] == "superseded" for r in folded)
+    broken["notify"] = False
+    # Two calls interleaved at the document check: the one that accepts first writes the
+    # result and delivers; the other, whether its check passed or found stale documents,
+    # follows the row's state and delivers nothing.
+    for n, verdict in enumerate((None, "read the new analysis docs first"), 1):
+        at["head"] = f"x{n}"
+        db.update_agent("w1", result=None)   # the document check applies to a first report
+        during_docs.append((f"v{n}", verdict))
+        agents.report_result(db, "w1", f"v{n}")
+        assert db.get_agent("w1").result == f"v{n}" and messages() == 2 + n
+    # An older report stuck undelivered is superseded by a newer one that is delivered.
+    old = db.outbox_receive("w1", "old", "stale")
+    db.outbox_bind(old["id"], "h0")
+    at["head"] = "h3"
+    agents.report_result(db, "w1", "done, more")
+    assert db.conn.execute("SELECT state FROM report_outbox WHERE id=?", (old["id"],)).fetchone()[0] == "superseded"
+    assert states()[-1] == "delivered"
+    # Collecting the latest result directly drops the queued handoff messages.
     out = mcp_server._await_worker(db, "w1", wait_seconds=0)
-    assert "done later" in out
+    assert "done, more" in out
     assert db.pending_count("boss") == 0
-    assert db.get_agent("w1") is None  # handoff worker closed after collection
+    assert db.get_agent("w1") is None
 
 
 @pytest.mark.skipif(not shutil.which("tmux"), reason="tmux not installed")

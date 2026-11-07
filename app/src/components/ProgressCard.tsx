@@ -16,6 +16,8 @@ export interface ProgressCardProps {
   onRetry?(): void;
   /* A second choice beside Retry ("Skip for now"). */
   other?: { label: string; onClick(): void };
+  /* Another choice beside Retry (a button the screen draws). */
+  extra?: ReactNode;
   label: string;
   testId?: string;
   children?: ReactNode;
@@ -24,7 +26,7 @@ export interface ProgressCardProps {
 /* How many of the command's last lines show. */
 const SHOWN = 6;
 
-export function ProgressCard({ title, status, lines, failure, onRetry, other, label, testId, children }: ProgressCardProps) {
+export function ProgressCard({ title, status, lines, failure, onRetry, other, extra, label, testId, children }: ProgressCardProps) {
   const failed = status === "failed";
   const done = status === "done";
   return (
@@ -60,6 +62,7 @@ export function ProgressCard({ title, status, lines, failure, onRetry, other, la
               Retry
             </button>
           )}
+          {extra}
           {other && (
             <button type="button" className={quiet} onClick={other.onClick}>
               {other.label}

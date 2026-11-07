@@ -43,11 +43,15 @@ def _until(cond, within: float = 5.0) -> bool:
 
 
 def _room(monkeypatch, load, level, expected):
+    from brindle import disk
+
+    monkeypatch.setattr(disk, "low_disk", lambda root=None: None)
     monkeypatch.setattr(spawn, "_cores", lambda: 8)
     monkeypatch.setattr(spawn, "_load", lambda: load)
     monkeypatch.setattr(spawn, "pressure", lambda: level)
     monkeypatch.setattr(spawn, "_running", 1)
     assert spawn.room() == expected
+    assert spawn.check_no_room() == (spawn.why() if level >= spawn.PRESSURE_CRITICAL else None)
     if expected >= 1:
         assert spawn.no_room() is None
 

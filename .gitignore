@@ -8,6 +8,9 @@ graphify-out/
 # brindle local state that is not part of the repo
 .brindle/*.log
 .brindle/agents/
+# agents' visuals and kept copies (brindle.visuals): may quote repo contents
+.brindle/visuals/
+.brindle/kept/
 # private, kept local for now
 docs/*
 !docs/agents-and-routing.md

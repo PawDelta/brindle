@@ -267,6 +267,18 @@
           "title": "Mode",
           "type": "string"
         },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Model"
+        },
         "parent_id": {
           "anyOf": [
             {
@@ -1987,6 +1999,86 @@
       "title": "GcloudOptionsDTO",
       "type": "object"
     },
+    "GitHubConnectionDTO": {
+      "description": "brindle's own GitHub sign-in (brindle.github_connect), as every\n/v1/github/connection route answers. ``route``: how the person connected (a\ncopy of the GitHub CLI's sign-in, or a token they pasted). ``needs_reconnect``:\nGitHub no longer takes it. ``gh_available``: a copy of gh's sign-in can be\noffered. Never the token.",
+      "properties": {
+        "connected": {
+          "title": "Connected",
+          "type": "boolean"
+        },
+        "expires_at": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expires At"
+        },
+        "gh_available": {
+          "default": false,
+          "title": "Gh Available",
+          "type": "boolean"
+        },
+        "login": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Login"
+        },
+        "needs_reconnect": {
+          "default": false,
+          "title": "Needs Reconnect",
+          "type": "boolean"
+        },
+        "route": {
+          "anyOf": [
+            {
+              "enum": [
+                "gh",
+                "token"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Route"
+        },
+        "storage": {
+          "anyOf": [
+            {
+              "enum": [
+                "keychain",
+                "file"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Storage"
+        }
+      },
+      "required": [
+        "connected"
+      ],
+      "title": "GitHubConnectionDTO",
+      "type": "object"
+    },
     "GoalDTO": {
       "$defs": {
         "MilestoneDTO": {
@@ -2060,6 +2152,18 @@
               "title": "Phase",
               "type": "string"
             },
+            "phase_name": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Phase Name"
+            },
             "position": {
               "title": "Position",
               "type": "integer"
@@ -2132,6 +2236,11 @@
         }
       },
       "properties": {
+        "analysis_doc": {
+          "default": false,
+          "title": "Analysis Doc",
+          "type": "boolean"
+        },
         "detail": {
           "anyOf": [
             {
@@ -2574,6 +2683,18 @@
           "default": null,
           "title": "Section"
         },
+        "visual_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Visual Id"
+        },
         "workspace_id": {
           "anyOf": [
             {
@@ -2592,6 +2713,83 @@
         "reason"
       ],
       "title": "InboxItemDTO",
+      "type": "object"
+    },
+    "KeptVisualDTO": {
+      "$defs": {
+        "VisualAnswerDTO": {
+          "properties": {
+            "at": {
+              "title": "At",
+              "type": "number"
+            },
+            "note": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Note"
+            },
+            "option": {
+              "title": "Option",
+              "type": "string"
+            }
+          },
+          "required": [
+            "option",
+            "at"
+          ],
+          "title": "VisualAnswerDTO",
+          "type": "object"
+        }
+      },
+      "description": "A kept visual: outlives its session. Its page: /v1/kept-visuals/{id}/html.",
+      "properties": {
+        "answer": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/VisualAnswerDTO"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "from_session_name": {
+          "title": "From Session Name",
+          "type": "string"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "kept_at": {
+          "title": "Kept At",
+          "type": "number"
+        },
+        "repo": {
+          "title": "Repo",
+          "type": "string"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "from_session_name",
+        "repo",
+        "kept_at"
+      ],
+      "title": "KeptVisualDTO",
       "type": "object"
     },
     "MilestoneDTO": {
@@ -2664,6 +2862,18 @@
           "default": "in_progress",
           "title": "Phase",
           "type": "string"
+        },
+        "phase_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Phase Name"
         },
         "position": {
           "title": "Position",
@@ -4999,6 +5209,524 @@
       "title": "PermissionRuleDTO",
       "type": "object"
     },
+    "PlanCommentDTO": {
+      "properties": {
+        "section": {
+          "title": "Section",
+          "type": "string"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "section",
+        "text"
+      ],
+      "title": "PlanCommentDTO",
+      "type": "object"
+    },
+    "PlanDTO": {
+      "$defs": {
+        "PlanCommentDTO": {
+          "properties": {
+            "section": {
+              "title": "Section",
+              "type": "string"
+            },
+            "text": {
+              "title": "Text",
+              "type": "string"
+            }
+          },
+          "required": [
+            "section",
+            "text"
+          ],
+          "title": "PlanCommentDTO",
+          "type": "object"
+        },
+        "PlanDecisionDTO": {
+          "description": "A decision that shapes the plan: its alternatives and the supervisor's pick.",
+          "properties": {
+            "challenge": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Challenge"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "mine": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Mine"
+            },
+            "options": {
+              "items": {
+                "$ref": "#/$defs/VisualOptionDTO"
+              },
+              "title": "Options",
+              "type": "array"
+            },
+            "title": {
+              "title": "Title",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "title",
+            "options"
+          ],
+          "title": "PlanDecisionDTO",
+          "type": "object"
+        },
+        "PlanSectionDTO": {
+          "description": "One ``##`` section of a plan's markdown: what a comment anchors to.",
+          "properties": {
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "markdown": {
+              "title": "Markdown",
+              "type": "string"
+            },
+            "title": {
+              "title": "Title",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "title",
+            "markdown"
+          ],
+          "title": "PlanSectionDTO",
+          "type": "object"
+        },
+        "PlanVerdictDTO": {
+          "properties": {
+            "approved": {
+              "title": "Approved",
+              "type": "boolean"
+            },
+            "at": {
+              "title": "At",
+              "type": "number"
+            },
+            "comments": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/PlanCommentDTO"
+              },
+              "title": "Comments",
+              "type": "array"
+            },
+            "note": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Note"
+            },
+            "picks": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "default": {},
+              "title": "Picks",
+              "type": "object"
+            },
+            "rev": {
+              "title": "Rev",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "approved",
+            "at",
+            "rev"
+          ],
+          "title": "PlanVerdictDTO",
+          "type": "object"
+        },
+        "PlanWorkerDTO": {
+          "properties": {
+            "after": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "After",
+              "type": "array"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "title": {
+              "title": "Title",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "title"
+          ],
+          "title": "PlanWorkerDTO",
+          "type": "object"
+        },
+        "VisualOptionDTO": {
+          "properties": {
+            "detail": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Detail"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "label": {
+              "title": "Label",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "label"
+          ],
+          "title": "VisualOptionDTO",
+          "type": "object"
+        }
+      },
+      "description": "A planning doc (brindle.plans): markdown brindle renders itself, split\ninto its ``##`` sections. ``state``: open (the person hasn't decided),\nredirected (their comments went back; a new revision is coming) or\napproved. While open or redirected, the session's assign calls queue.",
+      "properties": {
+        "created_at": {
+          "title": "Created At",
+          "type": "number"
+        },
+        "decisions": {
+          "items": {
+            "$ref": "#/$defs/PlanDecisionDTO"
+          },
+          "title": "Decisions",
+          "type": "array"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "lede": {
+          "title": "Lede",
+          "type": "string"
+        },
+        "markdown": {
+          "title": "Markdown",
+          "type": "string"
+        },
+        "queued": {
+          "title": "Queued",
+          "type": "integer"
+        },
+        "rev": {
+          "title": "Rev",
+          "type": "integer"
+        },
+        "sections": {
+          "items": {
+            "$ref": "#/$defs/PlanSectionDTO"
+          },
+          "title": "Sections",
+          "type": "array"
+        },
+        "session": {
+          "title": "Session",
+          "type": "string"
+        },
+        "split": {
+          "items": {
+            "$ref": "#/$defs/PlanWorkerDTO"
+          },
+          "title": "Split",
+          "type": "array"
+        },
+        "state": {
+          "enum": [
+            "open",
+            "redirected",
+            "approved"
+          ],
+          "title": "State",
+          "type": "string"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        },
+        "verdict": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PlanVerdictDTO"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "id",
+        "session",
+        "title",
+        "rev",
+        "state",
+        "markdown",
+        "lede",
+        "sections",
+        "decisions",
+        "split",
+        "queued",
+        "created_at"
+      ],
+      "title": "PlanDTO",
+      "type": "object"
+    },
+    "PlanDecisionDTO": {
+      "$defs": {
+        "VisualOptionDTO": {
+          "properties": {
+            "detail": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Detail"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "label": {
+              "title": "Label",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "label"
+          ],
+          "title": "VisualOptionDTO",
+          "type": "object"
+        }
+      },
+      "description": "A decision that shapes the plan: its alternatives and the supervisor's pick.",
+      "properties": {
+        "challenge": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Challenge"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "mine": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Mine"
+        },
+        "options": {
+          "items": {
+            "$ref": "#/$defs/VisualOptionDTO"
+          },
+          "title": "Options",
+          "type": "array"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "options"
+      ],
+      "title": "PlanDecisionDTO",
+      "type": "object"
+    },
+    "PlanSectionDTO": {
+      "description": "One ``##`` section of a plan's markdown: what a comment anchors to.",
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "markdown": {
+          "title": "Markdown",
+          "type": "string"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "markdown"
+      ],
+      "title": "PlanSectionDTO",
+      "type": "object"
+    },
+    "PlanVerdictDTO": {
+      "$defs": {
+        "PlanCommentDTO": {
+          "properties": {
+            "section": {
+              "title": "Section",
+              "type": "string"
+            },
+            "text": {
+              "title": "Text",
+              "type": "string"
+            }
+          },
+          "required": [
+            "section",
+            "text"
+          ],
+          "title": "PlanCommentDTO",
+          "type": "object"
+        }
+      },
+      "properties": {
+        "approved": {
+          "title": "Approved",
+          "type": "boolean"
+        },
+        "at": {
+          "title": "At",
+          "type": "number"
+        },
+        "comments": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PlanCommentDTO"
+          },
+          "title": "Comments",
+          "type": "array"
+        },
+        "note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Note"
+        },
+        "picks": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "title": "Picks",
+          "type": "object"
+        },
+        "rev": {
+          "title": "Rev",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "approved",
+        "at",
+        "rev"
+      ],
+      "title": "PlanVerdictDTO",
+      "type": "object"
+    },
+    "PlanWorkerDTO": {
+      "properties": {
+        "after": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "After",
+          "type": "array"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title"
+      ],
+      "title": "PlanWorkerDTO",
+      "type": "object"
+    },
     "PreflightActionDTO": {
       "properties": {
         "body": {
@@ -6646,6 +7374,18 @@
           "title": "Profile",
           "type": "string"
         },
+        "request": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Request"
+        },
         "status": {
           "title": "Status",
           "type": "string"
@@ -6700,6 +7440,224 @@
         "profile"
       ],
       "title": "StoppedAgentDTO",
+      "type": "object"
+    },
+    "VisualAnswerDTO": {
+      "properties": {
+        "at": {
+          "title": "At",
+          "type": "number"
+        },
+        "note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Note"
+        },
+        "option": {
+          "title": "Option",
+          "type": "string"
+        }
+      },
+      "required": [
+        "option",
+        "at"
+      ],
+      "title": "VisualAnswerDTO",
+      "type": "object"
+    },
+    "VisualDTO": {
+      "$defs": {
+        "VisualAnswerDTO": {
+          "properties": {
+            "at": {
+              "title": "At",
+              "type": "number"
+            },
+            "note": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Note"
+            },
+            "option": {
+              "title": "Option",
+              "type": "string"
+            }
+          },
+          "required": [
+            "option",
+            "at"
+          ],
+          "title": "VisualAnswerDTO",
+          "type": "object"
+        },
+        "VisualOptionDTO": {
+          "properties": {
+            "detail": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Detail"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "label": {
+              "title": "Label",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "label"
+          ],
+          "title": "VisualOptionDTO",
+          "type": "object"
+        }
+      },
+      "description": "A visual in a session (brindle.visuals). ``rev``: its current revision,\nserved at /v1/visuals/{id}/r/{rev}; an answer names the revision it read.\n``unread``: a revision the person hasn't opened yet.",
+      "properties": {
+        "answer": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/VisualAnswerDTO"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "by": {
+          "title": "By",
+          "type": "string"
+        },
+        "created_at": {
+          "title": "Created At",
+          "type": "number"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "kept": {
+          "title": "Kept",
+          "type": "boolean"
+        },
+        "kind": {
+          "enum": [
+            "visual",
+            "plan"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "options": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/VisualOptionDTO"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Options"
+        },
+        "question": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Question"
+        },
+        "rev": {
+          "title": "Rev",
+          "type": "integer"
+        },
+        "session": {
+          "title": "Session",
+          "type": "string"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        },
+        "unread": {
+          "title": "Unread",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "session",
+        "title",
+        "by",
+        "kind",
+        "rev",
+        "kept",
+        "unread",
+        "created_at"
+      ],
+      "title": "VisualDTO",
+      "type": "object"
+    },
+    "VisualOptionDTO": {
+      "properties": {
+        "detail": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Detail"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "label": {
+          "title": "Label",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "label"
+      ],
+      "title": "VisualOptionDTO",
       "type": "object"
     },
     "WorkspaceDTO": {
@@ -6761,6 +7719,18 @@
             "mode": {
               "title": "Mode",
               "type": "string"
+            },
+            "model": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Model"
             },
             "parent_id": {
               "anyOf": [
@@ -7228,12 +8198,32 @@
       "path": "/v1/events"
     },
     {
+      "method": "DELETE",
+      "path": "/v1/github/connection"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/github/connection"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/github/connection"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/github/credential"
+    },
+    {
       "method": "GET",
       "path": "/v1/goal"
     },
     {
       "method": "POST",
       "path": "/v1/goal"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/goal/analysis-doc"
     },
     {
       "method": "POST",
@@ -7298,6 +8288,18 @@
     {
       "method": "POST",
       "path": "/v1/kb/sources/{id}/sync"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/kept-visuals"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/kept-visuals/{id}"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/kept-visuals/{id}/html"
     },
     {
       "method": "DELETE",
@@ -7406,6 +8408,14 @@
     {
       "method": "PUT",
       "path": "/v1/permissions/saved/{id}"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/plans/{id}"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/plans/{id}/decide"
     },
     {
       "method": "GET",
@@ -7520,6 +8530,22 @@
       "path": "/v1/sessions"
     },
     {
+      "method": "POST",
+      "path": "/v1/sessions/{id:path}/visual-input"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/sessions/{id:path}/visual-offer"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/sessions/{id:path}/visual-offer"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/sessions/{id:path}/visuals"
+    },
+    {
       "method": "GET",
       "path": "/v1/sessions/{root:path}/diff"
     },
@@ -7618,6 +8644,30 @@
     {
       "method": "PATCH",
       "path": "/v1/user-settings"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/visuals/{id}/answer"
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/visuals/{id}/keep"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/visuals/{id}/keep"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/visuals/{id}/r/{n}"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/visuals/{id}/read"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/visuals/{id}/snapshot"
     },
     {
       "method": "GET",

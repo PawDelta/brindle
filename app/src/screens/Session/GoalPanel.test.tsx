@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { ReactElement } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import App from "../../App";
@@ -84,6 +84,36 @@ function holdingClient(daemon: FakeDaemon, path: string) {
 const unfold = () => fireEvent.click(screen.getByRole("button", { name: /^Milestones \(/ }));
 
 describe("GoalPanel", () => {
+  it("copies the complete original request from the session header by double-click or button", async () => {
+    const request = "Build a goal screen.\n" + "Keep the original request readable and copyable. ".repeat(20);
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [{ ...appSession, request }], workspaces: [root], goal: { ...structuredClone(goal), root_id: APP_ROOT } });
+    const client = daemon.client();
+    const store = createAppStore();
+    const sync = startSync({ client, store, connect: daemon.connect });
+    localStorage.setItem(ONBOARDED_KEY, "1");
+    render(<PtyViewsProvider value={daemon.ptyViews()}><App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: APP_ROOT, repo: REPO }} /></PtyViewsProvider>);
+    try {
+      const original = await screen.findByTestId("session-request");
+      expect(original.textContent).toBe(request);
+      expect(original.className).toContain("line-clamp-3");
+      fireEvent.dblClick(original);
+      await waitFor(() => expect(daemon.clipboard).toBe(request));
+      fireEvent.click(screen.getByRole("button", { name: "Show full request" }));
+      expect(original.className).not.toContain("line-clamp-3");
+      daemon.clipboard = "";
+      vi.useFakeTimers();
+      await act(async () => fireEvent.click(screen.getByRole("button", { name: "Copy original request" })));
+      expect(daemon.clipboard).toBe(request);
+      const feedback = screen.getByTestId("session-request").parentElement!.querySelector('[role="status"]')!;
+      expect(feedback.textContent).not.toBe("");
+      act(() => vi.advanceTimersByTime(2000));
+      expect(feedback.textContent).toBe("");
+    } finally {
+      vi.useRealTimers();
+      sync.stop();
+    }
+  });
+
   it("sends the session root with each request", async () => {
     const daemon = new FakeDaemon({ goal: structuredClone(goal) });
     const store = createAppStore();
@@ -98,6 +128,13 @@ describe("GoalPanel", () => {
     expect(screen.getByText("2. Screen renders")).toBeTruthy();
     expect(screen.getByText("npm run build")).toBeTruthy();
     expect(daemon.requests.find((r) => r.path === "/goal")?.query).toMatchObject({ repo: REPO, root: ROOT });
+    const docChoice = screen.getByRole("checkbox", { name: "Write an analysis doc for this goal" }) as HTMLInputElement;
+    for (const requested of [true, false]) {
+      fireEvent.click(docChoice);
+      await waitFor(() => expect(docChoice.checked).toBe(requested));
+      await waitFor(() => expect(docChoice.disabled).toBe(false));
+      expect(daemon.data.goal?.analysis_doc).toBe(requested);
+    }
 
     expect(screen.queryByRole("switch")).toBeNull();
     sync.stop();
@@ -115,9 +152,10 @@ describe("GoalPanel", () => {
     });
     const summary = vi.spyOn(client, "docSessionSummary").mockResolvedValue({ total: 2, writing: 1, updated: 0, using: 1 });
     const cards = () => screen.getByTestId("docs").querySelectorAll("li[data-doc]").length;
-    const sync = startSync({ client, store: createAppStore(), connect: daemon.connect });
+    const store = createAppStore();
+    const sync = startSync({ client, store, connect: daemon.connect });
     localStorage.setItem(ONBOARDED_KEY, "1");
-    renderApp(<App store={createAppStore()} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: APP_ROOT, repo: OTHER_REPO }} />);
+    renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: APP_ROOT, repo: OTHER_REPO }} />);
     expect((await screen.findByTestId("goal-docs")).textContent).toContain("2 docs · writing 1, using 1 →");
     fireEvent.click(await screen.findByTestId("goal-docs"));
     await waitFor(() => expect(cards()).toBe(2));
@@ -135,9 +173,9 @@ describe("GoalPanel", () => {
 
     // With no docs for the session, the goal line is hidden.
     summary.mockResolvedValue({ total: 0, writing: 0, updated: 0, using: 0 });
-    const again = startSync({ client, store: createAppStore(), connect: daemon.connect });
-    renderApp(<App store={createAppStore()} client={client} refresh={again.refresh} initialRoute={{ screen: "session", root: APP_ROOT, repo: OTHER_REPO }} />);
-    await waitFor(() => expect(daemon.requests.some((r) => r.path === "/goal")).toBe(true));
+    const again = startSync({ client, store, connect: daemon.connect });
+    renderApp(<App store={store} client={client} refresh={again.refresh} initialRoute={{ screen: "session", root: APP_ROOT, repo: OTHER_REPO }} />);
+    await screen.findByRole("region", { name: "Session" });
     await flush();
     expect(screen.queryByTestId("goal-docs")).toBeNull();
     again.stop();
@@ -265,6 +303,39 @@ describe("GoalPanel", () => {
     expect(sidebar.getAllByTestId("milestone").map((li) => li.dataset.state)).toEqual(["done", "now", "now"]);
     expect(sidebar.queryByRole("progressbar")).toBeNull();
     expect(sidebar.getByTestId("goal-line").textContent).toContain("1 of 3 milestones complete");
+    // A goal without phases is the plain list, as it always was: no folds, no "phase n of m".
+    expect(sidebar.queryByTestId("phase-fold")).toBeNull();
+    expect(sidebar.queryByTestId("goal-where")).toBeNull();
+  });
+
+  /* Phases fold the list: a done phase is one line with its green count, the active one lists all its rows
+     (its passed one too), an upcoming one folds to a count; any fold opens and closes on a click. */
+  it.each([true, false])("folds the milestones by phase, the active one open (compact: %s)", async (compact) => {
+    const base = goal.milestones![0];
+    const ms = (n: number, phase_name: string | null, passed: boolean): MilestoneDTO => ({
+      ...base, id: n, position: n, title: `M${n}`, phase_name, status: passed ? "passed" : "pending", state: passed ? "passed" : "not_done",
+    });
+    const milestones = [ms(1, "Build", true), ms(2, null, true), ms(3, "Polish", true), ms(4, "Polish", false), ms(5, "Ship", false)];
+    const daemon = new FakeDaemon({ goal: { ...structuredClone(goal), milestones } });
+    const view = render(<GoalPanel client={daemon.client()} repo={REPO} root={ROOT} store={createAppStore()} compact={compact} />);
+    await waitFor(() => expect(view.getByRole("region", { name: "Goal" }).dataset.phase).toBe("in_progress"));
+    if (!compact) unfold();
+    const folds = () => view.getAllByTestId("phase-fold");
+    const rows = () => view.queryAllByTestId("milestone").map((li) => li.textContent!.match(/M\d/)![0]);
+    expect(folds().map((b) => [b.dataset.st, b.querySelector(".n")!.textContent, b.querySelector(".k")!.textContent, b.getAttribute("aria-expanded")])).toEqual([
+      ["done", "Build", "✓ 2 of 2", "false"],
+      ["active", "Polish", "1 of 2", "true"],
+      ["todo", "Ship", "1 upcoming", "false"],
+    ]);
+    expect(rows()).toEqual(["M3", "M4"]);
+    expect(view.getByTestId("goal-where").textContent).toBe("phase 2 of 3");
+    // Only the panel's fold line carries the tiny per-phase bar, one segment per milestone.
+    expect([...folds()[1].querySelectorAll(".bar-s i")].map((i) => (i as HTMLElement).dataset.s)).toEqual(compact ? [] : ["passed", "todo"]);
+    fireEvent.click(folds()[0]);
+    expect(rows()).toEqual(["M1", "M2", "M3", "M4"]);
+    fireEvent.click(folds()[1]);
+    expect(rows()).toEqual(["M1", "M2"]);
+    expect(folds()[1].getAttribute("aria-expanded")).toBe("false");
   });
 
   /* One row per goal phase: the panel's one status in both views, and the step that phase has (PR open's link,

@@ -21,6 +21,147 @@ from test_merge_order import add
 from test_pipeline_idempotent import drain
 
 
+@pytest.mark.parametrize("guard", [None, "health", "unreported", "verdict", "running", "queued", "moved", "standalone",
+                                    "resumed", pytest.param("repane", marks=pytest.mark.variant(
+                                        "a resumed review can exit in its new pane before stale death handling")), "tmux-error",
+                                    pytest.param("os-error", marks=pytest.mark.variant("process creation can raise OSError instead of TmuxError"))])
+def test_dead_reviewer_restarts_once_then_needs_the_person(db, repo, monkeypatch, guard):
+    from brindle import launch_health, tmux
+    from brindle.service import inbox
+
+    root = workspaces.adopt_root(db, str(repo))
+    add(db, root, "boss", "interactive", "supervisor", status="processing")
+    ws = workspaces.create(db, str(repo), "feat").workspace
+    sha = gates.head(ws)
+    add(db, ws, "w1", "assign", parent="boss", result="done", pipeline="reviewing")
+    add(db, ws, "rev0", "review", "reviewer", parent="boss", review_sha=sha)
+    db.update_agent("rev0", tmux_window="%2", status="processing", status_since=1, created_at=1)
+    panes = tmux.PaneSnapshot(tmux.current_server())
+    panes.update({"%2": False})
+    panes.exits = {"%2": (1, None)}
+    monkeypatch.setattr(tmux, "list_panes", lambda **kw: panes)
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id == "other")
+    monkeypatch.setattr(agents, "command_running", lambda *a: False)
+    monkeypatch.setattr(agents, "reconcile", lambda db_, a, **kw: a)
+    monkeypatch.setattr(agents, "model_problem", lambda *a, **kw: None)
+    monkeypatch.setattr(agents, "_review_profile", lambda *a: "reviewer")
+    monkeypatch.setattr(agents, "close_later", lambda *a: None)
+    secret = "sk-abcdefghijklmnop123456789"
+    monkeypatch.setattr(launch_health, "capture", lambda a: f"startup\nError: workspace routing discovery failed {secret}\n\n")
+    launched = []
+
+    class FakeProvider:
+        name = "codex"
+        launches_process = True
+
+        def command(self, ctx):
+            launched.append(ctx.agent_id)
+            return []
+
+    monkeypatch.setattr(agents, "get_provider", lambda name: FakeProvider())
+
+    def launch(db_, a, ws_, **kw):
+        if a.id == "rev0":
+            FakeProvider().command(agents.LaunchContext(a.id, agents.load_profile(a.profile), kw["prompt"]))
+            db.update_agent(a.id, status="processing", tmux_window="%4" if guard == "repane" else "%2")
+            return
+        if guard in ("tmux-error", "os-error"):
+            raise (tmux.TmuxError if guard == "tmux-error" else OSError)(f"new-window failed {secret}")
+        FakeProvider().command(agents.LaunchContext(a.id, agents.load_profile(a.profile), kw["prompt"]))
+        pipeline.on_reviewer_dead(db, db.get_agent("rev0"), ws)  # second detector during dispatch
+        db.update_agent(a.id, tmux_window="%3", status="processing", status_since=1, created_at=1)
+        panes["%3"] = True
+
+    monkeypatch.setattr(agents, "_launch_resolved", launch)
+    initial = db.get_agent("rev0")
+    initial.task = "review"
+    launch_health.prepare(db, initial, "test")
+    launch_health.bind(db, initial, "%2")
+    if guard == "verdict":
+        db.add_review(ws.id, sha, "rev0", True, "ok")
+    elif guard == "running":
+        add(db, ws, "other", "review", "reviewer", parent="boss", review_sha=sha)
+    elif guard == "queued":
+        agents._review_request_file(ws.id, "reviewer-gemini").write_text(f"queued\n{sha}\n{time.time()}\n")
+    elif guard == "moved":
+        db.update_agent("rev0", review_sha="old-commit")
+    elif guard == "standalone":
+        db.update_agent("w1", pipeline=None)
+    elif guard in ("resumed", "repane"):
+        dispatch_lock = agents.review_dispatch_lock
+        resumed = False
+
+        @contextlib.contextmanager
+        def resumed_before_recovery(workspace_id, **kw):
+            nonlocal resumed
+            with dispatch_lock(workspace_id, **kw):
+                if not resumed:
+                    resumed = True
+                    with monkeypatch.context() as launching:
+                        launching.setattr(agents, "review_dispatch_lock", dispatch_lock)
+                        agents._launch(db, initial, ws, prompt="review", resume=None, watch_pane=False)
+                    if guard == "resumed":
+                        monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id == "rev0")
+                yield
+
+        monkeypatch.setattr(agents, "review_dispatch_lock", resumed_before_recovery)
+
+    if guard == "health":
+        launch_health.inspect(db, "rev0", wait=False)
+    elif guard == "unreported":
+        agents.tell_parent_unreported(db, initial)
+    else:
+        cull.note_dead_panes(db, time.time(), panes)
+    if guard == "standalone":
+        launch_health.inspect(db, "rev0", wait=False)
+        messages = drain(db)
+        assert len(messages) == 2 and launched == []
+        assert all("workspace routing discovery failed" in m and secret not in m for m in messages)
+        return
+    if guard in ("verdict", "running", "queued", "moved", "resumed", "repane"):
+        assert launched == (["rev0"] if guard in ("resumed", "repane") else [])
+        assert db.get_agent("w1").pipeline == "reviewing"
+        assert drain(db) == []
+        if guard in ("resumed", "repane"):
+            pipeline.on_reviewer_dead(db, initial, ws)  # handler also rejects the old observation
+            assert db.get_agent("rev0").status == "processing"
+            assert not db.conn.execute("SELECT 1 FROM review_death_restarts").fetchall()
+        return
+    failed_launch = guard in ("tmux-error", "os-error")
+    if not failed_launch:
+        assert len(launched) == 1
+        assert db.get_agent(launched[0]).review_sha == sha
+        assert db.get_agent("w1").pipeline == "reviewing"
+        assert drain(db) == []
+        launch_health.inspect(db, "rev0", wait=False)
+        agents.tell_parent_unreported(db, db.get_agent("rev0"))
+        with pytest.raises(agents.AgentError):
+            agents._launch(db, initial, ws, prompt="review", resume=None, watch_pane=False)
+        assert len(launched) == 1
+        panes["%3"] = False
+        panes.exits["%3"] = (1, None)
+    cull.note_dead_panes(db, time.time(), panes)
+    cull.note_dead_panes(db, time.time(), panes)
+    assert len(launched) == (0 if failed_launch else 1)
+    assert db.get_agent("w1").pipeline is None
+    assert gates.verdict(db, ws.id, sha) is None
+    messages = drain(db)
+    assert len(messages) == 1 and "workspace routing discovery failed" in messages[0]
+    assert secret not in messages[0] and "[redacted]" in messages[0]
+    if failed_launch:
+        assert "new-window failed" in messages[0]
+    assert pipeline.review_state(db, ws).startswith("needs you")
+    row = db.get_agent("rev0" if failed_launch else launched[0])
+    assert "workspace routing discovery failed" in inbox.needs_you(vars(row), {})
+    assert secret not in row.failed_why
+    monkeypatch.setattr(inbox.view, "snapshot", lambda *a, **kw: [{"id": ws.id, "agents": [vars(row)]}])
+    card = next(item for item in inbox.items(db, str(repo), panes) if item.agent_id == row.id)
+    assert "workspace routing discovery failed" in card.detail and secret not in card.detail
+    if not failed_launch:
+        agents.request_review(db, db.get_agent("boss"), ws, "reviewer")
+        assert db.get_agent(row.id).failed_why is None
+
+
 def test_reviewer_without_verdict_gets_fallback_then_an_escalation_event(db, repo, monkeypatch):
     root = workspaces.adopt_root(db, str(repo))
     add(db, root, "boss", "interactive", "supervisor", status="processing")  # busy: messages queue
@@ -349,6 +490,88 @@ def test_issue186_a_reported_branch_nobody_is_checking_is_reviewed_again(db, rep
         # A report of its own: the helper still pending for the earlier one retires.
         assert claim.read_text() != active
     assert db.get_agent("w1").pipeline == "reviewing"
+
+
+def test_report_dispatch_preserves_the_current_claim(db, tmp_path, monkeypatch):
+    """Duplicate, superseding, failed and legacy dispatches share one branch's history."""
+    from brindle.db import Workspace
+
+    ws = Workspace("ws", str(tmp_path), "work", "worktree", "work", "main",
+                   str(tmp_path), None, "fake", 1)
+    db.add_workspace(ws)
+    add(db, ws, "boss", "interactive", "supervisor", status="processing")
+    add(db, ws, "w1", "assign", parent="boss", result="done")
+    monkeypatch.setattr(pipeline, "load_repo_config", lambda *a, **k: RepoConfig(checks=["true"], review_profile="reviewer"))
+    monkeypatch.setattr(agents, "_branch_head", lambda *a: "head")
+    monkeypatch.setattr(gates, "head", lambda *a: "head")
+    monkeypatch.setattr(agents.git, "ahead_behind", lambda *a: (0, 1))
+    monkeypatch.setattr(agents.git, "dirty_files", lambda *a, **k: [])
+    monkeypatch.setattr(agents, "warm_checks", lambda ws_: None)
+    monkeypatch.setattr(agents, "is_alive", lambda *a: False)
+    starts, claims = [], []
+    phase = "duplicate"
+
+    def detach(argv):
+        starts.append(argv)
+        claims.append(db.get_agent("w1").reviewing_since)
+        if phase == "duplicate" and len(starts) == 1:
+            agents.report_result(db, "w1", "done")
+        elif phase == "newer-report" and db.get_agent("w1").result == "older":
+            agents.report_result(db, "w1", "newer")
+            raise agents.AgentError("old launch failed after the new report")
+        elif phase in ("fallback-moved", "legacy-fallback"):
+            raise agents.AgentError("reviewer unavailable")
+
+    original = agents.condense
+
+    def condense(*a, **kw):
+        if phase == "fallback-moved":
+            db.update_agent("w1", pipeline="fixing")  # a verdict landed during preparation
+        return original(*a, **kw)
+
+    monkeypatch.setattr(agents, "_detach", detach)
+    monkeypatch.setattr(agents, "condense", condense)
+    agents.report_result(db, "w1", "done")
+    assert len(starts) == 1 and db.get_agent("w1").reviewing_since == claims[0]
+    assert db.get_agent("w1").pipeline == "reviewing" and db.pending_count("boss") == 0
+
+    phase = "newer-report"
+    agents.report_result(db, "w1", "older")
+    current = db.get_agent("w1")
+    assert len(starts) == 3 and current.reviewing_since == claims[-1]
+    assert current.result == "newer" and claims[-2] != claims[-1]
+    assert current.pipeline == "reviewing" and db.pending_count("boss") == 0
+
+    phase = "fallback-moved"
+    agents.report_result(db, "w1", "ready for another review")
+    current = db.get_agent("w1")
+    assert len(starts) == 4 and current.reviewing_since == claims[-1]
+    assert current.pipeline == "fixing" and db.pending_count("boss") == 0
+
+    # Recovery can also inherit a claim made before any outbox receipt existed.
+    phase = "legacy-fallback"
+    db.update_agent("w1", pipeline="reviewing", reviewing_since=1.0)
+    pipeline._start_review(db, pipeline.load_repo_config(ws.repo_root), db.get_agent("boss"),
+                           db.get_agent("w1"), ws, "done", 1.0)
+    row = db.conn.execute("SELECT * FROM report_outbox ORDER BY id DESC LIMIT 1").fetchone()
+    assert row["state"] == "delivered" and db.pending_count("boss") == 1
+    assert db.get_agent("w1").pipeline is None
+
+    # A direct legacy report must retain its receipt when the recipient is locked.
+    from brindle import identity_lock
+
+    phase = "legacy-dirty"
+    monkeypatch.setattr(agents.git, "dirty_files", lambda *a, **k: ["work.py"])
+    monkeypatch.setattr(identity_lock, "locked_by", lambda aid: "other" if aid == "boss" else None)
+    with pytest.raises(agents.AgentError):
+        pipeline.on_report(db, db.get_agent("w1"), ws, "dirty report")
+    assert db.pending_count("boss") == 1
+    monkeypatch.setattr(identity_lock, "locked_by", lambda aid: None)
+    pipeline.on_report(db, db.get_agent("w1"), ws, "dirty report")
+    pipeline.on_report(db, db.get_agent("w1"), ws, "dirty report")
+    row = db.conn.execute("SELECT * FROM report_outbox WHERE canonical_id IS NULL ORDER BY id DESC LIMIT 1").fetchone()
+    assert row["state"] == "delivered" and db.pending_count("boss") == 2
+    assert db.get_agent("w1").pipeline is None
 
 
 @pytest.mark.parametrize("session, exits_mid_delivery", [
