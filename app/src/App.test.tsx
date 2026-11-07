@@ -46,10 +46,12 @@ const nav = () => screen.getByRole("complementary", { name: "Sidebar" });
 const link = (name: string | RegExp) => within(nav()).getByRole("button", { name });
 const treeAgent = (id: string) => nav().querySelector<HTMLButtonElement>(`button[data-tree-agent="${id}"]`)!;
 const surfaceTitle = () => screen.getByTestId("surface-title").textContent;
+/* The session's pane is held back (the engine is still bringing sessions back): its calm card, no terminal. */
+const paneWaits = () => screen.queryByTestId("state-card")?.dataset.kind === "returning" && !screen.queryByTestId("terminal");
 
 describe("App", () => {
   beforeEach(() => localStorage.setItem(ONBOARDED_KEY, "1"));
-  it("shows starting until sessions are ready", async () => {
+  it("shows the app at once while sessions come back; only the pane waits until they are ready", async () => {
     vi.useFakeTimers();
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root] });
     const client = daemon.client();
@@ -62,11 +64,13 @@ describe("App", () => {
     try {
       renderApp(<App store={store} client={client} refresh={sync.refresh} />);
       await act(async () => { await vi.advanceTimersByTimeAsync(100); });
-      expect(screen.getByTestId("starting")).toBeTruthy();
-      expect(screen.queryByTestId("terminal")).toBeNull();
+      // No "Starting" in front of it all: the sidebar and the session are there, the pane says it's coming.
+      expect(screen.queryByTestId("starting")).toBeNull();
+      expect(screen.getByRole("complementary", { name: "Sidebar" })).toBeTruthy();
+      expect(paneWaits()).toBe(true);
       resuming = false;
       await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
-      expect(screen.getByTestId("starting")).toBeTruthy();
+      expect(paneWaits()).toBe(true);
       daemon.data.workspaces = [root, { ...worker, agents: worker.agents?.map((a) => ({ ...a, provider: "subagent", window: null })) }];
       let resolve!: (rows: Awaited<ReturnType<typeof client.snapshot>>) => void;
       vi.spyOn(client, "snapshot").mockReturnValueOnce(new Promise((ok) => { resolve = ok; }));
@@ -78,25 +82,26 @@ describe("App", () => {
         resuming = true;
         resolve([root]);
       });
-      expect(screen.getByTestId("starting")).toBeTruthy();
+      expect(paneWaits()).toBe(true);
       await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
-      expect(screen.getByTestId("starting")).toBeTruthy();
+      expect(paneWaits()).toBe(true);
       // Recovery starts after an apparently ready check, before releasing the gate.
       metadata.mockImplementationOnce(async () => ({ ...await meta(), resuming: false }));
       await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
-      expect(screen.getByTestId("starting")).toBeTruthy();
+      expect(paneWaits()).toBe(true);
       resuming = false;
       await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
-      expect(screen.queryByTestId("starting")).toBeNull();
+      expect(paneWaits()).toBe(false);
       expect(screen.getByTestId("terminal").textContent).toBe("sup1");
-      resuming = true;
+      // A blip of the same daemon leaves the pane be: no flash of "Bringing … back".
       daemon.drop();
       await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
-      expect(screen.queryByTestId("starting")).toBeNull();
+      expect(paneWaits()).toBe(false);
+      expect(screen.getByTestId("terminal").textContent).toBe("sup1");
     } finally { sync.stop(); vi.useRealTimers(); }
   });
 
-  it("keeps starting when a ready probe is followed by a failed store refresh", async () => {
+  it("keeps the pane waiting when a ready probe is followed by a failed store refresh", async () => {
     vi.useFakeTimers();
     const old = { ...root, agents: root.agents?.map((a) => ({ ...a, window: windowOf("old") })) };
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [old] });
@@ -111,15 +116,16 @@ describe("App", () => {
       renderApp(<App store={store} client={client} refresh={sync.refresh} />);
       await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
       expect(store.getState().workspaces).toEqual([old]);
-      expect(screen.getByTestId("starting")).toBeTruthy();
+      // The old window is never shown: the pane waits on rows read after recovery.
+      expect(paneWaits()).toBe(true);
       failed.mockRestore();
       await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
-      expect(screen.queryByTestId("starting")).toBeNull();
+      expect(paneWaits()).toBe(false);
       expect(screen.getByTestId("terminal").dataset.target).toBe(windowOf("sup1"));
     } finally { sync.stop(); vi.useRealTimers(); }
   });
 
-  it("opens after the startup deadline and discards the pending response", async () => {
+  it("a slow engine read holds back nothing but the pane, which opens at the startup deadline and discards the pending response", async () => {
     vi.useFakeTimers();
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root] });
     const client = daemon.client();
@@ -130,7 +136,10 @@ describe("App", () => {
     try {
       renderApp(<App store={store} client={client} initialRoute={{ screen: "session", root: "sup1", repo: REPO }} />);
       await act(async () => { await vi.advanceTimersByTimeAsync(100); });
-      expect(screen.queryByRole("complementary", { name: "Sidebar" })).toBeNull();
+      // The first screen is up and usable at once, from what the store already has.
+      expect(screen.getByRole("complementary", { name: "Sidebar" })).toBeTruthy();
+      expect(screen.getByRole("region", { name: "Session" })).toBeTruthy();
+      expect(paneWaits()).toBe(true);
       await act(async () => { await vi.advanceTimersByTimeAsync(30000); });
       expect(screen.getByTestId("terminal").textContent).toBe("sup1");
       await act(async () => { resolve([worker]); });
@@ -504,11 +513,13 @@ describe("App", () => {
     fireEvent.click(within(nav()).getByTestId("inbox-link"));
     await screen.findByRole("region", { name: "Inbox" });
 
-    // The engine dies: the stream drops and nothing answers. The banner says so; the app asks for nothing.
+    // The engine dies: the stream drops and nothing answers. The reconnect overlay says so over the
+    // Inbox, which stays where it was; no raw banner. The app asks for nothing.
     const before = daemon.requests.length;
     daemon.die();
-    await waitFor(() => expect(screen.getByTestId("engine-banner").textContent).toContain("Can't reach the brindle engine"));
-    expect(within(screen.getByTestId("engine-health")).getByTestId("connection").textContent).toBe("daemon · reconnecting…");
+    await waitFor(() => expect(screen.getByTestId("reconnecting").textContent).toContain("Reconnecting to brindle…"), { timeout: 3000 });
+    expect(screen.getByRole("region", { name: "Inbox" })).toBeTruthy();
+    expect(screen.queryByTestId("engine-health")).toBeNull();
     // It keeps trying on its own (the shell starts the daemon again on the next attempt).
     await waitFor(() => expect(daemon.sockets.filter((s) => s.closed).length).toBeGreaterThan(2));
     expect(store.getState().connection).not.toBe("open");
@@ -520,7 +531,8 @@ describe("App", () => {
     daemon.data.inbox = [];
     daemon.revive();
     await waitFor(() => expect(store.getState().connection).toBe("open"));
-    await waitFor(() => expect(screen.queryByTestId("engine-banner")).toBeNull());
+    await waitFor(() => expect(screen.queryByTestId("reconnecting")).toBeNull());
+    expect(screen.queryByTestId("engine-banner")).toBeNull();
     await waitFor(() => expect(screen.queryByTestId("inbox-badge")).toBeNull());
     fireEvent.click(link("Settings"));
     fireEvent.click(await screen.findByRole("tab", { name: "About" }));
@@ -534,6 +546,59 @@ describe("App", () => {
     expect(await screen.findByRole("region", { name: "Knowledge" })).toBeTruthy();
     expect(screen.queryByRole("alert")).toBeNull();
     sync.stop();
+  });
+
+  it("engine restart: the last screen stays under a calm reconnect overlay, a next step after a long wait, then the normal screen once the new engine has its sessions back", async () => {
+    vi.useFakeTimers();
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root] });
+    const client = daemon.client();
+    let resuming = false;
+    const meta = client.meta.bind(client);
+    vi.spyOn(client, "meta").mockImplementation(async () => ({ ...await meta(), resuming }));
+    const store = createAppStore();
+    const sync = startSync({ client, store, connect: daemon.connect, backoff: () => 1000 });
+    const advance = (ms: number) => act(async () => { await vi.advanceTimersByTimeAsync(ms); });
+    try {
+      renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO }} />);
+      await advance(1000);
+      expect(screen.getByTestId("terminal").textContent).toBe("sup1");
+
+      daemon.die();
+      await advance(0);
+      // A moment's drop shows nothing at all: no overlay yet, and no raw strip.
+      expect(screen.queryByTestId("reconnecting")).toBeNull();
+      expect(screen.queryByTestId("engine-health")).toBeNull();
+      await advance(1000);
+      const overlay = screen.getByTestId("reconnecting");
+      expect(within(overlay).getByRole("status", { name: "Reconnecting to brindle" })).toBeTruthy();
+      expect(within(overlay).queryByRole("button")).toBeNull();
+      // Over the last good screen, which stays mounted; nothing raw beside it.
+      expect(screen.getByRole("region", { name: "Session" })).toBeTruthy();
+      expect(screen.queryByTestId("engine-banner")).toBeNull();
+      expect(screen.queryByRole("alert")).toBeNull();
+
+      // A long wait: a clear next step, and Try again asks the engine at once.
+      await advance(30000);
+      expect(overlay.dataset.phase).toBe("long");
+      expect(overlay.textContent).toContain("quit brindle and open it again");
+      const asked = daemon.requests.filter((r) => r.path === "/meta").length;
+      fireEvent.click(within(overlay).getByRole("button", { name: "Try again now" }));
+      await advance(0);
+      expect(daemon.requests.filter((r) => r.path === "/meta").length).toBeGreaterThan(asked);
+
+      // Back as a new process, still bringing its sessions back: the overlay goes as soon as it
+      // answers; the pane waits on a calm card (no "Disconnected", no missing window) until it can show.
+      resuming = true;
+      daemon.revive();
+      await advance(1000);
+      expect(screen.queryByTestId("reconnecting")).toBeNull();
+      expect(screen.queryByTestId("engine-banner")).toBeNull();
+      expect(paneWaits()).toBe(true);
+      resuming = false;
+      await advance(1000);
+      expect(paneWaits()).toBe(false);
+      expect(screen.getByTestId("terminal").textContent).toBe("sup1");
+    } finally { sync.stop(); vi.useRealTimers(); }
   });
 
   it("first launch with a signed-in CLI offers the permission presets", async () => {
@@ -586,7 +651,7 @@ describe("App", () => {
     sync.stop();
     cleanup();
 
-    // The engine answers, but its event stream is down: the banner says so until it is back.
+    // The engine answered, then its event stream drops for a moment: nothing flashes up, raw or overlaid.
     vi.useFakeTimers();
     const live = new FakeDaemon();
     const store2 = createAppStore();
@@ -603,7 +668,8 @@ describe("App", () => {
         await vi.advanceTimersByTimeAsync(0);
       });
       expect(store2.getState().connection).toBe("closed");
-      expect(screen.getByTestId("engine-banner").getAttribute("role")).toBe("alert");
+      expect(screen.queryByTestId("engine-banner")).toBeNull();
+      expect(screen.queryByTestId("reconnecting")).toBeNull();
       await act(async () => { await vi.advanceTimersByTimeAsync(5); });
       expect(store2.getState().connection).toBe("open");
       expect(screen.queryByTestId("engine-banner")).toBeNull();
