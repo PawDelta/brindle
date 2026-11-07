@@ -399,6 +399,7 @@ def spawn(
     mode: str = "interactive",
     watch_pane: bool = False,
     background_setup: bool = False,
+    person_prompt: bool = False,
     done_when: str | None = None,
     autopilot: bool = False,
     plan_first: bool = False,
@@ -503,6 +504,10 @@ def spawn(
     if why:
         raise AgentError(why)
     db.add_agent(agent)
+    if person_prompt and raw_task and parent_id is None and mode == "interactive":
+        from brindle import visual_offers
+
+        visual_offers.person_spoke(db, agent, raw_task)
     if agent.weight:
         db.update_agent(agent_id, weight=agent.weight)
     if plan_first and provider.launches_process and mode in ("handoff", "assign"):

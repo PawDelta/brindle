@@ -874,7 +874,14 @@ CREATE TABLE IF NOT EXISTS visual_offers (
 CREATE TABLE IF NOT EXISTS visual_grants (
     root_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
     remaining INTEGER NOT NULL,
-    explicit INTEGER NOT NULL
+    explicit INTEGER NOT NULL,
+    scope TEXT NOT NULL DEFAULT 'visual'
+);
+CREATE TABLE IF NOT EXISTS visual_requests (
+    root_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
+    id TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    created_at REAL NOT NULL
 );
 -- Visuals an agent published into a session (brindle.visuals owns these):
 -- the current revision's question and options, the person's answer to it.
@@ -1310,6 +1317,11 @@ class DB:
 
     def _migrate(self) -> None:
         """Bring databases created by older versions up to the current schema."""
+        grant_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(visual_grants)")}
+        if "scope" not in grant_cols:
+            self.conn.execute("ALTER TABLE visual_grants ADD COLUMN scope TEXT NOT NULL DEFAULT 'visual'")
+            # Earlier grants did not distinguish conditional requests or artifact scope.
+            self.conn.execute("UPDATE visual_grants SET remaining=0")
         review_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(reviews)")}
         for col, kind in (("review_slot", "TEXT"), ("reviewer_created_at", "REAL")):
             if col not in review_cols:

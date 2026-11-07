@@ -429,6 +429,33 @@ describe("SessionScreen", () => {
     sync.stop();
   });
 
+  it("records Codex person input before its PTY receives submission, without treating output as input", async () => {
+    const submitted: string[] = [];
+    let release: () => void = () => {};
+    const codex = { ...root, agents: root.agents!.map(a => ({ ...a, provider: "codex" })) };
+    const { daemon, sync, term } = mount({ sup1: live }, { workspaces: [codex] }, daemon => async (input, init) => {
+      if (String(input).endsWith("/visual-input")) {
+        submitted.push(JSON.parse(String(init?.body)).text);
+        await new Promise<void>(ok => { release = ok; });
+        return Response.json({ observed: true });
+      }
+      return daemon.fetch(input, init);
+    });
+    try {
+      await waitFor(() => expect(term().written).toBe(drawnLive));
+      const [view] = daemon.viewers("sup1");
+      term().type("Make a visual");
+      term().type("\r");
+      await waitFor(() => expect(submitted).toHaveLength(1));
+      expect(view.written.join("")).toBe("Make a visual");
+      await act(async () => release());
+      await waitFor(() => expect(view.written.join("")).toBe("Make a visual\r"));
+      daemon.print("sup1", "Make a visual\r");
+      await waitFor(() => expect(term().written).toContain("Make a visual"));
+      expect(submitted).toHaveLength(1);
+    } finally { sync.stop(); }
+  });
+
   it("shows a native card, never a shell, for an agent whose process isn't running, with what it left behind a disclosure", async () => {
     // The supervisor's process is gone (liveness says so, the pane is dead): an ended card with Continue.
     const { daemon, sync, term } = mount({ sup1: { live: false, text: "$ \n" } });

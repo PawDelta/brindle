@@ -18,6 +18,7 @@ import { VisualReader } from "./VisualReader";
 import { useVisuals } from "./useVisuals";
 import { OfferChip } from "./OfferChip";
 import { VisualsSetting } from "../../Settings/VisualsSetting";
+import { withVisualInput } from "./terminalInput";
 
 vi.mock("../../../components/PtyTerminal", () => import("../../../test/panes"));
 
@@ -51,6 +52,33 @@ afterEach(() => {
 });
 
 describe("visuals", () => {
+  it("observes Codex PTY submissions before forwarding Enter, including edits, pastes and uncertain history", async () => {
+    const submitted: string[] = [], bytes: string[] = [];
+    let recorded: (() => void) | undefined;
+    const open = withVisualInput({ visualInput: async (_id, text) => {
+      submitted.push(text);
+      await new Promise<void>(ok => { recorded = ok; });
+      return { observed: true };
+    } }, "codex", () => ({ write(data) { bytes.push(data); }, resize() {}, focus() {}, close() {} }));
+    const view = open({ server: null, target: "%1" }, { cols: 80, rows: 24 }, { onData() {}, onExit() {}, onError() {} });
+    view.write("Make a visualx");
+    view.write("\x7f\r");
+    await act(async () => undefined);
+    expect(submitted).toEqual(["Make a visual"]);
+    expect(bytes.join("")).not.toContain("\r");
+    await act(async () => recorded?.());
+    view.write("\x1b[200~Compare choices.\nPlease make a visual.\x1b[201~\r");
+    await act(async () => undefined);
+    expect(submitted.at(-1)).toBe("Compare choices.\nPlease make a visual.");
+    await act(async () => recorded?.());
+    view.write("\x1b[A\r");
+    await act(async () => undefined);
+    expect(submitted.at(-1)).toBe("");
+    await act(async () => recorded?.());
+    expect(bytes.join("")).toContain("\x1b[A\r");
+    view.close();
+  });
+
   it("drops stale offer reads across sessions, dismisses and expires offers", async () => {
     vi.useFakeTimers();
     const store = createAppStore();
@@ -58,7 +86,7 @@ describe("visuals", () => {
     let oldRead: (value: typeof offer) => void = () => undefined;
     const decisions: boolean[] = [];
     const client = {
-      visualOffer: async (root: string) => root === "old" ? new Promise<typeof offer>(ok => { oldRead = ok; }) : root === "empty" ? null : offer,
+      visualOffer: async (root: string) => root === "old" ? new Promise<typeof offer>(ok => { oldRead = ok; }) : root === "empty" ? null : root === "confirm" ? { ...offer, id: "r_1", confirmation: "plan" as const, expires_at: Date.now() / 1000 + 1800 } : offer,
       resolveVisualOffer: async (_root: string, _id: string, accept: boolean) => { decisions.push(accept); return { accepted: accept }; },
     };
     const chip = (root: string) => <StoreContext.Provider value={store}><OfferChip client={client} root={root} /></StoreContext.Provider>;
@@ -76,6 +104,12 @@ describe("visuals", () => {
       view.rerender(chip("expiry"));
       await act(async () => undefined);
       await act(async () => vi.advanceTimersByTime(2000));
+      expect(screen.queryByRole("button")).toBeNull();
+      view.rerender(chip("confirm"));
+      await act(async () => undefined);
+      await act(async () => vi.advanceTimersByTime(2000));
+      await act(async () => fireEvent.click(screen.getByRole("button", { name: "Create the planning document now?" })));
+      expect(decisions).toEqual([false, true]);
       expect(screen.queryByRole("button")).toBeNull();
     } finally { vi.useRealTimers(); }
   });

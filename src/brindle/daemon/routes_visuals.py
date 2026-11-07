@@ -65,6 +65,20 @@ def resolve_offer(db: DB, params: dict, body: dict) -> Any:
                                  _get(body, "accept", bool, required=True))
 
 
+def visual_input(db: DB, params: dict, body: dict) -> Any:
+    """Authenticated shell input, observed before the PTY receives its submit key."""
+    root = params["id"]
+    visuals._unlocked(root)
+    agent = db.get_agent(root)
+    if agent is None:
+        raise ServiceError("not_found", "no such session", 404)
+    text = _get(body, "text", required=True)
+    if len(text) > 32000:
+        raise ServiceError("invalid", "input is too long", 400)
+    visual_offers.person_spoke(db, agent, text)
+    return {"observed": True}
+
+
 @_page
 def visual_page(db: DB, request: Request) -> Path:
     return visuals.page(db, request.path_params["id"], request.path_params["n"])
@@ -110,6 +124,7 @@ def kept_page(db: DB, request: Request) -> Path:
 
 
 ROUTES = [
+    Route("/v1/sessions/{id:path}/visual-input", _endpoint(visual_input), methods=["POST"]),
     Route("/v1/sessions/{id:path}/visual-offer", session_offer),
     Route("/v1/sessions/{id:path}/visual-offer", _endpoint(resolve_offer), methods=["POST"]),
     Route("/v1/sessions/{id:path}/visuals", session_visuals),

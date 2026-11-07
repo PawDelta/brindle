@@ -813,6 +813,7 @@ export interface VisualOffer {
   kind: string;
   counts: Record<string, number>;
   expires_at: number;
+  confirmation?: "visual" | "plan";
 }
 
 export interface UserSettings {
@@ -1548,6 +1549,10 @@ export class DaemonClient {
 
   visualOffer(root: string) {
     return this.get<VisualOffer | null>(`${this.sessionPath(root)}/visual-offer`);
+  }
+
+  visualInput(root: string, text: string) {
+    return this.post<{ observed: boolean }>(`${this.sessionPath(root)}/visual-input`, { text });
   }
 
   resolveVisualOffer(root: string, offer: string, accept: boolean) {

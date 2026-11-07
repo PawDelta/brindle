@@ -99,6 +99,8 @@ def test_accept_and_explicit_ask_allow_one_publish(db, session):
         assert client.patch("/v1/user-settings", json={"visuals": "off"}).json()["visuals"] == "off"
         assert client.get("/v1/user-settings").json()["visuals"] == "off"
         agents.send_message(db, boss.id, "Please make a visual of this layout", person=True)
+        with pytest.raises(ServiceError):
+            visuals.publish(db, worker, "Not a planning request", "<p>no</p>", kind="plan")
         # A failed publication must preserve the grant for a corrected page.
         with pytest.raises(ServiceError):
             visuals.publish(db, worker, "Bad", "")
@@ -108,6 +110,78 @@ def test_accept_and_explicit_ask_allow_one_publish(db, session):
             visuals.publish(db, worker, "Unrequested", "<p>no</p>")
         agents.handle_hook(db, boss.id, "prompt-submit", {"prompt": "Create a planning doc for this change"})
         visuals.publish(db, worker, "Plan", "<p>plan</p>", kind="plan")
+
+
+@pytest.mark.parametrize("text,scope,allowed", [
+    ("Make a visual only if I ask you later.", "visual", False),
+    ("Compare these choices. Please make a visual.", "visual", True),
+    ("Create a planning document once I approve the approach.", "plan", False),
+    ("Please visualize this layout.", "visual", True),
+    ("I am quoting a sentence.\nMake a visual.", "visual", False),
+])
+def test_complete_request_intent(db, session, text, scope, allowed):
+    boss, _ = session
+    agents.send_message(db, boss.id, text, person=True)
+    if allowed:
+        visuals.publish(db, boss, "Requested", "<p>yes</p>", kind=scope)
+    else:
+        with pytest.raises(ServiceError):
+            visuals.publish(db, boss, "Conditional", "<p>no</p>", kind=scope)
+        # Conditional intent requires a fresh host confirmation, even with offers off.
+        config.set_user("visuals", "off")
+        request = offers.current(db, boss.id)
+        assert request["confirmation"] == scope
+        offers.resolve(db, boss.id, request["id"], True)
+        visuals.publish(db, boss, "Confirmed now", "<p>yes</p>", kind=scope)
+        with pytest.raises(ServiceError):
+            offers.resolve(db, boss.id, request["id"], True)
+
+
+def test_codex_terminal_submission_folds_and_authorizes(db, session):
+    boss, worker = session
+    db.update_agent(boss.id, provider="codex")
+    oid = offers.offer(db, db.get_agent(boss.id), "Which layout?", "layout")["id"]
+    token = "t" * 43
+    with TestClient(build_app(token), headers={"Authorization": f"Bearer {token}"}) as client:
+        path = f"/v1/sessions/{boss.id}/visual-input"
+        assert client.post(path, json={"text": "Use the second layout"}).status_code == 200
+        assert offers.current(db, boss.id) is None
+        with pytest.raises(ServiceError):
+            offers.resolve(db, boss.id, oid, True)
+        assert client.post(path, json={"text": "Make a visual"}).status_code == 200
+        visuals.publish(db, worker, "Codex request", "<p>yes</p>")
+
+
+def test_initial_person_prompt_is_observed_before_provider_launch(db, repo, monkeypatch):
+    from brindle import workspaces
+    from brindle.service import sessions
+
+    monkeypatch.setenv("BRINDLE_VISUALS", "1")
+    ws = workspaces.adopt_root(db, str(repo))
+    launched = []
+    def launch(db, agent, ws, **kwargs):
+        # Use the real gate at launch time; a hook after launch is too late.
+        with db.tx() as c:
+            offers.consume(c, agent.id)
+        launched.append(agent.id)
+    monkeypatch.setattr(agents, "_launch", launch)
+    started = sessions.launch(db, ws, provider="codex", prompt="Make a visual")
+    assert launched == [started.agent.id]
+
+
+def test_legacy_unscoped_grants_are_revoked(db, session):
+    from brindle.db import DB
+
+    boss, _ = session
+    agents.send_message(db, boss.id, "Make a visual", person=True)
+    db.conn.execute("ALTER TABLE visual_grants DROP COLUMN scope")
+    reopened = DB(db.path)
+    try:
+        with pytest.raises(ServiceError):
+            with reopened.tx() as c:
+                offers.consume(c, boss.id)
+    finally:
+        reopened.conn.close()
 
 
 def test_answer_folds_offer_and_setting_never_grants(db, session):

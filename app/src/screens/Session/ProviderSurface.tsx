@@ -20,7 +20,7 @@
    (a tmux too old for the pty view, no window named for it, a browser tab
    with no shell) says so on the card instead. */
 
-import { useContext, useEffect, useRef, useState } from "react";
+import { useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { AgentDTO, InboxItemDTO } from "../../api/schema";
 import { DaemonContext } from "../../api/context";
 import { usePtyViews } from "../../api/ptyView";
@@ -30,6 +30,7 @@ import { PtyTerminal, type TerminalView } from "../../components/PtyTerminal";
 import { button, card as cardClass, main, quiet } from "../../components/ui";
 import { providerName } from "../../store/overview";
 import type { Recovery } from "./useContinue";
+import { withVisualInput } from "./Visuals/terminalInput";
 
 export interface ProviderSurfaceProps {
   /* The session's repo (a preflight sign-in checks the provider there). */
@@ -170,6 +171,10 @@ export function ProviderSurface({ repo, agent: listedAgent, alive, sessionStatus
   // the card, not as a surface, where the pty view can show it.
   const live = agent && !card;
   const ready = pty?.status.kind === "ready" ? pty : null;
+  // Claude and OpenCode have authenticated prompt-submit hooks. The other
+  // CLIs need the shell's input observed before their native PTY write.
+  const observedOpen = useMemo(() => ready && client && agent && !["claude", "opencode"].includes(agent.provider)
+    ? withVisualInput(client, agent.id, ready.open) : ready?.open, [ready?.open, client, agent?.id, agent?.provider]);
   const target = agent?.window ?? null;
   const left = agent && card && card.kind !== "starting" && !(card.kind === "ended" && card.locked) && !!target && !!ready && (alive === false || STOPPED.has(agent.status));
 
@@ -179,7 +184,7 @@ export function ProviderSurface({ repo, agent: listedAgent, alive, sessionStatus
       {/* Mounted under the "starting" card too: the card leaves once this view is live, and an agent
           that stays "starting" while it waits on a startup prompt (trust, permission) is shown by it. */}
       {agent && (live || card?.kind === "starting") && ready && target && (
-        <PtyTerminal key={`${agent.id}:${recovery.attempt}:${reconnects}`} at={{ server: agent.tmux_server ?? null, target }} open={ready.open} copy={ready.copy} paste={ready.paste} onView={setView} />
+        <PtyTerminal key={`${agent.id}:${recovery.attempt}:${reconnects}`} at={{ server: agent.tmux_server ?? null, target }} open={observedOpen!} copy={ready.copy} paste={ready.paste} onView={setView} />
       )}
       {/* The engine's preflight items, from either Continue, whatever this pane shows: over a live
           worker's pane (the supervisor's chat is what the continue brings back) as a strip, else as the surface. */}
