@@ -731,6 +731,7 @@ Goal driving, merge gates and cleanup:
 | Key | Default | |
 |---|---|---|
 | `claude_permission_mode` | `"default"` | the `--permission-mode` for Claude Code sessions whose profile sets no `permission_mode`; the default holds permission requests for the brindle app, set `"auto"` to opt into auto mode. Only read from `~/.brindle/config.json` |
+| `opencode_permission_mode` | `"ask"` | how OpenCode sessions whose profile sets no `permission_mode` ask: `"ask"` keeps OpenCode's own prompts, `"auto"` lets edits run, `"autonomous"` asks nothing and brindle's plugin decides each call, failing closed (needs `permission_policy` on; see OpenCode below). Only read from `~/.brindle/config.json` |
 | `auto_update` | `false` | run `uv tool upgrade brindle` in the background at session start when PyPI has a newer version; restart to use it. Can also be set in `~/.brindle/config.json` for every repo |
 | `scoped_checks` | unset (acts as `"off"`) | `"infer"` narrows a bare pytest check (`pytest ...`, `python -m pytest ...`, `uv run pytest ...`, options only) on a worker's branch to the tests `graphify affected` reaches plus the touched test files, when the repo has a stored graph; it runs in full when the mapping fails or `conftest.py`, `pyproject.toml`, `setup.cfg`, `pytest.ini`, `tox.ini` or a lockfile changed. A pytest command that already names test paths (`pytest tests/`) and every other command always run in full. `"off"` narrows nothing. It becomes the default next release; until you set it, brindle tells you once |
 | `scoped_checks_max_files` | `40` | with `scoped_checks`, a worker's branch whose selected tests exceed this many files runs only its own changed test files and each changed module's namesake tests (`tests/test_<module>.py`, `tests/test_<module>_*.py`) instead, and the check output carries a one-line note saying so. The session branch and the full run before a PR (`gates.pr_checked`) always run everything. `0`: no cap |
@@ -1749,7 +1750,7 @@ events, so a worker's status never depends on reading its screen.
 |---|---|
 | `model` | `--model`. Use OpenCode's `provider/model` form (`anthropic/claude-sonnet-4-5`, `opencode/big-pickle`); a bare `claude-…`, `gpt-…` or `gemini-…` name gets its provider added. With no model, OpenCode's own default. |
 | `allowed_tools` | Each `Bash(cmd:*)` becomes an allowed `bash` pattern; any other command asks. |
-| `permission_mode` | `bypassPermissions`: everything runs. `dontAsk`: only `allowed_tools` commands run, edits and web fetches are refused. `acceptEdits`/`auto`: edits run. `plan`: OpenCode's `plan` agent. Unset: edits ask too. |
+| `permission_mode` | `bypassPermissions`: everything runs. `dontAsk`: only `allowed_tools` commands run, edits and web fetches are refused. `acceptEdits`/`auto`: edits run. `plan`: OpenCode's `plan` agent. Unset: your `opencode_permission_mode` (below) decides; with it on Ask, edits ask too. |
 | `add_dirs`, `worker_extra_read_dirs` | Allowed as external directories. |
 
 A `dontAsk` OpenCode worker (the built-in reviewer, for one) can't read outside
@@ -1760,11 +1761,22 @@ its worktree or its `add_dirs`: with nobody to ask, anything else is refused.
 call and stops the ones the policy denies (as for Claude Code and Codex
 workers); calls the policy allows or asks about are left to the profile's
 permissions above, so the policy can narrow what an OpenCode worker does but
-never widens it. The exception is Autonomous with a profile that sets no
-`permission_mode`: OpenCode then asks about nothing, since nothing can hold its
-prompt for the app, and the plugin is the gate. What the policy would ask you is
-refused unless a saved approval covers it, which spends a use, and a call the
-plugin couldn't check or read (a patch whose files it can't all name) is refused too.
+never widens it.
+
+For a profile that sets no `permission_mode`, `opencode_permission_mode` in
+`~/.brindle/config.json` (Settings → How your agents ask you → OpenCode
+permission mode) picks how OpenCode asks:
+
+| Mode | OpenCode |
+|---|---|
+| `ask` (default) | OpenCode's own prompt, in its pane, for edits and for commands `allowed_tools` doesn't cover. |
+| `auto` | Edits run without asking, as `permission_mode: auto`; other commands still ask. |
+| `autonomous` | OpenCode asks about nothing, since nothing can hold its prompt for the app, and the plugin is the gate. Needs `permission_policy` on; with it off brindle can vouch for nothing, so OpenCode asks as under `ask`. |
+
+Under `autonomous`, what the policy would ask you is refused unless a saved
+approval covers it, which spends a use, and a call the plugin couldn't check or
+read (a patch whose files it can't all name, a hook that didn't answer) is
+refused too.
 
 ### Cheap workers
 

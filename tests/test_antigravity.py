@@ -4,6 +4,7 @@ import shlex
 import subprocess
 import sys
 import time
+from types import SimpleNamespace
 
 import pytest
 from typer.testing import CliRunner
@@ -339,6 +340,18 @@ def test_interactive_supervisor_on_autonomous_needs_no_grants(db, ws, monkeypatc
     monkeypatch.setattr(antigravity, "_launched_with_skip_flag", lambda: None)
     permissions.store_path().unlink(missing_ok=True)
     add_agent(db, ws, agent_id="sup", window="")
+    # The hook's ancestors as agy runs it, read through a fake ps: a shell, then
+    # the agy launch() starts with the skip flag. No real process table is walked.
+    agy_pid = "4242"
+
+    def ps(argv, **_):
+        pid = argv[-1]
+        if "ppid=" in argv:
+            return SimpleNamespace(stdout=f"{agy_pid if pid != agy_pid else 1}\n")
+        command = f"/bin/agy {antigravity.SKIP_FLAG}" if pid == agy_pid else "/bin/sh -c brindle _hook"
+        return SimpleNamespace(stdout=command + "\n")
+
+    monkeypatch.setattr(antigravity, "subprocess", SimpleNamespace(run=ps))
 
     def launch(**ctx):
         argv = Antigravity().command(LaunchContext("sup", load_profile("supervisor"), None, cwd=ws.path,

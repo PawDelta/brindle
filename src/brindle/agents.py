@@ -4498,7 +4498,7 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
     Codex (#241). A request left to the person is held for the app's answer
     while the app is open (_hold_for_app; a Claude one is recorded with the
     policy off too). Never raises: any failure is ask, or a deny for an OpenCode
-    agent with nothing of its own to ask (opencode.unasked_launch)."""
+    agent with nothing of its own to ask (opencode.Launch.unasked)."""
     from brindle import opencode
 
     opencode_unasked = provider == "opencode" and os.environ.get(opencode.UNASKED_ENV) == "1"
@@ -4512,6 +4512,10 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
             return opencode.UNCHECKED if opencode_unasked else None
         cfg = load_repo_config(ws.repo_root)
         policy = cfg.permission_policy == "on"
+        if opencode_unasked and not policy:
+            # Launched with the rules on and OpenCode's own asks off (opencode.Launch):
+            # turning the rules off since must not leave its calls unchecked.
+            return opencode.POLICY_OFF
         # Policy off: of the other CLIs only a Codex reviewer has the hook
         # (codex_hook.launch_flags). Nobody watches it, so it gets what its
         # allowed_tools cover and nothing else of brindle's: every other
@@ -4633,7 +4637,7 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
                 decision = permissions.deny_in_parts(reqs[0], checks=cfg.checks, rules=rules) or decision
             if decision.decision == "ask" and (decision.rule is not None or opencode_unasked):
                 # A rule asks explicitly (or anything asks, where nothing of OpenCode's
-                # would: opencode.unasked_launch), and this plugin can't hold a request for
+                # would: opencode.Launch.unasked), and this plugin can't hold a request for
                 # the person: it fails closed rather than let OpenCode's own config run it.
                 permissions.note_prompt(decision)
                 decision = permissions.Decision(

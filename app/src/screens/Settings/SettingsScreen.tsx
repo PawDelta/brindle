@@ -73,7 +73,7 @@
    Last, About: the app's version and its license files (About.tsx). */
 
 import { useCallback, useContext, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
-import type { ClaudePermissionMode, Config, DaemonClient, DebugState, DoctorCheck, KeyInfo, Meta, ProviderConnection, ProviderInstalled, UserSettings } from "../../api/client";
+import type { ClaudePermissionMode, Config, DaemonClient, DebugState, DoctorCheck, KeyInfo, Meta, OpenCodePermissionMode, ProviderConnection, ProviderInstalled, UserSettings } from "../../api/client";
 import { debugState } from "../../api/debug";
 import { connected, factsOf, settingsNote, turnedOff } from "../../api/providers";
 import type { Install } from "../../api/providersInstall";
@@ -457,11 +457,31 @@ export function RestOfConfig({ lines, testId, note }: { lines: [string, string][
   );
 }
 
-/* The person's choice of how Claude's permission requests are handled,
-   saved the moment it is picked (PATCH /v1/user-settings). */
-const MODES: { value: ClaudePermissionMode; label: string; blurb: string }[] = [
-  { value: "default", label: "Normal", blurb: "Claude's held permission requests show up in the Inbox for you to answer." },
-  { value: "auto", label: "Auto", blurb: "Claude approves most commands itself; only what it can't decide reaches you." },
+/* The person's choice of how each CLI's permission requests are handled,
+   saved the moment it is picked (PATCH /v1/user-settings). One row per CLI
+   that has the setting; a profile's own permission_mode still wins. */
+type ModeKey = "claude_permission_mode" | "opencode_permission_mode";
+type ModeChoice = { value: ClaudePermissionMode | OpenCodePermissionMode; label: string; blurb: string };
+const MODE_ROWS: { key: ModeKey; name: string; testId: string; modes: ModeChoice[] }[] = [
+  {
+    key: "claude_permission_mode",
+    name: "Claude",
+    testId: "permission-mode",
+    modes: [
+      { value: "default", label: "Normal", blurb: "Claude's held permission requests show up in the Inbox for you to answer." },
+      { value: "auto", label: "Auto", blurb: "Claude approves most commands itself; only what it can't decide reaches you." },
+    ],
+  },
+  {
+    key: "opencode_permission_mode",
+    name: "OpenCode",
+    testId: "opencode-permission-mode",
+    modes: [
+      { value: "ask", label: "Ask", blurb: "OpenCode asks in its own pane before edits and commands its profile doesn't allow." },
+      { value: "auto", label: "Auto", blurb: "OpenCode edits files without asking; commands its profile doesn't allow still ask." },
+      { value: "autonomous", label: "Autonomous", blurb: "OpenCode asks nothing: brindle's rules decide each call and refuse what they'd ask about or can't check. With the rules off, OpenCode asks." },
+    ],
+  },
 ];
 
 function PermissionMode({ client }: { client: DaemonClient }) {
@@ -479,50 +499,59 @@ function PermissionMode({ client }: { client: DaemonClient }) {
       live = false;
     };
   }, [client]);
-  const pick = async (mode: ClaudePermissionMode) => {
-    if (!settings || saving || settings.claude_permission_mode === mode) return;
+  const pick = async (key: ModeKey, mode: ModeChoice["value"]) => {
+    if (!settings || saving || settings[key] === mode) return;
     setSaving(true);
     setError(null);
     try {
-      setSettings(await client.patchUserSettings({ claude_permission_mode: mode }));
+      setSettings(await client.patchUserSettings({ [key]: mode }));
     } catch (e) {
       setError(message(e));
     } finally {
       setSaving(false);
     }
   };
-  const current = settings?.claude_permission_mode;
+  // An engine older than a setting doesn't return it: that row isn't offered.
+  const rows = MODE_ROWS.filter((r) => r.key === "claude_permission_mode" || !settings || settings[r.key] !== undefined);
   return (
-    <Row
-      label="Claude permission mode"
-      help={unavailable ? `Not offered by this engine: ${unavailable}` : (MODES.find((m) => m.value === current)?.blurb ?? "How Claude's permission requests are handled.")}
-      testId="permission-mode"
-      data={{ mode: current }}
-    >
-      {!unavailable && (
-        <div role="radiogroup" aria-label="Claude permission mode" className="inline-flex rounded-md border border-line p-0.5">
-          {MODES.map((m) => (
-            <button
-              key={m.value}
-              type="button"
-              role="radio"
-              aria-checked={current === m.value}
-              disabled={saving || !settings}
-              title={m.blurb}
-              className={`rounded-sm px-s2 py-0.5 text-sm disabled:opacity-50 ${current === m.value ? "bg-pass-soft font-medium text-pass" : "text-ink-2 hover:bg-surface-2"}`}
-              onClick={() => void pick(m.value)}
-            >
-              {m.label}
-            </button>
-          ))}
-        </div>
-      )}
+    <>
+      {rows.map((r) => {
+        const current = settings?.[r.key];
+        return (
+          <Row
+            key={r.key}
+            label={`${r.name} permission mode`}
+            help={unavailable ? `Not offered by this engine: ${unavailable}` : (r.modes.find((m) => m.value === current)?.blurb ?? `How ${r.name}'s permission requests are handled.`)}
+            testId={r.testId}
+            data={{ mode: current }}
+          >
+            {!unavailable && (
+              <div role="radiogroup" aria-label={`${r.name} permission mode`} className="inline-flex rounded-md border border-line p-0.5">
+                {r.modes.map((m) => (
+                  <button
+                    key={m.value}
+                    type="button"
+                    role="radio"
+                    aria-checked={current === m.value}
+                    disabled={saving || !settings}
+                    title={m.blurb}
+                    className={`rounded-sm px-s2 py-0.5 text-sm disabled:opacity-50 ${current === m.value ? "bg-pass-soft font-medium text-pass" : "text-ink-2 hover:bg-surface-2"}`}
+                    onClick={() => void pick(r.key, m.value)}
+                  >
+                    {m.label}
+                  </button>
+                ))}
+              </div>
+            )}
+          </Row>
+        );
+      })}
       {error && (
         <p role="alert" className={`${alert} w-full`}>
           Could not save: {error}
         </p>
       )}
-    </Row>
+    </>
   );
 }
 
@@ -1441,7 +1470,7 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
 
       <Pane id="permissions" {...panes}>
           {config && (
-            <Section id="you" title="How Claude asks you" blurb="Whether Claude's held requests wait for you in the Inbox or Claude decides most itself." testId="user-settings">
+            <Section id="you" title="How your agents ask you" blurb="For each CLI, whether its requests wait for you or it decides more itself. A profile's own permission mode wins." testId="user-settings">
               <PermissionMode client={client} />
             </Section>
           )}

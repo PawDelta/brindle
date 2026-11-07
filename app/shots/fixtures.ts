@@ -575,7 +575,7 @@ export const data: Partial<DaemonData> = {
     { chunk_id: "k2", heading_path: "Design notes > Sidebar", text: "The sidebar is the backbone: every session as a tree with its workers nested, the same tree the Sessions screen shows in full.", url: "file:///home/sam/Notes/pawdelta-design/sidebar.md", title: "Design notes", external_id: "sidebar.md", updated_at: now - 200 * 86400, updated: "2026-04-03" },
   ],
   orgs: {},
-  userSettings: { claude_permission_mode: "default" },
+  userSettings: { claude_permission_mode: "default", opencode_permission_mode: "ask" },
   config: {
     user: { supervisor: "claude", reviewer: "reviewer", sidebar: "left", routing_light: ["developer-light"] },
     repo: {
