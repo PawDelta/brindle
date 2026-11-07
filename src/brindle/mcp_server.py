@@ -81,8 +81,15 @@ class _Server(MCPServer):
         return result
 
     async def list_tools(self):
+        from brindle import visuals
+
         agent = _calling_agent()
-        return [t for t in await super().list_tools() if coordinator.refusal(agent, t.name) is None]
+        hidden = () if visuals.enabled() else VISUAL_TOOLS
+        return [t for t in await super().list_tools()
+                if coordinator.refusal(agent, t.name) is None and t.name not in hidden]
+
+
+VISUAL_TOOLS = ("publish_visual", "list_visuals")   # hidden while the visuals capability is off
 
 
 mcp = _Server(
@@ -142,6 +149,68 @@ def request_doc_read(doc: int | str, why: str, section: str | None = None) -> st
     except ServiceError as e:
         raise ToolError(str(e)) from e
     return f"Document read requested: {request}."
+
+
+class VisualOption(BaseModel):
+    id: str = Field(description="1-32 letters, digits, _ or -; what the person's answer names")
+    label: str
+    detail: str | None = None
+
+
+@mcp.tool()
+def publish_visual(title: str, html: str, question: str | None = None,
+                   options: list[VisualOption] | None = None, visual_id: str | None = None) -> str:
+    """Show the person a page in the app: a self-contained HTML document
+    (inline script and style only; it gets no network, no remote images or
+    fonts). Workers' visuals go to their supervisor's session. To ask a
+    choice, pass the question and 2-12 options; the person answers with one
+    option id (and maybe a note), which arrives as a message from them.
+    visual_id: publish a new revision of one of this session's visuals (it
+    asks again: an earlier answer is cleared). At most 2 MB per page, 20
+    revisions; a page or text that looks like a secret is refused."""
+    from brindle import visuals
+    from brindle.service.errors import ServiceError
+
+    db = DB()
+    caller, _ = _caller(db)
+    try:
+        v = visuals.publish(db, caller, title, html, question,
+                            [o.model_dump() if isinstance(o, BaseModel) else o for o in options or []],
+                            visual_id)
+    except ServiceError as e:
+        raise ToolError(e.message) from e
+    asks = " The person's answer arrives as a message." if v["options"] else ""
+    return f"Published {v['id']} r{v['rev']} (brindle://visual/{v['id']}).{asks}"
+
+
+@mcp.tool()
+def list_visuals() -> str:
+    """This session's visuals, newest first: id, revision, title and the person's answer, if any."""
+    from brindle import visuals
+    from brindle.service.errors import ServiceError
+
+    db = DB()
+    caller, _ = _caller(db)
+    try:
+        visuals.require_enabled()
+        root = autopilot.root_of(db, caller.id) if caller else None
+        if root is None:
+            raise ServiceError("invalid", "not running as a brindle agent; no session", 400)
+        found = visuals.for_session(db, root)
+    except ServiceError as e:
+        raise ToolError(e.message) from e
+    if not found:
+        return "No visuals in this session."
+    lines = []
+    for v in found:
+        state = "no question"
+        if v["answer"]:
+            a = v["answer"]
+            state = f"answered: option {a['option']}" + (f" (note: {a['note']})" if a["note"] else "")
+        elif v["options"]:
+            state = "open: " + ", ".join(o["id"] for o in v["options"])
+        lines.append(f"{v['id']} r{v['rev']} · {v['title']} · {state}" + (" · kept" if v["kept_at"] else ""))
+    return "\n".join(lines)
 
 
 @mcp.tool()
