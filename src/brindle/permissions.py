@@ -84,6 +84,7 @@ import fnmatch
 import functools
 import glob
 import hashlib
+import itertools
 import json
 import math
 import os
@@ -2825,8 +2826,6 @@ def _names_store_in_text(command: str) -> bool:
 _UNKNOWN = "\0"
 _EXPANSION = re.compile(r"\$\((?:[^()]|\([^()]*\))*\)|`[^`]*`|\$\{[^}]*\}|\$(?:[A-Za-z_]\w*|[0-9@*#?$!-])")
 _LITERAL = "\1"    # a quoted or escaped * ? [: matches only itself, which no store name holds
-# An array's list (f=(~/.ss?/id_*)), which the splitter doesn't read.
-_ARRAY_LIST = re.compile(r"(?:^|[\s;&|(])[A-Za-z_]\w*\+?=\(([^)]*)\)")
 # A path under a home in inline code brindle can't resolve.
 _HOME_PATH_TEXT = (r"(?:(?<![\w$.~/-])~[A-Za-z0-9_.-]*|\$\{HOME\}|\$HOME(?!\w)|/Users/[^/\s'\"]+|/home/[^/\s'\"]+"
                    r"|/var/root|/root|%s)(/[^\s;|&()<>]*)")
@@ -2933,17 +2932,6 @@ def _dotglob_after(part: ShellPart, dotglob: bool) -> bool:
     if program in ("setopt", "unsetopt") and ("globdots" in names or "noglobdots" in names):
         return (program == "setopt") == ("globdots" in names)
     return dotglob
-
-
-def _arrays_reach_store(req: Request, command: str, dotglob: bool) -> bool:
-    """An array's list (which the splitter doesn't read) with a word that may be a store."""
-    where = ShellPart([], "", req.cwd or req.worktree or None)
-    for found in _ARRAY_LIST.finditer(command):
-        tokens = _script_tokens(found.group(1), credential_scan=True)
-        words = [t[1].raw for t in tokens if t[0] == "word"] if tokens is not None else found.group(1).split()
-        if any(_word_reaches_store(where, word, dotglob) for word in words):
-            return True
-    return False
 
 
 def _text_reaches_store(text: str) -> bool:
@@ -3230,19 +3218,18 @@ def prints_credentials(req: Request, depth: int = 0, *, plain: bool = False) -> 
         fallback = _PartReader(req, credential_scan=True)
         fallback.scan(req.command)
         reader.parts.extend(fallback.parts)
+        reader.arrays += fallback.arrays
     if any(_credential_words(req, part, part.words, depth, plain=plain) for part in reader.parts):
         return True
     # A path only the run resolves (pieces, $1, $(...), an array's pattern, a glob
     # dotglob lets select dot entries) that could be a store: what it reads can't be
     # told, so it may be one (``plain`` leaves these out, for decide's message).
     if not plain:
-        dotglob = ever = False    # dotglob as each part runs (a subshell's shopt counts as lasting)
-        for part in reader.parts:
-            dotglob = _dotglob_after(part, dotglob)
-            ever |= dotglob
-            if _part_reaches_store(part, dotglob):
-                return True
-        if reader.unread and _arrays_reach_store(req, req.command, ever):
+        if any(_part_reaches_store(part, part.dotglob) for part in reader.parts):
+            return True
+        # An array's list (f=(~/.ss?/id_*)), which only the scan reads, under dotglob as it was there.
+        where = ShellPart([], "", req.cwd or req.worktree or None)
+        if any(_word_reaches_store(where, word, dotglob) for words, dotglob in reader.arrays for word in words):
             return True
     # Does the command name a store anywhere: a part's words or redirections, an
     # assignment's value, a loop's list? Then a word or target only the run knows
@@ -4520,13 +4507,19 @@ class _Flattener:
         # A credential scan's record of what assignments and for-loop lists resolve to:
         # paths a part never sees as a word (f=~/.ssh; for f in "$HOME"/.ssh/*).
         self.named: list[str] = []
+        # The subshell each runs in, as the path of subshells from the script's own shell (()
+        # for that shell): what a shopt changes lasts only in its own (_PartReader.options).
+        self.scopes: list[tuple] = []
+        self.scope: tuple = ()
+        self.ids = itertools.count()
 
     def emit(self, command: str, definite: bool = False, chained: tuple[bool, bool] = (False, False),
-             fed: bool = False) -> None:
+             fed: bool = False, scope: tuple | None = None) -> None:
         self.out.append(command)
         self.definite.append(definite)
         self.chained.append(chained if self.track else (False, False))
         self.fed.append(fed)
+        self.scopes.append(self.scope if scope is None else scope)
         if len(self.out) > _FLAT_LIMIT:
             raise ValueError("too many commands")
 
@@ -4549,14 +4542,23 @@ class _Flattener:
                 self.track &= not node[4]
                 chained = (chains and node[2] in ("&&", "|", "|&"),
                            chains and node[2] in ("", ";", "\n", "&&", "&") and node[3] == "&&")
+                # A pipeline's part or a background job runs in a subshell of its own.
+                kept = self.scope
+                if node[2] in ("|", "|&") or node[3] in ("|", "|&", "&"):
+                    self.scope = kept + (next(self.ids),)
                 self.command(node[1], env, definite and node[2] in ("", ";", "\n")
                              and node[3] in ("", ";", "\n", "&&", "||"), chained, fed or node[2] in ("|", "|&"))
+                self.scope = kept
                 continue
             self.changed = True
             if node[0] == "group":
                 # Not definite: it may be skipped (false && { ... }), backgrounded or in a subshell (piped),
                 # so what it assigns isn't known afterwards.
+                kept = self.scope
+                if node[2]:    # ( ... ), or { ... } in a pipeline: a subshell
+                    self.scope = kept + (next(self.ids),)
                 self.walk(node[1], env, False, chains and not node[2], fed or node[3])
+                self.scope = kept
                 continue
             fed_in = fed or node[-1]
             body = node[3] if node[0] == "for" else node[1]
@@ -4603,9 +4605,10 @@ class _Flattener:
 
     def substitution(self, inner: str, env: dict) -> None:
         sub = _Flattener(self.cwd, credential_scan=self.credential_scan, reading=self.reading)
+        sub.ids, sub.scope = self.ids, self.scope + (next(self.ids),)    # a subshell of its own
         sub.script(inner, dict(env))
-        for command, fed in zip(sub.out, sub.fed):
-            self.emit(command, fed=fed)
+        for command, fed, scope in zip(sub.out, sub.fed, sub.scopes):
+            self.emit(command, fed=fed, scope=scope)
         self.named += sub.named
 
     def resolved(self, text: str) -> str:
@@ -4849,6 +4852,7 @@ class ShellPart:
     places: list[str] = field(default_factory=list)
     # Per word of ``written``: whether the shell expands it as a pattern of names.
     patterned: list[bool] = field(default_factory=list)
+    dotglob: bool = False    # a pattern selects dot entries where it runs (_PartReader.options)
 
 
 class _Unverifiable(ValueError):
@@ -4958,6 +4962,17 @@ class _PartReader:
         self.named: list[str] = []    # assignment values and loop lists, resolved (_Flattener.named)
         self.wrote = False    # an earlier part may have made files a later pattern would match
         self.expanded = self.tilde = False    # the part being read's ShellPart.expanded and .tilde
+        # The subshell the part being read runs in (_Flattener.scopes), and dotglob as each
+        # subshell last left it: one starts from its parent's, and its changes stay in it.
+        self.scope: tuple = ()
+        self.ids = itertools.count()
+        self.options: dict[tuple, bool] = {}
+        self.arrays: list[tuple[list[str], bool]] = []    # each array list scan() met, and dotglob there
+
+    def dotglob(self) -> bool:
+        """dotglob in the current subshell: as it left it, else as its nearest parent did."""
+        scope = self.scope
+        return next((self.options[scope[:n]] for n in range(len(scope), -1, -1) if scope[:n] in self.options), False)
 
     def scan(self, command: str) -> None:
         """Inspect recognizable commands even when the full script isn't verifiable.
@@ -4970,10 +4985,27 @@ class _PartReader:
         _script_tokens(command, credential_scan=True, partial=tokens)
         chunk: list[tuple] = []
         case_patterns: list[bool] = []
+        outer, piped = self.scope, False    # ( ... ), a pipeline's parts and & jobs: subshells
+        array: list[tuple] | None = None
         for token in [*tokens, ("op", ";", False)]:
             if token[0] != "op" or token[1] not in (*_SCRIPT_SEPARATORS, ";;", "(", ")"):
                 chunk.append(token)
                 continue
+            if array is not None:    # an array's list, up to its ): words, not a command
+                array += chunk
+                if token[1] == ")":
+                    self.arrays.append(([t[1].raw for t in array if t[0] == "word"], self.dotglob()))
+                    array = None
+                chunk = []
+                continue
+            if token[1] == "(" and chunk and chunk[-1][0] == "word" and re.fullmatch(r"[A-Za-z_]\w*\+?=",
+                                                                                     chunk[-1][1].raw):
+                array, chunk = [], []
+                continue
+            shell = self.scope
+            if piped or token[1] in ("|", "|&", "&"):
+                self.scope = shell + (next(self.ids),)
+            piped = token[1] in ("|", "|&")
             while chunk and chunk[0][0] == "word" and chunk[0][1].plain() in (*_SCRIPT_OPENERS, "!"):
                 chunk.pop(0)
             head = chunk[0][1].plain() if chunk and chunk[0][0] == "word" else None
@@ -4987,6 +5019,11 @@ class _PartReader:
                     self.part(line, False)
                 except ValueError:
                     pass
+            self.scope = shell
+            if token[1] == "(" and not case_patterns:
+                self.scope = shell + (next(self.ids),)
+            elif token[1] == ")" and not case_patterns and len(self.scope) > len(outer):
+                self.scope = self.scope[:-1]
             if case_patterns and token[1] == ")":
                 case_patterns[-1] = False
             elif case_patterns and token[1] == ";;":
@@ -5013,6 +5050,7 @@ class _PartReader:
         if readers & _CODE_RUNNERS:
             raise ValueError("a heredoc a program may run as code")
         flattener = _Flattener(self.cwd or "", credential_scan=self.credential_scan, reading=not self.credential_scan)
+        flattener.ids, flattener.scope = self.ids, self.scope
         try:
             flattener.script(command, {})
         except ValueError:
@@ -5022,18 +5060,21 @@ class _PartReader:
             self.scan(command)
             return
         self.named += flattener.named
-        outer = self.fed
-        for line, sure, (chained, leads), fed in zip(flattener.out, flattener.definite, flattener.chained, flattener.fed):
+        outer, shell = self.fed, self.scope
+        for line, sure, (chained, leads), fed, scope in zip(flattener.out, flattener.definite, flattener.chained,
+                                                            flattener.fed, flattener.scopes):
             self.fed = outer or fed or self.input_stays
+            self.scope = scope
             self.part(line, definite and sure, chains and chained, chains and leads)
-        self.fed = outer
+        self.fed, self.scope = outer, shell
 
     def inner(self, command: str) -> None:
         """A substitution's commands: they run in a subshell of their own."""
-        kept = self.cwd, self.settled, self.expanded, self.tilde, self.places
+        kept = self.cwd, self.settled, self.expanded, self.tilde, self.places, self.scope
         self.settled = self.cwd
+        self.scope += (next(self.ids),)
         self.read(command)
-        self.cwd, self.settled, self.expanded, self.tilde, self.places = kept
+        self.cwd, self.settled, self.expanded, self.tilde, self.places, self.scope = kept
 
     def part(self, line: str, definite: bool, chained: bool = False, leads: bool = False) -> None:
         """One simple command; ``chained``: it runs only if the one before it
@@ -5143,6 +5184,7 @@ class _PartReader:
             raise _Unverifiable("eval runs what only the run knows")
         if program in ("source", ".") or program in _WRAPPERS and runner_unknown and not self.credential_scan:
             raise ValueError(f"{program} runs what only the run knows")
+        part.dotglob = self.options[self.scope] = _dotglob_after(part, self.dotglob())
         self.parts.append(part)
         if program == "exec" and (self.fed or part.reads):
             self.input_stays = True
