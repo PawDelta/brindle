@@ -641,6 +641,21 @@ def _profile_for(db: DB, agent: Agent, ws: Workspace, m=_UNREAD):
     if agent.profile == SUPERVISOR and agent.mode == "interactive":
         profile = _with_supervisor_choice(profile, agent.provider, ws.repo_root)
     profile = _with_kind_overrides(db, profile, agent, ws.repo_root)
+    from brindle import visuals
+
+    if visuals.enabled():
+        profile = replace(profile, prompt=profile.prompt + "\n\n" +
+                          "Make visuals only after the person explicitly asks or accepts an offer. "
+                          "Planning documents require an explicit ask. Workers may publish into their "
+                          "supervisor's session, but only supervisors may offer. Ask the choice in text "
+                          "as usual; offer_visual never blocks it. Offer only for a pending choice: "
+                          "3+ options (or 2 differing on 3+ attributes), a comparison of 4+ rows by "
+                          "3+ columns, a flow of 5+ steps or a branch, a diff over 12 lines, or a UI "
+                          "layout choice. Never offer for yes/no, go-ahead, <=3 short lines, status, "
+                          "permission, plan approval, worker questions, or a question already answered "
+                          "in chat. Declare kind and counts honestly. Respect refusals: one open offer, "
+                          "15 minutes apart, four per day, no repeated question; two dismissals silence "
+                          "offers for 24 hours. The Visuals setting controls offers only.")
     # The profile's rule packs: their text joins the prompt here, for every
     # provider; their mechanical rules are checked by brindle.rule_checks.
     # So do its guardrails (write and read scope), which that check enforces.
@@ -2185,6 +2200,10 @@ def send_message(db: DB, to_id: str, body: str, sender_id: str | None = None,
 
     agent = get(db, to_id)
     identity_lock.ensure(agent)
+    if person:
+        from brindle import visual_offers
+
+        visual_offers.person_spoke(db, agent, body)
     if not person and runs_process(agent) and is_alive(agent) and pulls_messages(db, agent):
         # Keep the message unread and deliver only a notice, once for everything unread.
         db.enqueue_held(agent.id, body, sender_id)
@@ -5151,6 +5170,9 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
             from brindle import autopilot as pilot
 
             pilot.user_spoke(db, agent)
+            from brindle import visual_offers
+
+            visual_offers.person_spoke(db, agent, prompt)
     elif event == "notification":
         text = str(payload.get("message", "")).lower()
         if "permission" in text or "approval" in text:

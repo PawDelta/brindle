@@ -34,6 +34,7 @@ import { useContinue, type Recovery } from "./useContinue";
 import { VisualLinkContext } from "./Visuals/link";
 import { VisualReader } from "./Visuals/VisualReader";
 import { VisualsButton } from "./Visuals/VisualsButton";
+import { OfferChip } from "./Visuals/OfferChip";
 import { useVisuals } from "./Visuals/useVisuals";
 
 export interface SessionScreenProps {
@@ -208,7 +209,7 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
     <VisualLinkContext.Provider value={openVisual}>
     <section ref={host} className="relative flex min-h-0 flex-1 flex-col" aria-label="Session">
       <SessionBar
-        visuals={<VisualsButton visuals={visuals.visuals} onOpen={openVisual} />}
+        visuals={<><OfferChip client={client} root={root} /><VisualsButton visuals={visuals.visuals} onOpen={openVisual} /></>}
         client={client}
         root={root}
         repo={repo}

@@ -16,7 +16,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
-from brindle import visuals
+from brindle import visuals, visual_offers
 from brindle.daemon.routes_actions import _endpoint, _get
 from brindle.daemon.routes_read import _json
 from brindle.db import DB
@@ -53,6 +53,16 @@ def session_visuals(db: DB, request: Request) -> Any:
         raise ServiceError("not_found", f"no session {root}", 404)
     visuals._unlocked(root)
     return [visuals.to_dto(v) for v in visuals.for_session(db, root)]
+
+
+@_json
+def session_offer(db: DB, request: Request) -> Any:
+    return visual_offers.current(db, request.path_params["id"])
+
+
+def resolve_offer(db: DB, params: dict, body: dict) -> Any:
+    return visual_offers.resolve(db, params["id"], _get(body, "offer", required=True),
+                                 _get(body, "accept", bool, required=True))
 
 
 @_page
@@ -100,6 +110,8 @@ def kept_page(db: DB, request: Request) -> Path:
 
 
 ROUTES = [
+    Route("/v1/sessions/{id:path}/visual-offer", session_offer),
+    Route("/v1/sessions/{id:path}/visual-offer", _endpoint(resolve_offer), methods=["POST"]),
     Route("/v1/sessions/{id:path}/visuals", session_visuals),
     Route("/v1/visuals/{id}/r/{n}", visual_page),
     Route("/v1/visuals/{id}/answer", _endpoint(answer), methods=["POST"]),

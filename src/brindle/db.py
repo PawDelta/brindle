@@ -859,6 +859,23 @@ CREATE TABLE IF NOT EXISTS kb_embeddings (
     model TEXT NOT NULL,
     vector BLOB NOT NULL
 );
+-- Offers and one-use requests from the person (brindle.visual_offers).
+CREATE TABLE IF NOT EXISTS visual_offers (
+    id TEXT PRIMARY KEY,
+    root_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    question_hash TEXT NOT NULL,
+    question TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    counts TEXT NOT NULL,
+    state TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    changed_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS visual_grants (
+    root_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
+    remaining INTEGER NOT NULL,
+    explicit INTEGER NOT NULL
+);
 -- Visuals an agent published into a session (brindle.visuals owns these):
 -- the current revision's question and options, the person's answer to it.
 -- Deleted with their session; a kept copy is a kept_visuals row instead.

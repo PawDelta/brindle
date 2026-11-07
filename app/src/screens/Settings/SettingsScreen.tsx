@@ -76,6 +76,7 @@ import { useCallback, useContext, useEffect, useId, useMemo, useRef, useState, t
 import type { ClaudePermissionMode, Config, DaemonClient, DebugState, DoctorCheck, KeyInfo, Meta, OpenCodePermissionMode, ProviderConnection, ProviderInstalled, UserSettings } from "../../api/client";
 import { debugState } from "../../api/debug";
 import { connected, factsOf, settingsNote, turnedOff } from "../../api/providers";
+import { VisualsSetting } from "./VisualsSetting";
 import type { Install } from "../../api/providersInstall";
 import type { About as AboutInfo, AppUpdater, AppUpdates, CliLink, ReleaseBuildUpdater } from "../../api/tauri";
 import { plain } from "../../api/wording";
@@ -1414,6 +1415,7 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
         )}
       </Pane>
       <Pane id="general" {...panes}>
+        <VisualsSetting client={client} />
       <div className="border-t border-line">
         <Row label="Appearance">
           <ThemeToggle choices />

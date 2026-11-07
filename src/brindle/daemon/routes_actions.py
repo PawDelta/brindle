@@ -1303,12 +1303,12 @@ PERMISSION_MODES = ("default", "auto")
 
 
 def patch_user_settings(db: DB, params: dict, body: Body) -> Any:
-    """``claude_permission_mode`` ("default" or "auto") and/or
+    """``visuals`` ("on" or "off", offers only), ``claude_permission_mode`` ("default" or "auto") and/or
     ``opencode_permission_mode`` ("ask", "auto" or "autonomous") into
     ~/.brindle/config.json; its other keys are kept."""
     from brindle import config
 
-    allowed = {"claude_permission_mode": PERMISSION_MODES,
+    allowed = {"visuals": ("on", "off"), "claude_permission_mode": PERMISSION_MODES,
                "opencode_permission_mode": config.OPENCODE_PERMISSION_MODES}
     changes = {key: _get(body, key) for key in allowed if body.get(key) is not None}
     if not changes:
@@ -1318,7 +1318,9 @@ def patch_user_settings(db: DB, params: dict, body: Body) -> Any:
             raise ServiceError("invalid", f"{key} must be one of: {', '.join(allowed[key])}")
     for key, mode in changes.items():
         config.set_user(key, mode)
-    return {"claude_permission_mode": config.claude_permission_mode(),
+    if "visuals" in changes:
+        bus.publish(db, "visual.offers_setting")
+    return {"visuals": config.visuals_setting(), "claude_permission_mode": config.claude_permission_mode(),
             "opencode_permission_mode": config.opencode_permission_mode()}
 
 

@@ -2449,7 +2449,7 @@ def test_user_settings_round_trip_validates_and_keeps_other_keys(db, world, monk
     path.write_text(json.dumps({"delegation": "fast"}))
 
     assert _send("GET", "/v1/user-settings") == (200, {"claude_permission_mode": "default",
-                                                        "opencode_permission_mode": "ask"})
+                                                        "opencode_permission_mode": "ask", "visuals": "off"})
     assert _send("PATCH", "/v1/user-settings", {"claude_permission_mode": "yolo"})[0] == 400
     assert _send("PATCH", "/v1/user-settings", {})[0] == 400
     # One bad value refuses the whole change.
@@ -2458,7 +2458,7 @@ def test_user_settings_round_trip_validates_and_keeps_other_keys(db, world, monk
     assert _send("PATCH", "/v1/user-settings", {"claude_permission_mode": "auto"})[0] == 200
     assert _send("PATCH", "/v1/user-settings", {"opencode_permission_mode": "autonomous"})[0] == 200
     assert _send("GET", "/v1/user-settings") == (200, {"claude_permission_mode": "auto",
-                                                        "opencode_permission_mode": "autonomous"})
+                                                        "opencode_permission_mode": "autonomous", "visuals": "off"})
     assert json.loads(path.read_text()) == {"delegation": "fast", "claude_permission_mode": "auto",
                                             "opencode_permission_mode": "autonomous"}
     assert not list(path.parent.glob("*.tmp"))

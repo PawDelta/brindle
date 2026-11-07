@@ -426,7 +426,7 @@ def _key_rows(repo: str | None) -> list[dict]:
 
 @_json
 def get_user_settings(db: DB, request: Request) -> Any:
-    return {"claude_permission_mode": config.claude_permission_mode(),
+    return {"visuals": config.visuals_setting(), "claude_permission_mode": config.claude_permission_mode(),
             "opencode_permission_mode": config.opencode_permission_mode()}
 
 

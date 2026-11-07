@@ -16,6 +16,8 @@ import type { VisualFrameProps, VisualSource } from "./frame";
 import { StoreContext } from "../../../store/useStore";
 import { VisualReader } from "./VisualReader";
 import { useVisuals } from "./useVisuals";
+import { OfferChip } from "./OfferChip";
+import { VisualsSetting } from "../../Settings/VisualsSetting";
 
 vi.mock("../../../components/PtyTerminal", () => import("../../../test/panes"));
 
@@ -49,6 +51,71 @@ afterEach(() => {
 });
 
 describe("visuals", () => {
+  it("drops stale offer reads across sessions, dismisses and expires offers", async () => {
+    vi.useFakeTimers();
+    const store = createAppStore();
+    const offer = { id: "o_1", kind: "layout", counts: {}, expires_at: Date.now() / 1000 + 5 };
+    let oldRead: (value: typeof offer) => void = () => undefined;
+    const decisions: boolean[] = [];
+    const client = {
+      visualOffer: async (root: string) => root === "old" ? new Promise<typeof offer>(ok => { oldRead = ok; }) : root === "empty" ? null : offer,
+      resolveVisualOffer: async (_root: string, _id: string, accept: boolean) => { decisions.push(accept); return { accepted: accept }; },
+    };
+    const chip = (root: string) => <StoreContext.Provider value={store}><OfferChip client={client} root={root} /></StoreContext.Provider>;
+    try {
+      const view = render(chip("old"));
+      view.rerender(chip("empty"));
+      await act(async () => { oldRead(offer); });
+      await act(async () => vi.advanceTimersByTime(2000));
+      expect(screen.queryByRole("button")).toBeNull();
+      view.rerender(chip("current"));
+      await act(async () => undefined);
+      await act(async () => vi.advanceTimersByTime(2000));
+      await act(async () => fireEvent.click(screen.getByRole("button", { name: "Not now" })));
+      expect(decisions).toEqual([false]);
+      view.rerender(chip("expiry"));
+      await act(async () => undefined);
+      await act(async () => vi.advanceTimersByTime(2000));
+      expect(screen.queryByRole("button")).toBeNull();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("delays offers while typing, preserves focus and permits keyboard acceptance; setting saves independently", async () => {
+    vi.useFakeTimers();
+    const store = createAppStore();
+    const accepted: boolean[] = [];
+    const offer = { id: "o_1", kind: "options", counts: { options: 3, attributes: 4 }, expires_at: Date.now() / 1000 + 1800 };
+    let mode: "on" | "off" = "off";
+    const client = {
+      visualOffer: async () => offer,
+      resolveVisualOffer: async (_root: string, _offer: string, accept: boolean) => { accepted.push(accept); return { accepted: accept }; },
+      userSettings: async () => ({ claude_permission_mode: "default" as const, visuals: mode }),
+      patchUserSettings: async (body: { visuals?: "on" | "off" }) => { mode = body.visuals!; return client.userSettings(); },
+    };
+    try {
+      render(<StoreContext.Provider value={store}><textarea aria-label="chat" /><OfferChip client={client} root="sup1" /><VisualsSetting client={client} /></StoreContext.Provider>);
+      await act(async () => undefined);
+      const chat = screen.getByRole("textbox");
+      chat.focus();
+      await act(async () => vi.advanceTimersByTime(1500));
+      fireEvent.keyDown(chat, { key: "a" });
+      await act(async () => vi.advanceTimersByTime(1500));
+      expect(screen.queryByRole("button", { name: "Make a visual?" })).toBeNull();
+      await act(async () => vi.advanceTimersByTime(500));
+      expect(document.activeElement).toBe(chat);
+      const chip = screen.getByRole("button", { name: "Make a visual?" });
+      chip.focus();
+      fireEvent.keyDown(chip, { key: "Tab" });
+      expect(document.activeElement).toBe(chip);
+      await act(async () => fireEvent.click(chip));
+      expect(accepted).toEqual([true]);
+      expect(screen.queryByRole("button", { name: "Make a visual?" })).toBeNull();
+      await act(async () => fireEvent.click(screen.getByRole("switch", { name: "Visuals" })));
+      expect(mode).toBe("on");
+      expect(screen.getByRole("switch").getAttribute("aria-checked")).toBe("true");
+    } finally { vi.useRealTimers(); }
+  });
+
   it("opens from the header in the chat's place with the sidebar as a rail, Focus hides it and is remembered, and Esc returns to the same terminal", async () => {
     const session: SessionDTO = { id: "sup1", workspace_id: "proj", profile: "supervisor", status: "idle", mode: "interactive", created_at: now - 600, goal: "Ship it" };
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root] });

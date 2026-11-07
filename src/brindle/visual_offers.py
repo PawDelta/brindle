@@ -1,0 +1,158 @@
+"""Person-controlled visual offers and single-use publication grants.
+
+All decisions and grant consumption run in the caller's write transaction.
+The user setting permits offers only; it never authorizes publication.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+import re
+import secrets
+import time
+import unicodedata
+
+from brindle import bus, config, debuglog, visuals
+from brindle.db import DB, Agent
+from brindle.service.errors import ServiceError
+
+log = logging.getLogger(__name__)
+COOLDOWN = 15 * 60
+DAY = 24 * 60 * 60
+FOLD = 30 * 60
+
+
+def _expire(c, root: str, now: float) -> None:
+    c.execute("UPDATE visual_offers SET state='expired', changed_at=? "
+              "WHERE root_id=? AND state='open' AND created_at<=?", (now, root, now - FOLD))
+
+
+def _dto(row) -> dict | None:
+    return ({"id": row["id"], "kind": row["kind"], "counts": json.loads(row["counts"]),
+             "expires_at": row["created_at"] + FOLD} if row else None)
+
+
+def current(db: DB, root: str) -> dict | None:
+    visuals.require_enabled()
+    visuals._unlocked(root)
+    with db.tx() as c:
+        _expire(c, root, time.time())
+        if config.visuals_setting() != "on":
+            return None
+        return _dto(c.execute("SELECT * FROM visual_offers WHERE root_id=? AND state='open'",
+                              (root,)).fetchone())
+
+
+def offer(db: DB, caller: Agent | None, question: str, kind: str, **counts: int) -> dict:
+    visuals.require_enabled()
+    root, ws = visuals._session(db, caller)
+    if caller.id != root.id:
+        return {"offered": False, "reason": "only_supervisors"}
+    question = visuals._text(question, "question", visuals.MAX_QUESTION, True)
+    visuals._refuse_secrets([("the question", question)])
+    keys = ("options", "attributes", "rows", "columns", "steps", "branches", "lines")
+    if any(k not in keys or type(v) is not int or not 0 <= v <= 10000 for k, v in counts.items()):
+        raise ServiceError("invalid", "counts must be nonnegative integers", 400)
+    n = {k: counts.get(k, 0) for k in keys}
+    eligible = {
+        "options": n["options"] >= 3 or (n["options"] == 2 and n["attributes"] >= 3),
+        "comparison": n["rows"] >= 4 and n["columns"] >= 3,
+        "flow": n["steps"] >= 5 or n["branches"] >= 1,
+        "diff": n["lines"] > 12,
+        "layout": True,
+    }.get(kind, False)
+    normalized = " ".join(re.findall(r"\w+", unicodedata.normalize("NFKC", question).casefold()))
+    digest = hashlib.sha256(normalized.encode()).hexdigest()
+    now = time.time()
+    with db.tx() as c:
+        _expire(c, root.id, now)
+        history = c.execute("SELECT * FROM visual_offers WHERE root_id=? ORDER BY created_at DESC, rowid DESC",
+                            (root.id,)).fetchall()
+        reason = None
+        if config.visuals_setting() != "on":
+            reason = "setting_off"
+        elif not eligible:
+            reason = "below_threshold"
+        elif any(r["state"] == "open" for r in history):
+            reason = "open_offer"
+        elif any(r["question_hash"] == digest for r in history):
+            reason = "duplicate_question"
+        elif history and now - history[0]["created_at"] < COOLDOWN:
+            reason = "cooldown"
+        elif sum(r["created_at"] > now - DAY for r in history) >= 4:
+            reason = "daily_cap"
+        else:
+            decisions = [r for r in history if r["state"] in ("accepted", "dismissed")]
+            if len(decisions) >= 2 and all(r["state"] == "dismissed" for r in decisions[:2]) \
+                    and now - decisions[0]["changed_at"] < DAY:
+                reason = "dismissals"
+        if reason:
+            return {"offered": False, "reason": reason}
+        oid = "o_" + secrets.token_hex(6)
+        c.execute("INSERT INTO visual_offers VALUES (?,?,?,?,?,?,?,?,?)",
+                  (oid, root.id, digest, question, kind, json.dumps(n), "open", now, now))
+    log.debug("visual offer created")
+    debuglog.record("visuals", "debug", "offer", {"count": 1})
+    bus.publish(db, "visual.offered", repo_root=ws.repo_root, root_id=root.id, offer=oid)
+    return {"offered": True, "id": oid}
+
+
+def resolve(db: DB, root: str, oid: str, accept: bool) -> dict:
+    from brindle import agents
+
+    visuals.require_enabled()
+    visuals._unlocked(root)
+    with db.tx() as c:
+        _expire(c, root, time.time())
+        row = c.execute("SELECT * FROM visual_offers WHERE id=? AND root_id=? AND state='open'",
+                        (oid, root)).fetchone()
+        if row is None or config.visuals_setting() != "on":
+            raise ServiceError("stale", "this offer is no longer open", 409)
+        c.execute("UPDATE visual_offers SET state=?, changed_at=? WHERE id=?",
+                  ("accepted" if accept else "dismissed", time.time(), oid))
+        if accept:
+            _grant(c, root)
+            # Queue in the same transaction as the grant: no double delivery on repeated clicks.
+            c.execute("INSERT INTO inbox (agent_id, sender_id, body, created_at, held) VALUES (?,NULL,?,?,0)",
+                      (root, f"The person asked for a visual of: {row['question']}", time.time()))
+    if accept:
+        agents.flush(db, root)
+    log.debug("visual offer %s", "accepted" if accept else "dismissed")
+    debuglog.record("visuals", "debug", "accept" if accept else "dismiss", {"count": 1})
+    bus.publish(db, "visual.offer_resolved", root_id=root, offer=oid)
+    return {"accepted": accept}
+
+
+def _grant(c, root: str, explicit: bool = False) -> None:
+    c.execute("INSERT INTO visual_grants VALUES (?,1,?) ON CONFLICT(root_id) DO UPDATE "
+              "SET remaining=1, explicit=excluded.explicit", (root, int(explicit)))
+
+
+def person_spoke(db: DB, agent: Agent, text: str) -> None:
+    """Called only for authenticated person input, never for agent messages."""
+    if not visuals.enabled():
+        return
+    root, _ = visuals._session(db, agent)
+    if root.id != agent.id:
+        return
+    # An explicit creation request, rather than a mention of visuals in a status question.
+    asked = re.search(
+        r"^\s*(?:(?:can|could|would|will) you\s+)?(?:please\s+)?(?:visualize\b|"
+        r"(?:(?:make|create|show|draw|build|generate|render)\s+(?:(?:me|us)\s+)?|"
+        r"(?:I want|I'd like|I would like)\s+)"
+        r"(?:(?:a|an|the|this|that)\s+)?(?:(?:simple|interactive|quick|small|new)\s+)*"
+        r"(?:visual(?:ization)?|diagram|chart|mockup|planning doc(?:ument)?|plan document)\b)", text, re.I)
+    with db.tx() as c:
+        c.execute("UPDATE visual_offers SET state='answered', changed_at=? WHERE root_id=? AND state='open'",
+                  (time.time(), root.id))
+        if asked:
+            _grant(c, root.id, explicit=True)
+    bus.publish(db, "visual.offer_resolved", root_id=root.id)
+
+
+def consume(c, root: str, kind: str = "visual") -> None:
+    changed = c.execute("UPDATE visual_grants SET remaining=remaining-1 WHERE root_id=? AND remaining>0 "
+                        "AND (? != 'plan' OR explicit=1)", (root, kind)).rowcount
+    if not changed:
+        raise ServiceError("visual_request_required", "accept an offer or ask for a visual first", 403)

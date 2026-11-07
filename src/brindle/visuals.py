@@ -253,6 +253,9 @@ def publish(db: DB, caller: Agent | None, title: str, html: str, question: str |
     # removes only the page this call installed, before the lock is let go.
     with db.tx() as c:
         now = time.time()
+        from brindle import visual_offers
+
+        visual_offers.consume(c, root.id, kind)
         if visual_id is None:
             vid, rev = "v_" + secrets.token_hex(6), 1
         else:

@@ -808,7 +808,15 @@ export interface ConfigUpdated {
 export type ClaudePermissionMode = "default" | "auto";
 export type OpenCodePermissionMode = "ask" | "auto" | "autonomous";
 
+export interface VisualOffer {
+  id: string;
+  kind: string;
+  counts: Record<string, number>;
+  expires_at: number;
+}
+
 export interface UserSettings {
+  visuals?: "on" | "off";
   claude_permission_mode: ClaudePermissionMode;
   /* Absent from an engine older than this setting. */
   opencode_permission_mode?: OpenCodePermissionMode;
@@ -1536,6 +1544,14 @@ export class DaemonClient {
   async visuals(root: string): Promise<VisualDTO[]> {
     const got = await this.get<VisualDTO[] | { visuals?: VisualDTO[] }>(`${this.sessionPath(root)}/visuals`);
     return Array.isArray(got) ? got : (got.visuals ?? []);
+  }
+
+  visualOffer(root: string) {
+    return this.get<VisualOffer | null>(`${this.sessionPath(root)}/visual-offer`);
+  }
+
+  resolveVisualOffer(root: string, offer: string, accept: boolean) {
+    return this.post<{ accepted: boolean }>(`${this.sessionPath(root)}/visual-offer`, { offer, accept });
   }
 
   /* The person's answer to the revision on screen; a newer revision makes this a 409. */
