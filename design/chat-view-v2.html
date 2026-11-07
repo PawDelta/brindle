@@ -619,7 +619,7 @@ function renderFeed() {
     const says = gs.filter((g) => g.k === "say"), acts = gs.filter((g) => g.k === "act").flatMap((g) => g.items), ask = gs.find((g) => g.k === "ask");
     const failed = acts.find((s) => s.k === "run" && s.exit !== 0);
     const k = `3:steps-${ti}`, open = isOpen(k);
-    const names = acts.map((s) => summary(s).lb.replace(/<[^>]+>/g, "")).join(", ");
+    const names = acts.map((s) => { const d = document.createElement("div"); d.innerHTML = summary(s).lb; return esc(d.textContent); }).join(", ");
     const stepsHtml = acts.length ? `<div class="steps"><button class="sum" type="button" data-tog="${k}" aria-expanded="${open}"><span class="n ${failed ? "fail" : ""}">${acts.length} step${acts.length === 1 ? "" : "s"}</span><span>${names}</span>${CHEV}</button><div class="clp ${open ? "open" : ""}" data-clp="${k}"><div>${actRows(3, acts, { fail: false })}</div></div></div>` : "";
     const card = ask
       ? `<div class="card ask">${perm(ask)}</div>`
