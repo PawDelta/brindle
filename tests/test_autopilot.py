@@ -777,6 +777,52 @@ def test_milestone_phase(db, root, monkeypatch, passed, checking, workers, expec
     assert [phases[m.id] for m in db.milestones("boss")] == expected
 
 
+@pytest.mark.parametrize("checking, workers, expected", [
+    (False, [], None),                              # nothing running
+    (False, ["building"], "working"),
+    (False, ["reviewing"], "checks"),               # in review, no reviewer yet: its checks run
+    (False, ["reviewing", "reviewer"], "review"),
+    (False, ["ready"], "merging"),
+    (False, ["ready", "building"], "working"),      # the earliest stage any branch is at
+    (True, [], "checks"),                           # a milestone check
+])
+def test_goal_activity_stage(db, root, checking, workers, expected):
+    _, ws = root
+    with_goal(db)
+    if checking:
+        db.update_autopilot("boss", checking_since=time.time())
+    for i, kind in enumerate(workers):
+        add_agent(db, ws, f"w{i}", mode="review" if kind == "reviewer" else "assign", parent="boss",
+                  status="idle" if kind == "ready" else "processing")
+        if kind in ("reviewing", "ready"):
+            db.update_agent(f"w{i}", pipeline=kind, result="done", reviewing_since=time.time())
+    assert autopilot.goal_activity(db, "boss")["stage"] == expected
+
+
+def test_goal_activity_commits_and_estimate(db, root, repo):
+    _, ws = root
+    with_goal(db)
+    t = time.time()
+    db.update_agent("boss", created_at=t + 100)   # after the fixture's own commits
+    for at in (t + 1000, t + 9500, t + 9800):
+        sh(f"GIT_COMMITTER_DATE=@{int(at)} git commit --allow-empty -q -m c{int(at)}", repo)
+    add_agent(db, ws, "w0", mode="assign", parent="boss", status="idle")
+    now = t + 10000
+    db.update_agent("w0", pipeline="ready", result="done", reviewing_since=now - 600)
+    day = time.strftime("%Y-%m-%d", time.gmtime(now))
+
+    def history(samples):
+        db.conn.execute("INSERT OR REPLACE INTO stage_timings (day, repo_root, stage, n, median_s, p90_s, samples)"
+                        " VALUES (?, ?, 'report_to_merge', ?, 1800, 1800, ?)",
+                        (day, ws.repo_root, len(samples), json.dumps(samples)))
+
+    history([1800.0] * 4)
+    got = autopilot.goal_activity(db, "boss", now=now)
+    assert (got["commits_last_hour"], got["last_commit_at"], got["eta_seconds"]) == (2, int(t + 9800), None)
+    history([1800.0] * 5)
+    assert autopilot.goal_activity(db, "boss", now=now)["eta_seconds"] == 1200
+
+
 @pytest.mark.parametrize("passed, checking, ready, pr, merged, goal_done, expected, target", [
     (0, False, False, False, False, False, "in_progress", True),
     (2, False, True, False, False, True, "ready_for_pr", True),         # all pass, session review ready

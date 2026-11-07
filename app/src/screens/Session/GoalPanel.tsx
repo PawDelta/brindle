@@ -220,6 +220,38 @@ export function phaseFolds(milestones: MilestoneDTO[], isDone: (m: MilestoneDTO)
   return folds;
 }
 
+/* The stage the active step is at (the engine's goal_activity): each has its colour in the sidebar, a
+   `st-<stage>` class (styles.css), and its word as a tag. */
+export type Stage = "working" | "checks" | "review" | "merging";
+const STAGES: readonly string[] = ["working", "checks", "review", "merging"];
+const isStage = (s: string | null | undefined): s is Stage => !!s && STAGES.includes(s);
+
+/* A milestone's name as a sidebar step: its title up to the first ": " or " — ", or the whole title. */
+export function shortName(title: string): string {
+  const cut = title.search(/: | — /);
+  return cut > 0 ? title.slice(0, cut) : title;
+}
+
+/* "15m", "2h", "3d": how long ago, as the activity line says it (bus seconds). */
+function shortAgo(at: number, now: number): string {
+  const s = Math.max(0, now - at);
+  if (s < 3600) return `${Math.max(1, Math.round(s / 60))}m`;
+  if (s < 86400) return `${Math.round(s / 3600)}h`;
+  return `${Math.round(s / 86400)}d`;
+}
+
+/* The sidebar's activity line: commits in the last hour, else when the last one landed, and how long is left
+   when brindle can say and something runs. Null when there is nothing to say (an older engine sends none of it). */
+export function activityLine(goal: GoalDTO, now = Date.now() / 1000): { what: string | null; eta: string | null } | null {
+  const commits = goal.commits_last_hour ?? 0;
+  const what = commits > 0
+    ? `${commits} ${commits === 1 ? "commit" : "commits"} in the last hour`
+    : goal.last_commit_at != null ? `last commit ${shortAgo(goal.last_commit_at, now)} ago` : null;
+  const minutes = isStage(goal.stage) && goal.eta_seconds != null ? Math.max(1, Math.round(goal.eta_seconds / 60)) : null;
+  const eta = minutes === null ? null : minutes < 90 ? `~${minutes}m left` : `~${Math.round(minutes / 60)}h left`;
+  return what || eta ? { what, eta } : null;
+}
+
 /* "phase 3 of 4": where the goal is, by its named phases; empty with none, or once nothing is left. */
 function phaseWord(folds: PhaseFold[] | null): string {
   const named = (folds ?? []).filter((f) => f.name !== null);
@@ -570,34 +602,32 @@ export function GoalPanel({ client, repo, root, store, compact = false, onReview
       </button>
     ) : null;
   if (compact) {
-    // The sidebar's goal: a ring and completed count, the milestones as a list (✓ done, every unfinished one lit),
-    // then when the supervisor last checked.
-    const lastCheck = Math.max(0, ...milestones.map((m) => m.checked_at ?? 0));
-    const donePct = finished ? 100 : total === 0 ? 0 : (passed / total) * 100;
-    const nowPct = finished ? 100 : total === 0 ? 0 : (Math.min(passed + 1, total) / total) * 100;
+    // The sidebar's goal: the completed count, a thin bar (done in green, the active step's slice in its stage's
+    // colour), one activity line, then the milestones as short steps (✓ done, the active one marked and tagged).
+    const donePct = total === 0 ? (finished ? 100 : 0) : (passed / total) * 100;
+    // The stage the active step is at; none once the goal is finished or while nothing runs.
+    const stage = !finished && current && isStage(goal.stage) ? goal.stage : null;
+    const activity = finished ? null : activityLine(goal);
     // Every unfinished milestone is in progress (the engine works them in parallel), so each one is lit.
     const stateOf = (m: MilestoneDTO): "done" | "now" => (isDone(m) ? "done" : "now");
     const sideRow = (m: MilestoneDTO) => {
       const state = stateOf(m);
+      const active = m.id === current?.id;
       const label = finished ? "Done" : checkLabel(m);
+      const tip = [m.title, label, m.state_why ?? (active ? m.detail || m.check_cmd : null)].filter(Boolean).join(" · ");
       return (
-        <li key={m.id} className="m" data-state={state} data-testid="milestone" title={m.state_why ?? m.check_cmd ?? undefined}>
+        <li key={m.id} className={`m${active && stage ? ` st-${stage}` : ""}`} data-state={state} data-active={active || undefined} data-testid="milestone" title={tip}>
           <span className="i" aria-hidden>
-            {state === "done" ? "✓" : m.position}
+            {state === "done" ? "✓" : active ? "●" : "·"}
           </span>
-          <span className="t">
-            {m.title}
-            {(label || (m.id === current?.id && (m.detail || m.check_cmd))) && (
-              <small>{[label, m.id === current?.id ? m.detail || m.check_cmd : null].filter(Boolean).join(" · ")}</small>
-            )}
-          </span>
+          <span className="t">{shortName(m.title)}</span>
+          {active && stage && <span className="tag" data-testid="goal-stage">{stage}</span>}
         </li>
       );
     };
     return (
       <section className={frame} aria-label="Goal" data-phase={phase}>
         <div className="flex items-center gap-s1 px-0.5 text-xs font-medium text-ink">
-          <span className="side-ring" style={{ background: `conic-gradient(var(--pass) 0 ${donePct}%, var(--branch) ${donePct}% ${nowPct}%, var(--line) ${nowPct}% 100%)` }} aria-hidden />
           {/* The count is green once the goal is finished; In progress and Done need no label of their own. */}
           <span data-testid="goal-line" className={finished ? "text-pass" : undefined}>
             {total > 0 ? `${passed} of ${total} milestones complete` : ""}
@@ -613,6 +643,16 @@ export function GoalPanel({ client, repo, root, store, compact = false, onReview
           <span className="flex-1" />
           {where && <span className="whitespace-nowrap font-normal text-ink-3" data-testid="goal-where">{where}</span>}
         </div>
+        <div className="side-bar" role="progressbar" aria-label="Progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(donePct)} title={goal.detail ?? undefined}>
+          <span className="d" style={{ width: `${donePct}%` }} />
+          {stage && total > 0 && <span className={`n st-${stage}`} data-testid="goal-bar-now" style={{ width: `${100 / total}%` }} />}
+        </div>
+        {activity && (
+          <div className="side-act" data-testid="goal-activity">
+            <span className="min-w-0 truncate" data-testid="goal-activity-what">{activity.what}</span>
+            {activity.eta && <span data-testid="goal-eta">{activity.eta}</span>}
+          </div>
+        )}
         {total > 0 && folds ? (
           <PhaseFoldList folds={folds} open={foldOpen} onToggle={toggleFold} isDone={isDone} large={false} rowsClass="side-ms" row={sideRow} />
         ) : total > 0 ? (
@@ -626,9 +666,6 @@ export function GoalPanel({ client, repo, root, store, compact = false, onReview
         {docChoice}
         {closeSession}
         {step}
-        <div className="flex items-center gap-1.5 whitespace-nowrap px-1.5 pt-0.5 text-[11px] text-ink-3" title={goal.detail ?? undefined}>
-          <span className="min-w-0 truncate">Checked {lastCheck > 0 ? formatAgo(lastCheck) : "never"}</span>
-        </div>
         {shownError && <p className={`${alert} text-xs`}>{shownError}</p>}
         {goal.note && <p className="px-0.5 text-[11px] text-ink-3">{goal.note}</p>}
       </section>
