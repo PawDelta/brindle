@@ -539,7 +539,7 @@ describe("visuals", () => {
     const sync = startSync({ client, store, connect: daemon.connect });
     try {
       render(<PtyViewsProvider value={standInViews}><App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "inbox", session: "sup1" }} /></PtyViewsProvider>);
-      const card = (await screen.findAllByTestId("inbox-card"))[0];
+      const card = (await screen.findAllByTestId("inbox-card")).find((candidate) => candidate.dataset.kind === "visual")!;
       fireEvent.click(within(card).getByRole("button", { name: "Open visual" }));
       await waitFor(() => expect(screen.getByTestId("visual-frame").dataset.src).toBe("brindle-visual://v_8f2c/r2"));
       expect(screen.queryByRole("complementary", { name: "Sidebar" })).toBeNull();
