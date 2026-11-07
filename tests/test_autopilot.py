@@ -777,18 +777,21 @@ def test_milestone_phase(db, root, monkeypatch, passed, checking, workers, expec
     assert [phases[m.id] for m in db.milestones("boss")] == expected
 
 
-@pytest.mark.parametrize("checking, workers, expected", [
-    (False, [], None),                              # nothing running
-    (False, ["building"], "working"),
-    (False, ["reviewing"], "checks"),               # in review, no reviewer yet: its checks run
-    (False, ["reviewing", "reviewer"], "review"),
-    (False, ["ready"], "merging"),
-    (False, ["ready", "building"], "working"),      # the earliest stage any branch is at
-    (True, [], "checks"),                           # a milestone check
+@pytest.mark.parametrize("boss, checking, workers, expected", [
+    ("idle", False, [], None),                              # nothing running
+    ("processing", False, [], "working"),                   # the supervisor doing the work itself
+    ("idle", False, ["building"], "working"),
+    ("idle", False, ["reviewing"], "checks"),               # in review, no reviewer yet: its checks run
+    ("idle", False, ["reviewing", "reviewer"], "review"),
+    ("processing", False, ["ready"], "merging"),            # a busy supervisor doesn't hide the branch's stage
+    ("idle", False, ["ready", "building"], "working"),      # the earliest stage any branch is at
+    ("idle", True, [], "checks"),                           # a milestone check
+    ("paused", False, ["ready"], None),                     # paused: its branches keep their state, nothing runs
 ])
-def test_goal_activity_stage(db, root, checking, workers, expected):
+def test_goal_activity_stage(db, root, boss, checking, workers, expected):
     _, ws = root
     with_goal(db)
+    db.update_agent("boss", status=boss)
     if checking:
         db.update_autopilot("boss", checking_since=time.time())
     for i, kind in enumerate(workers):
@@ -821,6 +824,10 @@ def test_goal_activity_commits_and_estimate(db, root, repo):
     assert (got["commits_last_hour"], got["last_commit_at"], got["eta_seconds"]) == (2, int(t + 9800), None)
     history([1800.0] * 5)
     assert autopilot.goal_activity(db, "boss", now=now)["eta_seconds"] == 1200
+    # Paused, nothing runs: no estimate, the commits still told.
+    db.update_agent("boss", status="paused")
+    got = autopilot.goal_activity(db, "boss", now=now)
+    assert (got["commits_last_hour"], got["eta_seconds"]) == (2, None)
 
 
 @pytest.mark.parametrize("passed, checking, ready, pr, merged, goal_done, expected, target", [

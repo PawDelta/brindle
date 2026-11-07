@@ -27,8 +27,9 @@ import type { BusEvent } from "../../api/events";
 import type { DaemonClient } from "../../api/client";
 import { openExternal, type OpenUrl } from "../../api/open";
 import { usePtyViews } from "../../api/ptyView";
-import type { GoalDTO, MilestoneDTO } from "../../api/schema";
+import type { GoalDTO, MilestoneDTO, WorkspaceDTO } from "../../api/schema";
 import { alert, button, card, mainTone, mono, pill, quiet } from "../../components/ui";
+import { rootOf } from "../../store/overview";
 import type { AppStore } from "../../store/store";
 import { isGoalActivity, usePrReadiness, type Readiness } from "./review";
 
@@ -123,7 +124,20 @@ function concernsGoal(e: BusEvent, root: string): boolean {
   return isGoalActivity(e) || e.kind.startsWith("session.pr") || isGoalJobDone(e);
 }
 
-export type GoalPhase = "in_progress" | "in_review" | "ready_for_pr" | "pr_open" | "done";
+/* Where the session's worktrees stand by git (commits ahead, dirty files), as the store's git sweeps update it:
+   a change means commits the activity line should count. */
+function sessionGitMark(workspaces: WorkspaceDTO[], root: string): string {
+  const agents = workspaces.flatMap((ws) => ws.agents ?? []);
+  return workspaces
+    .filter((ws) => (ws.agents ?? []).some((a) => rootOf(agents, a.id) === root))
+    .map((ws) => `${ws.id}:${ws.ahead ?? ""}:${ws.dirty ?? ""}`)
+    .join("|");
+}
+
+/* How often the sidebar refetches its goal while open, for the activity line's rolling hour, ages and estimate. */
+const ACTIVITY_REFRESH_MS = 60_000;
+
+export type GoalPhase ="in_progress" | "in_review" | "ready_for_pr" | "pr_open" | "done";
 export const GOAL_PHASE_LABEL: Record<GoalPhase, string> = {
   in_progress: "In progress",
   in_review: "In review",
@@ -458,21 +472,35 @@ export function GoalPanel({ client, repo, root, store, compact = false, onReview
     void refresh();
     let seen = store.getState().lastEventId;
     let stale = store.getState().stale;
+    let workspaces = store.getState().workspaces;
+    let gitMark = sessionGitMark(workspaces, root);
     const unsubscribe = store.subscribe(() => {
       const s = store.getState();
+      let again = false;
       if (s.lastEventId !== seen) {
         const fresh = s.recent.filter((e) => e.id > seen);
         seen = s.lastEventId;
-        if (fresh.some((e) => concernsGoal(e, root))) void refresh();
+        again ||= fresh.some((e) => concernsGoal(e, root));
       }
-      if (s.stale && !stale) void refresh();
+      again ||= s.stale && !stale;
       stale = s.stale;
+      // The sidebar counts the session's commits: a git sweep of one of its worktrees may have new ones.
+      if (compact && s.workspaces !== workspaces) {
+        workspaces = s.workspaces;
+        const mark = sessionGitMark(workspaces, root);
+        again ||= mark !== gitMark;
+        gitMark = mark;
+      }
+      if (again) void refresh();
     });
+    // The activity line's last hour, ages and estimate move with the clock.
+    const tick = compact ? window.setInterval(() => void refresh(), ACTIVITY_REFRESH_MS) : undefined;
     return () => {
       activeSession.current = null;
       unsubscribe();
+      window.clearInterval(tick);
     };
-  }, [session, store, refresh, root]);
+  }, [session, store, refresh, root, compact]);
 
   if (!loaded && loadError) {
     return (

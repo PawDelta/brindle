@@ -367,6 +367,30 @@ describe("GoalPanel", () => {
     expect(view.queryByTestId("goal-eta")?.textContent ?? null).toBe(eta);
   });
 
+  /* Commits land without any goal event: a git sweep of the session's worktree refetches the line, and so does
+     the clock, once a minute, for the rolling hour and the ages. */
+  it("refetches the activity line on a git sweep of its session's worktree and as the clock moves", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    try {
+      const daemon = new FakeDaemon({ goal: { ...structuredClone(goal), root_id: APP_ROOT, stage: "working", commits_last_hour: 1, last_commit_at: ago(60) } });
+      const store = createAppStore();
+      store.dispatch({ type: "snapshot", workspaces: [structuredClone(root)], inbox: [] });
+      const view = render(<GoalPanel client={daemon.client()} repo={REPO} root={APP_ROOT} store={store} compact />);
+      const what = () => view.queryByTestId("goal-activity-what")?.textContent;
+      await waitFor(() => expect(what()).toBe("1 commit in the last hour"));
+
+      daemon.data.goal = { ...daemon.data.goal!, commits_last_hour: 2 };
+      act(() => store.dispatch({ type: "stream", message: { type: "git", workspace_id: root.id, status: { branch: "main", base: null, ahead: 1, behind: 0, dirty_files: [], unpushed: null } } }));
+      await waitFor(() => expect(what()).toBe("2 commits in the last hour"));
+
+      daemon.data.goal = { ...daemon.data.goal!, commits_last_hour: 0, last_commit_at: ago(1800) };
+      act(() => vi.advanceTimersByTime(60_000));
+      await waitFor(() => expect(what()).toBe("last commit 30m ago"));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   /* Phases fold the list: a done phase is one line with its green count, the active one lists all its rows
      (its passed one too), an upcoming one folds to a count; any fold opens and closes on a click. */
   it.each([true, false])("folds the milestones by phase, the active one open (compact: %s)", async (compact) => {

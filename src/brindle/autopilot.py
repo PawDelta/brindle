@@ -1842,7 +1842,8 @@ def goal_activity(db: DB, root_id: str, now: float | None = None) -> dict:
     """What session ``root_id`` is doing now, for the sidebar's goal summary.
 
     ``stage``: the earliest stage any of its branches is at (``STAGES``; a
-    milestone check counts as checks), None when nothing runs. Commits made
+    milestone check counts as checks; a busy supervisor with neither is
+    working), None when nothing runs or the session is paused. Commits made
     since the session started, in its checkout and its live branches'
     worktrees: ``commits_last_hour`` and ``last_commit_at``. ``eta_seconds``:
     once every branch has reported, the repo's median report-to-merge time
@@ -1879,7 +1880,10 @@ def goal_activity(db: DB, root_id: str, now: float | None = None) -> dict:
             paths.add(ws.path)
     if ap is not None and checking(ap):
         stages.add("checks")
-    stage = next((s for s in STAGES if s in stages), None)
+    if not stages and boss.status in ("starting", "processing"):
+        stages.add("working")      # the supervisor doing the work itself
+    # A paused session starts nothing until its resume: its branches keep their pipeline state, but nothing runs.
+    stage = None if boss.status == "paused" else next((s for s in STAGES if s in stages), None)
 
     home = db.get_workspace(boss.workspace_id)
     if home is not None:
