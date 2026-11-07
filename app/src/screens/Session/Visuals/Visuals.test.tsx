@@ -188,6 +188,21 @@ describe("visuals", () => {
     expect(submitted.at(-1)).toBe("2");
     await act(async () => recorded?.());
     expect(bytes.join("")).toContain("\x1b[A\r");
+    view.write("Make a visual");
+    view.write("\n"); // Ctrl+J inserts a draft newline rather than submitting.
+    await act(async () => undefined);
+    expect(submitted).toHaveLength(4);
+    expect(bytes.at(-1)).toBe("\n");
+    view.write("only if I ask later\r");
+    await act(async () => undefined);
+    expect(submitted).toHaveLength(5);
+    expect(submitted.at(-1)).toBe("Make a visual\nonly if I ask later");
+    await act(async () => recorded?.());
+    for (const edit of ["\x1b[H", "\x05"]) {
+      view.write(`Make a visual\n${edit}only if I ask later\r`);
+      await act(async () => undefined);
+      expect(submitted).toHaveLength(5);
+    }
     view.close();
   });
 

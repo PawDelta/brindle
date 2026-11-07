@@ -22,6 +22,8 @@ export function withVisualInput(client: Pick<DaemonClient, "visualInput" | "begi
           const sequence = /^\x1b\[[0-9;?<>]*[A-Za-z~]/.exec(pending)?.[0];
           if (!sequence && /^\x1b(?:\[[0-9;?<>]*)?$/.test(pending)) break;
           pending = pending.slice(sequence?.length ?? 2);
+          // Home/End can target a line or the whole editor in multiline drafts.
+          if (draft.includes("\n") && (sequence === "\x1b[H" || sequence === "\x1b[F")) valid = false;
           switch (sequence) {
             case "\x1b[200~": paste = true; break;
             case "\x1b[201~": paste = false; break;
@@ -38,7 +40,8 @@ export function withVisualInput(client: Pick<DaemonClient, "visualInput" | "begi
         }
         const char = pending[0];
         pending = pending.slice(1);
-        if (!paste && (char === "\r" || char === "\n")) {
+        if (!paste && draft.includes("\n") && /[\x01\x05\x0b\x15]/.test(char)) valid = false;
+        if (!paste && char === "\r") {
           // Short answers may answer a chat choice; the engine folds offers
           // separately from publication consent. Only empty/unknown drafts are skipped.
           if (valid && draft.trim()) messages.push(draft);
@@ -53,7 +56,8 @@ export function withVisualInput(client: Pick<DaemonClient, "visualInput" | "begi
           draft = draft.slice(0, cursor);
         } else if (!paste && char === "\x01") cursor = 0;
         else if (!paste && char === "\x05") cursor = draft.length;
-        else if (char >= " " || (paste && (char === "\n" || char === "\r"))) {
+        // Ctrl+J inserts a draft newline in Codex; only Enter submits consent.
+        else if (char === "\n" || char >= " " || (paste && char === "\r")) {
           draft = draft.slice(0, cursor) + char + draft.slice(cursor); cursor++;
           if (draft.length > 32000) { draft = ""; cursor = 0; valid = false; }
         } else valid = false;

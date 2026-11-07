@@ -164,6 +164,9 @@ def test_codex_terminal_submission_folds_and_authorizes(db, session):
         assert offers.current(db, boss.id) is None
         with pytest.raises(ServiceError):
             offers.resolve(db, boss.id, oid, True)
+        assert send("Make a visual\nonly if I ask later").status_code == 200
+        with pytest.raises(ServiceError):
+            visuals.publish(db, worker, "Conditional multiline draft", "<p>no</p>")
         assert send("Make a visual").status_code == 200
         assert send("").status_code == 200
         assert send("y").status_code == 200
