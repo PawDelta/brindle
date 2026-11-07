@@ -42,7 +42,7 @@ import { AppUpdateBanner, AppUpdateProvider } from "./components/AppUpdateBanner
 import { UpgradeCard, useEngineUpgrade } from "./components/EngineUpgrade";
 import { EngineBanner } from "./components/EngineBanner";
 import { Sidebar } from "./components/Sidebar";
-import { Walkthrough } from "./components/Walkthrough";
+import { Walkthrough, type WalkthroughStep } from "./components/Walkthrough";
 import { TerminalPanel, TerminalProvider, shellPlace } from "./components/TerminalPanel";
 import { alert, button } from "./components/ui";
 import { HOME, readLastSession, settingsTab, writeLastSession, type Route, type SessionRef, type SheetRef } from "./routes";
@@ -241,6 +241,25 @@ function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, p
     setRoute(to);
   }, []);
   const { repos, sessions, error: feedError, reload } = useSessions();
+  const showWalkthroughStep = useCallback((step: WalkthroughStep) => {
+    switch (step.target) {
+      case "new-session":
+      case "project-picker":
+        // Keep the selected project and draft when both steps describe the composer.
+        setRoute((current) => current?.screen === "new" ? current : HOME);
+        break;
+      case "inbox":
+        navigate({ screen: "inbox" });
+        break;
+      case "profile":
+        navigate({ screen: "account" });
+        break;
+      case "session-view":
+        // With no session yet, show the empty session area and its composer.
+        navigate(landing(repos ?? [], sessions, readLastSession()));
+        break;
+    }
+  }, [navigate, repos, sessions]);
   useEffect(() => {
     // A place the person already picked (the sidebar answers before the sessions do) stays.
     if (route === null && repos !== null) setRoute((picked) => picked ?? landing(repos, sessions, readLastSession()));
@@ -314,7 +333,7 @@ function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, p
           {/* Docked under the session (or whatever page is shown): the screen above gets shorter, nothing lies over it. */}
           <TerminalPanel />
         </div>
-        {client && <Walkthrough autoStart={firstRun} />}
+        {client && <Walkthrough autoStart={firstRun} onStep={showWalkthroughStep} />}
       </div>
       </AppUpdateProvider>
     </TerminalProvider>
