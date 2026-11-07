@@ -207,6 +207,8 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
   return (
     <VisualLinkContext.Provider value={openVisual}>
     <section ref={host} className="relative flex min-h-0 flex-1 flex-col" aria-label="Session">
+      {/* An open visual takes the whole window; the session's own chrome waits, mounted, for Back. */}
+      <div className="contents" hidden={showVisual}>
       <SessionBar
         visuals={<VisualsButton visuals={visuals.visuals} onOpen={openVisual} />}
         client={client}
@@ -241,6 +243,7 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
           </button>
         </div>
       )}
+      </div>
       <div className={showChanges || showVisual ? "hidden" : "flex min-h-0 flex-1 p-s2"} data-testid="chat-area">
         {!tree && !paused && !synced ? (
           <p className="flex-1 text-ink-3">Loading…</p>

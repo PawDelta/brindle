@@ -36,7 +36,7 @@ export function KeptVisuals({ client }: { client: KeptVisualsClient }) {
           source={{ kind: "kept", id: open.id }}
           meta={`kept ${ago(open.kept_at)} ago · from ${open.from_session_name}`}
           onBack={() => setOpen(null)}
-          focusable={false}
+          backLabel="Kept visuals"
           footer={
             open.answer && (
               <p className="border-t border-line px-s2 py-s1 text-sm" role="status">
