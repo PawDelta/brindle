@@ -332,6 +332,48 @@ export interface Meta {
   airgap: boolean;
 }
 
+/* The visualizer's wave-1 contract (design/visualizer-build-plan.html §4; brindle/visuals.py,
+   daemon/routes_visuals.py): a page an agent published into a session, its options when it asks
+   the person to choose, and the person's answer once given. `rev` is the revision on screen; an
+   answer names it, and a newer revision makes an older one's answer a 409. */
+export interface VisualOption {
+  id: string;
+  label: string;
+  detail?: string;
+}
+
+export interface VisualAnswer {
+  option: string;
+  note: string;
+  at: number;
+}
+
+export interface VisualDTO {
+  id: string;
+  session: string;
+  title: string;
+  /* The agent that published it. */
+  by: string;
+  kind: "visual" | "plan";
+  rev: number;
+  question?: string;
+  options?: VisualOption[];
+  answer?: VisualAnswer | null;
+  kept: boolean;
+  unread: boolean;
+  created_at: number;
+}
+
+/* Knowledge › Kept visuals: a copy kept from a session, readable after the session is gone. */
+export interface KeptVisualDTO {
+  id: string;
+  title: string;
+  from_session_name: string;
+  repo: string;
+  answer?: VisualAnswer | null;
+  kept_at: number;
+}
+
 export type Repo = RepoDTO;
 
 export interface Diff {
@@ -1488,6 +1530,42 @@ export class DaemonClient {
   /* Deletes the folder's docs from the library; the folder stays. */
   removeKbFromLibrary(repo: string, id: string) {
     return this.delete<{ left: number }>(`/kb/sources/${encodeURIComponent(id)}/library?repo=${encodeURIComponent(repo)}`, {});
+  }
+
+  /* A session's visuals, newest first. An engine without the visualizer answers 404. */
+  async visuals(root: string): Promise<VisualDTO[]> {
+    const got = await this.get<VisualDTO[] | { visuals?: VisualDTO[] }>(`${this.sessionPath(root)}/visuals`);
+    return Array.isArray(got) ? got : (got.visuals ?? []);
+  }
+
+  /* The person's answer to the revision on screen; a newer revision makes this a 409. */
+  answerVisual(id: string, rev: number, option: string, note: string) {
+    return this.post<VisualDTO>(`/visuals/${encodeURIComponent(id)}/answer`, { rev, option, note });
+  }
+
+  exportVisual(id: string, rev: number, html: string, destination: ExportDestination = "download", markdown?: string) {
+    return this.post<{ filename: string; mime: string; content_b64: string }>(`/visuals/${encodeURIComponent(id)}/snapshot`, { rev, html, destination, markdown });
+  }
+
+  keepVisual(id: string) {
+    return this.post<VisualDTO>(`/visuals/${encodeURIComponent(id)}/keep`, {});
+  }
+
+  unkeepVisual(id: string) {
+    return this.delete<VisualDTO>(`/visuals/${encodeURIComponent(id)}/keep`, {});
+  }
+
+  markVisualRead(id: string) {
+    return this.post<unknown>(`/visuals/${encodeURIComponent(id)}/read`, {});
+  }
+
+  async keptVisuals(): Promise<KeptVisualDTO[]> {
+    const got = await this.get<KeptVisualDTO[] | { visuals?: KeptVisualDTO[] }>("/kept-visuals");
+    return Array.isArray(got) ? got : (got.visuals ?? []);
+  }
+
+  keptVisual(id: string) {
+    return this.get<KeptVisualDTO>(`/kept-visuals/${encodeURIComponent(id)}`);
   }
 
   /* The analysis-doc library (brindle Pro), through the daemon; nothing is kept on disk.

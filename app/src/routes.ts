@@ -23,12 +23,13 @@ export interface SessionRef {
    the engine says the session is ready for one. Nothing else ever lies
    over a session: what waits on the person is acted on from the Inbox's
    cards or in the agent's own terminal. */
-/* What lies over a session's chat: the review sheet (an open PR's Review changes), or the session's
-   changes in the chat's place (the sidebar's Changes row). */
-export type SheetRef = { kind: "review" } | { kind: "changes" };
+/* What lies over a session's chat: the review sheet (an open PR's Review changes), the session's
+   changes in the chat's place (the sidebar's Changes row), or one of its visuals in the chat's
+   place (the header's Visuals, a brindle://visual/<id> link in the chat). */
+export type SheetRef = { kind: "review" } | { kind: "changes" } | { kind: "visual"; id: string };
 
 /* Knowledge's tabs. */
-export type KnowledgeView = "map" | "docs" | "imported" | "decisions";
+export type KnowledgeView = "map" | "docs" | "imported" | "decisions" | "kept";
 
 export type Route =
   /* `repo`: the project to start in (one just picked, as the first launch ends). */

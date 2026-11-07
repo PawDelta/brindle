@@ -10,9 +10,11 @@
    is open are the route's (App.tsx), so the sidebar and this view agree;
    alone (tests) the view keeps that itself. */
 
-import { useContext, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { DaemonClient } from "../../api/client";
 import type { OpenUrl } from "../../api/open";
+import type { InboxItemDTO } from "../../api/schema";
+import { seenKey } from "../Inbox/items";
 import { LoadingButton } from "../../components/LoadingButton";
 import { button, main, mono } from "../../components/ui";
 import type { SheetRef } from "../../routes";
@@ -29,6 +31,10 @@ import { ReviewSheet } from "./ReviewSheet";
 import { SessionDiffEditor } from "./SessionDiffEditor";
 import { agentIds, sessionTree, sessionWork, since, type AgentNode } from "./tree";
 import { useContinue, type Recovery } from "./useContinue";
+import { VisualLinkContext } from "./Visuals/link";
+import { VisualReader } from "./Visuals/VisualReader";
+import { VisualsButton } from "./Visuals/VisualsButton";
+import { useVisuals } from "./Visuals/useVisuals";
 
 export interface SessionScreenProps {
   client: DaemonClient;
@@ -51,6 +57,10 @@ export interface SessionScreenProps {
   onCloseSession?(root: string): void;
 }
 
+
+/* An ask as the Back badge tells them apart: its inbox identity, and what it says (an identity a
+   new question at the same agent reuses still reads as new). */
+const askIdentity = (item: InboxItemDTO) => `${seenKey(item)}|${item.reason}|${item.detail ?? ""}`;
 
 export function findNode(node: AgentNode | null, id: string): AgentNode | null {
   if (!node) return null;
@@ -138,6 +148,33 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
     window.addEventListener("keydown", back);
     return () => window.removeEventListener("keydown", back);
   });
+  // The session's visuals; one open replaces the chat (the terminal stays mounted under it, hidden).
+  const visuals = useVisuals(client, root);
+  const showVisual = shownSheet?.kind === "visual";
+  const visualId = shownSheet?.kind === "visual" ? shownSheet.id : null;
+  // Stable, for the chat's link handler: it opens on the agent and route as they are when clicked.
+  const latest = useRef({ select, selected });
+  latest.current = { select, selected };
+  const openVisual = useCallback((id: string) => latest.current.select(latest.current.selected, { kind: "visual", id }), []);
+  // What waits on the person when the visual opened, by identity and wording: one that wasn't there
+  // (or left and came back) while it's open, and Back carries a sap badge until the next open. A
+  // supervisor's question keeps one inbox row ("has a question") however often it asks, so each new
+  // autopilot.need_user on the bus (the question itself, its own event id) counts too.
+  const asked = useRef<{ items: Set<string>; question: number }>({ items: new Set(), question: 0 });
+  const [asking, setAsking] = useState(false);
+  const question = useAppState((s) => s.recent.filter((e) => e.kind === "autopilot.need_user" && (e.root_id === root || (!!e.agent_id && members.has(e.agent_id)))).at(-1)?.id ?? 0);
+  useEffect(() => {
+    if (!visualId) return;
+    asked.current = { items: new Set(waiting.map(askIdentity)), question };
+    setAsking(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visualId]);
+  useEffect(() => {
+    if (!visualId) return;
+    const live = new Set(waiting.map(askIdentity));
+    if ([...live].some((k) => !asked.current.items.has(k)) || question > asked.current.question) setAsking(true);
+    asked.current = { items: new Set([...asked.current.items].filter((k) => live.has(k))), question: Math.max(question, asked.current.question) };
+  }, [waiting, visualId, question]);
   // A new HEAD the diff's own refresh found: readiness (an open PR's unpushed count) is read again.
   const head = changes.diff?.head;
   const seenHead = useRef(head);
@@ -168,8 +205,10 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
   }, [root, repo, selected, shownSheet]);
 
   return (
+    <VisualLinkContext.Provider value={openVisual}>
     <section ref={host} className="relative flex min-h-0 flex-1 flex-col" aria-label="Session">
       <SessionBar
+        visuals={<VisualsButton visuals={visuals.visuals} onOpen={openVisual} />}
         client={client}
         root={root}
         repo={repo}
@@ -202,7 +241,7 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
           </button>
         </div>
       )}
-      <div className={showChanges ? "hidden" : "flex min-h-0 flex-1 p-s2"}>
+      <div className={showChanges || showVisual ? "hidden" : "flex min-h-0 flex-1 p-s2"} data-testid="chat-area">
         {!tree && !paused && !synced ? (
           <p className="flex-1 text-ink-3">Loading…</p>
         ) : !tree && !paused && !session ? (
@@ -231,13 +270,28 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
       {/* The one thing that ever lies over a session, opened on purpose: an open PR's Review changes.
           Open, it stays through readiness being read again (an edit here, a sweep): it says so quietly instead. */}
       {shownSheet?.kind === "review" && <ReviewSheet key={root} client={client} root={root} readiness={readiness} state={changes} onClose={closeSheet} openUrl={openUrl} />}
+      {visualId && (
+        <VisualReader
+          client={client}
+          repo={repo}
+          visual={visuals.visuals?.find((v) => v.id === visualId) ?? null}
+          loading={visuals.visuals === null}
+          asking={asking}
+          onBack={closeSheet}
+          onAnswered={visuals.put}
+          onRead={visuals.read}
+        />
+      )}
     </section>
+    </VisualLinkContext.Provider>
   );
 }
 
 /* The selected agent's status and controls. */
-function SessionBar({ client, root, repo, node, alive, sessionStatus, paused, reload, refresh, recovery, onAgent, onOpen, closeSession, onChat }: {
+function SessionBar({ client, root, repo, node, alive, sessionStatus, paused, reload, refresh, recovery, onAgent, onOpen, closeSession, onChat, visuals }: {
   client: DaemonClient;
+  /* The header's Visuals N (nothing while the session has none). */
+  visuals?: ReactNode;
   root: string;
   repo: string;
   node: AgentNode | null;
@@ -299,6 +353,7 @@ function SessionBar({ client, root, repo, node, alive, sessionStatus, paused, re
         </span>
       </div>
       <span className="flex-1" />
+      {visuals}
       {onChat && (
         <button type="button" className={button} onClick={onChat} data-testid="back-to-chat" title="Back to the chat (esc)">
           ← Chat

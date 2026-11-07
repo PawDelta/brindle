@@ -859,6 +859,36 @@ CREATE TABLE IF NOT EXISTS kb_embeddings (
     model TEXT NOT NULL,
     vector BLOB NOT NULL
 );
+-- Visuals an agent published into a session (brindle.visuals owns these):
+-- the current revision's question and options, the person's answer to it.
+-- Deleted with their session; a kept copy is a kept_visuals row instead.
+CREATE TABLE IF NOT EXISTS visuals (
+    id TEXT PRIMARY KEY,
+    root_id TEXT NOT NULL,         -- the session (its root agent)
+    repo_root TEXT NOT NULL,       -- the session's repo: pages are under its .brindle/visuals/
+    by_agent TEXT NOT NULL,        -- who published the current revision
+    kind TEXT NOT NULL,            -- visual | plan
+    title TEXT NOT NULL,
+    rev INTEGER NOT NULL,
+    question TEXT,
+    options TEXT,                  -- JSON [{id, label, detail}] of the current revision
+    answer TEXT,                   -- JSON {option, note, at, rev}
+    read_rev INTEGER NOT NULL DEFAULT 0,
+    kept_at REAL,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS visuals_root ON visuals(root_id, created_at);
+CREATE TABLE IF NOT EXISTS kept_visuals (
+    id TEXT PRIMARY KEY,           -- the visual's id; outlives the visual and its session
+    title TEXT NOT NULL,
+    from_session TEXT NOT NULL,
+    from_session_name TEXT NOT NULL,
+    repo TEXT NOT NULL,            -- its page is under this repo's .brindle/kept/visuals/
+    rev INTEGER NOT NULL,
+    answer TEXT,
+    kept_at REAL NOT NULL
+);
 """
 
 
@@ -1547,9 +1577,16 @@ class DB:
 
     def delete_workspace(self, ws_id: str) -> None:
         ws = self.get_workspace(ws_id)
+        # The sessions this workspace is home to go with it, and their visuals.
+        roots = [r[0] for r in self.conn.execute(
+            "SELECT id FROM agents WHERE workspace_id=? AND parent_id IS NULL", (ws_id,))]
         with self.tx() as c:
             c.execute("DELETE FROM workspaces WHERE id=?", (ws_id,))
         if ws:
+            if roots:
+                from brindle import visuals
+
+                visuals.forget_sessions(self, ws.repo_root, roots)
             bus.publish_ws(self, "workspace.removed", ws, branch=ws.branch)
 
     # -- attached repos (brindle.repos) ---------------------------------------
