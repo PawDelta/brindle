@@ -1552,10 +1552,18 @@ export class DaemonClient {
     return this.get<VisualOffer | null>(`${this.sessionPath(root)}/visual-offer`);
   }
 
-  visualInput(root: string, text: string, expiresAt?: number, signal?: AbortSignal) {
+  beginVisualInput(root: string, expiresAt: number, signal?: AbortSignal) {
+    return this.request<{ generation: number }>(this.url(`${this.sessionPath(root)}/visual-input`), {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ begin: true, expires_at: expiresAt }), signal,
+    });
+  }
+
+  visualInput(root: string, text: string, expiresAt?: number, signal?: AbortSignal,
+              observation?: { generation: number; sequence: number }) {
     return this.request<{ observed: boolean }>(this.url(`${this.sessionPath(root)}/visual-input`), {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text, expires_at: expiresAt }), signal,
+      body: JSON.stringify({ text, expires_at: expiresAt, ...observation }), signal,
     });
   }
 

@@ -877,6 +877,11 @@ CREATE TABLE IF NOT EXISTS visual_grants (
     explicit INTEGER NOT NULL,
     scope TEXT NOT NULL DEFAULT 'visual'
 );
+CREATE TABLE IF NOT EXISTS visual_input_state (
+    root_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
+    generation INTEGER NOT NULL,
+    sequence INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS visual_requests (
     root_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
     id TEXT NOT NULL,

@@ -7,6 +7,17 @@ from brindle.db import Agent, Workspace
 from brindle.service.errors import ServiceError
 
 
+def terminal_input(client, root):
+    path = f"/v1/sessions/{root}/visual-input"
+    generation = client.post(path, json={"begin": True}).json()["generation"]
+    sequence = 0
+    def send(text, **fields):
+        nonlocal sequence
+        sequence += 1
+        return client.post(path, json={"text": text, "generation": generation, "sequence": sequence, **fields})
+    return send
+
+
 @pytest.fixture
 def session(db, tmp_path, monkeypatch):
     monkeypatch.setenv("BRINDLE_VISUALS", "1")
@@ -89,7 +100,7 @@ def test_accept_and_explicit_ask_allow_one_publish(db, session):
         assert client.get(path).json()["id"] == oid
         assert client.post(path, json={"offer": oid, "accept": True}).json()["accepted"]
         assert client.post(path, json={"offer": oid, "accept": True}).status_code == 409
-        assert client.post(f"/v1/sessions/{boss.id}/visual-input", json={"text": ""}).status_code == 200
+        assert terminal_input(client, boss.id)("").status_code == 200
         messages = db.conn.execute("SELECT body FROM inbox WHERE agent_id=?", (boss.id,)).fetchall()
         assert len(messages) == 1 and "Which layout?" in messages[0]["body"]
         with pytest.raises(ServiceError):
@@ -145,24 +156,47 @@ def test_codex_terminal_submission_folds_and_authorizes(db, session):
     token = "t" * 43
     with TestClient(build_app(token), headers={"Authorization": f"Bearer {token}"}) as client:
         path = f"/v1/sessions/{boss.id}/visual-input"
-        assert client.post(path, json={"text": "Use the second layout"}).status_code == 200
+        send = terminal_input(client, boss.id)
+        assert send("2").status_code == 200
         assert offers.current(db, boss.id) is None
         with pytest.raises(ServiceError):
             offers.resolve(db, boss.id, oid, True)
-        assert client.post(path, json={"text": "Make a visual"}).status_code == 200
-        assert client.post(path, json={"text": ""}).status_code == 200
-        assert client.post(path, json={"text": "y"}).json()["observed"] is False
-        assert client.post(path, json={"text": "Do not change permissions"}).status_code == 200
+        assert send("Make a visual").status_code == 200
+        assert send("").status_code == 200
+        assert send("y").status_code == 200
+        assert send("Do not change permissions").status_code == 200
         visuals.publish(db, worker, "Codex request", "<p>yes</p>")
         with pytest.raises(ServiceError):
             visuals.publish(db, worker, "No second request", "<p>no</p>")
-        assert client.post(path, json={"text": "Make a visual", "expires_at": offers.time.time() - 1}).status_code == 409
+        assert send("Make a visual", expires_at=offers.time.time() - 1).status_code == 409
         with pytest.raises(ServiceError):
             visuals.publish(db, worker, "Late recording", "<p>no</p>")
-        assert client.post(path, json={"text": "Make a visual"}).status_code == 200
-        assert client.post(path, json={"text": "Don't make a visual"}).status_code == 200
+        assert send("Make a visual").status_code == 200
+        assert send("Don't make a visual").status_code == 200
         with pytest.raises(ServiceError):
             visuals.publish(db, worker, "Cancelled request", "<p>no</p>")
+
+
+def test_superseded_terminal_observation_cannot_restore_consent(db, session):
+    boss, worker = session
+    token = "t" * 43
+    with TestClient(build_app(token), headers={"Authorization": f"Bearer {token}"}) as client:
+        path = f"/v1/sessions/{boss.id}/visual-input"
+        # Cancellation reaches the actual dispatch before the older request.
+        assert client.post(path, json={"begin": True, "expires_at": offers.time.time() - 1}).status_code == 409
+        generation = client.post(path, json={"begin": True}).json()["generation"]
+        newer = {"text": "Don't make a visual", "generation": generation, "sequence": 2}
+        older = {"text": "Make a visual", "generation": generation, "sequence": 1}
+        assert client.post(path, json=newer).status_code == 200
+        assert client.post(path, json=older).status_code == 409
+        assert client.post(path, json={"text": "Make a visual"}).status_code == 400
+        with pytest.raises(ServiceError):
+            visuals.publish(db, worker, "Superseded", "<p>no</p>")
+        # A replaced view's larger sequence cannot override the new view either.
+        next_generation = client.post(path, json={"begin": True}).json()["generation"]
+        assert client.post(path, json={**older, "generation": next_generation}).status_code == 200
+        assert client.post(path, json={**newer, "sequence": 99}).status_code == 409
+        visuals.publish(db, worker, "Current view", "<p>yes</p>")
 
 
 def test_initial_person_prompt_is_observed_before_provider_launch(db, repo, monkeypatch):

@@ -72,16 +72,25 @@ def visual_input(db: DB, params: dict, body: dict) -> Any:
     agent = db.get_agent(root)
     if agent is None:
         raise ServiceError("not_found", "no such session", 404)
-    text = _get(body, "text", required=True)
-    if len(text) > 32000:
-        raise ServiceError("invalid", "input is too long", 400)
-    # Empty/unknown drafts and provider menu replies are observations, not messages.
-    if not text.strip() or text.strip().lower() in ("y", "yes", "n", "no") or text.strip().isdigit():
-        return {"observed": False}
     expires_at = _get(body, "expires_at", (int, float))
     if expires_at is not None and (isinstance(expires_at, bool) or not 0 < expires_at < float("inf")):
         raise ServiceError("invalid", "expires_at must be a finite timestamp", 400)
-    visual_offers.person_spoke(db, agent, text, expires_at=expires_at)
+    if _get(body, "begin", bool):
+        return {"generation": visual_offers.begin_input(db, agent, expires_at)}
+    text = _get(body, "text", required=True)
+    if len(text) > 32000:
+        raise ServiceError("invalid", "input is too long", 400)
+    # Bare Enter/unknown drafts convey no chat answer. Short answers may be
+    # either chat or menu input: fold an offer without changing publication consent.
+    if not text.strip():
+        return {"observed": False}
+    generation = _get(body, "generation", int, required=True)
+    sequence = _get(body, "sequence", int, required=True)
+    if generation < 1 or sequence < 1:
+        raise ServiceError("invalid", "generation and sequence must be positive integers", 400)
+    fold_only = text.strip().lower() in ("y", "yes", "n", "no") or text.strip().isdigit()
+    visual_offers.person_spoke(db, agent, text, expires_at=expires_at,
+                               observation=(generation, sequence), fold_only=fold_only)
     return {"observed": True}
 
 

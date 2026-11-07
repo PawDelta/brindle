@@ -52,11 +52,14 @@ afterEach(() => {
 });
 
 describe("visuals", () => {
-  it.each(["interrupt", "deadline"])("recovers the PTY from pending consent recording on %s", async (how) => {
+  it.each(["interrupt", "deadline", "cancellation"])("recovers the PTY from pending consent recording on %s", async (how) => {
     vi.useFakeTimers();
     const bytes: string[] = [];
     let signal: AbortSignal | undefined;
-    const open = withVisualInput({ visualInput: (_id, _text, _expiry, given) => { signal = given; return new Promise(() => {}); } }, "codex",
+    const observations: { generation: number; sequence: number }[] = [];
+    const open = withVisualInput({ beginVisualInput: async () => ({ generation: 1 }), visualInput: (_id, _text, _expiry, given, observation) => {
+      signal ??= given; observations.push(observation!); return new Promise(() => {});
+    } }, "codex",
       () => ({ write(data) { bytes.push(data); }, resize() {}, focus() {}, close() {} }));
     const view = open({ server: null, target: "%1" }, { cols: 80, rows: 24 }, { onData() {}, onExit() {}, onError() {} });
     try {
@@ -66,8 +69,14 @@ describe("visuals", () => {
         view.write("\x03"); view.write("more");
         await act(async () => undefined);
         expect(bytes.join("")).toBe("hello\r\x03more");
-      } else {
+      } else if (how === "deadline") {
         await act(async () => vi.advanceTimersByTime(300));
+        expect(bytes.join("")).toBe("hello\r");
+      } else {
+        view.write("Don't make a visual\r");
+        await act(async () => undefined);
+        expect(observations.map(o => o.sequence)).toEqual([1, 2]);
+        expect(observations[1].generation).toBe(observations[0].generation);
         expect(bytes.join("")).toBe("hello\r");
       }
       expect(signal?.aborted).toBe(true);
@@ -77,7 +86,7 @@ describe("visuals", () => {
   it("observes Codex PTY submissions before forwarding Enter, including edits, pastes and uncertain history", async () => {
     const submitted: string[] = [], bytes: string[] = [];
     let recorded: (() => void) | undefined;
-    const open = withVisualInput({ visualInput: async (_id, text) => {
+    const open = withVisualInput({ beginVisualInput: async () => ({ generation: 1 }), visualInput: async (_id, text) => {
       submitted.push(text);
       await new Promise<void>(ok => { recorded = ok; });
       return { observed: true };
@@ -97,7 +106,13 @@ describe("visuals", () => {
     await act(async () => undefined);
     view.write("\r"); view.write("y\r");
     await act(async () => undefined);
-    expect(submitted).toHaveLength(2);
+    expect(submitted).toHaveLength(3);
+    expect(submitted.at(-1)).toBe("y");
+    await act(async () => recorded?.());
+    view.write("2\r");
+    await act(async () => undefined);
+    expect(submitted.at(-1)).toBe("2");
+    await act(async () => recorded?.());
     expect(bytes.join("")).toContain("\x1b[A\r");
     view.close();
   });

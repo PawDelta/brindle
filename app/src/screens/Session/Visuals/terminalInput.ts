@@ -6,12 +6,14 @@ const RECORD_WINDOW = 250;
 /* Observe the person's submitted input, never the terminal's output or agent deliveries.
    The native and WSL PTYs share this opener. Unknown editor operations (history,
    completion, etc.) are not treated as chat submissions or guessed consent. */
-export function withVisualInput(client: Pick<DaemonClient, "visualInput">, agent: string, open: PtyViewOpener, enabled: () => boolean = () => true): PtyViewOpener {
+export function withVisualInput(client: Pick<DaemonClient, "visualInput" | "beginVisualInput">, agent: string, open: PtyViewOpener, enabled: () => boolean = () => true): PtyViewOpener {
   return (at, size, handlers) => {
     const view = open(at, size, handlers);
     let draft = "", pending = "", cursor = 0;
     let valid = true, paste = false, closed = false;
     let held: { release(): void } | null = null;
+    let generation: Promise<number> | null = null;
+    let sequence = 0;
     const submitted = (data: string): string[] => {
       pending += data;
       const messages: string[] = [];
@@ -37,8 +39,9 @@ export function withVisualInput(client: Pick<DaemonClient, "visualInput">, agent
         const char = pending[0];
         pending = pending.slice(1);
         if (!paste && (char === "\r" || char === "\n")) {
-          // Bare Enter and conventional menu answers are not chat submissions.
-          if (valid && draft.trim() && !/^(?:y|yes|n|no|\d+)$/i.test(draft.trim())) messages.push(draft);
+          // Short answers may answer a chat choice; the engine folds offers
+          // separately from publication consent. Only empty/unknown drafts are skipped.
+          if (valid && draft.trim()) messages.push(draft);
           draft = ""; cursor = 0; valid = true;
         } else if (!paste && (char === "\x7f" || char === "\b")) {
           if (cursor) { draft = draft.slice(0, cursor - 1) + draft.slice(cursor); cursor--; }
@@ -68,7 +71,7 @@ export function withVisualInput(client: Pick<DaemonClient, "visualInput">, agent
           view.write(data);
           return;
         }
-        const messages = submitted(data);
+        const messages = submitted(data).map(text => ({ text, sequence: ++sequence }));
         if (!messages.length) { view.write(data); return; }
         const controller = new AbortController();
         const expiresAt = (Date.now() + RECORD_WINDOW) / 1000;
@@ -84,14 +87,18 @@ export function withVisualInput(client: Pick<DaemonClient, "visualInput">, agent
         };
         held = { release };
         alarm = setTimeout(release, RECORD_WINDOW);
-        // Native IPC may ignore AbortSignal. The engine checks this expiry
-        // inside its write transaction so a late request cannot grant consent.
+        let usedGeneration: Promise<number> | null = null;
+        // Native IPC may ignore AbortSignal. The engine checks both expiry
+        // and persisted generation/sequence inside the consent transaction.
         void (async () => {
-          for (const text of messages) {
+          usedGeneration = generation ??= client.beginVisualInput(agent, expiresAt, controller.signal).then(r => r.generation);
+          const currentGeneration = await usedGeneration;
+          for (const message of messages) {
             if (controller.signal.aborted) break;
-            await client.visualInput(agent, text, expiresAt, controller.signal);
+            await client.visualInput(agent, message.text, expiresAt, controller.signal,
+              { generation: currentGeneration, sequence: message.sequence });
           }
-        })().catch(() => undefined).finally(release);
+        })().catch(() => { if (generation === usedGeneration) generation = null; }).finally(release);
       },
       close() { closed = true; held?.release(); view.close(); },
     };

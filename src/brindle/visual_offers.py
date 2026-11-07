@@ -185,7 +185,20 @@ def request_intent(text: str) -> tuple[str | None, bool]:
     return found[-1][0], context_clear and len(scopes) == 1 and all(clear for _, clear in found) and not _QUALIFIED.search(text)
 
 
-def person_spoke(db: DB, agent: Agent, text: str, *, expires_at: float | None = None) -> None:
+def begin_input(db: DB, agent: Agent, expires_at: float | None = None) -> int:
+    """A new authenticated terminal observer supersedes earlier observers."""
+    visuals.require_enabled()
+    with db.tx() as c:
+        if expires_at is not None and time.time() >= expires_at:
+            raise ServiceError("stale", "this input observation expired", 409)
+        row = c.execute("INSERT INTO visual_input_state VALUES (?,1,0) ON CONFLICT(root_id) "
+                        "DO UPDATE SET generation=generation+1, sequence=0 RETURNING generation",
+                        (agent.id,)).fetchone()
+        return row["generation"]
+
+
+def person_spoke(db: DB, agent: Agent, text: str, *, expires_at: float | None = None,
+                 observation: tuple[int, int] | None = None, fold_only: bool = False) -> None:
     """Called only for authenticated person input, never for agent messages."""
     if not visuals.enabled():
         return
@@ -196,16 +209,28 @@ def person_spoke(db: DB, agent: Agent, text: str, *, expires_at: float | None = 
     with db.tx() as c:
         if expires_at is not None and time.time() >= expires_at:
             raise ServiceError("stale", "this input observation expired", 409)
+        if observation is not None:
+            generation, sequence = observation
+            changed = c.execute("UPDATE visual_input_state SET sequence=? WHERE root_id=? "
+                                "AND generation=? AND sequence<?",
+                                (sequence, root.id, generation, sequence)).rowcount
+            if not changed:
+                raise ServiceError("stale", "this input observation was superseded", 409)
+        else:
+            # Direct person messages and provider hooks also supersede older terminal input.
+            c.execute("UPDATE visual_input_state SET generation=generation+1, sequence=0 WHERE root_id=?",
+                      (root.id,))
         c.execute("UPDATE visual_offers SET state='answered', changed_at=? WHERE root_id=? AND state='open'",
                   (time.time(), root.id))
-        c.execute("DELETE FROM visual_requests WHERE root_id=?", (root.id,))
+        if not fold_only:
+            c.execute("DELETE FROM visual_requests WHERE root_id=?", (root.id,))
         # A tool approval or ordinary follow-up does not cancel the person's
         # still unused request. Only a new artifact request or explicit stop does.
-        if scope or _CANCEL_REQUEST.search(text):
+        if not fold_only and (scope or _CANCEL_REQUEST.search(text)):
             c.execute("DELETE FROM visual_grants WHERE root_id=?", (root.id,))
-        if scope and clear:
+        if not fold_only and scope and clear:
             _grant(c, root.id, scope)
-        elif scope:
+        elif not fold_only and scope:
             c.execute("INSERT INTO visual_requests VALUES (?,?,?,?)",
                       (root.id, "r_" + secrets.token_hex(6), scope, time.time()))
     bus.publish(db, "visual.offer_resolved", root_id=root.id)
