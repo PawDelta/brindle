@@ -77,6 +77,8 @@ only-include = ["src", "README.md", "LICENSE", "SCHEDULE-A", "pyproject.toml"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["tests"]
+# pytest's defaults plus dev/, parked work that isn't wired into the product.
+norecursedirs = ["dev", ".*", "build", "dist", "node_modules", "venv", "*.egg", "{arch}", "_darcs", "CVS"]
 # With -n, workers steal queued tests from busy ones: the slow tail no longer
 # waits on one worker's backlog (~15% off the parallel run). No effect without -n.
 addopts = "--dist worksteal"
