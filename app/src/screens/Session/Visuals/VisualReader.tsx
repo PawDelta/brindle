@@ -139,7 +139,7 @@ function AnswerBar({ client, visual, picked, onPick, onAnswered }: { client: Vis
   const [note, setNote] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const noteInput = useRef<HTMLInputElement>(null);
+  const noteInput = useRef<HTMLTextAreaElement>(null);
   const options = visual.options ?? [];
   // Empty ids cannot be published; this host-only choice carries no option to the engine.
   const ownWords = picked === "";
@@ -167,7 +167,14 @@ function AnswerBar({ client, visual, picked, onPick, onAnswered }: { client: Vis
           {visual.answer.note && <span className="text-ink-2"> · {visual.answer.note}</span>}
         </p>
       ) : (
-        <div className="flex flex-wrap items-center gap-s1">
+        <div className="flex flex-wrap items-center gap-s1" onKeyDown={(e) => {
+          // Enter submits from the note, the free-text box and a chosen option; Shift+Enter (a newline in the note) and Enter confirming an IME composition are left alone.
+          if (e.key !== "Enter" || e.shiftKey || e.nativeEvent.isComposing) return;
+          // An unchosen option's Enter picks it natively; once something is chosen, Enter sends instead of toggling it.
+          if (picked === null && e.target instanceof HTMLButtonElement && e.target.getAttribute("role") === "radio") return;
+          e.preventDefault();
+          void send();
+        }}>
           <div role="radiogroup" aria-label="Options" className="flex flex-wrap gap-1">
             {options.map((o) => (
               <button key={o.id} type="button" role="radio" aria-checked={picked === o.id} title={o.detail} className={`${button} ${picked === o.id ? "border-branch bg-branch-soft" : ""}`} onClick={() => onPick(o.id)}>
@@ -178,12 +185,7 @@ function AnswerBar({ client, visual, picked, onPick, onAnswered }: { client: Vis
               Something else…
             </button>
           </div>
-          <input ref={noteInput} className={`${field} min-w-40 flex-1`} aria-label={ownWords ? "Your answer" : "Add a note"} placeholder={ownWords ? "Your answer" : "Add a note (optional)"} value={note} onChange={(e) => setNote(e.target.value)} onKeyDown={(e) => {
-            // Enter submits; Shift+Enter is left alone, and so is Enter that confirms an IME composition.
-            if (e.key !== "Enter" || e.shiftKey || e.nativeEvent.isComposing) return;
-            e.preventDefault();
-            void send();
-          }} />
+          <textarea ref={noteInput} rows={1} className={`${field} min-w-40 flex-1 resize-none`} aria-label={ownWords ? "Your answer" : "Add a note"} placeholder={ownWords ? "Your answer" : "Add a note (optional)"} value={note} onChange={(e) => setNote(e.target.value)} />
           <LoadingButton className={main} busy={sending} disabled={!canSend || sending} data-testid="visual-send" onClick={() => void send()}>
             Send answer
           </LoadingButton>

@@ -580,7 +580,7 @@ describe("visuals", () => {
     expect(screen.getByTestId("visual-answered").textContent).toContain("Stage it first");
   });
 
-  it("submits the answer on Enter from the note field, but not on Shift+Enter, IME composition or with no option", async () => {
+  it("submits the answer on Enter from the note, the free-text box or a chosen option, keeping Shift+Enter newlines", async () => {
     const sent: unknown[] = [];
     const client = new DaemonClient({ baseUrl: "http://daemon/v1", token: "test", fetch: async (url, init) => {
       if (String(url).endsWith("/answer")) sent.push(JSON.parse(init!.body as string));
@@ -590,18 +590,39 @@ describe("visuals", () => {
       const [row, setRow] = useState(visual);
       return <VisualReader client={client} visual={row} onBack={() => {}} onAnswered={setRow} Frame={() => <div />} />;
     }
+    // A chosen option, Enter from its focused button with no note: exactly one answer, the option stays chosen.
     render(<Reader />);
-    const note = () => screen.getByRole("textbox", { name: "Add a note" });
-    fireEvent.keyDown(note(), { key: "Enter" });
-    expect(sent).toEqual([]);
-    fireEvent.click(screen.getByRole("radio", { name: "B · Gate on CI" }));
-    fireEvent.change(note(), { target: { value: "Ship it" } });
-    fireEvent.keyDown(note(), { key: "Enter", shiftKey: true });
-    fireEvent.keyDown(note(), { key: "Enter", isComposing: true });
-    expect(sent).toEqual([]);
-    fireEvent.keyDown(note(), { key: "Enter" });
+    const option = screen.getByRole("radio", { name: "B · Gate on CI" });
+    fireEvent.click(option);
+    option.focus();
+    fireEvent.keyDown(option, { key: "Enter" });
     await screen.findByTestId("visual-answered");
-    expect(sent).toEqual([{ rev: 2, option: "B", note: "Ship it" }]);
+    expect(sent).toEqual([{ rev: 2, option: "B", note: "" }]);
+    cleanup();
+
+    // Enter from the note with an option: a Shift+Enter newline stays in the text and is sent with it.
+    sent.length = 0;
+    render(<Reader />);
+    fireEvent.click(screen.getByRole("radio", { name: "B · Gate on CI" }));
+    const note = screen.getByRole("textbox", { name: "Add a note" });
+    fireEvent.change(note, { target: { value: "Line one\nLine two" } });
+    fireEvent.keyDown(note, { key: "Enter", shiftKey: true });
+    fireEvent.keyDown(note, { key: "Enter", isComposing: true });
+    expect(sent).toEqual([]);
+    fireEvent.keyDown(note, { key: "Enter" });
+    await waitFor(() => expect(sent).toEqual([{ rev: 2, option: "B", note: "Line one\nLine two" }]));
+    cleanup();
+
+    // Enter from the free-text box with no option chosen sends nothing.
+    sent.length = 0;
+    render(<Reader />);
+    fireEvent.click(screen.getByRole("radio", { name: "Something else…" }));
+    const own = screen.getByRole("textbox", { name: "Your answer" });
+    fireEvent.keyDown(own, { key: "Enter" });
+    expect(sent).toEqual([]);
+    fireEvent.change(own, { target: { value: "Stage it" } });
+    fireEvent.keyDown(own, { key: "Enter" });
+    await waitFor(() => expect(sent).toEqual([{ rev: 2, option: undefined, note: "Stage it" }]));
   });
 
   const open: VisualSource = { kind: "session", id: visual.id, rev: visual.rev };
