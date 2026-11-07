@@ -359,23 +359,29 @@ def test_paste_blocked_or_draft_holds_message_then_delivers_it_once(db, ws, monk
 @pytest.mark.parametrize("typed_after,then", [
     ("load-buffer", "cleared"), ("lead", "cleared"), ("body", "cleared"), ("body", "sent"),
     ("body", "codex turn"),   # Codex reports what went in only when the turn ends
+    ("body", "agy sent"), ("body", "agy cleared"),   # agy reports no prompt text: the two look alike
     # keys pressed after the lead, but the next write comes over TYPED_WITHIN later
     ("lead-late", "sent"),
+    ("lead-switch", "cleared"),   # then the person's client moves to another pane
 ])
 def test_person_typing_mid_paste_stops_it_and_message_goes_in_once_later(db, ws, monkeypatch, typed_after, then):
     # Real flush and tmux.paste over a fake terminal: the person starts a reply
     # after brindle's last look, while the paste is under way, then sends or
     # clears whatever the composer holds.
     from types import SimpleNamespace
+    from brindle import antigravity
 
+    agy = then.startswith("agy")
     fake_agent(db, ws, status="idle", mode="interactive")
+    db.update_agent("a1", provider="antigravity" if agy else "claude")
+    monkeypatch.setattr(antigravity, "_flush_soon", lambda *a, **k: None)
     db.enqueue("a1", "WORKER REPORT", None)
-    s = {"composer": "", "typed": None, "at": typed_after}
+    s = {"composer": "", "typed": time.time() - 60, "at": typed_after}   # their client, idle a minute
     submitted = []
 
     def person_types(point):
-        if s["at"] in (point, point + "-late"):
-            s["typed"] = time.time() - (6 if s["at"].endswith("-late") else 0)
+        if s["at"] in (point, point + "-late", point + "-switch"):
+            s["typed"] = None if s["at"].endswith("-switch") else time.time() - (6 if s["at"].endswith("-late") else 0)
             s["at"] = None
             s["composer"] += "MY UNSENT REPLY"
 
@@ -384,7 +390,8 @@ def test_person_typing_mid_paste_stops_it_and_message_goes_in_once_later(db, ws,
             authorize()
         out = ""
         if args[0] == "capture-pane":
-            out = CLAUDE_IDLE.replace("❯ ", "❯ " + s["composer"])
+            out = (f"────\n> {s['composer']}\n────\n? for shortcuts\n" if agy
+                   else CLAUDE_IDLE.replace("❯ ", "❯ " + s["composer"]))
         elif args[0] == "list-clients" and s["typed"]:
             out = f"@0\t{int(s['typed'])}\n"
         elif args[0] == "load-buffer":
@@ -412,12 +419,20 @@ def test_person_typing_mid_paste_stops_it_and_message_goes_in_once_later(db, ws,
         db.set_status("a1", "idle")
     elif then == "codex turn":
         agents.handle_hook(db, "a1", "codex-notify", {"type": "agent-turn-complete", "input-messages": [sent]})
+    elif then == "agy sent":   # agy's real hooks for the turn it started
+        antigravity.handle_hook(db, "a1", "agy-pre-invocation", {"invocationNum": 0})
+        antigravity.handle_hook(db, "a1", "agy-stop", {})
     again = typed_after != "body" or then == "cleared"
-    assert agents.flush(db, "a1") is again and db.pending_count("a1") == 0
-    assert submitted == ([f"{lead} WORKER REPORT"] if again else [])
+    assert agents.flush(db, "a1") is (again or agy) and db.pending_count("a1") == 0
+    if agy:   # never typed in again, and not lost: unread mail with a one-line notice
+        [notice] = submitted
+        assert "WORKER REPORT" not in notice and "read_messages" in notice
+        assert [m.body for m in db.unread("a1")] == ["WORKER REPORT"]
+    else:
+        assert submitted == ([f"{lead} WORKER REPORT"] if again else [])
     db.set_status("a1", "idle")   # that turn ended; the queue moves on
     db.enqueue("a1", "NEXT", None)
-    assert agents.flush(db, "a1") is True and submitted[-1] == f"{lead} NEXT" and len(submitted) == 1 + again
+    assert agents.flush(db, "a1") is True and submitted[-1] == f"{lead} NEXT" and len(submitted) == 1 + (again or agy)
 
 
 def test_reconcile_keeps_hook_status_when_screen_is_unclear(db, ws, monkeypatch):

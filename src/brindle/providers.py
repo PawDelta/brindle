@@ -303,6 +303,9 @@ class Provider:
     # Whether input typed into its pane mid-turn waits in the CLI until the
     # current step finishes, so a queued message can go in while it's busy.
     types_midturn = False
+    # Whether a hook reports the text of each prompt the CLI takes in, so a
+    # stopped pane delivery can be told sent from cleared (agents._acknowledge_submitted).
+    reports_prompts = False
     # False for providers whose work happens outside brindle (see Subagent):
     # no process, no tmux window; the caller records the result itself.
     launches_process = True
@@ -783,6 +786,7 @@ class ClaudeCode(Provider):
     name = "claude"
     uses_hooks = True
     startup_prompts = True
+    reports_prompts = True   # UserPromptSubmit
 
     TRUST_DIALOG = re.compile(r"(one you trust|trust (this|the files in this) folder)", re.I)
     # Claude Code's input box, across versions: the "❯" prompt line, the old
@@ -1893,6 +1897,7 @@ class Codex(Provider):
     announces_turns = False
     announces_start = False
     types_midturn = True
+    reports_prompts = True   # its notify's input-messages, at the turn's end
     # The MCP connection alone can take 120s under load. The launch observer
     # must not abandon readiness before that connection has had its budget.
     STARTUP_SECONDS = 150
@@ -2230,6 +2235,7 @@ class OpenCode(Provider):
     name = "opencode"
     uses_hooks = True
     announces_start = False
+    reports_prompts = True   # chat.message, as prompt-submit
 
     @staticmethod
     def can_resume(session_id: str) -> bool:

@@ -2410,10 +2410,15 @@ def _paste_message(db: DB, agent: Agent, text: str, lead: str | None,
                 baseline[0] = _pane_input(fresh)
             # Immediately before each write (tmux.paste's): any key the person
             # pressed since this delivery began, however long the writes took,
-            # stops it (brindle's own keys are no client's input), and a first
-            # write needs a composer holding nothing.
+            # or the pane's clients changing, stops it (brindle's own keys are
+            # no client's input). A first write needs a composer holding
+            # nothing; the body, one holding exactly the lead (a resumed one
+            # is matched below). Enter is guarded by the input alone: a
+            # collapsed paste can't be matched as text.
             elif (_typed_lately(fresh, since=baseline[0])
-                  or (state["stage"] is None and _composer_taken(fresh))):
+                  or (state["stage"] is None and _composer_taken(fresh))
+                  or (state["stage"] == "lead" and resume is None
+                      and not _partial_composer(fresh, state, "lead"))):
                 raise _PasteBlocked
         if resume is not None and state["stage"] == resume:
             if not _partial_composer(fresh, state, resume):
@@ -2475,10 +2480,19 @@ def _resume_pane_delivery(db: DB, agent: Agent, saved: str) -> bool:
                 return False  # the person's text and this delivery's are still there: theirs to send or clear
             if state["stage"] != "lead":
                 # Stopped after the body, and the composer is empty with no
-                # turn running. A prompt carrying the body would have
-                # acknowledged it (_acknowledge_submitted), so it was cleared:
-                # the same row goes back in the queue, no second copy made.
-                db.set_mark(agent.id, "pane-delivery", None)
+                # turn running. Where the CLI reports its prompts, one carrying
+                # the body would have acknowledged it (_acknowledge_submitted),
+                # so it was cleared: the same row goes back in the queue, no
+                # second copy made. Where it doesn't (agy), sent and cleared
+                # look alike: the body is never typed in again, but kept for
+                # read_messages with a one-line notice, so it isn't lost.
+                if get_provider(agent.provider).reports_prompts:
+                    db.set_mark(agent.id, "pane-delivery", None)
+                else:
+                    db.hold_unread(row["id"], agent.id)
+                    claimed = db.claim_notice(agent.id)
+                    if claimed:
+                        db.enqueue(agent.id, unread_notice(db, claimed), None, notice=True)
                 return _flush_messages(db, agent.id)
             # Stopped after the lead: the body never reached the composer and
             # Enter was never pressed for it, so the whole message goes in, once.
@@ -2684,11 +2698,9 @@ def _typed_lately(agent: Agent, since=_ANY) -> bool:
     screen alone can show an empty composer that is taking input. An
     unanswerable server fails closed."""
     typed = _pane_input(agent)
-    if typed is _INPUT_UNREAD:
-        return True
-    if typed is None:
-        return False
-    return time.time() - typed < TYPED_WITHIN or (since is not _ANY and typed != since)
+    if typed is _INPUT_UNREAD or (since is not _ANY and typed != since):
+        return True   # also a client gone from the pane, or a new one: the source moved
+    return typed is not None and time.time() - typed < TYPED_WITHIN
 
 
 def _composer_screen(agent: Agent) -> tuple[Provider, str] | None:

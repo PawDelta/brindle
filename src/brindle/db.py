@@ -2176,6 +2176,15 @@ class DB:
                       " ON CONFLICT(agent_id, kind) DO UPDATE SET value=excluded.value", (agent_id, state))
         return True
 
+    def hold_unread(self, message_id: int, agent_id: str) -> None:
+        """A partial pane delivery whose fate can't be known becomes unread
+        mail for read_messages (held, not noticed yet), its pane mark retired,
+        so it is neither typed in again nor lost."""
+        with self.tx() as c:
+            c.execute("UPDATE inbox SET held=1, delivered_at=NULL, noticed_at=NULL WHERE id=? AND agent_id=?",
+                      (message_id, agent_id))
+            c.execute("DELETE FROM agent_marks WHERE agent_id=? AND kind='pane-delivery'", (agent_id,))
+
     def retry_pending(self, message_id: int, agent_id: str, idle_since: float) -> None:
         """Release the caller's failed delivery claim without creating a second message.
 
