@@ -595,7 +595,11 @@ describe("visuals", () => {
     fireEvent.click(screen.getByRole("radio", { name: "A · Tag first" }));
     const other = screen.getByRole("radio", { name: "B · Gate on CI" });
     other.focus();
-    fireEvent.keyDown(other, { key: "Enter" });
+    // fireEvent.keyDown returns false when the handler cancels the event; a browser then skips the native pick.
+    expect(fireEvent.keyDown(other, { key: "Enter" })).toBe(true);
+    fireEvent.click(other); // the native activation an uncanceled Enter produces on a focused radio
+    expect(other.getAttribute("aria-checked")).toBe("true");
+    expect(screen.getByRole("radio", { name: "A · Tag first" }).getAttribute("aria-checked")).toBe("false");
     expect(sent).toEqual([]);
     cleanup();
 
