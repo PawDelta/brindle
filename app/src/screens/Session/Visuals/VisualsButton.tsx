@@ -1,5 +1,5 @@
-/* The session header's way in: an icon, with a dot while one is unread. It opens the session's
-   list: the open ones first, newest first, and the
+/* The session header's way in: an icon. It opens the session's list: the open ones first, newest
+   first, and the
    decided ones folded under "Decided · N". Picking one opens it in the chat's place. No visuals (or
    an engine without them): no button. */
 
@@ -40,9 +40,10 @@ export function VisualsButton({ visuals, onOpen }: { visuals: VisualDTO[] | null
   return (
     <div ref={box} className="relative">
       <button type="button" className={`${button} relative !gap-0 p-1.5 text-ink-2 hover:bg-sap/10 hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sap`} aria-label="Visuals" title="Visuals" aria-expanded={open} aria-haspopup="true" data-testid="visuals-button" onClick={() => setOpen((o) => !o)}>
-        <svg aria-hidden="true" viewBox="0 0 20 20" className="size-4" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M4 2.75h8l4 4v10.5H4z" />
-          <path d="M12 2.75v4h4M7 14v-2m3 2V9m3 5v-4" />
+        <svg aria-hidden="true" viewBox="0 0 24 24" className="size-4" fill="none" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z" />
+          <path d="M14 3v6h6" />
+          <path d="M8 17l3-4 2 2 3-4" />
         </svg>
       </button>
       {open && (
