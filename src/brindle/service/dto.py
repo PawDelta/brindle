@@ -234,6 +234,49 @@ class InboxItemDTO(_DTO):
     fix: str | None = None         # a setup item's: what the app's fix button repairs (codex_hook_trust)
     permission: PermissionDTO | None = None
     action: InboxActionDTO | None = None
+    visual_id: str | None = None   # a visual's open question: GET /v1/sessions/{root_id}/visuals
+
+
+class VisualOptionDTO(_DTO):
+    id: str
+    label: str
+    detail: str | None = None
+
+
+class VisualAnswerDTO(_DTO):
+    option: str
+    note: str | None = None
+    at: float
+
+
+class VisualDTO(_DTO):
+    """A visual in a session (brindle.visuals). ``rev``: its current revision,
+    served at /v1/visuals/{id}/r/{rev}; an answer names the revision it read.
+    ``unread``: a revision the person hasn't opened yet."""
+
+    id: str
+    session: str
+    title: str
+    by: str
+    kind: Literal["visual", "plan"]
+    rev: int
+    question: str | None = None
+    options: list[VisualOptionDTO] | None = None
+    answer: VisualAnswerDTO | None = None
+    kept: bool
+    unread: bool
+    created_at: float
+
+
+class KeptVisualDTO(_DTO):
+    """A kept visual: outlives its session. Its page: /v1/kept-visuals/{id}/html."""
+
+    id: str
+    title: str
+    from_session_name: str
+    repo: str
+    answer: VisualAnswerDTO | None = None
+    kept_at: float
 
 
 class MilestoneDTO(_DTO):
@@ -251,6 +294,7 @@ class MilestoneDTO(_DTO):
     state_why: str | None = None
     label: str | None = None       # plain words for state: "not done yet", "regressed", "couldn't run: <why>"
     phase: str = "in_progress"     # done | in_review | in_progress (autopilot.milestone_phases)
+    phase_name: str | None = None  # the goal's phase it is grouped under (goals.md `phase:`); None: no phases
 
     @classmethod
     def from_row(cls, m: Milestone, phase: str = "in_progress") -> MilestoneDTO:

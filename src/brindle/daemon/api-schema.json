@@ -2152,6 +2152,18 @@
               "title": "Phase",
               "type": "string"
             },
+            "phase_name": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Phase Name"
+            },
             "position": {
               "title": "Position",
               "type": "integer"
@@ -2666,6 +2678,18 @@
           "default": null,
           "title": "Section"
         },
+        "visual_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Visual Id"
+        },
         "workspace_id": {
           "anyOf": [
             {
@@ -2684,6 +2708,83 @@
         "reason"
       ],
       "title": "InboxItemDTO",
+      "type": "object"
+    },
+    "KeptVisualDTO": {
+      "$defs": {
+        "VisualAnswerDTO": {
+          "properties": {
+            "at": {
+              "title": "At",
+              "type": "number"
+            },
+            "note": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Note"
+            },
+            "option": {
+              "title": "Option",
+              "type": "string"
+            }
+          },
+          "required": [
+            "option",
+            "at"
+          ],
+          "title": "VisualAnswerDTO",
+          "type": "object"
+        }
+      },
+      "description": "A kept visual: outlives its session. Its page: /v1/kept-visuals/{id}/html.",
+      "properties": {
+        "answer": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/VisualAnswerDTO"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "from_session_name": {
+          "title": "From Session Name",
+          "type": "string"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "kept_at": {
+          "title": "Kept At",
+          "type": "number"
+        },
+        "repo": {
+          "title": "Repo",
+          "type": "string"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "from_session_name",
+        "repo",
+        "kept_at"
+      ],
+      "title": "KeptVisualDTO",
       "type": "object"
     },
     "MilestoneDTO": {
@@ -2756,6 +2857,18 @@
           "default": "in_progress",
           "title": "Phase",
           "type": "string"
+        },
+        "phase_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Phase Name"
         },
         "position": {
           "title": "Position",
@@ -6806,6 +6919,224 @@
       "title": "StoppedAgentDTO",
       "type": "object"
     },
+    "VisualAnswerDTO": {
+      "properties": {
+        "at": {
+          "title": "At",
+          "type": "number"
+        },
+        "note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Note"
+        },
+        "option": {
+          "title": "Option",
+          "type": "string"
+        }
+      },
+      "required": [
+        "option",
+        "at"
+      ],
+      "title": "VisualAnswerDTO",
+      "type": "object"
+    },
+    "VisualDTO": {
+      "$defs": {
+        "VisualAnswerDTO": {
+          "properties": {
+            "at": {
+              "title": "At",
+              "type": "number"
+            },
+            "note": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Note"
+            },
+            "option": {
+              "title": "Option",
+              "type": "string"
+            }
+          },
+          "required": [
+            "option",
+            "at"
+          ],
+          "title": "VisualAnswerDTO",
+          "type": "object"
+        },
+        "VisualOptionDTO": {
+          "properties": {
+            "detail": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Detail"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "label": {
+              "title": "Label",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "label"
+          ],
+          "title": "VisualOptionDTO",
+          "type": "object"
+        }
+      },
+      "description": "A visual in a session (brindle.visuals). ``rev``: its current revision,\nserved at /v1/visuals/{id}/r/{rev}; an answer names the revision it read.\n``unread``: a revision the person hasn't opened yet.",
+      "properties": {
+        "answer": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/VisualAnswerDTO"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "by": {
+          "title": "By",
+          "type": "string"
+        },
+        "created_at": {
+          "title": "Created At",
+          "type": "number"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "kept": {
+          "title": "Kept",
+          "type": "boolean"
+        },
+        "kind": {
+          "enum": [
+            "visual",
+            "plan"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "options": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/VisualOptionDTO"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Options"
+        },
+        "question": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Question"
+        },
+        "rev": {
+          "title": "Rev",
+          "type": "integer"
+        },
+        "session": {
+          "title": "Session",
+          "type": "string"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        },
+        "unread": {
+          "title": "Unread",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "session",
+        "title",
+        "by",
+        "kind",
+        "rev",
+        "kept",
+        "unread",
+        "created_at"
+      ],
+      "title": "VisualDTO",
+      "type": "object"
+    },
+    "VisualOptionDTO": {
+      "properties": {
+        "detail": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Detail"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "label": {
+          "title": "Label",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "label"
+      ],
+      "title": "VisualOptionDTO",
+      "type": "object"
+    },
     "WorkspaceDTO": {
       "$defs": {
         "AgentDTO": {
@@ -7432,6 +7763,18 @@
       "path": "/v1/kb/sources/{id}/sync"
     },
     {
+      "method": "GET",
+      "path": "/v1/kept-visuals"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/kept-visuals/{id}"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/kept-visuals/{id}/html"
+    },
+    {
       "method": "DELETE",
       "path": "/v1/keys/{name}"
     },
@@ -7653,6 +7996,10 @@
     },
     {
       "method": "GET",
+      "path": "/v1/sessions/{id:path}/visuals"
+    },
+    {
+      "method": "GET",
       "path": "/v1/sessions/{root:path}/diff"
     },
     {
@@ -7750,6 +8097,26 @@
     {
       "method": "PATCH",
       "path": "/v1/user-settings"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/visuals/{id}/answer"
+    },
+    {
+      "method": "DELETE",
+      "path": "/v1/visuals/{id}/keep"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/visuals/{id}/keep"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/visuals/{id}/r/{n}"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/visuals/{id}/read"
     },
     {
       "method": "GET",

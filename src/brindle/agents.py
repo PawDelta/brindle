@@ -3478,18 +3478,34 @@ def delegate(
     why = model_problem(profile, caller_ws)
     if why:
         raise AgentError(why)
+    from brindle import fair_share
+
     busy = admission(profile, caller_ws.repo_root) if admit else None
+    # A direct start (no queued task claimed its slot) takes the machine-wide fair share's turn itself.
+    fair = admit and busy is None and launches_process(profile, caller_ws.repo_root)
+    if fair:
+        busy = fair_share.start_reason(db, caller.id if caller else None, caller_ws.repo_root, profile)
     if busy:
         raise NoRoom(busy)
     def start_worker(ws: Workspace) -> Agent:
         # Startup dialogs are handled by the detached _after-launch helper, so
         # handoff/assign return as soon as the window exists instead of polling
         # the new pane for up to 30 seconds.
-        return spawn(
-            db, ws, profile, prompt=task, parent_id=caller.id if caller else None, mode=mode,
-            done_when=done_when, background_setup=True, plan_first=bool(plan_first), files=files,
-            weight=weight, analysis_doc=analysis_doc, **({"detached": True} if detached else {}),
-        )
+        def launch() -> Agent:
+            return spawn(
+                db, ws, profile, prompt=task, parent_id=caller.id if caller else None, mode=mode,
+                done_when=done_when, background_setup=True, plan_first=bool(plan_first), files=files,
+                weight=weight, analysis_doc=analysis_doc, **({"detached": True} if detached else {}),
+            )
+
+        if not fair:
+            return launch()
+        # Decided again, and the worker's row made (it counts from then on), under the machine-wide lock.
+        with fair_share.machine_lock():
+            why = fair_share.start_reason(db, caller.id if caller else None, caller_ws.repo_root, profile)
+            if why:
+                raise NoRoom(why)
+            return launch()
 
     if isolate:
         from brindle import pipeline
@@ -4019,6 +4035,13 @@ def review_after_checks(db: DB, caller_id: str | None, ws: Workspace, profile: s
                     continue   # moved while waiting for the lock: check the new commit
                 if summary and gates.summary_failed(summary):
                     pipeline.on_checks_failed(db, ws, sha, since, text, caller)
+                    return None
+                if summary and gates.summary_timed_out(summary):
+                    # Inconclusive: no review of unchecked code, and no failure sent to the worker.
+                    if to_id := gates.supervisor_id(db, ws):
+                        gates.tell(db, to_id, f"[brindle] checks on `{ws.branch}` timed out, not a "
+                                              "failure; no review was started. Request the review "
+                                              "again once the machine is quieter.")
                     return None
                 piped = caller or pipeline.piped_worker(db, ws)
                 if since is not None and piped is not None and session_paused(db, piped):
@@ -4644,7 +4667,7 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
     Codex (#241). A request left to the person is held for the app's answer
     while the app is open (_hold_for_app; a Claude one is recorded with the
     policy off too). Never raises: any failure is ask, or a deny for an OpenCode
-    agent with nothing of its own to ask (opencode.unasked_launch)."""
+    agent with nothing of its own to ask (opencode.Launch.unasked)."""
     from brindle import opencode
 
     opencode_unasked = provider == "opencode" and os.environ.get(opencode.UNASKED_ENV) == "1"
@@ -4658,6 +4681,10 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
             return opencode.UNCHECKED if opencode_unasked else None
         cfg = load_repo_config(ws.repo_root)
         policy = cfg.permission_policy == "on"
+        if opencode_unasked and not policy:
+            # Launched with the rules on and OpenCode's own asks off (opencode.Launch):
+            # turning the rules off since must not leave its calls unchecked.
+            return opencode.POLICY_OFF
         # Policy off: of the other CLIs only a Codex reviewer has the hook
         # (codex_hook.launch_flags). Nobody watches it, so it gets what its
         # allowed_tools cover and nothing else of brindle's: every other
@@ -4779,7 +4806,7 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
                 decision = permissions.deny_in_parts(reqs[0], checks=cfg.checks, rules=rules) or decision
             if decision.decision == "ask" and (decision.rule is not None or opencode_unasked):
                 # A rule asks explicitly (or anything asks, where nothing of OpenCode's
-                # would: opencode.unasked_launch), and this plugin can't hold a request for
+                # would: opencode.Launch.unasked), and this plugin can't hold a request for
                 # the person: it fails closed rather than let OpenCode's own config run it.
                 permissions.note_prompt(decision)
                 decision = permissions.Decision(
@@ -5469,10 +5496,17 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
         else:
             db.set_status(agent_id, "idle")
             db.clear_permission_requests(agent_id)
-            if is_rate_limit:
+            # An overloaded API (529) is the provider's capacity, not this
+            # account's usage: it pauses nothing, and its worker is reported.
+            overloaded = bool(re.search(r"\b(529|overloaded|overloaded_error)\b", err_fields))
+            if is_rate_limit and not overloaded:
                 from brindle import autopilot as pilot
 
                 pilot.limit_reached(db, agent)
+            current = db.get_agent(agent_id)
+            # Not paused for a usage limit; agy's own stop tells its parent itself.
+            if current is not None and current.status == "idle" and current.provider == "claude":
+                tell_parent_api_error(db, current, err_fields)
     elif event == "subagent-start":
         # A crash can skip SubagentStop, so this doesn't touch agent.status:
         # the sidebar hides a subagent that's been "running" too long instead.
@@ -5772,6 +5806,72 @@ def tell_parent_unreported(db: DB, agent: Agent, *, remind: bool = False) -> boo
     finally:
         if not sent:
             db.release_note(agent.id, claimed_at, agent.unreported_noted, field="unreported_noted")
+
+
+# What kind of API error a turn ended on, as its supervisor is told it: a
+# fixed label, never the error text (which can quote request ids or headers).
+API_ERROR_KINDS = (
+    (re.compile(r"\b529\b|overloaded"), "overloaded (529)"),
+    (re.compile(r"\b429\b|rate.?limit|usage.?limit|resource.?exhausted"), "rate limited (429)"),
+    (re.compile(r"\b40[13]\b|unauthori[sz]ed|authentication|forbidden"), "authentication refused (401/403)"),
+    (re.compile(r"\b5\d\d\b|internal server error|bad gateway|service unavailable|api_error"),
+     "server error (5xx)"),
+    (re.compile(r"timed? ?out|timeout"), "request timed out"),
+    (re.compile(r"connection|network|econnreset|socket"), "connection error"),
+)
+
+
+def api_error_kind(text: str) -> str:
+    """The kind of API error ``text`` describes, as a fixed label."""
+    low = (text or "").lower()
+    return next((label for pattern, label in API_ERROR_KINDS if pattern.search(low)), "API error")
+
+
+API_ERROR_MARK = "api-error-told"
+
+
+def api_error_stop(agent: Agent) -> str:
+    """Which stop of ``agent``'s an API-error notice is about: when it went
+    idle. Each new turn moves it, so each stop gets its own notice."""
+    return repr(agent.status_since or agent.created_at)
+
+
+def tell_parent_api_error(db: DB, agent: Agent, error: str) -> bool:
+    """A worker's turn ended on an API error (Claude Code gave up on it, or
+    never runs a hook after it) before the worker reported. Its CLI sits idle
+    at its prompt and nothing wakes it, so tell its supervisor now, naming
+    only the error's kind. Once per stop, by a mark of its own: a generic
+    idle reminder sent first doesn't stand in for it (it can't say why the
+    worker stopped), while this one, sent first, stands in for that reminder.
+    Returns whether the supervisor was told."""
+    if agent.mode not in ("assign", "handoff_detached") or not agent.parent_id or agent.result is not None:
+        return False
+    if db.get_agent(agent.parent_id) is None:
+        return False
+    stop = agent.status_since or agent.created_at
+    won, previous = db.claim_stop_mark(agent.id, API_ERROR_MARK, stop, agent.reopened_at)
+    if not won:
+        return False  # this stop was told already, or it isn't the worker's current one
+    ws = db.get_workspace(agent.workspace_id)
+    where = f" on branch `{ws.branch}` (workspace {ws.id})" if ws else ""
+    body = (f"[brindle] Worker {agent.id} ({agent.profile}, {agent.provider}){where} stopped on an "
+            f"API error before reporting: {api_error_kind(error)}. Its CLI is idle at its prompt and "
+            "won't go on by itself. send_message it to run the turn again, assign the task to "
+            "another profile, or remove_workspace if the work is abandoned. "
+            f"What brindle sees: {liveness(db, agent, ws)}.")
+    try:
+        send_message(db, agent.parent_id, body, sender_id=agent.id)
+    except (AgentError, tmux.TmuxError):
+        try:
+            db.enqueue(agent.parent_id, body, agent.id)
+        except Exception:  # noqa: BLE001
+            db.release_stop_mark(agent.id, API_ERROR_MARK, stop, previous)
+            return False
+    if not agent.unreported_noted:
+        # The idle reminder would only repeat this, less exactly.
+        db.claim_unreported(agent.id, time.time(), None, reopened_at=agent.reopened_at,
+                            status_since=agent.status_since or agent.created_at)
+    return True
 
 
 def _tell_parent_unreported(db: DB, agent: Agent, ws: Workspace | None) -> bool:

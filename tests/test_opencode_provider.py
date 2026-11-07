@@ -9,7 +9,7 @@ import time
 import pytest
 
 from brindle import antigravity, opencode, permissions, pipeline, workspaces
-from brindle.config import set_local
+from brindle.config import set_local, set_user
 from brindle.db import Agent
 from brindle.profiles import load_profile
 from brindle.providers import DELIVERY_NOTE, LaunchContext, OpenCode, brindle_invocation
@@ -150,22 +150,34 @@ console.log(JSON.stringify([counts, replies.map(r => r.body.response)]));
         assert ("deny" if "deny" in decisions else "ask" if "ask" in decisions else "allow") == decision
 
 
-@pytest.mark.parametrize("preset, mode, unasked", [
-    ("autonomous", None, True),
-    ("standard", None, False),
-    ("autonomous", "dontAsk", False),
+@pytest.mark.parametrize("chosen, policy, mode, edit", [
+    ("ask", "on", None, "ask"),            # the default: OpenCode's own prompts stay, even on Autonomous
+    ("auto", "on", None, "allow"),         # edits run; commands outside allowed_tools still ask
+    ("autonomous", "on", None, None),      # nothing of OpenCode's asks: the plugin is the gate
+    ("autonomous", "off", None, "ask"),    # brindle can vouch for nothing: OpenCode keeps asking
+    ("autonomous", "on", "dontAsk", "deny"),   # a profile's own mode wins
 ])
-def test_autonomous_starts_opencode_without_prompts(db, ws, monkeypatch, preset, mode, unasked):
-    """Nothing of OpenCode's asks on Autonomous, a profile's mode wins, and a failed check stops the call."""
-    permissions.apply_preset(preset)
-    set_local(ws.repo_root, "permission_policy", "on")
+def test_opencode_permission_mode_picks_what_opencode_asks(db, ws, monkeypatch, chosen, policy, mode, edit):
+    """The person's OpenCode mode maps onto OpenCode's permissions, a profile's mode wins,
+    and in an unasked launch a failed check stops the call."""
+    permissions.apply_preset("autonomous")
+    set_local(ws.repo_root, "permission_policy", policy)
+    set_user("opencode_permission_mode", chosen)
     profile = dataclasses.replace(load_profile("supervisor"), permission_mode=mode)
     argv = OpenCode().command(LaunchContext("o1", profile, None, cwd=ws.path))
     got = _config(argv)["permission"]
+    unasked = edit is None
     assert (f"{opencode.UNASKED_ENV}=1" in argv) == unasked
-    assert (got["bash"] == got["edit"] == got["doom_loop"] == "allow") if unasked else (got["bash"] != "allow")
     if not unasked:
+        assert got["edit"] == edit and got["bash"]["*"] == ("deny" if mode == "dontAsk" else "ask")
         return
+    assert got["bash"] == got["edit"] == got["doom_loop"] == "allow"
+    # Switched to Ask mid-launch: one read decides both, so an allow-everything block
+    # never goes out without the marker that makes the plugin fail closed.
+    reads = iter(["autonomous"])
+    monkeypatch.setattr("brindle.config.opencode_permission_mode", lambda: next(reads, "ask"))
+    argv = OpenCode().command(LaunchContext("o1", profile, None, cwd=ws.path))
+    assert f"{opencode.UNASKED_ENV}=1" in argv and _config(argv)["permission"]["bash"] == "allow"
 
     add_agent(db, ws)
     monkeypatch.setenv(opencode.UNASKED_ENV, "1")
@@ -204,6 +216,11 @@ def test_autonomous_starts_opencode_without_prompts(db, ws, monkeypatch, preset,
     for tool, args in (("apply_patch", {"patchText": 1}), ("apply_patch", {"patchText": hidden}), ("", {}), ("bash", {})):
         assert json.loads(call(None, tool=tool, args=args))["decision"] == "deny", tool
     assert call(None, tool="glob", args={"pattern": "*"}) == call(None, tool="todowrite", args={}) == ""
+    # The rules turned off after the launch: OpenCode still asks nothing, so nothing may pass unchecked.
+    set_local(ws.repo_root, "permission_policy", "off")
+    assert [json.loads(call(*c))["decision"] for c in (("touch x",), (None, "o1", "apply_patch", {"patchText": 1}))] \
+        == ["deny", "deny"]
+    set_local(ws.repo_root, "permission_policy", "on")
     monkeypatch.setattr(permissions, "decide", lambda *args, **kwargs: 1 / 0)
     assert json.loads(call("touch x"))["decision"] == "deny"
 

@@ -573,6 +573,18 @@ def claude_permission_mode() -> str:
     return mode if isinstance(mode, str) and mode else "default"
 
 
+OPENCODE_PERMISSION_MODES = ("ask", "auto", "autonomous")
+
+
+def opencode_permission_mode() -> str:
+    """How OpenCode sessions whose profile sets no ``permission_mode`` ask
+    (brindle.opencode): "ask" (the default) keeps OpenCode's own prompts for
+    edits and commands; "auto" lets edits run; "autonomous" asks nothing and
+    brindle's plugin decides each call, failing closed. Anything else is "ask"."""
+    mode = user_settings().get("opencode_permission_mode")
+    return mode if mode in OPENCODE_PERMISSION_MODES else "ask"
+
+
 _USER_WRITE = threading.Lock()
 
 

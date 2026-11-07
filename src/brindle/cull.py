@@ -284,6 +284,8 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
     decline_environment_setups(db, panes)
     done.extend(settle_startups(db, now, panes))
     done.extend(note_stuck(db, now, panes))
+    # Before the idle reminder: a stop on an API error is told with its kind.
+    done.extend(note_api_errors(db, now, panes))
     done.extend(note_idle_unreported(db, now, panes))
     done.extend(note_unreported_commits(db, now, panes))
     done.extend(note_reported_stuck(db, now, panes))
@@ -1019,6 +1021,55 @@ def note_silent(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
         if not _send_note(db, a, last, body):
             continue
         done.append(f"told {a.parent_id} that worker {a.id} has gone silent")
+    return done
+
+
+# How long a worker's pane must have shown a turn ended on an API error, with
+# nothing new, before a sweep takes it that no hook will say so: Claude Code's
+# own attempts redraw the pane, and its StopFailure hook runs within seconds.
+API_ERROR_GRACE = 60.0
+
+
+def note_api_errors(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
+    """A Claude Code worker whose pane shows its last turn ended on an API
+    error (529 Overloaded, a 5xx, ...) and has printed nothing since for
+    API_ERROR_GRACE, and whose supervisor hasn't been told about this stop:
+    its StopFailure hook never ran, so it would sit there forever. It may
+    still say 'processing', or a screen read (agents.reconcile, which the
+    dashboard runs) may have moved it to 'idle' already. Mark it idle (the
+    screen shows its prompt) and tell its supervisor once per stop
+    (agents.tell_parent_api_error). A model the account refuses is
+    note_model_refused's."""
+    from brindle import model_access
+    from brindle.providers import ClaudeCode
+
+    done = []
+    owners = agents.pane_owners(db, panes)
+    for a in db.list_agents():
+        if (a.mode not in agents.FORWARDING_MODES or not a.parent_id or a.result is not None
+                or a.dismissed_at is not None or a.provider != "claude" or a.headless
+                or a.status not in ("processing", "idle")
+                or (a.status == "idle" and db.mark(a.id, agents.API_ERROR_MARK) == agents.api_error_stop(a))
+                or not agents.runs_process(a) or not agents.same_server(a, panes)
+                or not agents.is_alive(a, panes) or not agents.owns_pane(db, a, owners)):
+            continue
+        activity = tmux.window_activity(a.tmux_window, server=agents.server_of(a))
+        if activity is None or now - activity < API_ERROR_GRACE:
+            continue
+        try:
+            screen = tmux.capture(a.tmux_window, lines=40, server=agents.server_of(a))
+        except tmux.TmuxError:
+            continue
+        error = ClaudeCode.api_error(screen)
+        if not error or model_access.classify(error):
+            continue
+        if a.status == "processing":
+            db.set_status(a.id, "idle", only_if="processing")
+        current = db.get_agent(a.id)
+        if current is None or current.status != "idle":
+            continue   # a hook moved it first
+        if agents.tell_parent_api_error(db, current, error):
+            done.append(f"told {a.parent_id} that worker {a.id} stopped on an API error")
     return done
 
 

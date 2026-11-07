@@ -264,6 +264,22 @@ def _bypass(command):
     _bypass('a=(~/.ssh/id_rsa); cat "${a[0]}"'),
     _bypass('for f in "$HOME"/.ssh/*; do cat $f; done'),
     _bypass("cat $HOME/.s*h/id_rsa"),
+    # Disguised: a path only the run resolves that could still be a store.
+    _bypass('bash -c "cat \\"\\$HOME/.a\\$1/credentials\\"" _ ws'),    # pieces and $1 inside sh -c
+    _bypass("python3 -c \"import os; print(open(os.environ['HOME'] + '/.a' + 'ws/credentials').read())\""),
+    _bypass('f=(~/.ss?/id_*); cat "${f[@]}"'),    # an array over a store's pattern
+    _bypass("shopt -s dotglob; cat ~/*/credentials"),
+    pytest.param("python3 -c \"import os; print(os.path.expanduser('~') + '/' + 'notes')\"", "allow",
+                 marks=pytest.mark.variant("look-alike: a home path built in pieces that is no store")),
+    pytest.param("shopt -s dotglob; ls ./build/*", "allow",
+                 marks=pytest.mark.variant("look-alike: dotglob over no home")),
+    pytest.param(("echo dotglob; cat ~/*/README.md", "shopt -s dotglob; shopt -u dotglob; cat ~/*/README.md",
+                  "shopt -s dotglob | cat; cat ~/*/README.md", 'echo "$(shopt -s dotglob)"; cat ~/*/README.md',
+                  "(shopt -s dotglob); cat ~/*/README.md", "{ shopt -s dotglob; } & cat ~/*/README.md",
+                  "for x in one; do shopt -s dotglob; done | cat; cat ~/*/README.md"),
+                 "allow", marks=pytest.mark.variant("review: dotglob as a word, turned off again, or in a subshell")),
+    pytest.param(("cat '$HOME/$filename'", "grep -F '$HOME/$filename' README.md"), "allow",
+                 marks=pytest.mark.variant("review: single quotes keep $ literal")),
     _bypass('ls ~/.ssh > "$OUTPUT"'),    # a store named, a target only the run knows
     pytest.param('ls > "$OUTPUT"', "allow",
                  marks=pytest.mark.variant("no store named: an unresolved target is the policy's question")),
@@ -291,8 +307,8 @@ def _bypass(command):
                  marks=pytest.mark.variant("assignment value does not print")),
     pytest.param('env API_TOKEN="$API_TOKEN" echo ready', "allow",
                  marks=pytest.mark.variant("assignment through env does not print its value")),
-    pytest.param("case x in (env) echo ready;; esac", "deny",
-                 marks=pytest.mark.variant("a case isn't read: the split message, not a credential deny by its pattern")),
+    pytest.param("case x in (env) echo ready;; esac", "allow",
+                 marks=pytest.mark.variant("a case isn't read: unchecked's answer, not a credential deny by its pattern")),
     ("env -u FOO git status", "allow"),
     ("env VAR=1 git status", "allow"),
     ("printenv PATH", "allow"),
@@ -329,6 +345,8 @@ def test_credential_dumps_are_denied(tmp_path, command, expected):
     (tmp_path / "other").mkdir()
     for command in (command,) if isinstance(command, str) else command:
         permissions.set_unmatched("allow")
+        # The owner's own setting: what brindle can't read is allowed, so only a credential deny denies.
+        permissions.set_groups({"shell": {"subcategories": {"unchecked": "allow"}}})
         permissions.add_rule("bash", "*", "allow", "glob", source="learned")
         payload = {"tool_name": "Bash", "tool_input": {"command": command}, "cwd": str(here)}
         requests = [permissions.from_claude(payload, str(here), str(here)),
