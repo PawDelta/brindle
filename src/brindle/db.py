@@ -1984,6 +1984,24 @@ class DB:
                       (agent_id, kind, value))
         return True, row["value"] if row else None
 
+    def replace_mark(self, agent_id: str, kind: str, old: str, new: str) -> bool:
+        """Set an existing mark from ``old`` to ``new``, never recreating one
+        another process retired or changed meanwhile. Returns whether it did."""
+        with self.tx() as c:
+            return bool(c.execute("UPDATE agent_marks SET value=? WHERE agent_id=? AND kind=? AND value=?",
+                                  (new, agent_id, kind, old)).rowcount)
+
+    def retain_unresolved(self, message_id: int, agent_id: str) -> None:
+        """A partial pane delivery that may or may not have gone in (agy says
+        nothing of what it took in): kept, unresolved (held=2, in neither the
+        queue nor the unread mail), so it is never typed in again, offered
+        again or counted delivered; read_messages(message_id=...) still shows
+        it. Its pane mark is retired, so the queue moves on."""
+        with self.tx() as c:
+            c.execute("UPDATE inbox SET held=2, delivered_at=NULL WHERE id=? AND agent_id=?",
+                      (message_id, agent_id))
+            c.execute("DELETE FROM agent_marks WHERE agent_id=? AND kind='pane-delivery'", (agent_id,))
+
     def release_note(self, agent_id: str, since: float, previous: float | None,
                      *, field: str = "stuck_noted") -> None:
         """Undo ``claim_note`` when the note couldn't be sent, unless a later one replaced it."""

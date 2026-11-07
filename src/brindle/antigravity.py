@@ -315,8 +315,6 @@ def handle_hook(db, agent_id: str, event: str, payload: dict) -> dict | None:
         db.update_agent(agent_id, session_ref=base["session_id"])
 
     if event == "agy-pre-invocation":
-        if payload.get("invocationNum", 0) == 0:
-            agents._acknowledge_submitted(db, agent_id, None)   # its hooks carry no prompt text
         db.set_status(agent_id, "processing")
         if payload.get("invocationNum", 0) == 0 and not db.delivered_since(agent_id, time.time() - DELIVERY_WINDOW):
             # A new turn the user typed. One brindle typed in (the report
@@ -325,6 +323,8 @@ def handle_hook(db, agent_id: str, event: str, payload: dict) -> dict | None:
             db.update_agent(agent_id, stop_blocked=0)
             if agent.mode == "interactive":
                 autopilot.user_spoke(db, agent)
+        if payload.get("invocationNum", 0) == 0:
+            agents.note_turn_started(db, agent_id)   # a stopped delivery's outcome: unknown from here
         return None
     if event == "agy-post-tool":
         agents.handle_hook(db, agent_id, "tool-done", base)

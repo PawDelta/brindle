@@ -359,7 +359,9 @@ def test_paste_blocked_or_draft_holds_message_then_delivers_it_once(db, ws, monk
 @pytest.mark.parametrize("typed_after,then", [
     ("load-buffer", "cleared"), ("lead", "cleared"), ("body", "cleared"), ("body", "sent"),
     ("body", "codex turn"),   # Codex reports what went in only when the turn ends
-    ("body", "agy sent"), ("body", "agy cleared"),   # agy reports no prompt text: the two look alike
+    ("body", "replaced"),   # cleared, then something else sent before the next flush
+    # agy reports no prompt text: once it starts a turn, sent and replaced look alike
+    ("body", "agy sent"), ("body", "agy replaced"), ("body", "agy cleared"),
     # keys pressed after the lead, but the next write comes over TYPED_WITHIN later
     ("lead-late", "sent"),
     ("lead-switch", "cleared"),   # then the person's client moves to another pane
@@ -369,12 +371,14 @@ def test_person_typing_mid_paste_stops_it_and_message_goes_in_once_later(db, ws,
     # after brindle's last look, while the paste is under way, then sends or
     # clears whatever the composer holds.
     from types import SimpleNamespace
-    from brindle import antigravity
+    from brindle import antigravity, autopilot
 
     agy = then.startswith("agy")
     fake_agent(db, ws, status="idle", mode="interactive")
     db.update_agent("a1", provider="antigravity" if agy else "claude")
     monkeypatch.setattr(antigravity, "_flush_soon", lambda *a, **k: None)
+    spoke = []
+    monkeypatch.setattr(autopilot, "user_spoke", lambda db_, a: spoke.append(a.id))
     db.enqueue("a1", "WORKER REPORT", None)
     s = {"composer": "", "typed": time.time() - 60, "at": typed_after}   # their client, idle a minute
     submitted = []
@@ -414,19 +418,25 @@ def test_person_typing_mid_paste_stops_it_and_message_goes_in_once_later(db, ws,
     assert agents.flush(db, "a1") is False and submitted == [] and db.pending_count("a1") == 1
     assert ("WORKER REPORT" in s["composer"]) == (typed_after == "body")   # the body never lands on their text
     sent, s["composer"], s["typed"] = s["composer"], "", time.time() - 60   # a minute ago
-    if then == "sent":   # the report went in with their reply, or it didn't (only their text and the lead)
+    if then.endswith("replaced"):
+        sent = "SOMETHING ELSE"
+    if then in ("sent", "replaced"):   # the report went in with their reply, or it didn't
         agents.handle_hook(db, "a1", "prompt-submit", {"prompt": sent})
         db.set_status("a1", "idle")
     elif then == "codex turn":
         agents.handle_hook(db, "a1", "codex-notify", {"type": "agent-turn-complete", "input-messages": [sent]})
-    elif then == "agy sent":   # agy's real hooks for the turn it started
+    elif then in ("agy sent", "agy replaced"):   # agy's real hooks for the turn it started
         antigravity.handle_hook(db, "a1", "agy-pre-invocation", {"invocationNum": 0})
         antigravity.handle_hook(db, "a1", "agy-stop", {})
-    again = typed_after != "body" or then.endswith("cleared")
+    assert len(spoke) == (then in ("sent", "replaced", "agy sent", "agy replaced"))   # their turn, as theirs
+    again = typed_after != "body" or then in ("cleared", "replaced", "agy cleared")
+    unresolved = then in ("agy sent", "agy replaced")
     assert agents.flush(db, "a1") is again and db.pending_count("a1") == 0
     assert submitted == ([f"{lead} WORKER REPORT"] if again else [])
     # by no other way either: read_messages hands nothing over again
     assert "WORKER REPORT" not in agents.render_unread(db, db.read_held("a1"))
+    kept = db.get_message("a1", 1)   # agy's unknowable case: kept, never counted delivered
+    assert (kept.held == 2 and kept.delivered_at is None) == unresolved
     db.set_status("a1", "idle")   # that turn ended; the queue moves on
     db.enqueue("a1", "NEXT", None)
     assert agents.flush(db, "a1") is True and submitted[-1] == f"{lead} NEXT" and len(submitted) == 1 + again

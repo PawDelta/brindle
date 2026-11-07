@@ -2419,6 +2419,9 @@ def _paste_message(db: DB, agent: Agent, text: str, lead: str | None,
                   or (state["stage"] is None and _composer_taken(fresh))
                   or (state["stage"] == "lead" and resume is None
                       and not _partial_composer(fresh, state, "lead"))):
+                if state["stage"] == "body":   # its Enter withheld: whatever goes in now, the person sent
+                    state["stopped"] = True
+                    db.record_pane_delivery(message_id, agent.id, json.dumps(state))
                 raise _PasteBlocked
         if resume is not None and state["stage"] == resume:
             if not _partial_composer(fresh, state, resume):
@@ -2480,11 +2483,16 @@ def _resume_pane_delivery(db: DB, agent: Agent, saved: str) -> bool:
                 return False  # the person's text and this delivery's are still there: theirs to send or clear
             if state["stage"] != "lead":
                 # Stopped after the body, and the composer is empty with no
-                # turn running. Sending it would have acknowledged it
-                # (_acknowledge_submitted: the prompt Claude Code, OpenCode or
-                # Codex reports, or the turn agy starts), so it was cleared:
-                # the same row goes back in the queue, no second copy made.
-                db.set_mark(agent.id, "pane-delivery", None)
+                # turn running. A prompt carrying it would have acknowledged
+                # it (_acknowledge_submitted: Claude Code, OpenCode, Codex), and
+                # agy starting no turn since means nothing went in: cleared,
+                # so the same row goes back in the queue, no second copy made.
+                # Once agy started a turn, sent and cleared-then-replaced look
+                # alike: kept unresolved, neither retyped, offered nor counted.
+                if state.get("turn_started"):
+                    db.retain_unresolved(row["id"], agent.id)
+                else:
+                    db.set_mark(agent.id, "pane-delivery", None)
                 return _flush_messages(db, agent.id)
             # Stopped after the lead: the body never reached the composer and
             # Enter was never pressed for it, so the whole message goes in, once.
@@ -2724,20 +2732,38 @@ def _composer_settled(agent: Agent) -> bool:
             and provider.screen_state(screen) != "busy")
 
 
-def _acknowledge_submitted(db: DB, agent_id: str, prompt: str | None) -> None:
+def _acknowledge_submitted(db: DB, agent_id: str, prompt: str) -> bool:
     """A prompt the CLI took in (Claude Code's or OpenCode's prompt-submit,
-    Codex's turn inputs) carrying a pane delivery's body, or (``prompt`` None)
-    a turn started from a composer holding it whose CLI doesn't say what went
-    in (agy; while a delivery is stopped brindle starts none): the person sent
-    it, their reply typed onto it, so it is delivered and its mark retired."""
+    Codex's turn inputs) carrying a delivery whose body is in the composer,
+    Enter not yet recorded: it went in, so it is delivered and its mark
+    retired. Returns whether the person sent it (one brindle had stopped,
+    their reply typed onto it)."""
+    saved = db.mark(agent_id, "pane-delivery")
+    if not saved or not prompt:
+        return False
+    state = json.loads(saved)
+    body = str(state.get("body") or "").strip()
+    if state.get("stage") != "body" or not body or body not in prompt:
+        return False
+    db.mark_delivered(state["message_id"])
+    db.set_mark(agent_id, "pane-delivery", None)
+    # Only one brindle stopped is theirs to have sent: an unstopped one at
+    # this stage is brindle's own Enter, its hook ahead of "submitted".
+    return bool(state.get("stopped"))
+
+
+def note_turn_started(db: DB, agent_id: str) -> None:
+    """A turn began, from a CLI that doesn't say what went in (agy). While a
+    delivery is stopped brindle starts none, so the person sent whatever the
+    composer held then: with or without this delivery's body, no one can
+    tell. Its outcome becomes unresolved (see _resume_pane_delivery), never
+    counted delivered nor typed in again."""
     saved = db.mark(agent_id, "pane-delivery")
     if not saved:
         return
     state = json.loads(saved)
-    body = str(state.get("body") or "").strip()
-    if state.get("stage") in ("body", "submitted") and body and (prompt is None or body in prompt):
-        db.mark_delivered(state["message_id"])
-        db.set_mark(agent_id, "pane-delivery", None)
+    if state.get("stage") == "body" and not state.get("turn_started"):
+        db.replace_mark(agent_id, "pane-delivery", saved, json.dumps({**state, "turn_started": True}))
 
 
 def _paste_blocked(agent: Agent) -> bool:
@@ -5217,15 +5243,17 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
         # Queued messages (worker results) are typed into an idle chat too;
         # only a prompt brindle didn't deliver is the user speaking.
         prompt = str(payload.get("prompt", ""))
-        _acknowledge_submitted(db, agent_id, prompt)
+        # brindle's own reminders also arrive as prompts, possibly wrapped or
+        # sent without being recorded as delivered (the unread-mail one): any
+        # prompt carrying brindle's tag is not the user speaking. Judged before
+        # an acknowledgement below marks anything delivered; sending a stopped
+        # delivery with their reply typed onto it is the user speaking, though.
+        person = "[brindle" not in prompt and not db.recently_delivered(agent_id, prompt)
+        person = _acknowledge_submitted(db, agent_id, prompt) or person
         db.set_status(agent_id, "processing")
         from brindle import launch_health
         launch_health.accepted(db, agent)
-        # brindle's own reminders also arrive as prompts, possibly wrapped or
-        # sent without being recorded as delivered (the unread-mail one): any
-        # prompt carrying brindle's tag is not the user speaking.
-        if (agent.mode == "interactive" and "[brindle" not in prompt
-                and not db.recently_delivered(agent_id, prompt)):
+        if agent.mode == "interactive" and person:
             from brindle import autopilot as pilot
 
             pilot.user_spoke(db, agent)
