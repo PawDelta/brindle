@@ -190,6 +190,7 @@ def test_large_goal_is_offered_a_doc_once_and_yes_turns_it_on(milestones, goal, 
         autopilot.resolve_analysis_offer(db, "boss", True, first)
 
 
+@pytest.mark.variant("race: the goal grows between showing the offer and the answer")
 def test_an_answer_belongs_to_the_offer_it_saw_and_a_grown_plan_is_offered(db, goal_env):
     autopilot.set_goal(db, "boss", "Goal A", _plan(2))
     assert _offer(db) is None
@@ -208,6 +209,7 @@ def test_an_answer_belongs_to_the_offer_it_saw_and_a_grown_plan_is_offered(db, g
     assert db.get_autopilot("boss").analysis_doc == 1
 
 
+@pytest.mark.variant("input variant: a goal with few milestones that grows through its workers")
 def test_several_workers_make_a_small_goal_deserve_an_offer(db, boss, goal_env):
     autopilot.set_goal(db, "boss", "Small goal", _plan(1))
     for i in range(3):
@@ -279,6 +281,7 @@ def test_alias_and_path_of_one_attached_repo_are_one_repository(db, boss, goal_e
     assert _offer(db) is None
 
 
+@pytest.mark.variant("identity boundary: workers of a replaced goal must not count for the new one")
 def test_workers_of_an_earlier_goal_do_not_count_for_a_new_goal(db, boss, goal_env):
     autopilot.set_goal(db, "boss", "Big goal", _plan(1))
     for i in range(3):
@@ -290,6 +293,7 @@ def test_workers_of_an_earlier_goal_do_not_count_for_a_new_goal(db, boss, goal_e
     assert _offer(db) is None
 
 
+@pytest.mark.variant("race: the goal is replaced after the offer was accepted")
 def test_goal_replaced_after_acceptance_still_gets_its_own_doc_instruction(db, boss, goal_env, monkeypatch):
     autopilot.set_goal(db, "boss", "Goal A", _plan(4))
     a = _offer(db)
