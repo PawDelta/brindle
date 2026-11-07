@@ -4,11 +4,11 @@ import App from "../../../App";
 import type { VisualDTO } from "../../../api/client";
 import { ONBOARDED_KEY } from "../../../api/providers";
 import { PtyViewsProvider } from "../../../api/ptyView";
-import type { SessionDTO } from "../../../api/schema";
+import type { InboxItemDTO, SessionDTO } from "../../../api/schema";
 import { createAppStore } from "../../../store/store";
 import { startSync } from "../../../store/sync";
 import { FakeDaemon } from "../../../test/fakeDaemon";
-import { REPO, question, root } from "../../../test/fixtures";
+import { REPO, question, root, waiting } from "../../../test/fixtures";
 import { standInViews } from "../../../test/panes";
 import type { VisualsClient } from "./client";
 import { FOCUS_KEY, setFocus } from "./focus";
@@ -60,7 +60,11 @@ describe("visuals", () => {
     const read = vi.spyOn(client, "markVisualRead").mockImplementation(async (id) => edit(id, { unread: false }));
     vi.spyOn(client, "keepVisual").mockImplementation(async (id) => edit(id, { kept: true }));
     const store = createAppStore();
-    const ask = (reason: string) => act(() => store.dispatch({ type: "snapshot", workspaces: store.getState().workspaces, inbox: [{ ...question, reason }] }));
+    // The inbox as the engine has it: a blocked supervisor's question is one row, the same however often it asks.
+    const supervisorAsks = { ...question, reason: "has a question", detail: null };
+    const ask = (item: InboxItemDTO) => act(() => store.dispatch({ type: "snapshot", workspaces: store.getState().workspaces, inbox: [item] }));
+    const needUser = (id: number, text: string) =>
+      act(() => store.dispatch({ type: "stream", message: { type: "event", id, ts: now, kind: "autopilot.need_user", repo_root: REPO, root_id: "sup1", agent_id: "sup1", workspace_id: "proj", task_id: null, payload: { question: text } } }));
     const sync = startSync({ client, store, connect: daemon.connect });
     try {
       render(
@@ -74,7 +78,8 @@ describe("visuals", () => {
       const entry = await screen.findByTestId("visuals-button");
       expect(entry.textContent).toContain("1");
       expect(within(entry).getByLabelText("unread")).toBeTruthy();
-      ask("Which database should the cache use?");
+      needUser(1, "Which database should the cache use?");
+      ask(supervisorAsks);
       fireEvent.click(entry);
       const list = screen.getByTestId("visuals-panel");
       expect(within(list).queryByTestId("visual-row-v_old")).toBeNull();
@@ -90,9 +95,11 @@ describe("visuals", () => {
       // Opened, it's read: the header's dot goes, with no event on the bus to say so.
       await waitFor(() => expect(within(screen.getByTestId("visuals-button")).queryByLabelText("unread")).toBeNull());
       expect(read).toHaveBeenCalledTimes(1);
-      // The ask there at opening badges nothing; another taking its place (the same count) does.
+      // The ask there at opening badges nothing, read again or not; the supervisor asking anew (the same row) does.
       expect(screen.queryByTestId("visual-back-asking")).toBeNull();
-      ask("Should the cache be per user?");
+      ask(supervisorAsks);
+      expect(screen.queryByTestId("visual-back-asking")).toBeNull();
+      needUser(2, "Should the cache be per user?");
       expect(screen.getByTestId("visual-back-asking")).toBeTruthy();
       // Keep: the engine's kept row shows at once.
       fireEvent.click(screen.getByTestId("visual-keep"));
@@ -116,6 +123,10 @@ describe("visuals", () => {
       fireEvent.click(within(screen.getByTestId("visuals-panel")).getByTestId("visual-row-v_8f2c"));
       fireEvent.click(screen.getByTestId("sidebar-handle"));
       expect(sidebar().dataset.mode).toBe("rail");
+      // A fresh open starts the badge over; another ask taking the open one's place (the same count) badges it.
+      expect(screen.queryByTestId("visual-back-asking")).toBeNull();
+      ask({ ...waiting, agent_id: "sup1", workspace_id: "proj" });
+      expect(screen.getByTestId("visual-back-asking")).toBeTruthy();
 
       // Knowledge › Kept visuals: the kept copy opens in the same reader, read-only, on its own scheme path.
       vi.spyOn(client, "keptVisuals").mockResolvedValue([{ id: "k_1", title: "Release flow", from_session_name: "Ship it", repo: REPO, answer: { option: "B", note: "", at: now }, kept_at: now }]);

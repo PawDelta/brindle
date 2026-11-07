@@ -157,21 +157,24 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
   latest.current = { select, selected };
   const openVisual = useCallback((id: string) => latest.current.select(latest.current.selected, { kind: "visual", id }), []);
   // What waits on the person when the visual opened, by identity and wording: one that wasn't there
-  // (or left and came back) while it's open, and Back carries a sap badge until the next open.
-  const asked = useRef<Set<string>>(new Set());
+  // (or left and came back) while it's open, and Back carries a sap badge until the next open. A
+  // supervisor's question keeps one inbox row ("has a question") however often it asks, so each new
+  // autopilot.need_user on the bus (the question itself, its own event id) counts too.
+  const asked = useRef<{ items: Set<string>; question: number }>({ items: new Set(), question: 0 });
   const [asking, setAsking] = useState(false);
+  const question = useAppState((s) => s.recent.filter((e) => e.kind === "autopilot.need_user" && (e.root_id === root || (!!e.agent_id && members.has(e.agent_id)))).at(-1)?.id ?? 0);
   useEffect(() => {
     if (!visualId) return;
-    asked.current = new Set(waiting.map(askIdentity));
+    asked.current = { items: new Set(waiting.map(askIdentity)), question };
     setAsking(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visualId]);
   useEffect(() => {
     if (!visualId) return;
     const live = new Set(waiting.map(askIdentity));
-    if ([...live].some((k) => !asked.current.has(k))) setAsking(true);
-    asked.current = new Set([...asked.current].filter((k) => live.has(k)));
-  }, [waiting, visualId]);
+    if ([...live].some((k) => !asked.current.items.has(k)) || question > asked.current.question) setAsking(true);
+    asked.current = { items: new Set([...asked.current.items].filter((k) => live.has(k))), question: Math.max(question, asked.current.question) };
+  }, [waiting, visualId, question]);
   // A new HEAD the diff's own refresh found: readiness (an open PR's unpushed count) is read again.
   const head = changes.diff?.head;
   const seenHead = useRef(head);
