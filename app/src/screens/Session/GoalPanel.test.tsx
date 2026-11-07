@@ -143,15 +143,25 @@ describe("GoalPanel", () => {
     expect(screen.getByText("2. Screen renders")).toBeTruthy();
     expect(screen.getByText("npm run build")).toBeTruthy();
     expect(daemon.requests.find((r) => r.path === "/goal")?.query).toMatchObject({ repo: REPO, root: ROOT });
-    const docChoice = screen.getByRole("checkbox", { name: "Write an analysis doc for this goal" }) as HTMLInputElement;
-    for (const requested of [true, false]) {
-      fireEvent.click(docChoice);
-      await waitFor(() => expect(docChoice.checked).toBe(requested));
-      await waitFor(() => expect(docChoice.disabled).toBe(false));
-      expect(daemon.data.goal?.analysis_doc).toBe(requested);
-    }
+    // No raw checkbox, and no offer for a goal brindle did not flag.
+    expect(screen.queryByRole("checkbox")).toBeNull();
+    expect(screen.queryByTestId("analysis-offer")).toBeNull();
 
     expect(screen.queryByRole("switch")).toBeNull();
+    sync.stop();
+  });
+
+  it.each([[true, "Yes"], [false, "Not now"]])("offers an analysis doc once for a large goal; answer %s sets it", async (accepted, label) => {
+    const daemon = new FakeDaemon({ goal: { ...structuredClone(goal), analysis_offer: true } });
+    const store = createAppStore();
+    const sync = startSync({ client: daemon.client(), store, connect: daemon.connect });
+    render(<GoalPanel client={daemon.client()} repo={REPO} root={ROOT} store={store} />);
+
+    await waitFor(() => expect(screen.getByTestId("analysis-offer")).toBeTruthy());
+    expect(screen.getAllByTestId("analysis-offer")).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: label }));
+    await waitFor(() => expect(screen.queryByTestId("analysis-offer")).toBeNull());
+    expect(daemon.data.goal?.analysis_doc ?? false).toBe(accepted);
     sync.stop();
   });
 

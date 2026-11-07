@@ -150,6 +150,46 @@ def test_goal_doc_requires_a_request_and_is_briefed_once(requested, db, boss, ba
     assert autopilot._goal_doc_rule(db, "boss") == ""
 
 
+def _offer_open(db) -> bool:
+    from brindle.service.dto import GoalDTO
+
+    return GoalDTO.from_autopilot(db.get_autopilot("boss"), []).analysis_offer
+
+
+@pytest.mark.parametrize("count, goal, offered", [(2, "Fix the typo", False), (4, "Fix the typo", True),
+                                                   (3, "Redesign the sync architecture", True)])
+def test_large_goal_is_offered_a_doc_once_and_yes_turns_it_on(count, goal, offered, db, boss, monkeypatch):
+    from brindle.daemon import routes_actions
+
+    monkeypatch.setattr(autopilot, "_commit", lambda ws, tracked_only=False: "abc123")
+    monkeypatch.setattr(ab, "_entitled", lambda store=None: None)
+    db.add_autopilot("boss")
+    milestones = [(f"M{i}", "true", None) for i in range(count)]
+    autopilot.set_goal(db, "boss", goal, milestones)
+    assert _offer_open(db) is offered
+    if not offered:
+        return
+    autopilot.set_goal(db, "boss", goal, milestones)    # the same goal again keeps the one offer
+    routes_actions.goal_analysis_offer(db, {}, {"root": "boss", "accept": True})
+    assert (_offer_open(db), db.get_autopilot("boss").analysis_doc) == (False, 1)
+    autopilot.set_goal(db, "boss", goal, milestones)    # answered: never asked again for this goal
+    assert _offer_open(db) is False
+    with pytest.raises(autopilot.AutopilotError):
+        autopilot.resolve_analysis_offer(db, "boss", True)
+
+
+def test_not_now_keeps_the_doc_off_and_a_chat_request_still_turns_it_on(db, boss, monkeypatch):
+    monkeypatch.setattr(autopilot, "_commit", lambda ws, tracked_only=False: "abc123")
+    monkeypatch.setattr(ab, "_entitled", lambda store=None: None)
+    db.add_autopilot("boss")
+    milestones = [(f"M{i}", "true", None) for i in range(4)]
+    autopilot.set_goal(db, "boss", "Big goal", milestones)
+    autopilot.resolve_analysis_offer(db, "boss", False)
+    assert (_offer_open(db), db.get_autopilot("boss").analysis_doc) == (False, 0)
+    autopilot.set_goal(db, "boss", "Big goal", milestones, analysis_doc=True)   # the person asked in chat
+    assert db.get_autopilot("boss").analysis_doc == 1
+
+
 @pytest.mark.parametrize("via", ["app", "cli", "tool"])
 def test_person_can_request_and_cancel_a_goal_doc(via, db, boss, monkeypatch):
     from typer.testing import CliRunner

@@ -1125,6 +1125,16 @@ def goal_analysis_doc(db: DB, params: dict, body: Body) -> Any:
     return {"analysis_doc": requested}
 
 
+def goal_analysis_offer(db: DB, params: dict, body: Body) -> Any:
+    root, _ = _autopilot_root(db, body)
+    accept = _get(body, "accept", bool, required=True)
+    try:
+        autopilot.resolve_analysis_offer(db, root.id, accept)
+    except autopilot.AutopilotError as e:
+        raise ServiceError("stale", str(e), 409) from e
+    return {"accepted": accept}
+
+
 # -- decisions, coordinator, config, permissions -----------------------------------
 
 
@@ -2658,6 +2668,7 @@ ROUTES = [
     _post("/goal/check", check_goal),
     _post("/goal/enabled", enable_goal),
     _post("/goal/analysis-doc", goal_analysis_doc),
+    _post("/goal/analysis-offer", goal_analysis_offer),
     _post("/decisions", record_decision),
     _post("/coordinator/undo", coordinator_undo),
     _post("/kb/sources", add_kb_source),

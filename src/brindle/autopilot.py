@@ -697,6 +697,14 @@ def set_goal(db: DB, root_id: str, goal: str,
     if ap is None or ap.goal != goal.strip():
         fields["audit_history"] = None
         fields["analysis_doc"] = 0
+        # One offer per goal: brindle decides whether this goal deserves a doc.
+        from brindle.pro import analysis_brief
+
+        repos = {m[4] for m in milestones if len(m) > 4 and m[4]}
+        text = "\n".join([goal, detail or "", *(m[0] for m in milestones)])
+        fields["analysis_offer"] = ("open" if analysis_doc is not True and
+                                    analysis_brief.deserves_offer(len(milestones), max(len(repos), 1), text)
+                                    else None)
     if ap is None or ap.goal != goal.strip() or not ap.goal_sha:
         root = db.get_agent(root_id)
         ws = db.get_workspace(root.workspace_id) if root else None
@@ -727,7 +735,10 @@ def set_goal_analysis_doc(db: DB, root_id: str, requested: bool) -> None:
     ap = db.get_autopilot(root_id)
     if ap is None or not ap.goal:
         raise AutopilotError("no goal is set up for this session")
-    db.update_autopilot(root_id, analysis_doc=int(requested))
+    fields: dict[str, object] = {"analysis_doc": int(requested)}
+    if ap.analysis_offer == "open":      # the person answered another way: the offer is settled
+        fields["analysis_offer"] = "accepted" if requested else "dismissed"
+    db.update_autopilot(root_id, **fields)
     bus.publish_agent(db, "autopilot.goal", root_id)
     root = db.get_agent(root_id)
     ws = db.get_workspace(root.workspace_id) if root else None
@@ -738,6 +749,18 @@ def set_goal_analysis_doc(db: DB, root_id: str, requested: bool) -> None:
             brief = "\n\n".join(part for part in (_goal_doc_rule(db, root_id), brief) if part)
         if brief:
             db.enqueue(root_id, brief, None)
+
+
+def resolve_analysis_offer(db: DB, root_id: str, accept: bool) -> None:
+    """The person's answer to brindle's one-time analysis doc offer."""
+    ap = db.get_autopilot(root_id)
+    if ap is None or ap.analysis_offer != "open":
+        raise AutopilotError("this offer is no longer open")
+    if accept:
+        set_goal_analysis_doc(db, root_id, True)    # also settles the offer
+    else:
+        db.update_autopilot(root_id, analysis_offer="dismissed")
+        bus.publish_agent(db, "autopilot.goal", root_id)
 
 
 def _goal_doc_rule(db: DB, root_id: str) -> str:

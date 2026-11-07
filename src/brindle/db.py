@@ -159,7 +159,8 @@ CREATE TABLE IF NOT EXISTS milestone_phases (
 -- The person's per-goal doc request, outside the released autopilot table.
 CREATE TABLE IF NOT EXISTS goal_doc_requests (
     root_id TEXT PRIMARY KEY REFERENCES autopilot(root_id) ON DELETE CASCADE,
-    requested INTEGER NOT NULL
+    requested INTEGER NOT NULL,
+    offer TEXT                  -- brindle's one-time doc offer: open | accepted | dismissed
 );
 -- Repos attached to a session (brindle Pro multi_repo; see brindle.repos):
 -- assign/handoff may put workers there by alias.
@@ -1029,6 +1030,7 @@ class Autopilot:
     proposal: str | None = None        # JSON {checks, rules, at}: checks awaiting the user's answer
     external_wait: str | None = None   # JSON {pid, until, path, note}: an outside job
     analysis_doc: int | None = None    # the person requested a doc for this goal
+    analysis_offer: str | None = None  # the doc offer: open | accepted | dismissed (None: never made)
 
 
 @dataclass
@@ -1415,6 +1417,8 @@ class DB:
             self.conn.execute("ALTER TABLE tasks ADD COLUMN plan_first INTEGER")
         if "weight" not in task_cols:
             self.conn.execute("ALTER TABLE tasks ADD COLUMN weight TEXT")
+        if "offer" not in {r["name"] for r in self.conn.execute("PRAGMA table_info(goal_doc_requests)")}:
+            self.conn.execute("ALTER TABLE goal_doc_requests ADD COLUMN offer TEXT")
         if "analysis_doc" not in task_cols:
             self.conn.execute("ALTER TABLE tasks ADD COLUMN analysis_doc INTEGER")
         if "waiting" not in task_cols:
@@ -2582,9 +2586,10 @@ class DB:
         ap = _load(Autopilot, row) if row else None
         if ap:
             ap.enabled = 1  # Legacy off values no longer disable the goal driver.
-            request = self.conn.execute("SELECT requested FROM goal_doc_requests WHERE root_id=?",
+            request = self.conn.execute("SELECT requested, offer FROM goal_doc_requests WHERE root_id=?",
                                         (root_id,)).fetchone()
             ap.analysis_doc = request["requested"] if request else None
+            ap.analysis_offer = request["offer"] if request else None
         return ap
 
     def legacy_goal_owners(self) -> list[str]:
@@ -2603,6 +2608,7 @@ class DB:
 
     def update_autopilot(self, root_id: str, **fields: object) -> None:
         requested = fields.pop("analysis_doc", None)
+        offer = fields.pop("analysis_offer", "keep")
         cols = ", ".join(f"{k}=?" for k in fields)
         with self.tx() as c:
             if fields:
@@ -2611,6 +2617,9 @@ class DB:
                 c.execute("INSERT INTO goal_doc_requests (root_id, requested) VALUES (?,?) "
                           "ON CONFLICT(root_id) DO UPDATE SET requested=excluded.requested",
                           (root_id, requested))
+            if offer != "keep":
+                c.execute("INSERT INTO goal_doc_requests (root_id, requested, offer) VALUES (?,0,?) "
+                          "ON CONFLICT(root_id) DO UPDATE SET offer=excluded.offer", (root_id, offer))
         if "proposal" in fields:
             # Both the app and the terminal can settle proposed checks.
             bus.publish_agent(self, "checks.changed", root_id)
