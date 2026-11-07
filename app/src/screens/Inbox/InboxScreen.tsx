@@ -183,10 +183,12 @@ export function InboxScreen({ client, refresh, onOpen, onNavigate, session = nul
     const repo = root ? repoOf(root) : null;
     return root && repo ? { root, repo } : null;
   };
-  /* Go to session: the item's agent in its session, its provider screen and nothing over it
-     (`sheet`: Review & open PR over it, for a prepared PR's item). */
+  /* A visual decision opens its reader; other items open the agent or the requested sheet. */
   const goTo = (item: InboxItemDTO, sheet?: SheetRef) => {
     const where = sessionOf(item);
+    if (!sheet && item.kind === "visual" && item.visual_id) {
+      sheet = { kind: "visual", id: item.visual_id };
+    }
     if (where && onOpen) onOpen(where.root, where.repo, item.agent_id ?? undefined, ...(sheet ? [sheet] : []));
   };
 

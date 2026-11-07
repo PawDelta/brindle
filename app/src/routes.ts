@@ -53,7 +53,13 @@ export type Route =
   /* The plan, sign-in and spend (the sidebar's initials button): the Account tab; `section`
      "usage" (the sidebar's usage reading) the Usage tab. */
   | { screen: "account"; section?: "usage"; ask?: number }
-  | ({ screen: "session"; agent?: string; sheet?: SheetRef } & SessionRef);
+  | ({
+      screen: "session";
+      agent?: string;
+      sheet?: SheetRef;
+      /* A visual opened from the Inbox returns to the same filter on Back or Esc. */
+      visualFrom?: { screen: "inbox"; session?: string };
+    } & SessionRef);
 
 /* Settings' tabs, in order: everything the person sets, behind the sidebar's account entry. */
 export const SETTINGS_TABS = [
