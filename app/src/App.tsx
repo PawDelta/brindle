@@ -274,7 +274,7 @@ function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, p
 
   const noop = useCallback(() => Promise.resolve(), []);
   // The engine answered before and now doesn't (a restart): the last screen stays, under the reconnect overlay.
-  const reconnect = useReconnect(connection);
+  const { phase: reconnect, focusBefore } = useReconnect(connection);
   const away = reconnect !== "none";
   const held = reconnect === "shown" || reconnect === "long";
 
@@ -328,7 +328,7 @@ function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, p
           <TerminalPanel />
         </div>
         {client && <Walkthrough autoStart={firstRun} />}
-        <ReconnectOverlay phase={reconnect} onRetry={check} />
+        <ReconnectOverlay phase={reconnect} focusBefore={focusBefore} onRetry={check} />
       </div>
       </AppUpdateProvider>
     </TerminalProvider>

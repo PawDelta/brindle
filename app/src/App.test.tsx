@@ -558,6 +558,7 @@ describe("App", () => {
     const store = createAppStore();
     const sync = startSync({ client, store, connect: daemon.connect, backoff: () => 1000 });
     const advance = (ms: number) => act(async () => { await vi.advanceTimersByTimeAsync(ms); });
+    let inertBlurs: { mockRestore(): void } | null = null;
     try {
       renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO }} />);
       await advance(1000);
@@ -568,6 +569,21 @@ describe("App", () => {
       terminal.addEventListener("keydown", typed);
       const focused = within(nav()).getByTestId("inbox-link");
       focused.focus();
+      // Inert as a browser has it (jsdom doesn't): the moment the app goes inert, the focus leaves it for
+      // the body, before any effect runs, and nothing inert takes the focus back (React's own restore
+      // after its commit included). Where it was must be known from before that.
+      const setAttribute = Element.prototype.setAttribute;
+      const focus = HTMLElement.prototype.focus;
+      const inert = [
+        vi.spyOn(Element.prototype, "setAttribute").mockImplementation(function (this: Element, name: string, value: string) {
+          setAttribute.call(this, name, value);
+          if (name === "inert" && this.contains(document.activeElement)) (document.activeElement as HTMLElement).blur();
+        }),
+        vi.spyOn(HTMLElement.prototype, "focus").mockImplementation(function (this: HTMLElement, options?: FocusOptions) {
+          if (!this.closest("[inert]")) focus.call(this, options);
+        }),
+      ];
+      inertBlurs = { mockRestore: () => inert.forEach((s) => s.mockRestore()) };
 
       daemon.die();
       await advance(0);
@@ -618,7 +634,7 @@ describe("App", () => {
       await advance(1000);
       expect(paneWaits()).toBe(false);
       expect(screen.getByTestId("terminal").textContent).toBe("sup1");
-    } finally { sync.stop(); vi.useRealTimers(); }
+    } finally { inertBlurs?.mockRestore(); sync.stop(); vi.useRealTimers(); }
   });
 
   it("first launch with a signed-in CLI offers the permission presets", async () => {

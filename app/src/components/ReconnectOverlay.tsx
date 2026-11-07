@@ -9,7 +9,7 @@
    first connection that never opens, or a refused token, is the engine
    banner's (components/EngineBanner), not this. */
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type RefObject } from "react";
 import type { AppState } from "../store/store";
 import { button } from "./ui";
 
@@ -20,12 +20,17 @@ export const RECONNECT_LONG_MS = 30000;
 export type Reconnect = "none" | "quiet" | "shown" | "long";
 
 /* Where the reconnect is: "none" while connected (or before the engine
-   ever answered), "quiet" in the grace after a drop, then "shown", then "long". */
-export function useReconnect(connection: AppState["connection"]): Reconnect {
+   ever answered), "quiet" in the grace after a drop, then "shown", then "long".
+   `focusBefore`: what had the focus as the overlay was about to show, read
+   before the update that shows it, since that update makes the app inert
+   and the browser then moves the focus off it (to the body) before any
+   effect of the overlay's could read it. */
+export function useReconnect(connection: AppState["connection"]): { phase: Reconnect; focusBefore: RefObject<HTMLElement | null> } {
   const up = connection === "open";
   const refused = connection === "unauthorized";
   const [answered, setAnswered] = useState(up);
   const [phase, setPhase] = useState<Reconnect>("none");
+  const focusBefore = useRef<HTMLElement | null>(null);
   useEffect(() => {
     if (up) setAnswered(true);
   }, [up]);
@@ -35,14 +40,18 @@ export function useReconnect(connection: AppState["connection"]): Reconnect {
       return;
     }
     setPhase("quiet");
-    const shown = setTimeout(() => setPhase("shown"), RECONNECT_GRACE_MS);
+    const shown = setTimeout(() => {
+      const now = document.activeElement;
+      focusBefore.current = now instanceof HTMLElement && now !== document.body ? now : null;
+      setPhase("shown");
+    }, RECONNECT_GRACE_MS);
     const long = setTimeout(() => setPhase("long"), RECONNECT_LONG_MS);
     return () => {
       clearTimeout(shown);
       clearTimeout(long);
     };
   }, [up, refused, answered]);
-  return phase;
+  return { phase, focusBefore };
 }
 
 /* The overlay while it shows: a global shortcut of the app's own checks for it and stands down. */
@@ -55,14 +64,20 @@ const HELD = ["keydown", "keypress", "keyup", "beforeinput", "paste"] as const;
    (onto Try again once that's offered), Tab stays there, and keys or pastes aimed at the app under
    it (a terminal that had the focus, ⌘N's, ⌘V's window handlers) are held at the window before
    they reach anything. Gone, the focus goes back where it was. */
-export function ReconnectOverlay({ phase, onRetry }: { phase: Reconnect; /* Ask the engine now (the shell starts it again when it can). */ onRetry(): void }) {
+export function ReconnectOverlay({ phase, focusBefore, onRetry }: {
+  phase: Reconnect;
+  /* Where the focus goes back to (useReconnect's, read before the app went inert). */
+  focusBefore?: RefObject<HTMLElement | null>;
+  /* Ask the engine now (the shell starts it again when it can). */
+  onRetry(): void;
+}) {
   const visible = phase === "shown" || phase === "long";
   const layer = useRef<HTMLDivElement>(null);
   const box = useRef<HTMLElement>(null);
   const tryAgain = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     if (!visible) return;
-    const before = document.activeElement instanceof HTMLElement && document.activeElement !== document.body ? document.activeElement : null;
+    const before = focusBefore?.current ?? null;
     const hold = (e: Event) => {
       if (e.target instanceof Node && layer.current?.contains(e.target)) return;
       e.stopPropagation();
@@ -76,7 +91,7 @@ export function ReconnectOverlay({ phase, onRetry }: { phase: Reconnect; /* Ask 
       const now = document.activeElement;
       if (before?.isConnected && (!now || now === document.body || !now.isConnected)) before.focus();
     };
-  }, [visible]);
+  }, [visible, focusBefore]);
   useEffect(() => {
     if (phase === "long") tryAgain.current?.focus();
     else if (phase === "shown") box.current?.focus();
