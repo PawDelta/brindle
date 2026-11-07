@@ -1,0 +1,125 @@
+"""Inert, self-contained snapshots for downloads and cloud exports.
+
+The rendered DOM is untrusted, just like the published page. Only explicit
+elements and attributes survive; neither CSS nor SVG can fetch anything.
+"""
+
+from __future__ import annotations
+
+import base64
+import re
+from html import escape
+from html.parser import HTMLParser
+
+from brindle import visuals
+from brindle.db import DB
+from brindle.service.errors import ServiceError
+
+TAGS = set(("html head body title main section article header footer nav div span p br hr h1 h2 h3 h4 h5 h6 "
+            "ul ol li dl dt dd table thead tbody tfoot tr th td caption colgroup col pre code blockquote "
+            "strong em b i u s small sub sup figure figcaption img svg g path rect circle ellipse line "
+            "polyline polygon text tspan defs lineargradient radialgradient stop").split())
+VOID = {"br", "hr", "img", "col"}
+DROP = {"script", "style", "iframe", "object", "embed", "template", "math", "foreignobject"}
+ATTRS = set(("title alt width height colspan rowspan viewbox d x y x1 x2 y1 y2 cx cy r rx ry points "
+             "fill stroke stroke-width opacity transform offset stop-color font-size text-anchor").split())
+CSS = set(("color background-color font-size font-weight font-family text-align display margin padding "
+           "border border-radius width height max-width min-width gap grid-template-columns "
+           "flex-direction align-items justify-content").split())
+
+
+class _Snapshot(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.out: list[str] = []
+        self.stack: list[str] = []
+        self.hidden: list[str] = []
+
+    def handle_starttag(self, tag, attrs):
+        if self.hidden or tag in DROP:
+            if tag not in VOID and tag not in {"meta", "link", "input", "embed"}:
+                self.hidden.append(tag)
+            return
+        if tag not in TAGS:
+            return
+        safe = []
+        for key, value in attrs:
+            if value is None:
+                continue
+            if key == "style":
+                declarations = []
+                for declaration in value.split(";"):
+                    prop, _, val = declaration.partition(":")
+                    if prop.strip().lower() in CSS and re.fullmatch(r"[\w\s#.,%+\-/]+", val, re.ASCII):
+                        declarations.append(f"{prop.strip().lower()}:{val}")
+                value = ";".join(declarations)
+            elif key == "src" and tag == "img":
+                if not re.fullmatch(r"data:image/(?:png|jpeg|gif|webp);base64,[A-Za-z0-9+/=\s]+", value):
+                    continue
+            elif key not in ATTRS or re.search(r"url|[\\(@]", value, re.I):
+                continue
+            # SVG names are case sensitive in standalone HTML.
+            key = "viewBox" if key == "viewbox" else key
+            safe.append(f' {key}="{escape(value, quote=True)}"')
+        self.out.append(f"<{tag}{''.join(safe)}>")
+        if tag not in VOID:
+            self.stack.append(tag)
+
+    def handle_endtag(self, tag):
+        if self.hidden:
+            if tag in self.hidden:
+                del self.hidden[len(self.hidden) - 1 - self.hidden[::-1].index(tag):]
+            return
+        if tag in self.stack:
+            while self.stack:
+                top = self.stack.pop()
+                self.out.append(f"</{top}>")
+                if top == tag:
+                    break
+
+    def handle_data(self, data):
+        if not self.hidden:
+            self.out.append(escape(data))
+
+
+def sanitise(html: str) -> str:
+    parser = _Snapshot()
+    parser.feed(html)
+    parser.close()
+    return "".join(parser.out) + "".join(f"</{tag}>" for tag in reversed(parser.stack))
+
+
+def snapshot(db: DB, visual_id: str, rev: int, html: str, destination: str = "download",
+             *, markdown: str | None = None) -> dict:
+    """Validate the revision and destination before releasing any export bytes."""
+    v = visuals.get(db, visual_id)
+    if v["kind"] != "plan":
+        visuals.require_enabled()
+    visuals._unlocked(v["root_id"])
+    if type(rev) is not int or rev != v["rev"]:
+        raise ServiceError("stale", "the visual changed; open its new revision", 409)
+    if destination not in {"download", "google_docs", "sharepoint"}:
+        raise ServiceError("invalid", "unknown export destination")
+    if destination != "download":
+        from brindle.daemon.routes_actions import docs_org_api
+
+        policy = docs_org_api("GET", "policy", repo=v["repo_root"])
+        if destination not in policy.get("export_destinations", ["download"]):
+            raise ServiceError("forbidden", "the organisation does not allow this destination", 403)
+    content = markdown if markdown is not None else html
+    if not isinstance(content, str) or not content.strip() or len(content.encode()) > visuals.MAX_BYTES:
+        raise ServiceError("invalid", "the snapshot is missing or too large")
+    if markdown is not None and v["kind"] != "plan":
+        raise ServiceError("invalid", "only a plan exports markdown")
+    answer = v.get("answer")
+    visuals._refuse_secrets([("the snapshot", content), ("the title", v["title"]),
+                             ("the answer", answer.get("note") if answer else None)])
+    if markdown is None:
+        content = sanitise(content)
+        if answer:
+            content += f'<footer>You picked {escape(answer["option"])} · {escape(answer["note"])}</footer>'
+    visuals._refuse_secrets([("the export", content)])
+    extension, mime = ("md", "text/markdown") if markdown is not None else ("html", "text/html")
+    name = re.sub(r"[^A-Za-z0-9_-]+", "-", v["title"]).strip("-") or "visual"
+    return {"filename": f"{name}.{extension}", "mime": mime,
+            "content_b64": base64.b64encode(content.encode()).decode()}

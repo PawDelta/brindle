@@ -22,11 +22,12 @@ export const sameSource = (a: VisualSource, b: VisualSource): boolean =>
   a.kind === b.kind && a.id === b.id && (a.kind === "kept" || (b.kind === "session" && a.rev === b.rev));
 
 /* What a page may post to the host (the wave-1 contract's frame → host). A snapshot is worker 5's (export). */
-export type FrameMessage = { type: "choice"; option: string } | { type: "brindle.esc" };
+export type FrameMessage = { type: "choice"; option: string } | { type: "brindle.esc" } | { type: "brindle.snapshot"; html: string };
 
 export function frameMessage(data: unknown): FrameMessage | null {
   if (!data || typeof data !== "object") return null;
-  const m = data as { type?: unknown; option?: unknown };
+  const m = data as { type?: unknown; option?: unknown; html?: unknown };
+  if (m.type === "brindle.snapshot" && typeof m.html === "string") return { type: "brindle.snapshot", html: m.html };
   if (m.type === "brindle.esc") return { type: "brindle.esc" };
   if (m.type === "choice" && typeof m.option === "string") return { type: "choice", option: m.option };
   return null;
@@ -35,6 +36,8 @@ export function frameMessage(data: unknown): FrameMessage | null {
 export interface VisualFrameProps {
   source: VisualSource;
   title: string;
+  /* An increment asks the shell to post the current rendered outerHTML. */
+  snapshotRequest?: number;
   /* A message the page posted, and the visual the host saw it come from. */
   onMessage(data: unknown, from: VisualSource): void;
 }
