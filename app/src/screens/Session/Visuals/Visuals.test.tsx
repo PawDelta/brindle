@@ -445,11 +445,11 @@ describe("visuals", () => {
       const aside = sidebar();
       // The person folds the open session's agents away; Back must find them still folded.
       fireEvent.click(await within(aside).findByRole("button", { name: "Hide sup1's agents" }));
-      // The header uses an icon and an unread dot, without exposing the old count text.
+      // The header uses an icon without exposing the old count text or an unread dot.
       const entry = await screen.findByTestId("visuals-button");
       expect(entry.querySelector("svg")).toBeTruthy();
       expect(entry.textContent).toBe("");
-      expect(within(entry).getByLabelText("unread")).toBeTruthy();
+      expect(within(entry).queryByLabelText("unread")).toBeNull();
       needUser(1, "Which database should the cache use?");
       ask(supervisorAsks);
       fireEvent.click(entry);
@@ -468,7 +468,7 @@ describe("visuals", () => {
       expect(screen.getByTestId("terminal")).toBe(terminal);
       expect(screen.queryByRole("complementary", { name: "Sidebar" })).toBeNull();
       expect(screen.queryByRole("button", { name: /Visuals/ })).toBeNull();
-      // Opened, it's read: the header's dot goes, with no event on the bus to say so.
+      // Opening marks it read, though the header remains icon-only either way.
       await waitFor(() => expect(within(screen.getByTestId("visuals-button")).queryByLabelText("unread")).toBeNull());
       expect(screen.getByTestId("visuals-button").querySelector("svg")).toBeTruthy();
       expect(screen.getByTestId("visuals-button").textContent).toBe("");

@@ -33,19 +33,17 @@ export function VisualsButton({ visuals, onOpen }: { visuals: VisualDTO[] | null
   if (!visuals || visuals.length === 0) return null;
   const pending = visuals.filter((v) => !decided(v));
   const done = visuals.filter(decided);
-  const unread = visuals.some((v) => v.unread);
   const pick = (id: string) => {
     setOpen(false);
     onOpen(id);
   };
   return (
     <div ref={box} className="relative">
-      <button type="button" className={`${button} relative !gap-0 p-1.5 text-ink-2 hover:bg-sap/10 hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sap`} aria-label="Visuals" title={unread ? "Visuals · 1 new" : "Visuals"} aria-expanded={open} aria-haspopup="true" data-testid="visuals-button" onClick={() => setOpen((o) => !o)}>
+      <button type="button" className={`${button} relative !gap-0 p-1.5 text-ink-2 hover:bg-sap/10 hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sap`} aria-label="Visuals" title="Visuals" aria-expanded={open} aria-haspopup="true" data-testid="visuals-button" onClick={() => setOpen((o) => !o)}>
         <svg aria-hidden="true" viewBox="0 0 20 20" className="size-4" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
           <path d="M4 2.75h8l4 4v10.5H4z" />
           <path d="M12 2.75v4h4M7 14v-2m3 2V9m3 5v-4" />
         </svg>
-        {unread && <span className="absolute right-1 top-1 size-1.5 rounded-full bg-sap" aria-label="unread" />}
       </button>
       {open && (
         <div className={`${panel} absolute right-0 top-full z-20 mt-1 flex w-80 flex-col gap-px p-1`} role="group" aria-label="Visuals" data-testid="visuals-panel">
