@@ -323,6 +323,8 @@ def handle_hook(db, agent_id: str, event: str, payload: dict) -> dict | None:
             db.update_agent(agent_id, stop_blocked=0)
             if agent.mode == "interactive":
                 autopilot.user_spoke(db, agent)
+        if payload.get("invocationNum", 0) == 0:
+            agents.note_turn_started(db, agent_id)   # a stopped delivery's outcome: unknown from here
         return None
     if event == "agy-post-tool":
         agents.handle_hook(db, agent_id, "tool-done", base)

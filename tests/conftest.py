@@ -225,6 +225,15 @@ def test_tmux_server(monkeypatch):
     _START_TEST_SERVER[:] = [keeper]
 
 
+@pytest.fixture(autouse=True)
+def nobody_typing(monkeypatch):
+    """No person pressed a key in any agent's pane lately (tmux.pane_input):
+    a fake agent's pane is on the default server, which tests never ask."""
+    from brindle import tmux
+
+    monkeypatch.setattr(tmux, "pane_input", lambda *a, **k: None, raising=False)
+
+
 @pytest.fixture(scope="session", autouse=True)
 def private_tmux_server():
     """Run every test's tmux sessions on a private server, so parallel test
