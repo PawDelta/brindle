@@ -4340,8 +4340,10 @@ def _script_items(tokens: list[tuple]) -> list[tuple]:
             items.append(("for", words[1].raw, words[3:] if len(words) > 2 else None, before in ("|", "|&")))
             continue
         if first in ("done", "fi", "}"):
-            # Piped, and given input in its redirections (done < file, } >out <<EOF): all of it reads that.
-            items.append(("kw", first, after in ("|", "|&"), any(_gives_input(token) for token in toks[1:])))
+            # Piped, and given input in its redirections (done < file, } >out <<EOF): all of it reads that;
+            # and whether it runs in a subshell of its own (piped on, or a background job).
+            items.append(("kw", first, after in ("|", "|&"), any(_gives_input(token) for token in toks[1:]),
+                          after in ("|", "|&", "&")))
             toks = toks[1:]
             if not toks:
                 continue
@@ -4359,11 +4361,13 @@ def _script_items(tokens: list[tuple]) -> list[tuple]:
 
 def _script_tree(items: list[tuple], i: int = 0, stops: tuple[str, ...] = ()) -> tuple[list[tuple], int]:
     """Nodes from ``items[i:]`` up to a reserved word in ``stops``:
-    ``("cmd", ...)``, ``("for", name, values, body, fed)``, ``("maybe", body,
-    fed)`` for what may run any number of times (if, while, until) and
-    ``("group", body, piped, fed)`` (piped: a pipeline's part, in a subshell of
-    its own). ``fed``: a pipe runs into it, or its closing word's redirections
-    give it input. Raises ValueError for a structure left open."""
+    ``("cmd", ...)``, ``("for", name, values, body, fed, apart)``, ``("maybe",
+    body, fed, apart)`` for what may run any number of times (if, while, until)
+    and ``("group", body, piped, fed, apart)`` (piped: a pipeline's part, in a
+    subshell of its own). ``fed``: a pipe runs into it, or its closing word's
+    redirections give it input; ``apart``: it runs in a subshell of its own (a
+    pipeline's part, ( ... ), a background job). Raises ValueError for a
+    structure left open."""
     def expect(i: int, word: str) -> int:
         if i >= len(items) or items[i][:2] != ("kw", word):
             raise _Malformed(f"no {word}")
@@ -4380,12 +4384,12 @@ def _script_tree(items: list[tuple], i: int = 0, stops: tuple[str, ...] = ()) ->
         elif item[0] == "for":
             body, i = _script_tree(items, expect(i + 1, "do"), ("done",))
             i = expect(i, "done")
-            nodes.append(("for", item[1], item[2], body, item[3] or items[i - 1][3]))
+            nodes.append(("for", item[1], item[2], body, item[3] or items[i - 1][3], item[3] or items[i - 1][4]))
         elif item[1] in ("while", "until"):
             cond, i = _script_tree(items, i + 1, ("do",))
             body, i = _script_tree(items, expect(i, "do"), ("done",))
             i = expect(i, "done")
-            nodes.append(("maybe", cond + body, item[2] or items[i - 1][3]))
+            nodes.append(("maybe", cond + body, item[2] or items[i - 1][3], item[2] or items[i - 1][4]))
         elif item[1] == "if":
             body: list[tuple] = []
             while True:
@@ -4398,11 +4402,12 @@ def _script_tree(items: list[tuple], i: int = 0, stops: tuple[str, ...] = ()) ->
                 branch, i = _script_tree(items, i + 1, ("fi",))
                 body += branch
             i = expect(i, "fi")
-            nodes.append(("maybe", body, item[2] or items[i - 1][3]))
+            nodes.append(("maybe", body, item[2] or items[i - 1][3], item[2] or items[i - 1][4]))
         elif item[1] == "{":
             body, i = _script_tree(items, i + 1, ("}",))
             i = expect(i, "}")
-            nodes.append(("group", body, item[2] or items[i - 1][2], item[2] or items[i - 1][3]))
+            nodes.append(("group", body, item[2] or items[i - 1][2], item[2] or items[i - 1][3],
+                          item[2] or items[i - 1][4]))
         else:
             raise _Malformed(f"a stray {item[1]}")
     if stops:
@@ -4551,33 +4556,37 @@ class _Flattener:
                 self.scope = kept
                 continue
             self.changed = True
-            if node[0] == "group":
-                # Not definite: it may be skipped (false && { ... }), backgrounded or in a subshell (piped),
-                # so what it assigns isn't known afterwards.
-                kept = self.scope
-                if node[2]:    # ( ... ), or { ... } in a pipeline: a subshell
-                    self.scope = kept + (next(self.ids),)
-                self.walk(node[1], env, False, chains and not node[2], fed or node[3])
-                self.scope = kept
-                continue
-            fed_in = fed or node[-1]
-            body = node[3] if node[0] == "for" else node[1]
-            values = self.loop_values(node[2], env) if node[0] == "for" else []
-            assigned = _assigned_in(body)
-            if assigned is None:
-                env.clear()
-            for name in assigned or ():
-                env.pop(name, None)    # a later pass sees what an earlier one set
-            if node[0] == "maybe":
-                self.walk(body, env, False, False, fed_in)
-                continue
-            for value in dict.fromkeys(values):
-                if value is None:
-                    env.pop(node[1], None)
-                else:
-                    env[node[1]] = value
-                self.walk(body, env, False, False, fed_in)
-            env.pop(node[1], None)
+            kept = self.scope
+            if node[-1]:    # ( ... ), a piped or backgrounded group, loop or if: a subshell of its own
+                self.scope = kept + (next(self.ids),)
+            self.compound(node, env, chains, fed)
+            self.scope = kept
+
+    def compound(self, node: tuple, env: dict, chains: bool, fed: bool) -> None:
+        """A group, loop or if (_script_tree's nodes), walked in the current scope."""
+        if node[0] == "group":
+            # Not definite: it may be skipped (false && { ... }), backgrounded or in a subshell (piped),
+            # so what it assigns isn't known afterwards.
+            self.walk(node[1], env, False, chains and not node[2], fed or node[3])
+            return
+        fed_in = fed or node[-2]
+        body = node[3] if node[0] == "for" else node[1]
+        values = self.loop_values(node[2], env) if node[0] == "for" else []
+        assigned = _assigned_in(body)
+        if assigned is None:
+            env.clear()
+        for name in assigned or ():
+            env.pop(name, None)    # a later pass sees what an earlier one set
+        if node[0] == "maybe":
+            self.walk(body, env, False, False, fed_in)
+            return
+        for value in dict.fromkeys(values):
+            if value is None:
+                env.pop(node[1], None)
+            else:
+                env[node[1]] = value
+            self.walk(body, env, False, False, fed_in)
+        env.pop(node[1], None)
 
     def loop_values(self, words: list[_Word] | None, env: dict) -> list[tuple | None]:
         """What a for loop's variable takes, in order (None: unknown)."""
@@ -4983,31 +4992,38 @@ class _PartReader:
         """
         tokens: list[tuple] = []
         _script_tokens(command, credential_scan=True, partial=tokens)
+        # The simple commands between separators, and arrays' lists (f=(...): words, not commands).
+        entries: list[tuple[str, list[tuple], str]] = []
         chunk: list[tuple] = []
-        case_patterns: list[bool] = []
-        outer, piped = self.scope, False    # ( ... ), a pipeline's parts and & jobs: subshells
         array: list[tuple] | None = None
         for token in [*tokens, ("op", ";", False)]:
             if token[0] != "op" or token[1] not in (*_SCRIPT_SEPARATORS, ";;", "(", ")"):
                 chunk.append(token)
-                continue
-            if array is not None:    # an array's list, up to its ): words, not a command
+            elif array is not None:
                 array += chunk
                 if token[1] == ")":
-                    self.arrays.append(([t[1].raw for t in array if t[0] == "word"], self.dotglob()))
+                    entries.append(("array", array, ")"))
                     array = None
+            elif token[1] == "(" and chunk and chunk[-1][0] == "word" and re.fullmatch(r"[A-Za-z_]\w*\+?=",
+                                                                                         chunk[-1][1].raw):
+                array = []
+            else:
+                entries.append(("cmd", chunk, token[1]))
+            if token[0] == "op" and token[1] in (*_SCRIPT_SEPARATORS, ";;", "(", ")"):
                 chunk = []
+        # The subshells, as spans of entries: ( ... ), and a group, loop or if piped or put in the background.
+        spans = self.subshell_spans(entries)
+        outer = self.scope
+        case_patterns: list[bool] = []
+        for k, (kind, chunk, sep) in enumerate(entries):
+            before = entries[k - 1][2] if k else ""
+            own = (next(self.ids),) if before in ("|", "|&") or sep in ("|", "|&", "&") else ()
+            self.scope = outer + tuple(found for start, end, found in spans if start <= k <= end) + own
+            if kind == "array":
+                self.arrays.append(([t[1].raw for t in chunk if t[0] == "word"], self.dotglob()))
                 continue
-            if token[1] == "(" and chunk and chunk[-1][0] == "word" and re.fullmatch(r"[A-Za-z_]\w*\+?=",
-                                                                                     chunk[-1][1].raw):
-                array, chunk = [], []
-                continue
-            shell = self.scope
-            if piped or token[1] in ("|", "|&", "&"):
-                self.scope = shell + (next(self.ids),)
-            piped = token[1] in ("|", "|&")
             while chunk and chunk[0][0] == "word" and chunk[0][1].plain() in (*_SCRIPT_OPENERS, "!"):
-                chunk.pop(0)
+                chunk = chunk[1:]
             head = chunk[0][1].plain() if chunk and chunk[0][0] == "word" else None
             if head == "case":
                 case_patterns.append(True)
@@ -5019,16 +5035,38 @@ class _PartReader:
                     self.part(line, False)
                 except ValueError:
                     pass
-            self.scope = shell
-            if token[1] == "(" and not case_patterns:
-                self.scope = shell + (next(self.ids),)
-            elif token[1] == ")" and not case_patterns and len(self.scope) > len(outer):
-                self.scope = self.scope[:-1]
-            if case_patterns and token[1] == ")":
+            if case_patterns and sep == ")":
                 case_patterns[-1] = False
-            elif case_patterns and token[1] == ";;":
+            elif case_patterns and sep == ";;":
                 case_patterns[-1] = True
-            chunk = []
+        self.scope = outer
+
+    def subshell_spans(self, entries: list[tuple[str, list[tuple], str]]) -> list[tuple[int, int, int]]:
+        """scan()'s subshells as (first entry, last entry, id), outermost first."""
+        spans: list[tuple[int, int, int]] = []
+        opened: list[tuple[int, bool]] = []    # a group, loop or if: where, and whether a pipe runs into it
+        parens: list[int] = []
+        cases = 0
+        for k, (kind, chunk, sep) in enumerate(entries):
+            if kind != "cmd":
+                continue
+            before = entries[k - 1][2] if k else ""
+            words = [t[1].plain() for t in chunk if t[0] == "word"]
+            leading = list(itertools.takewhile(lambda w: w in (*_SCRIPT_OPENERS, "!"), words))
+            opened += [(k, before in ("|", "|&")) for w in leading if w in ("{", "if", "while", "until")]
+            rest = words[len(leading):]
+            if rest[:1] == ["for"]:
+                opened.append((k, before in ("|", "|&")))
+            cases += (rest[:1] == ["case"]) - (rest[:1] == ["esac"] and cases > 0)
+            if rest[:1] in (["}"], ["done"], ["fi"]) and opened:
+                start, piped = opened.pop()
+                if piped or sep in ("|", "|&", "&"):
+                    spans.append((start, k, next(self.ids)))
+            if sep == "(" and not cases:
+                parens.append(k + 1)
+            elif sep == ")" and not cases and parens:
+                spans.append((parens.pop(), k, next(self.ids)))
+        return sorted(spans)
 
     def read(self, command: str, definite: bool = True, chains: bool = True) -> None:
         """``command``'s parts; ``definite``: whether it surely runs in this
