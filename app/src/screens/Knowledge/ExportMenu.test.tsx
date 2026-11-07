@@ -73,16 +73,20 @@ describe("ExportMenu", () => {
       expect(await blob!.text()).toBe(content);
       if (mode === "reader") return;
       if (mode === "free") {
-        expect(screen.queryByRole("button", { name: "Google Docs" })).toBeNull();
-        expect(screen.queryByRole("button", { name: "SharePoint" })).toBeNull();
+        // Off Pro the online destinations show, greyed, with a Pro badge; Download is for everyone.
+        for (const name of ["Google Drive", "SharePoint"]) {
+          const gated = await screen.findByRole("button", { name }) as HTMLButtonElement;
+          expect(gated.disabled).toBe(true);
+          expect(gated.textContent).toContain("Pro");
+        }
         return;
       }
     }
-    fireEvent.click(await screen.findByRole("button", { name: "Google Docs" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Google Drive" }));
     if (stale) {
       view.rerender(<ExportMenu client={client} source={{ ...source, id: "v2" }} session={session} onSaid={() => undefined} />);
       release();
-      await waitFor(() => expect((screen.getByRole("button", { name: "Google Docs" }) as HTMLButtonElement).disabled).toBe(false));
+      await waitFor(() => expect((screen.getByRole("button", { name: "Google Drive" }) as HTMLButtonElement).disabled).toBe(false));
       expect(requests).toHaveLength(0);
       return;
     }
@@ -94,6 +98,7 @@ describe("ExportMenu", () => {
     expect(body).toContain(content);
     await waitFor(() => expect((screen.getByRole("button", { name: "SharePoint" }) as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(screen.getByRole("button", { name: "SharePoint" }));
+    fireEvent.click(screen.getByRole("button", { name: "Find" }));
     fireEvent.click(await screen.findByRole("button", { name: "Save here" }));
     await waitFor(() => expect(requests.some((r) => r.init?.method === "PUT")).toBe(true));
     const sharepoint = requests.find((r) => r.init?.method === "PUT")!;
@@ -103,9 +108,9 @@ describe("ExportMenu", () => {
   });
 
   it.each([
-    ["policy excludes SharePoint", ["download", "google_docs"] as ExportDestination[], BOTH, "Google Docs", "SharePoint"],
+    ["policy excludes SharePoint", ["download", "google_docs"] as ExportDestination[], BOTH, "Google Drive", "SharePoint"],
     ["policy leaves downloads out", ["sharepoint"] as ExportDestination[], BOTH, "SharePoint", "Word"],
-    ["no client id for a provider", ALL, { ...BOTH, microsoft_client_id: null }, "Google Docs", "SharePoint"],
+    ["no client id for a provider", ALL, { ...BOTH, microsoft_client_id: null }, "Google Drive", "SharePoint"],
   ])("only offers what is allowed: %s", async (_, export_destinations, config, shown, hidden) => {
     const client = { exportDoc: vi.fn(), docPolicy: vi.fn().mockResolvedValue({ export_destinations }), docExportConfig: vi.fn().mockResolvedValue(config) };
     render(<ExportMenu client={client} id="d1" onSaid={() => undefined} />);

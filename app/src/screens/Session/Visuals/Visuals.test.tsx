@@ -11,7 +11,6 @@ import { FakeDaemon } from "../../../test/fakeDaemon";
 import { REPO, question, root, waiting } from "../../../test/fixtures";
 import { standInViews } from "../../../test/panes";
 import type { VisualsClient } from "./client";
-import { FOCUS_KEY, setFocus } from "./focus";
 import { VisualFrame, type VisualFrameProps, type VisualSource } from "./frame";
 import { StoreContext } from "../../../store/useStore";
 import { VisualReader } from "./VisualReader";
@@ -56,7 +55,6 @@ beforeEach(() => {
 });
 afterEach(() => {
   cleanup();
-  setFocus(false);
   native.enabled = false;
   native.events.clear();
   document.documentElement.style.removeProperty("--canvas");
@@ -101,7 +99,7 @@ describe("visuals", () => {
     await waitFor(() => expect(native.invoke).toHaveBeenCalledWith("visual_post", { label: delivery.label, message: expect.objectContaining({ type: "brindle.theme", vars: expect.objectContaining({ "--canvas": "#123456" }) }) }));
     document.documentElement.style.setProperty("--canvas", "#abcdef");
     await waitFor(() => expect(native.invoke).toHaveBeenCalledWith("visual_post", { label: delivery.label, message: expect.objectContaining({ vars: expect.objectContaining({ "--canvas": "#abcdef" }) }) }));
-    fireEvent.click(screen.getByRole("button", { name: "Export ▾" }));
+    fireEvent.click(screen.getByRole("button", { name: "Export" }));
     await waitFor(() => expect(native.invoke).toHaveBeenCalledWith("visual_snapshot", { label: delivery.label }));
     deliver("visual:message", { ...delivery, message: { type: "brindle.snapshot", html: "<html><body>Flow</body></html>" } });
     const menu = await screen.findByRole("group", { name: "Export as" });
@@ -111,7 +109,7 @@ describe("visuals", () => {
     bounds = { ...bounds, y: bounds.y + 80, height: bounds.height - 80 };
     await act(async () => layouts.forEach((layout) => layout()));
     expect(native.invoke).toHaveBeenCalledWith("visual_set_bounds", { label: delivery.label, bounds });
-    fireEvent.click(screen.getByRole("button", { name: "Export ▾" }));
+    fireEvent.click(screen.getByRole("button", { name: "Export" }));
     fireEvent.click(screen.getByTestId("visual-back"));
     await waitFor(() => expect(native.invoke).toHaveBeenCalledWith("visual_close", { label: delivery.label }));
     expect(native.events.size).toBe(0);
@@ -153,7 +151,7 @@ describe("visuals", () => {
     view.unmount();
   });
 
-  it("opens from the header in the chat's place with the sidebar as a rail, Focus hides it and is remembered, and Esc returns to the same terminal", async () => {
+  it("opens from the header over the whole window with the sidebar hidden, and Esc or Back returns to the same sidebar and terminal", async () => {
     const session: SessionDTO = { id: "sup1", workspace_id: "proj", profile: "supervisor", status: "idle", mode: "interactive", created_at: now - 600, goal: "Ship it" };
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root] });
     const client = daemon.client();
@@ -178,6 +176,7 @@ describe("visuals", () => {
       );
       const terminal = await screen.findByTestId("terminal", {}, { timeout: 4000 });
       const sidebar = () => screen.getByRole("complementary", { name: "Sidebar" });
+      const aside = sidebar();
       // The header's count is the visuals still open; the decided one is folded away in the list.
       const entry = await screen.findByTestId("visuals-button");
       expect(entry.textContent).toContain("1");
@@ -191,14 +190,15 @@ describe("visuals", () => {
       expect(within(list).getByTestId("visual-row-v_old")).toBeTruthy();
       fireEvent.click(within(list).getByTestId("visual-row-v_8f2c"));
 
-      // The reader in the chat's place; the terminal still mounted under it, hidden; the sidebar a rail.
+      // The reader takes the window; the terminal still mounted under it, hidden; the sidebar and the session's bar out of sight.
       expect(screen.getByTestId("visual-reader")).toBeTruthy();
       // Browser development keeps the frame placeholder without calling the desktop shell.
       expect(screen.getByTestId("visual-frame").dataset.src).toBe("brindle-visual://v_8f2c/r2");
       expect(native.invoke).not.toHaveBeenCalled();
       expect(screen.getByTestId("chat-area").className).toContain("hidden");
       expect(screen.getByTestId("terminal")).toBe(terminal);
-      expect(sidebar().dataset.mode).toBe("rail");
+      expect(screen.queryByRole("complementary", { name: "Sidebar" })).toBeNull();
+      expect(screen.queryByRole("button", { name: /Visuals/ })).toBeNull();
       // Opened, it's read: the header's dot goes, with no event on the bus to say so.
       await waitFor(() => expect(within(screen.getByTestId("visuals-button")).queryByLabelText("unread")).toBeNull());
       expect(read).toHaveBeenCalledTimes(1);
@@ -212,32 +212,30 @@ describe("visuals", () => {
       fireEvent.click(screen.getByTestId("visual-keep"));
       await waitFor(() => expect(screen.getByTestId("visual-keep").getAttribute("aria-pressed")).toBe("true"));
 
-      // Focus hides the sidebar down to its edge handle, and the device remembers it.
-      fireEvent.click(screen.getByTestId("visual-focus"));
-      expect(screen.getByTestId("sidebar-handle")).toBeTruthy();
-      expect(screen.queryByRole("complementary", { name: "Sidebar" })).toBeNull();
-      expect(localStorage.getItem(FOCUS_KEY)).toBe("1");
-
-      // Esc: the chat back, the same terminal, the full sidebar.
+      // Esc: the chat back, the same terminal, the very sidebar it left (never unmounted, so as it was).
       act(() => void window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })));
       expect(screen.queryByTestId("visual-reader")).toBeNull();
       expect(screen.getByTestId("chat-area").className).not.toContain("hidden");
       expect(screen.getByTestId("terminal")).toBe(terminal);
+      expect(sidebar()).toBe(aside);
       expect(within(sidebar()).getByTestId("tree-session-sup1")).toBeTruthy();
 
-      // Opened again, Focus is still on; the handle brings the rail back.
+      // Opened again, the sidebar hides again.
       fireEvent.click(screen.getByTestId("visuals-button"));
       fireEvent.click(within(screen.getByTestId("visuals-panel")).getByTestId("visual-row-v_8f2c"));
-      fireEvent.click(screen.getByTestId("sidebar-handle"));
-      expect(sidebar().dataset.mode).toBe("rail");
+      expect(screen.queryByRole("complementary", { name: "Sidebar" })).toBeNull();
       // A fresh open starts the badge over; another ask taking the open one's place (the same count) badges it.
       expect(screen.queryByTestId("visual-back-asking")).toBeNull();
       ask({ ...waiting, agent_id: "sup1", workspace_id: "proj" });
       expect(screen.getByTestId("visual-back-asking")).toBeTruthy();
 
-      // Knowledge › Kept visuals: the kept copy opens in the same reader, read-only, on its own scheme path.
+      // Back, the button: the same sidebar and terminal again.
       vi.spyOn(client, "keptVisuals").mockResolvedValue([{ id: "k_1", title: "Release flow", from_session_name: "Ship it", repo: REPO, answer: { option: "B", note: "", at: now }, kept_at: now }]);
-      act(() => void window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })));
+      fireEvent.click(screen.getByTestId("visual-back"));
+      expect(sidebar()).toBe(aside);
+      expect(screen.getByTestId("terminal")).toBe(terminal);
+
+      // Knowledge › Kept visuals: the kept copy opens in the same reader, read-only, on its own scheme path.
       fireEvent.click(within(sidebar()).getByRole("button", { name: "Knowledge" }));
       fireEvent.click(await screen.findByRole("tab", { name: /Kept visuals/ }));
       fireEvent.click(await screen.findByTestId("kept-k_1"));

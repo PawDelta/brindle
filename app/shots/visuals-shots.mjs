@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 /* Screenshots of the in-app visualizer in a browser (dev only), over the fake daemon:
      node shots/visuals-shots.mjs --out <dir>
-   Six states x light/dark at 1440px. The child webview exists only in the Tauri shell, so the
+   Eight states x light/dark at 1440px. The child webview exists only in the Tauri shell, so the
    reader shows its placeholder frame. The Export menu needs a snapshot the child webview would
-   post; for that one shot only, a second server swaps in a frame that posts a stub snapshot. */
+   post; for its shots only, a second server swaps in a frame that posts a stub snapshot. The
+   last one opens the page with ?free=1, where the policy answers 402 as it does off Pro. */
 
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -40,11 +41,11 @@ async function serve(stub) {
   return { server, base: server.resolvedUrls.local[0].replace(/\/$/, "") };
 }
 
-async function open(browser, base, theme) {
+async function open(browser, base, theme, extra = "") {
   const ctx = await browser.newContext({ viewport: { width: 1440, height: 960 }, colorScheme: theme });
   const page = await ctx.newPage();
   page.on("pageerror", (e) => console.log("pageerror", e.message));
-  await page.goto(`${base}/shots/visuals.html?theme=${theme}`);
+  await page.goto(`${base}/shots/visuals.html?theme=${theme}${extra}`);
   await page.waitForSelector("html[data-ready]", { timeout: 30000 });
   await page.waitForSelector('[data-testid="visuals-button"]', { timeout: 15000 });
   return { ctx, page };
@@ -73,17 +74,31 @@ try {
           await page.fill('input[aria-label="Add a note"]', "CI is the gate we already trust");
           await settle();
           await shot("4-answer-chosen");
-          await page.click('[data-testid="visual-focus"]');
+          await page.click('[data-testid="visual-keep"]');
           await settle();
-          await shot("3-focus");
+          await shot("3-kept");
         } else {
-          await page.click('[data-testid="visuals-button"]');
-          await page.click('[data-testid="visual-row-v_8f2c"]');
-          await page.waitForSelector('[data-testid="visual-reader"]');
-          await page.click('button:has-text("Export")');
-          await page.waitForSelector("text=Download", { timeout: 5000 }).catch(() => {});
+          const exporting = async (p) => {
+            await p.click('[data-testid="visuals-button"]');
+            await p.click('[data-testid="visual-row-v_8f2c"]');
+            await p.waitForSelector('[data-testid="visual-reader"]');
+            await p.click('[data-testid="visual-export"]');
+            await p.waitForSelector('[data-testid="export-menu"]', { timeout: 5000 });
+          };
+          await exporting(page);
           await settle();
           await shot("6-export-menu");
+          await page.click('button[aria-label="SharePoint"]');
+          await page.fill('input[aria-label="Find a SharePoint site"]', "Release");
+          await settle();
+          await shot("7-export-sharepoint");
+          // Off Pro: the online destinations greyed, with their Pro badge.
+          const free = await open(browser, base, theme, "&free=1");
+          await exporting(free.page);
+          await settle();
+          await free.page.screenshot({ path: resolve(out, `8-export-pro-${theme}.png`) });
+          console.log(`8-export-pro-${theme}.png`);
+          await free.ctx.close();
         }
         await ctx.close();
       }

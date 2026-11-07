@@ -42,7 +42,6 @@ import { goalPhase, useGoal } from "../screens/Session/GoalPanel";
 import { UNKNOWN } from "../screens/Session/review";
 import { agentIds, sessionTree, type AgentNode } from "../screens/Session/tree";
 import { useContinue } from "../screens/Session/useContinue";
-import type { SidebarMode } from "../screens/Session/Visuals/focus";
 import { waitingCount } from "../store/appUpdates";
 import { AppUpdatePill } from "./AppUpdateBanner";
 import { cliStatus, formatAge, isPaused, type CliStatus } from "../store/overview";
@@ -608,69 +607,7 @@ function Handle({ height, onChange }: { height: number; onChange(next: number): 
   );
 }
 
-/* While a visual is open (design/visualizer-build-plan.html §2): the rail, 52px, keeps the Inbox
-   count and one dot per live session (sap while it asks the person), the one on screen ringed. */
-function Rail({ route, navigate }: Pick<SidebarProps, "route" | "navigate">) {
-  const { repos, sessions } = useSessions();
-  const total = useAppState(waitingCount);
-  const inbox = useAppState((s) => s.inbox);
-  const live = (repos ?? []).flatMap((repo) => (sessions[repo.repo_root] ?? []).filter((s) => !isPaused(s)).map((session) => ({ session, repo: repo.repo_root })));
-  return (
-    <aside className="side flex w-[52px] shrink-0 flex-col items-center gap-[10px] border-r border-line bg-canvas-2 py-[14px] text-[13px] text-ink" aria-label="Sidebar" data-mode="rail" data-testid="sidebar-rail">
-      <button
-        type="button"
-        className={`flex flex-col items-center rounded-md px-1 py-1 hover:bg-surface-2 ${total > 0 ? "font-semibold text-ink" : "text-ink-3"}`}
-        aria-label={total > 0 ? `Inbox, ${total} needing you` : "Inbox"}
-        data-testid="inbox-link"
-        onClick={() => navigate({ screen: "inbox" })}
-      >
-        <span aria-hidden>⌂</span>
-        {total > 0 && <span className="side-nb" data-testid="inbox-badge">{total}</span>}
-      </button>
-      <div className="h-px w-6 bg-line" role="separator" />
-      <nav aria-label="Sessions" className="flex flex-col items-center gap-1.5">
-        {live.map(({ session, repo }) => {
-          const here = route.screen === "session" && route.root === session.id;
-          const asks = inbox.some((i) => i.root_id === session.id);
-          return (
-            <button
-              key={session.id}
-              type="button"
-              className={`flex size-6 items-center justify-center rounded-full ${here ? "ring-1 ring-branch" : "hover:bg-surface-2"}`}
-              aria-label={`${session.name || session.id}${asks ? ", asks you" : ""}`}
-              aria-current={here ? "page" : undefined}
-              title={session.name || session.id}
-              data-testid={`rail-session-${session.id}`}
-              onClick={() => navigate({ screen: "session", root: session.id, repo, agent: session.id })}
-            >
-              <Dot tone={asks ? "wait" : "idle"} />
-            </button>
-          );
-        })}
-      </nav>
-    </aside>
-  );
-}
-
-/* Focus: everything but the visual goes; a thin handle on the left edge brings the rail back, with
-   a sap dot while something asks the person. */
-function EdgeHandle({ onShow }: { onShow(): void }) {
-  const total = useAppState(waitingCount);
-  return (
-    <button type="button" className="relative w-[6px] shrink-0 border-r border-line bg-canvas-2 hover:bg-surface-2" aria-label="Show the sidebar" title="Show the sidebar (⌘.)" data-mode="hidden" data-testid="sidebar-handle" onClick={onShow}>
-      {total > 0 && <span className="absolute left-0 top-s3 size-1.5 rounded-full bg-sap" aria-hidden />}
-    </button>
-  );
-}
-
-/* `mode`: full, or the rail and the edge handle while a visual is open (screens/Session/Visuals/focus.ts). */
-export function Sidebar({ mode = "full", onShow, ...props }: SidebarProps & { mode?: SidebarMode; onShow?(): void }) {
-  if (mode === "rail") return <Rail route={props.route} navigate={props.navigate} />;
-  if (mode === "hidden") return <EdgeHandle onShow={onShow ?? (() => undefined)} />;
-  return <FullSidebar {...props} />;
-}
-
-function FullSidebar({ route, navigate, refresh, openUrl }: SidebarProps) {
+export function Sidebar({ route, navigate, refresh, openUrl }: SidebarProps) {
   const { repos, sessions, error: feedError, closeError, close, after } = useSessions();
   const [cursor, setCursor] = useState<string | null>(null);
   const [folded, setFolded] = useState<Set<string>>(new Set());
