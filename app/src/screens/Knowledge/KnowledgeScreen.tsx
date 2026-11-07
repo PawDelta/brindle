@@ -34,6 +34,7 @@ import { formatAge } from "../../store/overview";
 import { StoreContext, useAppState } from "../../store/useStore";
 import { DocsView } from "./DocsView";
 import { ImportedLibrary } from "./ImportedLibrary";
+import { KeptVisuals } from "./KeptVisuals";
 import { MapView } from "./MapView";
 
 export interface KnowledgeScreenProps {
@@ -57,6 +58,7 @@ const TABS: [KnowledgeView, string][] = [
   ["docs", "Docs"],
   ["imported", "Imported"],
   ["decisions", "Decisions"],
+  ["kept", "Kept visuals"],
 ];
 
 const message = (e: unknown) => plain(e instanceof Error ? e.message : String(e));
@@ -562,6 +564,7 @@ export function KnowledgeScreen({ client, pickFolder, view, doc, session, onBack
         ))}
       </div>
       {tab === "map" && <MapView key={repo} client={client} repo={repo ?? undefined} decisions={decisions ?? []} sources={sources ?? []} />}
+      {tab === "kept" && <KeptVisuals client={client} />}
       {tab === "docs" && <DocsView client={client} repo={repo ?? undefined} session={session} onBack={onBackToSession} doc={typeof doc === "string" ? doc : undefined} pickFolder={pickFolder} />}
       {local && repos && repos.length === 0 && <p className="text-ink-3">{NO_REPO}</p>}
       {local && loadError && (
