@@ -191,9 +191,27 @@ def begin_input(db: DB, agent: Agent, expires_at: float | None = None) -> int:
     with db.tx() as c:
         if expires_at is not None and time.time() >= expires_at:
             raise ServiceError("stale", "this input observation expired", 409)
-        row = c.execute("INSERT INTO visual_input_state VALUES (?,1,0) ON CONFLICT(root_id) "
-                        "DO UPDATE SET generation=generation+1, sequence=0 RETURNING generation",
+        row = c.execute("INSERT INTO visual_input_state VALUES (?,1,0,1) ON CONFLICT(root_id) "
+                        "DO UPDATE SET generation=generation+1, observer=generation+1, sequence=0 RETURNING generation",
                         (agent.id,)).fetchone()
+        return row["generation"]
+
+
+def refresh_input(db: DB, agent: Agent, observer: int, expires_at: float | None = None) -> int:
+    """Read the current message context without replacing the terminal's registration.
+
+    A direct message invalidates old context snapshots, while the same open
+    terminal can snapshot the new context for its next submission. A replaced
+    terminal cannot acquire a fresh context using its old observer identity.
+    """
+    visuals.require_enabled()
+    with db.tx() as c:
+        if expires_at is not None and time.time() >= expires_at:
+            raise ServiceError("stale", "this input observation expired", 409)
+        row = c.execute("SELECT generation FROM visual_input_state WHERE root_id=? AND observer=?",
+                        (agent.id, observer)).fetchone()
+        if row is None:
+            raise ServiceError("stale", "this terminal observer was superseded", 409)
         return row["generation"]
 
 
@@ -217,8 +235,9 @@ def person_spoke(db: DB, agent: Agent, text: str, *, expires_at: float | None = 
             if not changed:
                 raise ServiceError("stale", "this input observation was superseded", 409)
         else:
-            # Direct person messages and provider hooks also supersede older terminal input.
-            c.execute("UPDATE visual_input_state SET generation=generation+1, sequence=0 WHERE root_id=?",
+            # Invalidate snapshots taken before this message, retaining the
+            # open observer and its sequence ordering for future submissions.
+            c.execute("UPDATE visual_input_state SET generation=generation+1 WHERE root_id=?",
                       (root.id,))
         c.execute("UPDATE visual_offers SET state='answered', changed_at=? WHERE root_id=? AND state='open'",
                   (time.time(), root.id))

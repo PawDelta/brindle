@@ -880,7 +880,8 @@ CREATE TABLE IF NOT EXISTS visual_grants (
 CREATE TABLE IF NOT EXISTS visual_input_state (
     root_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
     generation INTEGER NOT NULL,
-    sequence INTEGER NOT NULL
+    sequence INTEGER NOT NULL,
+    observer INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS visual_requests (
     root_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
@@ -1322,6 +1323,10 @@ class DB:
 
     def _migrate(self) -> None:
         """Bring databases created by older versions up to the current schema."""
+        input_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(visual_input_state)")}
+        if "observer" not in input_cols:
+            self.conn.execute("ALTER TABLE visual_input_state ADD COLUMN observer INTEGER NOT NULL DEFAULT 0")
+            self.conn.execute("UPDATE visual_input_state SET observer=generation")
         grant_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(visual_grants)")}
         if "scope" not in grant_cols:
             self.conn.execute("ALTER TABLE visual_grants ADD COLUMN scope TEXT NOT NULL DEFAULT 'visual'")

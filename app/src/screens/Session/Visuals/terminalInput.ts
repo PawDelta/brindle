@@ -6,13 +6,13 @@ const RECORD_WINDOW = 250;
 /* Observe the person's submitted input, never the terminal's output or agent deliveries.
    The native and WSL PTYs share this opener. Unknown editor operations (history,
    completion, etc.) are not treated as chat submissions or guessed consent. */
-export function withVisualInput(client: Pick<DaemonClient, "visualInput" | "beginVisualInput">, agent: string, open: PtyViewOpener, enabled: () => boolean = () => true): PtyViewOpener {
+export function withVisualInput(client: Pick<DaemonClient, "visualInput" | "beginVisualInput" | "refreshVisualInput">, agent: string, open: PtyViewOpener, enabled: () => boolean = () => true): PtyViewOpener {
   return (at, size, handlers) => {
     const view = open(at, size, handlers);
     let draft = "", pending = "", cursor = 0;
     let valid = true, paste = false, closed = false;
     let held: { release(): void } | null = null;
-    let generation: Promise<number> | null = null;
+    let observer: Promise<number> | null = null;
     let sequence = 0;
     const submitted = (data: string): string[] => {
       pending += data;
@@ -87,18 +87,22 @@ export function withVisualInput(client: Pick<DaemonClient, "visualInput" | "begi
         };
         held = { release };
         alarm = setTimeout(release, RECORD_WINDOW);
-        let usedGeneration: Promise<number> | null = null;
+        let usedObserver: Promise<number> | null = null;
         // Native IPC may ignore AbortSignal. The engine checks both expiry
         // and persisted generation/sequence inside the consent transaction.
         void (async () => {
-          usedGeneration = generation ??= client.beginVisualInput(agent, expiresAt, controller.signal).then(r => r.generation);
-          const currentGeneration = await usedGeneration;
+          usedObserver = observer ??= client.beginVisualInput(agent, expiresAt, controller.signal).then(r => r.generation);
+          const registration = await usedObserver;
+          if (controller.signal.aborted) return;
+          // Context changes on direct person messages. Read it for this
+          // submission rather than caching it across the terminal's lifetime.
+          const { generation } = await client.refreshVisualInput(agent, registration, expiresAt, controller.signal);
           for (const message of messages) {
             if (controller.signal.aborted) break;
             await client.visualInput(agent, message.text, expiresAt, controller.signal,
-              { generation: currentGeneration, sequence: message.sequence });
+              { generation, sequence: message.sequence });
           }
-        })().catch(() => { if (generation === usedGeneration) generation = null; }).finally(release);
+        })().catch(() => { if (observer === usedObserver) observer = null; }).finally(release);
       },
       close() { closed = true; held?.release(); view.close(); },
     };

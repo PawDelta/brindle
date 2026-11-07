@@ -437,7 +437,7 @@ describe("SessionScreen", () => {
     const { daemon, sync, term } = mount({ sup1: live }, { workspaces: [codex] }, daemon => async (input, init) => {
       if (String(input).endsWith("/meta")) return Response.json({ ...(await (await daemon.fetch(input, init)).json()), visuals: enabled });
       if (String(input).endsWith("/visual-input")) {
-        if (JSON.parse(String(init?.body)).begin) return Response.json({ generation: 1 });
+        if (JSON.parse(String(init?.body)).begin || JSON.parse(String(init?.body)).refresh) return Response.json({ generation: 1 });
         bytesAtRecording = daemon.viewers("sup1")[0].written.join("");
         submitted.push(JSON.parse(String(init?.body)).text);
         await new Promise<void>(ok => { release = ok; });

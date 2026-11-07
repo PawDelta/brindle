@@ -1567,6 +1567,13 @@ export class DaemonClient {
     });
   }
 
+  refreshVisualInput(root: string, observer: number, expiresAt: number, signal?: AbortSignal) {
+    return this.request<{ generation: number }>(this.url(`${this.sessionPath(root)}/visual-input`), {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ refresh: observer, expires_at: expiresAt }), signal,
+    });
+  }
+
   resolveVisualOffer(root: string, offer: string, accept: boolean) {
     return this.post<{ accepted: boolean }>(`${this.sessionPath(root)}/visual-offer`, { offer, accept });
   }

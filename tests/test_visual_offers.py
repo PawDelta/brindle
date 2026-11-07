@@ -9,11 +9,12 @@ from brindle.service.errors import ServiceError
 
 def terminal_input(client, root):
     path = f"/v1/sessions/{root}/visual-input"
-    generation = client.post(path, json={"begin": True}).json()["generation"]
+    observer = client.post(path, json={"begin": True}).json()["generation"]
     sequence = 0
     def send(text, **fields):
         nonlocal sequence
         sequence += 1
+        generation = client.post(path, json={"refresh": observer}).json()["generation"]
         return client.post(path, json={"text": text, "generation": generation, "sequence": sequence, **fields})
     return send
 
@@ -194,9 +195,35 @@ def test_superseded_terminal_observation_cannot_restore_consent(db, session):
             visuals.publish(db, worker, "Superseded", "<p>no</p>")
         # A replaced view's larger sequence cannot override the new view either.
         next_generation = client.post(path, json={"begin": True}).json()["generation"]
+        assert client.post(path, json={"refresh": generation}).status_code == 409
         assert client.post(path, json={**older, "generation": next_generation}).status_code == 200
         assert client.post(path, json={**newer, "sequence": 99}).status_code == 409
         visuals.publish(db, worker, "Current view", "<p>yes</p>")
+
+
+def test_open_terminal_records_cancellation_after_direct_person_message(db, session):
+    boss, worker = session
+    token = "t" * 43
+    with TestClient(build_app(token), headers={"Authorization": f"Bearer {token}"}) as client:
+        send = terminal_input(client, boss.id)
+        assert send("Make a visual").status_code == 200
+        old_context = db.conn.execute("SELECT generation FROM visual_input_state WHERE root_id=?", (boss.id,)).fetchone()[0]
+        agents.send_message(db, boss.id, "Use blue for the labels", person=True)
+        path = f"/v1/sessions/{boss.id}/visual-input"
+        # An observation already holding the old snapshot remains superseded.
+        assert client.post(path, json={"text": "Make a visual", "generation": old_context, "sequence": 2}).status_code == 409
+        assert send("Don't make a visual").status_code == 200
+        with pytest.raises(ServiceError):
+            visuals.publish(db, worker, "Cancelled after direct message", "<p>no</p>")
+        agents.send_message(db, boss.id, "Use red for the labels", person=True)
+        offers.offer(db, boss, "Which layout?", "layout")
+        assert send("2").status_code == 200
+        assert offers.current(db, boss.id) is None
+        agents.send_message(db, boss.id, "Use green for the labels", person=True)
+        assert send("Make a visual").status_code == 200
+        visuals.publish(db, worker, "Fresh ask", "<p>yes</p>")
+        with pytest.raises(ServiceError):
+            visuals.publish(db, worker, "No second ask", "<p>no</p>")
 
 
 def test_initial_person_prompt_is_observed_before_provider_launch(db, repo, monkeypatch):
@@ -221,9 +248,12 @@ def test_legacy_unscoped_grants_are_revoked(db, session):
 
     boss, _ = session
     agents.send_message(db, boss.id, "Make a visual", person=True)
+    observer = offers.begin_input(db, boss)
     db.conn.execute("ALTER TABLE visual_grants DROP COLUMN scope")
+    db.conn.execute("ALTER TABLE visual_input_state DROP COLUMN observer")
     reopened = DB(db.path)
     try:
+        assert offers.refresh_input(reopened, boss, observer) == observer
         with pytest.raises(ServiceError):
             with reopened.tx() as c:
                 offers.consume(c, boss.id)

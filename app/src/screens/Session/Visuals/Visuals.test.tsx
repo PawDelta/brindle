@@ -52,12 +52,56 @@ afterEach(() => {
 });
 
 describe("visuals", () => {
+  it("refreshes context after direct messages without replaying a superseded submission", async () => {
+    vi.useFakeTimers();
+    let context = 1, lastSequence = 0, registrations = 0;
+    let granted = false, hold = false;
+    let resolveSnapshot: (() => void) | undefined;
+    const seen: string[] = [];
+    const open = withVisualInput({
+      beginVisualInput: async () => { registrations++; return { generation: 1 }; },
+      refreshVisualInput: async () => {
+        const snapshot = context;
+        if (hold) { hold = false; await new Promise<void>(ok => { resolveSnapshot = ok; }); }
+        return { generation: snapshot };
+      },
+      visualInput: async (_id, text, _expires, _signal, observation) => {
+        seen.push(text);
+        if (observation?.generation !== context || observation.sequence <= lastSequence) throw new Error("superseded");
+        lastSequence = observation.sequence;
+        granted = text === "Make a visual";
+        return { observed: true };
+      },
+    }, "codex", () => ({ write() {}, resize() {}, focus() {}, close() {} }));
+    const view = open({ server: null, target: "%1" }, { cols: 80, rows: 24 }, { onData() {}, onExit() {}, onError() {} });
+    try {
+      view.write("Make a visual\r");
+      await act(async () => undefined);
+      expect(granted).toBe(true);
+      context++; // Direct person message: same terminal, new message context.
+      view.write("Don't make a visual\r");
+      await act(async () => undefined);
+      expect(granted).toBe(false);
+      expect(registrations).toBe(1);
+      view.write("Make a visual\r");
+      await act(async () => undefined);
+      hold = true;
+      view.write("Don't make a visual\r");
+      await act(async () => undefined);
+      view.write("Make a visual\r");
+      await act(async () => undefined);
+      await act(async () => resolveSnapshot?.());
+      expect(granted).toBe(true);
+      expect(seen).toHaveLength(4);
+    } finally { view.close(); vi.useRealTimers(); }
+  });
+
   it.each(["interrupt", "deadline", "cancellation"])("recovers the PTY from pending consent recording on %s", async (how) => {
     vi.useFakeTimers();
     const bytes: string[] = [];
     let signal: AbortSignal | undefined;
     const observations: { generation: number; sequence: number }[] = [];
-    const open = withVisualInput({ beginVisualInput: async () => ({ generation: 1 }), visualInput: (_id, _text, _expiry, given, observation) => {
+    const open = withVisualInput({ beginVisualInput: async () => ({ generation: 1 }), refreshVisualInput: async () => ({ generation: 1 }), visualInput: (_id, _text, _expiry, given, observation) => {
       signal ??= given; observations.push(observation!); return new Promise(() => {});
     } }, "codex",
       () => ({ write(data) { bytes.push(data); }, resize() {}, focus() {}, close() {} }));
@@ -86,7 +130,7 @@ describe("visuals", () => {
   it("observes Codex PTY submissions before forwarding Enter, including edits, pastes and uncertain history", async () => {
     const submitted: string[] = [], bytes: string[] = [];
     let recorded: (() => void) | undefined;
-    const open = withVisualInput({ beginVisualInput: async () => ({ generation: 1 }), visualInput: async (_id, text) => {
+    const open = withVisualInput({ beginVisualInput: async () => ({ generation: 1 }), refreshVisualInput: async () => ({ generation: 1 }), visualInput: async (_id, text) => {
       submitted.push(text);
       await new Promise<void>(ok => { recorded = ok; });
       return { observed: true };

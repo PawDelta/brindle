@@ -77,6 +77,9 @@ def visual_input(db: DB, params: dict, body: dict) -> Any:
         raise ServiceError("invalid", "expires_at must be a finite timestamp", 400)
     if _get(body, "begin", bool):
         return {"generation": visual_offers.begin_input(db, agent, expires_at)}
+    observer = _get(body, "refresh", int)
+    if observer is not None:
+        return {"generation": visual_offers.refresh_input(db, agent, observer, expires_at)}
     text = _get(body, "text", required=True)
     if len(text) > 32000:
         raise ServiceError("invalid", "input is too long", 400)
