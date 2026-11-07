@@ -80,6 +80,25 @@ class _Server(MCPServer):
             result.content.append(TextContent(type="text", text=STALE_NOTICE))
         return result
 
+    async def _handle_list_tools(self, ctx, params):
+        self.client_session = ctx.session   # what tools/list_changed goes out on (notify_tools_changed)
+        return await super()._handle_list_tools(ctx, params)
+
+    async def notify_tools_changed(self) -> bool:
+        """Tell the client its tool list changed (the visuals setting flipped):
+        to its `subscriptions/listen` streams, and on the connection itself
+        for a client of the older handshake protocol (the SDK drops that copy
+        where a listen stream is the way). False before the client has
+        listed tools: nothing to refresh."""
+        from mcp.shared.subscriptions import ToolsListChanged
+
+        session = getattr(self, "client_session", None)
+        if session is None:
+            return False
+        await self._subscriptions.publish(ToolsListChanged())
+        await session.send_tool_list_changed()
+        return True
+
     async def list_tools(self):
         from brindle import visuals
 
@@ -1952,8 +1971,11 @@ def _wants_reload(reloaded: bool) -> bool:
 
 
 async def _run_server(read_stream, write_stream) -> None:
+    from mcp.server.lowlevel import NotificationOptions
+
     server = mcp._lowlevel_server
-    await server.run(read_stream, write_stream, server.create_initialization_options())
+    await server.run(read_stream, write_stream,
+                     server.create_initialization_options(NotificationOptions(tools_changed=True)))
 
 
 async def _serve_stdio(handover) -> None:
@@ -1965,6 +1987,20 @@ async def _serve_stdio(handover) -> None:
 
 
 INSTALL_WATCH_INTERVAL = 5.0   # seconds between an idle server's looks at its install
+
+
+async def _watch_visuals(wait) -> None:
+    """Each INSTALL_WATCH_INTERVAL, send tools/list_changed when the visuals
+    capability flipped (the person's setting changed in the app) so the client
+    re-lists tools: publish_visual and the rest appear or go without a reconnect."""
+    from brindle import visuals
+
+    shown = visuals.enabled()
+    while True:
+        await wait(INSTALL_WATCH_INTERVAL)
+        now = visuals.enabled()
+        if now != shown and await mcp.notify_tools_changed():
+            shown = now
 
 
 async def _serve(conn, wait=None) -> None:
@@ -1991,6 +2027,7 @@ async def _serve(conn, wait=None) -> None:
 
     async with anyio.create_task_group() as tg:
         tg.start_soon(watch_install)
+        tg.start_soon(_watch_visuals, wait)
         await conn.serve(_run_server)
         tg.cancel_scope.cancel()
 

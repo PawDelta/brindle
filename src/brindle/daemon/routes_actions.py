@@ -1316,7 +1316,8 @@ def patch_user_settings(db: DB, params: dict, body: Body) -> Any:
     ~/.brindle/config.json; its other keys are kept."""
     from brindle import config
 
-    allowed = {"visuals": ("on", "off"), "claude_permission_mode": PERMISSION_MODES,
+    allowed = {"visuals": ("on", "off"), "visuals_enabled": ("on", "off"),
+               "claude_permission_mode": PERMISSION_MODES,
                "opencode_permission_mode": config.OPENCODE_PERMISSION_MODES}
     changes = {key: _get(body, key) for key in allowed if body.get(key) is not None}
     if not changes:
@@ -1329,7 +1330,8 @@ def patch_user_settings(db: DB, params: dict, body: Body) -> Any:
     if "visuals" in changes:
         bus.publish(db, "visual.offers_setting")
     return {"visuals": config.visuals_setting(), "claude_permission_mode": config.claude_permission_mode(),
-            "opencode_permission_mode": config.opencode_permission_mode()}
+            "opencode_permission_mode": config.opencode_permission_mode(),
+            "visuals_enabled": "on" if config.visuals_enabled_setting() else "off"}
 
 
 def put_debug(db: DB, params: dict, body: Body) -> Any:
