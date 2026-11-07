@@ -38,10 +38,16 @@ def test_single_release_approval_precedes_credentials(workflow, gate_condition):
 @pytest.mark.variant("release workflow and shell build assets are outside Python coverage")
 def test_intel_builds_on_apple_silicon():
     root = Path(__file__).resolve().parents[1]
-    job = yaml.safe_load((root / ".github/workflows/app-release.yml").read_text())["jobs"]["macos"]
-    matrix = job["strategy"]["matrix"]["include"]
-    assert {row["target"] for row in matrix} == {"aarch64-apple-darwin", "x86_64-apple-darwin"}
-    assert all(row["runner"] == "macos-latest" for row in matrix)
+    workflow = yaml.safe_load((root / ".github/workflows/app-release.yml").read_text())
+    job = workflow["jobs"]["macos"]
+    matrix = job["strategy"]["matrix"]["arch"]
+    assert "'[\"aarch64\"]'" in matrix and "'[\"aarch64\",\"x86_64\"]'" in matrix
+    assert 'TARGET: ${{ matrix.arch }}-apple-darwin' in yaml.safe_dump(job)
+    publish = workflow["jobs"]["macos-publish"]
+    combine = next(step for step in publish["steps"] if step.get("name") == "Combine (latest.json)")["run"]
+    assert 'arches=(aarch64)' in combine and 'if $include_x64 == "2"' in combine
+    release_publish = (root / "app/scripts/release_publish.mjs").read_text()
+    assert 'for (const arch of ["aarch64"])' in release_publish
     steps = {step.get("id", step.get("name")): step for step in job["steps"]}
     assert "--install-rosetta" in steps["Runner architecture"]["run"]
     smoke = steps["Binary architectures"]["run"]

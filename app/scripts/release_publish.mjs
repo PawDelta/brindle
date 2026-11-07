@@ -30,7 +30,6 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const ARCHES = ["aarch64", "x86_64"];
 /** The workflows a release-branch build needs green for its commit, by path. */
 export const REQUIRED = [".github/workflows/ci.yml", ".github/workflows/app.yml"];
 /** Of those, the ones a commit may have no run of: ci.yml ignores app-only pushes. */
@@ -192,7 +191,7 @@ export function promotion(current, next, descends) {
 }
 
 /**
- * Check both Mac builds in `dir` against the identity and write latest.json and build.json into dir/<name>.
+ * Check the Apple Silicon Mac build in `dir` and write latest.json and build.json into dir/<name>.
  * @param {string} dir
  * @param {{ version: string, name: string, path: string, site: string, sha: string, runId: string, attempt: string }} build
  */
@@ -207,7 +206,7 @@ export function verify(dir, { version, name, path, site, sha, runId, attempt }) 
   const base = `${site}/${path}`;
   /** @type {Record<string, { signature: string, url: string }>} */
   const platforms = {};
-  for (const arch of ARCHES) {
+  for (const arch of ["aarch64"]) {
     const statusFile = join(dir, `macos-${arch}.status.json`);
     if (!existsSync(statusFile)) throw new Error(`no ${arch} build`);
     const status = JSON.parse(readFileSync(statusFile, "utf8"));
@@ -235,7 +234,7 @@ export function verify(dir, { version, name, path, site, sha, runId, attempt }) 
   writeFileSync(join(files, "latest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
   const build = { version, package_version: version.split("+")[0], commit: sha, run_id: runId, run_attempt: attempt, path };
   writeFileSync(join(files, "build.json"), `${JSON.stringify(build, null, 2)}\n`);
-  for (const arch of ARCHES) rmSync(join(dir, `macos-${arch}.status.json`));
+  rmSync(join(dir, "macos-aarch64.status.json"));
   return manifest;
 }
 
