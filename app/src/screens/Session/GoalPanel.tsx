@@ -529,30 +529,27 @@ export function GoalPanel({ client, repo, root, store, compact = false, onReview
         {docSummary.total} {docSummary.total === 1 ? "doc" : "docs"} · writing {docSummary.writing}, using {docSummary.using} →
       </button>
     ) : null;
-  const docChoice = !finished ? (
-    <label className="flex items-center gap-s1 text-xs text-ink-2">
-      <input
-        type="checkbox"
-        checked={goal.analysis_doc ?? false}
-        disabled={docSaving}
-        onChange={(event) => {
-          const requested = event.currentTarget.checked;
-          setDocSaving(true);
-          setActionError(null);
-          void client.setGoalAnalysisDoc(root, requested).then(
-            () => {
-              if (activeSession.current === session) void refresh();
-            },
-            (e: unknown) => {
-              if (activeSession.current === session) setActionError(message(e));
-            },
-          ).finally(() => {
-            if (activeSession.current === session) setDocSaving(false);
-          });
-        }}
-      />
-      Write an analysis doc for this goal
-    </label>
+  /* brindle's one-time offer of an analysis doc for a large goal: a small question, the same shape as the visual offer. */
+  const answerDocOffer = (offer: string, accept: boolean) => {
+    setDocSaving(true);
+    setActionError(null);
+    void client.resolveAnalysisOffer(root, offer, accept).then(
+      () => {
+        if (activeSession.current === session) void refresh();
+      },
+      (e: unknown) => {
+        if (activeSession.current === session) setActionError(message(e));
+      },
+    ).finally(() => {
+      if (activeSession.current === session) setDocSaving(false);
+    });
+  };
+  const docChoice = !finished && goal.analysis_offer ? (
+    <div className="inline-flex items-center gap-s1 self-start rounded-full border border-dashed border-line px-s2 text-xs text-ink-2" data-testid="analysis-offer">
+      <span>Write an analysis doc for this goal?</span>
+      <button type="button" disabled={docSaving} onClick={() => answerDocOffer(goal.analysis_offer!, true)}>Yes</button>
+      <button type="button" disabled={docSaving} onClick={() => answerDocOffer(goal.analysis_offer!, false)}>Not now</button>
+    </div>
   ) : null;
   /* Done's step: close the session, one click, nothing asked. Beside the status in the full view; in the sidebar
      a quiet text button under the milestones, aligned with their names. */
