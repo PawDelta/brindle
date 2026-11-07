@@ -230,6 +230,7 @@ def test_legacy_agents_without_a_recorded_identity_are_unaffected(db, ws, who, l
     assert tasks.unmet_dependencies(db, db.find_workspaces(ws.repo_root)[0], ["w1"]) == []
 
 
+@pytest.mark.variant("identity boundary bypasses: renamed organizations, reused names, and AWS role/account changes")
 @pytest.mark.parametrize("was, now, locked", [
     (ACME, "claude org Acme Corp (org-1)", False),   # the org renamed: same org id
     (ACME, "claude org Acme (org-2)", True),         # same name, another org: still locked

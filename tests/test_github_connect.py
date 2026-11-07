@@ -438,6 +438,7 @@ def test_under_the_app_only_the_helper_daemon_holds_the_token_and_the_rest_ask_i
     assert github_connect.main(["get"]) == 0 and capsys.readouterr().out == stop
 
 
+@pytest.mark.variant("locked-keychain bypass: real Security.framework must refuse reads and writes without a dialog")
 @pytest.mark.skipif(sys.platform != "darwin", reason="Security.framework is macOS's")
 def test_keychain_item_reads_back_for_its_maker_and_a_locked_keychain_refuses_without_asking(tmp_path):
     # A keychain file of the test's own, never the person's: made here, deleted here.

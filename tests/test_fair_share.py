@@ -40,15 +40,27 @@ def queued(db, root, at, ws="w", depends_on=None):
     return db.get_task(t.id)
 
 
-def test_fair_share_session_over_its_share_queues_while_another_has_work(rows):
+def _session_capacity(rows, monkeypatch, competing):
+    config.forget_user("machine_max_workers")
+    busy = [3.0]
+    monkeypatch.setattr(spawn, "_cores", lambda: 4)
+    monkeypatch.setattr(spawn, "_load", lambda: busy[0])
     session(rows, "a", running=3)
-    session(rows, "b")
     mine = queued(rows, "a", at=1.0)
-    theirs = queued(rows, "b", at=2.0)
-    assert tasks.task_wait(rows, mine) is not None   # one slot left, and b's queued work goes first
-    assert tasks.task_wait(rows, theirs) is None
+    if competing:
+        session(rows, "b")
+        theirs = queued(rows, "b", at=2.0)
+        assert tasks.task_wait(rows, mine) is not None   # one slot left, and b's queued work goes first
+        assert tasks.task_wait(rows, theirs) is None
+    else:
+        assert tasks.task_wait(rows, mine) is None
+        rows.add_agent(Agent("a-w-last", "w", "developer", "claude", "a", "assign", "processing", "@1", None, 1.0))
+        assert tasks.task_wait(rows, mine) is not None   # even a lone session waits at the limit
+        busy[0] = 1.0
+        assert tasks.task_wait(rows, mine) is None       # under half the cores busy: up to 8
 
 
+@pytest.mark.variant("claim race: another repo takes the last slot after this task passes the start gate")
 def test_fair_share_claim_decides_again_under_the_machine_lock(rows):
     """A's task passed the gate, then B's (another repo) took the last slot
     before A claimed: A's stale decision must not start a worker over the limit."""
@@ -63,6 +75,7 @@ def test_fair_share_claim_decides_again_under_the_machine_lock(rows):
     assert not claimed and why and rows.get_task(late.id).state == "pending"
 
 
+@pytest.mark.variant("claim race: another connection links the worker between the worker and claim counts")
 def test_fair_share_counts_a_claim_as_it_becomes_its_worker(rows, monkeypatch):
     """A's claimed task links its worker (another connection) between the
     count's read of the workers and of the claims: still one slot taken."""
@@ -89,7 +102,11 @@ def test_fair_share_counts_a_claim_as_it_becomes_its_worker(rows, monkeypatch):
     assert linked and not claimed and why
 
 
-def test_fair_share_queued_tasks_start_round_robin_across_sessions(rows, monkeypatch):
+@pytest.mark.parametrize("competing", [None, True, False], ids=["round-robin", "over-share", "lone-session"])
+def test_fair_share_queued_tasks_start_round_robin_across_sessions(rows, monkeypatch, competing):
+    if competing is not None:
+        _session_capacity(rows, monkeypatch, competing)
+        return
     config.set_user("machine_max_workers", 1)
     session(rows, "a")
     session(rows, "b")
@@ -119,18 +136,3 @@ def test_fair_share_queued_tasks_start_round_robin_across_sessions(rows, monkeyp
     rows.update_task(a1.id, agent_id="a1-worker", state="started")
     rows.update_agent("a1-worker", status="done")   # a's worker finished: b's turn, not a's older backlog
     assert [tasks.task_wait(rows, t) is None for t in (a2, b1)] == [False, True]
-
-
-def test_fair_share_lone_session_may_use_every_slot(rows, monkeypatch):
-    """Unset, the limit is the core count (4 here), twice that when the machine is lightly loaded."""
-    config.forget_user("machine_max_workers")
-    busy = [3.0]
-    monkeypatch.setattr(spawn, "_cores", lambda: 4)
-    monkeypatch.setattr(spawn, "_load", lambda: busy[0])
-    session(rows, "a", running=3)
-    t = queued(rows, "a", at=1.0)
-    assert tasks.task_wait(rows, t) is None
-    rows.add_agent(Agent("a-w-last", "w", "developer", "claude", "a", "assign", "processing", "@1", None, 1.0))
-    assert tasks.task_wait(rows, t) is not None   # all 4 taken: even a lone session waits at the limit
-    busy[0] = 1.0
-    assert tasks.task_wait(rows, t) is None       # under half the cores busy: up to 8
