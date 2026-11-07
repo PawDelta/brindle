@@ -24,11 +24,14 @@ function themeMessage() {
   return { type: "brindle.theme", vars };
 }
 
-export function NativeFrame({ source, title, onMessage, snapshotRequest = 0 }: VisualFrameProps) {
+export function NativeFrame({ source, title, onMessage, snapshotRequest = 0, covered = false }: VisualFrameProps) {
   const host = useRef<HTMLDivElement>(null);
   const posted = useRef(onMessage);
   posted.current = onMessage;
   const snapshot = useRef<(() => void) | null>(null);
+  const relayout = useRef<(() => void) | null>(null);
+  const coveredNow = useRef(covered);
+  coveredNow.current = covered;
   const [error, setError] = useState<string | null>(null);
   const { kind, id } = source;
   const rev = source.kind === "session" ? source.rev : null;
@@ -58,9 +61,10 @@ export function NativeFrame({ source, title, onMessage, snapshotRequest = 0 }: V
       failed = true;
       void close().then(() => { if (!disposed) setError(String(e)); }).catch(() => {});
     }
+    // While a menu is open over the page, the native page takes no room: the menu can't be covered.
     const bounds = () => {
       const { x, y, width, height } = element.getBoundingClientRect();
-      return { x, y, width, height };
+      return coveredNow.current ? { x, y, width: 0, height: 0 } : { x, y, width, height };
     };
     const matches = (delivery: Delivery) => {
       const visual = delivery.visual;
@@ -86,6 +90,7 @@ export function NativeFrame({ source, title, onMessage, snapshotRequest = 0 }: V
       }).catch(fail);
     };
     const layout = () => send("visual_set_bounds", { bounds: bounds() });
+    relayout.current = layout;
     function theme() { send("visual_post", { message: themeMessage() }); }
     snapshot.current = () => send("visual_snapshot");
     void opened.then(() => { if (!disposed) { layout(); theme(); } }, fail);
@@ -101,6 +106,7 @@ export function NativeFrame({ source, title, onMessage, snapshotRequest = 0 }: V
     return () => {
       disposed = true;
       snapshot.current = null;
+      relayout.current = null;
       resize.disconnect();
       observer.disconnect();
       system.removeEventListener("change", theme);
@@ -111,6 +117,7 @@ export function NativeFrame({ source, title, onMessage, snapshotRequest = 0 }: V
     };
   }, [kind, id, rev]);
   useEffect(() => { if (snapshotRequest > 0) snapshot.current?.(); }, [snapshotRequest]);
+  useEffect(() => { relayout.current?.(); }, [covered]);
   return <div ref={host} className="min-h-0 flex-1" data-testid="visual-frame" aria-label={title}>
     {error && <p role="alert" className="p-s3 text-sm text-sap">Couldn't show this visual: {error}</p>}
   </div>;

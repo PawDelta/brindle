@@ -45,6 +45,7 @@ export function ReaderChrome({ title, source, missing, meta, actions, onBack, ba
   const [snapshotRequest, setSnapshotRequest] = useState(0);
   const back = useRef(onBack);
   back.current = onBack;
+  const [exporting, setExporting] = useState(false);
   useEffect(() => {
     // Esc goes back, unless a field or menu took it first.
     const esc = (e: KeyboardEvent) => {
@@ -78,6 +79,7 @@ export function ReaderChrome({ title, source, missing, meta, actions, onBack, ba
         <h2 className="min-w-0 flex-1 truncate text-[15px] font-semibold tracking-[-0.01em]">{title}</h2>
         {actions}
         {exportClient && source?.kind === "session" && <ExportButton key={`${source.id}:${source.rev}`} client={exportClient} repo={repo}
+          open={exporting} onOpenChange={setExporting}
           source={snapshot && sameSource(snapshot.source, source) ? { kind: "visual", id: source.id, rev: source.rev, html: snapshot.html } : null}
           onRequestSnapshot={() => { setSnapshot(null); setSnapshotRequest((n) => n + 1); }} />}
       </header>
@@ -87,7 +89,7 @@ export function ReaderChrome({ title, source, missing, meta, actions, onBack, ba
             <span>sandboxed · no network</span>
             <span className="truncate">{meta}</span>
           </div>
-          {source ? <Frame key={JSON.stringify(source)} source={source} title={title} onMessage={posted} snapshotRequest={snapshotRequest} /> : <p className="p-s3 text-sm text-ink-3">{missing ?? "This visual isn't here any more."}</p>}
+          {source ? <Frame key={JSON.stringify(source)} source={source} title={title} onMessage={posted} snapshotRequest={snapshotRequest} covered={exporting} /> : <p className="p-s3 text-sm text-ink-3">{missing ?? "This visual isn't here any more."}</p>}
         </div>
       </div>
       {footer}

@@ -1,40 +1,41 @@
 /* The reader's Export: the same destinations as the doc reader, with a rendered snapshot source.
-   Two flex items of the reader's header: the button in its row, and the open menu on a row of its
-   own under it, right-aligned. The menu sits in the layout rather than over the page, since the
-   visual's native surface would cover anything laid over it; the page moves down while it's open. */
+   The menu is an overlay anchored under the button, so nothing below it moves. The visual's native
+   page is a child webview that would cover anything laid over it, so the reader hides it while the
+   menu is open (its `covered` frame prop). Open state lives in the reader for that reason. */
 import { useRef, useState, type KeyboardEvent } from "react";
 import { ChevronDownIcon, ShareIcon } from "../../../components/icons";
 import { button } from "../../../components/ui";
 import { ExportMenu, exportPanel, type ExportClient, type ExportSource } from "../../Knowledge/ExportMenu";
 
-export function ExportButton({ client, source, repo, onRequestSnapshot }: {
+export function ExportButton({ client, source, repo, open, onOpenChange, onRequestSnapshot }: {
   client: ExportClient;
   source: ExportSource | null;
   repo?: string;
+  open: boolean;
+  onOpenChange(open: boolean): void;
   onRequestSnapshot?(): void;
 }) {
-  const [open, setOpen] = useState(false);
   const [said, setSaid] = useState("");
   const toggle = useRef<HTMLButtonElement>(null);
   // Esc closes the menu (and goes no further: the reader's Esc would leave the visual).
   const esc = (e: KeyboardEvent) => {
     if (e.key !== "Escape" || !open) return;
     e.preventDefault();
-    setOpen(false);
+    onOpenChange(false);
     toggle.current?.focus();
   };
   return (
-    <>
+    <div className="relative">
       <button ref={toggle} type="button" className={`${button} pl-2.5 pr-2 ${open ? "bg-surface-2" : ""}`} aria-haspopup="true" aria-expanded={open} data-testid="visual-export" onKeyDown={esc} onClick={() => {
         if (!open) onRequestSnapshot?.();
-        setOpen(!open);
+        onOpenChange(!open);
       }}>
         <ShareIcon size={15} className="text-ink-2" />
         Export
         <ChevronDownIcon size={14} className={`text-ink-3 transition-transform duration-150 ${open ? "rotate-180" : ""}`} />
       </button>
       {open && (
-        <div className="order-last flex basis-full justify-end pt-0.5" onKeyDown={esc}>
+        <div className="absolute right-0 top-full z-20 pt-1.5" onKeyDown={esc}>
           {source ? (
             <ExportMenu key={`${source.kind}:${source.id}:${"rev" in source ? source.rev : ""}`} client={client} source={source} repo={repo} onSaid={setSaid} status={said} />
           ) : (
@@ -45,6 +46,6 @@ export function ExportButton({ client, source, repo, onRequestSnapshot }: {
           )}
         </div>
       )}
-    </>
+    </div>
   );
 }
