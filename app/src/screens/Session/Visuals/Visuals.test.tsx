@@ -177,6 +177,8 @@ describe("visuals", () => {
       const terminal = await screen.findByTestId("terminal", {}, { timeout: 4000 });
       const sidebar = () => screen.getByRole("complementary", { name: "Sidebar" });
       const aside = sidebar();
+      // The person folds the open session's agents away; Back must find them still folded.
+      fireEvent.click(await within(aside).findByRole("button", { name: "Hide sup1's agents" }));
       // The header's count is the visuals still open; the decided one is folded away in the list.
       const entry = await screen.findByTestId("visuals-button");
       expect(entry.textContent).toContain("1");
@@ -219,6 +221,7 @@ describe("visuals", () => {
       expect(screen.getByTestId("terminal")).toBe(terminal);
       expect(sidebar()).toBe(aside);
       expect(within(sidebar()).getByTestId("tree-session-sup1")).toBeTruthy();
+      expect(within(sidebar()).getByRole("button", { name: "Show sup1's agents" })).toBeTruthy();
 
       // Opened again, the sidebar hides again.
       fireEvent.click(screen.getByTestId("visuals-button"));
@@ -233,6 +236,7 @@ describe("visuals", () => {
       vi.spyOn(client, "keptVisuals").mockResolvedValue([{ id: "k_1", title: "Release flow", from_session_name: "Ship it", repo: REPO, answer: { option: "B", note: "", at: now }, kept_at: now }]);
       fireEvent.click(screen.getByTestId("visual-back"));
       expect(sidebar()).toBe(aside);
+      expect(within(sidebar()).getByRole("button", { name: "Show sup1's agents" })).toBeTruthy();
       expect(screen.getByTestId("terminal")).toBe(terminal);
 
       // Knowledge › Kept visuals: the kept copy opens in the same reader, read-only, on its own scheme path.

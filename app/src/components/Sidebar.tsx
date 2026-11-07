@@ -607,6 +607,10 @@ function Handle({ height, onChange }: { height: number; onChange(next: number): 
   );
 }
 
+/* Two session routes that differ only in the sheet over the chat. */
+const sheetOnly = (a: Extract<Route, { screen: "session" }>, b: Extract<Route, { screen: "session" }>) =>
+  JSON.stringify(a.sheet ?? null) !== JSON.stringify(b.sheet ?? null) && JSON.stringify({ ...a, sheet: null }) === JSON.stringify({ ...b, sheet: null });
+
 export function Sidebar({ route, navigate, refresh, openUrl }: SidebarProps) {
   const { repos, sessions, error: feedError, closeError, close, after } = useSessions();
   const [cursor, setCursor] = useState<string | null>(null);
@@ -642,9 +646,15 @@ export function Sidebar({ route, navigate, refresh, openUrl }: SidebarProps) {
   const shown = own ?? mostUsed;
   const warning = !!shown && (shown.limited || planWindows(shown).some((window) => window.used >= WARN));
 
-  // An open session's agents show.
+  // An open session's agents show, on each navigation to it; a sheet opening or closing over the
+  // session (a visual, Review changes) isn't one, so Back finds the tree folded as it was left.
+  const lastRoute = useRef(route);
   useEffect(() => {
-    if (route.screen === "session") setFolded((f) => (f.has(route.root) ? new Set([...f].filter((id) => id !== route.root)) : f));
+    const was = lastRoute.current;
+    lastRoute.current = route;
+    if (route.screen !== "session") return;
+    if (was.screen === "session" && sheetOnly(was, route)) return;
+    setFolded((f) => (f.has(route.root) ? new Set([...f].filter((id) => id !== route.root)) : f));
   }, [route]);
 
   const resize = useCallback((next: number) => {
