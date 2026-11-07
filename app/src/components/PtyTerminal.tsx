@@ -65,10 +65,12 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal as XTerm } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
-import { useEffect, useRef, useState } from "react";
+import { useContext, useEffect, useRef, useState } from "react";
 import { logDebug } from "../api/debug";
 import { openExternal, type OpenUrl } from "../api/open";
 import type { Crop, PtyViewOpener, PtyViewTarget } from "../api/ptyView";
+import { visualLink } from "../screens/Session/Visuals/client";
+import { VISUAL_LINK, VisualLinkContext } from "../screens/Session/Visuals/link";
 import { scrollByWheel } from "./terminalScroll";
 
 /* What the view is doing: opening, showing the pane, closed (the client
@@ -197,10 +199,15 @@ const onMac = () => typeof navigator !== "undefined" && /Mac|iPhone|iPad/.test(n
 
 /* A link in the pane, a URL it prints or a program's OSC 8 hyperlink (tmux passes them on): ⌘-clicked (Ctrl-clicked
    off a Mac), as iTerm2 and Ghostty open one, it opens in the system browser. A plain click is the pane's, so a drag
-   over a URL copies it; only http(s) links open. */
-export function linkOpener(openUrl: () => OpenUrl, mac: boolean): (e: MouseEvent, uri: string) => void {
+   over a URL copies it; only http(s) links open. A session's brindle://visual/<id> opens that visual in the chat's
+   place, the same way. */
+export function linkOpener(openUrl: () => OpenUrl, mac: boolean, openVisual?: () => ((id: string) => void) | null): (e: MouseEvent, uri: string) => void {
   return (e, uri) => {
-    if (!(mac ? e.metaKey : e.ctrlKey) || !/^https?:\/\//i.test(uri)) return;
+    if (!(mac ? e.metaKey : e.ctrlKey)) return;
+    const visual = visualLink(uri);
+    const show = openVisual?.();
+    if (visual && show) return show(visual);
+    if (!/^https?:\/\//i.test(uri)) return;
     openUrl()(uri).catch((err) => logDebug("pty_view", "error", `couldn't open a link: ${String(err)}`));
   };
 }
@@ -222,6 +229,9 @@ export function PtyTerminal({ at, open, copy, paste, openUrl, onView, onSize }: 
   pasted.current = paste;
   const browsed = useRef(openUrl ?? openExternal);
   browsed.current = openUrl ?? openExternal;
+  const linked = useContext(VisualLinkContext);
+  const visuals = useRef(linked);
+  visuals.current = linked;
   useEffect(() => {
     viewed.current?.(view);
   }, [view]);
@@ -232,7 +242,7 @@ export function PtyTerminal({ at, open, copy, paste, openUrl, onView, onSize }: 
     const inner = box.current;
     if (!el || !inner) return;
     const mac = onMac();
-    const follow = linkOpener(() => browsed.current, mac);
+    const follow = linkOpener(() => browsed.current, mac, () => visuals.current);
     const term = new XTerm({
       cursorBlink: true,
       fontFamily: '"Geist Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
@@ -245,6 +255,7 @@ export function PtyTerminal({ at, open, copy, paste, openUrl, onView, onSize }: 
     const fit = new FitAddon();
     term.loadAddon(fit);
     term.loadAddon(new WebLinksAddon(follow));
+    term.loadAddon(new WebLinksAddon(follow, { urlRegex: VISUAL_LINK }));
     let gone = false;
     // Every copy onto the app's clipboard, whoever made it (xterm.js's selection, tmux's, the program's), and
     // "Copied" over the view for a moment once the clipboard holds text. A copy that failed says nothing here

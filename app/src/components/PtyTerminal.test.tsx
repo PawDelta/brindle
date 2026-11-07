@@ -2,6 +2,7 @@ import { act, cleanup, render } from "@testing-library/react";
 import type { ILink, ILinkProvider } from "@xterm/xterm";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { PtyViewHandlers, PtyViewOpener } from "../api/ptyView";
+import { VisualLinkContext } from "../screens/Session/Visuals/link";
 import { ATTACH_WAIT, COPIED_SHOWN, COPY_OR_INTERRUPT, LATE_PASTE_WINDOW, PASTE_WAIT, PtyTerminal, selectionIn } from "./PtyTerminal";
 
 /* What goes to the debug log. */
@@ -605,13 +606,18 @@ it("off a Mac, ⌘V pastes the app's clipboard, and an Edit > Paste after it pas
   expect(written).toHaveLength(2);
 });
 
-it("opens a link Ctrl-clicked (⌘-clicked on a Mac) in the system browser, a URL the pane prints or a program's OSC 8 hyperlink; a plain click opens nothing", async () => {
+it("opens a link Ctrl-clicked (⌘-clicked on a Mac) in the system browser, a URL the pane prints or a program's OSC 8 hyperlink; a plain click opens nothing; a session's brindle://visual link opens the visual", async () => {
   const urls: string[] = [];
+  const visuals: string[] = [];
   let handlers: PtyViewHandlers | undefined;
   const open: PtyViewOpener = (_at, _size, h) => ((handlers = h), { write() {}, resize() {}, focus() {}, close() {} });
-  render(<PtyTerminal at={{ server: "brindle", target: "s:@1" }} open={open} openUrl={(url) => (urls.push(url), Promise.resolve())} />);
+  render(
+    <VisualLinkContext.Provider value={(id) => visuals.push(id)}>
+      <PtyTerminal at={{ server: "brindle", target: "s:@1" }} open={open} openUrl={(url) => (urls.push(url), Promise.resolve())} />
+    </VisualLinkContext.Provider>,
+  );
   const term = xterms.at(-1)!;
-  act(() => handlers!.onData(new TextEncoder().encode("see https://example.com/docs?a=1.\r\n\x1b]8;;https://example.com/osc\x07a link\x1b]8;;\x07")));
+  act(() => handlers!.onData(new TextEncoder().encode("see https://example.com/docs?a=1.\r\n\x1b]8;;https://example.com/osc\x07a link\x1b]8;;\x07\r\nopen brindle://visual/v_8f2c to pick")));
   await parsed(term);
   // The links xterm.js finds on a row (1-based), as hovering it would.
   const providers = (term as unknown as { _core: { _linkProviderService: { linkProviders: ILinkProvider[] } } })._core._linkProviderService.linkProviders;
@@ -625,6 +631,10 @@ it("opens a link Ctrl-clicked (⌘-clicked on a Mac) in the system browser, a UR
   const [osc] = await linksOn(2);
   click(osc, { ctrlKey: true });
   expect(urls).toEqual(["https://example.com/docs?a=1", "https://example.com/osc"]);
+  const [visual] = await linksOn(3);
+  click(visual, { ctrlKey: true });
+  expect(visuals).toEqual(["v_8f2c"]);
+  expect(urls).toHaveLength(2);
 });
 
 it("copies a selection across rows only from the columns shown: never a cropped sidebar's or its border", async () => {
