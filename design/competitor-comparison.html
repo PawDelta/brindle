@@ -135,6 +135,16 @@ table.heat{border-collapse:separate;border-spacing:0;width:100%;min-width:960px;
 .dim .w{font-size:13px;color:var(--ink);margin:6px 0 4px}
 .dim .w span{font:11px var(--mono);color:var(--ink-3);text-transform:uppercase;letter-spacing:.05em;margin-right:4px}
 .dim .bv{font-size:13px;color:var(--ink-2);margin:0}
+.dim .ev{font-size:11.5px;color:var(--ink-3);margin:8px 0 0;line-height:1.5}
+.br .nm a{color:inherit;text-decoration:none}
+.br .nm a:hover{color:var(--branch);text-decoration:underline}
+.hn{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:10px;margin-top:12px}
+.hn .card{border:1px solid var(--line);border-radius:var(--r);padding:12px 14px;background:var(--surface-2)}
+.hn .card h3{font-size:14px;margin:0}
+.hn .card .m{font:11.5px var(--mono);color:var(--ink-3);margin:2px 0 6px}
+.hn .card ul{margin:0;padding-left:16px;font-size:12.5px;color:var(--ink-2)}
+.hn .card li{margin:3px 0}
+.hn .card .for{font-size:11.5px;color:var(--branch);margin-top:6px}
 
 /* traction */
 .two{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(0,1fr);gap:14px}
@@ -208,7 +218,7 @@ ol.srcs li em{color:var(--ink-3);font-style:normal}
   <header class="hero">
     <div class="eyebrow">Competitor comparison · 16 tools · 11 dimensions</div>
     <h1>brindle wins on proof, and loses on almost everything else that buyers see first</h1>
-    <p class="lead">It's the only tool here that won't merge until a different agent approves the exact commit and your checks pass. That's a real feature edge. But the rest of the field has 100× to 65,000× its GitHub stars, real sandboxes, Windows, SSO and simpler installs.</p>
+    <p class="lead">It's the only tool here whose agents can't merge until a different agent approves the exact commit and your configured checks pass. That's on by default in goal sessions and a repo setting otherwise; a person merging by hand isn't gated. It's a real feature edge. But the rest of the field has 100× to 65,000× its GitHub stars, real sandboxes, Windows, SSO and simpler installs.</p>
   </header>
 
   <div class="strip">
@@ -225,7 +235,7 @@ ol.srcs li em{color:var(--ink-3);font-style:normal}
         <span><i style="background:var(--branch)"></i>brindle</span>
         <span><i style="background:var(--fawn)"></i>Local multi-agent tools</span>
         <span><i style="background:var(--grey)"></i>Model vendors and cloud agents</span>
-        <span><i style="background:transparent;box-shadow:inset 0 0 0 2px var(--sap)"></i>Sunset, pivoted or stale</span>
+        <span><i style="background:transparent;box-shadow:inset 0 0 0 2px var(--sap)"></i>Sunset, acquired or stale</span>
       </div>
     </div>
     <p class="sub" style="margin-top:10px">The top-right corner (gated and vendor-neutral) is nearly empty, and that's brindle's opening. Paradev and Emdash are moving up toward it with team plans and CI views. Copilot gets close from the vendor side, using GitHub rulesets.</p>
@@ -253,7 +263,7 @@ ol.srcs li em{color:var(--ink-3);font-style:normal}
 
   <section id="traction">
     <h2>Traction, on one scale</h2>
-    <p class="sub">GitHub stars on a log scale, read Nov 6, 2026 through the GitHub API. Dots show release freshness: green under 30 days, amber under 120, red older. Conductor, Cursor, Devin and Copilot are closed source, so they're left out.</p>
+    <p class="sub">GitHub stars on a log scale, read Nov 6, 2026 through the GitHub API. Each name links to the repo's releases; hover it for the observed stars, license and release. Dots show release freshness: green under 30 days, amber under 120, red older. Conductor, Cursor, Devin and Copilot are closed source, so they're left out.</p>
     <div class="two">
       <div class="panel"><div class="bars" id="bars"></div><div class="axis" id="axis"></div></div>
       <div class="panel">
@@ -277,6 +287,47 @@ ol.srcs li em{color:var(--ink-3);font-style:normal}
     <div class="wins" id="wincards"></div>
   </section>
 
+  <section id="community">
+    <h2>What HN says</h2>
+    <p class="sub">Six threads, read Nov 6, 2026. Usernames are HN handles; each line is a paraphrase. Reddit couldn't be read (it blocks our fetcher), so no Reddit evidence is used. Items marked <span class="u">?</span> came from a summary of a long thread, not verbatim text.</p>
+    <details>
+      <summary>6 threads · review is the bottleneck · tmux splits people · VMs over worktrees · "open-source it before you get acquired"</summary>
+      <div class="hn">
+        <div class="card"><h3><a href="https://news.ycombinator.com/item?id=50369503" target="_blank" rel="noopener">Conductor is joining Meta</a></h3><div class="m">~Nov 4, 2026 · 214 pts · 225 comments</div><ul>
+          <li>markerz quotes the announcement: signups closed Nov 4, Cloud read-only Nov 13, the local app winds down in early 2027.</li>
+          <li>sksum suggests open-sourcing the core; BowBun asks why it wasn't open source<span class="u">?</span>.</li>
+          <li>fnoef and vadepaysa prefer tmux with their own scripts<span class="u">?</span>.</li></ul>
+          <div class="for">Backs: Conductor's row, platform risk, gap 1 (license)</div></div>
+        <div class="card"><h3><a href="https://news.ycombinator.com/item?id=50366117" target="_blank" rel="noopener">Ask HN: What's your current AI agentic setup?</a></h3><div class="m">~Nov 4, 2026 · 541 pts · 675 comments</div><ul>
+          <li>fhub runs about 5 tasks a day at first and 2–3 later in the week, to keep understanding the system.</li>
+          <li>fishtoaster runs each agent in its own cloud environment; petesergeant keeps agents on a separate devbox.</li>
+          <li>over190bpm names "not open source" as Docker Sandboxes' main downside<span class="u">?</span>.</li></ul>
+          <div class="for">Backs: isolation verdict, gap 2, gap 1</div></div>
+        <div class="card"><h3><a href="https://news.ycombinator.com/item?id=50298436" target="_blank" rel="noopener">Herdr has released native app</a></h3><div class="m">~Oct 29, 2026 · 367 pts · 271 comments</div><ul>
+          <li>xionon: herdr has native worktree support, a nested workspace per worktree.</li>
+          <li>alepar: agent status is inferred from terminal output for Claude Code and Codex.</li>
+          <li>yoyohello13 avoids it because it's VC-funded, not because of its license.</li></ul>
+          <div class="for">Backs: herdr's isolation cell, herdr traction</div></div>
+        <div class="card"><h3><a href="https://news.ycombinator.com/item?id=48756578" target="_blank" rel="noopener">Herdr: One terminal to rule them all</a></h3><div class="m">~Jul 2026 · 404 pts · 178 comments</div><ul>
+          <li>spudlyo: apart from clickable UI, agent status and popups, it's "exactly like tmux".</li>
+          <li>bloody-crow runs 10+ agents; the status view shows which need attention, where tmux let agents sit idle for days.</li>
+          <li>kkapelon calls automatic worktree management the most important missing feature.</li></ul>
+          <div class="for">Backs: UI verdict (split on tmux), gap 3</div></div>
+        <div class="card"><h3><a href="https://news.ycombinator.com/item?id=48236770" target="_blank" rel="noopener">Launch HN: Superset (YC P26)</a></h3><div class="m">~Jun 2026 · 108 pts · 135 comments</div><ul>
+          <li>The founder (avipeltz): with 5–10 agents the bottleneck becomes tracking state and human review.</li>
+          <li>hoakiet98: review matters more than writing code; they monetize teams and plan a cloud.</li>
+          <li>desireco42 calls it a heavy (~2 GB) Electron app that froze.</li></ul>
+          <div class="for">Backs: review-gate verdict (the wedge), Paradev's row</div></div>
+        <div class="card"><h3><a href="https://news.ycombinator.com/item?id=45489884" target="_blank" rel="noopener">Embracing the parallel coding agent lifestyle</a></h3><div class="m">Oct 9, 2025 · 174 pts · 138 comments</div><ul>
+          <li>munk-a: reviewing agent code means verifying every assumption, which adds heavy overhead.</li>
+          <li>CBLT: worktrees are shared state; containers are the real boundary<span class="u">?</span>.</li>
+          <li>nvader points to Sculptor, one container per agent<span class="u">?</span>.</li></ul>
+          <div class="for">Backs: review-gate verdict, isolation verdict</div></div>
+      </div>
+      <p class="sub" style="margin:12px 0 0">Not found: no thread in this set says a source-available license made someone drop a tool. The license point in gap 1 is a hypothesis, supported only by "open-source it" requests and worries about acquisitions.</p>
+    </details>
+  </section>
+
   <section id="pick">
     <h2>Who should pick which</h2>
     <div class="pick" id="picks"></div>
@@ -288,13 +339,13 @@ ol.srcs li em{color:var(--ink-3);font-style:normal}
       <div class="wedge">
         <div class="eyebrow" style="color:var(--branch)">The wedge</div>
         <h3 style="font-size:19px;margin:8px 0 10px">"Done means proven", on your machine, with any vendor</h3>
-        <p>No other tool here, local or cloud, makes merging conditional on a <strong>different agent approving the exact commit</strong> plus <strong>your check command exiting 0</strong>. brindle also re-runs those checks after later merges and keeps going unattended across usage limits. Add routing to cheap and local workers, and controls that keep code on-prem (air-gap, managed Bedrock/Vertex models, audit log). The result is the governed corner of the map, which nobody else holds.</p>
+        <p>No other tool here, local or cloud, makes an agent's merge conditional on a <strong>different agent approving the exact commit</strong> plus <strong>your configured checks exiting 0</strong>. Scope: review is required by default in goal (autopilot) sessions and otherwise only when the repo's <code>review</code> setting turns it on, and a person running <code>brindle merge</code> isn't gated (<a href="https://github.com/PawDelta/brindle/blob/main/src/brindle/gates.py" target="_blank" rel="noopener">gates.py</a>, <a href="https://github.com/PawDelta/brindle/blob/main/src/brindle/pipeline.py" target="_blank" rel="noopener">pipeline.py</a>). brindle also re-runs those checks after later merges and keeps going unattended across usage limits. Add routing to cheap and local workers, and controls that keep code on-prem (air-gap, managed Bedrock/Vertex models, audit log). The result is the governed corner of the map, which nobody else holds.</p>
         <p><strong>How strong it is:</strong> real as a feature, unproven as a market. The only evidence is the owner's own log: 1,567 reviews, 47% sent back. No outside user has shown that the gate leads to better outcomes. It can also be copied: Claude Code's <code>TaskCompleted</code> hooks, GitHub rulesets with Copilot review, oh-my-pi's <code>/review</code> and herdr's <code>hc run codex review</code> each get partway there.</p>
       </div>
       <div class="gaps">
-        <div class="gap"><div class="n">1</div><div><h3>Proof and reach</h3><p>2 stars and ~2 weekly outside users, against open tools mostly in the 3k–133k range, nearly all MIT or Apache. The source-available license is a real barrier on HN. <strong>Close it with</strong> a public before-and-after benchmark (gate on vs off on real repos: escaped bugs, reverts) and a Show HN built around that number rather than the feature list.</p></div></div>
-        <div class="gap"><div class="n">2</div><div><h3>Isolation beyond worktrees</h3><p>The permission policy "isn't a sandbox", in the guide's own words, and there are no containers or cloud workers. Codex has an OS sandbox. Cursor, Devin, Copilot, Conductor Cloud and Paradev Team run in VMs or sandboxes, and Sculptor in containers. <strong>Close it with</strong> the OS sandbox already planned for the next release, then optional container or remote workers so unattended runs are safe.</p></div></div>
-        <div class="gap"><div class="n">3</div><div><h3>First run and platforms</h3><p>The CLI needs tmux and uv, and the app needs an account. There's no Windows app, and 4 of 10 accounts never connected anything. herdr, Emdash and Nimbalyst ship on all three OSes. <strong>Close it with</strong> one installer that brings everything it needs, a Windows build, and a first run that reaches a merged, reviewed branch in under 5 minutes. After that come SAML, SCIM and SOC 2 for the Enterprise story.</p></div></div>
+        <div class="gap"><div class="n">1</div><div><h3>Proof and reach</h3><p>2 stars and ~2 weekly outside users, against open tools mostly in the 2k–133k range, nearly all MIT or Apache. On HN, non-OSS tools draw "why isn't this open source?" and "what happens if you get acquired?" (<a href="https://news.ycombinator.com/item?id=50369503" target="_blank" rel="noopener">Conductor joining Meta</a>, which then happened). So the source-available license is likely a barrier, though that's a hypothesis, not measured. <strong>Close it with</strong> a public before-and-after benchmark (gate on vs off on real repos: escaped bugs, reverts) and a Show HN built around that number rather than the feature list.</p></div></div>
+        <div class="gap"><div class="n">2</div><div><h3>Isolation beyond worktrees</h3><p>The permission policy "isn't a sandbox", in the guide's own words, and there are no containers or cloud workers. Codex has an OS sandbox. Cursor, Devin, Copilot and Paradev Team run in VMs or sandboxes, and Sculptor in containers. HN users increasingly isolate with VMs or containers (<a href="https://news.ycombinator.com/item?id=50366117" target="_blank" rel="noopener">Ask HN, Nov 2026</a>). <strong>Close it with</strong> the OS sandbox already planned for the next release, then optional container or remote workers so unattended runs are safe.</p></div></div>
+        <div class="gap"><div class="n">3</div><div><h3>First run and platforms</h3><p>The CLI needs tmux and uv, and the app needs an account. There's no Windows app, and 4 of 10 accounts never connected anything. herdr, Emdash and Nimbalyst ship on all three OSes, and on HN users are split: some say tmux plus scripts is enough, others want a status view or an app (<a href="https://news.ycombinator.com/item?id=48756578" target="_blank" rel="noopener">herdr launch</a>). <strong>Close it with</strong> one installer that brings everything it needs, a Windows build, and a first run that reaches a merged, reviewed branch in under 5 minutes. After that come SAML, SCIM and SOC 2 for the Enterprise story.</p></div></div>
       </div>
     </div>
   </section>
@@ -304,7 +355,7 @@ ol.srcs li em{color:var(--ink-3);font-style:normal}
       <summary>Sources (all read Nov 6, 2026 unless noted)</summary>
       <ol class="srcs" id="srclist"></ol>
     </details>
-    <p class="foot">Method: product sites, docs and READMEs were read live on Nov 6, 2026. Stars and releases come from the GitHub GraphQL API on the same day. Third-party reviews and HN mirrors are marked <span class="u">?</span>. Where a page didn't state something, the cell says "not stated" and scores it missing. brindle's claims come from README.md, docs/guide.md, src/brindle/gates.py and the internal usage read. This is research only: no code was changed.</p>
+    <p class="foot">Method: product sites, docs, READMEs and HN threads were read live on Nov 6, 2026. Stars, licenses and releases come from the GitHub GraphQL API on the same day; each repo's source entry records the observed values and links its releases page. Third-party reviews and HN mirrors are marked <span class="u">?</span>. Where a page didn't state something, the cell says "not stated" and scores it missing. brindle's claims come from README.md, docs/guide.md, src/brindle/gates.py and the internal usage read. This is research only: no code was changed.</p>
   </section>
 </div>
 <div class="tip" id="tip" role="tooltip"></div>
@@ -316,33 +367,36 @@ const SRC = {
   "b-gates":["brindle src/brindle/gates.py: merge gates incl. review approval of HEAD","https://github.com/PawDelta/brindle/blob/main/src/brindle/gates.py"],
   "b-usage":["brindle internal usage read (accounts, devices, PyPI BigQuery), Nov 6",""],
   "b-tos":["brindle design/chat-view-tos.html: open question on driving subscription CLIs","https://github.com/PawDelta/brindle/blob/main/design/chat-view-tos.html"],
-  "gh":["GitHub GraphQL API: stars, forks, license, latest release (all repos)","https://docs.github.com/en/graphql"],
-  "gh-brindle":["github.com/PawDelta/brindle","https://github.com/PawDelta/brindle"],
+  "b-pipeline":["brindle src/brindle/pipeline.py: review = repo config, else on in autopilot sessions","https://github.com/PawDelta/brindle/blob/main/src/brindle/pipeline.py"],
+  "gh-brindle":["github.com/PawDelta/brindle · 2★, created Oct 5, 2026, v0.6.2 on Nov 6, 2026 (GitHub API)","https://github.com/PawDelta/brindle/releases"],
   "pd-home":["paradev.com (superset.sh 308 → here): 'Superset is now Paradev'","https://paradev.com/"],
   "pd-price":["paradev.com/pricing","https://paradev.com/pricing"],
-  "pd-gh":["github.com/ParadevAI/Paradev (superset-sh/superset redirects)","https://github.com/ParadevAI/Paradev"],
+  "pd-gh":["github.com/ParadevAI/Paradev (superset-sh/superset redirects) · 16,040★, MIT, desktop-v2.0.5 on Nov 5, 2026 (GitHub API)","https://github.com/ParadevAI/Paradev/releases"],
   "pd-seed":["Magica: Paradev seed funding (secondary)","https://magica.com/news/paradev-seed-funding-coding-agent-workspace",1],
   "pd-tb":["TechBytes: Paradev rename, Oct 26, 2026 (secondary)","https://techbytes.app/posts/paradev-one-workspace-for-claude-code-codex-and-any-coding/",1],
   "hd-home":["herdr.dev","https://herdr.dev/"],
-  "hd-gh":["github.com/herdrdev/herdr","https://github.com/herdrdev/herdr"],
+  "hd-gh":["github.com/herdrdev/herdr · 48,745★, Apache-2.0, created Mar 27, 2026, v0.9.5 on Oct 14, 2026 (GitHub API)","https://github.com/herdrdev/herdr/releases"],
   "hd-hn":["eesel.ai: herdr explained, HN thread sizes (secondary)","https://www.eesel.ai/blog/herdr",1],
   "hd-yc":["TechBytes: herdr joins Y Combinator (secondary)","https://techbytes.app/posts/herdr-is-joining-y-combinator-the-runtime-stays-open/",1],
   "hd-bd":["bitdoze: herdr review (secondary)","https://www.bitdoze.com/herdr-agent-multiplexer/",1],
-  "omp-gh":["github.com/can1357/oh-my-pi README (tail read as summary)","https://github.com/can1357/oh-my-pi"],
-  "pi-gh":["github.com/earendil-works/pi (upstream Pi)","https://github.com/earendil-works/pi"],
+  "omp-gh":["github.com/can1357/oh-my-pi README (tail read as summary) · 38,061★, MIT, v18.18.0 on Nov 7, 2026 UTC (GitHub API)","https://github.com/can1357/oh-my-pi"],
+  "pi-gh":["github.com/earendil-works/pi (upstream Pi) · 120,518★, MIT (GitHub API)","https://github.com/earendil-works/pi"],
   "cd-home":["conductor.build (homepage and /pricing returned the same stub)","https://www.conductor.build/"],
+  "cd-meta":["HN: 'Conductor is joining Meta' (214 pts, 225 comments): signups closed Nov 4, Cloud read-only Nov 13, local app winds down early 2027","https://news.ycombinator.com/item?id=50369503"],
+  "cd-sa":["SiliconANGLE: Meta acquires Conductor; Cloud shuts down Nov 20 (secondary)","https://siliconangle.com/?p=853091",1],
   "cd-faq":["conductor.build Cloud FAQ (search snippet)","https://www.conductor.build/docs/cloud/faq",1],
   "cd-td":["ToolDirectory: Conductor pricing (third-party)","https://tooldirectory.ai/tools/conductor",1],
-  "cs-gh":["github.com/smtg-ai/claude-squad README","https://github.com/smtg-ai/claude-squad"],
-  "cr-gh":["github.com/stravu/crystal README (deprecated → Nimbalyst)","https://github.com/stravu/crystal"],
+  "cs-gh":["github.com/smtg-ai/claude-squad README · 8,743★, AGPL-3.0, v1.0.20 on Aug 20, 2026 (GitHub API)","https://github.com/smtg-ai/claude-squad/releases"],
+  "cr-gh":["github.com/stravu/crystal README: deprecated Feb 2026 → Nimbalyst · 3,128★, v0.3.5 on Feb 26, 2026 (GitHub API)","https://github.com/stravu/crystal"],
+  "nb-gh":["github.com/nimbalyst/nimbalyst: parallel Claude Code/Codex/OpenCode, desktop on 3 OSes + iOS/Android companion · 2,033★, MIT, v0.81.7 on Oct 16, 2026 (GitHub API)","https://github.com/nimbalyst/nimbalyst/releases"],
   "nb-price":["nimbalyst.com/pricing","https://nimbalyst.com/pricing/"],
   "nb-home":["nimbalyst.com","https://nimbalyst.com/"],
-  "vk-gh":["github.com/BloopAI/vibe-kanban README ('sunsetting' banner)","https://github.com/BloopAI/vibe-kanban"],
+  "vk-gh":["github.com/BloopAI/vibe-kanban README ('sunsetting' banner) · 28,610★, Apache-2.0, last release Apr 24, 2026 (GitHub API)","https://github.com/BloopAI/vibe-kanban/releases"],
   "vk-bye":["vibekanban.com/blog/shutdown: 'Goodbye bloop', Apr 10, 2026","https://www.vibekanban.com/blog/shutdown"],
   "vk-price":["vibekanban.com/pricing","https://www.vibekanban.com/pricing"],
-  "sc-gh":["github.com/imbue-ai/sculptor README","https://github.com/imbue-ai/sculptor"],
+  "sc-gh":["github.com/imbue-ai/sculptor README · 246★, MIT, sculptor-v0.49.0 on Oct 21, 2026 (GitHub API)","https://github.com/imbue-ai/sculptor/releases"],
   "sc-site":["imbue.com/sculptor (blog updated Dec 3, 2025)","https://imbue.com/sculptor"],
-  "em-gh":["github.com/generalaction/emdash README","https://github.com/generalaction/emdash"],
+  "em-gh":["github.com/generalaction/emdash README · 6,209★, Apache-2.0, v1.2.11 on Nov 6, 2026 (GitHub API)","https://github.com/generalaction/emdash/releases"],
   "em-site":["emdash.com (emdash.sh 301 → here): Emdash 2.0","https://emdash.com/"],
   "cc-sub":["Claude Code docs: subagents","https://code.claude.com/docs/en/sub-agents"],
   "cc-team":["Claude Code docs: agent teams (experimental)","https://code.claude.com/docs/en/agent-teams"],
@@ -352,7 +406,7 @@ const SRC = {
   "cx-cloud":["Codex docs: cloud (developers.openai.com 308 → learn.chatgpt.com)","https://learn.chatgpt.com/docs/cloud"],
   "cx-price":["Codex docs: pricing","https://learn.chatgpt.com/docs/pricing"],
   "cx-app":["Codex app docs (search snippet)","https://developers.openai.com/codex/app",1],
-  "cx-gh":["github.com/openai/codex","https://github.com/openai/codex"],
+  "cx-gh":["github.com/openai/codex · 133,500★, Apache-2.0, rust-v0.167.0 on Nov 6, 2026 (GitHub API)","https://github.com/openai/codex/releases"],
   "cu-cloud":["Cursor docs: cloud agents","https://cursor.com/docs/cloud-agent"],
   "cu-price":["cursor.com/pricing (page also listed Grok/X products)","https://cursor.com/pricing"],
   "cu-sx":["Techzine: SpaceX acquires Cursor for $60B (closed ~Aug 2026, secondary)","https://www.techzine.eu/news/devops/142197/spacex-acquires-cursor-for-60-billion/",1],
@@ -360,39 +414,56 @@ const SRC = {
   "dv-docs":["docs.devin.ai","https://docs.devin.ai/"],
   "gc-agent":["GitHub docs: Copilot coding agent / Copilot in the cloud","https://docs.github.com/en/copilot/concepts/agents/coding-agent"],
   "gc-plans":["github.com/features/copilot/plans","https://github.com/features/copilot/plans"],
-  "du-gh":["github.com/dagger/container-use","https://github.com/dagger/container-use"],
-  "hn-tax":["'The Orchestration Tax': review is the bottleneck (HN mirror)","https://hackernews-dynamic.seasondane.workers.dev/news/48332616",1],
+  "du-gh":["github.com/dagger/container-use · 4,087★, Apache-2.0, v0.4.2 on Aug 19, 2025 (GitHub API)","https://github.com/dagger/container-use/releases"],
+  "hn-herdr1":["HN: 'Herdr: One terminal to rule them all' (~Jul 2026, 404 pts, 178 comments)","https://news.ycombinator.com/item?id=48756578"],
+  "hn-herdr2":["HN: 'Herdr has released native app' (~Oct 29, 2026, 367 pts, 271 comments)","https://news.ycombinator.com/item?id=50298436"],
+  "hn-superset":["HN: 'Launch HN: Superset (YC P26)' (~Jun 2026, 108 pts, 135 comments)","https://news.ycombinator.com/item?id=48236770"],
+  "hn-setup":["HN: 'Ask HN: What's your current AI agentic setup?' (~Nov 4, 2026, 541 pts, 675 comments)","https://news.ycombinator.com/item?id=50366117"],
+  "hn-simon":["HN: 'Embracing the parallel coding agent lifestyle' (Oct 9, 2025, 174 pts, 138 comments)","https://news.ycombinator.com/item?id=45489884"],
 };
 const SRC_IDS = Object.keys(SRC);
 
 const DIMS = [
   {k:"prov", l:"Providers", w:"oh-my-pi (60+ model providers). Paradev, herdr and Emdash run any CLI.", b:"Strong: 4 CLIs plus open-weight models, and it can mix them in one pipeline (a Codex reviewer on a Claude worker). Few others route a review to a different vendor automatically.", s:"par"},
-  {k:"iso", l:"Isolation", w:"Codex, Cursor, Devin and Copilot run in cloud VMs or sandboxes. Conductor Cloud and Paradev Team add cloud sandboxes, and Sculptor uses containers.", b:"Local worktrees on a freshly fetched base, with a port block and services per worktree. No containers or cloud runs, so it's behind anything with a sandbox.", s:"behind"},
-  {k:"rev", l:"Review gates", w:"brindle. It's the only tool where a merge is blocked until a reviewer agent approves the exact commit and the checks pass, and a milestone is only done when its check exits 0.", b:"Leads, with the owner's own evidence: 1,567 reviews, 47% sent back. GitHub rulesets with Copilot review come closest. Bugbot and Codex auto-review are advisory.", s:"lead"},
+  {k:"iso", l:"Isolation", w:"Codex, Cursor, Devin and Copilot run in cloud VMs or sandboxes. Paradev Team adds cloud sandboxes, and Sculptor uses containers. HN power users increasingly run agents in VMs or containers.", b:"Local worktrees on a freshly fetched base, with a port block and services per worktree. No containers or cloud runs, so it's behind anything with a sandbox.", s:"behind"},
+  {k:"rev", l:"Review gates", w:"brindle. It's the only tool where an agent's merge is blocked until a reviewer agent approves the exact commit and the configured checks pass, and a milestone is only done when its check exits 0.", b:"Leads, with the owner's own evidence: 1,567 reviews, 47% sent back. Scope: review is on by default in goal (autopilot) sessions and otherwise only if the repo enables it, and a person's brindle merge isn't gated. GitHub rulesets with Copilot review come closest. Bugbot and Codex auto-review are advisory. HN users name review as the bottleneck once they run 5–10 agents.", s:"lead"},
   {k:"perm", l:"Permissions", w:"Codex, with its OS sandbox and approval modes. The cloud tools sandbox by VM.", b:"The most thorough of the local orchestrators: structured hook decisions, compound-command parsing, presets, and a supervisor that answers routine asks. But in its own words it 'isn't a sandbox'. Claude Squad just offers --autoyes.", s:"par"},
   {k:"cost", l:"Cost / routing", w:"brindle. It routes tasks by weight to profiles, local Ollama workers included, pauses at the usage limit and resumes, and has budgets and cost reports.", b:"Leads. oh-my-pi routes between models but has no budgets. The vendors give you plan limits, and Cursor and Devin bill extra usage.", s:"lead"},
-  {k:"ui", l:"UI", w:"Paradev (desktop, mobile, CLI, SDK and MCP), Conductor (the polish) and herdr (native on all 3 OSes).", b:"Desktop app on macOS and Linux, a tmux TUI and a local web UI. No Windows app, and tmux is a lightning rod on HN.", s:"behind"},
+  {k:"ui", l:"UI", w:"Paradev (desktop, mobile, CLI, SDK and MCP), herdr (native on all 3 OSes) and Nimbalyst (3 OSes plus a mobile companion).", b:"Desktop app on macOS and Linux, a tmux TUI and a local web UI. No Windows app. HN is split on tmux: some call tmux plus scripts enough, others want status views and apps.", s:"behind"},
   {k:"team", l:"Team / enterprise", w:"Copilot, Cursor, Devin and Paradev: SAML, SCIM, SOC 2 and SLAs.", b:"Deep on paper: org policies, audit log and export, air-gap, managed models, a remote kill switch. But no SAML or SCIM, no SOC 2, and 1 Enterprise customer.", s:"behind"},
-  {k:"price", l:"Pricing", w:"herdr, Claude Squad, oh-my-pi and Emdash Classic are free and OSS.", b:"Free core on your existing CLI plans. Pro $20, Team $40 a seat, cheaper than Paradev Team ($60) or Conductor Teams ($60). But source-available, not OSS.", s:"par"},
+  {k:"price", l:"Pricing", w:"herdr, Claude Squad, oh-my-pi and Emdash Classic are free and OSS.", b:"Free core on your existing CLI plans. Pro $20, Team $40 a seat, cheaper than Paradev Team ($60) or Conductor Teams ($60, now winding down). But source-available, not OSS.", s:"par"},
   {k:"inst", l:"Install", w:"Cloud agents (nothing to install), Claude Code and Codex (already installed), herdr and Emdash (installers for 3 OSes).", b:"The CLI needs tmux and uv, and the app needs an account. 4 of 10 accounts never connected anything.", s:"behind"},
   {k:"mat", l:"Maturity / traction", w:"Codex (133.5k★), herdr (48.7k★ in 7 months), oh-my-pi (38.1k★).", b:"2★, one month old, ~2 weekly outside users. Only the dead projects score lower.", s:"behind"},
-  {k:"risk", l:"Platform risk (✓ = low)", w:"Lowest for the vendors themselves: Anthropic, OpenAI, GitHub, Cognition.", b:"High. It's built on Claude Code hooks while Anthropic ships native parallelism (agent view, worktree subagents, cloud sessions). There's an open terms question about driving subscription CLIs, the team is tiny, and the license blocks forking. Vibe Kanban and Crystal show how fast this category churns.", s:"behind"},
+  {k:"risk", l:"Platform risk (✓ = low)", w:"Lowest for the vendors themselves: Anthropic, OpenAI, GitHub, Cognition.", b:"High. It's built on Claude Code hooks while Anthropic ships native parallelism (agent view, worktree subagents, cloud sessions). There's an open terms question about driving subscription CLIs, the team is tiny, and the license blocks forking. Vibe Kanban's shutdown and Meta's purchase of Conductor show how fast this category churns.", s:"behind"},
 ];
+const DSRC = {
+  prov:["omp-gh","pd-home","hd-home","b-readme"],
+  iso:["cu-cloud","dv-price","gc-agent","pd-price","sc-site","hn-setup","hn-simon"],
+  rev:["b-gates","b-pipeline","b-readme","gc-agent","cu-price","cx-price","hn-superset","hn-simon"],
+  perm:["cx-app","b-guide","cs-gh"],
+  cost:["b-guide","omp-gh","cu-price","dv-price"],
+  ui:["pd-price","hd-home","nb-gh","b-readme","hn-herdr1","hn-superset","cd-meta"],
+  team:["gc-plans","cu-price","dv-price","pd-price","b-guide","b-usage"],
+  price:["hd-home","cs-gh","omp-gh","em-gh","b-guide","pd-price"],
+  inst:["cu-cloud","hd-home","em-gh","b-readme","b-usage"],
+  mat:["cx-gh","hd-gh","omp-gh","gh-brindle","b-usage"],
+  risk:["cc-wt","cc-av","cc-web","b-tos","vk-bye","cd-meta","cd-sa"],
+};
 
 // score, text, sources, unverified flag
 const P = [
   {id:"brindle", n:"brindle", kind:"me", g:"local", w:"Supervisor that delegates, reviews and gates merges", stars:2, rel:"2026-11-06", tag:"v0.6.2", x:90, y:88, c:{
     prov:[3,"Claude Code, Codex, Antigravity and OpenCode, as supervisor or worker. Open-weight models (Ollama, LM Studio, hosted) as workers through its own loop.",["b-readme"]],
     iso:[2,"A git worktree per worker, cut from a freshly fetched base, with its own port block. Per-worktree services on Pro. No containers or cloud workspaces.",["b-readme","b-guide"]],
-    rev:[3,"No merge until a reviewer agent approves the exact commit and the pre-commit hooks and checks pass. A milestone counts only when its check exits 0, and the check re-runs after later merges.",["b-readme","b-gates"]],
+    rev:[3,"An agent's merge waits until a reviewer agent approves the exact commit and the pre-commit hooks, rule packs and configured checks pass. A milestone counts only when its check exits 0, and the check re-runs after later merges. Scope: review is on by default in goal (autopilot) sessions and otherwise only when the repo's review setting enables it, and a person's brindle merge isn't gated.",["b-readme","b-gates","b-pipeline"]],
     perm:[2,"Rule engine on Claude Code's PermissionRequest and PreToolUse hooks, with presets, part-by-part shell parsing and supervisor answers. The guide says it 'isn't a sandbox'.",["b-guide"]],
     cost:[3,"Routes by weight to profiles, local workers included. Pauses at your usage limit and resumes after the reset. Budgets and cost reports on Pro.",["b-guide","b-readme"]],
-    ui:[2,"Desktop app on macOS and Linux, a tmux TUI and a local web UI. Windows only through WSL2, CLI only.",["b-readme"]],
+    ui:[2,"Desktop app on macOS and Linux, a tmux TUI and a local web UI. Windows only through WSL2, CLI only. HN is split on tmux-based tools.",["b-readme","hn-herdr1"]],
     team:[2,"Team: org policies, audit feed, pinned profiles. Enterprise: audit log and export, air-gap, managed models, kill switch. No SAML, SCIM or SOC 2.",["b-guide"]],
     price:[3,"Core free on the CLI plans you already pay for. Pro $20/mo, Team $40/seat/mo (up to 20), Enterprise by contact. Source-available license.",["b-guide","b-readme"]],
     inst:[1,"The curl script installs uv and brindle, but tmux is a manual step on Linux. The app needs a free account. 4 of 10 accounts never connected the CLI or app.",["b-readme","b-usage"]],
     mat:[1,"2 stars, repo created Oct 5, 2026. 10 accounts (3 staff), ~2 weekly active outside users, 2 paying Pro, 1 Enterprise.",["gh-brindle","b-usage"]],
-    risk:[1,"Relies on other vendors' CLIs and hooks while they ship parallelism natively. An open question on subscription terms. Tiny team. The license blocks forks.",["cc-wt","b-tos"]]}},
+    risk:[1,"Relies on other vendors' CLIs and hooks while they ship parallelism natively. An open question on subscription terms. Tiny team. The license blocks forks, which HN asks about when a tool might be acquired.",["cc-wt","cc-av","b-tos","cd-meta"]]}},
   {id:"paradev", n:"Paradev (ex-Superset)", kind:"local", g:"local", w:"Desktop workspace for many CLI agents; renamed Oct 2026", stars:16040, rel:"2026-11-05", tag:"desktop-v2.0.5", x:86, y:58, c:{
     prov:[3,"Claude Code, Codex, OpenCode and 'any CLI-based coding agent'. The homepage lists about a dozen more (Gemini, Cursor Agent, Kiro, Antigravity…).",["pd-home","pd-price"]],
     iso:[3,"A worktree and branch per task, locally. Cloud workspaces 'run in a sandbox' on Team (150 h/seat) and Ultra.",["pd-home","pd-price"]],
@@ -403,11 +474,11 @@ const P = [
     team:[3,"Enterprise: SAML SSO, SCIM, audit logs, a SOC 2 Type II report, an uptime SLA.",["pd-price"]],
     price:[2,"Free. Pro $20 ($16 billed yearly), Team $60 ($54), Ultra $200, Enterprise custom.",["pd-price"]],
     inst:[3,"A desktop download, or brew or curl for the CLI. Uses the agent CLIs you've already signed in to.",["pd-gh","pd-home"]],
-    mat:[3,"16.0k stars, release Nov 5, 2026. Reported $11.5M seed led by USV (secondary).",["gh","pd-seed","pd-tb"]],
+    mat:[3,"16.0k stars, release Nov 5, 2026. Reported $11.5M seed led by USV (secondary). Launch HN as Superset (YC P26): 108 points.",["pd-gh","pd-seed","pd-tb","hn-superset"]],
     risk:[2,"VC-funded and multi-vendor, so less tied to one CLI. A rename mid-growth. The same squeeze from native vendor features.",["pd-tb"]]}},
   {id:"herdr", n:"herdr", kind:"local", g:"local", w:"Agent multiplexer: 'tmux rebuilt for agents', now a native app", stars:48745, rel:"2026-10-14", tag:"v0.9.5", x:94, y:12, c:{
     prov:[3,"'Anything that runs in a terminal'. Agents that speak OSC 7501 report their status (working, done, needs you).",["hd-home"]],
-    iso:[1,"No worktree or sandbox isolation stated. Agents run in terminals on the machine, and other machines join over SSH.",["hd-home"]],
+    iso:[2,"herdr.dev states no isolation, but HN users report native worktree support (a nested workspace per worktree). No sandbox; other machines join over SSH.",["hd-home","hn-herdr2"],1],
     rev:[1,"Nothing built in. An agent can hand a review to another, e.g. hc run --bg codex 'review my diff', and get the report back.",["hd-home"]],
     perm:[1,"Not stated. Reviewers warn against handing out bypass permissions casually.",["hd-home","hd-bd"],1],
     cost:[0,"Not stated.",["hd-home"]],
@@ -415,7 +486,7 @@ const P = [
     team:[0,"No team features stated.",["hd-home"]],
     price:[3,"Free. App, core and TUI are all Apache-2.0, with no paid tier stated.",["hd-home"]],
     inst:[3,"Builds for all three OSes.",["hd-home"]],
-    mat:[3,"48.7k stars since Mar 27, 2026. HN launch reported at ~404 points. Joined YC (secondary).",["gh","hd-hn","hd-yc"]],
+    mat:[3,"48.7k stars since Mar 27, 2026. HN launch thread 404 points; native app thread 367 points. Joined YC (secondary).",["hd-gh","hn-herdr1","hn-herdr2","hd-yc"]],
     risk:[2,"Free and VC-backed, so how it will make money is unclear. Little dependence on any one vendor.",["hd-yc"],1]}},
   {id:"omp", n:"oh-my-pi", kind:"local", g:"local", w:"One terminal agent (Pi fork) with subagents, LSP/DAP, 60+ providers", stars:38061, rel:"2026-11-07", tag:"v18.18.0", x:82, y:30, c:{
     prov:[3,"'60+ providers': frontier APIs, coding plans (Copilot, Kimi, GLM, MiniMax) and local Ollama, llama.cpp or vLLM.",["omp-gh"]],
@@ -427,9 +498,9 @@ const P = [
     team:[0,"None. A community project with no SLA.",["omp-gh"]],
     price:[3,"Free, MIT.",["omp-gh"]],
     inst:[2,"Needs Bun ≥ 1.3.14, or brew, curl or mise.",["omp-gh"]],
-    mat:[3,"38.1k stars, v18.18.0 on Nov 7, 2026 (UTC): a very fast release pace. Upstream Pi has 120.5k stars.",["gh","pi-gh"]],
+    mat:[3,"38.1k stars, v18.18.0 on Nov 7, 2026 (UTC): a very fast release pace. Upstream Pi has 120.5k stars.",["omp-gh","pi-gh"]],
     risk:[2,"A harness, not a wrapper around vendor CLIs, so it's exposed to provider terms on coding-plan logins. High churn.",["omp-gh"],1]}},
-  {id:"conductor", n:"Conductor", kind:"local", g:"local", closed:1, w:"Mac app for parallel Claude Code / Codex / Cursor agents", stars:null, x:52, y:46, c:{
+  {id:"conductor", n:"Conductor", kind:"local", g:"local", closed:1, dead:1, w:"Mac app for parallel agents; joined Meta Nov 4, 2026, winding down", stars:null, x:52, y:46, c:{
     prov:[2,"Claude Code, Codex and Cursor on the homepage. Docs reportedly add OpenCode.",["cd-home"]],
     iso:[3,"An isolated workspace (worktree) per agent. Conductor Cloud runs workspaces in Vercel sandboxes.",["cd-home","cd-faq"]],
     rev:[1,"'Review and merge their changes' in the app. No enforced checks stated.",["cd-home"]],
@@ -439,8 +510,8 @@ const P = [
     team:[2,"Teams plan ($60/user, from a docs snippet). Cloud chats are stored on Conductor's servers.",["cd-faq"],1],
     price:[2,"The pricing page showed no prices when read. Cloud is included on Pro, Teams and Enterprise. A third party lists Pro at $50.",["cd-home","cd-faq","cd-td"],1],
     inst:[2,"Mac only.",["cd-home"]],
-    mat:[2,"Closed source, so no public stars. Widely reviewed. v0.93.0.",["cd-home"]],
-    risk:[2,"Mac only, closed source, and dependent on Claude Code and Codex.",["cd-home"]]}},
+    mat:[1,"Closed source, v0.93.0. Acquired by Meta (announced Nov 4, 2026); new signups and downloads closed.",["cd-meta","cd-sa"]],
+    risk:[0,"Winding down: Cloud read-only Nov 13 and off Nov 20 (secondary); the local app gets only fixes and new models until early 2027.",["cd-meta","cd-sa"]]}},
   {id:"emdash", n:"Emdash", kind:"local", g:"local", w:"OSS desktop app for parallel agents (YC W26); 2.0 goes cloud", stars:6209, rel:"2026-11-06", tag:"v1.2.11", x:78, y:44, c:{
     prov:[3,"Detects 9+ CLIs automatically (Claude Code, Codex, Cursor, OpenCode, Amp, Devin, Qwen, Droid, Copilot), plus ACP.",["em-gh","em-site"]],
     iso:[2,"A worktree per task. Remote machines over SSH or SFTP.",["em-gh"]],
@@ -451,7 +522,7 @@ const P = [
     team:[1,"Emdash 2.0, 'for your whole team, in the cloud', is in early access.",["em-site"]],
     price:[3,"Classic is free (Apache-2.0). No price stated for 2.0.",["em-gh","em-site"]],
     inst:[3,"A Homebrew cask and installers for 3 OSes.",["em-gh"]],
-    mat:[2,"6.2k stars, v1.2.11 on Nov 6, 2026. Classic now only gets fixes.",["gh","em-site"]],
+    mat:[2,"6.2k stars, v1.2.11 on Nov 6, 2026. Classic now only gets fixes.",["em-gh","em-site"]],
     risk:[2,"In the middle of a pivot to a cloud product.",["em-site"]]}},
   {id:"sculptor", n:"Sculptor (Imbue)", kind:"local", g:"local", w:"Desktop app for parallel agents; 'experimental research preview'", stars:246, rel:"2026-10-21", tag:"v0.49.0", x:46, y:30, c:{
     prov:[2,"Claude Code, the Pi harness, Codex (with an API key) and any terminal agent.",["sc-gh","sc-site"]],
@@ -463,7 +534,7 @@ const P = [
     team:[0,"None stated.",["sc-gh"]],
     price:[2,"Not stated. Free during the preview, per a secondary source.",["sc-gh"],1],
     inst:[2,"Mac ARM and Linux only. Containers need Docker.",["sc-gh"]],
-    mat:[1,"246 stars, v0.49.0 on Oct 21, 2026.",["gh"]],
+    mat:[1,"246 stars, v0.49.0 on Oct 21, 2026.",["sc-gh"]],
     risk:[2,"A research preview from a well-funded lab.",["sc-gh"]]}},
   {id:"squad", n:"Claude Squad", kind:"local", g:"local", dead:1, w:"TUI managing terminal agents in tmux + worktrees", stars:8743, rel:"2026-08-20", tag:"v1.0.20", x:64, y:8, c:{
     prov:[2,"Claude Code by default. Codex, Gemini, Aider, OpenCode and Amp through -p.",["cs-gh"]],
@@ -475,20 +546,20 @@ const P = [
     team:[0,"None.",["cs-gh"]],
     price:[3,"Free, AGPL-3.0.",["cs-gh"]],
     inst:[3,"Homebrew or a script. Needs tmux and gh.",["cs-gh"]],
-    mat:[2,"8.7k stars. Last release Aug 20, 2026, 11 weeks ago.",["gh"]],
-    risk:[2,"Releases are slowing, and AGPL deters embedding.",["gh"]]}},
-  {id:"nimbalyst", n:"Crystal → Nimbalyst", kind:"local", g:"local", dead:1, w:"Crystal deprecated Feb 2026; now a visual workspace + agent wiki", stars:3128, rel:"2026-02-26", tag:"crystal v0.3.5", x:58, y:20, c:{
-    prov:[2,"Claude Code, Codex, OpenCode and Copilot agents.",["nb-home"]],
-    iso:[2,"'Git worktree isolation for safer parallel AI coding sessions.'",["nb-home"]],
-    rev:[1,"Diff views. No gate stated.",["nb-home"],1],
+    mat:[2,"8.7k stars. Last release Aug 20, 2026, 11 weeks ago.",["cs-gh"]],
+    risk:[2,"Releases are slowing, and AGPL deters embedding.",["cs-gh"]]}},
+  {id:"nimbalyst", n:"Nimbalyst (ex-Crystal)", kind:"local", g:"local", w:"Visual workspace running parallel Claude Code / Codex / OpenCode, plus docs, mockups and tasks", stars:2033, rel:"2026-10-16", tag:"v0.81.7", x:60, y:24, c:{
+    prov:[2,"Claude Code, Codex and OpenCode (repo); the site also names Copilot agents.",["nb-gh","nb-home"]],
+    iso:[2,"'Git worktree isolation for safer parallel AI coding sessions', optional per session.",["nb-home","nb-gh"]],
+    rev:[1,"Edit and review agent work visually (markdown, mockups, diagrams). No merge gate stated.",["nb-gh","nb-home"],1],
     perm:[1,"Not stated.",["nb-home"]],
-    cost:[0,"None.",["nb-home"]],
-    ui:[3,"Desktop on macOS, Windows and Linux.",["nb-home"]],
+    cost:[0,"None stated.",["nb-home"]],
+    ui:[3,"Desktop on macOS, Windows and Linux, plus an iOS and Android companion.",["nb-gh"]],
     team:[1,"Wiki Teams (beta), $20/user/mo, free during the beta.",["nb-price"]],
-    price:[3,"The app is free and open source.",["nb-price"]],
+    price:[3,"The app is free, MIT.",["nb-price","nb-gh"]],
     inst:[3,"Installers for 3 OSes.",["nb-home"]],
-    mat:[1,"Crystal has 3.1k stars and its last release was Feb 26, 2026. The product pivoted.",["gh","cr-gh"]],
-    risk:[2,"Pivoted from orchestrator to docs and wiki.",["cr-gh"]]}},
+    mat:[2,"2.0k stars on its own repo (created Oct 30, 2025), v0.81.7 on Oct 16, 2026. Successor to Crystal (3.1k stars, deprecated Feb 2026).",["nb-gh","cr-gh"]],
+    risk:[2,"Small and broadening beyond orchestration (wiki, docs, mockups); MIT, so forkable.",["nb-gh","nb-price"]]}},
   {id:"vk", n:"Vibe Kanban", kind:"local", g:"local", dead:1, w:"Kanban that starts agents in worktrees; bloop shut down Apr 2026", stars:28610, rel:"2026-04-24", tag:"v0.1.44", x:77, y:15, side:"l", c:{
     prov:[3,"10+ agents: Claude Code, Codex, Gemini, Copilot, Amp, Cursor, OpenCode, Droid, Qwen…",["vk-gh"]],
     iso:[2,"A worktree, branch, terminal and dev server per workspace.",["vk-gh"]],
@@ -499,7 +570,7 @@ const P = [
     team:[0,"Remote team features (issues, orgs) were removed in the sunset.",["vk-bye"]],
     price:[3,"Free. A Pro page at $30/user is still up, under the sunset banner.",["vk-price"]],
     inst:[3,"npx vibe-kanban.",["vk-gh"]],
-    mat:[1,"28.6k stars, but sunsetting. Last release Apr 24, 2026.",["gh","vk-bye"]],
+    mat:[1,"28.6k stars, but sunsetting. Last release Apr 24, 2026.",["vk-gh","vk-bye"]],
     risk:[0,"The company is gone. 'Open source and community maintained.'",["vk-bye"]]}},
   {id:"cu", n:"container-use (Dagger)", kind:"local", g:"local", dead:1, w:"MCP server giving each agent a container + git branch", stars:4087, rel:"2025-08-19", tag:"v0.4.2", x:60, y:37, c:{
     prov:[3,"Any agent that can use MCP.",["du-gh"]],
@@ -511,8 +582,8 @@ const P = [
     team:[0,"None.",["du-gh"]],
     price:[3,"Free, Apache-2.0.",["du-gh"]],
     inst:[2,"Needs Docker and Dagger.",["du-gh"]],
-    mat:[1,"4.1k stars. Last release Aug 19, 2025, more than a year ago.",["gh"]],
-    risk:[2,"Stale for over a year.",["gh"]]}},
+    mat:[1,"4.1k stars. Last release Aug 19, 2025, more than a year ago.",["du-gh"]],
+    risk:[2,"Stale for over a year.",["du-gh"]]}},
   {id:"cc", n:"Claude Code (native)", kind:"vendor", g:"vendor", closed:1, w:"Subagents, agent teams (exp.), agent view, --worktree, cloud sessions", stars:null, x:10, y:50, c:{
     prov:[1,"Claude models only, through the Anthropic API, Bedrock, Vertex or Foundry.",["cc-sub","b-readme"]],
     iso:[3,"isolation: worktree for subagents and claude --worktree. Background sessions get worktrees automatically. Cloud sessions are generally available.",["cc-sub","cc-wt","cc-av","cc-web"]],
@@ -535,7 +606,7 @@ const P = [
     team:[3,"Business and Enterprise/Edu plans.",["cx-price"]],
     price:[3,"Free, Go $8, Plus $20, Pro from $100. Business ~$20–25 per user (the page disagrees with itself).",["cx-price"],1],
     inst:[3,"npm or brew for the CLI, and an app installer.",["cx-gh"]],
-    mat:[3,"133.5k stars, rust-v0.167.0 on Nov 6, 2026.",["gh"]],
+    mat:[3,"133.5k stars, rust-v0.167.0 on Nov 6, 2026.",["cx-gh"]],
     risk:[3,"Owns the platform. OpenAI only.",["cx-gh"]]}},
   {id:"cursor", n:"Cursor cloud agents", kind:"vendor", g:"vendor", closed:1, w:"Parallel agents in cloud VMs that return PRs", stars:null, x:30, y:70, c:{
     prov:[2,"'A curated selection of models' from several vendors. Grok was added after the SpaceX/xAI deal.",["cu-cloud","cu-sx"]],
@@ -582,7 +653,8 @@ const tip = $("#tip");
 function showTip(e, html){ tip.innerHTML = html; tip.style.opacity = 1; moveTip(e); }
 function moveTip(e){ const r = tip.getBoundingClientRect(); let x = e.clientX + 14, y = e.clientY + 14; if (x + r.width > innerWidth - 8) x = e.clientX - r.width - 14; if (y + r.height > innerHeight - 8) y = e.clientY - r.height - 14; tip.style.left = Math.max(8,x) + "px"; tip.style.top = Math.max(8,y) + "px"; }
 function hideTip(){ tip.style.opacity = 0; }
-const srcNames = ids => ids.map(i => SRC[i][0] + (SRC[i][2] ? " (?)" : "")).join(" · ");
+const srcLink = i => { const [t, u, uv] = SRC[i]; const short = esc(t.split(" · ")[0].replace(/^(HN|brindle): /, "")); return (u ? `<a href="${esc(u)}" target="_blank" rel="noopener" title="${esc(t)}">${short}</a>` : short) + (uv ? '<span class="u">?</span>' : ""); };
+const srcNames = ids =>ids.map(i => SRC[i][0] + (SRC[i][2] ? " (?)" : "")).join(" · ");
 
 /* ---------- heatmap ---------- */
 (function heat(){
@@ -600,7 +672,7 @@ const srcNames = ids => ids.map(i => SRC[i][0] + (SRC[i][2] ? " (?)" : "")).join
       h += `</tr>`;
     }
   }
-  const short = {prov:"oh-my-pi · Paradev · herdr", iso:"Cloud VMs: Codex · Cursor · Devin · Copilot", rev:"brindle", perm:"Codex sandbox · cloud VMs", cost:"brindle", ui:"Paradev · Conductor · herdr", team:"Copilot · Cursor · Devin · Paradev", price:"herdr · omp · Emdash (free OSS)", inst:"Cloud agents · herdr · Emdash", mat:"Codex · herdr · oh-my-pi", risk:"The vendors"};
+  const short = {prov:"oh-my-pi · Paradev · herdr", iso:"Cloud VMs: Codex · Cursor · Devin · Copilot", rev:"brindle", perm:"Codex sandbox · cloud VMs", cost:"brindle", ui:"Paradev · herdr · Nimbalyst", team:"Copilot · Cursor · Devin · Paradev", price:"herdr · omp · Emdash (free OSS)", inst:"Cloud agents · herdr · Emdash", mat:"Codex · herdr · oh-my-pi", risk:"The vendors"};
   h += `<tr class="win"><td class="p">Best on this</td>${DIMS.map(d => `<td>${esc(short[d.k])}<br><span class="chip ${d.s}-c" style="margin-top:4px">brindle: ${d.s === "lead" ? "leads" : d.s === "par" ? "at par" : "behind"}</span></td>`).join("")}</tr>`;
   $("#heat").innerHTML = h + "</tbody>";
   const body = (p, d) => { const [s, t, ids, u] = p.c[d.k]; return {s, t, ids, u}; };
@@ -646,11 +718,12 @@ const srcNames = ids => ids.map(i => SRC[i][0] + (SRC[i][2] ? " (?)" : "")).join
 })();
 
 /* ---------- dimension cards ---------- */
-$("#dimcards").innerHTML = DIMS.map(d => `<div class="dim"><h3>${esc(d.l)}<span class="chip ${d.s}-c">brindle ${d.s === "lead" ? "leads" : d.s === "par" ? "at par" : "behind"}</span></h3><p class="w"><span>Winner</span>${esc(d.w)}</p><p class="bv">${esc(d.b)}</p></div>`).join("");
+$("#dimcards").innerHTML = DIMS.map(d => `<div class="dim"><h3>${esc(d.l)}<span class="chip ${d.s}-c">brindle ${d.s === "lead" ? "leads" : d.s === "par" ? "at par" : "behind"}</span></h3><p class="w"><span>Winner</span>${esc(d.w)}</p><p class="bv">${esc(d.b)}</p><p class="ev">Evidence: ${DSRC[d.k].map(srcLink).join(" · ")}</p></div>`).join("");
 
 /* ---------- traction bars ---------- */
 (function bars(){
   const today = Date.parse("2026-11-06");
+  const REPO = {brindle:"gh-brindle", paradev:"pd-gh", herdr:"hd-gh", omp:"omp-gh", emdash:"em-gh", sculptor:"sc-gh", squad:"cs-gh", nimbalyst:"nb-gh", vk:"vk-gh", cu:"du-gh", codex:"cx-gh"};
   const rows = P.filter(p => p.stars).sort((a, b) => b.stars - a.stars);
   const max = Math.log10(200000);
   const pct = v => Math.max(0.6, Math.log10(v) / max * 100);
@@ -658,7 +731,8 @@ $("#dimcards").innerHTML = DIMS.map(d => `<div class="dim"><h3>${esc(d.l)}<span 
     const days = Math.max(0, Math.round((today - Date.parse(p.rel)) / 864e5));
     const cls = days < 30 ? "f" : days < 120 ? "s" : "d";
     const w = pct(p.stars);
-    return `<div class="br ${p.kind === "me" ? "me" : ""}"><span class="nm" title="${esc(p.n)}">${esc(p.n.replace(" (ex-Superset)", "").replace(" (Dagger)", "").replace(" (Imbue)", ""))}</span><div class="track" style="--w:${w}%"><div class="fill" style="width:${w}%"></div><span class="val ${w > 62 ? "in" : ""}">${p.stars.toLocaleString()}</span></div><span class="rel ${cls}" title="${esc(p.tag)} · ${p.rel}">${days === 0 ? "today" : days + "d ago"}</span></div>`;
+    const rs = SRC[REPO[p.id]];
+    return `<div class="br ${p.kind === "me" ? "me" : ""}"><span class="nm"><a href="${esc(rs[1])}" target="_blank" rel="noopener" title="${esc(rs[0])} · read 2026-11-06">${esc(p.n.replace(" (ex-Superset)", "").replace(" (ex-Crystal)", "").replace(" (Dagger)", "").replace(" (Imbue)", ""))}</a></span><div class="track" style="--w:${w}%"><div class="fill" style="width:${w}%"></div><span class="val ${w > 62 ? "in" : ""}">${p.stars.toLocaleString()}</span></div><span class="rel ${cls}" title="${esc(p.tag)} · ${p.rel}">${days === 0 ? "today" : days + "d ago"}</span></div>`;
   }).join("");
   $("#axis").innerHTML = `<span></span><div>${[1, 10, 100, 1000, 10000, 100000].map(v => `<span style="left:${Math.log10(v) / max * 100}%">${v >= 1000 ? v / 1000 + "k" : v}</span>`).join("")}</div><span>last release</span>`;
 })();
@@ -669,7 +743,7 @@ const WINS = [
   ["Paradev","local","The most complete parallel workspace with funding behind it: desktop and mobile, cloud sandboxes, SSO, SCIM and SOC 2.",""],
   ["herdr","local","Terminal-first people running 10+ agents who mostly need to see who's blocked. Free, on every OS, and enormous traction.",""],
   ["oh-my-pi","local","One power agent instead of a fleet: 60+ providers, LSP and debugger, parallel subagents in copy-on-write worktrees.",""],
-  ["Conductor","local","Mac users who want the cleanest app for parallel Claude Code and Codex, with cloud workspaces when the laptop closes.",""],
+  ["Nimbalyst","local","A free visual workspace on all 3 OSes plus mobile: parallel Claude Code, Codex and OpenCode with optional worktrees, with docs, mockups and tasks beside the code.",""],
   ["Emdash","local","A free, cross-platform desktop app with 9+ CLIs, SSH remotes and a view of CI in one place.",""],
   ["Sculptor","local","Container isolation per agent, if a research preview is acceptable.",""],
   ["Claude Code","vendor","Claude-only users. Subagents with worktrees, agent view and cloud sessions cover most parallel needs at no extra cost.",""],
@@ -679,7 +753,7 @@ const WINS = [
   ["Copilot cloud agent","vendor","GitHub-native orgs: rulesets, Actions and policy, with Claude and Codex available as agents.",""],
   ["Claude Squad","dead","Still fine as a minimal TUI, but releases have slowed (last one Aug 20).","dead"],
   ["Vibe Kanban","dead","Don't start new work on it. The company shut down and the remote features are gone.","dead"],
-  ["Crystal → Nimbalyst","dead","Crystal is deprecated, and Nimbalyst is now a docs and wiki workspace.","dead"],
+  ["Conductor","dead","Was the cleanest Mac app. Meta bought it on Nov 4, 2026: signups are closed, Cloud shuts this month, and the app winds down in early 2027.","dead"],
   ["container-use","dead","A good idea (a container plus a branch per agent), but no release since Aug 2025.","dead"],
 ];
 const kcol = {me:"var(--branch)", local:"var(--fawn)", vendor:"var(--grey)", dead:"var(--sap)"};
@@ -693,7 +767,7 @@ const PICKS = [
   ["You want a polished workspace for a team, with SSO","Paradev"],
   ["You run many terminal agents and just need to see them all","herdr"],
   ["You want one strong agent, any model, inside the terminal","oh-my-pi"],
-  ["You're on a Mac and want the nicest parallel UI","Conductor"],
+  ["You want a free visual workspace on any OS, with mobile","Nimbalyst"],
   ["You want free, open source, Windows or Linux, and a CI view","Emdash"],
   ["You hand off whole tickets and review PRs later","Devin / Cursor"],
   ["Work must be proven before merge, across vendors, unattended, on your own machines (or air-gapped)","brindle"],
