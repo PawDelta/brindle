@@ -356,10 +356,16 @@ def test_paste_blocked_or_draft_holds_message_then_delivers_it_once(db, ws, monk
     assert agents.flush(db, "a1") is True and pasted == ["queued message"]
 
 
-@pytest.mark.parametrize("typed_after", ["load-buffer", "lead"])
-def test_person_typing_mid_paste_stops_it_and_message_goes_in_once_later(db, ws, monkeypatch, typed_after):
+@pytest.mark.parametrize("typed_after,then", [
+    ("load-buffer", "cleared"), ("lead", "cleared"), ("body", "cleared"), ("body", "sent"),
+    ("body", "codex turn"),   # Codex reports what went in only when the turn ends
+    # keys pressed after the lead, but the next write comes over TYPED_WITHIN later
+    ("lead-late", "sent"),
+])
+def test_person_typing_mid_paste_stops_it_and_message_goes_in_once_later(db, ws, monkeypatch, typed_after, then):
     # Real flush and tmux.paste over a fake terminal: the person starts a reply
-    # after brindle's last look, while the paste is under way.
+    # after brindle's last look, while the paste is under way, then sends or
+    # clears whatever the composer holds.
     from types import SimpleNamespace
 
     fake_agent(db, ws, status="idle", mode="interactive")
@@ -368,8 +374,9 @@ def test_person_typing_mid_paste_stops_it_and_message_goes_in_once_later(db, ws,
     submitted = []
 
     def person_types(point):
-        if s["at"] == point:
-            s["at"], s["typed"] = None, time.time()
+        if s["at"] in (point, point + "-late"):
+            s["typed"] = time.time() - (6 if s["at"].endswith("-late") else 0)
+            s["at"] = None
             s["composer"] += "MY UNSENT REPLY"
 
     def tmux_call(*args, input=None, authorize=None, **k):
@@ -388,6 +395,7 @@ def test_person_typing_mid_paste_stops_it_and_message_goes_in_once_later(db, ws,
             person_types("lead")
         elif args[0] == "paste-buffer":
             s["composer"] += s.pop("buffer")
+            person_types("body")
         elif args[0] == "send-keys" and args[-1] == "Enter":
             submitted.append(s["composer"])
             s["composer"] = ""
@@ -396,12 +404,20 @@ def test_person_typing_mid_paste_stops_it_and_message_goes_in_once_later(db, ws,
     monkeypatch.setattr(tmux, "_tmux", tmux_call)
     lead = agents.message_lead(db, db.get_agent("a1"), None)
 
-    assert agents.flush(db, "a1") is False
-    assert submitted == [] and "WORKER REPORT" not in s["composer"] and db.pending_count("a1") == 1
-    s["composer"], s["typed"] = "", time.time() - 60   # the person sent their reply, a minute ago
-    assert agents.flush(db, "a1") is True
-    assert submitted == [f"{lead} WORKER REPORT"] and db.pending_count("a1") == 0
-    assert agents.flush(db, "a1") is False and len(submitted) == 1
+    assert agents.flush(db, "a1") is False and submitted == [] and db.pending_count("a1") == 1
+    assert ("WORKER REPORT" in s["composer"]) == (typed_after == "body")   # the body never lands on their text
+    sent, s["composer"], s["typed"] = s["composer"], "", time.time() - 60   # a minute ago
+    if then == "sent":   # the report went in with their reply, or it didn't (only their text and the lead)
+        agents.handle_hook(db, "a1", "prompt-submit", {"prompt": sent})
+        db.set_status("a1", "idle")
+    elif then == "codex turn":
+        agents.handle_hook(db, "a1", "codex-notify", {"type": "agent-turn-complete", "input-messages": [sent]})
+    again = typed_after != "body" or then == "cleared"
+    assert agents.flush(db, "a1") is again and db.pending_count("a1") == 0
+    assert submitted == ([f"{lead} WORKER REPORT"] if again else [])
+    db.set_status("a1", "idle")   # that turn ended; the queue moves on
+    db.enqueue("a1", "NEXT", None)
+    assert agents.flush(db, "a1") is True and submitted[-1] == f"{lead} NEXT" and len(submitted) == 1 + again
 
 
 def test_reconcile_keeps_hook_status_when_screen_is_unclear(db, ws, monkeypatch):

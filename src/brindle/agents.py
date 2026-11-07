@@ -2405,11 +2405,15 @@ def _paste_message(db: DB, agent: Agent, text: str, lead: str | None,
 
     def authorize(write=True):
         fresh = current()
-        if write and message_id is not None and fresh.mode == "interactive":
-            # Immediately before each write (tmux.paste's): the person's keys
-            # since the last look stop it (brindle's own keys are no client's
-            # input), and a first write needs a composer holding nothing.
-            if _typed_lately(fresh) or (state["stage"] is None and _composer_taken(fresh)):
+        if message_id is not None and fresh.mode == "interactive":
+            if not write:
+                baseline[0] = _pane_input(fresh)
+            # Immediately before each write (tmux.paste's): any key the person
+            # pressed since this delivery began, however long the writes took,
+            # stops it (brindle's own keys are no client's input), and a first
+            # write needs a composer holding nothing.
+            elif (_typed_lately(fresh, since=baseline[0])
+                  or (state["stage"] is None and _composer_taken(fresh))):
                 raise _PasteBlocked
         if resume is not None and state["stage"] == resume:
             if not _partial_composer(fresh, state, resume):
@@ -2421,7 +2425,8 @@ def _paste_message(db: DB, agent: Agent, text: str, lead: str | None,
         if not db.record_pane_delivery(message_id, agent.id, json.dumps(state)):
             raise _PasteBlocked
 
-    authorize(write=False)   # the caller's last look just read the screen
+    baseline = [_INPUT_UNREAD]
+    authorize(write=False)   # the caller's last look just read the screen; note the input it saw
     options = {"progress": progress, "resume": resume} if message_id is not None else {}
     tmux.paste(agent.tmux_window, text, lead=lead, server=server,
                authorize=authorize, **options)
@@ -2466,11 +2471,17 @@ def _resume_pane_delivery(db: DB, agent: Agent, saved: str) -> bool:
     if state["stage"] != "submitted":
         stage = "body" if _partial_composer(agent, state, "body") else "lead"
         if stage == "lead" and (state["stage"] != "lead" or not _partial_composer(agent, state, "lead")):
-            if state["stage"] != "lead" or not _composer_empty(agent):
-                return False
-            # Stopped after the lead, and the person has since sent or cleared
-            # the composer: the body never reached it and Enter was never
-            # pressed for it, so the whole message goes in again, once.
+            if not _composer_settled(agent):
+                return False  # the person's text and this delivery's are still there: theirs to send or clear
+            if state["stage"] != "lead":
+                # Stopped after the body, and the composer is empty with no
+                # turn running. A prompt carrying the body would have
+                # acknowledged it (_acknowledge_submitted), so it was cleared:
+                # the same row goes back in the queue, no second copy made.
+                db.set_mark(agent.id, "pane-delivery", None)
+                return _flush_messages(db, agent.id)
+            # Stopped after the lead: the body never reached the composer and
+            # Enter was never pressed for it, so the whole message goes in, once.
             stage = None
         try:
             _paste_message(db, agent, state["body"], state["lead"], row["id"], resume=stage)
@@ -2654,16 +2665,30 @@ def _flush_midturn(db: DB, agent_id: str) -> bool:
     return True
 
 
-def _typed_lately(agent: Agent) -> bool:
+_INPUT_UNREAD = object()   # a pane's input time that couldn't be read
+_ANY = object()            # _typed_lately with no baseline to compare
+
+
+def _pane_input(agent: Agent):
+    """tmux.pane_input for ``agent``'s pane, or _INPUT_UNREAD."""
+    try:
+        return tmux.pane_input(agent.tmux_window, server=server_of(agent))
+    except tmux.TmuxError:
+        return _INPUT_UNREAD
+
+
+def _typed_lately(agent: Agent, since=_ANY) -> bool:
     """Whether the person pressed a key in ``agent``'s pane within
-    TYPED_WITHIN: keys reach tmux before a loaded CLI draws them, so the
+    TYPED_WITHIN, or (given ``since``, its input time when a delivery began)
+    at all since then: keys reach tmux before a loaded CLI draws them, so the
     screen alone can show an empty composer that is taking input. An
     unanswerable server fails closed."""
-    try:
-        typed = tmux.pane_input(agent.tmux_window, server=server_of(agent))
-    except tmux.TmuxError:
+    typed = _pane_input(agent)
+    if typed is _INPUT_UNREAD:
         return True
-    return typed is not None and time.time() - typed < TYPED_WITHIN
+    if typed is None:
+        return False
+    return time.time() - typed < TYPED_WITHIN or (since is not _ANY and typed != since)
 
 
 def _composer_screen(agent: Agent) -> tuple[Provider, str] | None:
@@ -2681,11 +2706,32 @@ def _composer_taken(agent: Agent) -> bool:
     return read is None or read[0].paste_blocked(read[1], True) is not None
 
 
-def _composer_empty(agent: Agent) -> bool:
-    """Whether the composer is recognized and holds nothing typed."""
+def _composer_settled(agent: Agent) -> bool:
+    """Whether the person is done with a stopped delivery's text: no key
+    pressed lately, the composer recognized and empty, no turn running on
+    screen (one they started by sending it, whose prompt acknowledges it)."""
+    if _typed_lately(agent):
+        return False
     read = _composer_screen(agent)
-    return (read is not None and read[0].composer_text(read[1]) is not None
-            and read[0].paste_blocked(read[1], True) is None)
+    if read is None:
+        return False
+    provider, screen = read
+    return (provider.composer_text(screen) is not None and provider.paste_blocked(screen, True) is None
+            and provider.screen_state(screen) != "busy")
+
+
+def _acknowledge_submitted(db: DB, agent_id: str, prompt: str) -> None:
+    """A prompt the CLI took in (Claude Code's or OpenCode's prompt-submit,
+    Codex's turn inputs) carrying a stopped pane delivery's body: the person
+    sent it, their reply typed onto it, so it is delivered and its mark retired."""
+    saved = db.mark(agent_id, "pane-delivery")
+    if not saved or not prompt:
+        return
+    state = json.loads(saved)
+    body = str(state.get("body") or "").strip()
+    if state.get("stage") in ("body", "submitted") and body and body in prompt:
+        db.mark_delivered(state["message_id"])
+        db.set_mark(agent_id, "pane-delivery", None)
 
 
 def _paste_blocked(agent: Agent) -> bool:
@@ -5162,12 +5208,13 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
             processes.detach([*brindle_invocation(), "_flush", agent_id, "--delay",
                           str(get_provider(agent.provider).ready_delay)])
     elif event == "prompt-submit":
-        db.set_status(agent_id, "processing")
-        from brindle import launch_health
-        launch_health.accepted(db, agent)
         # Queued messages (worker results) are typed into an idle chat too;
         # only a prompt brindle didn't deliver is the user speaking.
         prompt = str(payload.get("prompt", ""))
+        _acknowledge_submitted(db, agent_id, prompt)
+        db.set_status(agent_id, "processing")
+        from brindle import launch_health
+        launch_health.accepted(db, agent)
         # brindle's own reminders also arrive as prompts, possibly wrapped or
         # sent without being recorded as delivered (the unread-mail one): any
         # prompt carrying brindle's tag is not the user speaking.
@@ -5248,6 +5295,9 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
         except OSError:
             pass
         if payload.get("type") == "agent-turn-complete":
+            inputs = payload.get("input-messages")
+            if isinstance(inputs, list):
+                _acknowledge_submitted(db, agent_id, "\n".join(str(m) for m in inputs))
             db.set_status(agent_id, "idle")
             snapshot_turn(db, agent)
             analysis_docs_turn(db, agent)
