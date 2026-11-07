@@ -171,7 +171,8 @@ describe("visuals", () => {
     try {
       render(
         <PtyViewsProvider value={standInViews}>
-          <App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO, agent: "sup1" }} />
+          {/* No agent, as Inbox's "Open the session" opens it: the reader's open then names the root. */}
+          <App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO }} />
         </PtyViewsProvider>,
       );
       const terminal = await screen.findByTestId("terminal", {}, { timeout: 4000 });

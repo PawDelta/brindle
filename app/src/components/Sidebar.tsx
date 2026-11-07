@@ -607,9 +607,10 @@ function Handle({ height, onChange }: { height: number; onChange(next: number): 
   );
 }
 
-/* Two session routes that differ only in the sheet over the chat. */
+/* Two session routes that differ only in the sheet over the chat: the same session, repo and
+   selected agent (none selected is the root, as the session screen reads it), another sheet. */
 const sheetOnly = (a: Extract<Route, { screen: "session" }>, b: Extract<Route, { screen: "session" }>) =>
-  JSON.stringify(a.sheet ?? null) !== JSON.stringify(b.sheet ?? null) && JSON.stringify({ ...a, sheet: null }) === JSON.stringify({ ...b, sheet: null });
+  a.root === b.root && a.repo === b.repo && (a.agent ?? a.root) === (b.agent ?? b.root) && JSON.stringify(a.sheet ?? null) !== JSON.stringify(b.sheet ?? null);
 
 export function Sidebar({ route, navigate, refresh, openUrl }: SidebarProps) {
   const { repos, sessions, error: feedError, closeError, close, after } = useSessions();
