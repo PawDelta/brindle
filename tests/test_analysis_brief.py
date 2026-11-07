@@ -290,16 +290,21 @@ def test_workers_of_an_earlier_goal_do_not_count_for_a_new_goal(db, boss, goal_e
     assert _offer(db) is None
 
 
-def test_accepting_a_replaced_goals_offer_never_enables_the_new_goal(db, goal_env, monkeypatch):
+def test_goal_replaced_after_acceptance_still_gets_its_own_doc_instruction(db, boss, goal_env, monkeypatch):
     autopilot.set_goal(db, "boss", "Goal A", _plan(4))
     a = _offer(db)
-    real = db.answer_analysis_offer
-    # Goal B replaces A at the boundary between the answer's check and its effect.
-    monkeypatch.setattr(db, "answer_analysis_offer", lambda *x: (
-        autopilot.set_goal(db, "boss", "Goal B", _plan(1)), real(*x))[1])
-    with pytest.raises(autopilot.AutopilotError):
-        autopilot.resolve_analysis_offer(db, "boss", True, a)
-    assert db.get_autopilot("boss").analysis_doc == 0
+    db.update_autopilot("boss", state="done")
+    real = autopilot._commission_doc
+
+    def replaced_first(*args):    # B replaces A after the answer committed, before the briefing
+        autopilot.set_goal(db, "boss", "Goal B", _plan(1))
+        return real(*args)
+
+    monkeypatch.setattr(autopilot, "_commission_doc", replaced_first)
+    autopilot.resolve_analysis_offer(db, "boss", True, a)
+    assert db.get_autopilot("boss").analysis_doc == 0       # B stays unrequested
+    [queued] = [r[0] for r in db.conn.execute("SELECT body FROM inbox WHERE agent_id='boss'")]
+    assert 'the goal "Goal A"' in queued and FOLDER in queued
 
 
 def test_a_stale_evaluation_cannot_reopen_a_dismissed_offer(db, goal_env):

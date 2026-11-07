@@ -788,7 +788,7 @@ def _commission_doc(db: DB, root_id: str, goal: str, titles: list[str], state: s
     if ws and analysis_brief.large_work(requested=True, branch=ws.branch):
         brief = analysis_brief.server_brief(db, root_id, "\n".join([goal, *titles]), [])
         if state == "done":
-            brief = "\n\n".join(part for part in (_goal_doc_rule(db, root_id), brief) if part)
+            brief = "\n\n".join(part for part in (_goal_doc_rule(db, root_id, accepted=goal), brief) if part)
         if brief:
             db.enqueue(root_id, brief, None)
 
@@ -805,18 +805,21 @@ def resolve_analysis_offer(db: DB, root_id: str, accept: bool, offer_id: str) ->
         _commission_doc(db, root_id, done["goal"], done["titles"], done["state"])
 
 
-def _goal_doc_rule(db: DB, root_id: str) -> str:
-    """For a reached goal whose person requested a doc: the rule to write it."""
+def _goal_doc_rule(db: DB, root_id: str, accepted: str | None = None) -> str:
+    """For a reached goal whose person requested a doc: the rule to write it.
+    With ``accepted`` (the goal text the person said yes to) the request is
+    taken as given and named, never read from the session's current goal."""
     from brindle.pro import analysis_brief
 
     try:
         root = db.get_agent(root_id)
         ws = db.get_workspace(root.workspace_id) if root else None
         ap = db.get_autopilot(root_id)
-        if ws is None or ap is None or not analysis_brief.large_work(requested=bool(ap.analysis_doc),
-                                                       branch=ws.branch):
+        requested = accepted is not None or bool(ap and ap.analysis_doc)
+        if ws is None or not analysis_brief.large_work(requested=requested, branch=ws.branch):
             return ""
-        return ("The person requested an analysis doc for this goal: write it before reporting.\n\n"
+        what = f"the goal \"{accepted}\"" if accepted is not None else "this goal"
+        return (f"The person requested an analysis doc for {what}: write it before reporting.\n\n"
                 + analysis_brief.doc_rule(db, ws.repo_root, ws.branch))
     except Exception:  # noqa: BLE001 - extra guidance, never a reason to lose the verdict
         log.info("goal analysis doc rule not added", exc_info=True)
