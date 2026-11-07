@@ -65,6 +65,27 @@ def test_publish_refuses_each_bad_page(db, session, monkeypatch, caller, html, o
     assert (visuals.store_root(ws.repo_root) / ".gitignore").exists()
 
 
+def test_note_only_answers_reach_the_supervisor(db, session, client):
+    _, boss, worker = session
+    for via_route in (False, True):
+        v = visuals.publish(db, worker, "Release flow", "<p>flow</p>", "Which flow?", OPTIONS)
+        for option, note in ((None, "  "), ("unknown", "Another flow"), (None, SECRET)):
+            with pytest.raises(ServiceError):
+                visuals.answer(db, v["id"], 1, option, note)
+        if via_route:
+            response = client.post(f"/v1/visuals/{v['id']}/answer", json={"rev": 1, "note": "  Stage it first  "})
+            assert response.status_code == 200
+            answered = response.json()
+        else:
+            answered = visuals.answer(db, v["id"], 1, None, "  Stage it first  ")
+        assert answered["answer"]["option"] is None
+        assert answered["answer"]["note"] == "Stage it first"
+        assert not answered.get("unread", False)
+    bodies = [r["body"] for r in db.conn.execute("SELECT body FROM inbox WHERE agent_id=?", (boss.id,))]
+    assert len(bodies) == 2 and all("Stage it first" in body for body in bodies)
+    assert not [i for i in inbox.items(db, None, panes={}) if i.kind == "visual"]
+
+
 def test_an_answer_reaches_the_supervisor_once_and_only_for_the_revision_on_screen(db, session, client,
                                                                                  monkeypatch):
     ws, boss, worker = session

@@ -178,7 +178,8 @@ def sanitise(html: str, answer: dict | None = None) -> str:
     parser.close()
     body = "".join(parser.out) + "".join(f"</{tag}>" for tag in reversed(parser.stack))
     if answer:
-        body += f'<footer>You picked {escape(answer["option"])} · {escape(answer["note"])}</footer>'
+        picked = f'You picked {escape(answer["option"])} · ' if answer.get("option") is not None else "You picked "
+        body += f'<footer>{picked}{escape(answer["note"])}</footer>'
     styles = "".join(parser.styles)
     # No untrusted document wrappers or metadata can precede this policy.
     return (f'<!doctype html><html{parser.root_attrs.get("html", "")}><head><meta charset="utf-8">'

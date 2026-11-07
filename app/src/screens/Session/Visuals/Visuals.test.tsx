@@ -1,7 +1,8 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { useState } from "react";
 import App from "../../../App";
-import type { Plan, PlanVerdict, VisualDTO } from "../../../api/client";
+import { DaemonClient, type Plan, type PlanVerdict, type VisualDTO } from "../../../api/client";
 import { ONBOARDED_KEY } from "../../../api/providers";
 import { PtyViewsProvider } from "../../../api/ptyView";
 import type { InboxItemDTO, SessionDTO } from "../../../api/schema";
@@ -529,7 +530,7 @@ describe("visuals", () => {
     vi.spyOn(client, "visuals").mockImplementation(async () => [answered, row]);
     vi.spyOn(client, "markVisualRead").mockImplementation(async () => (row = { ...row, unread: false }));
     vi.spyOn(client, "answerVisual").mockImplementation(async (_id, _rev, option, note) => {
-      row = { ...row, answer: { option, note, at: now } };
+      row = { ...row, answer: { option: option ?? null, note, at: now } };
       daemon.data.inbox = [];
       daemon.publish("visual.answered", { root_id: "sup1" });
       return row;
@@ -538,7 +539,7 @@ describe("visuals", () => {
     const sync = startSync({ client, store, connect: daemon.connect });
     try {
       render(<PtyViewsProvider value={standInViews}><App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "inbox", session: "sup1" }} /></PtyViewsProvider>);
-      const card = (await screen.findAllByTestId("inbox-card"))[0];
+      const card = (await screen.findAllByTestId("inbox-card")).find((candidate) => candidate.dataset.kind === "visual")!;
       fireEvent.click(within(card).getByRole("button", { name: "Open visual" }));
       await waitFor(() => expect(screen.getByTestId("visual-frame").dataset.src).toBe("brindle-visual://v_8f2c/r2"));
       expect(screen.queryByRole("complementary", { name: "Sidebar" })).toBeNull();
@@ -557,6 +558,28 @@ describe("visuals", () => {
     } finally { sync.stop(); }
   });
 
+  it("sends a note-only answer from the free-text choice", async () => {
+    let sent: unknown;
+    const client = new DaemonClient({ baseUrl: "http://daemon/v1", token: "test", fetch: async (url, init) => {
+      if (String(url).endsWith("/answer")) sent = JSON.parse(init!.body as string);
+      return new Response(JSON.stringify({ ...visual, answer: { option: null, note: "Stage it first", at: now } }));
+    } });
+    function Reader() {
+      const [row, setRow] = useState(visual);
+      return <VisualReader client={client} visual={row} onBack={() => {}} onAnswered={setRow} Frame={() => <div />} />;
+    }
+    render(<Reader />);
+    fireEvent.click(screen.getByRole("radio", { name: "B · Gate on CI" }));
+    fireEvent.click(screen.getByRole("radio", { name: "Something else…" }));
+    const send = screen.getByTestId("visual-send") as HTMLButtonElement;
+    expect(send.disabled).toBe(true);
+    fireEvent.change(screen.getByRole("textbox", { name: "Your answer" }), { target: { value: "  Stage it first  " } });
+    fireEvent.click(send);
+    await screen.findByTestId("visual-answered");
+    expect(sent).toEqual({ rev: 2, note: "Stage it first" });
+    expect(screen.getByTestId("visual-answered").textContent).toContain("Stage it first");
+  });
+
   const open: VisualSource = { kind: "session", id: visual.id, rev: visual.rev };
   it.each([
     ["another visual's choice", { ...open, id: "v_other" }, { type: "choice", option: "B" }, { picked: false, back: false }],
@@ -567,7 +590,7 @@ describe("visuals", () => {
   ] as const)("%s", async (_name, from, data, want) => {
     let post: VisualFrameProps["onMessage"] = () => undefined;
     const Frame = ({ onMessage }: VisualFrameProps) => ((post = onMessage), <div data-testid="visual-frame" />);
-    const sent: { rev: number; option: string; note: string }[] = [];
+    const sent: { rev: number; option: string | undefined; note: string }[] = [];
     // The engine's rows, and list reads it can hold: each answers with the rows as they were when asked.
     let rows: VisualDTO[] = [{ ...visual, unread: false }];
     let hold = false;
@@ -579,7 +602,7 @@ describe("visuals", () => {
       },
       answerVisual: async (_id, rev, option, note) => {
         sent.push({ rev, option, note });
-        rows = rows.map((v) => ({ ...v, answer: { option, note, at: now } }));
+        rows = rows.map((v) => ({ ...v, answer: { option: option ?? null, note, at: now } }));
         return rows[0];
       },
       keepVisual: async () => rows[0],
