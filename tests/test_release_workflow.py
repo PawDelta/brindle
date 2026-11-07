@@ -1,10 +1,13 @@
 """Release build contracts for assets outside Python coverage."""
 import json
 import plistlib
+import re
+import shlex
 from pathlib import Path
 
 import pytest
 import yaml
+from conftest import sh
 
 
 @pytest.mark.variant("release approval dependencies are outside Python coverage")
@@ -71,7 +74,12 @@ def test_intel_builds_on_apple_silicon():
     assert 'export CC="clang -arch $MACH_ARCH"' in build
     assert build.count('--host="$CONFIGURE_HOST" --build="$CONFIGURE_BUILD"') == 2
     assert '-arch "$MACH_ARCH"' in build
-    staple = (root / "app/scripts/notarize_dmg.sh").read_text()
+    # configure's triples use autoconf's name: tmux 3.8's config.sub rejects arm64.
+    triple = re.search(r"^gnu_triple\(\) \{.*\}$", build, re.M).group(0)
+    for machine, want in (("arm64", "aarch64"), ("aarch64", "aarch64"), ("x86_64", "x86_64")):
+        out = sh(f"bash -c {shlex.quote(f'{triple}; gnu_triple {machine}')}", root)
+        assert out == f"{want}-apple-darwin"
+    staple =(root / "app/scripts/notarize_dmg.sh").read_text()
     assert 'tries="${STAPLE_TRIES:-12}"' in staple
     assert 'xcrun stapler staple "$dmg" && xcrun stapler validate "$dmg"' in staple
     assert '"--staple-only"' in staple
