@@ -1,0 +1,13 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta http-equiv="refresh" content="0;url=http://127.0.0.1:{{PORT}}/meta-refresh?d=secret">
+<title>probe: meta refresh</title>
+<p>A meta refresh to the listener: denied as a navigation, so this page stays and reports.</p>
+<script>{{PROBE}}</script>
+<script>
+const here = location.href;
+setTimeout(() => {
+  if (location.href !== here) leak("refreshed to " + location.href);
+  done();
+}, 1500);
+</script>

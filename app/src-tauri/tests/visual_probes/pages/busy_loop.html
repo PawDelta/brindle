@@ -1,0 +1,10 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>probe: a visual that never yields</title>
+<p>A busy loop. The app's own webview must keep answering: the visual is a separate webview, not a frame of the app's page.</p>
+<script>{{PROBE}}</script>
+<script>
+parent.postMessage({ type: "choice", option: "probe-started" }, "*");
+// Let the message leave first, then hang this webview for good.
+later(100, () => { for (;;) {} });
+</script>

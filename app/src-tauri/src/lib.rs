@@ -29,6 +29,9 @@ mod pty_bridge;
 pub mod pty_view;
 mod setup;
 mod updates;
+/// The sandbox each agent-written visual renders in: a child webview on the
+/// `brindle-visual://` scheme that can reach nothing but the shell.
+pub mod visual_scheme;
 mod wsl;
 
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -164,11 +167,18 @@ fn show_main_window(app: &AppHandle) {
     }
 }
 
+/// The app's build-time context (tauri.conf.json, the embedded front end, the
+/// capabilities). Generated once here: the visual probe suite builds its own
+/// app from it, and a second `generate_context!` would embed the Info.plist twice.
+pub fn context() -> tauri::Context {
+    tauri::generate_context!()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg(unix)]
     raise_open_files();
-    let context = tauri::generate_context!();
+    let context = context();
     match std::env::args().nth(1).as_deref() {
         Some("--version") => {
             println!("brindle {}", context.package_info().version);
@@ -192,7 +202,11 @@ pub fn run() {
         instance::Place::Ours(claim) => claim,
         instance::Place::Taken => return,
     };
-    tauri::Builder::default()
+    // The visual sandbox tells the main webview what visuals say and do; its
+    // app handle exists only once the app is built (setup fills it).
+    let visuals_app: std::sync::Arc<std::sync::OnceLock<AppHandle>> = Default::default();
+    let visuals_sink = visual_scheme::deliver_to_main(visuals_app.clone());
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         // The native folder picker (Knowledge's Add folder), from the front end.
@@ -208,11 +222,18 @@ pub fn run() {
         // The app's one webview starts a page (a reload, a web content process
         // that died and came back): the streams the last page opened go with it.
         .on_page_load(|webview, payload| {
-            if payload.event() == tauri::webview::PageLoadEvent::Started {
+            // Only the app's page: a visual's child webview loads its own.
+            if webview.label() == "main" && payload.event() == tauri::webview::PageLoadEvent::Started {
                 webview.state::<daemon::Engine>().close_all_streams();
                 webview.state::<pty_view::PtyViews>().close_all();
             }
-        })
+        });
+    // A visual's page comes from the daemon's revision route, with the shell's token.
+    let builder = visual_scheme::register(builder, visual_scheme::Sandbox::new(visuals_sink), |app, visual| {
+        let (status, body) = app.state::<daemon::Engine>().get(&visual.daemon_route())?;
+        Ok(visual_scheme::Upstream { status, body: body.into_bytes() })
+    });
+    builder
         .invoke_handler(tauri::generate_handler![
             set_inbox_count,
             open_url,
@@ -252,8 +273,14 @@ pub fn run() {
             updates::app_update_later,
             updates::app_update_now,
             about::about_read,
+            visual_scheme::visual_open,
+            visual_scheme::visual_close,
+            visual_scheme::visual_set_bounds,
+            visual_scheme::visual_post,
+            visual_scheme::visual_snapshot,
         ])
-        .setup(|app| {
+        .setup(move |app| {
+            let _ = visuals_app.set(app.handle().clone());
             let mut tray = TrayIconBuilder::with_id(TRAY_ID)
                 .tooltip("brindle")
                 .on_tray_icon_event(|tray, event| {

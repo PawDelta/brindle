@@ -1,0 +1,45 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>probe: WebRTC</title>
+<p>WebRTC is outside CSP: ICE gathering would send STUN to the listener. The prelude removes it, in every frame.</p>
+<iframe id="blank" src="about:blank"></iframe>
+<iframe id="srcdoc" srcdoc="<script>parent.rtcFromSrcdoc = typeof RTCPeerConnection;</script>"></iframe>
+<script>{{PROBE}}</script>
+<script>
+function gather(win, name) {
+  // A frame the policy refused has no window: nothing to gather from.
+  if (!win) return Promise.resolve("");
+  let Ctor;
+  try { Ctor = win.RTCPeerConnection || win.webkitRTCPeerConnection || win.mozRTCPeerConnection; } catch (_) { return Promise.resolve(""); }
+  if (!Ctor) return Promise.resolve("");
+  return new Promise((resolve) => {
+    try {
+      const pc = new Ctor({ iceServers: [{ urls: "stun:127.0.0.1:" + PORT }] });
+      pc.createDataChannel("leak");
+      pc.onicecandidate = (e) => { if (e.candidate) resolve(name + " gathered a candidate"); };
+      pc.createOffer().then((o) => pc.setLocalDescription(o)).then(() => resolve(name + " constructed and offered"));
+    } catch (e) { resolve(name + " constructed"); }
+  });
+}
+attempt("window", gather(window, "top"));
+for (const name of ["RTCPeerConnection", "webkitRTCPeerConnection", "RTCDataChannel", "RTCIceCandidate", "RTCSessionDescription"]) {
+  if (typeof window[name] !== "undefined") leak(name + " is defined");
+}
+// The removal must hold: no restoring it.
+try { delete window.RTCPeerConnection; } catch (_) {}
+try { Object.defineProperty(window, "RTCPeerConnection", { value: function () {} }); } catch (_) {}
+if (typeof window.RTCPeerConnection !== "undefined") leak("RTCPeerConnection came back");
+window.addEventListener("load", () => {
+  try {
+    const blank = document.getElementById("blank").contentWindow;
+    attempt("about:blank frame", gather(blank, "about:blank"));
+    if (window.rtcFromSrcdoc && window.rtcFromSrcdoc !== "undefined") leak("srcdoc frame sees RTCPeerConnection: " + window.rtcFromSrcdoc);
+    const fresh = document.createElement("iframe");
+    document.body.appendChild(fresh);
+    attempt("fresh frame", gather(fresh.contentWindow, "fresh"));
+  } catch (e) {
+    errors.push("frame access: " + e);
+  }
+  done();
+});
+</script>

@@ -15,7 +15,8 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon"] }
+# `unstable`: child webviews (Window::add_child), one per open visual (visual_scheme.rs).
+tauri = { version = "2", features = ["tray-icon", "unstable"] }
 tauri-plugin-notification = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-dialog = "2"
@@ -30,9 +31,34 @@ tokio = { version = "1", features = ["time", "sync"] }
 tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 
 [dev-dependencies]
-tauri = { version = "2", features = ["tray-icon", "test"] }
+tauri = { version = "2", features = ["tray-icon", "unstable", "test"] }
 base64 = "0.22"
 minisign-verify = "0.3"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# The visual sandbox's request blockers (visual_scheme.rs), on each platform's
+# webview: the same crates and versions wry uses, so one build of each.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString", "NSError", "NSArray"] }
+objc2-web-kit = { version = "0.3", features = ["block2", "WKContentRuleList", "WKContentRuleListStore", "WKUserContentController", "WKWebView", "WKWebViewConfiguration", "WKPreferences"] }
+block2 = "0.6"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+webview2-com = "0.39"
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Com"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+webkit2gtk = { version = "=2.0.2", features = ["v2_38"] }
+webkit2gtk-sys = { version = "=2.0.2", features = ["v2_38"] }
+gtk = "0.18"
+glib = "0.18"
+gio = "0.18"
+
+# The hostile-page probe suite (tests/visual_probes.rs) drives a real webview, so
+# it runs on the main thread as its own program, not under libtest.
+[[test]]
+name = "visual_probes"
+harness = false
