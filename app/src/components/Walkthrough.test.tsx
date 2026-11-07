@@ -6,7 +6,7 @@ import { ONBOARDED_KEY } from "../api/providers";
 import { PtyViewsProvider } from "../api/ptyView";
 import { createAppStore } from "../store/store";
 import { startSync } from "../store/sync";
-import { FakeDaemon } from "../test/fakeDaemon";
+import { FakeDaemon, flush } from "../test/fakeDaemon";
 import { REPO, root } from "../test/fixtures";
 import { standInViews } from "../test/panes";
 
@@ -36,7 +36,10 @@ it.each([true, false])("navigates every step forward and back, including newly m
     if (hasSession) {
       await screen.findByRole("region", { name: "Inbox" });
       expect(document.querySelector('[data-walkthrough="project-picker"]')).toBeNull();
-      act(() => openWalkthrough());
+      await act(async () => {
+        await flush();
+        openWalkthrough();
+      });
     } else {
       // First launch starts the tour itself when setup finishes, overriding the old page.
       fireEvent.click(await screen.findByRole("button", { name: "Skip for now" }));
@@ -62,6 +65,16 @@ it.each([true, false])("navigates every step forward and back, including newly m
       }
       if (i > 0) press("Next");
       await check(STEPS[i].target);
+      if (STEPS[i].target === "profile") {
+        fireEvent.click(screen.getByRole("tab", { name: "General" }));
+        const reads = daemon.requests.filter((r) => r.path === "/sessions").length;
+        await act(async () => {
+          daemon.publish("message.queued", { agent_id: "sup1" });
+          await flush();
+        });
+        expect(daemon.requests.filter((r) => r.path === "/sessions").length).toBeGreaterThan(reads);
+        expect(screen.getByRole("tab", { name: "General" }).getAttribute("aria-selected")).toBe("true");
+      }
     }
     for (let i = STEPS.length - 2; i >= 0; i--) {
       press("Back");
@@ -122,13 +135,27 @@ it("opens once after setup, follows its control as it scrolls, advances step by 
   unmount();
 
   // Dismissed: a later first-run mount doesn't open it again, but Help / the profile menu does.
-  render(<Walkthrough autoStart />);
+  let ready = false;
+  let page = "closed";
+  const navigate = (step: (typeof STEPS)[number]) => {
+    if (step.target === "session-view" && !ready) return false;
+    page = step.target;
+  };
+  const { rerender } = render(<Walkthrough autoStart onStep={navigate} />);
   expect(screen.queryByTestId("walkthrough")).toBeNull();
   act(() => openWalkthrough());
   for (const s of STEPS.slice(0, -1)) {
     expect(step()).toBe(s.target);
     fireEvent.click(screen.getByRole("button", { name: "Next" }));
   }
+  // Deferred initial data can reveal the final page once; later updates leave user selections alone.
+  expect(page).toBe("profile");
+  ready = true;
+  rerender(<Walkthrough onStep={(s) => navigate(s)} />);
+  expect(page).toBe("session-view");
+  page = "worker";
+  rerender(<Walkthrough onStep={(s) => navigate(s)} />);
+  expect(page).toBe("worker");
   fireEvent.click(screen.getByRole("button", { name: "Done" }));
   expect(screen.queryByTestId("walkthrough")).toBeNull();
 });

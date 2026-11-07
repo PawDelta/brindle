@@ -255,8 +255,9 @@ function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, p
         navigate({ screen: "account" });
         break;
       case "session-view":
+        if (repos === null) return false;
         // With no session yet, show the empty session area and its composer.
-        navigate(landing(repos ?? [], sessions, readLastSession()));
+        navigate(landing(repos, sessions, readLastSession()));
         break;
     }
   }, [navigate, repos, sessions]);

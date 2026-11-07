@@ -136,12 +136,13 @@ function cardPlace(box: Box | null): CSSProperties {
   return { left: clampX(box.left), top: below + 180 <= h ? below : clampY(box.top - GAP - 180) };
 }
 
-export function Walkthrough({ autoStart = false, onStep }: { autoStart?: boolean; onStep?: (step: WalkthroughStep) => void }) {
+export function Walkthrough({ autoStart = false, onStep }: { autoStart?: boolean; onStep?: (step: WalkthroughStep) => boolean | void }) {
   // A fresh cursor also restarts navigation when Help is pressed on the first step.
   const [cursor, setCursor] = useState<{ index: number } | null>(() => (autoStart && !readWalkthroughDone() ? { index: 0 } : null));
   const step = cursor?.index ?? null;
   const [box, setBox] = useState<Box | null>(null);
   const next = useRef<HTMLButtonElement>(null);
+  const navigated = useRef<typeof cursor>(null);
 
   useEffect(() => {
     const open = () => setCursor({ index: 0 });
@@ -155,9 +156,12 @@ export function Walkthrough({ autoStart = false, onStep }: { autoStart?: boolean
   }, []);
 
   // App owns the pages: reveal the step's page even if its target isn't mounted yet.
-  // Revisit when the session feed arrives, so the final step can open a real session.
+  // Only an explicitly deferred step can revisit when its initial data arrives.
+  // Ordinary feed updates must preserve the person's subsequent tab/agent selection.
   useLayoutEffect(() => {
-    if (cursor) onStep?.(STEPS[cursor.index]);
+    if (cursor && navigated.current !== cursor && onStep?.(STEPS[cursor.index]) !== false) {
+      navigated.current = cursor;
+    }
   }, [cursor, onStep]);
 
   // Follow the control: it can mount late (the composer once the projects load), move, resize, or
