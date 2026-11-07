@@ -244,7 +244,7 @@ class VisualOptionDTO(_DTO):
 
 
 class VisualAnswerDTO(_DTO):
-    option: str
+    option: str | None
     note: str | None = None
     at: float
 
