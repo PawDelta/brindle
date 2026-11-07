@@ -2242,9 +2242,16 @@
           "type": "boolean"
         },
         "analysis_offer": {
-          "default": false,
-          "title": "Analysis Offer",
-          "type": "boolean"
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Analysis Offer"
         },
         "detail": {
           "anyOf": [

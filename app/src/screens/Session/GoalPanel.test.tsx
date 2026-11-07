@@ -152,7 +152,7 @@ describe("GoalPanel", () => {
   });
 
   it.each([[true, "Yes"], [false, "Not now"]])("offers an analysis doc once for a large goal; answer %s sets it", async (accepted, label) => {
-    const daemon = new FakeDaemon({ goal: { ...structuredClone(goal), analysis_offer: true } });
+    const daemon = new FakeDaemon({ goal: { ...structuredClone(goal), analysis_offer: "o1" } });
     const store = createAppStore();
     const sync = startSync({ client: daemon.client(), store, connect: daemon.connect });
     render(<GoalPanel client={daemon.client()} repo={REPO} root={ROOT} store={store} />);

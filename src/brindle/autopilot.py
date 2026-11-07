@@ -42,6 +42,7 @@ import logging
 import math
 import os
 import re
+import secrets
 import subprocess
 import time
 from dataclasses import dataclass
@@ -697,14 +698,7 @@ def set_goal(db: DB, root_id: str, goal: str,
     if ap is None or ap.goal != goal.strip():
         fields["audit_history"] = None
         fields["analysis_doc"] = 0
-        # One offer per goal: brindle decides whether this goal deserves a doc.
-        from brindle.pro import analysis_brief
-
-        repos = {m[4] for m in milestones if len(m) > 4 and m[4]}
-        text = "\n".join([goal, detail or "", *(m[0] for m in milestones)])
-        fields["analysis_offer"] = ("open" if analysis_doc is not True and
-                                    analysis_brief.deserves_offer(len(milestones), max(len(repos), 1), text)
-                                    else None)
+        fields["analysis_offer"] = None     # a new goal gets its own, single offer
     if ap is None or ap.goal != goal.strip() or not ap.goal_sha:
         root = db.get_agent(root_id)
         ws = db.get_workspace(root.workspace_id) if root else None
@@ -726,6 +720,29 @@ def set_goal(db: DB, root_id: str, goal: str,
                    {"summary": "\n".join([goal.strip(), *(m[0] for m in milestones)]), "paths": []})
     if analysis_doc is not None:
         set_goal_analysis_doc(db, root_id, analysis_doc)
+    consider_analysis_offer(db, root_id)
+
+
+def consider_analysis_offer(db: DB, root_id: str) -> None:
+    """Open the one analysis-doc offer if this goal now deserves it: large, by
+    milestones, repos (an omitted repo is the root checkout) or workers, or
+    design-heavy. Never re-offers a goal already offered, answered or requested.
+    Run when the plan changes and when a worker is assigned; never raises."""
+    try:
+        from brindle.pro import analysis_brief
+
+        ap = db.get_autopilot(root_id)
+        if ap is None or not ap.goal or ap.analysis_offer is not None or ap.analysis_doc:
+            return
+        milestones = db.milestones(root_id)
+        workers = db.conn.execute("SELECT COUNT(*) FROM agents WHERE parent_id=? "
+                                  "AND mode IN ('assign','handoff','handoff_detached')", (root_id,)).fetchone()[0]
+        text = "\n".join([ap.goal, ap.detail or "", *(m.title for m in milestones)])
+        if analysis_brief.deserves_offer(len(milestones), len({m.repo or "" for m in milestones}), text, workers):
+            db.update_autopilot(root_id, analysis_offer="open:" + secrets.token_hex(4))
+            bus.publish_agent(db, "autopilot.goal", root_id)
+    except Exception:  # noqa: BLE001 - an offer is never a reason to fail a plan or a spawn
+        log.info("analysis offer not evaluated", exc_info=True)
 
 
 def set_goal_analysis_doc(db: DB, root_id: str, requested: bool) -> None:
@@ -736,7 +753,7 @@ def set_goal_analysis_doc(db: DB, root_id: str, requested: bool) -> None:
     if ap is None or not ap.goal:
         raise AutopilotError("no goal is set up for this session")
     fields: dict[str, object] = {"analysis_doc": int(requested)}
-    if ap.analysis_offer == "open":      # the person answered another way: the offer is settled
+    if (ap.analysis_offer or "").startswith("open:"):   # the person answered another way: it is settled
         fields["analysis_offer"] = "accepted" if requested else "dismissed"
     db.update_autopilot(root_id, **fields)
     bus.publish_agent(db, "autopilot.goal", root_id)
@@ -751,15 +768,15 @@ def set_goal_analysis_doc(db: DB, root_id: str, requested: bool) -> None:
             db.enqueue(root_id, brief, None)
 
 
-def resolve_analysis_offer(db: DB, root_id: str, accept: bool) -> None:
-    """The person's answer to brindle's one-time analysis doc offer."""
-    ap = db.get_autopilot(root_id)
-    if ap is None or ap.analysis_offer != "open":
+def resolve_analysis_offer(db: DB, root_id: str, accept: bool, offer_id: str) -> None:
+    """The person's answer to the one-time analysis doc offer they saw
+    (``offer_id``): settled atomically, so an answer to an older goal's offer
+    can never change a newer goal."""
+    if not db.settle_analysis_offer(root_id, "open:" + offer_id, "accepted" if accept else "dismissed"):
         raise AutopilotError("this offer is no longer open")
     if accept:
-        set_goal_analysis_doc(db, root_id, True)    # also settles the offer
+        set_goal_analysis_doc(db, root_id, True)
     else:
-        db.update_autopilot(root_id, analysis_offer="dismissed")
         bus.publish_agent(db, "autopilot.goal", root_id)
 
 

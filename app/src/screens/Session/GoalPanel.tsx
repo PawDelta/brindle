@@ -530,10 +530,10 @@ export function GoalPanel({ client, repo, root, store, compact = false, onReview
       </button>
     ) : null;
   /* brindle's one-time offer of an analysis doc for a large goal: a small question, the same shape as the visual offer. */
-  const answerDocOffer = (accept: boolean) => {
+  const answerDocOffer = (offer: string, accept: boolean) => {
     setDocSaving(true);
     setActionError(null);
-    void client.resolveAnalysisOffer(root, accept).then(
+    void client.resolveAnalysisOffer(root, offer, accept).then(
       () => {
         if (activeSession.current === session) void refresh();
       },
@@ -547,8 +547,8 @@ export function GoalPanel({ client, repo, root, store, compact = false, onReview
   const docChoice = !finished && goal.analysis_offer ? (
     <div className="inline-flex items-center gap-s1 self-start rounded-full border border-dashed border-line px-s2 text-xs text-ink-2" data-testid="analysis-offer">
       <span>Write an analysis doc for this goal?</span>
-      <button type="button" disabled={docSaving} onClick={() => answerDocOffer(true)}>Yes</button>
-      <button type="button" disabled={docSaving} onClick={() => answerDocOffer(false)}>Not now</button>
+      <button type="button" disabled={docSaving} onClick={() => answerDocOffer(goal.analysis_offer!, true)}>Yes</button>
+      <button type="button" disabled={docSaving} onClick={() => answerDocOffer(goal.analysis_offer!, false)}>Not now</button>
     </div>
   ) : null;
   /* Done's step: close the session, one click, nothing asked. Beside the status in the full view; in the sidebar

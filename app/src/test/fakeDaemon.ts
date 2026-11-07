@@ -2441,8 +2441,8 @@ export class FakeDaemon {
     }
     if (path === "/goal/analysis-offer") {
       if (typeof body.accept !== "boolean") return error("invalid", "accept is required", 400);
-      if (!goal.analysis_offer) return error("stale", "this offer is no longer open", 409);
-      goal.analysis_offer = false;
+      if (!goal.analysis_offer || goal.analysis_offer !== body.offer) return error("stale", "this offer is no longer open", 409);
+      goal.analysis_offer = null;
       if (body.accept) goal.analysis_doc = true;
       return json({ accepted: body.accept });
     }

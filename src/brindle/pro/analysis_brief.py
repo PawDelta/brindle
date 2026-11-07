@@ -60,12 +60,14 @@ def large_work(weight: str | None = None, milestones: int = 0, requested: bool =
 _DESIGN = re.compile(r"\b(?:design|architect\w*|redesign|migrat\w+|rewrite|refactor\w*)\b", re.I)
 OFFER_MILESTONES = 4        # a goal this long, or several repos, deserves the offer
 OFFER_DESIGN_MILESTONES = 3  # a design-heavy goal this long does
+OFFER_WORKERS = 3            # so does a goal that has had this many workers assigned
 
 
-def deserves_offer(milestones: int, repos: int = 1, text: str = "") -> bool:
+def deserves_offer(milestones: int, repos: int = 1, text: str = "", workers: int = 0) -> bool:
     """Whether brindle should offer the person an analysis doc for a goal:
-    large (many milestones, several repos) or design-heavy. Never writes one."""
-    return (milestones >= OFFER_MILESTONES or repos >= 2
+    large (many milestones, several repos, several workers) or design-heavy.
+    Never writes one."""
+    return (milestones >= OFFER_MILESTONES or repos >= 2 or workers >= OFFER_WORKERS
             or (milestones >= OFFER_DESIGN_MILESTONES and bool(_DESIGN.search(text))))
 
 

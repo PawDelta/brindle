@@ -1129,7 +1129,7 @@ def goal_analysis_offer(db: DB, params: dict, body: Body) -> Any:
     root, _ = _autopilot_root(db, body)
     accept = _get(body, "accept", bool, required=True)
     try:
-        autopilot.resolve_analysis_offer(db, root.id, accept)
+        autopilot.resolve_analysis_offer(db, root.id, accept, _get(body, "offer", str, required=True))
     except autopilot.AutopilotError as e:
         raise ServiceError("stale", str(e), 409) from e
     return {"accepted": accept}

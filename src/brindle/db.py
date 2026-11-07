@@ -2624,6 +2624,13 @@ class DB:
             # Both the app and the terminal can settle proposed checks.
             bus.publish_agent(self, "checks.changed", root_id)
 
+    def settle_analysis_offer(self, root_id: str, offer: str, state: str) -> bool:
+        """Atomically move exactly the offer the person saw to ``state``;
+        False when it was replaced or already answered."""
+        with self.tx() as c:
+            return c.execute("UPDATE goal_doc_requests SET offer=? WHERE root_id=? AND offer=?",
+                             (state, root_id, offer)).rowcount == 1
+
     def set_external_wait(self, root_id: str, wait: str) -> None:
         """A repeated declaration must leave the existing wait intact."""
         with self.tx() as c:

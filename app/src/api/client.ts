@@ -1401,8 +1401,8 @@ export class DaemonClient {
     return this.post<GoalEnabledAck>("/goal/enabled", { root, enabled });
   }
 
-  resolveAnalysisOffer(root: string, accept: boolean) {
-    return this.post<{ accepted: boolean }>("/goal/analysis-offer", { root, accept });
+  resolveAnalysisOffer(root: string, offer: string, accept: boolean) {
+    return this.post<{ accepted: boolean }>("/goal/analysis-offer", { root, offer, accept });
   }
 
   inbox(repo?: string) {
