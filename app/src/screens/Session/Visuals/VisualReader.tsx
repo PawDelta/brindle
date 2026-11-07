@@ -100,7 +100,9 @@ export function ReaderChrome({ title, source, missing, meta, actions, onBack, as
   );
 }
 
-export function VisualReader({ client, visual, loading, onBack, asking, onAnswered, Frame }: {
+export function VisualReader({ client, visual, loading, onBack, asking, onAnswered, onRead, Frame }: {
+  /* The engine marked this revision read. */
+  onRead?(id: string, rev: number): void;
   client: VisualsClient;
   /* The visual opened; null when the session has no such visual (gone, or a link to another session's). */
   visual: VisualDTO | null;
@@ -113,10 +115,14 @@ export function VisualReader({ client, visual, loading, onBack, asking, onAnswer
   Frame?: ComponentType<VisualFrameProps>;
 }) {
   const id = visual?.id;
+  const rev = visual?.rev ?? 0;
   const unread = !!visual?.unread;
+  const readRef = useRef(onRead);
+  readRef.current = onRead;
   useEffect(() => {
-    if (id && unread) client.markVisualRead(id).catch(() => undefined);
-  }, [client, id, unread]);
+    // No bus event says a visual was read: the list hears it from here, for the revision marked.
+    if (id && unread) client.markVisualRead(id).then(() => readRef.current?.(id, rev), () => undefined);
+  }, [client, id, rev, unread]);
   const [picked, setPicked] = useState<{ key: string; option: string } | null>(null);
   const key = visual ? `${visual.id}:${visual.rev}` : "";
   const options = visual?.options ?? [];

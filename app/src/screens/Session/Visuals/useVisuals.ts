@@ -1,5 +1,7 @@
 /* A session's visuals, read when the session opens and again on each visual.* event on the bus for
-   it (published, answered, kept, removed). Only the newest read for the session on screen applies. */
+   it (published, answered, kept, removed), and after each change made here (an answer, a Keep, a
+   read). Only the newest read for the session on screen applies: a change made here drops every
+   read begun before it, so a list read before an answer can't put the unanswered row back. */
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { VisualDTO } from "../../../api/client";
@@ -11,8 +13,11 @@ export interface Visuals {
   /* null until read, and while the engine has no visuals (an older one: the route is missing). */
   visuals: VisualDTO[] | null;
   reload(): void;
-  /* Puts a row the engine just answered with in place, ahead of the bus. */
+  /* A row the engine just answered with (an answer, a Keep): in place at once, then the list read
+     afresh, any older read dropped. */
   put(visual: VisualDTO): void;
+  /* The engine marked this revision read: its dot goes, then the list is read afresh. */
+  read(id: string, rev: number): void;
 }
 
 const about = (e: BusEvent, root: string) => e.kind.startsWith("visual.") && (e.root_id === root || e.payload.session === root);
@@ -37,11 +42,18 @@ export function useVisuals(client: VisualsClient, root: string): Visuals {
       );
   }, [client, root]);
   useEffect(reload, [reload, changed]);
-  const put = useCallback((visual: VisualDTO) => {
-    // An answer to an older revision, landing after a newer one was read, doesn't put the old one back.
-    setGot((g) => (g && g.root === visual.session ? { ...g, visuals: g.visuals.map((v) => (v.id === visual.id && visual.rev >= v.rev ? visual : v)) } : g));
-  }, []);
-  return { visuals: got && got.root === root ? got.visuals : null, reload, put };
+  // A local change to one row; reloading bumps the sequence, so a read begun before it is dropped.
+  const change = useCallback(
+    (id: string, edit: (v: VisualDTO) => VisualDTO | null) => {
+      setGot((g) => (g && g.root === root ? { ...g, visuals: g.visuals.map((v) => (v.id === id ? (edit(v) ?? v) : v)) } : g));
+      reload();
+    },
+    [root, reload],
+  );
+  // An answer to an older revision, landing after a newer one was read, doesn't put the old one back.
+  const put = useCallback((visual: VisualDTO) => change(visual.id, (v) => (visual.rev >= v.rev ? visual : null)), [change]);
+  const read = useCallback((id: string, rev: number) => change(id, (v) => (v.rev === rev ? { ...v, unread: false } : null)), [change]);
+  return { visuals: got && got.root === root ? got.visuals : null, reload, put, read };
 }
 
 /* Open: still asks the person (or asks nothing and isn't answered). Decided: answered. */

@@ -13,6 +13,8 @@
 import { useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { DaemonClient } from "../../api/client";
 import type { OpenUrl } from "../../api/open";
+import type { InboxItemDTO } from "../../api/schema";
+import { seenKey } from "../Inbox/items";
 import { LoadingButton } from "../../components/LoadingButton";
 import { button, main, mono } from "../../components/ui";
 import type { SheetRef } from "../../routes";
@@ -55,6 +57,10 @@ export interface SessionScreenProps {
   onCloseSession?(root: string): void;
 }
 
+
+/* An ask as the Back badge tells them apart: its inbox identity, and what it says (an identity a
+   new question at the same agent reuses still reads as new). */
+const askIdentity = (item: InboxItemDTO) => `${seenKey(item)}|${item.reason}|${item.detail ?? ""}`;
 
 export function findNode(node: AgentNode | null, id: string): AgentNode | null {
   if (!node) return null;
@@ -150,12 +156,22 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
   const latest = useRef({ select, selected });
   latest.current = { select, selected };
   const openVisual = useCallback((id: string) => latest.current.select(latest.current.selected, { kind: "visual", id }), []);
-  // What waits on the person when the visual opened: more since, and Back carries a sap badge.
-  const [waitingAtOpen, setWaitingAtOpen] = useState(0);
+  // What waits on the person when the visual opened, by identity and wording: one that wasn't there
+  // (or left and came back) while it's open, and Back carries a sap badge until the next open.
+  const asked = useRef<Set<string>>(new Set());
+  const [asking, setAsking] = useState(false);
   useEffect(() => {
-    if (visualId) setWaitingAtOpen(waiting.length);
+    if (!visualId) return;
+    asked.current = new Set(waiting.map(askIdentity));
+    setAsking(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visualId]);
+  useEffect(() => {
+    if (!visualId) return;
+    const live = new Set(waiting.map(askIdentity));
+    if ([...live].some((k) => !asked.current.has(k))) setAsking(true);
+    asked.current = new Set([...asked.current].filter((k) => live.has(k)));
+  }, [waiting, visualId]);
   // A new HEAD the diff's own refresh found: readiness (an open PR's unpushed count) is read again.
   const head = changes.diff?.head;
   const seenHead = useRef(head);
@@ -256,9 +272,10 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
           client={client}
           visual={visuals.visuals?.find((v) => v.id === visualId) ?? null}
           loading={visuals.visuals === null}
-          asking={waiting.length > waitingAtOpen}
+          asking={asking}
           onBack={closeSheet}
           onAnswered={visuals.put}
+          onRead={visuals.read}
         />
       )}
     </section>

@@ -1,5 +1,4 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../../../App";
 import type { VisualDTO } from "../../../api/client";
@@ -9,12 +8,14 @@ import type { SessionDTO } from "../../../api/schema";
 import { createAppStore } from "../../../store/store";
 import { startSync } from "../../../store/sync";
 import { FakeDaemon } from "../../../test/fakeDaemon";
-import { REPO, root } from "../../../test/fixtures";
+import { REPO, question, root } from "../../../test/fixtures";
 import { standInViews } from "../../../test/panes";
 import type { VisualsClient } from "./client";
 import { FOCUS_KEY, setFocus } from "./focus";
 import type { VisualFrameProps, VisualSource } from "./frame";
+import { StoreContext } from "../../../store/useStore";
 import { VisualReader } from "./VisualReader";
+import { useVisuals } from "./useVisuals";
 
 vi.mock("../../../components/PtyTerminal", () => import("../../../test/panes"));
 
@@ -52,9 +53,14 @@ describe("visuals", () => {
     const session: SessionDTO = { id: "sup1", workspace_id: "proj", profile: "supervisor", status: "idle", mode: "interactive", created_at: now - 600, goal: "Ship it" };
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root] });
     const client = daemon.client();
-    vi.spyOn(client, "visuals").mockResolvedValue([visual, answered]);
-    const read = vi.spyOn(client, "markVisualRead").mockResolvedValue({});
+    // The engine's rows: marking read and keeping change them, as the daemon's store would (no bus event for a read).
+    let rows = [visual, answered];
+    const edit = (id: string, fields: Partial<VisualDTO>) => (rows = rows.map((v) => (v.id === id ? { ...v, ...fields } : v))).find((v) => v.id === id)!;
+    vi.spyOn(client, "visuals").mockImplementation(async () => rows);
+    const read = vi.spyOn(client, "markVisualRead").mockImplementation(async (id) => edit(id, { unread: false }));
+    vi.spyOn(client, "keepVisual").mockImplementation(async (id) => edit(id, { kept: true }));
     const store = createAppStore();
+    const ask = (reason: string) => act(() => store.dispatch({ type: "snapshot", workspaces: store.getState().workspaces, inbox: [{ ...question, reason }] }));
     const sync = startSync({ client, store, connect: daemon.connect });
     try {
       render(
@@ -67,6 +73,8 @@ describe("visuals", () => {
       // The header's count is the visuals still open; the decided one is folded away in the list.
       const entry = await screen.findByTestId("visuals-button");
       expect(entry.textContent).toContain("1");
+      expect(within(entry).getByLabelText("unread")).toBeTruthy();
+      ask("Which database should the cache use?");
       fireEvent.click(entry);
       const list = screen.getByTestId("visuals-panel");
       expect(within(list).queryByTestId("visual-row-v_old")).toBeNull();
@@ -79,9 +87,14 @@ describe("visuals", () => {
       expect(screen.getByTestId("chat-area").className).toContain("hidden");
       expect(screen.getByTestId("terminal")).toBe(terminal);
       expect(sidebar().dataset.mode).toBe("rail");
-      await waitFor(() => expect(read).toHaveBeenCalledWith("v_8f2c"));
+      // Opened, it's read: the header's dot goes, with no event on the bus to say so.
+      await waitFor(() => expect(within(screen.getByTestId("visuals-button")).queryByLabelText("unread")).toBeNull());
+      expect(read).toHaveBeenCalledTimes(1);
+      // The ask there at opening badges nothing; another taking its place (the same count) does.
+      expect(screen.queryByTestId("visual-back-asking")).toBeNull();
+      ask("Should the cache be per user?");
+      expect(screen.getByTestId("visual-back-asking")).toBeTruthy();
       // Keep: the engine's kept row shows at once.
-      vi.spyOn(client, "keepVisual").mockResolvedValue({ ...visual, kept: true, unread: false });
       fireEvent.click(screen.getByTestId("visual-keep"));
       await waitFor(() => expect(screen.getByTestId("visual-keep").getAttribute("aria-pressed")).toBe("true"));
 
@@ -129,29 +142,55 @@ describe("visuals", () => {
     let post: VisualFrameProps["onMessage"] = () => undefined;
     const Frame = ({ onMessage }: VisualFrameProps) => ((post = onMessage), <div data-testid="visual-frame" />);
     const sent: { rev: number; option: string; note: string }[] = [];
+    // The engine's rows, and list reads it can hold: each answers with the rows as they were when asked.
+    let rows: VisualDTO[] = [{ ...visual, unread: false }];
+    let hold = false;
+    const held: (() => void)[] = [];
     const fake: VisualsClient = {
-      visuals: async () => [visual],
-      answerVisual: async (_id, rev, option, note) => (sent.push({ rev, option, note }), { ...visual, unread: false, answer: { option, note, at: now } }),
-      keepVisual: async () => ({ ...visual, kept: true }),
-      unkeepVisual: async () => visual,
+      visuals: () => {
+        const asked = rows;
+        return new Promise((ok) => (hold ? held.push(() => ok(asked)) : ok(asked)));
+      },
+      answerVisual: async (_id, rev, option, note) => {
+        sent.push({ rev, option, note });
+        rows = rows.map((v) => ({ ...v, answer: { option, note, at: now } }));
+        return rows[0];
+      },
+      keepVisual: async () => rows[0],
+      unkeepVisual: async () => rows[0],
       markVisualRead: async () => ({}),
     };
     const back = vi.fn();
+    const store = createAppStore();
     function Reader() {
-      const [shown, setShown] = useState(visual);
-      return <VisualReader client={fake} visual={shown} onBack={back} onAnswered={setShown} Frame={Frame} />;
+      const { visuals, put, read } = useVisuals(fake, visual.session);
+      return <VisualReader client={fake} visual={visuals?.find((v) => v.id === visual.id) ?? null} loading={visuals === null} onBack={back} onAnswered={put} onRead={read} Frame={Frame} />;
     }
-    render(<Reader />);
+    render(
+      <StoreContext.Provider value={store}>
+        <Reader />
+      </StoreContext.Provider>,
+    );
+    await screen.findByTestId("visual-frame");
     act(() => post(data, from));
     expect(back).toHaveBeenCalledTimes(want.back ? 1 : 0);
     const send = screen.getByTestId("visual-send") as HTMLButtonElement;
     expect(screen.getByRole("radio", { name: "B · Gate on CI" }).getAttribute("aria-checked")).toBe(String(want.picked));
     expect(send.disabled).toBe(!want.picked);
     if (!want.picked) return;
+    // A list read begun on the bus before the answer, still out when the answer lands.
+    hold = true;
+    await act(async () => store.dispatch({ type: "stream", message: { type: "event", id: 1, ts: now, kind: "visual.published", repo_root: null, root_id: visual.session, agent_id: null, workspace_id: null, task_id: null, payload: {} } }));
+    hold = false;
+    expect(held).toHaveLength(1);
     // Only the bar's Send answers, for the revision on screen.
     fireEvent.change(screen.getByLabelText("Add a note"), { target: { value: "ship it" } });
     fireEvent.click(send);
     await waitFor(() => expect(screen.getByTestId("visual-answered").textContent).toContain("B · Gate on CI"));
     expect(sent).toEqual([{ rev: 2, option: "B", note: "ship it" }]);
+    // The older read's unanswered rows come in last, and don't bring the answer bar back.
+    await act(async () => held.forEach((answer) => answer()));
+    expect(screen.getByTestId("visual-answered")).toBeTruthy();
+    expect(screen.queryByTestId("visual-send")).toBeNull();
   });
 });
