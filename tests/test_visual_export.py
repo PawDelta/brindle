@@ -1,5 +1,6 @@
 import base64
 import json
+from html.parser import HTMLParser
 
 import pytest
 
@@ -19,6 +20,14 @@ from test_visuals import SECRET, client, session  # noqa: F401 - shared visuals 
     '<img src="https://evil.test/tracker"><img src="data:image/svg+xml;base64,AAAA">',
     '<svg><path fill="url(https://evil.test)" d="M0 0"></path></svg>',
     '<style>@import "https://evil.test";</style>',
+    '<style>.selected{background:url(https://evil.test);color:green}</style>',
+    pytest.param('<style>.selected{background:u/**/rl(https://evil.test)}</style>',
+                 marks=pytest.mark.variant("CSS comment URL bypass")),
+    pytest.param('<style>.selected{background:\\75rl(https://evil.test)}</style>',
+                 marks=pytest.mark.variant("CSS escape URL bypass")),
+    '<style>[data-secret]{color:red;background:url(https://evil.test)}</style>',
+    pytest.param('<style>@media screen {.selected{color:red}}</style>',
+                 marks=pytest.mark.variant("unsupported nested stylesheet")),
     '<!--bad--><object><p>bad</p></object>',
 ])
 def test_snapshot_strips_active_content(db, session, client, hostile):
@@ -28,8 +37,39 @@ def test_snapshot_strips_active_content(db, session, client, hostile):
     got = client.post(f"/v1/visuals/{v['id']}/snapshot", json={"rev": 1, "html": safe + hostile})
     assert got.status_code == 200
     html = base64.b64decode(got.json()["content_b64"]).decode()
+    meta = []
+    parser = HTMLParser()
+    parser.handle_starttag = lambda tag, attrs: meta.append(dict(attrs)) if tag == "meta" else None
+    parser.feed(html)
+    assert len(meta) == 2
+    assert meta[0] == {"charset": "utf-8"}
+    policy = next(m["content"] for m in meta if m.get("http-equiv", "").lower() == "content-security-policy")
+    directives = {parts[0]: parts[1:] for rule in policy.split(";") if (parts := rule.split())}
+    assert directives["default-src"] == ["'none'"]
+    assert directives["script-src"] == ["'none'"]
+    assert directives["img-src"] == ["data:"]
+    assert directives["style-src"] == ["'unsafe-inline'"]
+    assert directives["base-uri"] == directives["form-action"] == ["'none'"]
+    assert html.index("<meta") < html.index("<body>")
     assert safe in html
-    assert not any(s in html for s in ("script", "onclick", "javascript:", "url(", "srcdoc", "http-equiv", "evil.test", "bad--"))
+    assert not any(s in html for s in ("<script", "onclick", "javascript:", "url(", "srcdoc", "refresh", "evil.test", "bad--"))
+
+
+def test_snapshot_preserves_safe_class_styling(db, session, client):
+    _, boss, _ = session
+    v = visuals.publish(db, boss, "Options", "<p>initial</p>")
+    rendered = ('<html><head><style>.options {display:grid;grid-template-columns:repeat(2, 1fr);gap:12px}'
+                '#picked.selected {background:green;color:white}</style></head><body>'
+                '<div class="options"><p>A</p><p id="picked" class="selected">B ✓</p></div></body></html>')
+    got = client.post(f"/v1/visuals/{v['id']}/snapshot", json={"rev": 1, "html": rendered})
+    assert got.status_code == 200
+    html = base64.b64decode(got.json()["content_b64"]).decode()
+    assert '<div class="options">' in html
+    assert '<p id="picked" class="selected">B ✓</p>' in html
+    assert ".options{display:grid;grid-template-columns:repeat(2, 1fr);gap:12px}" in html
+    assert "#picked.selected{background:green;color:white}" in html
+    assert html.count("<html>") == html.count("<body>") == 1
+    assert html.index("Content-Security-Policy") < html.index("<style>") < html.index("<body>")
 
 
 @pytest.mark.parametrize("case,status", [
@@ -77,7 +117,8 @@ def test_snapshot_checks_identity_revision_secrets_and_destination(db, session, 
         content = base64.b64decode(got.json()["content_b64"]).decode()
         if case == "answer":
             assert "B · ship &lt;it&gt;" in content
+            assert content.index("B · ship &lt;it&gt;") < content.index("</body>")
         elif case.startswith("plan"):
             assert content == body["markdown"] and got.json()["filename"].endswith(".md")
         else:
-            assert content == body["html"] and got.json()["mime"] == "text/html"
+            assert body["html"] in content and got.json()["mime"] == "text/html"

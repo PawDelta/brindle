@@ -15,17 +15,51 @@ from brindle import visuals
 from brindle.db import DB
 from brindle.service.errors import ServiceError
 
-TAGS = set(("html head body title main section article header footer nav div span p br hr h1 h2 h3 h4 h5 h6 "
+TAGS = set(("main section article header footer nav div span p br hr h1 h2 h3 h4 h5 h6 "
             "ul ol li dl dt dd table thead tbody tfoot tr th td caption colgroup col pre code blockquote "
             "strong em b i u s small sub sup figure figcaption img svg g path rect circle ellipse line "
             "polyline polygon text tspan defs lineargradient radialgradient stop").split())
 VOID = {"br", "hr", "img", "col"}
-DROP = {"script", "style", "iframe", "object", "embed", "template", "math", "foreignobject"}
+DROP = {"script", "title", "iframe", "object", "embed", "template", "math", "foreignobject"}
 ATTRS = set(("title alt width height colspan rowspan viewbox d x y x1 x2 y1 y2 cx cy r rx ry points "
              "fill stroke stroke-width opacity transform offset stop-color font-size text-anchor").split())
-CSS = set(("color background-color font-size font-weight font-family text-align display margin padding "
+CSS = set(("color background background-color font-size font-weight font-family text-align display margin padding "
            "border border-radius width height max-width min-width gap grid-template-columns "
-           "flex-direction align-items justify-content").split())
+           "flex-direction align-items justify-content fill stroke stroke-width opacity").split())
+CSP = ("default-src 'none'; script-src 'none'; style-src 'unsafe-inline'; img-src data:; "
+       "base-uri 'none'; form-action 'none'")
+
+
+def _declarations(css: str) -> str:
+    """Presentation values only: no escapes, URLs, variables or fetching functions."""
+    css = re.sub(r"/\*.*?(?:\*/|\Z)", "", css, flags=re.S)
+    safe = []
+    for declaration in css.split(";"):
+        prop, _, value = declaration.partition(":")
+        prop, value = prop.strip().lower(), value.strip()
+        if prop not in CSS or not re.fullmatch(r"[\w\s#.,%+\-/*()]+", value, re.ASCII):
+            continue
+        # Permit layout/color functions (including nested ones), never url(),
+        # image-set(), expression(), or future functions outside this list.
+        functions = re.sub(r"\b(?:repeat|minmax|rgb|rgba|hsl|hsla|calc|fit-content)\s*\(", "(", value, flags=re.I)
+        if re.search(r"[\w-]\s*\(", functions, re.ASCII):
+            continue
+        safe.append(f"{prop}:{value}")
+    return ";".join(safe)
+
+
+def _stylesheet(css: str) -> str:
+    """Only flat type/class/id rules; discard at-rules and complex selectors."""
+    css = re.sub(r"/\*.*?(?:\*/|\Z)", "", css, flags=re.S).strip()
+    if not re.fullmatch(r"(?:[^{}]*\{[^{}]*\})*", css):
+        return ""
+    safe = []
+    for selector, declarations in re.findall(r"([^{}]+)\{([^{}]*)\}", css):
+        selector = selector.strip()
+        declarations = _declarations(declarations)
+        if declarations and re.fullmatch(r"[A-Za-z0-9_#., >+~*\-]+", selector):
+            safe.append(f"{selector}{{{declarations}}}")
+    return "".join(safe)
 
 
 class _Snapshot(HTMLParser):
@@ -34,25 +68,29 @@ class _Snapshot(HTMLParser):
         self.out: list[str] = []
         self.stack: list[str] = []
         self.hidden: list[str] = []
+        self.styles: list[str] = []
+        self.style: list[str] | None = None
 
     def handle_starttag(self, tag, attrs):
         if self.hidden or tag in DROP:
             if tag not in VOID and tag not in {"meta", "link", "input", "embed"}:
                 self.hidden.append(tag)
             return
+        if tag == "style":
+            self.style = []
+            return
+        tag = {"html": "div", "body": "div"}.get(tag, tag)
         if tag not in TAGS:
             return
         safe = []
         for key, value in attrs:
             if value is None:
                 continue
-            if key == "style":
-                declarations = []
-                for declaration in value.split(";"):
-                    prop, _, val = declaration.partition(":")
-                    if prop.strip().lower() in CSS and re.fullmatch(r"[\w\s#.,%+\-/]+", val, re.ASCII):
-                        declarations.append(f"{prop.strip().lower()}:{val}")
-                value = ";".join(declarations)
+            if key in {"class", "id"}:
+                if not re.fullmatch(r"[\w\s-]+", value, re.ASCII):
+                    continue
+            elif key == "style":
+                value = _declarations(value)
             elif key == "src" and tag == "img":
                 if not re.fullmatch(r"data:image/(?:png|jpeg|gif|webp);base64,[A-Za-z0-9+/=\s]+", value):
                     continue
@@ -70,6 +108,11 @@ class _Snapshot(HTMLParser):
             if tag in self.hidden:
                 del self.hidden[len(self.hidden) - 1 - self.hidden[::-1].index(tag):]
             return
+        if tag == "style" and self.style is not None:
+            self.styles.append(_stylesheet("".join(self.style)))
+            self.style = None
+            return
+        tag = {"html": "div", "body": "div"}.get(tag, tag)
         if tag in self.stack:
             while self.stack:
                 top = self.stack.pop()
@@ -78,15 +121,26 @@ class _Snapshot(HTMLParser):
                     break
 
     def handle_data(self, data):
-        if not self.hidden:
+        if self.hidden:
+            return
+        if self.style is not None:
+            self.style.append(data)
+        else:
             self.out.append(escape(data))
 
 
-def sanitise(html: str) -> str:
+def sanitise(html: str, answer: dict | None = None) -> str:
     parser = _Snapshot()
     parser.feed(html)
     parser.close()
-    return "".join(parser.out) + "".join(f"</{tag}>" for tag in reversed(parser.stack))
+    body = "".join(parser.out) + "".join(f"</{tag}>" for tag in reversed(parser.stack))
+    if answer:
+        body += f'<footer>You picked {escape(answer["option"])} · {escape(answer["note"])}</footer>'
+    styles = "".join(parser.styles)
+    # No untrusted document wrappers or metadata can precede this policy.
+    return ('<!doctype html><html><head><meta charset="utf-8">'
+            f'<meta http-equiv="Content-Security-Policy" content="{escape(CSP, quote=True)}">'
+            f'<style>{styles}</style></head><body>{body}</body></html>')
 
 
 def snapshot(db: DB, visual_id: str, rev: int, html: str, destination: str = "download",
@@ -115,9 +169,7 @@ def snapshot(db: DB, visual_id: str, rev: int, html: str, destination: str = "do
     visuals._refuse_secrets([("the snapshot", content), ("the title", v["title"]),
                              ("the answer", answer.get("note") if answer else None)])
     if markdown is None:
-        content = sanitise(content)
-        if answer:
-            content += f'<footer>You picked {escape(answer["option"])} · {escape(answer["note"])}</footer>'
+        content = sanitise(content, answer)
     visuals._refuse_secrets([("the export", content)])
     extension, mime = ("md", "text/markdown") if markdown is not None else ("html", "text/html")
     name = re.sub(r"[^A-Za-z0-9_-]+", "-", v["title"]).strip("-") or "visual"
