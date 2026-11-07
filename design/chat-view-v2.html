@@ -551,7 +551,8 @@ function perm(a, size = "") {
 const foot = () => `<div class="foot"><span class="ro">${LOCK}Read-only · the agent runs in the Terminal tab</span><span class="cost"><span><b>${money(S.cost.session)}</b> of $${S.cost.budget}</span><span>${S.cost.tin} in · ${S.cost.tout} out</span><span>context <b>${S.cost.ctx}%</b></span></span></div>`;
 
 /* ── Page state ─────────────────────────────────────────────────────────── */
-const ST = { dir: 1, theme: "both", open: { "1:e1": true, "3:steps-1": true }, sheet: null };
+/* Nothing starts open: tool activity is collapsed until the reader clicks. */
+const ST = { dir: 1, theme: "both", open: {}, sheet: null };
 const hash = new URLSearchParams(location.hash.slice(1));
 if (hash.get("d")) ST.dir = +hash.get("d");
 if (hash.get("t")) ST.theme = hash.get("t");
@@ -726,9 +727,11 @@ document.addEventListener("click", (e) => {
   if (op) {
     const id = op.dataset.open;
     if (ST.dir === 2) { ST.sheet = ST.sheet === id ? null : id; renderFrames(); return; }
-    const k = `${ST.dir}:${id}`; ST.open[k] = true;
-    $$(`[data-tog="${k}"]`).forEach((b) => b.setAttribute("aria-expanded", true));
-    $$(`[data-clp="${k}"]`).forEach((c) => c.classList.add("open"));
+    /* Open the step's sheet and every collapsed group it sits inside (the Feed folds steps under a card), keeping each group's aria-expanded in step. */
+    const setOpen = (k) => { ST.open[k] = true; $$(`[data-tog="${k}"]`).forEach((b) => b.setAttribute("aria-expanded", true)); $$(`[data-clp="${k}"]`).forEach((c) => c.classList.add("open")); };
+    const k = `${ST.dir}:${id}`;
+    $$(`[data-clp="${k}"]`).forEach((c) => { let p = c.parentElement; while (p) { if (p.dataset && p.dataset.clp) setOpen(p.dataset.clp); p = p.parentElement; } });
+    setOpen(k);
     $$(`[data-tog="${k}"]`).forEach((b) => b.scrollIntoView({ block: "nearest", behavior: "smooth" }));
     return;
   }
