@@ -32,6 +32,10 @@ describe("ExportSession", () => {
     expect(exchanged.get("code_verifier")).toBeTruthy();
     expect(session.signedIn("google")).toBe(true);
     expect((await session.uploadToGoogle("Doc", new Uint8Array([1]))).url).toBe("https://docs.google.com/d/1");
+    await session.upload("Snapshot", "text/html", new TextEncoder().encode("<p>hello</p>"), false);
+    const raw = await (requests.at(-1)!.body as Blob).text();
+    expect(raw).toContain('"mimeType":"text/html"');
+    expect(raw).toContain("<p>hello</p>");
 
     expect(localStorage.length).toBe(0);
     expect(sessionStorage.length).toBe(0);

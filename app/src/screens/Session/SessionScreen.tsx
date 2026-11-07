@@ -273,6 +273,7 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
       {visualId && (
         <VisualReader
           client={client}
+          repo={repo}
           visual={visuals.visuals?.find((v) => v.id === visualId) ?? null}
           loading={visuals.visuals === null}
           asking={asking}
