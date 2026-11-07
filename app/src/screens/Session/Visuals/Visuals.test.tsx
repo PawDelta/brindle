@@ -12,12 +12,22 @@ import { REPO, question, root, waiting } from "../../../test/fixtures";
 import { standInViews } from "../../../test/panes";
 import type { VisualsClient } from "./client";
 import { FOCUS_KEY, setFocus } from "./focus";
-import type { VisualFrameProps, VisualSource } from "./frame";
+import { VisualFrame, type VisualFrameProps, type VisualSource } from "./frame";
 import { StoreContext } from "../../../store/useStore";
 import { VisualReader } from "./VisualReader";
 import { useVisuals } from "./useVisuals";
 
 vi.mock("../../../components/PtyTerminal", () => import("../../../test/panes"));
+const native = vi.hoisted(() => ({
+  enabled: false,
+  invoke: vi.fn(),
+  events: new Map<string, (event: { payload: unknown }) => void>(),
+}));
+vi.mock("@tauri-apps/api/core", async (original) => ({ ...await original<typeof import("@tauri-apps/api/core")>(), isTauri: () => native.enabled, invoke: native.invoke }));
+vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async (name: string, handler: (event: { payload: unknown }) => void) => {
+  native.events.set(name, handler);
+  return () => { if (native.events.get(name) === handler) native.events.delete(name); };
+}) }));
 
 const now = Date.now() / 1000;
 const visual: VisualDTO = {
@@ -42,13 +52,107 @@ const answered: VisualDTO = { ...visual, id: "v_old", title: "Old pick", answer:
 beforeEach(() => {
   localStorage.clear();
   localStorage.setItem(ONBOARDED_KEY, "1");
+  native.invoke.mockReset();
 });
 afterEach(() => {
   cleanup();
   setFocus(false);
+  native.enabled = false;
+  native.events.clear();
+  document.documentElement.style.removeProperty("--canvas");
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe("visuals", () => {
+  it("hosts the native page at the content bounds, relays choices and theme, and closes across reader lifecycles", async () => {
+    native.enabled = true;
+    vi.stubGlobal("matchMedia", () => ({ addEventListener() {}, removeEventListener() {} }));
+    let bounds = { x: 120, y: 90, width: 600, height: 400 };
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(() => ({ ...bounds, top: bounds.y, left: bounds.x, right: bounds.x + bounds.width, bottom: bounds.y + bounds.height, toJSON() {} }));
+    const layouts: (() => void)[] = [];
+    vi.stubGlobal("ResizeObserver", class {
+      constructor(layout: () => void) { layouts.push(layout); }
+      observe() {}
+      disconnect() {}
+    });
+    native.invoke.mockReset().mockImplementation(async (command) => command === "visual_open" ? "visual:v_8f2c:r2" : undefined);
+    const client = new FakeDaemon().client();
+    const answer = vi.spyOn(client, "answerVisual").mockResolvedValue({ ...visual, answer: { option: "B", note: "", at: now } });
+    function Reader({ shown = true, rev = 2 }) {
+      return shown ? <VisualReader client={client} visual={{ ...visual, unread: false, rev }} onBack={() => view.rerender(<Reader shown={false} />)} onAnswered={() => {}} /> : <div>Chat</div>;
+    }
+    const view = render(<Reader />);
+    await waitFor(() => expect(native.invoke).toHaveBeenCalledWith("visual_open", { id: visual.id, rev: 2, bounds }));
+    bounds = { x: 40, y: 100, width: 780, height: 300 };
+    await act(async () => layouts.forEach((layout) => layout()));
+    expect(native.invoke).toHaveBeenCalledWith("visual_set_bounds", { label: "visual:v_8f2c:r2", bounds });
+    const deliver = (name: string, payload: unknown) => act(() => native.events.get(name)!({ payload }));
+    const delivery = { label: "visual:v_8f2c:r2", visual: { kind: "revision", id: visual.id, rev: 2 }, message: { type: "choice", option: "B" } };
+    deliver("visual:message", { ...delivery, visual: { ...delivery.visual, rev: 1 } });
+    expect((screen.getByTestId("visual-send") as HTMLButtonElement).disabled).toBe(true);
+    deliver("visual:message", delivery);
+    expect(screen.getByRole("radio", { name: "B · Gate on CI" }).getAttribute("aria-checked")).toBe("true");
+    expect(answer).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByTestId("visual-send"));
+    await waitFor(() => expect(answer).toHaveBeenCalledWith(visual.id, 2, "B", ""));
+    document.documentElement.style.setProperty("--canvas", "#123456");
+    deliver("visual:loaded", { ...delivery, event: "loaded" });
+    await waitFor(() => expect(native.invoke).toHaveBeenCalledWith("visual_post", { label: delivery.label, message: expect.objectContaining({ type: "brindle.theme", vars: expect.objectContaining({ "--canvas": "#123456" }) }) }));
+    document.documentElement.style.setProperty("--canvas", "#abcdef");
+    await waitFor(() => expect(native.invoke).toHaveBeenCalledWith("visual_post", { label: delivery.label, message: expect.objectContaining({ vars: expect.objectContaining({ "--canvas": "#abcdef" }) }) }));
+    fireEvent.click(screen.getByRole("button", { name: "Export ▾" }));
+    await waitFor(() => expect(native.invoke).toHaveBeenCalledWith("visual_snapshot", { label: delivery.label }));
+    deliver("visual:message", { ...delivery, message: { type: "brindle.snapshot", html: "<html><body>Flow</body></html>" } });
+    const menu = await screen.findByRole("group", { name: "Export as" });
+    expect(menu.closest("header")).toBeTruthy();
+    // Native children cover DOM overlays: destinations must participate in header layout.
+    expect(menu.closest(".absolute, .fixed")).toBeNull();
+    bounds = { ...bounds, y: bounds.y + 80, height: bounds.height - 80 };
+    await act(async () => layouts.forEach((layout) => layout()));
+    expect(native.invoke).toHaveBeenCalledWith("visual_set_bounds", { label: delivery.label, bounds });
+    fireEvent.click(screen.getByRole("button", { name: "Export ▾" }));
+    fireEvent.click(screen.getByTestId("visual-back"));
+    await waitFor(() => expect(native.invoke).toHaveBeenCalledWith("visual_close", { label: delivery.label }));
+    expect(native.events.size).toBe(0);
+    // A revision change and a screen switch while the native open is still pending.
+    let opened!: (label: string) => void;
+    native.invoke.mockImplementation((command) => command === "visual_open" ? new Promise<string>((resolve) => { opened = resolve; }) : Promise.resolve());
+    view.rerender(<Reader rev={3} />);
+    await waitFor(() => expect(opened).toBeTypeOf("function"));
+    view.rerender(<Reader shown={false} />);
+    await act(async () => opened("visual:v_8f2c:r3"));
+    await waitFor(() => expect(native.invoke).toHaveBeenCalledWith("visual_close", { label: "visual:v_8f2c:r3" }));
+    native.invoke.mockImplementation(async (command) => command === "visual_open" ? "visual:kept:k_1" : undefined);
+    const kept = { kind: "kept", id: "k_1" } as const;
+    view.rerender(<VisualFrame source={kept} title="Kept" onMessage={() => {}} />);
+    await waitFor(() => expect(native.invoke).toHaveBeenCalledWith("visual_open", { id: "k_1", rev: null, bounds }));
+    view.rerender(<VisualFrame source={kept} title="Kept" onMessage={() => {}} snapshotRequest={1} />);
+    await waitFor(() => expect(native.invoke).toHaveBeenCalledWith("visual_snapshot", { label: "visual:kept:k_1" }));
+    native.invoke.mockClear();
+    let closed!: () => void;
+    native.invoke.mockImplementation((command) => command === "visual_close" ? new Promise<void>((resolve) => { closed = resolve; }) : Promise.resolve());
+    deliver("visual:failed", { label: "visual:kept:k_1", visual: kept, why: "Blocker unavailable" });
+    await waitFor(() => expect(native.invoke).toHaveBeenCalledWith("visual_close", { label: "visual:kept:k_1" }));
+    expect(screen.queryByRole("alert")).toBeNull();
+    await act(async () => closed());
+    expect(screen.getByRole("alert")).toBeTruthy();
+    await act(async () => layouts.forEach((layout) => layout()));
+    expect(native.invoke.mock.calls.map(([command]) => command)).toEqual(["visual_close"]);
+    // Blocker failure can arrive before the open command returns its child's label.
+    native.invoke.mockImplementation((command) => command === "visual_open" ? new Promise<string>((resolve) => { opened = resolve; }) : Promise.resolve());
+    opened = undefined!;
+    view.rerender(<Reader rev={4} />);
+    await waitFor(() => expect(opened).toBeTypeOf("function"));
+    native.invoke.mockClear();
+    deliver("visual:failed", { ...delivery, label: "visual:v_8f2c:r4", visual: { ...delivery.visual, rev: 4 }, why: "Blocker unavailable" });
+    expect(screen.queryByRole("alert")).toBeNull();
+    await act(async () => opened("visual:v_8f2c:r4"));
+    await waitFor(() => expect(screen.getByRole("alert")).toBeTruthy());
+    expect(native.invoke.mock.calls.map(([command]) => command)).toEqual(["visual_close"]);
+    view.unmount();
+  });
+
   it("opens from the header in the chat's place with the sidebar as a rail, Focus hides it and is remembered, and Esc returns to the same terminal", async () => {
     const session: SessionDTO = { id: "sup1", workspace_id: "proj", profile: "supervisor", status: "idle", mode: "interactive", created_at: now - 600, goal: "Ship it" };
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root] });
@@ -89,6 +193,9 @@ describe("visuals", () => {
 
       // The reader in the chat's place; the terminal still mounted under it, hidden; the sidebar a rail.
       expect(screen.getByTestId("visual-reader")).toBeTruthy();
+      // Browser development keeps the frame placeholder without calling the desktop shell.
+      expect(screen.getByTestId("visual-frame").dataset.src).toBe("brindle-visual://v_8f2c/r2");
+      expect(native.invoke).not.toHaveBeenCalled();
       expect(screen.getByTestId("chat-area").className).toContain("hidden");
       expect(screen.getByTestId("terminal")).toBe(terminal);
       expect(sidebar().dataset.mode).toBe("rail");

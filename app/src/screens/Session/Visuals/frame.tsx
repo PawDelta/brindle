@@ -2,13 +2,14 @@
 
    The page runs in a separate child webview on the brindle-visual:// scheme (owner amendment 8:
    design/visualizer-build-plan-amendments.md), so a hung page can't freeze the app's own webview.
-   The shell's side of that is worker 2's (app/src-tauri/src/visual_scheme.rs). Until it merges, a
-   placeholder stands in: swapping is the one line `VisualFrame = …` below.
+   The shell's side is app/src-tauri/src/visual_scheme.rs. Browser development uses a placeholder.
 
    The host, not the page, says which visual a message came from (the child webview's label), and
    the reader drops one from any other: a page can't speak for another visual or an older revision. */
 
 import type { ComponentType } from "react";
+import { isTauri } from "@tauri-apps/api/core";
+import { NativeFrame } from "./NativeFrame";
 
 /* What the frame shows: a session's visual at a revision, or a kept copy (Knowledge › Kept visuals). */
 export type VisualSource = { kind: "session"; id: string; rev: number } | { kind: "kept"; id: string };
@@ -42,7 +43,7 @@ export interface VisualFrameProps {
   onMessage(data: unknown, from: VisualSource): void;
 }
 
-/* Until the child webview is in: the frame's place, saying so. It loads nothing. */
+/* Browser development: the frame's place. It loads nothing. */
 export function PlaceholderFrame({ source, title }: VisualFrameProps) {
   return (
     <div className="flex min-h-0 flex-1 items-center justify-center p-s3 text-center text-sm text-ink-3" data-testid="visual-frame" data-src={visualSrc(source)} aria-label={title}>
@@ -51,4 +52,4 @@ export function PlaceholderFrame({ source, title }: VisualFrameProps) {
   );
 }
 
-export const VisualFrame: ComponentType<VisualFrameProps> = PlaceholderFrame;
+export const VisualFrame: ComponentType<VisualFrameProps> = (props) => isTauri() ? <NativeFrame {...props} /> : <PlaceholderFrame {...props} />;
