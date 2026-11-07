@@ -291,11 +291,11 @@ ol.qs small { display: block; color: var(--ink-2); font-size: 12.5px; margin-top
     <div class="chipdemo">
       <div>
         <div class="hdr"><span class="nm">Ship the one-approval release flow</span><span class="t-3 mono" style="font-size:11px">a3c91e07</span><span class="flex1"></span>
-          <span class="offer" role="status">Make a visual? <span class="t-3" style="font-size:11px">3 options × 4 trade-offs</span><button class="x" type="button" aria-label="Not now">×</button></span>
+          <span class="offer"><button class="x" type="button" style="color:var(--branch);padding:0">Make a visual?</button> <span class="t-3" style="font-size:11px">3 options × 4 trade-offs</span><button class="x" type="button" aria-label="Not now">×</button></span><span class="sr" role="status" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)">brindle can show this choice as a visual</span>
           <button class="vbtn" type="button">Visuals <span class="n">1</span><span class="dot"></span></button></div>
         <div class="term"><span class="d">supervisor ›</span> Three release flows fit. A: tag first … B: gate on CI …
   C: two approvals … Which should 0.6.2 use? Reply A, B or C.</div>
-        <p class="t-2" style="font-size:12.5px;margin:8px 0 0">The agent asks in text <b>as it always does</b>. The offer adds to the text and never blocks it. Clicking it delivers “The person asked for a visual of: <i>&lt;question&gt;</i>” and allows one <code>publish_visual</code>. The chip is <code>role="status"</code>: it takes no focus, isn't in the Tab order, and waits 2 s after your last key in the chat. Its label is brindle's own wording built from the tool's counts, never agent prose.</p>
+        <p class="t-2" style="font-size:12.5px;margin:8px 0 0">The agent asks in text <b>as it always does</b>. The offer adds to the text and never blocks it. Clicking it delivers “The person asked for a visual of: <i>&lt;question&gt;</i>” and allows one <code>publish_visual</code>. The chip is a native <code>&lt;button&gt;</code> (with a sibling × Not now button) in the header's Tab order, so it works from the keyboard. It <b>never takes focus on arrival</b>. A separate <code>role="status"</code> line announces it, and the chip appears 2 s after your last key in the chat. Its label is brindle's own wording built from the tool's counts, never agent prose.</p>
       </div>
       <div>
         <div class="set">
@@ -326,14 +326,14 @@ ol.qs small { display: block; color: var(--ink-2); font-size: 12.5px; margin-top
     <div class="phases">
       <div class="phase"><div class="eyebrow">wave 1 · start together</div>
         <div class="w"><div class="wt"><i>1</i>Engine store + tools <span class="pill h">heavy</span></div>
-          Store, migration, <code>publish_visual</code> / <code>list_visuals</code>, routes, <code>visual.*</code> events, delete on session remove, secret scan, gitignore.
+          Store, migration, <code>publish_visual</code> / <code>list_visuals</code>, routes, <code>visual.*</code> events, delete on session remove, secret scan, gitignore. Also the <b>kept store</b> (<code>kept_visuals</code>, <code>.brindle/kept/visuals/</code>) and its session-independent list and read routes. Answers are bound to the revision on screen.
           <div class="files">src/brindle/visuals.py (new) · db.py · mcp_server.py · daemon/routes_visuals.py (new) · daemon/app.py · daemon/events.py · daemon/api-schema.json · service/dto.py · service/sessions.py · .gitignore · tests/test_visuals.py</div></div>
         <div class="w gate"><div class="wt"><i>2</i>Shell sandbox + probes <span class="pill h">advanced · gate</span></div>
           The <code>brindle-visual://</code> scheme (proxies the daemon with its token, adds the CSP header), deny-by-default navigation and request hooks on WKWebView, WebView2 and WebKitGTK, <code>RTCPeerConnection</code> removed, app CSP <code>frame-src</code>, and the hostile probe suite in CI.
           <div class="files">app/src-tauri/src/visual_scheme.rs (new) · lib.rs · tauri.conf.json · app/src-tauri/tests/visual_probes/** (new) · .github/workflows (shell job)</div></div>
         <div class="w"><div class="wt"><i>3</i>App reader + layout <span class="pill h">heavy</span></div>
-          Header button and count, panel list with the decided fold, the reader replacing the chat area, Esc/Back, the rail and Focus, the answer bar, Keep. Built against a typed fake client.
-          <div class="files">app/src/screens/Session/Visuals/** (new) · SessionScreen.tsx · components/Sidebar.tsx · App.tsx · components/PtyTerminal.tsx (link) · api/client.ts</div></div>
+          Header button and count, panel list with the decided fold, the reader replacing the chat area, Esc/Back, the rail and Focus, the answer bar, Keep. Also <b>Knowledge › Kept visuals</b>: a list, plus the same reader opened read-only, which works after the source session is gone. Built against a typed fake client.
+          <div class="files">app/src/screens/Session/Visuals/** (new) · SessionScreen.tsx · components/Sidebar.tsx · App.tsx · components/PtyTerminal.tsx (link) · api/client.ts · Knowledge/KeptVisuals.tsx (new) · Knowledge/KnowledgeScreen.tsx (tab)</div></div>
       </div>
       <div class="phase"><div class="eyebrow">wave 2 · after 1 (+3) merge</div>
         <div class="w"><div class="wt"><i>4</i>Offers + setting <span class="pill m">medium</span></div>
@@ -356,7 +356,11 @@ VisualDTO  {id, session, title, by, kind: "visual"|"plan", rev, question?, optio
             answer?: {option, note, at}, kept, unread, created_at}
 GET    /v1/sessions/{id}/visuals            <span class="c"># list, newest first</span>
 GET    /v1/visuals/{id}/r/{n}               <span class="c"># the HTML; daemon token required; CSP header; only via the shell's scheme</span>
-POST   /v1/visuals/{id}/answer {option, note}  POST|DELETE /v1/visuals/{id}/keep   POST /v1/visuals/{id}/read
+POST   /v1/visuals/{id}/answer {rev, option, note}   <span class="c"># rev = the revision on screen; a stale rev is 409 (never read against a newer rev's options)</span>
+POST|DELETE /v1/visuals/{id}/keep   POST /v1/visuals/{id}/read
+GET    /v1/kept-visuals                     <span class="c"># Knowledge › Kept visuals; no session needed</span>
+GET    /v1/kept-visuals/{id}                <span class="c"># KeptVisualDTO {id, title, from_session_name, repo, answer?, kept_at}</span>
+GET    /v1/kept-visuals/{id}/html           <span class="c"># via brindle-visual://kept/&lt;id&gt;, same CSP and navigation deny</span>
 events visual.published · visual.answered · visual.kept · visual.removed  (+ visual.offered in wave 2)
 scheme brindle-visual://&lt;id&gt;/r&lt;n&gt;   (WebView2: http://brindle-visual.localhost/&lt;id&gt;/r&lt;n&gt;)
 frame  → host: {type:"choice", option} · {type:"brindle.esc"} · {type:"brindle.snapshot", html}   host → frame: {type:"brindle.theme", vars}</div>
@@ -418,7 +422,7 @@ frame  → host: {type:"choice", option} · {type:"brindle.esc"} · {type:"brind
         <tr><td>Secrets stored, kept, committed</td><td>A token pasted into a visual outlives the session, or <code>.brindle/visuals/</code> gets committed and pushed.</td><td><code>redact</code>'s secret scan on publish, Keep and export: refuse with the finding, never echo the value. The two paths go into <code>.gitignore</code> (they aren't ignored today). · 1, 5</td></tr>
         <tr><td>Export leaves the machine</td><td>The one real way out: a sanitiser miss runs script in a recipient's browser, or a secret goes to Drive.</td><td>An allowlist sanitiser rebuilt from parsed tokens (not regex stripping), with hostile inputs as test variants. A CSP <code>meta</code> on the exported file. The secret scan runs again. Only on the person's click, and only to destinations the org policy allows. · 5</td></tr>
         <tr><td>App freeze / exhaustion</td><td>A busy loop, a 2 MB page, 20 revisions × many sessions.</td><td>Caps: 2 MB per revision, 20 revisions; only the open visual is mounted; the freeze flag from D5. · 1, 3</td></tr>
-        <tr><td>Keys going to the wrong place</td><td>An offer chip or callout takes focus while you type to the agent.</td><td><code>role="status"</code>, out of the Tab order, no text field, held until 2 s after your last key. · 3, 4</td></tr>
+        <tr><td>Keys going to the wrong place</td><td>An offer chip or callout takes focus while you type to the agent.</td><td>Never auto-focused on arrival: the announcement is a separate <code>role="status"</code> line. The chip itself is a native, keyboard-reachable button in the header's Tab order (so keyboard-only users can accept). It has no text field and waits until 2 s after your last key. · 3, 4</td></tr>
       </tbody>
     </table>
   </section>
@@ -454,7 +458,7 @@ frame  → host: {type:"choice", option} · {type:"brindle.esc"} · {type:"brind
     <table>
       <thead><tr><th style="width:6%">W</th><th>Tests (DB rows and fakes; no tmux, no real waits)</th><th style="width:8%">Count</th></tr></thead>
       <tbody>
-        <tr><td>1</td><td>A parametrised publish table, one row per refusal branch (too big, bad option ids, secret found, unknown session) plus the accept row. · publish → answer → supervisor gets the delivered message and the Inbox item resolves, through the real dispatch. · removing a session deletes the unkept and leaves the kept. · the file route: CSP header present, another id or <code>..</code> refused (a parametrised table).</td><td>4</td></tr>
+        <tr><td>1</td><td>A parametrised publish table, one row per refusal branch (too big, bad option ids, secret found, unknown session) plus the accept row. · publish → answer → supervisor gets the delivered message and the Inbox item resolves, through the real dispatch. · removing a session deletes the unkept, and the kept one still lists and reads through <code>/v1/kept-visuals</code> after the source session is gone. · in the answer test, publishing r2 while r1 is open makes r1's answer a 409, not a read against r2's options. · the file route: CSP header present, another id or <code>..</code> refused (a parametrised table).</td><td>4</td></tr>
         <tr><td>2</td><td>One Rust integration test that loads every probe page (fetch, img, font, WebSocket, meta refresh, location, form, <code>window.open</code>, WebRTC, scheme redirect, cross-visual load) against a local listener and asserts zero hits. The probe pages are data, not test functions. · one unit test of the handler's id/rev validation.</td><td>2</td></tr>
         <tr><td>3</td><td>Open from the header → the chat area is replaced and the sidebar is a rail; Esc returns with the terminal still mounted and the draft kept. · a frame post from the wrong source or with an unknown option is ignored; a real Send posts the answer (a parametrised table).</td><td>2</td></tr>
         <tr><td>4</td><td>A rate-limiter table: open offer, cooldown, daily cap, duplicate question, two dismissals, below threshold, setting on. · accept → delivered message and one publish allowed; a second publish refused while the setting is off.</td><td>2</td></tr>
