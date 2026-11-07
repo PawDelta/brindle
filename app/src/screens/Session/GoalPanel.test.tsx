@@ -302,9 +302,12 @@ describe("GoalPanel", () => {
     const store = createAppStore();
 
     const sidebar = render(<GoalPanel client={daemon.client()} repo={REPO} root={ROOT} store={store} compact />);
-    await waitFor(() => expect(sidebar.getAllByTitle(why)).toHaveLength(1));
-    expect(sidebar.getByTitle(why).textContent).toContain(label);
-    expect(sidebar.getByText("Ship it", { exact: false }).closest("li")!.textContent).toContain("In progress");
+    // The sidebar's steps are one line each: the label and the reason are the row's tooltip.
+    await waitFor(() => expect(sidebar.getAllByTestId("milestone")).toHaveLength(3));
+    const [, row, later] = sidebar.getAllByTestId("milestone");
+    expect(row.title).toContain(label);
+    expect(row.title).toContain(why);
+    expect(later.title).toContain("In progress");
     sidebar.unmount();
 
     const full = render(<GoalPanel client={daemon.client()} repo={REPO} root={ROOT} store={store} />);
@@ -327,11 +330,65 @@ describe("GoalPanel", () => {
     const sidebar = render(<GoalPanel client={daemon.client()} repo={REPO} root={ROOT} store={createAppStore()} compact />);
     await waitFor(() => expect(sidebar.getAllByTestId("milestone")).toHaveLength(3));
     expect(sidebar.getAllByTestId("milestone").map((li) => li.dataset.state)).toEqual(["done", "now", "now"]);
-    expect(sidebar.queryByRole("progressbar")).toBeNull();
+    expect(sidebar.getByRole("progressbar").getAttribute("aria-valuenow")).toBe("33");
     expect(sidebar.getByTestId("goal-line").textContent).toContain("1 of 3 milestones complete");
     // A goal without phases is the plain list, as it always was: no folds, no "phase n of m".
     expect(sidebar.queryByTestId("phase-fold")).toBeNull();
     expect(sidebar.queryByTestId("goal-where")).toBeNull();
+  });
+
+  /* The active step and its slice of the bar take its stage's colour, with the stage's word; with nothing
+     running, neither does. */
+  it.each([["working"], ["checks"], ["review"], ["merging"], [null]])("colours the active step by its stage %s", async (stage) => {
+    const daemon = new FakeDaemon({ goal: { ...structuredClone(goal), stage } });
+    const view = render(<GoalPanel client={daemon.client()} repo={REPO} root={ROOT} store={createAppStore()} compact />);
+    await waitFor(() => expect(view.getAllByTestId("milestone")).toHaveLength(2));
+    const [done, active] = view.getAllByTestId("milestone");
+    expect(done.className).not.toMatch(/\bst-/);
+    expect(active.className.match(/\bst-(\w+)/)?.[1] ?? null).toBe(stage);
+    expect(view.queryByTestId("goal-bar-now")?.className.match(/\bst-(\w+)/)?.[1] ?? null).toBe(stage);
+    expect(view.queryByTestId("goal-stage")?.textContent ?? null).toBe(stage);
+  });
+
+  /* One activity line: commits in the last hour, else when the last one landed; the estimate only when brindle
+     has one and something runs. An engine that says nothing of either draws no line. */
+  const ago = (s: number) => Date.now() / 1000 - s;
+  it.each<[string, Partial<GoalDTO>, string | null, string | null]>([
+    ["commits, an estimate", { stage: "working", commits_last_hour: 3, last_commit_at: ago(60), eta_seconds: 1500 }, "3 commits in the last hour", "~25m left"],
+    ["one commit, no estimate", { stage: "working", commits_last_hour: 1, last_commit_at: ago(60), eta_seconds: null }, "1 commit in the last hour", null],
+    ["no commit this hour", { stage: "checks", commits_last_hour: 0, last_commit_at: ago(900), eta_seconds: 240 }, "last commit 15m ago", "~4m left"],
+    ["nothing running", { stage: null, commits_last_hour: 0, last_commit_at: ago(900), eta_seconds: 600 }, "last commit 15m ago", null],
+    ["an older engine", {}, null, null],
+  ])("says what happened lately: %s", async (_, fields, what, eta) => {
+    const daemon = new FakeDaemon({ goal: { ...structuredClone(goal), ...fields } });
+    const view = render(<GoalPanel client={daemon.client()} repo={REPO} root={ROOT} store={createAppStore()} compact />);
+    await waitFor(() => expect(view.getAllByTestId("milestone")).toHaveLength(2));
+    expect(view.queryByTestId("goal-activity-what")?.textContent ?? null).toBe(what);
+    expect(view.queryByTestId("goal-eta")?.textContent ?? null).toBe(eta);
+  });
+
+  /* Commits land without any goal event: a git sweep of the session's worktree refetches the line, and so does
+     the clock, once a minute, for the rolling hour and the ages. */
+  it("refetches the activity line on a git sweep of its session's worktree and as the clock moves", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    try {
+      const daemon = new FakeDaemon({ goal: { ...structuredClone(goal), root_id: APP_ROOT, stage: "working", commits_last_hour: 1, last_commit_at: ago(60) } });
+      const store = createAppStore();
+      store.dispatch({ type: "snapshot", workspaces: [structuredClone(root)], inbox: [] });
+      const view = render(<GoalPanel client={daemon.client()} repo={REPO} root={APP_ROOT} store={store} compact />);
+      const what = () => view.queryByTestId("goal-activity-what")?.textContent;
+      await waitFor(() => expect(what()).toBe("1 commit in the last hour"));
+
+      daemon.data.goal = { ...daemon.data.goal!, commits_last_hour: 2 };
+      act(() => store.dispatch({ type: "stream", message: { type: "git", workspace_id: root.id, status: { branch: "main", base: null, ahead: 1, behind: 0, dirty_files: [], unpushed: null } } }));
+      await waitFor(() => expect(what()).toBe("2 commits in the last hour"));
+
+      daemon.data.goal = { ...daemon.data.goal!, commits_last_hour: 0, last_commit_at: ago(1800) };
+      act(() => vi.advanceTimersByTime(60_000));
+      await waitFor(() => expect(what()).toBe("last commit 30m ago"));
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   /* Phases fold the list: a done phase is one line with its green count, the active one lists all its rows
@@ -339,7 +396,7 @@ describe("GoalPanel", () => {
   it.each([true, false])("folds the milestones by phase, the active one open (compact: %s)", async (compact) => {
     const base = goal.milestones![0];
     const ms = (n: number, phase_name: string | null, passed: boolean): MilestoneDTO => ({
-      ...base, id: n, position: n, title: `M${n}`, phase_name, status: passed ? "passed" : "pending", state: passed ? "passed" : "not_done",
+      ...base, id: n, position: n, title: `M${n}: the step in full`, phase_name, status: passed ? "passed" : "pending", state: passed ? "passed" : "not_done",
     });
     const milestones = [ms(1, "Build", true), ms(2, null, true), ms(3, "Polish", true), ms(4, "Polish", false), ms(5, "Ship", false)];
     const daemon = new FakeDaemon({ goal: { ...structuredClone(goal), milestones } });
@@ -354,6 +411,8 @@ describe("GoalPanel", () => {
       ["todo", "Ship", "1 upcoming", "false"],
     ]);
     expect(rows()).toEqual(["M3", "M4"]);
+    // The sidebar's steps go by their short names: a done one checked, the active one marked.
+    if (compact) expect(view.getAllByTestId("milestone").map((li) => li.textContent)).toEqual(["✓M3", "●M4"]);
     expect(view.getByTestId("goal-where").textContent).toBe("phase 2 of 3");
     // Only the panel's fold line carries the tiny per-phase bar, one segment per milestone.
     expect([...folds()[1].querySelectorAll(".bar-s i")].map((i) => (i as HTMLElement).dataset.s)).toEqual(compact ? [] : ["passed", "todo"]);
@@ -427,11 +486,11 @@ describe("GoalPanel", () => {
     const items = [...within(view.getByRole("list", { name: "Milestones" })).getAllByTestId("milestone")];
     if (compact) {
       expect(items.map((li) => li.dataset.state)).toEqual(["done", "done"]);
-      expect(items.map((li) => li.textContent)).toEqual(["✓Client wiredDone", "✓Screen rendersDone"]);
+      expect(items.map((li) => li.textContent)).toEqual(["✓Client wired", "✓Screen renders"]);
       expect(view.getByTestId("goal-line").textContent).toBe("2 of 2 milestones complete");
       expect(view.getByTestId("goal-line").className).toContain("text-pass");
       expect(view.queryByTestId("goal-phase")).toBeNull();
-      expect(view.queryByRole("progressbar")).toBeNull();
+      expect(view.getByRole("progressbar").getAttribute("aria-valuenow")).toBe("100");
     } else {
       expect(view.getByTestId("goal-phase").textContent).toBe("Done");
       expect(view.getByRole("heading", { name: "Ship the Goal screen" })).toBeTruthy();

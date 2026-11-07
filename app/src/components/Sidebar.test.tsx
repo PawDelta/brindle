@@ -257,9 +257,8 @@ describe("Sidebar", () => {
     const milestones = within(context()).getByRole("list", { name: "Milestones" });
     expect(milestones.textContent).toContain("Print JSON");
     expect([...milestones.querySelectorAll("li")].map((li) => li.dataset.state)).toEqual(["done", "now"]);
-    expect(within(context()).queryByRole("progressbar")).toBeNull();
+    expect(within(context()).getByRole("progressbar").getAttribute("aria-valuenow")).toBe("50");
     expect(screen.queryByTestId("connection")).toBeNull();
-    expect(context().textContent).toContain("Checked never");
     expect(within(context()).queryByRole("button", { name: /Check milestone|Run checks/ })).toBeNull();
     expect(within(context()).queryByRole("switch")).toBeNull();
     // Nothing about a PR until the engine says the session is ready (the fake's never does here).
