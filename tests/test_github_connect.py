@@ -83,6 +83,7 @@ class _Origin(http.server.SimpleHTTPRequestHandler):
         pass
 
 
+@pytest.mark.variant("credential fallback bypass: refused or expired GitHub tokens must not invoke the person's helper or askpass while connected")
 def test_connected_github_answers_git_without_the_keychain(brindle_home, tmp_path, monkeypatch, github_api):
     # The person's own helper and askpass stand for the keychain's and a dialog: a fake that notes being asked.
     asked = tmp_path / "asked"
@@ -438,6 +439,7 @@ def test_under_the_app_only_the_helper_daemon_holds_the_token_and_the_rest_ask_i
     assert github_connect.main(["get"]) == 0 and capsys.readouterr().out == stop
 
 
+@pytest.mark.variant("locked-keychain bypass: real Security.framework must refuse reads and writes without a dialog")
 @pytest.mark.skipif(sys.platform != "darwin", reason="Security.framework is macOS's")
 def test_keychain_item_reads_back_for_its_maker_and_a_locked_keychain_refuses_without_asking(tmp_path):
     # A keychain file of the test's own, never the person's: made here, deleted here.

@@ -204,12 +204,7 @@ def test_superseded_terminal_observation_cannot_restore_consent(db, session):
         assert client.post(path, json={**older, "generation": next_generation}).status_code == 200
         assert client.post(path, json={**newer, "sequence": 99}).status_code == 409
         visuals.publish(db, worker, "Current view", "<p>yes</p>")
-
-
-def test_open_terminal_records_cancellation_after_direct_person_message(db, session):
-    boss, worker = session
-    token = "t" * 43
-    with TestClient(build_app(token), headers={"Authorization": f"Bearer {token}"}) as client:
+        # Direct person messages invalidate snapshots while the same terminal stays open.
         send = terminal_input(client, boss.id)
         assert send("Make a visual").status_code == 200
         old_context = db.conn.execute("SELECT generation FROM visual_input_state WHERE root_id=?", (boss.id,)).fetchone()[0]
