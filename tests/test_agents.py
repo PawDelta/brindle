@@ -356,6 +356,54 @@ def test_paste_blocked_or_draft_holds_message_then_delivers_it_once(db, ws, monk
     assert agents.flush(db, "a1") is True and pasted == ["queued message"]
 
 
+@pytest.mark.parametrize("typed_after", ["load-buffer", "lead"])
+def test_person_typing_mid_paste_stops_it_and_message_goes_in_once_later(db, ws, monkeypatch, typed_after):
+    # Real flush and tmux.paste over a fake terminal: the person starts a reply
+    # after brindle's last look, while the paste is under way.
+    from types import SimpleNamespace
+
+    fake_agent(db, ws, status="idle", mode="interactive")
+    db.enqueue("a1", "WORKER REPORT", None)
+    s = {"composer": "", "typed": None, "at": typed_after}
+    submitted = []
+
+    def person_types(point):
+        if s["at"] == point:
+            s["at"], s["typed"] = None, time.time()
+            s["composer"] += "MY UNSENT REPLY"
+
+    def tmux_call(*args, input=None, authorize=None, **k):
+        if authorize is not None:
+            authorize()
+        out = ""
+        if args[0] == "capture-pane":
+            out = CLAUDE_IDLE.replace("❯ ", "❯ " + s["composer"])
+        elif args[0] == "list-clients" and s["typed"]:
+            out = f"@0\t{int(s['typed'])}\n"
+        elif args[0] == "load-buffer":
+            s["buffer"] = input
+            person_types("load-buffer")
+        elif args[0] == "send-keys" and "-l" in args:
+            s["composer"] += args[-1]
+            person_types("lead")
+        elif args[0] == "paste-buffer":
+            s["composer"] += s.pop("buffer")
+        elif args[0] == "send-keys" and args[-1] == "Enter":
+            submitted.append(s["composer"])
+            s["composer"] = ""
+        return SimpleNamespace(returncode=0, stdout=out, stderr="")
+    monkeypatch.setattr(tmux, "pane_input", _REAL_PANE_INPUT, raising=False)
+    monkeypatch.setattr(tmux, "_tmux", tmux_call)
+    lead = agents.message_lead(db, db.get_agent("a1"), None)
+
+    assert agents.flush(db, "a1") is False
+    assert submitted == [] and "WORKER REPORT" not in s["composer"] and db.pending_count("a1") == 1
+    s["composer"], s["typed"] = "", time.time() - 60   # the person sent their reply, a minute ago
+    assert agents.flush(db, "a1") is True
+    assert submitted == [f"{lead} WORKER REPORT"] and db.pending_count("a1") == 0
+    assert agents.flush(db, "a1") is False and len(submitted) == 1
+
+
 def test_reconcile_keeps_hook_status_when_screen_is_unclear(db, ws, monkeypatch):
     fake_agent(db, ws, status="processing")
     screens = iter([CLAUDE_IDLE, CLAUDE_BUSY])

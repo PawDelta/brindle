@@ -34,7 +34,7 @@ from brindle.model_availability import ModelAvailabilityChecker, PROVISIONING_TI
 from brindle.pro import route_health
 from brindle.redact import mask
 from brindle.profiles import load_profile, local_fallback, missing_add_dirs
-from brindle.providers import LaunchContext, get_provider, unusable
+from brindle.providers import LaunchContext, Provider, get_provider, unusable
 from brindle.sidebar_follow import (
     SIDEBAR_COLUMNS,
     SIDEBAR_DISMISSED,
@@ -2403,8 +2403,14 @@ def _paste_message(db: DB, agent: Agent, text: str, lead: str | None,
         identity_lock.ensure(fresh)
         return fresh
 
-    def authorize():
+    def authorize(write=True):
         fresh = current()
+        if write and message_id is not None and fresh.mode == "interactive":
+            # Immediately before each write (tmux.paste's): the person's keys
+            # since the last look stop it (brindle's own keys are no client's
+            # input), and a first write needs a composer holding nothing.
+            if _typed_lately(fresh) or (state["stage"] is None and _composer_taken(fresh)):
+                raise _PasteBlocked
         if resume is not None and state["stage"] == resume:
             if not _partial_composer(fresh, state, resume):
                 raise _PasteBlocked
@@ -2415,7 +2421,7 @@ def _paste_message(db: DB, agent: Agent, text: str, lead: str | None,
         if not db.record_pane_delivery(message_id, agent.id, json.dumps(state)):
             raise _PasteBlocked
 
-    authorize()
+    authorize(write=False)   # the caller's last look just read the screen
     options = {"progress": progress, "resume": resume} if message_id is not None else {}
     tmux.paste(agent.tmux_window, text, lead=lead, server=server,
                authorize=authorize, **options)
@@ -2460,7 +2466,12 @@ def _resume_pane_delivery(db: DB, agent: Agent, saved: str) -> bool:
     if state["stage"] != "submitted":
         stage = "body" if _partial_composer(agent, state, "body") else "lead"
         if stage == "lead" and (state["stage"] != "lead" or not _partial_composer(agent, state, "lead")):
-            return False
+            if state["stage"] != "lead" or not _composer_empty(agent):
+                return False
+            # Stopped after the lead, and the person has since sent or cleared
+            # the composer: the body never reached it and Enter was never
+            # pressed for it, so the whole message goes in again, once.
+            stage = None
         try:
             _paste_message(db, agent, state["body"], state["lead"], row["id"], resume=stage)
         except _PasteBlocked:
@@ -2643,6 +2654,40 @@ def _flush_midturn(db: DB, agent_id: str) -> bool:
     return True
 
 
+def _typed_lately(agent: Agent) -> bool:
+    """Whether the person pressed a key in ``agent``'s pane within
+    TYPED_WITHIN: keys reach tmux before a loaded CLI draws them, so the
+    screen alone can show an empty composer that is taking input. An
+    unanswerable server fails closed."""
+    try:
+        typed = tmux.pane_input(agent.tmux_window, server=server_of(agent))
+    except tmux.TmuxError:
+        return True
+    return typed is not None and time.time() - typed < TYPED_WITHIN
+
+
+def _composer_screen(agent: Agent) -> tuple[Provider, str] | None:
+    try:
+        screen = tmux.capture(agent.tmux_window, lines=40, escapes=True, server=server_of(agent))
+    except tmux.TmuxError:
+        return None
+    return get_provider(agent.provider), screen
+
+
+def _composer_taken(agent: Agent) -> bool:
+    """Whether the composer holds anything (or can't be read), at the moment
+    of a write: unlike _paste_blocked, never presses a key to clear a view."""
+    read = _composer_screen(agent)
+    return read is None or read[0].paste_blocked(read[1], True) is not None
+
+
+def _composer_empty(agent: Agent) -> bool:
+    """Whether the composer is recognized and holds nothing typed."""
+    read = _composer_screen(agent)
+    return (read is not None and read[0].composer_text(read[1]) is not None
+            and read[0].paste_blocked(read[1], True) is None)
+
+
 def _paste_blocked(agent: Agent) -> bool:
     """Whether pasting into ``agent``'s pane right now would land somewhere
     other than its chat: over text the person is mid-typing (interactive
@@ -2654,16 +2699,8 @@ def _paste_blocked(agent: Agent) -> bool:
     provider = get_provider(agent.provider)
     interactive = agent.mode == "interactive"
     server = server_of(agent)
-    if interactive:
-        # Keys the person just pressed may not be on screen yet (a loaded
-        # machine draws late), and more may follow mid-paste: hold, before
-        # the screen is read or a background view is escaped.
-        try:
-            typed = tmux.pane_input(agent.tmux_window, server=server)
-        except tmux.TmuxError:
-            return True
-        if typed is not None and time.time() - typed < TYPED_WITHIN:
-            return True
+    if interactive and _typed_lately(agent):
+        return True  # before the screen is read or a background view is escaped
     try:
         screen = tmux.capture(agent.tmux_window, lines=40, escapes=True, server=server)
     except tmux.TmuxError:
