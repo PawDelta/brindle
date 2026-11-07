@@ -3309,18 +3309,34 @@ def delegate(
     why = model_problem(profile, caller_ws)
     if why:
         raise AgentError(why)
+    from brindle import fair_share
+
     busy = admission(profile, caller_ws.repo_root) if admit else None
+    # A direct start (no queued task claimed its slot) takes the machine-wide fair share's turn itself.
+    fair = admit and busy is None and launches_process(profile, caller_ws.repo_root)
+    if fair:
+        busy = fair_share.start_reason(db, caller.id if caller else None, caller_ws.repo_root, profile)
     if busy:
         raise NoRoom(busy)
     def start_worker(ws: Workspace) -> Agent:
         # Startup dialogs are handled by the detached _after-launch helper, so
         # handoff/assign return as soon as the window exists instead of polling
         # the new pane for up to 30 seconds.
-        return spawn(
-            db, ws, profile, prompt=task, parent_id=caller.id if caller else None, mode=mode,
-            done_when=done_when, background_setup=True, plan_first=bool(plan_first), files=files,
-            weight=weight, analysis_doc=analysis_doc, **({"detached": True} if detached else {}),
-        )
+        def launch() -> Agent:
+            return spawn(
+                db, ws, profile, prompt=task, parent_id=caller.id if caller else None, mode=mode,
+                done_when=done_when, background_setup=True, plan_first=bool(plan_first), files=files,
+                weight=weight, analysis_doc=analysis_doc, **({"detached": True} if detached else {}),
+            )
+
+        if not fair:
+            return launch()
+        # Decided again, and the worker's row made (it counts from then on), under the machine-wide lock.
+        with fair_share.machine_lock():
+            why = fair_share.start_reason(db, caller.id if caller else None, caller_ws.repo_root, profile)
+            if why:
+                raise NoRoom(why)
+            return launch()
 
     if isolate:
         from brindle import pipeline
@@ -3850,6 +3866,13 @@ def review_after_checks(db: DB, caller_id: str | None, ws: Workspace, profile: s
                     continue   # moved while waiting for the lock: check the new commit
                 if summary and gates.summary_failed(summary):
                     pipeline.on_checks_failed(db, ws, sha, since, text, caller)
+                    return None
+                if summary and gates.summary_timed_out(summary):
+                    # Inconclusive: no review of unchecked code, and no failure sent to the worker.
+                    if to_id := gates.supervisor_id(db, ws):
+                        gates.tell(db, to_id, f"[brindle] checks on `{ws.branch}` timed out, not a "
+                                              "failure; no review was started. Request the review "
+                                              "again once the machine is quieter.")
                     return None
                 piped = caller or pipeline.piped_worker(db, ws)
                 if since is not None and piped is not None and session_paused(db, piped):

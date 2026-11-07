@@ -997,7 +997,7 @@ def test_analysis_doc_session_summary_counts_local_session_records(db, seeded, m
         if path == "/analysis-docs/manual-only":
             return {"doc_id": "manual-only", "version": 3}
         if path == "/me/analysis-docs/settings":
-            return {"switches": {"assist": "on"}}   # opt-in since the switches default to off
+            return {"switches": {"store": "on", "assist": "on"}}   # doc analysis is opt-in
         assert path == "/analysis-docs/brief"
         return {"block": "A brief", "cited": [{"doc_id": "worker-cited", "version": 4}]}
 

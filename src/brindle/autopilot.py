@@ -1259,6 +1259,9 @@ KILL_WAIT = 5.0     # seconds to wait for a killed check's pipes to close
 CANCEL_POLL = 1.0  # seconds between looks at ``cancel`` while a check runs
 
 
+TIMED_OUT = "(timed out after"   # what run_check's output carries when it killed a run on its timeout
+
+
 def run_check(cmd: str, cwd: str, env: dict[str, str], timeout: int,
               cancel=None) -> tuple[bool, str]:
     """Run one check command, at normal priority (a throttled check only makes

@@ -22,7 +22,7 @@ def write_doc(repo_root, branch="feat"):
 
 @pytest.fixture
 def remote(backend):
-    backend.docs, backend.switches, backend.status = [], {}, 200
+    backend.docs, backend.switches, backend.status = [], {"store": "on", "assist": "on"}, 200   # opt-in
 
     def store(form, headers):
         backend.docs.append(dict(form))

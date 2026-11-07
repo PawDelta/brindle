@@ -556,6 +556,12 @@ CREATE TABLE IF NOT EXISTS review_death_restarts (
     sha TEXT NOT NULL,
     PRIMARY KEY (workspace_id, sha)
 );
+-- A conflict handoff belongs to the branch, including across replacement workers.
+CREATE TABLE IF NOT EXISTS pipeline_conflicts (
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    sha TEXT NOT NULL,
+    PRIMARY KEY (workspace_id, sha)
+);
 -- The commits the session review's edit route made (the person's own edits):
 -- only the daemon writes them, so they never un-audit a session's work.
 CREATE TABLE IF NOT EXISTS review_edits (
