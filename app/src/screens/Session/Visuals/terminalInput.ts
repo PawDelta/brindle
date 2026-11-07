@@ -64,6 +64,7 @@ export function withVisualInput(client: Pick<DaemonClient, "visualInput" | "begi
       ...view,
       write(data) {
         if (closed) return;
+        const submittedAt = Date.now() / 1000;
         // Later input, including Ctrl-C, always releases an earlier held Enter.
         held?.release();
         if (!enabled()) {
@@ -74,7 +75,7 @@ export function withVisualInput(client: Pick<DaemonClient, "visualInput" | "begi
         const messages = submitted(data).map(text => ({ text, sequence: ++sequence }));
         if (!messages.length) { view.write(data); return; }
         const controller = new AbortController();
-        const expiresAt = (Date.now() + RECORD_WINDOW) / 1000;
+        const expiresAt = submittedAt + RECORD_WINDOW / 1000;
         let ended = false;
         let alarm: ReturnType<typeof setTimeout>;
         const release = () => {
@@ -94,13 +95,13 @@ export function withVisualInput(client: Pick<DaemonClient, "visualInput" | "begi
           usedObserver = observer ??= client.beginVisualInput(agent, expiresAt, controller.signal).then(r => r.generation);
           const registration = await usedObserver;
           if (controller.signal.aborted) return;
-          // Context changes on direct person messages. Read it for this
-          // submission rather than caching it across the terminal's lifetime.
-          const { generation } = await client.refreshVisualInput(agent, registration, expiresAt, controller.signal);
+          // Keep the original submission time across refresh: delayed dispatch
+          // must not relabel old input with a newer direct message's context.
+          const { generation } = await client.refreshVisualInput(agent, registration, expiresAt, controller.signal, submittedAt);
           for (const message of messages) {
             if (controller.signal.aborted) break;
             await client.visualInput(agent, message.text, expiresAt, controller.signal,
-              { generation, sequence: message.sequence });
+              { generation, sequence: message.sequence, submitted_at: submittedAt });
           }
         })().catch(() => { if (observer === usedObserver) observer = null; }).finally(release);
       },

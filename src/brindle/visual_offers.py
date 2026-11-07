@@ -191,32 +191,37 @@ def begin_input(db: DB, agent: Agent, expires_at: float | None = None) -> int:
     with db.tx() as c:
         if expires_at is not None and time.time() >= expires_at:
             raise ServiceError("stale", "this input observation expired", 409)
-        row = c.execute("INSERT INTO visual_input_state VALUES (?,1,0,1) ON CONFLICT(root_id) "
+        row = c.execute("INSERT INTO visual_input_state (root_id,generation,sequence,observer) VALUES (?,1,0,1) ON CONFLICT(root_id) "
                         "DO UPDATE SET generation=generation+1, observer=generation+1, sequence=0 RETURNING generation",
                         (agent.id,)).fetchone()
         return row["generation"]
 
 
-def refresh_input(db: DB, agent: Agent, observer: int, expires_at: float | None = None) -> int:
+def refresh_input(db: DB, agent: Agent, observer: int, submitted_at: float, expires_at: float | None = None) -> int:
     """Read the current message context without replacing the terminal's registration.
 
     A direct message invalidates old context snapshots, while the same open
-    terminal can snapshot the new context for its next submission. A replaced
+    terminal can snapshot the new context for its next submission. The original
+    submission timestamp must survive refresh, including delayed dispatch: a
+    refresh cannot relabel old input with a later direct message's context. A replaced
     terminal cannot acquire a fresh context using its old observer identity.
     """
     visuals.require_enabled()
     with db.tx() as c:
         if expires_at is not None and time.time() >= expires_at:
             raise ServiceError("stale", "this input observation expired", 409)
-        row = c.execute("SELECT generation FROM visual_input_state WHERE root_id=? AND observer=?",
+        row = c.execute("SELECT generation,invalidated_at FROM visual_input_state WHERE root_id=? AND observer=?",
                         (agent.id, observer)).fetchone()
         if row is None:
             raise ServiceError("stale", "this terminal observer was superseded", 409)
+        if submitted_at <= row["invalidated_at"]:
+            raise ServiceError("stale", "this submission predates a direct person message", 409)
         return row["generation"]
 
 
 def person_spoke(db: DB, agent: Agent, text: str, *, expires_at: float | None = None,
-                 observation: tuple[int, int] | None = None, fold_only: bool = False) -> None:
+                 observation: tuple[int, int] | None = None, submitted_at: float | None = None,
+                 fold_only: bool = False) -> None:
     """Called only for authenticated person input, never for agent messages."""
     if not visuals.enabled():
         return
@@ -230,15 +235,17 @@ def person_spoke(db: DB, agent: Agent, text: str, *, expires_at: float | None = 
         if observation is not None:
             generation, sequence = observation
             changed = c.execute("UPDATE visual_input_state SET sequence=? WHERE root_id=? "
-                                "AND generation=? AND sequence<?",
-                                (sequence, root.id, generation, sequence)).rowcount
+                                "AND generation=? AND sequence<? AND invalidated_at<?",
+                                (sequence, root.id, generation, sequence, submitted_at)).rowcount
             if not changed:
                 raise ServiceError("stale", "this input observation was superseded", 409)
         else:
             # Invalidate snapshots taken before this message, retaining the
             # open observer and its sequence ordering for future submissions.
-            c.execute("UPDATE visual_input_state SET generation=generation+1 WHERE root_id=?",
-                      (root.id,))
+            c.execute("INSERT INTO visual_input_state (root_id,generation,sequence,observer,invalidated_at) "
+                      "VALUES (?,1,0,0,?) ON CONFLICT(root_id) DO UPDATE SET "
+                      "generation=generation+1, invalidated_at=MAX(invalidated_at,excluded.invalidated_at)",
+                      (root.id, time.time()))
         c.execute("UPDATE visual_offers SET state='answered', changed_at=? WHERE root_id=? AND state='open'",
                   (time.time(), root.id))
         if not fold_only:

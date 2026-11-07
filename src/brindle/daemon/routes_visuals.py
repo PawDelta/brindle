@@ -77,9 +77,12 @@ def visual_input(db: DB, params: dict, body: dict) -> Any:
         raise ServiceError("invalid", "expires_at must be a finite timestamp", 400)
     if _get(body, "begin", bool):
         return {"generation": visual_offers.begin_input(db, agent, expires_at)}
+    submitted_at = _get(body, "submitted_at", (int, float), required=True)
+    if isinstance(submitted_at, bool) or not 0 < submitted_at < float("inf"):
+        raise ServiceError("invalid", "submitted_at must be a finite timestamp", 400)
     observer = _get(body, "refresh", int)
     if observer is not None:
-        return {"generation": visual_offers.refresh_input(db, agent, observer, expires_at)}
+        return {"generation": visual_offers.refresh_input(db, agent, observer, submitted_at, expires_at)}
     text = _get(body, "text", required=True)
     if len(text) > 32000:
         raise ServiceError("invalid", "input is too long", 400)
@@ -93,7 +96,7 @@ def visual_input(db: DB, params: dict, body: dict) -> Any:
         raise ServiceError("invalid", "generation and sequence must be positive integers", 400)
     fold_only = text.strip().lower() in ("y", "yes", "n", "no") or text.strip().isdigit()
     visual_offers.person_spoke(db, agent, text, expires_at=expires_at,
-                               observation=(generation, sequence), fold_only=fold_only)
+                               observation=(generation, sequence), submitted_at=submitted_at, fold_only=fold_only)
     return {"observed": True}
 
 

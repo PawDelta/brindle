@@ -55,19 +55,22 @@ describe("visuals", () => {
   it("refreshes context after direct messages without replaying a superseded submission", async () => {
     vi.useFakeTimers();
     let context = 1, lastSequence = 0, registrations = 0;
-    let granted = false, hold = false;
+    let invalidatedAt = 0;
+    let granted = false, hold = false, holdBeforeSnapshot = false;
     let resolveSnapshot: (() => void) | undefined;
     const seen: string[] = [];
     const open = withVisualInput({
       beginVisualInput: async () => { registrations++; return { generation: 1 }; },
-      refreshVisualInput: async () => {
+      refreshVisualInput: async (_id, _observer, _expires, _signal, submittedAt) => {
+        if (hold && holdBeforeSnapshot) { hold = false; await new Promise<void>(ok => { resolveSnapshot = ok; }); }
         const snapshot = context;
         if (hold) { hold = false; await new Promise<void>(ok => { resolveSnapshot = ok; }); }
+        if (submittedAt <= invalidatedAt) throw new Error("superseded submission");
         return { generation: snapshot };
       },
       visualInput: async (_id, text, _expires, _signal, observation) => {
         seen.push(text);
-        if (observation?.generation !== context || observation.sequence <= lastSequence) throw new Error("superseded");
+        if (observation?.generation !== context || observation.sequence <= lastSequence || observation.submitted_at <= invalidatedAt) throw new Error("superseded");
         lastSequence = observation.sequence;
         granted = text === "Make a visual";
         return { observed: true };
@@ -93,6 +96,19 @@ describe("visuals", () => {
       await act(async () => resolveSnapshot?.());
       expect(granted).toBe(true);
       expect(seen).toHaveLength(4);
+      hold = holdBeforeSnapshot = true;
+      view.write("Make a visual\r");
+      await act(async () => undefined);
+      await act(async () => vi.advanceTimersByTime(10));
+      invalidatedAt = Date.now() / 1000;
+      context++; granted = false; // A later direct cancellation precedes refresh processing.
+      await act(async () => resolveSnapshot?.());
+      expect(granted).toBe(false);
+      expect(seen).toHaveLength(4);
+      await act(async () => vi.advanceTimersByTime(10));
+      view.write("Make a visual\r");
+      await act(async () => undefined);
+      expect(granted).toBe(true);
     } finally { view.close(); vi.useRealTimers(); }
   });
 

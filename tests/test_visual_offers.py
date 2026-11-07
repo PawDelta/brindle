@@ -14,8 +14,10 @@ def terminal_input(client, root):
     def send(text, **fields):
         nonlocal sequence
         sequence += 1
-        generation = client.post(path, json={"refresh": observer}).json()["generation"]
-        return client.post(path, json={"text": text, "generation": generation, "sequence": sequence, **fields})
+        submitted_at = offers.time.time()
+        generation = client.post(path, json={"refresh": observer, "submitted_at": submitted_at}).json()["generation"]
+        return client.post(path, json={"text": text, "generation": generation, "sequence": sequence,
+                                      "submitted_at": submitted_at, **fields})
     return send
 
 
@@ -186,8 +188,8 @@ def test_superseded_terminal_observation_cannot_restore_consent(db, session):
         # Cancellation reaches the actual dispatch before the older request.
         assert client.post(path, json={"begin": True, "expires_at": offers.time.time() - 1}).status_code == 409
         generation = client.post(path, json={"begin": True}).json()["generation"]
-        newer = {"text": "Don't make a visual", "generation": generation, "sequence": 2}
-        older = {"text": "Make a visual", "generation": generation, "sequence": 1}
+        newer = {"text": "Don't make a visual", "generation": generation, "sequence": 2, "submitted_at": offers.time.time()}
+        older = {"text": "Make a visual", "generation": generation, "sequence": 1, "submitted_at": offers.time.time()}
         assert client.post(path, json=newer).status_code == 200
         assert client.post(path, json=older).status_code == 409
         assert client.post(path, json={"text": "Make a visual"}).status_code == 400
@@ -195,7 +197,7 @@ def test_superseded_terminal_observation_cannot_restore_consent(db, session):
             visuals.publish(db, worker, "Superseded", "<p>no</p>")
         # A replaced view's larger sequence cannot override the new view either.
         next_generation = client.post(path, json={"begin": True}).json()["generation"]
-        assert client.post(path, json={"refresh": generation}).status_code == 409
+        assert client.post(path, json={"refresh": generation, "submitted_at": offers.time.time()}).status_code == 409
         assert client.post(path, json={**older, "generation": next_generation}).status_code == 200
         assert client.post(path, json={**newer, "sequence": 99}).status_code == 409
         visuals.publish(db, worker, "Current view", "<p>yes</p>")
@@ -211,7 +213,8 @@ def test_open_terminal_records_cancellation_after_direct_person_message(db, sess
         agents.send_message(db, boss.id, "Use blue for the labels", person=True)
         path = f"/v1/sessions/{boss.id}/visual-input"
         # An observation already holding the old snapshot remains superseded.
-        assert client.post(path, json={"text": "Make a visual", "generation": old_context, "sequence": 2}).status_code == 409
+        assert client.post(path, json={"text": "Make a visual", "generation": old_context, "sequence": 2,
+                                       "submitted_at": offers.time.time()}).status_code == 409
         assert send("Don't make a visual").status_code == 200
         with pytest.raises(ServiceError):
             visuals.publish(db, worker, "Cancelled after direct message", "<p>no</p>")
@@ -224,6 +227,33 @@ def test_open_terminal_records_cancellation_after_direct_person_message(db, sess
         visuals.publish(db, worker, "Fresh ask", "<p>yes</p>")
         with pytest.raises(ServiceError):
             visuals.publish(db, worker, "No second ask", "<p>no</p>")
+
+
+def test_refresh_processed_after_direct_cancellation_cannot_relabel_old_ask(db, session, monkeypatch):
+    boss, worker = session
+    clock = [1000000.0]
+    monkeypatch.setattr(offers.time, "time", lambda: clock[0])
+    token = "t" * 43
+    with TestClient(build_app(token), headers={"Authorization": f"Bearer {token}"}) as client:
+        path = f"/v1/sessions/{boss.id}/visual-input"
+        observer = client.post(path, json={"begin": True}).json()["generation"]
+        submitted_at = clock[0]
+        # Hold refresh before dispatch/processing, rather than holding a response
+        # whose snapshot has already been taken.
+        delayed = {"refresh": observer, "submitted_at": submitted_at, "expires_at": submitted_at + .25}
+        clock[0] += .05
+        agents.send_message(db, boss.id, "Don't make a visual", person=True)
+        clock[0] += .05
+        assert client.post(path, json=delayed).status_code == 409
+        current = db.conn.execute("SELECT generation FROM visual_input_state WHERE root_id=?", (boss.id,)).fetchone()[0]
+        old_ask = {"text": "Make a visual", "generation": current, "sequence": 1, "submitted_at": submitted_at}
+        assert client.post(path, json=old_ask).status_code == 409
+        with pytest.raises(ServiceError):
+            visuals.publish(db, worker, "Old ask after cancellation", "<p>no</p>")
+        fresh = clock[0]
+        generation = client.post(path, json={"refresh": observer, "submitted_at": fresh}).json()["generation"]
+        assert client.post(path, json={**old_ask, "generation": generation, "submitted_at": fresh}).status_code == 200
+        visuals.publish(db, worker, "Actually asked afterward", "<p>yes</p>")
 
 
 def test_initial_person_prompt_is_observed_before_provider_launch(db, repo, monkeypatch):
@@ -251,9 +281,10 @@ def test_legacy_unscoped_grants_are_revoked(db, session):
     observer = offers.begin_input(db, boss)
     db.conn.execute("ALTER TABLE visual_grants DROP COLUMN scope")
     db.conn.execute("ALTER TABLE visual_input_state DROP COLUMN observer")
+    db.conn.execute("ALTER TABLE visual_input_state DROP COLUMN invalidated_at")
     reopened = DB(db.path)
     try:
-        assert offers.refresh_input(reopened, boss, observer) == observer
+        assert offers.refresh_input(reopened, boss, observer, offers.time.time()) == observer
         with pytest.raises(ServiceError):
             with reopened.tx() as c:
                 offers.consume(c, boss.id)
