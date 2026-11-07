@@ -28,6 +28,7 @@ export interface ApiSchema {
   GoalDTO: GoalDTO;
   InboxActionDTO: InboxActionDTO;
   InboxItemDTO: InboxItemDTO;
+  KeptVisualDTO: KeptVisualDTO;
   MilestoneDTO: MilestoneDTO;
   NativeSubagentDTO: NativeSubagentDTO;
   OrgApprovalPolicyDTO: OrgApprovalPolicyDTO;
@@ -67,6 +68,9 @@ export interface ApiSchema {
   SavedActionDTO: SavedActionDTO;
   SessionDTO: SessionDTO;
   StoppedAgentDTO: StoppedAgentDTO;
+  VisualAnswerDTO: VisualAnswerDTO;
+  VisualDTO: VisualDTO;
+  VisualOptionDTO: VisualOptionDTO;
   WorkspaceDTO: WorkspaceDTO;
 }
 /**
@@ -488,6 +492,7 @@ export interface InboxItemDTO {
   request_id?: string | null;
   root_id?: string | null;
   section?: string | null;
+  visual_id?: string | null;
   workspace_id?: string | null;
 }
 /**
@@ -525,6 +530,29 @@ export interface PermissionChoiceDTO {
   choice: string;
   label: string;
   rule?: string | null;
+}
+/**
+ * A kept visual: outlives its session. Its page: /v1/kept-visuals/{id}/html.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "KeptVisualDTO".
+ */
+export interface KeptVisualDTO {
+  answer?: VisualAnswerDTO | null;
+  from_session_name: string;
+  id: string;
+  kept_at: number;
+  repo: string;
+  title: string;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "VisualAnswerDTO".
+ */
+export interface VisualAnswerDTO {
+  at: number;
+  note?: string | null;
+  option: string;
 }
 /**
  * This interface was referenced by `ApiSchema`'s JSON-Schema
@@ -1000,6 +1028,37 @@ export interface SessionDTO {
   status: string;
   status_since?: number | null;
   workspace_id: string;
+}
+/**
+ * A visual in a session (brindle.visuals). ``rev``: its current revision,
+ * served at /v1/visuals/{id}/r/{rev}; an answer names the revision it read.
+ * ``unread``: a revision the person hasn't opened yet.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "VisualDTO".
+ */
+export interface VisualDTO {
+  answer?: VisualAnswerDTO | null;
+  by: string;
+  created_at: number;
+  id: string;
+  kept: boolean;
+  kind: "visual" | "plan";
+  options?: VisualOptionDTO[] | null;
+  question?: string | null;
+  rev: number;
+  session: string;
+  title: string;
+  unread: boolean;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "VisualOptionDTO".
+ */
+export interface VisualOptionDTO {
+  detail?: string | null;
+  id: string;
+  label: string;
 }
 /**
  * This interface was referenced by `ApiSchema`'s JSON-Schema

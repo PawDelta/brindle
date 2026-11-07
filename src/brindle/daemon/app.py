@@ -13,7 +13,7 @@ from starlette.routing import Route, WebSocketRoute
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 import brindle
-from brindle import airgap, spawn
+from brindle import airgap, spawn, visuals
 from brindle.config import db_path
 from brindle.daemon import routes_read
 from brindle.daemon.auth import Guard
@@ -22,6 +22,7 @@ from brindle.daemon.holds import ROUTES as HOLD_ROUTES
 from brindle.daemon.pty_view import pty_view
 from brindle.daemon.routes_actions import ROUTES as ACTIONS
 from brindle.daemon.routes_org_permissions import ROUTES as ORG_PERMISSION_ROUTES
+from brindle.daemon.routes_visuals import ROUTES as VISUAL_ROUTES
 
 API_VERSION = "1.0"
 REQUEST_DEADLINE = 50.0   # seconds a read request's processes get (the app waits 60)
@@ -37,13 +38,14 @@ async def meta(request: Request) -> JSONResponse:
         "tmux": shutil.which("tmux") is not None,
         "airgap": airgap.enabled(),
         "pty_view": True,       # WS /v1/pty_view: the Windows app's WSL bridge
+        "visuals": visuals.enabled(),   # the visuals capability: the app shows the feature only when on
         "resuming": getattr(request.app.state, "resuming", False),
     })
 
 
 ROUTES = [Route("/v1/meta", meta), *routes_read.ROUTES,
           WebSocketRoute("/v1/events", events), WebSocketRoute("/v1/pty_view", pty_view),
-          *ACTIONS, *HOLD_ROUTES, *ORG_PERMISSION_ROUTES]
+          *ACTIONS, *HOLD_ROUTES, *ORG_PERMISSION_ROUTES, *VISUAL_ROUTES]
 
 
 class Deadlines:
