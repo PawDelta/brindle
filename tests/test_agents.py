@@ -367,6 +367,7 @@ def test_paste_blocked_or_draft_holds_message_then_delivers_it_once(db, ws, monk
     ("lead-switch", "cleared"),   # then the person's client moves to another pane
     # they send it (or a replacement) and its turn's hook runs before brindle's Enter is authorized
     ("enter", "sent"), ("enter", "agy sent"), ("enter", "agy replaced"),
+    ("paste", "sent"), ("paste", "agy sent"),   # ... before the body's write is even recorded
 ])
 def test_person_typing_mid_paste_stops_it_and_message_goes_in_once_later(db, ws, monkeypatch, typed_after, then):
     # Real flush and tmux.paste over a fake terminal: the person starts a reply
@@ -397,12 +398,16 @@ def test_person_typing_mid_paste_stops_it_and_message_goes_in_once_later(db, ws,
         else:
             agents.handle_hook(db, "a1", "prompt-submit", {"prompt": prompt})
 
-    def tmux_call(*args, input=None, authorize=None, **k):
-        if args[0] == "send-keys" and args[-1] == "Enter" and s["at"] == "enter":
+    def person_sends(point):   # they type, send it (or a replacement), and its turn's hook runs
+        if s["at"] == point:
             s["at"], s["typed"] = None, time.time()
             s["composer"] += "MY UNSENT REPLY"
             start_turn("SOMETHING ELSE" if then.endswith("replaced") else s["composer"])
             s["composer"] = ""
+
+    def tmux_call(*args, input=None, authorize=None, **k):
+        if args[0] == "send-keys" and args[-1] == "Enter":
+            person_sends("enter")
         if authorize is not None:
             authorize()
         out = ""
@@ -420,6 +425,7 @@ def test_person_typing_mid_paste_stops_it_and_message_goes_in_once_later(db, ws,
         elif args[0] == "paste-buffer":
             s["composer"] += s.pop("buffer")
             person_types("body")
+            person_sends("paste")   # the body is in, its write not yet recorded
         elif args[0] == "send-keys" and args[-1] == "Enter":
             submitted.append(s["composer"])
             s["composer"] = ""
@@ -433,7 +439,8 @@ def test_person_typing_mid_paste_stops_it_and_message_goes_in_once_later(db, ws,
     sent, s["composer"], s["typed"] = s["composer"], "", time.time() - 60   # a minute ago
     if then.endswith("replaced"):
         sent = "SOMETHING ELSE"
-    if then in ("sent", "replaced", "agy sent", "agy replaced") and typed_after != "enter":
+    in_flight = typed_after in ("enter", "paste")   # their send and its hook came mid-paste
+    if then in ("sent", "replaced", "agy sent", "agy replaced") and not in_flight:
         start_turn(sent)   # the report went in with their reply, or it didn't
     if then in ("sent", "replaced"):
         db.set_status("a1", "idle")
@@ -442,10 +449,10 @@ def test_person_typing_mid_paste_stops_it_and_message_goes_in_once_later(db, ws,
     elif then in ("agy sent", "agy replaced"):
         antigravity.handle_hook(db, "a1", "agy-stop", {})
     assert len(spoke) == (then in ("sent", "replaced", "agy sent", "agy replaced"))   # their turn, as theirs
-    again = typed_after not in ("body", "enter") or then in ("cleared", "replaced", "agy cleared")
+    again = not (typed_after == "body" or in_flight) or then in ("cleared", "replaced", "agy cleared")
     unresolved = then in ("agy sent", "agy replaced")
     # this flush counts it (Codex's turn-end notify already flushed it)
-    acknowledged = then == "sent" and typed_after in ("body", "enter")
+    acknowledged = then == "sent" and (typed_after == "body" or in_flight)
     assert agents.flush(db, "a1") is (again or acknowledged) and db.pending_count("a1") == 0
     assert submitted == ([f"{lead} WORKER REPORT"] if again else [])
     # by no other way either: read_messages hands nothing over again

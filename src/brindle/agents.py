@@ -2776,7 +2776,10 @@ def _acknowledge_submitted(db: DB, agent_id: str, prompt: str) -> bool:
             return False
         state = json.loads(saved)
         body = str(state.get("body") or "").strip()
-        if state.get("stage") != "body" or not body or body not in prompt:
+        # "lead" too: the body can be in the composer before its write is
+        # recorded (paste-buffer done, progress("body") not yet), and a prompt
+        # carrying it is proof it was. The merge keeps "submitted" over that write.
+        if state.get("stage") not in ("lead", "body") or not body or body not in prompt:
             return False
         # The mark itself carries it ("submitted": the next flush counts it
         # delivered), so a paste still in flight sees it and presses no
@@ -2799,7 +2802,9 @@ def note_turn_started(db: DB, agent_id: str) -> None:
         if not saved:
             return
         state = json.loads(saved)
-        if state.get("stage") != "body" or state.get("turn_started"):
+        # "lead" too, as in _acknowledge_submitted: the body may already be
+        # in, its write not yet recorded; that write keeps this field.
+        if state.get("stage") not in ("lead", "body") or state.get("turn_started"):
             return
         if db.replace_mark(agent_id, "pane-delivery", saved, json.dumps({**state, "turn_started": True})):
             return
