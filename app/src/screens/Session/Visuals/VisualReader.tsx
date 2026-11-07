@@ -15,11 +15,15 @@ import { button, field, main, mono } from "../../../components/ui";
 import type { VisualsClient } from "./client";
 import { setFocus, useFocus } from "./focus";
 import { VisualFrame, frameMessage, sameSource, type VisualFrameProps, type VisualSource } from "./frame";
+import { ExportButton } from "./ExportButton";
+import type { ExportClient } from "../../Knowledge/ExportMenu";
 
 const message = (e: unknown) => plain(e instanceof Error ? e.message : String(e));
 
 /* The reader's frame and chrome, the session's and Knowledge's (read-only) alike. */
-export function ReaderChrome({ title, source, missing, meta, actions, onBack, asking, onChoice, footer, focusable = true, Frame = VisualFrame }: {
+export function ReaderChrome({ title, source, missing, meta, actions, onBack, asking, onChoice, footer, focusable = true, Frame = VisualFrame, exportClient, repo }: {
+  exportClient?: ExportClient;
+  repo?: string;
   title: string;
   /* Focus (and ⌘.) hides the sidebar: only where the sidebar steps aside, a session's reader. */
   focusable?: boolean;
@@ -37,6 +41,8 @@ export function ReaderChrome({ title, source, missing, meta, actions, onBack, as
   Frame?: ComponentType<VisualFrameProps>;
 }) {
   const focused = useFocus();
+  const [snapshot, setSnapshot] = useState<{ source: VisualSource; html: string } | null>(null);
+  const [snapshotRequest, setSnapshotRequest] = useState(0);
   const back = useRef(onBack);
   back.current = onBack;
   const focusedRef = useRef(focused);
@@ -70,6 +76,7 @@ export function ReaderChrome({ title, source, missing, meta, actions, onBack, as
     const m = frameMessage(data);
     if (m?.type === "brindle.esc") back.current();
     else if (m?.type === "choice") onChoice?.(m.option);
+    else if (m?.type === "brindle.snapshot") setSnapshot({ source: from, html: m.html });
   };
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col" data-testid="visual-reader">
@@ -80,6 +87,9 @@ export function ReaderChrome({ title, source, missing, meta, actions, onBack, as
         </button>
         <h2 className="min-w-0 flex-1 truncate text-sm font-semibold">{title}</h2>
         {actions}
+        {exportClient && source?.kind === "session" && <ExportButton key={`${source.id}:${source.rev}`} client={exportClient} repo={repo}
+          source={snapshot && sameSource(snapshot.source, source) ? { kind: "visual", id: source.id, rev: source.rev, html: snapshot.html } : null}
+          onRequestSnapshot={() => { setSnapshot(null); setSnapshotRequest((n) => n + 1); }} />}
         {focusable && (
           <button type="button" className={button} aria-pressed={focused} title="Hide the sidebar (⌘.)" data-testid="visual-focus" onClick={() => setFocus(!focused)}>
             {focused ? "Focus ✓" : "Focus"}
@@ -92,7 +102,7 @@ export function ReaderChrome({ title, source, missing, meta, actions, onBack, as
             <span>sandboxed · no network</span>
             <span className="truncate">{meta}</span>
           </div>
-          {source ? <Frame key={JSON.stringify(source)} source={source} title={title} onMessage={posted} /> : <p className="p-s3 text-sm text-ink-3">{missing ?? "This visual isn't here any more."}</p>}
+          {source ? <Frame key={JSON.stringify(source)} source={source} title={title} onMessage={posted} snapshotRequest={snapshotRequest} /> : <p className="p-s3 text-sm text-ink-3">{missing ?? "This visual isn't here any more."}</p>}
         </div>
       </div>
       {footer}
@@ -100,10 +110,11 @@ export function ReaderChrome({ title, source, missing, meta, actions, onBack, as
   );
 }
 
-export function VisualReader({ client, visual, loading, onBack, asking, onAnswered, onRead, Frame }: {
+export function VisualReader({ client, visual, loading, onBack, asking, onAnswered, onRead, Frame, repo }: {
+  repo?: string;
   /* The engine marked this revision read. */
   onRead?(id: string, rev: number): void;
-  client: VisualsClient;
+  client: VisualsClient & Partial<ExportClient>;
   /* The visual opened; null when the session has no such visual (gone, or a link to another session's). */
   visual: VisualDTO | null;
   /* The session's visuals aren't read yet. */
@@ -154,6 +165,8 @@ export function VisualReader({ client, visual, loading, onBack, asking, onAnswer
       asking={asking}
       onChoice={choose}
       Frame={Frame}
+      repo={repo}
+      exportClient={client.exportVisual && client.exportDoc && client.docPolicy && client.docExportConfig ? client as ExportClient : undefined}
       actions={
         visual && (
           <>

@@ -1543,6 +1543,10 @@ export class DaemonClient {
     return this.post<VisualDTO>(`/visuals/${encodeURIComponent(id)}/answer`, { rev, option, note });
   }
 
+  exportVisual(id: string, rev: number, html: string, destination: ExportDestination = "download", markdown?: string) {
+    return this.post<{ filename: string; mime: string; content_b64: string }>(`/visuals/${encodeURIComponent(id)}/snapshot`, { rev, html, destination, markdown });
+  }
+
   keepVisual(id: string) {
     return this.post<VisualDTO>(`/visuals/${encodeURIComponent(id)}/keep`, {});
   }

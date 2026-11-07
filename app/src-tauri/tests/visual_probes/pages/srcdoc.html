@@ -1,0 +1,26 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>probe: srcdoc, about:blank and data: frames</title>
+<p>Nested documents: each inherits the policy and gets the prelude, so none may request anything.</p>
+<script>{{PROBE}}</script>
+<iframe id="srcdoc" srcdoc="<img src='http://127.0.0.1:{{PORT}}/srcdoc-img.png'><script>fetch('http://127.0.0.1:{{PORT}}/srcdoc-fetch').then((r) => parent.leak('srcdoc fetch answered ' + r.status), () => {}); parent.srcdocRan = true;</script>"></iframe>
+<iframe id="data" src="data:text/html,<script>fetch('http://127.0.0.1:{{PORT}}/data-frame-fetch')</script><img src='http://127.0.0.1:{{PORT}}/data-frame-img.png'>"></iframe>
+<iframe id="blob"></iframe>
+<iframe id="blank"></iframe>
+<script>
+const blob = new Blob(["<script>fetch('" + HTTP + "/blob-frame-fetch')</" + "script><img src='" + HTTP + "/blob-frame-img.png'>"], { type: "text/html" });
+document.getElementById("blob").src = URL.createObjectURL(blob);
+window.addEventListener("load", () => {
+  const blank = document.getElementById("blank").contentWindow;
+  try {
+    blank.document.write("<img src='" + HTTP + "/blank-img.png'><script>fetch('" + HTTP + "/blank-fetch').then((r) => parent.leak('about:blank fetch answered ' + r.status), () => {})</" + "script>");
+    blank.document.close();
+    if (typeof blank.RTCPeerConnection !== "undefined") leak("about:blank frame has RTCPeerConnection");
+    attempt("about:blank frame fetch", blank.fetch(HTTP + "/blank-window-fetch").then((r) => "answered " + r.status));
+  } catch (_) {}
+  const w = document.createElement("iframe");
+  w.srcdoc = "<script>fetch('" + HTTP + "/late-srcdoc')</" + "script>";
+  document.body.appendChild(w);
+  done();
+});
+</script>
