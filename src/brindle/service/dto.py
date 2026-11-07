@@ -268,6 +268,65 @@ class VisualDTO(_DTO):
     created_at: float
 
 
+class PlanSectionDTO(_DTO):
+    """One ``##`` section of a plan's markdown: what a comment anchors to."""
+
+    id: str
+    title: str
+    markdown: str
+
+
+class PlanDecisionDTO(_DTO):
+    """A decision that shapes the plan: its alternatives and the supervisor's pick."""
+
+    id: str
+    title: str
+    options: list[VisualOptionDTO]
+    mine: str | None = None
+    challenge: str | None = None
+
+
+class PlanWorkerDTO(_DTO):
+    id: str
+    title: str
+    after: list[str] = []
+
+
+class PlanCommentDTO(_DTO):
+    section: str
+    text: str
+
+
+class PlanVerdictDTO(_DTO):
+    approved: bool
+    picks: dict[str, str] = {}
+    comments: list[PlanCommentDTO] = []
+    note: str | None = None
+    at: float
+    rev: int
+
+
+class PlanDTO(_DTO):
+    """A planning doc (brindle.plans): markdown brindle renders itself, split
+    into its ``##`` sections. ``state``: open (the person hasn't decided),
+    redirected (their comments went back; a new revision is coming) or
+    approved. While open or redirected, the session's assign calls queue."""
+
+    id: str
+    session: str
+    title: str
+    rev: int
+    state: Literal["open", "redirected", "approved"]
+    markdown: str
+    lede: str
+    sections: list[PlanSectionDTO]
+    decisions: list[PlanDecisionDTO]
+    split: list[PlanWorkerDTO]
+    verdict: PlanVerdictDTO | None = None
+    queued: int
+    created_at: float
+
+
 class KeptVisualDTO(_DTO):
     """A kept visual: outlives its session. Its page: /v1/kept-visuals/{id}/html."""
 

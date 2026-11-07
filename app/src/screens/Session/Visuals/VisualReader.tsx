@@ -10,16 +10,14 @@
 
 import { useEffect, useRef, useState, type ComponentType, type ReactNode } from "react";
 import { DaemonError, type VisualDTO } from "../../../api/client";
-import { plain } from "../../../api/wording";
 import { LoadingButton } from "../../../components/LoadingButton";
 import { button, field, main, mono } from "../../../components/ui";
-import type { VisualsClient } from "./client";
-import { ArrowLeftIcon, BookmarkIcon } from "../../../components/icons";
+import type { PlansClient, VisualsClient } from "./client";
+import { BackButton, KeepButton, message, useEscBack } from "./chrome";
+import { PlanReader } from "./PlanReader";
 import { VisualFrame, frameMessage, sameSource, type VisualFrameProps, type VisualSource } from "./frame";
 import { ExportButton } from "./ExportButton";
 import type { ExportClient } from "../../Knowledge/ExportMenu";
-
-const message = (e: unknown) => plain(e instanceof Error ? e.message : String(e));
 
 /* The reader's frame and chrome, the session's and Knowledge's (read-only) alike. */
 export function ReaderChrome({ title, source, missing, meta, actions, onBack, backLabel = "Back", asking, onChoice, footer, Frame = VisualFrame, exportClient, repo }: {
@@ -43,21 +41,8 @@ export function ReaderChrome({ title, source, missing, meta, actions, onBack, ba
 }) {
   const [snapshot, setSnapshot] = useState<{ source: VisualSource; html: string } | null>(null);
   const [snapshotRequest, setSnapshotRequest] = useState(0);
-  const back = useRef(onBack);
-  back.current = onBack;
+  const back = useEscBack(onBack);
   const [exporting, setExporting] = useState(false);
-  useEffect(() => {
-    // Esc goes back, unless a field or menu took it first.
-    const esc = (e: KeyboardEvent) => {
-      if (e.key !== "Escape" || e.defaultPrevented) return;
-      // In the note field, Esc first lets go of it, so a half-typed note isn't lost.
-      const typing = e.target instanceof HTMLElement && e.target.closest("input, textarea");
-      if (typing) (typing as HTMLElement).blur();
-      else back.current();
-    };
-    window.addEventListener("keydown", esc);
-    return () => window.removeEventListener("keydown", esc);
-  }, []);
   const posted = (data: unknown, from: VisualSource) => {
     if (!source || !sameSource(from, source)) return;
     const m = frameMessage(data);
@@ -69,12 +54,7 @@ export function ReaderChrome({ title, source, missing, meta, actions, onBack, ba
     <div className="flex min-h-0 min-w-0 flex-1 flex-col" data-testid="visual-reader">
       {/* One toolbar: Back (Esc) and the title on the left, the visual's own actions on the right. */}
       <header className="flex flex-wrap items-center gap-x-2 gap-y-1 px-s2 pt-2.5">
-        <button type="button" className={`${button} relative pl-2 pr-2`} onClick={onBack} title={`${backLabel} (Esc)`} data-testid="visual-back">
-          <ArrowLeftIcon size={15} className="text-ink-2" />
-          {backLabel}
-          <kbd className="ml-0.5 rounded-[3px] border border-line bg-surface-2 px-1 font-mono text-[10px] font-medium leading-4 text-ink-3">Esc</kbd>
-          {asking && <span className="absolute -right-1 -top-1 size-2.5 rounded-full bg-sap ring-2 ring-canvas" aria-label="the agent asks something new" data-testid="visual-back-asking" />}
-        </button>
+        <BackButton onBack={onBack} label={backLabel} asking={asking} />
         <span className="mx-1 h-5 w-px bg-line" aria-hidden />
         <h2 className="min-w-0 flex-1 truncate text-[15px] font-semibold tracking-[-0.01em]">{title}</h2>
         {actions}
@@ -101,7 +81,7 @@ export function VisualReader({ client, visual, loading, onBack, asking, onAnswer
   repo?: string;
   /* The engine marked this revision read. */
   onRead?(id: string, rev: number): void;
-  client: VisualsClient & Partial<ExportClient>;
+  client: VisualsClient & Partial<ExportClient> & Partial<PlansClient>;
   /* The visual opened; null when the session has no such visual (gone, or a link to another session's). */
   visual: VisualDTO | null;
   /* The session's visuals aren't read yet. */
@@ -127,21 +107,11 @@ export function VisualReader({ client, visual, loading, onBack, asking, onAnswer
   const choose = (option: string) => {
     if (visual && !visual.answer && options.some((o) => o.id === option)) setPicked({ key, option });
   };
-  const [keeping, setKeeping] = useState(false);
-  const [keepError, setKeepError] = useState<string | null>(null);
-  const keep = async () => {
-    if (!visual) return;
-    setKeeping(true);
-    setKeepError(null);
-    try {
-      onAnswered(await (visual.kept ? client.unkeepVisual(visual.id) : client.keepVisual(visual.id)));
-    } catch (e) {
-      setKeepError(message(e));
-    } finally {
-      setKeeping(false);
-    }
-  };
   const source: VisualSource | null = visual ? { kind: "session", id: visual.id, rev: visual.rev } : null;
+  if (visual?.kind === "plan" && client.plan && client.decidePlan) {
+    // A plan is brindle's own page, rendered here from its markdown: no frame.
+    return <PlanReader client={client as VisualsClient & PlansClient & Partial<ExportClient>} visual={visual} repo={repo} onBack={onBack} asking={asking} onChanged={onAnswered} />;
+  }
   return (
     <ReaderChrome
       title={visual?.title ?? "Visual"}
@@ -155,15 +125,7 @@ export function VisualReader({ client, visual, loading, onBack, asking, onAnswer
       repo={repo}
       exportClient={client.exportVisual && client.exportDoc && client.docPolicy && client.docExportConfig ? client as ExportClient : undefined}
       actions={
-        visual && (
-          <>
-            {keepError && <span className="text-xs text-sap">{keepError}</span>}
-            <LoadingButton className={`${button} pl-2.5 ${visual.kept ? "border-branch/45 bg-branch-soft" : ""}`} busy={keeping} disabled={keeping} aria-pressed={visual.kept} title={visual.kept ? "Kept in Knowledge › Kept visuals (click to remove)" : "Keep a copy in Knowledge › Kept visuals"} data-testid="visual-keep" onClick={() => void keep()}>
-              <BookmarkIcon size={15} filled={visual.kept} className={visual.kept ? "text-branch" : "text-ink-2"} />
-              {visual.kept ? "Kept" : "Keep"}
-            </LoadingButton>
-          </>
-        )
+        visual && <KeepButton client={client} visual={visual} onKept={onAnswered} />
       }
       footer={visual && options.length > 0 && <AnswerBar key={key} client={client} visual={visual} picked={picked?.key === key ? picked.option : null} onPick={choose} onAnswered={onAnswered} />}
     />

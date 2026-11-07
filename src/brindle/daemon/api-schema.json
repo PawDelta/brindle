@@ -5209,6 +5209,524 @@
       "title": "PermissionRuleDTO",
       "type": "object"
     },
+    "PlanCommentDTO": {
+      "properties": {
+        "section": {
+          "title": "Section",
+          "type": "string"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "section",
+        "text"
+      ],
+      "title": "PlanCommentDTO",
+      "type": "object"
+    },
+    "PlanDTO": {
+      "$defs": {
+        "PlanCommentDTO": {
+          "properties": {
+            "section": {
+              "title": "Section",
+              "type": "string"
+            },
+            "text": {
+              "title": "Text",
+              "type": "string"
+            }
+          },
+          "required": [
+            "section",
+            "text"
+          ],
+          "title": "PlanCommentDTO",
+          "type": "object"
+        },
+        "PlanDecisionDTO": {
+          "description": "A decision that shapes the plan: its alternatives and the supervisor's pick.",
+          "properties": {
+            "challenge": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Challenge"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "mine": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Mine"
+            },
+            "options": {
+              "items": {
+                "$ref": "#/$defs/VisualOptionDTO"
+              },
+              "title": "Options",
+              "type": "array"
+            },
+            "title": {
+              "title": "Title",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "title",
+            "options"
+          ],
+          "title": "PlanDecisionDTO",
+          "type": "object"
+        },
+        "PlanSectionDTO": {
+          "description": "One ``##`` section of a plan's markdown: what a comment anchors to.",
+          "properties": {
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "markdown": {
+              "title": "Markdown",
+              "type": "string"
+            },
+            "title": {
+              "title": "Title",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "title",
+            "markdown"
+          ],
+          "title": "PlanSectionDTO",
+          "type": "object"
+        },
+        "PlanVerdictDTO": {
+          "properties": {
+            "approved": {
+              "title": "Approved",
+              "type": "boolean"
+            },
+            "at": {
+              "title": "At",
+              "type": "number"
+            },
+            "comments": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/PlanCommentDTO"
+              },
+              "title": "Comments",
+              "type": "array"
+            },
+            "note": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Note"
+            },
+            "picks": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "default": {},
+              "title": "Picks",
+              "type": "object"
+            },
+            "rev": {
+              "title": "Rev",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "approved",
+            "at",
+            "rev"
+          ],
+          "title": "PlanVerdictDTO",
+          "type": "object"
+        },
+        "PlanWorkerDTO": {
+          "properties": {
+            "after": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "After",
+              "type": "array"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "title": {
+              "title": "Title",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "title"
+          ],
+          "title": "PlanWorkerDTO",
+          "type": "object"
+        },
+        "VisualOptionDTO": {
+          "properties": {
+            "detail": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Detail"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "label": {
+              "title": "Label",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "label"
+          ],
+          "title": "VisualOptionDTO",
+          "type": "object"
+        }
+      },
+      "description": "A planning doc (brindle.plans): markdown brindle renders itself, split\ninto its ``##`` sections. ``state``: open (the person hasn't decided),\nredirected (their comments went back; a new revision is coming) or\napproved. While open or redirected, the session's assign calls queue.",
+      "properties": {
+        "created_at": {
+          "title": "Created At",
+          "type": "number"
+        },
+        "decisions": {
+          "items": {
+            "$ref": "#/$defs/PlanDecisionDTO"
+          },
+          "title": "Decisions",
+          "type": "array"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "lede": {
+          "title": "Lede",
+          "type": "string"
+        },
+        "markdown": {
+          "title": "Markdown",
+          "type": "string"
+        },
+        "queued": {
+          "title": "Queued",
+          "type": "integer"
+        },
+        "rev": {
+          "title": "Rev",
+          "type": "integer"
+        },
+        "sections": {
+          "items": {
+            "$ref": "#/$defs/PlanSectionDTO"
+          },
+          "title": "Sections",
+          "type": "array"
+        },
+        "session": {
+          "title": "Session",
+          "type": "string"
+        },
+        "split": {
+          "items": {
+            "$ref": "#/$defs/PlanWorkerDTO"
+          },
+          "title": "Split",
+          "type": "array"
+        },
+        "state": {
+          "enum": [
+            "open",
+            "redirected",
+            "approved"
+          ],
+          "title": "State",
+          "type": "string"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        },
+        "verdict": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PlanVerdictDTO"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "id",
+        "session",
+        "title",
+        "rev",
+        "state",
+        "markdown",
+        "lede",
+        "sections",
+        "decisions",
+        "split",
+        "queued",
+        "created_at"
+      ],
+      "title": "PlanDTO",
+      "type": "object"
+    },
+    "PlanDecisionDTO": {
+      "$defs": {
+        "VisualOptionDTO": {
+          "properties": {
+            "detail": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Detail"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "label": {
+              "title": "Label",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "label"
+          ],
+          "title": "VisualOptionDTO",
+          "type": "object"
+        }
+      },
+      "description": "A decision that shapes the plan: its alternatives and the supervisor's pick.",
+      "properties": {
+        "challenge": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Challenge"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "mine": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Mine"
+        },
+        "options": {
+          "items": {
+            "$ref": "#/$defs/VisualOptionDTO"
+          },
+          "title": "Options",
+          "type": "array"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "options"
+      ],
+      "title": "PlanDecisionDTO",
+      "type": "object"
+    },
+    "PlanSectionDTO": {
+      "description": "One ``##`` section of a plan's markdown: what a comment anchors to.",
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "markdown": {
+          "title": "Markdown",
+          "type": "string"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "markdown"
+      ],
+      "title": "PlanSectionDTO",
+      "type": "object"
+    },
+    "PlanVerdictDTO": {
+      "$defs": {
+        "PlanCommentDTO": {
+          "properties": {
+            "section": {
+              "title": "Section",
+              "type": "string"
+            },
+            "text": {
+              "title": "Text",
+              "type": "string"
+            }
+          },
+          "required": [
+            "section",
+            "text"
+          ],
+          "title": "PlanCommentDTO",
+          "type": "object"
+        }
+      },
+      "properties": {
+        "approved": {
+          "title": "Approved",
+          "type": "boolean"
+        },
+        "at": {
+          "title": "At",
+          "type": "number"
+        },
+        "comments": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PlanCommentDTO"
+          },
+          "title": "Comments",
+          "type": "array"
+        },
+        "note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Note"
+        },
+        "picks": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "title": "Picks",
+          "type": "object"
+        },
+        "rev": {
+          "title": "Rev",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "approved",
+        "at",
+        "rev"
+      ],
+      "title": "PlanVerdictDTO",
+      "type": "object"
+    },
+    "PlanWorkerDTO": {
+      "properties": {
+        "after": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "After",
+          "type": "array"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title"
+      ],
+      "title": "PlanWorkerDTO",
+      "type": "object"
+    },
     "PreflightActionDTO": {
       "properties": {
         "body": {
@@ -7890,6 +8408,14 @@
     {
       "method": "PUT",
       "path": "/v1/permissions/saved/{id}"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/plans/{id}"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/plans/{id}/decide"
     },
     {
       "method": "GET",
