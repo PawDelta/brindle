@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { useEffect, useRef, useState } from "react";
+import { useContext, useEffect, useRef, useState } from "react";
+import { AppCovered } from "../../../components/ReconnectOverlay";
 import { sameSource, type VisualFrameProps, type VisualSource } from "./frame";
 
 type Delivery = {
@@ -24,7 +25,11 @@ function themeMessage() {
   return { type: "brindle.theme", vars };
 }
 
-export function NativeFrame({ source, title, onMessage, snapshotRequest = 0, covered = false }: VisualFrameProps) {
+export function NativeFrame({ source, title, onMessage, snapshotRequest = 0, covered: menuOver = false }: VisualFrameProps) {
+  // Covered by a menu of the reader's, or the whole app by the reconnect overlay: the native page
+  // sits above the page's DOM, so it takes no room rather than show (and take input) over them.
+  const appCovered = useContext(AppCovered);
+  const covered = menuOver || appCovered;
   const host = useRef<HTMLDivElement>(null);
   const posted = useRef(onMessage);
   posted.current = onMessage;
