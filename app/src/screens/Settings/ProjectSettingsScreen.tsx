@@ -13,6 +13,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Config, DaemonClient } from "../../api/client";
+import { LoadingButton } from "../../components/LoadingButton";
 import { alert, button, notice, panel, quiet } from "../../components/ui";
 import { More, message, RestOfConfig, Section, SettingRow } from "./SettingsScreen";
 import { PROJECT_RULES, SETTINGS, YOURS, carryEdits, changed, draftOf, invalid, scopeOf, statusLine, values, type Draft, type Setting } from "./settings";
@@ -202,9 +203,9 @@ export function RepoSettings({ client, repo }: { client: DaemonClient; repo: str
             <button type="button" className={quiet} disabled={saving} onClick={() => setDraft(loaded)}>
               Discard
             </button>
-            <button type="button" className={button} disabled={saving || missing.length > 0} onClick={save}>
-              {saving ? "Saving…" : "Save"}
-            </button>
+            <LoadingButton className={button} busy={saving} disabled={saving || missing.length > 0} onClick={save}>
+              Save
+            </LoadingButton>
           </div>
           <p className="text-xs text-ink-3">
             {toTeam.length > 0

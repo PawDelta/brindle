@@ -18,6 +18,7 @@ import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { DaemonError, LOGIN_PROVIDERS, type DaemonClient, type Note, type PreflightDTO, type Repo, type SessionConflict, type StartSession } from "../../api/client";
 import type { PickFolder } from "../../api/open";
 import type { SessionDTO } from "../../api/schema";
+import { LoadingButton } from "../../components/LoadingButton";
 import Logo from "../../components/Logo";
 import { Preflight } from "../../components/Preflight";
 import { ProjectCombobox } from "../../components/ProjectCombobox";
@@ -368,9 +369,9 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, on
         </div>
         <div className="flex shrink-0 items-center gap-s1">
           <span className="text-xs text-ink-3">⌘↵</span>
-          <button type="submit" disabled={busy || !repo || usable === null || needsPick} className={main}>
+          <LoadingButton type="submit" busy={busy && !identity} disabled={busy || !repo || usable === null || needsPick} className={main}>
             Start
-          </button>
+          </LoadingButton>
         </div>
       </div>
       {lookupFailed && (
@@ -423,7 +424,7 @@ function Composer({ client, repos, sessions, reload, refresh, onOpen, chosen, on
           <label>Name<input className={field} aria-label="Name" required value={gitName} onChange={(e) => setGitName(e.target.value)} /></label>
           <label>Email<input className={field} aria-label="Email" type="email" required value={gitEmail} onChange={(e) => setGitEmail(e.target.value)} /></label>
           <div className="flex gap-s1">
-            <button className={button} disabled={busy || !gitName.trim() || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(gitEmail.trim())}>Save and start</button>
+            <LoadingButton type="submit" busy={busy} className={button} disabled={busy || !gitName.trim() || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(gitEmail.trim())}>Save and start</LoadingButton>
             <button type="button" className={button} disabled={busy} onClick={() => setIdentity(null)}>Cancel</button>
           </div>
         </form>

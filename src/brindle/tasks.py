@@ -499,7 +499,7 @@ def _dep_task(db: DB, repo_root: str, dep: str) -> Task | None:
 
 def unmet_dependencies(
     db: DB, caller_ws: Workspace, depends_on: list[str] | None, caller_id: str | None = None,
-    *, dependent_task_id: str | None = None, inspect: bool = True,
+    *, dependent_task_id: str | None = None, inspect: bool = True, lock_identities: bool = True,
 ) -> list[str]:
     """``depends_on`` entries not yet merged into ``caller_ws``'s branch.
 
@@ -514,7 +514,8 @@ def unmet_dependencies(
     before replying) that git check, and the check that no other identity
     holds a dependency's worktree (``identity_lock``), are left to the
     start, which makes them before launching: such a dependency doesn't
-    count as unmet here."""
+    count as unmet here. ``lock_identities`` False keeps the git check but
+    skips the identity one (the fair share's readiness: ``fair_share._runnable``)."""
     if not depends_on:
         return []
     from brindle import identity_lock
@@ -526,7 +527,7 @@ def unmet_dependencies(
         target_repo, task, ws = _resolve_dependency(
             db, caller_ws, dep, session_roots, dependent_task_id=dependent_task_id)
         resolved[dep] = (target_repo, task, ws)
-        if ws is not None and inspect:   # its lookup can probe sign-ins for a minute: the start's job
+        if ws is not None and inspect and lock_identities:   # its lookup can probe sign-ins for a minute: the start's job
             identity_lock.ensure_workspace(db, ws)
 
     unmet = []
@@ -764,6 +765,17 @@ def room_wait(repo_root: str | None = None, profile: str | None = None) -> str |
     return spawn.no_room(repo_root)
 
 
+def task_wait(db: DB, t: Task) -> str | None:
+    """Why task ``t``'s worker should not start now: no room on the machine
+    (``room_wait``), or its session must wait its turn for the person's
+    machine-wide worker limit (``fair_share``); None: it may start."""
+    if not agents.launches_process(t.profile, t.repo_root):
+        return None
+    from brindle import fair_share
+
+    return spawn.no_room(t.repo_root) or fair_share.wait_reason(db, t)
+
+
 def _note_long_wait(db: DB, t: Task, why: str) -> bool:
     """Tell ``t``'s supervisor, once, that it has waited for room longer than
     the repo's ``room_wait_max``: what waits, for how long and why. It never
@@ -907,7 +919,7 @@ def start_when_room(db: DB, task_id: str, poll: float = ROOM_POLL) -> bool:
         t = db.get_task(task_id)
         if t is None or t.state != "pending" or session_paused(db, t):
             return False
-        why = room_wait(t.repo_root, t.profile)
+        why = task_wait(db, t)
         if why is None:
             # Unless a dependency added since holds it: merging that starts it.
             return _start_if_ready(db, t, "room on the machine", check_room=False)
@@ -1215,6 +1227,22 @@ def _claim_admitted(db: DB, t: Task, claim) -> tuple[bool, str | None]:
         return True, None
 
 
+def _claim_fair(db: DB, t: Task) -> tuple[bool, str | None, str | None]:
+    """``_claim_admitted`` with ``db.claim_task``, deciding the machine-wide
+    fair share (``fair_share.wait_reason``) again under ``fair_share.machine_lock``
+    so the check and the slot it allows are one step across every repo:
+    (claimed, the policy's refusal, why it must wait its turn instead). A
+    task told to wait stays pending."""
+    from brindle import fair_share
+
+    with fair_share.machine_lock():
+        why = fair_share.wait_reason(db, t) if agents.launches_process(t.profile, t.repo_root) else None
+        if why:
+            return False, None, why
+        claimed, refused = _claim_admitted(db, t, db.claim_task)
+        return claimed, refused, None
+
+
 def _launch_overlap(db: DB, t: Task, caller_ws: Workspace) -> tuple[bool, str | None]:
     """Check pending task ``t`` for the overlap only git can tell
     (``inspected_clash``) just before it launches, and handle it by the
@@ -1270,14 +1298,17 @@ def _start_if_ready(db: DB, t: Task, dep_ref: str, check_room: bool = True) -> b
     except agents.AgentError as e:
         _cancel(db, t.id, str(e))
         return False
-    why = room_wait(t.repo_root, t.profile) if check_room else None
+    why = task_wait(db, t) if check_room else None
     if why:
         wait_for_room(db, t, why)
         return False
     launch, overlap = _launch_overlap(db, t, caller_ws)
     if not launch:
         return False
-    claimed, refused = _claim_admitted(db, t, db.claim_task)
+    claimed, refused, turn = _claim_fair(db, t)
+    if turn:
+        wait_for_room(db, t, turn)
+        return False
     if refused:
         _cancel(db, t.id, f"the repo's policy refused it: {refused}")
     if not claimed:
@@ -1421,11 +1452,13 @@ def requeue(db: DB, caller: Agent | None, caller_ws: Workspace, task_id: str,
     if unmet:
         return f"Requeued task {old.id} as {new.id}, waiting on {', '.join(unmet)}."
     why = room_wait(new.repo_root)
+    claimed, refused = False, None
+    if not why:
+        claimed, refused, why = _claim_fair(db, new)   # the slot it takes counts for others
     if why:
         wait_for_room(db, new, why)
         return (f"Requeued task {old.id} as {new.id}, waiting for room: {why}. "
                 "It starts on its own when there's room.")
-    claimed, refused = _claim_admitted(db, new, db.claim_task)   # the slot it takes counts for others
     if not claimed:
         reason = f"the repo's policy refused it: {refused}" if refused else "it was started or cancelled meanwhile"
         _cancel(db, new.id, reason)

@@ -463,7 +463,14 @@ def _reply(caller: Agent, t: Task, mode: str, profile: str, branch: str | None, 
         text += wait.format(worker.id)
         warnings = [*warnings, *tasks._launch_warnings(worker, wws)]
     else:
-        text = _queued_text(now, profile, branch, not agents.launches_process(profile, now.repo_root))
+        subagent = not agents.launches_process(profile, now.repo_root)
+        if not now.waiting and not subagent:   # its start hasn't looked yet: say if its session waits its turn
+            from dataclasses import replace
+
+            from brindle import fair_share
+
+            now = replace(now, waiting=fair_share.wait_reason(db, now))
+        text = _queued_text(now, profile, branch, subagent)
         text += wait.format(t.id)
     return _remind_goal(db, caller, text + notes + "".join(f"\nWarning: {w}" for w in warnings) + tail)
 

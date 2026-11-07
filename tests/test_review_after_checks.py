@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from conftest import sh
-from brindle import agents, cli, gates, mcp_server, workspaces
+from brindle import agents, cli, gates, mcp_server, pipeline, workspaces
 from brindle.config import RepoConfig
 from brindle.db import Agent
 from test_merge_order import add
@@ -79,6 +79,16 @@ def test_a_crashing_check_run_starts_no_review_and_tells_the_caller(db, ws, boss
     assert spawned == []
     told = db.pop_pending("boss")
     assert told is not None and "crashed" in told.body and "boom" in told.body
+
+
+def test_timed_out_checks_start_no_review_and_are_not_sent_as_a_failure(db, ws, boss, spawned, monkeypatch):
+    add(db, ws, "w1", "assign", parent="boss", result="done")
+    failed = []
+    monkeypatch.setattr(pipeline, "on_checks_failed", lambda *a: failed.append(a))
+    monkeypatch.setattr(gates, "check_summary", lambda *a, **kw: "TIMEOUT `suite`\ntimed out, not a failure")
+    assert agents.review_after_checks(db, "boss", ws, "reviewer", None, RepoConfig(checks=["suite"])) is None
+    assert spawned == [] and failed == []
+    assert db.pop_pending("boss") is not None   # the supervisor was told
 
 
 def test_a_branch_that_moves_before_dispatch_is_checked_again_not_reviewed_unchecked(
