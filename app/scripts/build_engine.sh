@@ -88,13 +88,16 @@ case "$(uname -m)" in
   x86_64) ARCH=x86_64 ;;
   *) die "unsupported architecture $(uname -m)" ;;
 esac
-CONFIGURE_BUILD="$(uname -m)-apple-darwin"
+# autoconf's triples: config.sub (tmux 3.8, libevent) knows aarch64, not
+# arm64, which is only clang's and uname's name for it.
+gnu_triple() { case "$1" in arm64|aarch64) echo aarch64-apple-darwin ;; *) echo "$1-apple-darwin" ;; esac; }
+CONFIGURE_BUILD="$(gnu_triple "$(uname -m)")"
 if [ -n "${TAURI_ENV_TARGET_TRIPLE:-}" ]; then
   ARCH="${TAURI_ENV_TARGET_TRIPLE%-apple-darwin}"
 fi
 MACH_ARCH="$ARCH"
 [ "$ARCH" != aarch64 ] || MACH_ARCH=arm64
-CONFIGURE_HOST="$MACH_ARCH-apple-darwin"
+CONFIGURE_HOST="$(gnu_triple "$ARCH")"
 export CC="clang -arch $MACH_ARCH"
 export CFLAGS="$CFLAGS -arch $MACH_ARCH"
 export LDFLAGS="-arch $MACH_ARCH"
