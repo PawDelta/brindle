@@ -288,9 +288,9 @@ jobs:
             app/src-tauri/target
             !app/src-tauri/target/release/bundle
             !app/src-tauri/target/*/release/bundle
-          key: cargo-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('app/src-tauri/Cargo.lock') }}
+          key: cargo-${{ runner.os }}-${{ matrix.arch }}-apple-darwin-${{ hashFiles('app/src-tauri/Cargo.lock') }}
           restore-keys: |
-            cargo-${{ runner.os }}-${{ matrix.target }}-
+            cargo-${{ runner.os }}-${{ matrix.arch }}-apple-darwin-
       - name: Install
         run: bash app/scripts/retry.sh npm --prefix app ci
 
@@ -408,7 +408,7 @@ jobs:
       # through $GITHUB_ENV. Tried twice: Tauri's own codesign --timestamp and
       # notarytool calls to Apple aren't retried, and a second build reuses
       # the first's compiled code and engine (build_engine.sh's stamp).
-      - name: Build (${{ matrix.target }})
+      - name: Build (${{ matrix.arch }}-apple-darwin)
         id: build
         working-directory: app
         env:

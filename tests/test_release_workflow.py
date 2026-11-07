@@ -41,7 +41,7 @@ def test_intel_builds_on_apple_silicon():
     workflow = yaml.safe_load((root / ".github/workflows/app-release.yml").read_text())
     job = workflow["jobs"]["macos"]
     matrix = job["strategy"]["matrix"]["arch"]
-    assert "'[\"aarch64\"]'" in matrix and "'[\"aarch64\",\"x86_64\"]'" in matrix
+    assert matrix == "${{ fromJSON(needs.staff-gate.outputs.go == 'true' && '[\"aarch64\"]' || '[\"aarch64\",\"x86_64\"]') }}"
     assert 'TARGET: ${{ matrix.arch }}-apple-darwin' in yaml.safe_dump(job)
     publish = workflow["jobs"]["macos-publish"]
     combine = next(step for step in publish["steps"] if step.get("name") == "Combine (latest.json)")["run"]
