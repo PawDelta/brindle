@@ -28,7 +28,7 @@ const DEADLINE: Duration = Duration::from_secs(20);
 /// How long one step of the run (opening a probe, waiting for its page, the
 /// exit) may take before the watchdog fails the run: the probe's deadline,
 /// the question to a silent page, and room for a slow runner.
-const STEP_ALLOWANCE: Duration = Duration::from_secs(45);
+const STEP_ALLOWANCE: Duration = Duration::from_secs(60);
 
 /// Where the driver tells the watchdog which step it is on.
 static STEPS: Mutex<Option<Sender<String>>> = Mutex::new(None);
@@ -242,6 +242,25 @@ fn run_probes(app: tauri::AppHandle, rx: Receiver<Delivery>, listener: Listener)
         std::thread::yield_now();
     }
     listener.hits.lock().unwrap().clear();
+
+    // DIAG: where does a child webview hang on Windows?
+    for (what, incognito) in [("bare", false), ("incognito", true)] {
+        step(format!("diag: {what} child webview"));
+        let (tx, built) = mpsc::channel();
+        let w = window.clone();
+        let label = format!("diag-{what}");
+        window
+            .run_on_main_thread(move || {
+                eprintln!("diag {label}: on the main thread");
+                let builder = tauri::webview::WebviewBuilder::new(&label, tauri::WebviewUrl::External("about:blank".parse().unwrap()))
+                    .incognito(incognito);
+                let r = w.add_child(builder, tauri::LogicalPosition::new(0.0, 0.0), tauri::LogicalSize::new(100.0, 100.0));
+                eprintln!("diag {label}: add_child returned {:?}", r.as_ref().map(|_| ()).map_err(|e| e.to_string()));
+                let _ = tx.send(r.map(|_| ()).map_err(|e| e.to_string()));
+            })
+            .unwrap();
+        println!("diag {what}: {:?}", built.recv());
+    }
 
     let sandbox = app.state::<Sandbox>();
     let probe = |rev: u32, name: &str, until: Until, failures: &mut Vec<String>| -> Report {

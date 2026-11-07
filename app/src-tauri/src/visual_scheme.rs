@@ -600,11 +600,14 @@ fn build_child<R: Runtime>(window: &Window<R>, visual: &VisualRef, bounds: Bound
             }
         });
     let builder = platform::configure(builder)?;
+    eprintln!("DIAG {label}: adding the child");
     let webview = window
         .add_child(builder, LogicalPosition::new(bounds.x, bounds.y), LogicalSize::new(bounds.width, bounds.height))
         .map_err(|e| e.to_string())?;
+    eprintln!("DIAG {label}: child added; arming");
     platform::watch_load(&webview, visual, sink.clone());
     arm(&webview, sink, visual, bounds);
+    eprintln!("DIAG {label}: armed");
     Ok(webview)
 }
 
@@ -960,6 +963,7 @@ mod platform {
     pub fn arm<R: Runtime>(webview: &Webview<R>, _bounds: Bounds, armed: Armed) -> Result<(), String> {
         webview
             .with_webview(move |platform| {
+                eprintln!("DIAG arm: inside with_webview");
                 let environment = platform.environment();
                 // SAFETY: COM calls on the controller Tauri hands, on its thread.
                 let installed = unsafe {
@@ -992,7 +996,9 @@ mod platform {
                         )
                     })()
                 };
+                eprintln!("DIAG arm: filter installed: {:?}", installed.as_ref().map(|_| ()).map_err(|e| e.to_string()));
                 armed(installed.map_err(|e| format!("WebView2 refused the request filter: {e}")));
+                eprintln!("DIAG arm: armed callback returned");
             })
             .map_err(|e| e.to_string())
     }
