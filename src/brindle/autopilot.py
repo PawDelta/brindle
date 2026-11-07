@@ -228,10 +228,11 @@ class AutopilotError(RuntimeError):
 class Plan:
     goal: str
     detail: str | None
-    milestones: list[tuple]   # (title, check, detail[, profile[, repo]])
+    milestones: list[tuple]   # (title, check, detail[, profile[, repo[, phase]]])
 
 
 PROFILE_RE = re.compile(r"^\s*profile:\s*`?([\w.-]+)`?\s*$", re.I)
+PHASE_RE = re.compile(r"^\s*phase:\s*(\S.*?)\s*$", re.I)
 REPO_RE = re.compile(r"^\s*repo:\s*`?([\w.-]+)`?\s*$", re.I)
 CHECK_RE = re.compile(r"^\s*check(?:@([\w.-]+))?:\s*`?(.+?)`?\s*$", re.I)
 FENCED_CHECK_RE = re.compile(r"^\s*check(?:@([\w.-]+))?:\s*$", re.I)   # the command is the fenced block below
@@ -256,8 +257,9 @@ def _fences(lines: list[str]) -> dict[int, tuple[int, int]]:
 def parse_goals(text: str) -> Plan | None:
     """``# Goal`` then ``## Milestone`` sections, each with an optional
     ``check: <command>`` line (``check@<alias>: <command>`` runs it in a repo
-    attached to the session; so does a ``repo: <alias>`` line) and a
-    ``profile: <name>`` line. A bare ``check:`` line followed by a fenced
+    attached to the session; so does a ``repo: <alias>`` line), a
+    ``profile: <name>`` line and a ``phase: <name>`` line (the app folds
+    consecutive milestones of one phase together). A bare ``check:`` line followed by a fenced
     block takes the block as the command (any number of lines). A detail
     line starting with a backslash is that line without it, so detail can
     hold text that would otherwise read as a heading or a field. Returns None
@@ -280,12 +282,15 @@ def parse_goals(text: str) -> Plan | None:
                 goal = m.group(1)
             continue
         if m := re.match(r"^##\s+(.+?)\s*$", line):
-            milestones.append([m.group(1), None, [], None, None])
+            milestones.append([m.group(1), None, [], None, None, None])
             continue
         if milestones and STATUS_RE.match(line):
             continue   # written by sync_goals_file: information only, never read back
         if milestones and milestones[-1][3] is None and (m := PROFILE_RE.match(line)):
             milestones[-1][3] = m.group(1)
+            continue
+        if milestones and milestones[-1][5] is None and (m := PHASE_RE.match(line)):
+            milestones[-1][5] = m.group(1)
             continue
         if milestones and milestones[-1][4] is None and (m := REPO_RE.match(line)):
             milestones[-1][4] = m.group(1)
@@ -304,16 +309,18 @@ def parse_goals(text: str) -> Plan | None:
     if not goal:
         return None
     clean = lambda lines: "\n".join(lines).strip() or None  # noqa: E731
-    return Plan(goal, clean(detail_lines), [_item(t, c, clean(d), p, r) for t, c, d, p, r in milestones])
+    return Plan(goal, clean(detail_lines), [_item(t, c, clean(d), p, r, ph) for t, c, d, p, r, ph in milestones])
 
 
 def _item(title: str, check: str | None, detail: str | None,
-          profile: str | None, repo: str | None) -> tuple:
+          profile: str | None, repo: str | None, phase: str | None = None) -> tuple:
     item: tuple = (title, check or None, detail)
-    if profile or repo:
+    if profile or repo or phase:
         item += (profile or None,)
-    if repo:
-        item += (repo,)
+    if repo or phase:
+        item += (repo or None,)
+    if phase:
+        item += (phase,)
     return item
 
 
@@ -322,7 +329,7 @@ def _escaped(detail: str) -> list[str]:
     other than detail text behind a backslash."""
     def special(line: str) -> bool:
         return (line.startswith(("\\", "#")) or any(r.match(line) for r in (
-            FENCE_RE, STATUS_RE, PROFILE_RE, REPO_RE, CHECK_RE, FENCED_CHECK_RE)))
+            FENCE_RE, STATUS_RE, PROFILE_RE, PHASE_RE, REPO_RE, CHECK_RE, FENCED_CHECK_RE)))
     return ["\\" + line if special(line) else line for line in detail.splitlines()]
 
 
@@ -347,7 +354,10 @@ def render_goals(plan: Plan, statuses: list[str]) -> str:
         title, check, detail = item[:3]
         profile = item[3] if len(item) > 3 else None
         repo = item[4] if len(item) > 4 else None
+        phase = item[5] if len(item) > 5 else None
         out += [f"## {title}", status]
+        if phase:
+            out.append(f"phase: {phase}")
         if check:
             out += _check_lines(check, repo)
         elif repo:
@@ -402,7 +412,8 @@ def _db_plan(db: DB, root_id: str) -> Plan | None:
     if not ap or not ap.goal:
         return None
     return Plan(ap.goal, (ap.detail or "").strip() or None,
-                [_item(m.title, m.check_cmd, m.detail, m.profile, m.repo) for m in db.milestones(root_id)])
+                [_item(m.title, m.check_cmd, m.detail, m.profile, m.repo, m.phase_name)
+                 for m in db.milestones(root_id)])
 
 
 def write_goals_file(db: DB, root_id: str) -> None:
@@ -645,7 +656,7 @@ def set_enabled(db: DB, root_id: str, on: bool) -> None:
 
 def milestone_items(db: DB, root_id: str, milestones: list[dict]) -> list[tuple]:
     """``set_goal``'s milestones from their JSON form, {"title", "check",
-    "detail", "profile", "repo"}; a check may name its repo as "@<alias>: <command>"."""
+    "detail", "profile", "repo", "phase"}; a check may name its repo as "@<alias>: <command>"."""
     from brindle import repos
 
     items = []
@@ -658,14 +669,16 @@ def milestone_items(db: DB, root_id: str, milestones: list[dict]) -> list[tuple]
         if repo_alias and repos.resolve_attached(db, root_id, repo_alias) is None:
             raise AutopilotError(f"Milestone {title!r} names repo {repo_alias!r}, which isn't attached "
                                  "to this session (list_repos shows what is).")
-        items.append((title, check, (str(m.get("detail") or "").strip() or None),
-                      (str(m.get("profile") or "").strip() or None), repo_alias))
+        item = (title, check, (str(m.get("detail") or "").strip() or None),
+                (str(m.get("profile") or "").strip() or None), repo_alias)
+        phase = " ".join(str(m.get("phase") or "").split())
+        items.append(item + (phase,) if phase else item)
     return items
 
 
 def set_goal(db: DB, root_id: str, goal: str,
              milestones: list[tuple], detail: str | None = None) -> None:
-    """Record the goal and its milestones, ``(title, check, detail[, profile[, repo]])``.
+    """Record the goal and its milestones, ``(title, check, detail[, profile[, repo[, phase]]])``.
     A milestone that keeps its title and check keeps its last result."""
     if not goal.strip():
         raise AutopilotError("the goal needs a title")

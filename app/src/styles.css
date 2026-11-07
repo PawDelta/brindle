@@ -327,6 +327,24 @@ body {
 .side-ms .m[data-state="todo"] { color: var(--ink-3); }
 .side-ms .m .t { flex: 1; min-width: 0; line-height: 1.35; }
 .side-ms .m .t small { display: block; font-family: var(--mono); font-size: 10px; color: var(--ink-3); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* A goal's phase folds over those rows (GoalPanel's PhaseFoldList): one line per phase, a green count once done. */
+.ms-folds { display: flex; flex-direction: column; gap: 1px; }
+.ms-folds .ms-kids { padding-left: 18px; }
+.ms-folds.lg .ms-kids { padding-left: 24px; }
+.ms-fold { display: flex; align-items: center; gap: 8px; width: 100%; border: 0; background: transparent; text-align: left; padding: 4px 6px; border-radius: var(--r); font-size: 12px; color: var(--ink); min-width: 0; }
+.ms-folds.lg .ms-fold { font-size: 13px; padding: 5px 6px; }
+.ms-fold:hover { background: var(--surface-2); }
+.ms-fold .chev { width: 10px; height: 10px; flex: none; color: var(--ink-3); transition: transform 240ms var(--ease); }
+.ms-fold[aria-expanded="true"] .chev { transform: rotate(90deg); }
+.ms-fold .n { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 500; }
+.ms-fold .k { font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); flex: none; }
+.ms-fold[data-st="done"] .n, .ms-fold[data-st="todo"] .n { color: var(--ink-3); font-weight: 400; }
+.ms-fold[data-st="done"] .k { color: var(--pass); }
+.ms-fold .bar-s { display: flex; gap: 2px; width: 72px; height: 4px; flex: none; margin: 0 8px; }
+.ms-fold .bar-s i { flex: 1; border-radius: 1px; background: var(--line-strong); }
+.ms-fold .bar-s i[data-s="passed"] { background: var(--pass); }
+.ms-fold .bar-s i[data-s="running"] { background: var(--branch); }
+@media (prefers-reduced-motion: reduce) { .ms-fold .chev { transition: none; } }
 /* The small button is the Tinted secondary (.btn-secondary) at the small size. */
 .side-btn { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 9px; border-radius: var(--r); font: 500 12px/1 var(--sans); letter-spacing: -0.005em; border: 1px solid var(--line-strong); background: transparent; color: var(--ink); white-space: nowrap; cursor: pointer; transition: background-color 120ms var(--ease), border-color 120ms var(--ease); }
 .side-btn:hover:not(:disabled) { background: var(--surface-2); border-color: color-mix(in srgb, var(--line-strong) 70%, var(--ink-3)); }
