@@ -334,6 +334,9 @@ def test_interactive_supervisor_on_autonomous_needs_no_grants(db, ws, monkeypatc
         ws.repo_root: "main", str(tmp_path / "trunk-repo"): "trunk",
         str(tmp_path / "develop-repo"): "develop",
     }.get(root))
+    # No agy process runs this hook here: the real `ps` walk up the ancestors
+    # finds none and says "can't tell" (None), at about 100ms a call.
+    monkeypatch.setattr(antigravity, "_launched_with_skip_flag", lambda: None)
     permissions.store_path().unlink(missing_ok=True)
     add_agent(db, ws, agent_id="sup", window="")
 
