@@ -99,6 +99,7 @@ def test_an_answer_reaches_the_supervisor_once_and_only_for_the_revision_on_scre
     assert client.get(f"/v1/kept-visuals/{v['id']}").json()["answer"] is None
 
 
+@pytest.mark.variant("publication race: another publisher writes r2 between the first publisher's checks and write")
 def test_a_revision_published_meanwhile_keeps_its_page(db, session, monkeypatch):
     ws, boss, worker = session
     v = visuals.publish(db, boss, "First", "<p>r1</p>")

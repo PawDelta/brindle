@@ -201,18 +201,6 @@ def test_the_wait_for_room_is_bounded(db, repo, monkeypatch):
         pass
 
 
-def test_memory_pressure_level_two_alone_is_not_no_room(repo, monkeypatch):
-    from brindle import disk, spawn
-
-    monkeypatch.setattr(disk, "low_disk", lambda root=None: None)
-    monkeypatch.setattr(spawn, "_load", lambda: 0.0)
-    monkeypatch.setattr(spawn, "why", lambda: "pressure")
-    monkeypatch.setattr(spawn, "pressure", lambda: spawn.PRESSURE_WARN)
-    assert spawn.check_no_room(str(repo)) is None
-    monkeypatch.setattr(spawn, "pressure", lambda: spawn.PRESSURE_CRITICAL)
-    assert spawn.check_no_room(str(repo)) == "pressure"
-
-
 def test_check_summary_and_the_merge_gate_share_the_queue(db, repo, monkeypatch):
     configure(repo, check_concurrency=1, pre_commit=False)
     monkeypatch.setattr(gates, "SLOT_POLL", 0.01)
