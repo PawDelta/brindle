@@ -520,7 +520,7 @@ describe("visuals", () => {
     }
   });
 
-  it("opens an Inbox visual in its session and returns there after Esc, Back and an answer", async () => {
+  it.each(["Escape", "Back", "Answer"])("returns to the session from an Inbox visual after %s", async (leave) => {
     const session: SessionDTO = { id: "sup1", workspace_id: "proj", profile: "supervisor", status: "idle", mode: "interactive", created_at: now, goal: "Ship it" };
     const item: InboxItemDTO = { kind: "visual", agent_id: "sup1", root_id: "sup1", workspace_id: "proj", visual_id: visual.id, reason: "asks you to choose" };
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root], inbox: [item] });
@@ -538,21 +538,21 @@ describe("visuals", () => {
     const sync = startSync({ client, store, connect: daemon.connect });
     try {
       render(<PtyViewsProvider value={standInViews}><App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "inbox", session: "sup1" }} /></PtyViewsProvider>);
-      for (const leave of ["Escape", "Back", "Answer"]) {
-        const card = (await screen.findAllByTestId("inbox-card"))[0];
-        fireEvent.click(within(card).getByRole("button", { name: "Go to session ›" }));
-        await waitFor(() => expect(screen.getByTestId("visual-frame").dataset.src).toBe("brindle-visual://v_8f2c/r2"));
-        expect(screen.queryByRole("complementary", { name: "Sidebar" })).toBeNull();
-        if (leave === "Answer") {
-          fireEvent.click(screen.getByRole("radio", { name: "B · Gate on CI" }));
-          fireEvent.click(screen.getByTestId("visual-send"));
-          await waitFor(() => expect(store.getState().inbox).toEqual([]));
-        }
-        if (leave === "Escape") fireEvent.keyDown(window, { key: "Escape" });
-        else fireEvent.click(screen.getByTestId("visual-back"));
-        expect(await screen.findByTestId("inbox-session")).toBeTruthy();
-        expect(screen.queryByTestId("visual-reader")).toBeNull();
+      const card = (await screen.findAllByTestId("inbox-card"))[0];
+      fireEvent.click(within(card).getByRole("button", { name: "Go to session ›" }));
+      await waitFor(() => expect(screen.getByTestId("visual-frame").dataset.src).toBe("brindle-visual://v_8f2c/r2"));
+      expect(screen.queryByRole("complementary", { name: "Sidebar" })).toBeNull();
+      if (leave === "Answer") {
+        fireEvent.click(screen.getByRole("radio", { name: "B · Gate on CI" }));
+        fireEvent.click(screen.getByTestId("visual-send"));
+        await waitFor(() => expect(store.getState().inbox).toEqual([]));
       }
+      if (leave === "Escape") fireEvent.keyDown(window, { key: "Escape" });
+      else fireEvent.click(screen.getByTestId("visual-back"));
+      expect((await screen.findByTestId("terminal")).textContent).toBe("sup1");
+      expect(screen.getByTestId("chat-area").className).not.toContain("hidden");
+      expect(screen.queryByTestId("inbox-session")).toBeNull();
+      expect(screen.queryByTestId("visual-reader")).toBeNull();
       expect(screen.queryByTestId("inbox-card")).toBeNull();
     } finally { sync.stop(); }
   });
@@ -604,6 +604,11 @@ describe("visuals", () => {
     expect(screen.getByRole("radio", { name: "B · Gate on CI" }).getAttribute("aria-checked")).toBe(String(want.picked));
     expect(send.disabled).toBe(!want.picked);
     if (!want.picked) return;
+    const option = screen.getByRole("radio", { name: "B · Gate on CI" });
+    fireEvent.click(option);
+    expect(option.getAttribute("aria-checked")).toBe("false");
+    expect(send.disabled).toBe(true);
+    fireEvent.click(option);
     // A list read begun on the bus before the answer, still out when the answer lands.
     hold = true;
     await act(async () => store.dispatch({ type: "stream", message: { type: "event", id: 1, ts: now, kind: "visual.published", repo_root: null, root_id: visual.session, agent_id: null, workspace_id: null, task_id: null, payload: {} } }));

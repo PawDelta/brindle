@@ -57,8 +57,6 @@ export type Route =
       screen: "session";
       agent?: string;
       sheet?: SheetRef;
-      /* A visual opened from the Inbox returns to the same filter on Back or Esc. */
-      visualFrom?: { screen: "inbox"; session?: string };
     } & SessionRef);
 
 /* Settings' tabs, in order: everything the person sets, behind the sidebar's account entry. */
