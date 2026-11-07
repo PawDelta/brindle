@@ -959,27 +959,41 @@ def test_installs_at_different_paths_share_one_hook_definition(tmp_path, monkeyp
     # launcher and is about to replace it when the app's whole update runs.
     # Unlocked, the dmg's write drops the app; locked, the app waits its turn.
     (brindle_home() / "bin" / "codex-hook").unlink()
-    dmg_has_read, app_done = threading.Event(), threading.Event()
-    real_mkstemp = codex_hook.tempfile.mkstemp
+    import fcntl
+
+    dmg_has_read, app_met_the_dmg = threading.Event(), threading.Event()
+    advanced = []
+    real_mkstemp, real_flock = codex_hook.tempfile.mkstemp, fcntl.flock
 
     def mkstemp_after_read(*args, **kwargs):
         if threading.current_thread().name == "dmg":
             dmg_has_read.set()
-            app_done.wait(1)   # never set while the app is held back by the lock
+            # Released only by the app writer's own progress (below); the limit is a failure guard.
+            advanced.append(app_met_the_dmg.wait(30))
         return real_mkstemp(*args, **kwargs)
+
+    def flock_probing_contention(fd, op):
+        if threading.current_thread().name == "app" and op == fcntl.LOCK_EX:
+            try:
+                return real_flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:   # the real lock is held by the dmg writer
+                app_met_the_dmg.set()
+        return real_flock(fd, op)
 
     def app_registers():
         dmg_has_read.wait()
         codex_hook._launcher([str(first_exe)])
-        app_done.set()
+        app_met_the_dmg.set()   # without a lock it completed its whole update instead
 
     monkeypatch.setattr(codex_hook.tempfile, "mkstemp", mkstemp_after_read)
+    monkeypatch.setattr(fcntl, "flock", flock_probing_contention)
     writers = [threading.Thread(target=codex_hook._launcher, args=([str(second_exe)],), name="dmg"),
                threading.Thread(target=app_registers, name="app")]
     for w in writers:
         w.start()
     for w in writers:
         w.join()
+    assert advanced == [True]
     second_exe.unlink()   # the disk image is ejected: the app's running sessions still work
     assert run_hook() == "app"
 
