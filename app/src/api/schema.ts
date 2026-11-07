@@ -564,7 +564,7 @@ export interface KeptVisualDTO {
 export interface VisualAnswerDTO {
   at: number;
   note?: string | null;
-  option: string;
+  option: string | null;
 }
 /**
  * This interface was referenced by `ApiSchema`'s JSON-Schema
