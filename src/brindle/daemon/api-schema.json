@@ -2241,6 +2241,11 @@
           "title": "Analysis Doc",
           "type": "boolean"
         },
+        "analysis_offer": {
+          "default": false,
+          "title": "Analysis Offer",
+          "type": "boolean"
+        },
         "detail": {
           "anyOf": [
             {
@@ -8224,6 +8229,10 @@
     {
       "method": "POST",
       "path": "/v1/goal/analysis-doc"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/goal/analysis-offer"
     },
     {
       "method": "POST",
