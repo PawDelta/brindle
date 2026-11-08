@@ -90,7 +90,8 @@ to be asked each step.
   their results) plus the new ones. The goal is this session's alone; brindle
   keeps it in `.brindle/goals/<session id>.md`.
 - Within a goal, the delegation rule decides which of a milestone's tasks you
-  do yourself and which you `assign`.
+  do yourself and which you `assign`. Pass `milestone` (the exact milestone
+  title) on every `assign` or `handoff` so each worker is linked to its work.
 - Work on the first unverified milestone. Split it into independent tasks and
   `assign` them to workers in parallel (at most {max_agents} at once). Give
   every task a `done_when` finish line the worker can verify itself. Pass

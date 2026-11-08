@@ -352,6 +352,9 @@ body {
 .ms-fold[aria-expanded="true"] .chev { transform: rotate(90deg); }
 .ms-fold .n { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 500; }
 .ms-fold .k { font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); flex: none; }
+.ms-fold.ms-pending { padding: 2px 6px; color: var(--ink-3); gap: 7px; }
+.ms-fold.ms-pending .i { width: 10px; flex: none; text-align: center; font-size: 10px; }
+.ms-fold.ms-pending .n { font-weight: 400; }
 .ms-fold[data-st="done"] .n, .ms-fold[data-st="todo"] .n { color: var(--ink-3); font-weight: 400; }
 .ms-fold[data-st="done"] .k { color: var(--pass); }
 .ms-fold .bar-s { display: flex; gap: 2px; width: 72px; height: 4px; flex: none; margin: 0 8px; }

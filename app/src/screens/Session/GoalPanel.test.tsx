@@ -301,7 +301,7 @@ describe("GoalPanel", () => {
 
     const sidebar = render(<GoalPanel client={daemon.client()} repo={REPO} root={ROOT} store={store} compact />);
     // The sidebar's steps are one line each: the label and the reason are the row's tooltip.
-    await waitFor(() => expect(sidebar.getAllByTestId("milestone")).toHaveLength(3));
+    fireEvent.click(await sidebar.findByRole("button", { name: "1 pending" }));
     const [, row, later] = sidebar.getAllByTestId("milestone");
     expect(row.title).toContain(label);
     expect(row.title).toContain(why);
@@ -317,31 +317,48 @@ describe("GoalPanel", () => {
   });
 
   /* Only a milestone with work on it reads as in progress; one nobody has started reads as pending. */
-  it("marks a milestone nobody has started as pending", async () => {
+  it.each([false, true])("folds a pending line without hiding active or done rows (phases: %s)", async (phased) => {
     const milestones: MilestoneDTO[] = [
       { ...goal.milestones![0], state: "passed", status: "passed" },
       { ...goal.milestones![1], state: "not_done", status: "pending" },
       { ...goal.milestones![1], id: 3, position: 3, title: "Ship it", state: null, status: "pending" },
     ];
+    if (phased) milestones[0].phase_name = "Build";
     const daemon = new FakeDaemon({ goal: { ...structuredClone(goal), milestones } });
     const sidebar = render(<GoalPanel client={daemon.client()} repo={REPO} root={ROOT} store={createAppStore()} compact />);
-    await waitFor(() => expect(sidebar.getAllByTestId("milestone")).toHaveLength(3));
+    const pending = await sidebar.findByRole("button", { name: "1 pending" });
+    expect(sidebar.getAllByTestId("milestone")).toHaveLength(2);
+    expect(sidebar.queryByText("Ship it")).toBeNull();
+    expect(pending.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(pending);
     expect(sidebar.getAllByTestId("milestone").map((li) => li.dataset.state)).toEqual(["done", "now", "pending"]);
     expect(sidebar.getByRole("progressbar").getAttribute("aria-valuenow")).toBe("33");
     expect(sidebar.getByTestId("goal-line").textContent).toContain("1 of 3 milestones complete");
-    // A goal without phases is the plain list, as it always was: no folds, no "phase n of m".
-    expect(sidebar.queryByTestId("phase-fold")).toBeNull();
-    expect(sidebar.queryByTestId("goal-where")).toBeNull();
+    fireEvent.click(pending);
+    expect(sidebar.getAllByTestId("milestone")).toHaveLength(2);
+    if (phased) {
+      const phase = sidebar.getByTestId("phase-fold");
+      fireEvent.click(phase);
+      fireEvent.click(phase);
+      expect(sidebar.getByRole("button", { name: "1 pending" }).getAttribute("aria-expanded")).toBe("false");
+    }
+    fireEvent.click(sidebar.getByRole("button", { name: "1 pending" }));
+    const client = daemon.client();
+    daemon.data.goal = { ...daemon.data.goal!, root_id: "other" };
+    sidebar.rerender(<GoalPanel client={client} repo={REPO} root="other" store={createAppStore()} compact />);
+    expect((await sidebar.findByRole("button", { name: "1 pending" })).getAttribute("aria-expanded")).toBe("false");
   });
 
   /* Every milestone a live worker is linked to is active, in the stage's colour and word; one nobody works on is not. */
-  it("marks several active milestones, one per live worker", async () => {
+  it("marks several active milestones and opens a later phase with linked workers", async () => {
     const milestones: MilestoneDTO[] = [
       { ...goal.milestones![1], id: 1, position: 1, title: "Alpha", state: "not_done", status: "pending" },
       { ...goal.milestones![1], id: 2, position: 2, title: "Beta", state: "not_done", status: "pending" },
       { ...goal.milestones![1], id: 3, position: 3, title: "Gamma", state: "not_done", status: "pending" },
       { ...goal.milestones![1], id: 4, position: 4, title: "Delta", state: "not_done", status: "pending" },
     ];
+    milestones[0].phase_name = "Build";
+    milestones[2].phase_name = "Ship";
     const daemon = new FakeDaemon({ goal: { ...structuredClone(goal), root_id: APP_ROOT, stage: "working", milestones } });
     const store = createAppStore();
     const agent = (id: string, milestone: string, status = "processing", extra = {}) => ({ id, profile: "developer", provider: "claude", status, mode: "assign", parent_id: APP_ROOT, milestone, subagents: [], ...extra });
@@ -355,8 +372,13 @@ describe("GoalPanel", () => {
       inbox: [],
     });
     const view = render(<GoalPanel client={daemon.client()} repo={REPO} root={APP_ROOT} store={store} compact />);
-    await waitFor(() => expect(view.getAllByTestId("milestone")).toHaveLength(4));
-    const marks = () => view.getAllByTestId("milestone").map((li) => [li.dataset.active ?? null, li.className.match(/\bst-(\w+)/)?.[1] ?? null]);
+    fireEvent.click(await view.findByRole("button", { name: "1 pending" }));
+    expect(view.getAllByTestId("phase-fold")[1].dataset.st).toBe("active");
+    expect(view.getAllByTestId("phase-fold")[1].getAttribute("aria-expanded")).toBe("true");
+    const marks = () => milestones.map((m) => {
+      const li = view.getByText(m.title).closest("li")!;
+      return [li.dataset.active ?? null, li.className.match(/\bst-(\w+)/)?.[1] ?? null];
+    });
     // Alpha's worker is done; Beta's works; Gamma's reported but is busy again (fixing); Delta's branch is in checks.
     expect(marks()).toEqual([[null, null], ["true", "working"], ["true", "working"], ["true", "checks"]]);
     expect(view.getAllByTestId("goal-stage")).toHaveLength(3);

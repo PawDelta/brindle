@@ -256,7 +256,7 @@ export interface PhaseFold {
   state: "done" | "active" | "todo";
 }
 
-export function phaseFolds(milestones: MilestoneDTO[], isDone: (m: MilestoneDTO) => boolean): PhaseFold[] | null {
+export function phaseFolds(milestones: MilestoneDTO[], isDone: (m: MilestoneDTO) => boolean, activeStage: ReadonlyMap<number, Stage | null>): PhaseFold[] | null {
   if (!milestones.some((m) => m.phase_name)) return null;
   const folds: PhaseFold[] = [];
   for (const m of milestones) {
@@ -268,7 +268,7 @@ export function phaseFolds(milestones: MilestoneDTO[], isDone: (m: MilestoneDTO)
   for (const f of folds) {
     if (f.milestones.every(isDone)) f.state = "done";
     else {
-      const moving = f.milestones.some((m) => isDone(m) || m.status === "running");
+      const moving = f.milestones.some((m) => isDone(m) || m.status === "running" || activeStage.has(m.id));
       f.state = !seenUnfinished || moving ? "active" : "todo";
       seenUnfinished = true;
     }
@@ -324,7 +324,7 @@ const CHEV = (
 /* The milestones under their phase folds: a done phase is one line with its green count, the active one lists
    every row (passed ones too, as they look today), an upcoming one is folded with its count. Any fold opens or
    closes on a click. The full panel's fold line carries a tiny bar, one segment per milestone. */
-function PhaseFoldList({ folds, open, onToggle, isDone, large, rowsClass, row }: {
+function PhaseFoldList({ folds, open, onToggle, isDone, large, rowsClass, row, rows }: {
   folds: PhaseFold[];
   open: Record<number, boolean>;
   onToggle(key: number, next: boolean): void;
@@ -332,11 +332,13 @@ function PhaseFoldList({ folds, open, onToggle, isDone, large, rowsClass, row }:
   large: boolean;
   rowsClass: string;
   row(m: MilestoneDTO): ReactNode;
+  rows?(milestones: MilestoneDTO[], key: number): ReactNode;
 }) {
   return (
     <ul className={`ms-folds${large ? " lg" : ""}`} aria-label="Milestones">
       {folds.map((f) => {
-        if (f.name === null) return <li key={f.key}><ul className={rowsClass}>{f.milestones.map(row)}</ul></li>;
+        const children = () => rows ? rows(f.milestones, f.key) : f.milestones.map(row);
+        if (f.name === null) return <li key={f.key}><ul className={rowsClass}>{children()}</ul></li>;
         const isOpen = open[f.key] ?? f.state === "active";
         const passed = f.milestones.filter(isDone).length;
         const n = f.milestones.length;
@@ -355,7 +357,7 @@ function PhaseFoldList({ folds, open, onToggle, isDone, large, rowsClass, row }:
               )}
               <span className="k">{count}</span>
             </button>
-            {isOpen && <ul className={`${rowsClass} ms-kids`}>{f.milestones.map(row)}</ul>}
+            {isOpen && <ul className={`${rowsClass} ms-kids`}>{children()}</ul>}
           </li>
         );
       })}
@@ -468,6 +470,8 @@ export function GoalPanel({ client, repo, root, store, compact = false, onReview
   const [open, setOpen] = useState(compact);
   // The phase folds the person opened or closed, by fold key; the rest keep their default (only the active phase open).
   const [foldOpen, setFoldOpen] = useState<Record<number, boolean>>({});
+  // Pending rows fold independently within each phase (key 0 is the list without phases).
+  const [pendingOpen, setPendingOpen] = useState<Record<number, boolean>>({});
   const toggleFold = useCallback((key: number, next: boolean) => setFoldOpen((o) => ({ ...o, [key]: next })), []);
   const frame = compact ? "flex flex-col gap-1.5 px-1.5 pb-1.5 pt-1" : `${card} flex flex-col gap-1 px-s2 py-s1`;
   /* This session: its client, repo and root. Every continuation (a GET, an action's
@@ -509,6 +513,7 @@ export function GoalPanel({ client, repo, root, store, compact = false, onReview
     setActionError(null);
     setDocSummary(null);
     setFoldOpen({});
+    setPendingOpen({});
     void refresh();
     let seen = store.getState().lastEventId;
     let stale = store.getState().stale;
@@ -600,7 +605,7 @@ export function GoalPanel({ client, repo, root, store, compact = false, onReview
   const isPending = (m: MilestoneDTO) =>
     !isDone(m) && !activeStage.has(m.id) && m.phase == null && !["failed", "regressed"].includes(checkState(m) ?? "");
   // The goal's phases as folds; null without any (the list as it always was).
-  const folds = phaseFolds(milestones, isDone);
+  const folds = phaseFolds(milestones, isDone, activeStage);
   const where = finished ? "" : phaseWord(folds);
   const phaseLabel = GOAL_PHASE_LABEL[phase];
   // The sidebar's count line names only the steps after In progress; Done is the green count itself.
@@ -682,8 +687,32 @@ export function GoalPanel({ client, repo, root, store, compact = false, onReview
           </span>
           <span className="t">{shortName(m.title)}</span>
           {active && stage && <span className="tag" data-testid="goal-stage">{stage}</span>}
-          {state === "pending" && <span className="tag">pending</span>}
         </li>
+      );
+    };
+    // Keep the work visible above the pending fold, even when pending milestones precede it.
+    const sideRows = (items: MilestoneDTO[], key: number) => {
+      const pending = items.filter(isPending);
+      const expanded = pendingOpen[key] ?? false;
+      return (
+        <>
+          {items.filter((m) => !isPending(m)).map(sideRow)}
+          {pending.length > 0 && (
+            <li>
+              <button
+                type="button"
+                className="ms-fold ms-pending"
+                aria-expanded={expanded}
+                onClick={() => setPendingOpen((o) => ({ ...o, [key]: !expanded }))}
+              >
+                <span className="i" aria-hidden>○</span>
+                <span className="n">{pending.length} pending</span>
+                {CHEV}
+              </button>
+            </li>
+          )}
+          {expanded && pending.map(sideRow)}
+        </>
       );
     };
     return (
@@ -719,10 +748,10 @@ export function GoalPanel({ client, repo, root, store, compact = false, onReview
         </div>
         <div className="flex min-h-0 flex-col gap-1.5 overflow-auto" data-testid="goal-scroll">
         {total > 0 && folds ? (
-          <PhaseFoldList folds={folds} open={foldOpen} onToggle={toggleFold} isDone={isDone} large={false} rowsClass="side-ms" row={sideRow} />
+          <PhaseFoldList folds={folds} open={foldOpen} onToggle={toggleFold} isDone={isDone} large={false} rowsClass="side-ms" row={sideRow} rows={sideRows} />
         ) : total > 0 ? (
           <ul className="side-ms" aria-label="Milestones">
-            {milestones.map(sideRow)}
+            {sideRows(milestones, 0)}
           </ul>
         ) : (
           <p className="px-0.5 text-[11px] text-ink-3">{finished ? "brindle finished this goal." : "No milestones yet."}</p>

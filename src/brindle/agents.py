@@ -412,7 +412,8 @@ def spawn(
     milestone: str | None = None,
 ) -> Agent:
     """Start an agent in ``ws``. ``milestone``: the title of the goal milestone a
-    worker works on (None: the session's first unverified one). ``detached``: a handoff nobody waits on (a
+    worker works on (None: the session's first unfinished one without a live worker,
+    falling back to the first unfinished). ``detached``: a handoff nobody waits on (a
     queued one) is recorded as 'handoff_detached' from the start, so a
     result it reports at once is forwarded; it is briefed as a handoff.
     ``weight`` is the weight its task was routed
@@ -507,9 +508,19 @@ def spawn(
         raise AgentError(why)
     db.add_agent(agent)
     if session_root and mode in ("handoff", "assign"):
-        current = milestone or next((m.title for m in db.milestones(session_root) if m.status != "passed"), None)
-        if current:
-            db.set_agent_milestone(agent_id, current)
+        # Background launches can overlap after admission: reserve a milestone
+        # before another process looks for an unclaimed one in this session.
+        with milestone_claim_lock(session_root):
+            current = milestone
+            if not current:
+                unfinished = [m.title for m in db.milestones(session_root) if m.status != "passed"]
+                claimed = {db.agent_milestone(a.id) for a in tree(db, session_root)[1:]
+                           if a.id != agent_id and a.mode in REPORTING_MODES
+                           and a.status not in ("paused", "done", "failed") and alive_or_starting(a)}
+                current = next((title for title in unfinished if title not in claimed),
+                               unfinished[0] if unfinished else None)
+            if current:
+                db.set_agent_milestone(agent_id, current)
     if session_root and mode in ("handoff", "assign"):
         pilot.consider_analysis_offer(db, session_root)   # another worker may make the goal large
     if person_prompt and raw_task and parent_id is None and mode == "interactive":
@@ -537,6 +548,17 @@ def spawn(
         forget_files(agent)
         raise
     return agent
+
+
+def milestone_claim_lock(root_id: str, *, wait: bool = True):
+    """Serialize a session's milestone lookup and link across launch processes.
+
+    The claim is durable before releasing this lock; the launch itself stays
+    outside it so independent workers can start their CLIs concurrently.
+    """
+    from brindle import pipeline
+
+    return pipeline._reentrant_lock("milestone-claim-" + hashlib.sha1(root_id.encode()).hexdigest()[:16], wait=wait)
 
 
 def _pause_when_done(agent_id: str, argv: list[str]) -> list[str]:
