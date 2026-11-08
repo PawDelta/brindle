@@ -291,6 +291,17 @@ def test_org_list_use_and_policy(team, monkeypatch):
     assert f"{ORG} (member)" in out
 
 
+def test_org_policy_prints_every_role_override(team):
+    login(team, team_claims())
+    grants = {"allow": True, "kinds": ["bash", "write"], "overridable": ["env"], "max_minutes": 60, "max_uses": 5}
+    team.policy_body = {**team.policy_body, "policy": {**POLICY, "roles": {"reviewer": {
+        "allowed_providers": ["claude"], "allowed_models": ["gpt-5"], "allowed_profiles": ["light"],
+        "require_human_review": False, "max_parallel_workers": 2, "permission_grants": grants}}}}
+    code, out, err = run(team, "org", "policy")
+    assert code == 0, err
+    assert "reviewer" in out and "on for bash, write, up to 60 min or 5 uses" in out
+
+
 # -- org CI tokens ---------------------------------------------------------------------------------
 
 

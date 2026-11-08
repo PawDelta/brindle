@@ -468,11 +468,18 @@ class _OrgCommands:
             route = managed_models._describe_claude(c) if c.route in managed_models.CLAUDE_ROUTE_NAMES else c.route
             self._say(f"  {'agent setup':<22} Claude: {route}")
         if p.roles:
+            # A role override holds every rule key plus its raw permission_grants dict.
+            grants_summary = lambda g: (  # noqa: E731
+                "off" if not g.get("allow") else
+                f"on for {', '.join(g.get('kinds') or []) or 'no kinds'}, "
+                f"up to {g.get('max_minutes')} min or {g.get('max_uses')} uses")
+            role_show = {**show, "permission_grants": ("permission grants", grants_summary)}
             self._say("Role overrides (what a role's members get instead):")
             for role, over in sorted(p.roles.items()):
                 self._say(f"  {role}")
                 for key, v in over.items():
-                    self._say(f"    {show[key][0]:<22} {show[key][1](v)}")
+                    label, f = role_show[key]
+                    self._say(f"    {label:<22} {f(v)}")
         else:
             self._say("Role overrides: none")
         role, policy_role = p.role or ent.role, p.policy_role or ent.policy_role
