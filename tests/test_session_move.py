@@ -48,7 +48,7 @@ def test_handover_moves_goal_workers_tasks_and_carries_the_note(db, repo, monkey
     worker = workspaces.create(db, str(repo), "w-branch").workspace
     add(db, worker, "w1", mode="assign", parent="old")
     db.add_autopilot("old")
-    autopilot.set_goal(db, "old", "ship it", [("one", "true", None), ("two", "false", "d", "reviewer")], "why")
+    autopilot.set_goal(db, "old", "ship it", [("one", "true", None), ("two", "false", "d", "reviewer")], "why", summary="Release")
     m1 = db.milestones("old")[0]
     db.record_check(m1.id, True, "ok", "abc")
     db.add_task(Task("t1", str(repo), None, "old", root.id, "developer", "later", "assign", 1, None,
@@ -75,6 +75,7 @@ def test_handover_moves_goal_workers_tasks_and_carries_the_note(db, repo, monkey
     assert "rule: never push to main" in spawned["prompt"] and "w1" in spawned["prompt"]
     ap = db.get_autopilot("new")
     assert ap.goal == "ship it" and ap.detail == "why"
+    assert ap.summary == "Release"
     ms = db.milestones("new")
     assert [(m.title, m.status, m.profile) for m in ms] == [("one", "passed", None), ("two", "pending", "reviewer")]
     assert db.get_agent("w1").parent_id == "new"

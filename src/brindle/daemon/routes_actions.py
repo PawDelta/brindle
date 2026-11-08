@@ -1107,7 +1107,7 @@ def set_goal(db: DB, params: dict, body: Body) -> Any:
     root, _ = _autopilot_root(db, body)
     items = autopilot.milestone_items(db, root.id, _get(body, "milestones", list, required=True))
     autopilot.set_goal(db, root.id, _get(body, "goal", required=True), items, _get(body, "detail"),
-                       analysis_doc=_get(body, "analysis_doc", bool))
+                       analysis_doc=_get(body, "analysis_doc", bool), summary=_get(body, "summary"))
     return {"progress": autopilot.progress(db, root.id)}
 
 
