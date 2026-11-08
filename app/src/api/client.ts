@@ -1581,10 +1581,17 @@ export class DaemonClient {
   }
 
   visualInput(root: string, text: string, expiresAt?: number, signal?: AbortSignal,
-              observation?: { generation: number; sequence: number; submitted_at: number }) {
+              observation?: { generation: number; sequence: number; submitted_at: number; typed?: boolean }) {
     return this.request<{ observed: boolean }>(this.url(`${this.sessionPath(root)}/visual-input`), {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text, expires_at: expiresAt, ...observation }), signal,
+    });
+  }
+
+  visualTypedWords(root: string, text: string, expiresAt: number, submittedAt: number, signal?: AbortSignal) {
+    return this.request<{ observed: boolean }>(this.url(`${this.sessionPath(root)}/visual-input`), {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ typed_words: text, expires_at: expiresAt, submitted_at: submittedAt }), signal,
     });
   }
 
