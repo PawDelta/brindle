@@ -206,14 +206,14 @@ _QUOTED = re.compile("|".join(f"{o}[^{c}]*(?:{c}|$)" for o, c in ('""', "``", "�
                      + r"|‘(?:[^’]|’(?=\w))*(?:’(?!\w)|$)"
                      + r"|(?<!\w)'(?:[^']|'(?=\w))*'(?!\w)"
                      + r"|(?<!\w)'(?!\d|(?:em|n|cause|tis|twas)\b)(?:[^']|'(?=\w))*$")
-# What the words before a quoted name need, when a quote holds one: a request's verb, however it's
-# phrased ("please sketch", "why not render", "would you mind rendering"), and no one else's framing.
-_ASKS_FOR = re.compile(r"\b(?:(?:render|draw|sketch|show|mock|display|preview|build|plot|chart|diagram)(?:ing)?|mak(?:e|ing)(?! sure)|"
-                       r"creat(?:e|ing)|generat(?:e|ing)|visuali[sz](?:e|ing)|illustrat(?:e|ing))\b|"
-                       r"\b(?:let (?:me|us)|let['’]?s|can i|could i|may i|to)\W+(?:see|view)\b", re.I)
-_MENTION_FRAME = re.compile(r"^\W*(?:what|who|where|when|which|does|did|do you|was|were|is(?! it possible)|are(?! you able)|"
-                            r"how (?:does|do|did|is|are))\b|\bwhy (?:does|did|do|is|are|was)\b|"
-                            r"\b(?:he|she|they|someone|somebody|said|says|say|wrote|writes|told|tells|asked|asks|means?|meant|called|named)\b", re.I)
+_ASK_LEAD = (r"(?:(?:please|kindly|just|then|now|ok|okay|yes|so|and|maybe|perhaps|hey|go ahead and|how about|what about|why not|"
+             r"why don['’]t you|(?:can|could|would|will) you|would you mind|do you mind|mind|is it possible to|are you able to|"
+             r"i(?:['’]d| would)? (?:want|like|love|need)(?: you)? to|let['’]?s)\W+)*")
+# How a quote that holds a quoted name has to open: as a direct request, however polite. Anything else
+# ("he said", "the render log contains") is refused; the agent can still quote the person's plain words.
+_ASKS_FOR = re.compile(_ASK_LEAD + r"(?:(?:(?:render|draw|sketch|show|mock|display|preview|build|plot|chart|diagram)(?:ing)?|"
+                       r"mak(?:e|ing)(?! sure)|creat(?:e|ing)|generat(?:e|ing)|visuali[sz](?:e|ing)|illustrat(?:e|ing))\b"
+                       r"|(?:let (?:me|us)|let['’]?s|can i|could i|may i|i(?:['’]d| would)? (?:want|like|love) to)\W+(?:see|view)\b)", re.I)
 _IDEOGRAPH = re.compile(r"[぀-ヿ㐀-鿿豈-﫿]")
 
 
@@ -416,8 +416,7 @@ def _says_it_themselves(words: str, span: tuple[int, int], mentioned: list[tuple
         at = stop
     holds_a_mention = bool(own)
     own.append(words[at:end])
-    return _word_count(" ".join(own)) >= MIN_QUOTE_WORDS and (
-        not holds_a_mention or (_ASKS_FOR.search(own[0]) is not None and _MENTION_FRAME.search(own[0]) is None))
+    return _word_count(" ".join(own)) >= MIN_QUOTE_WORDS and (not holds_a_mention or _ASKS_FOR.match(own[0]) is not None)
 
 
 def _spend_quote(c, root: str, asked: str, now: float) -> bool:
