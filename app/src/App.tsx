@@ -326,13 +326,13 @@ function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, p
         <div className="contents" hidden={reading} inert={held}>
           <Sidebar route={shown} navigate={navigate} refresh={refresh ?? noop} openUrl={openUrl} />
         </div>
-        {/* The sidebar is hidden over a full-window visual: its logo still shows, and still goes Home. */}
-        {reading && (
-          <div className="absolute left-s3 top-s2 z-10">
-            <Logo className="text-[17px]" onHome={() => navigate({ screen: "new" })} />
-          </div>
-        )}
         <div className="relative flex min-w-0 flex-1 flex-col" inert={held}>
+          {/* The sidebar is hidden over a full-window visual: its logo keeps a row of its own above the reader, and still goes Home. */}
+          {reading && (
+            <div className="flex shrink-0 items-center px-s3 pt-s2">
+              <Logo className="text-[17px]" onHome={() => navigate({ screen: "new" })} />
+            </div>
+          )}
           <AppUpdateBanner openUrl={openUrl} />
           {/* The banner's upgrade follows the engine's terminal stream, which a page with no engine doesn't have.
               While the engine is away after having answered, the overlay speaks for it instead (no raw error strip). */}
