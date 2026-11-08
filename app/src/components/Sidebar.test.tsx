@@ -94,7 +94,9 @@ describe("Sidebar", () => {
     expect(parentsIn([ws([agent("sup1", "interactive", ""), agent("d", "assign", "sup1"), agent("r", "review", "sup1")])], "r")).toBe("d");
     // A reviewer already under its developer stays there beside a helper; with the developer gone, it stays under its parent.
     expect(parentsIn([ws([agent("sup1", "interactive", ""), agent("d", "assign", "sup1"), agent("h", "assign", "d"), agent("r", "review", "d")])], "r")).toBe("d");
-    expect(parentsIn([ws([agent("sup1", "interactive", ""), agent("r", "review", "sup1"), agent("h", "assign", "r")])], "r")).toBe("sup1");
+    const gone = { ...agent("d", "assign", "sup1"), dismissed_at: 1 };
+    const withGone = [ws([agent("sup1", "interactive", ""), gone, agent("r", "review", "d"), agent("h", "assign", "r")])];
+    expect([parentsIn(withGone, "d"), parentsIn(withGone, "r"), parentsIn(withGone, "h")]).toEqual([undefined, "sup1", "r"]);
     expect(parentsIn([ws([agent("sup1", "interactive", ""), agent("x", "assign", "sup2"), agent("r", "review", "sup1")])], "r")).toBe("sup1");
     expect(parentsIn([ws([agent("sup1", "interactive", ""), agent("d", "assign", "sup1"), agent("e", "assign", "sup1"), agent("r", "review", "sup1")])], "r")).toBe("sup1");
   });
