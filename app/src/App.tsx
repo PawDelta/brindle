@@ -10,7 +10,7 @@
    overview and brindle's layer, and the Inbox page (screens/Inbox, from
    the sidebar's head) lists every decision across sessions, each row
    jumping to its session with the item's review sheet over it, permission
-   and sign-in items completable in the row. The pages behind the sidebar's foot: Knowledge (a repo's
+   and sign-in items completable in the row. The pages behind the profile button's rail: Knowledge (a repo's
    decisions and document sources), Agents (which model or custom agent runs
    each kind of work, what takes over at a limit, and making a custom
    agent) and Settings, one place in tabs (the plan, sign-in and spend,
@@ -52,7 +52,8 @@ import { Sidebar } from "./components/Sidebar";
 import { Walkthrough, type WalkthroughStep } from "./components/Walkthrough";
 import { TerminalPanel, TerminalProvider, shellPlace } from "./components/TerminalPanel";
 import { alert, button } from "./components/ui";
-import { HOME, readLastSession, settingsTab, writeLastSession, type Route, type SessionRef, type SheetRef } from "./routes";
+import { escapeOwned } from "./escape";
+import { HOME, inProfileRail, readLastSession, settingsTab, writeLastSession, type Route, type SessionRef, type SheetRef } from "./routes";
 import { InboxScreen } from "./screens/Inbox";
 import { KnowledgeScreen } from "./screens/Knowledge";
 import { NewSession } from "./screens/New";
@@ -259,10 +260,10 @@ function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, p
   const restoreScroll = useRef<number | null>(null);
   const navigate = useCallback((to: Route) => {
     const from = routeNow.current;
-    if (settingsTab(to) !== null && (!from || settingsTab(from) === null)) {
+    if (inProfileRail(to) && (!from || !inProfileRail(from))) {
       setSettingsFrom({ route: from ?? HOME, visit: visitNow.current, scroll: page.current?.scrollTop ?? 0 });
       restoreScroll.current = 0;
-    } else if (settingsTab(to) === null) {
+    } else if (!inProfileRail(to)) {
       setSettingsFrom(null);
     }
     setVisit((n) => n + 1);
@@ -279,9 +280,9 @@ function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, p
     }
   }, [route]);
   useEffect(() => {
-    if (!route || settingsTab(route) === null) return;
+    if (!route || !inProfileRail(route)) return;
     const escape = (event: KeyboardEvent) => {
-      if (event.key !== "Escape" || event.defaultPrevented) return;
+      if (event.key !== "Escape" || event.defaultPrevented || escapeOwned()) return;
       event.preventDefault();
       backFromSettings();
     };

@@ -100,7 +100,7 @@ export function VisualReader({ client, visual, loading, onBack, asking, onAnswer
   const readRef = useRef(onRead);
   readRef.current = onRead;
   useEffect(() => {
-    // No bus event says a visual was read: the list hears it from here, for the revision marked.
+    // Update the list locally for this revision; the read event refreshes the Inbox too.
     if (id && unread) client.markVisualRead(id).then(() => readRef.current?.(id, rev), () => undefined);
   }, [client, id, rev, unread]);
   const [picked, setPicked] = useState<{ key: string; option: string } | null>(null);

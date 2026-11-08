@@ -3,7 +3,7 @@ import time
 import pytest
 from starlette.testclient import TestClient
 
-from brindle import agents, git, mcp_server, visual_offers, visuals
+from brindle import agents, bus, git, mcp_server, visual_offers, visuals
 from brindle.daemon.app import build_app
 from brindle.db import Agent, Workspace
 from brindle.service import inbox
@@ -153,16 +153,26 @@ def test_answer_attachments_refused_before_claim(db, session, client, tmp_path, 
     assert db.conn.execute("SELECT COUNT(*) FROM inbox WHERE agent_id=?", (boss.id,)).fetchone()[0] == 0
 
 
-def test_an_answer_reaches_the_supervisor_once_and_only_for_the_revision_on_screen(db, session, client,
-                                                                                 monkeypatch):
+def test_visual_ready_notice_and_answers_for_the_revision_on_screen(db, session, client,
+                                                                  monkeypatch):
     ws, boss, worker = session
+    ready = visuals.publish(db, worker, "Release flow", "<p>flow</p>")
+    for rev in (1, 2):
+        if rev == 2:
+            visuals.publish(db, worker, "Revised flow", "<p>revision</p>", visual_id=ready["id"])
+        assert [i.visual_id for i in inbox.items(db, ws.repo_root, panes={}) if i.kind == "visual"] == [ready["id"]]
+        assert not [i for i in inbox.items(db, "other-repo", panes={}) if i.kind == "visual"]
+        assert client.post(f"/v1/visuals/{ready['id']}/read").json()["unread"] is False
+        assert not [i for i in inbox.items(db, None, panes={}) if i.kind == "visual"]
+    assert len(bus.tail(db, kinds=("visual.read",), repo_root=ws.repo_root)) == 2
     monkeypatch.setenv("BRINDLE_AGENT_ID", worker.id)
     mcp_server.publish_visual("Release flow", "<p>r1</p>", "Which flow?", OPTIONS)
-    [v] = client.get(f"/v1/sessions/{boss.id}/visuals").json()
+    [v] = [v for v in client.get(f"/v1/sessions/{boss.id}/visuals").json() if v["id"] != ready["id"]]
     assert (v["rev"], v["unread"], v["by"]) == (1, True, "w1")
     [item] = [i for i in inbox.items(db, None, panes={}) if i.kind == "visual"]
     assert (item.visual_id, item.root_id) == (v["id"], boss.id)
     assert client.post(f"/v1/visuals/{v['id']}/read").json()["unread"] is False
+    assert [i.visual_id for i in inbox.items(db, None, panes={}) if i.kind == "visual"] == [v["id"]]
     assert client.post(f"/v1/visuals/{v['id']}/keep").json()["kept"] is True     # r1 is kept
 
     # A new revision arrives while r1 is on screen: r1's answer is refused, not read against r2.

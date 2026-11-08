@@ -2493,6 +2493,18 @@
           "title": "State",
           "type": "string"
         },
+        "summary": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Summary"
+        },
         "usage_resets_at": {
           "anyOf": [
             {

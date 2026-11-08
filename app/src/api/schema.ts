@@ -483,6 +483,7 @@ export interface GoalDTO {
   root_id: string;
   stage?: string | null;
   state: string;
+  summary?: string | null;
   usage_resets_at?: number | null;
 }
 /**

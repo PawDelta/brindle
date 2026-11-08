@@ -97,7 +97,7 @@ describe("the sidebar's weekly usage reading", () => {
     const pages = screen.getByTestId("pages");
     expect(pages.className).toContain("flex-nowrap");
     expect(pages.className).toContain("whitespace-nowrap");
-    expect(within(pages).getByRole("button", { name: "Agents" }).querySelector("[data-testid*='badge']")).toBeNull();
+    expect(within(pages).getByRole("button", { name: "Open Account" }).querySelector("[data-testid*='badge']")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Open Account" }));
     await screen.findByTestId("plan");
     stop();

@@ -1,9 +1,12 @@
+import threading
+
 import pytest
 from starlette.testclient import TestClient
 
-from brindle import agents, config, visual_offers as offers, visuals
+from brindle import agents, config, mcp_server, visual_offers as offers, visuals
 from brindle.daemon.app import build_app
-from brindle.db import Agent, Workspace
+from brindle.db import DB, Agent, Workspace
+from brindle.mcp_server import ToolError
 from brindle.service.errors import ServiceError
 
 
@@ -298,6 +301,330 @@ def test_legacy_unscoped_grants_are_revoked(db, session):
                 offers.consume(c, boss.id)
     finally:
         reopened.conn.close()
+
+
+def app_vouches(boss, text, expires_at, submitted_at=None):
+    token = "t" * 43
+    with TestClient(build_app(token), headers={"Authorization": f"Bearer {token}"}) as client:
+        return client.post(f"/v1/sessions/{boss.id}/visual-input", json={
+            "typed_words": text, "expires_at": expires_at, "submitted_at": submitted_at or offers.time.time()})
+
+
+def typed_into_cli(db, boss, text, vouched=True):
+    """A hook CLI in the app: the app vouches for the keys before Enter, then the hook reports the prompt."""
+    if vouched:
+        assert app_vouches(boss, text, offers.time.time() + 60).status_code == 200
+    agents.handle_hook(db, boss.id, "prompt-submit", {"prompt": text})
+
+
+@pytest.mark.parametrize("typed,asked,terminal", [
+    ("render first", "render first", False),
+    pytest.param("please send me updated renders", "please send me updated renders", False,
+                 marks=pytest.mark.variant("reported refusal")),
+    pytest.param("can i see the new session button rendering?", "can i see the new session button rendering?", False,
+                 marks=pytest.mark.variant("reported refusal")),
+    pytest.param("render the options for pending milestones", "render the options for pending milestones", False,
+                 marks=pytest.mark.variant("reported refusal")),
+    pytest.param("ok great, then render it", "then render it", False, marks=pytest.mark.variant("reported refusal, inside a longer message")),
+    pytest.param("no, render first", "  RENDER\n first ", False, marks=pytest.mark.variant("case and whitespace; no is not a negation of the quote")),
+    ("then render it", "then render it", True),
+])
+def test_asked_quote_accepts_what_the_person_typed(db, session, typed, asked, terminal):
+    boss, _ = session
+    if terminal:
+        token = "t" * 43
+        with TestClient(build_app(token), headers={"Authorization": f"Bearer {token}"}) as client:
+            assert terminal_input(client, boss.id)(typed, typed=True).status_code == 200
+    else:
+        typed_into_cli(db, boss, typed)
+    assert visuals.publish(db, boss, "Asked", "<p>yes</p>", asked=asked)["rev"] == 1
+
+
+def _report_came_late(db, boss, worker):
+    assert app_vouches(boss, "render first", offers.time.time() - 1).status_code == 409
+    typed_into_cli(db, boss, "render first", vouched=False)
+
+
+def _report_lands_after_a_newer_cancel(db, boss, worker):
+    submitted_at = offers.time.time()
+    agents.send_message(db, boss.id, "Don't make a visual", person=True)
+    assert app_vouches(boss, "render first", offers.time.time() + 60, submitted_at).status_code == 409
+    typed_into_cli(db, boss, "render first", vouched=False)
+
+
+def _report_with_no_prompt_yet(db, boss, worker):
+    assert app_vouches(boss, "render first", offers.time.time() + 60).status_code == 200
+
+
+def _direct_message_cannot_stand_in_for_the_prompt(db, boss, worker):
+    assert app_vouches(boss, "render first", offers.time.time() + 60).status_code == 200
+    agents.send_message(db, boss.id, "render first", person=True)
+
+
+def _terminal(**fields):
+    def send(db, boss, worker):
+        token = "t" * 43
+        with TestClient(build_app(token), headers={"Authorization": f"Bearer {token}"}) as client:
+            terminal_input(client, boss.id)("render first", **fields)
+    return send
+
+
+def _expired(db, boss, worker):
+    typed_into_cli(db, boss, "render first")
+    db.conn.execute("UPDATE visual_person_words SET created_at=created_at-?", (offers.FOLD + 1,))
+
+
+def _other_session(db, boss, worker):
+    db.add_agent(Agent("boss2", boss.workspace_id, "supervisor", "claude", None, "interactive", "idle", "%3", None, 0, headless=1))
+    typed_into_cli(db, db.get_agent("boss2"), "render first")
+
+
+def _says(*texts):
+    return lambda db, boss, worker: [typed_into_cli(db, boss, text) for text in texts]
+
+
+@pytest.mark.parametrize("setup,asked", [
+    (_says("fix the login bug"), "render first"),
+    (lambda db, boss, worker: agents.send_message(db, boss.id, "render first", sender_id=worker.id), "render first"),
+    # A hook prompt nobody vouched for: a paste, a failed report, a terminal outside the app.
+    (lambda db, boss, worker: typed_into_cli(db, boss, "render first", vouched=False), "render first"),
+    (_report_came_late, "render first"),
+    (_report_lands_after_a_newer_cancel, "render first"),
+    (_report_with_no_prompt_yet, "render first"),
+    (_direct_message_cannot_stand_in_for_the_prompt, "render first"),
+    (_terminal(typed=False), "render first"),
+    (_terminal(), "render first"),
+    (lambda db, boss, worker: agents.send_message(db, boss.id, "render first", person=True), "render first"),
+    (_says("surrender first please"), "render first"),
+    (_says("render first"), "render"),
+    (_says("please don't render it"), "render it"),
+    (_says("render first", "Don't make a visual"), "render first"),
+    (_expired, "render first"),
+    (_other_session, "render first"),
+])
+def test_asked_quote_refuses_words_that_are_not_the_persons(db, session, setup, asked):
+    boss, worker = session
+    setup(db, boss, worker)
+    with pytest.raises(ServiceError) as refused:
+        visuals.publish(db, boss, "Not asked", "<p>no</p>", asked=asked)
+    assert refused.value.code == "visual_request_required"
+
+
+@pytest.mark.variant("a bypass attempt: a worker or a plan can't spend the person's quote")
+def test_asked_quote_is_not_for_workers_or_plans(db, session):
+    boss, worker = session
+    typed_into_cli(db, boss, "render first")
+    with pytest.raises(ServiceError):
+        visuals.publish(db, worker, "From a worker", "<p>no</p>", asked="render first")
+    with pytest.raises(ServiceError):
+        visuals.publish(db, boss, "A plan", "<p>no</p>", kind="plan", asked="render first")
+    visuals.publish(db, boss, "Still unspent", "<p>yes</p>", asked="render first")
+
+
+def test_asked_quote_allows_one_publication_per_message(db, session):
+    boss, _ = session
+    typed_into_cli(db, boss, "render first")
+    typed_into_cli(db, boss, "render first")
+    for title in ("One", "Two"):   # each message is its own ask
+        visuals.publish(db, boss, title, "<p>yes</p>", asked="render first")
+    with pytest.raises(ServiceError):
+        visuals.publish(db, boss, "Three", "<p>no</p>", asked="render first")
+    # A message the wording test granted spends its grant or its quote, never both.
+    typed_into_cli(db, boss, "Make a visual")
+    visuals.publish(db, boss, "Granted", "<p>yes</p>")
+    with pytest.raises(ServiceError):
+        visuals.publish(db, boss, "Again", "<p>no</p>", asked="Make a visual")
+    typed_into_cli(db, boss, "Make a visual")
+    visuals.publish(db, boss, "Quoted", "<p>yes</p>", asked="Make a visual")
+    with pytest.raises(ServiceError):
+        visuals.publish(db, boss, "Again", "<p>no</p>")
+    # Between the app's report and its prompt's hook nothing can be spent.
+    assert app_vouches(boss, "Make a visual", offers.time.time() + 60).status_code == 200
+    with pytest.raises(ServiceError):
+        visuals.publish(db, boss, "Too early", "<p>no</p>", asked="Make a visual")
+    typed_into_cli(db, boss, "Make a visual", vouched=False)
+    visuals.publish(db, boss, "Then once", "<p>yes</p>", asked="Make a visual")
+    with pytest.raises(ServiceError):
+        visuals.publish(db, boss, "Not twice", "<p>no</p>")
+    # Likewise a message that raised a confirmation card.
+    ask = "Please render a mockup of the new session button"
+    typed_into_cli(db, boss, ask)
+    visuals.publish(db, boss, "Quoted card", "<p>yes</p>", asked=ask)
+    assert offers.current(db, boss.id) is None
+    typed_into_cli(db, boss, ask)
+    offers.resolve(db, boss.id, offers.current(db, boss.id)["id"], True)
+    visuals.publish(db, boss, "Confirmed", "<p>yes</p>")
+    with pytest.raises(ServiceError):
+        visuals.publish(db, boss, "Again", "<p>no</p>", asked=ask)
+
+
+def test_asked_quote_words_are_purged_without_more_input(db, session, monkeypatch):
+    from types import SimpleNamespace
+    import asyncio
+
+    from brindle.daemon import lifecycle, session_review
+
+    boss, _ = session
+    typed_into_cli(db, boss, "render first")
+    db.conn.execute("UPDATE visual_person_words SET created_at=created_at-?", (offers.FOLD + 1,))
+    monkeypatch.setattr(session_review.ReadinessWatch, "sweep_safely", lambda self: None)
+    server = SimpleNamespace(should_exit=False)
+
+    async def one_tick(seconds):
+        server.should_exit = True
+
+    asyncio.run(lifecycle._watch(server, lifecycle.Activity(build_app("t" * 43, port=8123)), False,
+                                 wait=one_tick, clock=offers.time.time))
+    assert db.conn.execute("SELECT COUNT(*) FROM visual_person_words").fetchone()[0] == 0
+
+
+def test_asked_quote_answered_visual_allows_one_revision(db, session, monkeypatch):
+    boss, worker = session
+    typed_into_cli(db, boss, "render first")
+    choices = [{"id": "more", "label": "None, keep exploring"}, {"id": "a", "label": "A"}]
+    v = visuals.publish(db, boss, "Options", "<p>1</p>", "Which?", choices, asked="render first")
+    with pytest.raises(ServiceError):
+        visuals.publish(db, boss, "Unanswered", "<p>no</p>", visual_id=v["id"])
+    visuals.answer(db, v["id"], 1, "more", "you didnt render anything")
+    with pytest.raises(ServiceError):
+        visuals.publish(db, worker, "A worker's revision", "<p>no</p>", visual_id=v["id"])
+    assert visuals.publish(db, boss, "Options", "<p>2</p>", "Which?", choices, visual_id=v["id"])["rev"] == 2
+    with pytest.raises(ServiceError):
+        visuals.publish(db, boss, "Second revision", "<p>no</p>", visual_id=v["id"])
+    visuals.answer(db, v["id"], 2, "a")
+    now = offers.time.time()
+    monkeypatch.setattr(offers.time, "time", lambda: now + offers.FOLD + 1)
+    with pytest.raises(ServiceError):
+        visuals.publish(db, boss, "Too late", "<p>no</p>", visual_id=v["id"])
+
+
+def _delivered_prompt(db, boss, worker):
+    agents.send_message(db, boss.id, "render first", sender_id=worker.id)
+    db.conn.execute("UPDATE inbox SET delivered_at=? WHERE agent_id=?", (offers.time.time(), boss.id))
+    agents.handle_hook(db, boss.id, "prompt-submit", {"prompt": "render first"})
+
+
+def _declined_card_typed_twice(db, boss, worker):
+    typed_into_cli(db, boss, CARD_ASK)
+    typed_into_cli(db, boss, CARD_ASK)
+    offers.resolve(db, boss.id, offers.current(db, boss.id)["id"], False)
+
+
+def _publishers_race(db, boss, worker):
+    outcomes = []
+
+    def publish():
+        own = DB()
+        try:
+            outcomes.append(visuals.publish(own, boss, "Race", "<p>r</p>", asked="render first")["id"])
+        except ServiceError as refused:
+            outcomes.append(refused.code)
+        finally:
+            own.conn.close()
+
+    threads = [threading.Thread(target=publish) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert sum(o.startswith("v_") for o in outcomes) == 1
+
+
+def _worker_calls_the_tool(db, boss, worker):
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv("BRINDLE_AGENT_ID", worker.id)
+        with pytest.raises(ToolError):
+            mcp_server.publish_visual("From a worker", "<p>no</p>", asked="render first")
+
+
+def _restart(db, boss, worker):
+    db.conn.close()
+    offers.purge_words(DB())
+
+
+def _stress(why, *row):
+    return pytest.param(*row, marks=pytest.mark.variant(why))
+
+
+CARD_ASK = "Please render a mockup of the new session button"
+FIRST = "render first"
+LONG_NOTES = "\n".join(f"line {n} of the notes about the migration" for n in range(110))
+
+
+@pytest.mark.parametrize("said,asked,published", [
+    # Words the person never asked with.
+    _stress("punctuation is not words", ["hmm . . . ok go"], ". .", False),
+    _stress("empty quote", [FIRST], "", False),
+    _stress("one ideograph is one word", ["画"], "画", False),
+    _stress("a piece cut from a run of ideographs", ["把这个流程画出来"], "流程", False),
+    _stress("homoglyph", [FIRST], "rеnder first", False),
+    _stress("a worker's message delivered as a prompt", [_delivered_prompt], FIRST, False),
+    # Words that take the ask back.
+    _stress("the quote carries the don't", ["please don't render it"], "don't render it", False),
+    _stress("don't ever", ["don't ever render it"], "render it", False),
+    _stress("did not ask", ["i didn't ask you to render it"], "render it", False),
+    _stress("instead of", ["write it up instead of render it"], "render it", False),
+    _stress("mentioned in backticks", ["the `render first` flag is broken"], FIRST, False),
+    _stress("deep inside a mention", ['What does "please render first" mean?'], FIRST, False),
+    _stress("the quote brings its own marks", ['What does "render first" mean?'], '"render first"', False),
+    _stress("mentioned in single quotes", ["what does 'please render first' mean"], FIRST, False),
+    _stress("an unclosed mention", ['he said "please render first'], FIRST, False),
+    _stress("an unclosed single quote", ["He said 'render first"], FIRST, False),
+    _stress("an unclosed curly quote", ["He said ‘render first"], FIRST, False),
+    _stress("an apostrophe inside an unclosed quote", ["He said 'let's render first"], FIRST, False),
+    _stress("the marks and one word of the person's own", ['What does "render first" mean?'], '"render first" mean', False),
+    _stress("begins outside, ends inside", ['What does "render first" mean?'], 'does "render first', False),
+    _stress("a report with a request verb as a noun", ['The render log contains "render first"'], 'The render log contains "render first"', False),
+    _stress("a quote opening on a digit", ["He said '2d render first'"], FIRST, False),
+    _stress("a quote opening on an elision", ["He said 'tis time to render first'"], FIRST, False),
+    _stress("a long message keeps its negation", [LONG_NOTES + "\nThen don't render the options."], "render the options", False),
+    # Cancelled, in the person's own words, for a quote and for a grant.
+    # Bare cancellation, negated requests, explicit artifacts, trailing clauses,
+    # Unicode separators and an unpunctuated explanation take distinct paths.
+    *[_stress("cancel then quote", [FIRST, cancel], FIRST, False) for cancel in (
+        "actually never mind", "don’t make a visual", "no visual please",
+        "thanks for that.\nNever mind the visual.", "Never mind — I found it", "never mind I found it")],
+    _stress("cancel then grant", ["Make a visual", "actually never mind"], None, False),
+    _stress("cancel with a reason, grant", ["Make a visual", "Never mind, I found the answer."], None, False),
+    _stress("cancel with unicode punctuation, grant", ["Make a visual", "Never mind…"], None, False),
+    _stress("a declined card covers the same words typed earlier", [_declined_card_typed_twice], CARD_ASK, False),
+    # Capability, races, restarts.
+    _stress("capability off", [lambda db, boss, worker: config.set_user("visuals_enabled", "off"), FIRST], FIRST, False),
+    _stress("one quote, eight publishers", [FIRST, _publishers_race], FIRST, False),
+    _stress("a worker's refused call leaves the quote", [FIRST, _worker_calls_the_tool], FIRST, True),
+    _stress("the offers setting never governs asking", [lambda db, boss, worker: config.set_user("visuals", "off"), FIRST], FIRST, True),
+    _stress("a restart keeps the words", [FIRST, _restart], FIRST, True),
+    # Real asks these guards must not catch.
+    _stress("why not", ["Why not render it?"], "render it", True),
+    _stress("can't you", ["can't you just render it?"], "render it", True),
+    _stress("negation in an earlier clause", ["I don't get it, render it"], "render it", True),
+    _stress("ideographs have no spaces", ["把这个流程画出来"], "把这个流程画出来", True),
+    _stress("never mind something else", ["never mind the typo, render it"], "render it", True),
+    _stress("never mind, then the ask", ["never mind, render it"], "render it", True),
+    _stress("never mind, then a polite ask", ["Never mind — can you show me the flow"], "show me the flow", True),
+    _stress("a whole ask holding a quoted name", ['render the "new session" button'], 'render the "new session" button', True),
+    _stress("another verb", ["Please sketch the `SessionContext` layout"], "Please sketch the `SessionContext` layout", True),
+    _stress("a subordinate clause in the ask", ['Please render what they see on the "new session" screen'], 'Please render what they see on the "new session" screen', True),
+    _stress("polite", ['Would you mind rendering the "new session" button?'], 'Would you mind rendering the "new session" button?', True),
+    _stress("a decade is not a quotation", ["the '90s layout, render it"], "render it", True),
+    _stress("apostrophes are not quotation marks", ["let's see what's wrong, render it"], "render it", True),
+    _stress("a long message ending in the ask", [LONG_NOTES + "\nThen render the options."], "render the options", True),
+    _stress("stop something else", ["stop the server and render the flow"], "render the flow", True),
+    _stress("cancel, then ask again", [FIRST, "never mind", FIRST], FIRST, True),
+])
+def test_visual_request_stress(db, session, monkeypatch, said, asked, published):
+    boss, worker = session
+    for step in said:
+        if callable(step):
+            step(db, boss, worker)
+        else:
+            typed_into_cli(db, boss, step)
+    monkeypatch.setenv("BRINDLE_AGENT_ID", boss.id)
+    if published:
+        assert mcp_server.publish_visual("Asked", "<p>yes</p>", asked=asked).startswith("Published")
+    else:
+        with pytest.raises(ToolError):
+            mcp_server.publish_visual("Not asked", "<p>no</p>", asked=asked)
 
 
 def test_answer_folds_offer_and_setting_never_grants(db, session):

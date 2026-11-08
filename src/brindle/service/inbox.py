@@ -18,7 +18,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from brindle import agents, autopilot, bus, identity_lock, permissions, prompt_answer, session_sync, tmux, view
+from brindle import agents, autopilot, bus, git, identity_lock, permissions, prompt_answer, session_sync, tmux, view
 from brindle.config import load_repo_config
 from brindle.daemon.holds import HOLDS, LEASE_SECONDS
 from brindle.db import DB, Agent, request_subagent
@@ -174,13 +174,21 @@ def _sign_in(provider: str) -> InboxActionDTO | None:
     return InboxActionDTO(method="POST", path=f"/v1/providers/{provider}/login") if provider in CLI_NAMES else None
 
 
-def _pr_items(db: DB, root_id: str, branch: str, link: dict) -> list[InboxItemDTO]:
+def _pr_items(db: DB, root_id: str, branch: str, path: str, link: dict) -> list[InboxItemDTO]:
     """The session's PR as brindle prepared it (routes_actions.prepare_pr),
     until the person opens it: ready for their approval, or its checks failed."""
     rows = db.conn.execute(
         "SELECT state, title, check_cmd, output FROM session_pr_prep p WHERE root_id = ? AND branch = ?"
         " AND state IN ('passed', 'failed') AND NOT EXISTS (SELECT 1 FROM session_prs s WHERE"
         " s.root_id = p.root_id AND s.branch = p.branch AND s.url IS NOT NULL)", (root_id, branch)).fetchall()
+    declined = db.conn.execute("SELECT sha FROM session_pr_declined WHERE root_id = ? AND branch = ?",
+                               (root_id, branch)).fetchone()
+    if declined and any(r["state"] == "passed" for r in rows):
+        try:
+            if git.out(["rev-parse", "HEAD"], path) == declined["sha"]:
+                rows = [r for r in rows if r["state"] != "passed"]
+        except (git.GitError, OSError):
+            pass  # An unavailable checkout must not break the rest of the inbox.
     return [InboxItemDTO(kind="pr_ready", reason="PR ready for your approval", detail=r["title"], **link)
             if r["state"] == "passed" else
             InboxItemDTO(kind="pr_failed", reason=f"PR checks failed: {r['check_cmd']}", detail=r["output"], **link)
@@ -234,8 +242,9 @@ def items(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None) -
                 checks = json.loads(ap.proposal).get("checks") or []
                 out.append(InboxItemDTO(kind="proposed_checks", reason="checks proposed", **link,
                                         detail="\n".join(checks)))
-            out += _pr_items(db, row.id, ws["branch"], link)
             home = db.get_workspace(row.workspace_id)
+            if home:
+                out += _pr_items(db, row.id, ws["branch"], home.path, link)
             if home and (stuck := session_sync.needs_you(db, home)):
                 out.append(InboxItemDTO(kind="sync_conflict", reason="session branch conflicts with origin",
                                         detail=stuck, **link))
@@ -270,15 +279,16 @@ def _idle_items(db: DB, repo_root: str | None) -> list[InboxItemDTO]:
 
 
 def _visual_items(db: DB, repo_root: str | None) -> list[InboxItemDTO]:
-    """A visual's open question, until the person answers it (brindle.visuals)."""
+    """Unread visual revisions and open questions (brindle.visuals)."""
     from brindle import visuals
 
     out = []
-    for v in visuals.open_questions(db, repo_root):
+    for v in visuals.inbox_pending(db, repo_root):
         root = db.get_agent(v["root_id"])
         if root is None or identity_lock.locked_by(root.id):
             continue
-        out.append(InboxItemDTO(kind="visual", reason="asks you to choose", detail=v["title"],
+        reason = "asks you to choose" if v["options"] else "visual is ready"
+        out.append(InboxItemDTO(kind="visual", reason=reason, detail=v["title"],
                                 visual_id=v["id"], agent_id=root.id, workspace_id=root.workspace_id,
                                 root_id=root.id))
     return out

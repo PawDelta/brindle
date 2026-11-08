@@ -235,15 +235,17 @@ def _session(db: DB, caller: Agent | None) -> tuple[Agent, Workspace]:
 
 def publish(db: DB, caller: Agent | None, title: str, html: str, question: str | None = None,
             options: list[dict] | None = None, visual_id: str | None = None, kind: str = "visual",
-            extra: Callable[[Any, str, int], None] | None = None) -> dict:
+            extra: Callable[[Any, str, int], None] | None = None, asked: str | None = None) -> dict:
     """Publish a new visual into ``caller``'s session, or (``visual_id``) a
     new revision of one of that session's visuals. A new revision is a new
     question: an answer to an earlier one is cleared. ``extra(c, id, rev)``
-    writes what goes with the row (a plan's own row) in its transaction."""
+    writes what goes with the row (a plan's own row) in its transaction.
+    ``asked``: the person's own words asking to see it (visual_offers.authorize)."""
     require_enabled()
     root, ws = _session(db, caller)
     title = _text(title, "title", MAX_TITLE, required=True)
     question = _text(question, "question", MAX_QUESTION)
+    asked = _text(asked, "asked", MAX_QUESTION)
     options = _options(options)
     if options and not question:
         raise ServiceError("invalid", "options need the question they answer", 400)
@@ -266,12 +268,14 @@ def publish(db: DB, caller: Agent | None, title: str, html: str, question: str |
         now = time.time()
         from brindle import visual_offers
 
-        visual_offers.consume(c, root.id, kind)
+        row = c.execute("SELECT root_id, rev, kind, answer FROM visuals WHERE id=?", (visual_id,)).fetchone() \
+            if isinstance(visual_id, str) and ID.fullmatch(visual_id) else None
+        visual_offers.authorize(c, root.id, kind, supervisor=caller.id == root.id, asked=asked,
+                                answered=row["answer"] if row and row["root_id"] == root.id
+                                and row["kind"] == kind else None)
         if visual_id is None:
             vid, rev = "v_" + secrets.token_hex(6), 1
         else:
-            row = c.execute("SELECT root_id, rev, kind FROM visuals WHERE id=?", (visual_id,)).fetchone() \
-                if isinstance(visual_id, str) and ID.fullmatch(visual_id) else None
             if row is None or row["root_id"] != root.id or row["kind"] != kind:
                 raise ServiceError("not_found", "no such visual in this session", 404)
             vid, rev = visual_id, row["rev"] + 1
@@ -296,6 +300,7 @@ def publish(db: DB, caller: Agent | None, title: str, html: str, question: str |
             raise
     bus.publish(db, "visual.published", repo_root=ws.repo_root, root_id=root.id, agent_id=caller.id,
                 visual=vid, rev=rev)
+    bus.publish(db, "visual.offer_resolved", root_id=root.id)   # a quote may have spent a confirmation card
     return get(db, vid)
 
 
@@ -304,6 +309,9 @@ def mark_read(db: DB, visual_id: str) -> dict:
     _unlocked(v["root_id"])
     with db.tx() as c:
         c.execute("UPDATE visuals SET read_rev=MAX(read_rev, rev) WHERE id=?", (v["id"],))
+    # Both entry points use this state: the Inbox card and the session's list.
+    # Tell connected clients to refresh their Inbox after either opens the reader.
+    bus.publish(db, "visual.read", repo_root=v["repo_root"], root_id=v["root_id"], visual=v["id"])
     return get(db, v["id"])
 
 
@@ -420,11 +428,18 @@ def answer(db: DB, visual_id: str, rev: Any, option: Any = None, note: Any = Non
     return get(db, v["id"])
 
 
-def open_questions(db: DB, repo_root: str | None) -> list[dict]:
-    """Unanswered visuals that ask something, oldest first, for the Inbox."""
+def inbox_pending(db: DB, repo_root: str | None) -> list[dict]:
+    """Visuals needing attention, oldest first, for the Inbox.
+
+    Questions stay until answered even after being read. A visual without
+    answer options is a notice: each published revision stays until read.
+    """
     if not enabled():
         return []
-    sql, args = "SELECT * FROM visuals WHERE options IS NOT NULL AND answer IS NULL", []
+    sql = ("SELECT * FROM visuals WHERE ("
+           "(options IS NOT NULL AND answer IS NULL) OR "
+           "(options IS NULL AND read_rev < rev))")
+    args = []
     if repo_root is not None:
         sql += " AND repo_root=?"
         args.append(repo_root)

@@ -83,6 +83,12 @@ def visual_input(db: DB, params: dict, body: dict) -> Any:
     observer = _get(body, "refresh", int)
     if observer is not None:
         return {"generation": visual_offers.refresh_input(db, agent, observer, submitted_at, expires_at)}
+    typed_words = _get(body, "typed_words")
+    if typed_words is not None:
+        if expires_at is None or len(typed_words) > 32000:
+            raise ServiceError("invalid", "typed_words needs expires_at and a sensible length", 400)
+        visual_offers.keep_typed(db, agent, typed_words, expires_at, submitted_at)
+        return {"observed": True}
     text = _get(body, "text", required=True)
     if len(text) > 32000:
         raise ServiceError("invalid", "input is too long", 400)
@@ -95,8 +101,8 @@ def visual_input(db: DB, params: dict, body: dict) -> Any:
     if generation < 1 or sequence < 1:
         raise ServiceError("invalid", "generation and sequence must be positive integers", 400)
     fold_only = text.strip().lower() in ("y", "yes", "n", "no") or text.strip().isdigit()
-    visual_offers.person_spoke(db, agent, text, expires_at=expires_at,
-                               observation=(generation, sequence), submitted_at=submitted_at, fold_only=fold_only)
+    visual_offers.person_spoke(db, agent, text, expires_at=expires_at, observation=(generation, sequence),
+                               submitted_at=submitted_at, fold_only=fold_only, typed=_get(body, "typed", bool) is True)
     return {"observed": True}
 
 
