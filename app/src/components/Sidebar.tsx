@@ -324,7 +324,9 @@ function AgentRow({ node, route, navigate, repo, root, cursor, setCursor }: { no
   const active = route.screen === "session" && route.root === root && (route.agent ?? root) === a.id;
   const status = cliStatus(a, node.workspace, alive);
   const key = `agent:${a.id}`;
-  const role = a.id === root ? "supervisor" : a.profile ? roleOf(a.profile) : "";
+  const role = a.id === root ? "supervisor" : a.profile
+    ? a.profile === a.provider ? (a.mode === "review" ? "reviewer" : "developer") : roleOf(a.profile)
+    : a.mode === "review" ? "reviewer" : "developer";
   const tone = dotTone(status, a.status);
   const stage = stageOf(tone, a, node.workspace.review_state);
   const info = [`id: ${a.id}`, `role: ${role}`, `profile: ${a.profile}`, `branch: ${node.workspace.branch}`, `milestone: ${a.milestone ?? ""}`].join("\n");

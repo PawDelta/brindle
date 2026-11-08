@@ -139,12 +139,14 @@ describe("Sidebar", () => {
     // The pipeline's reviewer is the developer's sibling (same parent), on a Codex model.
     const r = { ...a, id: "w3", mode: "review", profile: "reviewer-codex", provider: "codex", model: "gpt-6-luna", milestone: undefined };
     const g = { ...a, id: "w4", profile: "developer-gemini", provider: "gemini", model: "gemini-3-pro", milestone: undefined };
-    const { sync } = mount({ workspaces: [root, { ...worker, agents: [a, r] }, { ...worker, id: "proj/other", name: "other", branch: "feat/other", agents: [b, g] }] }, { screen: "session", root: "sup1", repo: REPO });
+    const bare = { ...a, id: "w5", profile: "claude", milestone: undefined };
+    const { sync } = mount({ workspaces: [root, { ...worker, agents: [a, r] }, { ...worker, id: "proj/other", name: "other", branch: "feat/other", agents: [b, g, bare] }] }, { screen: "session", root: "sup1", repo: REPO });
     await waitFor(() => expect(agentRow("w1")).toBeTruthy());
     expect(within(agentRow("w4")!).getByTestId("agent-role").textContent).toBe("developer · gemini");
     expect(agentRow("w1")!.closest("li")!.contains(agentRow("w3"))).toBe(true);
     expect(within(agentRow("w3")!).getByTestId("agent-role").textContent).toBe("reviewer · codex");
     expect(within(agentRow("w2")!).getByTestId("agent-role").textContent).toBe("developer · claude");
+    expect(within(agentRow("w5")!).getByTestId("agent-role").textContent).toBe("developer");
     expect(within(agentRow("w1")!).getByTestId("agent-role").textContent).toBe("developer · haiku");
     expect(agentRow("w1")!.title).toContain("haiku");
     expect(agentRow("w1")!.title).toContain("milestone: Logo goes Home");
@@ -233,7 +235,7 @@ describe("Sidebar", () => {
     expect(agentRow("w1")!.closest("li")!.contains(agentRow("c1"))).toBe(true);
     // The rows read: a dot for the CLI's status, "id · role", the label; the branch is in the tooltip.
     expect(agentRow("w1")!.querySelector(".side-dot")!.getAttribute("data-tone")).toBe("work");
-    expect(within(agentRow("w1")!).getByTestId("agent-role").textContent).toBe(roleOf(worker.agents![0].profile));
+    expect(within(agentRow("w1")!).getByTestId("agent-role").textContent).toBe("developer");
     expect(agentRow("w1")!.title).toContain("feat/ls");
     expect(within(agentRow("w1")!).getByTestId("agent-status").textContent).toBe("code");
     const workingClass = within(agentRow("w1")!).getByTestId("agent-status").className;
