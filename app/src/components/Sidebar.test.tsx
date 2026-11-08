@@ -48,18 +48,63 @@ const sessionRow = (id: string) => document.querySelector<HTMLButtonElement>(`bu
 const list = () => screen.getByRole("navigation", { name: "Sessions" });
 
 describe("Sidebar", () => {
-  it("draws tree lines with workers directly under the session and nested teams under their parent", async () => {
+  it.each([
+    ["processing", null, undefined, "Working", "working"],
+    ["idle", "working", undefined, "Working", "working"],
+    ["idle", "checks", undefined, "Working", "working"],
+    ["idle", "review", undefined, "Reviewing", "review"],
+    ["idle", "merging", undefined, "Merging", "merging"],
+    ["idle", null, undefined, "Idle", null],
+    ["paused", "review", undefined, "Paused", null],
+    ["paused", "review", "done", "Done", "done"],
+    ["idle", "merging", "done", "Done", "done"],
+  ])("session status word: %s / %s / %s reads as %s", async (status, stage, goal_phase, word, colour) => {
+    const { sync } = mount({ workspaces: [{ ...root, agents: [{ ...root.agents![0], model: "claude-sonnet-4" }] }, worker], sessions: [{ ...live, status }], goal: { ...goal, stage, goal_phase } }, { screen: "session", root: "sup1", repo: REPO });
+    onTestFinished(() => sync.stop());
+    await waitFor(() => expect(within(sessionRow("sup1")!).getByTestId("session-status").textContent).toBe(word));
+    const row = sessionRow("sup1")!;
+    const label = within(row).getByTestId("session-status");
+    expect(label.className).toContain(colour ? `st-${colour} stage-word` : "text-ink-3");
+    expect(label.classList.contains("stage-word")).toBe(colour !== null);
+    const marker = status === "paused" ? row.querySelector(".side-dot")! : screen.getByRole("button", { name: "Hide sup1's agents" });
+    expect(marker.className).toContain(colour ? `st-${colour}` : "text-ink-3");
+    expect(row.querySelector(".supervisor-tag")).toBeNull();
+    expect(row.textContent).not.toContain("supervisor");
+    if (status !== "paused") {
+      expect(within(row).getByTestId("session-model").textContent).toBe("sonnet");
+      fireEvent.click(screen.getByRole("button", { name: "Hide sup1's agents" }));
+      expect(agentRow("w1")).toBeNull();
+      expect(within(row).getByTestId("session-status").textContent).toBe(word);
+    }
+  });
+
+  it("branches workers from the root dot, folds from it, and opens the supervisor from the row", async () => {
     const supervisor = { ...worker.agents![0], profile: "supervisor-sonnet", milestone: "Release page" };
-    const { sync } = mount({ workspaces: [root, { ...worker, agents: [supervisor, child] }] });
+    const { sync, navigate } = mount({ workspaces: [root, { ...worker, agents: [supervisor, child] }] });
+    onTestFinished(() => sync.stop());
     await waitFor(() => expect(agentRow("c1")).toBeTruthy());
     expect(agentRow("sup1")).toBeNull();
     expect(agentRow("w1")!.closest("ul")!.parentElement!.dataset.session).toBe("sup1");
     expect(agentRow("c1")!.closest("ul")!.parentElement).toBe(agentRow("w1")!.closest("li"));
     expect(agentRow("w1")!.closest("li")!.classList.contains("session-tree-node")).toBe(true);
     expect(agentRow("c1")!.closest("li")!.classList.contains("session-tree-node")).toBe(true);
-    expect(agentRow("w1")!.querySelector(".supervisor-tag")!.textContent).toContain("sonnet");
+    expect(within(agentRow("w1")!).getByTestId("agent-role").textContent).toBe("supervisor · sonnet");
+    expect(agentRow("w1")!.querySelector(".supervisor-tag")).toBeNull();
     expect(agentRow("c1")!.textContent).not.toContain("↳");
-    sync.stop();
+    const dot = screen.getByRole("button", { name: "Hide sup1's agents" });
+    expect(dot.classList.contains("session-root-dot")).toBe(true);
+    expect(dot.getAttribute("aria-expanded")).toBe("true");
+    fireEvent.click(dot);
+    expect(dot.getAttribute("aria-expanded")).toBe("false");
+    expect(agentRow("w1")).toBeNull();
+    expect(navigate).not.toHaveBeenCalled();
+    fireEvent.click(dot);
+    expect(dot.getAttribute("aria-expanded")).toBe("true");
+    expect(agentRow("c1")).toBeTruthy();
+    // SessionGoal's block wrapper fills the row; its button must fill that wrapper.
+    expect(sessionRow("sup1")!.classList.contains("w-full")).toBe(true);
+    fireEvent.click(sessionRow("sup1")!);
+    expect(navigate).toHaveBeenLastCalledWith({ screen: "session", root: "sup1", repo: REPO, agent: "sup1" });
   });
 
   it("uses the short goal summary on one line and copies the full goal", async () => {
@@ -69,7 +114,7 @@ describe("Sidebar", () => {
     await waitFor(() => expect(sessionRow("sup1")!.textContent).toContain("CLI polish"));
     expect(sessionRow("sup1")!.querySelector("[data-testid=session-title]")!.classList.contains("truncate")).toBe(true);
     expect(sessionRow("sup1")!.textContent).not.toMatch(/sup1|interactive|agents|working/);
-    expect(sessionRow("sup1")!.querySelector(".supervisor-tag")).toBeTruthy();
+    expect(sessionRow("sup1")!.querySelector(".supervisor-tag")).toBeNull();
     fireEvent.click(sessionRow("sup1")!);
     expect(navigate).toHaveBeenLastCalledWith({ screen: "session", root: "sup1", repo: REPO, agent: "sup1" });
     await act(async () => fireEvent.dblClick(sessionRow("sup1")!));
@@ -86,7 +131,7 @@ describe("Sidebar", () => {
     sync.stop();
   });
 
-  it("shows a worker's milestone title with its role and model, falling back to its branch, and double-click copies its info", async () => {
+  it("worker row role reads only the role, with the milestone, model and branch in the tooltip, and double-click copies its info", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
     const a = { ...worker.agents![0], profile: "developer-haiku", milestone: "Logo goes Home" };
@@ -100,9 +145,11 @@ describe("Sidebar", () => {
     expect(agentRow("w1")!.closest("li")!.contains(agentRow("w3"))).toBe(true);
     expect(within(agentRow("w3")!).getByTestId("agent-role").textContent).toBe("reviewer · codex");
     expect(within(agentRow("w2")!).getByTestId("agent-role").textContent).toBe("developer · claude");
-    expect(within(agentRow("w1")!).getByTestId("agent-title").textContent).toBe("Logo goes Home ");
     expect(within(agentRow("w1")!).getByTestId("agent-role").textContent).toBe("developer · haiku");
-    expect(within(agentRow("w2")!).getByTestId("agent-title").textContent).toBe("Other ");
+    expect(agentRow("w1")!.title).toContain("haiku");
+    expect(agentRow("w1")!.title).toContain("milestone: Logo goes Home");
+    expect(agentRow("w3")!.title).toContain("gpt-6-luna");
+    expect(agentRow("w2")!.querySelector("[data-testid=agent-title]")).toBeNull();
     await act(async () => fireEvent.dblClick(agentRow("w1")!));
     expect(writeText).toHaveBeenCalledWith("id: w1\nrole: developer\nprofile: developer-haiku\nbranch: feat/ls\nmilestone: Logo goes Home");
     expect(screen.getByRole("status").textContent).toContain("copied");

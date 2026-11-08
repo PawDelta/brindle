@@ -22,7 +22,7 @@
    Only the newest GET answers: a slower, older response is dropped, and so is
    any response that arrives after the panel has moved to another session. */
 
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import type { BusEvent } from "../../api/events";
 import type { DaemonClient } from "../../api/client";
 import { openExternal, type OpenUrl } from "../../api/open";
@@ -346,7 +346,7 @@ function PhaseFoldList({ folds, open, onToggle, isDone, large, rowsClass, row, r
         const count = f.state === "done" ? `✓ ${n} of ${n}` : f.state === "todo" ? `${n} upcoming` : `${passed} of ${n}`;
         return (
           <li key={f.key} data-st={f.state}>
-            <button type="button" className="ms-fold" data-st={f.state} data-testid="phase-fold" aria-expanded={isOpen} onClick={() => onToggle(f.key, !isOpen)}>
+            <button type="button" className="ms-fold" data-st={f.state} data-testid="phase-fold" data-phase-key={f.key} aria-expanded={isOpen} onClick={() => onToggle(f.key, !isOpen)}>
               {CHEV}
               <span className="n">{f.name}</span>
               {large && (
@@ -363,6 +363,47 @@ function PhaseFoldList({ folds, open, onToggle, isDone, large, rowsClass, row, r
         );
       })}
     </ul>
+  );
+}
+
+/* One fixed phase line; the fold headers themselves scroll away. */
+function PhaseScroll({ folds, isDone, children, className }: {
+  folds: PhaseFold[] | null;
+  isDone(m: MilestoneDTO): boolean;
+  children: ReactNode;
+  className: string;
+}) {
+  const scroller = useRef<HTMLDivElement>(null);
+  const [key, setKey] = useState<number | null>(null);
+  const first = folds?.find((f) => f.name !== null);
+  const current = folds?.find((f) => f.key === key && f.name !== null) ?? first;
+  const update = useCallback(() => {
+    const list = scroller.current;
+    if (!list) return;
+    const top = list.getBoundingClientRect().top + 2;
+    let next = folds?.find((f) => f.name !== null)?.key ?? null;
+    for (const header of list.querySelectorAll<HTMLElement>("[data-phase-key]")) {
+      if (header.getBoundingClientRect().top <= top) next = Number(header.dataset.phaseKey);
+    }
+    setKey(next);
+  }, [folds]);
+  // Folding or refreshing can move headers even when the person hasn't scrolled.
+  useLayoutEffect(() => {
+    if (scroller.current?.scrollTop) update();
+    else setKey(null);
+  }, [children, update]);
+  return (
+    <>
+      {current && (
+        <div data-testid="goal-phase-line" className="flex min-w-0 shrink-0 flex-nowrap items-center gap-2 border-b border-line px-1.5 py-1 text-xs">
+          <span className="min-w-0 flex-1 truncate font-medium" title={current.name!}>{current.name}</span>
+          <span className="shrink-0 whitespace-nowrap font-mono text-[10.5px] text-ink-3">
+            {current.milestones.filter(isDone).length} of {current.milestones.length}
+          </span>
+        </div>
+      )}
+      <div ref={scroller} onScroll={update} className={className} data-testid="goal-scroll">{children}</div>
+    </>
   );
 }
 
@@ -770,7 +811,7 @@ export function GoalPanel({ client, repo, root, store, compact = false, title, r
           </div>
         )}
         </div>
-        <div className="flex min-h-0 flex-col gap-1.5 overflow-auto pb-1" data-testid="goal-scroll">
+        <PhaseScroll folds={folds} isDone={isDone} className="flex min-h-0 flex-col gap-1.5 overflow-auto pb-1 [&>*]:shrink-0">
         {(showPhase || where) && <div className="flex shrink-0 items-center justify-between gap-s1 px-0.5 text-[11px] text-ink-3">
           {showPhase && <span data-testid="goal-phase">{phaseLabel}</span>}
           {where && <span className="whitespace-nowrap font-normal text-ink-3" data-testid="goal-where">{where}</span>}
@@ -790,12 +831,12 @@ export function GoalPanel({ client, repo, root, store, compact = false, title, r
         {step}
         {shownError && <p className={`${alert} text-xs`}>{shownError}</p>}
         {goal.note && <p className="px-0.5 text-[11px] text-ink-3">{goal.note}</p>}
-        </div>
+        </PhaseScroll>
       </section>
     );
   }
   return (
-    <section className={frame} aria-label="Goal" data-phase={phase}>
+    <section className={`${frame}${folds ? " min-h-0 flex-1 overflow-hidden [&>*]:shrink-0" : ""}`} aria-label="Goal" data-phase={phase}>
       <div className="flex items-center gap-s1">
         <span className="text-xs font-medium uppercase tracking-wider text-ink-3">Goal</span>
         <span className={`${pill} ${GOAL_PHASE_STYLE[phase]}`} data-testid="goal-phase">
@@ -836,16 +877,18 @@ export function GoalPanel({ client, repo, root, store, compact = false, title, r
       {goal.note && <p className="text-sm text-ink-3">{goal.note}</p>}
       {(open || finished) &&
         (total > 0 && folds ? (
-          <div className="border-t border-line pt-1">
-            <PhaseFoldList
-              folds={folds}
-              open={foldOpen}
-              onToggle={toggleFold}
-              isDone={isDone}
-              large
-              rowsClass="flex flex-col divide-y divide-line"
-              row={(m) => <Milestone key={m.id} milestone={m} finished={finished} pending={isPending(m)} />}
-            />
+          <div className="flex min-h-0 flex-1 flex-col border-t border-line pt-1 !shrink">
+            <PhaseScroll folds={folds} isDone={isDone} className="min-h-0 overflow-auto">
+              <PhaseFoldList
+                folds={folds}
+                open={foldOpen}
+                onToggle={toggleFold}
+                isDone={isDone}
+                large
+                rowsClass="flex flex-col divide-y divide-line"
+                row={(m) => <Milestone key={m.id} milestone={m} finished={finished} pending={isPending(m)} />}
+              />
+            </PhaseScroll>
           </div>
         ) : total > 0 ? (
           <ul className="flex flex-col divide-y divide-line border-t border-line" aria-label="Milestones">

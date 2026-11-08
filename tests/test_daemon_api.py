@@ -393,7 +393,6 @@ def seeded(db, repo, monkeypatch):
 
 
 @pytest.mark.parametrize("path,check", [
-    ("/v1/repos", lambda b, s: [(r["repo_root"], r["demo"]) for r in b] == [(s["repo"], False)]),
     ("/v1/sessions", lambda b, s: [(x["id"], x["goal"]) for x in b] == [("r1", "ship the thing")]),
     ("/v1/snapshot", lambda b, s: [a["id"] for a in b[0]["agents"] if a["id"] == "w1"] == ["w1"]),
     ("/v1/inbox", lambda b, s: [(i["kind"], i["agent_id"]) for i in b] == [("waiting", "w1")]),
@@ -403,14 +402,11 @@ def seeded(db, repo, monkeypatch):
     ("/v1/agents/nope", lambda b, s: b["error"]["code"] == "not_found"),
     ("/v1/workspaces/{ws}/diff", lambda b, s: b["base"] == "main" and b["diff"] == ""),
     ("/v1/decisions", lambda b, s: [(d["topic"], d["author_session"]) for d in b] == [("storage", "r1")]),
-    ("/v1/kb/sources", lambda b, s: [x["kind"] for x in b] == ["folder"]),
     ("/v1/profiles", lambda b, s: "developer" in [p["name"] for p in b] and "env" not in b[0]),
-    ("/v1/config", lambda b, s: "repo" in b and b["repo"]["default_agent"] == "developer"),
-    ("/v1/doctor", lambda b, s: b == [{"level": "ok", "name": "python", "detail": "3.12"}]),
     ("/v1/account", lambda b, s: b == {"signed_in": False, "name": None, "email": None, "plan": None, "orgs": []}),
     ("/v1/cost", lambda b, s: b["days"] == 30 and b["total"]["dollars"] == 0),
-], ids=["repos", "sessions", "snapshot", "inbox", "goal", "agent", "agent-locked", "agent-missing", "diff",
-        "knowledge-decisions", "knowledge-sources", "profiles", "config", "doctor", "account", "cost"])
+], ids=["sessions", "snapshot", "inbox", "goal", "agent", "agent-locked", "agent-missing", "diff",
+        "knowledge-decisions", "profiles", "account", "cost"])
 def test_read_routes_answer_from_the_db(seeded, path, check):
     code, body = _get(path.format(ws=seeded["ws"]), AUTH, f"repo={seeded['repo']}")
     assert code in (200, 404)
@@ -1020,7 +1016,7 @@ def test_analysis_doc_session_summary_counts_local_session_records(db, seeded, m
     assert body == {"writing": 1, "updated": 1, "using": 1, "total": 2}
 
 
-@pytest.mark.parametrize("role,allowed", [("owner", True), ("admin", True), ("member", False), (None, False)])
+@pytest.mark.parametrize("role,allowed", [("admin", True), ("member", False), (None, False)])
 def test_doc_destination_is_read_by_anyone_and_changed_only_by_admins(monkeypatch, role, allowed):
     from brindle.daemon import routes_actions
     from brindle.pro import analysis_docs

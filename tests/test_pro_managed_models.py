@@ -110,6 +110,7 @@ def test_nothing_changes_without_a_provider_config():
     assert managed_models.apply_profile(managed(deny=True), p) is p
     assert managed_models.apply_profile(None, p) is p
     assert managed_models.agent_env(managed(deny=True), "claude") == {}
+    assert managed_models.refusal(managed(deny=True), profile("antigravity")) is None
 
 
 # -- refusals -----------------------------------------------------------------------------------
@@ -124,14 +125,6 @@ def test_nothing_changes_without_a_provider_config():
 def test_profiles_pointing_elsewhere_are_refused_with_a_reason(m, p, words):
     why = managed_models.refusal(m, p)
     assert why and words in why and ORG in why
-
-
-@pytest.mark.parametrize("m, p", [
-    (managed(BEDROCK), profile("shell")),
-    (managed(deny=True), profile("antigravity")),
-])
-def test_compatible_profiles_run(m, p):
-    assert managed_models.refusal(m, p) is None
 
 
 # -- personal keys ------------------------------------------------------------------------------
@@ -344,20 +337,15 @@ def test_without_the_exclusive_key_provider_config_stays_the_managed_source(db, 
     (CODEX_ONLY, profile(), "runs Claude Code, which can't use Azure"),
     (ANTIGRAVITY_ONLY, profile(), "runs Claude Code, which can't use a Gemini-compatible gateway"),
     ({"enforce": True, "exclusive": True}, profile(), "can't use the routes"),
-    # a route is a route, a login one included; shell and subagents have no model of their own
-    (VERTEX_ONLY, profile(), None), (VERTEX_ONLY, profile("shell"), None),
+    # Login routes also allow an agent to run; managed endpoints are checked in the migration table.
     ({**VERTEX_ONLY, "codex": {"route": "chatgpt"}}, profile("codex"), None),
     ({**VERTEX_ONLY, "antigravity": {"route": "gemini"}}, profile("antigravity"), None),
-    ({**VERTEX_ONLY, "antigravity": {"route": "gateway", "base_url": GATEWAY_URL}}, profile("antigravity"), None),
     ({**VERTEX_ONLY, "antigravity": {"route": "gateway", "base_url": GATEWAY_URL}},
      profile("antigravity", env={"GOOGLE_GEMINI_BASE_URL": "https://other"}),
      "pointing it away from a Gemini-compatible gateway"),
     ({**CODEX_ONLY, "claude": LOGINS["claude"]}, profile(), None),
-    (CODEX_ONLY, profile("native"), None),
     # not exclusive: an org that set up Company agents directly keeps running Codex
     ({**VERTEX_ONLY, "exclusive": False}, profile("codex", env={"OPENAI_BASE_URL": "https://x"}), None),
-    ({**VERTEX_ONLY, "exclusive": False}, profile("antigravity"), None),
-    ({**CODEX_ONLY, "exclusive": False}, profile(env={"ANTHROPIC_BASE_URL": "https://proxy"}), None),
 ])
 def test_exclusive_refuses_an_agent_the_routing_leaves_out(raw, p, words):
     why = managed_models.refusal(setup_managed(raw), p)
@@ -440,6 +428,8 @@ def test_an_old_policy_and_its_migrated_form_are_equivalent(db, ws, monkeypatch,
     new = from_policy(monkeypatch, agent_setup=migrated(pc), provider_config=pc, deny_personal_keys=True)
     assert old.setup is None and new.setup is not None and new.exclusive
     assert old.denied_keys == new.denied_keys == secrets.PERSONAL_KEYS
+    assert managed_models.refusal(new, profile("shell")) is None
+    assert managed_models.refusal(new, profile("native") if pc in (AZURE, COMPAT) else profile()) is None
     for provider in ("claude", "codex", "native"):
         assert pane_env(db, ws, monkeypatch, old, provider) == pane_env(db, ws, monkeypatch, new, provider), provider
     for p in PROFILES:

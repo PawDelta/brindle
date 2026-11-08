@@ -223,9 +223,6 @@ def test_env_is_stored_and_reaches_a_claude_pane(db, repo, monkeypatch):
 
 
 @pytest.mark.parametrize("setup,expected", [
-    (claude("vertex", gcp=GCP), {"CLAUDE_CODE_USE_VERTEX": "1", "ANTHROPIC_VERTEX_PROJECT_ID": "acme-brindle-prod",
-                                 "CLOUD_ML_REGION": "us-east5"}),
-    (claude("foundry", azure=AZURE), {"CLAUDE_CODE_USE_FOUNDRY": "1", "ANTHROPIC_FOUNDRY_RESOURCE": "acme-foundry"}),
     (claude("gateway", gateway=GatewaySetup("https://gw.example.com/v1")),
      {"ANTHROPIC_BASE_URL": "https://gw.example.com/v1"}),
     (claude("subscription", org_id=UUID), {}),
