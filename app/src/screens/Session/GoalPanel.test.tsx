@@ -84,6 +84,41 @@ function holdingClient(daemon: FakeDaemon, path: string) {
 const unfold = () => fireEvent.click(screen.getByRole("button", { name: /^Milestones \(/ }));
 
 describe("GoalPanel", () => {
+  it.each([true, false])("keeps the phase line outside the list and updates it on scroll (compact: %s)", async (compact) => {
+    const phased = structuredClone(goal);
+    phased.milestones![0].phase_name = "Planned work";
+    phased.milestones![1].phase_name = "Fixes from testing";
+    const view = render(<GoalPanel client={new FakeDaemon({ goal: phased }).client()} repo={REPO} root={ROOT} store={createAppStore()} compact={compact} />);
+    await view.findByText(goal.goal!);
+    if (!compact) unfold();
+    const line = view.getByTestId("goal-phase-line");
+    const list = view.getByTestId("goal-scroll");
+    expect(list.contains(line)).toBe(false);
+    expect(line.nextElementSibling).toBe(list);
+    expect(line.textContent).toBe("Planned work1 of 1");
+    expect(line.classList.contains("flex-nowrap")).toBe(true);
+    expect(line.firstElementChild?.classList.contains("truncate")).toBe(true);
+    expect(line.lastElementChild?.classList.contains("shrink-0")).toBe(true);
+    let nextTop = 150;
+    vi.spyOn(list, "getBoundingClientRect").mockImplementation(() => ({ top: 100 }) as DOMRect);
+    const headers = view.getAllByTestId("phase-fold");
+    vi.spyOn(headers[0], "getBoundingClientRect").mockImplementation(() => ({ top: 50 }) as DOMRect);
+    vi.spyOn(headers[1], "getBoundingClientRect").mockImplementation(() => ({ top: nextTop }) as DOMRect);
+    fireEvent.scroll(list);
+    expect(line.textContent).toBe("Planned work1 of 1");
+    nextTop = 99;
+    fireEvent.scroll(list);
+    expect(line.textContent).toBe("Fixes from testing0 of 1");
+    nextTop = 150;
+    fireEvent.scroll(list);
+    expect(line.textContent).toBe("Planned work1 of 1");
+    view.unmount();
+    const plain = render(<GoalPanel client={new FakeDaemon({ goal: structuredClone(goal) }).client()} repo={REPO} root={ROOT} store={createAppStore()} compact={compact} />);
+    await plain.findByText(goal.goal!);
+    if (!compact) unfold();
+    expect(plain.queryByTestId("goal-phase-line")).toBeNull();
+  });
+
   it.each([true, false])("opens and copies the complete request with copy feedback (recorded goal: %s)", async (recordedGoal) => {
     const request = "Build a goal screen.\n" + "Keep the original request readable and copyable. ".repeat(20);
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [{ ...appSession, request }], workspaces: [root], goal: recordedGoal ? { ...structuredClone(goal), root_id: APP_ROOT } : null });
