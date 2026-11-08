@@ -41,8 +41,8 @@ export const STEPS: WalkthroughStep[] = [
   },
   {
     target: "profile",
-    title: "Account and Settings",
-    body: "Your initials open Settings: your account (plan, sign-in and usage), the coding CLIs, keys and permission rules.",
+    title: "Knowledge, Agents and Settings",
+    body: "Your initials open a menu with Knowledge, Agents and Settings: your documents, your agent profiles, then your account (plan, sign-in and usage), the coding CLIs, keys and permission rules.",
   },
   {
     target: "session-view",

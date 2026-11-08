@@ -87,6 +87,15 @@ export function settingsTab(route: Route): SettingsTab | null {
   }
 }
 
+/* The full screens the profile button's rail also opens, beside Settings' tabs. */
+export type RailPage = "knowledge" | "agents";
+export function railPage(route: Route): RailPage | null {
+  return route.screen === "knowledge" || route.screen === "agents" ? route.screen : null;
+}
+
+/* Whether the sidebar shows the profile rail (with its "← Sessions") and Esc goes back. */
+export const inProfileRail = (route: Route): boolean => settingsTab(route) !== null || railPage(route) !== null;
+
 /* Where the app lands before it knows its sessions: the empty state. */
 export const HOME: Route = { screen: "new" };
 
