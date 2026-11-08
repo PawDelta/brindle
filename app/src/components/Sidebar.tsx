@@ -765,7 +765,7 @@ export function Sidebar({ route, navigate, refresh, openUrl }: SidebarProps) {
   return (
     <aside className="side flex w-[352px] shrink-0 flex-col gap-[10px] border-r border-line bg-canvas-2 px-[12px] pb-[12px] pt-[14px] text-[13px] text-ink" aria-label="Sidebar">
       <div className="flex items-center gap-s1 px-1.5 pb-1">
-        <Logo className="text-[17px]" />
+        <Logo className="text-[17px]" onHome={() => navigate({ screen: "new" })} />
         <span className="flex-1" />
         <button
           type="button"

@@ -557,6 +557,29 @@ describe("visuals", () => {
     } finally { sync.stop(); }
   });
 
+  it("keeps the logo, a Home button, clear of Back over an Inbox visual, and it goes Home", async () => {
+    const session: SessionDTO = { id: "sup1", workspace_id: "proj", profile: "supervisor", status: "idle", mode: "interactive", created_at: now, goal: "Ship it" };
+    const item: InboxItemDTO = { kind: "visual", agent_id: "sup1", root_id: "sup1", workspace_id: "proj", visual_id: visual.id, reason: "asks you to choose" };
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root], inbox: [item] });
+    const client = daemon.client();
+    vi.spyOn(client, "visuals").mockResolvedValue([visual]);
+    vi.spyOn(client, "markVisualRead").mockResolvedValue({ ...visual, unread: false });
+    const store = createAppStore();
+    const sync = startSync({ client, store, connect: daemon.connect });
+    try {
+      render(<PtyViewsProvider value={standInViews}><App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "inbox", session: "sup1" }} /></PtyViewsProvider>);
+      const card = (await screen.findAllByTestId("inbox-card")).find((candidate) => candidate.dataset.kind === "visual")!;
+      fireEvent.click(within(card).getByRole("button", { name: "Open visual" }));
+      await screen.findByTestId("visual-reader");
+      // The logo's own row: not inside the reader's toolbar, so Back is still its own control.
+      const home = screen.getByRole("button", { name: "Home" });
+      expect(screen.getByTestId("visual-back").parentElement?.contains(home)).toBe(false);
+      fireEvent.click(home);
+      expect(await screen.findByRole("region", { name: "New session" })).toBeTruthy();
+      expect(screen.queryByTestId("visual-reader")).toBeNull();
+    } finally { sync.stop(); }
+  });
+
   it("sends a note-only answer from the free-text choice", async () => {
     let sent: unknown;
     const client = new DaemonClient({ baseUrl: "http://daemon/v1", token: "test", fetch: async (url, init) => {
