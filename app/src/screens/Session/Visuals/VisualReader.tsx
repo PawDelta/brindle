@@ -8,7 +8,7 @@
    from the bar's Send, a real click on host chrome, with an option id or the person's own
    text. Messages from any other visual, or an older revision, are dropped. */
 
-import { useEffect, useRef, useState, type ComponentType, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ComponentType, type ReactNode } from "react";
 import { DaemonError, type VisualDTO } from "../../../api/client";
 import { LoadingButton } from "../../../components/LoadingButton";
 import { button, field, main, mono } from "../../../components/ui";
@@ -143,6 +143,14 @@ function AnswerBar({ client, visual, picked, onPick, onAnswered }: { client: Vis
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const noteInput = useRef<HTMLInputElement>(null);
+  const active = useRef(false);
+  useLayoutEffect(() => {
+    active.current = true;
+    return () => {
+      // The bar is keyed by visual and revision; leaving or replacing it invalidates its request.
+      active.current = false;
+    };
+  }, []);
   const options = visual.options ?? [];
   // Empty ids cannot be published; this host-only choice carries no option to the engine.
   const ownWords = picked === "";
@@ -154,11 +162,15 @@ function AnswerBar({ client, visual, picked, onPick, onAnswered }: { client: Vis
     setError(null);
     try {
       // The revision on screen: the bar is keyed by it, so a newer one is a new bar.
-      onAnswered(await client.answerVisual(visual.id, visual.rev, picked || undefined, note.trim()));
+      const result = await client.answerVisual(visual.id, visual.rev, picked || undefined, note.trim());
+      // A late response must not update or navigate away from the person's current screen.
+      if (!active.current) return;
+      onAnswered(result);
     } catch (e) {
+      if (!active.current) return;
       setError(e instanceof DaemonError && e.status === 409 ? "The agent changed this visual since you opened it. Read the new version and answer again." : `Couldn't send the answer: ${message(e)}`);
     } finally {
-      setSending(false);
+      if (active.current) setSending(false);
     }
   };
   return (

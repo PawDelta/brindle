@@ -638,6 +638,21 @@ describe("visuals", () => {
     await waitFor(() => expect(sent).toEqual([{ rev: 2, option: undefined, note: "Stage it" }]));
   });
 
+  it.each([null, { ...visual, id: "v_other" }, { ...visual, rev: 3 }])("ignores a pending answer after replacing its reader with %j", async (replacement) => {
+    let resolve!: (row: VisualDTO) => void;
+    const client = new FakeDaemon().client();
+    vi.spyOn(client, "answerVisual").mockImplementation(() => new Promise((done) => { resolve = done; }));
+    const onAnswered = vi.fn();
+    const reader = (row: VisualDTO) => <VisualReader client={client} visual={row} onAnswered={onAnswered} onBack={() => view.rerender(<div>Old session</div>)} Frame={() => <div />} />;
+    const view = render(reader(visual));
+    fireEvent.click(screen.getByRole("radio", { name: "B · Gate on CI" }));
+    fireEvent.click(screen.getByTestId("visual-send"));
+    view.rerender(replacement ? reader(replacement) : <div>Another session</div>);
+    await act(async () => resolve({ ...visual, answer: { option: "B", note: "", at: now } }));
+    expect(replacement ? screen.getByTestId("visual-reader") : screen.getByText("Another session")).toBeTruthy();
+    expect(onAnswered).not.toHaveBeenCalled();
+  });
+
   const open: VisualSource = { kind: "session", id: visual.id, rev: visual.rev };
   it.each([
     ["another visual's choice", { ...open, id: "v_other" }, { type: "choice", option: "B" }, { picked: false, back: false }],
