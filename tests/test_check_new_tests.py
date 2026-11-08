@@ -40,25 +40,6 @@ def _branch(monkeypatch, tmp_path, base_src, head_src, base_ids, head_ids):
     monkeypatch.setattr(gate, "tests_at", lambda b, files: base_ids)
 
 
-def test_a_row_inserted_before_an_old_one_is_the_new_row_worth_committing(monkeypatch, tmp_path):
-    # pytest numbers dict parameters by position: the inserted row is case0 and the old one becomes case1
-    ids = lambda *n: {f"tests/test_a.py::test_t[case{i}]": None for i in n}   # noqa: E731
-    table = "import pytest\n@pytest.mark.parametrize('d', %s)\ndef test_t(d): pass\n"
-    _branch(monkeypatch, tmp_path, table % "[{'k': 2}]", table % "[{'k': 1}, {'k': 2}]", ids(0), ids(0, 1))
-    assert list(gate.new_tests("x")) == ["tests/test_a.py::test_t[case0]"]
-    # a table no source comparison can match to the ids: every row of a changed function is judged
-    _branch(monkeypatch, tmp_path, table % "build()", table % "build()", ids(0), ids(0, 1))
-    assert list(gate.new_tests("x")) == list(ids(0, 1))
-    # stacked tables keep the id `0-x0` when a row's value is replaced: the changed table is still judged
-    stacked = ("import pytest\n@pytest.mark.parametrize('a', [0])\n"
-               "@pytest.mark.parametrize('d', [{'k': %d}])\ndef test_t(a, d): pass\n")
-    same = {"tests/test_a.py::test_t[x0-0]": None}
-    _branch(monkeypatch, tmp_path, stacked % 1, stacked % 2, same, same)
-    assert list(gate.new_tests("x")) == list(same)
-    _branch(monkeypatch, tmp_path, stacked % 1, stacked % 1, same, same)
-    assert gate.new_tests("x") == {}
-
-
 def test_listing_failures_stop_the_check_worth_committing(tmp_path, monkeypatch):
     with pytest.raises(SystemExit, match="could not list the tests"):
         gate.collect_in(tmp_path, ["missing_test.py"])   # pytest's usage error, not "no tests"
@@ -119,6 +100,17 @@ def test_changed_inputs_and_stable_ids_are_judged_by_real_collection_worth_commi
     stacked = ("import pytest\n@pytest.mark.parametrize('a', ['x'])\n"
                "@pytest.mark.parametrize('d', [{'k': %d}])\ndef test_t(a, d): pass\n")
     assert len(new_rows(stacked % 1, stacked % 2)) == 1
+    assert new_rows(stacked % 1, stacked % 1) == []
+    # pytest numbers dict parameters by position: the inserted row is case0 and the old one becomes case1
+    table = "import pytest\n@pytest.mark.parametrize('d', %s)\ndef test_t(d): pass\n"
+    assert new_rows(table % "[{'k': 2}]", table % "[{'k': 1}, {'k': 2}]") == ["test_t[d0]"]
+    # a row's variant mark travels with its collected id
+    marked = tmp_path / "marked"
+    marked.mkdir()
+    (marked / "test_m.py").write_text(
+        "import pytest\n@pytest.mark.parametrize('n', [1, pytest.param(2, marks=pytest.mark.variant('race'))])\n"
+        "def test_m(n): pass\n")
+    assert gate.collect_in(marked, ["test_m.py"]) == {"test_m.py::test_m[1]": None, "test_m.py::test_m[2]": "race"}
 
 
 def test_a_new_test_that_never_ran_is_not_a_pass_worth_committing(tmp_path, monkeypatch):
@@ -187,12 +179,3 @@ def test_new_rows_are_judged_worth_committing(monkeypatch, tmp_path, capsys):
     assert gate.main(["--base", "x", "--approved-by", next(iter(gate.APPROVERS))]) == 0
     monkeypatch.setattr(gate, "uncovered_alone", lambda c, ids: ([], []))
     assert gate.main(["--base", "x"]) == 0      # lots of new rows, each worth committing
-
-
-def test_collected_rows_carry_their_variant_marks_worth_committing(tmp_path):
-    (tmp_path / "test_t.py").write_text(
-        "import pytest\n"
-        "@pytest.mark.parametrize('n', [1, pytest.param(2, marks=pytest.mark.variant('race'))])\n"
-        "def test_t(n): pass\n")
-    assert gate.collect_in(tmp_path, ["test_t.py"]) == {"test_t.py::test_t[1]": None,
-                                                        "test_t.py::test_t[2]": "race"}
