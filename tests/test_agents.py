@@ -681,6 +681,9 @@ def test_workers_test_their_change_and_leave_the_full_suite_to_checks(db, ws, mo
 
 
 def test_spawn_chooses_unclaimed_milestone(db, ws, monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
     monkeypatch.setattr(agents, "_launch", lambda *a, **kw: None)
     monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: bool(a.tmux_window) and a.status not in ("paused", "done"))
     fake_agent(db, ws, agent_id="boss")
@@ -690,8 +693,34 @@ def test_spawn_chooses_unclaimed_milestone(db, ws, monkeypatch):
     db.record_check(db.milestones("boss")[0].id, True, "")
     outsider = fake_agent(db, ws, mode="assign", parent="other", agent_id="outsider")
     db.set_agent_milestone(outsider.id, "Build")
-    first = agents.spawn(db, ws, "developer", parent_id="boss", mode="assign")
-    second = agents.spawn(db, ws, "developer", parent_id="boss", mode="handoff")
+    contested = threading.Event()
+
+    def overlapping():
+        other_db = DB(db.path)
+        try:
+            try:
+                with agents.milestone_claim_lock("boss", wait=False):
+                    worker = agents.spawn(other_db, ws, "developer", parent_id="boss", mode="handoff")
+            except BlockingIOError:
+                contested.set()  # The first launch owns the claim; this launch must wait for it.
+                worker = agents.spawn(other_db, ws, "developer", parent_id="boss", mode="handoff")
+            return worker
+        finally:
+            contested.set()
+            other_db.conn.close()
+
+    link = db.set_agent_milestone
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        def interleave(agent_id, title):
+            nonlocal second
+            second = pool.submit(overlapping)
+            contested.wait()
+            link(agent_id, title)
+        second = None
+        with monkeypatch.context() as patch:
+            patch.setattr(db, "set_agent_milestone", interleave)
+            first = agents.spawn(db, ws, "developer", parent_id="boss", mode="assign")
+        second = second.result()
     assert [db.agent_milestone(a.id) for a in (first, second)] == ["Build", "Ship"]
     fallback = agents.spawn(db, ws, "developer", parent_id="boss", mode="assign")
     assert db.agent_milestone(fallback.id) == "Build"

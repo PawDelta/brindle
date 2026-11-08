@@ -342,6 +342,11 @@ describe("GoalPanel", () => {
       fireEvent.click(phase);
       expect(sidebar.getByRole("button", { name: "1 pending" }).getAttribute("aria-expanded")).toBe("false");
     }
+    fireEvent.click(sidebar.getByRole("button", { name: "1 pending" }));
+    const client = daemon.client();
+    daemon.data.goal = { ...daemon.data.goal!, root_id: "other" };
+    sidebar.rerender(<GoalPanel client={client} repo={REPO} root="other" store={createAppStore()} compact />);
+    expect((await sidebar.findByRole("button", { name: "1 pending" })).getAttribute("aria-expanded")).toBe("false");
   });
 
   /* Every milestone a live worker is linked to is active, in the stage's colour and word; one nobody works on is not. */

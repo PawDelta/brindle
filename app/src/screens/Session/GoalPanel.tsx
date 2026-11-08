@@ -513,6 +513,7 @@ export function GoalPanel({ client, repo, root, store, compact = false, onReview
     setActionError(null);
     setDocSummary(null);
     setFoldOpen({});
+    setPendingOpen({});
     void refresh();
     let seen = store.getState().lastEventId;
     let stale = store.getState().stale;
