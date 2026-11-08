@@ -186,6 +186,7 @@ def test_a_person_message_goes_once_beside_read_messages(db, boss, monkeypatch):
     assert db.pending_count("boss") == 1 and db.read_held("boss") == []
 
 
+@pytest.mark.variant("read_messages racing a restarted pane delivery's paste")
 def test_a_restarted_pane_delivery_keeps_its_message_from_read_messages(db, boss, monkeypatch):
     # A delivery stopped after its lead is typed in again whole once the
     # composer is clear; meanwhile read_messages must not take the same row.

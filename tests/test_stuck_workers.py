@@ -216,17 +216,17 @@ def test_a_skipped_takeover_restarts_the_hour_and_the_stop_refusal(db, boss, wor
     assert [ws for ws, _ in takeover["removed"]] == ["w"]
 
 
-def test_a_plan_waiting_for_approval_is_not_a_stuck_worker(db, boss, worker, takeover):
+def test_a_plan_waiting_for_approval_is_not_a_stuck_worker(db, boss, worker, takeover, monkeypatch):
+    # Another supervisor can't requeue this worker while its open item exists.
+    db.add_agent(Agent("other", boss.workspace_id, "supervisor", "claude", None, "interactive", "idle", "@2", None, T0))
+    monkeypatch.setenv("BRINDLE_AGENT_ID", "other")
+    assert db.open_items("boss") != []
+    assert mcp_server.requeue("w1").startswith("Error")   # without the ownership check this would take it over
+    assert takeover["removed"] == [] and db.open_items("boss") != []
+    monkeypatch.setenv("BRINDLE_AGENT_ID", "boss")
     db.update_agent("w1", plan_state="proposed")
     held = db.get_agent("w1")
     open_items.sweep(db, T0 + open_items.AUTO_REASSIGN_AFTER, panes())
     assert takeover["removed"] == []
     db.close_open_item("w1")
     assert open_items.track(db, held, "stopped without calling report_result", T0) is False
-
-
-def test_requeue_of_another_supervisors_worker_is_refused(db, boss, takeover, monkeypatch):
-    db.add_agent(Agent("other", boss.workspace_id, "supervisor", "claude", None, "interactive", "idle", "@2", None, T0))
-    monkeypatch.setenv("BRINDLE_AGENT_ID", "other")
-    assert mcp_server.requeue("w1").startswith("Error")
-    assert takeover["removed"] == []
