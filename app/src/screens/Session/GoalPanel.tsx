@@ -230,6 +230,7 @@ const LABEL_STYLE: Record<string, string> = {
   Done: "text-pass",
   "In review": "text-branch",
   "In progress": "text-branch",
+  Pending: "text-ink-3",
 };
 
 /* The label the panel shows: the engine's phase when it sends one, else the check state's. */
@@ -363,8 +364,8 @@ function PhaseFoldList({ folds, open, onToggle, isDone, large, rowsClass, row }:
 }
 
 /* finished: the goal is Done, so every milestone reads done whatever its last check said. */
-function Milestone({ milestone, finished }: { milestone: MilestoneDTO; finished: boolean }) {
-  const label = finished ? "Done" : checkLabel(milestone);
+function Milestone({ milestone, finished, pending }: { milestone: MilestoneDTO; finished: boolean; pending: boolean }) {
+  const label = finished ? "Done" : pending ? "Pending" : checkLabel(milestone);
   const done = label === "Done";
   return (
     <li className="flex gap-s1 py-1" data-testid="milestone">
@@ -378,7 +379,7 @@ function Milestone({ milestone, finished }: { milestone: MilestoneDTO; finished:
       </span>
       <div className="min-w-0 flex-1">
         <div className="flex items-baseline justify-between gap-s2">
-          <span className={`text-sm ${done ? "text-ink-2" : "font-medium"}`}>
+          <span className={`text-sm ${done ? "text-ink-2" : pending ? "text-ink-3" : "font-medium"}`}>
             {milestone.position}. {milestone.title}
           </span>
           {label && (
@@ -595,6 +596,9 @@ export function GoalPanel({ client, repo, root, store, compact = false, onReview
       ? linked.map((m) => [m.id, workerStages.get(m.title)!] as const)
       : current ? [[current.id, isStage(goal.stage) ? goal.stage : null] as const] : [],
   );
+  // Unfinished with no work on it and no check that broke: nobody has started it.
+  const isPending = (m: MilestoneDTO) =>
+    !isDone(m) && !activeStage.has(m.id) && m.phase == null && !["failed", "regressed"].includes(checkState(m) ?? "");
   // The goal's phases as folds; null without any (the list as it always was).
   const folds = phaseFolds(milestones, isDone);
   const where = finished ? "" : phaseWord(folds);
@@ -664,21 +668,21 @@ export function GoalPanel({ client, repo, root, store, compact = false, onReview
     // The stage the active step is at; none once the goal is finished or while nothing runs.
     const barStages = [...activeStage.values()].filter((s): s is Stage => s !== null);
     const activity = finished ? null : activityLine(goal);
-    // Every unfinished milestone is in progress (the engine works them in parallel), so each one is lit.
-    const stateOf = (m: MilestoneDTO): "done" | "now" => (isDone(m) ? "done" : "now");
+    const stateOf = (m: MilestoneDTO): "done" | "now" | "pending" => (isDone(m) ? "done" : isPending(m) ? "pending" : "now");
     const sideRow = (m: MilestoneDTO) => {
       const state = stateOf(m);
       const active = activeStage.has(m.id);
       const stage = active ? activeStage.get(m.id) : null;
-      const label = finished ? "Done" : checkLabel(m);
+      const label = finished ? "Done" : isPending(m) ? "Pending" : checkLabel(m);
       const tip = [m.title, label, m.state_why ?? (active ? m.detail || m.check_cmd : null)].filter(Boolean).join(" · ");
       return (
         <li key={m.id} className={`m${active && stage ? ` st-${stage}` : ""}`} data-state={state} data-active={active || undefined} data-testid="milestone" title={tip}>
           <span className="i" aria-hidden>
-            {state === "done" ? "✓" : active ? "●" : "·"}
+            {state === "done" ? "✓" : active ? "●" : state === "pending" ? "○" : "·"}
           </span>
           <span className="t">{shortName(m.title)}</span>
           {active && stage && <span className="tag" data-testid="goal-stage">{stage}</span>}
+          {state === "pending" && <span className="tag">pending</span>}
         </li>
       );
     };
@@ -779,13 +783,13 @@ export function GoalPanel({ client, repo, root, store, compact = false, onReview
               isDone={isDone}
               large
               rowsClass="flex flex-col divide-y divide-line"
-              row={(m) => <Milestone key={m.id} milestone={m} finished={finished} />}
+              row={(m) => <Milestone key={m.id} milestone={m} finished={finished} pending={isPending(m)} />}
             />
           </div>
         ) : total > 0 ? (
           <ul className="flex flex-col divide-y divide-line border-t border-line" aria-label="Milestones">
             {milestones.map((m) => (
-              <Milestone key={m.id} milestone={m} finished={finished} />
+              <Milestone key={m.id} milestone={m} finished={finished} pending={isPending(m)} />
             ))}
           </ul>
         ) : (

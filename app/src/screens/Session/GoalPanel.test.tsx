@@ -305,20 +305,19 @@ describe("GoalPanel", () => {
     const [, row, later] = sidebar.getAllByTestId("milestone");
     expect(row.title).toContain(label);
     expect(row.title).toContain(why);
-    expect(later.title).toContain("In progress");
+    expect(later.title).toContain("Pending");
     sidebar.unmount();
 
     const full = render(<GoalPanel client={daemon.client()} repo={REPO} root={ROOT} store={store} />);
     await waitFor(() => expect(full.getByText("Ship the Goal screen")).toBeTruthy());
     fireEvent.click(within(full.container).getByRole("button", { name: /^Milestones \(/ }));
     expect(within(full.container).getByTitle(why).textContent).toBe(label);
-    expect(within(full.container).getByText("3. Ship it").closest("li")!.textContent).toContain("In progress");
+    expect(within(full.container).getByText("3. Ship it").closest("li")!.textContent).toContain("Pending");
     expect(document.body.textContent).not.toMatch(/failed|broke/i);
   });
 
-  /* The engine works milestones in parallel: every unfinished one is lit as in progress in the
-     sidebar, not only the first; only the first carries its detail. */
-  it("lights every unfinished milestone as in progress, not only the first", async () => {
+  /* Only a milestone with work on it reads as in progress; one nobody has started reads as pending. */
+  it("marks a milestone nobody has started as pending", async () => {
     const milestones: MilestoneDTO[] = [
       { ...goal.milestones![0], state: "passed", status: "passed" },
       { ...goal.milestones![1], state: "not_done", status: "pending" },
@@ -327,7 +326,7 @@ describe("GoalPanel", () => {
     const daemon = new FakeDaemon({ goal: { ...structuredClone(goal), milestones } });
     const sidebar = render(<GoalPanel client={daemon.client()} repo={REPO} root={ROOT} store={createAppStore()} compact />);
     await waitFor(() => expect(sidebar.getAllByTestId("milestone")).toHaveLength(3));
-    expect(sidebar.getAllByTestId("milestone").map((li) => li.dataset.state)).toEqual(["done", "now", "now"]);
+    expect(sidebar.getAllByTestId("milestone").map((li) => li.dataset.state)).toEqual(["done", "now", "pending"]);
     expect(sidebar.getByRole("progressbar").getAttribute("aria-valuenow")).toBe("33");
     expect(sidebar.getByTestId("goal-line").textContent).toContain("1 of 3 milestones complete");
     // A goal without phases is the plain list, as it always was: no folds, no "phase n of m".

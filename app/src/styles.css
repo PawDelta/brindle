@@ -333,6 +333,8 @@ body {
 .side-ms .m .i { width: 10px; flex: none; text-align: center; font-size: 10px; color: var(--ink-3); }
 .side-ms .m[data-state="done"] { color: var(--ink-3); }
 .side-ms .m[data-state="done"] .i { color: var(--pass); }
+.side-ms .m[data-state="pending"] { color: var(--ink-3); }
+.side-ms .m[data-state="pending"] .tag { color: var(--ink-3); }
 .side-ms .m[data-active] { color: var(--ink); font-weight: 500; }
 .side-ms .m[data-active] .i { color: var(--st, var(--ink)); }
 /* Several milestones may be active at once (a live worker each): every one reads in its stage's colour. */
