@@ -9,24 +9,6 @@ gate = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(gate)
 
 
-def test_test_functions_find_methods_and_variant_reasons():
-    found = gate.test_functions('''
-import pytest
-def helper(): pass
-def test_plain(): pass
-@pytest.mark.variant("symlink bypass")
-def test_marked(): pass
-@pytest.mark.variant("")
-def test_empty_reason(): pass
-class TestGroup:
-    async def test_method(self): pass
-class Helper:
-    def test_ignored(self): pass
-''')
-    assert found == {"test_plain": None, "test_marked": "symlink bypass",
-                     "test_empty_reason": None, "TestGroup::test_method": None}
-
-
 def test_a_test_must_cover_something_no_other_test_covers(tmp_path):
     src = str(tmp_path / "src/brindle/m.py")
     data = CoverageData(str(tmp_path / ".coverage"))
@@ -39,24 +21,41 @@ def test_a_test_must_cover_something_no_other_test_covers(tmp_path):
         data.set_context(context)
         data.add_lines({src: lines})
     data.write()
-    redundant, unmeasured = gate.uncovered_alone(
-        tmp_path / ".coverage",
-        ["tests/test_a.py::test_repeat", "tests/test_a.py::test_new", "tests/test_a.py::test_skipped"])
+    ids = ["tests/test_a.py::test_repeat", "tests/test_a.py::test_new", "tests/test_a.py::test_skipped"]
+    redundant, unmeasured = gate.uncovered_alone(tmp_path / ".coverage", ids)
     assert redundant == ["tests/test_a.py::test_repeat"]
     assert unmeasured == ["tests/test_a.py::test_skipped"]
+    assert gate.analyse(tmp_path / ".coverage", ids[1:2])[ids[1]] == {(src, 4)}
 
 
-def test_growth_limits_and_who_can_waive_them(monkeypatch, capsys):
-    added = {f"tests/test_a.py::test_{i}": None for i in range(gate.MAX_NEW_TESTS)}
-    added["tests/test_a.py::test_variant"] = "race"
-    monkeypatch.setattr(gate, "new_tests", lambda base: added)
-    monkeypatch.setattr(gate, "line_counts", lambda base, path: {"tests": (500, 100), "src": (10, 90)}[path])
-    monkeypatch.setattr(gate, "uncovered_alone", lambda cov, ids: (ids[:1], []))
-    assert gate.main(["--base", "x"]) == 1
+def test_new_rows_are_judged_worth_committing(monkeypatch, capsys):
+    base = {"tests/test_a.py::test_t[x]": None}
+    head = {**base, **{f"tests/test_a.py::test_t[r{i}]": None for i in range(80)},
+            "tests/test_a.py::test_t[bypass]": "bypass attempt"}
+    monkeypatch.setattr(gate, "changed_test_files", lambda b: ["tests/test_a.py"])
+    monkeypatch.setattr(gate, "collect_in", lambda root, files: head)
+    monkeypatch.setattr(gate, "tests_at", lambda b, files: base)
+    judged = []
+
+    def only_r0_is_new(coverage, ids):
+        judged.extend(ids)
+        return [n for n in ids if not n.endswith("[r0]")], []
+
+    monkeypatch.setattr(gate, "uncovered_alone", only_r0_is_new)
+    assert gate.main(["--base", "x"]) == 1      # 81 new rows, no count limit: only repeats fail
     out = capsys.readouterr().out
-    assert f"adds {gate.MAX_NEW_TESTS + 1} test functions" in out
-    assert "adds 400 test lines for 10 source lines" in out
-    assert "tests/test_a.py::test_0 covers no line" in out
-    assert "test_variant: race" in out
-    assert gate.main(["--base", "x", "--approved-by", "someone-else"]) == 1
+    assert "test_t[r1] covers no line or branch" in out and "test_t[r0] covers" not in out
+    assert "tests/test_a.py::test_t[x]" not in judged and "bypass" not in " ".join(judged)
+    assert "variant: tests/test_a.py::test_t[bypass]: bypass attempt" in out
     assert gate.main(["--base", "x", "--approved-by", next(iter(gate.APPROVERS))]) == 0
+    monkeypatch.setattr(gate, "uncovered_alone", lambda c, ids: ([], []))
+    assert gate.main(["--base", "x"]) == 0      # lots of new rows, each worth committing
+
+
+def test_collected_rows_carry_their_variant_marks_worth_committing(tmp_path):
+    (tmp_path / "test_t.py").write_text(
+        "import pytest\n"
+        "@pytest.mark.parametrize('n', [1, pytest.param(2, marks=pytest.mark.variant('race'))])\n"
+        "def test_t(n): pass\n")
+    assert gate.collect_in(tmp_path, ["test_t.py"]) == {"test_t.py::test_t[1]": None,
+                                                        "test_t.py::test_t[2]": "race"}
