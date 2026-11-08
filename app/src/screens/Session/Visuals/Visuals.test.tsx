@@ -18,7 +18,7 @@ import { VisualReader } from "./VisualReader";
 import { useVisuals } from "./useVisuals";
 import { OfferChip } from "./OfferChip";
 import { VisualsSetting } from "../../Settings/VisualsSetting";
-import { withPasteNotice, withVisualInput } from "./terminalInput";
+import { withTypedWords, withVisualInput } from "./terminalInput";
 
 vi.mock("../../../components/PtyTerminal", () => import("../../../test/panes"));
 const native = vi.hoisted(() => ({
@@ -158,7 +158,7 @@ describe("visuals", () => {
     } finally { view.close(); vi.useRealTimers(); }
   });
 
-  it("asked_quote: only wholly typed input counts as typed, and a hook CLI's paste is reported before it lands", async () => {
+  it("asked_quote: only wholly typed input counts as typed, and a hook CLI's typed words are vouched for before Enter", async () => {
     const typed: (boolean | undefined)[] = [];
     const observed = withVisualInput({ beginVisualInput: async () => ({ generation: 1 }), refreshVisualInput: async () => ({ generation: 1 }), visualInput: async (_id, _text, _expiry, _signal, observation) => {
       typed.push(observation?.typed);
@@ -168,19 +168,29 @@ describe("visuals", () => {
     await send(..."hi!", "\r");
     await send("\x1b[200~hi there\x1b[201~", "\r");
     await send("hi there, pasted\r");
+    await send("render first", "\r");   // an unbracketed paste, its Enter a separate write
     await send(..."ok", "\r");
-    expect(typed).toEqual([true, false, false, true]);
+    expect(typed).toEqual([true, false, false, false, true]);
 
-    const bytes: string[] = [];
-    let noticed: (() => void) | undefined;
-    const hooked = withPasteNotice({ visualPaste: () => new Promise(ok => { noticed = () => ok({ observed: false }); }) }, "claude",
-      () => ({ write(data) { bytes.push(data); }, resize() {}, focus() {}, close() {} }))({ server: null, target: "%1" }, { cols: 80, rows: 24 }, { onData() {}, onExit() {}, onError() {} });
-    hooked.write("a");
-    hooked.write("\x1b[200~pasted\x1b[201~");
+    const bytes: string[] = [], words: string[] = [];
+    let answer: { ok(): void; fail(): void } | undefined;
+    const hooked = withTypedWords({ visualTypedWords: (_id, text) => { words.push(text); return new Promise((ok, no) => {
+      answer = { ok: () => ok({ observed: true }), fail: () => no(new Error("refused")) };
+    }); } }, "claude", () => ({ write(data) { bytes.push(data); }, resize() {}, focus() {}, close() {} }))({ server: null, target: "%1" }, { cols: 80, rows: 24 }, { onData() {}, onExit() {}, onError() {} });
+    [..."hi", "\r"].forEach(data => hooked.write(data));
+    expect(words).toEqual(["hi"]);
+    expect(bytes).toEqual(["h", "i"]);          // Enter waits for the report
+    await act(async () => answer?.ok());
+    expect(bytes.at(-1)).toBe("\r");
+    [..."no", "\r"].forEach(data => hooked.write(data));
+    await act(async () => answer?.fail());      // a refused report still lets the prompt go, unvouched
+    expect(bytes.at(-1)).toBe("\r");
+    words.length = 0;
+    hooked.write("\x1b[200~pasted words\x1b[201~");
     hooked.write("\r");
-    expect(bytes).toEqual(["a"]);
-    await act(async () => noticed?.());
-    expect(bytes).toEqual(["a", "\x1b[200~pasted\x1b[201~", "\r"]);
+    await act(async () => undefined);
+    expect(words).toEqual([]);                  // a paste is never vouched for
+    expect(bytes.at(-1)).toBe("\r");
     hooked.close();
   });
 

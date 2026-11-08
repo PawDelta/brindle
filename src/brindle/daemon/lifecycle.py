@@ -554,6 +554,7 @@ async def _watch(server, activity: Activity, idle_exit: bool, *,
             log.debug("brindle: couldn't record the daemon's health", exc_info=True)
         with spawn.waits_for_room():                    # background work: it waits for room
             await asyncio.to_thread(ready.sweep_safely)     # session.pr_ready when a session becomes ready
+        await asyncio.to_thread(_purge_typed_words)
         if clock() >= hook_due:
             hook_due = clock() + CODEX_HOOK_EVERY
             await asyncio.to_thread(_keep_codex_hook, CODEX_HOOK_SETTLE)
@@ -563,6 +564,21 @@ async def _watch(server, activity: Activity, idle_exit: bool, *,
               and time.monotonic() - activity.last >= IDLE_SECONDS
               and not await asyncio.to_thread(_agents_running)):
             server.should_exit = True
+
+
+def _purge_typed_words() -> None:
+    """visual_offers.purge_words, off the daemon's way: a failure is only logged."""
+    from brindle import visual_offers
+    from brindle.db import DB
+
+    try:
+        db = DB()
+        try:
+            visual_offers.purge_words(db)
+        finally:
+            db.conn.close()
+    except Exception:  # noqa: BLE001 - a purge must never stop the watch
+        log.debug("brindle: couldn't purge old typed words", exc_info=True)
 
 
 def _reset_window_sizes() -> None:

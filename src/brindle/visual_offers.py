@@ -121,6 +121,8 @@ def resolve(db: DB, root: str, oid: str, accept: bool) -> dict:
             raise ServiceError("stale", "this offer is no longer open", 409)
         if request:
             c.execute("DELETE FROM visual_requests WHERE root_id=?", (root,))
+            # Their answer on the card is that message's one say, yes or no.
+            c.execute("DELETE FROM visual_person_words WHERE root_id=? AND source='request'", (root,))
             scope = request["scope"]
             message = f"The person confirmed: create the {scope} they mentioned now."
         else:
@@ -141,7 +143,18 @@ def resolve(db: DB, root: str, oid: str, accept: bool) -> dict:
     return {"accepted": accept}
 
 
+def _unlink(c, root: str, source: str) -> None:
+    """The grant or confirmation a typed message raised is gone; the message itself isn't spent."""
+    c.execute("UPDATE visual_person_words SET source=NULL WHERE root_id=? AND source=?", (root, source))
+
+
+def _link(c, root: str, text: str, source: str) -> None:
+    c.execute("UPDATE visual_person_words SET source=? WHERE id=(SELECT MAX(id) FROM visual_person_words "
+              "WHERE root_id=? AND words=? AND source IS NULL)", (source, root, _words(text)))
+
+
 def _grant(c, root: str, scope: str = "visual") -> None:
+    _unlink(c, root, "grant")
     c.execute("INSERT INTO visual_grants (root_id, remaining, explicit, scope) VALUES (?,1,0,?) "
               "ON CONFLICT(root_id) DO UPDATE SET remaining=1, scope=excluded.scope", (root, scope))
 
@@ -170,10 +183,6 @@ _CANCEL_REQUEST = re.compile(
     r"(?:don't|do not)\s+(?:make|create|show|draw|build|generate|render)\s+(?:(?:a|an|the)\s+)?)"
     r"(?:visual|diagram|chart|mockup|planning document|planning doc|plan document|request)\b|"
     r"^\s*(?:never mind|nevermind)[.!?]*\s*$", re.I)
-# Marks of text the person didn't type, in a prompt a CLI hook reports whole:
-# brindle's deliveries and tags, a CLI's paste markers and injected blocks.
-_NOT_TYPED = re.compile(r"brindle delivered this message|\[brindle|<brindle-msg|full text: read_messages|"
-                        r"</?pasted_content\b|\[Pasted text|<(?:bash-|task-notification|system-reminder|command-)", re.I)
 _NEGATED = re.compile(r"(?:\b(?:don'?t|don’t|do not|never|not|without|won'?t|won’t)) $")
 
 
@@ -244,8 +253,8 @@ def person_spoke(db: DB, agent: Agent, text: str, *, expires_at: float | None = 
                  fold_only: bool = False, typed: bool = False) -> None:
     """Called only for authenticated person input, never for agent messages.
 
-    ``typed``: the channel can vouch that the person typed all of ``text``
-    themselves. Only then can its words back a publish_visual ``asked``."""
+    ``typed``: the app watched the person key in all of ``text`` themselves.
+    Only then can its words back a publish_visual ``asked``."""
     if not visuals.enabled():
         return
     root, _ = visuals._session(db, agent)
@@ -273,36 +282,51 @@ def person_spoke(db: DB, agent: Agent, text: str, *, expires_at: float | None = 
                   (time.time(), root.id))
         if not fold_only:
             c.execute("DELETE FROM visual_requests WHERE root_id=?", (root.id,))
+            _unlink(c, root.id, "request")
         # A tool approval or ordinary follow-up does not cancel the person's
         # still unused request. Only a new artifact request or explicit stop does.
         cancelled = not fold_only and _CANCEL_REQUEST.search(text) is not None
         if not fold_only and (scope or cancelled):
             c.execute("DELETE FROM visual_grants WHERE root_id=?", (root.id,))
+            _unlink(c, root.id, "grant")
         if cancelled:
             c.execute("DELETE FROM visual_person_words WHERE root_id=?", (root.id,))
-        # A message the wording test recognised has its own path (a grant, or
-        # a confirmation it must not skip), so it never backs a quote as well.
-        elif typed and not fold_only and scope is None:
+        elif typed and not fold_only:
             _keep_words(c, root.id, text)
+        # The words may be kept already (a hook CLI's arrive before its prompt
+        # does): tie them to what this message raises, so one spends the other.
         if not fold_only and scope and clear:
             _grant(c, root.id, scope)
+            _link(c, root.id, text, "grant")
         elif not fold_only and scope:
             c.execute("INSERT INTO visual_requests VALUES (?,?,?,?)",
                       (root.id, "r_" + secrets.token_hex(6), scope, time.time()))
+            _link(c, root.id, text, "request")
     bus.publish(db, "visual.offer_resolved", root_id=root.id)
 
 
-def note_paste(db: DB, agent: Agent) -> None:
-    """The app saw a paste go into this CLI, whose prompt hook can't say so."""
-    db.set_mark(agent.id, "visual-paste", "1")
+def keep_typed(db: DB, agent: Agent, text: str, expires_at: float) -> None:
+    """The app watched the person key in ``text``, for a CLI whose prompt hook
+    can't say what was typed. Sent before the app lets Enter through: a report
+    that fails or comes late leaves nothing, so those words can't be quoted."""
+    if not visuals.enabled():
+        return
+    root, _ = visuals._session(db, agent)
+    if root.id != agent.id:
+        return
+    with db.tx() as c:
+        if time.time() >= expires_at:
+            raise ServiceError("stale", "this input observation expired", 409)
+        if not _CANCEL_REQUEST.search(text):
+            _keep_words(c, root.id, text)
 
 
-def take_paste(db: DB, agent_id: str) -> bool:
-    """Whether a paste went in since the last prompt; the prompt being submitted holds it."""
-    pasted = db.mark(agent_id, "visual-paste") is not None
-    if pasted:
-        db.set_mark(agent_id, "visual-paste", None)
-    return pasted
+def purge_words(db: DB) -> None:
+    """Drop typed messages past their window, whether or not anyone types again."""
+    cutoff = time.time() - FOLD
+    if db.conn.execute("SELECT 1 FROM visual_person_words WHERE created_at<=? LIMIT 1", (cutoff,)).fetchone():
+        with db.tx() as c:
+            c.execute("DELETE FROM visual_person_words WHERE created_at<=?", (cutoff,))
 
 
 def _words(text: str) -> str:
@@ -315,7 +339,7 @@ def _keep_words(c, root: str, text: str) -> None:
     now = time.time()
     words = _words(text)
     if (len(words.split()) >= MIN_QUOTE_WORDS and len(words) <= MAX_KEPT_CHARS
-            and not _NOT_TYPED.search(text) and not visuals.secret_finding(text, "the message")):
+            and not visuals.secret_finding(text, "the message")):
         c.execute("INSERT INTO visual_person_words (root_id, words, created_at) VALUES (?,?,?)", (root, words, now))
     c.execute("DELETE FROM visual_person_words WHERE created_at<=?", (now - FOLD,))
     c.execute("DELETE FROM visual_person_words WHERE root_id=? AND id NOT IN "
@@ -330,10 +354,14 @@ def _spend_quote(c, root: str, asked: str, now: float) -> bool:
         return False
     # Whole words, and not a piece cut from "don't render it".
     pattern = re.compile(rf"(?<!\w){re.escape(quote)}(?!\w)")
-    for row in c.execute("SELECT id, words FROM visual_person_words WHERE root_id=? AND created_at>? "
+    for row in c.execute("SELECT id, words, source FROM visual_person_words WHERE root_id=? AND created_at>? "
                          "ORDER BY id DESC", (root, now - FOLD)).fetchall():
         if any(not _NEGATED.search(row["words"][:m.start()]) for m in pattern.finditer(row["words"])):
             c.execute("DELETE FROM visual_person_words WHERE id=?", (row["id"],))
+            if row["source"] == "grant":
+                c.execute("DELETE FROM visual_grants WHERE root_id=?", (root,))
+            elif row["source"] == "request":
+                c.execute("DELETE FROM visual_requests WHERE root_id=?", (root,))
             return True
     return False
 
@@ -364,7 +392,8 @@ def consume(c, root: str, kind: str = "visual") -> None:
         raise ServiceError("visual_request_required",
                            "nothing shows the person asked for this. If they asked to see it, the supervisor "
                            "publishes again with asked=\"...\": at least two of their words, copied exactly from "
-                           "one message they typed themselves in the last 30 minutes (not pasted, and not a "
-                           "message that already allowed a publication). Otherwise use offer_visual so they can "
-                           "accept an offer, or ask them in text. A worker needs its supervisor to do this first.",
-                           403)
+                           "one message they typed themselves in the app in the last 30 minutes (not pasted, and "
+                           "not a message that already allowed a publication). Otherwise use offer_visual so they "
+                           "can accept an offer, or ask them in text. A worker needs its supervisor to do this "
+                           "first.", 403)
+    c.execute("DELETE FROM visual_person_words WHERE root_id=? AND source='grant'", (root,))

@@ -75,9 +75,12 @@ def visual_input(db: DB, params: dict, body: dict) -> Any:
     expires_at = _get(body, "expires_at", (int, float))
     if expires_at is not None and (isinstance(expires_at, bool) or not 0 < expires_at < float("inf")):
         raise ServiceError("invalid", "expires_at must be a finite timestamp", 400)
-    if _get(body, "pasted", bool):
-        visual_offers.note_paste(db, agent)
-        return {"observed": False}
+    typed_words = _get(body, "typed_words")
+    if typed_words is not None:
+        if expires_at is None or len(typed_words) > 32000:
+            raise ServiceError("invalid", "typed_words needs expires_at and a sensible length", 400)
+        visual_offers.keep_typed(db, agent, typed_words, expires_at)
+        return {"observed": True}
     if _get(body, "begin", bool):
         return {"generation": visual_offers.begin_input(db, agent, expires_at)}
     submitted_at = _get(body, "submitted_at", (int, float), required=True)

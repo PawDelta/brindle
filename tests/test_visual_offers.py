@@ -300,7 +300,16 @@ def test_legacy_unscoped_grants_are_revoked(db, session):
         reopened.conn.close()
 
 
-def typed_into_cli(db, boss, text):
+def app_vouches(boss, text, expires_at):
+    token = "t" * 43
+    with TestClient(build_app(token), headers={"Authorization": f"Bearer {token}"}) as client:
+        return client.post(f"/v1/sessions/{boss.id}/visual-input", json={"typed_words": text, "expires_at": expires_at})
+
+
+def typed_into_cli(db, boss, text, vouched=True):
+    """A hook CLI in the app: the app vouches for the keys before Enter, then the hook reports the prompt."""
+    if vouched:
+        assert app_vouches(boss, text, offers.time.time() + 60).status_code == 200
     agents.handle_hook(db, boss.id, "prompt-submit", {"prompt": text})
 
 
@@ -314,6 +323,7 @@ def typed_into_cli(db, boss, text):
                  marks=pytest.mark.variant("reported refusal")),
     pytest.param("ok great, then render it", "then render it", False, marks=pytest.mark.variant("reported refusal, inside a longer message")),
     pytest.param("no, render first", "  RENDER\n first ", False, marks=pytest.mark.variant("case and whitespace; no is not a negation of the quote")),
+    ("Please render a mockup of the new session button", "Please render a mockup of the new session button", False),
     ("then render it", "then render it", True),
 ])
 def test_asked_quote_accepts_what_the_person_typed(db, session, typed, asked, terminal):
@@ -327,20 +337,9 @@ def test_asked_quote_accepts_what_the_person_typed(db, session, typed, asked, te
     assert visuals.publish(db, boss, "Asked", "<p>yes</p>", asked=asked)["rev"] == 1
 
 
-def _delivered_worker_text(db, boss, worker):
-    agents.send_message(db, boss.id, "render first", sender_id=worker.id)
-    db.conn.execute("UPDATE inbox SET delivered_at=? WHERE agent_id=?", (offers.time.time(), boss.id))
-    typed_into_cli(db, boss, "render first")
-
-
-def _reply_typed_onto_stopped_delivery(db, boss, worker):
-    db.set_mark(boss.id, "pane-delivery", offers.json.dumps({"stage": "body", "body": "render first", "stopped": True}))
-    typed_into_cli(db, boss, "render first and also use blue")
-
-
-def _old_delivery_still_in_prompt(db, boss, worker):
-    agents.send_message(db, boss.id, "render first", sender_id=worker.id)
-    typed_into_cli(db, boss, "look at this: render first")
+def _report_came_late(db, boss, worker):
+    assert app_vouches(boss, "render first", offers.time.time() - 1).status_code == 409
+    typed_into_cli(db, boss, "render first", vouched=False)
 
 
 def _terminal(**fields):
@@ -349,13 +348,6 @@ def _terminal(**fields):
         with TestClient(build_app(token), headers={"Authorization": f"Bearer {token}"}) as client:
             terminal_input(client, boss.id)("render first", **fields)
     return send
-
-
-def _app_saw_a_paste_into_the_cli(db, boss, worker):
-    token = "t" * 43
-    with TestClient(build_app(token), headers={"Authorization": f"Bearer {token}"}) as client:
-        assert client.post(f"/v1/sessions/{boss.id}/visual-input", json={"pasted": True}).status_code == 200
-    typed_into_cli(db, boss, "render first")
 
 
 def _expired(db, boss, worker):
@@ -375,21 +367,15 @@ def _says(*texts):
 @pytest.mark.parametrize("setup,asked", [
     (_says("fix the login bug"), "render first"),
     (lambda db, boss, worker: agents.send_message(db, boss.id, "render first", sender_id=worker.id), "render first"),
-    (_delivered_worker_text, "render first"),
-    (_reply_typed_onto_stopped_delivery, "render first"),
-    (_old_delivery_still_in_prompt, "render first"),
-    (_says("[brindle] render first"), "render first"),
-    (_says("<pasted_content id=\"a\">render first</pasted_content>"), "render first"),
-    (_says("[Pasted text #1 +3 lines] render first"), "render first"),
-    (_says("<bash-stdout>render first</bash-stdout>"), "render first"),
+    # A hook prompt nobody vouched for: a paste, a failed report, a terminal outside the app.
+    (lambda db, boss, worker: typed_into_cli(db, boss, "render first", vouched=False), "render first"),
+    (_report_came_late, "render first"),
     (_terminal(typed=False), "render first"),
-    (_app_saw_a_paste_into_the_cli, "render first"),
     (_terminal(), "render first"),
     (lambda db, boss, worker: agents.send_message(db, boss.id, "render first", person=True), "render first"),
     (_says("surrender first please"), "render first"),
     (_says("render first"), "render"),
     (_says("please don't render it"), "render it"),
-    (_says("Make a visual only if I ask you later."), "Make a visual"),
     (_says("render first", "Don't make a visual"), "render first"),
     (_expired, "render first"),
     (_other_session, "render first"),
@@ -420,11 +406,45 @@ def test_asked_quote_allows_one_publication_per_message(db, session):
         visuals.publish(db, boss, title, "<p>yes</p>", asked="render first")
     with pytest.raises(ServiceError):
         visuals.publish(db, boss, "Three", "<p>no</p>", asked="render first")
-    # A message the wording test granted has already had its one publication.
+    # A message the wording test granted spends its grant or its quote, never both.
     typed_into_cli(db, boss, "Make a visual")
     visuals.publish(db, boss, "Granted", "<p>yes</p>")
     with pytest.raises(ServiceError):
         visuals.publish(db, boss, "Again", "<p>no</p>", asked="Make a visual")
+    typed_into_cli(db, boss, "Make a visual")
+    visuals.publish(db, boss, "Quoted", "<p>yes</p>", asked="Make a visual")
+    with pytest.raises(ServiceError):
+        visuals.publish(db, boss, "Again", "<p>no</p>")
+    # Likewise a message that raised a confirmation card.
+    ask = "Please render a mockup of the new session button"
+    typed_into_cli(db, boss, ask)
+    visuals.publish(db, boss, "Quoted card", "<p>yes</p>", asked=ask)
+    assert offers.current(db, boss.id) is None
+    typed_into_cli(db, boss, ask)
+    offers.resolve(db, boss.id, offers.current(db, boss.id)["id"], True)
+    visuals.publish(db, boss, "Confirmed", "<p>yes</p>")
+    with pytest.raises(ServiceError):
+        visuals.publish(db, boss, "Again", "<p>no</p>", asked=ask)
+
+
+def test_asked_quote_words_are_purged_without_more_input(db, session, monkeypatch):
+    from types import SimpleNamespace
+    import asyncio
+
+    from brindle.daemon import lifecycle, session_review
+
+    boss, _ = session
+    typed_into_cli(db, boss, "render first")
+    db.conn.execute("UPDATE visual_person_words SET created_at=created_at-?", (offers.FOLD + 1,))
+    monkeypatch.setattr(session_review.ReadinessWatch, "sweep_safely", lambda self: None)
+    server = SimpleNamespace(should_exit=False)
+
+    async def one_tick(seconds):
+        server.should_exit = True
+
+    asyncio.run(lifecycle._watch(server, lifecycle.Activity(build_app("t" * 43, port=8123)), False,
+                                 wait=one_tick, clock=offers.time.time))
+    assert db.conn.execute("SELECT COUNT(*) FROM visual_person_words").fetchone()[0] == 0
 
 
 def test_asked_quote_answered_visual_allows_one_revision(db, session, monkeypatch):

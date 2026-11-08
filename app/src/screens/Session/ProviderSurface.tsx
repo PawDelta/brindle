@@ -31,7 +31,7 @@ import { button, card as cardClass, main, quiet } from "../../components/ui";
 import { providerName } from "../../store/overview";
 import { PanesReadyContext } from "../../store/panes";
 import type { Recovery } from "./useContinue";
-import { withPasteNotice, withVisualInput } from "./Visuals/terminalInput";
+import { withTypedWords, withVisualInput } from "./Visuals/terminalInput";
 
 export interface ProviderSurfaceProps {
   /* The session's repo (a preflight sign-in checks the provider there). */
@@ -191,9 +191,9 @@ export function ProviderSurface({ repo, agent: listedAgent, alive, sessionStatus
   const ready = pty?.status.kind === "ready" ? pty : null;
   // Claude and OpenCode have authenticated prompt-submit hooks. The other
   // CLIs need the shell's input observed before their native PTY write. The
-  // hooks can't say what was pasted, so those two still report a paste.
+  // hooks can't say what was typed rather than pasted, so those two report that.
   const observedOpen = useMemo(() => ready && client && agent
-    ? (["claude", "opencode"].includes(agent.provider) ? withPasteNotice : withVisualInput)(client, agent.id, ready.open, () => visualsEnabled.current)
+    ? (["claude", "opencode"].includes(agent.provider) ? withTypedWords : withVisualInput)(client, agent.id, ready.open, () => visualsEnabled.current)
     : ready?.open, [ready?.open, client, agent?.id, agent?.provider]);
   const target = agent?.window ?? null;
   const left = agent && card && card.kind !== "starting" && card.kind !== "returning" && !(card.kind === "ended" && card.locked) && !!target && !!ready && (alive === false || STOPPED.has(agent.status));

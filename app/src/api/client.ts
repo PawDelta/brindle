@@ -1588,8 +1588,11 @@ export class DaemonClient {
     });
   }
 
-  visualPaste(root: string) {
-    return this.post<{ observed: boolean }>(`${this.sessionPath(root)}/visual-input`, { pasted: true });
+  visualTypedWords(root: string, text: string, expiresAt: number, signal?: AbortSignal) {
+    return this.request<{ observed: boolean }>(this.url(`${this.sessionPath(root)}/visual-input`), {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ typed_words: text, expires_at: expiresAt }), signal,
+    });
   }
 
   refreshVisualInput(root: string, observer: number, expiresAt: number, signal: AbortSignal | undefined, submittedAt: number) {

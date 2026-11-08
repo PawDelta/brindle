@@ -925,11 +925,13 @@ CREATE TABLE IF NOT EXISTS visual_requests (
 );
 -- What the person typed lately, for publish_visual's `asked` to be checked
 -- against. A row is spent by the one publication it allows; the rest go after
--- visual_offers.FOLD.
+-- visual_offers.FOLD. source: the grant or confirmation this same message
+-- raised ('grant', 'request'), which spending the row also spends.
 CREATE TABLE IF NOT EXISTS visual_person_words (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     root_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
     words TEXT NOT NULL,
+    source TEXT,
     created_at REAL NOT NULL
 );
 -- Visuals an agent published into a session (brindle.visuals owns these):
@@ -2554,14 +2556,6 @@ class DB:
         )
         return any(r[1].strip() == want
                    or want.endswith(f"(full text: read_messages(message_id={r[0]}))") for r in rows)
-
-    def carries_message(self, agent_id: str, text: str, within: float) -> bool:
-        """Whether ``text`` contains the body of a message queued for or
-        delivered to the agent in the last ``within`` seconds: wider than
-        recently_delivered, it also sees a body with something typed around it."""
-        rows = self.conn.execute("SELECT body FROM inbox WHERE agent_id=? AND created_at > ?",
-                                 (agent_id, time.time() - within))
-        return any(r[0].strip() and r[0].strip() in text for r in rows)
 
     def delivered_since(self, agent_id: str, since: float) -> bool:
         """Whether brindle delivered any message to the agent after ``since``."""
