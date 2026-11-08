@@ -65,6 +65,20 @@ def test_worker_records_the_milestone_current_when_assigned(db, repo, no_pane):
     assert "milestone" not in view.agent_entry(db, db.get_agent(supervisor.id))
 
 
+def test_agent_milestone_follows_the_milestone_assigned(db, repo, no_pane):
+    from brindle import mcp_server
+
+    ws = Workspace("ws-ms2", str(repo), "main", "main", "main", "main", str(repo), 20000, "tmux-ms2", 0)
+    db.add_workspace(ws)
+    supervisor = agents.spawn(db, ws, "developer", mode="interactive")
+    db.set_milestones(supervisor.id, [("Parse flags", "true", None), ("Print JSON", "true", None)])
+    title = mcp_server._milestone_title(db, supervisor, 2)
+    worker = agents.spawn(db, ws, "developer", mode="assign", parent_id=supervisor.id, milestone=title)
+    assert db.agent_milestone(worker.id) == "Print JSON"   # not the first unverified, "Parse flags"
+    with pytest.raises(ValueError):
+        mcp_server._milestone_title(db, supervisor, 9)
+
+
 def test_selected_model_stop_failure_fails_the_worker_and_tells_its_parent(db, repo, monkeypatch, no_pane):
     ws = Workspace("ws-model", str(repo), "main", "main", "main", "main", str(repo), 20000, "tmux-model", 0)
     db.add_workspace(ws)

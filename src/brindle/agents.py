@@ -409,8 +409,10 @@ def spawn(
     weight: str | None = None,
     analysis_doc: bool = False,
     detached: bool = False,
+    milestone: str | None = None,
 ) -> Agent:
-    """Start an agent in ``ws``. ``detached``: a handoff nobody waits on (a
+    """Start an agent in ``ws``. ``milestone``: the title of the goal milestone a
+    worker works on (None: the session's first unverified one). ``detached``: a handoff nobody waits on (a
     queued one) is recorded as 'handoff_detached' from the start, so a
     result it reports at once is forwarded; it is briefed as a handoff.
     ``weight`` is the weight its task was routed
@@ -505,9 +507,9 @@ def spawn(
         raise AgentError(why)
     db.add_agent(agent)
     if session_root and mode in ("handoff", "assign"):
-        current = next((m for m in db.milestones(session_root) if m.status != "passed"), None)
+        current = milestone or next((m.title for m in db.milestones(session_root) if m.status != "passed"), None)
         if current:
-            db.set_agent_milestone(agent_id, current.title)
+            db.set_agent_milestone(agent_id, current)
     if session_root and mode in ("handoff", "assign"):
         pilot.consider_analysis_offer(db, session_root)   # another worker may make the goal large
     if person_prompt and raw_task and parent_id is None and mode == "interactive":
@@ -3514,6 +3516,7 @@ def delegate(
     analysis_doc: bool = False,
     admit: bool = True,
     detached: bool = False,
+    milestone: str | None = None,
 ) -> tuple[Agent, Workspace]:
     """Start a worker, or raise ``NoRoom`` (nothing created) when the machine
     has no room for it (``admission``); ``admit`` False skips that, for a
@@ -3562,7 +3565,8 @@ def delegate(
             return spawn(
                 db, ws, profile, prompt=task, parent_id=caller.id if caller else None, mode=mode,
                 done_when=done_when, background_setup=True, plan_first=bool(plan_first), files=files,
-                weight=weight, analysis_doc=analysis_doc, **({"detached": True} if detached else {}),
+                weight=weight, analysis_doc=analysis_doc, milestone=milestone,
+                **({"detached": True} if detached else {}),
             )
 
         if not fair:

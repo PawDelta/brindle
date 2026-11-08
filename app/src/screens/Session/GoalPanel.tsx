@@ -22,7 +22,7 @@
    Only the newest GET answers: a slower, older response is dropped, and so is
    any response that arrives after the panel has moved to another session. */
 
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import type { BusEvent } from "../../api/events";
 import type { DaemonClient } from "../../api/client";
 import { openExternal, type OpenUrl } from "../../api/open";
@@ -142,7 +142,21 @@ function sessionGitMark(workspaces: WorkspaceDTO[], root: string): string {
     .join("|");
 }
 
-/* How often the sidebar refetches its goal while open, for the activity line's rolling hour, ages and estimate. */
+const STOPPED_STATUS = new Set(["paused", "done", "failed", "exited", "rewound"]);
+
+/* The milestone titles a live worker of this session is linked to (the engine's agent `milestone`): a milestone
+   with one is active, however many others are too. */
+function activeMilestoneTitles(workspaces: WorkspaceDTO[], root: string): Set<string> {
+  const agents = workspaces.flatMap((ws) => ws.agents ?? []);
+  const titles = new Set<string>();
+  for (const a of agents) {
+    if (!a.milestone || a.mode === "interactive" || a.dismissed_at != null || STOPPED_STATUS.has(a.status) || a.reported) continue;
+    if (rootOf(agents, a.id) === root) titles.add(a.milestone);
+  }
+  return titles;
+}
+
+/* How often the sidebar refetches its goal while open,for the activity line's rolling hour, ages and estimate. */
 const ACTIVITY_REFRESH_MS = 60_000;
 
 export type GoalPhase ="in_progress" | "in_review" | "ready_for_pr" | "pr_open" | "done";
@@ -508,6 +522,8 @@ export function GoalPanel({ client, repo, root, store, compact = false, onReview
     };
   }, [session, store, refresh, root, compact]);
 
+  const storeWorkspaces = useSyncExternalStore(store.subscribe, () => store.getState().workspaces);
+  const workerTitles = useMemo(() => activeMilestoneTitles(storeWorkspaces, root), [storeWorkspaces, root]);
   if (!loaded && loadError) {
     return (
       <section className={`${compact ? "px-s1 py-1" : `${card} px-s2 py-s1`} flex items-center gap-s2`} aria-label="Goal">
@@ -551,6 +567,9 @@ export function GoalPanel({ client, repo, root, store, compact = false, onReview
   // The milestone being worked on: the running one, else the first not yet passed; none once the goal is done.
   const current = finished ? undefined : (milestones.find((m) => m.status === "running") ?? milestones.find((m) => m.status !== "passed"));
   const isDone = (m: MilestoneDTO) => finished || checkLabel(m) === "Done";
+  // Every unfinished milestone a live worker is linked to is active; with none linked, the current one stands alone.
+  const linked = finished ? [] : milestones.filter((m) => workerTitles.has(m.title) && !isDone(m));
+  const activeIds = new Set(linked.length > 0 ? linked.map((m) => m.id) : current ? [current.id] : []);
   // The goal's phases as folds; null without any (the list as it always was).
   const folds = phaseFolds(milestones, isDone);
   const where = finished ? "" : phaseWord(folds);
@@ -618,13 +637,13 @@ export function GoalPanel({ client, repo, root, store, compact = false, onReview
     // colour), one activity line, then the milestones as short steps (✓ done, the active one marked and tagged).
     const donePct = total === 0 ? (finished ? 100 : 0) : (passed / total) * 100;
     // The stage the active step is at; none once the goal is finished or while nothing runs.
-    const stage = !finished && current && isStage(goal.stage) ? goal.stage : null;
+    const stage = !finished && activeIds.size > 0 && isStage(goal.stage) ? goal.stage : null;
     const activity = finished ? null : activityLine(goal);
     // Every unfinished milestone is in progress (the engine works them in parallel), so each one is lit.
     const stateOf = (m: MilestoneDTO): "done" | "now" => (isDone(m) ? "done" : "now");
     const sideRow = (m: MilestoneDTO) => {
       const state = stateOf(m);
-      const active = m.id === current?.id;
+      const active = activeIds.has(m.id);
       const label = finished ? "Done" : checkLabel(m);
       const tip = [m.title, label, m.state_why ?? (active ? m.detail || m.check_cmd : null)].filter(Boolean).join(" · ");
       return (
@@ -638,7 +657,9 @@ export function GoalPanel({ client, repo, root, store, compact = false, onReview
       );
     };
     return (
-      <section className={frame} aria-label="Goal" data-phase={phase}>
+      <section className={`${frame} min-h-0`} aria-label="Goal" data-phase={phase}>
+        {/* Pinned: the count and the bar stay put; only the milestones below scroll. */}
+        <div className="flex shrink-0 flex-col gap-1.5" data-testid="goal-header">
         <div className="flex items-center gap-s1 px-0.5 text-xs font-medium text-ink">
           {/* The count is green once the goal is finished; In progress and Done need no label of their own. */}
           <span data-testid="goal-line" className={finished ? "text-pass" : undefined}>
@@ -657,7 +678,7 @@ export function GoalPanel({ client, repo, root, store, compact = false, onReview
         </div>
         <div className="side-bar" role="progressbar" aria-label="Progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(donePct)} title={goal.detail ?? undefined}>
           <span className="d" style={{ width: `${donePct}%` }} />
-          {stage && total > 0 && <span className={`n st-${stage}`} data-testid="goal-bar-now" style={{ width: `${100 / total}%` }} />}
+          {stage && total > 0 && <span className={`n st-${stage}`} data-testid="goal-bar-now" style={{ width: `${(100 * activeIds.size) / total}%` }} />}
         </div>
         {activity && (
           <div className="side-act" data-testid="goal-activity">
@@ -665,6 +686,8 @@ export function GoalPanel({ client, repo, root, store, compact = false, onReview
             {activity.eta && <span data-testid="goal-eta">{activity.eta}</span>}
           </div>
         )}
+        </div>
+        <div className="flex min-h-0 flex-col gap-1.5 overflow-auto" data-testid="goal-scroll">
         {total > 0 && folds ? (
           <PhaseFoldList folds={folds} open={foldOpen} onToggle={toggleFold} isDone={isDone} large={false} rowsClass="side-ms" row={sideRow} />
         ) : total > 0 ? (
@@ -679,6 +702,7 @@ export function GoalPanel({ client, repo, root, store, compact = false, onReview
         {step}
         {shownError && <p className={`${alert} text-xs`}>{shownError}</p>}
         {goal.note && <p className="px-0.5 text-[11px] text-ink-3">{goal.note}</p>}
+        </div>
       </section>
     );
   }

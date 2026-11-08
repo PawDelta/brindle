@@ -1239,6 +1239,7 @@ class Task:
     waiting_since: float | None = None
     pipeline: str | None = None        # the pipeline state its worker starts in (brindle.pipeline)
     forced: int | None = None          # 1: a supervisor started it despite the load (brindle.tasks.start_now)
+    milestone: str | None = None       # title of the goal milestone its worker works on (None: the first unverified)
 
 
 def request_subagent(row) -> str | None:
@@ -1454,6 +1455,8 @@ class DB:
             self.conn.execute("ALTER TABLE tasks ADD COLUMN pipeline TEXT")
         if "forced" not in task_cols:
             self.conn.execute("ALTER TABLE tasks ADD COLUMN forced INTEGER")
+        if "milestone" not in task_cols:
+            self.conn.execute("ALTER TABLE tasks ADD COLUMN milestone TEXT")
         cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(autopilot)")}
         if "checking_since" not in cols:
             self.conn.execute("ALTER TABLE autopilot ADD COLUMN checking_since REAL")

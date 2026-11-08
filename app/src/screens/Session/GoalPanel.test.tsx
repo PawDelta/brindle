@@ -335,6 +335,39 @@ describe("GoalPanel", () => {
     expect(sidebar.queryByTestId("goal-where")).toBeNull();
   });
 
+  /* Every milestone a live worker is linked to is active, in the stage's colour and word; one nobody works on is not. */
+  it("marks several active milestones, one per live worker", async () => {
+    const milestones: MilestoneDTO[] = [
+      { ...goal.milestones![1], id: 1, position: 1, title: "Alpha", state: "not_done", status: "pending" },
+      { ...goal.milestones![1], id: 2, position: 2, title: "Beta", state: "not_done", status: "pending" },
+      { ...goal.milestones![1], id: 3, position: 3, title: "Gamma", state: "not_done", status: "pending" },
+    ];
+    const daemon = new FakeDaemon({ goal: { ...structuredClone(goal), root_id: APP_ROOT, stage: "checks", milestones } });
+    const store = createAppStore();
+    const agent = (id: string, milestone: string, status = "processing") => ({ id, profile: "developer", provider: "claude", status, mode: "assign", parent_id: APP_ROOT, milestone, subagents: [] });
+    store.dispatch({ type: "snapshot", workspaces: [{ ...structuredClone(root), agents: [{ ...root.agents![0], id: APP_ROOT }, agent("w1", "Beta"), agent("w2", "Gamma"), agent("w3", "Alpha", "done")] }], inbox: [] });
+    const view = render(<GoalPanel client={daemon.client()} repo={REPO} root={APP_ROOT} store={store} compact />);
+    await waitFor(() => expect(view.getAllByTestId("milestone")).toHaveLength(3));
+    const rows = view.getAllByTestId("milestone");
+    expect(rows.map((li) => [li.dataset.active ?? null, li.className.match(/\bst-(\w+)/)?.[1] ?? null])).toEqual([[null, null], ["true", "checks"], ["true", "checks"]]);
+    expect(view.getAllByTestId("goal-stage")).toHaveLength(2);
+  });
+
+  /* The goal's count and bar stay above the list; only the milestones scroll. */
+  it("keeps the goal header pinned outside the scrolling milestone list", async () => {
+    const daemon = new FakeDaemon({ goal: structuredClone(goal) });
+    const view = render(<GoalPanel client={daemon.client()} repo={REPO} root={ROOT} store={createAppStore()} compact />);
+    await waitFor(() => expect(view.getAllByTestId("milestone")).toHaveLength(2));
+    const header = view.getByTestId("goal-header");
+    const list = view.getByTestId("goal-scroll");
+    expect(header.contains(view.getByTestId("goal-line"))).toBe(true);
+    expect(header.contains(view.getByRole("progressbar"))).toBe(true);
+    expect(list.contains(header)).toBe(false);
+    expect(list.className).toContain("overflow-auto");
+    expect(header.className).toContain("shrink-0");
+    expect(list.contains(view.getAllByTestId("milestone")[0])).toBe(true);
+  });
+
   /* The active step and its slice of the bar take its stage's colour, with the stage's word; with nothing
      running, neither does. */
   it.each([["working"], ["checks"], ["review"], ["merging"], [null]])("colours the active step by its stage %s", async (stage) => {
