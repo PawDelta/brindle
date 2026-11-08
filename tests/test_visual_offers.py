@@ -1,9 +1,12 @@
+import threading
+
 import pytest
 from starlette.testclient import TestClient
 
-from brindle import agents, config, visual_offers as offers, visuals
+from brindle import agents, config, mcp_server, visual_offers as offers, visuals
 from brindle.daemon.app import build_app
-from brindle.db import Agent, Workspace
+from brindle.db import DB, Agent, Workspace
+from brindle.mcp_server import ToolError
 from brindle.service.errors import ServiceError
 
 
@@ -493,6 +496,149 @@ def test_asked_quote_answered_visual_allows_one_revision(db, session, monkeypatc
     monkeypatch.setattr(offers.time, "time", lambda: now + offers.FOLD + 1)
     with pytest.raises(ServiceError):
         visuals.publish(db, boss, "Too late", "<p>no</p>", visual_id=v["id"])
+
+
+def _delivered_prompt(db, boss, worker):
+    agents.send_message(db, boss.id, "render first", sender_id=worker.id)
+    db.conn.execute("UPDATE inbox SET delivered_at=? WHERE agent_id=?", (offers.time.time(), boss.id))
+    agents.handle_hook(db, boss.id, "prompt-submit", {"prompt": "render first"})
+
+
+def _declined_card_typed_twice(db, boss, worker):
+    typed_into_cli(db, boss, CARD_ASK)
+    typed_into_cli(db, boss, CARD_ASK)
+    offers.resolve(db, boss.id, offers.current(db, boss.id)["id"], False)
+
+
+def _publishers_race(db, boss, worker):
+    outcomes = []
+
+    def publish():
+        own = DB()
+        try:
+            outcomes.append(visuals.publish(own, boss, "Race", "<p>r</p>", asked="render first")["id"])
+        except ServiceError as refused:
+            outcomes.append(refused.code)
+        finally:
+            own.conn.close()
+
+    threads = [threading.Thread(target=publish) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert sum(o.startswith("v_") for o in outcomes) == 1
+
+
+def _worker_calls_the_tool(db, boss, worker):
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv("BRINDLE_AGENT_ID", worker.id)
+        with pytest.raises(ToolError):
+            mcp_server.publish_visual("From a worker", "<p>no</p>", asked="render first")
+
+
+def _restart(db, boss, worker):
+    db.conn.close()
+    offers.purge_words(DB())
+
+
+def _stress(why, *row):
+    return pytest.param(*row, marks=pytest.mark.variant(why))
+
+
+CARD_ASK = "Please render a mockup of the new session button"
+FIRST = "render first"
+LONG_NOTES = "\n".join(f"line {n} of the notes about the migration" for n in range(110))
+
+
+@pytest.mark.parametrize("said,asked,published", [
+    # Words the person never asked with.
+    _stress("punctuation is not words", ["hmm . . . ok go"], ". .", False),
+    _stress("empty quote", [FIRST], "", False),
+    _stress("one ideograph is one word", ["画"], "画", False),
+    _stress("a piece cut from a run of ideographs", ["把这个流程画出来"], "流程", False),
+    _stress("zero-width inside the quote", [FIRST], "ren​der first", False),
+    _stress("homoglyph", [FIRST], "rеnder first", False),
+    _stress("a worker's message delivered as a prompt", [_delivered_prompt], FIRST, False),
+    # Words that take the ask back.
+    _stress("the quote carries the don't", ["please don't render it"], "don't render it", False),
+    _stress("the whole negative message", ["actually don't make a visual"], "actually don't make a visual", False),
+    _stress("don't ever", ["don't ever render it"], "render it", False),
+    _stress("did not ask", ["i didn't ask you to render it"], "render it", False),
+    _stress("no need to", ["no need to render it"], "render it", False),
+    _stress("cannot", ["you cannot render it"], "render it", False),
+    _stress("instead of", ["write it up instead of render it"], "render it", False),
+    _stress("mentioned in double quotes", ['what does "render first" mean'], FIRST, False),
+    _stress("mentioned in backticks", ["the `render first` flag is broken"], FIRST, False),
+    _stress("deep inside a mention", ['What does "please render first" mean?'], FIRST, False),
+    _stress("the quote brings its own marks", ['What does "render first" mean?'], '"render first"', False),
+    _stress("mentioned in single quotes", ["what does 'please render first' mean"], FIRST, False),
+    _stress("an unclosed mention", ['he said "please render first'], FIRST, False),
+    _stress("an unclosed single quote", ["He said 'render first"], FIRST, False),
+    _stress("an unclosed curly quote", ["He said ‘render first"], FIRST, False),
+    _stress("an apostrophe inside an unclosed quote", ["He said 'let's render first"], FIRST, False),
+    _stress("the marks and one word of the person's own", ['What does "render first" mean?'], '"render first" mean', False),
+    _stress("begins outside, ends inside", ['What does "render first" mean?'], 'does "render first', False),
+    _stress("someone else's words, whole message", ['He said "render first"'], 'He said "render first"', False),
+    _stress("a question about the words, whole message", ['What does "render first" mean?'], 'What does "render first" mean?', False),
+    _stress("a report naming a person", ['The worker suggested rendering "the new session button"'], 'The worker suggested rendering "the new session button"', False),
+    _stress("a report with a request verb as a noun", ['The render log contains "render first"'], 'The render log contains "render first"', False),
+    _stress("a quote opening on a digit", ["He said '2d render first'"], FIRST, False),
+    _stress("a quote opening on an elision", ["He said 'tis time to render first'"], FIRST, False),
+    _stress("a long message keeps its negation", [LONG_NOTES + "\nThen don't render the options."], "render the options", False),
+    # Cancelled, in the person's own words, for a quote and for a grant.
+    *[_stress("cancel then quote", [FIRST, cancel], FIRST, False) for cancel in (
+        "actually never mind", "never mind, thanks", "nvm", "forget it", "scratch that", "cancel that", "don't bother",
+        "don't render it", "don’t make a visual", "no visual please", "please stop",
+        "thanks for that.\nNever mind the visual.", "Never mind, I found the answer.", "Never mind…", "never mind I found it",
+        "Never mind — I found it", "never mind 🙂", "forget it, not needed")],
+    _stress("cancel then grant", ["Make a visual", "actually never mind"], None, False),
+    _stress("cancel with a reason, grant", ["Make a visual", "Never mind, I found the answer."], None, False),
+    _stress("cancel with unicode punctuation, grant", ["Make a visual", "Never mind…"], None, False),
+    _stress("a declined card covers the same words typed earlier", [_declined_card_typed_twice], CARD_ASK, False),
+    # Capability, races, restarts.
+    _stress("capability off", [lambda db, boss, worker: config.set_user("visuals_enabled", "off"), FIRST], FIRST, False),
+    _stress("one quote, eight publishers", [FIRST, _publishers_race], FIRST, False),
+    _stress("a worker's refused call leaves the quote", [FIRST, _worker_calls_the_tool], FIRST, True),
+    _stress("the offers setting never governs asking", [lambda db, boss, worker: config.set_user("visuals", "off"), FIRST], FIRST, True),
+    _stress("a restart keeps the words", [FIRST, _restart], FIRST, True),
+    # Real asks these guards must not catch.
+    _stress("a non-breaking space is the same words", [FIRST], "render first", True),
+    _stress("why not", ["Why not render it?"], "render it", True),
+    _stress("why don't you", ["why don't you render it"], "render it", True),
+    _stress("can't you", ["can't you just render it?"], "render it", True),
+    _stress("want is not a negation", ["i want you to render it"], "render it", True),
+    _stress("negation in an earlier clause", ["I don't get it, render it"], "render it", True),
+    _stress("ideographs have no spaces", ["把这个流程画出来"], "把这个流程画出来", True),
+    _stress("never mind something else", ["never mind the typo, render it"], "render it", True),
+    _stress("never mind, then the ask", ["never mind, render it"], "render it", True),
+    _stress("never mind, then a polite ask", ["Never mind — can you show me the flow"], "show me the flow", True),
+    _stress("a whole ask holding a quoted name", ['render the "new session" button'], 'render the "new session" button', True),
+    _stress("a whole ask holding a code name", ["Please render the `SessionContext` layout"], "Please render the `SessionContext` layout", True),
+    _stress("another verb", ["Please sketch the `SessionContext` layout"], "Please sketch the `SessionContext` layout", True),
+    _stress("a subordinate clause in the ask", ['Please render what they see on the "new session" screen'], 'Please render what they see on the "new session" screen', True),
+    _stress("rhetorical", ['Why not render the "new session" button?'], 'Why not render the "new session" button?', True),
+    _stress("polite", ['Would you mind rendering the "new session" button?'], 'Would you mind rendering the "new session" button?', True),
+    _stress("a decade is not a quotation", ["the '90s layout, render it"], "render it", True),
+    _stress("apostrophes are not quotation marks", ["let's see what's wrong, render it"], "render it", True),
+    _stress("a long message ending in the ask", [LONG_NOTES + "\nThen render the options."], "render the options", True),
+    _stress("stop something else", ["stop the server and render the flow"], "render the flow", True),
+    _stress("asks among other things", ["first fix the tests\nthen render the options\nthanks"], "render the options", True),
+    _stress("cancel, then ask again", [FIRST, "never mind", FIRST], FIRST, True),
+])
+def test_visual_request_stress(db, session, monkeypatch, said, asked, published):
+    boss, worker = session
+    for step in said:
+        if callable(step):
+            step(db, boss, worker)
+        else:
+            typed_into_cli(db, boss, step)
+    monkeypatch.setenv("BRINDLE_AGENT_ID", boss.id)
+    if published:
+        assert mcp_server.publish_visual("Asked", "<p>yes</p>", asked=asked).startswith("Published")
+    else:
+        with pytest.raises(ToolError):
+            mcp_server.publish_visual("Not asked", "<p>no</p>", asked=asked)
 
 
 def test_answer_folds_offer_and_setting_never_grants(db, session):

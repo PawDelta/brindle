@@ -23,7 +23,7 @@ DAY = 24 * 60 * 60
 FOLD = 30 * 60
 MIN_QUOTE_WORDS = 2     # a lone "yes" or "the" shows nothing about what was asked for
 MAX_KEPT_MESSAGES = 8   # per session
-MAX_KEPT_CHARS = 4000   # a longer message isn't kept: asking to see something is short
+MAX_KEPT_CHARS = 32000  # the most the app's input route accepts: a long message can end with an ask
 
 
 def _expire(c, root: str, now: float) -> None:
@@ -121,8 +121,9 @@ def resolve(db: DB, root: str, oid: str, accept: bool) -> dict:
             raise ServiceError("stale", "this offer is no longer open", 409)
         if request:
             c.execute("DELETE FROM visual_requests WHERE root_id=?", (root,))
-            # Their answer on the card is that message's one say, yes or no.
-            c.execute("DELETE FROM visual_person_words WHERE root_id=? AND source='request'", (root,))
+            # Their answer on the card is that message's one say, yes or no, however often they typed it.
+            c.execute("DELETE FROM visual_person_words WHERE root_id=? AND words IN "
+                      "(SELECT words FROM visual_person_words WHERE root_id=? AND source='request')", (root, root))
             scope = request["scope"]
             message = f"The person confirmed: create the {scope} they mentioned now."
         else:
@@ -178,12 +179,51 @@ _QUALIFIED = re.compile(r"\b(?:if|unless|when|after|before|later|only|maybe|perh
                         r"don't|do not|wait|until|provided|assuming)\b|[\"`“”]", re.I)
 _CONTEXT = re.compile(r"(?:compare|consider|examine|review)\s+(?:this|that|these|those|the)\s+"
                       r"(?:choices|options|layouts|designs|flow|pipeline|change|decision)[.!?]*", re.I)
+_CANCEL_LEAD = r"(?:(?:ok|okay|oh|ah|hmm|well|actually|sorry|no|nope|wait|please)\W+)*"
+_CANCEL_ARTIFACT = r"(?:visual(?:ization)?s?|diagrams?|charts?|mockups?|planning doc(?:ument)?s?|plan document|request)\b"
+# Names the artifact, or says not to make it: a cancel in any clause of a message.
 _CANCEL_REQUEST = re.compile(
-    r"^\s*(?:please\s+)?(?:(?:cancel|stop)\s+(?:(?:the|this|that)\s+)?|"
-    r"(?:don't|do not)\s+(?:make|create|show|draw|build|generate|render)\s+(?:(?:a|an|the)\s+)?)"
-    r"(?:visual|diagram|chart|mockup|planning document|planning doc|plan document|request)\b|"
-    r"^\s*(?:never mind|nevermind)[.!?]*\s*$", re.I)
-_NEGATED = re.compile(r"(?:\b(?:don'?t|don’t|do not|never|not|without|won'?t|won’t)) $")
+    _CANCEL_LEAD + r"(?:(?:cancel|stop|skip|drop|scratch|never\s*mind|forget(?:\s+about)?)\s+(?:(?:the|this|that|my)\s+)?" + _CANCEL_ARTIFACT
+    + r"|(?:don['’]?t|do not)\s+(?:make|create|show|draw|build|generate|render)\b(?:\s+(?:me|us|a|an|the|it|this|that))*"
+    r"(?:\s+" + _CANCEL_ARTIFACT + r"|\W*$)|no\s+(?:need\s+for\s+)?(?:(?:a|an|the)\s+)?" + _CANCEL_ARTIFACT + ")", re.I)
+# Says only "stop", or "never mind I found it": it cancels unless a new ask follows, as in "never mind, render it".
+_CANCEL_BARE = re.compile(_CANCEL_LEAD + r"(?:(?:never\s*mind|nvm)\s+(?:i|i['’]m|i['’]ve|we|we['’]re|it['’]s|its|got|found|figured|all)\b"
+                          r"|(?:never\s*mind|nvm|forget\s+(?:it|that|about\s+it)|scratch\s+that|"
+                          r"cancel\s+(?:it|that)|don['’]?t(?:\s+bother)?|stop)(?:\s+(?:it|that|this))?\W*$)", re.I)
+_ASKS_AGAIN = re.compile(r"(?:(?:please|just|then|instead|but|and|so|ok|okay|now|(?:can|could|would|will) you)\W+)*"
+                         r"(?:render|draw|visuali[sz]e|mock|display|show\s+(?:me|us|it|that|this)|(?:can|could) i see|let me see"
+                         r"|(?:make|create|build|generate)\s+(?:(?:me|us|a|an|the|this|that)\s+)*" + _CANCEL_ARTIFACT + r")\b", re.I)
+_COURTESY = re.compile(r"(?:thanks|thank you|thx|please|sorry)\W*$", re.I)
+_CLAUSES = re.compile(r"(?<=[.!?,;:])\s+|[…。！？，；、]+\s*|\s+[-–—]+\s+|[–—]+\s*|\n+")
+_NOT = (r"(?<!why )\b(?:not|never|cannot|without|avoid|stop|no need to|rather than|instead of|"
+        r"(?:do|does|did|should|must|need)n['’]?t|(?:ca|could|wo|would)n['’]?t(?! you))"
+        r"(?: (?:ever|even|bother|need|needed|want|wanted|have|ask|asked|try|go|to|you|i|me|us|just|really|please|actually|yet))*")
+_NEGATED = re.compile(_NOT + " $")     # just before a quote it takes the quote back: "don't ever <quote>"
+_NEGATES = re.compile(_NOT + r" \w")    # the quote carries its own "don't"
+_NEGATION_REACH = 200                   # characters before a quote that can negate it
+# Words someone is mentioning, not saying. An unclosed mark runs to the end; ' inside a word is an apostrophe.
+_QUOTED = re.compile("|".join(f"{o}[^{c}]*(?:{c}|$)" for o, c in ('""', "``", "“”", "«»", "「」", "『』", "„“"))
+                     + r"|‘(?:[^’]|’(?=\w))*(?:’(?!\w)|$)"
+                     + r"|(?<!\w)'(?:[^']|'(?=\w))*'(?!\w)"
+                     + r"|(?<!\w)'(?!\d|(?:em|n|cause|tis|twas)\b)(?:[^']|'(?=\w))*$")
+_ASK_LEAD = (r"(?:(?:please|kindly|just|then|now|ok|okay|yes|so|and|maybe|perhaps|hey|go ahead and|how about|what about|why not|"
+             r"why don['’]t you|(?:can|could|would|will) you|would you mind|do you mind|mind|is it possible to|are you able to|"
+             r"i(?:['’]d| would)? (?:want|like|love|need)(?: you)? to|let['’]?s)\W+)*")
+# How a quote that holds a quoted name has to open: as a direct request, however polite. Anything else
+# ("he said", "the render log contains") is refused; the agent can still quote the person's plain words.
+_ASKS_FOR = re.compile(_ASK_LEAD + r"(?:(?:(?:render|draw|sketch|show|mock|display|preview|build|plot|chart|diagram)(?:ing)?|"
+                       r"mak(?:e|ing)(?! sure)|creat(?:e|ing)|generat(?:e|ing)|visuali[sz](?:e|ing)|illustrat(?:e|ing))\b"
+                       r"|(?:let (?:me|us)|let['’]?s|can i|could i|may i|i(?:['’]d| would)? (?:want|like|love) to)\W+(?:see|view)\b)", re.I)
+_IDEOGRAPH = re.compile(r"[぀-ヿ㐀-鿿豈-﫿]")
+
+
+def _cancels(text: str) -> bool:
+    """Whether the person is calling off a visual, in whatever words."""
+    clauses = [c for c in _CLAUSES.split(text.strip()) if c.strip() and not _COURTESY.fullmatch(c)]
+    if any(_CANCEL_REQUEST.match(c) for c in clauses):
+        return True
+    bare = [i for i, c in enumerate(clauses) if _CANCEL_BARE.match(c)]
+    return bool(bare) and not any(_ASKS_AGAIN.match(c) for c in clauses[bare[-1] + 1:])
 
 
 def request_intent(text: str) -> tuple[str | None, bool]:
@@ -287,7 +327,7 @@ def person_spoke(db: DB, agent: Agent, text: str, *, expires_at: float | None = 
             _unlink(c, root.id, "request")
         # A tool approval or ordinary follow-up does not cancel the person's
         # still unused request. Only a new artifact request or explicit stop does.
-        cancelled = not fold_only and _CANCEL_REQUEST.search(text) is not None
+        cancelled = not fold_only and _cancels(text)
         if not fold_only and (scope or cancelled):
             c.execute("DELETE FROM visual_grants WHERE root_id=?", (root.id,))
             _unlink(c, root.id, "grant")
@@ -326,7 +366,7 @@ def keep_typed(db: DB, agent: Agent, text: str, expires_at: float, submitted_at:
         state = c.execute("SELECT invalidated_at FROM visual_input_state WHERE root_id=?", (root.id,)).fetchone()
         if state and submitted_at <= state["invalidated_at"]:
             raise ServiceError("stale", "this submission predates a direct person message", 409)
-        if not _CANCEL_REQUEST.search(text):
+        if not _cancels(text):
             _keep_words(c, root.id, text, staged=True)
 
 
@@ -343,11 +383,16 @@ def _words(text: str) -> str:
     return " ".join(text.split()).casefold()
 
 
+def _word_count(words: str) -> int:
+    """Real words only: punctuation isn't one, and each ideograph is (those scripts use no spaces)."""
+    return sum(len(_IDEOGRAPH.findall(w)) or any(ch.isalnum() for ch in w) for w in words.split())
+
+
 def _keep_words(c, root: str, text: str, staged: bool = False) -> None:
     """Keep a typed message for ``asked`` to be checked against, briefly."""
     now = time.time()
     words = _words(text)
-    if (len(words.split()) >= MIN_QUOTE_WORDS and len(words) <= MAX_KEPT_CHARS
+    if (_word_count(words) >= MIN_QUOTE_WORDS and len(words) <= MAX_KEPT_CHARS
             and not visuals.secret_finding(text, "the message")):
         c.execute("INSERT INTO visual_person_words (root_id, words, staged, created_at) VALUES (?,?,?,?)",
                   (root, words, int(staged), now))
@@ -357,16 +402,37 @@ def _keep_words(c, root: str, text: str, staged: bool = False) -> None:
               (root, root, MAX_KEPT_MESSAGES))
 
 
+def _says_it_themselves(words: str, span: tuple[int, int], mentioned: list[tuple[int, int]]) -> bool:
+    """A quote may hold a whole quoted name if it opens as a request, but not begin
+    or end inside one, and enough of it must be the person's own words outside the marks."""
+    begin, end = span
+    own, at = [], begin
+    for start, stop in mentioned:
+        if stop <= begin or start >= end:
+            continue
+        if start < begin or stop > end:
+            return False
+        own.append(words[at:start])
+        at = stop
+    holds_a_mention = bool(own)
+    own.append(words[at:end])
+    return _word_count(" ".join(own)) >= MIN_QUOTE_WORDS and (not holds_a_mention or _ASKS_FOR.match(own[0]) is not None)
+
+
 def _spend_quote(c, root: str, asked: str, now: float) -> bool:
     """Whether ``asked`` is the person's recent words; the message backing it is used up."""
     quote = _words(asked)
-    if len(quote.split()) < MIN_QUOTE_WORDS:
+    if _word_count(quote) < MIN_QUOTE_WORDS or _NEGATES.search(quote):
         return False
     # Whole words, and not a piece cut from "don't render it".
     pattern = re.compile(rf"(?<!\w){re.escape(quote)}(?!\w)")
     for row in c.execute("SELECT id, words, source FROM visual_person_words WHERE root_id=? AND staged=0 "
                          "AND created_at>? ORDER BY id DESC", (root, now - FOLD)).fetchall():
-        if any(not _NEGATED.search(row["words"][:m.start()]) for m in pattern.finditer(row["words"])):
+        words = row["words"]
+        mentioned = [q.span() for q in _QUOTED.finditer(words)]
+        if any(not _NEGATED.search(words[max(0, m.start() - _NEGATION_REACH):m.start()])
+               and _says_it_themselves(words, m.span(), mentioned)
+               for m in pattern.finditer(words)):
             c.execute("DELETE FROM visual_person_words WHERE id=?", (row["id"],))
             if row["source"] == "grant":
                 c.execute("DELETE FROM visual_grants WHERE root_id=?", (root,))
@@ -402,8 +468,9 @@ def consume(c, root: str, kind: str = "visual") -> None:
         raise ServiceError("visual_request_required",
                            "nothing shows the person asked for this. If they asked to see it, the supervisor "
                            "publishes again with asked=\"...\": at least two of their words, copied exactly from "
-                           "one message they typed themselves in the app in the last 30 minutes (not pasted, and "
-                           "not a message that already allowed a publication). Otherwise use offer_visual so they "
+                           "one message they typed themselves in the app in the last 30 minutes (not pasted, not "
+                           "words they were quoting or saying not to do, and not a message that already allowed a "
+                           "publication). Otherwise use offer_visual so they "
                            "can accept an offer, or ask them in text. A worker needs its supervisor to do this "
                            "first.", 403)
     c.execute("DELETE FROM visual_person_words WHERE root_id=? AND source='grant'", (root,))
