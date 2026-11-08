@@ -46,7 +46,7 @@ def _statements(tree: ast.Module) -> dict[str, str]:
     for node in tree.body:
         if isinstance(node, ast.Assign):
             targets = node.targets
-        elif isinstance(node, ast.AnnAssign):
+        elif isinstance(node, ast.AnnAssign) and node.value:   # `A: int` alone binds nothing
             targets = [node.target]
         else:
             continue

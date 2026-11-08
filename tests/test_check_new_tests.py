@@ -109,6 +109,10 @@ def test_changed_inputs_and_stable_ids_are_judged_by_real_collection_worth_commi
     unpack = ("import pytest\n%s = (1, 2)\nCASES = [{'k': A}]\n"
               "@pytest.mark.parametrize('d', CASES)\ndef test_t(d): pass\n")
     assert new_rows(unpack % "A, B", unpack % "B, A") == ["test_t[d0]"]
+    # a bare annotation after the assignment binds nothing and must not hide the value change
+    annotated = ("import pytest\nA = %d\nA: int\nCASES = [{'k': A}]\n"
+                 "@pytest.mark.parametrize('d', CASES)\ndef test_t(d): pass\n")
+    assert new_rows(annotated % 1, annotated % 2) == ["test_t[d0]"]
     # pytest numbers dict parameters by position: the inserted row is case0 and the old one becomes case1
     table = "import pytest\n@pytest.mark.parametrize('d', %s)\ndef test_t(d): pass\n"
     assert new_rows(table % "[{'k': 2}]", table % "[{'k': 1}, {'k': 2}]") == ["test_t[d0]"]
