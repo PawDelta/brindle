@@ -90,7 +90,8 @@ to be asked each step.
   their results) plus the new ones. The goal is this session's alone; brindle
   keeps it in `.brindle/goals/<session id>.md`.
 - Within a goal, the delegation rule decides which of a milestone's tasks you
-  do yourself and which you `assign`.
+  do yourself and which you `assign`. Pass `milestone` (the exact milestone
+  title) on every `assign` or `handoff` so each worker is linked to its work.
 - Work on the first unverified milestone. Split it into independent tasks and
   `assign` them to workers in parallel (at most {max_agents} at once). Give
   every task a `done_when` finish line the worker can verify itself. Pass
@@ -1408,6 +1409,12 @@ def checking(ap: Autopilot, timeout: float = 900.0) -> bool:
     return bool(ap.checking_since) and time.time() - ap.checking_since < timeout
 
 
+def set_checking(db: DB, root_id: str, on: bool) -> None:
+    """Mark a background check as started or finished, and tell the app so its goal view refetches."""
+    db.update_autopilot(root_id, checking_since=time.time() if on else None)
+    bus.publish_agent(db, "autopilot.checking", root_id, checking=on)
+
+
 def _detach(args: list[str]) -> None:
     """Start a brindle helper that outlives this process."""
     spawn.detach(args)
@@ -1428,7 +1435,7 @@ def check_in_background(db: DB, root_id: str, ws: Workspace, position: int | Non
     if ap and checking(ap):
         return ("A milestone check is already running; its result arrives as a message. "
                 "Carry on with other work meanwhile.")
-    db.update_autopilot(root_id, checking_since=time.time())
+    set_checking(db, root_id, True)
     args = [*brindle_invocation(), "_check-milestones", root_id, ws.id]
     if position is not None:
         args += ["--position", str(position)]
@@ -1665,6 +1672,19 @@ def _commit(ws: Workspace | None, *, tracked_only: bool = False) -> str | None:
         return None
 
 
+AUDIT_GAPS_PERSON = "Found more to do"
+
+
+def person_note(ap: Autopilot) -> str | None:
+    """``ap.note`` as the person sees it: the auditor's report is for the
+    supervisor only, so a note that is a recorded audit report (whatever the
+    state or verdict it was left under) shows a plain status instead."""
+    note = ap.note
+    if note and note in (ap.audit_history or ""):
+        return AUDIT_GAPS_PERSON
+    return note
+
+
 def audit_due(ap: Autopilot, cfg: RepoConfig, head: str | None) -> str | None:
     """With every milestone passing: None if the goal is reached (the audit is
     off, or approved ``head``), else which AUDIT_HOLD applies."""
@@ -1856,7 +1876,8 @@ def goal_activity(db: DB, root_id: str, now: float | None = None) -> dict:
     ap = db.get_autopilot(root_id)
     tree = agents.tree(db, root_id)
     if not tree:
-        return {"stage": None, "commits_last_hour": 0, "last_commit_at": None, "eta_seconds": None}
+        return {"stage": None, "commits_last_hour": 0, "last_commit_at": None, "eta_seconds": None,
+                "checking": False, "auditing": False}
     boss = tree[0]
     closed = ("paused", "done")
     reviewed = {a.workspace_id for a in tree[1:] if a.mode == "review" and a.status not in closed
@@ -1910,7 +1931,8 @@ def goal_activity(db: DB, root_id: str, now: float | None = None) -> dict:
 
             eta = max(60.0, statistics.median(samples) - (now - max(reports)))
     return {"stage": stage, "commits_last_hour": sum(at > now - 3600 for at in commits.values()),
-            "last_commit_at": max(commits.values(), default=None), "eta_seconds": eta}
+            "last_commit_at": max(commits.values(), default=None), "eta_seconds": eta,
+            "checking": ap is not None and checking(ap), "auditing": ap is not None and ap.state == "auditing"}
 
 
 def counts(db: DB, root_id: str) -> tuple[int, int]:
@@ -2256,6 +2278,12 @@ def on_stop(db: DB, agent: Agent, payload: dict) -> dict | None:
         return None  # only the person can renew the login; a nudge would just fail
     if proposing(ap):
         return None  # brindle's own dialog is asking the user to approve checks
+    if ap.state not in ("usage_paused", "done"):
+        from brindle import open_items
+
+        # Before everything below that waits on someone else: a worker is waiting on this supervisor.
+        if block := open_items.stop_block(db, agent):
+            return block
     if ap.state == "auditing":
         if ap.auditor_id:
             auditor = db.get_agent(ap.auditor_id)

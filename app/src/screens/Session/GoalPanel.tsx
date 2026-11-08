@@ -22,7 +22,7 @@
    Only the newest GET answers: a slower, older response is dropped, and so is
    any response that arrives after the panel has moved to another session. */
 
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import type { BusEvent } from "../../api/events";
 import type { DaemonClient } from "../../api/client";
 import { openExternal, type OpenUrl } from "../../api/open";
@@ -37,11 +37,18 @@ const GOAL_JOBS = new Set(["goal.check", "session.pr"]);
 
 /* Copy the full startup request from the goal title. Keyed by session and text
    by the caller, so pending copies and feedback cannot cross sessions. */
-export function SessionGoal({ text, children, className, onOpen }: {
+export function SessionGoal({ text, children, className, onOpen, noun = "Goal", title, enterCopies = true, current, treeAgent, row }: {
   text?: string | null;
   children: ReactNode;
   className: string;
   onOpen(): void;
+  /* What the toast says was copied; a tree row copies its handoff info and keeps Enter for opening. */
+  noun?: string;
+  title?: string;
+  enterCopies?: boolean;
+  current?: "page";
+  treeAgent?: string;
+  row?: string;
 }) {
   const views = usePtyViews();
   const [feedback, setFeedback] = useState<"copied" | "error" | null>(null);
@@ -72,10 +79,11 @@ export function SessionGoal({ text, children, className, onOpen }: {
   };
   return (
     <div className="relative min-w-0 flex-1">
-      <button type="button" className={className} title={text ? "Double-click to copy the goal" : "Open the session"}
-        onClick={onOpen} onDoubleClick={() => void copy()}
+      <button type="button" className={className} title={title ?? (text ? "Double-click to copy the goal" : "Open the session")}
+        onClick={onOpen} onDoubleClick={() => void copy()} aria-current={current}
+        data-tree-agent={treeAgent} data-row={row}
         onKeyDown={(e) => {
-          if (e.key === "Enter" && text) {
+          if (e.key === "Enter" && text && enterCopies) {
             e.preventDefault();
             e.stopPropagation();
             void copy();
@@ -84,7 +92,7 @@ export function SessionGoal({ text, children, className, onOpen }: {
         {children}
       </button>
       {feedback && <span role="status" className="pointer-events-none absolute left-0 top-full z-10 mt-1 whitespace-nowrap rounded border border-line bg-surface px-2 py-1 text-xs font-normal text-ink shadow-sm">
-        {feedback === "copied" ? "Goal copied to clipboard" : "Couldn't copy"}
+        {feedback === "copied" ? `${noun} copied to clipboard` : "Couldn't copy"}
       </span>}
     </div>
   );
@@ -134,7 +142,40 @@ function sessionGitMark(workspaces: WorkspaceDTO[], root: string): string {
     .join("|");
 }
 
-/* How often the sidebar refetches its goal while open, for the activity line's rolling hour, ages and estimate. */
+const STOPPED_STATUS = new Set(["paused", "done", "failed", "exited", "rewound"]);
+const BUSY_STATUS = new Set(["processing", "starting", "waiting"]);
+
+/* The stage a branch's review_state says it is at (checks, reviewer, merge), or null when it names none. */
+function pipelineStage(reviewState: string | null | undefined): Stage | null {
+  const s = reviewState ?? "";
+  if (/^(waiting for checks|checks running|checks waiting for room)/.test(s)) return "checks";
+  if (/^reviewer running/.test(s)) return "review";
+  if (/^approved, (merging|waiting to merge)/.test(s)) return "merging";
+  return null;
+}
+
+/* The stage of each milestone (by title) a worker of this session is linked to (the engine's agent `milestone`),
+   from the worker itself and its branch's checks/review: a milestone with an entry is active, however many others
+   are too. A worker that exited (liveness) or stopped counts only while its branch is in checks or review; one that
+   reported counts while it is busy again (fixing review findings). Several workers on one milestone: the earliest stage. */
+export function activeMilestoneStages(workspaces: WorkspaceDTO[], alive: Record<string, boolean>, root: string): Map<string, Stage> {
+  const agents = workspaces.flatMap((ws) => ws.agents ?? []);
+  const stages = new Map<string, Stage>();
+  for (const ws of workspaces) {
+    for (const a of ws.agents ?? []) {
+      if (!a.milestone || a.mode === "interactive" || a.mode === "review" || a.dismissed_at != null || rootOf(agents, a.id) !== root) continue;
+      const gone = STOPPED_STATUS.has(a.status) || alive[a.id] === false;
+      const piped = pipelineStage(ws.review_state);
+      const stage = piped ?? (!gone && (BUSY_STATUS.has(a.status) || !a.reported) ? "working" : null);
+      if (!stage) continue;
+      const before = stages.get(a.milestone);
+      if (!before || STAGES.indexOf(stage) < STAGES.indexOf(before)) stages.set(a.milestone, stage);
+    }
+  }
+  return stages;
+}
+
+/* How often the sidebar refetches its goal while open,for the activity line's rolling hour, ages and estimate. */
 const ACTIVITY_REFRESH_MS = 60_000;
 
 export type GoalPhase ="in_progress" | "in_review" | "ready_for_pr" | "pr_open" | "done";
@@ -189,6 +230,7 @@ const LABEL_STYLE: Record<string, string> = {
   Done: "text-pass",
   "In review": "text-branch",
   "In progress": "text-branch",
+  Pending: "text-ink-3",
 };
 
 /* The label the panel shows: the engine's phase when it sends one, else the check state's. */
@@ -214,7 +256,7 @@ export interface PhaseFold {
   state: "done" | "active" | "todo";
 }
 
-export function phaseFolds(milestones: MilestoneDTO[], isDone: (m: MilestoneDTO) => boolean): PhaseFold[] | null {
+export function phaseFolds(milestones: MilestoneDTO[], isDone: (m: MilestoneDTO) => boolean, activeStage: ReadonlyMap<number, Stage | null>): PhaseFold[] | null {
   if (!milestones.some((m) => m.phase_name)) return null;
   const folds: PhaseFold[] = [];
   for (const m of milestones) {
@@ -226,7 +268,7 @@ export function phaseFolds(milestones: MilestoneDTO[], isDone: (m: MilestoneDTO)
   for (const f of folds) {
     if (f.milestones.every(isDone)) f.state = "done";
     else {
-      const moving = f.milestones.some((m) => isDone(m) || m.status === "running");
+      const moving = f.milestones.some((m) => isDone(m) || m.status === "running" || activeStage.has(m.id));
       f.state = !seenUnfinished || moving ? "active" : "todo";
       seenUnfinished = true;
     }
@@ -256,14 +298,19 @@ function shortAgo(at: number, now: number): string {
 
 /* The sidebar's activity line: commits in the last hour, else when the last one landed, and how long is left
    when brindle can say and something runs. Null when there is nothing to say (an older engine sends none of it). */
-export function activityLine(goal: GoalDTO, now = Date.now() / 1000): { what: string | null; eta: string | null } | null {
+export function activityLine(goal: GoalDTO, now = Date.now() / 1000): { what: string | null; eta: string | null; checks: boolean } | null {
   const commits = goal.commits_last_hour ?? 0;
+  // While milestone checks or the completion audit run, say so in place of the commits (plain words, no report).
+  const running = goal.auditing
+    ? "Reviewing the finished work"
+    : goal.checking ? `Checking all ${goal.milestones?.length ?? 0} milestones` : null;
+  if (running) return { what: running, eta: null, checks: true };
   const what = commits > 0
     ? `${commits} ${commits === 1 ? "commit" : "commits"} in the last hour`
     : goal.last_commit_at != null ? `last commit ${shortAgo(goal.last_commit_at, now)} ago` : null;
   const minutes = isStage(goal.stage) && goal.eta_seconds != null ? Math.max(1, Math.round(goal.eta_seconds / 60)) : null;
   const eta = minutes === null ? null : minutes < 90 ? `~${minutes}m left` : `~${Math.round(minutes / 60)}h left`;
-  return what || eta ? { what, eta } : null;
+  return what || eta ? { what, eta, checks: false } : null;
 }
 
 /* "phase 3 of 4": where the goal is, by its named phases; empty with none, or once nothing is left. */
@@ -282,7 +329,7 @@ const CHEV = (
 /* The milestones under their phase folds: a done phase is one line with its green count, the active one lists
    every row (passed ones too, as they look today), an upcoming one is folded with its count. Any fold opens or
    closes on a click. The full panel's fold line carries a tiny bar, one segment per milestone. */
-function PhaseFoldList({ folds, open, onToggle, isDone, large, rowsClass, row }: {
+function PhaseFoldList({ folds, open, onToggle, isDone, large, rowsClass, row, rows }: {
   folds: PhaseFold[];
   open: Record<number, boolean>;
   onToggle(key: number, next: boolean): void;
@@ -290,11 +337,13 @@ function PhaseFoldList({ folds, open, onToggle, isDone, large, rowsClass, row }:
   large: boolean;
   rowsClass: string;
   row(m: MilestoneDTO): ReactNode;
+  rows?(milestones: MilestoneDTO[], key: number): ReactNode;
 }) {
   return (
     <ul className={`ms-folds${large ? " lg" : ""}`} aria-label="Milestones">
       {folds.map((f) => {
-        if (f.name === null) return <li key={f.key}><ul className={rowsClass}>{f.milestones.map(row)}</ul></li>;
+        const children = () => rows ? rows(f.milestones, f.key) : f.milestones.map(row);
+        if (f.name === null) return <li key={f.key}><ul className={rowsClass}>{children()}</ul></li>;
         const isOpen = open[f.key] ?? f.state === "active";
         const passed = f.milestones.filter(isDone).length;
         const n = f.milestones.length;
@@ -313,7 +362,7 @@ function PhaseFoldList({ folds, open, onToggle, isDone, large, rowsClass, row }:
               )}
               <span className="k">{count}</span>
             </button>
-            {isOpen && <ul className={`${rowsClass} ms-kids`}>{f.milestones.map(row)}</ul>}
+            {isOpen && <ul className={`${rowsClass} ms-kids`}>{children()}</ul>}
           </li>
         );
       })}
@@ -322,8 +371,8 @@ function PhaseFoldList({ folds, open, onToggle, isDone, large, rowsClass, row }:
 }
 
 /* finished: the goal is Done, so every milestone reads done whatever its last check said. */
-function Milestone({ milestone, finished }: { milestone: MilestoneDTO; finished: boolean }) {
-  const label = finished ? "Done" : checkLabel(milestone);
+function Milestone({ milestone, finished, pending }: { milestone: MilestoneDTO; finished: boolean; pending: boolean }) {
+  const label = finished ? "Done" : pending ? "Pending" : checkLabel(milestone);
   const done = label === "Done";
   return (
     <li className="flex gap-s1 py-1" data-testid="milestone">
@@ -337,7 +386,7 @@ function Milestone({ milestone, finished }: { milestone: MilestoneDTO; finished:
       </span>
       <div className="min-w-0 flex-1">
         <div className="flex items-baseline justify-between gap-s2">
-          <span className={`text-sm ${done ? "text-ink-2" : "font-medium"}`}>
+          <span className={`text-sm ${done ? "text-ink-2" : pending ? "text-ink-3" : "font-medium"}`}>
             {milestone.position}. {milestone.title}
           </span>
           {label && (
@@ -422,11 +471,12 @@ export function GoalPanel({ client, repo, root, store, compact = false, onReview
   const [loaded, setLoaded] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
-  const [docSaving, setDocSaving] = useState(false);
   // Beside a terminal the milestones fold away by default (it wants the room); in the sidebar they show.
   const [open, setOpen] = useState(compact);
   // The phase folds the person opened or closed, by fold key; the rest keep their default (only the active phase open).
   const [foldOpen, setFoldOpen] = useState<Record<number, boolean>>({});
+  // Pending rows fold independently within each phase (key 0 is the list without phases).
+  const [pendingOpen, setPendingOpen] = useState<Record<number, boolean>>({});
   const toggleFold = useCallback((key: number, next: boolean) => setFoldOpen((o) => ({ ...o, [key]: next })), []);
   const frame = compact ? "flex flex-col gap-1.5 px-1.5 pb-1.5 pt-1" : `${card} flex flex-col gap-1 px-s2 py-s1`;
   /* This session: its client, repo and root. Every continuation (a GET, an action's
@@ -466,9 +516,9 @@ export function GoalPanel({ client, repo, root, store, compact = false, onReview
     setLoaded(false);
     setLoadError(null);
     setActionError(null);
-    setDocSaving(false);
     setDocSummary(null);
     setFoldOpen({});
+    setPendingOpen({});
     void refresh();
     let seen = store.getState().lastEventId;
     let stale = store.getState().stale;
@@ -502,6 +552,9 @@ export function GoalPanel({ client, repo, root, store, compact = false, onReview
     };
   }, [session, store, refresh, root, compact]);
 
+  const storeWorkspaces = useSyncExternalStore(store.subscribe, () => store.getState().workspaces);
+  const storeAlive = useSyncExternalStore(store.subscribe, () => store.getState().alive);
+  const workerStages = useMemo(() => activeMilestoneStages(storeWorkspaces, storeAlive, root), [storeWorkspaces, storeAlive, root]);
   if (!loaded && loadError) {
     return (
       <section className={`${compact ? "px-s1 py-1" : `${card} px-s2 py-s1`} flex items-center gap-s2`} aria-label="Goal">
@@ -545,8 +598,19 @@ export function GoalPanel({ client, repo, root, store, compact = false, onReview
   // The milestone being worked on: the running one, else the first not yet passed; none once the goal is done.
   const current = finished ? undefined : (milestones.find((m) => m.status === "running") ?? milestones.find((m) => m.status !== "passed"));
   const isDone = (m: MilestoneDTO) => finished || checkLabel(m) === "Done";
+  // Every unfinished milestone a live worker is linked to is active; with none linked, the current one stands alone.
+  const linked = finished ? [] : milestones.filter((m) => workerStages.has(m.title) && !isDone(m));
+  // Each active milestone's own stage: its workers' (and their branches'); the lone current one reads the goal's.
+  const activeStage = new Map<number, Stage | null>(
+    linked.length > 0
+      ? linked.map((m) => [m.id, workerStages.get(m.title)!] as const)
+      : current ? [[current.id, isStage(goal.stage) ? goal.stage : null] as const] : [],
+  );
+  // Unfinished with no work on it and no check that broke: nobody has started it.
+  const isPending = (m: MilestoneDTO) =>
+    !isDone(m) && !activeStage.has(m.id) && m.phase == null && !["failed", "regressed"].includes(checkState(m) ?? "");
   // The goal's phases as folds; null without any (the list as it always was).
-  const folds = phaseFolds(milestones, isDone);
+  const folds = phaseFolds(milestones, isDone, activeStage);
   const where = finished ? "" : phaseWord(folds);
   const phaseLabel = GOAL_PHASE_LABEL[phase];
   // The sidebar's count line names only the steps after In progress; Done is the green count itself.
@@ -589,28 +653,6 @@ export function GoalPanel({ client, repo, root, store, compact = false, onReview
         {docSummary.total} {docSummary.total === 1 ? "doc" : "docs"} · writing {docSummary.writing}, using {docSummary.using} →
       </button>
     ) : null;
-  /* brindle's one-time offer of an analysis doc for a large goal: a small question, the same shape as the visual offer. */
-  const answerDocOffer = (offer: string, accept: boolean) => {
-    setDocSaving(true);
-    setActionError(null);
-    void client.resolveAnalysisOffer(root, offer, accept).then(
-      () => {
-        if (activeSession.current === session) void refresh();
-      },
-      (e: unknown) => {
-        if (activeSession.current === session) setActionError(message(e));
-      },
-    ).finally(() => {
-      if (activeSession.current === session) setDocSaving(false);
-    });
-  };
-  const docChoice = !finished && goal.analysis_offer ? (
-    <div className="inline-flex items-center gap-s1 self-start rounded-full border border-dashed border-line px-s2 text-xs text-ink-2" data-testid="analysis-offer">
-      <span>Write an analysis doc for this goal?</span>
-      <button type="button" disabled={docSaving} onClick={() => answerDocOffer(goal.analysis_offer!, true)}>Yes</button>
-      <button type="button" disabled={docSaving} onClick={() => answerDocOffer(goal.analysis_offer!, false)}>Not now</button>
-    </div>
-  ) : null;
   /* Done's step: close the session, one click, nothing asked. Beside the status in the full view; in the sidebar
      a quiet text button under the milestones, aligned with their names. */
   const closeSession =
@@ -634,27 +676,54 @@ export function GoalPanel({ client, repo, root, store, compact = false, onReview
     // colour), one activity line, then the milestones as short steps (✓ done, the active one marked and tagged).
     const donePct = total === 0 ? (finished ? 100 : 0) : (passed / total) * 100;
     // The stage the active step is at; none once the goal is finished or while nothing runs.
-    const stage = !finished && current && isStage(goal.stage) ? goal.stage : null;
+    const barStages = [...activeStage.values()].filter((s): s is Stage => s !== null);
     const activity = finished ? null : activityLine(goal);
-    // Every unfinished milestone is in progress (the engine works them in parallel), so each one is lit.
-    const stateOf = (m: MilestoneDTO): "done" | "now" => (isDone(m) ? "done" : "now");
+    const stateOf = (m: MilestoneDTO): "done" | "now" | "pending" => (isDone(m) ? "done" : isPending(m) ? "pending" : "now");
     const sideRow = (m: MilestoneDTO) => {
       const state = stateOf(m);
-      const active = m.id === current?.id;
-      const label = finished ? "Done" : checkLabel(m);
+      const active = activeStage.has(m.id);
+      const stage = active ? activeStage.get(m.id) : null;
+      const label = finished ? "Done" : isPending(m) ? "Pending" : checkLabel(m);
       const tip = [m.title, label, m.state_why ?? (active ? m.detail || m.check_cmd : null)].filter(Boolean).join(" · ");
       return (
         <li key={m.id} className={`m${active && stage ? ` st-${stage}` : ""}`} data-state={state} data-active={active || undefined} data-testid="milestone" title={tip}>
           <span className="i" aria-hidden>
-            {state === "done" ? "✓" : active ? "●" : "·"}
+            {state === "done" ? "✓" : active ? "●" : state === "pending" ? "○" : "·"}
           </span>
           <span className="t">{shortName(m.title)}</span>
           {active && stage && <span className="tag" data-testid="goal-stage">{stage}</span>}
         </li>
       );
     };
+    // Keep the work visible above the pending fold, even when pending milestones precede it.
+    const sideRows = (items: MilestoneDTO[], key: number) => {
+      const pending = items.filter(isPending);
+      const expanded = pendingOpen[key] ?? false;
+      return (
+        <>
+          {items.filter((m) => !isPending(m)).map(sideRow)}
+          {pending.length > 0 && (
+            <li>
+              <button
+                type="button"
+                className="ms-fold ms-pending"
+                aria-expanded={expanded}
+                onClick={() => setPendingOpen((o) => ({ ...o, [key]: !expanded }))}
+              >
+                <span className="i" aria-hidden>○</span>
+                <span className="n">{pending.length} pending</span>
+                {CHEV}
+              </button>
+            </li>
+          )}
+          {expanded && pending.map(sideRow)}
+        </>
+      );
+    };
     return (
-      <section className={frame} aria-label="Goal" data-phase={phase}>
+      <section className={`${frame} min-h-0`} aria-label="Goal" data-phase={phase}>
+        {/* Pinned: the count and the bar stay put; only the milestones below scroll. */}
+        <div className="flex shrink-0 flex-col gap-1.5" data-testid="goal-header">
         <div className="flex items-center gap-s1 px-0.5 text-xs font-medium text-ink">
           {/* The count is green once the goal is finished; In progress and Done need no label of their own. */}
           <span data-testid="goal-line" className={finished ? "text-pass" : undefined}>
@@ -673,29 +742,31 @@ export function GoalPanel({ client, repo, root, store, compact = false, onReview
         </div>
         <div className="side-bar" role="progressbar" aria-label="Progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(donePct)} title={goal.detail ?? undefined}>
           <span className="d" style={{ width: `${donePct}%` }} />
-          {stage && total > 0 && <span className={`n st-${stage}`} data-testid="goal-bar-now" style={{ width: `${100 / total}%` }} />}
+          {total > 0 && barStages.map((s, i) => <span key={i} className={`n st-${s}`} data-testid="goal-bar-now" style={{ width: `${100 / total}%` }} />)}
         </div>
         {activity && (
-          <div className="side-act" data-testid="goal-activity">
+          <div className={`side-act${activity.checks ? " st-checks" : ""}`} data-testid="goal-activity">
             <span className="min-w-0 truncate" data-testid="goal-activity-what">{activity.what}</span>
             {activity.eta && <span data-testid="goal-eta">{activity.eta}</span>}
           </div>
         )}
+        </div>
+        <div className="flex min-h-0 flex-col gap-1.5 overflow-auto" data-testid="goal-scroll">
         {total > 0 && folds ? (
-          <PhaseFoldList folds={folds} open={foldOpen} onToggle={toggleFold} isDone={isDone} large={false} rowsClass="side-ms" row={sideRow} />
+          <PhaseFoldList folds={folds} open={foldOpen} onToggle={toggleFold} isDone={isDone} large={false} rowsClass="side-ms" row={sideRow} rows={sideRows} />
         ) : total > 0 ? (
           <ul className="side-ms" aria-label="Milestones">
-            {milestones.map(sideRow)}
+            {sideRows(milestones, 0)}
           </ul>
         ) : (
           <p className="px-0.5 text-[11px] text-ink-3">{finished ? "brindle finished this goal." : "No milestones yet."}</p>
         )}
         {docsLine}
-        {docChoice}
         {closeSession}
         {step}
         {shownError && <p className={`${alert} text-xs`}>{shownError}</p>}
         {goal.note && <p className="px-0.5 text-[11px] text-ink-3">{goal.note}</p>}
+        </div>
       </section>
     );
   }
@@ -718,6 +789,9 @@ export function GoalPanel({ client, repo, root, store, compact = false, onReview
       <div className="h-1.5 w-full overflow-hidden rounded-full bg-canvas-2" role="progressbar" aria-label="Progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={pct}>
         <div className="h-full rounded-full bg-pass" style={{ width: `${pct}%` }} />
       </div>
+      {!finished && activityLine(goal)?.checks && (
+        <p className="st-checks text-xs" style={{ color: "var(--st)" }} data-testid="goal-activity-what">{activityLine(goal)?.what}</p>
+      )}
       {!open && current && (
         <p className="text-xs text-ink-3" data-testid="milestone-now">
           now: {current.position}. {current.title}
@@ -746,20 +820,19 @@ export function GoalPanel({ client, repo, root, store, compact = false, onReview
               isDone={isDone}
               large
               rowsClass="flex flex-col divide-y divide-line"
-              row={(m) => <Milestone key={m.id} milestone={m} finished={finished} />}
+              row={(m) => <Milestone key={m.id} milestone={m} finished={finished} pending={isPending(m)} />}
             />
           </div>
         ) : total > 0 ? (
           <ul className="flex flex-col divide-y divide-line border-t border-line" aria-label="Milestones">
             {milestones.map((m) => (
-              <Milestone key={m.id} milestone={m} finished={finished} />
+              <Milestone key={m.id} milestone={m} finished={finished} pending={isPending(m)} />
             ))}
           </ul>
         ) : (
           <p className="text-sm text-ink-3">{finished ? "brindle finished this goal." : "No milestones yet."}</p>
         ))}
       {docsLine}
-      {docChoice}
     </section>
   );
 }

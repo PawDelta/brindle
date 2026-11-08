@@ -409,8 +409,11 @@ def spawn(
     weight: str | None = None,
     analysis_doc: bool = False,
     detached: bool = False,
+    milestone: str | None = None,
 ) -> Agent:
-    """Start an agent in ``ws``. ``detached``: a handoff nobody waits on (a
+    """Start an agent in ``ws``. ``milestone``: the title of the goal milestone a
+    worker works on (None: the session's first unfinished one without a live worker,
+    falling back to the first unfinished). ``detached``: a handoff nobody waits on (a
     queued one) is recorded as 'handoff_detached' from the start, so a
     result it reports at once is forwarded; it is briefed as a handoff.
     ``weight`` is the weight its task was routed
@@ -505,7 +508,21 @@ def spawn(
         raise AgentError(why)
     db.add_agent(agent)
     if session_root and mode in ("handoff", "assign"):
-        pilot.consider_analysis_offer(db, session_root)    # another worker may make the goal large
+        # Background launches can overlap after admission: reserve a milestone
+        # before another process looks for an unclaimed one in this session.
+        with milestone_claim_lock(session_root):
+            current = milestone
+            if not current:
+                unfinished = [m.title for m in db.milestones(session_root) if m.status != "passed"]
+                claimed = {db.agent_milestone(a.id) for a in tree(db, session_root)[1:]
+                           if a.id != agent_id and a.mode in REPORTING_MODES
+                           and a.status not in ("paused", "done", "failed") and alive_or_starting(a)}
+                current = next((title for title in unfinished if title not in claimed),
+                               unfinished[0] if unfinished else None)
+            if current:
+                db.set_agent_milestone(agent_id, current)
+    if session_root and mode in ("handoff", "assign"):
+        pilot.consider_analysis_offer(db, session_root)   # another worker may make the goal large
     if person_prompt and raw_task and parent_id is None and mode == "interactive":
         from brindle import visual_offers
 
@@ -531,6 +548,17 @@ def spawn(
         forget_files(agent)
         raise
     return agent
+
+
+def milestone_claim_lock(root_id: str, *, wait: bool = True):
+    """Serialize a session's milestone lookup and link across launch processes.
+
+    The claim is durable before releasing this lock; the launch itself stays
+    outside it so independent workers can start their CLIs concurrently.
+    """
+    from brindle import pipeline
+
+    return pipeline._reentrant_lock("milestone-claim-" + hashlib.sha1(root_id.encode()).hexdigest()[:16], wait=wait)
 
 
 def _pause_when_done(agent_id: str, argv: list[str]) -> list[str]:
@@ -2198,8 +2226,10 @@ def full_message(db: DB, agent_id: str, message_id: int) -> str:
 
 
 def render_unread(db: DB, messages: list) -> str:
-    """What read_messages returns: one line per message."""
-    return "\n".join(one_line(db, m.id, m.body, m.sender_id) for m in messages)
+    """What read_messages returns: one line per held message; one that was
+    queued to be pushed (the person's, say) whole, as a push would have."""
+    return "\n".join(one_line(db, m.id, m.body, m.sender_id) if m.held
+                     else m.body if m.sender_id else f"[brindle] {m.body}" for m in messages)
 
 
 def send_message(db: DB, to_id: str, body: str, sender_id: str | None = None,
@@ -2565,8 +2595,12 @@ def _resume_pane_delivery(db: DB, agent: Agent, saved: str) -> bool:
                 return _flush_messages(db, agent.id)
             # Stopped after the lead: the body never reached the composer and
             # Enter was never pressed for it, so the whole message goes in, once,
-            # as a new attempt: the old one's mark (and what hooks noted on it) retired.
-            db.set_mark(agent.id, "pane-delivery", None)
+            # as a new attempt: the old one's mark (and what hooks noted on it)
+            # replaced by a fresh one, never dropped, so no other path
+            # (read_messages, the waiter) takes the row while it is typed.
+            fresh = {k: state.get(k) for k in ("message_id", "pane", "server", "provider", "body", "lead")}
+            if not db.replace_mark(agent.id, "pane-delivery", saved, json.dumps({**fresh, "stage": None})):
+                return False  # a hook changed it meanwhile: the next flush looks again
             stage = None
         try:
             _paste_message(db, agent, state["body"], state["lead"], row["id"], resume=stage)
@@ -2588,17 +2622,27 @@ def _deliver_to_inbox(db: DB, agent: Agent, message_id: int, text: str,
                       sender_id: str | None) -> bool:
     """Send a queued message through Claude Code's own inbox (see
     brindle.inbox), where it doesn't wait for the agent to go idle. Returns
-    whether it went; if not, it stays queued for the pane."""
+    whether it went (or another path, read_messages say, already took it);
+    if not, it stays queued for the pane. The row is claimed before the send,
+    so no other path delivers it again meanwhile."""
     from brindle import inbox
 
     if not inbox.usable(agent):
         return False
+    claimed = db.claim_delivery(message_id)
+    if claimed is None:
+        # Delivered by another path, or a pane delivery owns it: the caller's
+        # flush resumes that one, which delivers it there and nowhere else.
+        return db.message_delivered(message_id)
     sender = db.get_agent(sender_id) if sender_id else None
     who = f"brindle {sender.profile} {sender.id}" if sender else "brindle"
-    if not _send_to_inbox(db, agent, text, who):
-        return False
-    db.mark_delivered(message_id)
-    return True
+    sent = False
+    try:
+        sent = _send_to_inbox(db, agent, text, who)
+    finally:
+        if not sent:
+            db.release_delivery(message_id, claimed)
+    return sent
 
 
 def flush(db: DB, agent_id: str) -> bool:
@@ -2985,6 +3029,9 @@ def report_result(db: DB, agent_id: str, result: str, forward: bool = True,
             row = db.outbox_get(row["id"])
             if row["state"] in ("delivered", "superseded"):
                 return "result already recorded"
+    from brindle import open_items
+
+    open_items.close(db, agent.id)   # it reported, so nothing waits on its supervisor any more
     return _handle_report(db, agent, ws, row["payload"], first, forward, removed, outbox_id=row["id"])
 
 
@@ -3494,6 +3541,7 @@ def delegate(
     analysis_doc: bool = False,
     admit: bool = True,
     detached: bool = False,
+    milestone: str | None = None,
 ) -> tuple[Agent, Workspace]:
     """Start a worker, or raise ``NoRoom`` (nothing created) when the machine
     has no room for it (``admission``); ``admit`` False skips that, for a
@@ -3542,7 +3590,8 @@ def delegate(
             return spawn(
                 db, ws, profile, prompt=task, parent_id=caller.id if caller else None, mode=mode,
                 done_when=done_when, background_setup=True, plan_first=bool(plan_first), files=files,
-                weight=weight, analysis_doc=analysis_doc, **({"detached": True} if detached else {}),
+                weight=weight, analysis_doc=analysis_doc, milestone=milestone,
+                **({"detached": True} if detached else {}),
             )
 
         if not fair:
@@ -5323,6 +5372,10 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
         # a running command, so only a prompt or a long-enough gap counts.
         if event == "prompt-submit" or unreported_note_expired(agent):
             db.update_agent(agent_id, unreported_noted=None)
+    if event == "prompt-submit":
+        from brindle import open_items
+
+        open_items.close(db, agent_id)   # at work again: a later stop is a new item
 
     if event == "session-start":
         from brindle import inbox
@@ -5815,14 +5868,19 @@ def liveness(db: DB, a: Agent, ws: Workspace | None, panes: dict[str, bool] | No
     return "; ".join(parts)
 
 
-def tell_parent_unreported(db: DB, agent: Agent, *, remind: bool = False) -> bool:
+def tell_parent_unreported(db: DB, agent: Agent, *, remind: bool = False, now: float | None = None) -> bool:
     """A worker stopped again after being reminded to report, still without a
     result. It won't be reminded again on its own, and its supervisor has
     usually gone idle waiting for it with nothing left to wake it, so tell the
-    supervisor (queued if it's busy, delivered now if it's idle). Returns
-    whether the supervisor was told."""
+    supervisor (queued if it's busy, delivered now if it's idle), and open an
+    item it has to close (brindle.open_items), which from then on does the
+    reminding. Returns whether the supervisor was told."""
     if agent.mode not in FORWARDING_MODES or not agent.parent_id:
         return False  # a synchronous handoff's caller is still waiting on it
+    from brindle import open_items
+
+    if open_items.told_of_this_stop(db, agent):
+        return False  # its item says the rest, each notice once
     if db.get_agent(agent.parent_id) is None:
         _note_reviewer_end(db, agent)
         return False
@@ -5852,6 +5910,10 @@ def tell_parent_unreported(db: DB, agent: Agent, *, remind: bool = False) -> boo
     sent = False
     try:
         sent = _tell_parent_unreported(db, agent, ws)
+        if sent:
+            open_items.track(db, agent, ("stopped in a review fix round without committing or reporting"
+                                         if agent.pipeline == "fixing" and agent.result is not None
+                                         else "stopped without calling report_result"), now)
         return sent
     finally:
         if not sent:
@@ -5921,6 +5983,9 @@ def tell_parent_api_error(db: DB, agent: Agent, error: str) -> bool:
         # The idle reminder would only repeat this, less exactly.
         db.claim_unreported(agent.id, time.time(), None, reopened_at=agent.reopened_at,
                             status_since=agent.status_since or agent.created_at)
+    from brindle import open_items
+
+    open_items.track(db, agent, f"stopped on an API error: {api_error_kind(error)}")
     return True
 
 

@@ -3615,7 +3615,7 @@ def check_milestones_cmd(root_id: str, workspace_id: str,
                  "again, or ask the user whether to turn it off (\"goal_audit\": false in "
                  ".brindle/config.json).")
     finally:
-        db.update_autopilot(root_id, checking_since=None)
+        autopilot.set_checking(db, root_id, False)
     if db.get_agent(root_id) is None:
         return
     body = agents.condense(f"[brindle] {head}", text + "\n\n(The same progress, any time: get_progress.)")

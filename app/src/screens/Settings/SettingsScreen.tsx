@@ -96,7 +96,7 @@ import { Permissions } from "./Permissions";
 import { ReleaseBuildUpdate } from "./ReleaseBuildUpdate";
 import { NO_REPO, RepoSelect, useRepo } from "../../components/RepoSelect";
 import { openExternal, type OpenUrl } from "../../api/open";
-import { SETTINGS_TABS, type SettingsTab } from "../../routes";
+import { type SettingsTab } from "../../routes";
 import { AccountPanel, UsagePanel } from "../Account";
 import { RepoSettings } from "./ProjectSettingsScreen";
 import { LoadingButton } from "../../components/LoadingButton";
@@ -125,6 +125,7 @@ import {
 } from "./settings";
 
 export interface SettingsScreenProps {
+  onTab?(tab: SettingsTab): void;
   client: DaemonClient;
   /* Puts the `brindle` command on the PATH (the shell's install_cli,
      api/tauri.ts, which answers with the link it made). Without one (a
@@ -187,39 +188,6 @@ function Pane({ id, tab, seen, children }: { id: SettingsTab; tab: SettingsTab; 
   return (
     <div id={`settings-panel-${id}`} role="tabpanel" aria-labelledby={`settings-tab-${id}`} hidden={!open} className={open ? "flex min-h-0 flex-col gap-s3" : "hidden"}>
       {children}
-    </div>
-  );
-}
-
-/* The tabs: one button each, the open one marked; arrow keys move between them. */
-function TabBar({ tab, onTab }: { tab: SettingsTab; onTab(tab: SettingsTab): void }) {
-  const move = (step: number) => {
-    const i = SETTINGS_TABS.findIndex((t) => t.id === tab);
-    const next = SETTINGS_TABS[(i + step + SETTINGS_TABS.length) % SETTINGS_TABS.length].id;
-    onTab(next);
-    document.getElementById(`settings-tab-${next}`)?.focus();
-  };
-  return (
-    <div role="tablist" aria-label="Settings" className="flex flex-wrap gap-1 border-b border-line">
-      {SETTINGS_TABS.map((t) => (
-        <button
-          key={t.id}
-          id={`settings-tab-${t.id}`}
-          type="button"
-          role="tab"
-          aria-selected={tab === t.id}
-          aria-controls={`settings-panel-${t.id}`}
-          tabIndex={tab === t.id ? 0 : -1}
-          className={`-mb-px border-b-2 px-s2 py-1 text-sm ${tab === t.id ? "border-pass font-medium text-ink" : "border-transparent text-ink-2 hover:text-ink"}`}
-          onClick={() => onTab(t.id)}
-          onKeyDown={(e) => {
-            if (e.key === "ArrowRight") move(1);
-            else if (e.key === "ArrowLeft") move(-1);
-          }}
-        >
-          {t.label}
-        </button>
-      ))}
     </div>
   );
 }
@@ -1143,7 +1111,7 @@ function HealthRow({ c, busy, onFix }: { c: DoctorCheck; busy: boolean; onFix(fi
   );
 }
 
-export function SettingsScreen({ client, installCli, appUpdater, appUpdates, releaseBuildUpdater, readAbout, tab: routedTab, visit, section, ask, rule, repo: routed, current, openUrl = openExternal, onNavigate }: SettingsScreenProps) {
+export function SettingsScreen({ client, installCli, appUpdater, appUpdates, releaseBuildUpdater, readAbout, tab: routedTab, visit, section, ask, rule, repo: routed, current, openUrl = openExternal, onNavigate, onTab }: SettingsScreenProps) {
   const store = useContext(StoreContext);
   if (!store) throw new Error("SettingsScreen needs a <StoreContext.Provider>");
   const connection = useAppState((state) => state.connection);
@@ -1384,7 +1352,6 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
   return (
     <section className="flex min-h-0 flex-col gap-s3" aria-label="Settings">
       <PageHeader title="Settings" lede={LEDE[tab]} />
-      <TabBar tab={tab} onTab={setTab} />
       <div className="flex min-h-0 flex-col gap-s3" data-tab={tab}>
       {tab !== "account" && tab !== "usage" && tab !== "project" && noRepo}
       {tab !== "account" && tab !== "usage" && tab !== "project" && loadError && (
@@ -1396,7 +1363,7 @@ export function SettingsScreen({ client, installCli, appUpdater, appUpdates, rel
         </div>
       )}
       <Pane id="account" {...panes}>
-        <AccountPanel client={client} openUrl={openUrl} onNavigate={(to) => (to === "settings" ? setTab("general") : onNavigate?.(to))} />
+        <AccountPanel client={client} openUrl={openUrl} onNavigate={(to) => (to === "settings" ? (onTab ? onTab("general") : setTab("general")) : onNavigate?.(to))} />
       </Pane>
       <Pane id="usage" {...panes}>
         <UsagePanel ask={ask} />

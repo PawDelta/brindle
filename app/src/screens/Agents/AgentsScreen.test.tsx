@@ -341,7 +341,7 @@ describe("agents tab", () => {
 
     fireEvent.click(within(within(row("medium")).getByTestId("cant-run")).getByRole("button", { name: "Connect Codex" }));
     expect(await screen.findByRole("region", { name: "Settings" })).toBeTruthy();
-    expect(within(pages).getByRole("button", { name: "Settings" }).getAttribute("aria-current")).toBe("page");
+    expect(within(pages).getByRole("button", { name: "Open Account" }).getAttribute("aria-current")).toBe("page");
     sync.stop();
   });
 

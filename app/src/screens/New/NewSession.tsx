@@ -11,8 +11,7 @@
    one (components/ProjectPicker: open a folder, or clone a repository):
    in place of the composer while there is none, and behind "Add a
    project…" beside the repo after. Under it, the way to the demo the first
-   launch offers (screens/Onboarding/Demo), and "Take the tour" above it
-   opens the walkthrough again (components/Walkthrough). */
+   launch offers (screens/Onboarding/Demo). */
 
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { DaemonError, LOGIN_PROVIDERS, type DaemonClient, type Note, type PreflightDTO, type Repo, type SessionConflict, type StartSession } from "../../api/client";
@@ -23,7 +22,6 @@ import Logo from "../../components/Logo";
 import { Preflight } from "../../components/Preflight";
 import { ProjectCombobox } from "../../components/ProjectCombobox";
 import { ProjectPicker } from "../../components/ProjectPicker";
-import { openWalkthrough } from "../../components/Walkthrough";
 import { alert, button, card, field, h2, lede, main, mono, quiet, title } from "../../components/ui";
 import { isPaused, providerName } from "../../store/overview";
 import { useSessions } from "../../store/sessions";
@@ -98,10 +96,6 @@ export function NewSession({ client, onOpen, initialRepo, pickFolder, refresh, o
           <div className="flex flex-col gap-1">
             <div className="flex items-center gap-s1">
               <Logo className="text-2xl" />
-              <span className="flex-1" />
-              <button type="button" className={quiet} onClick={openWalkthrough}>
-                Take the tour
-              </button>
             </div>
             {repos !== null && repos.length > 0 && <h1 className={title}>Start a session</h1>}
             <p className="text-sm text-ink-2">

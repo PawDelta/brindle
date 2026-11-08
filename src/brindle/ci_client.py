@@ -994,7 +994,9 @@ def session_event(db, root_id: str, adapter: ci_adapters.Adapter, *, cwd: str | 
         state, note = "finished", None
     elif ap and ap.state in ("blocked", "usage_paused"):
         state, note = "needs_user", None
-        question = ap.note or "the supervisor needs the person"
+        from brindle.autopilot import person_note
+
+        question = person_note(ap) or "the supervisor needs the person"
     elif ap and ap.state == "stalled":
         state, note = "stalled", ap.note
     elif root.status in ("paused", "done") or not adapter.alive(db, root):

@@ -173,6 +173,9 @@ def agent_entry(db: DB, a: Agent, *, detail: bool = False,
              "status": status, "mode": a.mode}
     if status == "failed" and a.failed_why:
         entry["failed_why"] = a.failed_why
+    milestone = db.agent_milestone(a.id)
+    if milestone:
+        entry["milestone"] = milestone
     if u and u.total:
         entry["tokens"] = usage_mod.short_summary(u)
     if u and u.model:
@@ -426,7 +429,7 @@ def autopilot_entry(db: DB, repo_root: str | None, panes: dict[str, bool] | None
         "enabled": bool(ap.enabled),
         "goal": ap.goal,
         "state": ap.state,
-        "note": ap.note,
+        "note": autopilot.person_note(ap),
         "wait": autopilot.wait_summary(ap),
         "usage_resets_at": ap.usage_resets_at,
         "milestones": [{"position": m.position, "title": m.title,

@@ -550,6 +550,33 @@ def test_audit_gaps_keep_the_goal_open(db, root, repo, monkeypatch):
     assert db.get_autopilot("boss").state == "auditing"
 
 
+def test_audit_report_text_is_not_shown_to_the_person(db, root, repo):
+    from brindle import view
+    from brindle.daemon import session_review
+    from brindle.service.dto import GoalDTO
+
+    agent, ws = root
+    with_goal(db)
+    report = "Work not done: milestone 18 app/src/x.ts:95 never wired"
+    out = autopilot.record_audit(db, "boss", False, report)   # first failed audit: state stays running
+    assert report in out   # the supervisor still gets the full report
+    first = db.get_autopilot("boss")
+    assert first.state == "running" and autopilot.person_note(first) == autopilot.AUDIT_GAPS_PERSON
+    db.update_autopilot("boss", audit_ok=None)   # a retained note outlives the verdict
+    assert autopilot.person_note(db.get_autopilot("boss")) == autopilot.AUDIT_GAPS_PERSON
+    db.update_autopilot("boss", note="Which repo should this go in?")
+    assert autopilot.person_note(db.get_autopilot("boss")) == "Which repo should this go in?"
+    out = autopilot.record_audit(db, "boss", False, report)
+    assert report in out
+    ap = db.get_autopilot("boss")
+    assert ap.state == "blocked" and report in (ap.note or "")
+    dto = GoalDTO.from_autopilot(ap, db.milestones("boss"), None, session_review.goal_phase(db, "boss"))
+    assert dto.note == autopilot.AUDIT_GAPS_PERSON
+    assert view.autopilot_entry(db, ws.repo_root, root_id="boss")["note"] == autopilot.AUDIT_GAPS_PERSON
+    shown = " ".join(session_review.needs_you(db, agent, ap))
+    assert "app/src/x.ts" not in shown and autopilot.AUDIT_GAPS_PERSON in shown
+
+
 def test_approval_of_an_older_commit_keeps_the_goal_open(db, root, repo, monkeypatch):
     agent, ws = root
     with_goal(db)
@@ -800,6 +827,22 @@ def test_goal_activity_stage(db, root, boss, checking, workers, expected):
         if kind in ("reviewing", "ready"):
             db.update_agent(f"w{i}", pipeline=kind, result="done", reviewing_since=time.time())
     assert autopilot.goal_activity(db, "boss")["stage"] == expected
+
+
+def test_goal_activity_reports_checking(db, root):
+    with_goal(db)
+    assert autopilot.goal_activity(db, "boss")["checking"] is False
+    _, ws = root
+    autopilot.check_in_background(db, "boss", ws, None, detach=lambda argv: None)   # the real start path
+    got = autopilot.goal_activity(db, "boss")
+    assert (got["checking"], got["auditing"]) == (True, False)
+    autopilot.set_checking(db, "boss", False)
+    # Starting and finishing each tell the app, so an open goal view refetches at once.
+    events = bus.tail(db, kinds=("autopilot.checking",))
+    assert [e["payload"] for e in events] == [{"checking": True}, {"checking": False}]
+    db.update_autopilot("boss", state="auditing")
+    got = autopilot.goal_activity(db, "boss")
+    assert (got["checking"], got["auditing"]) == (False, True)
 
 
 def test_goal_activity_commits_and_estimate(db, root, repo):

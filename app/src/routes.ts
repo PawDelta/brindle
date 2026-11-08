@@ -46,7 +46,7 @@ export type Route =
      Settings › Providers); `ask` counts the requests, so asking again while the page is
      open switches and scrolls again; `rule`: a permission rule to open in its editor,
      from the Inbox's permission items. */
-  | { screen: "settings"; tab?: SettingsTab; section?: "providers" | "permissions" | "storage"; ask?: number; rule?: string }
+  | { screen: "settings"; tab?: SettingsTab; section?: "providers" | "permissions" | "storage"; ask?: number; rule?: string; repo?: string }
   /* The older routes, kept: they open Settings on their tab. One repo's checks, rules and
      overrides of the person's settings (from its sidebar heading): the Project tab. */
   | { screen: "project-settings"; repo?: string }
