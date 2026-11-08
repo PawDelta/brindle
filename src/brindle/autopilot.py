@@ -77,7 +77,8 @@ to be asked each step.
   yourself needs no goal: do it directly, run the targeted tests, and report.
 - The goal: as soon as you delegate work (before your first `assign` or
   `handoff`), record a goal derived from the user's request with `set_goal`,
-  without asking: the request is the goal, its parts are 1-6 milestones. Ask
+  without asking: the request is the goal, its parts are 1-6 milestones.
+  Include a `summary` of a few words for the sidebar's single-line session label. Ask
   the user what we're building only when there is no request at all. Each
   milestone has a `check` command brindle can run from the root of this
   checkout that exits 0 only when that milestone is done (e.g.
@@ -683,7 +684,7 @@ def milestone_items(db: DB, root_id: str, milestones: list[dict]) -> list[tuple]
 
 def set_goal(db: DB, root_id: str, goal: str,
              milestones: list[tuple], detail: str | None = None, *,
-             analysis_doc: bool | None = None) -> None:
+             analysis_doc: bool | None = None, summary: str | None = None) -> None:
     """Record the goal and its milestones, ``(title, check, detail[, profile[, repo[, phase]]])``.
     A milestone that keeps its title and check keeps its last result."""
     if not goal.strip():
@@ -696,6 +697,10 @@ def set_goal(db: DB, root_id: str, goal: str,
     old = {(m.title, m.check_cmd): m for m in db.milestones(root_id)}
     ap = db.get_autopilot(root_id)
     fields: dict[str, object] = {}
+    if summary is not None:
+        fields["summary"] = " ".join(summary.split()) or None
+    elif ap is None or ap.goal != goal.strip():
+        fields["summary"] = None
     if ap is None or ap.goal != goal.strip():
         fields["audit_history"] = None
         fields["analysis_doc"] = 0

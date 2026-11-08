@@ -7,11 +7,11 @@
    (SessionContext: its goal with milestones, progress and checks, and the
    one lifecycle that carries its PR step); a handle that drags the split between them (kept in
    localStorage); then "Sessions": every open session grouped by repo, each
-   row its goal with its id and mode under it and a caret that folds its
-   agents, and a close ("✕", on hover or focus; "Done · Close", always
+   row its short goal and supervisor/model tag, a caret that folds its
+   workers, and a close ("✕", on hover or focus; "Done · Close", always
    there, once its goal is Done or, with no goal, all in it is at rest)
    that closes the session in one click, nothing asked, the row just
-   going; its agents nested in compact rows (the mockup's dot vocabulary
+   going; its workers connected by tree lines in compact rows (the mockup's dot vocabulary
    for the CLI's statuses: branch at work, sap waiting, pass done, quiet
    idle, fail red), each "id · branch" with its state in plain words at the
    right, never a count or a needs-you mark; paused and failed sessions
@@ -325,7 +325,7 @@ function stageOf(tone: DotTone, a: { mode: string }, reviewState?: string | null
 /* One agent in a session's tree, and its children under it: a dot, its
    milestone's title with "role · model" muted (the id, profile and branch are
    in the tooltip), its stage at the right. Double-clicked, it copies its info. */
-function AgentRow({ node, depth, route, navigate, repo, root, cursor, setCursor }: { node: AgentNode; depth: number; repo: string; root: string; cursor: string | null; setCursor(key: string): void } & Pick<SidebarProps, "route" | "navigate">) {
+function AgentRow({ node, route, navigate, repo, root, cursor, setCursor }: { node: AgentNode; repo: string; root: string; cursor: string | null; setCursor(key: string): void } & Pick<SidebarProps, "route" | "navigate">) {
   const a = node.agent;
   const alive = useAppState((s) => s.alive[a.id]);
   const active = route.screen === "session" && route.root === root && (route.agent ?? root) === a.id;
@@ -335,12 +335,13 @@ function AgentRow({ node, depth, route, navigate, repo, root, cursor, setCursor 
   const tone = dotTone(status, a.status);
   const stage = stageOf(tone, a, node.workspace.review_state);
   const reviewer = a.mode === "review";
+  const supervisor = role === "supervisor";
   // A worker reads as its milestone's title (else its branch in words); a reviewer, nested, only as its role.
   const title = a.id === root || reviewer ? "" : a.milestone || branchWords(node.workspace.branch);
   const muted = [role, modelOf(a)].filter(Boolean).join(" · ");
   const info = [`id: ${a.id}`, `role: ${role}`, `profile: ${a.profile}`, `branch: ${node.workspace.branch}`, `milestone: ${a.milestone ?? ""}`].join("\n");
   return (
-    <li>
+    <li className="session-tree-node">
       <SessionGoal
         text={info}
         noun="Session info"
@@ -349,26 +350,26 @@ function AgentRow({ node, depth, route, navigate, repo, root, cursor, setCursor 
         treeAgent={a.id}
         row={key}
         title={`${a.id} · ${status.glyph} ${status.label} · ${a.profile} · ${node.workspace.branch} (double-click to copy its info)`}
-        className={`flex w-full items-center gap-s1 rounded-r-md py-[3px] pl-[10px] pr-s1 text-left hover:bg-surface ${active ? "bg-branch-soft" : ""} ${cursor === key ? CURSOR : ""}`}
+        className={`flex w-full items-center gap-s1 rounded-r-md py-[3px] pr-s1 text-left hover:bg-surface ${active ? "bg-branch-soft" : ""} ${cursor === key ? CURSOR : ""}`}
         onOpen={() => {
           setCursor(key);
           navigate({ screen: "session", root, repo, agent: a.id });
         }}
       >
         <Dot tone={tone} className={stage ? `st-${STAGE_CLASS[stage]}` : ""} />
-        <span className="min-w-0 flex-1 truncate text-xs text-ink" style={{ paddingLeft: `${(depth - 1) * 12}px` }}>
-          {depth > 2 && <span className="text-ink-3">↳ </span>}
+        <span className="min-w-0 flex-1 truncate text-xs text-ink">
           {title && <span data-testid="agent-title">{title} </span>}
-          <span className="text-ink-3" data-testid="agent-role">{muted}</span>
+          {!supervisor && <span className="text-ink-3" data-testid="agent-role">{muted}</span>}
         </span>
+        {supervisor && <SupervisorTag model={modelOf(a)} />}
         <span className={`max-w-[50%] shrink truncate text-[11px] ${stage ? `st-${STAGE_CLASS[stage]} stage-word` : "text-ink-3"}`} data-testid="agent-status">
           {stage ?? plainLabel(status, a.status)}
         </span>
       </SessionGoal>
       {node.children.length > 0 && (
-        <ul className="flex flex-col gap-px">
+        <ul className="session-tree">
           {node.children.map((child) => (
-            <AgentRow key={child.agent.id} node={child} depth={depth + 1} route={route} navigate={navigate} repo={repo} root={root} cursor={cursor} setCursor={setCursor} />
+            <AgentRow key={child.agent.id} node={child} route={route} navigate={navigate} repo={repo} root={root} cursor={cursor} setCursor={setCursor} />
           ))}
         </ul>
       )}
@@ -417,10 +418,11 @@ function useRowGoal(repo: string, root: string) {
 /* The goal is reached: Done, whatever the session's process is doing (live or paused). */
 const goalDone = (goal: GoalDTO | null | undefined) => !!goal && goalPhase(goal, UNKNOWN).phase === "done";
 
-/* A live session: its goal with its id and mode under it, a needs-you
-   count, the caret that folds its agents; the supervisor and its workers
-   nested under it. A close on hover or focus, and "Done · Close" in its
-   place once the session is through. */
+function SupervisorTag({ model }: { model: string }) {
+  return <span className="supervisor-tag shrink-0 whitespace-nowrap rounded-sm border border-line-strong px-[5px] text-[10.5px] leading-4 text-ink-2">supervisor{model && <span className="text-ink-3"> · {model}</span>}</span>;
+}
+
+/* The session row is its supervisor; workers branch directly from it. */
 function SessionRows({ session, repo, index, route, navigate, cursor, setCursor, folded, toggle, onClose, list }: { session: SessionDTO; repo: string; index: number; cursor: string | null; setCursor(key: string): void; folded: boolean; toggle(): void; onClose: CloseRow; list: RefObject<HTMLElement | null> } & Pick<SidebarProps, "route" | "navigate">) {
   const root = session.id;
   const workspaces = useAppState((s) => s.workspaces);
@@ -431,51 +433,43 @@ function SessionRows({ session, repo, index, route, navigate, cursor, setCursor,
   const members = useMemo(() => agentIds(tree), [tree]);
   const open = route.screen === "session" && route.root === root;
   const key = `session:${root}`;
-  const agents = members.size;
-  const busy = workspaces.flatMap((ws) => (ws.agents ?? []).filter((a) => members.has(a.id) && cliStatus(a, ws, alive[a.id]).style === "busy")).length;
   // Through: its goal Done, or no goal and every agent in it at rest (the supervisor among them).
   const mine = workspaces.flatMap((ws) => ws.agents ?? []).filter((a) => members.has(a.id));
   const idle = mine.some((a) => a.id === root) && mine.every((a) => AT_REST.has(a.status) || alive[a.id] === false);
   const done = goalDone(goal) || (goal === null && idle);
   return (
     <li className="flex flex-col gap-px" data-testid={`tree-session-${root}`} data-session={root}>
-      <div className={`group flex items-start gap-0.5 rounded-md ${open ? "bg-branch-soft" : "hover:bg-surface/60"}`}>
+      <div className={`group flex items-center gap-0.5 rounded-md ${open ? "bg-branch-soft" : "hover:bg-surface/60"}`}>
         <button
           type="button"
-          className={`flex min-w-0 flex-1 items-start gap-s1 rounded-md px-s1 py-[5px] text-left ${cursor === key ? CURSOR : ""}`}
-          data-tree-session={root}
-          data-row={key}
+          className="ml-s1 w-[9px] shrink-0 text-center text-[10px] text-ink-3 hover:text-ink"
+          aria-label={folded ? `Show ${root}'s agents` : `Hide ${root}'s agents`}
+          aria-expanded={!folded}
+          onClick={toggle}
+        >
+          {folded ? "▸" : "▾"}
+        </button>
+        <SessionGoal
+          text={goal?.goal || session.goal}
+          enterCopies={false}
+          treeSession={root}
+          row={key}
+          current={open && (route.agent ?? root) === root ? "page" : undefined}
+          className={`flex w-full min-w-0 items-center gap-s1 rounded-md py-[5px] pr-s1 text-left ${cursor === key ? CURSOR : ""}`}
           title={`${root} · ${session.status}${index < 9 ? ` · ⌘${index + 1}` : ""}`}
-          onClick={() => {
+          onOpen={() => {
             setCursor(key);
             navigate({ screen: "session", root, repo, agent: root });
           }}
         >
-          <Dot tone={busy > 0 ? "work" : "idle"} className="mt-[6px]" />
-          <span className="min-w-0 flex-1">
-            <span className="line-clamp-2 text-[13px] leading-[1.35] text-ink">{session.name || session.goal || <span className="italic text-ink-3">No goal set</span>}</span>
-            <span className="block truncate text-[11.5px] text-ink-3">
-              <span className="font-mono text-[11px]">{root}</span> · {session.mode} · {agents} agent{agents === 1 ? "" : "s"}
-              {busy > 0 && ` · ${busy} working`}
-            </span>
-          </span>
-        </button>
+          <span data-testid="session-title" className="min-w-0 flex-1 truncate text-[13px] font-medium leading-[1.35] text-ink">{session.name || goal?.summary || goal?.goal || session.goal || <span className="italic text-ink-3">No goal set</span>}</span>
+          <SupervisorTag model={tree ? modelOf(tree.agent) : modelOf({ profile: session.profile, provider: "", model: null })} />
+        </SessionGoal>
         <RowClose root={root} done={done} onClose={onClose} list={list} />
-        {agents > 0 && (
-          <button
-            type="button"
-            className="mt-[5px] w-[18px] shrink-0 pr-1 text-center text-[11px] leading-none text-ink-3 hover:text-ink"
-            aria-label={folded ? `Show ${root}'s agents` : `Hide ${root}'s agents`}
-            aria-expanded={!folded}
-            onClick={toggle}
-          >
-            {folded ? "▸" : "▾"}
-          </button>
-        )}
       </div>
       {folded ? null : tree ? (
-        <ul className="mb-1 ml-s1 flex flex-col gap-px border-l border-line">
-          <AgentRow node={tree} depth={1} route={route} navigate={navigate} repo={repo} root={root} cursor={cursor} setCursor={setCursor} />
+        <ul className="session-tree mb-1">
+          {tree.children.map((child) => <AgentRow key={child.agent.id} node={child} route={route} navigate={navigate} repo={repo} root={root} cursor={cursor} setCursor={setCursor} />)}
         </ul>
       ) : (
         <p className="pl-s3 text-xs text-ink-3">no agents yet</p>

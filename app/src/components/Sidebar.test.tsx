@@ -48,13 +48,41 @@ const sessionRow = (id: string) => document.querySelector<HTMLButtonElement>(`bu
 const list = () => screen.getByRole("navigation", { name: "Sessions" });
 
 describe("Sidebar", () => {
-  it.each(["rewound", "dismissed"])("omits a %s worker from the session sidebar and its agent count", async (reason) => {
+  it("draws tree lines with workers directly under the session and nested teams under their parent", async () => {
+    const supervisor = { ...worker.agents![0], profile: "supervisor-sonnet", milestone: "Release page" };
+    const { sync } = mount({ workspaces: [root, { ...worker, agents: [supervisor, child] }] });
+    await waitFor(() => expect(agentRow("c1")).toBeTruthy());
+    expect(agentRow("sup1")).toBeNull();
+    expect(agentRow("w1")!.closest("ul")!.parentElement!.dataset.session).toBe("sup1");
+    expect(agentRow("c1")!.closest("ul")!.parentElement).toBe(agentRow("w1")!.closest("li"));
+    expect(agentRow("w1")!.closest("li")!.classList.contains("session-tree-node")).toBe(true);
+    expect(agentRow("c1")!.closest("li")!.classList.contains("session-tree-node")).toBe(true);
+    expect(agentRow("w1")!.querySelector(".supervisor-tag")!.textContent).toContain("sonnet");
+    expect(agentRow("c1")!.textContent).not.toContain("↳");
+    sync.stop();
+  });
+
+  it("uses the short goal summary on one line and copies the full goal", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    const { sync, navigate } = mount({ workspaces: [root], goal: { ...goal, summary: "CLI polish" } as GoalDTO });
+    await waitFor(() => expect(sessionRow("sup1")!.textContent).toContain("CLI polish"));
+    expect(sessionRow("sup1")!.querySelector("[data-testid=session-title]")!.classList.contains("truncate")).toBe(true);
+    expect(sessionRow("sup1")!.textContent).not.toMatch(/sup1|interactive|agents|working/);
+    expect(sessionRow("sup1")!.querySelector(".supervisor-tag")).toBeTruthy();
+    fireEvent.click(sessionRow("sup1")!);
+    expect(navigate).toHaveBeenLastCalledWith({ screen: "session", root: "sup1", repo: REPO, agent: "sup1" });
+    await act(async () => fireEvent.dblClick(sessionRow("sup1")!));
+    expect(writeText).toHaveBeenCalledWith(goal.goal);
+    sync.stop();
+  });
+
+  it.each(["rewound", "dismissed"])("omits a %s worker from the session sidebar", async (reason) => {
     const past = { ...worker.agents![0], status: reason === "rewound" ? "rewound" : "exited", dismissed_at: reason === "dismissed" ? 1 : null };
     const fresh = { ...worker.agents![0], id: "fresh" };
     const { sync } = mount({ workspaces: [root, { ...worker, agents: [past, fresh] }] }, { screen: "session", root: "sup1", repo: REPO });
     await waitFor(() => expect(agentRow("fresh")).toBeTruthy());
     expect(agentRow("w1")).toBeNull();
-    expect(sessionRow("sup1")!.textContent).toContain("2 agents");
     sync.stop();
   });
 
@@ -149,18 +177,14 @@ describe("Sidebar", () => {
     expect(within(screen.getByTestId("status-line")).getByRole("button", { name: "Open Account › Usage" })).toBeTruthy();
     await waitFor(() => expect(agentRow("w1")).toBeTruthy());
     expect(screen.getByTestId("repo-proj")).toBeTruthy();
-    // Under "Sessions": the session (its goal, its id and mode under it) with the supervisor and its workers
-    // nested under it, as the mockup draws them; nothing in the tree about what needs a person (C2b).
+    // The session is its supervisor, with the workers directly beneath it.
     const session = screen.getByTestId("tree-session-sup1");
     expect(sessionRow("sup1")!.textContent).toContain("Ship ls --json");
-    expect(sessionRow("sup1")!.textContent).toContain("sup1 · interactive · 3 agents · 2 working");
     expect(sessionRow("sup1")!.title).toContain("⌘1");
-    expect(session.contains(agentRow("sup1"))).toBe(true);
+    expect(agentRow("sup1")).toBeNull();
     expect(session.contains(agentRow("w1"))).toBe(true);
     expect(agentRow("w1")!.closest("li")!.contains(agentRow("c1"))).toBe(true);
     // The rows read: a dot for the CLI's status, "id · role", the label; the branch is in the tooltip.
-    expect(agentRow("sup1")!.querySelector(".side-dot")!.getAttribute("data-tone")).toBe("idle");
-    expect(within(agentRow("sup1")!).getByTestId("agent-role").textContent).toBe("supervisor");
     expect(agentRow("w1")!.querySelector(".side-dot")!.getAttribute("data-tone")).toBe("work");
     expect(within(agentRow("w1")!).getByTestId("agent-role").textContent).toBe(roleOf(worker.agents![0].profile));
     expect(agentRow("w1")!.title).toContain("feat/ls");
@@ -177,7 +201,7 @@ describe("Sidebar", () => {
     expect(screen.queryByTestId("summary")).toBeNull();
     // The route's agent is the current one.
     expect(agentRow("w1")!.getAttribute("aria-current")).toBe("page");
-    expect(agentRow("sup1")!.getAttribute("aria-current")).toBeNull();
+    expect(sessionRow("sup1")!.getAttribute("aria-current")).toBeNull();
     // A paused session sits behind the group's collapsed "Paused · 1" row, at its foot.
     expect(sessionRow("sup0")).toBeNull();
     expect(screen.getByTestId("repo-proj").lastElementChild!.textContent).toContain("Paused · 1");

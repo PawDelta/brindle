@@ -37,7 +37,7 @@ const GOAL_JOBS = new Set(["goal.check", "session.pr"]);
 
 /* Copy the full startup request from the goal title. Keyed by session and text
    by the caller, so pending copies and feedback cannot cross sessions. */
-export function SessionGoal({ text, children, className, onOpen, noun = "Goal", title, enterCopies = true, current, treeAgent, row }: {
+export function SessionGoal({ text, children, className, onOpen, noun = "Goal", title, enterCopies = true, current, treeAgent, treeSession, row }: {
   text?: string | null;
   children: ReactNode;
   className: string;
@@ -48,6 +48,7 @@ export function SessionGoal({ text, children, className, onOpen, noun = "Goal", 
   enterCopies?: boolean;
   current?: "page";
   treeAgent?: string;
+  treeSession?: string;
   row?: string;
 }) {
   const views = usePtyViews();
@@ -81,7 +82,7 @@ export function SessionGoal({ text, children, className, onOpen, noun = "Goal", 
     <div className="relative min-w-0 flex-1">
       <button type="button" className={className} title={title ?? (text ? "Double-click to copy the goal" : "Open the session")}
         onClick={onOpen} onDoubleClick={() => void copy()} aria-current={current}
-        data-tree-agent={treeAgent} data-row={row}
+        data-tree-agent={treeAgent} data-tree-session={treeSession} data-row={row}
         onKeyDown={(e) => {
           if (e.key === "Enter" && text && enterCopies) {
             e.preventDefault();

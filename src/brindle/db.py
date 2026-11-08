@@ -122,6 +122,7 @@ CREATE TABLE IF NOT EXISTS autopilot (
     root_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
     enabled INTEGER NOT NULL DEFAULT 1,
     goal TEXT,                     -- NULL until the user says what we're building
+    summary TEXT,                  -- short goal label for the sidebar
     detail TEXT,
     state TEXT NOT NULL DEFAULT 'running',  -- running | blocked | stalled | usage_paused | auditing | done
     note TEXT,                     -- why it's blocked or stalled
@@ -1058,6 +1059,7 @@ class Autopilot:
     analysis_doc: int | None = None    # the person requested a doc for this goal
     analysis_goal_at: float | None = None  # when the current goal began (workers since count toward its offer)
     analysis_offer: str | None = None  # the doc offer: open | accepted | dismissed (None: never made)
+    summary: str | None = None        # a short goal label for the sidebar
 
 
 @dataclass
@@ -1495,7 +1497,7 @@ class DB:
             self.conn.execute("ALTER TABLE autopilot ADD COLUMN usage_resets_at REAL")
         if "usage_paused_ids" not in cols:
             self.conn.execute("ALTER TABLE autopilot ADD COLUMN usage_paused_ids TEXT")
-        for col, kind in (("goal_sha", "TEXT"), ("auditor_id", "TEXT"), ("audit_sha", "TEXT"),
+        for col, kind in (("summary", "TEXT"), ("goal_sha", "TEXT"), ("auditor_id", "TEXT"), ("audit_sha", "TEXT"),
                           ("audit_ok", "INTEGER"), ("audit_history", "TEXT"), ("question", "TEXT"),
                           ("nudged_time", "REAL"), ("proposal", "TEXT"), ("external_wait", "TEXT")):
             if col not in cols:
