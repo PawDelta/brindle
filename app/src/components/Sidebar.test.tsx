@@ -13,6 +13,7 @@ import { BASE_URL, FakeDaemon, TOKEN, type DaemonData } from "../test/fakeDaemon
 import { REPO, permission, permissionInTerminal, question, root, waiting, worker } from "../test/fixtures";
 import { PAUSED_KEY, SPLIT_KEY, Sidebar, roleOf } from "./Sidebar";
 import { sidebarChanges } from "./SessionContext";
+import { sessionTree } from "../screens/Session/tree";
 
 beforeEach(() => localStorage.clear());
 afterEach(cleanup);
@@ -64,18 +65,35 @@ describe("Sidebar", () => {
     const b = { ...a, id: "w2", milestone: undefined, profile: "developer-heavy" };
     // The pipeline's reviewer is the developer's sibling (same parent), on a Codex model.
     const r = { ...a, id: "w3", mode: "review", profile: "reviewer-codex", provider: "codex", model: "gpt-6-luna", milestone: undefined };
-    const { sync } = mount({ workspaces: [root, { ...worker, agents: [a, b, r] }] }, { screen: "session", root: "sup1", repo: REPO });
+    const g = { ...a, id: "w4", profile: "developer-gemini", provider: "gemini", model: "gemini-3-pro", milestone: undefined };
+    const { sync } = mount({ workspaces: [root, { ...worker, agents: [a, r] }, { ...worker, id: "proj/other", name: "other", branch: "feat/other", agents: [b, g] }] }, { screen: "session", root: "sup1", repo: REPO });
     await waitFor(() => expect(agentRow("w1")).toBeTruthy());
+    expect(within(agentRow("w4")!).getByTestId("agent-role").textContent).toBe("developer · gemini");
     expect(agentRow("w1")!.closest("li")!.contains(agentRow("w3"))).toBe(true);
     expect(within(agentRow("w3")!).getByTestId("agent-role").textContent).toBe("reviewer · codex");
     expect(within(agentRow("w2")!).getByTestId("agent-role").textContent).toBe("developer · claude");
     expect(within(agentRow("w1")!).getByTestId("agent-title").textContent).toBe("Logo goes Home ");
     expect(within(agentRow("w1")!).getByTestId("agent-role").textContent).toBe("developer · haiku");
-    expect(within(agentRow("w2")!).getByTestId("agent-title").textContent).toBe("Ls ");
+    expect(within(agentRow("w2")!).getByTestId("agent-title").textContent).toBe("Other ");
     await act(async () => fireEvent.dblClick(agentRow("w1")!));
     expect(writeText).toHaveBeenCalledWith("id: w1\nrole: developer\nprofile: developer-haiku\nbranch: feat/ls\nmilestone: Logo goes Home");
     expect(screen.getByRole("status").textContent).toContain("copied");
     sync.stop();
+  });
+
+  it("nests a reviewer only under the one worker of its own session in its workspace", () => {
+    const agent = (id: string, mode: string, parent: string) => ({ ...worker.agents![0], id, mode, parent_id: parent });
+    const ws = (agents: ReturnType<typeof agent>[]) => ({ ...worker, agents });
+    const parentsIn = (workspaces: ReturnType<typeof ws>[], of: string) => {
+      const found = new Map<string, string>();
+      const walk = (n: NonNullable<ReturnType<typeof sessionTree>>) => n.children.forEach((c) => { found.set(c.agent.id, n.agent.id); walk(c); });
+      walk(sessionTree(workspaces, "sup1")!);
+      return found.get(of);
+    };
+    // Sharing the workspace with its supervisor, the sole worker still wins; another session's worker or a second worker leave it be.
+    expect(parentsIn([ws([agent("sup1", "interactive", ""), agent("d", "assign", "sup1"), agent("r", "review", "sup1")])], "r")).toBe("d");
+    expect(parentsIn([ws([agent("sup1", "interactive", ""), agent("x", "assign", "sup2"), agent("r", "review", "sup1")])], "r")).toBe("sup1");
+    expect(parentsIn([ws([agent("sup1", "interactive", ""), agent("d", "assign", "sup1"), agent("e", "assign", "sup1"), agent("r", "review", "sup1")])], "r")).toBe("sup1");
   });
 
   it("new user sees no usage failure", async () => {
