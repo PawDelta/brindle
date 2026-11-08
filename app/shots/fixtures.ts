@@ -17,8 +17,9 @@ const SCRATCH = `${BRINDLE_HOME}/scratch/notes-20261020-091200`;
 
 /* An agent, in the tmux window the engine names for it (where the app's tmux client attaches). */
 const agent = (a: Partial<AgentDTO> & Pick<AgentDTO, "id" | "status" | "mode">): AgentDTO => ({
-  profile: "claude",
+  profile: "developer-sonnet",
   provider: "claude",
+  model: "claude-sonnet-4",
   subagents: [],
   window: `brindle:${a.id}`,
   tmux_server: "brindle",

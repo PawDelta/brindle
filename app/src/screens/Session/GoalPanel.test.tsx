@@ -84,34 +84,43 @@ function holdingClient(daemon: FakeDaemon, path: string) {
 const unfold = () => fireEvent.click(screen.getByRole("button", { name: /^Milestones \(/ }));
 
 describe("GoalPanel", () => {
-  it.each([true, false])("keeps the phase line outside the list and updates it on scroll (compact: %s)", async (compact) => {
+  it.each([true, false])("shows the phase line only after its heading scrolls out of view (compact: %s)", async (compact) => {
     const phased = structuredClone(goal);
     phased.milestones![0].phase_name = "Planned work";
     phased.milestones![1].phase_name = "Fixes from testing";
     const view = render(<GoalPanel client={new FakeDaemon({ goal: phased }).client()} repo={REPO} root={ROOT} store={createAppStore()} compact={compact} />);
     await view.findByText(goal.goal!);
     if (!compact) unfold();
-    const line = view.getByTestId("goal-phase-line");
+    expect(view.queryByTestId("goal-phase-line")).toBeNull();
+    expect(view.queryByTestId("goal-where")).toBeNull();
     const list = view.getByTestId("goal-scroll");
-    expect(list.contains(line)).toBe(false);
-    expect(line.nextElementSibling).toBe(list);
-    expect(line.textContent).toBe("Planned work1 of 1");
-    expect(line.classList.contains("flex-nowrap")).toBe(true);
-    expect(line.firstElementChild?.classList.contains("truncate")).toBe(true);
-    expect(line.lastElementChild?.classList.contains("shrink-0")).toBe(true);
+    let firstTop = 90;
     let nextTop = 150;
     vi.spyOn(list, "getBoundingClientRect").mockImplementation(() => ({ top: 100 }) as DOMRect);
     const headers = view.getAllByTestId("phase-fold");
-    vi.spyOn(headers[0], "getBoundingClientRect").mockImplementation(() => ({ top: 50 }) as DOMRect);
-    vi.spyOn(headers[1], "getBoundingClientRect").mockImplementation(() => ({ top: nextTop }) as DOMRect);
+    vi.spyOn(headers[0], "getBoundingClientRect").mockImplementation(() => ({ top: firstTop, bottom: firstTop + 20 }) as DOMRect);
+    vi.spyOn(headers[1], "getBoundingClientRect").mockImplementation(() => ({ top: nextTop, bottom: nextTop + 20 }) as DOMRect);
     fireEvent.scroll(list);
+    expect(view.queryByTestId("goal-phase-line")).toBeNull();
+    firstTop = 80;
+    fireEvent.scroll(list);
+    const line = view.getByTestId("goal-phase-line");
+    expect(list.contains(line)).toBe(false);
+    expect(line.nextElementSibling).toBe(list);
+    expect(line.classList.contains("absolute")).toBe(true);
     expect(line.textContent).toBe("Planned work1 of 1");
     nextTop = 99;
     fireEvent.scroll(list);
-    expect(line.textContent).toBe("Fixes from testing0 of 1");
+    expect(view.queryByTestId("goal-phase-line")).toBeNull();
+    nextTop = 80;
+    fireEvent.scroll(list);
+    expect(view.getByTestId("goal-phase-line").textContent).toBe("Fixes from testing0 of 1");
     nextTop = 150;
     fireEvent.scroll(list);
-    expect(line.textContent).toBe("Planned work1 of 1");
+    expect(view.getByTestId("goal-phase-line").textContent).toBe("Planned work1 of 1");
+    firstTop = 100;
+    fireEvent.scroll(list);
+    expect(view.queryByTestId("goal-phase-line")).toBeNull();
     view.unmount();
     const plain = render(<GoalPanel client={new FakeDaemon({ goal: structuredClone(goal) }).client()} repo={REPO} root={ROOT} store={createAppStore()} compact={compact} />);
     await plain.findByText(goal.goal!);
@@ -565,7 +574,7 @@ describe("GoalPanel", () => {
     expect(rows()).toEqual(["M3", "M4"]);
     // The sidebar's steps go by their short names: a done one checked, the active one marked.
     if (compact) expect(view.getAllByTestId("milestone").map((li) => li.textContent)).toEqual(["✓M3", "●M4"]);
-    expect(view.getByTestId("goal-where").textContent).toBe("phase 2 of 3");
+    expect(view.queryByTestId("goal-where")).toBeNull();
     // Only the panel's fold line carries the tiny per-phase bar, one segment per milestone.
     expect([...folds()[1].querySelectorAll(".bar-s i")].map((i) => (i as HTMLElement).dataset.s)).toEqual(compact ? [] : ["passed", "todo"]);
     fireEvent.click(folds()[0]);
