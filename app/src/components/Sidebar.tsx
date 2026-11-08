@@ -310,15 +310,15 @@ function branchWords(branch: string): string {
   return words ? words[0].toUpperCase() + words.slice(1) : branch;
 }
 
-/* The stage word and colour a row shares with the milestones view: code, checks, review, done; none when at rest. */
-type RowStage = "code" | "checks" | "review" | "done";
-const STAGE_CLASS: Record<RowStage, string> = { code: "working", checks: "checks", review: "review", done: "done" };
+/* The stage word and colour a row shares with the milestones view; none when at rest. */
+type RowStage = "code" | "review" | "done";
+const STAGE_CLASS: Record<RowStage, string> = { code: "working", review: "review", done: "done" };
 
 function stageOf(tone: DotTone, a: { mode: string }, reviewState?: string | null): RowStage | null {
   if (tone === "done") return "done";
   if (a.mode === "review") return tone === "work" ? "review" : null;
   if (reviewState?.startsWith("reviewer")) return "review";
-  if (reviewState?.startsWith("checks") || reviewState?.startsWith("waiting for checks")) return "checks";
+  if (reviewState?.startsWith("checks") || reviewState?.startsWith("waiting for checks")) return "code";
   return tone === "work" ? "code" : null;
 }
 

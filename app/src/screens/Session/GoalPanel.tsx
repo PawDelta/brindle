@@ -276,8 +276,7 @@ export function phaseFolds(milestones: MilestoneDTO[], isDone: (m: MilestoneDTO)
   return folds;
 }
 
-/* The stage the active step is at (the engine's goal_activity): each has its colour in the sidebar, a
-   `st-<stage>` class (styles.css), and its word as a tag. */
+/* Engine stages stay distinct; checks share working's display word and colour. */
 export type Stage = "working" | "checks" | "review" | "merging";
 const STAGES: readonly string[] = ["working", "checks", "review", "merging"];
 const isStage = (s: string | null | undefined): s is Stage => !!s && STAGES.includes(s);
@@ -300,11 +299,7 @@ function shortAgo(at: number, now: number): string {
    when brindle can say and something runs. Null when there is nothing to say (an older engine sends none of it). */
 export function activityLine(goal: GoalDTO, now = Date.now() / 1000): { what: string | null; eta: string | null; checks: boolean } | null {
   const commits = goal.commits_last_hour ?? 0;
-  // While milestone checks or the completion audit run, say so in place of the commits (plain words, no report).
-  const running = goal.auditing
-    ? "Reviewing the finished work"
-    : goal.checking ? `Checking all ${goal.milestones?.length ?? 0} milestones` : null;
-  if (running) return { what: running, eta: null, checks: true };
+  if (goal.checking || goal.auditing) return { what: "Finishing up", eta: null, checks: true };
   const what = commits > 0
     ? `${commits} ${commits === 1 ? "commit" : "commits"} in the last hour`
     : goal.last_commit_at != null ? `last commit ${shortAgo(goal.last_commit_at, now)} ago` : null;
@@ -682,7 +677,8 @@ export function GoalPanel({ client, repo, root, store, compact = false, onReview
     const sideRow = (m: MilestoneDTO) => {
       const state = stateOf(m);
       const active = activeStage.has(m.id);
-      const stage = active ? activeStage.get(m.id) : null;
+      const engineStage = active ? activeStage.get(m.id) : null;
+      const stage = engineStage === "checks" ? "working" : engineStage;
       const label = finished ? "Done" : isPending(m) ? "Pending" : checkLabel(m);
       const tip = [m.title, label, m.state_why ?? (active ? m.detail || m.check_cmd : null)].filter(Boolean).join(" · ");
       return (
@@ -742,10 +738,10 @@ export function GoalPanel({ client, repo, root, store, compact = false, onReview
         </div>
         <div className="side-bar" role="progressbar" aria-label="Progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(donePct)} title={goal.detail ?? undefined}>
           <span className="d" style={{ width: `${donePct}%` }} />
-          {total > 0 && barStages.map((s, i) => <span key={i} className={`n st-${s}`} data-testid="goal-bar-now" style={{ width: `${100 / total}%` }} />)}
+          {total > 0 && barStages.map((s, i) => <span key={i} className={`n st-${s === "checks" ? "working" : s}`} data-testid="goal-bar-now" style={{ width: `${100 / total}%` }} />)}
         </div>
         {activity && (
-          <div className={`side-act${activity.checks ? " st-checks" : ""}`} data-testid="goal-activity">
+          <div className="side-act" data-testid="goal-activity">
             <span className="min-w-0 truncate" data-testid="goal-activity-what">{activity.what}</span>
             {activity.eta && <span data-testid="goal-eta">{activity.eta}</span>}
           </div>
@@ -790,7 +786,7 @@ export function GoalPanel({ client, repo, root, store, compact = false, onReview
         <div className="h-full rounded-full bg-pass" style={{ width: `${pct}%` }} />
       </div>
       {!finished && activityLine(goal)?.checks && (
-        <p className="st-checks text-xs" style={{ color: "var(--st)" }} data-testid="goal-activity-what">{activityLine(goal)?.what}</p>
+        <p className="text-xs text-ink-3" data-testid="goal-activity-what">{activityLine(goal)?.what}</p>
       )}
       {!open && current && (
         <p className="text-xs text-ink-3" data-testid="milestone-now">

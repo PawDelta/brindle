@@ -380,10 +380,10 @@ describe("GoalPanel", () => {
       return [li.dataset.active ?? null, li.className.match(/\bst-(\w+)/)?.[1] ?? null];
     });
     // Alpha's worker is done; Beta's works; Gamma's reported but is busy again (fixing); Delta's branch is in checks.
-    expect(marks()).toEqual([[null, null], ["true", "working"], ["true", "working"], ["true", "checks"]]);
+    expect(marks()).toEqual([[null, null], ["true", "working"], ["true", "working"], ["true", "working"]]);
     expect(view.getAllByTestId("goal-stage")).toHaveLength(3);
     // Delta's reported worker keeps its marker as its branch waits for check room, then waits to merge.
-    for (const [state, stage] of [["checks waiting for room: 2 running", "checks"], ["approved, waiting to merge", "merging"]]) {
+    for (const [state, stage] of [["checks waiting for room: 2 running", "working"], ["approved, waiting to merge", "merging"]]) {
       act(() => store.dispatch({ type: "snapshot", workspaces: [store.getState().workspaces[0], { ...second, review_state: state }], inbox: [] }));
       expect(marks()[3]).toEqual(["true", stage]);
     }
@@ -414,10 +414,11 @@ describe("GoalPanel", () => {
     const view = render(<GoalPanel client={daemon.client()} repo={REPO} root={ROOT} store={createAppStore()} compact />);
     await waitFor(() => expect(view.getAllByTestId("milestone")).toHaveLength(2));
     const [done, active] = view.getAllByTestId("milestone");
+    const displayed = stage === "checks" ? "working" : stage;
     expect(done.className).not.toMatch(/\bst-/);
-    expect(active.className.match(/\bst-(\w+)/)?.[1] ?? null).toBe(stage);
-    expect(view.queryByTestId("goal-bar-now")?.className.match(/\bst-(\w+)/)?.[1] ?? null).toBe(stage);
-    expect(view.queryByTestId("goal-stage")?.textContent ?? null).toBe(stage);
+    expect(active.className.match(/\bst-(\w+)/)?.[1] ?? null).toBe(displayed);
+    expect(view.queryByTestId("goal-bar-now")?.className.match(/\bst-(\w+)/)?.[1] ?? null).toBe(displayed);
+    expect(view.queryByTestId("goal-stage")?.textContent ?? null).toBe(displayed);
   });
 
   /* One activity line: commits in the last hour, else when the last one landed; the estimate only when brindle
@@ -437,16 +438,19 @@ describe("GoalPanel", () => {
     expect(view.queryByTestId("goal-eta")?.textContent ?? null).toBe(eta);
   });
 
-  /* While checks or the audit run, the line says so instead of the commits, in the check stage's colour. */
-  it.each<[Partial<GoalDTO>, string]>([
-    [{ checking: true }, "Checking all 2 milestones"],
-    [{ auditing: true }, "Reviewing the finished work"],
-  ])("shows the checking line %#", async (fields, text) => {
+  /* Both finishing states use the same plain activity line in each view. */
+  it.each<[Partial<GoalDTO>, boolean]>([
+    [{ checking: true }, true],
+    [{ auditing: true }, true],
+    [{ checking: true }, false],
+    [{ auditing: true }, false],
+  ])("shows the checking line %#", async (fields, compact) => {
     const daemon = new FakeDaemon({ goal: { ...structuredClone(goal), commits_last_hour: 3, ...fields } });
-    const view = render(<GoalPanel client={daemon.client()} repo={REPO} root={ROOT} store={createAppStore()} compact />);
-    await waitFor(() => expect(view.getAllByTestId("milestone")).toHaveLength(2));
-    expect(view.getByTestId("goal-activity-what").textContent).toBe(text);
-    expect(view.getByTestId("goal-activity").className).toMatch(/\bst-checks\b/);
+    const view = render(<GoalPanel client={daemon.client()} repo={REPO} root={ROOT} store={createAppStore()} compact={compact} />);
+    const line = await view.findByTestId("goal-activity-what");
+    expect(line.textContent).toBe("Finishing up");
+    expect(line.style.color).toBe("");
+    expect((compact ? view.getByTestId("goal-activity") : line).className).toBe(compact ? "side-act" : "text-xs text-ink-3");
   });
 
   it("shows the checking line on a mounted panel as checks start and stop", async () => {
@@ -458,7 +462,7 @@ describe("GoalPanel", () => {
     expect(screen.queryByTestId("goal-activity-what")).toBeNull();
     daemon.data.goal = { ...goal, checking: true };
     daemon.publish("autopilot.checking", { repo_root: REPO });
-    await waitFor(() => expect(screen.getByTestId("goal-activity-what").textContent).toBe("Checking all 2 milestones"));
+    await waitFor(() => expect(screen.getByTestId("goal-activity-what")).toBeTruthy());
     daemon.data.goal = { ...goal, checking: false };
     daemon.publish("autopilot.checking", { repo_root: REPO });
     await waitFor(() => expect(screen.queryByTestId("goal-activity-what")).toBeNull());
