@@ -23,9 +23,12 @@ direct_spawn_allowed:
   - src/brindle/native/lsp.py     # the native agent runner's language server
   - scripts/*                     # repo scripts
 ---
-Tests in this repo must earn their place. CI fails a pull request whose new test
-covers no line or branch that other tests don't (scripts/check_new_tests.py), or
-that adds more than 15 test functions or more test lines than source lines.
+Tests in this repo must earn their place. There is no limit on how many tests a
+branch adds, but each new test function and each new parametrize row must be worth
+committing. scripts/check_new_tests.py (a repo check on every branch before review,
+and in CI) fails a test or row that covers no line or branch other tests don't, unless
+it is marked `@pytest.mark.variant("why")`. The reviewer is given every test and row
+the diff adds and must be told what bug each would catch; one with no answer is a blocker.
 - Add the fewest tests that would fail without your change: usually one, a
   regression test for the bug or the new branch. Extend an existing test or
   parametrize table before writing a new test, and a new file only for a new module.

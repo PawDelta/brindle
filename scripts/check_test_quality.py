@@ -5,10 +5,8 @@ Collection executes test imports and fixtures' parametrization, but no tests.
 Run with ``uv run python scripts/check_test_quality.py``. The checked-in baseline
 grandfathers specific legacy findings; new findings fail. ``--strict`` shows all
 findings. ``--dump-baseline`` prints proposed baseline JSON for manual review;
-it never edits the baseline. TEST_BUDGET is a rounded ceiling for suite growth,
-changed only deliberately in review, not for tests added on ordinary branches.
-Per-PR growth is guarded by scripts/check_new_tests.py in CI; --budget is
-available for isolated checks.
+it never edits the baseline. The suite's size is reported but never fails: each
+new test or parametrize row is held to scripts/check_new_tests.py instead.
 """
 from __future__ import annotations
 
@@ -25,9 +23,6 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 MAX_PERMUTATIONS = 12
-# Rounded suite ceiling, changed only deliberately in review. Ordinary branches
-# adding tests leave it alone; scripts/check_new_tests.py guards per-PR growth.
-TEST_BUDGET = 4000
 
 
 class Finding(NamedTuple):
@@ -445,14 +440,11 @@ def new_findings(findings: list[Finding], baseline: Counter) -> list[Finding]:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=ROOT)
-    parser.add_argument("--budget", type=int, default=TEST_BUDGET)
     parser.add_argument("--baseline", type=Path, help="use an explicit baseline JSON file")
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--strict", action="store_true", help="ignore legacy baseline")
     modes.add_argument("--dump-baseline", action="store_true", help="print proposed baseline JSON only")
     args = parser.parse_args(argv)
-    if args.budget < 1:
-        parser.error("--budget must be positive")
     root = args.root.resolve()
     tests = root / "tests"
     baseline_path = args.baseline or root / "scripts" / "test_quality_baseline.json"
@@ -481,11 +473,9 @@ def main(argv=None) -> int:
         return 0
     new = new_findings(issues, baseline)
     failures = [i.message for i in new]
-    if collection.count > args.budget:
-        failures.append(f"total test count {collection.count} exceeds budget {args.budget}")
     for issue in failures:
         print(issue)
-    print(f"Test quality: {collection.count}/{args.budget} tests; {len(failures)} new issue(s); "
+    print(f"Test quality: {collection.count} tests; {len(failures)} new issue(s); "
           f"{len(issues) - len(new)} grandfathered")
     return int(bool(failures))
 
