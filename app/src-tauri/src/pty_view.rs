@@ -1276,11 +1276,13 @@ pub enum ClipboardAttachment {
 /// Leave all file access and credential checks to the engine. Only translate
 /// the OS namespace here, using the same WSL target as the daemon connection.
 #[tauri::command]
-pub fn pty_view_attachment_path(path: String) -> Result<String, String> {
-    #[cfg(windows)]
-    { crate::wsl::attachment_path(&path) }
-    #[cfg(not(windows))]
-    { Ok(path) }
+pub async fn pty_view_attachment_path(path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        #[cfg(windows)]
+        { crate::wsl::attachment_path(&path) }
+        #[cfg(not(windows))]
+        { Ok(path) }
+    }).await.map_err(|e| e.to_string())?
 }
 
 // Bound decoded pixels too, while allowing Retina screenshots whose PNG is
@@ -1314,7 +1316,11 @@ fn clipboard_image(image: arboard::ImageData<'_>) -> Result<ClipboardAttachment,
 /// Called only for a paste with no text. File lists use native clipboard formats
 /// (Finder file URLs, Windows HDROP, Linux URI lists), never file names as text.
 #[tauri::command]
-pub fn pty_view_files() -> Result<Vec<ClipboardAttachment>, String> {
+pub async fn pty_view_files() -> Result<Vec<ClipboardAttachment>, String> {
+    tauri::async_runtime::spawn_blocking(clipboard_files).await.map_err(|e| e.to_string())?
+}
+
+fn clipboard_files() -> Result<Vec<ClipboardAttachment>, String> {
     let mut clipboard = arboard::Clipboard::new().map_err(|_| "couldn't open the clipboard")?;
     if clipboard.get_text().is_ok_and(|text| !text.is_empty()) {
         return Ok(Vec::new());
