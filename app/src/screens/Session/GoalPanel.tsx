@@ -422,7 +422,6 @@ export function GoalPanel({ client, repo, root, store, compact = false, onReview
   const [loaded, setLoaded] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
-  const [docSaving, setDocSaving] = useState(false);
   // Beside a terminal the milestones fold away by default (it wants the room); in the sidebar they show.
   const [open, setOpen] = useState(compact);
   // The phase folds the person opened or closed, by fold key; the rest keep their default (only the active phase open).
@@ -466,7 +465,6 @@ export function GoalPanel({ client, repo, root, store, compact = false, onReview
     setLoaded(false);
     setLoadError(null);
     setActionError(null);
-    setDocSaving(false);
     setDocSummary(null);
     setFoldOpen({});
     void refresh();
@@ -589,28 +587,6 @@ export function GoalPanel({ client, repo, root, store, compact = false, onReview
         {docSummary.total} {docSummary.total === 1 ? "doc" : "docs"} · writing {docSummary.writing}, using {docSummary.using} →
       </button>
     ) : null;
-  /* brindle's one-time offer of an analysis doc for a large goal: a small question, the same shape as the visual offer. */
-  const answerDocOffer = (offer: string, accept: boolean) => {
-    setDocSaving(true);
-    setActionError(null);
-    void client.resolveAnalysisOffer(root, offer, accept).then(
-      () => {
-        if (activeSession.current === session) void refresh();
-      },
-      (e: unknown) => {
-        if (activeSession.current === session) setActionError(message(e));
-      },
-    ).finally(() => {
-      if (activeSession.current === session) setDocSaving(false);
-    });
-  };
-  const docChoice = !finished && goal.analysis_offer ? (
-    <div className="inline-flex items-center gap-s1 self-start rounded-full border border-dashed border-line px-s2 text-xs text-ink-2" data-testid="analysis-offer">
-      <span>Write an analysis doc for this goal?</span>
-      <button type="button" disabled={docSaving} onClick={() => answerDocOffer(goal.analysis_offer!, true)}>Yes</button>
-      <button type="button" disabled={docSaving} onClick={() => answerDocOffer(goal.analysis_offer!, false)}>Not now</button>
-    </div>
-  ) : null;
   /* Done's step: close the session, one click, nothing asked. Beside the status in the full view; in the sidebar
      a quiet text button under the milestones, aligned with their names. */
   const closeSession =
@@ -691,7 +667,6 @@ export function GoalPanel({ client, repo, root, store, compact = false, onReview
           <p className="px-0.5 text-[11px] text-ink-3">{finished ? "brindle finished this goal." : "No milestones yet."}</p>
         )}
         {docsLine}
-        {docChoice}
         {closeSession}
         {step}
         {shownError && <p className={`${alert} text-xs`}>{shownError}</p>}
@@ -759,7 +734,6 @@ export function GoalPanel({ client, repo, root, store, compact = false, onReview
           <p className="text-sm text-ink-3">{finished ? "brindle finished this goal." : "No milestones yet."}</p>
         ))}
       {docsLine}
-      {docChoice}
     </section>
   );
 }

@@ -227,6 +227,11 @@ def items(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None) -
                 checks = json.loads(ap.proposal).get("checks") or []
                 out.append(InboxItemDTO(kind="proposed_checks", reason="checks proposed", **link,
                                         detail="\n".join(checks)))
+            if ap and (ap.analysis_offer or "").startswith("open:"):
+                # brindle's one-time offer of an analysis doc: answered Yes / Not now from here
+                # (POST /goal/analysis-offer names the offer id, carried in request_id).
+                out.append(InboxItemDTO(kind="analysis_offer", reason="offers to write an analysis doc",
+                                        detail=ap.goal, request_id=ap.analysis_offer[5:], **link))
             out += _pr_items(db, row.id, ws["branch"], link)
             home = db.get_workspace(row.workspace_id)
             if home and (stuck := session_sync.needs_you(db, home)):

@@ -182,8 +182,13 @@ def test_large_goal_is_offered_a_doc_once_and_yes_turns_it_on(milestones, goal, 
     first = _offer(db)
     autopilot.set_goal(db, "boss", goal, milestones)    # the same goal again keeps the one offer
     assert _offer(db) == first
+    from brindle.service import inbox
+
+    asks = [i for i in inbox.items(db, None) if i.kind == "analysis_offer"]    # the Inbox carries the ask
+    assert [(i.request_id, i.root_id) for i in asks] == [(first, "boss")]
     routes_actions.goal_analysis_offer(db, {}, {"root": "boss", "accept": True, "offer": first})
     assert (_offer(db), db.get_autopilot("boss").analysis_doc) == (None, 1)
+    assert not [i for i in inbox.items(db, None) if i.kind == "analysis_offer"]
     autopilot.set_goal(db, "boss", goal, milestones)    # answered: never asked again for this goal
     assert _offer(db) is None
     with pytest.raises(autopilot.AutopilotError):

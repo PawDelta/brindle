@@ -152,17 +152,15 @@ describe("GoalPanel", () => {
     sync.stop();
   });
 
-  it.each([[true, "Yes"], [false, "Not now"]])("offers an analysis doc once for a large goal; answer %s sets it", async (accepted, label) => {
+  it("shows no analysis-doc button for an offered goal: the offer lives in the Inbox", async () => {
     const daemon = new FakeDaemon({ goal: { ...structuredClone(goal), analysis_offer: "o1" } });
     const store = createAppStore();
     const sync = startSync({ client: daemon.client(), store, connect: daemon.connect });
     render(<GoalPanel client={daemon.client()} repo={REPO} root={ROOT} store={store} />);
 
-    await waitFor(() => expect(screen.getByTestId("analysis-offer")).toBeTruthy());
-    expect(screen.getAllByTestId("analysis-offer")).toHaveLength(1);
-    fireEvent.click(screen.getByRole("button", { name: label }));
-    await waitFor(() => expect(screen.queryByTestId("analysis-offer")).toBeNull());
-    expect(daemon.data.goal?.analysis_doc ?? false).toBe(accepted);
+    await waitFor(() => expect(screen.getByText("Ship the Goal screen")).toBeTruthy());
+    expect(screen.queryByTestId("analysis-offer")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Not now" })).toBeNull();
     sync.stop();
   });
 
