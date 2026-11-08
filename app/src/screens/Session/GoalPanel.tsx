@@ -309,13 +309,6 @@ export function activityLine(goal: GoalDTO, now = Date.now() / 1000): { what: st
   return what || eta ? { what, eta, checks: false } : null;
 }
 
-/* "phase 3 of 4": where the goal is, by its named phases; empty with none, or once nothing is left. */
-function phaseWord(folds: PhaseFold[] | null): string {
-  const named = (folds ?? []).filter((f) => f.name !== null);
-  const at = named.findIndex((f) => f.state !== "done");
-  return at < 0 ? "" : `phase ${at + 1} of ${named.length}`;
-}
-
 const CHEV = (
   <svg className="chev" viewBox="0 0 12 12" aria-hidden>
     <path d="M4.5 3 7.5 6 4.5 9" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
@@ -366,7 +359,7 @@ function PhaseFoldList({ folds, open, onToggle, isDone, large, rowsClass, row, r
   );
 }
 
-/* One fixed phase line; the fold headers themselves scroll away. */
+/* Overlay the current phase only while its own fold header is above the scroller. */
 function PhaseScroll({ folds, isDone, children, className }: {
   folds: PhaseFold[] | null;
   isDone(m: MilestoneDTO): boolean;
@@ -375,15 +368,15 @@ function PhaseScroll({ folds, isDone, children, className }: {
 }) {
   const scroller = useRef<HTMLDivElement>(null);
   const [key, setKey] = useState<number | null>(null);
-  const first = folds?.find((f) => f.name !== null);
-  const current = folds?.find((f) => f.key === key && f.name !== null) ?? first;
+  const current = folds?.find((f) => f.key === key && f.name !== null);
   const update = useCallback(() => {
     const list = scroller.current;
     if (!list) return;
-    const top = list.getBoundingClientRect().top + 2;
-    let next = folds?.find((f) => f.name !== null)?.key ?? null;
+    const top = list.getBoundingClientRect().top;
+    let next: number | null = null;
     for (const header of list.querySelectorAll<HTMLElement>("[data-phase-key]")) {
-      if (header.getBoundingClientRect().top <= top) next = Number(header.dataset.phaseKey);
+      const bounds = header.getBoundingClientRect();
+      if (bounds.top <= top) next = bounds.bottom <= top ? Number(header.dataset.phaseKey) : null;
     }
     setKey(next);
   }, [folds]);
@@ -393,9 +386,9 @@ function PhaseScroll({ folds, isDone, children, className }: {
     else setKey(null);
   }, [children, update]);
   return (
-    <>
+    <div className="relative flex min-h-0 flex-col">
       {current && (
-        <div data-testid="goal-phase-line" className="flex min-w-0 shrink-0 flex-nowrap items-center gap-2 border-b border-line px-1.5 py-1 text-xs">
+        <div data-testid="goal-phase-line" className="pointer-events-none absolute inset-x-0 top-0 z-10 flex min-w-0 flex-nowrap items-center gap-2 border-b border-line bg-canvas px-1.5 py-1 text-xs">
           <span className="min-w-0 flex-1 truncate font-medium" title={current.name!}>{current.name}</span>
           <span className="shrink-0 whitespace-nowrap font-mono text-[10.5px] text-ink-3">
             {current.milestones.filter(isDone).length} of {current.milestones.length}
@@ -403,7 +396,7 @@ function PhaseScroll({ folds, isDone, children, className }: {
         </div>
       )}
       <div ref={scroller} onScroll={update} className={className} data-testid="goal-scroll">{children}</div>
-    </>
+    </div>
   );
 }
 
@@ -667,7 +660,6 @@ export function GoalPanel({ client, repo, root, store, compact = false, title, r
     !isDone(m) && !activeStage.has(m.id) && m.phase == null && !["failed", "regressed"].includes(checkState(m) ?? "");
   // The goal's phases as folds; null without any (the list as it always was).
   const folds = phaseFolds(milestones, isDone, activeStage);
-  const where = finished ? "" : phaseWord(folds);
   const phaseLabel = GOAL_PHASE_LABEL[phase];
   // The sidebar's count line names only the steps after In progress; Done is the green count itself.
   const showPhase = phase !== "in_progress" && phase !== "done";
@@ -812,9 +804,8 @@ export function GoalPanel({ client, repo, root, store, compact = false, title, r
         )}
         </div>
         <PhaseScroll folds={folds} isDone={isDone} className="flex min-h-0 flex-col gap-1.5 overflow-auto pb-1 [&>*]:shrink-0">
-        {(showPhase || where) && <div className="flex shrink-0 items-center justify-between gap-s1 px-0.5 text-[11px] text-ink-3">
-          {showPhase && <span data-testid="goal-phase">{phaseLabel}</span>}
-          {where && <span className="whitespace-nowrap font-normal text-ink-3" data-testid="goal-where">{where}</span>}
+        {showPhase && <div className="flex shrink-0 items-center justify-between gap-s1 px-0.5 text-[11px] text-ink-3">
+          <span data-testid="goal-phase">{phaseLabel}</span>
         </div>}
         {fullGoal}
         {total > 0 && folds ? (
@@ -863,7 +854,6 @@ export function GoalPanel({ client, repo, root, store, compact = false, title, r
         </p>
       )}
       <div className="flex flex-wrap items-center gap-1">
-        {where && <span className="text-xs text-ink-3" data-testid="goal-where">{where}</span>}
         <span className="flex-1" />
         {/* A finished goal shows its milestones, unfolded: nothing to fold them for. */}
         {total > 0 && !finished && (
