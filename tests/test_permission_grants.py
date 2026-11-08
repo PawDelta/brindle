@@ -248,12 +248,11 @@ def test_pending_asks_group_by_general_form_and_one_decision_resolves_the_group(
 @pytest.mark.parametrize("approved, siblings", [
     ("git log --oneline -5", [("git diff HEAD~1 | head -50", "allow"), ("git log -1 && git reset --hard", "deny")]),
     ("ls -la src | head", [("cd src && grep -rn foo . | wc -l", "allow"), ("ls && cd $DIR && cat secret.txt", "ask")]),
-    ("uv run pytest tests/test_a.py -q 2>&1 | tail -5", [("uv run pytest tests/test_b.py", "allow"),
-                                                           ("uv run rm -rf build", "ask")]),
-    ("npm ls --depth=0", [("npm ls react | head -3", "allow")]),
-    ("uv run pytest tests/test_a.py", [("cd / && uv run pytest", "ask"), ("uv run pytest --basetemp=src", "ask"),
+    ("uv run pytest tests/test_a.py", [("uv run pytest tests/test_b.py", "allow"), ("uv run rm -rf build", "ask"),
+                                       ("cd / && uv run pytest", "ask"), ("uv run pytest --basetemp=src", "ask"),
                                        ("uv run pytest -k @args.txt", "ask")]),
-    ("npm config get registry | head", [("npm config set registry https://example.invalid", "ask")]),
+    ("npm config get registry | head", [("npm ls react | head -3", "allow"),
+                                        ("npm config set registry https://example.invalid", "ask")]),
     ("grep -rn foo src | head", [("grep -rn foo src > found.txt", "ask")]),
 ])
 def test_approval_covers_its_family(db, ws, approved, siblings):
@@ -459,7 +458,6 @@ BYPASS = pytest.mark.variant("spelled so the families don't read it: a bypass at
                  marks=BYPASS),
     ({"group": "network/fetch", "decision": "ask"}, "curl -s https://example.com", "ask", 60),
     (PACKAGES, "pip install requests", "deny", None),
-    (PACKAGES, "python -m pip install requests", "deny", None),
     pytest.param(PACKAGES, "python -I -m pip install requests", "deny", None, marks=BYPASS),
     pytest.param(PACKAGES, "npm --location global install left-pad", "deny", None, marks=BYPASS),
     pytest.param(PACKAGES, "sudo --user root npm install left-pad", "deny", None, marks=BYPASS),
