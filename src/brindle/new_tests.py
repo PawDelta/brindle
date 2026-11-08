@@ -22,8 +22,12 @@ ROW_WIDTH = 100
 def _consts(tree: ast.Module) -> dict[str, ast.expr]:
     found = {}
     for node in tree.body:
-        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
-            found[node.targets[0].id] = node.value
+        if isinstance(node, ast.Assign):
+            # every name a chained or unpacking assignment binds (A = B = 1; A, B = f())
+            for target in node.targets:
+                for name in ast.walk(target):
+                    if isinstance(name, ast.Name):
+                        found[name.id] = node.value
         elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.value:
             found[node.target.id] = node.value
     return found
