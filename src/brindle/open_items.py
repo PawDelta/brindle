@@ -91,9 +91,10 @@ def _working(worker: Agent, panes=None) -> bool:
 
 
 def _settled(worker: Agent) -> bool:
-    """Closed for good. One that died after an earlier report is marked done
-    (cull.note_dead_panes), but in a fix round its work still isn't finished."""
-    return (worker.dismissed_at is not None or worker.status == "done") and worker.pipeline != "fixing"
+    """Closed for good: dismissed on purpose, or done. One that died after an
+    earlier report is marked done too (cull.note_dead_panes), but in a fix
+    round its work still isn't finished."""
+    return worker.dismissed_at is not None or (worker.status == "done" and worker.pipeline != "fixing")
 
 
 def _takeover_due(item: OpenItem, now: float) -> bool:
@@ -168,7 +169,7 @@ def sweep(db: DB, now: float, panes) -> list[str]:
         try:
             if (_takeover_due(item, now) and supervisor is not None
                     and supervisor.status == "idle" and agents.is_alive(supervisor, panes)):
-                line = reassign(db, item, now)
+                line = _attempt(db, item, worker, now)
                 if line:
                     done.append(line)
             elif item.level < len(ESCALATE_AFTER) and age >= ESCALATE_AFTER[item.level]:
@@ -177,6 +178,32 @@ def sweep(db: DB, now: float, panes) -> list[str]:
         except Exception:  # noqa: BLE001 - one worker's item must never stop the sweep
             log.exception("brindle: couldn't act on %s's open item", worker.id)
     return done
+
+
+def _attempt(db: DB, item: OpenItem, worker: Agent, now: float) -> str | None:
+    """``reassign`` for the sweep. A takeover that errors can't be left due:
+    a due item lets its supervisor stop, so this would let it stop for good."""
+    try:
+        return reassign(db, item, now)
+    except Exception:  # noqa: BLE001 - see above
+        log.exception("brindle: couldn't take over %s", worker.id)
+        return _give_up(db, item, worker, "an internal error stopped it (see brindle's log)", None)
+
+
+def _hold_off(db: DB, item: OpenItem, now: float, actor: Agent | None) -> None:
+    """A takeover found the worker alive. Back at work closes its item. Any
+    lesser sign (an edit since it opened, a command still running) restarts the
+    hour: the supervisor is held to it again, and the sign counts only once."""
+    worker = db.get_agent(item.worker_id)
+    if worker is None or db.get_open_item(item.worker_id) is None:
+        return
+    if _working(worker):
+        close(db, worker.id)
+        return
+    db.restart_open_item(worker.id, now)
+    if actor is None:
+        _tell(db, item.supervisor_id, (f"brindle held off taking over worker {worker.id}: it has shown signs of life "
+                                       f"since this opened, so it gets another hour. {_named(db, item, worker)}"))
 
 
 def for_task(db: DB, ref: str) -> OpenItem | None:
@@ -276,8 +303,7 @@ def reassign(db: DB, item: OpenItem, now: float | None = None, *, actor: Agent |
         db.release_open_item_retire(item.worker_id)
         return None
     if identity_lock.locked_by(worker.id):
-        db.release_open_item_retire(worker.id)   # another identity's: that one's sweep can
-        return None
+        return _give_up(db, item, worker, "another identity's session holds it", actor)
     ws = db.get_workspace(worker.workspace_id)
     task = next((t for t in db.list_tasks(ws.repo_root) if t.agent_id == worker.id), None) if ws else None
     caller_ws = _caller_ws(db, supervisor, ws, task)
@@ -287,7 +313,7 @@ def reassign(db: DB, item: OpenItem, now: float | None = None, *, actor: Agent |
         return _give_up(db, item, worker, why, actor)
 
     if _gone_or_back(db, item, ws):   # before telling anyone it's being removed
-        db.release_open_item_retire(worker.id)
+        _hold_off(db, item, now, actor)
         return None
 
     unmerged_note = (f"\n\n(An earlier worker on this task stopped; its unmerged work is on branch "
@@ -310,7 +336,7 @@ def reassign(db: DB, item: OpenItem, now: float | None = None, *, actor: Agent |
     # The last look, right before retiring it: the repo's event hooks ran just above.
     if _gone_or_back(db, item, ws):
         undo()
-        db.release_open_item_retire(worker.id)
+        _hold_off(db, item, now, actor)
         return None
     try:
         workspaces.remove(db, ws, force=True, delete_branch=False)
@@ -326,8 +352,9 @@ def reassign(db: DB, item: OpenItem, now: float | None = None, *, actor: Agent |
     tasks.move(db, new.id, tasks.UNANSWERED, "pending")
     try:
         started = tasks.start_requeued(db, db.get_task(new.id) or new, f"worker {worker.id}'s task")
-    except ValueError as e:
-        started = f"couldn't start its replacement: {e}"
+    except Exception as e:  # noqa: BLE001 - it is retired already, so the supervisor must hear of this
+        log.exception("brindle: couldn't start %s's replacement", worker.id)
+        started = f"couldn't start its replacement (task {new.id}): {e}"
     minutes = int((now - item.opened_at) // 60)
     body = (f"[brindle] Worker {worker.id} sat {minutes} min on an open item, so brindle took it over: retired it "
             f"(branch `{ws.branch}` kept; any uncommitted changes are in the trash). {started} "

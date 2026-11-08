@@ -109,6 +109,12 @@ def test_a_worker_that_died_in_a_fix_round_stays_open(db, boss, worker, told, mo
     assert cull.note_stalled(db, time.time(), panes())
     assert "w1" in autopilot.on_stop(db, boss, {})["reason"]
 
+    # Closed on purpose, though (agents.close keeps its worktree and branch): nothing to chase.
+    db.update_agent("w1", dismissed_at=time.time())
+    open_items.sweep(db, time.time() + open_items.AUTO_REASSIGN_AFTER, panes())
+    assert db.open_items("boss") == [] and db.list_tasks() == []   # and no takeover
+    assert os.path.isdir(db.get_workspace("w").path)
+
 
 def test_a_stuck_worker_in_a_fix_round_is_reported_once_then_escalates(db, boss, worker, told, monkeypatch):
     """The incident: the idle notice and the fix-round notice overwrote each
@@ -191,6 +197,23 @@ def test_a_worker_that_came_back_is_not_retired(db, boss, takeover, monkeypatch,
     assert takeover["removed"] == [] and takeover["started"] == []
     assert tasks._loads(db.get_task(waiting.id).depends_on) == ["w1"]
     assert {t.state for t in db.list_tasks() if t.id != waiting.id} <= {"cancelled"}
+
+
+def test_a_skipped_takeover_restarts_the_hour_and_the_stop_refusal(db, boss, worker, takeover, told, monkeypatch):
+    """One edit made after the item opened counts as life once, not forever:
+    the supervisor is held to it again, and the next hour's takeover goes ahead."""
+    now = time.time()
+    opened = now - open_items.AUTO_REASSIGN_AFTER
+    db.close_open_item("w1")
+    open_items.track(db, worker, "stopped without calling report_result", opened)
+    monkeypatch.setattr(cull, "_last_edit", lambda ws: opened + 10)
+
+    open_items.sweep(db, now, panes())
+    assert takeover["removed"] == [] and "held off" in told[-1][1]
+    assert "w1" in autopilot.on_stop(db, boss, {})["reason"]
+
+    open_items.sweep(db, now + open_items.AUTO_REASSIGN_AFTER, panes())
+    assert [ws for ws, _ in takeover["removed"]] == ["w"]
 
 
 def test_a_plan_waiting_for_approval_is_not_a_stuck_worker(db, boss, worker, takeover):

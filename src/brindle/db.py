@@ -2324,6 +2324,11 @@ class DB:
                             " AND (retiring_at IS NULL OR retiring_at < ?)", (now, worker_id, expired_before))
         return cur.rowcount == 1
 
+    def restart_open_item(self, worker_id: str, now: float) -> None:
+        """A takeover held off: the hour starts over, and the claim is let go."""
+        with self.tx() as c:
+            c.execute("UPDATE open_items SET opened_at=?, retiring_at=NULL WHERE worker_id=?", (now, worker_id))
+
     def release_open_item_retire(self, worker_id: str) -> None:
         with self.tx() as c:
             c.execute("UPDATE open_items SET retiring_at=NULL WHERE worker_id=?", (worker_id,))
