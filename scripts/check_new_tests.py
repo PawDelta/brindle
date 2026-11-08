@@ -43,7 +43,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from brindle import new_tests as inventory  # noqa: E402  (the reviewer's listing shares the row matching)
 
 APPROVERS = {"hmlerner"}
-MAX_RELATED_FILES = 30     # scoped mode: related test files run beyond the changed ones
+MAX_RELATED_FILES = 12    # scoped mode: related test files run beyond the changed ones
 COMMON_NAME = 40           # a name found in more test files than this picks no tests
 SKIP_NAMES = {"__init__", "main", "run"}
 
