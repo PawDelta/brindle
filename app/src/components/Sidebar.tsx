@@ -303,12 +303,6 @@ function modelOf(a: { model?: string | null; profile: string; provider: string }
   return word ?? (a.profile === a.provider ? "" : a.provider);
 }
 
-/* "feat/logo-goes-home" as "Logo goes home": the row's title when a worker has no milestone. */
-function branchWords(branch: string): string {
-  const words = (branch.split("/").pop() ?? branch).replace(/[-_]+/g, " ").trim();
-  return words ? words[0].toUpperCase() + words.slice(1) : branch;
-}
-
 /* The stage word and colour a row shares with the milestones view; none when at rest. */
 type RowStage = "code" | "review" | "done";
 const STAGE_CLASS: Record<RowStage, string> = { code: "working", review: "review", done: "done" };
@@ -321,9 +315,9 @@ function stageOf(tone: DotTone, a: { mode: string }, reviewState?: string | null
   return tone === "work" ? "code" : null;
 }
 
-/* One agent in a session's tree, and its children under it: a dot, its
-   milestone's title with "role · model" muted (the id, profile and branch are
-   in the tooltip), its stage at the right. Double-clicked, it copies its info. */
+/* One agent in a session's tree, and its children under it: a dot, its role
+   in words, its stage at the right. The tooltip carries id, role, profile,
+   model, branch and milestone. Double-clicked, it copies its info. */
 function AgentRow({ node, route, navigate, repo, root, cursor, setCursor }: { node: AgentNode; repo: string; root: string; cursor: string | null; setCursor(key: string): void } & Pick<SidebarProps, "route" | "navigate">) {
   const a = node.agent;
   const alive = useAppState((s) => s.alive[a.id]);
@@ -333,10 +327,6 @@ function AgentRow({ node, route, navigate, repo, root, cursor, setCursor }: { no
   const role = a.id === root ? "supervisor" : a.profile ? roleOf(a.profile) : "";
   const tone = dotTone(status, a.status);
   const stage = stageOf(tone, a, node.workspace.review_state);
-  const reviewer = a.mode === "review";
-  // A worker reads as its milestone's title (else its branch in words); a reviewer, nested, only as its role.
-  const title = a.id === root || reviewer ? "" : a.milestone || branchWords(node.workspace.branch);
-  const muted = [role, modelOf(a)].filter(Boolean).join(" · ");
   const info = [`id: ${a.id}`, `role: ${role}`, `profile: ${a.profile}`, `branch: ${node.workspace.branch}`, `milestone: ${a.milestone ?? ""}`].join("\n");
   return (
     <li className="session-tree-node">
@@ -347,7 +337,7 @@ function AgentRow({ node, route, navigate, repo, root, cursor, setCursor }: { no
         current={active ? "page" : undefined}
         treeAgent={a.id}
         row={key}
-        title={`${a.id} · ${status.glyph} ${status.label} · ${a.profile} · ${node.workspace.branch} (double-click to copy its info)`}
+        title={`${a.id} · ${status.glyph} ${status.label} · ${role} · ${a.profile} · ${a.model || modelOf(a) || "no model"} · ${node.workspace.branch}${a.milestone ? ` · milestone: ${a.milestone}` : ""} (double-click to copy its info)`}
         className={`flex w-full items-center gap-s1 rounded-r-md py-[3px] pr-s1 text-left hover:bg-surface ${active ? "bg-branch-soft" : ""} ${cursor === key ? CURSOR : ""}`}
         onOpen={() => {
           setCursor(key);
@@ -356,8 +346,7 @@ function AgentRow({ node, route, navigate, repo, root, cursor, setCursor }: { no
       >
         <Dot tone={tone} className={stage ? `st-${STAGE_CLASS[stage]}` : ""} />
         <span className="min-w-0 flex-1 truncate text-xs text-ink">
-          {title && <span data-testid="agent-title">{title} </span>}
-          <span className="text-ink-3" data-testid="agent-role">{muted}</span>
+          <span className="text-ink-3" data-testid="agent-role">{[role, modelOf(a)].filter(Boolean).join(" · ")}</span>
         </span>
         <span className={`max-w-[50%] shrink truncate text-[11px] ${stage ? `st-${STAGE_CLASS[stage]} stage-word` : "text-ink-3"}`} data-testid="agent-status">
           {stage ?? plainLabel(status, a.status)}
