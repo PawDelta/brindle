@@ -1673,22 +1673,26 @@ def set_goal(goal: str, milestones: list[dict[str, str]], detail: str | None = N
     their last result. Pass analysis_doc=true only when the person explicitly
     asked for a doc for this goal. Omission preserves the choice for the same
     goal; a new goal defaults to no doc, regardless of milestone count."""
-    db = DB()
-    found = _session(db)
-    if isinstance(found, str):
-        return found
-    root_id, _ = found
     try:
+        db = DB()
+        found = _session(db)
+        if isinstance(found, str):
+            return found
+        root_id, _ = found
         items = autopilot.milestone_items(db, root_id, milestones)
         autopilot.set_goal(db, root_id, goal, items, detail, analysis_doc=analysis_doc)
+        text = autopilot.progress(db, root_id)
+        repo_root = found[1].repo_root
+        default = load_repo_config(repo_root).default_agent
+        # milestone_items includes an optional sixth field for the phase.
+        note = cost_estimate.reply_note(
+            db, repo_root, [cost_estimate.TaskSpec(item[3] or default) for item in items])
+        return f"{text}\n\n{note}" if note else text
     except autopilot.AutopilotError as e:
         return str(e)
-    text = autopilot.progress(db, root_id)
-    repo_root = found[1].repo_root
-    default = load_repo_config(repo_root).default_agent
-    note = cost_estimate.reply_note(
-        db, repo_root, [cost_estimate.TaskSpec(profile or default) for _, _, _, profile, _ in items])
-    return f"{text}\n\n{note}" if note else text
+    except Exception as e:
+        # The SDK hides unexpected exceptions; keep set_goal failures actionable.
+        raise ToolError(str(e)) from e
 
 
 class _ApproveChecks(BaseModel):
