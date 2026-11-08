@@ -614,10 +614,11 @@ def _run_read(argv: list[str], cwd: Any, env: dict[str, str] | None, input: str 
               own_end: float, reap: bool = False) -> subprocess.CompletedProcess:
     env = {**(os.environ if env is None else env), "GIT_OPTIONAL_LOCKS": "0"}
     # Its own session, so stopping it reaches everything it started (git's hooks, a pager).
-    p = subprocess.Popen(_background(argv), cwd=cwd, env=env, text=text, start_new_session=True,
-                         stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
-                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    # Tracked as it starts: an exit in between would miss it and leave it running.
     with _reads_lock:
+        p = subprocess.Popen(_background(argv), cwd=cwd, env=env, text=text, start_new_session=True,
+                             stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         _reads.add(p)
     try:
         return _wait_read(p, argv, input, timeout, dl, end, own_end, reap)
