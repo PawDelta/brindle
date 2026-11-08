@@ -46,6 +46,7 @@ import type { About, AppUpdater, AppUpdates, CliLink, ReleaseBuildUpdater } from
 import { AppUpdateBanner, AppUpdateProvider } from "./components/AppUpdateBanner";
 import { UpgradeCard, useEngineUpgrade } from "./components/EngineUpgrade";
 import { EngineBanner } from "./components/EngineBanner";
+import Logo from "./components/Logo";
 import { AppCovered, ReconnectOverlay, useReconnect } from "./components/ReconnectOverlay";
 import { Sidebar } from "./components/Sidebar";
 import { Walkthrough, type WalkthroughStep } from "./components/Walkthrough";
@@ -325,6 +326,12 @@ function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, p
         <div className="contents" hidden={reading} inert={held}>
           <Sidebar route={shown} navigate={navigate} refresh={refresh ?? noop} openUrl={openUrl} />
         </div>
+        {/* The sidebar is hidden over a full-window visual: its logo still shows, and still goes Home. */}
+        {reading && (
+          <div className="absolute left-s3 top-s2 z-10">
+            <Logo className="text-[17px]" onHome={() => navigate({ screen: "new" })} />
+          </div>
+        )}
         <div className="relative flex min-w-0 flex-1 flex-col" inert={held}>
           <AppUpdateBanner openUrl={openUrl} />
           {/* The banner's upgrade follows the engine's terminal stream, which a page with no engine doesn't have.

@@ -184,6 +184,13 @@ describe("Sidebar", () => {
     sync.stop();
   });
 
+  it("takes the logo, a button labelled Home, to the Home screen", async () => {
+    const { sync, navigate } = mount({}, { screen: "session", root: "sup1", repo: REPO });
+    fireEvent.click(screen.getByRole("button", { name: "Home" }));
+    expect(navigate).toHaveBeenLastCalledWith({ screen: "new" });
+    sync.stop();
+  });
+
   it("leads with one Inbox · N entry at the very top, the only thing about attention in the sidebar, which opens the Inbox page", async () => {
     const { daemon, sync, navigate } = mount({ workspaces: [root, worker], inbox: [question, waiting, permission] }, { screen: "new" });
     await waitFor(() => expect(screen.getByTestId("inbox-badge").textContent).toBe("3"));
