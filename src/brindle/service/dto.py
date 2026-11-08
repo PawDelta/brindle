@@ -222,6 +222,22 @@ class InboxActionDTO(_DTO):
     path: str
 
 
+class AnalysisOfferMilestoneDTO(_DTO):
+    title: str
+    verified: bool
+
+
+class AnalysisOfferDTO(_DTO):
+    """Current session context for deciding whether to request an analysis doc."""
+    session_name: str
+    goal: str
+    detail: str | None = None
+    milestones: list[AnalysisOfferMilestoneDTO]
+    workers: int
+    repos: int
+    reasons: list[str]
+
+
 class InboxItemDTO(_DTO):
     kind: str
     reason: str
@@ -238,6 +254,7 @@ class InboxItemDTO(_DTO):
     permission: PermissionDTO | None = None
     action: InboxActionDTO | None = None
     visual_id: str | None = None   # a visual's open question: GET /v1/sessions/{root_id}/visuals
+    analysis_offer: AnalysisOfferDTO | None = None
 
 
 class VisualOptionDTO(_DTO):

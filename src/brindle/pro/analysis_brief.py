@@ -67,8 +67,21 @@ def deserves_offer(milestones: int, repos: int = 1, text: str = "", workers: int
     """Whether brindle should offer the person an analysis doc for a goal:
     large (many milestones, several repos, several workers) or design-heavy.
     Never writes one."""
-    return (milestones >= OFFER_MILESTONES or repos >= 2 or workers >= OFFER_WORKERS
-            or (milestones >= OFFER_DESIGN_MILESTONES and bool(_DESIGN.search(text))))
+    return bool(offer_reasons(milestones, repos, text, workers))
+
+
+def offer_reasons(milestones: int, repos: int = 1, text: str = "", workers: int = 0) -> list[str]:
+    """The conditions this work meets, shared by the offer and its explanation."""
+    reasons = []
+    if milestones >= OFFER_MILESTONES:
+        reasons.append(f"This goal has {milestones} milestones.")
+    if repos >= 2:
+        reasons.append(f"This work spans {repos} repositories.")
+    if workers >= OFFER_WORKERS:
+        reasons.append(f"{workers} workers have been assigned to this goal.")
+    if milestones >= OFFER_DESIGN_MILESTONES and _DESIGN.search(text):
+        reasons.append(f"This goal includes design or restructuring work across {milestones} milestones.")
+    return reasons
 
 
 def _named(name: str, identity: str) -> str:
