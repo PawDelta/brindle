@@ -1866,7 +1866,7 @@ ESTIMATE_DAYS = 14
 def _goal_eta(db: DB, tree: list[Agent], live: list[Agent], now: float) -> float | None:
     """Remaining critical path through workers and queued dependencies, then goal checks/audit."""
     import statistics
-    from brindle import agents, tasks
+    from brindle import agents, fair_share, tasks
 
     since = now - ESTIMATE_DAYS * 86400
     day = time.strftime("%Y-%m-%d", time.gmtime(since))
@@ -1890,6 +1890,7 @@ def _goal_eta(db: DB, tree: list[Agent], live: list[Agent], now: float) -> float
         return medians[key]
 
     remaining: dict[str, float] = {}
+    releases: list[float] = []
     for a in live:
         ws = db.get_workspace(a.workspace_id)
         merge = typical(ws.repo_root) if ws else None
@@ -1901,51 +1902,59 @@ def _goal_eta(db: DB, tree: list[Agent], live: list[Agent], now: float) -> float
             build = typical(ws.repo_root, a.profile)
             if build is None:
                 return None
-            remaining[a.id] = max(60.0, build - max(0, now - a.created_at)) + merge
+            release = max(60.0, build - max(0, now - a.created_at))
+            remaining[a.id] = release + merge
+            releases.append(release)
 
     ids = {a.id for a in tree}
     queued = {t.id: t for t in db.list_tasks() if t.caller_id in ids
               and t.state in (*tasks.QUEUED, "starting") and t.agent_id not in remaining}
-    visiting: set[str] = set()
-
-    def finish(task_id: str) -> float | None:
-        key = f"task:{task_id}"
-        if key in remaining:
-            return remaining[key]
-        if task_id in visiting:
-            return None
-        visiting.add(task_id)
-        t = queued[task_id]
+    dependencies: dict[str, list[str]] = {}
+    durations: dict[str, tuple[float, float]] = {}
+    for t in queued.values():
         ws = db.get_workspace(t.caller_ws_id)
         build, merge = typical(t.repo_root, t.profile), typical(t.repo_root)
         if ws is None or build is None or merge is None:
             return None
-        waits = []
+        durations[t.id] = (build, merge)
+        dependencies[t.id] = []
+        session_repos = tasks._session_repos(db, ws, t.caller_id)
         for dep in json.loads(t.depends_on or "[]"):
             try:
-                _, upstream, branch = tasks._resolve_dependency(db, ws, dep, [t.repo_root], dependent_task_id=t.id)
+                _, upstream, branch = tasks._resolve_dependency(db, ws, dep, session_repos, dependent_task_id=t.id)
             except agents.AgentError:
                 return None
             if upstream is not None and upstream.id in queued:
-                wait = finish(upstream.id)
+                dependencies[t.id].append(f"task:{upstream.id}")
             elif upstream is not None and upstream.state == "merged":
-                wait = 0.0
+                continue
             else:
                 worker = next((a for a in live if a.id == dep or
                                (branch is not None and a.workspace_id == branch.id)), None)
-                wait = remaining.get(worker.id) if worker else None
-            if wait is None:
+                if worker is None:
+                    return None
+                dependencies[t.id].append(worker.id)
+    if queued:
+        cap = fair_share.limit()
+        cap = cap if cap > 0 else len(releases) + len(queued)
+        # If already over capacity, enough workers must report before a slot opens.
+        slots = sorted(releases, reverse=True)[:cap]
+        slots.extend([0.0] * max(0, cap - len(slots)))
+        while queued:
+            candidates = []
+            for t in queued.values():
+                deps = dependencies[t.id]
+                if all(dep in remaining for dep in deps):
+                    start = max(min(slots), max((remaining[dep] for dep in deps), default=0.0))
+                    candidates.append((start, t.created_at, t.id))
+            if not candidates:   # cyclic dependencies have no estimable launch order
                 return None
-            waits.append(wait)
-        # Without an explicit dependency, a queued worker waits for a running slot.
-        wait = max(waits, default=min((remaining[a.id] for a in live), default=0.0))
-        remaining[key] = wait + build + merge
-        visiting.remove(task_id)
-        return remaining[key]
-
-    for task_id in queued:
-        if finish(task_id) is None:
-            return None
+            start, _, task_id = min(candidates)
+            build, merge = durations[task_id]
+            # Reporting releases the execution slot; merging releases dependants.
+            slots[slots.index(min(slots))] = start + build
+            remaining[f"task:{task_id}"] = start + build + merge
+            del queued[task_id]
     if not remaining:
         return None
     home = db.get_workspace(tree[0].workspace_id)
