@@ -293,6 +293,14 @@ body {
    small button. The split between the context and the tree is a handle
    that drags. Every colour here is a token. */
 .side-handle { cursor: row-resize; }
+.side-context { flex-shrink: 1; min-height: 100px; max-height: 55%; }
+.side-sessions { flex-basis: 80px; }
+.side > .contents > [data-testid="inbox-link"] { flex-shrink: 0; }
+@media (max-height: 500px) {
+  .side { gap: 4px; padding-top: 8px; padding-bottom: 8px; }
+  .side-context { min-height: 88px; }
+  .side .side-h { padding-top: 2px; padding-bottom: 2px; }
+}
 .side-handle i { display: block; width: 36px; height: 4px; border-radius: 2px; background: var(--line-strong); }
 .side-handle:hover i, .side-handle[data-dragging="true"] i, .side-handle:focus-visible i { background: var(--branch); }
 .side-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--ink-3); }
@@ -333,7 +341,7 @@ body {
 .side-bar .d { background: var(--pass); }
 .side-bar .n { background: var(--st); }
 .side-act.st-checks { color: var(--st); }
-.side-act { display: flex; justify-content: space-between; gap: 8px; padding: 0 2px; font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); white-space: nowrap; }
+.side-act { padding: 0 2px; font-family: var(--sans); font-size: 11.5px; color: var(--ink-3); }
 .side-ms { display: flex; flex-direction: column; gap: 1px; }
 .side-ms .m { display: flex; align-items: center; gap: 7px; padding: 2px 6px; border-radius: var(--r); font-size: 12px; color: var(--ink-2); }
 .side-ms .m .i { width: 10px; flex: none; text-align: center; font-size: 10px; color: var(--ink-3); }
@@ -361,6 +369,7 @@ body {
 .ms-fold.ms-pending { padding: 2px 6px; color: var(--ink-3); gap: 7px; }
 .ms-fold.ms-pending .i { width: 10px; flex: none; text-align: center; font-size: 10px; }
 .ms-fold.ms-pending .n { font-weight: 400; }
+.ms-fold.ms-done .i { color: var(--pass); }
 .ms-fold[data-st="done"] .n, .ms-fold[data-st="todo"] .n { color: var(--ink-3); font-weight: 400; }
 .ms-fold[data-st="done"] .k { color: var(--pass); }
 .ms-fold .bar-s { display: flex; gap: 2px; width: 72px; height: 4px; flex: none; margin: 0 8px; }
