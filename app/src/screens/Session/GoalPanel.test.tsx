@@ -335,6 +335,57 @@ describe("GoalPanel", () => {
     expect(sidebar.queryByTestId("goal-where")).toBeNull();
   });
 
+  /* Every milestone a live worker is linked to is active, in the stage's colour and word; one nobody works on is not. */
+  it("marks several active milestones, one per live worker", async () => {
+    const milestones: MilestoneDTO[] = [
+      { ...goal.milestones![1], id: 1, position: 1, title: "Alpha", state: "not_done", status: "pending" },
+      { ...goal.milestones![1], id: 2, position: 2, title: "Beta", state: "not_done", status: "pending" },
+      { ...goal.milestones![1], id: 3, position: 3, title: "Gamma", state: "not_done", status: "pending" },
+      { ...goal.milestones![1], id: 4, position: 4, title: "Delta", state: "not_done", status: "pending" },
+    ];
+    const daemon = new FakeDaemon({ goal: { ...structuredClone(goal), root_id: APP_ROOT, stage: "working", milestones } });
+    const store = createAppStore();
+    const agent = (id: string, milestone: string, status = "processing", extra = {}) => ({ id, profile: "developer", provider: "claude", status, mode: "assign", parent_id: APP_ROOT, milestone, subagents: [], ...extra });
+    const second = { ...structuredClone(root), id: "proj/feat-b", review_state: "checks running", agents: [agent("w4", "Delta", "idle", { reported: true })] };
+    store.dispatch({
+      type: "snapshot",
+      workspaces: [
+        { ...structuredClone(root), agents: [{ ...root.agents![0], id: APP_ROOT }, agent("w1", "Beta"), agent("w2", "Gamma", "processing", { reported: true }), agent("w3", "Alpha", "done")] },
+        second,
+      ],
+      inbox: [],
+    });
+    const view = render(<GoalPanel client={daemon.client()} repo={REPO} root={APP_ROOT} store={store} compact />);
+    await waitFor(() => expect(view.getAllByTestId("milestone")).toHaveLength(4));
+    const marks = () => view.getAllByTestId("milestone").map((li) => [li.dataset.active ?? null, li.className.match(/\bst-(\w+)/)?.[1] ?? null]);
+    // Alpha's worker is done; Beta's works; Gamma's reported but is busy again (fixing); Delta's branch is in checks.
+    expect(marks()).toEqual([[null, null], ["true", "working"], ["true", "working"], ["true", "checks"]]);
+    expect(view.getAllByTestId("goal-stage")).toHaveLength(3);
+    // Delta's reported worker keeps its marker as its branch waits for check room, then waits to merge.
+    for (const [state, stage] of [["checks waiting for room: 2 running", "checks"], ["approved, waiting to merge", "merging"]]) {
+      act(() => store.dispatch({ type: "snapshot", workspaces: [store.getState().workspaces[0], { ...second, review_state: state }], inbox: [] }));
+      expect(marks()[3]).toEqual(["true", stage]);
+    }
+    // Beta's worker exits (a liveness message, no new snapshot): it drops out while the others stay active.
+    act(() => store.dispatch({ type: "stream", message: { type: "liveness", agents: { w1: false } } } as never));
+    expect(marks()).toEqual([[null, null], [null, null], ["true", "working"], ["true", "merging"]]);
+  });
+
+  /* The goal's count and bar stay above the list; only the milestones scroll. */
+  it("keeps the goal header pinned outside the scrolling milestone list", async () => {
+    const daemon = new FakeDaemon({ goal: structuredClone(goal) });
+    const view = render(<GoalPanel client={daemon.client()} repo={REPO} root={ROOT} store={createAppStore()} compact />);
+    await waitFor(() => expect(view.getAllByTestId("milestone")).toHaveLength(2));
+    const header = view.getByTestId("goal-header");
+    const list = view.getByTestId("goal-scroll");
+    expect(header.contains(view.getByTestId("goal-line"))).toBe(true);
+    expect(header.contains(view.getByRole("progressbar"))).toBe(true);
+    expect(list.contains(header)).toBe(false);
+    expect(list.className).toContain("overflow-auto");
+    expect(header.className).toContain("shrink-0");
+    expect(list.contains(view.getAllByTestId("milestone")[0])).toBe(true);
+  });
+
   /* The active step and its slice of the bar take its stage's colour, with the stage's word; with nothing
      running, neither does. */
   it.each([["working"], ["checks"], ["review"], ["merging"], [null]])("colours the active step by its stage %s", async (stage) => {

@@ -18,6 +18,9 @@ from brindle import agents, autopilot, mcp_server, rewind, workspaces
 from brindle.db import Agent
 
 
+_REAL_SPAWN = agents.spawn   # before the autouse fake replaces it
+
+
 def run(coro):
     return asyncio.run(coro)
 
@@ -131,6 +134,17 @@ def test_assign_isolate_gives_the_worker_its_own_worktree_and_branch(db, repo, b
     assert db.get_agent(wid).workspace_id == ws.id
     assert db.get_agent(wid).parent_id == "boss"
     assert "feat-a" in mcp_server.list_agents() and wid in mcp_server.list_agents()
+
+
+def test_assign_with_a_milestone_records_it_for_the_worker_not_the_first_unverified(db, repo, boss, monkeypatch, fake_agent_cli):
+    """assign(milestone=2) reaches the real spawn through the task queue: the worker's agent_milestones row
+    names milestone 2, where the default would be the first unverified one."""
+    monkeypatch.setattr(agents, "spawn", _REAL_SPAWN)
+    monkeypatch.setattr(agents, "_launch", lambda db_, a, ws, **kw: db_.set_status(a.id, "processing"))
+    db.add_autopilot("boss")
+    mcp_server.set_goal("ship it", [{"title": "Parse flags", "check": "true"}, {"title": "Print JSON", "check": "true"}])
+    wid = started_id(run(mcp_server.assign("developer", "print json", branch="feat-m", milestone=2)))
+    assert db.agent_milestone(wid) == "Print JSON"
 
 
 def test_assign_without_isolate_shares_the_checkout(db, repo, boss):

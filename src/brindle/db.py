@@ -100,6 +100,12 @@ CREATE TABLE IF NOT EXISTS agent_milestones (
     agent_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
     title TEXT NOT NULL
 );
+-- The goal milestone a queued task's worker is assigned to (assign/handoff's milestone); a table of its
+-- own so no released table gains a column.
+CREATE TABLE IF NOT EXISTS task_milestones (
+    task_id TEXT PRIMARY KEY,
+    title TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS inbox (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
@@ -1835,6 +1841,14 @@ class DB:
     def set_agent_milestone(self, agent_id: str, title: str) -> None:
         with self.tx() as c:
             c.execute("INSERT OR REPLACE INTO agent_milestones (agent_id, title) VALUES (?,?)", (agent_id, title))
+
+    def set_task_milestone(self, task_id: str, title: str) -> None:
+        with self.tx() as c:
+            c.execute("INSERT OR REPLACE INTO task_milestones (task_id, title) VALUES (?,?)", (task_id, title))
+
+    def task_milestone(self, task_id: str) -> str | None:
+        row = self.conn.execute("SELECT title FROM task_milestones WHERE task_id=?", (task_id,)).fetchone()
+        return row["title"] if row else None
 
     def agent_milestone(self, agent_id: str) -> str | None:
         row = self.conn.execute("SELECT title FROM agent_milestones WHERE agent_id=?", (agent_id,)).fetchone()
