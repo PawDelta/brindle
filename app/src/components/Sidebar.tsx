@@ -20,9 +20,9 @@
    session stays listed under it). Clicking a session opens its
    provider session on the supervisor; clicking an agent opens the session
    on that agent. Keys, as in the CLI: ↑ ↓ (or j k) move, Enter opens, ⌘1-9
-   jump to a session, ⌘N starts one. Knowledge, Agents,
-   and Settings as small links at the foot, on one line with an initials
-   button that opens Account and the terminal switch. Theme choices live
+   jump to a session, ⌘N starts one. At the foot, an initials
+   button opens the profile rail (Knowledge, Agents and Settings' tabs), on
+   one line with the terminal switch. Theme choices live
    in Settings. Above the row,
    the most-used weekly allowance opens Account › Usage; beside it, while a provider
    has a problem (signed out, an install failed), a few more that open
@@ -36,7 +36,7 @@ import type { DaemonClient, ProviderUsage } from "../api/client";
 import { DaemonContext } from "../api/context";
 import type { OpenUrl } from "../api/open";
 import type { GoalDTO, SessionDTO } from "../api/schema";
-import { readLastSession, routeSession, sameRoute, settingsTab, type Route, type SessionRef } from "../routes";
+import { inProfileRail, railPage, readLastSession, routeSession, settingsTab, type Route, type SessionRef } from "../routes";
 import { AccountAvatar, SettingsRail } from "./SettingsRail";
 import { pruneShown, seenKey } from "../screens/Inbox/items";
 import { goalPhase, SessionGoal, useGoal } from "../screens/Session/GoalPanel";
@@ -192,7 +192,6 @@ function ProviderProblemLine({ problems, navigate }: { problems: ProviderProblem
    foot's links. */
 const CURSOR = "bg-surface-2 in-focus-visible:ring-1 in-focus-visible:ring-inset in-focus-visible:ring-branch";
 const REPO_HEADING = "px-s1 pb-1 text-[10.5px] font-semibold uppercase tracking-[0.08em] text-ink-3";
-const FOOT_LINK = "text-[11.5px] text-ink-3 hover:text-ink";
 
 /* The split: how tall the session's context is, kept for next time. */
 export const SPLIT_KEY = "brindle.sidebar.split";
@@ -651,6 +650,7 @@ const sheetOnly = (a: Extract<Route, { screen: "session" }>, b: Extract<Route, {
 
 export function Sidebar({ route, navigate, refresh, openUrl, onBackFromSettings }: SidebarProps) {
   const tab = settingsTab(route);
+  const railOpen = inProfileRail(route);
   const { repos, sessions, error: feedError, closeError, close, after } = useSessions();
   const [cursor, setCursor] = useState<string | null>(null);
   const [folded, setFolded] = useState<Set<string>>(new Set());
@@ -783,16 +783,10 @@ export function Sidebar({ route, navigate, refresh, openUrl, onBackFromSettings 
     return () => window.removeEventListener("keydown", jump);
   }, [live, navigate]);
 
-  const page = (to: Route, label: string) => (
-    <button type="button" className={`${FOOT_LINK} ${sameRoute(route, to) ? "font-medium text-ink" : ""}`} aria-current={sameRoute(route, to) ? "page" : undefined} onClick={() => navigate(to)}>
-      {label}
-    </button>
-  );
-
   let index = 0;
   return (
-    <aside className="side flex w-[352px] shrink-0 flex-col gap-[10px] border-r border-line bg-canvas-2 px-[12px] pb-[12px] pt-[14px] text-[13px] text-ink" aria-label="Sidebar">
-      <div className="flex items-center gap-s1 px-1.5 pb-1">
+    <aside className="side flex min-h-0 w-[352px] max-w-full shrink-0 flex-col gap-[10px] overflow-hidden border-r border-line bg-canvas-2 px-[12px] pb-[12px] pt-[14px] text-[13px] text-ink" aria-label="Sidebar">
+      <div className="flex shrink-0 items-center gap-s1 px-1.5 pb-1">
         <Logo className="text-[17px]" onHome={() => navigate({ screen: "new" })} />
         <span className="flex-1" />
         <button
@@ -809,14 +803,14 @@ export function Sidebar({ route, navigate, refresh, openUrl, onBackFromSettings 
           New session
         </button>
       </div>
-      {tab && <SettingsRail tab={tab} onBack={onBackFromSettings ?? (() => navigate({ screen: "new" }))} onTab={(tab) => navigate({ screen: "settings", tab, repo: "repo" in route ? route.repo : undefined })} />}
-      <div hidden={tab !== null} className={tab ? "hidden" : "contents"}>
+      {railOpen && <SettingsRail tab={tab} page={railPage(route)} onBack={onBackFromSettings ?? (() => navigate({ screen: "new" }))} onTab={(tab) => navigate({ screen: "settings", tab, repo: "repo" in route ? route.repo : undefined })} onPage={(page) => navigate({ screen: page })} />}
+      <div hidden={railOpen} className={railOpen ? "hidden" : "contents"}>
       <InboxEntry route={route} navigate={navigate} />
       <div className="mx-2 h-px shrink-0 bg-line" role="separator" data-testid="inbox-divider" />
       <SessionContext session={selected} route={route} navigate={navigate} refresh={refresh ?? noRefresh} openUrl={openUrl} style={{ height: split }} />
       <Handle height={split} onChange={resize} />
-      <div className="side-h">Sessions</div>
-      <nav ref={list} aria-label="Sessions" className="flex min-h-0 flex-1 flex-col gap-[14px] overflow-auto outline-none focus-visible:ring-1 focus-visible:ring-branch" tabIndex={0} onKeyDown={keys}>
+      <div className="side-h shrink-0">Sessions</div>
+      <nav ref={list} aria-label="Sessions" className="side-sessions flex min-h-0 flex-1 flex-col gap-[14px] overflow-auto outline-none focus-visible:ring-1 focus-visible:ring-branch" tabIndex={0} onKeyDown={keys}>
         {/* A close the engine refused: the session is back in its place, and this says why. */}
         {closeError && (
           <p className="px-s1 text-xs text-sap" data-testid="close-error">
@@ -890,16 +884,13 @@ export function Sidebar({ route, navigate, refresh, openUrl, onBackFromSettings 
         {repos && repos.length > 0 && live.length === 0 && <p className="px-s1 text-xs text-ink-3">Nothing running. Start a session, or continue a recent one.</p>}
       </nav>
       </div>
-      <div className="flex min-h-4 items-center justify-between gap-2 whitespace-nowrap border-t border-line px-s1 pt-s1" data-testid="status-line">
+      <div className="flex min-h-4 shrink-0 items-center justify-between gap-2 whitespace-nowrap border-t border-line px-s1 pt-s1" data-testid="status-line">
         <UsageReading provider={shown} model={model} warning={warning} failed={usageError != null} navigate={navigate} />
         <ProviderProblemLine problems={problems} navigate={navigate} />
         <AppUpdatePill />
       </div>
       <nav aria-label="Pages" className="flex h-10 shrink-0 flex-nowrap items-center gap-1 whitespace-nowrap px-s1" data-testid="pages">
         <AccountButton route={route} navigate={navigate} />
-        {page({ screen: "knowledge" }, "Knowledge")}
-        <span aria-hidden className="text-ink-3">·</span>
-        {page({ screen: "agents" }, "Agents")}
         <span className="flex-1" />
         <TerminalToggle />
       </nav>

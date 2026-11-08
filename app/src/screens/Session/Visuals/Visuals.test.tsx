@@ -545,12 +545,19 @@ describe("visuals", () => {
       expect(screen.getByTestId("terminal")).toBe(terminal);
 
       // Knowledge › Kept visuals: the kept copy opens in the same reader, read-only, on its own scheme path.
+      fireEvent.click(within(sidebar()).getByRole("button", { name: "Open Account" }));
       fireEvent.click(within(sidebar()).getByRole("button", { name: "Knowledge" }));
       fireEvent.click(await screen.findByRole("tab", { name: /Kept visuals/ }));
       fireEvent.click(await screen.findByTestId("kept-k_1"));
       const kept = screen.getByTestId("kept-reader");
       expect(within(kept).getByTestId("visual-frame").dataset.src).toBe("brindle-visual://kept/k_1");
       expect(within(kept).queryByTestId("visual-send")).toBeNull();
+      // Esc closes the reader and stays in Knowledge; the next Esc, with nothing nested open, leaves it.
+      fireEvent.keyDown(window, { key: "Escape" });
+      expect(await screen.findByTestId("kept-k_1")).toBeTruthy();
+      expect(screen.queryByTestId("kept-reader")).toBeNull();
+      fireEvent.keyDown(window, { key: "Escape" });
+      await waitFor(() => expect(screen.queryByTestId("kept-k_1")).toBeNull());
     } finally {
       sync.stop();
     }
