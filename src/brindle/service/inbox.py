@@ -272,15 +272,16 @@ def _idle_items(db: DB, repo_root: str | None) -> list[InboxItemDTO]:
 
 
 def _visual_items(db: DB, repo_root: str | None) -> list[InboxItemDTO]:
-    """A visual's open question, until the person answers it (brindle.visuals)."""
+    """Unread visual revisions and open questions (brindle.visuals)."""
     from brindle import visuals
 
     out = []
-    for v in visuals.open_questions(db, repo_root):
+    for v in visuals.inbox_pending(db, repo_root):
         root = db.get_agent(v["root_id"])
         if root is None or identity_lock.locked_by(root.id):
             continue
-        out.append(InboxItemDTO(kind="visual", reason="asks you to choose", detail=v["title"],
+        reason = "asks you to choose" if v["options"] else "visual is ready"
+        out.append(InboxItemDTO(kind="visual", reason=reason, detail=v["title"],
                                 visual_id=v["id"], agent_id=root.id, workspace_id=root.workspace_id,
                                 root_id=root.id))
     return out

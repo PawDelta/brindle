@@ -697,10 +697,13 @@ def set_goal(db: DB, root_id: str, goal: str,
     old = {(m.title, m.check_cmd): m for m in db.milestones(root_id)}
     ap = db.get_autopilot(root_id)
     fields: dict[str, object] = {}
-    if summary is not None:
-        fields["summary"] = " ".join(summary.split()) or None
-    elif ap is None or ap.goal != goal.strip():
-        fields["summary"] = None
+    if summary is None and ap is not None and ap.goal == goal.strip():
+        summary = ap.summary
+    short = " ".join((summary or "").split()) or " ".join(goal.split())
+    if len(short) > 30:
+        prefix = short[:31]
+        short = prefix.rsplit(" ", 1)[0] if " " in prefix else short[:30]
+    fields["summary"] = short
     if ap is None or ap.goal != goal.strip():
         fields["audit_history"] = None
         fields["analysis_doc"] = 0

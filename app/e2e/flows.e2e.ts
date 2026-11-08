@@ -2,7 +2,7 @@
    alone: no tmux, no Claude Code, so they run in CI. The page exposes the fake
    as `window.fake`: what a pane view wrote to its pty, and `print` into a pane. */
 
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 
 const WORKER = "a7aaa807";
 
@@ -18,6 +18,66 @@ const open = async (page: Page, scene: string) => {
   await page.goto(`/shots/preview.html?scene=${scene}&theme=light&renderer=dom`);
   await page.waitForSelector("html[data-ready]");
 };
+
+test("sidebar keeps its goal pinned and its lists reachable when resized", async ({ page }, testInfo) => {
+  await open(page, "sidebar-resize");
+  const sidebar = page.getByRole("complementary", { name: "Sidebar" });
+  const goal = sidebar.getByRole("region", { name: "Goal", exact: true });
+  const line = goal.getByTestId("goal-line");
+  const count = goal.getByTestId("goal-count");
+  const bar = goal.getByRole("progressbar");
+  const milestones = goal.getByTestId("goal-scroll");
+  const sessions = sidebar.getByRole("navigation", { name: "Sessions", exact: true });
+  const box = async (locator: Locator) => (await locator.boundingBox())!;
+  // Visibility here means inside every clipping ancestor, not merely a nonzero DOM box.
+  const fullyInView = async (locator: Locator) => {
+    await expect(locator).toBeInViewport({ ratio: 1 });
+    expect(await locator.evaluate((el) => {
+      const rect = el.getBoundingClientRect();
+      for (let parent = el.parentElement; parent; parent = parent.parentElement) {
+        const clip = parent.getBoundingClientRect();
+        const css = getComputedStyle(parent);
+        if (/(auto|scroll|hidden|clip)/.test(css.overflowX) && (rect.left < clip.left - 1 || rect.right > clip.right + 1)) return false;
+        if (/(auto|scroll|hidden|clip)/.test(css.overflowY) && (rect.top < clip.top - 1 || rect.bottom > clip.bottom + 1)) return false;
+      }
+      return true;
+    })).toBe(true);
+  };
+
+  await expect(count).toHaveText("9 of 15");
+  await goal.getByRole("button", { name: "9 done" }).click();
+  await goal.getByRole("button", { name: "5 pending" }).click();
+  for (const [name, width, height] of [["normal", 1440, 960], ["short", 1440, 420], ["narrow", 760, 960]] as const) {
+    await page.setViewportSize({ width, height });
+    await milestones.evaluate((el) => { el.scrollTop = 0; });
+    const lineHeight = await line.evaluate((el) => parseFloat(getComputedStyle(el).lineHeight));
+    expect((await box(line)).height).toBeLessThanOrEqual(lineHeight + 1);
+    await fullyInView(line);
+    await fullyInView(count);
+    expect(await count.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
+    await fullyInView(bar);
+    const pinned = await box(goal.getByTestId("goal-header"));
+    expect(await milestones.evaluate((el) => el.scrollHeight > el.clientHeight)).toBe(true);
+    await milestones.evaluate((el) => { el.scrollTop = el.scrollHeight; });
+    expect(await milestones.evaluate((el) => el.scrollTop)).toBeGreaterThan(0);
+    await fullyInView(goal.getByTestId("milestone").last());
+    expect(await box(goal.getByTestId("goal-header"))).toEqual(pinned);
+    await fullyInView(line);
+    await fullyInView(bar);
+
+    await fullyInView(sessions);
+    expect((await box(sessions)).height).toBeGreaterThan(30);
+    await sessions.evaluate((el) => { el.scrollTop = el.scrollHeight; });
+    await fullyInView(sessions.locator("button[data-row]").last());
+    await fullyInView(sidebar.getByTestId("status-line"));
+    await fullyInView(sidebar.getByRole("navigation", { name: "Pages" }));
+    expect(await sidebar.evaluate((el) => [el, ...el.querySelectorAll<HTMLElement>("*")]
+      .filter((node) => node.clientWidth > 0 && getComputedStyle(node).overflowX !== "hidden")
+      .filter((node) => node.scrollWidth > node.clientWidth + 1)
+      .map((node) => node.className))).toEqual([]);
+    await page.screenshot({ path: testInfo.outputPath(`sidebar-${name}.png`) });
+  }
+});
 
 test("New Session: the project search filters, and closes on an outside click and on Esc", async ({ page }) => {
   await open(page, "new");
