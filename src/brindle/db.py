@@ -1246,6 +1246,23 @@ def request_subagent(row) -> str | None:
     return subagent if isinstance(subagent, str) and subagent else None
 
 
+def _pane_delivery_message(c: sqlite3.Connection, agent_id: str) -> int | None:
+    """The id of the message ``agent_id``'s pane-delivery mark is typing in,
+    while that message is still there. A mark whose message is gone (a
+    notice read_held dropped) holds nothing back: left blocking, it stopped
+    every later message, the person's too, on every path."""
+    row = c.execute("SELECT value FROM agent_marks WHERE agent_id=? AND kind='pane-delivery'",
+                    (agent_id,)).fetchone()
+    if row is None:
+        return None
+    try:
+        message_id = json.loads(row["value"]).get("message_id")
+    except (ValueError, AttributeError):
+        return None
+    found = c.execute("SELECT 1 FROM inbox WHERE id=? AND agent_id=?", (message_id, agent_id)).fetchone()
+    return message_id if found else None
+
+
 def _load(cls, row):
     """Build ``cls`` from a row, ignoring columns this version doesn't know.
     A newer brindle may have added columns; an older brindle reading the same
@@ -2314,14 +2331,15 @@ class DB:
                               (agent_id, row["tool_use_id"]))
 
     def pop_pending(self, agent_id: str) -> Message | None:
-        """Atomically claim the oldest undelivered message, if any."""
+        """Atomically claim the oldest undelivered message, if any. None while
+        a pane delivery holds the queue (agents._resume_pane_delivery goes first)."""
         with self.tx() as c:
+            if _pane_delivery_message(c, agent_id) is not None:
+                return None
             row = c.execute(
                 "SELECT * FROM inbox WHERE agent_id=? AND delivered_at IS NULL "
-                "AND COALESCE(held,0)=0 AND NOT EXISTS"
-                " (SELECT 1 FROM agent_marks WHERE agent_id=? AND kind='pane-delivery')"
-                " ORDER BY id LIMIT 1",
-                (agent_id, agent_id),
+                "AND COALESCE(held,0)=0 ORDER BY id LIMIT 1",
+                (agent_id,),
             ).fetchone()
             if not row:
                 return None
@@ -2545,21 +2563,28 @@ class DB:
             )
 
     def read_held(self, agent_id: str) -> list[Message]:
-        """Every unread held message, marked read. A Stop's reminder covered
-        only these (claim_stop_reminder): mail after them gets its own."""
+        """Every unread held message, and every message still queued to be
+        pushed (the person's, say) but the one a pane delivery is typing,
+        marked read: whichever path runs first delivers each once. A Stop's
+        reminder covered only the held ones (claim_stop_reminder): mail after
+        them gets its own."""
         with self.tx() as c:
+            typing = _pane_delivery_message(c, agent_id)
             rows = c.execute(
-                "SELECT * FROM inbox WHERE agent_id=? AND held=1 AND delivered_at IS NULL ORDER BY id",
-                (agent_id,),
+                "SELECT * FROM inbox WHERE agent_id=? AND delivered_at IS NULL AND (held=1 OR "
+                "(COALESCE(held,0)=0 AND noticed_at IS NULL AND id IS NOT ?)) ORDER BY id",
+                (agent_id, typing),
             ).fetchall()
-            c.execute(
-                "UPDATE inbox SET delivered_at=? WHERE agent_id=? AND held=1 AND delivered_at IS NULL",
-                (time.time(), agent_id),
-            )
+            now = time.time()
+            c.executemany("UPDATE inbox SET delivered_at=? WHERE id=?", [(now, r["id"]) for r in rows])
             c.execute("UPDATE agents SET stop_reminded_at=NULL WHERE id=?", (agent_id,))
             # A notice still queued announces only what was just read: it would wake the agent for nothing.
             c.execute("DELETE FROM inbox WHERE agent_id=? AND COALESCE(held,0)=0 "
                       "AND delivered_at IS NULL AND noticed_at IS NOT NULL", (agent_id,))
+            if _pane_delivery_message(c, agent_id) is None:
+                # Its message is gone (a notice just dropped, typed as far as
+                # its lead): nothing is left to resume, and the queue moves on.
+                c.execute("DELETE FROM agent_marks WHERE agent_id=? AND kind='pane-delivery'", (agent_id,))
             return [_load(Message, r) for r in rows]
 
     def message_delivered(self, message_id: int) -> bool:

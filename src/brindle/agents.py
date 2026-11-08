@@ -2198,8 +2198,10 @@ def full_message(db: DB, agent_id: str, message_id: int) -> str:
 
 
 def render_unread(db: DB, messages: list) -> str:
-    """What read_messages returns: one line per message."""
-    return "\n".join(one_line(db, m.id, m.body, m.sender_id) for m in messages)
+    """What read_messages returns: one line per held message; one that was
+    queued to be pushed (the person's, say) whole, as a push would have."""
+    return "\n".join(one_line(db, m.id, m.body, m.sender_id) if m.held
+                     else m.body if m.sender_id else f"[brindle] {m.body}" for m in messages)
 
 
 def send_message(db: DB, to_id: str, body: str, sender_id: str | None = None,
