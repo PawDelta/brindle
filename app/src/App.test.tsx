@@ -45,6 +45,7 @@ const paused: SessionDTO = { ...session, id: "sup0", status: "paused", status_si
 const nav = () => screen.getByRole("complementary", { name: "Sidebar" });
 const link = (name: string | RegExp) => within(nav()).getByRole("button", { name });
 const treeAgent = (id: string) => nav().querySelector<HTMLButtonElement>(`button[data-tree-agent="${id}"]`)!;
+const treeSession = (id: string) => nav().querySelector<HTMLButtonElement>(`button[data-tree-session="${id}"]`)!;
 const surfaceTitle = () => screen.getByTestId("surface-title").textContent;
 /* The session's pane is held back (the engine is still bringing sessions back): its calm card, no terminal. */
 const paneWaits = () => screen.queryByTestId("state-card")?.dataset.kind === "returning" && !screen.queryByTestId("terminal");
@@ -211,10 +212,10 @@ describe("App", () => {
     expect(screen.getByTestId("engine-banner").textContent).toContain("update the app");
     expect(JSON.parse(localStorage.getItem(LAST_SESSION_KEY)!)).toEqual({ root: "sup1", repo: REPO });
     // The merged sidebar: Inbox at the top, the session's context (its goal and milestones) above the split, then
-    // the tree with the supervisor and its worker under the session. Nothing sits beside the provider session.
+    // the tree with its worker under the session's supervisor row. Nothing sits beside the provider session.
     await waitFor(() => expect(treeAgent("w1")).toBeTruthy());
     expect(within(nav()).getByTestId("tree-session-sup1").textContent).toContain("Ship ls --json");
-    expect(treeAgent("sup1").getAttribute("aria-current")).toBe("page");
+    expect(treeSession("sup1").getAttribute("aria-current")).toBe("page");
     expect(screen.queryByRole("complementary", { name: "Session panel" })).toBeNull();
     const context = within(nav()).getByTestId("session-context");
     await waitFor(() => expect(within(context).getByTestId("goal-line").textContent).toContain("1 of 1 milestones complete"));
@@ -762,7 +763,7 @@ describe("providers in the sidebar", () => {
 
   it("providers: the sidebar has no providers block, and its status line says nothing about providers while none has a problem", async () => {
     const { daemon, stop } = start();
-    await waitFor(() => expect(treeAgent("sup1")).toBeTruthy());
+    await waitFor(() => expect(treeSession("sup1")).toBeTruthy());
     await waitFor(() => expect(daemon.requests.some((r) => r.path === "/providers/installed")).toBe(true));
     await flush();
     expect(nav().textContent).not.toMatch(/providers/i);
@@ -780,7 +781,7 @@ describe("providers in the sidebar", () => {
     const { daemon, stop } = start(
       freshProviders({ claude: { path: "/home/u/.local/bin/claude", version: "2.1.47" }, codex: { path: "/opt/homebrew/bin/codex", version: "0.48.0", signed_in: false } }),
     );
-    await waitFor(() => expect(treeAgent("sup1")).toBeTruthy());
+    await waitFor(() => expect(treeSession("sup1")).toBeTruthy());
     const problem = await within(nav()).findByTestId("provider-problem");
     expect(statusLine().lastElementChild).toBe(problem);
     expect(within(statusLine()).getByTestId("usage-reading")).toBeTruthy();

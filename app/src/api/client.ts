@@ -1058,7 +1058,7 @@ export interface SessionConflict {
 /* POST /inbox/{id}/{action} (daemon/routes_actions.py inbox_action).
    "permission" (engine branch desktop/permission-items) takes {request,
    digest, choice}: the person's answer to the request the item showed. */
-export type InboxAction = "answer" | "approve" | "reject" | "accept" | "decline" | "review" | "merge" | "read" | "permission" | "dismiss";
+export type InboxAction = "answer" | "approve" | "reject" | "accept" | "decline" | "review" | "merge" | "read" | "permission" | "dismiss" | "pr-not-now";
 
 /* What an action answers: a message or status, a reviewer, or a job id. */
 export interface InboxActionResult {

@@ -113,15 +113,15 @@ def test_an_unedited_file_resumes_to_the_same_goal(db, repo):
     assert [(m.check_cmd, m.status) for m in db.milestones("boss")] == [("true\nfalse", "passed")]
 
 
-def test_milestone_phases_round_trip_through_the_goal_file(db, repo, monkeypatch):
+def test_goal_summary_and_milestone_phases_round_trip_through_the_goal_file(db, repo, monkeypatch):
     from mcp.server.mcpserver.exceptions import ToolError
-    from brindle.service.dto import MilestoneDTO
+    from brindle.service.dto import GoalDTO, MilestoneDTO
 
     ws = workspaces.adopt_root(db, str(repo))
     add_agent(db, ws, "boss")
     db.add_autopilot("boss")
     monkeypatch.setenv("BRINDLE_AGENT_ID", "boss")
-    asyncio.run(mcp_server.mcp.call_tool("set_goal", {"goal": "Phased", "milestones": [
+    asyncio.run(mcp_server.mcp.call_tool("set_goal", {"goal": "Phased", "summary": " CLI polish ", "milestones": [
         {"title": "API", "check": "true", "phase": " Build  it "},
         {"title": "UI", "check": "true", "detail": "phase: not a phase"},
         {"title": "Ship", "check": "true", "phase": "Release"}]}))
@@ -131,6 +131,14 @@ def test_milestone_phases_round_trip_through_the_goal_file(db, repo, monkeypatch
     ms = db.milestones("boss")
     assert [(m.phase_name, m.detail) for m in ms] == [("Build it", None), (None, "phase: not a phase"), ("Release", None)]
     assert MilestoneDTO.from_row(ms[0]).phase_name == "Build it"
+    ap = db.get_autopilot("boss")
+    assert ap.summary == "CLI polish"
+    assert GoalDTO.from_autopilot(ap, ms).summary == "CLI polish"
+    args = {"goal": "Phased", "milestones": [{"title": "API", "check": "true"}]}
+    asyncio.run(mcp_server.mcp.call_tool("set_goal", args))
+    assert db.get_autopilot("boss").summary == "CLI polish"
+    asyncio.run(mcp_server.mcp.call_tool("set_goal", {**args, "goal": "Another goal"}))
+    assert db.get_autopilot("boss").summary is None
 
     # A later failure must retain its cause through the SDK's error wrapper.
     def broken_note(*args):

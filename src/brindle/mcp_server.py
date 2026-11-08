@@ -1712,9 +1712,10 @@ def _session(db: DB) -> tuple[str, Workspace] | str:
 
 @mcp.tool()
 def set_goal(goal: str, milestones: list[dict[str, str]], detail: str | None = None,
-             analysis_doc: bool | None = None) -> str:
+             analysis_doc: bool | None = None, summary: str | None = None) -> str:
     """Autopilot: record what we're building. milestones is an ordered list of
-    {"title": ..., "check": ..., "detail": ..., "profile": ..., "repo": ...}. The optional
+    {"title": ..., "check": ..., "detail": ..., "profile": ..., "repo": ...}. Include
+    summary: a few words naming the goal for the sidebar's single-line session label. The optional
     profile names the default worker profile for `assign` while that milestone
     is the current one (e.g. a cheaper profile for a small milestone). Each check is a shell command
     brindle runs from the root of your checkout; it must exit 0 only when that
@@ -1734,7 +1735,7 @@ def set_goal(goal: str, milestones: list[dict[str, str]], detail: str | None = N
             return found
         root_id, _ = found
         items = autopilot.milestone_items(db, root_id, milestones)
-        autopilot.set_goal(db, root_id, goal, items, detail, analysis_doc=analysis_doc)
+        autopilot.set_goal(db, root_id, goal, items, detail, analysis_doc=analysis_doc, summary=summary)
         text = autopilot.progress(db, root_id)
         repo_root = found[1].repo_root
         default = load_repo_config(repo_root).default_agent

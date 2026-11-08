@@ -296,6 +296,11 @@ body {
 .side-handle i { display: block; width: 36px; height: 4px; border-radius: 2px; background: var(--line-strong); }
 .side-handle:hover i, .side-handle[data-dragging="true"] i, .side-handle:focus-visible i { background: var(--branch); }
 .side-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--ink-3); }
+.session-tree { margin-left: 12px; }
+.session-tree-node { position: relative; padding-left: 14px; }
+.session-tree-node::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 1px; background: var(--line-strong); }
+.session-tree-node:last-child::before { bottom: auto; height: 13px; }
+.session-tree-node::after { content: ""; position: absolute; left: 0; top: 13px; width: 10px; height: 1px; background: var(--line-strong); }
 .side-dot[data-tone="work"] { background: var(--branch); }
 .side-dot[data-tone="wait"] { background: var(--sap); }
 .side-dot[data-tone="done"] { background: var(--pass); }
