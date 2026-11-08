@@ -111,6 +111,35 @@ def test_shell_forms(tmp_path, command, expected):
     assert decision.decision == expected, decision.reason
 
 
+@pytest.mark.parametrize("command, expected", [
+    pytest.param(r'grep -rln "check_new_tests\|MAX_NEW_TESTS" . --include=*.py --include=*.md --exclude-dir=node_modules', "allow",
+                 marks=pytest.mark.variant("reported search with regex and bare globs")),
+    ('git grep -n -E "chat-text|/api/.*(send|message|chat)" -- src/brindle/web/static/app.js', "allow"),
+    pytest.param("grep -rln 'sidebar-resize' shots scripts e2e . --include=*.ts --include=*.tsx", "allow",
+                 marks=pytest.mark.variant("reported search with multiple paths")),
+    pytest.param('grep -rIl "KeyError: \'permission_grants\'" "/Users/x/Library/Application Support/y"', "allow",
+                 marks=pytest.mark.variant("reported search with nested quotes and spaced path")),
+    ("grep -n '$(blocked) `blocked` >out | blocked' . --include='*.py' --exclude-dir=\"node*\"", "allow"),
+    pytest.param('grep "$(blocked)" . --include=*.py', "deny", marks=pytest.mark.variant("bypass: live substitution")),
+    pytest.param('grep "`blocked`" .', "deny", marks=pytest.mark.variant("bypass: live backticks")),
+    pytest.param('grep "x|y" . >out', "ask", marks=pytest.mark.variant("bypass: output redirect")),
+    pytest.param('grep "x|y" . | tee out', "ask", marks=pytest.mark.variant("bypass: pipeline writer")),
+    pytest.param('grep -f patterns . --include=*.py', "ask", marks=pytest.mark.variant("bypass: pattern file")),
+    pytest.param('grep --file=patterns .', "ask", marks=pytest.mark.variant("bypass: long pattern-file option")),
+    pytest.param('git grep --open-files-in-pager=blocked "x|y"', "ask", marks=pytest.mark.variant("bypass: git pager")),
+    pytest.param('rg --pre=blocked "x|y" .', "ask", marks=pytest.mark.variant("bypass: search preprocessor")),
+    pytest.param('grep "x|y .', "ask", marks=pytest.mark.variant("bypass: unclosed quote")),
+])
+def test_quoted_search(tmp_path, command, expected):
+    from brindle import permissions
+
+    permissions.apply_preset("standard")
+    permissions.add_rule("bash", "blocked", "deny", "prefix")
+    here = str(tmp_path)
+    decision = permissions.decide(permissions.Request("claude", "bash", "Bash", here, here, here, command=command))
+    assert decision.decision == expected, decision.reason
+
+
 def _bypass(command):
     return pytest.param(command, "deny", marks=pytest.mark.variant("bypass attempt"))
 

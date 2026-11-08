@@ -1570,8 +1570,10 @@ def _is_force(arg: str) -> bool:
 
 
 def _readonly_git(req: Request, argv: list[str]) -> bool:
-    """Whether ``argv`` is a read-only git command (READONLY_GIT, no unsafe or
-    force option), with ``-C`` only into a checkout of the session (session_roots)."""
+    """Whether ``argv`` is a read-only git command: READONLY_GIT without unsafe
+    or force options, or grep with known search options. ``-C`` may only name
+    a checkout of the session (session_roots). Search patterns are arguments,
+    so their metacharacters do not change the command's classification."""
     if not argv or argv[0] != "git":
         return False
     args = argv[1:]
@@ -1582,6 +1584,10 @@ def _readonly_git(req: Request, argv: list[str]) -> bool:
         if not any(path == os.path.realpath(root) or _inside(path, root) for root in session_roots(req)):
             return False
         args = args[2:]
+    if args[:1] == ["grep"]:
+        # Search options are data only when the option reader knows them.
+        # In particular, don't admit pattern files or git's pager launcher.
+        return _grep_options_known(args[1:])
     return bool(args and args[0] in READONLY_GIT
                 and not any(a.startswith(GIT_UNSAFE_OPTIONS) or _is_force(a) for a in args[1:]))
 
@@ -1983,6 +1989,8 @@ _RG_VALUES = ("-e", "--regexp", "-m", "--max-count", "-A", "-B", "-C", "--after-
 
 
 def _grep_options_known(args: list[str]) -> bool:
+    """Search flags and literal patterns, without a pattern file or an
+    unknown option that might consume a path or launch another program."""
     i = 0
     while i < len(args):
         arg = args[i]
@@ -1990,6 +1998,8 @@ def _grep_options_known(args: list[str]) -> bool:
             return True
         if arg.startswith("--"):
             name, eq, _ = arg.partition("=")
+            if name == "--file":
+                return False
             if eq and name not in _GREP_VALUES or not eq and name not in (*_GREP_FLAGS, *_GREP_VALUES):
                 return False
             if not eq and name in _GREP_VALUES and name not in _GREP_FLAGS:
@@ -1998,7 +2008,10 @@ def _grep_options_known(args: list[str]) -> bool:
             short = _GREP_SHORT.fullmatch(arg)
             if short is None:
                 return False
-            if short.group("value") is not None and len(short.group("value")) == 1:
+            value = short.group("value")
+            if value is not None and value.startswith("f"):
+                return False
+            if value is not None and len(value) == 1:
                 i += 1  # its value is the next word
         i += 1
     return True
@@ -2334,8 +2347,10 @@ def _reads_clear(req: Request, words: list[str], path_denies: list[Rule]) -> boo
 
 def readonly_pipeline(req: Request, rules: list[Rule], checks: list[str] | None = None) -> bool:
     """Whether ``req`` is one of the read-only commands this section describes: one or more joined by control operators,
-    with no substitution, input or file redirection, heredoc or subshell
-    (what _simple_commands reads), each a listed program used in a way that
+    with no live substitution, input or file redirection, heredoc or subshell
+    (what _simple_commands reads). Literal substitution spellings also pass
+    the shell reader, which checks builtins that evaluate their arguments.
+    Each part must be a listed program used in a way that
     writes nothing and reads no file a read deny in ``rules`` covers; and no
     bash deny or ask in ``rules`` applies to the whole command or any part
     of it. Quoting is read as the shell reads it, so an escaped regex
@@ -2343,8 +2358,14 @@ def readonly_pipeline(req: Request, rules: list[Rule], checks: list[str] | None 
     from brindle.native.permissions import _joined, _simple_commands, _tokens
 
     command = req.command
-    if req.kind != "bash" or not command or "$(" in command or "`" in command:
+    if req.kind != "bash" or not command:
         return False
+    if "$(" in command or "`" in command:
+        # Quoted or escaped spellings remain arguments, not substitutions.
+        # Still use the shell reader: builtins such as printf -v can evaluate
+        # even quoted array subscripts. Its refusal must not become an allow.
+        if _substitution_spans(command) != [] or shell_parts(req) is None:
+            return False
     tokens = _tokens(command)
     if tokens is None or any(is_op and "<" in text for is_op, text in tokens):
         return False
@@ -3484,7 +3505,9 @@ def _restriction_parts(command: str, *, word_pattern: re.Pattern[str] = SIMPLE_C
     """
     from brindle.native.permissions import _SEPARATORS, _tokens
 
-    if "$(" in command or "`" in command:
+    # Keep literal substitution text inert here as in the allow reader;
+    # Unclosed or actual substitutions remain unreadable; _tokens checks quotes.
+    if _substitution_spans(command) != []:
         return None
     tokens = _tokens(command, word_pattern=word_pattern)
     if tokens is None:
