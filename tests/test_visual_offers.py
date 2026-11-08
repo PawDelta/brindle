@@ -410,6 +410,7 @@ def test_asked_quote_refuses_words_that_are_not_the_persons(db, session, setup, 
     assert refused.value.code == "visual_request_required"
 
 
+@pytest.mark.variant("a bypass attempt: a worker or a plan can't spend the person's quote")
 def test_asked_quote_is_not_for_workers_or_plans(db, session):
     boss, worker = session
     typed_into_cli(db, boss, "render first")
