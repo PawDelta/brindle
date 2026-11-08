@@ -294,10 +294,14 @@ export function roleOf(profile: string): string {
 }
 
 /* The model an agent runs, in a word: what its transcript last ran on, else the variant its profile names. */
-function modelOf(a: { model?: string | null; profile: string }): string {
-  if (a.model) return a.model.replace(/^claude-/, "").split("-")[0];
-  const last = a.profile.split("-").pop() ?? "";
-  return a.profile.includes("-") && PROFILE_VARIANT.test(last) ? last : "";
+const MODEL_WORD = /^(sonnet|opus|haiku|fable|codex|gemini|flash|opencode|local)$/;
+
+function modelOf(a: { model?: string | null; profile: string; provider: string }): string {
+  // Codex and Gemini name their models by version (gpt-6-luna), which says less than the CLI; Claude's family word says it.
+  if (a.model) return /^(codex|gemini)$/.test(a.provider) ? a.provider : /(sonnet|opus|haiku|fable)/.exec(a.model)?.[1] ?? a.model;
+  // No transcript yet: a model word in the profile name; a routing tier (heavy, low…) is not a model, so the provider stands in.
+  const word = a.profile.split("-").find((w, i) => i > 0 && MODEL_WORD.test(w));
+  return word ?? (a.profile === a.provider ? "" : a.provider);
 }
 
 /* "feat/logo-goes-home" as "Logo goes home": the row's title when a worker has no milestone. */

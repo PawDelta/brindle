@@ -46,6 +46,13 @@ export function sessionTree(workspaces: WorkspaceDTO[], root: string, hidden: Hi
   const all = every.filter((e) => !isPastWorker(e.agent));
   const shown = new Set(all.map((e) => e.agent.id));
   const parent = new Map(all.map((e) => [e.agent.id, climb(e.agent, shown, hidden).shown]));
+  // A pipeline reviewer is started with its developer's parent, so the two are siblings: show it under the
+  // developer working in the workspace it reviews (presentation only; who owns whom is the engine's).
+  for (const { agent, workspace } of all) {
+    if (agent.mode !== "review" || !parent.get(agent.id)) continue;
+    const dev = all.find((e) => e.workspace.id === workspace.id && e.agent.mode !== "review" && e.agent.id !== agent.id);
+    if (dev) parent.set(agent.id, dev.agent.id);
+  }
   const seen = new Set<string>();
   const build = (entry: Entry): AgentNode => {
     seen.add(entry.agent.id);

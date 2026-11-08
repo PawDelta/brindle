@@ -61,9 +61,14 @@ describe("Sidebar", () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
     const a = { ...worker.agents![0], profile: "developer-haiku", milestone: "Logo goes Home" };
-    const b = { ...a, id: "w2", milestone: undefined };
-    const { sync } = mount({ workspaces: [root, { ...worker, agents: [a, b] }] }, { screen: "session", root: "sup1", repo: REPO });
+    const b = { ...a, id: "w2", milestone: undefined, profile: "developer-heavy" };
+    // The pipeline's reviewer is the developer's sibling (same parent), on a Codex model.
+    const r = { ...a, id: "w3", mode: "review", profile: "reviewer-codex", provider: "codex", model: "gpt-6-luna", milestone: undefined };
+    const { sync } = mount({ workspaces: [root, { ...worker, agents: [a, b, r] }] }, { screen: "session", root: "sup1", repo: REPO });
     await waitFor(() => expect(agentRow("w1")).toBeTruthy());
+    expect(agentRow("w1")!.closest("li")!.contains(agentRow("w3"))).toBe(true);
+    expect(within(agentRow("w3")!).getByTestId("agent-role").textContent).toBe("reviewer · codex");
+    expect(within(agentRow("w2")!).getByTestId("agent-role").textContent).toBe("developer · claude");
     expect(within(agentRow("w1")!).getByTestId("agent-title").textContent).toBe("Logo goes Home ");
     expect(within(agentRow("w1")!).getByTestId("agent-role").textContent).toBe("developer · haiku");
     expect(within(agentRow("w2")!).getByTestId("agent-title").textContent).toBe("Ls ");
