@@ -94,6 +94,7 @@ def test_a_user_prompt_clears_the_question_card_but_a_brindle_message_does_not(d
     assert db.get_autopilot("r1").question is None
 
 
+@pytest.mark.variant("the reported bug: other tests reach this card but assert nothing of what it tells the person")
 @pytest.mark.parametrize("count, repos, workers, detail, reasons", [
     (2, 2, 0, "Keep existing behavior", 1),
     (2, 1, 3, "Keep existing behavior", 1),
