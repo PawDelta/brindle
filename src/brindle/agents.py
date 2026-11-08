@@ -2603,7 +2603,9 @@ def _deliver_to_inbox(db: DB, agent: Agent, message_id: int, text: str,
         return False
     claimed = db.claim_delivery(message_id)
     if claimed is None:
-        return True
+        # Delivered by another path, or a pane delivery owns it: the caller's
+        # flush resumes that one, which delivers it there and nowhere else.
+        return db.message_delivered(message_id)
     sender = db.get_agent(sender_id) if sender_id else None
     who = f"brindle {sender.profile} {sender.id}" if sender else "brindle"
     sent = False

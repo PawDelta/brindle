@@ -2267,13 +2267,18 @@ class DB:
 
     def claim_delivery(self, message_id: int) -> float | None:
         """Mark one queued message delivered before a transport sends it, so no
-        other path (read_messages, the waiter) takes it too. Returns the claim's
-        time, or None if another path already had it."""
+        other path (read_messages, the waiter, a pane delivery) takes it too.
+        Returns the claim's time, or None if another path already had it: one
+        that delivered it, or a pane delivery typing it (its row stays
+        undelivered while its mark owns it)."""
         now = time.time()
         with self.tx() as c:
-            took = c.execute("UPDATE inbox SET delivered_at=? WHERE id=? AND delivered_at IS NULL",
-                             (now, message_id)).rowcount
-        return now if took else None
+            row = c.execute("SELECT agent_id FROM inbox WHERE id=? AND delivered_at IS NULL",
+                            (message_id,)).fetchone()
+            if row is None or _pane_delivery_message(c, row["agent_id"]) == message_id:
+                return None
+            c.execute("UPDATE inbox SET delivered_at=? WHERE id=?", (now, message_id))
+        return now
 
     def release_delivery(self, message_id: int, claimed_at: float) -> None:
         """Put back a message whose send failed, only if the claim is still this one's."""
