@@ -217,7 +217,6 @@ CREATE TABLE IF NOT EXISTS open_items (
     opened_at REAL NOT NULL,
     stop_at REAL NOT NULL,         -- the status_since of the stop it is about
     level INTEGER NOT NULL DEFAULT 0,
-    stop_blocks INTEGER NOT NULL DEFAULT 0,
     retiring_at REAL
 );
 CREATE INDEX IF NOT EXISTS open_items_supervisor ON open_items(supervisor_id);
@@ -1238,7 +1237,6 @@ class OpenItem:
     opened_at: float
     stop_at: float
     level: int = 0
-    stop_blocks: int = 0
     retiring_at: float | None = None
 
 
@@ -2317,10 +2315,6 @@ class DB:
             cur = c.execute("UPDATE open_items SET level=? WHERE worker_id=? AND level=?",
                             (level, worker_id, expect))
         return cur.rowcount == 1
-
-    def count_open_item_block(self, worker_id: str) -> None:
-        with self.tx() as c:
-            c.execute("UPDATE open_items SET stop_blocks=stop_blocks+1 WHERE worker_id=?", (worker_id,))
 
     def claim_open_item_retire(self, worker_id: str, now: float, expired_before: float) -> bool:
         """Claim taking the worker over, unless a claim newer than

@@ -1006,11 +1006,12 @@ def send_message(to_agent_id: str, message: str) -> str:
     db = DB()
     caller, _ = _caller(db)
     try:
-        sent = agents.send_message(db, to_agent_id, message, caller.id if caller else None)
+        recipient = agents.get(db, to_agent_id).id   # to_agent_id may be a prefix of it
+        sent = agents.send_message(db, recipient, message, caller.id if caller else None)
     except (agents.AgentError, KeyError) as e:
         return f"Not sent: {str(e).strip(chr(39))}"
     if caller:
-        open_items.on_message(db, caller, to_agent_id, message)
+        open_items.on_message(db, caller, recipient, message)
     return sent
 
 

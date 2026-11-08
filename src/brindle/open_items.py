@@ -6,11 +6,13 @@ sat 14 hours under some 80 copies of it). So the first notice opens an item:
 
 - It closes when the supervisor messages the worker, requeues its task or
   removes its workspace, and by itself when the worker reports or works again.
-- While it is open the supervisor can't end its turn (``stop_block``).
+- While it is open the supervisor can't end its turn (``stop_block``), until
+  the hour is up and brindle's takeover needs it idle.
 - It is never repeated: each later notice says something new (``sweep``).
 - An hour on, with the supervisor idle, brindle takes the work over itself
   (``reassign``): a fresh worker from the supervisor's branch, and the stuck
-  one retired, its branch kept and its uncommitted changes in the trash.
+  one retired, its branch kept and its uncommitted changes in the trash. If
+  brindle can't, the item is the supervisor's again, and so are its stops.
 
 Reviewers aren't tracked: the pipeline restarts or replaces its own.
 """
@@ -29,9 +31,6 @@ log = logging.getLogger("brindle")
 TRACKED_MODES = ("assign", "handoff_detached")   # a synchronous handoff's caller is already waiting
 ESCALATE_AFTER = (1200.0, 2700.0)   # seconds open before the second and the third notice
 AUTO_REASSIGN_AFTER = 3600.0
-# A supervisor that won't act has to reach idle sometime, or brindle's own
-# takeover (which waits for idle) would never come, and each block is a paid turn.
-MAX_STOP_BLOCKS = 5
 GAVE_UP = len(ESCALATE_AFTER) + 1   # level: brindle couldn't take it over, and said so
 CLAIM_EXPIRES = 900.0
 ASKED_MARK = "asked-supervisor"     # agent_marks: what it last asked, until answered
@@ -91,6 +90,16 @@ def _working(worker: Agent, panes=None) -> bool:
     return worker.status in WORKING and agents.is_alive(worker, panes)
 
 
+def _settled(worker: Agent) -> bool:
+    """Closed for good. One that died after an earlier report is marked done
+    (cull.note_dead_panes), but in a fix round its work still isn't finished."""
+    return (worker.dismissed_at is not None or worker.status == "done") and worker.pipeline != "fixing"
+
+
+def _takeover_due(item: OpenItem, now: float) -> bool:
+    return now - item.opened_at >= AUTO_REASSIGN_AFTER and item.level < GAVE_UP
+
+
 def _live(db: DB, supervisor_id: str | None = None, panes=None) -> list[tuple[OpenItem, Agent]]:
     """The items still waiting, with their workers. Closes those that ended
     some way nobody reported here (a worktree pruned, the worker back at work);
@@ -98,8 +107,8 @@ def _live(db: DB, supervisor_id: str | None = None, panes=None) -> list[tuple[Op
     live = []
     for item in db.open_items(supervisor_id):
         worker = db.get_agent(item.worker_id)
-        if (worker is None or db.get_agent(item.supervisor_id) is None or worker.dismissed_at is not None
-                or worker.status == "done" or _working(worker, panes)):
+        if (worker is None or db.get_agent(item.supervisor_id) is None or _settled(worker)
+                or _working(worker, panes)):
             close(db, item.worker_id)
         elif not _on_hold(worker):
             live.append((item, worker))
@@ -115,12 +124,12 @@ def _named(db: DB, item: OpenItem, worker: Agent) -> str:
 
 def stop_block(db: DB, supervisor: Agent) -> dict | None:
     """The Stop hook's "block" while ``supervisor`` has open items, naming the
-    first of them in the one line the chat shows. None once it may stop."""
-    items = [(i, w) for i, w in _live(db, supervisor.id) if i.stop_blocks < MAX_STOP_BLOCKS]
+    first of them in the one line the chat shows. An item whose takeover is
+    due doesn't block: that waits for this supervisor to be idle."""
+    now = time.time()
+    items = [(i, w) for i, w in _live(db, supervisor.id) if not _takeover_due(i, now)]
     if not items:
         return None
-    for item, _ in items:
-        db.count_open_item_block(item.worker_id)
     named = "\n".join(_named(db, i, w) for i, w in items)
     return {"decision": "block", "reason": (
         f"[brindle autopilot] {named}\n\nYou can't end your turn with this open. For each worker: "
@@ -157,7 +166,7 @@ def sweep(db: DB, now: float, panes) -> list[str]:
         age = now - item.opened_at
         supervisor = db.get_agent(item.supervisor_id)
         try:
-            if (age >= AUTO_REASSIGN_AFTER and item.level < GAVE_UP and supervisor is not None
+            if (_takeover_due(item, now) and supervisor is not None
                     and supervisor.status == "idle" and agents.is_alive(supervisor, panes)):
                 line = reassign(db, item, now)
                 if line:
@@ -191,6 +200,12 @@ def _came_back(db: DB, item: OpenItem, worker: Agent, ws: Workspace | None) -> b
     from brindle import cull
 
     return cull._last_edit(ws) > item.opened_at
+
+
+def _gone_or_back(db: DB, item: OpenItem, ws: Workspace | None) -> bool:
+    """A fresh look: its item closed, or it shows life (see ``_came_back``)."""
+    worker = db.get_agent(item.worker_id)
+    return worker is None or db.get_open_item(item.worker_id) is None or _came_back(db, item, worker, ws)
 
 
 def _why_not(db: DB, worker: Agent, ws: Workspace | None, caller_ws: Workspace | None, brief: str) -> str | None:
@@ -271,9 +286,7 @@ def reassign(db: DB, item: OpenItem, now: float | None = None, *, actor: Agent |
     if why:
         return _give_up(db, item, worker, why, actor)
 
-    # Right before retiring it, and after everything slow: the state it's judged on.
-    fresh = db.get_agent(worker.id)
-    if fresh is None or _came_back(db, item, fresh, ws):
+    if _gone_or_back(db, item, ws):   # before telling anyone it's being removed
         db.release_open_item_retire(worker.id)
         return None
 
@@ -288,12 +301,21 @@ def reassign(db: DB, item: OpenItem, now: float | None = None, *, actor: Agent |
         analysis_doc=bool(task.analysis_doc) if task else False, unanswered=True,
     )
     moved = _repoint(db, worker, ws, task, new)
-    try:
-        workspaces.remove(db, ws, force=True, delete_branch=False)
-    except (workspaces.WorkspaceError, git.GitError, OSError) as e:
+
+    def undo() -> None:
         for task_id, before, after in moved:
             tasks.set_dependencies(db, task_id, before, after)
         tasks.drop_unanswered(db, [new.id])
+
+    # The last look, right before retiring it: the repo's event hooks ran just above.
+    if _gone_or_back(db, item, ws):
+        undo()
+        db.release_open_item_retire(worker.id)
+        return None
+    try:
+        workspaces.remove(db, ws, force=True, delete_branch=False)
+    except (workspaces.WorkspaceError, git.GitError, OSError) as e:
+        undo()
         return _give_up(db, item, worker, f"removing its worktree failed: {e}", actor)
 
     close(db, worker.id)
