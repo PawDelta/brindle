@@ -333,8 +333,12 @@ body {
 .side-ms .m .i { width: 10px; flex: none; text-align: center; font-size: 10px; color: var(--ink-3); }
 .side-ms .m[data-state="done"] { color: var(--ink-3); }
 .side-ms .m[data-state="done"] .i { color: var(--pass); }
+.side-ms .m[data-state="pending"] { color: var(--ink-3); }
+.side-ms .m[data-state="pending"] .tag { color: var(--ink-3); }
 .side-ms .m[data-active] { color: var(--ink); font-weight: 500; }
 .side-ms .m[data-active] .i { color: var(--st, var(--ink)); }
+/* Several milestones may be active at once (a live worker each): every one reads in its stage's colour. */
+.side-ms .m[data-active][class*="st-"] .t { color: var(--st); }
 .side-ms .m .t { flex: 1; min-width: 0; line-height: 1.35; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .side-ms .m .tag { flex: none; font-family: var(--mono); font-size: 10px; font-weight: 400; color: var(--st); }
 /* A goal's phase folds over those rows (GoalPanel's PhaseFoldList): one line per phase, a green count once done. */

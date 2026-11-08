@@ -350,6 +350,21 @@ def _remind_goal(db: DB, caller: Agent | None, text: str) -> str:
     return f"{text}\n\n{reminder}" if reminder else text
 
 
+def _milestone_title(db: DB, caller: Agent | None, milestone: int | str | None) -> str | None:
+    """The title of the session's milestone a worker is assigned to, given its
+    number or title (None: not given). Raises ValueError naming what doesn't match."""
+    if milestone is None or str(milestone).strip() == "":
+        return None
+    items = db.milestones(autopilot.root_of(db, caller.id)) if caller else []
+    ref = str(milestone).strip()
+    for m in items:
+        if ref.isdigit() and m.position == int(ref):
+            return m.title
+        if m.title.strip().lower() == ref.lower():
+            return m.title
+    raise ValueError(f"No milestone {ref!r} in this session's goal ({len(items)} milestones).")
+
+
 def _target(db: DB, caller: Agent | None, here: Workspace, repo: str | None) -> Workspace:
     """The workspace a tool works from: ``here`` (the caller's own), or, with
     ``repo`` (an alias or path of a repo attached to the session), the main
@@ -651,7 +666,8 @@ def _await_task(db: DB, task_id: str, wait_seconds: int) -> str:
 def _route_clash(req: _Request, db: DB, caller: Agent, ws: Workspace, profile: str, task: str, mode: str, *,
                  isolate: bool, branch: str | None, done_when: str | None, files: list[str] | None,
                  depends_on: list[str] | None, plan_first: bool | None, weight: str | None,
-                 decision: dict, why: list[str], analysis_doc: bool = False) -> tuple[str | None, str | None]:
+                 decision: dict, why: list[str], analysis_doc: bool = False,
+                 milestone: str | None = None) -> tuple[str | None, str | None]:
     """Handle a new task's overlap with running work by the repo's ``overlap``
     setting (``tasks.overlap_mode``): (a reply to return instead of starting,
     a warning for the started reply). Queueing waits on the holder's worker;
@@ -673,7 +689,7 @@ def _route_clash(req: _Request, db: DB, caller: Agent, ws: Workspace, profile: s
         t = req.enqueue(
             db, caller, ws, profile, task, mode, isolate=isolate, branch=branch,
             done_when=done_when, files=files, depends_on=[*(depends_on or []), clash.holder],
-            plan_first=plan_first, weight=weight, analysis_doc=analysis_doc,
+            plan_first=plan_first, weight=weight, analysis_doc=analysis_doc, milestone=milestone,
         )
         savings.record(db, ws.repo_root, decision, task_id=t.id)
         outcome = f"queued as task {t.id} until {clash.holder} merges"
@@ -725,9 +741,12 @@ async def handoff(
     wait_seconds: int = DEFAULT_WAIT_SECONDS, done_when: str | None = None,
     files: list[str] | None = None, depends_on: list[str] | None = None,
     plan_first: bool | None = None, weight: str | None = None, repo: str | None = None,
-    dry_run: bool = False, analysis_doc: bool = False,
+    dry_run: bool = False, analysis_doc: bool = False, milestone: int | str | None = None,
 ) -> str:
     """Give a task to a new worker agent and wait for its result.
+
+    milestone: the goal milestone (its number or title) the worker works on;
+    default the first unverified one. Shown as in progress while it runs.
 
     dry_run=true starts and queues nothing: it reports the resolved profile,
     the files each `files` glob matches (warning for any that match none),
@@ -790,6 +809,10 @@ async def handoff(
         if not task.strip():
             return "Give the worker a task."
         try:
+            ms_title = _milestone_title(db, caller, milestone)
+        except ValueError as e:
+            return f"Not started: {e}"
+        try:
             ws = _target(db, caller, ws, repo)
         except repos.RepoError as e:
             return f"Not started: {e}"
@@ -819,7 +842,7 @@ async def handoff(
             t = req.enqueue(
                 db, caller, ws, profile, task,"handoff", isolate=isolate, branch=branch,
                 done_when=done_when, files=files, depends_on=depends_on, plan_first=plan_first,
-                weight=effective_weight, analysis_doc=analysis_doc,
+                weight=effective_weight, analysis_doc=analysis_doc, milestone=ms_title,
             )
             savings.record(db, ws.repo_root, decision, task_id=t.id)
             return _remind_goal(db, caller,
@@ -828,7 +851,8 @@ async def handoff(
         reply, warning = _route_clash(
             req, db, caller, ws, profile, task, "handoff", isolate=isolate, branch=branch,
             done_when=done_when, files=files, depends_on=depends_on, plan_first=plan_first,
-            weight=effective_weight, decision=decision, why=why, analysis_doc=analysis_doc)
+            weight=effective_weight, decision=decision, why=why, analysis_doc=analysis_doc,
+            milestone=ms_title)
         if reply:
             return reply
         # The worktree, its setup and the launch (a subagent's worktree too) wait
@@ -836,7 +860,7 @@ async def handoff(
         t = req.enqueue(
             db, caller, ws, profile, task, "handoff", isolate=isolate, branch=branch,
             done_when=done_when, files=files, depends_on=depends_on, plan_first=plan_first,
-            weight=effective_weight, analysis_doc=analysis_doc, start=True,
+            weight=effective_weight, analysis_doc=analysis_doc, milestone=ms_title, start=True,
         )
         savings.record(db, ws.repo_root, decision, task_id=t.id)
         notes = "".join(f"\nprofile: {w}" for w in why)
@@ -866,9 +890,12 @@ async def assign(
     done_when: str | None = None, files: list[str] | None = None,
     depends_on: list[str] | None = None, plan_first: bool | None = None,
     weight: str | None = None, repo: str | None = None, dry_run: bool = False,
-    analysis_doc: bool = False,
+    analysis_doc: bool = False, milestone: int | str | None = None,
 ) -> str:
     """Start a worker agent on a task and return immediately.
+
+    milestone: the goal milestone (its number or title) the worker works on;
+    default the first unverified one. Shown as in progress while it runs.
 
     dry_run=true starts and queues nothing: it reports the resolved profile,
     the files each `files` glob matches (warning for any that match none),
@@ -921,6 +948,10 @@ async def assign(
         if not task.strip():
             return "Give the worker a task."
         try:
+            ms_title = _milestone_title(db, caller, milestone)
+        except ValueError as e:
+            return f"Not started: {e}"
+        try:
             ws = _target(db, caller, ws, repo)
         except repos.RepoError as e:
             return f"Not started: {e}"
@@ -950,7 +981,7 @@ async def assign(
             t = req.enqueue(
                 db, caller, ws, profile, task,"assign", isolate=isolate, branch=branch,
                 done_when=done_when, files=files, depends_on=depends_on, plan_first=plan_first,
-                weight=effective_weight, analysis_doc=analysis_doc,
+                weight=effective_weight, analysis_doc=analysis_doc, milestone=ms_title,
             )
             savings.record(db, ws.repo_root, decision, task_id=t.id)
             return _remind_goal(db, caller,
@@ -966,7 +997,7 @@ async def assign(
             t = req.enqueue(
                 db, caller, ws, profile, task, "assign", isolate=isolate, branch=branch,
                 done_when=done_when, files=files, depends_on=depends_on, plan_first=plan_first,
-                weight=effective_weight, analysis_doc=analysis_doc, start=True,
+                weight=effective_weight, analysis_doc=analysis_doc, milestone=ms_title, start=True,
             )
             savings.record(db, ws.repo_root, decision, task_id=t.id)
             return _remind_goal(db, caller, f"Queued task {t.id} behind plan {plan['id']}: it starts when the "
@@ -975,7 +1006,8 @@ async def assign(
         reply, warning = _route_clash(
             req, db, caller, ws, profile, task, "assign", isolate=isolate, branch=branch,
             done_when=done_when, files=files, depends_on=depends_on, plan_first=plan_first,
-            weight=effective_weight, decision=decision, why=why, analysis_doc=analysis_doc)
+            weight=effective_weight, decision=decision, why=why, analysis_doc=analysis_doc,
+            milestone=ms_title)
         if reply:
             return reply
         # Admission, the worktree, its setup and the launch (a subagent's
@@ -984,7 +1016,7 @@ async def assign(
         t = req.enqueue(
             db, caller, ws, profile, task, "assign", isolate=isolate, branch=branch,
             done_when=done_when, files=files, depends_on=depends_on, plan_first=plan_first,
-            weight=effective_weight, analysis_doc=analysis_doc, start=True,
+            weight=effective_weight, analysis_doc=analysis_doc, milestone=ms_title, start=True,
         )
         savings.record(db, ws.repo_root, decision, task_id=t.id)
         notes = "".join(f"\nprofile: {w}" for w in why)

@@ -92,8 +92,8 @@ function Context({ client, session, route, navigate, openUrl, style }: Pick<Sess
 
   const here = route.screen === "session" && route.root === root;
   return (
-    <section className="flex min-h-0 flex-col gap-[10px] overflow-auto" aria-label="Session context" data-testid="session-context" style={style}>
-      <div className="px-s1">
+    <section className="flex min-h-0 flex-col gap-[10px] overflow-hidden" aria-label="Session context" data-testid="session-context" style={style}>
+      <div className="shrink-0 px-s1">
         {renaming ? (
           <input
             autoFocus
