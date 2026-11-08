@@ -21,6 +21,8 @@ Two ways to run it:
   changed test files, then the test files that name the functions a new test
   alone covers, with per-test coverage. Judged against that subset only, it can
   miss a repeat but never invents one. The base comes from BRINDLE_BASE_BRANCH.
+  It also runs every new or changed test (and the changed vitest files) FLAKY_RUNS
+  times, in parallel and in random order, and fails any test that fails in one run.
 """
 from __future__ import annotations
 
@@ -43,7 +45,9 @@ sys.path.insert(0, str(ROOT / "src"))
 from brindle import new_tests as inventory  # noqa: E402  (the reviewer's listing shares the row matching)
 
 APPROVERS = {"hmlerner"}
-MAX_RELATED_FILES = 12    # scoped mode: related test files run beyond the changed ones
+HERE = Path(__file__).resolve().parent
+FLAKY_RUNS = 5             # scoped mode: runs of every new or changed test
+MAX_RELATED_FILES = 12   # scoped mode: related test files run beyond the changed ones
 COMMON_NAME = 40           # a name found in more test files than this picks no tests
 SKIP_NAMES = {"__init__", "main", "run"}
 
@@ -314,6 +318,106 @@ def scoped_redundant(base: str, to_check: list[str]) -> tuple[list[str], list[st
         shutil.rmtree(work, ignore_errors=True)
 
 
+# -- flaky tests: the new and changed tests, repeated
+
+
+def _function_dumps(source: str) -> dict[str, str]:
+    found: dict[str, str] = {}
+
+    def visit(body, prefix):
+        for node in body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test"):
+                found[prefix + node.name] = ast.dump(node)
+            elif isinstance(node, ast.ClassDef) and node.name.startswith("Test"):
+                visit(node.body, f"{prefix}{node.name}::")
+
+    visit(ast.parse(source).body, "")
+    return found
+
+
+def selected_python(base: str, added) -> list[str]:
+    """Node ids of the new tests and rows, and of every test function a changed test
+    file changed (all its rows)."""
+    selected = set()
+    for path in changed_test_files(base):
+        try:
+            old = _function_dumps(_git("show", f"{base}:{path}"))
+        except subprocess.CalledProcessError:
+            old = {}
+        new = _function_dumps((ROOT / path).read_text(encoding="utf-8"))
+        selected |= {f"{path}::{q}" for q, dump in new.items() if old.get(q) != dump}
+    selected |= {n for n in added if n.split("[", 1)[0] not in selected}
+    return sorted(selected)
+
+
+def flaky_python(selected: list[str]) -> dict[str, int]:
+    """Run ``selected`` FLAKY_RUNS times, each time in parallel (-n 2) and in a
+    different random order; returns how many runs each failing test failed in."""
+    from xml.etree import ElementTree
+
+    if not selected:
+        return {}
+    serial = any("serial" in (ROOT / n.split("::")[0]).read_text(encoding="utf-8", errors="replace")
+                 for n in selected)
+    failed: dict[str, int] = {}
+    work = Path(tempfile.mkdtemp(prefix="new-tests-flaky-"))
+    try:
+        for run in range(1, FLAKY_RUNS + 1):
+            env = {**os.environ, "BRINDLE_SHUFFLE_SEED": str(run),
+                   "PYTHONPATH": os.pathsep.join(filter(None, [str(HERE), os.environ.get("PYTHONPATH", "")]))}
+            this_run = set()
+            for part, args in enumerate((["-n", "2", "-m", "not serial"], ["-m", "serial"])):
+                if part and not serial:
+                    continue
+                report = work / f"run{run}-{part}.xml"
+                proc = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+                                       "-p", "shuffle_tests", f"--junitxml={report}", *args, *selected],
+                                      cwd=ROOT, env=env, capture_output=True, text=True)
+                if proc.returncode not in (0, 1, 5):
+                    raise SystemExit(f"pytest exited {proc.returncode} repeating the new and changed tests "
+                                     f"(run {run}):\n{proc.stdout[-1500:]}{proc.stderr[-500:]}")
+                if report.exists():
+                    for case in ElementTree.parse(report).iter("testcase"):
+                        if case.find("failure") is not None or case.find("error") is not None:
+                            this_run.add(f"{case.get('classname')}.{case.get('name')}")
+            for name in this_run:
+                failed[name] = failed.get(name, 0) + 1
+        return failed
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def flaky_vitest(base: str) -> dict[str, int]:
+    """The same for the vitest files the branch changed: FLAKY_RUNS runs in a random order each."""
+    names = _git("diff", "--name-only", "--diff-filter=AMR", f"{base}...HEAD", "--", "app").split()
+    files = [n[len("app/"):] for n in names
+             if re.search(r"\.(test|spec)\.[jt]sx?$", n) and (ROOT / n).is_file()]
+    if not files:
+        return {}
+    app = ROOT / "app"
+    if not (app / "node_modules").is_dir():
+        subprocess.run(["npm", "ci", "--silent"], cwd=app, check=True, capture_output=True)
+    failed: dict[str, int] = {}
+    work = Path(tempfile.mkdtemp(prefix="new-tests-vitest-"))
+    try:
+        for run in range(1, FLAKY_RUNS + 1):
+            report = work / f"run{run}.json"
+            proc = subprocess.run(["npx", "vitest", "run", *files, "--sequence.shuffle",
+                                   f"--sequence.seed={run}", "--reporter=json", f"--outputFile={report}"],
+                                  cwd=app, capture_output=True, text=True)
+            if not report.exists():
+                raise SystemExit(f"vitest wrote no report (exit {proc.returncode}) repeating the changed "
+                                 f"test files (run {run}):\n{proc.stdout[-1000:]}{proc.stderr[-1000:]}")
+            for suite in json.loads(report.read_text(encoding="utf-8")).get("testResults", []):
+                for case in suite.get("assertionResults", []):
+                    if case.get("status") == "failed":
+                        name = f"{Path(suite.get('name', '')).name}: {case.get('fullName')}"
+                        failed[name] = failed.get(name, 0) + 1
+        return failed
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--base", default=os.environ.get("BRINDLE_BASE_BRANCH", ""),
@@ -346,6 +450,10 @@ def main(argv=None) -> int:
     failures = [f"{n} covers no line or branch that other tests don't; delete it, fold it into "
                 f"the test it repeats, or mark it @pytest.mark.variant(\"why\")" for n in redundant]
     failures += [f"{n} recorded no coverage and wasn't reported skipped: it never ran here" for n in missing]
+    if args.scoped:
+        for n, count in {**flaky_python(selected_python(args.base, added)), **flaky_vitest(args.base)}.items():
+            failures.append(f"{n} is flaky: it failed in {count} of {FLAKY_RUNS} runs "
+                            "(repeated in parallel, in random order); make it deterministic")
 
     for n in unmeasured:
         print(f"note: {n} ran no measured code (skipped here?); not checked")

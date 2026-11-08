@@ -68,6 +68,17 @@ def test_listing_failures_stop_the_check_worth_committing(tmp_path, monkeypatch)
         gate.run_with_coverage(["tests/test_a.py"], tmp_path / ".coverage", append=False)
 
 
+def test_a_test_that_passes_only_sometimes_fails_the_check_worth_committing(tmp_path, monkeypatch):
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests/test_f.py").write_text(
+        "import os\ndef test_sometimes(): assert os.environ['BRINDLE_SHUFFLE_SEED'] != '2'\n"
+        "def test_always(): pass\n")
+    monkeypatch.setattr(gate, "ROOT", tmp_path)
+    monkeypatch.setattr(gate, "FLAKY_RUNS", 2)
+    # one run in two fails, under -n 2 and a different order each time
+    assert gate.flaky_python(["tests/test_f.py"]) == {"tests.test_f.test_sometimes": 1}
+
+
 def test_a_new_test_that_never_ran_is_not_a_pass_worth_committing(tmp_path, monkeypatch):
     new = "tests/test_a.py::test_new"
 
