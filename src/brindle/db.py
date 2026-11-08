@@ -212,6 +212,20 @@ CREATE TABLE IF NOT EXISTS agent_marks (
     value TEXT NOT NULL,
     PRIMARY KEY (agent_id, kind)
 );
+-- A worker's question or stall its supervisor hasn't dealt with (brindle.open_items):
+-- one row per worker, deleted when it closes. level: the notices sent past the
+-- first. retiring_at: a sweep is taking the worker over.
+CREATE TABLE IF NOT EXISTS open_items (
+    worker_id TEXT PRIMARY KEY,
+    supervisor_id TEXT NOT NULL,
+    kind TEXT NOT NULL,            -- question | stalled
+    detail TEXT NOT NULL,
+    opened_at REAL NOT NULL,
+    stop_at REAL NOT NULL,         -- the status_since of the stop it is about
+    level INTEGER NOT NULL DEFAULT 0,
+    retiring_at REAL
+);
+CREATE INDEX IF NOT EXISTS open_items_supervisor ON open_items(supervisor_id);
 -- Every report_result call, from receipt to delivery (agents.report_result):
 -- state received -> accepted (promoted into agents.result) -> delivered (the
 -- supervisor's inbox row or the review's claim written in that same
@@ -1218,6 +1232,18 @@ class Message:
     delivered_at: float | None
     held: int | None = None
     noticed_at: float | None = None
+
+
+@dataclass
+class OpenItem:
+    worker_id: str
+    supervisor_id: str
+    kind: str
+    detail: str
+    opened_at: float
+    stop_at: float
+    level: int = 0
+    retiring_at: float | None = None
 
 
 @dataclass
@@ -2269,6 +2295,57 @@ class DB:
             c.execute("DELETE FROM agents WHERE id=?", (agent_id,))
             c.execute("DELETE FROM agent_marks WHERE agent_id=?", (agent_id,))
             c.execute("DELETE FROM report_outbox WHERE agent_id=?", (agent_id,))
+            c.execute("DELETE FROM open_items WHERE worker_id=?", (agent_id,))
+
+    # -- open items (brindle.open_items) -----------------------------------
+
+    def add_open_item(self, worker_id: str, supervisor_id: str, kind: str, detail: str, at: float,
+                      stop_at: float) -> bool:
+        """Open the worker's item. False when it already has one."""
+        with self.tx() as c:
+            cur = c.execute("INSERT OR IGNORE INTO open_items (worker_id, supervisor_id, kind, detail, opened_at, stop_at)"
+                            " VALUES (?,?,?,?,?,?)", (worker_id, supervisor_id, kind, detail, at, stop_at))
+        return cur.rowcount == 1
+
+    def get_open_item(self, worker_id: str) -> OpenItem | None:
+        row = self.conn.execute("SELECT * FROM open_items WHERE worker_id=?", (worker_id,)).fetchone()
+        return _load(OpenItem, row) if row else None
+
+    def open_items(self, supervisor_id: str | None = None) -> list[OpenItem]:
+        """Oldest first, every supervisor's unless one is named."""
+        sql, args = "SELECT * FROM open_items", ()
+        if supervisor_id is not None:
+            sql, args = sql + " WHERE supervisor_id=?", (supervisor_id,)
+        return [_load(OpenItem, r) for r in self.conn.execute(sql + " ORDER BY opened_at, worker_id", args)]
+
+    def close_open_item(self, worker_id: str) -> bool:
+        with self.tx() as c:
+            cur = c.execute("DELETE FROM open_items WHERE worker_id=?", (worker_id,))
+        return cur.rowcount == 1
+
+    def set_open_item_level(self, worker_id: str, expect: int, level: int) -> bool:
+        """Compare-and-set, so of the processes sweeping only one sends a notice."""
+        with self.tx() as c:
+            cur = c.execute("UPDATE open_items SET level=? WHERE worker_id=? AND level=?",
+                            (level, worker_id, expect))
+        return cur.rowcount == 1
+
+    def claim_open_item_retire(self, worker_id: str, now: float, expired_before: float) -> bool:
+        """Claim taking the worker over, unless a claim newer than
+        ``expired_before`` holds it (one that old is a sweep that died)."""
+        with self.tx() as c:
+            cur = c.execute("UPDATE open_items SET retiring_at=? WHERE worker_id=?"
+                            " AND (retiring_at IS NULL OR retiring_at < ?)", (now, worker_id, expired_before))
+        return cur.rowcount == 1
+
+    def restart_open_item(self, worker_id: str, now: float) -> None:
+        """A takeover held off: the hour starts over, and the claim is let go."""
+        with self.tx() as c:
+            c.execute("UPDATE open_items SET opened_at=?, retiring_at=NULL WHERE worker_id=?", (now, worker_id))
+
+    def release_open_item_retire(self, worker_id: str) -> None:
+        with self.tx() as c:
+            c.execute("UPDATE open_items SET retiring_at=NULL WHERE worker_id=?", (worker_id,))
 
     # -- inbox -------------------------------------------------------------
 

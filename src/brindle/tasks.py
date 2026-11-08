@@ -1473,25 +1473,31 @@ def requeue(db: DB, caller: Agent | None, caller_ws: Workspace, task_id: str,
     )
     if unmet:
         return f"Requeued task {old.id} as {new.id}, waiting on {', '.join(unmet)}."
+    return start_requeued(db, new, f"task {old.id}")
+
+
+def start_requeued(db: DB, new: Task, label: str) -> str:
+    """Start ``new``, the pending replacement of ``label``, or leave it waiting
+    for room. Says which; raises ``ValueError`` if it can't start."""
     why = room_wait(new.repo_root)
     claimed, refused = False, None
     if not why:
         claimed, refused, why = _claim_fair(db, new)   # the slot it takes counts for others
     if why:
         wait_for_room(db, new, why)
-        return (f"Requeued task {old.id} as {new.id}, waiting for room: {why}. "
+        return (f"Requeued {label} as {new.id}, waiting for room: {why}. "
                 "It starts on its own when there's room.")
     if not claimed:
         reason = f"the repo's policy refused it: {refused}" if refused else "it was started or cancelled meanwhile"
         _cancel(db, new.id, reason)
-        raise ValueError(f"Requeued task {old.id} as {new.id}, but it didn't start: {reason}.")
+        raise ValueError(f"Requeued {label} as {new.id}, but it didn't start: {reason}.")
     try:
         worker = start_queued(db, new)
     except agents.AgentError as e:
         db.update_task(new.id, state="pending", started_at=None)   # so the cancel below applies
         _cancel(db, new.id, f"it could not start: {e}")
         raise ValueError(f"Nothing left to wait on, but the worker could not start: {e}") from e
-    return f"Requeued task {old.id} as {new.id}: nothing to wait on, started worker {worker.id}."
+    return f"Requeued {label} as {new.id}: nothing to wait on, started worker {worker.id}."
 
 
 def _matches(glob: str, path: str) -> bool:
