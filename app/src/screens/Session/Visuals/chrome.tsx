@@ -6,6 +6,7 @@ import { plain } from "../../../api/wording";
 import { LoadingButton } from "../../../components/LoadingButton";
 import { ArrowLeftIcon, BookmarkIcon } from "../../../components/icons";
 import { button } from "../../../components/ui";
+import { useEscapeOwner } from "../../../escape";
 import type { VisualsClient } from "./client";
 
 export const message = (e: unknown) => plain(e instanceof Error ? e.message : String(e));
@@ -15,6 +16,7 @@ export const message = (e: unknown) => plain(e instanceof Error ? e.message : St
 export function useEscBack(onBack: () => void) {
   const back = useRef(onBack);
   back.current = onBack;
+  useEscapeOwner();
   useEffect(() => {
     const esc = (e: KeyboardEvent) => {
       if (e.key !== "Escape" || e.defaultPrevented) return;

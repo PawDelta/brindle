@@ -1058,7 +1058,7 @@ export interface SessionConflict {
 /* POST /inbox/{id}/{action} (daemon/routes_actions.py inbox_action).
    "permission" (engine branch desktop/permission-items) takes {request,
    digest, choice}: the person's answer to the request the item showed. */
-export type InboxAction = "answer" | "approve" | "reject" | "accept" | "decline" | "review" | "merge" | "read" | "permission" | "dismiss";
+export type InboxAction = "answer" | "approve" | "reject" | "accept" | "decline" | "review" | "merge" | "read" | "permission" | "dismiss" | "pr-not-now";
 
 /* What an action answers: a message or status, a reviewer, or a job id. */
 export interface InboxActionResult {
@@ -1581,10 +1581,17 @@ export class DaemonClient {
   }
 
   visualInput(root: string, text: string, expiresAt?: number, signal?: AbortSignal,
-              observation?: { generation: number; sequence: number; submitted_at: number }) {
+              observation?: { generation: number; sequence: number; submitted_at: number; typed?: boolean }) {
     return this.request<{ observed: boolean }>(this.url(`${this.sessionPath(root)}/visual-input`), {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text, expires_at: expiresAt, ...observation }), signal,
+    });
+  }
+
+  visualTypedWords(root: string, text: string, expiresAt: number, submittedAt: number, signal?: AbortSignal) {
+    return this.request<{ observed: boolean }>(this.url(`${this.sessionPath(root)}/visual-input`), {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ typed_words: text, expires_at: expiresAt, submitted_at: submittedAt }), signal,
     });
   }
 
