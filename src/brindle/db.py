@@ -168,6 +168,11 @@ CREATE TABLE IF NOT EXISTS milestone_phases (
     milestone_id INTEGER PRIMARY KEY REFERENCES milestones(id) ON DELETE CASCADE,
     phase TEXT NOT NULL
 );
+-- Short goal labels live outside the released autopilot table.
+CREATE TABLE IF NOT EXISTS goal_summaries (
+    root_id TEXT PRIMARY KEY REFERENCES autopilot(root_id) ON DELETE CASCADE,
+    summary TEXT NOT NULL
+);
 -- The person's per-goal doc request, outside the released autopilot table.
 CREATE TABLE IF NOT EXISTS goal_doc_requests (
     root_id TEXT PRIMARY KEY REFERENCES autopilot(root_id) ON DELETE CASCADE,
@@ -631,6 +636,14 @@ CREATE TABLE IF NOT EXISTS session_pr_prep (
     prepared_at REAL NOT NULL,
     PRIMARY KEY (root_id, branch)
 );
+-- Inbox's Not now choice: only hides a ready PR at this branch head.
+-- Separate from preparation so rechecking the same head preserves the choice.
+CREATE TABLE IF NOT EXISTS session_pr_declined (
+    root_id TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    sha TEXT NOT NULL,
+    PRIMARY KEY (root_id, branch)
+);
 -- A session branch against origin/<default> as brindle last synced it
 -- (brindle.session_sync). state: synced | behind (its checkout was dirty) |
 -- conflict (files: the JSON list); upstream_sha: the origin commit looked at;
@@ -923,6 +936,19 @@ CREATE TABLE IF NOT EXISTS visual_requests (
     scope TEXT NOT NULL,
     created_at REAL NOT NULL
 );
+-- What the person typed lately, for publish_visual's `asked` to be checked
+-- against. A row is spent by the one publication it allows; the rest go after
+-- visual_offers.FOLD. source: the grant or confirmation this same message
+-- raised ('grant', 'request'), which spending the row also spends. staged:
+-- reported by the app, waiting for the CLI's hook to report that same prompt.
+CREATE TABLE IF NOT EXISTS visual_person_words (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    root_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+    words TEXT NOT NULL,
+    source TEXT,
+    staged INTEGER NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL
+);
 -- Visuals an agent published into a session (brindle.visuals owns these):
 -- the current revision's question and options, the person's answer to it.
 -- Deleted with their session; a kept copy is a kept_visuals row instead.
@@ -1058,6 +1084,7 @@ class Autopilot:
     analysis_doc: int | None = None    # the person requested a doc for this goal
     analysis_goal_at: float | None = None  # when the current goal began (workers since count toward its offer)
     analysis_offer: str | None = None  # the doc offer: open | accepted | dismissed (None: never made)
+    summary: str | None = None        # a short goal label for the sidebar
 
 
 @dataclass
@@ -1495,6 +1522,14 @@ class DB:
             self.conn.execute("ALTER TABLE autopilot ADD COLUMN usage_resets_at REAL")
         if "usage_paused_ids" not in cols:
             self.conn.execute("ALTER TABLE autopilot ADD COLUMN usage_paused_ids TEXT")
+        if "summary" in cols:
+            # Move the development column out of the released table. Another
+            # opener may finish the move before this transaction starts.
+            with self.tx() as c:
+                if "summary" in {r["name"] for r in c.execute("PRAGMA table_info(autopilot)")}:
+                    c.execute("INSERT OR IGNORE INTO goal_summaries (root_id, summary) "
+                              "SELECT root_id, summary FROM autopilot WHERE summary IS NOT NULL")
+                    c.execute("ALTER TABLE autopilot DROP COLUMN summary")
         for col, kind in (("goal_sha", "TEXT"), ("auditor_id", "TEXT"), ("audit_sha", "TEXT"),
                           ("audit_ok", "INTEGER"), ("audit_history", "TEXT"), ("question", "TEXT"),
                           ("nudged_time", "REAL"), ("proposal", "TEXT"), ("external_wait", "TEXT")):
@@ -2745,6 +2780,8 @@ class DB:
             ap.analysis_doc = request["requested"] if request else None
             ap.analysis_offer = request["offer"] if request else None
             ap.analysis_goal_at = request["goal_at"] if request else None
+            summary = self.conn.execute("SELECT summary FROM goal_summaries WHERE root_id=?", (root_id,)).fetchone()
+            ap.summary = summary["summary"] if summary else None
         return ap
 
     def legacy_goal_owners(self) -> list[str]:
@@ -2762,11 +2799,19 @@ class DB:
             )
 
     def update_autopilot(self, root_id: str, **fields: object) -> None:
+        has_summary = "summary" in fields
+        summary = fields.pop("summary", None)
         requested = fields.pop("analysis_doc", None)
         offer = fields.pop("analysis_offer", "keep")
         goal_at = fields.pop("analysis_goal_at", None)
         cols = ", ".join(f"{k}=?" for k in fields)
         with self.tx() as c:
+            if has_summary:
+                if summary is None:
+                    c.execute("DELETE FROM goal_summaries WHERE root_id=?", (root_id,))
+                else:
+                    c.execute("INSERT INTO goal_summaries (root_id, summary) VALUES (?,?) "
+                              "ON CONFLICT(root_id) DO UPDATE SET summary=excluded.summary", (root_id, summary))
             if fields:
                 c.execute(f"UPDATE autopilot SET {cols} WHERE root_id=?", (*fields.values(), root_id))
             if requested is not None:

@@ -18,7 +18,7 @@ import { VisualReader } from "./VisualReader";
 import { useVisuals } from "./useVisuals";
 import { OfferChip } from "./OfferChip";
 import { VisualsSetting } from "../../Settings/VisualsSetting";
-import { withVisualInput } from "./terminalInput";
+import { withTypedWords, withVisualInput } from "./terminalInput";
 
 vi.mock("../../../components/PtyTerminal", () => import("../../../test/panes"));
 const native = vi.hoisted(() => ({
@@ -156,6 +156,42 @@ describe("visuals", () => {
       }
       expect(signal?.aborted).toBe(true);
     } finally { view.close(); vi.useRealTimers(); }
+  });
+
+  it("asked_quote: only wholly typed input counts as typed, and a hook CLI's typed words are vouched for before Enter", async () => {
+    const typed: (boolean | undefined)[] = [];
+    const observed = withVisualInput({ beginVisualInput: async () => ({ generation: 1 }), refreshVisualInput: async () => ({ generation: 1 }), visualInput: async (_id, _text, _expiry, _signal, observation) => {
+      typed.push(observation?.typed);
+      return { observed: true };
+    } }, "codex", () => ({ write() {}, resize() {}, focus() {}, close() {} }))({ server: null, target: "%1" }, { cols: 80, rows: 24 }, { onData() {}, onExit() {}, onError() {} });
+    const send = async (...writes: string[]) => { writes.forEach(data => observed.write(data)); await act(async () => undefined); };
+    await send(..."hi!", "\r");
+    await send("\x1b[200~hi there\x1b[201~", "\r");
+    await send("hi there, pasted\r");
+    await send("render first", "\r");   // an unbracketed paste, its Enter a separate write
+    await send(..."ok", "\r");
+    expect(typed).toEqual([true, false, false, false, true]);
+
+    const bytes: string[] = [], words: string[] = [];
+    let answer: { ok(): void; fail(): void } | undefined;
+    const hooked = withTypedWords({ visualTypedWords: (_id, text) => { words.push(text); return new Promise((ok, no) => {
+      answer = { ok: () => ok({ observed: true }), fail: () => no(new Error("refused")) };
+    }); } }, "claude", () => ({ write(data) { bytes.push(data); }, resize() {}, focus() {}, close() {} }))({ server: null, target: "%1" }, { cols: 80, rows: 24 }, { onData() {}, onExit() {}, onError() {} });
+    [..."hi", "\r"].forEach(data => hooked.write(data));
+    expect(words).toEqual(["hi"]);
+    expect(bytes).toEqual(["h", "i"]);          // Enter waits for the report
+    await act(async () => answer?.ok());
+    expect(bytes.at(-1)).toBe("\r");
+    [..."no", "\r"].forEach(data => hooked.write(data));
+    await act(async () => answer?.fail());      // a refused report still lets the prompt go, unvouched
+    expect(bytes.at(-1)).toBe("\r");
+    words.length = 0;
+    hooked.write("\x1b[200~pasted words\x1b[201~");
+    hooked.write("\r");
+    await act(async () => undefined);
+    expect(words).toEqual([]);                  // a paste is never vouched for
+    expect(bytes.at(-1)).toBe("\r");
+    hooked.close();
   });
 
   it("observes Codex PTY submissions before forwarding Enter, including edits, pastes and uncertain history", async () => {
@@ -509,12 +545,19 @@ describe("visuals", () => {
       expect(screen.getByTestId("terminal")).toBe(terminal);
 
       // Knowledge › Kept visuals: the kept copy opens in the same reader, read-only, on its own scheme path.
+      fireEvent.click(within(sidebar()).getByRole("button", { name: "Open Account" }));
       fireEvent.click(within(sidebar()).getByRole("button", { name: "Knowledge" }));
       fireEvent.click(await screen.findByRole("tab", { name: /Kept visuals/ }));
       fireEvent.click(await screen.findByTestId("kept-k_1"));
       const kept = screen.getByTestId("kept-reader");
       expect(within(kept).getByTestId("visual-frame").dataset.src).toBe("brindle-visual://kept/k_1");
       expect(within(kept).queryByTestId("visual-send")).toBeNull();
+      // Esc closes the reader and stays in Knowledge; the next Esc, with nothing nested open, leaves it.
+      fireEvent.keyDown(window, { key: "Escape" });
+      expect(await screen.findByTestId("kept-k_1")).toBeTruthy();
+      expect(screen.queryByTestId("kept-reader")).toBeNull();
+      fireEvent.keyDown(window, { key: "Escape" });
+      await waitFor(() => expect(screen.queryByTestId("kept-k_1")).toBeNull());
     } finally {
       sync.stop();
     }
