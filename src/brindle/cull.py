@@ -252,8 +252,11 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
         if (finished or gone) and ws is not None and pipeline._settled(db, ws) is None:
             # The pipeline still owns its branch: closing it would leave the
             # branch with nobody on it. A stopped one is note_stalled's; one
-            # in review is note_reported_stuck's (its stuck_noted de-dupe).
-            if finished and a.parent_id and a.pipeline != "reviewing" and a.stuck_noted != idle_since:
+            # in review is note_reported_stuck's (its stuck_noted de-dupe). One
+            # in a fix round is note_idle_unreported's: told from here too, each
+            # overwrote the other's stuck_noted and both repeated for hours.
+            fix_round_told = a.mode in agents.FORWARDING_MODES and _fix_round_since(db, a) is not None
+            if finished and a.parent_id and a.pipeline != "reviewing" and not fix_round_told and a.stuck_noted != idle_since:
                 done.extend(_tell_stalled(db, a, idle_since, (
                     f"Worker {a.id} has sat idle {int(idle_for // 60)} min, but its branch `{ws.branch}` "
                     f"is still in the pipeline ({pipeline.review_state(db, ws) or a.pipeline}), so "
@@ -293,6 +296,9 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
     done.extend(note_long_commands(db, now, panes))
     done.extend(note_silent(db, now, panes))
     done.extend(note_model_refused(db, now, panes))
+    from brindle import open_items
+
+    done.extend(open_items.sweep(db, now, panes))
 
     # 4. Sidebar locks of sessions that are over.
     removed = clean_locks(db, now)
@@ -591,7 +597,7 @@ def note_idle_unreported(db: DB, now: float, panes: dict[str, bool]) -> list[str
         # Not told while a command it started is still running; tried again then.
         sent = False
         try:
-            sent = agents.tell_parent_unreported(db, a, remind=True)
+            sent = agents.tell_parent_unreported(db, a, remind=True, now=now)
         finally:
             if not sent:
                 db.release_note(a.id, since, previous)
@@ -890,11 +896,16 @@ def note_stalled(db: DB, now: float, panes: dict[str, bool]) -> list[str]:
         if limits[ws.repo_root] <= 0 or now - since < limits[ws.repo_root] or a.stuck_noted == since:
             continue
         state = pipeline.review_state(db, ws) or a.pipeline
-        done.extend(_tell_stalled(db, a, since, (
+        told = _tell_stalled(db, a, since, (
             f"Branch `{ws.branch}` (workspace {ws.id}) is in the pipeline ({state}), but nothing is "
             f"working on it: worker {a.id} isn't running, and no reviewer or check run is at work, "
             f"for {int((now - since) // 60)} min. This needs you: send_message the worker what it "
-            f"needs, assign a new one on the branch, or merge_workspace(\"{ws.id}\") if it's approved.")))
+            f"needs, assign a new one on the branch, or merge_workspace(\"{ws.id}\") if it's approved."))
+        done.extend(told)
+        if told and a.pipeline == "fixing":   # an approved branch only waits for its merge
+            from brindle import open_items
+
+            open_items.track(db, a, "its process ended in a review fix round", now)
     return done
 
 

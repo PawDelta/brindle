@@ -3007,6 +3007,9 @@ def report_result(db: DB, agent_id: str, result: str, forward: bool = True,
             row = db.outbox_get(row["id"])
             if row["state"] in ("delivered", "superseded"):
                 return "result already recorded"
+    from brindle import open_items
+
+    open_items.close(db, agent.id)   # it reported, so nothing waits on its supervisor any more
     return _handle_report(db, agent, ws, row["payload"], first, forward, removed, outbox_id=row["id"])
 
 
@@ -5347,6 +5350,10 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
         # a running command, so only a prompt or a long-enough gap counts.
         if event == "prompt-submit" or unreported_note_expired(agent):
             db.update_agent(agent_id, unreported_noted=None)
+    if event == "prompt-submit":
+        from brindle import open_items
+
+        open_items.close(db, agent_id)   # at work again: a later stop is a new item
 
     if event == "session-start":
         from brindle import inbox
@@ -5839,14 +5846,19 @@ def liveness(db: DB, a: Agent, ws: Workspace | None, panes: dict[str, bool] | No
     return "; ".join(parts)
 
 
-def tell_parent_unreported(db: DB, agent: Agent, *, remind: bool = False) -> bool:
+def tell_parent_unreported(db: DB, agent: Agent, *, remind: bool = False, now: float | None = None) -> bool:
     """A worker stopped again after being reminded to report, still without a
     result. It won't be reminded again on its own, and its supervisor has
     usually gone idle waiting for it with nothing left to wake it, so tell the
-    supervisor (queued if it's busy, delivered now if it's idle). Returns
-    whether the supervisor was told."""
+    supervisor (queued if it's busy, delivered now if it's idle), and open an
+    item it has to close (brindle.open_items), which from then on does the
+    reminding. Returns whether the supervisor was told."""
     if agent.mode not in FORWARDING_MODES or not agent.parent_id:
         return False  # a synchronous handoff's caller is still waiting on it
+    from brindle import open_items
+
+    if open_items.told_of_this_stop(db, agent):
+        return False  # its item says the rest, each notice once
     if db.get_agent(agent.parent_id) is None:
         _note_reviewer_end(db, agent)
         return False
@@ -5876,6 +5888,10 @@ def tell_parent_unreported(db: DB, agent: Agent, *, remind: bool = False) -> boo
     sent = False
     try:
         sent = _tell_parent_unreported(db, agent, ws)
+        if sent:
+            open_items.track(db, agent, ("stopped in a review fix round without committing or reporting"
+                                         if agent.pipeline == "fixing" and agent.result is not None
+                                         else "stopped without calling report_result"), now)
         return sent
     finally:
         if not sent:
@@ -5945,6 +5961,9 @@ def tell_parent_api_error(db: DB, agent: Agent, error: str) -> bool:
         # The idle reminder would only repeat this, less exactly.
         db.claim_unreported(agent.id, time.time(), None, reopened_at=agent.reopened_at,
                             status_since=agent.status_since or agent.created_at)
+    from brindle import open_items
+
+    open_items.track(db, agent, f"stopped on an API error: {api_error_kind(error)}")
     return True
 
 

@@ -687,7 +687,13 @@ def at_turn_end(db, agent) -> bool:
         row = db.conn.execute("SELECT submitted_prompt FROM launch_health WHERE agent_id=?",
                               (agent.id,)).fetchone()
         brief = (row["submitted_prompt"] if row else None) or agent.task or ""
-        return blocking_prompt(screen, agent.provider, brief) and tell(db, agent, "\n".join(_tail(screen)))
+        question = "\n".join(_tail(screen))
+        told = blocking_prompt(screen, agent.provider, brief) and tell(db, agent, question)
+        if told and not agents.pending_permission(db, agent.id):   # that one is the person's to answer
+            from brindle import open_items
+
+            open_items.track(db, agent, f"ended its turn on a question: {redact(question)[-open_items.DETAIL_LIMIT:]}")
+        return told
     except Exception:  # noqa: BLE001 - must never break the hook
         log.exception("brindle: couldn't check %s's pane at the end of its turn", agent.id)
         return False

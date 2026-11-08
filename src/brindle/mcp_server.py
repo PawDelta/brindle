@@ -19,7 +19,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import TextContent
 from pydantic import BaseModel, Field
 
-from brindle import agents, autopilot, coordinator, cost_estimate, git, history, kb, knowledge, mcp_stdio, pipeline, policy, quota, repos, savings, sessions, tasks, upgrade, workspaces
+from brindle import agents, autopilot, coordinator, cost_estimate, git, history, kb, knowledge, mcp_stdio, open_items, pipeline, policy, quota, repos, savings, sessions, tasks, upgrade, workspaces
 from brindle.pro import brief_learning
 from brindle.config import load_repo_config
 from brindle.db import DB, Agent, Task, Workspace, migrated_by_newer, migration_incompatibility
@@ -1038,9 +1038,13 @@ def send_message(to_agent_id: str, message: str) -> str:
     db = DB()
     caller, _ = _caller(db)
     try:
-        return agents.send_message(db, to_agent_id, message, caller.id if caller else None)
+        recipient = agents.get(db, to_agent_id).id   # to_agent_id may be a prefix of it
+        sent = agents.send_message(db, recipient, message, caller.id if caller else None)
     except (agents.AgentError, KeyError) as e:
         return f"Not sent: {str(e).strip(chr(39))}"
+    if caller:
+        open_items.on_message(db, caller, recipient, message)
+    return sent
 
 
 @mcp.tool()
@@ -1308,9 +1312,15 @@ def requeue(task_id: str, depends_on: list[str] | None = None) -> str:
     """Queue a cancelled task again as a new task with the same brief,
     done_when, files, profile, weight and dependencies. depends_on replaces
     the dependencies (an empty list for none); with nothing left to wait on
-    it starts at once. Only a cancelled task can be requeued."""
+    it starts at once. Only a cancelled task can be requeued, or the task (or
+    worker id) of a worker of yours brindle named as waiting on you: a fresh
+    worker then takes it over, and the stuck one is retired, its branch kept."""
     db = DB()
     caller, here = _caller(db)
+    item = open_items.for_task(db, task_id)
+    if item is not None and caller is not None and item.supervisor_id == caller.id:
+        return (open_items.reassign(db, item, actor=caller)
+                or f"Not requeued: worker {item.worker_id} is at work again, or is already being taken over.")
     old = db.get_task(task_id)
     if old is not None:
         if old.repo_root not in {root for _, root in _session_repos(db, caller, here)}:
@@ -1595,6 +1605,7 @@ def remove_workspace(workspace: str, delete_branch: bool | None = None, force: b
             pass
     worker = agents.workspace_worker(db, ws)
     abandoned = bool(worker and worker.result is None and not db.merged_sha(ws.id))
+    its_agents = [a.id for a in db.list_agents(ws.id)]
     if unmerged or abandoned:
         if unmerged:
             tasks.on_removed_unmerged(db, ws)
@@ -1605,6 +1616,8 @@ def remove_workspace(workspace: str, delete_branch: bool | None = None, force: b
         removed = workspaces.remove(db, ws, force=force, delete_branch=delete_branch)
     except workspaces.WorkspaceError as e:
         return f"Not removed: {e}"
+    for agent_id in its_agents:
+        open_items.close(db, agent_id)
     return f"Removed {ws.id}. {removed.branch_note or 'branch deleted'}"
 
 
