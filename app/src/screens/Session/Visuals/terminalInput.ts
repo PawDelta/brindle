@@ -137,11 +137,11 @@ export function withVisualInput(client: Pick<DaemonClient, "visualInput" | "begi
    pasted. Vouch for what the person keyed in, before Enter goes through. Only this makes those words
    quotable: a report that fails or comes late leaves nothing, and the engine refuses a late one. */
 export function withTypedWords(client: Pick<DaemonClient, "visualTypedWords">, agent: string, open: PtyViewOpener, enabled: () => boolean = () => true): PtyViewOpener {
-  return observed(open, enabled, () => async (messages, { expiresAt, signal }) => {
+  return observed(open, enabled, () => async (messages, { submittedAt, expiresAt, signal }) => {
     try {
       for (const message of messages) {
         if (signal.aborted) break;
-        await client.visualTypedWords(agent, message.text, expiresAt, signal);
+        await client.visualTypedWords(agent, message.text, expiresAt, submittedAt, signal);
       }
     } catch { /* not vouched for: the Enter still goes through */ }
   }, message => message.typed);

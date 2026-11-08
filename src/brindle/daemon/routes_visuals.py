@@ -75,12 +75,6 @@ def visual_input(db: DB, params: dict, body: dict) -> Any:
     expires_at = _get(body, "expires_at", (int, float))
     if expires_at is not None and (isinstance(expires_at, bool) or not 0 < expires_at < float("inf")):
         raise ServiceError("invalid", "expires_at must be a finite timestamp", 400)
-    typed_words = _get(body, "typed_words")
-    if typed_words is not None:
-        if expires_at is None or len(typed_words) > 32000:
-            raise ServiceError("invalid", "typed_words needs expires_at and a sensible length", 400)
-        visual_offers.keep_typed(db, agent, typed_words, expires_at)
-        return {"observed": True}
     if _get(body, "begin", bool):
         return {"generation": visual_offers.begin_input(db, agent, expires_at)}
     submitted_at = _get(body, "submitted_at", (int, float), required=True)
@@ -89,6 +83,12 @@ def visual_input(db: DB, params: dict, body: dict) -> Any:
     observer = _get(body, "refresh", int)
     if observer is not None:
         return {"generation": visual_offers.refresh_input(db, agent, observer, submitted_at, expires_at)}
+    typed_words = _get(body, "typed_words")
+    if typed_words is not None:
+        if expires_at is None or len(typed_words) > 32000:
+            raise ServiceError("invalid", "typed_words needs expires_at and a sensible length", 400)
+        visual_offers.keep_typed(db, agent, typed_words, expires_at, submitted_at)
+        return {"observed": True}
     text = _get(body, "text", required=True)
     if len(text) > 32000:
         raise ServiceError("invalid", "input is too long", 400)

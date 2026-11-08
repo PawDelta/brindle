@@ -250,11 +250,13 @@ def refresh_input(db: DB, agent: Agent, observer: int, submitted_at: float, expi
 
 def person_spoke(db: DB, agent: Agent, text: str, *, expires_at: float | None = None,
                  observation: tuple[int, int] | None = None, submitted_at: float | None = None,
-                 fold_only: bool = False, typed: bool = False) -> None:
+                 fold_only: bool = False, typed: bool = False, cli_prompt: bool = False) -> None:
     """Called only for authenticated person input, never for agent messages.
 
     ``typed``: the app watched the person key in all of ``text`` themselves.
-    Only then can its words back a publish_visual ``asked``."""
+    Only then can its words back a publish_visual ``asked``. ``cli_prompt``:
+    this is a CLI hook's report of ``text``, which makes words the app staged
+    for this same prompt quotable."""
     if not visuals.enabled():
         return
     root, _ = visuals._session(db, agent)
@@ -293,8 +295,10 @@ def person_spoke(db: DB, agent: Agent, text: str, *, expires_at: float | None = 
             c.execute("DELETE FROM visual_person_words WHERE root_id=?", (root.id,))
         elif typed and not fold_only:
             _keep_words(c, root.id, text)
-        # The words may be kept already (a hook CLI's arrive before its prompt
-        # does): tie them to what this message raises, so one spends the other.
+        elif cli_prompt:
+            c.execute("UPDATE visual_person_words SET staged=0 WHERE id=(SELECT MAX(id) FROM visual_person_words "
+                      "WHERE root_id=? AND words=? AND staged=1)", (root.id, _words(text)))
+        # Tie the words to what this message raises, so one spends the other.
         if not fold_only and scope and clear:
             _grant(c, root.id, scope)
             _link(c, root.id, text, "grant")
@@ -305,10 +309,12 @@ def person_spoke(db: DB, agent: Agent, text: str, *, expires_at: float | None = 
     bus.publish(db, "visual.offer_resolved", root_id=root.id)
 
 
-def keep_typed(db: DB, agent: Agent, text: str, expires_at: float) -> None:
+def keep_typed(db: DB, agent: Agent, text: str, expires_at: float, submitted_at: float) -> None:
     """The app watched the person key in ``text``, for a CLI whose prompt hook
     can't say what was typed. Sent before the app lets Enter through: a report
-    that fails or comes late leaves nothing, so those words can't be quoted."""
+    that fails, comes late or predates newer person input leaves nothing. What
+    it leaves is staged: only that prompt's own hook makes the words quotable,
+    in the transaction that raises any grant, so a message can't be spent twice."""
     if not visuals.enabled():
         return
     root, _ = visuals._session(db, agent)
@@ -317,8 +323,11 @@ def keep_typed(db: DB, agent: Agent, text: str, expires_at: float) -> None:
     with db.tx() as c:
         if time.time() >= expires_at:
             raise ServiceError("stale", "this input observation expired", 409)
+        state = c.execute("SELECT invalidated_at FROM visual_input_state WHERE root_id=?", (root.id,)).fetchone()
+        if state and submitted_at <= state["invalidated_at"]:
+            raise ServiceError("stale", "this submission predates a direct person message", 409)
         if not _CANCEL_REQUEST.search(text):
-            _keep_words(c, root.id, text)
+            _keep_words(c, root.id, text, staged=True)
 
 
 def purge_words(db: DB) -> None:
@@ -334,13 +343,14 @@ def _words(text: str) -> str:
     return " ".join(text.split()).casefold()
 
 
-def _keep_words(c, root: str, text: str) -> None:
+def _keep_words(c, root: str, text: str, staged: bool = False) -> None:
     """Keep a typed message for ``asked`` to be checked against, briefly."""
     now = time.time()
     words = _words(text)
     if (len(words.split()) >= MIN_QUOTE_WORDS and len(words) <= MAX_KEPT_CHARS
             and not visuals.secret_finding(text, "the message")):
-        c.execute("INSERT INTO visual_person_words (root_id, words, created_at) VALUES (?,?,?)", (root, words, now))
+        c.execute("INSERT INTO visual_person_words (root_id, words, staged, created_at) VALUES (?,?,?,?)",
+                  (root, words, int(staged), now))
     c.execute("DELETE FROM visual_person_words WHERE created_at<=?", (now - FOLD,))
     c.execute("DELETE FROM visual_person_words WHERE root_id=? AND id NOT IN "
               "(SELECT id FROM visual_person_words WHERE root_id=? ORDER BY id DESC LIMIT ?)",
@@ -354,8 +364,8 @@ def _spend_quote(c, root: str, asked: str, now: float) -> bool:
         return False
     # Whole words, and not a piece cut from "don't render it".
     pattern = re.compile(rf"(?<!\w){re.escape(quote)}(?!\w)")
-    for row in c.execute("SELECT id, words, source FROM visual_person_words WHERE root_id=? AND created_at>? "
-                         "ORDER BY id DESC", (root, now - FOLD)).fetchall():
+    for row in c.execute("SELECT id, words, source FROM visual_person_words WHERE root_id=? AND staged=0 "
+                         "AND created_at>? ORDER BY id DESC", (root, now - FOLD)).fetchall():
         if any(not _NEGATED.search(row["words"][:m.start()]) for m in pattern.finditer(row["words"])):
             c.execute("DELETE FROM visual_person_words WHERE id=?", (row["id"],))
             if row["source"] == "grant":

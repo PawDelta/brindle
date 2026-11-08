@@ -926,12 +926,14 @@ CREATE TABLE IF NOT EXISTS visual_requests (
 -- What the person typed lately, for publish_visual's `asked` to be checked
 -- against. A row is spent by the one publication it allows; the rest go after
 -- visual_offers.FOLD. source: the grant or confirmation this same message
--- raised ('grant', 'request'), which spending the row also spends.
+-- raised ('grant', 'request'), which spending the row also spends. staged:
+-- reported by the app, waiting for the CLI's hook to report that same prompt.
 CREATE TABLE IF NOT EXISTS visual_person_words (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     root_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
     words TEXT NOT NULL,
     source TEXT,
+    staged INTEGER NOT NULL DEFAULT 0,
     created_at REAL NOT NULL
 );
 -- Visuals an agent published into a session (brindle.visuals owns these):

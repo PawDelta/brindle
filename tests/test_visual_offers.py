@@ -300,10 +300,11 @@ def test_legacy_unscoped_grants_are_revoked(db, session):
         reopened.conn.close()
 
 
-def app_vouches(boss, text, expires_at):
+def app_vouches(boss, text, expires_at, submitted_at=None):
     token = "t" * 43
     with TestClient(build_app(token), headers={"Authorization": f"Bearer {token}"}) as client:
-        return client.post(f"/v1/sessions/{boss.id}/visual-input", json={"typed_words": text, "expires_at": expires_at})
+        return client.post(f"/v1/sessions/{boss.id}/visual-input", json={
+            "typed_words": text, "expires_at": expires_at, "submitted_at": submitted_at or offers.time.time()})
 
 
 def typed_into_cli(db, boss, text, vouched=True):
@@ -342,6 +343,22 @@ def _report_came_late(db, boss, worker):
     typed_into_cli(db, boss, "render first", vouched=False)
 
 
+def _report_lands_after_a_newer_cancel(db, boss, worker):
+    submitted_at = offers.time.time()
+    agents.send_message(db, boss.id, "Don't make a visual", person=True)
+    assert app_vouches(boss, "render first", offers.time.time() + 60, submitted_at).status_code == 409
+    typed_into_cli(db, boss, "render first", vouched=False)
+
+
+def _report_with_no_prompt_yet(db, boss, worker):
+    assert app_vouches(boss, "render first", offers.time.time() + 60).status_code == 200
+
+
+def _direct_message_cannot_stand_in_for_the_prompt(db, boss, worker):
+    assert app_vouches(boss, "render first", offers.time.time() + 60).status_code == 200
+    agents.send_message(db, boss.id, "render first", person=True)
+
+
 def _terminal(**fields):
     def send(db, boss, worker):
         token = "t" * 43
@@ -370,6 +387,9 @@ def _says(*texts):
     # A hook prompt nobody vouched for: a paste, a failed report, a terminal outside the app.
     (lambda db, boss, worker: typed_into_cli(db, boss, "render first", vouched=False), "render first"),
     (_report_came_late, "render first"),
+    (_report_lands_after_a_newer_cancel, "render first"),
+    (_report_with_no_prompt_yet, "render first"),
+    (_direct_message_cannot_stand_in_for_the_prompt, "render first"),
     (_terminal(typed=False), "render first"),
     (_terminal(), "render first"),
     (lambda db, boss, worker: agents.send_message(db, boss.id, "render first", person=True), "render first"),
@@ -415,6 +435,14 @@ def test_asked_quote_allows_one_publication_per_message(db, session):
     visuals.publish(db, boss, "Quoted", "<p>yes</p>", asked="Make a visual")
     with pytest.raises(ServiceError):
         visuals.publish(db, boss, "Again", "<p>no</p>")
+    # Between the app's report and its prompt's hook nothing can be spent.
+    assert app_vouches(boss, "Make a visual", offers.time.time() + 60).status_code == 200
+    with pytest.raises(ServiceError):
+        visuals.publish(db, boss, "Too early", "<p>no</p>", asked="Make a visual")
+    typed_into_cli(db, boss, "Make a visual", vouched=False)
+    visuals.publish(db, boss, "Then once", "<p>yes</p>", asked="Make a visual")
+    with pytest.raises(ServiceError):
+        visuals.publish(db, boss, "Not twice", "<p>no</p>")
     # Likewise a message that raised a confirmation card.
     ask = "Please render a mockup of the new session button"
     typed_into_cli(db, boss, ask)
