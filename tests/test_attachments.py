@@ -1,4 +1,5 @@
 import base64
+import os
 import unicodedata
 from pathlib import Path
 
@@ -70,6 +71,29 @@ def test_attachment_refusals(db, repo, world, tmp_path, monkeypatch):
     for body in ({}, {"name": "x", "data_base64": "!"}, {"path": str(link), "name": "x"},
                  {"name": [], "data_base64": "YQ=="}, {"path": 1}):
         assert _send("POST", "/v1/agents/wk/attachments", body)[0] == 400
+    # Synthetic Windows paths only: an attempted open can read just our fixture.
+    with monkeypatch.context() as patch:
+        patch.setattr(attachments, "_open_file", lambda _: os.open(source, os.O_RDONLY))
+        for path, expected in (
+            ("/mnt/c/Users/name/.ssh/id_rsa", 403),
+            ("/MNT/C/users/NAME/.AWS/credentials", 403),  # Case-alias bypass.
+            ("/windows/d/Users/name/.ssh/id_rsa", 403),  # Custom automount.
+            (r"\\?\C:\Users\name\.ssh\id_rsa", 403),  # Extended native alias.
+            ("/windows/c/Users/name/.ssh. /id_rsa", 403),  # Win32 trailing-dot/space alias.
+            ("/home/name/.ssh/id_rsa", 403),  # A converted WSL UNC share.
+            ("/mnt/c/Users/name/AppData/Roaming/gcloud/credentials.db", 403),
+            ("/windows/c/Users/name/AppData/Roaming/GitHub CLI/hosts.yml", 403),
+            ("/mnt/c/Users/name/AppData/Local/Microsoft/Credentials/token", 403),
+            ("/mnt/c/Projects/notes.txt", 200),
+            ("/windows/c/Users/name/Documents/notes.txt", 200),
+        ):
+            code, result = _send("POST", "/v1/agents/wk/attachments", {"path": path})
+            assert code == expected, path
+            if code == 200:
+                saved = Path(result["paths"][0])
+                assert saved.read_bytes() == source.read_bytes()
+                saved.unlink()
+                saved.parent.rmdir()
     monkeypatch.setattr(attachments, "MAX_BYTES", 4)
     monkeypatch.setattr(providers, "_codex_denied_reads", lambda: [])
     secret = tmp_path / "credential"

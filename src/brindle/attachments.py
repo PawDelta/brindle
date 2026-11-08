@@ -18,6 +18,16 @@ from brindle.service.errors import ServiceError
 
 MAX_BYTES = 10 * 1024 * 1024
 
+# Windows locations for the same CLI credentials and the profile's OS vaults.
+_WINDOWS_CREDENTIAL_STORES = (
+    "AppData/Roaming/gh", "AppData/Roaming/GitHub CLI", "AppData/Roaming/gcloud",
+    "AppData/Roaming/gnupg", "AppData/Roaming/npm/npmrc", "AppData/Roaming/npm/etc/npmrc",
+    "AppData/Roaming/Docker", "AppData/Local/Docker", ".gcm", ".codex/auth.json",
+    "AppData/Local/Microsoft/Credentials", "AppData/Roaming/Microsoft/Credentials",
+    "AppData/Local/Microsoft/Vault", "AppData/Roaming/Microsoft/Vault",
+    "AppData/Roaming/Microsoft/Protect",
+)
+
 
 def request_limit() -> int:
     # Base64 plus the JSON envelope and a bounded filename/path.
@@ -40,6 +50,24 @@ def _denied(path: Path, worktree: Path) -> bool:
            for rule in permissions.CREDENTIAL_DENIES if rule.kind == "read"):
         return True
     denied = [*providers._codex_denied_reads(), *permissions.credential_paths()]
+    # WSL drive mounts need not be /mnt: recognize the Users/<profile> suffix
+    # at any mount root, including native/extended aliases from other clients.
+    # Normalize only the comparison; the source still gets the no-symlink walk.
+    windows_key = _path_key(os.path.normpath(str(path).replace("\\", "/")))
+    windows_key = "/".join(part.rstrip(" .") for part in windows_key.split("/"))
+    if profiles := list(re.finditer(r"(?:^|/)users/[^/]+(?=/|$)", windows_key)):
+        stores = [*permissions._CREDENTIAL_DIRS, *permissions._CREDENTIAL_FILES,
+                  *_WINDOWS_CREDENTIAL_STORES]
+        home = _path_key(Path.home()) + "/"
+        for name in denied:
+            expanded = _path_key(os.path.expanduser(name))
+            if expanded.startswith(home):
+                stores.append(expanded[len(home):])
+        for profile in profiles:
+            relative = windows_key[profile.end():].lstrip("/")
+            if any(relative == (store := _path_key(name)) or relative.startswith(store + "/")
+                   for name in stores):
+                return True
     # Include the credential-path checker's home-relative stores too, including
     # another account's home, so its fallback cannot miss an aliased spelling.
     homes = {str(Path.home())}

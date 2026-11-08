@@ -267,6 +267,7 @@ class VisualAnswerDTO(_DTO):
     option: str | None
     note: str | None = None
     at: float
+    attachments: list[str] = []
 
 
 class VisualDTO(_DTO):
@@ -276,6 +277,8 @@ class VisualDTO(_DTO):
 
     id: str
     session: str
+    answer_agent_id: str
+    accepts_files: bool
     title: str
     by: str
     kind: Literal["visual", "plan"]
