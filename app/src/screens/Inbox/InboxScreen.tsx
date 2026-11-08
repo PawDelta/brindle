@@ -356,10 +356,10 @@ function Banner({ item, actions, who, branch, sessionTitle, repo, isNew, onDone,
         Review &amp; open PR
       </button>
     );
-  } else if (item.kind === "visual" && onGo) {
-    // A visual decision opens its reader (goTo), not the session it belongs to.
+  } else if (item.kind === "visual") {
+    // A visual decision opens its reader (goTo), not the session it belongs to; disabled until that session has loaded.
     acts = (
-      <button type="button" className={`${button} text-xs`} onClick={onGo}>
+      <button type="button" className={`${button} text-xs`} disabled={!onGo} onClick={onGo}>
         Open visual
       </button>
     );
