@@ -32,7 +32,7 @@
    nowhere else: the Inbox is where what needs a person is read and acted
    on. */
 
-import { useEffect, useMemo, useRef, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { DaemonClient, InboxAction } from "../../api/client";
 import { useDaemon } from "../../api/context";
 import { openExternal, type OpenUrl } from "../../api/open";
@@ -337,6 +337,8 @@ function Banner({ item, actions, who, branch, sessionTitle, repo, isNew, onDone,
         {act("Decline", "decline", {}, GHOST)}
       </>
     );
+  } else if (item.kind === "analysis_offer") {
+    acts = <AnalysisOfferActions item={item} actions={actions} onDone={onDone} />;
   } else if (item.kind === "org_notice") {
     acts = act("Mark read", "read", {}, PLAIN);
   } else if (item.kind === "org_blocked") {
@@ -354,10 +356,10 @@ function Banner({ item, actions, who, branch, sessionTitle, repo, isNew, onDone,
         Review &amp; open PR
       </button>
     );
-  } else if (item.kind === "visual" && onGo) {
-    // A visual decision opens its reader (goTo), not the session it belongs to.
+  } else if (item.kind === "visual") {
+    // A visual decision opens its reader (goTo), not the session it belongs to; disabled until that session has loaded.
     acts = (
-      <button type="button" className={`${button} text-xs`} onClick={onGo}>
+      <button type="button" className={`${button} text-xs`} disabled={!onGo} onClick={onGo}>
         Open visual
       </button>
     );
@@ -398,6 +400,35 @@ function Banner({ item, actions, who, branch, sessionTitle, repo, isNew, onDone,
         )}
       </div>
     </article>
+  );
+}
+
+/* brindle's one-time offer of an analysis doc for a large goal: Yes / Not now, answered through
+   the goal route with the offer id the item carries (request_id). A refusal (the offer was replaced
+   meanwhile) is the one line on the card; either way the inbox is read again. */
+function AnalysisOfferActions({ item, actions, onDone }: { item: InboxItemDTO; actions: ReturnType<typeof useInboxActions>; onDone(): void }) {
+  const client = useDaemon();
+  const [saving, setSaving] = useState(false);
+  const answer = (accept: boolean) => {
+    setSaving(true);
+    actions.dismiss(itemKey(item));
+    void client
+      .resolveAnalysisOffer(item.root_id ?? "", item.request_id ?? "", accept)
+      .then(() => actions.settle(item), (e: unknown) => actions.report(item, e instanceof Error ? e.message : String(e), true))
+      .finally(() => {
+        setSaving(false);
+        onDone();
+      });
+  };
+  return (
+    <>
+      <button type="button" className={`${ACT} ${PLAIN}`} disabled={saving} onClick={() => answer(true)}>
+        Yes
+      </button>
+      <button type="button" className={`${ACT} ${GHOST}`} disabled={saving} onClick={() => answer(false)}>
+        Not now
+      </button>
+    </>
   );
 }
 

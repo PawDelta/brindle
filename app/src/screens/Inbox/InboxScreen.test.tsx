@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { DaemonClient } from "../../api/client";
 import { DaemonContext } from "../../api/context";
 import { scopesFor } from "../../api/permissions";
-import type { AskDTO, AskDecisionDTO, AskGroupDTO, InboxItemDTO, SessionDTO } from "../../api/schema";
+import type { AskDTO, AskDecisionDTO, AskGroupDTO, GoalDTO, InboxItemDTO, SessionDTO } from "../../api/schema";
 import { SessionsProvider } from "../../store/sessions";
 import { createAppStore } from "../../store/store";
 import { startSync } from "../../store/sync";
@@ -165,6 +165,26 @@ describe("inbox", () => {
     fireEvent.click(within(card("visual")).getByRole("button", { name: "Open visual" }));
     expect(onOpen).toHaveBeenLastCalledWith("sup1", REPO, "sup1", { kind: "visual", id: "v_8f2c" });
     expect(within(card("question")).getByRole("button", { name: "Go to session ›" }).className).toContain("btn-secondary");
+    sync.stop();
+  });
+
+  it("a visual decision whose session hasn't loaded yet waits to open and never reads as answered", async () => {
+    const visualItem: InboxItemDTO = { kind: "visual", agent_id: "sup1", root_id: "sup1", workspace_id: "proj", visual_id: "v_8f2c", reason: "asks you to choose" };
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [], workspaces: [], inbox: [visualItem] });
+    const { sync } = mount(daemon);
+    await screen.findAllByTestId("inbox-card");
+    expect((within(card("visual")).getByRole("button", { name: "Open visual" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(card("visual").textContent).not.toContain("answered in its session");
+    sync.stop();
+  });
+
+  it.each([[true, "Yes"], [false, "Not now"]])("an analysis doc offer is an Inbox card answered %s with %s through the goal route", async (accepted, label) => {
+    const offer: InboxItemDTO = { kind: "analysis_offer", agent_id: "sup1", root_id: "sup1", workspace_id: "proj", request_id: "o1", reason: "offers to write an analysis doc", detail: "Ship ls --json" };
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], inbox: [offer], goal: { root_id: "sup1", analysis_offer: "o1" } as GoalDTO });
+    const { sync } = mount(daemon);
+    await screen.findByText("Write an analysis doc for this goal?");
+    fireEvent.click(within(card("analysis_offer")).getByRole("button", { name: label }));
+    await waitFor(() => expect(posts(daemon).find((r) => r.path === "/goal/analysis-offer")?.body).toMatchObject({ root: "sup1", offer: "o1", accept: accepted }));
     sync.stop();
   });
 

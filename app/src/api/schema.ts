@@ -128,6 +128,7 @@ export interface AgentDTO {
   hooks_off?: string | null;
   id: string;
   locked?: string | null;
+  milestone?: string | null;
   mode: string;
   model?: string | null;
   parent_id?: string | null;
@@ -440,6 +441,8 @@ export interface GitHubConnectionDTO {
 export interface GoalDTO {
   analysis_doc?: boolean;
   analysis_offer?: string | null;
+  auditing?: boolean;
+  checking?: boolean;
   commits_last_hour?: number;
   detail?: string | null;
   enabled: boolean;

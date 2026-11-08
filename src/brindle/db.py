@@ -94,6 +94,18 @@ CREATE TABLE IF NOT EXISTS agents (
     failed_why TEXT,               -- why its status is 'failed': auth | model | delivery (service.inbox)
     name TEXT                      -- a session root's name, given by the person (POST /sessions/{root}/rename)
 );
+-- The milestone current when a worker was assigned (agents.spawn). A table of
+-- its own: released tables never gain columns (see session_repo_branches).
+CREATE TABLE IF NOT EXISTS agent_milestones (
+    agent_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
+    title TEXT NOT NULL
+);
+-- The goal milestone a queued task's worker is assigned to (assign/handoff's milestone); a table of its
+-- own so no released table gains a column.
+CREATE TABLE IF NOT EXISTS task_milestones (
+    task_id TEXT PRIMARY KEY,
+    title TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS inbox (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
@@ -200,6 +212,20 @@ CREATE TABLE IF NOT EXISTS agent_marks (
     value TEXT NOT NULL,
     PRIMARY KEY (agent_id, kind)
 );
+-- A worker's question or stall its supervisor hasn't dealt with (brindle.open_items):
+-- one row per worker, deleted when it closes. level: the notices sent past the
+-- first. retiring_at: a sweep is taking the worker over.
+CREATE TABLE IF NOT EXISTS open_items (
+    worker_id TEXT PRIMARY KEY,
+    supervisor_id TEXT NOT NULL,
+    kind TEXT NOT NULL,            -- question | stalled
+    detail TEXT NOT NULL,
+    opened_at REAL NOT NULL,
+    stop_at REAL NOT NULL,         -- the status_since of the stop it is about
+    level INTEGER NOT NULL DEFAULT 0,
+    retiring_at REAL
+);
+CREATE INDEX IF NOT EXISTS open_items_supervisor ON open_items(supervisor_id);
 -- Every report_result call, from receipt to delivery (agents.report_result):
 -- state received -> accepted (promoted into agents.result) -> delivered (the
 -- supervisor's inbox row or the review's claim written in that same
@@ -1004,7 +1030,6 @@ class Agent:
     failed_why: str | None = None          # why it is 'failed': auth | model | delivery; None from an older brindle
     name: str | None = None                # a session root's name from the person; None: listed by its goal
 
-
 @dataclass
 class Autopilot:
     root_id: str
@@ -1210,6 +1235,18 @@ class Message:
 
 
 @dataclass
+class OpenItem:
+    worker_id: str
+    supervisor_id: str
+    kind: str
+    detail: str
+    opened_at: float
+    stop_at: float
+    level: int = 0
+    retiring_at: float | None = None
+
+
+@dataclass
 class Task:
     id: str
     repo_root: str
@@ -1244,6 +1281,23 @@ def request_subagent(row) -> str | None:
     except (ValueError, TypeError, AttributeError):
         return None
     return subagent if isinstance(subagent, str) and subagent else None
+
+
+def _pane_delivery_message(c: sqlite3.Connection, agent_id: str) -> int | None:
+    """The id of the message ``agent_id``'s pane-delivery mark is typing in,
+    while that message is still there. A mark whose message is gone (a
+    notice read_held dropped) holds nothing back: left blocking, it stopped
+    every later message, the person's too, on every path."""
+    row = c.execute("SELECT value FROM agent_marks WHERE agent_id=? AND kind='pane-delivery'",
+                    (agent_id,)).fetchone()
+    if row is None:
+        return None
+    try:
+        message_id = json.loads(row["value"]).get("message_id")
+    except (ValueError, AttributeError):
+        return None
+    found = c.execute("SELECT 1 FROM inbox WHERE id=? AND agent_id=?", (message_id, agent_id)).fetchone()
+    return message_id if found else None
 
 
 def _load(cls, row):
@@ -1810,6 +1864,22 @@ class DB:
 
     # -- agents ------------------------------------------------------------
 
+    def set_agent_milestone(self, agent_id: str, title: str) -> None:
+        with self.tx() as c:
+            c.execute("INSERT OR REPLACE INTO agent_milestones (agent_id, title) VALUES (?,?)", (agent_id, title))
+
+    def set_task_milestone(self, task_id: str, title: str) -> None:
+        with self.tx() as c:
+            c.execute("INSERT OR REPLACE INTO task_milestones (task_id, title) VALUES (?,?)", (task_id, title))
+
+    def task_milestone(self, task_id: str) -> str | None:
+        row = self.conn.execute("SELECT title FROM task_milestones WHERE task_id=?", (task_id,)).fetchone()
+        return row["title"] if row else None
+
+    def agent_milestone(self, agent_id: str) -> str | None:
+        row = self.conn.execute("SELECT title FROM agent_milestones WHERE agent_id=?", (agent_id,)).fetchone()
+        return row["title"] if row else None
+
     def add_agent(self, a: Agent) -> None:
         if a.tmux_server is None:
             # An agent's window goes on the tmux server brindle is using when
@@ -2225,6 +2295,57 @@ class DB:
             c.execute("DELETE FROM agents WHERE id=?", (agent_id,))
             c.execute("DELETE FROM agent_marks WHERE agent_id=?", (agent_id,))
             c.execute("DELETE FROM report_outbox WHERE agent_id=?", (agent_id,))
+            c.execute("DELETE FROM open_items WHERE worker_id=?", (agent_id,))
+
+    # -- open items (brindle.open_items) -----------------------------------
+
+    def add_open_item(self, worker_id: str, supervisor_id: str, kind: str, detail: str, at: float,
+                      stop_at: float) -> bool:
+        """Open the worker's item. False when it already has one."""
+        with self.tx() as c:
+            cur = c.execute("INSERT OR IGNORE INTO open_items (worker_id, supervisor_id, kind, detail, opened_at, stop_at)"
+                            " VALUES (?,?,?,?,?,?)", (worker_id, supervisor_id, kind, detail, at, stop_at))
+        return cur.rowcount == 1
+
+    def get_open_item(self, worker_id: str) -> OpenItem | None:
+        row = self.conn.execute("SELECT * FROM open_items WHERE worker_id=?", (worker_id,)).fetchone()
+        return _load(OpenItem, row) if row else None
+
+    def open_items(self, supervisor_id: str | None = None) -> list[OpenItem]:
+        """Oldest first, every supervisor's unless one is named."""
+        sql, args = "SELECT * FROM open_items", ()
+        if supervisor_id is not None:
+            sql, args = sql + " WHERE supervisor_id=?", (supervisor_id,)
+        return [_load(OpenItem, r) for r in self.conn.execute(sql + " ORDER BY opened_at, worker_id", args)]
+
+    def close_open_item(self, worker_id: str) -> bool:
+        with self.tx() as c:
+            cur = c.execute("DELETE FROM open_items WHERE worker_id=?", (worker_id,))
+        return cur.rowcount == 1
+
+    def set_open_item_level(self, worker_id: str, expect: int, level: int) -> bool:
+        """Compare-and-set, so of the processes sweeping only one sends a notice."""
+        with self.tx() as c:
+            cur = c.execute("UPDATE open_items SET level=? WHERE worker_id=? AND level=?",
+                            (level, worker_id, expect))
+        return cur.rowcount == 1
+
+    def claim_open_item_retire(self, worker_id: str, now: float, expired_before: float) -> bool:
+        """Claim taking the worker over, unless a claim newer than
+        ``expired_before`` holds it (one that old is a sweep that died)."""
+        with self.tx() as c:
+            cur = c.execute("UPDATE open_items SET retiring_at=? WHERE worker_id=?"
+                            " AND (retiring_at IS NULL OR retiring_at < ?)", (now, worker_id, expired_before))
+        return cur.rowcount == 1
+
+    def restart_open_item(self, worker_id: str, now: float) -> None:
+        """A takeover held off: the hour starts over, and the claim is let go."""
+        with self.tx() as c:
+            c.execute("UPDATE open_items SET opened_at=?, retiring_at=NULL WHERE worker_id=?", (now, worker_id))
+
+    def release_open_item_retire(self, worker_id: str) -> None:
+        with self.tx() as c:
+            c.execute("UPDATE open_items SET retiring_at=NULL WHERE worker_id=?", (worker_id,))
 
     # -- inbox -------------------------------------------------------------
 
@@ -2247,6 +2368,27 @@ class DB:
     def mark_delivered(self, message_id: int) -> None:
         with self.tx() as c:
             c.execute("UPDATE inbox SET delivered_at=? WHERE id=?", (time.time(), message_id))
+
+    def claim_delivery(self, message_id: int) -> float | None:
+        """Mark one queued message delivered before a transport sends it, so no
+        other path (read_messages, the waiter, a pane delivery) takes it too.
+        Returns the claim's time, or None if another path already had it: one
+        that delivered it, or a pane delivery typing it (its row stays
+        undelivered while its mark owns it)."""
+        now = time.time()
+        with self.tx() as c:
+            row = c.execute("SELECT agent_id FROM inbox WHERE id=? AND delivered_at IS NULL",
+                            (message_id,)).fetchone()
+            if row is None or _pane_delivery_message(c, row["agent_id"]) == message_id:
+                return None
+            c.execute("UPDATE inbox SET delivered_at=? WHERE id=?", (now, message_id))
+        return now
+
+    def release_delivery(self, message_id: int, claimed_at: float) -> None:
+        """Put back a message whose send failed, only if the claim is still this one's."""
+        with self.tx() as c:
+            c.execute("UPDATE inbox SET delivered_at=NULL WHERE id=? AND delivered_at=?",
+                      (message_id, claimed_at))
 
     # -- permission requests left to the person (brindle.permissions) --
 
@@ -2314,14 +2456,15 @@ class DB:
                               (agent_id, row["tool_use_id"]))
 
     def pop_pending(self, agent_id: str) -> Message | None:
-        """Atomically claim the oldest undelivered message, if any."""
+        """Atomically claim the oldest undelivered message, if any. None while
+        a pane delivery holds the queue (agents._resume_pane_delivery goes first)."""
         with self.tx() as c:
+            if _pane_delivery_message(c, agent_id) is not None:
+                return None
             row = c.execute(
                 "SELECT * FROM inbox WHERE agent_id=? AND delivered_at IS NULL "
-                "AND COALESCE(held,0)=0 AND NOT EXISTS"
-                " (SELECT 1 FROM agent_marks WHERE agent_id=? AND kind='pane-delivery')"
-                " ORDER BY id LIMIT 1",
-                (agent_id, agent_id),
+                "AND COALESCE(held,0)=0 ORDER BY id LIMIT 1",
+                (agent_id,),
             ).fetchone()
             if not row:
                 return None
@@ -2545,21 +2688,28 @@ class DB:
             )
 
     def read_held(self, agent_id: str) -> list[Message]:
-        """Every unread held message, marked read. A Stop's reminder covered
-        only these (claim_stop_reminder): mail after them gets its own."""
+        """Every unread held message, and every message still queued to be
+        pushed (the person's, say) but the one a pane delivery is typing,
+        marked read: whichever path runs first delivers each once. A Stop's
+        reminder covered only the held ones (claim_stop_reminder): mail after
+        them gets its own."""
         with self.tx() as c:
+            typing = _pane_delivery_message(c, agent_id)
             rows = c.execute(
-                "SELECT * FROM inbox WHERE agent_id=? AND held=1 AND delivered_at IS NULL ORDER BY id",
-                (agent_id,),
+                "SELECT * FROM inbox WHERE agent_id=? AND delivered_at IS NULL AND (held=1 OR "
+                "(COALESCE(held,0)=0 AND noticed_at IS NULL AND id IS NOT ?)) ORDER BY id",
+                (agent_id, typing),
             ).fetchall()
-            c.execute(
-                "UPDATE inbox SET delivered_at=? WHERE agent_id=? AND held=1 AND delivered_at IS NULL",
-                (time.time(), agent_id),
-            )
+            now = time.time()
+            c.executemany("UPDATE inbox SET delivered_at=? WHERE id=?", [(now, r["id"]) for r in rows])
             c.execute("UPDATE agents SET stop_reminded_at=NULL WHERE id=?", (agent_id,))
             # A notice still queued announces only what was just read: it would wake the agent for nothing.
             c.execute("DELETE FROM inbox WHERE agent_id=? AND COALESCE(held,0)=0 "
                       "AND delivered_at IS NULL AND noticed_at IS NOT NULL", (agent_id,))
+            if _pane_delivery_message(c, agent_id) is None:
+                # Its message is gone (a notice just dropped, typed as far as
+                # its lead): nothing is left to resume, and the queue moves on.
+                c.execute("DELETE FROM agent_marks WHERE agent_id=? AND kind='pane-delivery'", (agent_id,))
             return [_load(Message, r) for r in rows]
 
     def message_delivered(self, message_id: int) -> bool:

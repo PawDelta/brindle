@@ -145,6 +145,75 @@ def test_queued_message_goes_through_the_inbox_at_stop(db, boss, via_inbox):
     assert via_inbox == ["a queued message"]
 
 
+def test_a_person_message_goes_once_beside_read_messages(db, boss, monkeypatch):
+    # read_messages takes queued person messages too, so the inbox send claims
+    # its row first: a read during the send, or just before it, never doubles it.
+    from brindle import inbox
+
+    import json
+
+    sent, read, when = [], [], ["send"]
+
+    def reading(at):
+        if when[0] == at:
+            read.extend(m.body for m in db.read_held("boss"))
+        if when[0] == "pane" and at == "usable":
+            # A concurrent flush took the row first and its pane fallback
+            # stopped after the lead: that delivery owns the row now.
+            [(mid, body)] = db.conn.execute("SELECT id, body FROM inbox WHERE agent_id='boss' "
+                                            "ORDER BY id DESC LIMIT 1").fetchall()
+            db.record_pane_delivery(mid, "boss", json.dumps(
+                {"message_id": mid, "pane": "@0", "server": agents.server_of(db.get_agent("boss")),
+                 "provider": "claude", "body": body, "lead": "brindle delivered this message:",
+                 "stage": "lead", "stopped": True}))
+
+    monkeypatch.setattr(inbox, "usable", lambda a: reading("usable") or True)
+    monkeypatch.setattr(inbox, "send", lambda a, text, **k: reading("send") or sent.append(text) or True)
+    assert agents.send_message(db, "boss", "first answer", person=True) == "delivered"
+    assert sent == ["first answer"] and read == []
+    when[0] = "usable"
+    assert agents.send_message(db, "boss", "second answer", person=True) == "delivered"
+    assert sent == ["first answer"] and read == ["second answer"]
+    assert db.pending_count("boss") == 0
+
+    def unreadable(*a, **k):
+        raise tmux.TmuxError("no pane")
+
+    monkeypatch.setattr(tmux, "capture", unreadable)
+    when[0] = "pane"
+    assert agents.send_message(db, "boss", "third answer", person=True) == "queued"
+    assert sent == ["first answer"]  # never the socket too: the pane delivery resumes it
+    assert db.pending_count("boss") == 1 and db.read_held("boss") == []
+
+
+@pytest.mark.variant("read_messages racing a restarted pane delivery's paste")
+def test_a_restarted_pane_delivery_keeps_its_message_from_read_messages(db, boss, monkeypatch):
+    # A delivery stopped after its lead is typed in again whole once the
+    # composer is clear; meanwhile read_messages must not take the same row.
+    import json
+
+    db.set_status("boss", "idle")
+    answer = "The person answered visual v_1 (r1): option A."
+    mid = db.enqueue("boss", answer, None)
+    db.record_pane_delivery(mid, "boss", json.dumps(
+        {"message_id": mid, "pane": "@0", "server": agents.server_of(db.get_agent("boss")),
+         "provider": "claude", "body": answer, "lead": "brindle delivered this message:",
+         "stage": "lead", "stopped": True}))
+    monkeypatch.setattr(agents, "_composer_settled", lambda a: True)
+    monkeypatch.setattr(agents, "_partial_composer", lambda a, state, stage: False)
+    monkeypatch.setattr(agents, "_pane_input", lambda a: None)
+    pasted, read = [], []
+
+    def paste(target, body, **k):
+        read.extend(m.body for m in db.read_held("boss"))  # a read_messages mid-paste
+        pasted.append(body)
+
+    monkeypatch.setattr(tmux, "paste", paste)
+    assert agents.flush(db, "boss") is True
+    assert pasted == [answer] and read == []
+    assert db.message_delivered(mid) and db.mark("boss", "pane-delivery") is None
+
+
 def test_tool_hooks_mark_an_idle_agent_busy(db, boss):
     # A turn begun by a finished background task runs no UserPromptSubmit,
     # so the 'idle' its previous Stop left would otherwise stick.

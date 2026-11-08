@@ -671,7 +671,7 @@ def enqueue(
     *, isolate: bool, branch: str | None, done_when: str | None,
     files: list[str] | None, depends_on: list[str] | None, plan_first: bool | None = None,
     weight: str | None = None, analysis_doc: bool = False, waiting: str | None = None,
-    pipeline: str | None = None, unanswered: bool = False,
+    pipeline: str | None = None, unanswered: bool = False, milestone: str | None = None,
 ) -> Task:
     """Record a task that can't start yet: no worker, no workspace, just what
     it takes to start it once its dependencies are merged, or (``waiting``,
@@ -692,6 +692,8 @@ def enqueue(
         db.update_task(t.id, plan_first=int(plan_first))
     if analysis_doc:
         db.update_task(t.id, analysis_doc=1)   # add_task writes the original columns only
+    if milestone:
+        db.set_task_milestone(t.id, milestone)
     if pipeline:
         db.update_task(t.id, pipeline=pipeline)
     bus.publish(db, "task.queued", repo_root=t.repo_root, task_id=t.id, caller_id=t.caller_id,
@@ -1083,7 +1085,7 @@ def start_queued(db: DB, task: Task) -> Agent:
         isolate=bool(task.isolate), branch=task.branch, done_when=task.done_when,
         plan_first=None if task.plan_first is None else bool(task.plan_first),
         start=_holder_start(db, caller_ws, _loads(task.depends_on)), files=_loads(task.files),
-        weight=launch_weight, analysis_doc=bool(task.analysis_doc),
+        weight=launch_weight, analysis_doc=bool(task.analysis_doc), milestone=db.task_milestone(task.id),
         admit=False,   # every caller has just looked for room (_start_if_ready, requeue)
         # Nobody waits on a queued handoff (its reply said "queued" long ago):
         # detached from its first row, so even a result it reports before this
@@ -1467,29 +1469,35 @@ def requeue(db: DB, caller: Agent | None, caller_ws: Workspace, task_id: str,
         db, caller, ws, old.profile, old.task_text, old.mode, isolate=bool(old.isolate),
         branch=old.branch, done_when=old.done_when, files=_loads(old.files), depends_on=deps,
         plan_first=None if old.plan_first is None else bool(old.plan_first), weight=old.weight,
-        analysis_doc=bool(old.analysis_doc),
+        analysis_doc=bool(old.analysis_doc), milestone=db.task_milestone(old.id),
     )
     if unmet:
         return f"Requeued task {old.id} as {new.id}, waiting on {', '.join(unmet)}."
+    return start_requeued(db, new, f"task {old.id}")
+
+
+def start_requeued(db: DB, new: Task, label: str) -> str:
+    """Start ``new``, the pending replacement of ``label``, or leave it waiting
+    for room. Says which; raises ``ValueError`` if it can't start."""
     why = room_wait(new.repo_root)
     claimed, refused = False, None
     if not why:
         claimed, refused, why = _claim_fair(db, new)   # the slot it takes counts for others
     if why:
         wait_for_room(db, new, why)
-        return (f"Requeued task {old.id} as {new.id}, waiting for room: {why}. "
+        return (f"Requeued {label} as {new.id}, waiting for room: {why}. "
                 "It starts on its own when there's room.")
     if not claimed:
         reason = f"the repo's policy refused it: {refused}" if refused else "it was started or cancelled meanwhile"
         _cancel(db, new.id, reason)
-        raise ValueError(f"Requeued task {old.id} as {new.id}, but it didn't start: {reason}.")
+        raise ValueError(f"Requeued {label} as {new.id}, but it didn't start: {reason}.")
     try:
         worker = start_queued(db, new)
     except agents.AgentError as e:
         db.update_task(new.id, state="pending", started_at=None)   # so the cancel below applies
         _cancel(db, new.id, f"it could not start: {e}")
         raise ValueError(f"Nothing left to wait on, but the worker could not start: {e}") from e
-    return f"Requeued task {old.id} as {new.id}: nothing to wait on, started worker {worker.id}."
+    return f"Requeued {label} as {new.id}: nothing to wait on, started worker {worker.id}."
 
 
 def _matches(glob: str, path: str) -> bool:

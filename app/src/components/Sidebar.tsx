@@ -36,9 +36,10 @@ import type { DaemonClient, ProviderUsage } from "../api/client";
 import { DaemonContext } from "../api/context";
 import type { OpenUrl } from "../api/open";
 import type { GoalDTO, SessionDTO } from "../api/schema";
-import { readLastSession, routeSession, sameRoute, type Route, type SessionRef } from "../routes";
+import { readLastSession, routeSession, sameRoute, settingsTab, type Route, type SessionRef } from "../routes";
+import { AccountAvatar, SettingsRail } from "./SettingsRail";
 import { pruneShown, seenKey } from "../screens/Inbox/items";
-import { goalPhase, useGoal } from "../screens/Session/GoalPanel";
+import { goalPhase, SessionGoal, useGoal } from "../screens/Session/GoalPanel";
 import { UNKNOWN } from "../screens/Session/review";
 import { agentIds, sessionTree, type AgentNode } from "../screens/Session/tree";
 import { useContinue } from "../screens/Session/useContinue";
@@ -56,9 +57,9 @@ import Logo from "./Logo";
 import { Preflight } from "./Preflight";
 import { SessionContext } from "./SessionContext";
 import { TerminalToggle } from "./TerminalPanel";
-import { openWalkthrough } from "./Walkthrough";
 
 export interface SidebarProps {
+  onBackFromSettings?(): void;
   route: Route;
   navigate(route: Route): void;
   /* Fetch the snapshot and inbox again (Sync.refresh), after a decision made here. */
@@ -82,6 +83,17 @@ function WeeklyMeter({ provider }: { provider: ProviderUsage }) {
   );
 }
 
+/* The model beside its provider, without repeating the provider: "claude-opus-4-7" under Claude
+   reads "Opus 4.7"; a model that doesn't start with the provider's name ("gpt-5.5") keeps its own. */
+export function usageModel(model: string, provider: string): string {
+  const own = new RegExp(`^${provider}[-\\s]`, "i");
+  const rest = model.replace(own, "").replace(/(\d)-(\d)/g, "$1.$2");
+  return prettyModel(rest);
+}
+
+/* The reset day only matters once the weekly window is close to full. */
+const RESET_SHOWN_FROM = 80;
+
 /* Each click is its own request, so a second one with Account open scrolls back to Usage. */
 let usageAsks = 0;
 /* No reading is not a fault: a new user has none yet, and the first load may still be out.
@@ -101,9 +113,9 @@ function UsageReading({ provider, model, warning, failed, navigate }: { provider
       {provider ? (
         <>
           <span>{providerName(provider.provider)}</span>
-          {model && <span data-testid="usage-model">{prettyModel(model)}</span>}
+          {model && <span data-testid="usage-model">{usageModel(model, provider.provider)}</span>}
           <WeeklyMeter provider={provider} />
-          {window?.resets_at != null && <span className="truncate">· resets {new Date(window.resets_at * 1000).toLocaleDateString("en-US", { weekday: "short" })}</span>}
+          {window?.resets_at != null && window.used >= RESET_SHOWN_FROM &&<span className="truncate">· resets {new Date(window.resets_at * 1000).toLocaleDateString("en-US", { weekday: "short" })}</span>}
         </>
       ) : failed ? "Usage unavailable" : "Usage"}
     </button>
@@ -131,25 +143,17 @@ function AccountButton({ route, navigate }: Pick<SidebarProps, "route" | "naviga
   }, [client, connection, store]);
   const name = account?.signed_in ? account.name?.trim() : "";
   const email = account?.signed_in ? account.email?.trim() : "";
-  const initials = name
-    ? name.split(/\s+/).slice(0, 2).map((part) => Array.from(part)[0]).join("").toUpperCase()
-    : email?.split("@")[0]?.slice(0, 1).toUpperCase();
   return (
     <button
       type="button"
       aria-label="Open Account"
       data-walkthrough="profile"
-      aria-current={route.screen === "account" ? "page" : undefined}
+      aria-current={settingsTab(route) ? "page" : undefined}
       title={account?.signed_in ? name || email || "Signed in" : "Sign in"}
-      className={`flex size-7 shrink-0 items-center justify-center rounded-full border border-line-strong font-mono text-[10px] ${account?.signed_in ? "text-ink-2" : "text-ink-3"} hover:bg-surface-2`}
+      className="shrink-0 rounded-full hover:bg-surface-2"
       onClick={() => navigate({ screen: "account" })}
     >
-      {initials || (
-        <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-          <circle cx="12" cy="8" r="3.5" />
-          <path d="M5 21v-2a7 7 0 0 1 14 0v2" />
-        </svg>
-      )}
+      <AccountAvatar />
     </button>
   );
 }
@@ -289,39 +293,78 @@ export function roleOf(profile: string): string {
   return words.join("-");
 }
 
-/* One agent in a session's tree, and its children under it: a dot, "id ·
-   role" (the profile and branch are in the tooltip), its state at the right. */
+/* The model an agent runs, in a word: what its transcript last ran on, else the variant its profile names. */
+const MODEL_WORD = /^(sonnet|opus|haiku|fable|codex|gemini|flash|opencode|local)$/;
+
+function modelOf(a: { model?: string | null; profile: string; provider: string }): string {
+  // Codex and Gemini name their models by version (gpt-6-luna), which says less than the CLI; Claude's family word says it.
+  if (a.model) return /^(codex|gemini)$/.test(a.provider) ? a.provider : /(sonnet|opus|haiku|fable)/.exec(a.model)?.[1] ?? a.model;
+  // No transcript yet: a model word in the profile name; a routing tier (heavy, low…) is not a model, so the provider stands in.
+  const word = a.profile.split("-").find((w, i) => i > 0 && MODEL_WORD.test(w));
+  return word ?? (a.profile === a.provider ? "" : a.provider);
+}
+
+/* "feat/logo-goes-home" as "Logo goes home": the row's title when a worker has no milestone. */
+function branchWords(branch: string): string {
+  const words = (branch.split("/").pop() ?? branch).replace(/[-_]+/g, " ").trim();
+  return words ? words[0].toUpperCase() + words.slice(1) : branch;
+}
+
+/* The stage word and colour a row shares with the milestones view; none when at rest. */
+type RowStage = "code" | "review" | "done";
+const STAGE_CLASS: Record<RowStage, string> = { code: "working", review: "review", done: "done" };
+
+function stageOf(tone: DotTone, a: { mode: string }, reviewState?: string | null): RowStage | null {
+  if (tone === "done") return "done";
+  if (a.mode === "review") return tone === "work" ? "review" : null;
+  if (reviewState?.startsWith("reviewer")) return "review";
+  if (reviewState?.startsWith("checks") || reviewState?.startsWith("waiting for checks")) return "code";
+  return tone === "work" ? "code" : null;
+}
+
+/* One agent in a session's tree, and its children under it: a dot, its
+   milestone's title with "role · model" muted (the id, profile and branch are
+   in the tooltip), its stage at the right. Double-clicked, it copies its info. */
 function AgentRow({ node, depth, route, navigate, repo, root, cursor, setCursor }: { node: AgentNode; depth: number; repo: string; root: string; cursor: string | null; setCursor(key: string): void } & Pick<SidebarProps, "route" | "navigate">) {
   const a = node.agent;
   const alive = useAppState((s) => s.alive[a.id]);
   const active = route.screen === "session" && route.root === root && (route.agent ?? root) === a.id;
   const status = cliStatus(a, node.workspace, alive);
   const key = `agent:${a.id}`;
-  const label = a.id === root ? "supervisor" : a.profile ? roleOf(a.profile) : node.workspace.branch;
+  const role = a.id === root ? "supervisor" : a.profile ? roleOf(a.profile) : "";
+  const tone = dotTone(status, a.status);
+  const stage = stageOf(tone, a, node.workspace.review_state);
+  const reviewer = a.mode === "review";
+  // A worker reads as its milestone's title (else its branch in words); a reviewer, nested, only as its role.
+  const title = a.id === root || reviewer ? "" : a.milestone || branchWords(node.workspace.branch);
+  const muted = [role, modelOf(a)].filter(Boolean).join(" · ");
+  const info = [`id: ${a.id}`, `role: ${role}`, `profile: ${a.profile}`, `branch: ${node.workspace.branch}`, `milestone: ${a.milestone ?? ""}`].join("\n");
   return (
     <li>
-      <button
-        type="button"
+      <SessionGoal
+        text={info}
+        noun="Session info"
+        enterCopies={false}
+        current={active ? "page" : undefined}
+        treeAgent={a.id}
+        row={key}
+        title={`${a.id} · ${status.glyph} ${status.label} · ${a.profile} · ${node.workspace.branch} (double-click to copy its info)`}
         className={`flex w-full items-center gap-s1 rounded-r-md py-[3px] pl-[10px] pr-s1 text-left hover:bg-surface ${active ? "bg-branch-soft" : ""} ${cursor === key ? CURSOR : ""}`}
-        style={{ paddingLeft: `${10 + (depth - 1) * 12}px` }}
-        aria-current={active ? "page" : undefined}
-        data-tree-agent={a.id}
-        data-row={key}
-        title={`${a.id} · ${status.glyph} ${status.label} · ${a.profile} · ${node.workspace.branch}`}
-        onClick={() => {
+        onOpen={() => {
           setCursor(key);
           navigate({ screen: "session", root, repo, agent: a.id });
         }}
       >
-        <Dot tone={dotTone(status, a.status)} />
-        <span className="min-w-0 flex-1 truncate font-mono text-xs text-ink">
+        <Dot tone={tone} className={stage ? `st-${STAGE_CLASS[stage]}` : ""} />
+        <span className="min-w-0 flex-1 truncate text-xs text-ink" style={{ paddingLeft: `${(depth - 1) * 12}px` }}>
           {depth > 2 && <span className="text-ink-3">↳ </span>}
-          {a.id} · {label}
+          {title && <span data-testid="agent-title">{title} </span>}
+          <span className="text-ink-3" data-testid="agent-role">{muted}</span>
         </span>
-        <span className="max-w-[50%] shrink truncate text-[11px] text-ink-3" data-testid="agent-status">
-          {plainLabel(status, a.status)}
+        <span className={`max-w-[50%] shrink truncate text-[11px] ${stage ? `st-${STAGE_CLASS[stage]} stage-word` : "text-ink-3"}`} data-testid="agent-status">
+          {stage ?? plainLabel(status, a.status)}
         </span>
-      </button>
+      </SessionGoal>
       {node.children.length > 0 && (
         <ul className="flex flex-col gap-px">
           {node.children.map((child) => (
@@ -612,7 +655,8 @@ function Handle({ height, onChange }: { height: number; onChange(next: number): 
 const sheetOnly = (a: Extract<Route, { screen: "session" }>, b: Extract<Route, { screen: "session" }>) =>
   a.root === b.root && a.repo === b.repo && (a.agent ?? a.root) === (b.agent ?? b.root) && JSON.stringify(a.sheet ?? null) !== JSON.stringify(b.sheet ?? null);
 
-export function Sidebar({ route, navigate, refresh, openUrl }: SidebarProps) {
+export function Sidebar({ route, navigate, refresh, openUrl, onBackFromSettings }: SidebarProps) {
+  const tab = settingsTab(route);
   const { repos, sessions, error: feedError, closeError, close, after } = useSessions();
   const [cursor, setCursor] = useState<string | null>(null);
   const [folded, setFolded] = useState<Set<string>>(new Set());
@@ -755,11 +799,11 @@ export function Sidebar({ route, navigate, refresh, openUrl }: SidebarProps) {
   return (
     <aside className="side flex w-[352px] shrink-0 flex-col gap-[10px] border-r border-line bg-canvas-2 px-[12px] pb-[12px] pt-[14px] text-[13px] text-ink" aria-label="Sidebar">
       <div className="flex items-center gap-s1 px-1.5 pb-1">
-        <Logo className="text-[17px]" />
+        <Logo className="text-[17px]" onHome={() => navigate({ screen: "new" })} />
         <span className="flex-1" />
         <button
           type="button"
-          className={`flex items-center gap-1 rounded-md border px-2 py-0.5 text-[11.5px] font-medium hover:text-ink ${route.screen === "new" ? "border-branch/40 bg-branch-soft text-ink" : "border-branch/30 bg-branch-soft/50 text-ink-2 hover:bg-branch-soft"}`}
+          className={`flex items-center gap-1 rounded-md border px-2 py-0.5 text-[11.5px] font-medium ${route.screen === "new" ? "border-pass/40 bg-pass-soft text-pass" : "border-pass/30 bg-pass-soft/60 text-ink-2 hover:bg-pass-soft hover:text-pass"}`}
           aria-current={route.screen === "new" ? "page" : undefined}
           title="New session (⌘N)"
           data-walkthrough="new-session"
@@ -771,6 +815,8 @@ export function Sidebar({ route, navigate, refresh, openUrl }: SidebarProps) {
           New session
         </button>
       </div>
+      {tab && <SettingsRail tab={tab} onBack={onBackFromSettings ?? (() => navigate({ screen: "new" }))} onTab={(tab) => navigate({ screen: "settings", tab, repo: "repo" in route ? route.repo : undefined })} />}
+      <div hidden={tab !== null} className={tab ? "hidden" : "contents"}>
       <InboxEntry route={route} navigate={navigate} />
       <div className="mx-2 h-px shrink-0 bg-line" role="separator" data-testid="inbox-divider" />
       <SessionContext session={selected} route={route} navigate={navigate} refresh={refresh ?? noRefresh} openUrl={openUrl} style={{ height: split }} />
@@ -849,6 +895,7 @@ export function Sidebar({ route, navigate, refresh, openUrl }: SidebarProps) {
         )}
         {repos && repos.length > 0 && live.length === 0 && <p className="px-s1 text-xs text-ink-3">Nothing running. Start a session, or continue a recent one.</p>}
       </nav>
+      </div>
       <div className="flex min-h-4 items-center justify-between gap-2 whitespace-nowrap border-t border-line px-s1 pt-s1" data-testid="status-line">
         <UsageReading provider={shown} model={model} warning={warning} failed={usageError != null} navigate={navigate} />
         <ProviderProblemLine problems={problems} navigate={navigate} />
@@ -859,21 +906,7 @@ export function Sidebar({ route, navigate, refresh, openUrl }: SidebarProps) {
         {page({ screen: "knowledge" }, "Knowledge")}
         <span aria-hidden className="text-ink-3">·</span>
         {page({ screen: "agents" }, "Agents")}
-        <span aria-hidden className="text-ink-3">·</span>
-        {page({ screen: "settings" }, "Settings")}
         <span className="flex-1" />
-        <button
-          type="button"
-          className={FOOT_LINK}
-          aria-label="Show the walkthrough"
-          title="Show the walkthrough"
-          onClick={() => {
-            navigate({ screen: "new" });
-            openWalkthrough();
-          }}
-        >
-          ?
-        </button>
         <TerminalToggle />
       </nav>
     </aside>

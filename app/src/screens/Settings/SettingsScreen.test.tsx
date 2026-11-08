@@ -1,5 +1,8 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { useState } from "react";
+import { SettingsRail } from "../../components/SettingsRail";
+import type { SettingsTab } from "../../routes";
 import { DaemonContext } from "../../api/context";
 import { ProvidersProvider } from "../../store/providers";
 import { SessionsProvider } from "../../store/sessions";
@@ -40,6 +43,10 @@ afterEach(() => {
 
 /* `props`: the screen's own (the tab to open on, the shell's hooks); the client is the fake daemon's. */
 function setup(data: Partial<DaemonData> = {}, props: Omit<SettingsScreenProps, "client"> = {}) {
+  function Settings() {
+    const [tab, setTab] = useState<SettingsTab>(props.tab ?? props.section ?? (props.repo ? "project" : "general"));
+    return <><SettingsRail tab={tab} onTab={setTab} onBack={() => undefined} /><SettingsScreen client={client} {...props} tab={tab} onTab={setTab} /></>;
+  }
   const daemon = new FakeDaemon({
     repos: [{ repo_root: REPO, name: "proj" }],
     config: {
@@ -79,7 +86,7 @@ function setup(data: Partial<DaemonData> = {}, props: Omit<SettingsScreenProps, 
           <ProvidersProvider client={client}>
             {/* A sign-in's CLI read through the fake daemon's pty views, as the shell's show it. */}
             <PtyViewsProvider value={daemon.ptyViews()}>
-              <SettingsScreen client={client} {...props} />
+              <Settings />
             </PtyViewsProvider>
           </ProvidersProvider>
         </SessionsProvider>

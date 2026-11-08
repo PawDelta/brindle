@@ -321,18 +321,25 @@ body {
 .st-working { --st: var(--group-1); }
 .st-checks { --st: var(--group-6); }
 .st-review { --st: var(--group-7); }
-.st-merging { --st: var(--pass); }
+.st-merging, .st-done { --st: var(--pass); }
+.side-dot[class*="st-"] { background: var(--st); }
+.stage-word { color: var(--st); }
 .side-bar { display: flex; height: 3px; margin: 0 2px; border-radius: 2px; background: var(--line); overflow: hidden; }
 .side-bar .d { background: var(--pass); }
 .side-bar .n { background: var(--st); }
+.side-act.st-checks { color: var(--st); }
 .side-act { display: flex; justify-content: space-between; gap: 8px; padding: 0 2px; font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); white-space: nowrap; }
 .side-ms { display: flex; flex-direction: column; gap: 1px; }
 .side-ms .m { display: flex; align-items: center; gap: 7px; padding: 2px 6px; border-radius: var(--r); font-size: 12px; color: var(--ink-2); }
 .side-ms .m .i { width: 10px; flex: none; text-align: center; font-size: 10px; color: var(--ink-3); }
 .side-ms .m[data-state="done"] { color: var(--ink-3); }
 .side-ms .m[data-state="done"] .i { color: var(--pass); }
+.side-ms .m[data-state="pending"] { color: var(--ink-3); }
+.side-ms .m[data-state="pending"] .tag { color: var(--ink-3); }
 .side-ms .m[data-active] { color: var(--ink); font-weight: 500; }
 .side-ms .m[data-active] .i { color: var(--st, var(--ink)); }
+/* Several milestones may be active at once (a live worker each): every one reads in its stage's colour. */
+.side-ms .m[data-active][class*="st-"] .t { color: var(--st); }
 .side-ms .m .t { flex: 1; min-width: 0; line-height: 1.35; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .side-ms .m .tag { flex: none; font-family: var(--mono); font-size: 10px; font-weight: 400; color: var(--st); }
 /* A goal's phase folds over those rows (GoalPanel's PhaseFoldList): one line per phase, a green count once done. */
@@ -346,6 +353,9 @@ body {
 .ms-fold[aria-expanded="true"] .chev { transform: rotate(90deg); }
 .ms-fold .n { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 500; }
 .ms-fold .k { font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); flex: none; }
+.ms-fold.ms-pending { padding: 2px 6px; color: var(--ink-3); gap: 7px; }
+.ms-fold.ms-pending .i { width: 10px; flex: none; text-align: center; font-size: 10px; }
+.ms-fold.ms-pending .n { font-weight: 400; }
 .ms-fold[data-st="done"] .n, .ms-fold[data-st="todo"] .n { color: var(--ink-3); font-weight: 400; }
 .ms-fold[data-st="done"] .k { color: var(--pass); }
 .ms-fold .bar-s { display: flex; gap: 2px; width: 72px; height: 4px; flex: none; margin: 0 8px; }

@@ -3,8 +3,7 @@
    Inbox, Account and Settings, the session view), one at a time, with Next,
    Back and Skip. It opens by itself once, right after the first launch's
    setup (App's FirstLaunch passes `autoStart`), and again whenever
-   openWalkthrough() is called (the home screen's "Take the tour", the
-   sidebar's "?"). Finished or skipped, it is remembered on this Mac and
+   openWalkthrough() is called. Finished or skipped, it is remembered on this Mac and
    never opens by itself again.
 
    Each step finds its control by a data attribute, data-walkthrough="<id>",
@@ -43,12 +42,12 @@ export const STEPS: WalkthroughStep[] = [
   {
     target: "profile",
     title: "Account and Settings",
-    body: "Your initials open Account: your plan, sign-in and usage. Settings, beside them, holds the coding CLIs, keys and permission rules.",
+    body: "Your initials open Settings: your account (plan, sign-in and usage), the coding CLIs, keys and permission rules.",
   },
   {
     target: "session-view",
     title: "The session view",
-    body: "A running session fills this area with its supervisor's conversation; its agents are listed in the sidebar. Take this tour again any time from the ? at the foot of the sidebar.",
+    body: "A running session fills this area with its supervisor's conversation; its agents are listed in the sidebar.",
   },
 ];
 

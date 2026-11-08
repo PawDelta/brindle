@@ -263,6 +263,18 @@
           "default": null,
           "title": "Locked"
         },
+        "milestone": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Milestone"
+        },
         "mode": {
           "title": "Mode",
           "type": "string"
@@ -2252,6 +2264,16 @@
           ],
           "default": null,
           "title": "Analysis Offer"
+        },
+        "auditing": {
+          "default": false,
+          "title": "Auditing",
+          "type": "boolean"
+        },
+        "checking": {
+          "default": false,
+          "title": "Checking",
+          "type": "boolean"
         },
         "commits_last_hour": {
           "default": 0,
@@ -7789,6 +7811,18 @@
               ],
               "default": null,
               "title": "Locked"
+            },
+            "milestone": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Milestone"
             },
             "mode": {
               "title": "Mode",

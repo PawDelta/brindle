@@ -136,6 +136,8 @@ class AgentDTO(_DTO):
     tokens: str | None = None
     # The model its transcript last ran on (the usage meter names it); absent until it has run.
     model: str | None = None
+    # Title of the milestone current when the worker was assigned; absent for a supervisor or when none.
+    milestone: str | None = None
     unread: int | None = None
     hooks_off: str | None = None
     parent_id: str | None = None
@@ -381,6 +383,8 @@ class GoalDTO(_DTO):
     commits_last_hour: int = 0
     last_commit_at: float | None = None
     eta_seconds: float | None = None
+    checking: bool = False           # milestone checks run now
+    auditing: bool = False           # the completion audit runs now
     milestones: list[MilestoneDTO] = []
 
     @classmethod
@@ -388,11 +392,13 @@ class GoalDTO(_DTO):
                        phases: dict[int, str] | None = None,
                        goal_phase: tuple[str, str | None] = ("in_progress", None),
                        activity: dict | None = None) -> GoalDTO:
+        from brindle.autopilot import person_note
+
         phases = phases or {}
         return cls(**(activity or {}), root_id=ap.root_id, enabled=bool(ap.enabled), analysis_doc=bool(ap.analysis_doc),
                    analysis_offer=(ap.analysis_offer or "")[5:] if (ap.analysis_offer or "").startswith("open:") else None,
                    goal=ap.goal, detail=ap.detail,
-                   state=ap.state, note=ap.note, progress=ap.progress,
+                   state=ap.state, note=person_note(ap), progress=ap.progress,
                    usage_resets_at=ap.usage_resets_at,
                    goal_phase=goal_phase[0], pr_url=goal_phase[1],
                    milestones=[MilestoneDTO.from_row(m, phases.get(m.id, "in_progress"))

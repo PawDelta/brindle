@@ -38,6 +38,7 @@ export const KIND_LABEL: Record<string, string> = {
   org_blocked: "Org policy",
   setup: "Setup",
   idle_stopped: "Stopped while idle",
+  analysis_offer: "Analysis doc offer",
 };
 
 /* What the app can repair itself for a `setup` item, by its `fix` (engine
@@ -75,6 +76,7 @@ export const KIND_SHORT: Record<string, string> = {
   org_blocked: "org policy",
   setup: "setup",
   idle_stopped: "idle",
+  analysis_offer: "doc offer",
 };
 
 /* What is being asked, in a line the person can decide on. */
@@ -109,6 +111,8 @@ export function describeItem(item: InboxItemDTO): string {
       return `${providerLabel(loginProvider(item))} needs a sign-in`;
     case "login":
       return "brindle's cloud sign-in expired";
+    case "analysis_offer":
+      return "Write an analysis doc for this goal?";
     case "org_notice":
     /* An org Block, every request it stopped in one notice (service/inbox._org_blocks): "Blocked by <org> policy: <why>". */
     case "org_blocked":
@@ -197,7 +201,7 @@ export const FILTERS: { key: string; label: string; kinds: string[] }[] = [
   { key: "reviews", label: "Reviews", kinds: ["review", "merge_failed"] },
   { key: "checks", label: "Checks", kinds: ["proposed_checks"] },
   { key: "docs", label: "Docs", kinds: ["doc"] },
-  { key: "other", label: "Other", kinds: ["credentials", "login", "org_notice", "org_blocked", "setup", "idle_stopped"] },
+  { key: "other", label: "Other", kinds: ["credentials", "login", "org_notice", "org_blocked", "setup", "idle_stopped", "analysis_offer"] },
 ];
 
 export const filterOf = (item: InboxItemDTO) => FILTERS.find((f) => f.kinds.includes(item.kind))?.key ?? "other";

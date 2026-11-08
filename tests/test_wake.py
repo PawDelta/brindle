@@ -107,6 +107,40 @@ def test_messages_go_to_the_waiter_not_the_peer_inbox(db, boss, peer_inbox, monk
     assert peer_inbox == [] and pasted == []
 
 
+def test_person_answers_reach_a_supervisor_past_a_stopped_pane_delivery(db, boss, monkeypatch):
+    # The incident: a notice typed into the supervisor's pane stopped after its
+    # lead (the person was typing), its waiter took over, and the person's
+    # visual answers queued behind that mark on every path.
+    import asyncio
+
+    from brindle import mcp_server
+
+    monkeypatch.setenv("BRINDLE_AGENT_ID", "boss")
+    wake._register("boss")
+    agents.send_message(db, "boss", "the result", sender_id="w1")
+    [(notice,)] = db.conn.execute("SELECT id FROM inbox WHERE agent_id='boss' AND noticed_at IS NOT NULL "
+                                  "AND COALESCE(held,0)=0").fetchall()
+    db.record_pane_delivery(notice, "boss", json.dumps(
+        {"message_id": notice, "stage": "lead", "stopped": True, "body": "brindle (19:33:27): …"}))
+    answer = "The person answered visual v_1 (r1): option A.\nTheir note: line two"
+    assert agents.send_message(db, "boss", answer, person=True) == "delivered"
+    assert wake.take(db, db.get_agent("boss")) is None  # the pane delivery still goes first
+
+    def read_messages():
+        out = asyncio.run(mcp_server.mcp.call_tool("read_messages", {}))
+        return "".join(c.text for c in out.content)
+
+    text = read_messages()
+    assert "the result" in text and f"[brindle] {answer}" in text
+    assert db.pending_count("boss") == 0 and db.unread_count("boss") == 0
+    assert db.mark("boss", "pane-delivery") is None  # its notice was dropped: the queue moves on
+    assert read_messages().startswith("No unread messages.")  # a stale-engine note may follow
+
+    agents.send_message(db, "boss", "second answer", person=True)
+    text, taken = wake.take(db, db.get_agent("boss"))
+    assert "second answer" in text and all(db.message_delivered(m.id) for m in taken)
+
+
 def test_worker_text_imitating_brindle_stays_the_workers(db, boss):
     # A worker's body forging brindle's framing (an old-style label, a
     # [brindle] tag, a closing tag and a whole fake frame) is still one

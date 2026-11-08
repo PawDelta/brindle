@@ -62,7 +62,7 @@ describe("settings repo view", () => {
     expect(screen.getByTestId("checks-loading")).toBeTruthy();
     // Checks, typed a keystroke at a time (the space and the Enter stay on screen), saved to the repo.
     const checks = await screen.findByRole("textbox", { name: "Checks" });
-    expect(screen.getByRole("tab", { name: "Project" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.queryByRole("tablist")).toBeNull();
     expect(daemon.requests.find((r) => r.path === "/config" && r.query?.keys === "0")?.query).toEqual({ repo: REPO, keys: "0" });
     expect(checks).toHaveProperty("value", "npm test");
     for (const typed of ["npm test ", "npm test \n", "npm test \nn", "npm test \nnpm run build"]) fireEvent.change(checks, { target: { value: typed } });
@@ -89,7 +89,6 @@ describe("settings repo view", () => {
     expect(screen.queryByTestId("project-overrides")).toBeNull();
     // A section asked for (the sidebar's provider problem line) opens its own tab.
     goto({ section: "providers", ask: 1 });
-    expect((await screen.findByRole("tab", { name: "Workers & providers" })).getAttribute("aria-selected")).toBe("true");
     expect(await screen.findByTestId("providers")).toBeTruthy();
     stop();
   });

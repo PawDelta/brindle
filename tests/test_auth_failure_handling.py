@@ -52,6 +52,19 @@ def test_rate_limit_with_session_id_401_not_treated_as_auth_failure(db, repo):
     assert w.status != "failed"
 
 
+def test_worker_records_the_milestone_current_when_assigned(db, repo, no_pane):
+    from brindle import view
+
+    ws = Workspace("ws-ms", str(repo), "main", "main", "main", "main", str(repo), 20000, "tmux-ms", 0)
+    db.add_workspace(ws)
+    supervisor = agents.spawn(db, ws, "developer", mode="interactive")
+    db.set_milestones(supervisor.id, [("Parse flags", "true", None), ("Print JSON", "true", None)])
+    db.record_check(db.milestones(supervisor.id)[0].id, True, "ok")
+    worker = agents.spawn(db, ws, "developer", mode="assign", parent_id=supervisor.id)
+    assert view.agent_entry(db, db.get_agent(worker.id))["milestone"] == "Print JSON"
+    assert "milestone" not in view.agent_entry(db, db.get_agent(supervisor.id))
+
+
 def test_selected_model_stop_failure_fails_the_worker_and_tells_its_parent(db, repo, monkeypatch, no_pane):
     ws = Workspace("ws-model", str(repo), "main", "main", "main", "main", str(repo), 20000, "tmux-model", 0)
     db.add_workspace(ws)

@@ -35,7 +35,7 @@
    And before that, on every launch, the sign-in gate (SignInGate below):
    nothing but brindle's sign-in until the account reads signed in. */
 
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { DaemonError, type DaemonClient, type ProviderInstalled } from "./api/client";
 import { plain } from "./api/wording";
 import { DaemonContext } from "./api/context";
@@ -46,6 +46,7 @@ import type { About, AppUpdater, AppUpdates, CliLink, ReleaseBuildUpdater } from
 import { AppUpdateBanner, AppUpdateProvider } from "./components/AppUpdateBanner";
 import { UpgradeCard, useEngineUpgrade } from "./components/EngineUpgrade";
 import { EngineBanner } from "./components/EngineBanner";
+import Logo from "./components/Logo";
 import { AppCovered, ReconnectOverlay, useReconnect } from "./components/ReconnectOverlay";
 import { Sidebar } from "./components/Sidebar";
 import { Walkthrough, type WalkthroughStep } from "./components/Walkthrough";
@@ -172,7 +173,6 @@ function Screen({ route, visit, navigate, client, refresh, store, openUrl, pickF
     case "account":
       return (
         <SettingsScreen
-          key={route.screen === "project-settings" ? `repo:${route.repo}` : route.screen}
           client={client}
           installCli={installCli}
           appUpdater={appUpdater}
@@ -181,12 +181,13 @@ function Screen({ route, visit, navigate, client, refresh, store, openUrl, pickF
           readAbout={readAbout}
           openUrl={openUrl}
           onNavigate={(screen) => navigate({ screen })}
+          onTab={(tab) => navigate({ screen: "settings", tab, repo: "repo" in route ? route.repo : undefined })}
           tab={settingsTab(route) ?? undefined}
           visit={visit}
           section={route.screen === "settings" ? route.section : undefined}
           ask={route.screen === "project-settings" ? undefined : route.ask}
           rule={route.screen === "settings" ? route.rule : undefined}
-          repo={route.screen === "project-settings" ? route.repo : undefined}
+          repo={route.screen === "project-settings" || route.screen === "settings" ? route.repo : undefined}
           current={readLastSession()?.repo}
         />
       );
@@ -249,10 +250,44 @@ function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, p
   const [route, setRoute] = useState<Route | null>(initialRoute ?? null);
   /* Counts the navigations: one to the route already open still counts (Settings opens its tab again). */
   const [visit, setVisit] = useState(0);
+  const page = useRef<HTMLElement>(null);
+  const routeNow = useRef(route);
+  routeNow.current = route;
+  const [settingsFrom, setSettingsFrom] = useState<{ route: Route; visit: number; scroll: number } | null>(null);
+  const visitNow = useRef(visit);
+  visitNow.current = visit;
+  const restoreScroll = useRef<number | null>(null);
   const navigate = useCallback((to: Route) => {
+    const from = routeNow.current;
+    if (settingsTab(to) !== null && (!from || settingsTab(from) === null)) {
+      setSettingsFrom({ route: from ?? HOME, visit: visitNow.current, scroll: page.current?.scrollTop ?? 0 });
+      restoreScroll.current = 0;
+    } else if (settingsTab(to) === null) {
+      setSettingsFrom(null);
+    }
     setVisit((n) => n + 1);
     setRoute(to);
   }, []);
+  const backFromSettings = useCallback(() => {
+    restoreScroll.current = settingsFrom?.scroll ?? 0;
+    navigate(settingsFrom?.route ?? HOME);
+  }, [navigate, settingsFrom]);
+  useLayoutEffect(() => {
+    if (restoreScroll.current !== null && page.current) {
+      page.current.scrollTop = restoreScroll.current;
+      restoreScroll.current = null;
+    }
+  }, [route]);
+  useEffect(() => {
+    if (!route || settingsTab(route) === null) return;
+    const escape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      event.preventDefault();
+      backFromSettings();
+    };
+    window.addEventListener("keydown", escape);
+    return () => window.removeEventListener("keydown", escape);
+  }, [route, backFromSettings]);
   const { repos, sessions, error: feedError, reload } = useSessions();
   const showWalkthroughStep = useCallback((step: WalkthroughStep) => {
     switch (step.target) {
@@ -323,20 +358,30 @@ function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, p
       <div className="relative flex h-full bg-canvas text-ink">
         {/* Under the reconnect overlay the app stays on screen but out of reach: no focus, no clicks. */}
         <div className="contents" hidden={reading} inert={held}>
-          <Sidebar route={shown} navigate={navigate} refresh={refresh ?? noop} openUrl={openUrl} />
+          <Sidebar route={shown} navigate={navigate} onBackFromSettings={backFromSettings} refresh={refresh ?? noop} openUrl={openUrl} />
         </div>
         <div className="relative flex min-w-0 flex-1 flex-col" inert={held}>
+          {/* The sidebar is hidden over a full-window visual: its logo keeps a row of its own above the reader, and still goes Home. */}
+          {reading && (
+            <div className="flex shrink-0 items-center px-s3 pt-s2">
+              <Logo className="text-[17px]" onHome={() => navigate({ screen: "new" })} />
+            </div>
+          )}
           <AppUpdateBanner openUrl={openUrl} />
           {/* The banner's upgrade follows the engine's terminal stream, which a page with no engine doesn't have.
               While the engine is away after having answered, the overlay speaks for it instead (no raw error strip). */}
           {away ? null : client ? <Banner status={bannerStatus(engine, connection)} connection={connection} onRetry={check} client={client} store={store} /> : <EngineBanner status={bannerStatus(engine, connection)} connection={connection} onRetry={check} />}
-          <main data-walkthrough="session-view" className={`relative flex min-h-0 flex-1 flex-col ${fills ? "overflow-hidden" : "gap-s2 overflow-auto p-s3"}`}>
+          <main ref={page} data-walkthrough="session-view" className={`relative flex min-h-0 flex-1 flex-col ${fills ? "overflow-hidden" : "gap-s2 overflow-auto p-s3"}`}>
             {error && !away && <p className={`${alert} ${fills ? "m-s2 mb-0" : ""}`}>{error}</p>}
             {client ? (
               route ? (
-                <div className={`relative flex min-h-0 flex-1 flex-col ${shown.screen === "inbox" ? "gap-s2 p-s3" : ""}`}>
-                  <Screen route={route} visit={visit} navigate={navigate} client={client} refresh={refresh ?? noop} store={store} openUrl={openUrl} pickFolder={pickFolder} installCli={installCli} appUpdater={appUpdater} appUpdates={appUpdates} releaseBuildUpdater={releaseBuildUpdater} readAbout={readAbout} />
-</div>
+                <>
+                  {/* Keep the previous page mounted so its drafts, terminal and nested scroll survive Settings. */}
+                  <div hidden={settingsFrom !== null} className={settingsFrom ? "hidden" : `relative flex min-h-0 flex-1 flex-col ${shown.screen === "inbox" ? "gap-s2 p-s3" : ""}`}>
+                    <Screen route={settingsFrom?.route ?? route} visit={settingsFrom?.visit ?? visit} navigate={navigate} client={client} refresh={refresh ?? noop} store={store} openUrl={openUrl} pickFolder={pickFolder} installCli={installCli} appUpdater={appUpdater} appUpdates={appUpdates} releaseBuildUpdater={releaseBuildUpdater} readAbout={readAbout} />
+                  </div>
+                  {settingsFrom && <Screen route={route} visit={visit} navigate={navigate} client={client} refresh={refresh ?? noop} store={store} openUrl={openUrl} pickFolder={pickFolder} installCli={installCli} appUpdater={appUpdater} appUpdates={appUpdates} releaseBuildUpdater={releaseBuildUpdater} readAbout={readAbout} />}
+                </>
               ) : feedError ? (
                 // Nothing to land on: the sessions couldn't be read (the engine itself may be fine). Ask again.
                 <div role="alert" className={`${alert} m-s3 flex items-center gap-s2`} data-testid="sessions-failed">
