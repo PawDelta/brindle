@@ -193,3 +193,23 @@ def test_new_rows_are_judged_worth_committing(monkeypatch, tmp_path, capsys):
     assert gate.main(["--base", "x", "--approved-by", next(iter(gate.APPROVERS))]) == 0
     monkeypatch.setattr(gate, "uncovered_alone", lambda c, ids: ([], []))
     assert gate.main(["--base", "x"]) == 0      # lots of new rows, each worth committing
+
+    # a trimmed table: the survivors got new ids, but nothing grew, so nothing is new
+    trimmed_base = {f"tests/test_a.py::test_t[a{i}]": None for i in range(4)}
+    trimmed_head = {"tests/test_a.py::test_t[z0]": None, "tests/test_a.py::test_t[z1]": None}
+    src = "import pytest\n@pytest.mark.parametrize('v', [%s])\ndef test_t(v): pass\n"
+    _branch(monkeypatch, tmp_path, src % "'a0', 'a1', 'a2', 'a3'", src % "'z0', 'z1'", trimmed_base, trimmed_head)
+    assert gate.new_tests("x") == {}
+    # a table that truly grew reports only its growth
+    grown_head = {f"tests/test_a.py::test_t[z{i}]": None for i in range(6)}
+    _branch(monkeypatch, tmp_path, src % "'a0', 'a1', 'a2', 'a3'", src % "'z0', 'z1', 'z2', 'z3', 'z4', 'z5'",
+            trimmed_base, grown_head)
+    assert list(gate.new_tests("x")) == [f"tests/test_a.py::test_t[z{i}]" for i in (4, 5)]
+    # one table grows while another shrinks, no test deleted: the growth still counts
+    two = ("import pytest\n@pytest.mark.parametrize('v', [%s])\ndef test_a(v): pass\n"
+           "@pytest.mark.parametrize('v', [%s])\ndef test_b(v): pass\n")
+    ids = lambda a, b: {**{f"tests/test_a.py::test_a[{i}]": None for i in a},   # noqa: E731
+                        **{f"tests/test_a.py::test_b[{i}]": None for i in b}}
+    _branch(monkeypatch, tmp_path, two % ("0", "1, 2"), two % ("0, 3", "1"), ids([0], [1, 2]), ids([0, 3], [1]))
+    assert list(gate.new_tests("x")) == ["tests/test_a.py::test_a[3]"]
+    assert gate.selected_python("x", gate.new_tests("x")) == ["tests/test_a.py::test_a[3]"]
