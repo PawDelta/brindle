@@ -567,6 +567,7 @@ export interface KeptVisualDTO {
  */
 export interface VisualAnswerDTO {
   at: number;
+  attachments?: string[];
   note?: string | null;
   option: string | null;
 }
@@ -1142,7 +1143,9 @@ export interface SessionDTO {
  * via the `definition` "VisualDTO".
  */
 export interface VisualDTO {
+  accepts_files: boolean;
   answer?: VisualAnswerDTO | null;
+  answer_agent_id: string;
   by: string;
   created_at: number;
   id: string;

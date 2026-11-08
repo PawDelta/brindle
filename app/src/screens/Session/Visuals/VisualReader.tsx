@@ -9,7 +9,8 @@
    text. Messages from any other visual, or an older revision, are dropped. */
 
 import { useEffect, useLayoutEffect, useRef, useState, type ComponentType, type ReactNode } from "react";
-import { DaemonError, type VisualDTO } from "../../../api/client";
+import { DaemonError, type DaemonClient, type VisualDTO } from "../../../api/client";
+import { listenForDrops, type Attachment } from "../../../api/attachments";
 import { LoadingButton } from "../../../components/LoadingButton";
 import { button, field, main, mono } from "../../../components/ui";
 import type { PlansClient, VisualsClient } from "./client";
@@ -81,7 +82,7 @@ export function VisualReader({ client, visual, loading, onBack, asking, onAnswer
   repo?: string;
   /* The engine marked this revision read. */
   onRead?(id: string, rev: number): void;
-  client: VisualsClient & Partial<ExportClient> & Partial<PlansClient>;
+  client: VisualsClient & Partial<ExportClient> & Partial<PlansClient> & Partial<Pick<DaemonClient, "attach">>;
   /* The visual opened; null when the session has no such visual (gone, or a link to another session's). */
   visual: VisualDTO | null;
   /* The session's visuals aren't read yet. */
@@ -137,8 +138,20 @@ export function VisualReader({ client, visual, loading, onBack, asking, onAnswer
   );
 }
 
+const fileName = (path: string) => path.split(/[\\/]/).pop() || path;
+
+/* A browser File (picker, paste) as the upload body: its bytes, base64. */
+function fileAttachment(file: File): Promise<Attachment> {
+  return new Promise((done, fail) => {
+    const reader = new FileReader();
+    reader.onload = () => done({ name: file.name || "pasted-file", data_base64: String(reader.result).split(",")[1] ?? "" });
+    reader.onerror = () => fail(new Error("couldn't read the file"));
+    reader.readAsDataURL(file);
+  });
+}
+
 /* The question, the options as host buttons, a note, and Send. Answered: what was picked. */
-function AnswerBar({ client, visual, picked, onPick, onAnswered }: { client: VisualsClient; visual: VisualDTO; picked: string | null; onPick(option: string): void; onAnswered(v: VisualDTO): void }) {
+function AnswerBar({ client, visual, picked, onPick, onAnswered }: { client: VisualsClient & Partial<Pick<DaemonClient, "attach">>; visual: VisualDTO; picked: string | null; onPick(option: string): void; onAnswered(v: VisualDTO): void }) {
   const [note, setNote] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -151,10 +164,49 @@ function AnswerBar({ client, visual, picked, onPick, onAnswered }: { client: Vis
       active.current = false;
     };
   }, []);
+  const [attached, setAttached] = useState<string[]>([]);
+  const [uploading, setUploading] = useState(0);
+  const bar = useRef<HTMLElement>(null);
+  const picker = useRef<HTMLInputElement>(null);
   const options = visual.options ?? [];
+  // Files go to the agent that receives the answer, and only where its provider takes them.
+  const target = visual.answer_agent_id;
+  const canAttach = !!client.attach && !!target && visual.accepts_files === true && !visual.answer;
+  // Browser Files (picker, paste) are sent as bytes; native drops as paths.
+  const upload = async (files: (File | string)[]) => {
+    if (!canAttach || !files.length) return;
+    setUploading((n) => n + 1);
+    setError(null);
+    try {
+      for (const file of files) {
+        const got = await client.attach!(target!,typeof file === "string" ? { path: file } : await fileAttachment(file));
+        // The bar belongs to one visual revision; a result for another is dropped.
+        if (!active.current) return;
+        setAttached((list) => [...list, ...got.paths]);
+      }
+    } catch (e) {
+      if (active.current) setError(`Couldn't attach the file: ${message(e)}`);
+    } finally {
+      if (active.current) setUploading((n) => n - 1);
+    }
+  };
+  const uploadLatest = useRef(upload);
+  uploadLatest.current = upload;
+  useEffect(() => {
+    if (!canAttach) return;
+    let gone = false;
+    let stop: (() => void) | undefined;
+    // Native drops reach the window, not the visual's child webview; only those released over this bar count.
+    void listenForDrops((event) => {
+      if (gone || event.type !== "drop" || !event.paths?.length) return;
+      const under = document.elementFromPoint(event.x!, event.y!);
+      if (under && bar.current?.contains(under)) void uploadLatest.current(event.paths);
+    }).then((unlisten) => { if (gone) unlisten(); else stop = unlisten; }, () => undefined);
+    return () => { gone = true; stop?.(); };
+  }, [canAttach]);
   // Empty ids cannot be published; this host-only choice carries no option to the engine.
   const ownWords = picked === "";
-  const canSend = picked !== null && (!ownWords || !!note.trim());
+  const canSend = picked !== null && (!ownWords || !!note.trim()) && uploading === 0;
   const answered = visual.answer ? options.find((o) => o.id === visual.answer!.option) : null;
   const send = async () => {
     if (!canSend || sending) return;
@@ -162,7 +214,7 @@ function AnswerBar({ client, visual, picked, onPick, onAnswered }: { client: Vis
     setError(null);
     try {
       // The revision on screen: the bar is keyed by it, so a newer one is a new bar.
-      const result = await client.answerVisual(visual.id, visual.rev, picked || undefined, note.trim());
+      const result = await client.answerVisual(visual.id, visual.rev, picked || undefined, note.trim(), ...(attached.length ? [attached] : []));
       // A late response must not update or navigate away from the person's current screen.
       if (!active.current) return;
       onAnswered(result);
@@ -174,12 +226,13 @@ function AnswerBar({ client, visual, picked, onPick, onAnswered }: { client: Vis
     }
   };
   return (
-    <footer className="flex flex-col gap-s1 border-t border-line px-s2 py-s1" data-testid="visual-answer">
+    <footer ref={bar} className="flex flex-col gap-s1 border-t border-line px-s2 py-s1" data-testid="visual-answer">
       {visual.question && <p className="text-sm text-ink-2">{visual.question}</p>}
       {visual.answer ? (
         <p className="text-sm" role="status" data-testid="visual-answered">
           {visual.answer.option == null ? "You answered" : <>You picked <span className="font-semibold">{answered?.label ?? visual.answer.option}</span></>}
           {visual.answer.note && <span className="text-ink-2"> · {visual.answer.note}</span>}
+          {!!visual.answer.attachments?.length && <span className="text-ink-2"> · attached {visual.answer.attachments.map(fileName).join(", ")}</span>}
         </p>
       ) : (
         <div className="flex flex-wrap items-center gap-s1" onKeyDown={(e) => {
@@ -200,11 +253,34 @@ function AnswerBar({ client, visual, picked, onPick, onAnswered }: { client: Vis
               Something else…
             </button>
           </div>
-          <input ref={noteInput} type="text" className={`${field} min-w-40 flex-1`} aria-label={ownWords ? "Your answer" : "Add a note"} placeholder={ownWords ? "Your answer" : "Add a note (optional)"} value={note} onChange={(e) => setNote(e.target.value)} />
+          <input ref={noteInput} type="text" className={`${field} min-w-40 flex-1`} aria-label={ownWords ? "Your answer" : "Add a note"} placeholder={ownWords ? "Your answer" : "Add a note (optional)"} value={note} onChange={(e) => setNote(e.target.value)}
+            onPaste={(e) => {
+              const files = canAttach ? Array.from(e.clipboardData.files) : [];
+              if (!files.length) return;
+              e.preventDefault();
+              void upload(files);
+            }} />
+          {canAttach && (
+            <>
+              <input ref={picker} type="file" multiple hidden data-testid="visual-attach-input" onChange={(e) => { void upload(Array.from(e.target.files ?? [])); e.target.value = ""; }} />
+              <button type="button" className={button} onClick={() => picker.current?.click()}>Attach</button>
+            </>
+          )}
           <LoadingButton className={main} busy={sending} disabled={!canSend || sending} data-testid="visual-send" onClick={() => void send()}>
             Send answer
           </LoadingButton>
         </div>
+      )}
+      {!visual.answer && (attached.length > 0 || uploading > 0) && (
+        <ul className="flex flex-wrap gap-1" aria-label="Attached files">
+          {attached.map((path, i) => (
+            <li key={`${path}:${i}`} className="flex items-center gap-1 rounded border border-line px-1.5 text-xs">
+              {fileName(path)}
+              <button type="button" aria-label={`Remove ${fileName(path)}`} className="text-ink-3" onClick={() => setAttached((list) => list.filter((_, j) => j !== i))}>×</button>
+            </li>
+          ))}
+          {uploading > 0 && <li className="text-xs text-ink-3" role="status">Uploading…</li>}
+        </ul>
       )}
       {error && (
         <p role="alert" className="text-xs text-sap">
