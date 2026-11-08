@@ -143,17 +143,36 @@ function sessionGitMark(workspaces: WorkspaceDTO[], root: string): string {
 }
 
 const STOPPED_STATUS = new Set(["paused", "done", "failed", "exited", "rewound"]);
+const BUSY_STATUS = new Set(["processing", "starting", "waiting"]);
 
-/* The milestone titles a live worker of this session is linked to (the engine's agent `milestone`): a milestone
-   with one is active, however many others are too. */
-function activeMilestoneTitles(workspaces: WorkspaceDTO[], root: string): Set<string> {
+/* The stage a branch's review_state says it is at (checks, reviewer, merge), or null when it names none. */
+function pipelineStage(reviewState: string | null | undefined): Stage | null {
+  const s = reviewState ?? "";
+  if (/^(waiting for checks|checks running)/.test(s)) return "checks";
+  if (/^reviewer running/.test(s)) return "review";
+  if (/^approved, merging/.test(s)) return "merging";
+  return null;
+}
+
+/* The stage of each milestone (by title) a worker of this session is linked to (the engine's agent `milestone`),
+   from the worker itself and its branch's checks/review: a milestone with an entry is active, however many others
+   are too. A worker that exited (liveness) or stopped counts only while its branch is in checks or review; one that
+   reported counts while it is busy again (fixing review findings). Several workers on one milestone: the earliest stage. */
+export function activeMilestoneStages(workspaces: WorkspaceDTO[], alive: Record<string, boolean>, root: string): Map<string, Stage> {
   const agents = workspaces.flatMap((ws) => ws.agents ?? []);
-  const titles = new Set<string>();
-  for (const a of agents) {
-    if (!a.milestone || a.mode === "interactive" || a.dismissed_at != null || STOPPED_STATUS.has(a.status) || a.reported) continue;
-    if (rootOf(agents, a.id) === root) titles.add(a.milestone);
+  const stages = new Map<string, Stage>();
+  for (const ws of workspaces) {
+    for (const a of ws.agents ?? []) {
+      if (!a.milestone || a.mode === "interactive" || a.mode === "review" || a.dismissed_at != null || rootOf(agents, a.id) !== root) continue;
+      const gone = STOPPED_STATUS.has(a.status) || alive[a.id] === false;
+      const piped = pipelineStage(ws.review_state);
+      const stage = piped ?? (!gone && (BUSY_STATUS.has(a.status) || !a.reported) ? "working" : null);
+      if (!stage) continue;
+      const before = stages.get(a.milestone);
+      if (!before || STAGES.indexOf(stage) < STAGES.indexOf(before)) stages.set(a.milestone, stage);
+    }
   }
-  return titles;
+  return stages;
 }
 
 /* How often the sidebar refetches its goal while open,for the activity line's rolling hour, ages and estimate. */
@@ -523,7 +542,8 @@ export function GoalPanel({ client, repo, root, store, compact = false, onReview
   }, [session, store, refresh, root, compact]);
 
   const storeWorkspaces = useSyncExternalStore(store.subscribe, () => store.getState().workspaces);
-  const workerTitles = useMemo(() => activeMilestoneTitles(storeWorkspaces, root), [storeWorkspaces, root]);
+  const storeAlive = useSyncExternalStore(store.subscribe, () => store.getState().alive);
+  const workerStages = useMemo(() => activeMilestoneStages(storeWorkspaces, storeAlive, root), [storeWorkspaces, storeAlive, root]);
   if (!loaded && loadError) {
     return (
       <section className={`${compact ? "px-s1 py-1" : `${card} px-s2 py-s1`} flex items-center gap-s2`} aria-label="Goal">
@@ -568,8 +588,13 @@ export function GoalPanel({ client, repo, root, store, compact = false, onReview
   const current = finished ? undefined : (milestones.find((m) => m.status === "running") ?? milestones.find((m) => m.status !== "passed"));
   const isDone = (m: MilestoneDTO) => finished || checkLabel(m) === "Done";
   // Every unfinished milestone a live worker is linked to is active; with none linked, the current one stands alone.
-  const linked = finished ? [] : milestones.filter((m) => workerTitles.has(m.title) && !isDone(m));
-  const activeIds = new Set(linked.length > 0 ? linked.map((m) => m.id) : current ? [current.id] : []);
+  const linked = finished ? [] : milestones.filter((m) => workerStages.has(m.title) && !isDone(m));
+  // Each active milestone's own stage: its workers' (and their branches'); the lone current one reads the goal's.
+  const activeStage = new Map<number, Stage | null>(
+    linked.length > 0
+      ? linked.map((m) => [m.id, workerStages.get(m.title)!] as const)
+      : current ? [[current.id, isStage(goal.stage) ? goal.stage : null] as const] : [],
+  );
   // The goal's phases as folds; null without any (the list as it always was).
   const folds = phaseFolds(milestones, isDone);
   const where = finished ? "" : phaseWord(folds);
@@ -637,13 +662,14 @@ export function GoalPanel({ client, repo, root, store, compact = false, onReview
     // colour), one activity line, then the milestones as short steps (✓ done, the active one marked and tagged).
     const donePct = total === 0 ? (finished ? 100 : 0) : (passed / total) * 100;
     // The stage the active step is at; none once the goal is finished or while nothing runs.
-    const stage = !finished && activeIds.size > 0 && isStage(goal.stage) ? goal.stage : null;
+    const barStages = [...activeStage.values()].filter((s): s is Stage => s !== null);
     const activity = finished ? null : activityLine(goal);
     // Every unfinished milestone is in progress (the engine works them in parallel), so each one is lit.
     const stateOf = (m: MilestoneDTO): "done" | "now" => (isDone(m) ? "done" : "now");
     const sideRow = (m: MilestoneDTO) => {
       const state = stateOf(m);
-      const active = activeIds.has(m.id);
+      const active = activeStage.has(m.id);
+      const stage = active ? activeStage.get(m.id) : null;
       const label = finished ? "Done" : checkLabel(m);
       const tip = [m.title, label, m.state_why ?? (active ? m.detail || m.check_cmd : null)].filter(Boolean).join(" · ");
       return (
@@ -678,7 +704,7 @@ export function GoalPanel({ client, repo, root, store, compact = false, onReview
         </div>
         <div className="side-bar" role="progressbar" aria-label="Progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(donePct)} title={goal.detail ?? undefined}>
           <span className="d" style={{ width: `${donePct}%` }} />
-          {stage && total > 0 && <span className={`n st-${stage}`} data-testid="goal-bar-now" style={{ width: `${(100 * activeIds.size) / total}%` }} />}
+          {total > 0 && barStages.map((s, i) => <span key={i} className={`n st-${s}`} data-testid="goal-bar-now" style={{ width: `${100 / total}%` }} />)}
         </div>
         {activity && (
           <div className="side-act" data-testid="goal-activity">
