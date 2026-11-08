@@ -2265,6 +2265,22 @@ class DB:
         with self.tx() as c:
             c.execute("UPDATE inbox SET delivered_at=? WHERE id=?", (time.time(), message_id))
 
+    def claim_delivery(self, message_id: int) -> float | None:
+        """Mark one queued message delivered before a transport sends it, so no
+        other path (read_messages, the waiter) takes it too. Returns the claim's
+        time, or None if another path already had it."""
+        now = time.time()
+        with self.tx() as c:
+            took = c.execute("UPDATE inbox SET delivered_at=? WHERE id=? AND delivered_at IS NULL",
+                             (now, message_id)).rowcount
+        return now if took else None
+
+    def release_delivery(self, message_id: int, claimed_at: float) -> None:
+        """Put back a message whose send failed, only if the claim is still this one's."""
+        with self.tx() as c:
+            c.execute("UPDATE inbox SET delivered_at=NULL WHERE id=? AND delivered_at=?",
+                      (message_id, claimed_at))
+
     # -- permission requests left to the person (brindle.permissions) --
 
     def add_permission_request(self, agent_id: str, tool_use_id: str, request: str, reason: str,

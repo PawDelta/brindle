@@ -2567,8 +2567,12 @@ def _resume_pane_delivery(db: DB, agent: Agent, saved: str) -> bool:
                 return _flush_messages(db, agent.id)
             # Stopped after the lead: the body never reached the composer and
             # Enter was never pressed for it, so the whole message goes in, once,
-            # as a new attempt: the old one's mark (and what hooks noted on it) retired.
-            db.set_mark(agent.id, "pane-delivery", None)
+            # as a new attempt: the old one's mark (and what hooks noted on it)
+            # replaced by a fresh one, never dropped, so no other path
+            # (read_messages, the waiter) takes the row while it is typed.
+            fresh = {k: state.get(k) for k in ("message_id", "pane", "server", "provider", "body", "lead")}
+            if not db.replace_mark(agent.id, "pane-delivery", saved, json.dumps({**fresh, "stage": None})):
+                return False  # a hook changed it meanwhile: the next flush looks again
             stage = None
         try:
             _paste_message(db, agent, state["body"], state["lead"], row["id"], resume=stage)
@@ -2590,17 +2594,25 @@ def _deliver_to_inbox(db: DB, agent: Agent, message_id: int, text: str,
                       sender_id: str | None) -> bool:
     """Send a queued message through Claude Code's own inbox (see
     brindle.inbox), where it doesn't wait for the agent to go idle. Returns
-    whether it went; if not, it stays queued for the pane."""
+    whether it went (or another path, read_messages say, already took it);
+    if not, it stays queued for the pane. The row is claimed before the send,
+    so no other path delivers it again meanwhile."""
     from brindle import inbox
 
     if not inbox.usable(agent):
         return False
+    claimed = db.claim_delivery(message_id)
+    if claimed is None:
+        return True
     sender = db.get_agent(sender_id) if sender_id else None
     who = f"brindle {sender.profile} {sender.id}" if sender else "brindle"
-    if not _send_to_inbox(db, agent, text, who):
-        return False
-    db.mark_delivered(message_id)
-    return True
+    sent = False
+    try:
+        sent = _send_to_inbox(db, agent, text, who)
+    finally:
+        if not sent:
+            db.release_delivery(message_id, claimed)
+    return sent
 
 
 def flush(db: DB, agent_id: str) -> bool:
