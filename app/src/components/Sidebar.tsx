@@ -439,8 +439,9 @@ function sessionStageClass(word: string) {
 }
 
 function SessionStatus({ word }: { word: string }) {
+  const stageClass = sessionStageClass(word);
   return (
-    <span className={`max-w-[50%] shrink truncate text-[11px] ${sessionStageClass(word)} stage-word`} data-testid="session-status">
+    <span className={`max-w-[50%] shrink truncate text-[11px] ${stageClass}${stageClass === "text-ink-3" ? "" : " stage-word"}`} data-testid="session-status">
       {word}
     </span>
   );

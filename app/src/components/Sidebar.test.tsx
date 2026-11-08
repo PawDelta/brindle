@@ -65,6 +65,7 @@ describe("Sidebar", () => {
     const row = sessionRow("sup1")!;
     const label = within(row).getByTestId("session-status");
     expect(label.className).toContain(colour ? `st-${colour} stage-word` : "text-ink-3");
+    expect(label.classList.contains("stage-word")).toBe(colour !== null);
     const marker = row.querySelector(".side-dot");
     if (marker) expect(marker.className).toContain(colour ? `st-${colour}` : "text-ink-3");
     expect(row.querySelector(".supervisor-tag")).toBeNull();
