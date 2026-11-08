@@ -832,10 +832,15 @@ def test_goal_activity_stage(db, root, boss, checking, workers, expected):
 def test_goal_activity_reports_checking(db, root):
     with_goal(db)
     assert autopilot.goal_activity(db, "boss")["checking"] is False
-    db.update_autopilot("boss", checking_since=time.time())
+    _, ws = root
+    autopilot.check_in_background(db, "boss", ws, None, detach=lambda argv: None)   # the real start path
     got = autopilot.goal_activity(db, "boss")
     assert (got["checking"], got["auditing"]) == (True, False)
-    db.update_autopilot("boss", checking_since=None, state="auditing")
+    autopilot.set_checking(db, "boss", False)
+    # Starting and finishing each tell the app, so an open goal view refetches at once.
+    events = bus.tail(db, kinds=("autopilot.checking",))
+    assert [e["payload"] for e in events] == [{"checking": True}, {"checking": False}]
+    db.update_autopilot("boss", state="auditing")
     got = autopilot.goal_activity(db, "boss")
     assert (got["checking"], got["auditing"]) == (False, True)
 
