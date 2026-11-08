@@ -12,6 +12,8 @@ export interface ApiSchema {
   AgentDTO: AgentDTO;
   AllowAllGrantDTO: AllowAllGrantDTO;
   AllowAllPlanDTO: AllowAllPlanDTO;
+  AnalysisOfferDTO: AnalysisOfferDTO;
+  AnalysisOfferMilestoneDTO: AnalysisOfferMilestoneDTO;
   AskDTO: AskDTO;
   AskDecisionDTO: AskDecisionDTO;
   AskGroupDTO: AskGroupDTO;
@@ -123,6 +125,7 @@ export interface ActionTerminalDTO {
  * via the `definition` "AgentDTO".
  */
 export interface AgentDTO {
+  accepts_files?: boolean;
   dismissed_at?: number | null;
   headless?: boolean | null;
   hooks_off?: string | null;
@@ -236,6 +239,29 @@ export interface SavedActionDTO {
   };
   scope: string;
   session?: string | null;
+}
+/**
+ * Current session context for deciding whether to request an analysis doc.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "AnalysisOfferDTO".
+ */
+export interface AnalysisOfferDTO {
+  detail?: string | null;
+  goal: string;
+  milestones: AnalysisOfferMilestoneDTO[];
+  reasons: string[];
+  repos: number;
+  session_name: string;
+  workers: number;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "AnalysisOfferMilestoneDTO".
+ */
+export interface AnalysisOfferMilestoneDTO {
+  title: string;
+  verified: boolean;
 }
 /**
  * One pending request, generalized. ``blocked``: a deny rule covers it
@@ -497,6 +523,7 @@ export interface InboxActionDTO {
 export interface InboxItemDTO {
   action?: InboxActionDTO | null;
   agent_id?: string | null;
+  analysis_offer?: AnalysisOfferDTO | null;
   detail?: string | null;
   doc?: number | string | null;
   fix?: string | null;

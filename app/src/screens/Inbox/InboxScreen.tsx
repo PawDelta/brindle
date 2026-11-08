@@ -299,7 +299,23 @@ function Banner({ item, actions, who, branch, sessionTitle, repo, isNew, onDone,
   const age = formatAge((Date.now() - seenAt(item)) / 1000);
 
   let body: ReactNode = null;
-  if (item.kind === "proposed_checks" || item.kind === "plan") {
+  if (item.kind === "analysis_offer" && item.analysis_offer) {
+    const offer = item.analysis_offer;
+    const verified = offer.milestones.filter((m) => m.verified).length;
+    body = <div className="space-y-2 break-words" data-testid="card-detail">
+      <p><strong>Session: {offer.session_name}</strong></p>
+      <p className="whitespace-pre-wrap">{offer.goal}{offer.detail && `\n${offer.detail}`}</p>
+      <div>
+        <p data-testid="analysis-progress">{verified} of {offer.milestones.length} milestones verified</p>
+        <ul className="list-disc pl-4">
+          {offer.milestones.map((m, index) => <li key={index}>{m.title}{m.verified ? " — verified" : ""}</li>)}
+        </ul>
+      </div>
+      <p data-testid="analysis-scale">{offer.workers} {offer.workers === 1 ? "worker" : "workers"} · {offer.repos} {offer.repos === 1 ? "repository" : "repositories"}</p>
+      <p><strong>Why brindle is offering: </strong>{offer.reasons.join(" ") || "The work qualified when this offer was made; the plan has since changed."}</p>
+      <p>The doc would explain what was built, the decisions behind it, and how the work was checked.</p>
+    </div>;
+  } else if (item.kind === "proposed_checks" || item.kind === "plan") {
     // Approved or accepted from this card: shown whole, never cut short.
     body = <pre className="whitespace-pre-wrap font-mono text-xs" data-testid="card-detail">{item.detail}</pre>;
   } else if (item.kind === "org_notice") {

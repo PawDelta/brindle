@@ -834,6 +834,101 @@
       "title": "AllowAllPlanDTO",
       "type": "object"
     },
+    "AnalysisOfferDTO": {
+      "$defs": {
+        "AnalysisOfferMilestoneDTO": {
+          "properties": {
+            "title": {
+              "title": "Title",
+              "type": "string"
+            },
+            "verified": {
+              "title": "Verified",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "title",
+            "verified"
+          ],
+          "title": "AnalysisOfferMilestoneDTO",
+          "type": "object"
+        }
+      },
+      "description": "Current session context for deciding whether to request an analysis doc.",
+      "properties": {
+        "detail": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Detail"
+        },
+        "goal": {
+          "title": "Goal",
+          "type": "string"
+        },
+        "milestones": {
+          "items": {
+            "$ref": "#/$defs/AnalysisOfferMilestoneDTO"
+          },
+          "title": "Milestones",
+          "type": "array"
+        },
+        "reasons": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Reasons",
+          "type": "array"
+        },
+        "repos": {
+          "title": "Repos",
+          "type": "integer"
+        },
+        "session_name": {
+          "title": "Session Name",
+          "type": "string"
+        },
+        "workers": {
+          "title": "Workers",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "session_name",
+        "goal",
+        "milestones",
+        "workers",
+        "repos",
+        "reasons"
+      ],
+      "title": "AnalysisOfferDTO",
+      "type": "object"
+    },
+    "AnalysisOfferMilestoneDTO": {
+      "properties": {
+        "title": {
+          "title": "Title",
+          "type": "string"
+        },
+        "verified": {
+          "title": "Verified",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "title",
+        "verified"
+      ],
+      "title": "AnalysisOfferMilestoneDTO",
+      "type": "object"
+    },
     "AskDTO": {
       "$defs": {
         "PermissionLimitsDTO": {
@@ -2441,6 +2536,81 @@
     },
     "InboxItemDTO": {
       "$defs": {
+        "AnalysisOfferDTO": {
+          "description": "Current session context for deciding whether to request an analysis doc.",
+          "properties": {
+            "detail": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Detail"
+            },
+            "goal": {
+              "title": "Goal",
+              "type": "string"
+            },
+            "milestones": {
+              "items": {
+                "$ref": "#/$defs/AnalysisOfferMilestoneDTO"
+              },
+              "title": "Milestones",
+              "type": "array"
+            },
+            "reasons": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Reasons",
+              "type": "array"
+            },
+            "repos": {
+              "title": "Repos",
+              "type": "integer"
+            },
+            "session_name": {
+              "title": "Session Name",
+              "type": "string"
+            },
+            "workers": {
+              "title": "Workers",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "session_name",
+            "goal",
+            "milestones",
+            "workers",
+            "repos",
+            "reasons"
+          ],
+          "title": "AnalysisOfferDTO",
+          "type": "object"
+        },
+        "AnalysisOfferMilestoneDTO": {
+          "properties": {
+            "title": {
+              "title": "Title",
+              "type": "string"
+            },
+            "verified": {
+              "title": "Verified",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "title",
+            "verified"
+          ],
+          "title": "AnalysisOfferMilestoneDTO",
+          "type": "object"
+        },
         "InboxActionDTO": {
           "description": "A route the app can call to act on the item itself.",
           "properties": {
@@ -2656,6 +2826,17 @@
           ],
           "default": null,
           "title": "Agent Id"
+        },
+        "analysis_offer": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AnalysisOfferDTO"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "detail": {
           "anyOf": [
