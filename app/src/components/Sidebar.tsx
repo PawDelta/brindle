@@ -337,7 +337,7 @@ function AgentRow({ node, route, navigate, repo, root, cursor, setCursor }: { no
         current={active ? "page" : undefined}
         treeAgent={a.id}
         row={key}
-        title={`${a.id} · ${status.glyph} ${status.label} · ${role} · ${a.profile} · ${modelOf(a) || "no model"} · ${node.workspace.branch}${a.milestone ? ` · milestone: ${a.milestone}` : ""} (double-click to copy its info)`}
+        title={`${a.id} · ${status.glyph} ${status.label} · ${role} · ${a.profile} · ${a.model || modelOf(a) || "no model"} · ${node.workspace.branch}${a.milestone ? ` · milestone: ${a.milestone}` : ""} (double-click to copy its info)`}
         className={`flex w-full items-center gap-s1 rounded-r-md py-[3px] pr-s1 text-left hover:bg-surface ${active ? "bg-branch-soft" : ""} ${cursor === key ? CURSOR : ""}`}
         onOpen={() => {
           setCursor(key);
@@ -346,7 +346,7 @@ function AgentRow({ node, route, navigate, repo, root, cursor, setCursor }: { no
       >
         <Dot tone={tone} className={stage ? `st-${STAGE_CLASS[stage]}` : ""} />
         <span className="min-w-0 flex-1 truncate text-xs text-ink">
-          <span className="text-ink-3" data-testid="agent-role">{role}</span>
+          <span className="text-ink-3" data-testid="agent-role">{[role, modelOf(a)].filter(Boolean).join(" · ")}</span>
         </span>
         <span className={`max-w-[50%] shrink truncate text-[11px] ${stage ? `st-${STAGE_CLASS[stage]} stage-word` : "text-ink-3"}`} data-testid="agent-status">
           {stage ?? plainLabel(status, a.status)}
