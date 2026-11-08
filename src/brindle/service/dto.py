@@ -383,6 +383,8 @@ class GoalDTO(_DTO):
     commits_last_hour: int = 0
     last_commit_at: float | None = None
     eta_seconds: float | None = None
+    checking: bool = False           # milestone checks run now
+    auditing: bool = False           # the completion audit runs now
     milestones: list[MilestoneDTO] = []
 
     @classmethod

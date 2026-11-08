@@ -2265,6 +2265,16 @@
           "default": null,
           "title": "Analysis Offer"
         },
+        "auditing": {
+          "default": false,
+          "title": "Auditing",
+          "type": "boolean"
+        },
+        "checking": {
+          "default": false,
+          "title": "Checking",
+          "type": "boolean"
+        },
         "commits_last_hour": {
           "default": 0,
           "title": "Commits Last Hour",

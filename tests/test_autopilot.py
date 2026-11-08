@@ -829,6 +829,17 @@ def test_goal_activity_stage(db, root, boss, checking, workers, expected):
     assert autopilot.goal_activity(db, "boss")["stage"] == expected
 
 
+def test_goal_activity_reports_checking(db, root):
+    with_goal(db)
+    assert autopilot.goal_activity(db, "boss")["checking"] is False
+    db.update_autopilot("boss", checking_since=time.time())
+    got = autopilot.goal_activity(db, "boss")
+    assert (got["checking"], got["auditing"]) == (True, False)
+    db.update_autopilot("boss", checking_since=None, state="auditing")
+    got = autopilot.goal_activity(db, "boss")
+    assert (got["checking"], got["auditing"]) == (False, True)
+
+
 def test_goal_activity_commits_and_estimate(db, root, repo):
     _, ws = root
     with_goal(db)

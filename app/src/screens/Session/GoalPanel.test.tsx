@@ -437,6 +437,18 @@ describe("GoalPanel", () => {
     expect(view.queryByTestId("goal-eta")?.textContent ?? null).toBe(eta);
   });
 
+  /* While checks or the audit run, the line says so instead of the commits, in the check stage's colour. */
+  it.each<[Partial<GoalDTO>, string]>([
+    [{ checking: true }, "Checking all 2 milestones"],
+    [{ auditing: true }, "Reviewing the finished work"],
+  ])("shows the checking line %#", async (fields, text) => {
+    const daemon = new FakeDaemon({ goal: { ...structuredClone(goal), commits_last_hour: 3, ...fields } });
+    const view = render(<GoalPanel client={daemon.client()} repo={REPO} root={ROOT} store={createAppStore()} compact />);
+    await waitFor(() => expect(view.getAllByTestId("milestone")).toHaveLength(2));
+    expect(view.getByTestId("goal-activity-what").textContent).toBe(text);
+    expect(view.getByTestId("goal-activity").className).toMatch(/\bst-checks\b/);
+  });
+
   /* Commits land without any goal event: a git sweep of the session's worktree refetches the line, and so does
      the clock, once a minute, for the rolling hour and the ages. */
   it("refetches the activity line on a git sweep of its session's worktree and as the clock moves", async () => {

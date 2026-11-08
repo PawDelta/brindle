@@ -1870,7 +1870,8 @@ def goal_activity(db: DB, root_id: str, now: float | None = None) -> dict:
     ap = db.get_autopilot(root_id)
     tree = agents.tree(db, root_id)
     if not tree:
-        return {"stage": None, "commits_last_hour": 0, "last_commit_at": None, "eta_seconds": None}
+        return {"stage": None, "commits_last_hour": 0, "last_commit_at": None, "eta_seconds": None,
+                "checking": False, "auditing": False}
     boss = tree[0]
     closed = ("paused", "done")
     reviewed = {a.workspace_id for a in tree[1:] if a.mode == "review" and a.status not in closed
@@ -1924,7 +1925,8 @@ def goal_activity(db: DB, root_id: str, now: float | None = None) -> dict:
 
             eta = max(60.0, statistics.median(samples) - (now - max(reports)))
     return {"stage": stage, "commits_last_hour": sum(at > now - 3600 for at in commits.values()),
-            "last_commit_at": max(commits.values(), default=None), "eta_seconds": eta}
+            "last_commit_at": max(commits.values(), default=None), "eta_seconds": eta,
+            "checking": ap is not None and checking(ap), "auditing": ap is not None and ap.state == "auditing"}
 
 
 def counts(db: DB, root_id: str) -> tuple[int, int]:

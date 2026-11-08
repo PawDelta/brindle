@@ -327,6 +327,7 @@ body {
 .side-bar { display: flex; height: 3px; margin: 0 2px; border-radius: 2px; background: var(--line); overflow: hidden; }
 .side-bar .d { background: var(--pass); }
 .side-bar .n { background: var(--st); }
+.side-act.st-checks { color: var(--st); }
 .side-act { display: flex; justify-content: space-between; gap: 8px; padding: 0 2px; font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); white-space: nowrap; }
 .side-ms { display: flex; flex-direction: column; gap: 1px; }
 .side-ms .m { display: flex; align-items: center; gap: 7px; padding: 2px 6px; border-radius: var(--r); font-size: 12px; color: var(--ink-2); }
