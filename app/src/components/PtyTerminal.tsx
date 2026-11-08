@@ -468,7 +468,7 @@ export function PtyTerminal({ at, open, copy, paste, attachments, openUrl, onVie
       }
       return texts.join(" ") || null;
     };
-    const fromApp = async (): Promise<string | null> => {
+    const fromApp = async (onRead?: (text: string) => void): Promise<string | null> => {
       const pasteFrom = pasted.current;
       const destination = attaching.current;
       if (gone || !pasteFrom) return null;
@@ -476,6 +476,7 @@ export function PtyTerminal({ at, open, copy, paste, attachments, openUrl, onVie
         dropPaste(`couldn't read the app's clipboard: ${String(err)}`, 0);
         return null;
       });
+      onRead?.(text ?? "");
       if (text || gone || !destination) return text;
       try {
         const files = await clipboardAttachments();
@@ -515,15 +516,15 @@ export function PtyTerminal({ at, open, copy, paste, attachments, openUrl, onVie
     // The webview's own pastes, taken from xterm.js: each fills the ⌘V waiting longest for it, or (Edit > Paste
     // clicked, or a ⌘V's that came late) is pasted as it comes. Every paste the webview sends is pasted once.
     const awaiting: ((text: string) => void)[] = [];
-    // ⌘Vs past their wait, the app's clipboard pasted in their place: the text each pasted, as its late answer will
-    // hold it, and until when that answer is looked for.
-    const owed: { text: string; until: number }[] = [];
+    // ⌘Vs past their wait: match their original clipboard text (empty for files),
+    // not the attachment text generated for the terminal, until their late answer arrives.
+    const owed: { clipboardText: string; until: number }[] = [];
     const sameLines = (text: string) => text.replace(/\r\n?/g, "\n");
     const pasting = (e: ClipboardEvent) => {
       e.preventDefault();
       e.stopPropagation();
       const text = e.clipboardData?.getData("text/plain") ?? "";
-      const lateAnswer = owed.findIndex((o) => o.until > Date.now() && o.text === sameLines(text));
+      const lateAnswer = owed.findIndex((o) => o.until > Date.now() && o.clipboardText === sameLines(text));
       if (lateAnswer >= 0) {
         owed.splice(lateAnswer, 1);
         return dropPaste("a late webview paste of what the app's clipboard already pasted", text.length);
@@ -616,7 +617,8 @@ export function PtyTerminal({ at, open, copy, paste, attachments, openUrl, onVie
         // coming later with that text, isn't pasted again (`owed`). One coming during that read still answers it.
         pasteInLine(new Promise<string | null>((ok) => {
           let reading: Promise<string | null> | undefined;
-          const read = () => reading ??= fromApp();
+          let clipboardText = "";
+          const read = () => reading ??= fromApp(text => { clipboardText = text; });
           const waiter = (text: string) => {
             clearTimeout(timer);
             ok(text || read());
@@ -627,7 +629,7 @@ export function PtyTerminal({ at, open, copy, paste, attachments, openUrl, onVie
               const unanswered = awaiting.indexOf(waiter);
               if (unanswered < 0) return;
               awaiting.splice(unanswered, 1);
-              if (text) owed.push({ text: sameLines(text), until: Date.now() + LATE_PASTE_WINDOW });
+              if (text) owed.push({ clipboardText: sameLines(clipboardText), until: Date.now() + LATE_PASTE_WINDOW });
               ok(text);
             });
           }, PASTE_WAIT);

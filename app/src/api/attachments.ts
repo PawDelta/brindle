@@ -6,6 +6,14 @@ export type FileDrop = { type: "enter" | "over" | "drop" | "leave"; x?: number; 
 
 export const clipboardAttachments = (): Promise<Attachment[]> => invoke("pty_view_files");
 
+// Both clipboard files and drops cross this seam before reaching the engine.
+// Windows asks the connected WSL distribution, whose drive mounts may differ.
+export async function engineAttachment(file: Attachment): Promise<Attachment> {
+  return "path" in file && isTauri()
+    ? { path: await invoke<string>("pty_view_attachment_path", { path: file.path }) }
+    : file;
+}
+
 // Tauri positions are physical pixels; the terminal's bounds are CSS pixels.
 export async function listenForDrops(handle: (drop: FileDrop) => void): Promise<() => void> {
   if (!isTauri()) return () => {};

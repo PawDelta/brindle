@@ -1273,6 +1273,16 @@ pub enum ClipboardAttachment {
     Image { name: String, data_base64: String },
 }
 
+/// Leave all file access and credential checks to the engine. Only translate
+/// the OS namespace here, using the same WSL target as the daemon connection.
+#[tauri::command]
+pub fn pty_view_attachment_path(path: String) -> Result<String, String> {
+    #[cfg(windows)]
+    { crate::wsl::attachment_path(&path) }
+    #[cfg(not(windows))]
+    { Ok(path) }
+}
+
 // Bound decoded pixels too, while allowing Retina screenshots whose PNG is
 // much smaller. The encoded file has the same limit as the engine.
 const ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;

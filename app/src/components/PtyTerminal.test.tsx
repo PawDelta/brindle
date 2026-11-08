@@ -2,13 +2,24 @@ import { act, cleanup, render } from "@testing-library/react";
 import type { ILink, ILinkProvider } from "@xterm/xterm";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { PtyViewHandlers, PtyViewOpener } from "../api/ptyView";
+import { DaemonClient } from "../api/client";
 import { VisualLinkContext } from "../screens/Session/Visuals/link";
 import { ATTACH_WAIT, COPIED_SHOWN, COPY_OR_INTERRUPT, LATE_PASTE_WINDOW, PASTE_WAIT, PtyTerminal, selectionIn } from "./PtyTerminal";
 
 const files = vi.hoisted(() => ({ read: vi.fn(), listen: vi.fn(), drop: (_event: unknown) => {} }));
-vi.mock("../api/attachments", () => ({
+vi.mock("../api/attachments", async (original) => ({
+  ...await original<typeof import("../api/attachments")>(),
   clipboardAttachments: () => files.read(),
   listenForDrops: (handler: typeof files.drop) => { files.drop = handler; return files.listen(); },
+}));
+const native = vi.hoisted(() => ({ enabled: false }));
+vi.mock("@tauri-apps/api/core", async original => ({
+  ...await original<typeof import("@tauri-apps/api/core")>(),
+  isTauri: () => native.enabled,
+  invoke: async (command: string, args: { path: string }) => {
+    if (command !== "pty_view_attachment_path") throw new Error("unexpected native command");
+    return args.path.replace(/^C:\\/, "/windows/c/").replaceAll("\\", "/");
+  },
 }));
 
 /* What goes to the debug log. */
@@ -35,6 +46,7 @@ beforeEach(() => {
   vi.stubGlobal("matchMedia", () => ({ matches: false, addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {} }));
 });
 afterEach(() => {
+  native.enabled = false;
   cleanup();
   xterms.length = 0;
   logs.length = 0;
@@ -131,12 +143,45 @@ it.each(["MacIntel", "Win32"])("attaches clipboard files and image bytes on an e
       await act(async () => answer([{ path: "/late-file" }]));
       await settled();
       expect(written.at(-1)).toBe("\x1b[200~/late-file\x1b[201~");
+      files.read.mockResolvedValue([{ path: "/completed" }]);
+      act(() => void term().textarea!.dispatchEvent(new KeyboardEvent("keydown", { key: "v", metaKey: true, bubbles: true })));
+      await act(() => vi.advanceTimersByTimeAsync(PASTE_WAIT));
+      await settled();
+      const uploads = attach.mock.calls.length;
+      const writes = written.length;
+      webviewPaste(term().textarea!, "");
+      await settled();
+      expect(attach.mock.calls).toHaveLength(uploads);
+      expect(written).toHaveLength(writes);
+      // The late answer is consumed once; another menu paste is a new attachment.
+      webviewPaste(term().textarea!, "");
+      await settled();
+      expect(attach.mock.calls).toHaveLength(uploads + 1);
     } finally {
       vi.useRealTimers();
       platform.mockRestore();
     }
   }
   platform.mockRestore();
+});
+
+it("attaches Windows drop and clipboard paths through the native engine path conversion", async () => {
+  native.enabled = true;
+  const client = new DaemonClient({ baseUrl: "http://localhost", token: "test", fetch: async (_url, init) => {
+    const file = JSON.parse(init!.body as string);
+    if (!file.path.startsWith("/windows/c/")) return new Response(JSON.stringify({ error: { code: "invalid", message: "Linux path required" } }), { status: 400 });
+    return new Response(JSON.stringify({ paths: [file.path], text: `@${file.path}` }));
+  } });
+  const { term, opened, written } = mount(undefined, undefined, { acceptsFiles: true, attach: file => client.attach("agent", file) });
+  act(() => opened.handlers!.onData(new TextEncoder().encode("\x1b[?1049h")));
+  await parsed(term());
+  act(() => files.drop({ type: "drop", x: 20, y: 20, paths: ["C:\\Users\\name\\photo.png"] }));
+  await settled();
+  expect(written).toEqual(["\x1b[200~@/windows/c/Users/name/photo.png\x1b[201~"]);
+  files.read.mockResolvedValue([{ path: "C:\\Users\\name\\notes.txt" }]);
+  webviewPaste(term().textarea!, "");
+  await settled();
+  expect(written.at(-1)).toBe("\x1b[200~@/windows/c/Users/name/notes.txt\x1b[201~");
 });
 
 it("refuses attachments for unsupported agents and discards an attachment after unmount", async () => {
