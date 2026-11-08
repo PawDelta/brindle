@@ -1890,7 +1890,6 @@ def _goal_eta(db: DB, tree: list[Agent], live: list[Agent], now: float) -> float
         return medians[key]
 
     remaining: dict[str, float] = {}
-    releases: list[float] = []
     for a in live:
         ws = db.get_workspace(a.workspace_id)
         merge = typical(ws.repo_root) if ws else None
@@ -1904,7 +1903,6 @@ def _goal_eta(db: DB, tree: list[Agent], live: list[Agent], now: float) -> float
                 return None
             release = max(60.0, build - max(0, now - a.created_at))
             remaining[a.id] = release + merge
-            releases.append(release)
 
     ids = {a.id for a in tree}
     queued = {t.id: t for t in db.list_tasks() if t.caller_id in ids
@@ -1936,7 +1934,31 @@ def _goal_eta(db: DB, tree: list[Agent], live: list[Agent], now: float) -> float
                 dependencies[t.id].append(worker.id)
     if queued:
         cap = fair_share.limit()
-        cap = cap if cap > 0 else len(releases) + len(queued)
+        releases: list[float] = []
+        if cap > 0:
+            # Match fair_share.running: all sessions' process workers and unlinked launch claims.
+            with db.snapshot():
+                occupants = [a for a in db.list_agents() if a.mode in fair_share.WORKER_MODES
+                             and a.status in ("starting", "processing") and agents.runs_process(a)]
+                claims = [t for t in db.list_tasks(state="starting") if not t.agent_id]
+
+            def release_at(repo: str | None, profile: str, began: float) -> float:
+                build = typical(repo, profile) if repo is not None else None
+                return max(60.0, build - max(0, now - began)) if build is not None else float("inf")
+
+            for a in occupants:
+                ws = db.get_workspace(a.workspace_id)
+                releases.append(0.0 if a.pipeline in ("ready", "reviewing") and a.reviewing_since else
+                                release_at(ws.repo_root if ws else None, a.profile, a.created_at))
+            for t in claims:
+                release = release_at(t.repo_root, t.profile, t.started_at or t.created_at)
+                releases.append(release)
+                if t.id in queued:
+                    # A claimed task already owns its slot; don't schedule it twice.
+                    remaining[f"task:{t.id}"] = release + durations[t.id][1]
+                    del queued[t.id]
+        else:
+            cap = len(queued)
         # If already over capacity, enough workers must report before a slot opens.
         slots = sorted(releases, reverse=True)[:cap]
         slots.extend([0.0] * max(0, cap - len(slots)))
@@ -1945,7 +1967,10 @@ def _goal_eta(db: DB, tree: list[Agent], live: list[Agent], now: float) -> float
             for t in queued.values():
                 deps = dependencies[t.id]
                 if all(dep in remaining for dep in deps):
-                    start = max(min(slots), max((remaining[dep] for dep in deps), default=0.0))
+                    ready = max((remaining[dep] for dep in deps), default=0.0)
+                    if min(slots) > ready and float("inf") in slots:
+                        return None   # an unknown occupant could determine when the next slot opens
+                    start = max(min(slots), ready)
                     candidates.append((start, t.created_at, t.id))
             if not candidates:   # cyclic dependencies have no estimable launch order
                 return None

@@ -877,6 +877,13 @@ def test_goal_activity_commits_and_estimate(db, root, repo):
     (5, 300, "chain", False, 6900),
     (5, 300, "slots", False, 5700),
     (5, 300, "attached", False, 3300),
+    (5, 300, "other_session", False, 3300),
+    (5, 300, "unknown_session", False, None),
+    (5, 300, "unknown_session_room", False, 2400),
+    (5, 300, "claim_session", False, 3300),
+    (5, 300, "own_claim", False, 2100),
+    pytest.param(5, 300, "slow_session", False, 3300,
+                 marks=pytest.mark.variant("Other sessions' longer work must stay out of this goal's critical path")),
     (5, 300, False, True, 2400),
 ])
 def test_goal_activity_eta_while_building(db, root, monkeypatch, runs, elapsed, queued, overhead, expected):
@@ -887,7 +894,8 @@ def test_goal_activity_eta_while_building(db, root, monkeypatch, runs, elapsed, 
     _, ws = root
     now = time.time()
     monkeypatch.setattr(git, "out", lambda *args: "")
-    monkeypatch.setattr(fair_share, "limit", lambda: 1 if queued == "slots" else 2)
+    monkeypatch.setattr(fair_share, "limit", lambda: 1 if queued == "slots" else
+                        3 if queued == "unknown_session_room" else 2)
     other_ws = replace(ws, id="elsewhere", repo_root="/another-repo", name="elsewhere", branch="feat/upstream")
     db.add_workspace(other_ws)
     # Other profiles and repositories must not supply a worker's history.
@@ -927,6 +935,22 @@ def test_goal_activity_eta_while_building(db, root, monkeypatch, runs, elapsed, 
         if queued == "chain":
             db.add_task(Task("last", ws.repo_root, None, "boss", ws.id, "builder", "last", "assign", 1,
                              "last", None, None, json.dumps(["task:later"]), "pending", now))
+        if isinstance(queued, str) and "session" in queued:
+            db.update_agent("parallel", status="done")
+            db.update_task("later", depends_on=None)
+            add_agent(db, other_ws, "other_boss")
+            if queued == "claim_session":
+                db.add_task(Task("claim", other_ws.repo_root, None, "other_boss", other_ws.id, "builder", "next",
+                                 "assign", 1, "claim", None, None, None, "starting", now - 2100, now - 2100))
+            else:
+                add_agent(db, other_ws, "outside", mode="assign", parent="other_boss")
+                db.update_agent("outside", profile="unknown" if "unknown" in queued else "builder",
+                                created_at=now - 2100)
+                if queued == "slow_session":
+                    for i in range(5):
+                        db.update_agent(f"foreign{i}", created_at=now - 20000, reviewing_since=now - 10000)
+        if queued == "own_claim":
+            db.update_task("later", state="starting", started_at=now - 300)
     if overhead:
         for i in range(5):
             for at, kind, payload in [
