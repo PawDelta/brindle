@@ -300,6 +300,153 @@ def test_legacy_unscoped_grants_are_revoked(db, session):
         reopened.conn.close()
 
 
+def typed_into_cli(db, boss, text):
+    agents.handle_hook(db, boss.id, "prompt-submit", {"prompt": text})
+
+
+@pytest.mark.parametrize("typed,asked,terminal", [
+    ("render first", "render first", False),
+    pytest.param("please send me updated renders", "please send me updated renders", False,
+                 marks=pytest.mark.variant("reported refusal")),
+    pytest.param("can i see the new session button rendering?", "can i see the new session button rendering?", False,
+                 marks=pytest.mark.variant("reported refusal")),
+    pytest.param("render the options for pending milestones", "render the options for pending milestones", False,
+                 marks=pytest.mark.variant("reported refusal")),
+    pytest.param("ok great, then render it", "then render it", False, marks=pytest.mark.variant("reported refusal, inside a longer message")),
+    pytest.param("no, render first", "  RENDER\n first ", False, marks=pytest.mark.variant("case and whitespace; no is not a negation of the quote")),
+    ("then render it", "then render it", True),
+])
+def test_asked_quote_accepts_what_the_person_typed(db, session, typed, asked, terminal):
+    boss, _ = session
+    if terminal:
+        token = "t" * 43
+        with TestClient(build_app(token), headers={"Authorization": f"Bearer {token}"}) as client:
+            assert terminal_input(client, boss.id)(typed, typed=True).status_code == 200
+    else:
+        typed_into_cli(db, boss, typed)
+    assert visuals.publish(db, boss, "Asked", "<p>yes</p>", asked=asked)["rev"] == 1
+
+
+def _delivered_worker_text(db, boss, worker):
+    agents.send_message(db, boss.id, "render first", sender_id=worker.id)
+    db.conn.execute("UPDATE inbox SET delivered_at=? WHERE agent_id=?", (offers.time.time(), boss.id))
+    typed_into_cli(db, boss, "render first")
+
+
+def _reply_typed_onto_stopped_delivery(db, boss, worker):
+    db.set_mark(boss.id, "pane-delivery", offers.json.dumps({"stage": "body", "body": "render first", "stopped": True}))
+    typed_into_cli(db, boss, "render first and also use blue")
+
+
+def _old_delivery_still_in_prompt(db, boss, worker):
+    agents.send_message(db, boss.id, "render first", sender_id=worker.id)
+    typed_into_cli(db, boss, "look at this: render first")
+
+
+def _terminal(**fields):
+    def send(db, boss, worker):
+        token = "t" * 43
+        with TestClient(build_app(token), headers={"Authorization": f"Bearer {token}"}) as client:
+            terminal_input(client, boss.id)("render first", **fields)
+    return send
+
+
+def _app_saw_a_paste_into_the_cli(db, boss, worker):
+    token = "t" * 43
+    with TestClient(build_app(token), headers={"Authorization": f"Bearer {token}"}) as client:
+        assert client.post(f"/v1/sessions/{boss.id}/visual-input", json={"pasted": True}).status_code == 200
+    typed_into_cli(db, boss, "render first")
+
+
+def _expired(db, boss, worker):
+    typed_into_cli(db, boss, "render first")
+    db.conn.execute("UPDATE visual_person_words SET created_at=created_at-?", (offers.FOLD + 1,))
+
+
+def _other_session(db, boss, worker):
+    db.add_agent(Agent("boss2", boss.workspace_id, "supervisor", "claude", None, "interactive", "idle", "%3", None, 0, headless=1))
+    typed_into_cli(db, db.get_agent("boss2"), "render first")
+
+
+def _says(*texts):
+    return lambda db, boss, worker: [typed_into_cli(db, boss, text) for text in texts]
+
+
+@pytest.mark.parametrize("setup,asked", [
+    (_says("fix the login bug"), "render first"),
+    (lambda db, boss, worker: agents.send_message(db, boss.id, "render first", sender_id=worker.id), "render first"),
+    (_delivered_worker_text, "render first"),
+    (_reply_typed_onto_stopped_delivery, "render first"),
+    (_old_delivery_still_in_prompt, "render first"),
+    (_says("[brindle] render first"), "render first"),
+    (_says("<pasted_content id=\"a\">render first</pasted_content>"), "render first"),
+    (_says("[Pasted text #1 +3 lines] render first"), "render first"),
+    (_says("<bash-stdout>render first</bash-stdout>"), "render first"),
+    (_terminal(typed=False), "render first"),
+    (_app_saw_a_paste_into_the_cli, "render first"),
+    (_terminal(), "render first"),
+    (lambda db, boss, worker: agents.send_message(db, boss.id, "render first", person=True), "render first"),
+    (_says("surrender first please"), "render first"),
+    (_says("render first"), "render"),
+    (_says("please don't render it"), "render it"),
+    (_says("Make a visual only if I ask you later."), "Make a visual"),
+    (_says("render first", "Don't make a visual"), "render first"),
+    (_expired, "render first"),
+    (_other_session, "render first"),
+])
+def test_asked_quote_refuses_words_that_are_not_the_persons(db, session, setup, asked):
+    boss, worker = session
+    setup(db, boss, worker)
+    with pytest.raises(ServiceError) as refused:
+        visuals.publish(db, boss, "Not asked", "<p>no</p>", asked=asked)
+    assert refused.value.code == "visual_request_required"
+
+
+def test_asked_quote_is_not_for_workers_or_plans(db, session):
+    boss, worker = session
+    typed_into_cli(db, boss, "render first")
+    with pytest.raises(ServiceError):
+        visuals.publish(db, worker, "From a worker", "<p>no</p>", asked="render first")
+    with pytest.raises(ServiceError):
+        visuals.publish(db, boss, "A plan", "<p>no</p>", kind="plan", asked="render first")
+    visuals.publish(db, boss, "Still unspent", "<p>yes</p>", asked="render first")
+
+
+def test_asked_quote_allows_one_publication_per_message(db, session):
+    boss, _ = session
+    typed_into_cli(db, boss, "render first")
+    typed_into_cli(db, boss, "render first")
+    for title in ("One", "Two"):   # each message is its own ask
+        visuals.publish(db, boss, title, "<p>yes</p>", asked="render first")
+    with pytest.raises(ServiceError):
+        visuals.publish(db, boss, "Three", "<p>no</p>", asked="render first")
+    # A message the wording test granted has already had its one publication.
+    typed_into_cli(db, boss, "Make a visual")
+    visuals.publish(db, boss, "Granted", "<p>yes</p>")
+    with pytest.raises(ServiceError):
+        visuals.publish(db, boss, "Again", "<p>no</p>", asked="Make a visual")
+
+
+def test_asked_quote_answered_visual_allows_one_revision(db, session, monkeypatch):
+    boss, worker = session
+    typed_into_cli(db, boss, "render first")
+    choices = [{"id": "more", "label": "None, keep exploring"}, {"id": "a", "label": "A"}]
+    v = visuals.publish(db, boss, "Options", "<p>1</p>", "Which?", choices, asked="render first")
+    with pytest.raises(ServiceError):
+        visuals.publish(db, boss, "Unanswered", "<p>no</p>", visual_id=v["id"])
+    visuals.answer(db, v["id"], 1, "more", "you didnt render anything")
+    with pytest.raises(ServiceError):
+        visuals.publish(db, worker, "A worker's revision", "<p>no</p>", visual_id=v["id"])
+    assert visuals.publish(db, boss, "Options", "<p>2</p>", "Which?", choices, visual_id=v["id"])["rev"] == 2
+    with pytest.raises(ServiceError):
+        visuals.publish(db, boss, "Second revision", "<p>no</p>", visual_id=v["id"])
+    visuals.answer(db, v["id"], 2, "a")
+    now = offers.time.time()
+    monkeypatch.setattr(offers.time, "time", lambda: now + offers.FOLD + 1)
+    with pytest.raises(ServiceError):
+        visuals.publish(db, boss, "Too late", "<p>no</p>", visual_id=v["id"])
+
+
 def test_answer_folds_offer_and_setting_never_grants(db, session):
     boss, _ = session
     oid = offers.offer(db, boss, "Which layout?", "layout")["id"]

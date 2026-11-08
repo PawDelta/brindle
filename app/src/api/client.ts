@@ -1581,11 +1581,15 @@ export class DaemonClient {
   }
 
   visualInput(root: string, text: string, expiresAt?: number, signal?: AbortSignal,
-              observation?: { generation: number; sequence: number; submitted_at: number }) {
+              observation?: { generation: number; sequence: number; submitted_at: number; typed?: boolean }) {
     return this.request<{ observed: boolean }>(this.url(`${this.sessionPath(root)}/visual-input`), {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text, expires_at: expiresAt, ...observation }), signal,
     });
+  }
+
+  visualPaste(root: string) {
+    return this.post<{ observed: boolean }>(`${this.sessionPath(root)}/visual-input`, { pasted: true });
   }
 
   refreshVisualInput(root: string, observer: number, expiresAt: number, signal: AbortSignal | undefined, submittedAt: number) {

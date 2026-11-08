@@ -75,6 +75,9 @@ def visual_input(db: DB, params: dict, body: dict) -> Any:
     expires_at = _get(body, "expires_at", (int, float))
     if expires_at is not None and (isinstance(expires_at, bool) or not 0 < expires_at < float("inf")):
         raise ServiceError("invalid", "expires_at must be a finite timestamp", 400)
+    if _get(body, "pasted", bool):
+        visual_offers.note_paste(db, agent)
+        return {"observed": False}
     if _get(body, "begin", bool):
         return {"generation": visual_offers.begin_input(db, agent, expires_at)}
     submitted_at = _get(body, "submitted_at", (int, float), required=True)
@@ -95,8 +98,8 @@ def visual_input(db: DB, params: dict, body: dict) -> Any:
     if generation < 1 or sequence < 1:
         raise ServiceError("invalid", "generation and sequence must be positive integers", 400)
     fold_only = text.strip().lower() in ("y", "yes", "n", "no") or text.strip().isdigit()
-    visual_offers.person_spoke(db, agent, text, expires_at=expires_at,
-                               observation=(generation, sequence), submitted_at=submitted_at, fold_only=fold_only)
+    visual_offers.person_spoke(db, agent, text, expires_at=expires_at, observation=(generation, sequence),
+                               submitted_at=submitted_at, fold_only=fold_only, typed=_get(body, "typed", bool) is True)
     return {"observed": True}
 
 

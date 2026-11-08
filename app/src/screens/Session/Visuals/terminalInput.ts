@@ -3,6 +3,36 @@ import type { PtyViewOpener } from "../../../api/ptyView";
 
 const RECORD_WINDOW = 250;
 
+/* Several characters in one write are a paste the terminal didn't bracket: keys arrive one at a time. */
+const isBurst = (data: string) => data.length > 4 && !data.startsWith("\x1b");
+
+/* Claude and OpenCode report a prompt through their hook, which can't say what was pasted. Tell the
+   engine before the pasted bytes reach the CLI (later keys wait behind them), so that prompt's words
+   can't back a publish_visual quote. */
+export function withPasteNotice(client: Pick<DaemonClient, "visualPaste">, agent: string, open: PtyViewOpener, enabled: () => boolean = () => true): PtyViewOpener {
+  return (at, size, handlers) => {
+    const view = open(at, size, handlers);
+    let waiting: string[] | null = null, closed = false;
+    const flush = () => {
+      const held = waiting ?? [];
+      waiting = null;
+      if (!closed) held.forEach(data => view.write(data));
+    };
+    return {
+      ...view,
+      write(data) {
+        if (closed) return;
+        if (waiting) { waiting.push(data); return; }
+        if (!enabled() || !(data.includes("\x1b[200~") || isBurst(data))) { view.write(data); return; }
+        waiting = [data];
+        const alarm = setTimeout(flush, RECORD_WINDOW);
+        void client.visualPaste(agent).catch(() => undefined).finally(() => { clearTimeout(alarm); flush(); });
+      },
+      close() { flush(); closed = true; view.close(); },
+    };
+  };
+}
+
 /* Observe the person's submitted input, never the terminal's output or agent deliveries.
    The native and WSL PTYs share this opener. Unknown editor operations (history,
    completion, etc.) are not treated as chat submissions or guessed consent. */
@@ -10,13 +40,14 @@ export function withVisualInput(client: Pick<DaemonClient, "visualInput" | "begi
   return (at, size, handlers) => {
     const view = open(at, size, handlers);
     let draft = "", pending = "", cursor = 0;
-    let valid = true, paste = false, closed = false;
+    let valid = true, paste = false, closed = false, pasted = false;
     let held: { release(): void } | null = null;
     let observer: Promise<number> | null = null;
     let sequence = 0;
-    const submitted = (data: string): string[] => {
+    const submitted = (data: string): { text: string; typed: boolean }[] => {
       pending += data;
-      const messages: string[] = [];
+      const burst = isBurst(data);
+      const messages: { text: string; typed: boolean }[] = [];
       while (pending) {
         if (pending.startsWith("\x1b")) {
           const sequence = /^\x1b\[[0-9;?<>]*[A-Za-z~]/.exec(pending)?.[0];
@@ -25,7 +56,7 @@ export function withVisualInput(client: Pick<DaemonClient, "visualInput" | "begi
           // Home/End can target a line or the whole editor in multiline drafts.
           if (draft.includes("\n") && (sequence === "\x1b[H" || sequence === "\x1b[F")) valid = false;
           switch (sequence) {
-            case "\x1b[200~": paste = true; break;
+            case "\x1b[200~": paste = pasted = true; break;
             case "\x1b[201~": paste = false; break;
             case "\x1b[D": cursor = Math.max(0, cursor - 1); break;
             case "\x1b[C": cursor = Math.min(draft.length, cursor + 1); break;
@@ -44,12 +75,12 @@ export function withVisualInput(client: Pick<DaemonClient, "visualInput" | "begi
         if (!paste && char === "\r") {
           // Short answers may answer a chat choice; the engine folds offers
           // separately from publication consent. Only empty/unknown drafts are skipped.
-          if (valid && draft.trim()) messages.push(draft);
-          draft = ""; cursor = 0; valid = true;
+          if (valid && draft.trim()) messages.push({ text: draft, typed: !pasted && !burst });
+          draft = ""; cursor = 0; valid = true; pasted = false;
         } else if (!paste && (char === "\x7f" || char === "\b")) {
           if (cursor) { draft = draft.slice(0, cursor - 1) + draft.slice(cursor); cursor--; }
         } else if (!paste && char === "\x03") {
-          draft = ""; cursor = 0; valid = true;
+          draft = ""; cursor = 0; valid = true; pasted = false;
         } else if (!paste && char === "\x15") {
           draft = draft.slice(cursor); cursor = 0;
         } else if (!paste && char === "\x0b") {
@@ -72,11 +103,11 @@ export function withVisualInput(client: Pick<DaemonClient, "visualInput" | "begi
         // Later input, including Ctrl-C, always releases an earlier held Enter.
         held?.release();
         if (!enabled()) {
-          draft = pending = ""; cursor = 0; valid = true; paste = false;
+          draft = pending = ""; cursor = 0; valid = true; paste = pasted = false;
           view.write(data);
           return;
         }
-        const messages = submitted(data).map(text => ({ text, sequence: ++sequence }));
+        const messages = submitted(data).map(message => ({ ...message, sequence: ++sequence }));
         if (!messages.length) { view.write(data); return; }
         const controller = new AbortController();
         const expiresAt = submittedAt + RECORD_WINDOW / 1000;
@@ -105,7 +136,7 @@ export function withVisualInput(client: Pick<DaemonClient, "visualInput" | "begi
           for (const message of messages) {
             if (controller.signal.aborted) break;
             await client.visualInput(agent, message.text, expiresAt, controller.signal,
-              { generation, sequence: message.sequence, submitted_at: submittedAt });
+              { generation, sequence: message.sequence, submitted_at: submittedAt, typed: message.typed });
           }
         })().catch(() => { if (observer === usedObserver) observer = null; }).finally(release);
       },

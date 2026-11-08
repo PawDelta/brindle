@@ -18,7 +18,7 @@ import { VisualReader } from "./VisualReader";
 import { useVisuals } from "./useVisuals";
 import { OfferChip } from "./OfferChip";
 import { VisualsSetting } from "../../Settings/VisualsSetting";
-import { withVisualInput } from "./terminalInput";
+import { withPasteNotice, withVisualInput } from "./terminalInput";
 
 vi.mock("../../../components/PtyTerminal", () => import("../../../test/panes"));
 const native = vi.hoisted(() => ({
@@ -156,6 +156,32 @@ describe("visuals", () => {
       }
       expect(signal?.aborted).toBe(true);
     } finally { view.close(); vi.useRealTimers(); }
+  });
+
+  it("asked_quote: only wholly typed input counts as typed, and a hook CLI's paste is reported before it lands", async () => {
+    const typed: (boolean | undefined)[] = [];
+    const observed = withVisualInput({ beginVisualInput: async () => ({ generation: 1 }), refreshVisualInput: async () => ({ generation: 1 }), visualInput: async (_id, _text, _expiry, _signal, observation) => {
+      typed.push(observation?.typed);
+      return { observed: true };
+    } }, "codex", () => ({ write() {}, resize() {}, focus() {}, close() {} }))({ server: null, target: "%1" }, { cols: 80, rows: 24 }, { onData() {}, onExit() {}, onError() {} });
+    const send = async (...writes: string[]) => { writes.forEach(data => observed.write(data)); await act(async () => undefined); };
+    await send(..."hi!", "\r");
+    await send("\x1b[200~hi there\x1b[201~", "\r");
+    await send("hi there, pasted\r");
+    await send(..."ok", "\r");
+    expect(typed).toEqual([true, false, false, true]);
+
+    const bytes: string[] = [];
+    let noticed: (() => void) | undefined;
+    const hooked = withPasteNotice({ visualPaste: () => new Promise(ok => { noticed = () => ok({ observed: false }); }) }, "claude",
+      () => ({ write(data) { bytes.push(data); }, resize() {}, focus() {}, close() {} }))({ server: null, target: "%1" }, { cols: 80, rows: 24 }, { onData() {}, onExit() {}, onError() {} });
+    hooked.write("a");
+    hooked.write("\x1b[200~pasted\x1b[201~");
+    hooked.write("\r");
+    expect(bytes).toEqual(["a"]);
+    await act(async () => noticed?.());
+    expect(bytes).toEqual(["a", "\x1b[200~pasted\x1b[201~", "\r"]);
+    hooked.close();
   });
 
   it("observes Codex PTY submissions before forwarding Enter, including edits, pastes and uncertain history", async () => {

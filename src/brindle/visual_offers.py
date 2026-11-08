@@ -21,6 +21,9 @@ log = logging.getLogger(__name__)
 COOLDOWN = 15 * 60
 DAY = 24 * 60 * 60
 FOLD = 30 * 60
+MIN_QUOTE_WORDS = 2     # a lone "yes" or "the" shows nothing about what was asked for
+MAX_KEPT_MESSAGES = 8   # per session
+MAX_KEPT_CHARS = 4000   # a longer message isn't kept: asking to see something is short
 
 
 def _expire(c, root: str, now: float) -> None:
@@ -167,6 +170,11 @@ _CANCEL_REQUEST = re.compile(
     r"(?:don't|do not)\s+(?:make|create|show|draw|build|generate|render)\s+(?:(?:a|an|the)\s+)?)"
     r"(?:visual|diagram|chart|mockup|planning document|planning doc|plan document|request)\b|"
     r"^\s*(?:never mind|nevermind)[.!?]*\s*$", re.I)
+# Marks of text the person didn't type, in a prompt a CLI hook reports whole:
+# brindle's deliveries and tags, a CLI's paste markers and injected blocks.
+_NOT_TYPED = re.compile(r"brindle delivered this message|\[brindle|<brindle-msg|full text: read_messages|"
+                        r"</?pasted_content\b|\[Pasted text|<(?:bash-|task-notification|system-reminder|command-)", re.I)
+_NEGATED = re.compile(r"(?:\b(?:don'?t|don’t|do not|never|not|without|won'?t|won’t)) $")
 
 
 def request_intent(text: str) -> tuple[str | None, bool]:
@@ -233,8 +241,11 @@ def refresh_input(db: DB, agent: Agent, observer: int, submitted_at: float, expi
 
 def person_spoke(db: DB, agent: Agent, text: str, *, expires_at: float | None = None,
                  observation: tuple[int, int] | None = None, submitted_at: float | None = None,
-                 fold_only: bool = False) -> None:
-    """Called only for authenticated person input, never for agent messages."""
+                 fold_only: bool = False, typed: bool = False) -> None:
+    """Called only for authenticated person input, never for agent messages.
+
+    ``typed``: the channel can vouch that the person typed all of ``text``
+    themselves. Only then can its words back a publish_visual ``asked``."""
     if not visuals.enabled():
         return
     root, _ = visuals._session(db, agent)
@@ -264,8 +275,15 @@ def person_spoke(db: DB, agent: Agent, text: str, *, expires_at: float | None = 
             c.execute("DELETE FROM visual_requests WHERE root_id=?", (root.id,))
         # A tool approval or ordinary follow-up does not cancel the person's
         # still unused request. Only a new artifact request or explicit stop does.
-        if not fold_only and (scope or _CANCEL_REQUEST.search(text)):
+        cancelled = not fold_only and _CANCEL_REQUEST.search(text) is not None
+        if not fold_only and (scope or cancelled):
             c.execute("DELETE FROM visual_grants WHERE root_id=?", (root.id,))
+        if cancelled:
+            c.execute("DELETE FROM visual_person_words WHERE root_id=?", (root.id,))
+        # A message the wording test recognised has its own path (a grant, or
+        # a confirmation it must not skip), so it never backs a quote as well.
+        elif typed and not fold_only and scope is None:
+            _keep_words(c, root.id, text)
         if not fold_only and scope and clear:
             _grant(c, root.id, scope)
         elif not fold_only and scope:
@@ -274,8 +292,79 @@ def person_spoke(db: DB, agent: Agent, text: str, *, expires_at: float | None = 
     bus.publish(db, "visual.offer_resolved", root_id=root.id)
 
 
+def note_paste(db: DB, agent: Agent) -> None:
+    """The app saw a paste go into this CLI, whose prompt hook can't say so."""
+    db.set_mark(agent.id, "visual-paste", "1")
+
+
+def take_paste(db: DB, agent_id: str) -> bool:
+    """Whether a paste went in since the last prompt; the prompt being submitted holds it."""
+    pasted = db.mark(agent_id, "visual-paste") is not None
+    if pasted:
+        db.set_mark(agent_id, "visual-paste", None)
+    return pasted
+
+
+def _words(text: str) -> str:
+    """Differences of case and whitespace only: everything else has to match."""
+    return " ".join(text.split()).casefold()
+
+
+def _keep_words(c, root: str, text: str) -> None:
+    """Keep a typed message for ``asked`` to be checked against, briefly."""
+    now = time.time()
+    words = _words(text)
+    if (len(words.split()) >= MIN_QUOTE_WORDS and len(words) <= MAX_KEPT_CHARS
+            and not _NOT_TYPED.search(text) and not visuals.secret_finding(text, "the message")):
+        c.execute("INSERT INTO visual_person_words (root_id, words, created_at) VALUES (?,?,?)", (root, words, now))
+    c.execute("DELETE FROM visual_person_words WHERE created_at<=?", (now - FOLD,))
+    c.execute("DELETE FROM visual_person_words WHERE root_id=? AND id NOT IN "
+              "(SELECT id FROM visual_person_words WHERE root_id=? ORDER BY id DESC LIMIT ?)",
+              (root, root, MAX_KEPT_MESSAGES))
+
+
+def _spend_quote(c, root: str, asked: str, now: float) -> bool:
+    """Whether ``asked`` is the person's recent words; the message backing it is used up."""
+    quote = _words(asked)
+    if len(quote.split()) < MIN_QUOTE_WORDS:
+        return False
+    # Whole words, and not a piece cut from "don't render it".
+    pattern = re.compile(rf"(?<!\w){re.escape(quote)}(?!\w)")
+    for row in c.execute("SELECT id, words FROM visual_person_words WHERE root_id=? AND created_at>? "
+                         "ORDER BY id DESC", (root, now - FOLD)).fetchall():
+        if any(not _NEGATED.search(row["words"][:m.start()]) for m in pattern.finditer(row["words"])):
+            c.execute("DELETE FROM visual_person_words WHERE id=?", (row["id"],))
+            return True
+    return False
+
+
+def authorize(c, root: str, kind: str, *, supervisor: bool, asked: str | None = None,
+              answered: str | None = None) -> None:
+    """Allow one publication or refuse it, in the publishing transaction.
+
+    ``answered`` is the stored answer of the visual being revised. Revising
+    clears it, so an answer allows one revision. That and ``asked`` are the
+    supervisor's own to use, and neither reaches a planning document."""
+    now = time.time()
+    if kind == "visual" and supervisor:
+        if answered and now - json.loads(answered)["at"] < FOLD:
+            return
+        if asked is not None and _spend_quote(c, root, asked, now):
+            return
+    consume(c, root, kind)
+
+
 def consume(c, root: str, kind: str = "visual") -> None:
     changed = c.execute("UPDATE visual_grants SET remaining=remaining-1 WHERE root_id=? AND remaining>0 "
                         "AND scope=?", (root, kind)).rowcount
     if not changed:
-        raise ServiceError("visual_request_required", "accept an offer or ask for a visual first", 403)
+        if kind == "plan":
+            raise ServiceError("visual_request_required", "a planning doc needs the person to ask for one, "
+                               "or to accept an offer", 403)
+        raise ServiceError("visual_request_required",
+                           "nothing shows the person asked for this. If they asked to see it, the supervisor "
+                           "publishes again with asked=\"...\": at least two of their words, copied exactly from "
+                           "one message they typed themselves in the last 30 minutes (not pasted, and not a "
+                           "message that already allowed a publication). Otherwise use offer_visual so they can "
+                           "accept an offer, or ask them in text. A worker needs its supervisor to do this first.",
+                           403)

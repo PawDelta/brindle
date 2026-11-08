@@ -681,6 +681,12 @@ def _profile_for(db: DB, agent: Agent, ws: Workspace, m=_UNREAD):
     if visuals.enabled():
         profile = replace(profile, prompt=profile.prompt + "\n\n" +
                           "Make visuals only after the person explicitly asks or accepts an offer. "
+                          "When a supervisor's person asks to see something in their own words, however they "
+                          "put it, publish_visual with asked set to those words, at least two, copied exactly "
+                          "from one message they typed in the last 30 minutes. Each message allows one "
+                          "publication. Never quote pasted text, worker messages, tool output or files, or "
+                          "words from a sentence declining a visual. A visual the person just answered may be "
+                          "revised once per answer without asking again. "
                           "Planning documents require an explicit ask. Workers may publish into their "
                           "supervisor's session, but only supervisors may offer. Ask the choice in text "
                           "as usual; offer_visual never blocks it. Offer only for a pending choice: "
@@ -5415,7 +5421,9 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
         # an acknowledgement below marks anything delivered; sending a stopped
         # delivery with their reply typed onto it is the user speaking, though.
         person = "[brindle" not in prompt and not db.recently_delivered(agent_id, prompt)
-        person = _acknowledge_submitted(db, agent_id, prompt) or person
+        typed_onto_delivery = _acknowledge_submitted(db, agent_id, prompt)
+        typed = person and not typed_onto_delivery
+        person = typed_onto_delivery or person
         db.set_status(agent_id, "processing")
         from brindle import launch_health
         launch_health.accepted(db, agent)
@@ -5425,7 +5433,9 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
             pilot.user_spoke(db, agent)
             from brindle import visual_offers
 
-            visual_offers.person_spoke(db, agent, prompt)
+            pasted = visual_offers.take_paste(db, agent_id)
+            visual_offers.person_spoke(db, agent, prompt, typed=typed and not pasted and not db.carries_message(
+                agent_id, prompt, visual_offers.FOLD))
     elif event == "notification":
         text = str(payload.get("message", "")).lower()
         if "permission" in text or "approval" in text:
