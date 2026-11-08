@@ -92,6 +92,9 @@ describe("Sidebar", () => {
     };
     // Sharing the workspace with its supervisor, the sole worker still wins; another session's worker or a second worker leave it be.
     expect(parentsIn([ws([agent("sup1", "interactive", ""), agent("d", "assign", "sup1"), agent("r", "review", "sup1")])], "r")).toBe("d");
+    // A reviewer already under its developer stays there beside a helper; with the developer gone, it stays under its parent.
+    expect(parentsIn([ws([agent("sup1", "interactive", ""), agent("d", "assign", "sup1"), agent("h", "assign", "d"), agent("r", "review", "d")])], "r")).toBe("d");
+    expect(parentsIn([ws([agent("sup1", "interactive", ""), agent("r", "review", "sup1"), agent("h", "assign", "r")])], "r")).toBe("sup1");
     expect(parentsIn([ws([agent("sup1", "interactive", ""), agent("x", "assign", "sup2"), agent("r", "review", "sup1")])], "r")).toBe("sup1");
     expect(parentsIn([ws([agent("sup1", "interactive", ""), agent("d", "assign", "sup1"), agent("e", "assign", "sup1"), agent("r", "review", "sup1")])], "r")).toBe("sup1");
   });

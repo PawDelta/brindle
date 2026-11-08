@@ -55,6 +55,8 @@ export function sessionTree(workspaces: WorkspaceDTO[], root: string, hidden: Hi
   for (const { agent, workspace } of all) {
     const mine = original.get(agent.id);
     if (agent.mode !== "review" || !mine) continue;
+    // Already the child of a worker in its workspace (request_review's caller): that is the association.
+    if (all.some((e) => e.agent.id === mine && e.workspace.id === workspace.id && !NOT_WORKERS.has(e.agent.mode))) continue;
     const devs = all.filter((e) => e.workspace.id === workspace.id && !NOT_WORKERS.has(e.agent.mode) && e.agent.id !== agent.id && original.get(e.agent.id) === mine);
     if (devs.length === 1) parent.set(agent.id, devs[0].agent.id);
   }
