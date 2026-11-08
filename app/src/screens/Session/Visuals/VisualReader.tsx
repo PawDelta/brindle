@@ -129,7 +129,10 @@ export function VisualReader({ client, visual, loading, onBack, asking, onAnswer
       actions={
         visual && <KeepButton client={client} visual={visual} onKept={onAnswered} />
       }
-      footer={visual && options.length > 0 && <AnswerBar key={key} client={client} visual={visual} picked={picked?.key === key ? picked.option : null} onPick={choose} onAnswered={onAnswered} />}
+      footer={visual && options.length > 0 && <AnswerBar key={key} client={client} visual={visual} picked={picked?.key === key ? picked.option : null} onPick={choose} onAnswered={(answered) => {
+        onAnswered(answered);
+        onBack();
+      }} />}
     />
   );
 }
@@ -139,7 +142,7 @@ function AnswerBar({ client, visual, picked, onPick, onAnswered }: { client: Vis
   const [note, setNote] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const noteInput = useRef<HTMLTextAreaElement>(null);
+  const noteInput = useRef<HTMLInputElement>(null);
   const options = visual.options ?? [];
   // Empty ids cannot be published; this host-only choice carries no option to the engine.
   const ownWords = picked === "";
@@ -168,7 +171,7 @@ function AnswerBar({ client, visual, picked, onPick, onAnswered }: { client: Vis
         </p>
       ) : (
         <div className="flex flex-wrap items-center gap-s1" onKeyDown={(e) => {
-          // Enter submits from the note, the free-text box and a chosen option; Shift+Enter (a newline in the note) and Enter confirming an IME composition are left alone.
+          // Enter submits from the note, the free-text box and a chosen option; Shift+Enter and IME composition are left alone.
           if (e.key !== "Enter" || e.shiftKey || e.nativeEvent.isComposing) return;
           // An unchecked option's Enter picks it natively (even when another option is chosen); only the chosen one sends.
           if (e.target instanceof HTMLButtonElement && e.target.getAttribute("role") === "radio" && e.target.getAttribute("aria-checked") !== "true") return;
@@ -185,7 +188,7 @@ function AnswerBar({ client, visual, picked, onPick, onAnswered }: { client: Vis
               Something else…
             </button>
           </div>
-          <textarea ref={noteInput} rows={1} className={`${field} min-w-40 flex-1 resize-none`} aria-label={ownWords ? "Your answer" : "Add a note"} placeholder={ownWords ? "Your answer" : "Add a note (optional)"} value={note} onChange={(e) => setNote(e.target.value)} />
+          <input ref={noteInput} type="text" className={`${field} min-w-40 flex-1`} aria-label={ownWords ? "Your answer" : "Add a note"} placeholder={ownWords ? "Your answer" : "Add a note (optional)"} value={note} onChange={(e) => setNote(e.target.value)} />
           <LoadingButton className={main} busy={sending} disabled={!canSend || sending} data-testid="visual-send" onClick={() => void send()}>
             Send answer
           </LoadingButton>

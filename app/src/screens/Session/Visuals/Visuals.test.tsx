@@ -307,8 +307,6 @@ describe("visuals", () => {
     deliver("visual:message", delivery);
     expect(screen.getByRole("radio", { name: "B · Gate on CI" }).getAttribute("aria-checked")).toBe("true");
     expect(answer).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByTestId("visual-send"));
-    await waitFor(() => expect(answer).toHaveBeenCalledWith(visual.id, 2, "B", ""));
     document.documentElement.style.setProperty("--canvas", "#123456");
     deliver("visual:loaded", { ...delivery, event: "loaded" });
     await waitFor(() => expect(native.invoke).toHaveBeenCalledWith("visual_post", { label: delivery.label, message: expect.objectContaining({ type: "brindle.theme", vars: expect.objectContaining({ "--canvas": "#123456" }) }) }));
@@ -324,7 +322,8 @@ describe("visuals", () => {
     await waitFor(() => expect(native.invoke).toHaveBeenCalledWith("visual_set_bounds", { label: delivery.label, bounds: { ...bounds, width: 0, height: 0 } }));
     fireEvent.click(screen.getByRole("button", { name: "Export" }));
     await waitFor(() => expect(native.invoke).toHaveBeenLastCalledWith("visual_set_bounds", { label: delivery.label, bounds }));
-    fireEvent.click(screen.getByTestId("visual-back"));
+    fireEvent.click(screen.getByTestId("visual-send"));
+    await waitFor(() => expect(answer).toHaveBeenCalledWith(visual.id, 2, "B", ""));
     await waitFor(() => expect(native.invoke).toHaveBeenCalledWith("visual_close", { label: delivery.label }));
     expect(native.events.size).toBe(0);
     // A revision change and a screen switch while the native open is still pending.
@@ -549,7 +548,7 @@ describe("visuals", () => {
         await waitFor(() => expect(store.getState().inbox).toEqual([]));
       }
       if (leave === "Escape") fireEvent.keyDown(window, { key: "Escape" });
-      else fireEvent.click(screen.getByTestId("visual-back"));
+      else if (leave === "Back") fireEvent.click(screen.getByTestId("visual-back"));
       expect((await screen.findByTestId("terminal")).textContent).toBe("sup1");
       expect(screen.getByTestId("chat-area").className).not.toContain("hidden");
       expect(screen.queryByTestId("inbox-session")).toBeNull();
@@ -580,7 +579,7 @@ describe("visuals", () => {
     expect(screen.getByTestId("visual-answered").textContent).toContain("Stage it first");
   });
 
-  it("submits the answer on Enter from the note, the free-text box or a chosen option, keeping Shift+Enter newlines", async () => {
+  it("submits the answer on Enter from the single-line note, the free-text box or a chosen option", async () => {
     const sent: unknown[] = [];
     const client = new DaemonClient({ baseUrl: "http://daemon/v1", token: "test", fetch: async (url, init) => {
       if (String(url).endsWith("/answer")) sent.push(JSON.parse(init!.body as string));
@@ -613,17 +612,18 @@ describe("visuals", () => {
     expect(sent).toEqual([{ rev: 2, option: "B", note: "" }]);
     cleanup();
 
-    // Enter from the note with an option: a Shift+Enter newline stays in the text and is sent with it.
     sent.length = 0;
     render(<Reader />);
     fireEvent.click(screen.getByRole("radio", { name: "B · Gate on CI" }));
     const note = screen.getByRole("textbox", { name: "Add a note" });
+    expect(note).toBeInstanceOf(HTMLInputElement);
     fireEvent.change(note, { target: { value: "Line one\nLine two" } });
+    expect((note as HTMLInputElement).value).toBe("Line oneLine two");
     fireEvent.keyDown(note, { key: "Enter", shiftKey: true });
     fireEvent.keyDown(note, { key: "Enter", isComposing: true });
     expect(sent).toEqual([]);
     fireEvent.keyDown(note, { key: "Enter" });
-    await waitFor(() => expect(sent).toEqual([{ rev: 2, option: "B", note: "Line one\nLine two" }]));
+    await waitFor(() => expect(sent).toEqual([{ rev: 2, option: "B", note: "Line oneLine two" }]));
     cleanup();
 
     // Enter from the free-text box with no option chosen sends nothing.
