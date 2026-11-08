@@ -1510,6 +1510,7 @@ def create_profile(db: DB, params: dict, body: Body) -> Any:
     ``instructions`` and ``rules`` (known rule packs). An existing name is
     refused (409)."""
     from brindle import config, profiles, providers
+    from brindle.pro.team_policy import model_refusal
     from brindle.service.routing import RoutingPolicy
 
     repo = _get(body, "repo", required=True)
@@ -1540,8 +1541,8 @@ def create_profile(db: DB, params: dict, body: Body) -> Any:
     if access.org_id is not None or access.error:
         why = access.error or access.refusal(provider)
         if not why and not access.allows_run(provider, model):
-            why = (f"org {access.org_id} allows only the models "
-                   f"{', '.join(access.allowed_models or ()) or '(none)'}, not {model or 'no declared model'}")
+            why = model_refusal(access.org_id, access.allowed_models, model or "no declared model",
+                                who=f"profile {name!r}")
         if why:
             raise ServiceError("forbidden", why, 403)
     if model is not None and (not isinstance(model, str) or not model.isprintable()):

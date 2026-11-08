@@ -117,6 +117,37 @@ def test_undeclared_model_is_denied_when_a_list_is_set(team):
     assert not d.allowed and "no declared model" in d.reason
 
 
+@pytest.mark.parametrize("path", ["assign", "routing", "create"])
+def test_model_refusal_points_at_the_org_to_change(team, monkeypatch, path):
+    from types import SimpleNamespace
+    from urllib.parse import parse_qs, urlsplit
+
+    from brindle import providers
+    from brindle.daemon.routes_actions import create_profile
+    from brindle.pro import team_policy
+    from brindle.service.errors import ServiceError
+    from brindle.service.routing import RoutingPolicy
+
+    acc = team_policy.Access(org_id=ORG, allowed_models=tuple(POLICY["allowed_models"]))
+    monkeypatch.setattr(RoutingPolicy, "load", lambda repo: RoutingPolicy(acc, None, repo))
+    monkeypatch.setattr(providers, "unusable", lambda provider: None)
+    if path == "assign":
+        reason = plugin(team).check_assign(assign(model="forbidden-model")).reason
+    elif path == "routing":
+        reason = RoutingPolicy(acc, None, REPO, {"developer": ("claude", "forbidden-model")}).refusal(
+            SimpleNamespace(name="developer"))
+    else:
+        with pytest.raises(ServiceError) as error:
+            create_profile(None, {}, {"repo": REPO, "name": "new-agent", "provider": "claude",
+                                      "model": "forbidden-model"})
+        reason = error.value.message
+    [link] = re.findall(r"https?://[^\s)]+", reason)
+    url = urlsplit(link)
+    assert (url.scheme, url.netloc) == (urlsplit(BASE).scheme, urlsplit(BASE).netloc)
+    assert url.path == f"/brindle/account/orgs/{ORG}/settings"
+    assert parse_qs(url.query) == {"section": ["models"], "onboard": ["1"]}
+
+
 # -- policy caching and failing closed -----------------------------------------------------------------
 
 
