@@ -558,9 +558,16 @@ def test_audit_report_text_is_not_shown_to_the_person(db, root, repo):
     agent, ws = root
     with_goal(db)
     report = "Work not done: milestone 18 app/src/x.ts:95 never wired"
-    for _ in range(autopilot.MAX_AUDIT_PASSES):
-        out = autopilot.record_audit(db, "boss", False, report)
+    out = autopilot.record_audit(db, "boss", False, report)   # first failed audit: state stays running
     assert report in out   # the supervisor still gets the full report
+    first = db.get_autopilot("boss")
+    assert first.state == "running" and autopilot.person_note(first) == autopilot.AUDIT_GAPS_PERSON
+    db.update_autopilot("boss", audit_ok=None)   # a retained note outlives the verdict
+    assert autopilot.person_note(db.get_autopilot("boss")) == autopilot.AUDIT_GAPS_PERSON
+    db.update_autopilot("boss", note="Which repo should this go in?")
+    assert autopilot.person_note(db.get_autopilot("boss")) == "Which repo should this go in?"
+    out = autopilot.record_audit(db, "boss", False, report)
+    assert report in out
     ap = db.get_autopilot("boss")
     assert ap.state == "blocked" and report in (ap.note or "")
     dto = GoalDTO.from_autopilot(ap, db.milestones("boss"), None, session_review.goal_phase(db, "boss"))

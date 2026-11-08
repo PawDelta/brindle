@@ -1670,9 +1670,10 @@ AUDIT_GAPS_PERSON = "Found more to do"
 
 def person_note(ap: Autopilot) -> str | None:
     """``ap.note`` as the person sees it: the auditor's report is for the
-    supervisor only, so a block that holds it shows a plain status instead."""
+    supervisor only, so a note that is a recorded audit report (whatever the
+    state or verdict it was left under) shows a plain status instead."""
     note = ap.note
-    if note and ap.state == "blocked" and ap.audit_ok == 0 and note in (ap.audit_history or ""):
+    if note and note in (ap.audit_history or ""):
         return AUDIT_GAPS_PERSON
     return note
 
