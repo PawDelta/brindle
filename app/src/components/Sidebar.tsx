@@ -803,7 +803,7 @@ export function Sidebar({ route, navigate, refresh, openUrl, onBackFromSettings 
         <span className="flex-1" />
         <button
           type="button"
-          className={`flex items-center gap-1 rounded-md border px-2 py-0.5 text-[11.5px] font-medium hover:text-ink ${route.screen === "new" ? "border-pass/40 bg-pass-soft text-pass" : "border-pass/30 bg-pass-soft/60 text-ink-2 hover:bg-pass-soft hover:text-pass"}`}
+          className={`flex items-center gap-1 rounded-md border px-2 py-0.5 text-[11.5px] font-medium ${route.screen === "new" ? "border-pass/40 bg-pass-soft text-pass" : "border-pass/30 bg-pass-soft/60 text-ink-2 hover:bg-pass-soft hover:text-pass"}`}
           aria-current={route.screen === "new" ? "page" : undefined}
           title="New session (⌘N)"
           data-walkthrough="new-session"
