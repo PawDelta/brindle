@@ -361,9 +361,14 @@ describe("GoalPanel", () => {
     // Alpha's worker is done; Beta's works; Gamma's reported but is busy again (fixing); Delta's branch is in checks.
     expect(marks()).toEqual([[null, null], ["true", "working"], ["true", "working"], ["true", "checks"]]);
     expect(view.getAllByTestId("goal-stage")).toHaveLength(3);
+    // Delta's reported worker keeps its marker as its branch waits for check room, then waits to merge.
+    for (const [state, stage] of [["checks waiting for room: 2 running", "checks"], ["approved, waiting to merge", "merging"]]) {
+      act(() => store.dispatch({ type: "snapshot", workspaces: [store.getState().workspaces[0], { ...second, review_state: state }], inbox: [] }));
+      expect(marks()[3]).toEqual(["true", stage]);
+    }
     // Beta's worker exits (a liveness message, no new snapshot): it drops out while the others stay active.
     act(() => store.dispatch({ type: "stream", message: { type: "liveness", agents: { w1: false } } } as never));
-    expect(marks()).toEqual([[null, null], [null, null], ["true", "working"], ["true", "checks"]]);
+    expect(marks()).toEqual([[null, null], [null, null], ["true", "working"], ["true", "merging"]]);
   });
 
   /* The goal's count and bar stay above the list; only the milestones scroll. */

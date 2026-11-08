@@ -148,9 +148,9 @@ const BUSY_STATUS = new Set(["processing", "starting", "waiting"]);
 /* The stage a branch's review_state says it is at (checks, reviewer, merge), or null when it names none. */
 function pipelineStage(reviewState: string | null | undefined): Stage | null {
   const s = reviewState ?? "";
-  if (/^(waiting for checks|checks running)/.test(s)) return "checks";
+  if (/^(waiting for checks|checks running|checks waiting for room)/.test(s)) return "checks";
   if (/^reviewer running/.test(s)) return "review";
-  if (/^approved, merging/.test(s)) return "merging";
+  if (/^approved, (merging|waiting to merge)/.test(s)) return "merging";
   return null;
 }
 
