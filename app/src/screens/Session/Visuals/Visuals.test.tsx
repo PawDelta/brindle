@@ -738,8 +738,11 @@ describe("visuals", () => {
     expect(attach).toHaveBeenCalledTimes(3);
     let clip!: (files: unknown[]) => void;
     drops.clipboard = () => new Promise((done) => { clip = done; });
+    fireEvent.click(screen.getAllByRole("radio")[0]);
+    const send = screen.getByTestId("visual-send") as HTMLButtonElement;
+    expect(send.disabled).toBe(false);
     fireEvent.paste(screen.getByLabelText("Add a note"), { clipboardData: { files: [], getData: () => "" } });
-    expect((screen.getByTestId("visual-send") as HTMLButtonElement).disabled).toBe(true);
+    expect(send.disabled).toBe(true);
     view.rerender(reader({ ...takesFiles, rev: 3 }));
     await act(async () => clip([{ path: "/clip/old.png" }]));
     expect(attach).toHaveBeenCalledTimes(3);
