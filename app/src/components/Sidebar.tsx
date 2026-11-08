@@ -36,7 +36,8 @@ import type { DaemonClient, ProviderUsage } from "../api/client";
 import { DaemonContext } from "../api/context";
 import type { OpenUrl } from "../api/open";
 import type { GoalDTO, SessionDTO } from "../api/schema";
-import { readLastSession, routeSession, sameRoute, type Route, type SessionRef } from "../routes";
+import { readLastSession, routeSession, sameRoute, settingsTab, type Route, type SessionRef } from "../routes";
+import { AccountAvatar, SettingsRail } from "./SettingsRail";
 import { pruneShown, seenKey } from "../screens/Inbox/items";
 import { goalPhase, useGoal } from "../screens/Session/GoalPanel";
 import { UNKNOWN } from "../screens/Session/review";
@@ -58,6 +59,7 @@ import { SessionContext } from "./SessionContext";
 import { TerminalToggle } from "./TerminalPanel";
 
 export interface SidebarProps {
+  onBackFromSettings?(): void;
   route: Route;
   navigate(route: Route): void;
   /* Fetch the snapshot and inbox again (Sync.refresh), after a decision made here. */
@@ -141,25 +143,17 @@ function AccountButton({ route, navigate }: Pick<SidebarProps, "route" | "naviga
   }, [client, connection, store]);
   const name = account?.signed_in ? account.name?.trim() : "";
   const email = account?.signed_in ? account.email?.trim() : "";
-  const initials = name
-    ? name.split(/\s+/).slice(0, 2).map((part) => Array.from(part)[0]).join("").toUpperCase()
-    : email?.split("@")[0]?.slice(0, 1).toUpperCase();
   return (
     <button
       type="button"
       aria-label="Open Account"
       data-walkthrough="profile"
-      aria-current={route.screen === "account" || route.screen === "settings" ? "page" : undefined}
+      aria-current={settingsTab(route) ? "page" : undefined}
       title={account?.signed_in ? name || email || "Signed in" : "Sign in"}
-      className={`flex size-7 shrink-0 items-center justify-center rounded-full border border-line-strong font-mono text-[10px] ${account?.signed_in ? "text-ink-2" : "text-ink-3"} hover:bg-surface-2`}
+      className="shrink-0 rounded-full hover:bg-surface-2"
       onClick={() => navigate({ screen: "account" })}
     >
-      {initials || (
-        <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-          <circle cx="12" cy="8" r="3.5" />
-          <path d="M5 21v-2a7 7 0 0 1 14 0v2" />
-        </svg>
-      )}
+      <AccountAvatar />
     </button>
   );
 }
@@ -622,7 +616,8 @@ function Handle({ height, onChange }: { height: number; onChange(next: number): 
 const sheetOnly = (a: Extract<Route, { screen: "session" }>, b: Extract<Route, { screen: "session" }>) =>
   a.root === b.root && a.repo === b.repo && (a.agent ?? a.root) === (b.agent ?? b.root) && JSON.stringify(a.sheet ?? null) !== JSON.stringify(b.sheet ?? null);
 
-export function Sidebar({ route, navigate, refresh, openUrl }: SidebarProps) {
+export function Sidebar({ route, navigate, refresh, openUrl, onBackFromSettings }: SidebarProps) {
+  const tab = settingsTab(route);
   const { repos, sessions, error: feedError, closeError, close, after } = useSessions();
   const [cursor, setCursor] = useState<string | null>(null);
   const [folded, setFolded] = useState<Set<string>>(new Set());
@@ -781,6 +776,8 @@ export function Sidebar({ route, navigate, refresh, openUrl }: SidebarProps) {
           New session
         </button>
       </div>
+      {tab && <SettingsRail tab={tab} onBack={onBackFromSettings ?? (() => navigate({ screen: "new" }))} onTab={(tab) => navigate({ screen: "settings", tab, repo: "repo" in route ? route.repo : undefined })} />}
+      <div hidden={tab !== null} className={tab ? "hidden" : "contents"}>
       <InboxEntry route={route} navigate={navigate} />
       <div className="mx-2 h-px shrink-0 bg-line" role="separator" data-testid="inbox-divider" />
       <SessionContext session={selected} route={route} navigate={navigate} refresh={refresh ?? noRefresh} openUrl={openUrl} style={{ height: split }} />
@@ -859,6 +856,7 @@ export function Sidebar({ route, navigate, refresh, openUrl }: SidebarProps) {
         )}
         {repos && repos.length > 0 && live.length === 0 && <p className="px-s1 text-xs text-ink-3">Nothing running. Start a session, or continue a recent one.</p>}
       </nav>
+      </div>
       <div className="flex min-h-4 items-center justify-between gap-2 whitespace-nowrap border-t border-line px-s1 pt-s1" data-testid="status-line">
         <UsageReading provider={shown} model={model} warning={warning} failed={usageError != null} navigate={navigate} />
         <ProviderProblemLine problems={problems} navigate={navigate} />
