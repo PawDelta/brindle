@@ -57,6 +57,18 @@ const posts = (daemon: FakeDaemon) => daemon.requests.filter((r) => r.method ===
 const card = (kind: string) => document.querySelector<HTMLElement>(`[data-testid="inbox-card"][data-kind="${kind}"]`)!;
 
 describe("inbox", () => {
+  it("PR card not now removes the ready card and calls the route", async () => {
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root], inbox: [prReady, { ...prReady, kind: "pr_failed" }] });
+    const { sync } = mount(daemon);
+    await screen.findByRole("region", { name: "Ship ls --json" });
+    expect(within(card("pr_failed")).queryByRole("button", { name: "Not now" })).toBeNull();
+    fireEvent.click(within(card("pr_ready")).getByRole("button", { name: "Not now" }));
+    await waitFor(() => expect(posts(daemon)).toEqual([{ method: "POST", path: "/inbox/sup1/pr-not-now", query: {}, body: {} }]));
+    await waitFor(() => expect(card("pr_ready")).toBeNull());
+    expect(card("pr_failed")).toBeTruthy();
+    sync.stop();
+  });
+
   it.each([["rewound", "card"], ["dismissed", "card"], ["rewound", "permission group"], ["dismissed", "permission group"]])("omits stale Inbox %s worker %s", async (reason, surface) => {
     const past = { ...worker.agents![0], status: reason === "rewound" ? "rewound" : "exited", dismissed_at: reason === "dismissed" ? 1 : null };
     const daemon = new FakeDaemon({ sessions: [session], workspaces: [root, { ...worker, agents: [past] }], inbox: [question, waiting], asks: surface === "permission group" ? [{ ...pushes, items: [pushes.items[0]] }] : [] });
@@ -156,15 +168,26 @@ describe("inbox", () => {
     sync.stop();
   });
 
-  it("a visual decision's card has Open visual, which opens the visual, and no Go to session; another card's Go to session is a tinted button", async () => {
-    const visualItem: InboxItemDTO = { kind: "visual", agent_id: "sup1", root_id: "sup1", workspace_id: "proj", visual_id: "v_8f2c", reason: "asks you to choose" };
-    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], inbox: [visualItem, question] });
+  it("visual ready card opens the reader and dismisses independently on a read refresh", async () => {
+    const visualItem: InboxItemDTO = { kind: "visual", agent_id: "sup1", root_id: "sup1", workspace_id: "proj", visual_id: "v_8f2c", reason: "visual is ready", detail: "Flow A" };
+    const visualB = { ...visualItem, visual_id: "v_b", detail: "Flow B" };
+    const decision = { ...visualItem, visual_id: "v_question", reason: "asks you to choose", detail: "Pick a flow" };
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], inbox: [decision, visualItem, visualB, question] });
     const { sync, onOpen } = mount(daemon);
     await screen.findByRole("region", { name: "Ship ls --json" });
     expect(within(card("visual")).queryByRole("button", { name: "Go to session ›" })).toBeNull();
-    fireEvent.click(within(card("visual")).getByRole("button", { name: "Open visual" }));
+    fireEvent.click(within(screen.getByText("Flow A").closest("article")!).getByRole("button", { name: "Open visual" }));
     expect(onOpen).toHaveBeenLastCalledWith("sup1", REPO, "sup1", { kind: "visual", id: "v_8f2c" });
     expect(within(card("question")).getByRole("button", { name: "Go to session ›" }).className).toContain("btn-secondary");
+    await act(async () => {
+      // While the reader was open, its notice was read and the decision was answered.
+      daemon.data.inbox = [visualB, question];
+      daemon.publish("visual.read", { root_id: "sup1", payload: { visual: visualItem.visual_id } });
+      await sync.idle();
+    });
+    expect(screen.queryByText("Flow A")).toBeNull();
+    expect(screen.getByText("Flow B")).toBeTruthy();
+    expect(screen.queryByText("Pick a flow")).toBeNull();
     sync.stop();
   });
 

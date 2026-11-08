@@ -1,9 +1,6 @@
-/* brindle's layer for the selected session, in the sidebar above the tree
-   (design/options-v2/M3b-multi .ctx, as design/options-v3/C2b-inbox-only
-   keeps it): the goal's title with the session's id, repo and mode under
-   it; the goal with its milestones, progress and checks (GoalPanel
-   compact: the check button, none of that for a paused
-   session), whose one lifecycle carries the PR step: at Ready for PR its
+/* The selected session's short goal and progress, above its milestones
+   and the Sessions tree (card B in calm.html). GoalPanel
+   compact carries the PR step: at Ready for PR its
    Review & open PR opens the session's sheet, at PR open it links to the
    PR, and at Done its Close session closes the session and moves on. There
    is no separate PR entry, so a Done goal never sits beside a
@@ -20,11 +17,10 @@ import type { AppStore } from "../store/store";
 import { useGoal } from "../screens/Session/GoalPanel";
 import { useSessionDiff } from "../screens/Session/review";
 import { GoalPanel, SessionGoal } from "../screens/Session/GoalPanel";
-import { agentIds, sessionTree } from "../screens/Session/tree";
-import { isPaused, liveWorkers, sessionAge } from "../store/overview";
+import { isPaused } from "../store/overview";
 import { useCloseSession, useSessions } from "../store/sessions";
-import { useAppState, useStore } from "../store/useStore";
-import { useMemo, useRef, useState } from "react";
+import { useStore } from "../store/useStore";
+import { useRef, useState } from "react";
 
 export interface SessionContextProps {
   /* The session whose context shows; null when none is selected. */
@@ -54,16 +50,10 @@ export function SessionContext({ session, route, navigate, openUrl, style }: Ses
 function Context({ client, session, route, navigate, openUrl, style }: Pick<SessionContextProps, "route" | "navigate" | "openUrl" | "style"> & { client: DaemonClient; session: SessionRef }) {
   const store = useStore();
   const feed = useSessions();
-  const workspaces = useAppState((s) => s.workspaces);
-  const alive = useAppState((s) => s.alive);
   const { root, repo } = session;
   const row = feed.find(root);
-  const tree = useMemo(() => sessionTree(workspaces, root, feed.hidden), [workspaces, root, feed.hidden]);
-  const members = useMemo(() => agentIds(tree), [tree]);
-  const agents = useMemo(() => workspaces.flatMap((ws) => ws.agents ?? []).filter((a) => members.has(a.id)), [workspaces, members]);
   const goal = useGoal(client, repo, root, store);
   const paused = row ? isPaused(row) : false;
-  const repoName = feed.repos?.find((r) => r.repo_root === repo)?.name ?? repo;
   const closeSession = useCloseSession(navigate);
   const [renaming, setRenaming] = useState(false);
   const [renameError, setRenameError] = useState<string | null>(null);
@@ -92,44 +82,7 @@ function Context({ client, session, route, navigate, openUrl, style }: Pick<Sess
 
   const here = route.screen === "session" && route.root === root;
   return (
-    <section className="flex min-h-0 flex-col gap-[10px] overflow-hidden" aria-label="Session context" data-testid="session-context" style={style}>
-      <div className="shrink-0 px-s1">
-        {renaming ? (
-          <input
-            autoFocus
-            aria-label="Session name"
-            className="w-full rounded border border-line bg-surface px-1 text-[12.5px] font-semibold text-ink"
-            defaultValue={row?.name ?? ""}
-            placeholder={row?.goal || goal?.goal || "Name this session"}
-            onFocus={(e) => e.currentTarget.select()}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") commit(e.currentTarget.value);
-              if (e.key === "Escape") {
-                setRenaming(false);
-                setRenameError(null);
-              }
-            }}
-            onBlur={(e) => commit(e.currentTarget.value)}
-          />
-        ) : (
-          <div className="flex items-start gap-1">
-            <SessionGoal key={`${repo}:${root}:${row?.request}`} text={row?.request} className={`block w-full text-left text-[12.5px] font-semibold leading-[1.35] ${here ? "text-ink" : "text-ink/90 hover:text-ink"}`} onOpen={() => navigate({ screen: "session", root, repo, agent: root })}>
-              {row?.name || row?.goal || goal?.goal || <span className="italic text-ink-3">No goal set</span>}
-            </SessionGoal>
-            <button type="button" className="text-[11px] text-ink-3 hover:text-ink" aria-label="Rename session" title="Rename session" onClick={() => setRenaming(true)}>
-              ✎
-            </button>
-          </div>
-        )}
-        {renameError && (
-          <p role="alert" className="text-[11px] text-sap">
-            {renameError}
-          </p>
-        )}
-        <div className="truncate text-[11px] text-ink-3">
-          <span className="font-mono text-[11px]">{root}</span> · {repoName} · {row ? (paused ? sessionAge(row) : `${row.mode} · ${liveWorkers(agents, alive)} working`) : "…"}
-        </div>
-      </div>
+    <section className="side-context flex min-h-0 min-w-0 flex-col overflow-hidden" aria-label="Session context" data-testid="session-context" style={style}>
       <GoalPanel
         client={client}
         repo={repo}
@@ -137,11 +90,48 @@ function Context({ client, session, route, navigate, openUrl, style }: Pick<Sess
         store={store}
         paused={paused}
         compact
+        request={row?.request}
+        title={(onOpen) => (
+          <div className="flex min-w-0 flex-1 items-center gap-1">
+            {renaming ? (
+              <input
+                autoFocus
+                aria-label="Session name"
+                className="min-w-0 w-full rounded border border-line bg-surface px-1 text-[12.5px] font-semibold text-ink"
+                defaultValue={row?.name ?? ""}
+                placeholder={row?.goal || goal?.goal || "Name this session"}
+                onFocus={(e) => e.currentTarget.select()}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") commit(e.currentTarget.value);
+                  if (e.key === "Escape") {
+                    setRenaming(false);
+                    setRenameError(null);
+                  }
+                }}
+                onBlur={(e) => commit(e.currentTarget.value)}
+              />
+            ) : (
+              <>
+                <SessionGoal key={`${repo}:${root}:${row?.request}`} text={row?.request || goal?.goal || row?.goal} className={`block w-full truncate text-left text-[13px] font-medium ${here ? "text-ink" : "text-ink/90 hover:text-ink"}`} onOpen={onOpen}>
+                  {row?.name || goal?.summary || row?.goal || goal?.goal || <span className="italic text-ink-3">No goal set</span>}
+                </SessionGoal>
+                <button type="button" className="shrink-0 text-[11px] text-ink-3 hover:text-ink" aria-label="Rename session" title="Rename session" onClick={() => setRenaming(true)}>
+                  ✎
+                </button>
+              </>
+            )}
+          </div>
+        )}
         onReview={() => navigate({ screen: "session", root, repo, agent: root, sheet: { kind: "review" } })}
         openUrl={openUrl}
         onCloseSession={closeSession && (() => closeSession(root))}
         onOpenDocs={() => navigate({ screen: "knowledge", view: "docs", session: root, from: { root, repo } })}
       />
+      {renameError && (
+        <p role="alert" className="shrink-0 text-[11px] text-sap">
+          {renameError}
+        </p>
+      )}
       {sidebarChanges.shown && (
         <ChangesRow
           client={client}

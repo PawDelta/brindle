@@ -869,6 +869,101 @@ def test_goal_activity_commits_and_estimate(db, root, repo):
     assert (got["commits_last_hour"], got["eta_seconds"]) == (2, None)
 
 
+@pytest.mark.parametrize("runs, elapsed, queued, overhead, expected", [
+    (5, 300, False, False, 2100),
+    (4, 300, False, False, None),
+    (5, 1500, False, False, 1260),
+    (5, 300, True, False, 4500),
+    (5, 300, "chain", False, 6900),
+    (5, 300, "slots", False, 5700),
+    (5, 300, "attached", False, 3300),
+    (5, 300, "other_session", False, 3300),
+    (5, 300, "unknown_session", False, None),
+    (5, 300, "unknown_session_room", False, 2400),
+    (5, 300, "claim_session", False, 3300),
+    (5, 300, "own_claim", False, 2100),
+    pytest.param(5, 300, "slow_session", False, 3300,
+                 marks=pytest.mark.variant("Other sessions' longer work must stay out of this goal's critical path")),
+    (5, 300, False, True, 2400),
+])
+def test_goal_activity_eta_while_building(db, root, monkeypatch, runs, elapsed, queued, overhead, expected):
+    from dataclasses import replace
+    from brindle import fair_share
+    from brindle.db import Task
+
+    _, ws = root
+    now = time.time()
+    monkeypatch.setattr(git, "out", lambda *args: "")
+    monkeypatch.setattr(fair_share, "limit", lambda: 1 if queued == "slots" else
+                        3 if queued == "unknown_session_room" else 2)
+    other_ws = replace(ws, id="elsewhere", repo_root="/another-repo", name="elsewhere", branch="feat/upstream")
+    db.add_workspace(other_ws)
+    # Other profiles and repositories must not supply a worker's history.
+    for i in range(5):
+        add_agent(db, ws, f"past{i}", mode="assign", status="done")
+        db.update_agent(f"past{i}", profile="builder" if i < runs else "other",
+                        created_at=now - 4000, reviewing_since=now - 2800, result="done")
+        add_agent(db, other_ws, f"foreign{i}", mode="assign", status="done")
+        db.update_agent(f"foreign{i}", profile="builder", created_at=now - 4000,
+                        reviewing_since=now - 1000, result="done")
+        add_agent(db, ws, f"fast{i}", mode="handoff_detached", status="done")
+        db.update_agent(f"fast{i}", profile="fast", created_at=now - 4000,
+                        reviewing_since=now - 3400, result="done")
+    add_agent(db, ws, "writing", mode="assign", parent="boss")
+    db.update_agent("writing", profile="builder", created_at=now - elapsed)
+    add_agent(db, ws, "parallel", mode="assign", parent="boss")
+    db.update_agent("parallel", profile="fast", created_at=now - elapsed)
+    day = time.strftime("%Y-%m-%d", time.gmtime(now))
+    db.conn.execute("INSERT INTO stage_timings VALUES (?, ?, 'report_to_merge', 5, 1200, 1200, ?)",
+                    (day, ws.repo_root, json.dumps([1200] * 5)))
+    if queued:
+        db.add_task(Task("later", ws.repo_root, None, "boss", ws.id, "builder", "next", "assign", 1,
+                         "later", None, None, json.dumps(["writing"]), "pending", now))
+        if queued == "slots":
+            db.update_agent("parallel", status="done")
+            db.update_task("later", depends_on=None)
+            for i in range(2):
+                db.add_task(Task(f"slot{i}", ws.repo_root, None, "boss", ws.id, "builder", "next", "assign", 1,
+                                 f"slot{i}", None, None, None, "pending", now + i + 1))
+        if queued == "attached":
+            db.add_session_repo("boss", "other", other_ws.repo_root)
+            add_agent(db, other_ws, "upstream", mode="assign", parent="boss", status="idle")
+            db.update_agent("upstream", pipeline="reviewing", result="done", reviewing_since=now - 300)
+            db.conn.execute("INSERT INTO stage_timings VALUES (?, ?, 'report_to_merge', 5, 1200, 1200, ?)",
+                            (day, other_ws.repo_root, json.dumps([1200] * 5)))
+            db.update_task("later", depends_on=json.dumps([other_ws.branch]))
+        if queued == "chain":
+            db.add_task(Task("last", ws.repo_root, None, "boss", ws.id, "builder", "last", "assign", 1,
+                             "last", None, None, json.dumps(["task:later"]), "pending", now))
+        if isinstance(queued, str) and "session" in queued:
+            db.update_agent("parallel", status="done")
+            db.update_task("later", depends_on=None)
+            add_agent(db, other_ws, "other_boss")
+            if queued == "claim_session":
+                db.add_task(Task("claim", other_ws.repo_root, None, "other_boss", other_ws.id, "builder", "next",
+                                 "assign", 1, "claim", None, None, None, "starting", now - 2100, now - 2100))
+            else:
+                add_agent(db, other_ws, "outside", mode="assign", parent="other_boss")
+                db.update_agent("outside", profile="unknown" if "unknown" in queued else "builder",
+                                created_at=now - 2100)
+                if queued == "slow_session":
+                    for i in range(5):
+                        db.update_agent(f"foreign{i}", created_at=now - 20000, reviewing_since=now - 10000)
+        if queued == "own_claim":
+            db.update_task("later", state="starting", started_at=now - 300)
+    if overhead:
+        for i in range(5):
+            for at, kind, payload in [
+                (now - 3000, "autopilot.checking", {"checking": True}),
+                (now - 2900, "autopilot.checking", {"checking": False}),
+                (now - 2800, "autopilot.audit_started", {}),
+                (now - 2600, "autopilot.audit", {}),
+            ]:
+                bus.publish_agent(db, kind, f"past{i}", **payload)
+                db.conn.execute("UPDATE events SET ts=? WHERE id=(SELECT MAX(id) FROM events)", (at,))
+    assert autopilot.goal_activity(db, "boss", now=now)["eta_seconds"] == expected
+
+
 @pytest.mark.parametrize("passed, checking, ready, pr, merged, goal_done, expected, target", [
     (0, False, False, False, False, False, "in_progress", True),
     (2, False, True, False, False, True, "ready_for_pr", True),         # all pass, session review ready

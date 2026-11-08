@@ -45,6 +45,7 @@ const paused: SessionDTO = { ...session, id: "sup0", status: "paused", status_si
 const nav = () => screen.getByRole("complementary", { name: "Sidebar" });
 const link = (name: string | RegExp) => within(nav()).getByRole("button", { name });
 const treeAgent = (id: string) => nav().querySelector<HTMLButtonElement>(`button[data-tree-agent="${id}"]`)!;
+const treeSession = (id: string) => nav().querySelector<HTMLButtonElement>(`button[data-tree-session="${id}"]`)!;
 const surfaceTitle = () => screen.getByTestId("surface-title").textContent;
 /* The session's pane is held back (the engine is still bringing sessions back): its calm card, no terminal. */
 const paneWaits = () => screen.queryByTestId("state-card")?.dataset.kind === "returning" && !screen.queryByTestId("terminal");
@@ -211,13 +212,14 @@ describe("App", () => {
     expect(screen.getByTestId("engine-banner").textContent).toContain("update the app");
     expect(JSON.parse(localStorage.getItem(LAST_SESSION_KEY)!)).toEqual({ root: "sup1", repo: REPO });
     // The merged sidebar: Inbox at the top, the session's context (its goal and milestones) above the split, then
-    // the tree with the supervisor and its worker under the session. Nothing sits beside the provider session.
+    // the tree with its worker under the session's supervisor row. Nothing sits beside the provider session.
     await waitFor(() => expect(treeAgent("w1")).toBeTruthy());
     expect(within(nav()).getByTestId("tree-session-sup1").textContent).toContain("Ship ls --json");
-    expect(treeAgent("sup1").getAttribute("aria-current")).toBe("page");
+    expect(treeSession("sup1").getAttribute("aria-current")).toBe("page");
     expect(screen.queryByRole("complementary", { name: "Session panel" })).toBeNull();
     const context = within(nav()).getByTestId("session-context");
-    await waitFor(() => expect(within(context).getByTestId("goal-line").textContent).toContain("1 of 1 milestones complete"));
+    await waitFor(() => expect(within(context).getByTestId("goal-count").textContent).toBe("1 of 1"));
+    fireEvent.click(within(context).getByRole("button", { name: "1 done" }));
     expect(within(context).getByRole("list", { name: "Milestones" }).textContent).toContain("Client wired");
     expect(within(nav()).getByTestId("split-handle")).toBeTruthy();
     expect(daemon.requests.find((r) => r.path === "/goal")?.query).toEqual({ repo: REPO, root: "sup1" });
@@ -251,14 +253,11 @@ describe("App", () => {
     daemon.publish("message.queued", { agent_id: "sup1" });
     await waitFor(() => expect(screen.queryByTestId("inbox-badge")).toBeNull());
 
-    // The pages behind the sidebar's foot, each for the repo in view.
+    // The Inbox is the page Settings returns to below.
     expect(within(nav()).queryByRole("button", { name: "Settings" })).toBeNull();
-    for (const name of ["Knowledge", "Agents"]) {
-      fireEvent.click(link(name));
-      expect(await screen.findByRole("region", { name })).toBeTruthy();
-      expect(link(name).getAttribute("aria-current")).toBe("page");
-    }
-    const previousPage = screen.getByRole("region", { name: "Agents" });
+    fireEvent.click(link(/^Inbox/));
+    expect(await screen.findByRole("region", { name: "Inbox" })).toBeTruthy();
+    const previousPage = screen.getByRole("region", { name: "Inbox" });
     const main = screen.getByRole("main");
     main.scrollTop = 180;
     fireEvent.click(link("Open Account"));
@@ -282,11 +281,11 @@ describe("App", () => {
     await waitFor(() => expect(selected("Account")).toBe("true"));
     main.scrollTop = 0;
     fireEvent.keyDown(window, { key: "Escape" });
-    expect(screen.getByRole("region", { name: "Agents" })).toBe(previousPage);
+    expect(screen.getByRole("region", { name: "Inbox" })).toBe(previousPage);
     expect(main.scrollTop).toBe(180);
     fireEvent.click(link("Open Account"));
     fireEvent.click(link("← Sessions"));
-    expect(screen.getByRole("region", { name: "Agents" })).toBe(previousPage);
+    expect(screen.getByRole("region", { name: "Inbox" })).toBe(previousPage);
     expect(main.scrollTop).toBe(180);
 
     // ⌘1 is the first live session, back from any page; ⌘N the composer.
@@ -330,6 +329,28 @@ describe("App", () => {
     expect(screen.queryByRole("status")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Check again" }));
     await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("Can't reach the brindle engine: missing or wrong token"));
+    sync.stop();
+  });
+
+  it("profile rail: Knowledge and Agents sit in the profile button's rail, open their screens with the rail kept, and are no longer page links", async () => {
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root] });
+    const store = createAppStore();
+    const client = daemon.client();
+    const sync = startSync({ client, store, connect: daemon.connect });
+    renderApp(<App store={store} client={client} refresh={sync.refresh} />);
+    expect(await screen.findByRole("region", { name: "Session" }, { timeout: 4000 })).toBeTruthy();
+    expect(within(screen.getByTestId("pages")).queryByRole("button", { name: "Knowledge" })).toBeNull();
+    expect(within(screen.getByTestId("pages")).queryByRole("button", { name: "Agents" })).toBeNull();
+
+    fireEvent.click(link("Open Account"));
+    for (const name of ["Knowledge", "Agents"]) {
+      fireEvent.click(link(name));
+      expect(await screen.findByRole("region", { name })).toBeTruthy();
+      expect(link(name).getAttribute("aria-current")).toBe("page");
+      expect(link("← Sessions")).toBeTruthy();
+    }
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(await screen.findByRole("region", { name: "Session" })).toBeTruthy();
     sync.stop();
   });
 
@@ -762,7 +783,7 @@ describe("providers in the sidebar", () => {
 
   it("providers: the sidebar has no providers block, and its status line says nothing about providers while none has a problem", async () => {
     const { daemon, stop } = start();
-    await waitFor(() => expect(treeAgent("sup1")).toBeTruthy());
+    await waitFor(() => expect(treeSession("sup1")).toBeTruthy());
     await waitFor(() => expect(daemon.requests.some((r) => r.path === "/providers/installed")).toBe(true));
     await flush();
     expect(nav().textContent).not.toMatch(/providers/i);
@@ -780,7 +801,7 @@ describe("providers in the sidebar", () => {
     const { daemon, stop } = start(
       freshProviders({ claude: { path: "/home/u/.local/bin/claude", version: "2.1.47" }, codex: { path: "/opt/homebrew/bin/codex", version: "0.48.0", signed_in: false } }),
     );
-    await waitFor(() => expect(treeAgent("sup1")).toBeTruthy());
+    await waitFor(() => expect(treeSession("sup1")).toBeTruthy());
     const problem = await within(nav()).findByTestId("provider-problem");
     expect(statusLine().lastElementChild).toBe(problem);
     expect(within(statusLine()).getByTestId("usage-reading")).toBeTruthy();

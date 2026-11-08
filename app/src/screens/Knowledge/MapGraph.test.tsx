@@ -103,6 +103,11 @@ it("highlights a hovered node's neighbourhood, selects on click, moves a dragged
   expect(onOpen).toHaveBeenLastCalledWith({ id: "path:src/cache", kind: "path", path: "src/cache" });
   fireEvent.click(screen.getByRole("button", { name: "Close details" }));
   expect(screen.queryByRole("complementary")).toBeNull();
+  // Escape from a focused node dismisses a selection (consumed); with none left it reaches the app's Esc-back.
+  fireEvent.click(node("d"));
+  expect(fireEvent.keyDown(node("d"), { key: "Escape" })).toBe(false);
+  expect(screen.queryByRole("complementary")).toBeNull();
+  expect(fireEvent.keyDown(node("d"), { key: "Escape" })).toBe(true);
 
   const left = parseFloat(node("x").style.left);
   fireEvent.pointerDown(node("x"), { pointerId: 1, clientX: 10, clientY: 10 });
@@ -110,7 +115,7 @@ it("highlights a hovered node's neighbourhood, selects on click, moves a dragged
   fireEvent.pointerUp(node("x"), { pointerId: 1, clientX: 70, clientY: 10 });
   fireEvent.click(node("x"), { detail: 1 });
   expect(parseFloat(node("x").style.left)).toBeGreaterThan(left + 20);
-  expect(onOpen).toHaveBeenCalledTimes(2);
+  expect(onOpen).toHaveBeenCalledTimes(3);
 
   fireEvent.click(screen.getByRole("button", { name: "Fit graph" }));
   const fitted = stage.style.transform;

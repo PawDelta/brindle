@@ -6,7 +6,7 @@ import time
 import pytest
 
 from brindle import identity_lock, workspaces
-from brindle.db import Agent
+from brindle.db import DB, Agent, Workspace
 from brindle.pro import status as org_status
 from brindle.service import inbox
 
@@ -92,6 +92,38 @@ def test_a_user_prompt_clears_the_question_card_but_a_brindle_message_does_not(d
     agents.handle_hook(db, "r1", "prompt-submit", {"prompt": "yes, commit it"})
     assert cards() == []
     assert db.get_autopilot("r1").question is None
+
+
+def test_pr_not_now(db, tmp_path, monkeypatch):
+    from brindle import git
+    from brindle.daemon.routes_actions import inbox_action
+
+    ws = Workspace("pr-card", str(tmp_path), "pr-card", "session", "feat/pr-card", "main",
+                   str(tmp_path / "checkout"), None, "pr-card", time.time())
+    db.add_workspace(ws)
+    db.add_agent(Agent("r1", ws.id, "supervisor", "claude", None, "interactive", "idle", "@1", None, time.time()))
+    db.conn.execute("INSERT INTO session_pr_prep (root_id, branch, sha, state, prepared_at) VALUES (?, ?, ?, ?, ?)",
+                    ("r1", ws.branch, "head1", "passed", time.time()))
+    head = "head1"
+    monkeypatch.setattr(git, "out", lambda args, path: head)
+    monkeypatch.setattr(inbox.view, "snapshot", lambda *args, **kwargs: [
+        {"id": ws.id, "branch": ws.branch, "agents": [{"id": "r1", "status": "idle"}]}])
+
+    def cards(database):
+        return [i.kind for i in inbox.items(database, ws.repo_root, panes={"@1": True}) if i.kind.startswith("pr_")]
+
+    assert cards(db) == ["pr_ready"]
+    inbox_action(db, {"id": "r1", "action": "pr-not-now"}, {})
+    restarted = DB(db.path)
+    try:
+        assert cards(restarted) == []
+        restarted.conn.execute("UPDATE session_pr_prep SET state = 'failed'")
+        assert cards(restarted) == ["pr_failed"]
+        restarted.conn.execute("UPDATE session_pr_prep SET state = 'passed'")
+        head = "head2"
+        assert cards(restarted) == ["pr_ready"]
+    finally:
+        restarted.conn.close()
 
 
 

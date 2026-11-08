@@ -8,7 +8,7 @@
    session to show); the Inbox lists everything waiting on a person, each
    row jumping to its session. Knowledge (a repo's decisions and sources),
    Agents (which model runs each kind of work, and the person's custom
-   agents) and Settings (with Account and Usage among its tabs) are the pages behind the sidebar's foot. There is
+   agents) and Settings (with Account and Usage among its tabs) are the pages behind the profile button's rail. There is
    no home board: the sidebar is the overview. */
 
 export interface SessionRef {
@@ -86,6 +86,15 @@ export function settingsTab(route: Route): SettingsTab | null {
       return null;
   }
 }
+
+/* The full screens the profile button's rail also opens, beside Settings' tabs. */
+export type RailPage = "knowledge" | "agents";
+export function railPage(route: Route): RailPage | null {
+  return route.screen === "knowledge" || route.screen === "agents" ? route.screen : null;
+}
+
+/* Whether the sidebar shows the profile rail (with its "← Sessions") and Esc goes back. */
+export const inProfileRail = (route: Route): boolean => settingsTab(route) !== null || railPage(route) !== null;
 
 /* Where the app lands before it knows its sessions: the empty state. */
 export const HOME: Route = { screen: "new" };
