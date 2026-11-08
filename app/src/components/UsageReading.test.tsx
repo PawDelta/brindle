@@ -75,7 +75,10 @@ describe("the sidebar's weekly usage reading", () => {
     await screen.findByText("Waiting for the browser…");
     daemon.completeLogin();
     await waitFor(() => expect(screen.getByRole("button", { name: "Open Account" }).textContent).toBe("SR"));
-    fireEvent.click(within(screen.getByTestId("pages")).getByRole("button", { name: "Settings" }));
+    // Settings is no longer a link in Pages: it opens from the profile.
+    expect(within(screen.getByTestId("pages")).queryByRole("button", { name: "Settings" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Open Account" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "General" }));
     const settings = await screen.findByRole("region", { name: "Settings" });
     const theme = within(settings).getByRole("group", { name: "Theme" });
     fireEvent.click(within(theme).getByRole("button", { name: "Dark" }));

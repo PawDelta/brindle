@@ -149,7 +149,7 @@ function AccountButton({ route, navigate }: Pick<SidebarProps, "route" | "naviga
       type="button"
       aria-label="Open Account"
       data-walkthrough="profile"
-      aria-current={route.screen === "account" ? "page" : undefined}
+      aria-current={route.screen === "account" || route.screen === "settings" ? "page" : undefined}
       title={account?.signed_in ? name || email || "Signed in" : "Sign in"}
       className={`flex size-7 shrink-0 items-center justify-center rounded-full border border-line-strong font-mono text-[10px] ${account?.signed_in ? "text-ink-2" : "text-ink-3"} hover:bg-surface-2`}
       onClick={() => navigate({ screen: "account" })}
@@ -869,8 +869,6 @@ export function Sidebar({ route, navigate, refresh, openUrl }: SidebarProps) {
         {page({ screen: "knowledge" }, "Knowledge")}
         <span aria-hidden className="text-ink-3">·</span>
         {page({ screen: "agents" }, "Agents")}
-        <span aria-hidden className="text-ink-3">·</span>
-        {page({ screen: "settings" }, "Settings")}
         <span className="flex-1" />
         <TerminalToggle />
       </nav>
