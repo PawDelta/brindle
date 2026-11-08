@@ -201,9 +201,10 @@ _NOT = (r"(?<!why )\b(?:not|never|cannot|without|avoid|stop|no need to|rather th
 _NEGATED = re.compile(_NOT + " $")     # just before a quote it takes the quote back: "don't ever <quote>"
 _NEGATES = re.compile(_NOT + r" \w")    # the quote carries its own "don't"
 _NEGATION_REACH = 200                   # characters before a quote that can negate it
-# Words someone is mentioning, not saying. An unclosed mark runs to the end; a lone ' is an apostrophe.
+# Words someone is mentioning, not saying. An unclosed mark runs to the end; ' inside a word is an apostrophe.
 _QUOTED = re.compile("|".join(f"{o}[^{c}]*(?:{c}|$)" for o, c in ('""', "``", "“”", "«»", "「」", "『』", "„“"))
-                     + r"|‘[^‘]*?’(?!\w)|(?<!\w)'[^']*'(?!\w)")
+                     + r"|‘(?:[^’]|’(?=\w))*(?:’(?!\w)|$)"
+                     + r"|(?<!\w)'(?!\d|(?:em|n|cause|tis|twas)\b)(?:[^']|'(?=\w))*(?:'(?!\w)|$)")
 _IDEOGRAPH = re.compile(r"[぀-ヿ㐀-鿿豈-﫿]")
 
 
@@ -392,6 +393,22 @@ def _keep_words(c, root: str, text: str, staged: bool = False) -> None:
               (root, root, MAX_KEPT_MESSAGES))
 
 
+def _says_it_themselves(words: str, span: tuple[int, int], mentioned: list[tuple[int, int]]) -> bool:
+    """A quote may hold a whole quoted name, but not begin or end inside one, and
+    enough of it must be the person's own words outside the quotation marks."""
+    begin, end = span
+    own, at = [], begin
+    for start, stop in mentioned:
+        if stop <= begin or start >= end:
+            continue
+        if start < begin or stop > end:
+            return False
+        own.append(words[at:start])
+        at = stop
+    own.append(words[at:end])
+    return _word_count(" ".join(own)) >= MIN_QUOTE_WORDS
+
+
 def _spend_quote(c, root: str, asked: str, now: float) -> bool:
     """Whether ``asked`` is the person's recent words; the message backing it is used up."""
     quote = _words(asked)
@@ -404,7 +421,7 @@ def _spend_quote(c, root: str, asked: str, now: float) -> bool:
         words = row["words"]
         mentioned = [q.span() for q in _QUOTED.finditer(words)]
         if any(not _NEGATED.search(words[max(0, m.start() - _NEGATION_REACH):m.start()])
-               and not any(m.start() < end and start < m.end() for start, end in mentioned)
+               and _says_it_themselves(words, m.span(), mentioned)
                for m in pattern.finditer(words)):
             c.execute("DELETE FROM visual_person_words WHERE id=?", (row["id"],))
             if row["source"] == "grant":

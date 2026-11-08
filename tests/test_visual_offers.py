@@ -579,6 +579,11 @@ LONG_NOTES = "\n".join(f"line {n} of the notes about the migration" for n in ran
     _stress("the quote brings its own marks", ['What does "render first" mean?'], '"render first"', False),
     _stress("mentioned in single quotes", ["what does 'please render first' mean"], FIRST, False),
     _stress("an unclosed mention", ['he said "please render first'], FIRST, False),
+    _stress("an unclosed single quote", ["He said 'render first"], FIRST, False),
+    _stress("an unclosed curly quote", ["He said ‘render first"], FIRST, False),
+    _stress("an apostrophe inside an unclosed quote", ["He said 'let's render first"], FIRST, False),
+    _stress("the marks and one word of the person's own", ['What does "render first" mean?'], '"render first" mean', False),
+    _stress("begins outside, ends inside", ['What does "render first" mean?'], 'does "render first', False),
     _stress("a long message keeps its negation", [LONG_NOTES + "\nThen don't render the options."], "render the options", False),
     # Cancelled, in the person's own words, for a quote and for a grant.
     *[_stress("cancel then quote", [FIRST, cancel], FIRST, False) for cancel in (
@@ -608,7 +613,9 @@ LONG_NOTES = "\n".join(f"line {n} of the notes about the migration" for n in ran
     _stress("never mind something else", ["never mind the typo, render it"], "render it", True),
     _stress("never mind, then the ask", ["never mind, render it"], "render it", True),
     _stress("never mind, then a polite ask", ["Never mind — can you show me the flow"], "show me the flow", True),
-    _stress("a name in quotes inside an ask", ['render the "new session" button'], "render the", True),
+    _stress("a whole ask holding a quoted name", ['render the "new session" button'], 'render the "new session" button', True),
+    _stress("a whole ask holding a code name", ["Please render the `SessionContext` layout"], "Please render the `SessionContext` layout", True),
+    _stress("a decade is not a quotation", ["the '90s layout, render it"], "render it", True),
     _stress("apostrophes are not quotation marks", ["let's see what's wrong, render it"], "render it", True),
     _stress("a long message ending in the ask", [LONG_NOTES + "\nThen render the options."], "render the options", True),
     _stress("stop something else", ["stop the server and render the flow"], "render the flow", True),
