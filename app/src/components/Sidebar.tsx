@@ -56,7 +56,6 @@ import Logo from "./Logo";
 import { Preflight } from "./Preflight";
 import { SessionContext } from "./SessionContext";
 import { TerminalToggle } from "./TerminalPanel";
-import { openWalkthrough } from "./Walkthrough";
 
 export interface SidebarProps {
   route: Route;
@@ -82,6 +81,17 @@ function WeeklyMeter({ provider }: { provider: ProviderUsage }) {
   );
 }
 
+/* The model beside its provider, without repeating the provider: "claude-opus-4-7" under Claude
+   reads "Opus 4.7"; a model that doesn't start with the provider's name ("gpt-5.5") keeps its own. */
+export function usageModel(model: string, provider: string): string {
+  const own = new RegExp(`^${provider}[-\\s]`, "i");
+  const rest = model.replace(own, "").replace(/(\d)-(\d)/g, "$1.$2");
+  return prettyModel(rest);
+}
+
+/* The reset day only matters once the weekly window is close to full. */
+const RESET_SHOWN_FROM = 80;
+
 /* Each click is its own request, so a second one with Account open scrolls back to Usage. */
 let usageAsks = 0;
 /* No reading is not a fault: a new user has none yet, and the first load may still be out.
@@ -101,9 +111,9 @@ function UsageReading({ provider, model, warning, failed, navigate }: { provider
       {provider ? (
         <>
           <span>{providerName(provider.provider)}</span>
-          {model && <span data-testid="usage-model">{prettyModel(model)}</span>}
+          {model && <span data-testid="usage-model">{usageModel(model, provider.provider)}</span>}
           <WeeklyMeter provider={provider} />
-          {window?.resets_at != null && <span className="truncate">· resets {new Date(window.resets_at * 1000).toLocaleDateString("en-US", { weekday: "short" })}</span>}
+          {window?.resets_at != null && window.used >= RESET_SHOWN_FROM &&<span className="truncate">· resets {new Date(window.resets_at * 1000).toLocaleDateString("en-US", { weekday: "short" })}</span>}
         </>
       ) : failed ? "Usage unavailable" : "Usage"}
     </button>
@@ -139,7 +149,7 @@ function AccountButton({ route, navigate }: Pick<SidebarProps, "route" | "naviga
       type="button"
       aria-label="Open Account"
       data-walkthrough="profile"
-      aria-current={route.screen === "account" ? "page" : undefined}
+      aria-current={route.screen === "account" || route.screen === "settings" ? "page" : undefined}
       title={account?.signed_in ? name || email || "Signed in" : "Sign in"}
       className={`flex size-7 shrink-0 items-center justify-center rounded-full border border-line-strong font-mono text-[10px] ${account?.signed_in ? "text-ink-2" : "text-ink-3"} hover:bg-surface-2`}
       onClick={() => navigate({ screen: "account" })}
@@ -859,21 +869,7 @@ export function Sidebar({ route, navigate, refresh, openUrl }: SidebarProps) {
         {page({ screen: "knowledge" }, "Knowledge")}
         <span aria-hidden className="text-ink-3">·</span>
         {page({ screen: "agents" }, "Agents")}
-        <span aria-hidden className="text-ink-3">·</span>
-        {page({ screen: "settings" }, "Settings")}
         <span className="flex-1" />
-        <button
-          type="button"
-          className={FOOT_LINK}
-          aria-label="Show the walkthrough"
-          title="Show the walkthrough"
-          onClick={() => {
-            navigate({ screen: "new" });
-            openWalkthrough();
-          }}
-        >
-          ?
-        </button>
         <TerminalToggle />
       </nav>
     </aside>

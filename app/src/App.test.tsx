@@ -252,7 +252,8 @@ describe("App", () => {
     await waitFor(() => expect(screen.queryByTestId("inbox-badge")).toBeNull());
 
     // The pages behind the sidebar's foot, each for the repo in view.
-    for (const name of ["Knowledge", "Agents", "Settings"]) {
+    expect(within(nav()).queryByRole("button", { name: "Settings" })).toBeNull();
+    for (const name of ["Knowledge", "Agents"]) {
       fireEvent.click(link(name));
       expect(await screen.findByRole("region", { name })).toBeTruthy();
       expect(link(name).getAttribute("aria-current")).toBe("page");
@@ -265,10 +266,6 @@ describe("App", () => {
     fireEvent.click(screen.getByRole("tab", { name: "Permissions" }));
     fireEvent.click(link("Open Account"));
     await waitFor(() => expect(selected("Account")).toBe("true"));
-    fireEvent.click(link("Settings"));
-    fireEvent.click(await screen.findByRole("tab", { name: "Storage" }));
-    fireEvent.click(link("Settings"));
-    await waitFor(() => expect(selected("General")).toBe("true"));
 
     // ⌘1 is the first live session, back from any page; ⌘N the composer.
     fireEvent.keyDown(window, { key: "1", metaKey: true });
@@ -320,11 +317,10 @@ describe("App", () => {
     expect(screen.getByRole("combobox", { name: "Repo" })).toHaveProperty("value", OTHER);
     fireEvent.click(screen.getByTestId("terminal-toggle"));
     await waitFor(() => expect(daemon.shells.map((s) => s.cwd)).toEqual([OTHER]));
-    // Settings opens on General; its Project tab is the current session's repo (here the second), with a picker for the others.
+    // Settings (opened from the profile) has a Project tab on the current session's repo (here the second), with a picker for the others.
     localStorage.setItem(LAST_SESSION_KEY, JSON.stringify({ root: "sup2", repo: OTHER }));
-    fireEvent.click(link("Settings"));
-    expect((await screen.findByRole("tab", { name: "General" })).getAttribute("aria-selected")).toBe("true");
-    fireEvent.click(screen.getByRole("tab", { name: "Project" }));
+    fireEvent.click(link("Open Account"));
+    fireEvent.click(await screen.findByRole("tab", { name: "Project" }));
     await screen.findByRole("region", { name: "Project settings" });
     expect(screen.getByRole("combobox", { name: "Repo" })).toHaveProperty("value", OTHER);
     fireEvent.change(screen.getByRole("combobox", { name: "Repo" }), { target: { value: REPO } });
@@ -503,7 +499,7 @@ describe("App", () => {
     await waitFor(() => expect(screen.getByTestId("inbox-badge").textContent).toBe("1"));
     expect(screen.queryByTestId("engine-banner")).toBeNull();
 
-    fireEvent.click(link("Settings"));
+    fireEvent.click(link("Open Account"));
     fireEvent.click(await screen.findByRole("tab", { name: "About" }));
     const engineSection = screen.getByTestId("engine");
     fireEvent.click(within(engineSection).getByRole("button", { name: /Details/ }));
@@ -534,7 +530,7 @@ describe("App", () => {
     await waitFor(() => expect(screen.queryByTestId("reconnecting")).toBeNull());
     expect(screen.queryByTestId("engine-banner")).toBeNull();
     await waitFor(() => expect(screen.queryByTestId("inbox-badge")).toBeNull());
-    fireEvent.click(link("Settings"));
+    fireEvent.click(link("Open Account"));
     fireEvent.click(await screen.findByRole("tab", { name: "About" }));
     fireEvent.click(within(screen.getByTestId("engine")).getByRole("button", { name: /Details/ }));
     expect(within(screen.getByTestId("engine")).getByTestId("connection").textContent).toBe("daemon · connected");
@@ -764,7 +760,7 @@ describe("providers in the sidebar", () => {
     const codex = await screen.findByTestId("provider-codex");
     expect(within(codex).getByRole("button", { name: "Sign in to Codex" })).toBeTruthy();
     await waitFor(() => expect(scrolled.mock.contexts.some((el) => (el as Element).id === "providers")).toBe(true));
-    expect(within(nav()).getByRole("button", { name: "Settings" }).getAttribute("aria-current")).toBe("page");
+    expect(within(nav()).getByRole("button", { name: "Open Account" }).getAttribute("aria-current")).toBe("page");
 
     // An install that fails reaches the status line too, after the sign-out: "+1", still there on another page.
     daemon.installFails.opencode = 1;
