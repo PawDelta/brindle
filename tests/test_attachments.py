@@ -1,4 +1,5 @@
 import base64
+import unicodedata
 from pathlib import Path
 
 import pytest
@@ -53,6 +54,19 @@ def test_attachment_refusals(db, repo, world, tmp_path, monkeypatch):
     hardlink.hardlink_to(source)
     assert _send("POST", "/v1/agents/wk/attachments", {"path": str(hardlink)})[0] == 400
     hardlink.unlink()
+    with monkeypatch.context() as patch:
+        patch.setenv("HOME", str(tmp_path))
+        credential = tmp_path / ".aws" / "credentials"
+        credential.parent.mkdir()
+        credential.write_bytes(b"key")
+        custom = tmp_path / "Sécret"
+        custom.write_bytes(b"key")
+        patch.setattr(providers, "_codex_denied_reads", lambda: [str(custom)])
+        for spelling in (".aws/credentials", ".AWS/credentials", "SÉCRET",
+                         unicodedata.normalize("NFD", custom.name)):
+            assert _send("POST", "/v1/agents/wk/attachments", {
+                "path": str(tmp_path / spelling)})[0] == 403
+            assert not (repo / ".brindle" / "attachments").exists()
     for body in ({}, {"name": "x", "data_base64": "!"}, {"path": str(link), "name": "x"},
                  {"name": [], "data_base64": "YQ=="}, {"path": 1}):
         assert _send("POST", "/v1/agents/wk/attachments", body)[0] == 400
@@ -67,9 +81,12 @@ def test_attachment_refusals(db, repo, world, tmp_path, monkeypatch):
     config_secret.parent.mkdir(parents=True)
     config_secret.write_bytes(b"secret")
     assert _send("POST", "/v1/agents/wk/attachments", {"path": str(config_secret)})[0] == 403
+    assert _send("POST", "/v1/agents/wk/attachments", {
+        "path": str(tmp_path / ".CONFIG" / "other-cli" / "token")})[0] == 403
     env = repo / ".env.local"
     env.write_bytes(b"secret")
     assert _send("POST", "/v1/agents/wk/attachments", {"path": str(env)})[0] == 403
+    assert _send("POST", "/v1/agents/wk/attachments", {"path": str(repo / ".ENV.LOCAL")})[0] == 403
     assert _send("POST", "/v1/agents/wk/attachments", {"path": str(source)})[0] == 413
     assert _send("POST", "/v1/agents/wk/attachments", {
         "name": "x", "data_base64": base64.b64encode(b"large").decode()})[0] == 413

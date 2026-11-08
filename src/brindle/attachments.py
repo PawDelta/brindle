@@ -10,6 +10,7 @@ import os
 import re
 import secrets
 import stat
+import unicodedata
 from pathlib import Path
 
 from brindle import git, permissions, providers
@@ -27,14 +28,28 @@ def _too_large() -> ServiceError:
     return ServiceError("too_large", "attachment exceeds the file size limit", 413)
 
 
+def _path_key(path: str | Path) -> str:
+    # Fail closed for case and Unicode aliases even on case-sensitive volumes.
+    # This changes comparisons only; the source walk still refuses symlinks.
+    return unicodedata.normalize("NFD", str(path)).casefold()
+
+
 def _denied(path: Path, worktree: Path) -> bool:
-    if any(fnmatch.fnmatchcase(str(path), os.path.expanduser(rule.match))
+    key = _path_key(path)
+    if any(fnmatch.fnmatchcase(key, _path_key(os.path.expanduser(rule.match)))
            for rule in permissions.CREDENTIAL_DENIES if rule.kind == "read"):
         return True
     denied = [*providers._codex_denied_reads(), *permissions.credential_paths()]
+    # Include the credential-path checker's home-relative stores too, including
+    # another account's home, so its fallback cannot miss an aliased spelling.
+    homes = {str(Path.home())}
+    if other := re.match(permissions._OTHER_HOME.pattern, str(path), re.IGNORECASE):
+        homes.add(other.group())
+    denied.extend(str(Path(home) / store) for home in homes
+                  for store in (*permissions._CREDENTIAL_DIRS, *permissions._CREDENTIAL_FILES))
     for name in denied:
-        root = Path(name).expanduser().resolve()
-        if path == root or root in path.parents:
+        root = _path_key(Path(name).expanduser().resolve())
+        if key == root or key.startswith(root + "/"):
             return True
     request = permissions.Request("attachments", "read", "Read", worktree=str(worktree))
     part = permissions.ShellPart([], "", str(worktree))
