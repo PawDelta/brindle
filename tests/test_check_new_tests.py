@@ -101,6 +101,7 @@ def test_a_duplicate_in_another_file_is_found_by_the_scoped_run_worth_committing
     assert (redundant, skipped, missing) == (["tests/test_new.py::test_dup"], [], [])
 
 
+@pytest.mark.variant("the module fallback: the covered function is a main() no test names")
 def test_related_tests_fall_back_to_the_module_worth_committing(tmp_path):
     tests = tmp_path / "tests"
     tests.mkdir()
