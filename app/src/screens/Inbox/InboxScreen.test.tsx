@@ -168,8 +168,8 @@ describe("inbox", () => {
     sync.stop();
   });
 
-  it("a visual decision's card has Open visual, which opens the visual, and no Go to session; another card's Go to session is a tinted button", async () => {
-    const visualItem: InboxItemDTO = { kind: "visual", agent_id: "sup1", root_id: "sup1", workspace_id: "proj", visual_id: "v_8f2c", reason: "asks you to choose" };
+  it.each(["visual is ready", "asks you to choose"])("visual ready card or question (%s) opens the reader without Go to session", async (reason) => {
+    const visualItem: InboxItemDTO = { kind: "visual", agent_id: "sup1", root_id: "sup1", workspace_id: "proj", visual_id: "v_8f2c", reason };
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], inbox: [visualItem, question] });
     const { sync, onOpen } = mount(daemon);
     await screen.findByRole("region", { name: "Ship ls --json" });
