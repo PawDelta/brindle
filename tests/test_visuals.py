@@ -116,14 +116,7 @@ def test_answer_attachments_reach_receiver_and_kept_visual(db, session, client, 
     assert all('@"' + path + '"' in body for path in paths)
 
 
-@pytest.mark.parametrize("case", [
-    "outside", "directory", "missing", "bad_item", "unsupported",
-    pytest.param("bad_type", marks=pytest.mark.variant("a scalar bypass of attachment-list validation")),
-    pytest.param("traversal", marks=pytest.mark.variant("a traversal bypass of the attachment boundary")),
-    pytest.param("symlink", marks=pytest.mark.variant("an uploaded path linked to an outside file")),
-    pytest.param("root_symlink", marks=pytest.mark.variant("the attachments folder itself points outside")),
-])
-def test_answer_attachments_refused_before_claim(db, session, client, tmp_path, case):
+def test_answer_attachments_refused_before_claim(db, session, client, tmp_path):
     _, boss, worker = session
     folder = tmp_path / "repo" / ".brindle" / "attachments"
     folder.mkdir(parents=True)
@@ -131,26 +124,36 @@ def test_answer_attachments_refused_before_claim(db, session, client, tmp_path, 
     outside.write_text("outside")
     path = folder / "file.txt"
     path.write_text("uploaded")
-    if case == "unsupported":
-        db.update_agent(boss.id, provider="shell")
-    if case == "symlink":
-        path.unlink()
-        path.symlink_to(outside)
-    if case == "root_symlink":
-        folder.rename(tmp_path / "moved")
-        folder.symlink_to(tmp_path / "moved", target_is_directory=True)
-    paths = {"outside": [str(outside)], "traversal": [str(folder / ".." / ".." / ".." / outside.name)],
-             "directory": [str(folder)], "missing": [str(folder / "absent")],
-             "bad_type": str(path), "bad_item": [42]}.get(case, [str(path)])
     v = visuals.publish(db, worker, "Flow", "<p>flow</p>", "Which?", OPTIONS)
-    if case == "unsupported":
-        [dto] = client.get(f"/v1/sessions/{boss.id}/visuals").json()
-        assert dto["accepts_files"] is False
-    response = client.post(f"/v1/visuals/{v['id']}/answer",
-                           json={"rev": 1, "option": "A", "attachments": paths})
-    assert response.status_code == 400
-    assert visuals.get(db, v["id"])["answer"] is None
-    assert db.conn.execute("SELECT COUNT(*) FROM inbox WHERE agent_id=?", (boss.id,)).fetchone()[0] == 0
+
+    def refused(paths):
+        response = client.post(f"/v1/visuals/{v['id']}/answer",
+                               json={"rev": 1, "option": "A", "attachments": paths})
+        assert response.status_code == 400, paths
+        assert visuals.get(db, v["id"])["answer"] is None
+        assert db.conn.execute("SELECT COUNT(*) FROM inbox WHERE agent_id=?", (boss.id,)).fetchone()[0] == 0
+
+    # Outside, traversal, a directory, missing, a scalar in place of the list, a non-path item.
+    for paths in ([str(outside)], [str(folder / ".." / ".." / ".." / outside.name)], [str(folder)],
+                  [str(folder / "absent")], str(path), [42]):
+        refused(paths)
+    # An uploaded path linked to an outside file.
+    path.unlink()
+    path.symlink_to(outside)
+    refused([str(path)])
+    path.unlink()
+    path.write_text("uploaded")
+    # The attachments folder itself points outside.
+    folder.rename(tmp_path / "moved")
+    folder.symlink_to(tmp_path / "moved", target_is_directory=True)
+    refused([str(path)])
+    folder.unlink()
+    (tmp_path / "moved").rename(folder)
+    # A provider that takes no files.
+    db.update_agent(boss.id, provider="shell")
+    [dto] = client.get(f"/v1/sessions/{boss.id}/visuals").json()
+    assert dto["accepts_files"] is False
+    refused([str(path)])
 
 
 def test_visual_ready_notice_and_answers_for_the_revision_on_screen(db, session, client,

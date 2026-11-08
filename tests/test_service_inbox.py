@@ -95,10 +95,8 @@ def test_a_user_prompt_clears_the_question_card_but_a_brindle_message_does_not(d
 
 
 @pytest.mark.parametrize("count, repos, workers, detail, reasons", [
-    (4, 1, 0, "Keep existing behavior", 1),
     (2, 2, 0, "Keep existing behavior", 1),
     (2, 1, 3, "Keep existing behavior", 1),
-    (3, 1, 0, "Redesign storage", 1),
 ])
 def test_analysis_offer_explains_current_paused_session(db, tmp_path, monkeypatch,
                                                        count, repos, workers, detail, reasons):

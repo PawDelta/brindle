@@ -141,18 +141,18 @@ def test_attachment_atomic_failure(db, repo, world, monkeypatch):
     assert _send("POST", "/v1/agents/wk/attachments", {"name": "x", "data_base64": "YQ=="})[0] == 400
 
 
-@pytest.mark.parametrize("provider,expected", [
-    ("claude", '@"/work tree/a.png"'),
-    ("codex", '"/work tree/a.png"'),
-    ("antigravity", '"/work tree/a.png"'),
-    ("opencode", '"/work tree/a.png"'),
-    ("native", '"/work tree/a.png"'),
-    ("shell", None), ("subagent", None), ("base", None),
-])
-def test_provider_attachment(provider, expected):
-    p = providers.PROVIDERS.get(provider, providers.Provider())
-    if expected is None:
-        with pytest.raises(ValueError):
-            p.format_attachment("/work tree/a.png")
-    else:
-        assert p.format_attachment("/work tree/a.png") == expected
+def test_provider_attachment():
+    for provider, expected in (
+        ("claude", '@"/work tree/a.png"'),
+        ("codex", '"/work tree/a.png"'),
+        ("antigravity", '"/work tree/a.png"'),
+        ("opencode", '"/work tree/a.png"'),
+        ("native", '"/work tree/a.png"'),
+        ("shell", None), ("subagent", None), ("base", None),
+    ):
+        p = providers.PROVIDERS.get(provider, providers.Provider())
+        if expected is None:
+            with pytest.raises(ValueError):
+                p.format_attachment("/work tree/a.png")
+        else:
+            assert p.format_attachment("/work tree/a.png") == expected, provider
