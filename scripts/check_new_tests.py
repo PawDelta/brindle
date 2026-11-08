@@ -131,9 +131,21 @@ def new_tests(base: str) -> dict[str, str | None]:
         except subprocess.CalledProcessError:
             old_tables = {}
         new_tables = inventory.scan((ROOT / path).read_text(encoding="utf-8"))
+        found: list[str] = []
+        old_by = _by_function(before, path)
         for qual, ids in _by_function(head, path).items():
-            old_ids = _by_function(before, path).get(qual, [])
-            for n in _new_ids(ids, old_ids, old_tables.get(qual), new_tables.get(qual)):
+            old_ids = old_by.get(qual, [])
+            candidates = _new_ids(ids, old_ids, old_tables.get(qual), new_tables.get(qual))
+            # A function that shrinks or stays level adds nothing: its surviving rows
+            # got new ids, they are not new tests. Otherwise only the growth counts.
+            growth = max(0, len(ids) - len(old_ids))
+            found += candidates[len(candidates) - growth:] if growth else []
+        # Tests folded in from tests deleted in the same diff don't count unless
+        # the file as a whole collects more than it did at the base.
+        file_growth = (sum(1 for n in head if n.startswith(path + "::"))
+                       - sum(1 for n in before if n.startswith(path + "::")))
+        if file_growth > 0:
+            for n in found[len(found) - file_growth:]:
                 added[n] = head[n]
     return added
 
@@ -328,7 +340,9 @@ def _function_dumps(source: str) -> dict[str, str]:
     def visit(body, prefix):
         for node in body:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test"):
-                found[prefix + node.name] = ast.dump(node)
+                # decorators (parametrize tables) are left out: rows are judged as
+                # added ids, so a trimmed table doesn't make the whole test "changed"
+                found[prefix + node.name] = ast.dump(node.args) + ast.dump(ast.Module(body=node.body, type_ignores=[]))
             elif isinstance(node, ast.ClassDef) and node.name.startswith("Test"):
                 visit(node.body, f"{prefix}{node.name}::")
 
