@@ -77,6 +77,7 @@ const SCENES: Record<string, Route> = {
   "account-free": { screen: "account" },
   "account-signed-out": { screen: "account" },
   session: { screen: "session", root: "sup-42", repo: REPO, agent: "a7aaa807" },
+  "sidebar-resize": { screen: "session", root: "sup-42", repo: REPO, agent: "a7aaa807" },
   "session-review": { screen: "session", root: "sup-42", repo: REPO, agent: "sup-42", sheet: { kind: "review" } },
   // One scene per agent of the session: the supervisor, each worker, the reviewer, in the state its row shows.
   "agent-supervisor": { screen: "session", root: "sup-42", repo: REPO, agent: "sup-42" },
@@ -111,6 +112,18 @@ if (scene === "knowledge-map") {
     { id: "local:kb:3", kind: "doc", title: "Credential storage", local_path: "/home/sam/Notes/pawdelta-design/storage.md", paths: ["/home/sam/Notes/pawdelta-design/storage.md"], topics: ["secrets"], updated_at: 1793610000 },
   ];
   daemon.data.decisions.push({ ...daemon.data.decisions[0], id: "daemon-reads", topic: "Read-only daemon access", scope: ["docs/**", "src/brindle/daemon/**"] });
+}
+// Resize coverage: a goal with enough rows to exercise both sidebar scrollers.
+if (scene === "sidebar-resize" && daemon.data.goal) {
+  daemon.data.goal.summary = "Make the desktop sidebar work at every window size";
+  daemon.data.goal.milestones = Array.from({ length: 15 }, (_, i) => ({
+    ...daemon.data.goal!.milestones[i % 5],
+    id: i + 1,
+    position: i + 1,
+    title: `Milestone ${i + 1}: verify the sidebar layout with several sessions`,
+    status: i < 9 ? "passed" : i === 9 ? "running" : "pending",
+    state: i < 9 ? "passed" : "not_done",
+  }));
 }
 // First run: no project yet.
 if (scene === "new-first") daemon.data.repos = [];

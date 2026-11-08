@@ -770,7 +770,7 @@ export function GoalPanel({ client, repo, root, store, compact = false, title, r
           </div>
         )}
         </div>
-        <div className="flex min-h-0 flex-col gap-1.5 overflow-auto" data-testid="goal-scroll">
+        <div className="flex min-h-0 flex-col gap-1.5 overflow-auto pb-1" data-testid="goal-scroll">
         {(showPhase || where) && <div className="flex shrink-0 items-center justify-between gap-s1 px-0.5 text-[11px] text-ink-3">
           {showPhase && <span data-testid="goal-phase">{phaseLabel}</span>}
           {where && <span className="whitespace-nowrap font-normal text-ink-3" data-testid="goal-where">{where}</span>}
