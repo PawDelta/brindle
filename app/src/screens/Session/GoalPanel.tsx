@@ -448,6 +448,9 @@ export interface GoalPanelProps {
   /* In the sidebar's context pane: no card frame, tighter, and the
      milestones open from the start (the pane is theirs). */
   compact?: boolean;
+  /* The sidebar's editable session title, sharing the goal's count line. */
+  title?(onOpen: () => void): ReactNode;
+  request?: string | null;
   /* Opens the session's Review & open PR sheet: the Ready for PR step's action. */
   onReview?(): void;
   /* Opens the PR's page in the system browser; the shell's by default. */
@@ -458,7 +461,7 @@ export interface GoalPanelProps {
   onOpenDocs?(): void;
 }
 
-export function GoalPanel({ client, repo, root, store, compact = false, onReview, openUrl = openExternal, onCloseSession, onOpenDocs }: GoalPanelProps) {
+export function GoalPanel({ client, repo, root, store, compact = false, title, request, onReview, openUrl = openExternal, onCloseSession, onOpenDocs }: GoalPanelProps) {
   const [goal, setGoal] = useState<GoalDTO | null>(null);
   // The docs this session wrote or used; null while unknown or unreachable (the line stays hidden).
   const [docSummary, setDocSummary] = useState<{ total: number; writing: number; updated: number; using: number } | null>(null);
@@ -469,12 +472,14 @@ export function GoalPanel({ client, repo, root, store, compact = false, onReview
   const [actionError, setActionError] = useState<string | null>(null);
   // Beside a terminal the milestones fold away by default (it wants the room); in the sidebar they show.
   const [open, setOpen] = useState(compact);
+  const [fullGoalOpen, setFullGoalOpen] = useState(false);
   // The phase folds the person opened or closed, by fold key; the rest keep their default (only the active phase open).
   const [foldOpen, setFoldOpen] = useState<Record<number, boolean>>({});
   // Pending rows fold independently within each phase (key 0 is the list without phases).
   const [pendingOpen, setPendingOpen] = useState<Record<number, boolean>>({});
+  const [doneOpen, setDoneOpen] = useState<Record<number, boolean>>({});
   const toggleFold = useCallback((key: number, next: boolean) => setFoldOpen((o) => ({ ...o, [key]: next })), []);
-  const frame = compact ? "flex flex-col gap-1.5 px-1.5 pb-1.5 pt-1" : `${card} flex flex-col gap-1 px-s2 py-s1`;
+  const frame = compact ? "flex min-w-0 flex-1 flex-col gap-1.5 overflow-hidden px-1.5 pb-1.5 pt-1" : `${card} flex flex-col gap-1 px-s2 py-s1`;
   /* This session: its client, repo and root. Every continuation (a GET, an action's
      ack, its error or end) applies only while it is still the session on screen, so
      one started for an earlier session can't touch this one. */
@@ -513,8 +518,10 @@ export function GoalPanel({ client, repo, root, store, compact = false, onReview
     setLoadError(null);
     setActionError(null);
     setDocSummary(null);
+    setFullGoalOpen(false);
     setFoldOpen({});
     setPendingOpen({});
+    setDoneOpen({});
     void refresh();
     let seen = store.getState().lastEventId;
     let stale = store.getState().stale;
@@ -551,6 +558,14 @@ export function GoalPanel({ client, repo, root, store, compact = false, onReview
   const storeWorkspaces = useSyncExternalStore(store.subscribe, () => store.getState().workspaces);
   const storeAlive = useSyncExternalStore(store.subscribe, () => store.getState().alive);
   const workerStages = useMemo(() => activeMilestoneStages(storeWorkspaces, storeAlive, root), [storeWorkspaces, storeAlive, root]);
+  const contextTitle = compact ? title?.(() => setFullGoalOpen((o) => !o)) : null;
+  const fullGoal = fullGoalOpen && (request || goal?.goal) ? (
+    <section aria-label="Full goal" className="shrink-0 rounded border border-line px-s1 py-1 text-xs text-ink-2">
+      <button type="button" className={`${quiet} float-right text-xs`} aria-label="Close full goal" onClick={() => setFullGoalOpen(false)}>✕</button>
+      <p className="whitespace-pre-wrap break-words">{request || goal?.goal}</p>
+      {goal?.detail && <p className="mt-1 whitespace-pre-wrap break-words text-ink-3">{goal.detail}</p>}
+    </section>
+  ) : null;
   if (!loaded && loadError) {
     return (
       <section className={`${compact ? "px-s1 py-1" : `${card} px-s2 py-s1`} flex items-center gap-s2`} aria-label="Goal">
@@ -577,8 +592,12 @@ export function GoalPanel({ client, repo, root, store, compact = false, onReview
   }
   if (!goal) {
     return (
-      <section className={`${compact ? "px-s1 py-1" : `${card} px-s2 py-s1`} text-sm text-ink-3`} aria-label="Goal">
-        No goal set for this session.
+      <section className={`${frame} min-h-0 text-sm text-ink-3`} aria-label="Goal">
+        {contextTitle && <div className="shrink-0">{contextTitle}</div>}
+        <div className="min-h-0 overflow-auto">
+          {fullGoal}
+          No goal set for this session.
+        </div>
       </section>
     );
   }
@@ -694,11 +713,23 @@ export function GoalPanel({ client, repo, root, store, compact = false, onReview
     };
     // Keep the work visible above the pending fold, even when pending milestones precede it.
     const sideRows = (items: MilestoneDTO[], key: number) => {
+      const done = items.filter(isDone);
       const pending = items.filter(isPending);
       const expanded = pendingOpen[key] ?? false;
+      const doneExpanded = doneOpen[key] ?? false;
       return (
         <>
-          {items.filter((m) => !isPending(m)).map(sideRow)}
+          {done.length > 0 && (
+            <li>
+              <button type="button" className="ms-fold ms-pending ms-done" aria-expanded={doneExpanded} onClick={() => setDoneOpen((o) => ({ ...o, [key]: !doneExpanded }))}>
+                <span className="i" aria-hidden>✓</span>
+                <span className="n">{done.length} done</span>
+                {CHEV}
+              </button>
+            </li>
+          )}
+          {doneExpanded && done.map(sideRow)}
+          {items.filter((m) => !isDone(m) && !isPending(m)).map(sideRow)}
           {pending.length > 0 && (
             <li>
               <button
@@ -721,21 +752,11 @@ export function GoalPanel({ client, repo, root, store, compact = false, onReview
       <section className={`${frame} min-h-0`} aria-label="Goal" data-phase={phase}>
         {/* Pinned: the count and the bar stay put; only the milestones below scroll. */}
         <div className="flex shrink-0 flex-col gap-1.5" data-testid="goal-header">
-        <div className="flex items-center gap-s1 px-0.5 text-xs font-medium text-ink">
-          {/* The count is green once the goal is finished; In progress and Done need no label of their own. */}
-          <span data-testid="goal-line" className={finished ? "text-pass" : undefined}>
-            {total > 0 ? `${passed} of ${total} milestones complete` : ""}
-            {showPhase && (
-              <>
-                {total > 0 && " · "}
-                <span data-testid="goal-phase">
-                  {phaseLabel}
-                </span>
-              </>
-            )}
+        <div data-testid="goal-line" className={`flex min-w-0 flex-nowrap items-center gap-s1 px-0.5 text-[13px] font-medium ${finished ? "text-pass" : "text-ink"}`}>
+          {contextTitle ?? <SessionGoal text={goal.goal} className="block w-full truncate text-left" onOpen={() => setFullGoalOpen((o) => !o)}>{goal.summary || goal.goal}</SessionGoal>}
+          <span data-testid="goal-count" className="shrink-0 whitespace-nowrap font-mono text-[11px] font-normal text-ink-3">
+            {total > 0 ? `${passed} of ${total}` : ""}
           </span>
-          <span className="flex-1" />
-          {where && <span className="whitespace-nowrap font-normal text-ink-3" data-testid="goal-where">{where}</span>}
         </div>
         <div className="side-bar" role="progressbar" aria-label="Progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(donePct)} title={goal.detail ?? undefined}>
           <span className="d" style={{ width: `${donePct}%` }} />
@@ -743,12 +764,18 @@ export function GoalPanel({ client, repo, root, store, compact = false, onReview
         </div>
         {activity && (
           <div className="side-act" data-testid="goal-activity">
-            <span className="min-w-0 truncate" data-testid="goal-activity-what">{activity.what}</span>
-            {activity.eta && <span data-testid="goal-eta">{activity.eta}</span>}
+            <span data-testid="goal-activity-what">{activity.what}</span>
+            {activity.what && activity.eta && ", "}
+            {activity.eta && <span data-testid="goal-eta">{activity.eta.replace("~", "about ")}</span>}
           </div>
         )}
         </div>
-        <div className="flex min-h-0 flex-col gap-1.5 overflow-auto" data-testid="goal-scroll">
+        <div className="flex min-h-0 flex-col gap-1.5 overflow-auto pb-1" data-testid="goal-scroll">
+        {(showPhase || where) && <div className="flex shrink-0 items-center justify-between gap-s1 px-0.5 text-[11px] text-ink-3">
+          {showPhase && <span data-testid="goal-phase">{phaseLabel}</span>}
+          {where && <span className="whitespace-nowrap font-normal text-ink-3" data-testid="goal-where">{where}</span>}
+        </div>}
+        {fullGoal}
         {total > 0 && folds ? (
           <PhaseFoldList folds={folds} open={foldOpen} onToggle={toggleFold} isDone={isDone} large={false} rowsClass="side-ms" row={sideRow} rows={sideRows} />
         ) : total > 0 ? (

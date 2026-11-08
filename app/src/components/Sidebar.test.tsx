@@ -331,20 +331,20 @@ describe("Sidebar", () => {
     second.sync.stop();
   });
 
-  it("shows the selected session's context above the tree: goal and milestones and the PR status, nothing of what waits; the split drags and is kept", async () => {
+  it("keeps milestones on top of Sessions with the short goal and a persistent split", async () => {
     const credentials: InboxItemDTO = { kind: "credentials", reason: "credentials need attention", agent_id: "c1", workspace_id: "proj/feat-ls", detail: "claude auth login" };
     const { sync } = mount(
-      { workspaces: [root, { ...worker, agents: [...worker.agents!, child] }], inbox: [permission, waiting, permissionInTerminal, credentials], goal: structuredClone(goal) },
+      { workspaces: [root, { ...worker, agents: [...worker.agents!, child] }], inbox: [permission, waiting, permissionInTerminal, credentials], goal: { ...structuredClone(goal), summary: "CLI polish" } },
       { screen: "session", root: "sup1", repo: REPO, agent: "sup1" },
     );
     const context = () => screen.getByTestId("session-context");
     // Completion stays visible alongside the phase; the milestone list carries the detail.
-    await waitFor(() => expect(within(context()).getByTestId("goal-line").textContent).toBe("1 of 2 milestones complete"));
-    expect(context().textContent).toContain("Ship ls --json");
-    expect(context().textContent).toContain("sup1 · proj · interactive");
+    await waitFor(() => expect(within(context()).getByTestId("goal-line").textContent).toContain("CLI polish"));
+    expect(context().compareDocumentPosition(list()) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(within(context()).getByTestId("goal-count").textContent).toBe("1 of 2");
     const milestones = within(context()).getByRole("list", { name: "Milestones" });
     expect(milestones.textContent).toContain("Print JSON");
-    expect([...milestones.querySelectorAll("li")].map((li) => li.dataset.state)).toEqual(["done", "now"]);
+    expect(within(milestones).getAllByTestId("milestone").map((li) => li.dataset.state)).toEqual(["now"]);
     expect(within(context()).getByRole("progressbar").getAttribute("aria-valuenow")).toBe("50");
     expect(screen.queryByTestId("connection")).toBeNull();
     expect(within(context()).queryByRole("button", { name: /Check milestone|Run checks/ })).toBeNull();
@@ -386,7 +386,7 @@ describe("Sidebar", () => {
     );
     await waitFor(() => expect(sessionRow("sup1")).toBeTruthy());
     const rename = async (name: string) => {
-      fireEvent.click(screen.getByRole("button", { name: "Rename session" }));
+      fireEvent.click(await screen.findByRole("button", { name: "Rename session" }));
       const input = screen.getByLabelText("Session name");
       fireEvent.change(input, { target: { value: name } });
       fireEvent.keyDown(input, { key: "Enter" });

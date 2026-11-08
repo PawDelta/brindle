@@ -138,7 +138,7 @@ def test_goal_summary_and_milestone_phases_round_trip_through_the_goal_file(db, 
     asyncio.run(mcp_server.mcp.call_tool("set_goal", args))
     assert db.get_autopilot("boss").summary == "CLI polish"
     asyncio.run(mcp_server.mcp.call_tool("set_goal", {**args, "goal": "Another goal"}))
-    assert db.get_autopilot("boss").summary is None
+    assert db.get_autopilot("boss").summary == "Another goal"
 
     # A later failure must retain its cause through the SDK's error wrapper.
     def broken_note(*args):
@@ -148,6 +148,19 @@ def test_goal_summary_and_milestone_phases_round_trip_through_the_goal_file(db, 
     with pytest.raises(ToolError, match="cost estimate unavailable"):
         asyncio.run(mcp_server.mcp.call_tool("set_goal", {
             "goal": "Phased", "milestones": [{"title": "API", "check": "true"}]}))
+
+
+@pytest.mark.parametrize("summary,expected", [
+    ("  Ship  the sidebar with milestones above sessions  ", "Ship the sidebar with"),
+    (None, "Ship the sidebar with"),
+    (" ", "Ship the sidebar with"),
+    ("x" * 40, "x" * 30),
+])
+def test_goal_summary_limit(db, repo, summary, expected):
+    load(db, repo)
+    text = "Ship the sidebar with milestones above sessions"
+    autopilot.set_goal(db, "boss", text, [("Layout", "true", None)], summary=summary)
+    assert db.get_autopilot("boss").summary == expected
 
 
 def test_a_sync_failure_is_logged_not_raised(db, repo, monkeypatch, caplog):

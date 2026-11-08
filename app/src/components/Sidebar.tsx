@@ -785,8 +785,8 @@ export function Sidebar({ route, navigate, refresh, openUrl, onBackFromSettings 
 
   let index = 0;
   return (
-    <aside className="side flex w-[352px] shrink-0 flex-col gap-[10px] border-r border-line bg-canvas-2 px-[12px] pb-[12px] pt-[14px] text-[13px] text-ink" aria-label="Sidebar">
-      <div className="flex items-center gap-s1 px-1.5 pb-1">
+    <aside className="side flex min-h-0 w-[352px] max-w-full shrink-0 flex-col gap-[10px] overflow-hidden border-r border-line bg-canvas-2 px-[12px] pb-[12px] pt-[14px] text-[13px] text-ink" aria-label="Sidebar">
+      <div className="flex shrink-0 items-center gap-s1 px-1.5 pb-1">
         <Logo className="text-[17px]" onHome={() => navigate({ screen: "new" })} />
         <span className="flex-1" />
         <button
@@ -809,8 +809,8 @@ export function Sidebar({ route, navigate, refresh, openUrl, onBackFromSettings 
       <div className="mx-2 h-px shrink-0 bg-line" role="separator" data-testid="inbox-divider" />
       <SessionContext session={selected} route={route} navigate={navigate} refresh={refresh ?? noRefresh} openUrl={openUrl} style={{ height: split }} />
       <Handle height={split} onChange={resize} />
-      <div className="side-h">Sessions</div>
-      <nav ref={list} aria-label="Sessions" className="flex min-h-0 flex-1 flex-col gap-[14px] overflow-auto outline-none focus-visible:ring-1 focus-visible:ring-branch" tabIndex={0} onKeyDown={keys}>
+      <div className="side-h shrink-0">Sessions</div>
+      <nav ref={list} aria-label="Sessions" className="side-sessions flex min-h-0 flex-1 flex-col gap-[14px] overflow-auto outline-none focus-visible:ring-1 focus-visible:ring-branch" tabIndex={0} onKeyDown={keys}>
         {/* A close the engine refused: the session is back in its place, and this says why. */}
         {closeError && (
           <p className="px-s1 text-xs text-sap" data-testid="close-error">
@@ -884,7 +884,7 @@ export function Sidebar({ route, navigate, refresh, openUrl, onBackFromSettings 
         {repos && repos.length > 0 && live.length === 0 && <p className="px-s1 text-xs text-ink-3">Nothing running. Start a session, or continue a recent one.</p>}
       </nav>
       </div>
-      <div className="flex min-h-4 items-center justify-between gap-2 whitespace-nowrap border-t border-line px-s1 pt-s1" data-testid="status-line">
+      <div className="flex min-h-4 shrink-0 items-center justify-between gap-2 whitespace-nowrap border-t border-line px-s1 pt-s1" data-testid="status-line">
         <UsageReading provider={shown} model={model} warning={warning} failed={usageError != null} navigate={navigate} />
         <ProviderProblemLine problems={problems} navigate={navigate} />
         <AppUpdatePill />
