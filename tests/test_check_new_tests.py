@@ -49,6 +49,14 @@ def test_a_row_inserted_before_an_old_one_is_the_new_row_worth_committing(monkey
     # a table no source comparison can match to the ids: every row of a changed function is judged
     _branch(monkeypatch, tmp_path, table % "build()", table % "build()", ids(0), ids(0, 1))
     assert list(gate.new_tests("x")) == list(ids(0, 1))
+    # stacked tables keep the id `0-x0` when a row's value is replaced: the changed table is still judged
+    stacked = ("import pytest\n@pytest.mark.parametrize('a', [0])\n"
+               "@pytest.mark.parametrize('d', [{'k': %d}])\ndef test_t(a, d): pass\n")
+    same = {"tests/test_a.py::test_t[x0-0]": None}
+    _branch(monkeypatch, tmp_path, stacked % 1, stacked % 2, same, same)
+    assert list(gate.new_tests("x")) == list(same)
+    _branch(monkeypatch, tmp_path, stacked % 1, stacked % 1, same, same)
+    assert gate.new_tests("x") == {}
 
 
 def test_listing_failures_stop_the_check_worth_committing(tmp_path, monkeypatch):
@@ -58,6 +66,39 @@ def test_listing_failures_stop_the_check_worth_committing(tmp_path, monkeypatch)
     monkeypatch.setattr(gate.subprocess, "run", lambda *a, **kw: crashed)
     with pytest.raises(SystemExit, match="pytest exited 2"):
         gate.run_with_coverage(["tests/test_a.py"], tmp_path / ".coverage", append=False)
+
+
+def test_a_new_test_that_never_ran_is_not_a_pass_worth_committing(tmp_path, monkeypatch):
+    new = "tests/test_a.py::test_new"
+
+    def partial(files, coverage_file, append):
+        data = CoverageData(str(coverage_file))
+        data.set_context("tests/test_a.py::test_old|run")
+        data.add_lines({str(tmp_path / "m.py"): [1]})
+        data.write()
+        return skips
+
+    monkeypatch.setattr(gate, "changed_test_files", lambda b: ["tests/test_a.py"])
+    monkeypatch.setattr(gate, "run_with_coverage", partial)
+    skips = set()    # coverage exists, but this test left none and wasn't skipped
+    assert gate.scoped_redundant("x", [new]) == ([], [], [new])
+    skips = {("tests.test_a", "test_new")}   # a positively identified skip is only noted
+    assert gate.scoped_redundant("x", [new]) == ([], [new], [])
+
+
+def test_a_duplicate_in_another_file_is_found_by_the_scoped_run_worth_committing(tmp_path, monkeypatch):
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "scripts/mod.py").write_text("def compute(x):\n    if x:\n        return 1\n    return 2\n")
+    (tmp_path / "tests/test_new.py").write_text(
+        "from scripts.mod import compute\ndef test_dup(): assert compute(1) == 1\n")
+    (tmp_path / "tests/test_old.py").write_text(
+        "from scripts.mod import compute\ndef test_orig(): assert compute(1) == 1\n"
+        "def test_other(): assert compute(0) == 2\n")
+    monkeypatch.setattr(gate, "ROOT", tmp_path)
+    monkeypatch.setattr(gate, "changed_test_files", lambda b: ["tests/test_new.py"])
+    redundant, skipped, missing = gate.scoped_redundant("x", ["tests/test_new.py::test_dup"])
+    assert (redundant, skipped, missing) == (["tests/test_new.py::test_dup"], [], [])
 
 
 def test_related_tests_fall_back_to_the_module_worth_committing(tmp_path):

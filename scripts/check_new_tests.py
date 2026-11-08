@@ -154,7 +154,9 @@ def _new_ids(ids: list[str], old_ids: list[str], old_tables, new_tables) -> list
     if new_tables and len(new_tables) == 1 and isinstance(new_tables[0], list) and len(ids) == len(new_tables[0]):
         old = old_tables[0] if old_tables and isinstance(old_tables[0], list) else None
         return [ids[p] for p in inventory.added_positions(old, new_tables[0])]
-    return ids if ids != old_ids else []
+    # Stable ids don't mean unchanged rows (a replaced value in one of two stacked
+    # tables keeps `0-x0`): judge the function whenever its tables or its ids changed.
+    return ids if ids != old_ids or old_tables != new_tables else []
 
 
 # -- judging them by coverage
@@ -253,30 +255,47 @@ def related_test_files(names: set[str], modules: set[str], skip: set[str],
     return ranked[:MAX_RELATED_FILES]
 
 
-def run_with_coverage(files: list[str], coverage_file: Path, append: bool) -> None:
+def run_with_coverage(files: list[str], coverage_file: Path, append: bool) -> set[tuple[str, str]]:
     """Run test files with per-test coverage: the parallel tests, then the serial ones.
     A failing test is the other checks' business; a pytest that couldn't run the
-    files (collection error, bad usage, crash) stops this check."""
+    files (collection error, bad usage, crash) stops this check. Returns the
+    (classname, name) of every test pytest reported as skipped."""
+    from xml.etree import ElementTree
+
     env = {**os.environ, "COVERAGE_FILE": str(coverage_file)}
     cov = ["--cov=brindle", "--cov=scripts", "--cov-branch", "--cov-context=test", "--cov-report="]
+    skipped: set[tuple[str, str]] = set()
     for i, args in enumerate((["-n", "2", "-m", "not serial"], ["-m", "serial"])):
         extra = ["--cov-append"] if append or i else []
+        report = coverage_file.parent / f"junit-{len(list(coverage_file.parent.glob('junit-*.xml')))}.xml"
         proc = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
-                               *args, *cov, *extra, *files], cwd=ROOT, env=env,
+                               f"--junitxml={report}", *args, *cov, *extra, *files], cwd=ROOT, env=env,
                               capture_output=True, text=True)
         if proc.returncode not in (0, 1, 5):
             raise SystemExit(f"pytest exited {proc.returncode} running {len(files)} test files "
                              f"with coverage:\n{proc.stdout[-1500:]}{proc.stderr[-500:]}")
+        if report.exists():
+            for case in ElementTree.parse(report).iter("testcase"):
+                if case.find("skipped") is not None:
+                    skipped.add((case.get("classname", ""), case.get("name", "")))
+    return skipped
 
 
-def scoped_redundant(base: str, to_check: list[str]) -> tuple[list[str], list[str]]:
+def _was_skipped(node_id: str, skipped) -> bool:
+    stem = Path(node_id.split("::")[0]).stem
+    return any(name == node_id.split("::")[-1] and stem in classname.split(".") for classname, name in skipped)
+
+
+def scoped_redundant(base: str, to_check: list[str]) -> tuple[list[str], list[str], list[str]]:
     """Judge new tests by running only the changed test files, then the files naming
-    what a still-unique new test alone covers."""
+    what a still-unique new test alone covers. Returns (redundant, skipped,
+    missing): a test that recorded no coverage and wasn't reported skipped never
+    ran, which is a failure, not a pass."""
     work = Path(tempfile.mkdtemp(prefix="new-tests-cov-"))
     coverage_file = work / ".coverage"
     try:
         ran = changed_test_files(base)
-        run_with_coverage(ran, coverage_file, append=False)
+        skipped = run_with_coverage(ran, coverage_file, append=False)
         if not coverage_file.exists():
             raise SystemExit("no coverage was recorded running the changed test files")
         verdicts = analyse(coverage_file, to_check)
@@ -285,10 +304,12 @@ def scoped_redundant(base: str, to_check: list[str]) -> tuple[list[str], list[st
             lines = set().union(*unique.values())
             more = related_test_files(enclosing_names(lines), modules_of(lines), set(ran))
             if more:
-                run_with_coverage(more, coverage_file, append=True)
+                skipped |= run_with_coverage(more, coverage_file, append=True)
                 verdicts.update(analyse(coverage_file, list(unique)))
+        unmeasured = [n for n, v in verdicts.items() if v == "unmeasured"]
         return ([n for n, v in verdicts.items() if v == "redundant"],
-                [n for n, v in verdicts.items() if v == "unmeasured"])
+                [n for n in unmeasured if _was_skipped(n, skipped)],
+                [n for n in unmeasured if not _was_skipped(n, skipped)])
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
@@ -315,14 +336,16 @@ def main(argv=None) -> int:
 
     added = new_tests(args.base)
     to_check = [n for n, reason in added.items() if reason is None]
+    missing: list[str] = []
     if not to_check:
         redundant, unmeasured = [], []
     elif args.scoped:
-        redundant, unmeasured = scoped_redundant(args.base, to_check)
+        redundant, unmeasured, missing = scoped_redundant(args.base, to_check)
     else:
         redundant, unmeasured = uncovered_alone(args.coverage, to_check)
     failures = [f"{n} covers no line or branch that other tests don't; delete it, fold it into "
                 f"the test it repeats, or mark it @pytest.mark.variant(\"why\")" for n in redundant]
+    failures += [f"{n} recorded no coverage and wasn't reported skipped: it never ran here" for n in missing]
 
     for n in unmeasured:
         print(f"note: {n} ran no measured code (skipped here?); not checked")

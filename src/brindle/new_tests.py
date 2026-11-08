@@ -33,7 +33,7 @@ def _table(arg: ast.expr, consts: dict[str, ast.expr]) -> "list[str] | str":
     value = consts.get(arg.id, arg) if isinstance(arg, ast.Name) else arg
     if isinstance(value, (ast.List, ast.Tuple)):
         return [ast.unparse(e) for e in value.elts]
-    return ast.unparse(arg)
+    return f"{arg.id} = {ast.unparse(value)}" if isinstance(arg, ast.Name) and value is not arg else ast.unparse(arg)
 
 
 def test_tables(source: str) -> dict[str, list]:
