@@ -32,9 +32,10 @@ vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async (name: string, han
   return () => { if (native.events.get(name) === handler) native.events.delete(name); };
 }) }));
 
-const drops = vi.hoisted(() => ({ handle: (_event: unknown) => {} }));
+const drops = vi.hoisted(() => ({ handle: (_event: unknown) => {}, clipboard: (): Promise<unknown[]> => Promise.resolve([]) }));
 vi.mock("../../../api/attachments", async (original) => ({
   ...await original<typeof import("../../../api/attachments")>(),
+  clipboardAttachments: () => drops.clipboard(),
   listenForDrops: async (handle: typeof drops.handle) => { drops.handle = handle; return () => {}; },
 }));
 
@@ -693,6 +694,9 @@ describe("visuals", () => {
     expect(screen.queryByRole("button", { name: "Attach" })).toBeNull();
     view.rerender(<VisualReader client={client} visual={takesFiles} onAnswered={() => {}} onBack={() => {}} Frame={() => <div />} />);
     fireEvent.click(screen.getByRole("radio", { name: "A · Tag first" }));
+    // Enter on Attach opens the picker; it doesn't submit the answer.
+    expect(fireEvent.keyDown(screen.getByRole("button", { name: "Attach" }), { key: "Enter" })).toBe(true);
+    expect(answer).not.toHaveBeenCalled();
     fireEvent.change(screen.getByTestId("visual-attach-input"), { target: { files: [new File(["x"], "a.png", { type: "image/png" })] } });
     await waitFor(() => expect(attach).toHaveBeenCalledWith("a_sup", { name: "a.png", data_base64: "eA==" }));
     expect((screen.getByTestId("visual-send") as HTMLButtonElement).disabled).toBe(true);
@@ -728,10 +732,24 @@ describe("visuals", () => {
     attach.mockRejectedValueOnce(new Error("too big"));
     await act(async () => drops.handle({ type: "drop", x: 5, y: 1, paths: ["/big"] }));
     expect(screen.getByRole("alert").textContent).toContain("too big");
+    // An empty browser paste falls back to the native clipboard (text pastes are left alone), read across a revision change.
+    native.enabled = true;
+    fireEvent.paste(screen.getByLabelText("Add a note"), { clipboardData: { files: [], getData: () => "plain" } });
+    expect(attach).toHaveBeenCalledTimes(3);
+    let clip!: (files: unknown[]) => void;
+    drops.clipboard = () => new Promise((done) => { clip = done; });
+    fireEvent.paste(screen.getByLabelText("Add a note"), { clipboardData: { files: [], getData: () => "" } });
+    expect((screen.getByTestId("visual-send") as HTMLButtonElement).disabled).toBe(true);
+    view.rerender(reader({ ...takesFiles, rev: 3 }));
+    await act(async () => clip([{ path: "/clip/old.png" }]));
+    expect(attach).toHaveBeenCalledTimes(3);
+    drops.clipboard = () => Promise.resolve([{ path: "/clip/new.png" }]);
+    fireEvent.paste(screen.getByLabelText("Add a note"), { clipboardData: { files: [], getData: () => "" } });
+    await waitFor(() => expect(attach).toHaveBeenLastCalledWith("a_sup", { path: "/clip/new.png" }));
     // A result that lands after the revision changed is dropped.
     await act(async () => drops.handle({ type: "drop", x: 5, y: 1, paths: ["/late"] }));
-    view.rerender(reader({ ...takesFiles, rev: 3 }));
-    await act(async () => finish[2]({ paths: ["/up/late.txt"], text: "" }));
+    view.rerender(reader({ ...takesFiles, rev: 4 }));
+    await act(async () => finish[3]({ paths: ["/up/late.txt"], text: "" }));
     expect(screen.queryByText("late.txt")).toBeNull();
     expect(screen.queryByRole("alert")).toBeNull();
   });

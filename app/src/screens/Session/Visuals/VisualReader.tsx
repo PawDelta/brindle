@@ -10,7 +10,8 @@
 
 import { useEffect, useLayoutEffect, useRef, useState, type ComponentType, type ReactNode } from "react";
 import { DaemonError, type DaemonClient, type VisualDTO } from "../../../api/client";
-import { listenForDrops, type Attachment } from "../../../api/attachments";
+import { isTauri } from "@tauri-apps/api/core";
+import { clipboardAttachments, listenForDrops, type Attachment } from "../../../api/attachments";
 import { LoadingButton } from "../../../components/LoadingButton";
 import { button, field, main, mono } from "../../../components/ui";
 import type { PlansClient, VisualsClient } from "./client";
@@ -172,14 +173,16 @@ function AnswerBar({ client, visual, picked, onPick, onAnswered }: { client: Vis
   // Files go to the agent that receives the answer, and only where its provider takes them.
   const target = visual.answer_agent_id;
   const canAttach = !!client.attach && !!target && visual.accepts_files === true && !visual.answer;
-  // Browser Files (picker, paste) are sent as bytes; native drops as paths.
-  const upload = async (files: (File | string)[]) => {
-    if (!canAttach || !files.length) return;
+  // `read` yields the files: browser Files are sent as bytes, native drops and clipboard files as paths.
+  const upload = async (read: () => Promise<Attachment[]>) => {
+    if (!canAttach) return;
     setUploading((n) => n + 1);
     setError(null);
     try {
+      const files = await read();
+      if (!active.current) return;
       for (const file of files) {
-        const got = await client.attach!(target!,typeof file === "string" ? { path: file } : await fileAttachment(file));
+        const got = await client.attach!(target!, file);
         // The bar belongs to one visual revision; a result for another is dropped.
         if (!active.current) return;
         setAttached((list) => [...list, ...got.paths]);
@@ -200,7 +203,7 @@ function AnswerBar({ client, visual, picked, onPick, onAnswered }: { client: Vis
     void listenForDrops((event) => {
       if (gone || event.type !== "drop" || !event.paths?.length) return;
       const under = document.elementFromPoint(event.x!, event.y!);
-      if (under && bar.current?.contains(under)) void uploadLatest.current(event.paths);
+      if (under && bar.current?.contains(under)) void uploadLatest.current(async () => event.paths!.map((path) => ({ path })));
     }).then((unlisten) => { if (gone) unlisten(); else stop = unlisten; }, () => undefined);
     return () => { gone = true; stop?.(); };
   }, [canAttach]);
@@ -240,6 +243,8 @@ function AnswerBar({ client, visual, picked, onPick, onAnswered }: { client: Vis
           if (e.key !== "Enter" || e.shiftKey || e.nativeEvent.isComposing) return;
           // An unchecked option's Enter picks it natively (even when another option is chosen); only the chosen one sends.
           if (e.target instanceof HTMLButtonElement && e.target.getAttribute("role") === "radio" && e.target.getAttribute("aria-checked") !== "true") return;
+          // Attach keeps its native activation (opening the picker).
+          if (e.target instanceof HTMLButtonElement && e.target.hasAttribute("data-attach")) return;
           e.preventDefault();
           void send();
         }}>
@@ -255,15 +260,21 @@ function AnswerBar({ client, visual, picked, onPick, onAnswered }: { client: Vis
           </div>
           <input ref={noteInput} type="text" className={`${field} min-w-40 flex-1`} aria-label={ownWords ? "Your answer" : "Add a note"} placeholder={ownWords ? "Your answer" : "Add a note (optional)"} value={note} onChange={(e) => setNote(e.target.value)}
             onPaste={(e) => {
-              const files = canAttach ? Array.from(e.clipboardData.files) : [];
-              if (!files.length) return;
-              e.preventDefault();
-              void upload(files);
+              if (!canAttach) return;
+              const files = Array.from(e.clipboardData.files);
+              if (files.length) {
+                e.preventDefault();
+                void upload(() => Promise.all(files.map(fileAttachment)));
+              } else if (isTauri() && !e.clipboardData.getData("text")) {
+                // The webview exposes no File: ask the native clipboard (Finder files, image bytes). Plain text pastes as usual.
+                e.preventDefault();
+                void upload(clipboardAttachments);
+              }
             }} />
           {canAttach && (
             <>
-              <input ref={picker} type="file" multiple hidden data-testid="visual-attach-input" onChange={(e) => { void upload(Array.from(e.target.files ?? [])); e.target.value = ""; }} />
-              <button type="button" className={button} onClick={() => picker.current?.click()}>Attach</button>
+              <input ref={picker} type="file" multiple hidden data-testid="visual-attach-input" onChange={(e) => { const files = Array.from(e.target.files ?? []); e.target.value = ""; if (files.length) void upload(() => Promise.all(files.map(fileAttachment))); }} />
+              <button type="button" data-attach className={button} onClick={() => picker.current?.click()}>Attach</button>
             </>
           )}
           <LoadingButton className={main} busy={sending} disabled={!canSend || sending} data-testid="visual-send" onClick={() => void send()}>
