@@ -23,7 +23,7 @@ DAY = 24 * 60 * 60
 FOLD = 30 * 60
 MIN_QUOTE_WORDS = 2     # a lone "yes" or "the" shows nothing about what was asked for
 MAX_KEPT_MESSAGES = 8   # per session
-MAX_KEPT_CHARS = 4000   # a longer message isn't kept: asking to see something is short
+MAX_KEPT_CHARS = 32000  # the most the app's input route accepts: a long message can end with an ask
 
 
 def _expire(c, root: str, now: float) -> None:
@@ -179,30 +179,41 @@ _QUALIFIED = re.compile(r"\b(?:if|unless|when|after|before|later|only|maybe|perh
                         r"don't|do not|wait|until|provided|assuming)\b|[\"`“”]", re.I)
 _CONTEXT = re.compile(r"(?:compare|consider|examine|review)\s+(?:this|that|these|those|the)\s+"
                       r"(?:choices|options|layouts|designs|flow|pipeline|change|decision)[.!?]*", re.I)
-_CANCEL_LEAD = r"(?:(?:ok|okay|oh|ah|hmm|well|actually|sorry|no|nope|wait|please)[,.!]?\s+)*"
+_CANCEL_LEAD = r"(?:(?:ok|okay|oh|ah|hmm|well|actually|sorry|no|nope|wait|please)\W+)*"
 _CANCEL_ARTIFACT = r"(?:visual(?:ization)?s?|diagrams?|charts?|mockups?|planning doc(?:ument)?s?|plan document|request)\b"
 # Names the artifact, or says not to make it: a cancel in any clause of a message.
 _CANCEL_REQUEST = re.compile(
     _CANCEL_LEAD + r"(?:(?:cancel|stop|skip|drop|scratch|never\s*mind|forget(?:\s+about)?)\s+(?:(?:the|this|that|my)\s+)?" + _CANCEL_ARTIFACT
     + r"|(?:don['’]?t|do not)\s+(?:make|create|show|draw|build|generate|render)\b(?:\s+(?:me|us|a|an|the|it|this|that))*"
-    r"(?:\s+" + _CANCEL_ARTIFACT + r"|[.!?,;]*$)|no\s+(?:need\s+for\s+)?(?:(?:a|an|the)\s+)?" + _CANCEL_ARTIFACT + ")", re.I)
-# Says only "stop": it cancels if nothing follows it, unlike "never mind, render it".
-_CANCEL_BARE = re.compile(_CANCEL_LEAD + r"(?:never\s*mind|nvm|forget\s+(?:it|that|about\s+it)|scratch\s+that|"
-                          r"cancel\s+(?:it|that)|don['’]?t(?:\s+bother)?|stop)(?:\s+(?:it|that|this))?[.!?,;]*$", re.I)
-_COURTESY = re.compile(r"(?:thanks|thank you|thx|please|sorry)[.!?,;]*$", re.I)
+    r"(?:\s+" + _CANCEL_ARTIFACT + r"|\W*$)|no\s+(?:need\s+for\s+)?(?:(?:a|an|the)\s+)?" + _CANCEL_ARTIFACT + ")", re.I)
+# Says only "stop", or "never mind I found it": it cancels unless a new ask follows, as in "never mind, render it".
+_CANCEL_BARE = re.compile(_CANCEL_LEAD + r"(?:(?:never\s*mind|nvm)\s+(?:i|i['’]m|i['’]ve|we|we['’]re|it['’]s|its|got|found|figured|all)\b"
+                          r"|(?:never\s*mind|nvm|forget\s+(?:it|that|about\s+it)|scratch\s+that|"
+                          r"cancel\s+(?:it|that)|don['’]?t(?:\s+bother)?|stop)(?:\s+(?:it|that|this))?\W*$)", re.I)
+_ASKS_AGAIN = re.compile(r"(?:(?:please|just|then|instead|but|and|so|ok|okay|now|(?:can|could|would|will) you)\W+)*"
+                         r"(?:render|draw|visuali[sz]e|mock|display|show\s+(?:me|us|it|that|this)|(?:can|could) i see|let me see"
+                         r"|(?:make|create|build|generate)\s+(?:(?:me|us|a|an|the|this|that)\s+)*" + _CANCEL_ARTIFACT + r")\b", re.I)
+_COURTESY = re.compile(r"(?:thanks|thank you|thx|please|sorry)\W*$", re.I)
+_CLAUSES = re.compile(r"(?<=[.!?,;:])\s+|[…。！？，；、]+\s*|\s+[-–—]+\s+|[–—]+\s*|\n+")
 _NOT = (r"(?<!why )\b(?:not|never|cannot|without|avoid|stop|no need to|rather than|instead of|"
         r"(?:do|does|did|should|must|need)n['’]?t|(?:ca|could|wo|would)n['’]?t(?! you))"
         r"(?: (?:ever|even|bother|need|needed|want|wanted|have|ask|asked|try|go|to|you|i|me|us|just|really|please|actually|yet))*")
-# What comes just before a quote and takes it back: "don't ever <quote>", or an opening quotation mark.
-_NEGATED = re.compile(_NOT + r" $|[\"`“‘«]$|(?:^| )'$")
+_NEGATED = re.compile(_NOT + " $")     # just before a quote it takes the quote back: "don't ever <quote>"
 _NEGATES = re.compile(_NOT + r" \w")    # the quote carries its own "don't"
+_NEGATION_REACH = 200                   # characters before a quote that can negate it
+# Words someone is mentioning, not saying. An unclosed mark runs to the end; a lone ' is an apostrophe.
+_QUOTED = re.compile("|".join(f"{o}[^{c}]*(?:{c}|$)" for o, c in ('""', "``", "“”", "«»", "「」", "『』", "„“"))
+                     + r"|‘[^‘]*?’(?!\w)|(?<!\w)'[^']*'(?!\w)")
 _IDEOGRAPH = re.compile(r"[぀-ヿ㐀-鿿豈-﫿]")
 
 
 def _cancels(text: str) -> bool:
     """Whether the person is calling off a visual, in whatever words."""
-    clauses = [c for c in re.split(r"(?<=[.!?,;])\s+|\n+", text.strip()) if c and not _COURTESY.fullmatch(c)]
-    return any(_CANCEL_REQUEST.match(c) for c in clauses) or bool(clauses and _CANCEL_BARE.match(clauses[-1]))
+    clauses = [c for c in _CLAUSES.split(text.strip()) if c.strip() and not _COURTESY.fullmatch(c)]
+    if any(_CANCEL_REQUEST.match(c) for c in clauses):
+        return True
+    bare = [i for i, c in enumerate(clauses) if _CANCEL_BARE.match(c)]
+    return bool(bare) and not any(_ASKS_AGAIN.match(c) for c in clauses[bare[-1] + 1:])
 
 
 def request_intent(text: str) -> tuple[str | None, bool]:
@@ -390,7 +401,11 @@ def _spend_quote(c, root: str, asked: str, now: float) -> bool:
     pattern = re.compile(rf"(?<!\w){re.escape(quote)}(?!\w)")
     for row in c.execute("SELECT id, words, source FROM visual_person_words WHERE root_id=? AND staged=0 "
                          "AND created_at>? ORDER BY id DESC", (root, now - FOLD)).fetchall():
-        if any(not _NEGATED.search(row["words"][:m.start()]) for m in pattern.finditer(row["words"])):
+        words = row["words"]
+        mentioned = [q.span() for q in _QUOTED.finditer(words)]
+        if any(not _NEGATED.search(words[max(0, m.start() - _NEGATION_REACH):m.start()])
+               and not any(m.start() < end and start < m.end() for start, end in mentioned)
+               for m in pattern.finditer(words)):
             c.execute("DELETE FROM visual_person_words WHERE id=?", (row["id"],))
             if row["source"] == "grant":
                 c.execute("DELETE FROM visual_grants WHERE root_id=?", (root,))

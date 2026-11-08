@@ -548,6 +548,7 @@ def _stress(why, *row):
 
 CARD_ASK = "Please render a mockup of the new session button"
 FIRST = "render first"
+LONG_NOTES = "\n".join(f"line {n} of the notes about the migration" for n in range(110))
 
 
 @pytest.mark.parametrize("said,asked,published", [
@@ -574,12 +575,20 @@ FIRST = "render first"
     _stress("instead of", ["write it up instead of render it"], "render it", False),
     _stress("mentioned in double quotes", ['what does "render first" mean'], FIRST, False),
     _stress("mentioned in backticks", ["the `render first` flag is broken"], FIRST, False),
+    _stress("deep inside a mention", ['What does "please render first" mean?'], FIRST, False),
+    _stress("the quote brings its own marks", ['What does "render first" mean?'], '"render first"', False),
+    _stress("mentioned in single quotes", ["what does 'please render first' mean"], FIRST, False),
+    _stress("an unclosed mention", ['he said "please render first'], FIRST, False),
+    _stress("a long message keeps its negation", [LONG_NOTES + "\nThen don't render the options."], "render the options", False),
     # Cancelled, in the person's own words, for a quote and for a grant.
     *[_stress("cancel then quote", [FIRST, cancel], FIRST, False) for cancel in (
         "actually never mind", "never mind, thanks", "nvm", "forget it", "scratch that", "cancel that", "don't bother",
         "don't render it", "don’t make a visual", "no visual please", "please stop",
-        "thanks for that.\nNever mind the visual.")],
+        "thanks for that.\nNever mind the visual.", "Never mind, I found the answer.", "Never mind…", "never mind I found it",
+        "Never mind — I found it", "never mind 🙂", "forget it, not needed")],
     _stress("cancel then grant", ["Make a visual", "actually never mind"], None, False),
+    _stress("cancel with a reason, grant", ["Make a visual", "Never mind, I found the answer."], None, False),
+    _stress("cancel with unicode punctuation, grant", ["Make a visual", "Never mind…"], None, False),
     _stress("cancel then grant, curly apostrophe", ["Make a visual", "don’t make a visual"], None, False),
     _stress("a declined card covers the same words typed earlier", [_declined_card_typed_twice], CARD_ASK, False),
     # Capability, races, restarts.
@@ -598,6 +607,10 @@ FIRST = "render first"
     _stress("ideographs have no spaces", ["把这个流程画出来"], "把这个流程画出来", True),
     _stress("never mind something else", ["never mind the typo, render it"], "render it", True),
     _stress("never mind, then the ask", ["never mind, render it"], "render it", True),
+    _stress("never mind, then a polite ask", ["Never mind — can you show me the flow"], "show me the flow", True),
+    _stress("a name in quotes inside an ask", ['render the "new session" button'], "render the", True),
+    _stress("apostrophes are not quotation marks", ["let's see what's wrong, render it"], "render it", True),
+    _stress("a long message ending in the ask", [LONG_NOTES + "\nThen render the options."], "render the options", True),
     _stress("stop something else", ["stop the server and render the flow"], "render the flow", True),
     _stress("asks among other things", ["first fix the tests\nthen render the options\nthanks"], "render the options", True),
     _stress("cancel, then ask again", [FIRST, "never mind", FIRST], FIRST, True),
