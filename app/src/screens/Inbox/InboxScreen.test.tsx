@@ -168,15 +168,26 @@ describe("inbox", () => {
     sync.stop();
   });
 
-  it.each(["visual is ready", "asks you to choose"])("visual ready card or question (%s) opens the reader without Go to session", async (reason) => {
-    const visualItem: InboxItemDTO = { kind: "visual", agent_id: "sup1", root_id: "sup1", workspace_id: "proj", visual_id: "v_8f2c", reason };
-    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], inbox: [visualItem, question] });
+  it("visual ready card opens the reader and dismisses independently on a read refresh", async () => {
+    const visualItem: InboxItemDTO = { kind: "visual", agent_id: "sup1", root_id: "sup1", workspace_id: "proj", visual_id: "v_8f2c", reason: "visual is ready", detail: "Flow A" };
+    const visualB = { ...visualItem, visual_id: "v_b", detail: "Flow B" };
+    const decision = { ...visualItem, visual_id: "v_question", reason: "asks you to choose", detail: "Pick a flow" };
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], inbox: [decision, visualItem, visualB, question] });
     const { sync, onOpen } = mount(daemon);
     await screen.findByRole("region", { name: "Ship ls --json" });
     expect(within(card("visual")).queryByRole("button", { name: "Go to session ›" })).toBeNull();
-    fireEvent.click(within(card("visual")).getByRole("button", { name: "Open visual" }));
+    fireEvent.click(within(screen.getByText("Flow A").closest("article")!).getByRole("button", { name: "Open visual" }));
     expect(onOpen).toHaveBeenLastCalledWith("sup1", REPO, "sup1", { kind: "visual", id: "v_8f2c" });
     expect(within(card("question")).getByRole("button", { name: "Go to session ›" }).className).toContain("btn-secondary");
+    await act(async () => {
+      // While the reader was open, its notice was read and the decision was answered.
+      daemon.data.inbox = [visualB, question];
+      daemon.publish("visual.read", { root_id: "sup1", payload: { visual: visualItem.visual_id } });
+      await sync.idle();
+    });
+    expect(screen.queryByText("Flow A")).toBeNull();
+    expect(screen.getByText("Flow B")).toBeTruthy();
+    expect(screen.queryByText("Pick a flow")).toBeNull();
     sync.stop();
   });
 

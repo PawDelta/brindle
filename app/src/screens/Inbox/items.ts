@@ -190,8 +190,18 @@ export const actionId = (item: InboxItemDTO) => (item.kind === "doc" ? item.requ
 
 /* Stable across snapshots, so a new item can be told from one already seen.
    A setup item belongs to no agent: it is told by what it fixes; an org Block by what it says. */
-export const itemKey = (item: InboxItemDTO) =>
-  `${item.kind}:${item.kind === "setup" ? (item.fix ?? "") : item.kind === "org_blocked" ? item.reason : actionId(item)}:${item.workspace_id ?? ""}`;
+export const itemKey = (item: InboxItemDTO) => {
+  let id = actionId(item);
+  if (item.kind === "visual") {
+    // One session can have several independent notices and questions.
+    id = item.visual_id ?? "";
+  } else if (item.kind === "setup") {
+    id = item.fix ?? "";
+  } else if (item.kind === "org_blocked") {
+    id = item.reason;
+  }
+  return `${item.kind}:${id}:${item.workspace_id ?? ""}`;
+};
 
 /* The groups the inbox can be filtered to, by kind. */
 export const FILTERS: { key: string; label: string; kinds: string[] }[] = [
