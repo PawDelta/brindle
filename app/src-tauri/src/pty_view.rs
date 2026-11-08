@@ -1266,8 +1266,90 @@ pub fn pty_view_paste(app: tauri::AppHandle) -> Result<String, String> {
     app.clipboard().read_text().map_err(|e| e.to_string())
 }
 
+#[derive(serde::Serialize)]
+#[serde(untagged)]
+pub enum ClipboardAttachment {
+    File { path: std::path::PathBuf },
+    Image { name: String, data_base64: String },
+}
+
+/// Leave all file access and credential checks to the engine. Only translate
+/// the OS namespace here, using the same WSL target as the daemon connection.
+#[tauri::command]
+pub async fn pty_view_attachment_path(path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        #[cfg(windows)]
+        { crate::wsl::attachment_path(&path) }
+        #[cfg(not(windows))]
+        { Ok(path) }
+    }).await.map_err(|e| e.to_string())?
+}
+
+// Bound decoded pixels too, while allowing Retina screenshots whose PNG is
+// much smaller. The encoded file has the same limit as the engine.
+const ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
+const CLIPBOARD_PIXEL_BYTES: usize = 100 * 1024 * 1024;
+
+fn clipboard_image(image: arboard::ImageData<'_>) -> Result<ClipboardAttachment, String> {
+    use base64::Engine;
+    use image::ImageEncoder;
+    let size = image.width.checked_mul(image.height).and_then(|n| n.checked_mul(4));
+    if size.is_none_or(|n| n > CLIPBOARD_PIXEL_BYTES) {
+        return Err("clipboard image exceeds the file size limit".into());
+    }
+    if size != Some(image.bytes.len()) {
+        return Err("clipboard image could not be read".into());
+    }
+    let mut png = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut png)
+        .write_image(&image.bytes, image.width as u32, image.height as u32, image::ExtendedColorType::Rgba8)
+        .map_err(|_| "clipboard image could not be encoded")?;
+    if png.len() > ATTACHMENT_BYTES {
+        return Err("clipboard image exceeds the file size limit".into());
+    }
+    Ok(ClipboardAttachment::Image {
+        name: "clipboard.png".into(),
+        data_base64: base64::engine::general_purpose::STANDARD.encode(png),
+    })
+}
+
+/// Called only for a paste with no text. File lists use native clipboard formats
+/// (Finder file URLs, Windows HDROP, Linux URI lists), never file names as text.
+#[tauri::command]
+pub async fn pty_view_files() -> Result<Vec<ClipboardAttachment>, String> {
+    tauri::async_runtime::spawn_blocking(clipboard_files).await.map_err(|e| e.to_string())?
+}
+
+fn clipboard_files() -> Result<Vec<ClipboardAttachment>, String> {
+    let mut clipboard = arboard::Clipboard::new().map_err(|_| "couldn't open the clipboard")?;
+    if clipboard.get_text().is_ok_and(|text| !text.is_empty()) {
+        return Ok(Vec::new());
+    }
+    match clipboard.get().file_list() {
+        Ok(paths) if !paths.is_empty() => return Ok(paths.into_iter().map(|path| ClipboardAttachment::File { path }).collect()),
+        Ok(_) | Err(arboard::Error::ContentNotAvailable) => {},
+        Err(_) => return Err("couldn't read clipboard files".into()),
+    }
+    match clipboard.get_image() {
+        Ok(image) => Ok(vec![clipboard_image(image)?]),
+        Err(arboard::Error::ContentNotAvailable) => Ok(Vec::new()),
+        Err(_) => Err("couldn't read clipboard image".into()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn clipboard_attachment_encodes_png_and_bounds_pixels() {
+        use base64::Engine;
+        let image = arboard::ImageData { width: 1, height: 1, bytes: std::borrow::Cow::Borrowed(&[11, 22, 33, 255]) };
+        let super::ClipboardAttachment::Image { data_base64, .. } = super::clipboard_image(image).unwrap() else { panic!("expected image") };
+        let png = base64::engine::general_purpose::STANDARD.decode(data_base64).unwrap();
+        assert_eq!(image::load_from_memory(&png).unwrap().to_rgba8().as_raw(), &[11, 22, 33, 255]);
+        for (width, height) in [(usize::MAX, 2), (10000, 10000), (1, 1)] {
+            assert!(super::clipboard_image(arboard::ImageData { width, height, bytes: std::borrow::Cow::Borrowed(&[]) }).is_err());
+        }
+    }
     use super::*;
     use std::time::{Duration, Instant};
 
