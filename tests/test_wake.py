@@ -134,7 +134,7 @@ def test_person_answers_reach_a_supervisor_past_a_stopped_pane_delivery(db, boss
     assert "the result" in text and f"[brindle] {answer}" in text
     assert db.pending_count("boss") == 0 and db.unread_count("boss") == 0
     assert db.mark("boss", "pane-delivery") is None  # its notice was dropped: the queue moves on
-    assert read_messages() == "No unread messages."
+    assert read_messages().startswith("No unread messages.")  # a stale-engine note may follow
 
     agents.send_message(db, "boss", "second answer", person=True)
     text, taken = wake.take(db, db.get_agent("boss"))
