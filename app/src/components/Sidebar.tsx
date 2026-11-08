@@ -469,7 +469,7 @@ function SessionRows({ session, repo, index, route, navigate, cursor, setCursor,
           treeSession={root}
           row={key}
           current={open && (route.agent ?? root) === root ? "page" : undefined}
-          className={`flex min-w-0 flex-1 items-center gap-s1 rounded-md py-[5px] pr-s1 text-left ${cursor === key ? CURSOR : ""}`}
+          className={`flex w-full min-w-0 items-center gap-s1 rounded-md py-[5px] pr-s1 text-left ${cursor === key ? CURSOR : ""}`}
           title={`${root} · ${session.status}${index < 9 ? ` · ⌘${index + 1}` : ""}`}
           onOpen={() => {
             setCursor(key);

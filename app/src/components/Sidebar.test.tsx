@@ -101,6 +101,8 @@ describe("Sidebar", () => {
     fireEvent.click(dot);
     expect(dot.getAttribute("aria-expanded")).toBe("true");
     expect(agentRow("c1")).toBeTruthy();
+    // SessionGoal's block wrapper fills the row; its button must fill that wrapper.
+    expect(sessionRow("sup1")!.classList.contains("w-full")).toBe(true);
     fireEvent.click(sessionRow("sup1")!);
     expect(navigate).toHaveBeenLastCalledWith({ screen: "session", root: "sup1", repo: REPO, agent: "sup1" });
   });
