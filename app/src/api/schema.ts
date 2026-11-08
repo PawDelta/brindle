@@ -128,6 +128,7 @@ export interface AgentDTO {
   hooks_off?: string | null;
   id: string;
   locked?: string | null;
+  milestone?: string | null;
   mode: string;
   model?: string | null;
   parent_id?: string | null;

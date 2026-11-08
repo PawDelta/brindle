@@ -94,6 +94,12 @@ CREATE TABLE IF NOT EXISTS agents (
     failed_why TEXT,               -- why its status is 'failed': auth | model | delivery (service.inbox)
     name TEXT                      -- a session root's name, given by the person (POST /sessions/{root}/rename)
 );
+-- The milestone current when a worker was assigned (agents.spawn). A table of
+-- its own: released tables never gain columns (see session_repo_branches).
+CREATE TABLE IF NOT EXISTS agent_milestones (
+    agent_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
+    title TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS inbox (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
@@ -1004,7 +1010,6 @@ class Agent:
     failed_why: str | None = None          # why it is 'failed': auth | model | delivery; None from an older brindle
     name: str | None = None                # a session root's name from the person; None: listed by its goal
 
-
 @dataclass
 class Autopilot:
     root_id: str
@@ -1826,6 +1831,14 @@ class DB:
 
 
     # -- agents ------------------------------------------------------------
+
+    def set_agent_milestone(self, agent_id: str, title: str) -> None:
+        with self.tx() as c:
+            c.execute("INSERT OR REPLACE INTO agent_milestones (agent_id, title) VALUES (?,?)", (agent_id, title))
+
+    def agent_milestone(self, agent_id: str) -> str | None:
+        row = self.conn.execute("SELECT title FROM agent_milestones WHERE agent_id=?", (agent_id,)).fetchone()
+        return row["title"] if row else None
 
     def add_agent(self, a: Agent) -> None:
         if a.tmux_server is None:

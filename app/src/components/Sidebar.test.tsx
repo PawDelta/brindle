@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { DaemonClient } from "../api/client";
 import { DaemonContext } from "../api/context";
@@ -13,6 +13,7 @@ import { BASE_URL, FakeDaemon, TOKEN, type DaemonData } from "../test/fakeDaemon
 import { REPO, permission, permissionInTerminal, question, root, waiting, worker } from "../test/fixtures";
 import { PAUSED_KEY, SPLIT_KEY, Sidebar, roleOf } from "./Sidebar";
 import { sidebarChanges } from "./SessionContext";
+import { sessionTree } from "../screens/Session/tree";
 
 beforeEach(() => localStorage.clear());
 afterEach(cleanup);
@@ -55,6 +56,49 @@ describe("Sidebar", () => {
     expect(agentRow("w1")).toBeNull();
     expect(sessionRow("sup1")!.textContent).toContain("2 agents");
     sync.stop();
+  });
+
+  it("shows a worker's milestone title with its role and model, falling back to its branch, and double-click copies its info", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    const a = { ...worker.agents![0], profile: "developer-haiku", milestone: "Logo goes Home" };
+    const b = { ...a, id: "w2", milestone: undefined, profile: "developer-heavy" };
+    // The pipeline's reviewer is the developer's sibling (same parent), on a Codex model.
+    const r = { ...a, id: "w3", mode: "review", profile: "reviewer-codex", provider: "codex", model: "gpt-6-luna", milestone: undefined };
+    const g = { ...a, id: "w4", profile: "developer-gemini", provider: "gemini", model: "gemini-3-pro", milestone: undefined };
+    const { sync } = mount({ workspaces: [root, { ...worker, agents: [a, r] }, { ...worker, id: "proj/other", name: "other", branch: "feat/other", agents: [b, g] }] }, { screen: "session", root: "sup1", repo: REPO });
+    await waitFor(() => expect(agentRow("w1")).toBeTruthy());
+    expect(within(agentRow("w4")!).getByTestId("agent-role").textContent).toBe("developer · gemini");
+    expect(agentRow("w1")!.closest("li")!.contains(agentRow("w3"))).toBe(true);
+    expect(within(agentRow("w3")!).getByTestId("agent-role").textContent).toBe("reviewer · codex");
+    expect(within(agentRow("w2")!).getByTestId("agent-role").textContent).toBe("developer · claude");
+    expect(within(agentRow("w1")!).getByTestId("agent-title").textContent).toBe("Logo goes Home ");
+    expect(within(agentRow("w1")!).getByTestId("agent-role").textContent).toBe("developer · haiku");
+    expect(within(agentRow("w2")!).getByTestId("agent-title").textContent).toBe("Other ");
+    await act(async () => fireEvent.dblClick(agentRow("w1")!));
+    expect(writeText).toHaveBeenCalledWith("id: w1\nrole: developer\nprofile: developer-haiku\nbranch: feat/ls\nmilestone: Logo goes Home");
+    expect(screen.getByRole("status").textContent).toContain("copied");
+    sync.stop();
+  });
+
+  it("nests a reviewer only under the one worker of its own session in its workspace", () => {
+    const agent = (id: string, mode: string, parent: string) => ({ ...worker.agents![0], id, mode, parent_id: parent });
+    const ws = (agents: ReturnType<typeof agent>[]) => ({ ...worker, agents });
+    const parentsIn = (workspaces: ReturnType<typeof ws>[], of: string) => {
+      const found = new Map<string, string>();
+      const walk = (n: NonNullable<ReturnType<typeof sessionTree>>) => n.children.forEach((c) => { found.set(c.agent.id, n.agent.id); walk(c); });
+      walk(sessionTree(workspaces, "sup1")!);
+      return found.get(of);
+    };
+    // Sharing the workspace with its supervisor, the sole worker still wins; another session's worker or a second worker leave it be.
+    expect(parentsIn([ws([agent("sup1", "interactive", ""), agent("d", "assign", "sup1"), agent("r", "review", "sup1")])], "r")).toBe("d");
+    // A reviewer already under its developer stays there beside a helper; with the developer gone, it stays under its parent.
+    expect(parentsIn([ws([agent("sup1", "interactive", ""), agent("d", "assign", "sup1"), agent("h", "assign", "d"), agent("r", "review", "d")])], "r")).toBe("d");
+    const gone = { ...agent("d", "assign", "sup1"), dismissed_at: 1 };
+    const withGone = [ws([agent("sup1", "interactive", ""), gone, agent("r", "review", "d"), agent("h", "assign", "r")])];
+    expect([parentsIn(withGone, "d"), parentsIn(withGone, "r"), parentsIn(withGone, "h")]).toEqual([undefined, "sup1", "r"]);
+    expect(parentsIn([ws([agent("sup1", "interactive", ""), agent("x", "assign", "sup2"), agent("r", "review", "sup1")])], "r")).toBe("sup1");
+    expect(parentsIn([ws([agent("sup1", "interactive", ""), agent("d", "assign", "sup1"), agent("e", "assign", "sup1"), agent("r", "review", "sup1")])], "r")).toBe("sup1");
   });
 
   it("new user sees no usage failure", async () => {
@@ -116,11 +160,11 @@ describe("Sidebar", () => {
     expect(agentRow("w1")!.closest("li")!.contains(agentRow("c1"))).toBe(true);
     // The rows read: a dot for the CLI's status, "id · role", the label; the branch is in the tooltip.
     expect(agentRow("sup1")!.querySelector(".side-dot")!.getAttribute("data-tone")).toBe("idle");
-    expect(agentRow("sup1")!.textContent).toContain("sup1 · supervisor");
+    expect(within(agentRow("sup1")!).getByTestId("agent-role").textContent).toBe("supervisor");
     expect(agentRow("w1")!.querySelector(".side-dot")!.getAttribute("data-tone")).toBe("work");
-    expect(agentRow("w1")!.textContent).toContain(`w1 · ${roleOf(worker.agents![0].profile)}`);
+    expect(within(agentRow("w1")!).getByTestId("agent-role").textContent).toBe(roleOf(worker.agents![0].profile));
     expect(agentRow("w1")!.title).toContain("feat/ls");
-    expect(within(agentRow("w1")!).getByTestId("agent-status").textContent).toBe("working");
+    expect(within(agentRow("w1")!).getByTestId("agent-status").textContent).toBe("code");
     expect(within(session).queryByTestId("needs-you")).toBeNull();
     expect(screen.queryByTestId("summary")).toBeNull();
     // The route's agent is the current one.
@@ -212,7 +256,7 @@ describe("Sidebar", () => {
     expect(screen.queryByTestId("context-card")).toBeNull();
     expect(screen.queryAllByTestId("needs-you")).toHaveLength(0);
     await waitFor(() => expect(agentRow("w1")).toBeTruthy());
-    expect(within(agentRow("w1")!).getByTestId("agent-status").textContent).toBe("working");
+    expect(within(agentRow("w1")!).getByTestId("agent-status").textContent).toBe("code");
     fireEvent.click(inbox);
     expect(navigate).toHaveBeenLastCalledWith({ screen: "inbox" });
     // Nothing waiting: no pill at all.
