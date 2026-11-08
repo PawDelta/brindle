@@ -263,6 +263,18 @@
           "default": null,
           "title": "Locked"
         },
+        "milestone": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Milestone"
+        },
         "mode": {
           "title": "Mode",
           "type": "string"
@@ -7789,6 +7801,18 @@
               ],
               "default": null,
               "title": "Locked"
+            },
+            "milestone": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Milestone"
             },
             "mode": {
               "title": "Mode",

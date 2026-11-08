@@ -507,7 +507,7 @@ def spawn(
     if session_root and mode in ("handoff", "assign"):
         current = next((m for m in db.milestones(session_root) if m.status != "passed"), None)
         if current:
-            db.update_agent(agent_id, milestone=current.title)
+            db.set_agent_milestone(agent_id, current.title)
     if session_root and mode in ("handoff", "assign"):
         pilot.consider_analysis_offer(db, session_root)   # another worker may make the goal large
     if person_prompt and raw_task and parent_id is None and mode == "interactive":
