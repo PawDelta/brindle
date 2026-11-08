@@ -186,6 +186,9 @@ def test_large_goal_is_offered_a_doc_once_and_yes_turns_it_on(milestones, goal, 
 
     asks = [i for i in inbox.items(db, None) if i.kind == "analysis_offer"]    # the Inbox carries the ask
     assert [(i.request_id, i.root_id) for i in asks] == [(first, "boss")]
+    with pytest.MonkeyPatch.context() as mp:    # a paused session the live snapshot no longer lists
+        mp.setattr(inbox.view, "snapshot", lambda *a, **k: [])
+        assert [i.request_id for i in inbox.items(db, None) if i.kind == "analysis_offer"] == [first]
     routes_actions.goal_analysis_offer(db, {}, {"root": "boss", "accept": True, "offer": first})
     assert (_offer(db), db.get_autopilot("boss").analysis_doc) == (None, 1)
     assert not [i for i in inbox.items(db, None) if i.kind == "analysis_offer"]
