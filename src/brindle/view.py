@@ -429,7 +429,7 @@ def autopilot_entry(db: DB, repo_root: str | None, panes: dict[str, bool] | None
         "enabled": bool(ap.enabled),
         "goal": ap.goal,
         "state": ap.state,
-        "note": ap.note,
+        "note": autopilot.person_note(ap),
         "wait": autopilot.wait_summary(ap),
         "usage_resets_at": ap.usage_resets_at,
         "milestones": [{"position": m.position, "title": m.title,
