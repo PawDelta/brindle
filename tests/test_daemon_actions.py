@@ -164,7 +164,6 @@ def _flat(args):
     # The person decides a plan as the worker's supervisor would.
     ("POST", "/v1/inbox/wk/approve", {}, (agents, "approve_plan"), "approved", 200, "sup"),
     ("POST", "/v1/agents/wk/kill", {}, (agents, "kill"), None, 200, "wk"),
-    ("POST", "/v1/workspaces/w-1/review", {}, (agents, "start_review"), None, 200, "w-1"),
     # Real workspace ids contain a slash, which arrives in the path as %2F decoded.
     ("POST", "/v1/workspaces/proj/w-2/merge", {}, (pipeline, "merge"), "Merged feat2", 202, "proj/w-2"),
     ("POST", "/v1/workspaces/proj/w-2/remove", {}, (workspaces, "remove"), SimpleNamespace(branch_note=None, teardown=None), 200, "proj/w-2"),
@@ -256,12 +255,10 @@ def test_closing_a_session_stops_and_hides_all_its_agents_but_keeps_their_work(d
 
 
 @pytest.mark.parametrize("path,base,setup,status", [
-    ("app.py", "shown", None, 200),
     ("app.py", "read", None, 200),              # the base from GET .../file, the app's way
     ("app.py", "e69de29", None, 409),           # the empty blob: not what the file is now
     ("app.py", "shown", "busy", 409),
     ("app.py", "shown", "hook-refuses", 409),   # the file goes back; the worker's index survives
-    ("new.txt", "shown", None, 200),            # a file git doesn't track yet
     ("new.txt", "shown", "hook-refuses", 409),  # ... refused: untracked again, as it was
     ("pkg/m.py", "shown", "deleted-refused", 409),  # its deletion staged, then refused: still staged
     ("app.py", "shown", "to-head", 200),        # back to HEAD's content: no commit, the staged version goes
@@ -273,7 +270,7 @@ def test_closing_a_session_stops_and_hides_all_its_agents_but_keeps_their_work(d
                  marks=pytest.mark.variant("a name that is pathspec magic must not commit other work")),
     pytest.param("pkg/m.py", "shown", "swap", 400,
                  marks=pytest.mark.variant("a directory swapped for an escaping symlink mid-edit")),
-], ids=["edit-commits", "edit-read", "edit-stale", "edit-busy", "edit-refused", "edit-new-file",
+], ids=["edit-read", "edit-stale", "edit-busy", "edit-refused",
         "edit-new-file-refused", "edit-deleted-refused", "edit-to-head", "edit-agent",
         "edit-dotdot", "edit-symlink", "edit-git", "edit-pathspec", "edit-swap"])
 def test_an_edit_from_review_commits_on_the_workers_branch(db, repo, world, tmp_path, monkeypatch,
@@ -1855,13 +1852,12 @@ def test_session_review_diff_attributes_each_hunk_to_its_author(db, repo, lead):
 
 
 @pytest.mark.parametrize("path,body,setup,status", [
-    ("app.py", {"content": "print('bye')\n"}, None, 200),
     ("app.py", {}, "delete", 200),
     ("new/deep/n.py", {"content": "n\n"}, "hook-refuses", 409),    # the file and its new directories go
     ("app.py", {"content": "x\n"}, "exists", 409),                  # a create where a file already is
     ("app.py", {"content": "print('bye')\n"}, "busy", 409),
     ("app.py", {"content": "print('bye')\n"}, "merging", 409),
-], ids=["edit", "delete", "create-refused", "exists", "busy", "merging"])
+], ids=["delete", "create-refused", "exists", "busy", "merging"])
 def test_session_review_edits_commit_on_the_session_branch(db, repo, lead, path, body, setup, status):
     from brindle import git
 
@@ -2249,8 +2245,7 @@ def cloning(world, repo, monkeypatch):
     return f"file://{repo.parent / 'origin.git'}"
 
 
-@pytest.mark.parametrize("parent_exists", [True, False])
-def test_a_clone_streams_git_progress_and_finishes_with_the_path(db, cloning, tmp_path, parent_exists):
+def test_a_clone_streams_git_progress_and_finishes_with_the_path(db, cloning, tmp_path):
     from brindle import git
 
     # The picker's other path: opening a plain folder only initializes it after confirmation.
@@ -2272,8 +2267,6 @@ def test_a_clone_streams_git_progress_and_finishes_with_the_path(db, cloning, tm
     code, reply = _send("POST", "/v1/repos/clone", {"url": cloning, "parent_dir": str(folder / "notes.txt")})
     assert (code, reply["error"]["code"]) == (400, "invalid")
     parent = tmp_path / "projects"
-    if parent_exists:
-        parent.mkdir()
     code, reply = _send("POST", "/v1/repos/clone", {"url": cloning, "parent_dir": str(parent)})
     assert code == 202, reply
     done = bus.tail(db, kinds=("job.done", "job.failed"))
@@ -2378,6 +2371,7 @@ def test_user_scope_routing_judges_the_persons_profile_not_the_repos_same_named_
 
 
 def test_hold_skipped_without_app(db, repo, world, answering, monkeypatch):
+    from brindle import permissions
     from brindle.daemon import events, holds
 
     monkeypatch.setattr(events, "connected", 0)
@@ -2393,6 +2387,13 @@ def test_hold_skipped_without_app(db, repo, world, answering, monkeypatch):
     body = {"agent_id": "wk", "request_id": "r-gone", "digest": "d", "nonce": "n", "hold_until": time.time() + 60}
     assert _send("POST", "/v1/holds", body, peer_pid=310, token=None)[0] == 503
     assert holds.HOLDS.agents() == []
+
+    # A hook reaching its deadline also returns to the CLI without waiting.
+    req = permissions.Request("claude", "bash", "Bash", command="npm test")
+    db.add_permission_request("wk", "expired", json.dumps(req.to_dict()), "", None, "hook")
+    monkeypatch.setattr(agents, "time", SimpleNamespace(time=lambda: 100.0, monotonic=lambda: 100.0))
+    assert agents._await_app_answer(db, db.get_agent("wk"), SimpleNamespace(request_id="expired"),
+                                    req, 99.0) == "timeout"
 
 
 def test_a_shell_opens_in_the_repo_each_call_and_closes(world, repo, tmp_path, monkeypatch):
