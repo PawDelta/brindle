@@ -6,7 +6,7 @@ import time
 import pytest
 
 from brindle import identity_lock, workspaces
-from brindle.db import DB, Agent
+from brindle.db import DB, Agent, Workspace
 from brindle.pro import status as org_status
 from brindle.service import inbox
 
@@ -94,20 +94,23 @@ def test_a_user_prompt_clears_the_question_card_but_a_brindle_message_does_not(d
     assert db.get_autopilot("r1").question is None
 
 
-def test_pr_not_now(db, repo, monkeypatch):
+def test_pr_not_now(db, tmp_path, monkeypatch):
     from brindle import git
     from brindle.daemon.routes_actions import inbox_action
 
-    ws = workspaces.create(db, str(repo), "feat/pr-card").workspace
+    ws = Workspace("pr-card", str(tmp_path), "pr-card", "session", "feat/pr-card", "main",
+                   str(tmp_path / "checkout"), None, "pr-card", time.time())
+    db.add_workspace(ws)
     db.add_agent(Agent("r1", ws.id, "supervisor", "claude", None, "interactive", "idle", "@1", None, time.time()))
     db.conn.execute("INSERT INTO session_pr_prep (root_id, branch, sha, state, prepared_at) VALUES (?, ?, ?, ?, ?)",
                     ("r1", ws.branch, "head1", "passed", time.time()))
-    original_out = git.out
     head = "head1"
-    monkeypatch.setattr(git, "out", lambda args, path: head if args == ["rev-parse", "HEAD"] else original_out(args, path))
+    monkeypatch.setattr(git, "out", lambda args, path: head)
+    monkeypatch.setattr(inbox.view, "snapshot", lambda *args, **kwargs: [
+        {"id": ws.id, "branch": ws.branch, "agents": [{"id": "r1", "status": "idle"}]}])
 
     def cards(database):
-        return [i.kind for i in inbox.items(database, str(repo), panes={"@1": True}) if i.kind.startswith("pr_")]
+        return [i.kind for i in inbox.items(database, ws.repo_root, panes={"@1": True}) if i.kind.startswith("pr_")]
 
     assert cards(db) == ["pr_ready"]
     inbox_action(db, {"id": "r1", "action": "pr-not-now"}, {})
