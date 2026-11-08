@@ -127,10 +127,10 @@ def new_tests(base: str) -> dict[str, str | None]:
     added: dict[str, str | None] = {}
     for path in files:
         try:
-            old_tables = inventory.test_tables(_git("show", f"{base}:{path}"))
+            old_tables = inventory.scan(_git("show", f"{base}:{path}"))
         except subprocess.CalledProcessError:
             old_tables = {}
-        new_tables = inventory.test_tables((ROOT / path).read_text(encoding="utf-8"))
+        new_tables = inventory.scan((ROOT / path).read_text(encoding="utf-8"))
         for qual, ids in _by_function(head, path).items():
             old_ids = _by_function(before, path).get(qual, [])
             for n in _new_ids(ids, old_ids, old_tables.get(qual), new_tables.get(qual)):
@@ -147,17 +147,21 @@ def _by_function(tests, path: str) -> dict[str, list[str]]:
     return found
 
 
-def _new_ids(ids: list[str], old_ids: list[str], old_tables, new_tables) -> list[str]:
-    """The ids of one test function that are new. A row is identified by its place
-    in the table's source, not by its id: pytest numbers non-literal parameters
-    by position, so inserting a row shifts the ids of those after it. Where the
-    table can't be matched to the ids, every row of a function whose ids changed
-    is judged."""
-    if not old_ids or old_tables is None:
+def _new_ids(ids: list[str], old_ids: list[str], old, new) -> list[str]:
+    """The ids of one test function that are new; ``old`` and ``new`` are its
+    (tables, inputs) as ``inventory.scan`` reads them. A row is identified by its
+    place in the table's source, not by its id: pytest numbers non-literal
+    parameters by position, so inserting a row shifts the ids of those after it.
+    When an assignment the tables use changed, or the table can't be matched to
+    the ids, every row of the function is judged."""
+    if not old_ids or old is None:
         return ids
-    if new_tables and len(new_tables) == 1 and isinstance(new_tables[0], list) and len(ids) == len(new_tables[0]):
-        old = old_tables[0] if old_tables and isinstance(old_tables[0], list) else None
-        return [ids[p] for p in inventory.added_positions(old, new_tables[0])]
+    (old_tables, old_inputs), (new_tables, new_inputs) = old, new
+    if old_inputs != new_inputs:
+        return ids
+    if len(new_tables) == 1 and isinstance(new_tables[0], list) and len(ids) == len(new_tables[0]):
+        before = old_tables[0] if old_tables and isinstance(old_tables[0], list) else None
+        return [ids[p] for p in inventory.added_positions(before, new_tables[0])]
     # Stable ids don't mean unchanged rows (a replaced value in one of two stacked
     # tables keeps `0-x0`): judge the function whenever its tables or its ids changed.
     return ids if ids != old_ids or old_tables != new_tables else []
@@ -259,35 +263,32 @@ def related_test_files(names: set[str], modules: set[str], skip: set[str],
     return ranked[:MAX_RELATED_FILES]
 
 
-def run_with_coverage(files: list[str], coverage_file: Path, append: bool) -> set[tuple[str, str]]:
+def _plugin_env(**extra: str) -> dict[str, str]:
+    path = os.pathsep.join(filter(None, [str(HERE), os.environ.get("PYTHONPATH", "")]))
+    return {**os.environ, "PYTHONPATH": path, **extra}
+
+
+def run_with_coverage(files: list[str], coverage_file: Path, append: bool) -> set[str]:
     """Run test files with per-test coverage: the parallel tests, then the serial ones.
     A failing test is the other checks' business; a pytest that couldn't run the
-    files (collection error, bad usage, crash) stops this check. Returns the
-    (classname, name) of every test pytest reported as skipped."""
-    from xml.etree import ElementTree
-
-    env = {**os.environ, "COVERAGE_FILE": str(coverage_file)}
+    files (collection error, bad usage, crash) stops this check. Returns the full
+    node id of every test pytest reported as skipped."""
+    skip_file = coverage_file.parent / "skipped.txt"
+    env = _plugin_env(COVERAGE_FILE=str(coverage_file), BRINDLE_SKIPPED_FILE=str(skip_file))
     cov = ["--cov=brindle", "--cov=scripts", "--cov-branch", "--cov-context=test", "--cov-report="]
-    skipped: set[tuple[str, str]] = set()
     for i, args in enumerate((["-n", "2", "-m", "not serial"], ["-m", "serial"])):
         extra = ["--cov-append"] if append or i else []
-        report = coverage_file.parent / f"junit-{len(list(coverage_file.parent.glob('junit-*.xml')))}.xml"
         proc = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
-                               f"--junitxml={report}", *args, *cov, *extra, *files], cwd=ROOT, env=env,
+                               "-p", "new_tests_plugin", *args, *cov, *extra, *files], cwd=ROOT, env=env,
                               capture_output=True, text=True)
         if proc.returncode not in (0, 1, 5):
             raise SystemExit(f"pytest exited {proc.returncode} running {len(files)} test files "
                              f"with coverage:\n{proc.stdout[-1500:]}{proc.stderr[-500:]}")
-        if report.exists():
-            for case in ElementTree.parse(report).iter("testcase"):
-                if case.find("skipped") is not None:
-                    skipped.add((case.get("classname", ""), case.get("name", "")))
-    return skipped
+    return set(skip_file.read_text(encoding="utf-8").split("\n")) if skip_file.exists() else set()
 
 
 def _was_skipped(node_id: str, skipped) -> bool:
-    stem = Path(node_id.split("::")[0]).stem
-    return any(name == node_id.split("::")[-1] and stem in classname.split(".") for classname, name in skipped)
+    return node_id in skipped
 
 
 def scoped_redundant(base: str, to_check: list[str]) -> tuple[list[str], list[str], list[str]]:
@@ -363,15 +364,14 @@ def flaky_python(selected: list[str]) -> dict[str, int]:
     work = Path(tempfile.mkdtemp(prefix="new-tests-flaky-"))
     try:
         for run in range(1, FLAKY_RUNS + 1):
-            env = {**os.environ, "BRINDLE_SHUFFLE_SEED": str(run),
-                   "PYTHONPATH": os.pathsep.join(filter(None, [str(HERE), os.environ.get("PYTHONPATH", "")]))}
+            env = _plugin_env(BRINDLE_SHUFFLE_SEED=str(run))
             this_run = set()
             for part, args in enumerate((["-n", "2", "-m", "not serial"], ["-m", "serial"])):
                 if part and not serial:
                     continue
                 report = work / f"run{run}-{part}.xml"
                 proc = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
-                                       "-p", "shuffle_tests", f"--junitxml={report}", *args, *selected],
+                                       "-p", "new_tests_plugin", f"--junitxml={report}", *args, *selected],
                                       cwd=ROOT, env=env, capture_output=True, text=True)
                 if proc.returncode not in (0, 1, 5):
                     raise SystemExit(f"pytest exited {proc.returncode} repeating the new and changed tests "
@@ -408,11 +408,19 @@ def flaky_vitest(base: str) -> dict[str, int]:
             if not report.exists():
                 raise SystemExit(f"vitest wrote no report (exit {proc.returncode}) repeating the changed "
                                  f"test files (run {run}):\n{proc.stdout[-1000:]}{proc.stderr[-1000:]}")
-            for suite in json.loads(report.read_text(encoding="utf-8")).get("testResults", []):
-                for case in suite.get("assertionResults", []):
-                    if case.get("status") == "failed":
-                        name = f"{Path(suite.get('name', '')).name}: {case.get('fullName')}"
-                        failed[name] = failed.get(name, 0) + 1
+            data = json.loads(report.read_text(encoding="utf-8"))
+            this_run = set()
+            for suite in data.get("testResults", []):
+                file = Path(suite.get("name", "")).name
+                named = [f"{file}: {c.get('fullName')}" for c in suite.get("assertionResults", [])
+                         if c.get("status") == "failed"]
+                if not named and suite.get("status") == "failed":
+                    named = [f"{file}: the suite failed ({(suite.get('message') or '')[:200]})"]
+                this_run.update(named)
+            if not this_run and (proc.returncode != 0 or data.get("success") is False):
+                this_run.add(f"vitest (exit {proc.returncode}): the run failed without naming a test")
+            for name in this_run:
+                failed[name] = failed.get(name, 0) + 1
         return failed
     finally:
         shutil.rmtree(work, ignore_errors=True)

@@ -36,25 +36,42 @@ def _table(arg: ast.expr, consts: dict[str, ast.expr]) -> "list[str] | str":
     return f"{arg.id} = {ast.unparse(value)}" if isinstance(arg, ast.Name) and value is not arg else ast.unparse(arg)
 
 
-def test_tables(source: str) -> dict[str, list]:
+def _inputs(args: list[ast.expr], consts: dict[str, ast.expr]) -> str:
+    """The module-level assignments the tables use, directly or through other
+    assignments by name, as source lines: when one changes, the rows may too."""
+    seen: set[str] = set()
+    todo = list(args)
+    while todo:
+        for node in ast.walk(todo.pop()):
+            if isinstance(node, ast.Name) and node.id in consts and node.id not in seen:
+                seen.add(node.id)
+                todo.append(consts[node.id])
+    return "\n".join(f"{name} = {ast.unparse(consts[name])}" for name in sorted(seen))
+
+
+def scan(source: str) -> dict[str, tuple[list, str]]:
     """Test function qualnames in a module (``test_x``, ``TestY::test_x``), each
-    with its parametrize tables, one per decorator."""
+    with its parametrize tables (one per decorator) and the assignments they use."""
     tree = ast.parse(source)
     consts = _consts(tree)
-    found: dict[str, list] = {}
+    found: dict[str, tuple[list, str]] = {}
 
     def visit(body, prefix):
         for node in body:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test"):
-                found[prefix + node.name] = [
-                    _table(d.args[1], consts) for d in node.decorator_list
-                    if isinstance(d, ast.Call) and ast.unparse(d.func).endswith("mark.parametrize")
-                    and len(d.args) > 1]
+                args = [d.args[1] for d in node.decorator_list
+                        if isinstance(d, ast.Call) and ast.unparse(d.func).endswith("mark.parametrize")
+                        and len(d.args) > 1]
+                found[prefix + node.name] = ([_table(a, consts) for a in args], _inputs(args, consts))
             elif isinstance(node, ast.ClassDef) and node.name.startswith("Test"):
                 visit(node.body, f"{prefix}{node.name}::")
 
     visit(tree.body, "")
     return found
+
+
+def test_tables(source: str) -> dict[str, list]:
+    return {name: tables for name, (tables, _) in scan(source).items()}
 
 
 def added_positions(old: "list[str] | None", new: list[str]) -> list[int]:
@@ -65,8 +82,11 @@ def added_positions(old: "list[str] | None", new: list[str]) -> list[int]:
             for j in range(j1, j2)]
 
 
-def _added_rows(path: str, name: str, old: list | None, new: list) -> list[str]:
+def _added_rows(path: str, name: str, old: list | None, new: list, inputs_changed: bool = False) -> list[str]:
     lines = []
+    if inputs_changed:
+        lines.append(f"{path}::{name} parametrize inputs changed (an assignment its tables use): "
+                     "review every row it produces")
     for i, table in enumerate(new):
         before = old[i] if old is not None and i < len(old) else None
         if isinstance(table, str):
@@ -89,17 +109,18 @@ def added_tests(root: str | Path, base: str) -> list[str]:
         if not re.search(r"(^|/)test_[^/]*\.py$", path):
             continue
         try:
-            head = test_tables((root / path).read_text(encoding="utf-8"))
+            head = scan((root / path).read_text(encoding="utf-8"))
         except (OSError, SyntaxError):
             continue
         try:
-            before = test_tables(git.out(["show", f"{base}:{path}"], root))
+            before = scan(git.out(["show", f"{base}:{path}"], root))
         except (git.GitError, SyntaxError):
             before = {}
-        for name, tables in head.items():
+        for name, (tables, inputs) in head.items():
             if name not in before:
                 lines.append(f"{path}::{name}")
-            lines += _added_rows(path, name, before.get(name), tables)
+            old_tables, old_inputs = before.get(name, (None, inputs))
+            lines += _added_rows(path, name, old_tables, tables, old_inputs != inputs)
     return lines
 
 

@@ -79,6 +79,48 @@ def test_a_test_that_passes_only_sometimes_fails_the_check_worth_committing(tmp_
     assert gate.flaky_python(["tests/test_f.py"]) == {"tests.test_f.test_sometimes": 1}
 
 
+def test_a_vitest_run_that_fails_without_naming_a_test_still_counts_worth_committing(tmp_path, monkeypatch):
+    (tmp_path / "app/node_modules").mkdir(parents=True)
+    (tmp_path / "app/a.test.ts").write_text("")
+    monkeypatch.setattr(gate, "ROOT", tmp_path)
+    monkeypatch.setattr(gate, "FLAKY_RUNS", 2)
+    monkeypatch.setattr(gate, "_git", lambda *a, **kw: "app/a.test.ts")
+    runs = iter([
+        {"success": False, "testResults": [{"name": "/x/a.test.ts", "status": "failed", "message": "boom",
+                                            "assertionResults": []}]},      # a suite that failed to load
+        {"success": False, "testResults": []}])                              # a crash with nothing named
+
+    def fake_vitest(cmd, **kw):
+        out = next(a for a in cmd if a.startswith("--outputFile=")).split("=", 1)[1]
+        Path(out).write_text(__import__("json").dumps(next(runs)))
+        return type("P", (), {"returncode": 1, "stdout": "", "stderr": ""})()
+
+    monkeypatch.setattr(gate.subprocess, "run", fake_vitest)
+    assert gate.flaky_vitest("x") == {"a.test.ts: the suite failed (boom)": 1,
+                                      "vitest (exit 1): the run failed without naming a test": 1}
+
+
+def test_changed_inputs_and_stable_ids_are_judged_by_real_collection_worth_committing(tmp_path):
+    def new_rows(base_src, head_src):
+        here = tmp_path / str(len(list(tmp_path.iterdir())))   # a fresh folder: no stale bytecode
+        here.mkdir()
+        (here / "test_base.py").write_text(base_src)
+        (here / "test_head.py").write_text(head_src)
+        ids = list(gate.collect_in(here, ["test_base.py", "test_head.py"]))
+        pick = lambda f: [n.split("::", 1)[1] for n in ids if n.startswith(f)]   # noqa: E731
+        scanned = lambda src: gate.inventory.scan(src)["test_t"]                  # noqa: E731
+        return gate._new_ids(pick("test_head"), pick("test_base"), scanned(base_src), scanned(head_src))
+
+    # a table that reaches its rows through assignments, one of them changed upstream by name
+    computed = "import pytest\nN = %d\nCASES = list(range(N))\n@pytest.mark.parametrize('n', CASES)\ndef test_t(n): pass\n"
+    assert new_rows(computed % 2, computed % 3) == ["test_t[0]", "test_t[1]", "test_t[2]"]
+    assert new_rows(computed % 2, computed % 2) == []
+    # a replaced value in one of two stacked tables keeps the id `0-x0`
+    stacked = ("import pytest\n@pytest.mark.parametrize('a', ['x'])\n"
+               "@pytest.mark.parametrize('d', [{'k': %d}])\ndef test_t(a, d): pass\n")
+    assert len(new_rows(stacked % 1, stacked % 2)) == 1
+
+
 def test_a_new_test_that_never_ran_is_not_a_pass_worth_committing(tmp_path, monkeypatch):
     new = "tests/test_a.py::test_new"
 
@@ -93,7 +135,7 @@ def test_a_new_test_that_never_ran_is_not_a_pass_worth_committing(tmp_path, monk
     monkeypatch.setattr(gate, "run_with_coverage", partial)
     skips = set()    # coverage exists, but this test left none and wasn't skipped
     assert gate.scoped_redundant("x", [new]) == ([], [], [new])
-    skips = {("tests.test_a", "test_new")}   # a positively identified skip is only noted
+    skips = {new}   # a skip identified by its full node id is only noted
     assert gate.scoped_redundant("x", [new]) == ([], [new], [])
 
 
