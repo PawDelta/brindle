@@ -352,9 +352,12 @@ function Banner({ item, actions, who, branch, sessionTitle, repo, isNew, onDone,
   } else if ((item.kind === "pr_ready" || item.kind === "pr_failed") && onReview) {
     // Nothing is pushed until the person's Open PR in the sheet.
     acts = (
-      <button type="button" className={`${ACT} ${PLAIN}`} onClick={onReview}>
-        Review &amp; open PR
-      </button>
+      <>
+        <button type="button" className={`${ACT} ${PLAIN}`} onClick={onReview}>
+          Review &amp; open PR
+        </button>
+        {item.kind === "pr_ready" && act("Not now", "pr-not-now", {}, GHOST)}
+      </>
     );
   } else if (item.kind === "visual") {
     // A visual decision opens its reader (goTo), not the session it belongs to; disabled until that session has loaded.
