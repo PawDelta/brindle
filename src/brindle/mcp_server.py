@@ -1715,7 +1715,7 @@ def set_goal(goal: str, milestones: list[dict[str, str]], detail: str | None = N
              analysis_doc: bool | None = None, summary: str | None = None) -> str:
     """Autopilot: record what we're building. milestones is an ordered list of
     {"title": ..., "check": ..., "detail": ..., "profile": ..., "repo": ...}. Include
-    summary: a few words naming the goal for the sidebar's single-line session label. The optional
+    summary: a few words (at most 30 characters) naming the goal for the sidebar's single-line session label. The optional
     profile names the default worker profile for `assign` while that milestone
     is the current one (e.g. a cheaper profile for a small milestone). Each check is a shell command
     brindle runs from the root of your checkout; it must exit 0 only when that

@@ -97,6 +97,9 @@ describe("GoalPanel", () => {
       // The shell shows before the sessions are read: the context pane is replaced once they are.
       const title = await waitFor(() => within(screen.getByTestId("session-context")).getByRole("button", { name: appSession.goal! }));
       const context = screen.getByTestId("session-context");
+      fireEvent.click(title);
+      expect(screen.getByRole("region", { name: "Full goal" }).textContent).toContain(request);
+      fireEvent.click(screen.getByRole("button", { name: "Close full goal" }));
       vi.useFakeTimers();
       await act(async () => fireEvent.dblClick(title));
       expect(daemon.clipboard).toBe(request);
@@ -302,6 +305,7 @@ describe("GoalPanel", () => {
     const sidebar = render(<GoalPanel client={daemon.client()} repo={REPO} root={ROOT} store={store} compact />);
     // The sidebar's steps are one line each: the label and the reason are the row's tooltip.
     fireEvent.click(await sidebar.findByRole("button", { name: "1 pending" }));
+    fireEvent.click(sidebar.getByRole("button", { name: /\d+ done/ }));
     const [, row, later] = sidebar.getAllByTestId("milestone");
     expect(row.title).toContain(label);
     expect(row.title).toContain(why);
@@ -317,7 +321,7 @@ describe("GoalPanel", () => {
   });
 
   /* Only a milestone with work on it reads as in progress; one nobody has started reads as pending. */
-  it.each([false, true])("folds a pending line without hiding active or done rows (phases: %s)", async (phased) => {
+  it.each([false, true])("keeps a done fold and pending fold independent with active rows visible (phases: %s)", async (phased) => {
     const milestones: MilestoneDTO[] = [
       { ...goal.milestones![0], state: "passed", status: "passed" },
       { ...goal.milestones![1], state: "not_done", status: "pending" },
@@ -327,13 +331,17 @@ describe("GoalPanel", () => {
     const daemon = new FakeDaemon({ goal: { ...structuredClone(goal), milestones } });
     const sidebar = render(<GoalPanel client={daemon.client()} repo={REPO} root={ROOT} store={createAppStore()} compact />);
     const pending = await sidebar.findByRole("button", { name: "1 pending" });
-    expect(sidebar.getAllByTestId("milestone")).toHaveLength(2);
+    expect(sidebar.getAllByTestId("milestone").map((li) => li.dataset.state)).toEqual(["now"]);
+    const done = sidebar.getByRole("button", { name: "1 done" });
+    expect(done.getAttribute("aria-expanded")).toBe("false");
     expect(sidebar.queryByText("Ship it")).toBeNull();
     expect(pending.getAttribute("aria-expanded")).toBe("false");
     fireEvent.click(pending);
+    expect(sidebar.getAllByTestId("milestone").map((li) => li.dataset.state)).toEqual(["now", "pending"]);
+    fireEvent.click(done);
     expect(sidebar.getAllByTestId("milestone").map((li) => li.dataset.state)).toEqual(["done", "now", "pending"]);
     expect(sidebar.getByRole("progressbar").getAttribute("aria-valuenow")).toBe("33");
-    expect(sidebar.getByTestId("goal-line").textContent).toContain("1 of 3 milestones complete");
+    expect(sidebar.getByTestId("goal-count").textContent).toBe("1 of 3");
     fireEvent.click(pending);
     expect(sidebar.getAllByTestId("milestone")).toHaveLength(2);
     if (phased) {
@@ -347,6 +355,7 @@ describe("GoalPanel", () => {
     daemon.data.goal = { ...daemon.data.goal!, root_id: "other" };
     sidebar.rerender(<GoalPanel client={client} repo={REPO} root="other" store={createAppStore()} compact />);
     expect((await sidebar.findByRole("button", { name: "1 pending" })).getAttribute("aria-expanded")).toBe("false");
+    expect(sidebar.getByRole("button", { name: "1 done" }).getAttribute("aria-expanded")).toBe("false");
   });
 
   /* Every milestone a live worker is linked to is active, in the stage's colour and word; one nobody works on is not. */
@@ -393,10 +402,10 @@ describe("GoalPanel", () => {
   });
 
   /* The goal's count and bar stay above the list; only the milestones scroll. */
-  it("keeps the goal header pinned outside the scrolling milestone list", async () => {
-    const daemon = new FakeDaemon({ goal: structuredClone(goal) });
+  it("keeps the goal summary on one line with the count visible and the header pinned", async () => {
+    const daemon = new FakeDaemon({ goal: { ...structuredClone(goal), summary: "A very long summary for a narrow sidebar", stage: "working", commits_last_hour: 4, eta_seconds: 1200 } });
     const view = render(<GoalPanel client={daemon.client()} repo={REPO} root={ROOT} store={createAppStore()} compact />);
-    await waitFor(() => expect(view.getAllByTestId("milestone")).toHaveLength(2));
+    await view.findByTestId("goal-line");
     const header = view.getByTestId("goal-header");
     const list = view.getByTestId("goal-scroll");
     expect(header.contains(view.getByTestId("goal-line"))).toBe(true);
@@ -404,6 +413,11 @@ describe("GoalPanel", () => {
     expect(list.contains(header)).toBe(false);
     expect(list.className).toContain("overflow-auto");
     expect(header.className).toContain("shrink-0");
+    expect(view.getByTestId("goal-line").className).toContain("flex-nowrap");
+    expect(view.getByRole("button", { name: daemon.data.goal!.summary! }).className).toContain("truncate");
+    expect(view.getByTestId("goal-count").className).toContain("shrink-0");
+    expect(view.getByTestId("goal-count").className).toContain("whitespace-nowrap");
+    expect(view.getByTestId("goal-activity").textContent).toBe("4 commits in the last hour, about 20m left");
     expect(list.contains(view.getAllByTestId("milestone")[0])).toBe(true);
   });
 
@@ -412,7 +426,7 @@ describe("GoalPanel", () => {
   it.each([["working"], ["checks"], ["review"], ["merging"], [null]])("colours the active step by its stage %s", async (stage) => {
     const daemon = new FakeDaemon({ goal: { ...structuredClone(goal), stage } });
     const view = render(<GoalPanel client={daemon.client()} repo={REPO} root={ROOT} store={createAppStore()} compact />);
-    await waitFor(() => expect(view.getAllByTestId("milestone")).toHaveLength(2));
+    fireEvent.click(await view.findByRole("button", { name: "1 done" }));
     const [done, active] = view.getAllByTestId("milestone");
     const displayed = stage === "checks" ? "working" : stage;
     expect(done.className).not.toMatch(/\bst-/);
@@ -425,15 +439,15 @@ describe("GoalPanel", () => {
      has one and something runs. An engine that says nothing of either draws no line. */
   const ago = (s: number) => Date.now() / 1000 - s;
   it.each<[string, Partial<GoalDTO>, string | null, string | null]>([
-    ["commits, an estimate", { stage: "working", commits_last_hour: 3, last_commit_at: ago(60), eta_seconds: 1500 }, "3 commits in the last hour", "~25m left"],
+    ["commits, an estimate", { stage: "working", commits_last_hour: 3, last_commit_at: ago(60), eta_seconds: 1500 }, "3 commits in the last hour", "about 25m left"],
     ["one commit, no estimate", { stage: "working", commits_last_hour: 1, last_commit_at: ago(60), eta_seconds: null }, "1 commit in the last hour", null],
-    ["no commit this hour", { stage: "checks", commits_last_hour: 0, last_commit_at: ago(900), eta_seconds: 240 }, "last commit 15m ago", "~4m left"],
+    ["no commit this hour", { stage: "checks", commits_last_hour: 0, last_commit_at: ago(900), eta_seconds: 240 }, "last commit 15m ago", "about 4m left"],
     ["nothing running", { stage: null, commits_last_hour: 0, last_commit_at: ago(900), eta_seconds: 600 }, "last commit 15m ago", null],
     ["an older engine", {}, null, null],
   ])("says what happened lately: %s", async (_, fields, what, eta) => {
     const daemon = new FakeDaemon({ goal: { ...structuredClone(goal), ...fields } });
     const view = render(<GoalPanel client={daemon.client()} repo={REPO} root={ROOT} store={createAppStore()} compact />);
-    await waitFor(() => expect(view.getAllByTestId("milestone")).toHaveLength(2));
+    await view.findByTestId("goal-header");
     expect(view.queryByTestId("goal-activity-what")?.textContent ?? null).toBe(what);
     expect(view.queryByTestId("goal-eta")?.textContent ?? null).toBe(eta);
   });
@@ -512,6 +526,7 @@ describe("GoalPanel", () => {
       ["active", "Polish", "1 of 2", "true"],
       ["todo", "Ship", "1 upcoming", "false"],
     ]);
+    if (compact) fireEvent.click(view.getByRole("button", { name: "1 done" }));
     expect(rows()).toEqual(["M3", "M4"]);
     // The sidebar's steps go by their short names: a done one checked, the active one marked.
     if (compact) expect(view.getAllByTestId("milestone").map((li) => li.textContent)).toEqual(["✓M3", "●M4"]);
@@ -519,6 +534,7 @@ describe("GoalPanel", () => {
     // Only the panel's fold line carries the tiny per-phase bar, one segment per milestone.
     expect([...folds()[1].querySelectorAll(".bar-s i")].map((i) => (i as HTMLElement).dataset.s)).toEqual(compact ? [] : ["passed", "todo"]);
     fireEvent.click(folds()[0]);
+    if (compact) fireEvent.click(view.getByRole("button", { name: "2 done" }));
     expect(rows()).toEqual(["M1", "M2", "M3", "M4"]);
     fireEvent.click(folds()[1]);
     expect(rows()).toEqual(["M1", "M2"]);
@@ -585,11 +601,12 @@ describe("GoalPanel", () => {
      sidebar's pane names it above), every milestone listed and checked, nothing of a PR or of no milestones. */
   async function expectDone(view: ReturnType<typeof render>, compact: boolean) {
     await waitFor(() => expect(view.getByRole("region", { name: "Goal" }).dataset.phase).toBe("done"));
+    if (compact) fireEvent.click(view.getByRole("button", { name: "2 done" }));
     const items = [...within(view.getByRole("list", { name: "Milestones" })).getAllByTestId("milestone")];
     if (compact) {
       expect(items.map((li) => li.dataset.state)).toEqual(["done", "done"]);
       expect(items.map((li) => li.textContent)).toEqual(["✓Client wired", "✓Screen renders"]);
-      expect(view.getByTestId("goal-line").textContent).toBe("2 of 2 milestones complete");
+      expect(view.getByTestId("goal-count").textContent).toBe("2 of 2");
       expect(view.getByTestId("goal-line").className).toContain("text-pass");
       expect(view.queryByTestId("goal-phase")).toBeNull();
       expect(view.getByRole("progressbar").getAttribute("aria-valuenow")).toBe("100");
