@@ -1862,8 +1862,146 @@ def milestone_phases(db: DB, root_id: str) -> dict[int, str]:
 
 
 STAGES = ("working", "checks", "review", "merging")   # a branch's way from its brief to its merge
-ESTIMATE_RUNS = 5        # report-to-merge runs on record before the sidebar says how long is left
+ESTIMATE_RUNS = 5        # samples required before the sidebar estimates a duration
 ESTIMATE_DAYS = 14
+
+
+def _goal_eta(db: DB, tree: list[Agent], live: list[Agent], now: float) -> float | None:
+    """Remaining critical path through workers and queued dependencies, then goal checks/audit."""
+    import statistics
+    from brindle import agents, fair_share, tasks
+
+    since = now - ESTIMATE_DAYS * 86400
+    day = time.strftime("%Y-%m-%d", time.gmtime(since))
+    medians: dict[tuple[str, str | None], float | None] = {}
+
+    def typical(repo: str, profile: str | None = None) -> float | None:
+        key = (repo, profile)
+        if key not in medians:
+            if profile is None:
+                samples = [s for r in db.conn.execute(
+                    "SELECT samples FROM stage_timings WHERE repo_root=? AND stage='report_to_merge' AND day>=?",
+                    (repo, day)) for s in json.loads(r["samples"])]
+            else:
+                samples = [r[0] for r in db.conn.execute(
+                    "SELECT a.reviewing_since-a.created_at FROM agents a JOIN workspaces w ON w.id=a.workspace_id"
+                    " WHERE w.repo_root=? AND a.profile=? AND a.created_at>=? AND a.reviewing_since<=?"
+                    " AND a.reviewing_since>a.created_at AND a.result IS NOT NULL"
+                    " AND a.mode IN ('assign', 'handoff', 'handoff_detached')",
+                    (repo, profile, since, now))]
+            medians[key] = statistics.median(samples) if len(samples) >= ESTIMATE_RUNS else None
+        return medians[key]
+
+    remaining: dict[str, float] = {}
+    for a in live:
+        ws = db.get_workspace(a.workspace_id)
+        merge = typical(ws.repo_root) if ws else None
+        if merge is None:
+            return None
+        if a.pipeline in ("ready", "reviewing") and a.reviewing_since:
+            remaining[a.id] = max(60.0, merge - max(0, now - a.reviewing_since))
+        else:
+            build = typical(ws.repo_root, a.profile)
+            if build is None:
+                return None
+            release = max(60.0, build - max(0, now - a.created_at))
+            remaining[a.id] = release + merge
+
+    ids = {a.id for a in tree}
+    queued = {t.id: t for t in db.list_tasks() if t.caller_id in ids
+              and t.state in (*tasks.QUEUED, "starting") and t.agent_id not in remaining}
+    dependencies: dict[str, list[str]] = {}
+    durations: dict[str, tuple[float, float]] = {}
+    for t in queued.values():
+        ws = db.get_workspace(t.caller_ws_id)
+        build, merge = typical(t.repo_root, t.profile), typical(t.repo_root)
+        if ws is None or build is None or merge is None:
+            return None
+        durations[t.id] = (build, merge)
+        dependencies[t.id] = []
+        session_repos = tasks._session_repos(db, ws, t.caller_id)
+        for dep in json.loads(t.depends_on or "[]"):
+            try:
+                _, upstream, branch = tasks._resolve_dependency(db, ws, dep, session_repos, dependent_task_id=t.id)
+            except agents.AgentError:
+                return None
+            if upstream is not None and upstream.id in queued:
+                dependencies[t.id].append(f"task:{upstream.id}")
+            elif upstream is not None and upstream.state == "merged":
+                continue
+            else:
+                worker = next((a for a in live if a.id == dep or
+                               (branch is not None and a.workspace_id == branch.id)), None)
+                if worker is None:
+                    return None
+                dependencies[t.id].append(worker.id)
+    if queued:
+        cap = fair_share.limit()
+        releases: list[float] = []
+        if cap > 0:
+            # Match fair_share.running: all sessions' process workers and unlinked launch claims.
+            with db.snapshot():
+                occupants = [a for a in db.list_agents() if a.mode in fair_share.WORKER_MODES
+                             and a.status in ("starting", "processing") and agents.runs_process(a)]
+                claims = [t for t in db.list_tasks(state="starting") if not t.agent_id]
+
+            def release_at(repo: str | None, profile: str, began: float) -> float:
+                build = typical(repo, profile) if repo is not None else None
+                return max(60.0, build - max(0, now - began)) if build is not None else float("inf")
+
+            for a in occupants:
+                ws = db.get_workspace(a.workspace_id)
+                releases.append(0.0 if a.pipeline in ("ready", "reviewing") and a.reviewing_since else
+                                release_at(ws.repo_root if ws else None, a.profile, a.created_at))
+            for t in claims:
+                release = release_at(t.repo_root, t.profile, t.started_at or t.created_at)
+                releases.append(release)
+                if t.id in queued:
+                    # A claimed task already owns its slot; don't schedule it twice.
+                    remaining[f"task:{t.id}"] = release + durations[t.id][1]
+                    del queued[t.id]
+        else:
+            cap = len(queued)
+        # If already over capacity, enough workers must report before a slot opens.
+        slots = sorted(releases, reverse=True)[:cap]
+        slots.extend([0.0] * max(0, cap - len(slots)))
+        while queued:
+            candidates = []
+            for t in queued.values():
+                deps = dependencies[t.id]
+                if all(dep in remaining for dep in deps):
+                    ready = max((remaining[dep] for dep in deps), default=0.0)
+                    if min(slots) > ready and float("inf") in slots:
+                        return None   # an unknown occupant could determine when the next slot opens
+                    start = max(min(slots), ready)
+                    candidates.append((start, t.created_at, t.id))
+            if not candidates:   # cyclic dependencies have no estimable launch order
+                return None
+            start, _, task_id = min(candidates)
+            build, merge = durations[task_id]
+            # Reporting releases the execution slot; merging releases dependants.
+            slots[slots.index(min(slots))] = start + build
+            remaining[f"task:{task_id}"] = start + build + merge
+            del queued[task_id]
+    if not remaining:
+        return None
+    home = db.get_workspace(tree[0].workspace_id)
+    overhead: dict[str, list[float]] = {"check": [], "audit": []}
+    opened: dict[tuple[str, str], float] = {}
+    if home is not None:
+        for r in db.conn.execute(
+                "SELECT agent_id, ts, kind, payload FROM events WHERE repo_root=? AND ts>=? AND ts<=?"
+                " AND kind IN ('autopilot.checking', 'autopilot.audit_started', 'autopilot.audit') ORDER BY id",
+                (home.repo_root, since, now)):
+            check = r["kind"] == "autopilot.checking"
+            stage = "check" if check else "audit"
+            key = (r["agent_id"], stage)
+            start = json.loads(r["payload"]).get("checking") if check else r["kind"] == "autopilot.audit_started"
+            if start:
+                opened.setdefault(key, r["ts"])
+            elif key in opened:
+                overhead[stage].append(max(0.0, r["ts"] - opened.pop(key)))
+    return max(remaining.values()) + sum(statistics.median(s) for s in overhead.values() if len(s) >= ESTIMATE_RUNS)
 
 
 def goal_activity(db: DB, root_id: str, now: float | None = None) -> dict:
@@ -1874,10 +2012,9 @@ def goal_activity(db: DB, root_id: str, now: float | None = None) -> dict:
     working), None when nothing runs or the session is paused. Commits made
     since the session started, in its checkout and its live branches'
     worktrees: ``commits_last_hour`` and ``last_commit_at``. ``eta_seconds``:
-    once every branch has reported, the repo's median report-to-merge time
-    (the ``stage_timings`` rollup) less how long the newest report has
-    waited; None with fewer than ``ESTIMATE_RUNS`` runs on record, or while a
-    branch is still being written."""
+    the slowest live branch's remaining build and report-to-merge time,
+    including queued dependencies and known final check/audit overhead;
+    None with fewer than ``ESTIMATE_RUNS`` runs for a required duration."""
     from brindle import agents, git
 
     now = time.time() if now is None else now
@@ -1890,7 +2027,7 @@ def goal_activity(db: DB, root_id: str, now: float | None = None) -> dict:
     closed = ("paused", "done")
     reviewed = {a.workspace_id for a in tree[1:] if a.mode == "review" and a.status not in closed
                 and a.result is None and not agents.review_moot(db, a)}
-    stages, reports, paths = set(), [], set()
+    stages, live, paths = set(), [], set()
     for a in tree[1:]:
         if a.mode == "review" or a.mode not in agents.REPORTING_MODES:
             continue
@@ -1902,8 +2039,7 @@ def goal_activity(db: DB, root_id: str, now: float | None = None) -> dict:
             stages.add("working")
         else:
             continue
-        if a.pipeline in ("ready", "reviewing") and a.reviewing_since:
-            reports.append(a.reviewing_since)
+        live.append(a)
         ws = db.get_workspace(a.workspace_id)
         if ws is not None:
             paths.add(ws.path)
@@ -1928,16 +2064,7 @@ def goal_activity(db: DB, root_id: str, now: float | None = None) -> dict:
             if at.isdigit():
                 commits[sha] = float(at)
 
-    eta = None
-    if stage in ("checks", "review", "merging") and reports and home is not None:
-        cutoff = time.strftime("%Y-%m-%d", time.gmtime(now - ESTIMATE_DAYS * 86400))
-        samples = [s for row in db.conn.execute(
-            "SELECT samples FROM stage_timings WHERE repo_root = ? AND stage = 'report_to_merge' AND day >= ?",
-            (home.repo_root, cutoff)) for s in json.loads(row["samples"])]
-        if len(samples) >= ESTIMATE_RUNS:
-            import statistics
-
-            eta = max(60.0, statistics.median(samples) - (now - max(reports)))
+    eta = _goal_eta(db, tree, live, now) if stage is not None and home is not None else None
     return {"stage": stage, "commits_last_hour": sum(at > now - 3600 for at in commits.values()),
             "last_commit_at": max(commits.values(), default=None), "eta_seconds": eta,
             "checking": ap is not None and checking(ap), "auditing": ap is not None and ap.state == "auditing"}
