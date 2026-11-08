@@ -144,7 +144,7 @@ describe("Sidebar", () => {
   });
 
   it("lists every open session by repo with its agents nested in the CLI's rows, recent ones folded, and opens them", async () => {
-    const { sync, navigate } = mount({ workspaces: [root, { ...worker, agents: [...worker.agents!, child] }], inbox: [waiting] }, { screen: "session", root: "sup1", repo: REPO, agent: "w1" });
+    const { sync, navigate, store } = mount({ workspaces: [root, { ...worker, agents: [...worker.agents!, child] }], inbox: [waiting] }, { screen: "session", root: "sup1", repo: REPO, agent: "w1" });
     expect(list().textContent).toContain("Loading");
     expect(within(screen.getByTestId("status-line")).getByRole("button", { name: "Open Account › Usage" })).toBeTruthy();
     await waitFor(() => expect(agentRow("w1")).toBeTruthy());
@@ -165,6 +165,14 @@ describe("Sidebar", () => {
     expect(within(agentRow("w1")!).getByTestId("agent-role").textContent).toBe(roleOf(worker.agents![0].profile));
     expect(agentRow("w1")!.title).toContain("feat/ls");
     expect(within(agentRow("w1")!).getByTestId("agent-status").textContent).toBe("code");
+    const workingClass = within(agentRow("w1")!).getByTestId("agent-status").className;
+    const workingDot = agentRow("w1")!.querySelector(".side-dot")!.className;
+    for (const review_state of ["checks running", "waiting for checks", "checks waiting for room: 2 running"]) {
+      act(() => store.dispatch({ type: "snapshot", workspaces: [root, { ...worker, review_state, agents: [...worker.agents!, child] }], inbox: [waiting] }));
+      expect(within(agentRow("w1")!).getByTestId("agent-status").textContent).toBe("code");
+      expect(within(agentRow("w1")!).getByTestId("agent-status").className).toBe(workingClass);
+      expect(agentRow("w1")!.querySelector(".side-dot")!.className).toBe(workingDot);
+    }
     expect(within(session).queryByTestId("needs-you")).toBeNull();
     expect(screen.queryByTestId("summary")).toBeNull();
     // The route's agent is the current one.
