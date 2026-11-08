@@ -680,6 +680,29 @@ def test_workers_test_their_change_and_leave_the_full_suite_to_checks(db, ws, mo
     assert seen == [True, False]
 
 
+def test_spawn_chooses_unclaimed_milestone(db, ws, monkeypatch):
+    monkeypatch.setattr(agents, "_launch", lambda *a, **kw: None)
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: bool(a.tmux_window) and a.status not in ("paused", "done"))
+    fake_agent(db, ws, agent_id="boss")
+    fake_agent(db, ws, agent_id="other")
+    db.add_autopilot("boss")
+    db.set_milestones("boss", [(t, "true", None) for t in ("Done", "Build", "Ship")])
+    db.record_check(db.milestones("boss")[0].id, True, "")
+    outsider = fake_agent(db, ws, mode="assign", parent="other", agent_id="outsider")
+    db.set_agent_milestone(outsider.id, "Build")
+    first = agents.spawn(db, ws, "developer", parent_id="boss", mode="assign")
+    second = agents.spawn(db, ws, "developer", parent_id="boss", mode="handoff")
+    assert [db.agent_milestone(a.id) for a in (first, second)] == ["Build", "Ship"]
+    fallback = agents.spawn(db, ws, "developer", parent_id="boss", mode="assign")
+    assert db.agent_milestone(fallback.id) == "Build"
+    explicit = agents.spawn(db, ws, "developer", parent_id="boss", mode="assign", milestone="Ship")
+    assert db.agent_milestone(explicit.id) == "Ship"
+    for a in (first, fallback):
+        db.set_status(a.id, "done")
+    replacement = agents.spawn(db, ws, "developer", parent_id="boss", mode="assign")
+    assert db.agent_milestone(replacement.id) == "Build"
+
+
 def test_no_goal_command_when_hooks_are_disabled(db, ws):
     from brindle.providers import get_provider
 
