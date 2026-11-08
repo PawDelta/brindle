@@ -455,6 +455,18 @@ def inbox_action(db: DB, params: dict, body: Body) -> Any:
 
         return {"read": status.mark_read([item])}
     a = _agent(db, item)
+    if action == "pr-not-now":
+        identity_lock.ensure(a)
+        ws = _workspace(db, a.workspace_id)
+        ready = db.conn.execute("SELECT 1 FROM session_pr_prep WHERE root_id = ? AND branch = ?"
+                                " AND state = 'passed'", (a.id, ws.branch)).fetchone()
+        if not ready:
+            raise ServiceError("conflict", "no longer a PR ready for approval", 409)
+        head = git.out(["rev-parse", "HEAD"], ws.path)
+        db.conn.execute("INSERT INTO session_pr_declined (root_id, branch, sha) VALUES (?, ?, ?)"
+                        " ON CONFLICT(root_id, branch) DO UPDATE SET sha = excluded.sha", (a.id, ws.branch, head))
+        bus.publish_agent(db, "session.pr_declined", a.id)
+        return {"dismissed": a.id}
     if action in ("approve", "reject"):
         # The person decides as the worker's supervisor would.
         text = agents.approve_plan(db, a.parent_id, a.id, _get(body, "feedback", default=""),
