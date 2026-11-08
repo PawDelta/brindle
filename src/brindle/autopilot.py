@@ -1665,6 +1665,18 @@ def _commit(ws: Workspace | None, *, tracked_only: bool = False) -> str | None:
         return None
 
 
+AUDIT_GAPS_PERSON = "Found more to do"
+
+
+def person_note(ap: Autopilot) -> str | None:
+    """``ap.note`` as the person sees it: the auditor's report is for the
+    supervisor only, so a block that holds it shows a plain status instead."""
+    note = ap.note
+    if note and ap.state == "blocked" and ap.audit_ok == 0 and note in (ap.audit_history or ""):
+        return AUDIT_GAPS_PERSON
+    return note
+
+
 def audit_due(ap: Autopilot, cfg: RepoConfig, head: str | None) -> str | None:
     """With every milestone passing: None if the goal is reached (the audit is
     off, or approved ``head``), else which AUDIT_HOLD applies."""

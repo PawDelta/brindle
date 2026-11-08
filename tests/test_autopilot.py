@@ -550,6 +550,26 @@ def test_audit_gaps_keep_the_goal_open(db, root, repo, monkeypatch):
     assert db.get_autopilot("boss").state == "auditing"
 
 
+def test_audit_report_text_is_not_shown_to_the_person(db, root, repo):
+    from brindle import view
+    from brindle.daemon import session_review
+    from brindle.service.dto import GoalDTO
+
+    agent, ws = root
+    with_goal(db)
+    report = "Work not done: milestone 18 app/src/x.ts:95 never wired"
+    for _ in range(autopilot.MAX_AUDIT_PASSES):
+        out = autopilot.record_audit(db, "boss", False, report)
+    assert report in out   # the supervisor still gets the full report
+    ap = db.get_autopilot("boss")
+    assert ap.state == "blocked" and report in (ap.note or "")
+    dto = GoalDTO.from_autopilot(ap, db.milestones("boss"), None, session_review.goal_phase(db, "boss"))
+    assert dto.note == autopilot.AUDIT_GAPS_PERSON
+    assert view.autopilot_entry(db, ws.repo_root, root_id="boss")["note"] == autopilot.AUDIT_GAPS_PERSON
+    shown = " ".join(session_review.needs_you(db, agent, ap))
+    assert "app/src/x.ts" not in shown and autopilot.AUDIT_GAPS_PERSON in shown
+
+
 def test_approval_of_an_older_commit_keeps_the_goal_open(db, root, repo, monkeypatch):
     agent, ws = root
     with_goal(db)

@@ -147,7 +147,7 @@ def needs_you(db: DB, root: Agent, ap) -> list[str]:
         if state and state.startswith("merge failed"):
             out.append(f"{ws.branch}: {state}")
     if ap is not None and ap.state == "blocked":
-        out.append(f"the session is waiting on you: {ap.note or 'a question'}")
+        out.append(f"the session is waiting on you: {autopilot.person_note(ap) or 'a question'}")
     if ap is not None and autopilot.proposing(ap):
         out.append("proposed checks are waiting on your answer")
     if (login := db.get_login_state(root.id)) and login.state == "auth_paused":
