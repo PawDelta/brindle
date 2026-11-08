@@ -578,11 +578,11 @@ LONG_NOTES = "\n".join(f"line {n} of the notes about the migration" for n in ran
     _stress("a quote opening on an elision", ["He said 'tis time to render first'"], FIRST, False),
     _stress("a long message keeps its negation", [LONG_NOTES + "\nThen don't render the options."], "render the options", False),
     # Cancelled, in the person's own words, for a quote and for a grant.
-    # One bare cancel, negated request, explicit artifact, trailing clause and
-    # Unicode clause separator; grant cancellation below also covers reasons.
+    # Bare cancellation, negated requests, explicit artifacts, trailing clauses,
+    # Unicode separators and an unpunctuated explanation take distinct paths.
     *[_stress("cancel then quote", [FIRST, cancel], FIRST, False) for cancel in (
         "actually never mind", "don’t make a visual", "no visual please",
-        "thanks for that.\nNever mind the visual.", "Never mind — I found it")],
+        "thanks for that.\nNever mind the visual.", "Never mind — I found it", "never mind I found it")],
     _stress("cancel then grant", ["Make a visual", "actually never mind"], None, False),
     _stress("cancel with a reason, grant", ["Make a visual", "Never mind, I found the answer."], None, False),
     _stress("cancel with unicode punctuation, grant", ["Make a visual", "Never mind…"], None, False),
