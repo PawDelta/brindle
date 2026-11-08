@@ -1,6 +1,7 @@
 import importlib.util
 from pathlib import Path
 
+import pytest
 from coverage import CoverageData
 
 spec = importlib.util.spec_from_file_location(
@@ -28,13 +29,54 @@ def test_a_test_must_cover_something_no_other_test_covers(tmp_path):
     assert gate.analyse(tmp_path / ".coverage", ids[1:2])[ids[1]] == {(src, 4)}
 
 
-def test_new_rows_are_judged_worth_committing(monkeypatch, capsys):
+def _branch(monkeypatch, tmp_path, base_src, head_src, base_ids, head_ids):
+    """A branch that changes tests/test_a.py from base_src to head_src."""
+    (tmp_path / "tests").mkdir(exist_ok=True)
+    (tmp_path / "tests/test_a.py").write_text(head_src)
+    monkeypatch.setattr(gate, "ROOT", tmp_path)
+    monkeypatch.setattr(gate, "_git", lambda *a, **kw: base_src)
+    monkeypatch.setattr(gate, "changed_test_files", lambda b: ["tests/test_a.py"])
+    monkeypatch.setattr(gate, "collect_in", lambda root, files: head_ids)
+    monkeypatch.setattr(gate, "tests_at", lambda b, files: base_ids)
+
+
+def test_a_row_inserted_before_an_old_one_is_the_new_row_worth_committing(monkeypatch, tmp_path):
+    # pytest numbers dict parameters by position: the inserted row is case0 and the old one becomes case1
+    ids = lambda *n: {f"tests/test_a.py::test_t[case{i}]": None for i in n}   # noqa: E731
+    table = "import pytest\n@pytest.mark.parametrize('d', %s)\ndef test_t(d): pass\n"
+    _branch(monkeypatch, tmp_path, table % "[{'k': 2}]", table % "[{'k': 1}, {'k': 2}]", ids(0), ids(0, 1))
+    assert list(gate.new_tests("x")) == ["tests/test_a.py::test_t[case0]"]
+    # a table no source comparison can match to the ids: every row of a changed function is judged
+    _branch(monkeypatch, tmp_path, table % "build()", table % "build()", ids(0), ids(0, 1))
+    assert list(gate.new_tests("x")) == list(ids(0, 1))
+
+
+def test_listing_failures_stop_the_check_worth_committing(tmp_path, monkeypatch):
+    with pytest.raises(SystemExit, match="could not list the tests"):
+        gate.collect_in(tmp_path, ["missing_test.py"])   # pytest's usage error, not "no tests"
+    crashed = type("P", (), {"returncode": 2, "stdout": "", "stderr": ""})()
+    monkeypatch.setattr(gate.subprocess, "run", lambda *a, **kw: crashed)
+    with pytest.raises(SystemExit, match="pytest exited 2"):
+        gate.run_with_coverage(["tests/test_a.py"], tmp_path / ".coverage", append=False)
+
+
+def test_related_tests_fall_back_to_the_module_worth_committing(tmp_path):
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "test_other.py").write_text("from brindle import agents\ndef test_x(): agents.go()\n")
+    (tests / "test_unrelated.py").write_text("def test_y(): pass\n")
+    # the lines only the new test covers are in main(): no test names it, but a file tests the module
+    assert gate.related_test_files({"main"}, {"agents"}, set(), tests) == ["tests/test_other.py"]
+    assert gate.modules_of({("/r/src/brindle/agents.py", 3), ("/r/tests/test_x.py", 1)}) == {"agents"}
+
+
+def test_new_rows_are_judged_worth_committing(monkeypatch, tmp_path, capsys):
     base = {"tests/test_a.py::test_t[x]": None}
     head = {**base, **{f"tests/test_a.py::test_t[r{i}]": None for i in range(80)},
             "tests/test_a.py::test_t[bypass]": "bypass attempt"}
-    monkeypatch.setattr(gate, "changed_test_files", lambda b: ["tests/test_a.py"])
-    monkeypatch.setattr(gate, "collect_in", lambda root, files: head)
-    monkeypatch.setattr(gate, "tests_at", lambda b, files: base)
+    rows = ["'x'", *(f"'r{i}'" for i in range(80)), "'bypass'"]
+    head_src = "import pytest\n@pytest.mark.parametrize('v', [%s])\ndef test_t(v): pass\n" % ", ".join(rows)
+    _branch(monkeypatch, tmp_path, head_src.replace(", " + ", ".join(rows[1:]), ""), head_src, base, head)
     judged = []
 
     def only_r0_is_new(coverage, ids):

@@ -39,6 +39,9 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "src"))
+from brindle import new_tests as inventory  # noqa: E402  (the reviewer's listing shares the row matching)
+
 APPROVERS = {"hmlerner"}
 MAX_RELATED_FILES = 30     # scoped mode: related test files run beyond the changed ones
 COMMON_NAME = 40           # a name found in more test files than this picks no tests
@@ -68,27 +71,34 @@ class _Collect:
             self.found[item.nodeid] = reason if isinstance(reason, str) and reason.strip() else None
 
 
-def collect_here(files: list[str]) -> dict[str, str | None]:
-    """Every test id in ``files`` (relative to the current directory) with its variant reason."""
+def collect_here(files: list[str]) -> dict:
+    """pytest's exit status and every test id in ``files`` (relative to the
+    current directory) with its variant reason."""
     import pytest
 
     plugin = _Collect()
     with contextlib.redirect_stdout(io.StringIO()):
-        pytest.main([*files, "--collect-only", "-q", "-o", "addopts=", "-m", "", "-k", "",
-                     "-p", "no:cacheprovider", "--continue-on-collection-errors"], plugins=[plugin])
-    return plugin.found
+        status = pytest.main([*files, "--collect-only", "-q", "-o", "addopts=", "-m", "", "-k", "",
+                              "-p", "no:cacheprovider"], plugins=[plugin])
+    return {"status": int(status), "tests": plugin.found}
 
 
 def collect_in(root: Path, files: list[str]) -> dict[str, str | None]:
-    """``collect_here`` in a separate process started in ``root``."""
+    """The tests of ``files`` as listed by a separate process started in ``root``.
+    A collection error or a missing file stops the check: an empty list must not
+    pass for "no new tests"."""
     if not files:
         return {}
     proc = subprocess.run([sys.executable, str(Path(__file__).resolve()), "--collect", *files],
                           cwd=root, capture_output=True, text=True)
     try:
-        return json.loads(proc.stdout.strip().splitlines()[-1])
+        listed = json.loads(proc.stdout.strip().splitlines()[-1])
     except (IndexError, ValueError):
-        raise SystemExit(f"could not list the tests in {', '.join(files)}:\n{proc.stderr[-2000:]}")
+        listed = {"status": -1, "tests": {}}
+    if listed["status"] not in (0, 5):
+        raise SystemExit(f"could not list the tests in {', '.join(files)} "
+                         f"(pytest exit {listed['status']}):\n{proc.stderr[-2000:]}")
+    return listed["tests"]
 
 
 def tests_at(base: str, files: list[str]) -> dict[str, str | None]:
@@ -110,7 +120,41 @@ def new_tests(base: str) -> dict[str, str | None]:
     files = changed_test_files(base)
     head = collect_in(ROOT, files)
     before = tests_at(base, files)
-    return {n: reason for n, reason in head.items() if n not in before}
+    added: dict[str, str | None] = {}
+    for path in files:
+        try:
+            old_tables = inventory.test_tables(_git("show", f"{base}:{path}"))
+        except subprocess.CalledProcessError:
+            old_tables = {}
+        new_tables = inventory.test_tables((ROOT / path).read_text(encoding="utf-8"))
+        for qual, ids in _by_function(head, path).items():
+            old_ids = _by_function(before, path).get(qual, [])
+            for n in _new_ids(ids, old_ids, old_tables.get(qual), new_tables.get(qual)):
+                added[n] = head[n]
+    return added
+
+
+def _by_function(tests, path: str) -> dict[str, list[str]]:
+    """Test ids under ``path``, in collection order, grouped by function qualname."""
+    found: dict[str, list[str]] = {}
+    for n in tests:
+        if n.startswith(path + "::"):
+            found.setdefault(n[len(path) + 2:].split("[", 1)[0], []).append(n)
+    return found
+
+
+def _new_ids(ids: list[str], old_ids: list[str], old_tables, new_tables) -> list[str]:
+    """The ids of one test function that are new. A row is identified by its place
+    in the table's source, not by its id: pytest numbers non-literal parameters
+    by position, so inserting a row shifts the ids of those after it. Where the
+    table can't be matched to the ids, every row of a function whose ids changed
+    is judged."""
+    if not old_ids or old_tables is None:
+        return ids
+    if new_tables and len(new_tables) == 1 and isinstance(new_tables[0], list) and len(ids) == len(new_tables[0]):
+        old = old_tables[0] if old_tables and isinstance(old_tables[0], list) else None
+        return [ids[p] for p in inventory.added_positions(old, new_tables[0])]
+    return ids if ids != old_ids else []
 
 
 # -- judging them by coverage
@@ -182,24 +226,37 @@ def enclosing_names(lines) -> set[str]:
     return names - SKIP_NAMES
 
 
-def related_test_files(names: set[str], skip: set[str]) -> list[str]:
-    """Test files that mention the names, most names first; names found in too
-    many files (``status``) pick nothing."""
-    texts = {p.relative_to(ROOT).as_posix(): p.read_text(encoding="utf-8", errors="replace")
-             for p in sorted((ROOT / "tests").glob("test_*.py"))}
+def modules_of(lines) -> set[str]:
+    """Module names (``agents``) of the src/brindle and scripts files in (file, line) pairs."""
+    return {Path(f).stem for f, _ in lines
+            if re.search(r"/(src/brindle|scripts)/", f.replace("\\", "/")) and Path(f).stem != "__init__"}
+
+
+def related_test_files(names: set[str], modules: set[str], skip: set[str],
+                       tests_dir: Path | None = None) -> list[str]:
+    """Test files that mention the functions a new test alone covers (names found
+    in too many files, like ``status``, pick nothing), then those that mention the
+    modules holding them: the fallback when the name is a ``main``, an alias or a
+    private helper no test names. Most mentions first."""
+    tests_dir = tests_dir or ROOT / "tests"
+    texts = {p.relative_to(tests_dir.parent).as_posix(): p.read_text(encoding="utf-8", errors="replace")
+             for p in sorted(tests_dir.glob("test_*.py"))}
     score: dict[str, int] = {}
-    for name in names:
-        hit = [p for p, text in texts.items() if re.search(rf"\b{re.escape(name)}\b", text)]
-        if len(hit) > COMMON_NAME:
-            continue
-        for p in hit:
-            score[p] = score.get(p, 0) + 1
+    for words, weight in ((names, 100), (modules, 1)):
+        for word in words:
+            hit = [p for p, text in texts.items() if re.search(rf"\b{re.escape(word)}\b", text)]
+            if weight == 100 and len(hit) > COMMON_NAME:
+                continue
+            for p in hit:
+                score[p] = score.get(p, 0) + weight
     ranked = sorted((p for p in score if p not in skip), key=lambda p: (-score[p], p))
     return ranked[:MAX_RELATED_FILES]
 
 
 def run_with_coverage(files: list[str], coverage_file: Path, append: bool) -> None:
-    """Run test files with per-test coverage: the parallel tests, then the serial ones."""
+    """Run test files with per-test coverage: the parallel tests, then the serial ones.
+    A failing test is the other checks' business; a pytest that couldn't run the
+    files (collection error, bad usage, crash) stops this check."""
     env = {**os.environ, "COVERAGE_FILE": str(coverage_file)}
     cov = ["--cov=brindle", "--cov=scripts", "--cov-branch", "--cov-context=test", "--cov-report="]
     for i, args in enumerate((["-n", "2", "-m", "not serial"], ["-m", "serial"])):
@@ -207,9 +264,9 @@ def run_with_coverage(files: list[str], coverage_file: Path, append: bool) -> No
         proc = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
                                *args, *cov, *extra, *files], cwd=ROOT, env=env,
                               capture_output=True, text=True)
-        if proc.returncode not in (0, 5):
-            print(f"note: pytest exited {proc.returncode} on {len(files)} files; "
-                  f"the other checks report test failures\n{proc.stdout[-600:]}")
+        if proc.returncode not in (0, 1, 5):
+            raise SystemExit(f"pytest exited {proc.returncode} running {len(files)} test files "
+                             f"with coverage:\n{proc.stdout[-1500:]}{proc.stderr[-500:]}")
 
 
 def scoped_redundant(base: str, to_check: list[str]) -> tuple[list[str], list[str]]:
@@ -221,11 +278,12 @@ def scoped_redundant(base: str, to_check: list[str]) -> tuple[list[str], list[st
         ran = changed_test_files(base)
         run_with_coverage(ran, coverage_file, append=False)
         if not coverage_file.exists():
-            return [], list(to_check)
+            raise SystemExit("no coverage was recorded running the changed test files")
         verdicts = analyse(coverage_file, to_check)
         unique = {n: v for n, v in verdicts.items() if isinstance(v, set)}
         if unique:
-            more = related_test_files(enclosing_names(set().union(*unique.values())), set(ran))
+            lines = set().union(*unique.values())
+            more = related_test_files(enclosing_names(lines), modules_of(lines), set(ran))
             if more:
                 run_with_coverage(more, coverage_file, append=True)
                 verdicts.update(analyse(coverage_file, list(unique)))
