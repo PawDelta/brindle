@@ -52,7 +52,7 @@ def session_visuals(db: DB, request: Request) -> Any:
     if db.get_agent(root) is None:
         raise ServiceError("not_found", f"no session {root}", 404)
     visuals._unlocked(root)
-    return [visuals.to_dto(v) for v in visuals.for_session(db, root)]
+    return [visuals.to_dto(db, v) for v in visuals.for_session(db, root)]
 
 
 @_json
@@ -108,23 +108,23 @@ def visual_page(db: DB, request: Request) -> Path:
 def answer(db: DB, params: dict, body: dict) -> Any:
     visuals.require_enabled()
     rev = body.get("rev")
-    return visuals.to_dto(visuals.answer(db, params["id"], rev, _get(body, "option"),
-                                         _get(body, "note")))
+    return visuals.to_dto(db, visuals.answer(db, params["id"], rev, _get(body, "option"),
+                                             _get(body, "note"), _get(body, "attachments", list)))
 
 
 def keep(db: DB, params: dict, body: dict) -> Any:
     visuals.require_enabled()
-    return visuals.to_dto(visuals.keep(db, params["id"]))
+    return visuals.to_dto(db, visuals.keep(db, params["id"]))
 
 
 def unkeep(db: DB, params: dict, body: dict) -> Any:
     visuals.require_enabled()
-    return visuals.to_dto(visuals.unkeep(db, params["id"]))
+    return visuals.to_dto(db, visuals.unkeep(db, params["id"]))
 
 
 def mark_read(db: DB, params: dict, body: dict) -> Any:
     visuals.require_enabled()
-    return visuals.to_dto(visuals.mark_read(db, params["id"]))
+    return visuals.to_dto(db, visuals.mark_read(db, params["id"]))
 
 
 def snapshot(db: DB, params: dict, body: dict) -> Any:
