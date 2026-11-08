@@ -40,7 +40,24 @@ def _table(arg: ast.expr, consts: dict[str, ast.expr]) -> "list[str] | str":
     return f"{arg.id} = {ast.unparse(value)}" if isinstance(arg, ast.Name) and value is not arg else ast.unparse(arg)
 
 
-def _inputs(args: list[ast.expr], consts: dict[str, ast.expr]) -> str:
+def _statements(tree: ast.Module) -> dict[str, str]:
+    """Each module-level name mapped to the source of the whole statement that binds it."""
+    found = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+        elif isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+        else:
+            continue
+        for target in targets:
+            for name in ast.walk(target):
+                if isinstance(name, ast.Name):
+                    found[name.id] = ast.unparse(node)
+    return found
+
+
+def _inputs(args: list[ast.expr], consts: dict[str, ast.expr], statements: dict[str, str]) -> str:
     """The module-level assignments the tables use, directly or through other
     assignments by name, as source lines: when one changes, the rows may too."""
     seen: set[str] = set()
@@ -50,7 +67,8 @@ def _inputs(args: list[ast.expr], consts: dict[str, ast.expr]) -> str:
             if isinstance(node, ast.Name) and node.id in consts and node.id not in seen:
                 seen.add(node.id)
                 todo.append(consts[node.id])
-    return "\n".join(f"{name} = {ast.unparse(consts[name])}" for name in sorted(seen))
+    # the whole statement, so `A, B = 1, 2` and `B, A = 1, 2` differ
+    return "\n".join(sorted({statements.get(name) or f"{name} = {ast.unparse(consts[name])}" for name in seen}))
 
 
 def scan(source: str) -> dict[str, tuple[list, str]]:
@@ -58,6 +76,7 @@ def scan(source: str) -> dict[str, tuple[list, str]]:
     with its parametrize tables (one per decorator) and the assignments they use."""
     tree = ast.parse(source)
     consts = _consts(tree)
+    statements = _statements(tree)
     found: dict[str, tuple[list, str]] = {}
 
     def visit(body, prefix):
@@ -66,7 +85,7 @@ def scan(source: str) -> dict[str, tuple[list, str]]:
                 args = [d.args[1] for d in node.decorator_list
                         if isinstance(d, ast.Call) and ast.unparse(d.func).endswith("mark.parametrize")
                         and len(d.args) > 1]
-                found[prefix + node.name] = ([_table(a, consts) for a in args], _inputs(args, consts))
+                found[prefix + node.name] = ([_table(a, consts) for a in args], _inputs(args, consts, statements))
             elif isinstance(node, ast.ClassDef) and node.name.startswith("Test"):
                 visit(node.body, f"{prefix}{node.name}::")
 
