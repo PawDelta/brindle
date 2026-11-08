@@ -1409,6 +1409,12 @@ def checking(ap: Autopilot, timeout: float = 900.0) -> bool:
     return bool(ap.checking_since) and time.time() - ap.checking_since < timeout
 
 
+def set_checking(db: DB, root_id: str, on: bool) -> None:
+    """Mark a background check as started or finished, and tell the app so its goal view refetches."""
+    db.update_autopilot(root_id, checking_since=time.time() if on else None)
+    bus.publish_agent(db, "autopilot.checking", root_id, checking=on)
+
+
 def _detach(args: list[str]) -> None:
     """Start a brindle helper that outlives this process."""
     spawn.detach(args)
@@ -1429,7 +1435,7 @@ def check_in_background(db: DB, root_id: str, ws: Workspace, position: int | Non
     if ap and checking(ap):
         return ("A milestone check is already running; its result arrives as a message. "
                 "Carry on with other work meanwhile.")
-    db.update_autopilot(root_id, checking_since=time.time())
+    set_checking(db, root_id, True)
     args = [*brindle_invocation(), "_check-milestones", root_id, ws.id]
     if position is not None:
         args += ["--position", str(position)]
@@ -1870,7 +1876,8 @@ def goal_activity(db: DB, root_id: str, now: float | None = None) -> dict:
     ap = db.get_autopilot(root_id)
     tree = agents.tree(db, root_id)
     if not tree:
-        return {"stage": None, "commits_last_hour": 0, "last_commit_at": None, "eta_seconds": None}
+        return {"stage": None, "commits_last_hour": 0, "last_commit_at": None, "eta_seconds": None,
+                "checking": False, "auditing": False}
     boss = tree[0]
     closed = ("paused", "done")
     reviewed = {a.workspace_id for a in tree[1:] if a.mode == "review" and a.status not in closed
@@ -1924,7 +1931,8 @@ def goal_activity(db: DB, root_id: str, now: float | None = None) -> dict:
 
             eta = max(60.0, statistics.median(samples) - (now - max(reports)))
     return {"stage": stage, "commits_last_hour": sum(at > now - 3600 for at in commits.values()),
-            "last_commit_at": max(commits.values(), default=None), "eta_seconds": eta}
+            "last_commit_at": max(commits.values(), default=None), "eta_seconds": eta,
+            "checking": ap is not None and checking(ap), "auditing": ap is not None and ap.state == "auditing"}
 
 
 def counts(db: DB, root_id: str) -> tuple[int, int]:
