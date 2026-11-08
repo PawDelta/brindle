@@ -2269,6 +2269,12 @@ def on_stop(db: DB, agent: Agent, payload: dict) -> dict | None:
         return None  # only the person can renew the login; a nudge would just fail
     if proposing(ap):
         return None  # brindle's own dialog is asking the user to approve checks
+    if ap.state not in ("usage_paused", "done"):
+        from brindle import open_items
+
+        # Before everything below that waits on someone else: a worker is waiting on this supervisor.
+        if block := open_items.stop_block(db, agent):
+            return block
     if ap.state == "auditing":
         if ap.auditor_id:
             auditor = db.get_agent(ap.auditor_id)
