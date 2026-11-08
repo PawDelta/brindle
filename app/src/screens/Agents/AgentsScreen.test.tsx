@@ -325,7 +325,8 @@ describe("agents tab", () => {
     const pages = await screen.findByRole("navigation", { name: "Pages" });
     expect(within(pages).getByRole("button", { name: "Open Account" })).toBeTruthy();
     expect(pages.className).toContain("flex-nowrap");
-    fireEvent.click(within(pages).getByRole("button", { name: "Agents" }));
+    fireEvent.click(within(pages).getByRole("button", { name: "Open Account" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Agents" }));
     await screen.findByTestId("kind-medium");
 
     // Medium's GPT-5.5 can't run: Sonnet 5.5 runs it for now; Light's quick-fix fallback is skipped.
