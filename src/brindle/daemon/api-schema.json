@@ -2803,6 +2803,14 @@
               "title": "At",
               "type": "number"
             },
+            "attachments": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Attachments",
+              "type": "array"
+            },
             "note": {
               "anyOf": [
                 {
@@ -7535,6 +7543,14 @@
           "title": "At",
           "type": "number"
         },
+        "attachments": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Attachments",
+          "type": "array"
+        },
         "note": {
           "anyOf": [
             {
@@ -7573,6 +7589,14 @@
             "at": {
               "title": "At",
               "type": "number"
+            },
+            "attachments": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Attachments",
+              "type": "array"
             },
             "note": {
               "anyOf": [
@@ -7638,6 +7662,10 @@
       },
       "description": "A visual in a session (brindle.visuals). ``rev``: its current revision,\nserved at /v1/visuals/{id}/r/{rev}; an answer names the revision it read.\n``unread``: a revision the person hasn't opened yet.",
       "properties": {
+        "accepts_files": {
+          "title": "Accepts Files",
+          "type": "boolean"
+        },
         "answer": {
           "anyOf": [
             {
@@ -7648,6 +7676,10 @@
             }
           ],
           "default": null
+        },
+        "answer_agent_id": {
+          "title": "Answer Agent Id",
+          "type": "string"
         },
         "by": {
           "title": "By",
@@ -7720,6 +7752,8 @@
       "required": [
         "id",
         "session",
+        "answer_agent_id",
+        "accepts_files",
         "title",
         "by",
         "kind",
