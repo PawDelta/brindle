@@ -569,6 +569,7 @@ describe("visuals", () => {
     try {
       render(<PtyViewsProvider value={standInViews}><App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "inbox", session: "sup1" }} /></PtyViewsProvider>);
       const card = (await screen.findAllByTestId("inbox-card")).find((candidate) => candidate.dataset.kind === "visual")!;
+      await waitFor(() => expect((within(card).getByRole("button", { name: "Open visual" }) as HTMLButtonElement).disabled).toBe(false));
       fireEvent.click(within(card).getByRole("button", { name: "Open visual" }));
       await screen.findByTestId("visual-reader");
       // The logo's own row: not inside the reader's toolbar, so Back is still its own control.
