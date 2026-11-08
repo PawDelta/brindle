@@ -636,6 +636,14 @@ CREATE TABLE IF NOT EXISTS session_pr_prep (
     prepared_at REAL NOT NULL,
     PRIMARY KEY (root_id, branch)
 );
+-- Inbox's Not now choice: only hides a ready PR at this branch head.
+-- Separate from preparation so rechecking the same head preserves the choice.
+CREATE TABLE IF NOT EXISTS session_pr_declined (
+    root_id TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    sha TEXT NOT NULL,
+    PRIMARY KEY (root_id, branch)
+);
 -- A session branch against origin/<default> as brindle last synced it
 -- (brindle.session_sync). state: synced | behind (its checkout was dirty) |
 -- conflict (files: the JSON list); upstream_sha: the origin commit looked at;
