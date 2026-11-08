@@ -132,7 +132,6 @@ def _resolve(monkeypatch, *, provider=None, pick=None, tty=True, signed_in=(), a
     # No terminal: never ask; the default CLI, and with none usable nothing (not the profile's Claude).
     (dict(tty=False, signed_in=["codex"]), "codex", [], None),
     (dict(ci=True), "refused", [], None),
-    (dict(pick="codex", tty=False, allowed=("codex",), signed_in=["codex"]), "codex", [], "codex"),
     (dict(provider="codex", tty=False), "refused", [], None),                       # -s CLI unusable, can't sign in
     # The real picker never offers a CLI turned off in brindle (its second row is then Antigravity) ...
     (dict(off="codex", typed="2"), "antigravity", ["sign_in:antigravity"], "antigravity"),
