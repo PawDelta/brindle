@@ -176,6 +176,8 @@ def test_a_new_store_is_autonomous_and_an_old_one_migrates_to_standard_keeping_i
     # A separator inside quotes splits no command: the force flag after it still counts.
     (lambda ws: bash(ws, "git rm 'a;b' -f"), "deny", "d-git-force"),
     (lambda ws: bash(ws, 'git checkout "x;y" -f'), "deny", "d-git-force"),
+    pytest.param(lambda ws: bash(ws, 'git push origin "a;b" --force'), "deny", "d-git-force",
+                 marks=pytest.mark.variant("a quoted separator must not hide a force flag from the push parser")),
     (lambda ws: bash(ws, 'git tag -m "fix (x)" -f v1'), "deny", "d-git-force"),
     (lambda ws: bash(ws, "git worktree add -f ../wt topic"), "allow", None),       # a forced add discards nothing
     (lambda ws: bash(ws, "git add -f build/out.txt"), "allow", None),
@@ -272,17 +274,27 @@ def test_autonomous_runs_everything_but_default_branch_pushes_and_destructive_ac
     ("cd unknown && git push", "feature", {}, "ask"),
     ("git -C . push origin HEAD", "feature", {}, "allow"),
     ("git push", "feature", {"remote.origin.push": "HEAD:heads/main"}, "ask"),
+    pytest.param("git push", "feature", {"remote.origin.push": "HEAD:heads/release/desktop"}, "ask",
+                 marks=pytest.mark.variant("a short refspec must still reach the release-branch rule")),
     ("git push", "feature", {"remote.origin.push": "heads/main"}, "ask"),
     ("git push", "feature", {"remote.origin.push": "HEAD:refs/heads/main"}, "ask"),
     ("git push", "stable", {"push.default": "current", "branch.stable.pushremote": "publish",
                              "remote.publish.url": "/publish"}, "ask"),
     ("git push", "stable", {"push.default": "current", "remote.origin.pushurl": "/publish"}, "ask"),
+    pytest.param("git push", "stable", {"push.default": "current", "url./publish.insteadof": "/origin"}, "ask",
+                 marks=pytest.mark.variant("a URL rewrite changes where the push really lands")),
+    pytest.param("git push", "stable", {"push.default": "current", "url./publish.pushinsteadof": "/origin"}, "ask",
+                 marks=pytest.mark.variant("a push-only URL rewrite changes where the push really lands")),
     ("git push", "stable", {"push.default": "current", "remote.origin.pushurl": ["/origin", "/publish"]}, "ask"),
     ("git push", "feature", {"remote.origin.url": "https://example.com/repo.git"}, "ask"),
     ("git push", "feature", {"remote.origin.url": "file:///origin"}, "allow"),
+    pytest.param("git push", "stable", {"push.default": "current", "remote.origin.url": "file:///ori\tgin"}, "ask",
+                 marks=pytest.mark.variant("URL parsing stripped the tab: /origin was checked, /ori<TAB>gin pushed to")),
     ("git push", "stable", {"push.default": "current", "remote.origin.url": "file:///ori%FFgin"}, "ask"),
     pytest.param("git push", "stable", {"push.default": "current", "remote.origin.url": "file:///origin\n/origin"},
                  "ask", marks=pytest.mark.variant("embedded newline can masquerade as multiple push URLs")),
+    pytest.param("git push", "feature", {"remote.origin.url": "file://[invalid"}, "ask",
+                 marks=pytest.mark.variant("a file URL that names no absolute path stays unresolved")),
     ("git push", "feature", {"remote.origin.url": "/unreadable"}, "ask"),
     ("git push", "feature", {"push.default": "upstream",
                               "branch.feature.merge": ["refs/heads/feature", "refs/heads/main"]}, "ask"),
@@ -316,8 +328,8 @@ def test_bare_push_asks_only_for_a_protected_target(tmp_path, monkeypatch, comma
 
     def run(args, cwd, **kwargs):
         reads.append((str(cwd), *args))
-        if str(cwd) in ("/origin", "/publish", "/ori\ufffdgin"):
-            target = "stable" if str(cwd) == "/publish" else "main"
+        if str(cwd) in ("/origin", "/publish", "/ori\tgin", "/ori\ufffdgin"):
+            target = "stable" if str(cwd) in ("/publish", "/ori\tgin") else "main"
             return subprocess.CompletedProcess(args, 0, f"refs/heads/{target}\n", "")
         if os.path.realpath(cwd) != folder:  # A main-checkout or unresolved -C read cannot resolve this worktree.
             return subprocess.CompletedProcess(args, 1, "", "")
@@ -325,6 +337,9 @@ def test_bare_push_asks_only_for_a_protected_target(tmp_path, monkeypatch, comma
             remote = args[-1]
             urls = values.get(f"remote.{remote}.pushurl", values.get(f"remote.{remote}.url", ""))
             urls = urls if isinstance(urls, list) else [urls]
+            for key, prefix in values.items():
+                if key.startswith("url.") and key.endswith((".insteadof", ".pushinsteadof")):
+                    urls = [key[4:key.rfind(".")] + url[len(prefix):] if url.startswith(prefix) else url for url in urls]
             return subprocess.CompletedProcess(args, 0, "\n".join(urls), "")
         if args[0] == "symbolic-ref":
             # A same-named tag makes Git's --short output ambiguous.
