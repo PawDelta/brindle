@@ -32,6 +32,13 @@ vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async (name: string, han
   return () => { if (native.events.get(name) === handler) native.events.delete(name); };
 }) }));
 
+const drops = vi.hoisted(() => ({ handle: (_event: unknown) => {}, clipboard: (): Promise<unknown[]> => Promise.resolve([]) }));
+vi.mock("../../../api/attachments", async (original) => ({
+  ...await original<typeof import("../../../api/attachments")>(),
+  clipboardAttachments: () => drops.clipboard(),
+  listenForDrops: async (handle: typeof drops.handle) => { drops.handle = handle; return () => {}; },
+}));
+
 const now = Date.now() / 1000;
 const visual: VisualDTO = {
   id: "v_8f2c",
@@ -675,6 +682,76 @@ describe("visuals", () => {
     await act(async () => resolve({ ...visual, answer: { option: "B", note: "", at: now } }));
     expect(replacement ? screen.getByTestId("visual-reader") : screen.getByText("Another session")).toBeTruthy();
     expect(onAnswered).not.toHaveBeenCalled();
+  });
+
+  const takesFiles: VisualDTO = { ...visual, answer_agent_id: "a_sup", accepts_files: true };
+  it("shows attach controls only when the provider accepts files, and sends uploaded paths after the uploads finish", async () => {
+    const client = new FakeDaemon().client();
+    let finish!: (r: { paths: string[]; text: string }) => void;
+    const attach = vi.spyOn(client, "attach").mockImplementation(() => new Promise((done) => { finish = done; }));
+    const answer = vi.spyOn(client, "answerVisual").mockResolvedValue({ ...takesFiles, answer: { option: "A", note: "", at: now, attachments: ["/up/a.png"] } });
+    const view = render(<VisualReader client={client} visual={visual} onAnswered={() => {}} onBack={() => {}} Frame={() => <div />} />);
+    expect(screen.queryByRole("button", { name: "Attach" })).toBeNull();
+    view.rerender(<VisualReader client={client} visual={takesFiles} onAnswered={() => {}} onBack={() => {}} Frame={() => <div />} />);
+    fireEvent.click(screen.getByRole("radio", { name: "A · Tag first" }));
+    // Enter on Attach opens the picker; it doesn't submit the answer.
+    expect(fireEvent.keyDown(screen.getByRole("button", { name: "Attach" }), { key: "Enter" })).toBe(true);
+    expect(answer).not.toHaveBeenCalled();
+    fireEvent.change(screen.getByTestId("visual-attach-input"), { target: { files: [new File(["x"], "a.png", { type: "image/png" })] } });
+    await waitFor(() => expect(attach).toHaveBeenCalledWith("a_sup", { name: "a.png", data_base64: "eA==" }));
+    expect((screen.getByTestId("visual-send") as HTMLButtonElement).disabled).toBe(true);
+    await act(async () => finish({ paths: ["/up/a.png"], text: "" }));
+    const send = screen.getByTestId("visual-send") as HTMLButtonElement;
+    expect(send.disabled).toBe(false);
+    fireEvent.click(send);
+    await waitFor(() => expect(answer).toHaveBeenCalledWith(visual.id, visual.rev, "A", "", ["/up/a.png"]));
+    view.rerender(<VisualReader client={client} visual={{ ...takesFiles, answer: { option: "A", note: "", at: now, attachments: ["/up/a.png"] } }} onAnswered={() => {}} onBack={() => {}} Frame={() => <div />} />);
+    expect(screen.getByTestId("visual-answered").textContent).toContain("attached a.png");
+  });
+
+  it("attach: pasted files and drops over the bar upload, chips are removable, failures show, and a stale upload is dropped", async () => {
+    const client = new FakeDaemon().client();
+    const finish: ((r: { paths: string[]; text: string }) => void)[] = [];
+    const attach = vi.spyOn(client, "attach").mockImplementation(() => new Promise((done) => { finish.push(done); }));
+    const reader = (row: VisualDTO) => <VisualReader client={client} visual={row} onAnswered={() => {}} onBack={() => {}} Frame={() => <div />} />;
+    const view = render(reader(takesFiles));
+    Object.defineProperty(document, "elementFromPoint", { configurable: true, value: (x: number) => x < 100 ? screen.getByTestId("visual-answer") : document.body });
+    // A drop elsewhere is ignored; one over the bar uploads by path.
+    await act(async () => drops.handle({ type: "drop", x: 500, y: 1, paths: ["/elsewhere"] }));
+    expect(attach).not.toHaveBeenCalled();
+    await act(async () => drops.handle({ type: "drop", x: 5, y: 1, paths: ["/Users/me/notes.txt"] }));
+    expect(attach).toHaveBeenCalledWith("a_sup", { path: "/Users/me/notes.txt" });
+    await act(async () => finish[0]({ paths: ["/up/notes.txt"], text: "" }));
+    fireEvent.click(screen.getByRole("button", { name: "Remove notes.txt" }));
+    expect(screen.queryByText("notes.txt")).toBeNull();
+    // A paste with files uploads them and is kept out of the note.
+    fireEvent.paste(screen.getByLabelText("Add a note"), { clipboardData: { files: [new File(["y"], "shot.png")] } });
+    await waitFor(() => expect(attach).toHaveBeenCalledTimes(2));
+    await act(async () => finish[1]({ paths: ["/up/shot.png"], text: "" }));
+    expect(screen.getByText("shot.png")).toBeTruthy();
+    attach.mockRejectedValueOnce(new Error("too big"));
+    await act(async () => drops.handle({ type: "drop", x: 5, y: 1, paths: ["/big"] }));
+    expect(screen.getByRole("alert").textContent).toContain("too big");
+    // An empty browser paste falls back to the native clipboard (text pastes are left alone), read across a revision change.
+    native.enabled = true;
+    fireEvent.paste(screen.getByLabelText("Add a note"), { clipboardData: { files: [], getData: () => "plain" } });
+    expect(attach).toHaveBeenCalledTimes(3);
+    let clip!: (files: unknown[]) => void;
+    drops.clipboard = () => new Promise((done) => { clip = done; });
+    fireEvent.paste(screen.getByLabelText("Add a note"), { clipboardData: { files: [], getData: () => "" } });
+    expect((screen.getByTestId("visual-send") as HTMLButtonElement).disabled).toBe(true);
+    view.rerender(reader({ ...takesFiles, rev: 3 }));
+    await act(async () => clip([{ path: "/clip/old.png" }]));
+    expect(attach).toHaveBeenCalledTimes(3);
+    drops.clipboard = () => Promise.resolve([{ path: "/clip/new.png" }]);
+    fireEvent.paste(screen.getByLabelText("Add a note"), { clipboardData: { files: [], getData: () => "" } });
+    await waitFor(() => expect(attach).toHaveBeenLastCalledWith("a_sup", { path: "/clip/new.png" }));
+    // A result that lands after the revision changed is dropped.
+    await act(async () => drops.handle({ type: "drop", x: 5, y: 1, paths: ["/late"] }));
+    view.rerender(reader({ ...takesFiles, rev: 4 }));
+    await act(async () => finish[3]({ paths: ["/up/late.txt"], text: "" }));
+    expect(screen.queryByText("late.txt")).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 
   const open: VisualSource = { kind: "session", id: visual.id, rev: visual.rev };

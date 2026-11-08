@@ -350,11 +350,16 @@ export interface VisualAnswer {
   option: string | null;
   note: string;
   at: number;
+  /* Paths of the files attached to the answer. */
+  attachments?: string[];
 }
 
 export interface VisualDTO {
   id: string;
   session: string;
+  /* The agent that receives the answer, and whether its provider takes files. */
+  answer_agent_id?: string;
+  accepts_files?: boolean;
   title: string;
   /* The agent that published it. */
   by: string;
@@ -1605,8 +1610,8 @@ export class DaemonClient {
   }
 
   /* The person's answer to the revision on screen; a newer revision makes this a 409. */
-  answerVisual(id: string, rev: number, option: string | undefined, note: string) {
-    return this.post<VisualDTO>(`/visuals/${encodeURIComponent(id)}/answer`, { rev, option, note });
+  answerVisual(id: string, rev: number, option: string | undefined, note: string, attachments?: string[]) {
+    return this.post<VisualDTO>(`/visuals/${encodeURIComponent(id)}/answer`, { rev, option, note, ...(attachments?.length ? { attachments } : {}) });
   }
 
   exportVisual(id: string, rev: number, html: string, destination: ExportDestination = "download", markdown?: string) {
