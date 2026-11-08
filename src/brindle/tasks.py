@@ -693,7 +693,7 @@ def enqueue(
     if analysis_doc:
         db.update_task(t.id, analysis_doc=1)   # add_task writes the original columns only
     if milestone:
-        db.update_task(t.id, milestone=milestone)
+        db.set_task_milestone(t.id, milestone)
     if pipeline:
         db.update_task(t.id, pipeline=pipeline)
     bus.publish(db, "task.queued", repo_root=t.repo_root, task_id=t.id, caller_id=t.caller_id,
@@ -1085,7 +1085,7 @@ def start_queued(db: DB, task: Task) -> Agent:
         isolate=bool(task.isolate), branch=task.branch, done_when=task.done_when,
         plan_first=None if task.plan_first is None else bool(task.plan_first),
         start=_holder_start(db, caller_ws, _loads(task.depends_on)), files=_loads(task.files),
-        weight=launch_weight, analysis_doc=bool(task.analysis_doc), milestone=task.milestone,
+        weight=launch_weight, analysis_doc=bool(task.analysis_doc), milestone=db.task_milestone(task.id),
         admit=False,   # every caller has just looked for room (_start_if_ready, requeue)
         # Nobody waits on a queued handoff (its reply said "queued" long ago):
         # detached from its first row, so even a result it reports before this
@@ -1469,7 +1469,7 @@ def requeue(db: DB, caller: Agent | None, caller_ws: Workspace, task_id: str,
         db, caller, ws, old.profile, old.task_text, old.mode, isolate=bool(old.isolate),
         branch=old.branch, done_when=old.done_when, files=_loads(old.files), depends_on=deps,
         plan_first=None if old.plan_first is None else bool(old.plan_first), weight=old.weight,
-        analysis_doc=bool(old.analysis_doc), milestone=old.milestone,
+        analysis_doc=bool(old.analysis_doc), milestone=db.task_milestone(old.id),
     )
     if unmet:
         return f"Requeued task {old.id} as {new.id}, waiting on {', '.join(unmet)}."

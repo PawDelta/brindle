@@ -100,6 +100,12 @@ CREATE TABLE IF NOT EXISTS agent_milestones (
     agent_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
     title TEXT NOT NULL
 );
+-- The goal milestone a queued task's worker is assigned to (assign/handoff's milestone); a table of its
+-- own so no released table gains a column.
+CREATE TABLE IF NOT EXISTS task_milestones (
+    task_id TEXT PRIMARY KEY,
+    title TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS inbox (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
@@ -1239,7 +1245,6 @@ class Task:
     waiting_since: float | None = None
     pipeline: str | None = None        # the pipeline state its worker starts in (brindle.pipeline)
     forced: int | None = None          # 1: a supervisor started it despite the load (brindle.tasks.start_now)
-    milestone: str | None = None       # title of the goal milestone its worker works on (None: the first unverified)
 
 
 def request_subagent(row) -> str | None:
@@ -1455,8 +1460,6 @@ class DB:
             self.conn.execute("ALTER TABLE tasks ADD COLUMN pipeline TEXT")
         if "forced" not in task_cols:
             self.conn.execute("ALTER TABLE tasks ADD COLUMN forced INTEGER")
-        if "milestone" not in task_cols:
-            self.conn.execute("ALTER TABLE tasks ADD COLUMN milestone TEXT")
         cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(autopilot)")}
         if "checking_since" not in cols:
             self.conn.execute("ALTER TABLE autopilot ADD COLUMN checking_since REAL")
@@ -1838,6 +1841,14 @@ class DB:
     def set_agent_milestone(self, agent_id: str, title: str) -> None:
         with self.tx() as c:
             c.execute("INSERT OR REPLACE INTO agent_milestones (agent_id, title) VALUES (?,?)", (agent_id, title))
+
+    def set_task_milestone(self, task_id: str, title: str) -> None:
+        with self.tx() as c:
+            c.execute("INSERT OR REPLACE INTO task_milestones (task_id, title) VALUES (?,?)", (task_id, title))
+
+    def task_milestone(self, task_id: str) -> str | None:
+        row = self.conn.execute("SELECT title FROM task_milestones WHERE task_id=?", (task_id,)).fetchone()
+        return row["title"] if row else None
 
     def agent_milestone(self, agent_id: str) -> str | None:
         row = self.conn.execute("SELECT title FROM agent_milestones WHERE agent_id=?", (agent_id,)).fetchone()
