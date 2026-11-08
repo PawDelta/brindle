@@ -36,8 +36,8 @@ def boss(db, tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("kwargs, large", [
-    ({"weight": "heavy"}, False),   # weight alone never asks
-    ({"requested": True}, True), ({"milestones": 2}, False), ({"milestones": 3}, False),
+    ({"weight": "heavy", "milestones": 3}, False),   # neither weight nor milestone count asks
+    ({"requested": True}, True),
     ({"requested": True, "branch": "merge/x"}, False), ({"milestones": 3, "branch": "sync-main"}, False),
     pytest.param({"requested": True, "branch": "team/alice/merge/main"}, False,
                  marks=pytest.mark.variant("branch_prefix puts the namespace in front of the chore name")),

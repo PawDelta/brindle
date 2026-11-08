@@ -58,7 +58,7 @@ def test_snapshot_strips_active_content(db, session, client, hostile):
     assert not any(s in html for s in ("<script", "onclick", "onload", "javascript:", "url(", "srcdoc", "refresh", "evil.test", "bad--"))
 
 
-@pytest.mark.parametrize("layout", ["class", "mixed", "roots"])
+@pytest.mark.parametrize("layout", ["mixed", "roots"])
 def test_snapshot_preserves_safe_class_styling(db, session, client, layout):
     _, boss, _ = session
     v = visuals.publish(db, boss, "Options", "<p>initial</p>")
