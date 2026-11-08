@@ -205,3 +205,11 @@ def test_new_rows_are_judged_worth_committing(monkeypatch, tmp_path, capsys):
     _branch(monkeypatch, tmp_path, src % "'a0', 'a1', 'a2', 'a3'", src % "'z0', 'z1', 'z2', 'z3', 'z4', 'z5'",
             trimmed_base, grown_head)
     assert list(gate.new_tests("x")) == [f"tests/test_a.py::test_t[z{i}]" for i in (4, 5)]
+    # one table grows while another shrinks, no test deleted: the growth still counts
+    two = ("import pytest\n@pytest.mark.parametrize('v', [%s])\ndef test_a(v): pass\n"
+           "@pytest.mark.parametrize('v', [%s])\ndef test_b(v): pass\n")
+    ids = lambda a, b: {**{f"tests/test_a.py::test_a[{i}]": None for i in a},   # noqa: E731
+                        **{f"tests/test_a.py::test_b[{i}]": None for i in b}}
+    _branch(monkeypatch, tmp_path, two % ("0", "1, 2"), two % ("0, 3", "1"), ids([0], [1, 2]), ids([0, 3], [1]))
+    assert list(gate.new_tests("x")) == ["tests/test_a.py::test_a[3]"]
+    assert gate.selected_python("x", gate.new_tests("x")) == ["tests/test_a.py::test_a[3]"]

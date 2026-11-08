@@ -142,11 +142,14 @@ def new_tests(base: str) -> dict[str, str | None]:
             found += candidates[len(candidates) - growth:] if growth else []
         # Tests folded in from tests deleted in the same diff don't count unless
         # the file as a whole collects more than it did at the base.
-        file_growth = (sum(1 for n in head if n.startswith(path + "::"))
-                       - sum(1 for n in before if n.startswith(path + "::")))
-        if file_growth > 0:
-            for n in found[len(found) - file_growth:]:
-                added[n] = head[n]
+        # Only a file that lost a whole test function is capped this way; unrelated
+        # tables shrinking elsewhere in the file must not hide a table that grew.
+        if set(old_by) - set(_by_function(head, path)):
+            file_growth = max(0, sum(1 for n in head if n.startswith(path + "::"))
+                              - sum(1 for n in before if n.startswith(path + "::")))
+            found = found[len(found) - file_growth:] if file_growth else []
+        for n in found:
+            added[n] = head[n]
     return added
 
 
