@@ -3,8 +3,7 @@
    Inbox, Account and Settings, the session view), one at a time, with Next,
    Back and Skip. It opens by itself once, right after the first launch's
    setup (App's FirstLaunch passes `autoStart`), and again whenever
-   openWalkthrough() is called (the home screen's "Take the tour", the
-   sidebar's "?"). Finished or skipped, it is remembered on this Mac and
+   openWalkthrough() is called. Finished or skipped, it is remembered on this Mac and
    never opens by itself again.
 
    Each step finds its control by a data attribute, data-walkthrough="<id>",

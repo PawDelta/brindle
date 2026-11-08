@@ -85,6 +85,10 @@ describe("the sidebar's weekly usage reading", () => {
     fireEvent.click(within(theme).getByRole("button", { name: "System" }));
     expect(document.documentElement.dataset.theme).toBeUndefined();
     expect(within(screen.getByRole("complementary", { name: "Sidebar" })).queryByRole("group", { name: "Theme" })).toBeNull();
+    // The walkthrough has no button in the foot any more.
+    expect(screen.queryByRole("button", { name: "Show the walkthrough" })).toBeNull();
+    // The reset day shows only from 80% of the week: Codex at 41% has none, at 82% it does.
+    expect(reading.textContent?.includes("resets")).toBe(scenario === "several");
     expect(within(statusLine()).queryByTestId("connection")).toBeNull();
     // The footer's links never wrap, whatever the status line carries.
     const pages = screen.getByTestId("pages");
@@ -122,7 +126,7 @@ describe("the sidebar's weekly usage reading", () => {
 
   it("names the model the current session runs on beside the provider", async () => {
     const { stop } = app("normal", { workspaces: [{ ...root, agents: root.agents?.map((a) => ({ ...a, model: "claude-opus-4-7" })) }] });
-    expect((await screen.findByTestId("usage-model", {}, { timeout: 3000 })).textContent).toBe("Claude Opus 4 7");
+    expect((await screen.findByTestId("usage-model", {}, { timeout: 3000 })).textContent).toBe("Opus 4.7");
     // The meter beside the model is the session's own provider's (Claude 9%), not the fuller Codex (41%).
     const reading = screen.getByTestId("usage-reading");
     expect(reading.dataset.provider).toBe("claude");
@@ -153,7 +157,7 @@ describe("the sidebar's weekly usage reading", () => {
       </DaemonContext.Provider>
     );
     const view = render(tree("sup1"));
-    expect((await screen.findByTestId("usage-model", {}, { timeout: 3000 })).textContent).toBe("Claude Opus 4 7");
+    expect((await screen.findByTestId("usage-model", {}, { timeout: 3000 })).textContent).toBe("Opus 4.7");
     expect(screen.getByTestId("usage-reading").dataset.provider).toBe("claude");
     expect(within(screen.getByTestId("usage-reading")).getByRole("progressbar").getAttribute("aria-valuenow")).toBe("63");
     view.rerender(tree("sup2"));
