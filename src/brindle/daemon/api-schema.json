@@ -211,6 +211,11 @@
         }
       },
       "properties": {
+        "accepts_files": {
+          "default": false,
+          "title": "Accepts Files",
+          "type": "boolean"
+        },
         "dismissed_at": {
           "anyOf": [
             {
@@ -7760,6 +7765,11 @@
       "$defs": {
         "AgentDTO": {
           "properties": {
+            "accepts_files": {
+              "default": false,
+              "title": "Accepts Files",
+              "type": "boolean"
+            },
             "dismissed_at": {
               "anyOf": [
                 {
@@ -8148,6 +8158,10 @@
     {
       "method": "GET",
       "path": "/v1/agents/{id}"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/agents/{id}/attachments"
     },
     {
       "method": "POST",

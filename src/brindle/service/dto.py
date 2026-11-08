@@ -128,6 +128,7 @@ class AgentDTO(_DTO):
     id: str
     profile: str
     provider: str
+    accepts_files: bool = False
     status: str
     mode: str
     dismissed_at: float | None = None
