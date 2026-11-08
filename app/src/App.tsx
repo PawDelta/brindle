@@ -52,6 +52,7 @@ import { Sidebar } from "./components/Sidebar";
 import { Walkthrough, type WalkthroughStep } from "./components/Walkthrough";
 import { TerminalPanel, TerminalProvider, shellPlace } from "./components/TerminalPanel";
 import { alert, button } from "./components/ui";
+import { escapeOwned } from "./escape";
 import { HOME, inProfileRail, readLastSession, settingsTab, writeLastSession, type Route, type SessionRef, type SheetRef } from "./routes";
 import { InboxScreen } from "./screens/Inbox";
 import { KnowledgeScreen } from "./screens/Knowledge";
@@ -281,7 +282,7 @@ function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, p
   useEffect(() => {
     if (!route || !inProfileRail(route)) return;
     const escape = (event: KeyboardEvent) => {
-      if (event.key !== "Escape" || event.defaultPrevented) return;
+      if (event.key !== "Escape" || event.defaultPrevented || escapeOwned()) return;
       event.preventDefault();
       backFromSettings();
     };

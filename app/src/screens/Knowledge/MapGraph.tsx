@@ -488,7 +488,7 @@ export function MapGraph({ nodes: given, edges: givenEdges, onOpen, onDeselect, 
       onPointerMove={move}
       onPointerUp={up}
       onPointerCancel={up}
-      onKeyDown={(e) => { if (e.key === "Escape") setPicked(null); }}
+      onKeyDown={(e) => { if (e.key === "Escape") { e.preventDefault(); setPicked(null); } }}
       onScroll={(e) => { e.currentTarget.scrollTop = 0; e.currentTarget.scrollLeft = 0; }}
     >
       <div data-testid="graph-stage" className="absolute left-0 top-0 origin-top-left" style={{ transform: `translate(${view.x}px, ${view.y}px) scale(${view.k})` }}>

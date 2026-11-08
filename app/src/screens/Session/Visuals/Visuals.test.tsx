@@ -516,6 +516,12 @@ describe("visuals", () => {
       const kept = screen.getByTestId("kept-reader");
       expect(within(kept).getByTestId("visual-frame").dataset.src).toBe("brindle-visual://kept/k_1");
       expect(within(kept).queryByTestId("visual-send")).toBeNull();
+      // Esc closes the reader and stays in Knowledge; the next Esc, with nothing nested open, leaves it.
+      fireEvent.keyDown(window, { key: "Escape" });
+      expect(await screen.findByTestId("kept-k_1")).toBeTruthy();
+      expect(screen.queryByTestId("kept-reader")).toBeNull();
+      fireEvent.keyDown(window, { key: "Escape" });
+      await waitFor(() => expect(screen.queryByTestId("kept-k_1")).toBeNull());
     } finally {
       sync.stop();
     }

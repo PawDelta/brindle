@@ -8,7 +8,7 @@
    session to show); the Inbox lists everything waiting on a person, each
    row jumping to its session. Knowledge (a repo's decisions and sources),
    Agents (which model runs each kind of work, and the person's custom
-   agents) and Settings (with Account and Usage among its tabs) are the pages behind the sidebar's foot. There is
+   agents) and Settings (with Account and Usage among its tabs) are the pages behind the profile button's rail. There is
    no home board: the sidebar is the overview. */
 
 export interface SessionRef {
