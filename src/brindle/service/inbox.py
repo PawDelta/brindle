@@ -238,7 +238,7 @@ def items(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None) -
                                         **{**link, "agent_id": login.agent_id or a["id"]},
                                         detail=login.refresh_cmd))
     all_items = (out + _idle_items(db, repo_root) + _doc_items(db, repo_root, shown) + _visual_items(db, repo_root)
-                 + _setup_items()
+                 + _analysis_offer_items(db, repo_root) + _setup_items()
                  + _org_blocks(db, repo_root) + _org_notices())
     # Requests can outlive the live snapshot (notably document requests).
     # Paused sessions keep theirs, but dismissed/replaced workers do not ask
@@ -274,6 +274,24 @@ def _visual_items(db: DB, repo_root: str | None) -> list[InboxItemDTO]:
         out.append(InboxItemDTO(kind="visual", reason="asks you to choose", detail=v["title"],
                                 visual_id=v["id"], agent_id=root.id, workspace_id=root.workspace_id,
                                 root_id=root.id))
+    return out
+
+
+def _analysis_offer_items(db: DB, repo_root: str | None) -> list[InboxItemDTO]:
+    """brindle's one-time offer of an analysis doc, answered Yes / Not now from here
+    (POST /goal/analysis-offer names the offer id, carried in request_id). Listed
+    from the stored offer, not the live snapshot: a paused session keeps its offer."""
+    out = []
+    for r in db.conn.execute("SELECT root_id FROM goal_doc_requests WHERE offer LIKE 'open:%' ORDER BY rowid"):
+        root = db.get_agent(r["root_id"])
+        ap = db.get_autopilot(r["root_id"])
+        ws = db.get_workspace(root.workspace_id) if root else None
+        if (ap is None or ws is None or (repo_root and ws.repo_root != repo_root)
+                or identity_lock.locked_by(root.id)):
+            continue
+        out.append(InboxItemDTO(kind="analysis_offer", reason="offers to write an analysis doc",
+                                detail=ap.goal, request_id=ap.analysis_offer[5:], agent_id=root.id,
+                                workspace_id=ws.id, root_id=root.id))
     return out
 
 

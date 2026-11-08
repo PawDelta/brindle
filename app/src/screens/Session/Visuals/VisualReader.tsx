@@ -8,7 +8,7 @@
    from the bar's Send, a real click on host chrome, with an option id or the person's own
    text. Messages from any other visual, or an older revision, are dropped. */
 
-import { useEffect, useRef, useState, type ComponentType, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ComponentType, type ReactNode } from "react";
 import { DaemonError, type VisualDTO } from "../../../api/client";
 import { LoadingButton } from "../../../components/LoadingButton";
 import { button, field, main, mono } from "../../../components/ui";
@@ -129,7 +129,10 @@ export function VisualReader({ client, visual, loading, onBack, asking, onAnswer
       actions={
         visual && <KeepButton client={client} visual={visual} onKept={onAnswered} />
       }
-      footer={visual && options.length > 0 && <AnswerBar key={key} client={client} visual={visual} picked={picked?.key === key ? picked.option : null} onPick={choose} onAnswered={onAnswered} />}
+      footer={visual && options.length > 0 && <AnswerBar key={key} client={client} visual={visual} picked={picked?.key === key ? picked.option : null} onPick={choose} onAnswered={(answered) => {
+        onAnswered(answered);
+        onBack();
+      }} />}
     />
   );
 }
@@ -139,7 +142,15 @@ function AnswerBar({ client, visual, picked, onPick, onAnswered }: { client: Vis
   const [note, setNote] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const noteInput = useRef<HTMLTextAreaElement>(null);
+  const noteInput = useRef<HTMLInputElement>(null);
+  const active = useRef(false);
+  useLayoutEffect(() => {
+    active.current = true;
+    return () => {
+      // The bar is keyed by visual and revision; leaving or replacing it invalidates its request.
+      active.current = false;
+    };
+  }, []);
   const options = visual.options ?? [];
   // Empty ids cannot be published; this host-only choice carries no option to the engine.
   const ownWords = picked === "";
@@ -151,11 +162,15 @@ function AnswerBar({ client, visual, picked, onPick, onAnswered }: { client: Vis
     setError(null);
     try {
       // The revision on screen: the bar is keyed by it, so a newer one is a new bar.
-      onAnswered(await client.answerVisual(visual.id, visual.rev, picked || undefined, note.trim()));
+      const result = await client.answerVisual(visual.id, visual.rev, picked || undefined, note.trim());
+      // A late response must not update or navigate away from the person's current screen.
+      if (!active.current) return;
+      onAnswered(result);
     } catch (e) {
+      if (!active.current) return;
       setError(e instanceof DaemonError && e.status === 409 ? "The agent changed this visual since you opened it. Read the new version and answer again." : `Couldn't send the answer: ${message(e)}`);
     } finally {
-      setSending(false);
+      if (active.current) setSending(false);
     }
   };
   return (
@@ -168,7 +183,7 @@ function AnswerBar({ client, visual, picked, onPick, onAnswered }: { client: Vis
         </p>
       ) : (
         <div className="flex flex-wrap items-center gap-s1" onKeyDown={(e) => {
-          // Enter submits from the note, the free-text box and a chosen option; Shift+Enter (a newline in the note) and Enter confirming an IME composition are left alone.
+          // Enter submits from the note, the free-text box and a chosen option; Shift+Enter and IME composition are left alone.
           if (e.key !== "Enter" || e.shiftKey || e.nativeEvent.isComposing) return;
           // An unchecked option's Enter picks it natively (even when another option is chosen); only the chosen one sends.
           if (e.target instanceof HTMLButtonElement && e.target.getAttribute("role") === "radio" && e.target.getAttribute("aria-checked") !== "true") return;
@@ -185,7 +200,7 @@ function AnswerBar({ client, visual, picked, onPick, onAnswered }: { client: Vis
               Something else…
             </button>
           </div>
-          <textarea ref={noteInput} rows={1} className={`${field} min-w-40 flex-1 resize-none`} aria-label={ownWords ? "Your answer" : "Add a note"} placeholder={ownWords ? "Your answer" : "Add a note (optional)"} value={note} onChange={(e) => setNote(e.target.value)} />
+          <input ref={noteInput} type="text" className={`${field} min-w-40 flex-1`} aria-label={ownWords ? "Your answer" : "Add a note"} placeholder={ownWords ? "Your answer" : "Add a note (optional)"} value={note} onChange={(e) => setNote(e.target.value)} />
           <LoadingButton className={main} busy={sending} disabled={!canSend || sending} data-testid="visual-send" onClick={() => void send()}>
             Send answer
           </LoadingButton>
