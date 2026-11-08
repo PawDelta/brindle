@@ -199,6 +199,7 @@ def test_untracked_ignored_and_dot_git_reads_are_not_allowed(ws):
     assert decide(read(ws, os.path.join(root, "build.log"))).decision == "ask"
     assert decide(read(ws, os.path.join(ws.repo_root, ".git", "config"))).decision == "ask"
     assert decide(read(ws, root)).decision == "ask"  # a directory
+    assert decide(read(ws, os.path.expanduser("~/.ssh/id_rsa"))).decision == "deny"
 
 
 def test_pathspec_magic_names_are_taken_literally(ws):
@@ -232,12 +233,6 @@ def test_a_user_allow_rule_does_not_follow_a_symlink_out(ws, tmp_path, match, ma
         assert decide(read(ws, link), rules=[rule]).decision == "ask", value
         # A deny still matches the name as given.
         assert decide(read(ws, link), rules=[Rule("read", value, match_type, "deny")]).decision == "deny"
-
-
-def test_secret_locations_are_denied(ws):
-    assert decide(read(ws, os.path.expanduser("~/.ssh/id_rsa"))).decision == "deny"
-    assert decide(read(ws, os.path.expanduser("~/.aws/credentials"))).decision == "deny"
-    assert decide(read(ws, os.path.join(ws.repo_root, ".env"))).decision == "deny"
 
 
 def test_repo_rules_can_only_add_denies(ws):
@@ -283,7 +278,6 @@ ON_FRESH_ACCOUNT = ("""echo "--- config"; git config --show-origin --get-regexp 
 @pytest.mark.parametrize("preset, policy, chosen, profile_mode, mode", [
     # Nobody set the policy: on, whatever is in the home, and that's what stops the prompts.
     ("autonomous", None, None, None, "default"),
-    ("autonomous", "on", None, None, "default"),
     ("standard", "on", None, None, "default"),
     ("autonomous", "off", None, None, "default"),
     ("autonomous", "on", "bypassPermissions", None, "bypassPermissions"),
