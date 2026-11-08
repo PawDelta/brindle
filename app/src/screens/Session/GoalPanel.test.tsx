@@ -84,9 +84,9 @@ function holdingClient(daemon: FakeDaemon, path: string) {
 const unfold = () => fireEvent.click(screen.getByRole("button", { name: /^Milestones \(/ }));
 
 describe("GoalPanel", () => {
-  it("copies the complete request from the goal by double-click or keyboard, with transient feedback on success and failure", async () => {
+  it.each([true, false])("opens and copies the complete request with copy feedback (recorded goal: %s)", async (recordedGoal) => {
     const request = "Build a goal screen.\n" + "Keep the original request readable and copyable. ".repeat(20);
-    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [{ ...appSession, request }], workspaces: [root], goal: { ...structuredClone(goal), root_id: APP_ROOT } });
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [{ ...appSession, request }], workspaces: [root], goal: recordedGoal ? { ...structuredClone(goal), root_id: APP_ROOT } : null });
     const client = daemon.client();
     const store = createAppStore();
     const sync = startSync({ client, store, connect: daemon.connect });

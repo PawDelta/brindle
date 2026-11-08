@@ -559,6 +559,13 @@ export function GoalPanel({ client, repo, root, store, compact = false, title, r
   const storeAlive = useSyncExternalStore(store.subscribe, () => store.getState().alive);
   const workerStages = useMemo(() => activeMilestoneStages(storeWorkspaces, storeAlive, root), [storeWorkspaces, storeAlive, root]);
   const contextTitle = compact ? title?.(() => setFullGoalOpen((o) => !o)) : null;
+  const fullGoal = fullGoalOpen && (request || goal?.goal) ? (
+    <section aria-label="Full goal" className="shrink-0 rounded border border-line px-s1 py-1 text-xs text-ink-2">
+      <button type="button" className={`${quiet} float-right text-xs`} aria-label="Close full goal" onClick={() => setFullGoalOpen(false)}>✕</button>
+      <p className="whitespace-pre-wrap break-words">{request || goal?.goal}</p>
+      {goal?.detail && <p className="mt-1 whitespace-pre-wrap break-words text-ink-3">{goal.detail}</p>}
+    </section>
+  ) : null;
   if (!loaded && loadError) {
     return (
       <section className={`${compact ? "px-s1 py-1" : `${card} px-s2 py-s1`} flex items-center gap-s2`} aria-label="Goal">
@@ -585,9 +592,12 @@ export function GoalPanel({ client, repo, root, store, compact = false, title, r
   }
   if (!goal) {
     return (
-      <section className={`${compact ? "px-s1 py-1" : `${card} px-s2 py-s1`} text-sm text-ink-3`} aria-label="Goal">
-        {contextTitle}
-        No goal set for this session.
+      <section className={`${frame} min-h-0 text-sm text-ink-3`} aria-label="Goal">
+        {contextTitle && <div className="shrink-0">{contextTitle}</div>}
+        <div className="min-h-0 overflow-auto">
+          {fullGoal}
+          No goal set for this session.
+        </div>
       </section>
     );
   }
@@ -765,11 +775,7 @@ export function GoalPanel({ client, repo, root, store, compact = false, title, r
           {showPhase && <span data-testid="goal-phase">{phaseLabel}</span>}
           {where && <span className="whitespace-nowrap font-normal text-ink-3" data-testid="goal-where">{where}</span>}
         </div>}
-        {fullGoalOpen && <section aria-label="Full goal" className="shrink-0 rounded border border-line px-s1 py-1 text-xs text-ink-2">
-          <button type="button" className={`${quiet} float-right text-xs`} aria-label="Close full goal" onClick={() => setFullGoalOpen(false)}>✕</button>
-          <p className="whitespace-pre-wrap break-words">{request || goal.goal}</p>
-          {goal.detail && <p className="mt-1 whitespace-pre-wrap break-words text-ink-3">{goal.detail}</p>}
-        </section>}
+        {fullGoal}
         {total > 0 && folds ? (
           <PhaseFoldList folds={folds} open={foldOpen} onToggle={toggleFold} isDone={isDone} large={false} rowsClass="side-ms" row={sideRow} rows={sideRows} />
         ) : total > 0 ? (
