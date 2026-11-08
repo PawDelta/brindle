@@ -76,6 +76,8 @@ def test_session_repo_branch_column_moves_out_and_no_released_table_gains_a_colu
     path = str(tmp_path / "state.db")
     db = DB(path)
     db.conn.execute("PRAGMA foreign_keys=OFF")
+    db.conn.execute("ALTER TABLE autopilot ADD COLUMN summary TEXT")
+    db.conn.execute("INSERT INTO autopilot (root_id, created_at, summary) VALUES ('root', 1, 'CLI polish')")
     db.conn.execute("DROP TABLE session_repo_branches")
     db.conn.execute("ALTER TABLE session_repos ADD COLUMN branch TEXT")
     db.conn.execute("INSERT INTO session_repos VALUES ('root','a','/a',1,'feat')")
@@ -98,6 +100,7 @@ def test_session_repo_branch_column_moves_out_and_no_released_table_gains_a_colu
         monkeypatch.setattr(DB, "tx", tx_after_other_process)
     db = DB(path)
     assert bool(moved) == interleaved
+    assert db.get_autopilot("root").summary == "CLI polish"
     assert [(r.alias, r.branch) for r in db.session_repos("root")] == [("a", "feat"), ("b", None)]
     now = _columns(db.conn)
     assert {t: sorted(now[t] - set(cols.split())) for t, cols in V0_5_12.items()
