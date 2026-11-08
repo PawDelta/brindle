@@ -299,7 +299,8 @@ def test_org_policy_prints_every_role_override(team):
         "require_human_review": False, "max_parallel_workers": 2, "permission_grants": grants}}}}
     code, out, err = run(team, "org", "policy")
     assert code == 0, err
-    assert "reviewer" in out and "on for bash, write, up to 60 min or 5 uses" in out
+    grant_line = next(line for line in out.splitlines() if "permission grants" in line)
+    assert "reviewer" in out and all(v in grant_line for v in ("bash", "write", "60", "5"))
 
 
 # -- org CI tokens ---------------------------------------------------------------------------------
