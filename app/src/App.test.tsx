@@ -258,18 +258,53 @@ describe("App", () => {
       expect(await screen.findByRole("region", { name })).toBeTruthy();
       expect(link(name).getAttribute("aria-current")).toBe("page");
     }
+    const previousPage = screen.getByRole("region", { name: "Agents" });
+    const main = screen.getByRole("main");
+    main.scrollTop = 180;
     fireEvent.click(link("Open Account"));
     expect(await screen.findByRole("region", { name: "Account" })).toBeTruthy();
+    expect(main.scrollTop).toBe(0);
     expect(link("Open Account").getAttribute("aria-current")).toBe("page");
+    expect(within(main).queryByRole("tablist")).toBeNull();
+    expect(within(nav()).getByRole("tablist", { name: "Settings" })).toBeTruthy();
+    expect(within(nav()).queryByRole("navigation", { name: "Sessions" })).toBeNull();
+    expect(within(nav()).queryByRole("region", { name: "Session context" })).toBeNull();
+    const accountTab = within(nav()).getByRole("tab", { name: "Account" });
+    fireEvent.keyDown(accountTab, { key: "ArrowDown" });
+    expect(document.activeElement).toBe(screen.getByRole("tab", { name: "Usage" }));
+    expect(screen.getByRole("tab", { name: "Usage" }).getAttribute("aria-selected")).toBe("true");
+    fireEvent.keyDown(document.activeElement!, { key: "ArrowUp" });
+    expect(document.activeElement).toBe(accountTab);
     // Clicked again from another of Settings' tabs, an entry opens its own tab again.
     const selected = (name: string) => screen.getByRole("tab", { name }).getAttribute("aria-selected");
     fireEvent.click(screen.getByRole("tab", { name: "Permissions" }));
     fireEvent.click(link("Open Account"));
     await waitFor(() => expect(selected("Account")).toBe("true"));
+    main.scrollTop = 0;
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.getByRole("region", { name: "Agents" })).toBe(previousPage);
+    expect(main.scrollTop).toBe(180);
+    fireEvent.click(link("Open Account"));
+    fireEvent.click(link("← Sessions"));
+    expect(screen.getByRole("region", { name: "Agents" })).toBe(previousPage);
+    expect(main.scrollTop).toBe(180);
 
     // ⌘1 is the first live session, back from any page; ⌘N the composer.
     fireEvent.keyDown(window, { key: "1", metaKey: true });
     expect(await screen.findByRole("region", { name: "Session" })).toBeTruthy();
+    const terminal = screen.getByTestId("terminal");
+    const sessionsList = within(nav()).getByRole("navigation", { name: "Sessions" });
+    sessionsList.scrollTop = 64;
+    terminal.scrollTop = 96;
+    fireEvent.click(link("Open Account"));
+    expect(within(nav()).getByRole("button", { name: "New session" })).toBeTruthy();
+    expect(within(nav()).getByRole("button", { name: "Home" })).toBeTruthy();
+    expect(within(nav()).getByRole("button", { name: "Knowledge" })).toBeTruthy();
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.getByTestId("terminal")).toBe(terminal);
+    expect(terminal.scrollTop).toBe(96);
+    expect(within(nav()).getByRole("navigation", { name: "Sessions" })).toBe(sessionsList);
+    expect(sessionsList.scrollTop).toBe(64);
     fireEvent.keyDown(window, { key: "n", metaKey: true });
     expect(await screen.findByRole("region", { name: "New session" })).toBeTruthy();
     expect(screen.getByLabelText("What should brindle work on?")).toBeTruthy();

@@ -78,15 +78,20 @@ describe("Sidebar", () => {
     { account: { signed_in: true }, initials: "" },
     { account: { signed_in: false, name: "Sam Rivera", email: "sam@example.com" }, initials: "" },
   ])("renders the account identity fallback for $account", async ({ account, initials }) => {
-    const { sync, navigate, store } = mount({ account });
+    const { sync, navigate, store } = mount({ account }, { screen: "account" });
     const button = screen.getByRole("button", { name: "Open Account" });
     try {
       await waitFor(() => {
         expect(store.getState().account).toEqual(account);
         expect(button.textContent).toBe(initials);
         expect(Boolean(button.querySelector("svg"))).toBe(!initials);
-        expect(button.className.includes("text-ink-3")).toBe(!account.signed_in);
+        expect(button.firstElementChild!.className.includes("text-ink-3")).toBe(!account.signed_in);
+        expect(button.firstElementChild!.className.includes("border-dashed")).toBe(!account.signed_in);
+        expect(button.firstElementChild!.className.includes("bg-pass-soft")).toBe(account.signed_in);
       });
+      expect(screen.getByRole("tablist", { name: "Settings" })).toBeTruthy();
+      expect(screen.queryByRole("navigation", { name: "Sessions" })).toBeNull();
+      if (initials) expect(screen.getAllByText(initials)).toHaveLength(2);
       fireEvent.click(button);
       expect(navigate).toHaveBeenLastCalledWith({ screen: "account" });
     } finally {
