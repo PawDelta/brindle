@@ -584,6 +584,10 @@ LONG_NOTES = "\n".join(f"line {n} of the notes about the migration" for n in ran
     _stress("an apostrophe inside an unclosed quote", ["He said 'let's render first"], FIRST, False),
     _stress("the marks and one word of the person's own", ['What does "render first" mean?'], '"render first" mean', False),
     _stress("begins outside, ends inside", ['What does "render first" mean?'], 'does "render first', False),
+    _stress("someone else's words, whole message", ['He said "render first"'], 'He said "render first"', False),
+    _stress("a question about the words, whole message", ['What does "render first" mean?'], 'What does "render first" mean?', False),
+    _stress("a quote opening on a digit", ["He said '2d render first'"], FIRST, False),
+    _stress("a quote opening on an elision", ["He said 'tis time to render first'"], FIRST, False),
     _stress("a long message keeps its negation", [LONG_NOTES + "\nThen don't render the options."], "render the options", False),
     # Cancelled, in the person's own words, for a quote and for a grant.
     *[_stress("cancel then quote", [FIRST, cancel], FIRST, False) for cancel in (

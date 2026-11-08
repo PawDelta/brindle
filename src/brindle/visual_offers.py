@@ -204,7 +204,13 @@ _NEGATION_REACH = 200                   # characters before a quote that can neg
 # Words someone is mentioning, not saying. An unclosed mark runs to the end; ' inside a word is an apostrophe.
 _QUOTED = re.compile("|".join(f"{o}[^{c}]*(?:{c}|$)" for o, c in ('""', "``", "“”", "«»", "「」", "『』", "„“"))
                      + r"|‘(?:[^’]|’(?=\w))*(?:’(?!\w)|$)"
-                     + r"|(?<!\w)'(?!\d|(?:em|n|cause|tis|twas)\b)(?:[^']|'(?=\w))*(?:'(?!\w)|$)")
+                     + r"|(?<!\w)'(?:[^']|'(?=\w))*'(?!\w)"
+                     + r"|(?<!\w)'(?!\d|(?:em|n|cause|tis|twas)\b)(?:[^']|'(?=\w))*$")
+_ASK_LEAD = (r"(?:(?:please|kindly|just|then|now|ok|okay|yes|so|and|go ahead and|(?:can|could|would|will) you|"
+             r"i(?:['’]d| would)? (?:want|like|love|need)(?: you)? to|let['’]?s)\W+)*")
+# What has to open a quote that holds quoted material: a request, not "he said" or "what does".
+_ASKS_FOR = re.compile(_ASK_LEAD + r"(?:(?:render|show|draw|make(?! sure)|create|build|generate|visuali[sz]e|mock|display|preview)\b"
+                       r"|(?:let (?:me|us)|let['’]?s|can i|could i|i(?:['’]d| would)? (?:want|like|love) to)\W+(?:see|view)\b)", re.I)
 _IDEOGRAPH = re.compile(r"[぀-ヿ㐀-鿿豈-﫿]")
 
 
@@ -394,8 +400,8 @@ def _keep_words(c, root: str, text: str, staged: bool = False) -> None:
 
 
 def _says_it_themselves(words: str, span: tuple[int, int], mentioned: list[tuple[int, int]]) -> bool:
-    """A quote may hold a whole quoted name, but not begin or end inside one, and
-    enough of it must be the person's own words outside the quotation marks."""
+    """A quote may hold a whole quoted name if it opens as a request, but not begin
+    or end inside one, and enough of it must be the person's own words outside the marks."""
     begin, end = span
     own, at = [], begin
     for start, stop in mentioned:
@@ -405,8 +411,9 @@ def _says_it_themselves(words: str, span: tuple[int, int], mentioned: list[tuple
             return False
         own.append(words[at:start])
         at = stop
+    holds_a_mention = bool(own)
     own.append(words[at:end])
-    return _word_count(" ".join(own)) >= MIN_QUOTE_WORDS
+    return _word_count(" ".join(own)) >= MIN_QUOTE_WORDS and (not holds_a_mention or _ASKS_FOR.match(own[0]) is not None)
 
 
 def _spend_quote(c, root: str, asked: str, now: float) -> bool:
