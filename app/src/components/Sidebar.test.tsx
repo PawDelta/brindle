@@ -53,7 +53,7 @@ describe("Sidebar", () => {
     ["idle", "working", undefined, "Working", "working"],
     ["idle", "checks", undefined, "Working", "working"],
     ["idle", "review", undefined, "Reviewing", "review"],
-    ["idle", "merging", undefined, "Merging", null],
+    ["idle", "merging", undefined, "Merging", "merging"],
     ["idle", null, undefined, "Idle", null],
     ["paused", "review", undefined, "Paused", null],
     ["paused", "review", "done", "Done", "done"],
@@ -66,8 +66,8 @@ describe("Sidebar", () => {
     const label = within(row).getByTestId("session-status");
     expect(label.className).toContain(colour ? `st-${colour} stage-word` : "text-ink-3");
     expect(label.classList.contains("stage-word")).toBe(colour !== null);
-    const marker = row.querySelector(".side-dot");
-    if (marker) expect(marker.className).toContain(colour ? `st-${colour}` : "text-ink-3");
+    const marker = status === "paused" ? row.querySelector(".side-dot")! : screen.getByRole("button", { name: "Hide sup1's agents" });
+    expect(marker.className).toContain(colour ? `st-${colour}` : "text-ink-3");
     expect(row.querySelector(".supervisor-tag")).toBeNull();
     expect(row.textContent).not.toContain("supervisor");
     if (status !== "paused") {
@@ -78,9 +78,10 @@ describe("Sidebar", () => {
     }
   });
 
-  it("draws tree lines with workers directly under the session and nested teams under their parent", async () => {
+  it("branches workers from the root dot, folds from it, and opens the supervisor from the row", async () => {
     const supervisor = { ...worker.agents![0], profile: "supervisor-sonnet", milestone: "Release page" };
-    const { sync } = mount({ workspaces: [root, { ...worker, agents: [supervisor, child] }] });
+    const { sync, navigate } = mount({ workspaces: [root, { ...worker, agents: [supervisor, child] }] });
+    onTestFinished(() => sync.stop());
     await waitFor(() => expect(agentRow("c1")).toBeTruthy());
     expect(agentRow("sup1")).toBeNull();
     expect(agentRow("w1")!.closest("ul")!.parentElement!.dataset.session).toBe("sup1");
@@ -90,7 +91,18 @@ describe("Sidebar", () => {
     expect(within(agentRow("w1")!).getByTestId("agent-role").textContent).toBe("supervisor · sonnet");
     expect(agentRow("w1")!.querySelector(".supervisor-tag")).toBeNull();
     expect(agentRow("c1")!.textContent).not.toContain("↳");
-    sync.stop();
+    const dot = screen.getByRole("button", { name: "Hide sup1's agents" });
+    expect(dot.classList.contains("session-root-dot")).toBe(true);
+    expect(dot.getAttribute("aria-expanded")).toBe("true");
+    fireEvent.click(dot);
+    expect(dot.getAttribute("aria-expanded")).toBe("false");
+    expect(agentRow("w1")).toBeNull();
+    expect(navigate).not.toHaveBeenCalled();
+    fireEvent.click(dot);
+    expect(dot.getAttribute("aria-expanded")).toBe("true");
+    expect(agentRow("c1")).toBeTruthy();
+    fireEvent.click(sessionRow("sup1")!);
+    expect(navigate).toHaveBeenLastCalledWith({ screen: "session", root: "sup1", repo: REPO, agent: "sup1" });
   });
 
   it("uses the short goal summary on one line and copies the full goal", async () => {

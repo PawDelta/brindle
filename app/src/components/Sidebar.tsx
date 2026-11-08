@@ -7,7 +7,7 @@
    (SessionContext: its goal with milestones, progress and checks, and the
    one lifecycle that carries its PR step); a handle that drags the split between them (kept in
    localStorage); then "Sessions": every open session grouped by repo, each
-   row its short goal, model and status word, a caret that folds its
+   row its short goal, model and status word, a root dot that folds its
    workers, and a close ("✕", on hover or focus; "Done · Close", always
    there, once its goal is Done or, with no goal, all in it is at rest)
    that closes the session in one click, nothing asked, the row just
@@ -422,6 +422,7 @@ function sessionStageClass(word: string) {
   switch (word) {
     case "Working": return "st-working";
     case "Reviewing": return "st-review";
+    case "Merging": return "st-merging";
     case "Done": return "st-done";
     default: return "text-ink-3";
   }
@@ -454,23 +455,21 @@ function SessionRows({ session, repo, index, route, navigate, cursor, setCursor,
   const done = goalDone(goal) || (goal === null && idle);
   return (
     <li className="flex flex-col gap-px" data-testid={`tree-session-${root}`} data-session={root}>
-      <div className={`group flex items-center gap-0.5 rounded-md ${open ? "bg-branch-soft" : "hover:bg-surface/60"}`}>
+      <div className={`session-root-row group flex items-center rounded-md ${open ? "bg-branch-soft" : "hover:bg-surface/60"}`} data-connected={!folded && !!tree?.children.length}>
         <button
           type="button"
-          className="ml-s1 w-[9px] shrink-0 text-center text-[10px] text-ink-3 hover:text-ink"
+          className={`session-root-dot ${sessionStageClass(word)}`}
           aria-label={folded ? `Show ${root}'s agents` : `Hide ${root}'s agents`}
           aria-expanded={!folded}
           onClick={toggle}
-        >
-          {folded ? "▸" : "▾"}
-        </button>
+        />
         <SessionGoal
           text={goal?.goal || session.goal}
           enterCopies={false}
           treeSession={root}
           row={key}
           current={open && (route.agent ?? root) === root ? "page" : undefined}
-          className={`flex w-full min-w-0 items-center gap-s1 rounded-md py-[5px] pr-s1 text-left ${cursor === key ? CURSOR : ""}`}
+          className={`flex min-w-0 flex-1 items-center gap-s1 rounded-md py-[5px] pr-s1 text-left ${cursor === key ? CURSOR : ""}`}
           title={`${root} · ${session.status}${index < 9 ? ` · ⌘${index + 1}` : ""}`}
           onOpen={() => {
             setCursor(key);
