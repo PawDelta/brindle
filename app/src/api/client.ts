@@ -33,6 +33,7 @@ import type {
   SessionDTO,
   WorkspaceDTO,
 } from "./schema";
+import type { Attachment } from "./attachments";
 
 /* PUT /routing (routes_actions.put_routing): what to write and where. The
    tiers given replace their lists in that scope's file; the others, and a
@@ -1427,6 +1428,10 @@ export class DaemonClient {
   /* The person's message, queued until the agent is idle. */
   message(id: string, text: string) {
     return this.post<MessageResult>(`/agents/${encodeURIComponent(id)}/message`, { text });
+  }
+
+  attach(id: string, file: Attachment) {
+    return this.post<{ paths: string[]; text: string }>(`/agents/${encodeURIComponent(id)}/attachments`, file);
   }
 
   /* Hide the agent for good, stopping it first if it runs; its record and work stay. */

@@ -123,6 +123,7 @@ export interface ActionTerminalDTO {
  * via the `definition` "AgentDTO".
  */
 export interface AgentDTO {
+  accepts_files?: boolean;
   dismissed_at?: number | null;
   headless?: boolean | null;
   hooks_off?: string | null;

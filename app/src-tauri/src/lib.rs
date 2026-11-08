@@ -224,6 +224,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         pty_view::pty_view_status,
         pty_view::pty_view_copy,
         pty_view::pty_view_paste,
+        pty_view::pty_view_files,
         pty_view::pty_view_open,
         pty_view::pty_view_write,
         pty_view::pty_view_resize,
