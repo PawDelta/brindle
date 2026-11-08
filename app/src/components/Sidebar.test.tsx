@@ -137,7 +137,7 @@ describe("Sidebar", () => {
     const a = { ...worker.agents![0], profile: "developer-haiku", milestone: "Logo goes Home" };
     const b = { ...a, id: "w2", milestone: undefined, profile: "developer-heavy" };
     // The pipeline's reviewer is the developer's sibling (same parent), on a Codex model.
-    const r = { ...a, id: "w3", mode: "review", profile: "reviewer-codex", provider: "codex", model: "gpt-6-luna", milestone: undefined };
+    const r = { ...a, id: "w3", mode: "review", profile: "codex", provider: "codex", model: "gpt-6-luna", milestone: undefined };
     const g = { ...a, id: "w4", profile: "developer-gemini", provider: "gemini", model: "gemini-3-pro", milestone: undefined };
     const bare = { ...a, id: "w5", profile: "claude", milestone: undefined };
     const { sync } = mount({ workspaces: [root, { ...worker, agents: [a, r] }, { ...worker, id: "proj/other", name: "other", branch: "feat/other", agents: [b, g, bare] }] }, { screen: "session", root: "sup1", repo: REPO });
