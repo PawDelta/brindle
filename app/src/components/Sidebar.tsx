@@ -39,7 +39,7 @@ import type { GoalDTO, SessionDTO } from "../api/schema";
 import { readLastSession, routeSession, sameRoute, settingsTab, type Route, type SessionRef } from "../routes";
 import { AccountAvatar, SettingsRail } from "./SettingsRail";
 import { pruneShown, seenKey } from "../screens/Inbox/items";
-import { goalPhase, useGoal } from "../screens/Session/GoalPanel";
+import { goalPhase, SessionGoal, useGoal } from "../screens/Session/GoalPanel";
 import { UNKNOWN } from "../screens/Session/review";
 import { agentIds, sessionTree, type AgentNode } from "../screens/Session/tree";
 import { useContinue } from "../screens/Session/useContinue";
@@ -293,39 +293,74 @@ export function roleOf(profile: string): string {
   return words.join("-");
 }
 
-/* One agent in a session's tree, and its children under it: a dot, "id ·
-   role" (the profile and branch are in the tooltip), its state at the right. */
+/* The model an agent runs, in a word: what its transcript last ran on, else the variant its profile names. */
+function modelOf(a: { model?: string | null; profile: string }): string {
+  if (a.model) return a.model.replace(/^claude-/, "").split("-")[0];
+  const last = a.profile.split("-").pop() ?? "";
+  return a.profile.includes("-") && PROFILE_VARIANT.test(last) ? last : "";
+}
+
+/* "feat/logo-goes-home" as "Logo goes home": the row's title when a worker has no milestone. */
+function branchWords(branch: string): string {
+  const words = (branch.split("/").pop() ?? branch).replace(/[-_]+/g, " ").trim();
+  return words ? words[0].toUpperCase() + words.slice(1) : branch;
+}
+
+/* The stage word and colour a row shares with the milestones view: code, checks, review, done; none when at rest. */
+type RowStage = "code" | "checks" | "review" | "done";
+const STAGE_CLASS: Record<RowStage, string> = { code: "working", checks: "checks", review: "review", done: "done" };
+
+function stageOf(tone: DotTone, a: { mode: string }, reviewState?: string | null): RowStage | null {
+  if (tone === "done") return "done";
+  if (a.mode === "review") return tone === "work" ? "review" : null;
+  if (reviewState?.startsWith("reviewer")) return "review";
+  if (reviewState?.startsWith("checks") || reviewState?.startsWith("waiting for checks")) return "checks";
+  return tone === "work" ? "code" : null;
+}
+
+/* One agent in a session's tree, and its children under it: a dot, its
+   milestone's title with "role · model" muted (the id, profile and branch are
+   in the tooltip), its stage at the right. Double-clicked, it copies its info. */
 function AgentRow({ node, depth, route, navigate, repo, root, cursor, setCursor }: { node: AgentNode; depth: number; repo: string; root: string; cursor: string | null; setCursor(key: string): void } & Pick<SidebarProps, "route" | "navigate">) {
   const a = node.agent;
   const alive = useAppState((s) => s.alive[a.id]);
   const active = route.screen === "session" && route.root === root && (route.agent ?? root) === a.id;
   const status = cliStatus(a, node.workspace, alive);
   const key = `agent:${a.id}`;
-  const label = a.id === root ? "supervisor" : a.profile ? roleOf(a.profile) : node.workspace.branch;
+  const role = a.id === root ? "supervisor" : a.profile ? roleOf(a.profile) : "";
+  const tone = dotTone(status, a.status);
+  const stage = stageOf(tone, a, node.workspace.review_state);
+  const reviewer = a.mode === "review";
+  // A worker reads as its milestone's title (else its branch in words); a reviewer, nested, only as its role.
+  const title = a.id === root || reviewer ? "" : a.milestone || branchWords(node.workspace.branch);
+  const muted = [role, modelOf(a)].filter(Boolean).join(" · ");
+  const info = [`id: ${a.id}`, `role: ${role}`, `profile: ${a.profile}`, `branch: ${node.workspace.branch}`, `milestone: ${a.milestone ?? ""}`].join("\n");
   return (
     <li>
-      <button
-        type="button"
+      <SessionGoal
+        text={info}
+        noun="Session info"
+        enterCopies={false}
+        current={active ? "page" : undefined}
+        treeAgent={a.id}
+        row={key}
+        title={`${a.id} · ${status.glyph} ${status.label} · ${a.profile} · ${node.workspace.branch} (double-click to copy its info)`}
         className={`flex w-full items-center gap-s1 rounded-r-md py-[3px] pl-[10px] pr-s1 text-left hover:bg-surface ${active ? "bg-branch-soft" : ""} ${cursor === key ? CURSOR : ""}`}
-        style={{ paddingLeft: `${10 + (depth - 1) * 12}px` }}
-        aria-current={active ? "page" : undefined}
-        data-tree-agent={a.id}
-        data-row={key}
-        title={`${a.id} · ${status.glyph} ${status.label} · ${a.profile} · ${node.workspace.branch}`}
-        onClick={() => {
+        onOpen={() => {
           setCursor(key);
           navigate({ screen: "session", root, repo, agent: a.id });
         }}
       >
-        <Dot tone={dotTone(status, a.status)} />
-        <span className="min-w-0 flex-1 truncate font-mono text-xs text-ink">
+        <Dot tone={tone} className={stage ? `st-${STAGE_CLASS[stage]}` : ""} />
+        <span className="min-w-0 flex-1 truncate text-xs text-ink" style={{ paddingLeft: `${(depth - 1) * 12}px` }}>
           {depth > 2 && <span className="text-ink-3">↳ </span>}
-          {a.id} · {label}
+          {title && <span data-testid="agent-title">{title} </span>}
+          <span className="text-ink-3" data-testid="agent-role">{muted}</span>
         </span>
-        <span className="max-w-[50%] shrink truncate text-[11px] text-ink-3" data-testid="agent-status">
-          {plainLabel(status, a.status)}
+        <span className={`max-w-[50%] shrink truncate text-[11px] ${stage ? `st-${STAGE_CLASS[stage]} stage-word` : "text-ink-3"}`} data-testid="agent-status">
+          {stage ?? plainLabel(status, a.status)}
         </span>
-      </button>
+      </SessionGoal>
       {node.children.length > 0 && (
         <ul className="flex flex-col gap-px">
           {node.children.map((child) => (

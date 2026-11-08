@@ -321,7 +321,9 @@ body {
 .st-working { --st: var(--group-1); }
 .st-checks { --st: var(--group-6); }
 .st-review { --st: var(--group-7); }
-.st-merging { --st: var(--pass); }
+.st-merging, .st-done { --st: var(--pass); }
+.side-dot[class*="st-"] { background: var(--st); }
+.stage-word { color: var(--st); }
 .side-bar { display: flex; height: 3px; margin: 0 2px; border-radius: 2px; background: var(--line); overflow: hidden; }
 .side-bar .d { background: var(--pass); }
 .side-bar .n { background: var(--st); }

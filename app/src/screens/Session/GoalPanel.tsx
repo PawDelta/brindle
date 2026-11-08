@@ -37,11 +37,18 @@ const GOAL_JOBS = new Set(["goal.check", "session.pr"]);
 
 /* Copy the full startup request from the goal title. Keyed by session and text
    by the caller, so pending copies and feedback cannot cross sessions. */
-export function SessionGoal({ text, children, className, onOpen }: {
+export function SessionGoal({ text, children, className, onOpen, noun = "Goal", title, enterCopies = true, current, treeAgent, row }: {
   text?: string | null;
   children: ReactNode;
   className: string;
   onOpen(): void;
+  /* What the toast says was copied; a tree row copies its handoff info and keeps Enter for opening. */
+  noun?: string;
+  title?: string;
+  enterCopies?: boolean;
+  current?: "page";
+  treeAgent?: string;
+  row?: string;
 }) {
   const views = usePtyViews();
   const [feedback, setFeedback] = useState<"copied" | "error" | null>(null);
@@ -72,10 +79,11 @@ export function SessionGoal({ text, children, className, onOpen }: {
   };
   return (
     <div className="relative min-w-0 flex-1">
-      <button type="button" className={className} title={text ? "Double-click to copy the goal" : "Open the session"}
-        onClick={onOpen} onDoubleClick={() => void copy()}
+      <button type="button" className={className} title={title ?? (text ? "Double-click to copy the goal" : "Open the session")}
+        onClick={onOpen} onDoubleClick={() => void copy()} aria-current={current}
+        data-tree-agent={treeAgent} data-row={row}
         onKeyDown={(e) => {
-          if (e.key === "Enter" && text) {
+          if (e.key === "Enter" && text && enterCopies) {
             e.preventDefault();
             e.stopPropagation();
             void copy();
@@ -84,7 +92,7 @@ export function SessionGoal({ text, children, className, onOpen }: {
         {children}
       </button>
       {feedback && <span role="status" className="pointer-events-none absolute left-0 top-full z-10 mt-1 whitespace-nowrap rounded border border-line bg-surface px-2 py-1 text-xs font-normal text-ink shadow-sm">
-        {feedback === "copied" ? "Goal copied to clipboard" : "Couldn't copy"}
+        {feedback === "copied" ? `${noun} copied to clipboard` : "Couldn't copy"}
       </span>}
     </div>
   );

@@ -136,6 +136,8 @@ class AgentDTO(_DTO):
     tokens: str | None = None
     # The model its transcript last ran on (the usage meter names it); absent until it has run.
     model: str | None = None
+    # Title of the milestone current when the worker was assigned; absent for a supervisor or when none.
+    milestone: str | None = None
     unread: int | None = None
     hooks_off: str | None = None
     parent_id: str | None = None
