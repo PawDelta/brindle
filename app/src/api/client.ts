@@ -1633,6 +1633,11 @@ export class DaemonClient {
     return this.post<VisualDTO>(`/visuals/${encodeURIComponent(id)}/answer`, { rev, option, note, ...(attachments?.length ? { attachments } : {}) });
   }
 
+  /* The person won't answer the revision on screen; the agent is told, the Inbox card clears. */
+  dismissVisual(id: string, rev: number) {
+    return this.post<VisualDTO>(`/visuals/${encodeURIComponent(id)}/dismiss`, { rev });
+  }
+
   exportVisual(id: string, rev: number, html: string, destination: ExportDestination = "download", markdown?: string) {
     return this.post<{ filename: string; mime: string; content_b64: string }>(`/visuals/${encodeURIComponent(id)}/snapshot`, { rev, html, destination, markdown });
   }
