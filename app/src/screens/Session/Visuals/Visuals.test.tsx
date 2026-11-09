@@ -241,6 +241,21 @@ describe("visuals", () => {
     expect(words).toEqual(["failed answer", "pending answer", "answered on"]);
   });
 
+  it("never records the tail of a message that was begun while watching was off", async () => {
+    let on = false;
+    const words: string[] = [];
+    const view = withTypedWords({ visualTypedWords: async (_id, text) => { words.push(text); return { observed: true }; } }, "claude",
+      () => ({ write() {}, resize() {}, focus() {}, close() {} }), () => on)({ server: null, target: "%1" }, { cols: 80, rows: 24 }, { onData() {}, onExit() {}, onError() {} });
+    [..."r"].forEach(c => view.write(c));
+    on = true;                                  // the engine answers mid-draft
+    [..."ender first", "\r"].forEach(c => view.write(c));
+    await act(async () => undefined);
+    expect(words).toEqual(["render first"]);    // the whole draft, never the tail "ender first"
+    [..."\"x y\"", "\r"].forEach(c => view.write(c));
+    await act(async () => undefined);
+    expect(words.at(-1)).toBe("\"x y\"");
+  });
+
   it("observes Codex PTY submissions before forwarding Enter, including edits, pastes and uncertain history", async () => {
     const submitted: string[] = [], bytes: string[] = [];
     let recorded: (() => void) | undefined;

@@ -82,7 +82,9 @@ function observed(open: PtyViewOpener, enabled: () => boolean, recorder: () => R
         // Later input, including Ctrl-C, always releases an earlier held Enter.
         held?.release();
         if (!enabled()) {
-          draft = pending = ""; cursor = 0; valid = true; paste = pasted = false;
+          // Keep following the draft while off, so that turning on halfway through a message
+          // can't make the rest of it look like a whole typed message.
+          submitted(data);
           view.write(data);
           return;
         }
