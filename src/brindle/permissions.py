@@ -2076,7 +2076,10 @@ def _grep_selected(name: str, filters: tuple[tuple[str, str], ...], *,
         return True
     filters = tuple((kind, p.replace("[^", "[!")) for kind, p in filters)
     if directory:
-        return not any(kind == "--exclude-dir" and fnmatch.fnmatchcase(name, p.rstrip("/"))
+        # Directory patterns must exclude the basename on every supported grep.
+        # In particular, BSD grep does not treat "nested/" as "nested". Paths
+        # need implementation-specific matching, so they cannot justify pruning.
+        return not any(kind == "--exclude-dir" and "/" not in p and fnmatch.fnmatchcase(name, p)
                        for kind, p in filters)
     files = [(kind, p) for kind, p in filters if kind != "--exclude-dir"]
     for candidate in (name, path, os.path.normpath(path)):

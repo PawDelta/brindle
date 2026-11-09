@@ -136,6 +136,8 @@ def test_shell_forms(tmp_path, command, expected):
                  marks=pytest.mark.variant("bypass: BSD grep includes full paths as well as basenames")),
     pytest.param('grep -r confidential nested --include="nested*.py"', "ask",
                  marks=pytest.mark.variant("bypass: BSD grep wildcard can include directory separators")),
+    pytest.param('grep -r "trailing slash" . --exclude-dir="nested/"', "ask",
+                 marks=pytest.mark.variant("bypass: BSD grep does not exclude a directory with a trailing-slash pattern")),
     pytest.param('git grep confidential -- secret.py', "ask", marks=pytest.mark.variant("bypass: git preset skips read deny")),
     pytest.param('git grep confidential', "ask", marks=pytest.mark.variant("bypass: implicit git search reads denied file")),
     pytest.param('git grep confidential -- .', "ask", marks=pytest.mark.variant("bypass: git directory contains denied file")),
@@ -186,6 +188,8 @@ def test_quoted_search(tmp_path, command, expected):
         (tmp_path / "sub/secret.py").touch()
         permissions.add_rule("read", str(tmp_path / "sub/secret.py"), "deny", "exact")
     (tmp_path / "nested/public.txt").touch()
+    if "trailing slash" in command:
+        (tmp_path / "nested/secret.py").touch()
     if "included files" in command:
         (tmp_path / "public.py").touch()
         (tmp_path / "secret.env").touch()
