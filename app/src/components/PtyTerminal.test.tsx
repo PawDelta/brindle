@@ -3,9 +3,11 @@ import type { ILink, ILinkProvider } from "@xterm/xterm";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { PtyViewHandlers, PtyViewOpener } from "../api/ptyView";
 import { DaemonClient } from "../api/client";
+import { startupStep } from "../api/startup";
 import { VisualLinkContext } from "../screens/Session/Visuals/link";
 import { ATTACH_WAIT, COPIED_SHOWN, COPY_OR_INTERRUPT, LATE_PASTE_WINDOW, PASTE_WAIT, PtyTerminal, selectionIn } from "./PtyTerminal";
 
+vi.mock("../api/startup", { spy: true });
 const files = vi.hoisted(() => ({ read: vi.fn(), listen: vi.fn(), drop: (_event: unknown) => {} }));
 vi.mock("../api/attachments", async (original) => ({
   ...await original<typeof import("../api/attachments")>(),
@@ -322,7 +324,9 @@ function webviewPaste(target: EventTarget, text: string | null): Event {
 const settled = (ms = 0) => act(() => new Promise((r) => setTimeout(r, ms)));
 
 it("off a Mac, ⌘V pastes the app's clipboard (bracketed where asked), and ⌘C copies xterm.js's selection onto it, taking the keys", async () => {
+  vi.mocked(startupStep).mockClear();
   const { written, copied, clipboard, opened, term } = mount();
+  expect(startupStep).not.toHaveBeenCalled();
   const textarea = term().textarea!;
   const press = (key: string) => {
     const e = new KeyboardEvent("keydown", { key, metaKey: true, bubbles: true, cancelable: true });
@@ -332,6 +336,7 @@ it("off a Mac, ⌘V pastes the app's clipboard (bracketed where asked), and ⌘C
   // tmux has the view's terminal.
   act(() => opened.handlers!.onData(new TextEncoder().encode("\x1b[?1049hhello pty")));
   await parsed(term());
+  expect(startupStep).toHaveBeenCalledWith("terminal_attached");
   clipboard.text = "from the clipboard ✓";
   // jsdom's platform is no Mac's: ⌘V taken (no webview paste follows), the app's clipboard read.
   expect(press("v").defaultPrevented, "the webview's own paste doesn't follow").toBe(true);

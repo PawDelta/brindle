@@ -42,7 +42,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import brindle
-from brindle import procs, spawn, upgrade
+from brindle import debuglog, procs, spawn, upgrade
 from brindle.config import brindle_home
 
 HOST = "127.0.0.1"
@@ -300,10 +300,10 @@ def pause_for_exit(recovery: Recovery | None = None) -> list[str]:
 
     The record of what is paused, with the server each session is on, is
     written before the pause, so a pause cut short (a tmux failure, the
-    daemon killed mid-way) still leaves its sessions to recover; the entries
-    are marked paused once the pause has finished (a later write that fails
-    leaves them unfinished, which recovery treats the safe way). No record,
-    no pause: a session paused with nothing to bring it back would stay
+    daemon killed mid-way) still leaves its sessions to recover: each stays
+    on the record, with its count of tries, until the next start's reconcile
+    with tmux confirms it, so whatever this pause leaves open is settled
+    there. No record, no pause: a session paused with nothing to bring it back would stay
     paused, so one that can't be recorded is left running. Processes the
     panes hosted are left to a detached cull: the time to go is short (the
     next start stops what the cull left, resume_after_start). A pause that
@@ -324,25 +324,29 @@ def pause_for_exit(recovery: Recovery | None = None) -> list[str]:
     from brindle.service import sessions as svc
 
     try:
-        # What this daemon's start was still to bring back (its record already taken), or the
-        # record itself if that never began: recorded again, for the next start.
-        unresumed = (_read_resume() or []) + (recovery.stop() if recovery else [])
+        # What is still to be brought back, by this daemon's start or the next: recorded again.
+        unresumed = (recovery.stop() if recovery else []) + (_read_resume() or [])
         db = DB()
         try:
             roots = [a for a in db.list_agents() if a.parent_id is None and a.mode == "interactive"
                      and a.status not in ("done", "paused") and agents.same_server(a)]
             server = tmux.current_server()
             left, seen = [], {root.id for root in roots}
+            tries = {e["id"]: e.get("tries") for e in reversed(unresumed)}      # stopping is no fresh start for them
+
+            def recorded(session: str) -> dict:
+                return {"id": session, "server": server, **({"tries": tries[session]} if tries.get(session) else {})}
+
             for entry in unresumed:
                 root = db.get_agent(entry["id"])
                 if (entry["id"] not in seen and entry.get("server") == server
                         and root is not None and root.status == "paused"):
-                    left.append(entry)
+                    left.append(recorded(entry["id"]))
                     seen.add(entry["id"])
             if not roots and not left:
                 _resume_path().unlink(missing_ok=True)
                 return []
-            entries = [{"id": root.id, "server": server, "paused": False} for root in roots]
+            entries = [recorded(root.id) for root in roots]
             if not _record_resume(left + entries) or not roots:
                 return []
             closings = agents.record_pauses(db, [entry["id"] for entry in entries])
@@ -369,9 +373,6 @@ def pause_for_exit(recovery: Recovery | None = None) -> list[str]:
                 log.warning("brindle: the sessions weren't paused within %gs; the next start finishes it",
                             PAUSE_BUDGET)
             return []
-        for entry in entries:
-            entry["paused"] = True
-        _record_resume(left + entries)
         svc.cull_detached()
         return [entry["id"] for entry in entries]
     except Exception:  # noqa: BLE001 - leaving must not fail over this
@@ -390,7 +391,10 @@ def _read_resume() -> list[dict] | None:
     return [e for e in entries if isinstance(e, dict) and isinstance(e.get("id"), str)]
 
 
-RESUME_WAIT = 5.0      # seconds the way out waits for a start's resume still under way (Recovery)
+RESUME_WAIT = 5.0     # seconds the way out waits for a start's resume still under way (Recovery)
+LAUNCH_WAIT = 8.0      # and in all, launches under way included (within daemon.rs PAUSE_GRACE, with PAUSE_BUDGET)
+RESUME_STALL = 120.0   # seconds with no session finished after which a start stops waiting (a resume that hangs)
+RESUME_TRIES = 2       # starts that may fail to bring one session back before it is left paused
 RESUME_PARALLEL = 4    # sessions a start brings back at once (resume_after_start)
 RESUME_BUSY_WAIT = 3.0  # seconds a session coming back waits on a machine short of CPU only: the person is waiting for it
 
@@ -399,8 +403,7 @@ class Recovery:
     """One daemon's resume_after_start as its own pause_for_exit sees it: the
     daemon may be stopped while it still brings sessions back. Once it is
     stopping, no further session is launched; the way out waits (up to
-    RESUME_WAIT) for those under way and records the rest for the next
-    start, as their record has already been taken.
+    RESUME_WAIT) for those under way and leaves the rest for the next start.
 
     Every launch of a resume is counted in ``launches``, under ``launch_lock``
     (launching, the gate agents.resume holds from a launch's first change of
@@ -408,12 +411,13 @@ class Recovery:
     count to reach none once ``stopping`` is set: sessions launch side by
     side, the launches under way finish before stop returns, and none begins
     after, however long a resume was held up, so the way out's pause sees
-    every session launched.
+    every session launched. Only a launch that hangs (LAUNCH_WAIT) is left
+    behind, and whatever it opens is the next start's to reconcile.
 
-    The start takes the record and registers it as ``pending`` in one step
-    under ``lock``, so the way out (which reads ``pending`` under it) sees
-    the record either still there or taken and pending, never neither, and a
-    record it writes is never taken by a start that was stopped."""
+    The record stays on disk throughout: a session leaves it only once its
+    reconcile has confirmed its panes (settled), so a daemon that dies at any
+    point leaves the next start what is still to do. ``pending`` is those
+    whose turn in this start isn't over, ``lanes`` those not yet begun."""
 
     def __init__(self) -> None:
         self.lock = threading.Lock()
@@ -423,16 +427,61 @@ class Recovery:
         self.stopping = threading.Event()
         self.idle = threading.Event()
         self.idle.set()
-        self.pending: list[dict] = []   # the record's entries not yet brought back (or given up on)
+        self.record: list[dict] = []    # what is on disk: sessions not confirmed back yet
+        self.pending: list[dict] = []   # those whose turn in this start isn't over
+        self.lanes: deque[list[dict]] = deque()     # those whose turn hasn't begun, under lock
         self.total = 0                  # how many entries the record had
+        self.handed_over = False        # stop has returned: the record is the way out's now
 
-    def progress(self) -> dict[str, int] | None:
+    def _save(self) -> bool:
+        if self.handed_over:
+            return False
+        if self.record:
+            return _record_resume(self.record)
+        _resume_path().unlink(missing_ok=True)
+        return True
+
+    def trying(self, entry: dict) -> bool:
+        """``entry``'s session is about to be brought back: counted on disk
+        first, or it isn't (False), lest it kill the daemon at every start."""
+        with self.lock:
+            entry["tries"] = entry.get("tries", 0) + 1
+            return self._save()
+
+    def settled(self, entry: dict) -> None:
+        """``entry``'s session is as it should be: nothing is left to do for it."""
+        with self.lock:
+            self.record.remove(entry)
+            self._save()
+
+    def finished(self, entry: dict) -> None:
+        """``entry``'s turn in this start is over, back or not."""
+        with self.lock:
+            self.pending.remove(entry)
+
+    def next_lane(self) -> list[dict] | None:
+        with self.lock:
+            return self.lanes.popleft() if self.lanes else None
+
+    def prioritize(self, root_id: str) -> None:
+        """Bring session ``root_id``'s lane to the front of those not yet begun
+        (the person has opened it). Nothing, if it has begun or none is under way."""
+        with self.lock:
+            for lane in self.lanes:
+                if any(e["id"] == root_id for e in lane):
+                    self.lanes.remove(lane)
+                    self.lanes.appendleft(lane)
+                    return
+
+    def progress(self) -> dict | None:
         """How far the start's resume has come (the app's "3 of 6"): sessions
-        finished with, whether they came back or not. None when none is under way."""
+        finished with, whether they came back or not, and those tmux hasn't yet
+        confirmed back. None when none is under way."""
         with self.lock:
             if self.idle.is_set() or not self.total:
                 return None
-            return {"done": self.total - len(self.pending), "total": self.total}
+            return {"done": self.total - len(self.pending), "total": self.total,
+                    "pending": [e["id"] for e in self.record]}
 
     @contextmanager
     def launching(self):
@@ -453,16 +502,20 @@ class Recovery:
 
     def stop(self) -> list[dict]:
         """Stop resuming; once those under way are done (or RESUME_WAIT has
-        passed), the entries still to resume. Nothing is launched after it
-        returns."""
+        passed, and LAUNCH_WAIT for a launch that hangs), the entries still to
+        resume. Nothing is launched after it returns."""
+        began = time.monotonic()
         self.stopping.set()
         if not self.idle.wait(RESUME_WAIT):
             log.warning("brindle: a session still being resumed after %gs on the way out; "
                         "the next start resumes it again", RESUME_WAIT)
         with self.launch_lock:      # the launches under way end first; any later one sees stopping
-            self.launch_ended.wait_for(lambda: self.launches == 0)
+            if not self.launch_ended.wait_for(lambda: self.launches == 0,
+                                              max(0.0, began + LAUNCH_WAIT - time.monotonic())):
+                log.warning("brindle: a launch still under way after %gs on the way out", LAUNCH_WAIT)
         with self.lock:
-            return list(self.pending)
+            self.handed_over = True
+            return list(self.record)
 
 
 def _most_recent_first(db, entries: list[dict]) -> list[dict]:
@@ -482,8 +535,7 @@ def _most_recent_first(db, entries: list[dict]) -> list[dict]:
 def _lanes(db, entries: list[dict]) -> deque[list[dict]]:
     """``entries`` (in order) as work for resume_after_start's threads, one
     lane per tmux session: sessions sharing one come back one after another,
-    as a pause closes that tmux session (Closing.closes) and the first launch
-    creates it (tmux.ensure_session)."""
+    as the first launch creates it (tmux.ensure_session)."""
     lanes: dict[str, list[dict]] = {}
     for entry in entries:
         root = db.get_agent(entry["id"])
@@ -511,47 +563,74 @@ def _timed(steps: list[str], step: str):
 
 def _resume_session(db, entry: dict, server: str | None, recovery: Recovery, env: dict[str, str],
                     *, waited: float = 0.0) -> bool:
-    """Bring back the one session of ``entry``, on its thread's own ``db``.
-    Whether it came back. Raises agents.Cancelled once the daemon is stopping."""
-    from brindle import agents
+    """One idempotent reconcile of ``entry``'s session against tmux, on its
+    thread's own ``db``, safe to run again after a crash at any point: what
+    runs is left, what shouldn't is closed, what is missing is launched, and
+    the session leaves the record only once tmux confirms it. Whether it was
+    brought back. Raises agents.Cancelled once the daemon is stopping. Under
+    the session's resume lock, against a sign-in sweep's or the person's resume."""
+    from brindle import agents, signin_pause
 
-    root = db.get_agent(entry["id"])
-    if root is None or root.status != "paused":
-        return False
-    if entry.get("server") != server or not agents.same_server(root):
-        log.info("brindle: session %s is on another tmux server; not resumed here", root.id)
-        return False
-    steps: list[str] = [f"room {waited:.2f}s"]     # how long it waited for the machine to have room
-    try:
-        with _timed(steps, "pause"):
-            # Paused again as well if something got launched past the pause (a task's
-            # helper, an assign under way): stopped below, it must come back too.
-            if not entry.get("paused") or any(
-                    a.status not in ("paused", "done", "failed") for a in agents.tree(db, root.id)):
-                # The local model server stays: this session and those launching beside it want it.
-                agents.pause(db, root.id, stop_procs=False, stop_local_models=False)
-                with recovery.lock:
-                    entry["paused"] = True
-        with _timed(steps, "stop"):
-            procs.stop([a.id for a in agents.tree(db, root.id)], grace=2.0)
-        with _timed(steps, "resume"):
-            agents.resume(db, root.id, gate=recovery.launching, recovery_env=env)
+    with agents.resume_lock(entry["id"]):
+        root = db.get_agent(entry["id"])
+        if root is None or root.status == "done":       # closed meanwhile (failed isn't: its pane may well be alive)
+            recovery.settled(entry)
+            return False
+        if entry.get("server") != server or not agents.same_server(root):
+            log.info("brindle: session %s is on another tmux server; not resumed here", root.id)
+            recovery.settled(entry)
+            return False
+        tree = agents.tree(db, root.id)
+        # What the sign-in sweep holds is its own: it alone knows the account each may come back under.
+        held = set(signin_pause.paused_for_signin())
+        if entry.get("tries", 0) > RESUME_TRIES:    # nothing more is launched, and it isn't left half-running
+            if not agents.panes_match(db, root.id, held):
+                log.warning("brindle: session %s isn't resumed: tried %d times", root.id, RESUME_TRIES)
+                agents.settle_panes(db, [a for a in tree if a.status != "done"], keep=False)
+            recovery.settled(entry)
+            return False
+        steps: list[str] = [f"room {waited:.2f}s"]     # how long it waited for the machine to have room
+        try:
+            with _timed(steps, "resume"):
+                agents.resume(db, root.id, only={a.id for a in tree} - held, settle=True,
+                              gate=recovery.launching, recovery_env=env)
+        finally:
+            # A warning, so it's seen: the daemon's log is its stderr (app-daemon.log), warnings only.
+            debuglog.recovery_timing(log, "brindle: session %s recovery: %s", root.id, ", ".join(steps))
+        if agents.panes_match(db, root.id, held):
+            recovery.settled(entry)
         return True
-    finally:
-        # A warning, so it's seen: the daemon's log is its stderr (app-daemon.log), warnings only.
-        log.warning("brindle: session %s recovery: %s", root.id, ", ".join(steps))
+
+
+def _join(threads: list[threading.Thread], recovery: Recovery) -> None:
+    """Wait for ``threads``, or until no session has finished for RESUME_STALL
+    seconds: what hangs mustn't keep the app waiting or its progress up for
+    good. Hung sessions stay on the record for the next start."""
+    finished, since = -1, 0.0
+    while alive := [t for t in threads if t.is_alive()]:
+        left = len(recovery.pending)    # only a count, as it stands: not worth holding the work up for
+        if left != finished:
+            finished, since = left, time.monotonic()
+        wait = since + RESUME_STALL - time.monotonic()
+        if wait <= 0:
+            log.warning("brindle: no session came back for %gs; %d left to the next start", RESUME_STALL, left)
+            return
+        alive[0].join(min(wait, 1.0))
 
 
 def resume_after_start(recovery: Recovery | None = None) -> list[str]:
-    """Bring back the sessions the previous daemon paused on its way out
-    (pause_for_exit), once: the record goes before any is resumed, so one
-    that can't come back isn't tried at every start. Only roots still paused
-    are resumed (the person may have closed one meanwhile), and only those on
-    this daemon's own tmux server, recorded there and still there. One whose
-    pause never finished is paused again first (its windows and session
-    closed). Then, for every one, what still runs of it is stopped: the
-    detached cull pause_for_exit left that to may not have run, and once its
-    agents run again the cull would leave the old processes be.
+    """Recover sessions before optional timing authorization can contact the backend."""
+    with debuglog.recovery_timings():
+        return _resume_after_start(recovery)
+
+
+def _resume_after_start(recovery: Recovery | None = None) -> list[str]:
+    """Bring back the sessions on the record (pause_for_exit), each by one
+    reconcile with tmux (_resume_session). A session stays on the record until
+    tmux confirms it, so a start that dies leaves the rest to the next; each is
+    counted as tried first, so one that can't come back isn't tried at every
+    start. None that the person has closed meanwhile is resumed, and only those
+    on this daemon's own tmux server, recorded there and still there.
 
     Up to RESUME_PARALLEL sessions come back at once, the one last at work
     first (_most_recent_first), each when the machine has room for it
@@ -559,21 +638,19 @@ def resume_after_start(recovery: Recovery | None = None) -> list[str]:
     another (_lanes). A session that fails doesn't hold up the others.
 
     ``recovery``: the daemon's (serve), which may be stopped meanwhile: then
-    nothing more is launched, and what is left to resume stays in
-    ``recovery.pending`` for its pause_for_exit to record again."""
+    nothing more is launched, and what is left stays on the record."""
     from brindle import agents, secrets, tmux
     from brindle.db import DB
 
     recovery = recovery or Recovery()
-    with recovery.lock:     # the record taken and pending at once (Recovery)
+    with recovery.lock:
         if recovery.stopping.is_set():
             return []       # stopped before it began: the record stays as it is
         entries = _read_resume()
-        if entries is None:
+        if not entries:
             return []
-        recovery.pending = list(entries)
+        recovery.record, recovery.pending = list(entries), list(entries)
         recovery.total = len(entries)
-        _resume_path().unlink(missing_ok=True)
         recovery.idle.clear()
     began = time.monotonic()
     resumed: list[str] = []
@@ -588,15 +665,16 @@ def resume_after_start(recovery: Recovery | None = None) -> list[str]:
             lanes = _lanes(db, _most_recent_first(db, entries))
         finally:
             db.conn.close()
+        with recovery.lock:
+            recovery.lanes = lanes
         ordered = time.monotonic() - began
 
         def work() -> None:
             db = DB()       # its own: SQLite connections stay on their thread
             try:
                 while not recovery.stopping.is_set():
-                    try:
-                        lane = lanes.popleft()
-                    except IndexError:
+                    lane = recovery.next_lane()
+                    if lane is None:
                         return
                     for entry in lane:
                         waiting = time.monotonic()
@@ -605,14 +683,17 @@ def resume_after_start(recovery: Recovery | None = None) -> list[str]:
                         if recovery.stopping.is_set():
                             return
                         try:
-                            if _resume_session(db, entry, server, recovery, env, waited=waited):
+                            if not recovery.trying(entry):
+                                log.warning("brindle: session %s couldn't be noted as tried; left to the next start",
+                                            entry["id"])
+                            elif _resume_session(db, entry, server, recovery, env, waited=waited):
                                 resumed.append(entry["id"])
                         except agents.Cancelled:
+                            entry["tries"] -= 1     # stopped, it didn't fail
                             return      # launched now, it would run on past the way out's pause: left pending
                         except Exception:  # noqa: BLE001 - the others still come back
                             log.warning("brindle: couldn't resume session %s", entry["id"], exc_info=True)
-                        with recovery.lock:
-                            recovery.pending.remove(entry)
+                        recovery.finished(entry)
             finally:
                 db.conn.close()
 
@@ -622,12 +703,11 @@ def resume_after_start(recovery: Recovery | None = None) -> list[str]:
                    for n in range(min(RESUME_PARALLEL, len(lanes)))]
         for thread in threads:
             thread.start()
-        for thread in threads:
-            thread.join()
+        _join(threads, recovery)
     finally:
         recovery.idle.set()
-        log.warning("brindle: recovery of %d session(s) took %.2fs (%d back; ordering %.2fs)",
-                    len(entries), time.monotonic() - began, len(resumed), ordered)
+        debuglog.recovery_timing(log, "brindle: recovery of %d session(s) took %.2fs (%d back; ordering %.2fs)",
+                                len(entries), time.monotonic() - began, len(resumed), ordered)
     return resumed
 
 
@@ -808,6 +888,7 @@ def serve(*, unix: bool = True, tcp: bool = False, idle_exit: bool = False) -> d
             try:
                 await asyncio.to_thread(resume_after_start, recovery)
             finally:
+                activity.state.recovered_at = time.time()
                 activity.state.resuming = False
 
         watcher = asyncio.create_task(_watch(server, activity, idle_exit, parent=parent))

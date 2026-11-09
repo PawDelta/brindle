@@ -222,7 +222,11 @@ def brindle_tools(db: DB, agent_id: str, ws: Workspace, mode: str) -> list[Tool]
         summary = str(args.get("summary") or "").strip()
         if not isinstance(approved, bool) or not summary:
             return ToolResult("approved (true/false) and summary are both required", True)
-        return ToolResult(agents.submit_review(db, agent_id, approved, summary))
+        tests_only = args.get("tests_only") in (True, "true", "True", "yes", "1")
+        paths = args.get("finding_paths")
+        paths = [str(p) for p in paths] if isinstance(paths, list) else []
+        return ToolResult(agents.submit_review(db, agent_id, approved, summary,
+                                               tests_only=tests_only, finding_paths=paths))
 
     def send(args: dict) -> ToolResult:
         to, message = str(args.get("to_agent_id") or ""), str(args.get("message") or "")
@@ -278,8 +282,11 @@ def brindle_tools(db: DB, agent_id: str, ws: Workspace, mode: str) -> list[Tool]
     ]
     if mode == "review":
         tools.append(Tool("submit_review", "Reviewers: call this once with your verdict. approved=true "
-                          "only if the branch can merge as is. summary: your findings, most severe first.",
-                          {**obj, "properties": {"approved": {"type": "boolean"}, "summary": {"type": "string"}},
+                          "only if the branch can merge as is. summary: your findings, most severe first. "
+                          "tests_only: every finding concerns test code only; finding_paths: those test files.",
+                          {**obj, "properties": {"approved": {"type": "boolean"}, "summary": {"type": "string"},
+                                                 "tests_only": {"type": "boolean"},
+                                                 "finding_paths": {"type": "array", "items": {"type": "string"}}},
                            "required": ["approved", "summary"]}, review))
     else:
         tools.append(Tool("report_result", "Call this once when your task is done (after committing), "

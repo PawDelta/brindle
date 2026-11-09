@@ -21,7 +21,7 @@ export interface Setting {
   /* A number needs a value; a boolean is on or off; a choice may be the
      engine's own null when it lists it; a list is one entry per line. */
   kind: "number" | "boolean" | "choice" | "list" | "text";
-  choices?: { value: string | null; label: string }[];
+  choices?: { value: string | boolean | null; label: string }[];
   /* The engine's default, for a field the config leaves unset. */
   fallback: unknown;
   /* Needs brindle Pro (the engine ignores it otherwise). */
@@ -55,7 +55,19 @@ export const SETTINGS: Setting[] = [
     ],
   },
   { key: "stale_after", label: "Close idle workers after", kind: "number", fallback: 30, unit: "minutes", blurb: "A worker that has reported and sits idle this long is closed. 0 keeps it open." },
-  { key: "coordinator", label: "Coordinator", kind: "boolean", fallback: false, pro: true, blurb: "A coordinator above this repo's sessions holds and orders queued work." },
+  {
+    key: "coordinator",
+    label: "Coordinator",
+    kind: "choice",
+    fallback: null,
+    pro: true,
+    blurb: "A coordinator above this repo's sessions holds and orders queued work.",
+    choices: [
+      { value: null, label: "Default: on when included in your plan" },
+      { value: true, label: "On" },
+      { value: false, label: "Off" },
+    ],
+  },
   {
     key: "sidebar",
     label: "Sidebar",

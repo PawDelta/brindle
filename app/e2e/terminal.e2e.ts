@@ -76,7 +76,7 @@ test("terminal panel: the status line's toggle docks a live shell under the sess
   await expect(page.getByTestId("terminal-panel")).toHaveCount(0);
 
   // Open from the sidebar's status line: one tab, named by the repo, saying where the shell started.
-  const toggle = page.getByTestId("status-line").getByTestId("terminal-toggle");
+  const toggle = page.getByTestId("sidebar-foot").getByTestId("terminal-toggle");
   await expect(toggle).toHaveText(">_Terminal⌃`");
   await toggle.click();
   const panel = page.getByTestId("terminal-panel");

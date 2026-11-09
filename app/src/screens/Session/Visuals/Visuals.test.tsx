@@ -584,7 +584,7 @@ describe("visuals", () => {
       expect(screen.getByTestId("terminal")).toBe(terminal);
 
       // Knowledge › Kept visuals: the kept copy opens in the same reader, read-only, on its own scheme path.
-      fireEvent.click(within(sidebar()).getByRole("button", { name: "Open Account" }));
+      fireEvent.click(within(sidebar()).getByRole("button", { name: "Open Account › Usage" }));
       fireEvent.click(within(sidebar()).getByRole("button", { name: "Knowledge" }));
       fireEvent.click(await screen.findByRole("tab", { name: /Kept visuals/ }));
       fireEvent.click(await screen.findByTestId("kept-k_1"));
@@ -760,6 +760,37 @@ describe("visuals", () => {
     expect(onAnswered).not.toHaveBeenCalled();
   });
 
+  it("can dismiss a visual prompt without answering, closing the reader like Back", async () => {
+    const sup: SessionDTO = { id: "sup1", workspace_id: "proj", profile: "supervisor", status: "idle", mode: "interactive", created_at: 0, goal: "Ship" };
+    const daemon = new FakeDaemon({
+      repos: [{ repo_root: REPO, name: "proj" }], sessions: [sup], workspaces: [root],
+      inbox: [{ kind: "visual", agent_id: "sup1", root_id: visual.session, workspace_id: "proj", visual_id: visual.id, reason: "asks you to choose", detail: visual.title }],
+    });
+    daemon.visualRows = [visual];
+    const client = daemon.client();
+    const store = createAppStore();
+    const sync = startSync({ client, store, repo: REPO, connect: daemon.connect });
+    const answer = vi.spyOn(client, "answerVisual");
+    try {
+      render(<PtyViewsProvider value={standInViews}><App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "inbox", session: "sup1" }} /></PtyViewsProvider>);
+      const card = (await screen.findAllByTestId("inbox-card")).find((candidate) => candidate.dataset.kind === "visual")!;
+      await waitFor(() => expect((within(card).getByRole("button", { name: "Open visual" }) as HTMLButtonElement).disabled).toBe(false));
+      await waitFor(() => expect(screen.getByTestId("inbox-badge").textContent).toBe("1"));
+      fireEvent.click(within(card).getByRole("button", { name: "Open visual" }));
+      fireEvent.click(await screen.findByTestId("visual-dismiss"));
+      // Back to the session, as Back does; the Inbox count and card clear, the visual stays in the session.
+      expect((await screen.findByTestId("terminal")).textContent).toBe("sup1");
+      expect(screen.queryByTestId("visual-reader")).toBeNull();
+      await waitFor(() => expect(screen.queryByTestId("inbox-badge")).toBeNull());
+      fireEvent.click(screen.getByTestId("inbox-link"));
+      await screen.findByRole("region", { name: "Inbox" });
+      expect(screen.queryByTestId("inbox-card")).toBeNull();
+      expect(daemon.visualDismissals).toEqual([{ id: visual.id, rev: visual.rev }]);
+      expect((await client.visuals(visual.session)).map((v) => v.id)).toEqual([visual.id]);
+      expect(answer).not.toHaveBeenCalled();
+    } finally { sync.stop(); }
+  });
+
   const takesFiles: VisualDTO = { ...visual, answer_agent_id: "a_sup", accepts_files: true };
   it("shows attach controls only when the provider accepts files, and sends uploaded paths after the uploads finish", async () => {
     const client = new FakeDaemon().client();
@@ -891,6 +922,7 @@ describe("visuals", () => {
     let hold = false;
     const held: (() => void)[] = [];
     const fake: VisualsClient = {
+      dismissVisual: async () => visual,
       visuals: () => {
         const asked = rows;
         return new Promise((ok) => (hold ? held.push(() => ok(asked)) : ok(asked)));
@@ -954,7 +986,7 @@ describe("visuals", () => {
     const replies: ((p: Plan) => void)[] = [];
     const sent: PlanVerdict[] = [];
     const fake: VisualsClient & PlansClient = {
-      visuals: async () => [], answerVisual: async () => visual, keepVisual: async () => visual, unkeepVisual: async () => visual, markVisualRead: async () => ({}),
+      visuals: async () => [], answerVisual: async () => visual, dismissVisual: async () => visual, keepVisual: async () => visual, unkeepVisual: async () => visual, markVisualRead: async () => ({}),
       plan: () => new Promise<Plan>((ok) => { reads.push(ok); }),
       decidePlan: (_id, verdict) => { sent.push(verdict); return new Promise<Plan>((ok) => { replies.push(ok); }); },
     };

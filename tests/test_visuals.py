@@ -86,6 +86,49 @@ def test_note_only_answers_reach_the_supervisor(db, session, client):
     assert not [i for i in inbox.items(db, None, panes={}) if i.kind == "visual"]
 
 
+def test_dismiss_tells_the_agent_once_clears_the_inbox_and_a_new_revision_asks_again(db, session, client, monkeypatch):
+    _, boss, worker = session
+    v = visuals.publish(db, worker, "Release flow", "<p>flow</p>", "Which flow?", OPTIONS)
+    answered = visuals.publish(db, worker, "Answered", "<p>x</p>", "Which?", OPTIONS)
+    visuals.answer(db, answered["id"], 1, "A")
+    assert [i for i in inbox.items(db, None, panes={}) if i.kind == "visual"]
+    def notices(agent):
+        return db.conn.execute("SELECT COUNT(*) FROM inbox WHERE agent_id=?", (agent,)).fetchone()[0]
+
+    before = (notices(worker.id), notices(boss.id))
+
+    response = client.post(f"/v1/visuals/{v['id']}/dismiss", json={"rev": 1})
+    assert response.status_code == 200
+    # The worker that published it stops waiting; its supervisor's session hears too.
+    assert (notices(worker.id), notices(boss.id)) == (before[0] + 1, before[1] + 1)
+    assert not [i for i in inbox.items(db, None, panes={}) if i.kind == "visual"]
+    assert v["id"] in [x["id"] for x in visuals.for_session(db, "boss")]
+
+    # A repeat, and an already answered revision, are safe no-ops that tell nobody.
+    assert client.post(f"/v1/visuals/{v['id']}/dismiss", json={"rev": 1}).status_code == 200
+    assert client.post(f"/v1/visuals/{answered['id']}/dismiss", json={"rev": 1}).status_code == 200
+    assert (notices(worker.id), notices(boss.id)) == (before[0] + 1, before[1] + 1)
+    assert visuals.get(db, answered["id"])["answer"]["option"] == "A"
+
+    visuals.publish(db, worker, "Release flow", "<p>flow 2</p>", "Which flow?", OPTIONS, visual_id=v["id"])
+    assert [i.visual_id for i in inbox.items(db, None, panes={}) if i.kind == "visual"] == [v["id"]]
+
+    # A supervisor that can't be told doesn't undo the publisher's dismissal or make a repeat re-tell it.
+    real = agents.send_message
+
+    def send(db_, to, *args, **kwargs):
+        if to == "boss":
+            raise ServiceError("paused", "the session is paused", 409)
+        return real(db_, to, *args, **kwargs)
+
+    monkeypatch.setattr(agents, "send_message", send)
+    w = notices(worker.id)
+    for _ in range(2):
+        assert client.post(f"/v1/visuals/{v['id']}/dismiss", json={"rev": 2}).status_code == 200
+    assert notices(worker.id) == w + 1
+    assert not [i for i in inbox.items(db, None, panes={}) if i.kind == "visual"]
+
+
 def test_answer_attachments_reach_receiver_and_kept_visual(db, session, client, tmp_path, monkeypatch):
     ws, boss, worker = session
     receiving = tmp_path / "receiving"

@@ -1225,8 +1225,11 @@ def patch_config(db: DB, params: dict, body: Body) -> Any:
     if unknown := sorted((set(values) | set(unset)) - known):
         raise ServiceError("invalid", f"unknown setting(s): {', '.join(unknown)}")
     for key, value in values.items():
-        if not _fits(value, getattr(defaults, key)):
-            raise ServiceError("invalid", f"{key} must be a {type(getattr(defaults, key)).__name__}")
+        # Coordinator is a nullable boolean: its plan-dependent default is
+        # None, which would otherwise let _fits accept values of any type.
+        default = False if key == "coordinator" else getattr(defaults, key)
+        if not _fits(value, default):
+            raise ServiceError("invalid", f"{key} must be a {type(default).__name__}")
     for key, value in values.items():
         if scope == "user":
             path = config.set_user(key, value)
@@ -1370,8 +1373,11 @@ def patch_user_settings(db: DB, params: dict, body: Body) -> Any:
             raise ServiceError("invalid", f"{key} must be one of: {', '.join(allowed[key])}")
     for key, mode in changes.items():
         config.set_user(key, mode)
-    if "visuals" in changes:
+    if "visuals" in changes or "visuals_enabled" in changes:
+        # The setting applies to every repo; scoped feeds need their own row.
         bus.publish(db, "visual.offers_setting")
+        for row in db.conn.execute("SELECT DISTINCT repo_root FROM workspaces"):
+            bus.publish(db, "visual.offers_setting", repo_root=row["repo_root"])
     return {"visuals": config.visuals_setting(), "claude_permission_mode": config.claude_permission_mode(),
             "opencode_permission_mode": config.opencode_permission_mode(),
             "visuals_enabled": "on" if config.visuals_enabled_setting() else "off"}

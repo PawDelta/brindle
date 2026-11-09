@@ -4,6 +4,7 @@
    {"error": {"code", "message"}} (brindle/service/errors.py) and is thrown as a
    DaemonError with that code. */
 
+import { startupStep } from "./startup";
 import type {
   AccountDTO,
   AgentDTO,
@@ -328,6 +329,8 @@ export interface Meta {
   visuals?: boolean;
   /* The daemon is still bringing back sessions from its previous shutdown. */
   resuming?: boolean;
+  /* Unix seconds when startup recovery ended; absent on older engines. */
+  recovered_at?: number | null;
   /* How far that has come: sessions finished with, of those it is bringing back. */
   recovery?: { done: number; total: number; pending?: string[] } | null;
   engine_version: string;
@@ -365,7 +368,7 @@ export interface VisualDTO {
   title: string;
   /* The agent that published it. */
   by: string;
-  kind: "visual" | "plan";
+  kind: "visual" | "plan" | "analysis_doc";
   rev: number;
   question?: string;
   options?: VisualOption[];
@@ -1239,6 +1242,8 @@ export class DaemonError extends Error {
 type Query = Record<string, string | number | null | undefined>;
 
 export class DaemonClient {
+  // Before any reads on this connection, including sync's first snapshot.
+  readonly createdAt = Date.now() / 1000;
   readonly baseUrl: string;
   readonly token: string;
   private readonly fetchImpl: typeof fetch;
@@ -1626,6 +1631,11 @@ export class DaemonClient {
   /* The person's answer to the revision on screen; a newer revision makes this a 409. */
   answerVisual(id: string, rev: number, option: string | undefined, note: string, attachments?: string[]) {
     return this.post<VisualDTO>(`/visuals/${encodeURIComponent(id)}/answer`, { rev, option, note, ...(attachments?.length ? { attachments } : {}) });
+  }
+
+  /* The person won't answer the revision on screen; the agent is told, the Inbox card clears. */
+  dismissVisual(id: string, rev: number) {
+    return this.post<VisualDTO>(`/visuals/${encodeURIComponent(id)}/dismiss`, { rev });
   }
 
   exportVisual(id: string, rev: number, html: string, destination: ExportDestination = "download", markdown?: string) {
@@ -2176,6 +2186,9 @@ export class DaemonClient {
       }
       throw new DaemonError(err?.code ?? "http", err?.message ?? response.statusText, response.status, undefined, undefined, Array.isArray(got?.reasons) ? got.reasons : undefined);
     }
+    const route = new URL(url).pathname;
+    if (route === "/v1/meta") startupStep("meta");
+    if (route === "/v1/snapshot") startupStep("snapshot");
     return body as T;
   }
 }
