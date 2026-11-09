@@ -191,6 +191,37 @@ pub fn command(distro: &str, script: &str) -> Command {
     cmd
 }
 
+/// Convert in the daemon's distribution, honoring its automount settings.
+/// Pass the native path as an argument, never shell source.
+pub fn attachment_path_command(distro: &str, path: &str) -> Command {
+    let mut cmd = wsl_exe();
+    cmd.args(["-d", distro, "--exec", "wslpath", "-a", "-u", path]);
+    cmd
+}
+
+/// WSL shares already name Linux files. Refuse another distribution's share
+/// rather than interpreting its path in the connected distribution.
+pub fn attachment_path_in(distro: &str, path: &str, convert: impl FnOnce(&str) -> Result<String, String>) -> Result<String, String> {
+    let normalized = path.replace('\\', "/");
+    let normalized = normalized.strip_prefix("//?/UNC/").map(|rest| format!("//{rest}"))
+        .unwrap_or_else(|| normalized.strip_prefix("//?/").unwrap_or(&normalized).to_string());
+    let mut parts = normalized.splitn(5, '/');
+    let _ = parts.next();
+    let _ = parts.next();
+    let host = parts.next().unwrap_or_default();
+    if normalized.starts_with("//") && (host.eq_ignore_ascii_case("wsl$") || host.eq_ignore_ascii_case("wsl.localhost")) {
+        let owner = parts.next().unwrap_or_default();
+        if !owner.eq_ignore_ascii_case(distro) {
+            return Err("attach a file from the connected WSL distribution".into());
+        }
+        return Ok(format!("/{}", parts.next().unwrap_or_default()));
+    }
+    if normalized.starts_with('/') && !normalized.starts_with("//") {
+        return Ok(normalized);
+    }
+    convert(path)
+}
+
 #[cfg(windows)]
 mod run {
     use std::process::{Command, Stdio};
@@ -231,6 +262,18 @@ mod run {
         let target = Target { distro, home: parse_home(&home.stdout)? };
         *known = Some(target.clone());
         Ok(target)
+    }
+
+    pub fn attachment_path(path: &str) -> Result<String, String> {
+        let target = target()?;
+        attachment_path_in(&target.distro, path, |native| {
+            let out = output(attachment_path_command(&target.distro, native), "an attachment path")?;
+            let linux = decode(&out.stdout).trim_end_matches(['\r', '\n']).to_string();
+            if !out.status.success() || !linux.starts_with('/') {
+                return Err("this file path is not available in the connected WSL distribution".into());
+            }
+            Ok(linux)
+        })
     }
 
     /// Start `brindle daemon --tcp` in the distribution and wait until it answers.
@@ -304,13 +347,28 @@ mod run {
 }
 
 #[cfg(windows)]
-pub use run::{detect_output, ensure, install_command, still_named};
+pub use run::{attachment_path, detect_output, ensure, install_command, still_named};
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;
+
+    #[test]
+    fn attachment_paths_use_the_connected_distribution_and_its_mounts() {
+        let native = r"C:\Users\name\a photo.png";
+        let cmd = attachment_path_command("Ubuntu", native);
+        let args: Vec<_> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert_eq!(args, ["-d", "Ubuntu", "--exec", "wslpath", "-a", "-u", native]);
+        // wslpath, rather than an assumed /mnt/c, supplies the actual mount.
+        assert_eq!(attachment_path_in("Ubuntu", native, |_| Ok("/drives/c/Users/name/a photo.png".into())).unwrap(), "/drives/c/Users/name/a photo.png");
+        for path in [r"\\wsl$\ubuntu\home\name\photo.png", r"\\wsl.localhost\Ubuntu\home\name\photo.png", r"\\?\UNC\wsl$\Ubuntu\home\name\photo.png"] {
+            assert_eq!(attachment_path_in("Ubuntu", path, |_| panic!("share needs no drive conversion")).unwrap(), "/home/name/photo.png");
+        }
+        assert!(attachment_path_in("Ubuntu", r"\\wsl$\Debian\home\name\photo.png", |_| panic!("wrong distribution")).is_err());
+        assert_eq!(attachment_path_in("Ubuntu", "/home/name/photo.png", |_| panic!("already Linux")).unwrap(), "/home/name/photo.png");
+    }
 
     fn utf16(text: &str) -> Vec<u8> {
         let mut raw = vec![0xFF, 0xFE];

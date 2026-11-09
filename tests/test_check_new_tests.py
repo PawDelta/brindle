@@ -49,6 +49,7 @@ def test_listing_failures_stop_the_check_worth_committing(tmp_path, monkeypatch)
         gate.run_with_coverage(["tests/test_a.py"], tmp_path / ".coverage", append=False)
 
 
+@pytest.mark.slow("spawns real parallel pytest runs to prove a flaky test is caught")
 def test_a_test_that_passes_only_sometimes_fails_the_check_worth_committing(tmp_path, monkeypatch):
     (tmp_path / "tests").mkdir()
     (tmp_path / "tests/test_f.py").write_text(

@@ -349,12 +349,14 @@ dependencies = [
 name = "brindle-desktop"
 version = "0.1.0"
 dependencies = [
+ "arboard",
  "base64 0.22.1",
  "block2",
  "gio",
  "glib",
  "gtk",
  "httparse",
+ "image",
  "libc",
  "minisign-verify",
  "objc2",

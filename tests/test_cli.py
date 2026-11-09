@@ -79,7 +79,8 @@ def test_ls_json(db, repo, monkeypatch):
     assert (entry["ahead"], entry["behind"], entry["dirty"]) == (0, 0, 2)
     # No tmux window, so the agent reads as exited.
     assert entry["agents"] == [
-        {"id": "a1", "profile": "developer", "provider": "claude", "status": "exited", "mode": "interactive"}
+        {"id": "a1", "profile": "developer", "provider": "claude", "status": "exited", "mode": "interactive",
+         "accepts_files": True}
     ]
 
 

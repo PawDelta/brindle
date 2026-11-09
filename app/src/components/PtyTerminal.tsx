@@ -67,6 +67,7 @@ import { Terminal as XTerm } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { useContext, useEffect, useRef, useState } from "react";
 import { logDebug } from "../api/debug";
+import { clipboardAttachments, listenForDrops, type Attachment } from "../api/attachments";
 import { openExternal, type OpenUrl } from "../api/open";
 import type { Crop, PtyViewOpener, PtyViewTarget } from "../api/ptyView";
 import { visualLink } from "../screens/Session/Visuals/client";
@@ -124,6 +125,7 @@ export interface PtyTerminalProps {
   copy?(text: string): Promise<void>;
   /* What the app's clipboard holds, for ⌘V. */
   paste?(): Promise<string>;
+  attachments?: { acceptsFiles: boolean; attach(file: Attachment): Promise<{ text: string }> };
   /* Where a link ⌘-clicked in the pane opens: the system browser (openExternal) unless given. */
   openUrl?: OpenUrl;
   onView?(view: TerminalView): void;
@@ -212,13 +214,17 @@ export function linkOpener(openUrl: () => OpenUrl, mac: boolean, openVisual?: ()
   };
 }
 
-export function PtyTerminal({ at, open, copy, paste, openUrl, onView, onSize }: PtyTerminalProps) {
+export function PtyTerminal({ at, open, copy, paste, attachments, openUrl, onView, onSize }: PtyTerminalProps) {
   const host = useRef<HTMLDivElement>(null);
   const box = useRef<HTMLDivElement>(null);
   const mask = useRef<HTMLDivElement>(null);
   const [renderer, setRenderer] = useState<Renderer | null>(null);
   const [view, setView] = useState<TerminalView>({ kind: "connecting" });
   const [copiedShown, setCopiedShown] = useState(false);
+  const [dropShown, setDropShown] = useState(false);
+  const [fileNotice, setFileNotice] = useState<{ error: boolean; text: string } | null>(null);
+  const attaching = useRef(attachments);
+  attaching.current = attachments;
   const viewed = useRef(onView);
   viewed.current = onView;
   const sized = useRef(onSize);
@@ -441,13 +447,45 @@ export function PtyTerminal({ at, open, copy, paste, openUrl, onView, onSize }: 
       logDebug("pty_view", "info", "paste sent to the view", { bytes, target });
     };
     // The app's clipboard, for a paste with no webview paste to go by. Null: nothing to paste, and why is said.
-    const fromApp = (): Promise<string | null> => {
+    const attachFiles = async (files: Attachment[]): Promise<string | null> => {
+      const destination = attaching.current;
+      if (gone || !destination || !files.length) return null;
+      if (!destination.acceptsFiles) {
+        setFileNotice({ error: false, text: "This agent can't take files." });
+        return null;
+      }
+      setFileNotice(null);
+      const texts: string[] = [];
+      for (const file of files) {
+        if (gone || attaching.current !== destination) break;
+        try {
+          const result = await destination.attach(file);
+          if (gone || attaching.current !== destination) return null;
+          texts.push(result.text);
+        } catch (err) {
+          if (!gone && attaching.current === destination) setFileNotice({ error: true, text: `Couldn't attach file: ${String(err)}` });
+        }
+      }
+      return texts.join(" ") || null;
+    };
+    const fromApp = async (onRead?: (text: string) => void): Promise<string | null> => {
       const pasteFrom = pasted.current;
-      if (gone || !pasteFrom) return Promise.resolve(null);
-      return pasteFrom().catch((err) => {
+      const destination = attaching.current;
+      if (gone || !pasteFrom) return null;
+      const text = await pasteFrom().catch((err) => {
         dropPaste(`couldn't read the app's clipboard: ${String(err)}`, 0);
         return null;
       });
+      onRead?.(text ?? "");
+      if (text || gone || !destination) return text;
+      try {
+        const files = await clipboardAttachments();
+        if (gone || attaching.current !== destination) return null;
+        return await attachFiles(files);
+      } catch (err) {
+        if (!gone && attaching.current === destination) setFileNotice({ error: true, text: `Couldn't read clipboard files: ${String(err)}` });
+        return null;
+      }
     };
     // Its place in the line kept from now, however long the text takes to come.
     const pasteInLine = (reading: Promise<string | null>) =>
@@ -455,25 +493,45 @@ export function PtyTerminal({ at, open, copy, paste, openUrl, onView, onSize }: 
         const text = await reading;
         if (text !== null) await toPane(text);
       });
+    let unlisten: (() => void) | undefined;
+    if (attaching.current) {
+      void listenForDrops(event => {
+        if (gone) return;
+        const underCursor = event.type === "leave" ? null : document.elementFromPoint(event.x!, event.y!);
+        const inside = !!underCursor && el.contains(underCursor);
+        setDropShown(inside && event.type !== "drop" && !!attaching.current?.acceptsFiles);
+        if (inside && event.type === "drop") {
+          // Reserve the whole drop's position before any upload starts.
+          const destination = attaching.current;
+          queued(async () => {
+            if (gone || attaching.current !== destination) return;
+            const text = await attachFiles((event.paths ?? []).map(path => ({ path })));
+            if (text) await toPane(text);
+          });
+        }
+      }).then(stop => { if (gone) stop(); else unlisten = stop; }, () => {
+        if (!gone) setFileNotice({ error: true, text: "Couldn't enable file drops." });
+      });
+    }
     // The webview's own pastes, taken from xterm.js: each fills the ⌘V waiting longest for it, or (Edit > Paste
     // clicked, or a ⌘V's that came late) is pasted as it comes. Every paste the webview sends is pasted once.
     const awaiting: ((text: string) => void)[] = [];
-    // ⌘Vs past their wait, the app's clipboard pasted in their place: the text each pasted, as its late answer will
-    // hold it, and until when that answer is looked for.
-    const owed: { text: string; until: number }[] = [];
+    // ⌘Vs past their wait: match their original clipboard text (empty for files),
+    // not the attachment text generated for the terminal, until their late answer arrives.
+    const owed: { clipboardText: string; until: number }[] = [];
     const sameLines = (text: string) => text.replace(/\r\n?/g, "\n");
     const pasting = (e: ClipboardEvent) => {
       e.preventDefault();
       e.stopPropagation();
       const text = e.clipboardData?.getData("text/plain") ?? "";
-      const lateAnswer = owed.findIndex((o) => o.until > Date.now() && o.text === sameLines(text));
+      const lateAnswer = owed.findIndex((o) => o.until > Date.now() && o.clipboardText === sameLines(text));
       if (lateAnswer >= 0) {
         owed.splice(lateAnswer, 1);
         return dropPaste("a late webview paste of what the app's clipboard already pasted", text.length);
       }
       const waiter = awaiting.shift();
       if (waiter) return waiter(text);
-      queued(() => toPane(text));
+      pasteInLine(text ? Promise.resolve(text) : fromApp());
     };
     el.addEventListener("paste", pasting, true);
     const selected = () => (crop.cols ? selectionIn(term, crop.left, crop.left + shownCols()) : term.getSelection());
@@ -525,6 +583,11 @@ export function PtyTerminal({ at, open, copy, paste, openUrl, onView, onSize }: 
       }
       const key = e.key.toLowerCase();
       const copyTo = copied.current;
+      if (!mac && key === "v" && e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && pasted.current) {
+        e.preventDefault();
+        pasteInLine(fromApp());
+        return false;
+      }
       if (!mac && key === "c" && e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
         // A copy of xterm.js's selection (cleared, as Windows Terminal does: the next Ctrl+C is ^C), else tmux's
         // (copy mode left) or, with none, ^C: tmux's key table decides.
@@ -553,17 +616,20 @@ export function PtyTerminal({ at, open, copy, paste, openUrl, onView, onSize }: 
         // moment: the app's clipboard in this ⌘V's place, so what's typed behind it stays behind it, and its paste,
         // coming later with that text, isn't pasted again (`owed`). One coming during that read still answers it.
         pasteInLine(new Promise<string | null>((ok) => {
+          let reading: Promise<string | null> | undefined;
+          let clipboardText = "";
+          const read = () => reading ??= fromApp(text => { clipboardText = text; });
           const waiter = (text: string) => {
             clearTimeout(timer);
-            ok(text || fromApp());
+            ok(text || read());
           };
           const timer = setTimeout(() => {
             if (!gone) logDebug("pty_view", "warning", `⌘V: the webview's paste didn't come within ${PASTE_WAIT} ms: reading the app's clipboard`, { target });
-            void fromApp().then((text) => {
+            void read().then((text) => {
               const unanswered = awaiting.indexOf(waiter);
               if (unanswered < 0) return;
               awaiting.splice(unanswered, 1);
-              if (text) owed.push({ text: sameLines(text), until: Date.now() + LATE_PASTE_WINDOW });
+              if (text) owed.push({ clipboardText: sameLines(clipboardText), until: Date.now() + LATE_PASTE_WINDOW });
               ok(text);
             });
           }, PASTE_WAIT);
@@ -577,7 +643,8 @@ export function PtyTerminal({ at, open, copy, paste, openUrl, onView, onSize }: 
     // it, and the webview has nowhere to paste. Taken for the view last used, once: not for a text field or dialog,
     // which have their own use for it. Its default prevented, no webview paste follows; the app's clipboard is read.
     const offView = (e: KeyboardEvent) => {
-      if (e.defaultPrevented || !e.metaKey || e.ctrlKey || e.altKey || e.shiftKey || e.key.toLowerCase() !== "v") return;
+      const pasteKey = (e.metaKey && !e.ctrlKey) || (!mac && e.ctrlKey && !e.metaKey);
+      if (e.defaultPrevented || !pasteKey || e.altKey || e.shiftKey || e.key.toLowerCase() !== "v") return;
       if (!pasted.current || el.contains(e.target as Node) || !onScreen(el)) return;
       if (lastFocused && lastFocused !== el && onScreen(lastFocused)) return;
       if (document.activeElement?.closest(TEXT_FIELD) || document.querySelector(DIALOG)) return;
@@ -591,10 +658,13 @@ export function PtyTerminal({ at, open, copy, paste, openUrl, onView, onSize }: 
     observer?.observe(el);
     return () => {
       gone = true;
+      unlisten?.();
       wake();
       if (lastFocused === el) lastFocused = null;
       clearTimeout(hide);
       setCopiedShown(false);
+      setDropShown(false);
+      setFileNotice(null);
       window.removeEventListener("keydown", offView);
       term.textarea?.removeEventListener("focus", noteFocus);
       term.textarea?.removeEventListener("focus", focused);
@@ -632,6 +702,8 @@ export function PtyTerminal({ at, open, copy, paste, openUrl, onView, onSize }: 
           Copied
         </div>
       )}
+      {dropShown && <div data-testid="terminal-drop" className="pointer-events-none absolute inset-0 z-20 rounded-md border-2 border-shell-acc bg-shell-bg/60 p-s3 text-shell-acc">Drop files to attach</div>}
+      {fileNotice && <div role={fileNotice.error ? "alert" : "status"} className="absolute bottom-s2 left-s2 right-s2 z-20 rounded-md border border-shell-line bg-shell-bg p-s2 text-xs text-shell-ink" onClick={() => setFileNotice(null)}>{fileNotice.text}</div>}
     </div>
   );
 }
