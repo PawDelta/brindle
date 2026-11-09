@@ -219,9 +219,7 @@ describe("visuals", () => {
     await type("r", false);                         // off: begun, not reported
     clock = 12000;
     await type("ender first", false);               // asks again, still off at this key
-    replies[1]!({ visuals: true });
-    await type("", false);
-    await type("");
+    await type("");                                 // sent while that answer is still pending
     expect(replies).toHaveLength(2);                // one request at a time
     expect(words).toEqual(["failed answer", "pending answer", "render first"]);   // never the tail "ender first"
   });

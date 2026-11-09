@@ -127,7 +127,8 @@ export function visualsGate(client: { meta(): Promise<{ visuals?: boolean }> } |
   };
   ask();
   return {
-    enabled: () => { if (known !== true) ask(); return known !== false; },
+    // While an answer is pending, a cached "off" may be out of date: keep recording (the engine decides).
+    enabled: () => { if (known !== true) ask(); return known !== false || inFlight; },
     close: () => { closed = true; },
   };
 }
