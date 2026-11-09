@@ -957,7 +957,7 @@ CREATE TABLE IF NOT EXISTS visuals (
     root_id TEXT NOT NULL,         -- the session (its root agent)
     repo_root TEXT NOT NULL,       -- the session's repo: pages are under its .brindle/visuals/
     by_agent TEXT NOT NULL,        -- who published the current revision
-    kind TEXT NOT NULL,            -- visual | plan
+    kind TEXT NOT NULL,            -- visual | plan | analysis_doc
     title TEXT NOT NULL,
     rev INTEGER NOT NULL,
     question TEXT,

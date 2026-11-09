@@ -7962,7 +7962,8 @@
         "kind": {
           "enum": [
             "visual",
-            "plan"
+            "plan",
+            "analysis_doc"
           ],
           "title": "Kind",
           "type": "string"

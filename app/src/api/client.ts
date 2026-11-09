@@ -365,7 +365,7 @@ export interface VisualDTO {
   title: string;
   /* The agent that published it. */
   by: string;
-  kind: "visual" | "plan";
+  kind: "visual" | "plan" | "analysis_doc";
   rev: number;
   question?: string;
   options?: VisualOption[];

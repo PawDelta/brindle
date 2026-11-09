@@ -85,6 +85,58 @@ def test_merged_doc_uploads_and_local_copy_goes_only_after_a_200(status, tmp_pat
         ["big.md", "summary.md"] if status == 200 else ["big.md", "raw.md", "summary.md"])
 
 
+@pytest.mark.parametrize("store", ["on", pytest.param("off", marks=pytest.mark.variant(
+    "the reported case: with storage off nothing else tells the person a doc is ready"))])
+def test_ready_doc_opens_in_visuals(store, tmp_path, remote, fixed_identity, db, monkeypatch):
+    from brindle import agents, identity_lock, visuals
+    from brindle.db import Agent, Workspace
+    from brindle.service import inbox
+
+    if store == "on":
+        monkeypatch.setattr(auth.UrllibTransport, "request", lambda self, m, url, form, headers: (
+            remote.request(m, url, form, headers)))
+        login_as(remote, credentials.default_store(), features=("analysis_docs",))
+    ws = Workspace("proj/feat", str(tmp_path), "feat", "main", "feat", "main",
+                   str(tmp_path), None, "brindle-test", 1.0)
+    db.add_workspace(ws)
+    db.add_agent(Agent("sup", ws.id, "supervisor", "shell", None, "interactive", "processing", "", None, 1.0))
+    monkeypatch.setattr(identity_lock, "ensure_workspace", lambda *a: None)
+    monkeypatch.setattr(agents, "model_problem", lambda *a, **kw: None)
+    monkeypatch.setattr(agents, "_launch", lambda *a, **kw: None)
+    monkeypatch.setattr(agents, "same_server", lambda *a, **kw: False)
+    worker = agents.spawn(db, ws, "developer", provider_name="shell", mode="handoff", parent_id="sup",
+                          analysis_doc=True)
+    summary = write_doc(tmp_path) / "summary.md"
+
+    def shown(rev):
+        [v] = visuals.for_session(db, "sup")
+        assert (v["kind"], v["rev"]) == ("analysis_doc", rev)
+        return v
+
+    summary.write_text("# Cache TTL\n\n<script>alert(1)</script> **short**\n")
+    agents.report_result(db, worker.id, "finished")
+    v = shown(1)
+    page = visuals.page(db, v["id"], "1").read_text()
+    assert "<script>" not in page and "&lt;script&gt;" in page and "<strong>short</strong>" in page
+    assert [(i.kind, i.detail) for i in inbox._visual_items(db, None)] == [("analysis_doc", "Cache TTL")]
+
+    agents.report_result(db, worker.id, "finished")     # unchanged: nothing new
+    shown(1)
+    summary.write_text("# Cache TTL\n\nrevised\n")
+    agents.report_result(db, worker.id, "finished")     # the same words, a changed doc
+    assert shown(2)["id"] == v["id"]
+
+    summary.write_text("# Cache TTL\n\nthe goal's doc\n")
+    db.add_autopilot("sup")
+    db.update_autopilot("sup", goal="ship", state="done", analysis_doc=1)
+    agents.analysis_docs_turn(db, db.get_agent("sup"))
+    shown(3)
+
+    summary.write_text("api_key = " + "Zq8vR2mK7pX4tL9w" + "B3nY6cH1\n")     # secret-shaped: refused, the report stands
+    assert agents.report_result(db, worker.id, "finished")
+    shown(3)
+
+
 @pytest.mark.parametrize("case", ["airgap", "unentitled", "off"])
 def test_nothing_sent(case, tmp_path, remote, fixed_identity, monkeypatch):
     write_doc(tmp_path)
