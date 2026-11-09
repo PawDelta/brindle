@@ -20,14 +20,10 @@
    session stays listed under it). Clicking a session opens its
    provider session on the supervisor; clicking an agent opens the session
    on that agent. Keys, as in the CLI: ↑ ↓ (or j k) move, Enter opens, ⌘1-9
-   jump to a session, ⌘N starts one. At the foot, an initials
-   button opens the profile rail (Knowledge, Agents and Settings' tabs), on
-   one line with the terminal switch. Theme choices live
-   in Settings. Above the row,
-   the most-used weekly allowance opens Account › Usage; beside it, while a provider
-   has a problem (signed out, an install failed), a few more that open
-   Settings › Providers (design/connect/); no providers block anywhere else
-   in the sidebar. There is no right-hand panel: this is
+   jump to a session, ⌘N starts one. At the foot, the profile pill combines
+   initials and usage and opens Account › Usage; the terminal switch sits
+   beside it. A provider problem strip above the row opens Settings › Providers.
+   Updates live in the Inbox and Settings › About. There is no right-hand panel: this is
    where brindle's layer lives. The site's surfaces, purple (branch) only
    as the accent (styles.css .side-*). */
 
@@ -44,14 +40,12 @@ import { UNKNOWN } from "../screens/Session/review";
 import { agentIds, sessionTree, type AgentNode } from "../screens/Session/tree";
 import { useContinue } from "../screens/Session/useContinue";
 import { waitingCount } from "../store/appUpdates";
-import { AppUpdatePill } from "./AppUpdateBanner";
 import { cliStatus, formatAge, isPaused, type CliStatus } from "../store/overview";
 import { planWindows, providerName, WARN } from "../screens/Account/usage";
 import { useSessions } from "../store/sessions";
 import { providerProblems, rememberSignedIn, type ProviderProblem } from "../api/providers";
 import { useProviders } from "../store/providers";
 import { useUsage } from "../store/usage";
-import { prettyModel } from "../screens/Agents/agents";
 import { useAppState, useStore } from "../store/useStore";
 import Logo from "./Logo";
 import { Preflight } from "./Preflight";
@@ -70,27 +64,6 @@ export interface SidebarProps {
 
 const weeklyWindow = (provider: ProviderUsage) => (provider.known ? planWindows(provider).find((window) => window.minutes === 10080) : undefined);
 
-function WeeklyMeter({ provider }: { provider: ProviderUsage }) {
-  const window = weeklyWindow(provider);
-  if (!window) return <span className="text-ink-3">—</span>;
-  return (
-    <span className="inline-flex items-center gap-1 font-mono">
-      <span role="progressbar" aria-label={`${providerName(provider.provider)} weekly usage`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={window.used} className="flex h-[3px] w-8 overflow-hidden rounded-full bg-line">
-        <span className="h-full bg-current" style={{ width: `${Math.max(0, Math.min(100, window.used))}%` }} />
-      </span>
-      {Math.round(window.used)}%
-    </span>
-  );
-}
-
-/* The model beside its provider, without repeating the provider: "claude-opus-4-7" under Claude
-   reads "Opus 4.7"; a model that doesn't start with the provider's name ("gpt-5.5") keeps its own. */
-export function usageModel(model: string, provider: string): string {
-  const own = new RegExp(`^${provider}[-\\s]`, "i");
-  const rest = model.replace(own, "").replace(/(\d)-(\d)/g, "$1.$2");
-  return prettyModel(rest);
-}
-
 /* The reset day only matters once the weekly window is close to full. */
 const RESET_SHOWN_FROM = 80;
 
@@ -98,31 +71,27 @@ const RESET_SHOWN_FROM = 80;
 let usageAsks = 0;
 /* No reading is not a fault: a new user has none yet, and the first load may still be out.
    Only a failed load says "unavailable"; otherwise a neutral "Usage" opens the same page. */
-function UsageReading({ provider, model, warning, failed, navigate }: { provider?: ProviderUsage; model?: string | null; warning: boolean; failed: boolean } & Pick<SidebarProps, "navigate">) {
+function UsageReading({ provider, warning, failed }: { provider?: ProviderUsage; warning: boolean; failed: boolean }) {
   const window = provider && weeklyWindow(provider);
   return (
-    <button
-      type="button"
-      className={`inline-flex min-w-0 items-center gap-1 truncate font-mono text-[10.5px] hover:underline ${warning ? "text-sap" : "text-ink-3"}`}
-      aria-label="Open Account › Usage"
-      data-testid="usage-reading"
+    <span
+      className={`min-w-0 truncate font-mono text-[11.5px] ${warning ? "text-sap" : "text-ink-3"}`}
+      data-testid="profile-usage"
       data-provider={provider?.provider}
       data-state={provider ? "reading" : failed ? "failed" : "none"}
-      onClick={() => navigate({ screen: "account", section: "usage", ask: ++usageAsks })}
     >
       {provider ? (
         <>
           <span>{providerName(provider.provider)}</span>
-          {model && <span data-testid="usage-model">{usageModel(model, provider.provider)}</span>}
-          <WeeklyMeter provider={provider} />
-          {window?.resets_at != null && window.used >= RESET_SHOWN_FROM &&<span className="truncate">· resets {new Date(window.resets_at * 1000).toLocaleDateString("en-US", { weekday: "short" })}</span>}
+          {" "}{window ? `${Math.round(window.used)}%` : "—"}
+          {window?.resets_at != null && window.used >= RESET_SHOWN_FROM && <> · {new Date(window.resets_at * 1000).toLocaleDateString("en-US", { weekday: "short" })}</>}
         </>
       ) : failed ? "Usage unavailable" : "Usage"}
-    </button>
+    </span>
   );
 }
 
-function AccountButton({ route, navigate }: Pick<SidebarProps, "route" | "navigate">) {
+function AccountButton({ route, navigate, provider, warning, failed }: Pick<SidebarProps, "route" | "navigate"> & { provider?: ProviderUsage; warning: boolean; failed: boolean }) {
   const client = useContext(DaemonContext);
   const store = useStore();
   const connection = useAppState((s) => s.connection);
@@ -146,23 +115,22 @@ function AccountButton({ route, navigate }: Pick<SidebarProps, "route" | "naviga
   return (
     <button
       type="button"
-      aria-label="Open Account"
+      aria-label="Open Account › Usage"
+      data-testid="profile-pill"
       data-walkthrough="profile"
       aria-current={settingsTab(route) ? "page" : undefined}
       title={account?.signed_in ? name || email || "Signed in" : "Sign in"}
-      className="shrink-0 rounded-full hover:bg-surface-2"
-      onClick={() => navigate({ screen: "account" })}
+      className="relative flex min-w-0 items-center gap-2 rounded-full border border-line py-0.5 pl-0.5 pr-3 hover:bg-surface-2 focus-visible:outline-2 focus-visible:outline-branch"
+      onClick={() => navigate({ screen: "account", section: "usage", ask: ++usageAsks })}
     >
       <AccountAvatar />
+      {warning && <span aria-hidden="true" data-testid="usage-warning-dot" className="absolute left-6 top-0 size-1.5 rounded-full bg-sap ring-2 ring-canvas-2" />}
+      <UsageReading provider={provider} warning={warning} failed={failed} />
     </button>
   );
 }
 
-/* The only thing the sidebar says about providers (design/connect/ step
-   9): a problem, in a few warm words beside the usage reading, "Codex
-   signed out" or "OpenCode install failed", signed out first, "+N" when
-   there are others, opening Settings › Providers. Nothing otherwise: the
-   sidebar has no providers block. */
+/* Provider problems alone fill the soft strip above the profile pill. */
 let providerAsks = 0;
 function ProviderProblemLine({ problems, navigate }: { problems: ProviderProblem[] } & Pick<SidebarProps, "navigate">) {
   const first = problems[0];
@@ -170,19 +138,20 @@ function ProviderProblemLine({ problems, navigate }: { problems: ProviderProblem
   return (
     <button
       type="button"
-      className={`group ml-auto inline-flex min-w-0 flex-[0_1_auto] items-baseline gap-1 font-mono text-[10.5px] ${first.kind === "set_up" ? "text-ink-3" : "font-medium text-sap"}`}
+      className={`group flex w-full min-w-0 items-center gap-1 whitespace-nowrap rounded-md px-2 py-1.5 text-left font-mono text-[10.5px] ${first.kind === "set_up" ? "bg-surface-2 text-ink-3" : "bg-sap-soft font-medium text-sap"}`}
       aria-label={`${first.text}: open Settings › Providers`}
       data-testid="provider-problem"
       data-provider={first.provider}
       data-kind={first.kind}
       onClick={() => navigate({ screen: "settings", section: "providers", ask: ++providerAsks })}
     >
-      <span className="min-w-0 overflow-hidden text-ellipsis group-hover:underline group-hover:underline-offset-2">{first.text}</span>
+      <span className="min-w-0 truncate group-hover:underline group-hover:underline-offset-2">{first.text}</span>
       {problems.length > 1 && (
         <span className="flex-none font-normal text-ink-3" data-testid="provider-problem-more">
-          +{problems.length - 1}
+          +{problems.length - 1} more
         </span>
       )}
+      <span aria-hidden="true" className="ml-auto shrink-0">›</span>
     </button>
   );
 }
@@ -729,8 +698,7 @@ export function Sidebar({ route, navigate, refresh, openUrl, onBackFromSettings 
   // The model the selected session's own agent last ran on, from the agents the snapshot already lists.
   const workspaces = useAppState((s) => s.workspaces);
   const agent = useMemo(() => workspaces.flatMap((ws) => ws.agents ?? []).find((a) => a.id === selected?.root), [workspaces, selected]);
-  // The meter names the model only with its own provider's usage; with none, the global most-used provider shows alone.
-  // The session's model always shows, with its own provider's weekly usage, or "—" when that provider reports none.
+  // Follow the selected session's provider when it has a model; otherwise show the fullest week.
   const model = agent?.model;
   const own = agent && model ? (usage?.providers.find((p) => p.provider === agent.provider) ?? { provider: agent.provider, known: false, limited: false, limited_until: null, updated_at: null, windows: [] }) : undefined;
   const shown = own ?? mostUsed;
@@ -936,16 +904,14 @@ export function Sidebar({ route, navigate, refresh, openUrl, onBackFromSettings 
         {repos && repos.length > 0 && live.length === 0 && <p className="px-s1 text-xs text-ink-3">Nothing running. Start a session, or continue a recent one.</p>}
       </nav>
       </div>
-      <div className="flex min-h-4 shrink-0 items-center justify-between gap-2 whitespace-nowrap border-t border-line px-s1 pt-s1" data-testid="status-line">
-        <UsageReading provider={shown} model={model} warning={warning} failed={usageError != null} navigate={navigate} />
+      <div className="flex shrink-0 flex-col gap-2 border-t border-line px-s1 pt-s1" data-testid="sidebar-foot">
         <ProviderProblemLine problems={problems} navigate={navigate} />
-        <AppUpdatePill />
+        <div className="flex h-10 min-w-0 shrink-0 flex-nowrap items-center gap-1 whitespace-nowrap" role="group" aria-label="Sidebar foot" data-testid="sidebar-foot-row">
+          <AccountButton route={route} navigate={navigate} provider={shown} warning={warning} failed={usageError != null} />
+          <span className="flex-1" />
+          <TerminalToggle />
+        </div>
       </div>
-      <nav aria-label="Pages" className="flex h-10 shrink-0 flex-nowrap items-center gap-1 whitespace-nowrap px-s1" data-testid="pages">
-        <AccountButton route={route} navigate={navigate} />
-        <span className="flex-1" />
-        <TerminalToggle />
-      </nav>
     </aside>
   );
 }

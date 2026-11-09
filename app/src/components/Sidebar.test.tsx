@@ -3,14 +3,18 @@ import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 
 import { DaemonClient } from "../api/client";
 import { DaemonContext } from "../api/context";
 import type { GoalDTO, InboxItemDTO, SessionDTO } from "../api/schema";
+import type { AppUpdates } from "../api/tauri";
 import type { Route } from "../routes";
+import { ProvidersProvider } from "../store/providers";
 import { SessionsProvider } from "../store/sessions";
 import { createAppStore } from "../store/store";
 import { startSync } from "../store/sync";
 import { UsageProvider } from "../store/usage";
 import { StoreContext } from "../store/useStore";
-import { BASE_URL, FakeDaemon, TOKEN, type DaemonData } from "../test/fakeDaemon";
+import { BASE_URL, FakeDaemon, TOKEN, freshProviders, type DaemonData } from "../test/fakeDaemon";
 import { REPO, permission, permissionInTerminal, question, root, waiting, worker } from "../test/fixtures";
+import { usageScenario } from "../test/usage";
+import { AppUpdateProvider } from "./AppUpdateBanner";
 import { PAUSED_KEY, SPLIT_KEY, Sidebar, roleOf } from "./Sidebar";
 import { sidebarChanges } from "./SessionContext";
 import { sessionTree } from "../screens/Session/tree";
@@ -32,11 +36,15 @@ function mount(data: Partial<DaemonData>, route: Route = { screen: "new" }, fetc
   render(
     <DaemonContext.Provider value={client}>
       <StoreContext.Provider value={store}>
-        <SessionsProvider client={client}>
-          <UsageProvider client={client}>
-            <Sidebar route={route} navigate={navigate} refresh={sync.refresh} openUrl={openUrl} />
-          </UsageProvider>
-        </SessionsProvider>
+        <ProvidersProvider client={client}>
+          <AppUpdateProvider updates={{} as AppUpdates}>
+            <SessionsProvider client={client}>
+              <UsageProvider client={client}>
+                <Sidebar route={route} navigate={navigate} refresh={sync.refresh} openUrl={openUrl} />
+              </UsageProvider>
+            </SessionsProvider>
+          </AppUpdateProvider>
+        </ProvidersProvider>
       </StoreContext.Provider>
     </DaemonContext.Provider>,
   );
@@ -48,6 +56,31 @@ const sessionRow = (id: string) => document.querySelector<HTMLButtonElement>(`bu
 const list = () => screen.getByRole("navigation", { name: "Sessions" });
 
 describe("Sidebar", () => {
+  it("sidebar foot pill combines identity and usage, with only provider problems above it and no update pill", async () => {
+    const { sync, store, navigate } = mount({ account: { signed_in: true, name: "Alex Brown" }, usage: usageScenario("normal"), providers: freshProviders({ claude: { path: "/bin/claude", version: "2" } }) });
+    onTestFinished(() => sync.stop());
+    await waitFor(() => expect(store.getState().account?.name).toBe("Alex Brown"));
+    const pill = screen.getByTestId("profile-pill");
+    await waitFor(() => expect(within(pill).getByTestId("profile-usage").dataset.state).toBe("reading"));
+    expect(pill.tagName).toBe("BUTTON");
+    expect(pill.textContent).toContain("AB");
+    expect(pill.querySelector("button")).toBeNull();
+    expect(screen.queryByTestId("provider-problem")).toBeNull();
+    expect(screen.queryByTestId("usage-warning-dot")).toBeNull();
+    fireEvent.click(pill);
+    expect(navigate).toHaveBeenLastCalledWith({ screen: "account", section: "usage", ask: expect.any(Number) });
+    act(() => store.dispatch({ type: "app_update", status: { automatic: true, version: "0.6.2", available: { version: "0.6.3", notes: null }, later: true, pending: null, updated: null, last_checked: null, checking: false } }));
+    expect(screen.queryByTestId("app-update-pill")).toBeNull();
+    sync.stop();
+    cleanup();
+    const busy = mount({ usage: usageScenario("several"), providers: freshProviders({ claude: { path: "/bin/claude", version: "2" }, codex: { path: "/bin/codex", version: "1", signed_in: false } }) });
+    onTestFinished(() => busy.sync.stop());
+    const strip = await screen.findByTestId("provider-problem");
+    expect(strip.nextElementSibling?.contains(screen.getByTestId("profile-pill"))).toBe(true);
+    expect(screen.getByTestId("usage-warning-dot")).toBeTruthy();
+    fireEvent.click(strip);
+    expect(busy.navigate).toHaveBeenLastCalledWith({ screen: "settings", section: "providers", ask: expect.any(Number) });
+  });
   it.each([
     ["processing", null, undefined, "Working", "working"],
     ["idle", "working", undefined, "Working", "working"],
@@ -227,7 +260,7 @@ describe("Sidebar", () => {
 
   it("new user sees no usage failure", async () => {
     const { daemon, sync } = mount({});
-    const reading = await screen.findByTestId("usage-reading");
+    const reading = await screen.findByTestId("profile-usage");
     await waitFor(() => expect(daemon.requests.some((r) => r.path === "/usage")).toBe(true));
     expect(reading.textContent).not.toContain("unavailable");
     sync.stop();
@@ -236,7 +269,7 @@ describe("Sidebar", () => {
   it("marks the usage reading failed when the load really failed", async () => {
     const { sync } = mount({}, { screen: "new" }, (daemon) => (input, init) =>
       String(input).endsWith("/usage") ? Promise.resolve(new Response("{}", { status: 500 })) : daemon.fetch(input, init));
-    await waitFor(() => expect(screen.getByTestId("usage-reading").dataset.state).toBe("failed"));
+    await waitFor(() => expect(screen.getByTestId("profile-usage").dataset.state).toBe("failed"));
     sync.stop();
   });
 
@@ -247,11 +280,11 @@ describe("Sidebar", () => {
     { account: { signed_in: false, name: "Sam Rivera", email: "sam@example.com" }, initials: "" },
   ])("renders the account identity fallback for $account", async ({ account, initials }) => {
     const { sync, navigate, store } = mount({ account }, { screen: "account" });
-    const button = screen.getByRole("button", { name: "Open Account" });
+    const button = screen.getByRole("button", { name: "Open Account › Usage" });
     try {
       await waitFor(() => {
         expect(store.getState().account).toEqual(account);
-        expect(button.textContent).toBe(initials);
+        expect(button.firstElementChild!.textContent).toBe(initials);
         expect(Boolean(button.querySelector("svg"))).toBe(!initials);
         expect(button.firstElementChild!.className.includes("text-ink-3")).toBe(!account.signed_in);
         expect(button.firstElementChild!.className.includes("border-dashed")).toBe(!account.signed_in);
@@ -261,7 +294,7 @@ describe("Sidebar", () => {
       expect(screen.queryByRole("navigation", { name: "Sessions" })).toBeNull();
       if (initials) expect(screen.getAllByText(initials)).toHaveLength(2);
       fireEvent.click(button);
-      expect(navigate).toHaveBeenLastCalledWith({ screen: "account" });
+      expect(navigate).toHaveBeenLastCalledWith({ screen: "account", section: "usage", ask: expect.any(Number) });
     } finally {
       sync.stop();
     }
@@ -270,7 +303,7 @@ describe("Sidebar", () => {
   it("lists every open session by repo with its agents nested in the CLI's rows, recent ones folded, and opens them", async () => {
     const { sync, navigate, store } = mount({ workspaces: [root, { ...worker, agents: [...worker.agents!, child] }], inbox: [waiting] }, { screen: "session", root: "sup1", repo: REPO, agent: "w1" });
     expect(list().textContent).toContain("Loading");
-    expect(within(screen.getByTestId("status-line")).getByRole("button", { name: "Open Account › Usage" })).toBeTruthy();
+    expect(within(screen.getByTestId("sidebar-foot")).getByRole("button", { name: "Open Account › Usage" })).toBeTruthy();
     await waitFor(() => expect(agentRow("w1")).toBeTruthy());
     expect(screen.getByTestId("repo-proj")).toBeTruthy();
     // The session is its supervisor, with the workers directly beneath it.

@@ -324,10 +324,10 @@ describe("agents tab", () => {
         <App store={store} client={client} refresh={sync.refresh} />
       </PtyViewsProvider>,
     );
-    const pages = await screen.findByRole("navigation", { name: "Pages" });
-    expect(within(pages).getByRole("button", { name: "Open Account" })).toBeTruthy();
+    const pages = await screen.findByRole("group", { name: "Sidebar foot" });
+    expect(within(pages).getByRole("button", { name: "Open Account › Usage" })).toBeTruthy();
     expect(pages.className).toContain("flex-nowrap");
-    fireEvent.click(within(pages).getByRole("button", { name: "Open Account" }));
+    fireEvent.click(within(pages).getByRole("button", { name: "Open Account › Usage" }));
     fireEvent.click(await screen.findByRole("button", { name: "Agents" }));
     await screen.findByTestId("kind-medium");
 
@@ -344,7 +344,7 @@ describe("agents tab", () => {
 
     fireEvent.click(within(within(row("medium")).getByTestId("cant-run")).getByRole("button", { name: "Connect Codex" }));
     expect(await screen.findByRole("region", { name: "Settings" })).toBeTruthy();
-    expect(within(pages).getByRole("button", { name: "Open Account" }).getAttribute("aria-current")).toBe("page");
+    expect(within(pages).getByRole("button", { name: "Open Account › Usage" }).getAttribute("aria-current")).toBe("page");
     sync.stop();
   });
 
