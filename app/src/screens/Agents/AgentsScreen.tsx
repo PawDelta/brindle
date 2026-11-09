@@ -30,6 +30,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { DaemonClient, KindPut, RulePackInfo } from "../../api/client";
 import type { RoutingDTO, RoutingProfileDTO } from "../../api/schema";
+import { openExternal } from "../../api/open";
 import { plain } from "../../api/wording";
 import { PageHeader } from "../../components/PageHeader";
 import { NO_REPO } from "../../components/RepoSelect";
@@ -74,6 +75,27 @@ export interface AgentsScreenProps {
 }
 
 const message = (e: unknown) => plain(e instanceof Error ? e.message : String(e));
+
+/* An https link in a message is a real link that opens in the system browser (api/open.ts); the text is otherwise as given. */
+function withLinks(text: string): ReactNode[] {
+  return text.split(/(https:\/\/[^\s'"<>]*[^\s'"<>.,;:!?)])/g).map((part, i) =>
+    i % 2 === 1 ? (
+      <a
+        key={i}
+        href={part}
+        className="underline"
+        onClick={(e) => {
+          e.preventDefault();
+          void openExternal(part).catch(() => undefined);
+        }}
+      >
+        {part}
+      </a>
+    ) : (
+      part
+    ),
+  );
+}
 
 /* What is open under a row: its list, its fallbacks, its More, or the builder. */
 type Panel = "pick" | "fb" | "more" | "make";
@@ -649,7 +671,7 @@ function Builder({ kind, draft, setDraft, profiles, connected, rules, taken, cho
           </p>
           {error && (
             <p role="alert" className={alert}>
-              Could not create it: {error}
+              Could not create it: {withLinks(error)}
             </p>
           )}
           <div className="flex flex-wrap items-center gap-s1">
@@ -895,7 +917,7 @@ export function AgentsScreen({ client, onNavigate }: AgentsScreenProps) {
           )}
           {saveError && (
             <p role="alert" className={`${alert} mx-s2 mb-s1`}>
-              Could not save: {saveError}
+              Could not save: {withLinks(saveError)}
             </p>
           )}
           <div className={`${label} px-s2 py-s1`}>Sizes · the supervisor gives every task one</div>
