@@ -60,22 +60,33 @@ impl<W: Write + Seek> Timing<W> {
 }
 
 static TIMING: OnceLock<Mutex<Timing<File>>> = OnceLock::new();
+static AUTHORIZING: OnceLock<()> = OnceLock::new();
 
 pub fn begin() {
     let _ = TIMING.set(Mutex::new(Timing::new()));
 }
 
 pub fn open(app: &tauri::AppHandle) {
+    if AUTHORIZING.set(()).is_err() { return; }
     let app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         // Never hold the timing lock across daemon discovery or the backend:
         // marks and startup continue even when the account cannot be checked.
-        let staff = crate::updates::engine_says_staff(|path| app.state::<crate::daemon::Engine>().get(path));
+        let staff = staff_after_recovery(|path| app.state::<crate::daemon::Engine>().get(path));
         let Ok(dir) = app.path().app_data_dir() else { return };
         let Some(timing) = TIMING.get() else { return };
         let Ok(mut timing) = timing.lock() else { return };
         timing.open_in(&dir, staff);
     });
+}
+
+fn staff_after_recovery(get: impl Fn(&str) -> Result<(u16, String), String>) -> bool {
+    let ready = match get("/v1/meta") {
+        Ok((200, body)) => serde_json::from_str::<serde_json::Value>(&body).ok()
+            .and_then(|v| v.get("resuming").and_then(serde_json::Value::as_bool)) == Some(false),
+        _ => false,
+    };
+    ready && crate::updates::engine_says_staff(get)
 }
 
 impl Timing<File> {
@@ -96,8 +107,9 @@ pub fn mark(step: &str) {
 }
 
 #[tauri::command]
-pub fn app_startup_step(step: String) {
+pub fn app_startup_step(app: tauri::AppHandle, step: String) {
     mark(&step);
+    if step == "panes_ready" { open(&app); }
 }
 
 #[cfg(test)]
@@ -110,13 +122,25 @@ mod tests {
         let dir = std::env::current_dir().unwrap().join(format!("target/startup-account-{}", std::process::id()));
         let mut timing = Timing::<File>::new();
         timing.mark("webview");
-        let non_staff = crate::updates::engine_says_staff(|_| Ok((200, r#"{"staff":false}"#.into())));
+        let non_staff = staff_after_recovery(|path| Ok((200, if path == "/v1/meta" {
+            r#"{"resuming":false}"#.into()
+        } else { r#"{"staff":false}"#.into() })));
         timing.open_in(&dir, non_staff);
         assert!(!dir.exists() && timing.output.is_none());
-        let unknown = crate::updates::engine_says_staff(|_| Err("offline".into()));
+        let unknown = staff_after_recovery(|path| if path == "/v1/meta" {
+            Ok((200, r#"{"resuming":false}"#.into()))
+        } else { Err("offline".into()) });
         timing.open_in(&dir, unknown);
         assert!(!dir.exists());
-        let staff = crate::updates::engine_says_staff(|_| Ok((200, r#"{"staff":true}"#.into())));
+        let recovering = staff_after_recovery(|path| {
+            assert_eq!(path, "/v1/meta");   // no backend account request while recovery runs
+            Ok((200, r#"{"resuming":true}"#.into()))
+        });
+        timing.open_in(&dir, recovering);
+        assert!(!dir.exists());
+        let staff = staff_after_recovery(|path| Ok((200, if path == "/v1/meta" {
+            r#"{"resuming":false}"#.into()
+        } else { r#"{"staff":true}"#.into() })));
         timing.open_in(&dir, staff);
         drop(timing);
         let record: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("app-startup.log")).unwrap()).unwrap();
