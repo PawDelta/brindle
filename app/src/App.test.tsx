@@ -125,6 +125,35 @@ describe("App", () => {
     } finally { sync.stop(); vi.useRealTimers(); }
   });
 
+  it("panes per session: a session that finishes coming back while its rows are being read is not shown from the old rows", async () => {
+    vi.useFakeTimers();
+    const at = (id: string, proj: string, window: string | null) => ({ ...root, id: proj, agents: root.agents?.map((a) => ({ ...a, id, window })) });
+    const daemon = new FakeDaemon({
+      repos: [{ repo_root: REPO, name: "proj" }],
+      sessions: [session, { ...session, id: "sup2" }, { ...session, id: "sup3" }],
+      workspaces: [root, at("sup2", "proj2", windowOf("old")), at("sup3", "proj3", null)],
+    });
+    const client = daemon.client();
+    const store = createAppStore();
+    const sync = startSync({ client, store, connect: daemon.connect });
+    let pending = ["sup2", "sup3"];
+    const meta = client.meta.bind(client);
+    vi.spyOn(client, "meta").mockImplementation(async () => ({ ...await meta(), resuming: true, recovery: { done: 1, total: 3, pending } }));
+    const snapshot = client.snapshot.bind(client);
+    // sup2 finishes coming back after its rows were read, before the engine is asked again.
+    let reads = 0;
+    // The sync's own first read comes first; the gate's read is the second.
+    vi.spyOn(client, "snapshot").mockImplementation(async () => { const rows = await snapshot(); if (++reads === 2) pending = ["sup3"]; return rows; });
+    try {
+      renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO }} />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(300); });
+      expect(screen.getByTestId("terminal").textContent).toBe("sup1");
+      fireEvent.click(treeSession("sup2"));
+      await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+      expect(paneWaits()).toBe(true);
+    } finally { sync.stop(); vi.useRealTimers(); }
+  });
+
   it("recovery progress line: counts sessions on the waiting pane and goes once it is ready", async () => {
     vi.useFakeTimers();
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root] });

@@ -540,7 +540,9 @@ function usePanesReady(client: DaemonClient | null, refresh?: () => Promise<void
     const releaseBack = async (meta: Meta, pending: string[], workspaces: WorkspaceDTO[], unchanged: () => boolean) => {
       const fresh = (rows: WorkspaceDTO[], not: string[]) => rows.flatMap((w) => w.agents ?? []).filter((a) => !a.parent_id).map((a) => a.id)
         .filter((id) => !not.includes(id) && !backNow.current.has(id) && !waitingForPanes(rows, agentIds(sessionTree(rows, id))));
-      if (!fresh(workspaces, pending).length) return;
+      // Only those back when these rows were read: one that came back since needs a read of its own.
+      const eligible = fresh(workspaces, pending);
+      if (!eligible.length) return;
       const version = store.getState().snapshotVersion;
       if (refresh) await Promise.all([reload(), refresh()]);
       else {
@@ -556,7 +558,7 @@ function usePanesReady(client: DaemonClient | null, refresh?: () => Promise<void
       if (!unchanged() || latest.pid !== meta.pid || !latest.resuming || !stillPending) return;
       const applied = store.getState();
       if (applied.snapshotVersion === version || applied.error || applied.stale) return;
-      const ready = fresh(applied.workspaces, stillPending);
+      const ready = fresh(applied.workspaces, stillPending).filter((id) => eligible.includes(id));
       for (const id of ready) backNow.current.add(id);
       if (ready.length) setPanes((p) => ({ ...p, back: [...backNow.current] }));
     };

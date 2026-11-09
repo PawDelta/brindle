@@ -150,7 +150,8 @@ export function ProviderSurface({ repo, root, agent: listedAgent, alive, session
   // Panes ready again after the engine was away (store/panes.ts): whatever the old view said is
   // forgotten, and the pane opens afresh on the rows read since.
   const panes = useContext(PanesReadyContext);
-  const epoch = panes.epoch;
+  // A session released ahead of the rest is a fresh view of its own too, without touching the others'.
+  const epoch = `${panes.epoch}:${root ? panes.back?.indexOf(root) ?? -1 : -1}`;
   const lifecycle = JSON.stringify([agent?.id, agent?.status, agent?.window, agent?.tmux_server, alive, recovery.attempt, epoch]);
   const [seen, setSeen] = useState({ lifecycle, attempt, epoch });
   if (seen.lifecycle !== lifecycle) {
