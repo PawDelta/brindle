@@ -446,10 +446,10 @@ describe("App", () => {
     const previousPage = screen.getByRole("region", { name: "Inbox" });
     const main = screen.getByRole("main");
     main.scrollTop = 180;
-    fireEvent.click(link("Open Account"));
-    expect(await screen.findByRole("region", { name: "Account" })).toBeTruthy();
+    fireEvent.click(link("Open Account › Usage"));
+    expect(await screen.findByTestId("usage")).toBeTruthy();
     expect(main.scrollTop).toBe(0);
-    expect(link("Open Account").getAttribute("aria-current")).toBe("page");
+    expect(link("Open Account › Usage").getAttribute("aria-current")).toBe("page");
     expect(within(main).queryByRole("tablist")).toBeNull();
     expect(within(nav()).getByRole("tablist", { name: "Settings" })).toBeTruthy();
     expect(within(nav()).queryByRole("navigation", { name: "Sessions" })).toBeNull();
@@ -463,13 +463,13 @@ describe("App", () => {
     // Clicked again from another of Settings' tabs, an entry opens its own tab again.
     const selected = (name: string) => screen.getByRole("tab", { name }).getAttribute("aria-selected");
     fireEvent.click(screen.getByRole("tab", { name: "Permissions" }));
-    fireEvent.click(link("Open Account"));
-    await waitFor(() => expect(selected("Account")).toBe("true"));
+    fireEvent.click(link("Open Account › Usage"));
+    await waitFor(() => expect(selected("Usage")).toBe("true"));
     main.scrollTop = 0;
     fireEvent.keyDown(window, { key: "Escape" });
     expect(screen.getByRole("region", { name: "Inbox" })).toBe(previousPage);
     expect(main.scrollTop).toBe(180);
-    fireEvent.click(link("Open Account"));
+    fireEvent.click(link("Open Account › Usage"));
     fireEvent.click(link("← Sessions"));
     expect(screen.getByRole("region", { name: "Inbox" })).toBe(previousPage);
     expect(main.scrollTop).toBe(180);
@@ -481,7 +481,7 @@ describe("App", () => {
     const sessionsList = within(nav()).getByRole("navigation", { name: "Sessions" });
     sessionsList.scrollTop = 64;
     terminal.scrollTop = 96;
-    fireEvent.click(link("Open Account"));
+    fireEvent.click(link("Open Account › Usage"));
     expect(within(nav()).getByRole("button", { name: "New session" })).toBeTruthy();
     expect(within(nav()).getByRole("button", { name: "Home" })).toBeTruthy();
     expect(within(nav()).getByRole("button", { name: "Knowledge" })).toBeTruthy();
@@ -525,10 +525,10 @@ describe("App", () => {
     const sync = startSync({ client, store, connect: daemon.connect });
     renderApp(<App store={store} client={client} refresh={sync.refresh} />);
     expect(await screen.findByRole("region", { name: "Session" }, { timeout: 4000 })).toBeTruthy();
-    expect(within(screen.getByTestId("pages")).queryByRole("button", { name: "Knowledge" })).toBeNull();
-    expect(within(screen.getByTestId("pages")).queryByRole("button", { name: "Agents" })).toBeNull();
+    expect(within(screen.getByTestId("sidebar-foot-row")).queryByRole("button", { name: "Knowledge" })).toBeNull();
+    expect(within(screen.getByTestId("sidebar-foot-row")).queryByRole("button", { name: "Agents" })).toBeNull();
 
-    fireEvent.click(link("Open Account"));
+    fireEvent.click(link("Open Account › Usage"));
     for (const name of ["Knowledge", "Agents"]) {
       fireEvent.click(link(name));
       expect(await screen.findByRole("region", { name })).toBeTruthy();
@@ -551,7 +551,7 @@ describe("App", () => {
     const client = daemon.client();
     const sync = startSync({ client, store, connect: daemon.connect });
     renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "new" }} />);
-    // The second repo's heading: its Project settings, and a shell from the status line starts at that repo.
+    // The second repo's heading: its Project settings, and a shell from the foot starts at that repo.
     await screen.findByRole("complementary", { name: "Sidebar" });
     fireEvent.click(await within(nav()).findByRole("button", { name: "Project settings for other" }));
     await screen.findByRole("region", { name: "Project settings" });
@@ -561,7 +561,7 @@ describe("App", () => {
     await waitFor(() => expect(daemon.shells.map((s) => s.cwd)).toEqual([OTHER]));
     // Settings (opened from the profile) has a Project tab on the current session's repo (here the second), with a picker for the others.
     localStorage.setItem(LAST_SESSION_KEY, JSON.stringify({ root: "sup2", repo: OTHER }));
-    fireEvent.click(link("Open Account"));
+    fireEvent.click(link("Open Account › Usage"));
     fireEvent.click(await screen.findByRole("tab", { name: "Project" }));
     await screen.findByRole("region", { name: "Project settings" });
     expect(screen.getByRole("combobox", { name: "Repo" })).toHaveProperty("value", OTHER);
@@ -741,7 +741,7 @@ describe("App", () => {
     await waitFor(() => expect(screen.getByTestId("inbox-badge").textContent).toBe("1"));
     expect(screen.queryByTestId("engine-banner")).toBeNull();
 
-    fireEvent.click(link("Open Account"));
+    fireEvent.click(link("Open Account › Usage"));
     fireEvent.click(await screen.findByRole("tab", { name: "About" }));
     const engineSection = screen.getByTestId("engine");
     fireEvent.click(within(engineSection).getByRole("button", { name: /Details/ }));
@@ -772,7 +772,7 @@ describe("App", () => {
     await waitFor(() => expect(screen.queryByTestId("reconnecting")).toBeNull());
     expect(screen.queryByTestId("engine-banner")).toBeNull();
     await waitFor(() => expect(screen.queryByTestId("inbox-badge")).toBeNull());
-    fireEvent.click(link("Open Account"));
+    fireEvent.click(link("Open Account › Usage"));
     fireEvent.click(await screen.findByRole("tab", { name: "About" }));
     fireEvent.click(within(screen.getByTestId("engine")).getByRole("button", { name: /Details/ }));
     expect(within(screen.getByTestId("engine")).getByTestId("connection").textContent).toBe("daemon · connected");
@@ -955,7 +955,7 @@ describe("App", () => {
 
 describe("providers in the sidebar", () => {
   beforeEach(() => localStorage.setItem(ONBOARDED_KEY, "1"));
-  const statusLine = () => within(nav()).getByTestId("status-line");
+  const foot = () => within(nav()).getByTestId("sidebar-foot");
   const start = (providers = freshProviders({ claude: { path: "/home/u/.local/bin/claude", version: "2.1.47" } })) => {
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], providers });
     const store = createAppStore();
@@ -965,7 +965,7 @@ describe("providers in the sidebar", () => {
     return { daemon, stop: () => sync.stop() };
   };
 
-  it("providers: the sidebar has no providers block, and its status line says nothing about providers while none has a problem", async () => {
+  it("providers: the sidebar has no providers block, and its provider strip says nothing about providers while none has a problem", async () => {
     const { daemon, stop } = start();
     await waitFor(() => expect(treeSession("sup1")).toBeTruthy());
     await waitFor(() => expect(daemon.requests.some((r) => r.path === "/providers/installed")).toBe(true));
@@ -974,11 +974,11 @@ describe("providers in the sidebar", () => {
     expect(nav().textContent).not.toContain("Claude Code");
     expect(within(nav()).queryByRole("button", { name: /Connect|Sign in/ })).toBeNull();
     expect(within(nav()).queryByTestId("provider-problem")).toBeNull();
-    expect(within(nav()).getByRole("button", { name: "Open Account" })).toBeTruthy();
+    expect(within(nav()).getByRole("button", { name: "Open Account › Usage" })).toBeTruthy();
     stop();
   });
 
-  it("providers: a signed-out provider and a failed install show as warm words in the status line, signed out first, and open Settings › Providers", async () => {
+  it("providers: a signed-out provider and a failed install show as warm words in the provider strip, signed out first, and open Settings › Providers", async () => {
     const before = Element.prototype.scrollIntoView;
     const scrolled = vi.fn();
     Element.prototype.scrollIntoView = scrolled;
@@ -987,40 +987,40 @@ describe("providers in the sidebar", () => {
     );
     await waitFor(() => expect(treeSession("sup1")).toBeTruthy());
     const problem = await within(nav()).findByTestId("provider-problem");
-    expect(statusLine().lastElementChild).toBe(problem);
-    expect(within(statusLine()).getByTestId("usage-reading")).toBeTruthy();
+    expect(foot().firstElementChild).toBe(problem);
+    expect(within(foot()).getByTestId("profile-usage")).toBeTruthy();
     // Claude works, so Codex's missing sign-in is setup to do: quiet words, not a warning.
-    expect(problem.textContent).toBe("Set up Codex");
+    expect(problem.textContent).toContain("Set up Codex");
     expect(problem.getAttribute("data-kind")).toBe("set_up");
     expect(problem.className).not.toContain("text-sap");
-    expect(within(statusLine()).queryByTestId("provider-problem-more")).toBeNull();
-    expect(statusLine().className).toContain("whitespace-nowrap");
+    expect(within(foot()).queryByTestId("provider-problem-more")).toBeNull();
+    expect(problem.className).toContain("whitespace-nowrap");
     // Clicking the words: Settings, scrolled to Providers, where the row has its Sign in.
     fireEvent.click(problem);
     const codex = await screen.findByTestId("provider-codex");
     expect(within(codex).getByRole("button", { name: "Sign in to Codex" })).toBeTruthy();
     await waitFor(() => expect(scrolled.mock.contexts.some((el) => (el as Element).id === "providers")).toBe(true));
-    expect(within(nav()).getByRole("button", { name: "Open Account" }).getAttribute("aria-current")).toBe("page");
+    expect(within(nav()).getByRole("button", { name: "Open Account › Usage" }).getAttribute("aria-current")).toBe("page");
 
-    // An install that fails reaches the status line too, after the sign-out: "+1", still there on another page.
+    // An install that fails reaches the provider strip too, after the sign-out: "+1", still there on another page.
     daemon.installFails.opencode = 1;
     fireEvent.click(within(screen.getByTestId("provider-opencode")).getByRole("button", { name: "Install OpenCode" }));
     await screen.findByTestId("provider-install-opencode-failed");
-    await waitFor(() => expect(within(statusLine()).getByTestId("provider-problem-more").textContent).toBe("+1"));
-    expect(within(statusLine()).getByTestId("provider-problem").textContent).toContain("OpenCode install failed");
+    await waitFor(() => expect(within(foot()).getByTestId("provider-problem-more").textContent).toBe("+1 more"));
+    expect(within(foot()).getByTestId("provider-problem").textContent).toContain("OpenCode install failed");
     fireEvent.click(link("Knowledge"));
-    expect(within(statusLine()).getByTestId("provider-problem-more").textContent).toBe("+1");
+    expect(within(foot()).getByTestId("provider-problem-more").textContent).toBe("+1 more");
     // Back through the words; the failed install let go, the sign-out is all that's left.
-    fireEvent.click(within(statusLine()).getByTestId("provider-problem"));
+    fireEvent.click(within(foot()).getByTestId("provider-problem"));
     fireEvent.click(within(await screen.findByTestId("provider-install-opencode-failed")).getByRole("button", { name: "Dismiss" }));
-    await waitFor(() => expect(within(statusLine()).queryByTestId("provider-problem-more")).toBeNull());
+    await waitFor(() => expect(within(foot()).queryByTestId("provider-problem-more")).toBeNull());
     // An install failure alone says so in its own words.
     fireEvent.click(within(screen.getByTestId("provider-codex")).getByRole("button", { name: "Connection details" }));
     fireEvent.click(within(screen.getByTestId("provider-codex")).getByRole("button", { name: "Remove Codex from brindle" }));
     await waitFor(() => expect(within(nav()).queryByTestId("provider-problem")).toBeNull());
     daemon.installFails.antigravity = 1;
     fireEvent.click(within(screen.getByTestId("provider-antigravity")).getByRole("button", { name: "Install Antigravity" }));
-    await waitFor(() => expect(within(nav()).getByTestId("provider-problem").textContent).toBe("Antigravity install failed"));
+    await waitFor(() => expect(within(nav()).getByTestId("provider-problem").textContent).toContain("Antigravity install failed"));
     expect(screen.queryByRole("dialog")).toBeNull();
     Element.prototype.scrollIntoView = before;
     stop();
@@ -1240,7 +1240,8 @@ describe("the sign-in gate", () => {
     localStorage.setItem(ONBOARDED_KEY, "1");
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }] });
     const { sync } = start(daemon);
-    fireEvent.click(await screen.findByRole("button", { name: "Open Account" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Open Account › Usage" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Account" }));
     fireEvent.click(await screen.findByRole("button", { name: "Sign out" }));
     await gate();
     onlySignIn();
