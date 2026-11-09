@@ -611,8 +611,8 @@ describe("GoalPanel", () => {
     ]);
     if (compact) fireEvent.click(view.getByRole("button", { name: /1 of 2: show finished milestones in Polish/ }));
     expect(rows()).toEqual(["M3", "M4"]);
-    // The sidebar's steps go by their short names: a done one checked, the active one marked.
-    if (compact) expect(view.getAllByTestId("milestone").map((li) => li.textContent)).toEqual(["✓M3", "●M4"]);
+    // The sidebar's steps show their full titles (cut by CSS): a done one checked, the active one marked.
+    if (compact) expect(view.getAllByTestId("milestone").map((li) => li.textContent)).toEqual(["✓M3: the step in full", "●M4: the step in full"]);
     expect(view.queryByTestId("goal-where")).toBeNull();
     // Only the panel's fold line carries the tiny per-phase bar, one segment per milestone.
     expect([...folds()[1].querySelectorAll(".bar-s i")].map((i) => (i as HTMLElement).dataset.s)).toEqual(compact ? [] : ["passed", "todo"]);
@@ -622,6 +622,20 @@ describe("GoalPanel", () => {
     fireEvent.click(folds()[1]);
     expect(rows()).toEqual(["M1", "M2"]);
     expect(folds()[1].getAttribute("aria-expanded")).toBe("false");
+  });
+
+  /* Sidebar steps show each milestone's full title, so titles sharing a prefix before a colon stay told apart. */
+  it("shows each sidebar step's full milestone title, not a prefix before the colon", async () => {
+    const base = goal.milestones![0];
+    const titles = ["Stress: load", "Stress: soak", "Stress: spike"];
+    const milestones = titles.map((title, i): MilestoneDTO => ({ ...base, id: i + 1, position: i + 1, title, status: "pending", state: "not_done" }));
+    const daemon = new FakeDaemon({ goal: { ...structuredClone(goal), milestones } });
+    const view = render(<GoalPanel client={daemon.client()} repo={REPO} root={ROOT} store={createAppStore()} compact />);
+    await waitFor(() => expect(view.getByRole("region", { name: "Goal" }).dataset.phase).toBe("in_progress"));
+    const sidebar = within(view.getByRole("list", { name: "Milestones" }));
+    fireEvent.click(sidebar.getByRole("button", { name: /2 pending/ }));
+    expect(sidebar.getAllByTestId("milestone").map((li) => li.querySelector(".t")!.textContent)).toEqual(titles);
+    expect(sidebar.getAllByTestId("milestone").map((li) => li.querySelector(".t")!.getAttribute("title"))).toEqual(titles);
   });
 
   /* One row per goal phase: the panel's one status in both views, and the step that phase has (PR open's link,
