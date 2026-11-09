@@ -46,7 +46,7 @@ export type Action =
   | { type: "account"; account: AccountDTO }
   | { type: "app_update"; status: AppUpdateStatus }
   | { type: "connection"; state: StreamState }
-  | { type: "snapshot"; workspaces: WorkspaceDTO[]; inbox: InboxItemDTO[] }
+  | { type: "snapshot"; workspaces: WorkspaceDTO[]; inbox?: InboxItemDTO[] }
   | { type: "stream"; message: StreamMessage }
   | { type: "error"; message: string };
 
@@ -78,7 +78,10 @@ export function reduce(state: AppState, action: Action): AppState {
       return { ...state, connection: action.state,
         connectionGeneration: state.connectionGeneration + Number(state.connection !== action.state) };
     case "snapshot":
-      return { ...state, ...liveSnapshot(action.workspaces, action.inbox, state.pastWorkers), stale: false, synced: true, error: null,
+      // The pane gate can apply ready rows before inbox answers. Keep the
+      // inbox's contents and initial-sync status until that read arrives.
+      return { ...state, ...liveSnapshot(action.workspaces, action.inbox ?? state.inbox, state.pastWorkers), stale: false,
+        synced: state.synced || action.inbox !== undefined, error: null,
         snapshotVersion: state.snapshotVersion + 1 };
     case "error":
       return { ...state, error: action.message };

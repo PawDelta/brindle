@@ -329,6 +329,8 @@ export interface Meta {
   visuals?: boolean;
   /* The daemon is still bringing back sessions from its previous shutdown. */
   resuming?: boolean;
+  /* Unix seconds when startup recovery ended; absent on older engines. */
+  recovered_at?: number | null;
   /* How far that has come: sessions finished with, of those it is bringing back. */
   recovery?: { done: number; total: number; pending?: string[] } | null;
   engine_version: string;
@@ -1240,6 +1242,8 @@ export class DaemonError extends Error {
 type Query = Record<string, string | number | null | undefined>;
 
 export class DaemonClient {
+  // Before any reads on this connection, including sync's first snapshot.
+  readonly createdAt = Date.now() / 1000;
   readonly baseUrl: string;
   readonly token: string;
   private readonly fetchImpl: typeof fetch;
