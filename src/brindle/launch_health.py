@@ -656,13 +656,13 @@ def mcp_failed(worktree: str, session_id: str, launched_at: float) -> bool:
     tool ...") is never a start failure. A missing directory or an unfamiliar
     format reads as healthy, and nothing here raises.
     """
+    connected = False
+    failed = False
     try:
         for path in mcp_log_dir(worktree).iterdir():
             started = _log_started(path.name)
             if started is None or started < launched_at:
                 continue
-            connected = False
-            failed = False
             for line in path.read_text(errors="replace").splitlines():
                 try:
                     row = json.loads(line)
@@ -674,17 +674,17 @@ def mcp_failed(worktree: str, session_id: str, launched_at: float) -> bool:
                 if isinstance(debug, str) and debug.startswith(_CONNECTED_MARKERS):
                     connected = True
                 error = row.get("error")
-                if (isinstance(error, str) and error
-                        and not error.startswith("Error executing tool")):
+                if isinstance(error, str) and _START_FAILURE.match(error):
                     failed = True
-            if failed and not connected:
-                return True
     except (OSError, ValueError, TypeError):
         pass
-    return False
+    return failed and not connected
 
 
 _CONNECTED_MARKERS = ("Successfully connected", "Connection established")
+# Startup and connection failures only; server stderr, tool errors and other
+# error rows are not start failures.
+_START_FAILURE = re.compile(r"Connection (failed|timeout)|Failed to (connect|start)")
 
 
 def has_mcp_failure(db, agent, ws) -> bool:
