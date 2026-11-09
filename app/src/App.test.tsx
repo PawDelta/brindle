@@ -70,6 +70,23 @@ describe("App", () => {
       });
     } finally { sync.stop(); native.mockRestore(); invoke.mockRestore(); }
   });
+  it("a sync read superseded by the gate's snapshot is read again, so the inbox still syncs without another event", async () => {
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root] });
+    const client = daemon.client();
+    const store = createAppStore();
+    // The sync's first inbox read is still out when the gate (daemon not recovering) applies its own snapshot.
+    const read = client.inbox.bind(client);
+    let finish!: () => void;
+    vi.spyOn(client, "inbox").mockImplementationOnce(() => new Promise((ok) => { finish = () => void read().then(ok); }));
+    const sync = startSync({ client, store, connect: daemon.connect });
+    try {
+      renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO }} />);
+      await screen.findByTestId("terminal");
+      expect(store.getState().synced).toBe(false);
+      await act(async () => { finish(); await flush(); await sync.idle(); });
+      expect(store.getState().synced).toBe(true);
+    } finally { sync.stop(); }
+  });
   it("shows the app at once while sessions come back; only the pane waits until they are ready", async () => {
     vi.useFakeTimers();
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root] });

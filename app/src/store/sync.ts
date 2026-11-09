@@ -37,7 +37,11 @@ export function startSync({ client, store, repo, connect, backoff }: SyncOptions
       if (version !== store.getState().lifecycleVersion) return;
       // Likewise a snapshot someone else applied meanwhile (the panes gate's, read after
       // recovery): this read began before it and could put older windows back.
-      if (applied !== store.getState().snapshotVersion) return;
+      // Its inbox is dropped with it, so read again rather than leave the inbox unsynced.
+      if (applied !== store.getState().snapshotVersion) {
+        again = true;
+        return;
+      }
       store.dispatch({ type: "snapshot", workspaces, inbox });
     } catch (e) {
       store.dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
