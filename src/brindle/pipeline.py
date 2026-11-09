@@ -1166,6 +1166,7 @@ TESTS_ONLY_WAIVED = ("[brindle] Passed as approved: past the standard review rou
                      "only findings concern test code. They went to the supervisor as a follow-up.")
 _TEST_DIRS = {"tests", "test", "__tests__", "spec", "specs"}
 _TEST_FILE = re.compile(r"test_.*\.py|.*_test\.(?:py|go|rb)|.*\.(?:test|spec)\.[cm]?[jt]sx?|conftest\.py")
+_CITED_DIRS = re.compile(r"[\w./~+@-]*$")
 
 
 def is_test_path(path: str) -> bool:
@@ -1190,11 +1191,23 @@ def _reviewed_paths(db: DB, ws: Workspace, sha: str) -> list[str]:
 
 
 def _cites(summary: str, path: str) -> bool:
-    """Whether ``summary`` names the changed file ``path``: in full, or by a
-    file name of its own (``pipeline.py:12``)."""
+    """Whether ``summary`` names the changed non-test file ``path``: in full,
+    by more or less of its directories (``brindle/pipeline.py``,
+    ``b/src/brindle/pipeline.py``), or by its bare name (``pipeline.py:12``),
+    which may mean it and blocks. The name inside a test file's own path, or
+    inside some other file's, doesn't cite it."""
+    if re.search(rf"(?<![\w./-]){re.escape(path)}(?![\w-])", summary):
+        return True
     name = PurePosixPath(path).name
-    return re.search(rf"(?<![\w.-]){re.escape(path)}(?![\w-])", summary) is not None or (
-        "." in name and re.search(rf"(?<![\w-]){re.escape(name)}(?![\w-])", summary) is not None)
+    if "." not in name:
+        return False
+    for m in re.finditer(rf"(?:(?<![\w.-])|(?<=/)){re.escape(name)}(?![\w-])", summary):
+        cited = (_CITED_DIRS.search(summary[:m.start()]).group() + name).removeprefix("./")
+        if "/" not in cited:
+            return True
+        if not is_test_path(cited) and (path.endswith(f"/{cited}") or cited.endswith(f"/{path}")):
+            return True
+    return False
 
 
 def tests_only_waived(db: DB, ws: Workspace, sha: str, summary: str, finding_paths: list[str]) -> bool:

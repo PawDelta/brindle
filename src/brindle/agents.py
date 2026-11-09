@@ -29,7 +29,7 @@ from brindle import bus, cloud_credential, company_identity, company_login, debu
 from brindle import spawn as processes   # this module's own spawn() starts an agent
 from brindle.assembler import DECISIONS, DOCUMENT_CHUNKS, OTHER_SESSIONS, TASK_AND_RULES, Block, assemble
 from brindle.config import RepoConfig
-from brindle.db import DB, Agent, Workspace, request_subagent
+from brindle.db import DB, Agent, Review, Workspace, request_subagent
 from brindle.model_availability import ModelAvailabilityChecker, PROVISIONING_TIMEOUT, provisioning_context
 from brindle.pro import route_health
 from brindle.redact import mask
@@ -4034,6 +4034,20 @@ def review_base(ws: Workspace, prev_sha: str) -> ReviewBase:
         return ReviewBase()
 
 
+def _prior_round(db: DB, ws: Workspace, sha: str, slot: str) -> Review | None:
+    """The review a new review of ``ws`` at ``sha`` is a later round of: the
+    latest one at another commit, or this reviewer role's own request for
+    changes at this commit (a worker that reported again with no new commit).
+    None for a first review, a second reviewer reading the commit for itself,
+    or another look at a commit already approved."""
+    prev = db.last_review(ws.id)
+    if prev is None or prev.sha != sha:
+        return prev
+    own = next((r for r in reversed(db.workspace_reviews(ws.id))
+                if r.sha == sha and (r.review_slot or "") == slot), None)
+    return own if own is not None and not own.approved else None
+
+
 def _hand_edited_merges(ws: Workspace, prev_sha: str) -> list[str]:
     """Files the two-parent merges made since ``prev_sha`` differ in from what
     git would have merged on its own: a resolved conflict, or a hand edit."""
@@ -4660,13 +4674,16 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
         task += (f"\n\nThe repo's checks have already run on this commit:\n\n{check_summary}\n\n"
                  "Take these results into account; don't run the whole suite yourself.")
 
-    prev = db.last_review(ws.id)
-    if prev and prev.sha != sha:
+    prev = _prior_round(db, ws, sha, profile if second else "")
+    if prev:
         prior = f"\n\nA previous review at {prev.sha[:8]} found:\n{(prev.summary or '').strip()}\n\n"
         rb = review_base(ws, prev.sha)
         if rb.sha == prev.sha:
             task += (prior + f"Review only what changed since then (`git diff {prev.sha}..HEAD`), "
                      "not the whole branch. " + DELTA_SCOPE)
+            if prev.sha == sha:
+                task += (" No commits were added since then, so that diff is empty: judge whether "
+                         "those findings still stand, and raise no new ones.")
         elif rb.sha:
             task += (prior + f"Since then {base} was merged in (up to {rb.merged[:8]}); "
                      "those changes were reviewed on their own branches. Review only the worker's "

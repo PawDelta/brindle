@@ -914,20 +914,25 @@ def test_merge_reuses_checks_only_when_the_base_brought_in_disjoint_files(db, re
     assert out.startswith("Merged") is reused, out
 
 
-@pytest.mark.parametrize("base_file", [
-    None,
-    "base.py",
-    pytest.param("work.py", marks=pytest.mark.variant("the base merge conflicts with the reviewed code")),
+@pytest.mark.parametrize("amend, base_file, second, delta", [
+    (True, None, False, "work.py"),
+    (True, "base.py", False, "work.py"),
+    pytest.param(True, "work.py", False, "work.py",
+                 marks=pytest.mark.variant("the base merge conflicts with the reviewed code")),
+    (False, None, False, ""),      # the worker reported again with no new commit
+    pytest.param(False, None, True, None,
+                 marks=pytest.mark.variant("a second reviewer of the commit reads the branch for itself")),
 ])
 def test_review_round_scope_rereview_after_an_amend_and_a_base_merge_reads_only_the_delta(
-        db, repo, monkeypatch, base_file):
+        db, repo, monkeypatch, amend, base_file, second, delta):
     """The commit a re-review follows was amended away, and the base may have
     been merged in on top: its diff is still only what the worker changed."""
     ws = _reported(db, repo)
     path = Path(ws.path)
     db.add_review(ws.id, gates.head(ws), "rev0", False, "Blocker: x is wrong in work.py.")
-    (path / "work.py").write_text("x = 2\n")
-    sh("git add work.py && git commit -q --amend --no-edit", path)
+    if amend:
+        (path / "work.py").write_text("x = 2\n")
+        sh("git add work.py && git commit -q --amend --no-edit", path)
     if base_file:
         (repo / base_file).write_text("b = 1\n")
         sh(f"git add {base_file} && git commit -qm base", repo)
@@ -937,11 +942,14 @@ def test_review_round_scope_rereview_after_an_amend_and_a_base_merge_reads_only_
     prompts = []
     monkeypatch.setattr(agents, "spawn", lambda db_, ws_, prof, **kw: prompts.append(kw["prompt"]))
 
-    agents._request_review(db, None, ws, "reviewer", None, RepoConfig(), None)
+    agents._request_review(db, None, ws, "reviewer", None, RepoConfig(), None, second=second)
 
     scope = re.search(r"`git diff (\S+?)(?<!\.)\.\.HEAD`", prompts[0])   # not the opening base...HEAD
-    assert scope, prompts[0]
-    assert sh(f"git diff --name-only {scope.group(1)}..HEAD", path) == "work.py"
+    if delta is None:
+        assert scope is None, prompts[0]
+    else:
+        assert scope, prompts[0]
+        assert sh(f"git diff --name-only {scope.group(1)}..HEAD", path) == delta
 
 
 @pytest.mark.parametrize("rounds, tests_only, paths, summary, merges", [
@@ -952,6 +960,10 @@ def test_review_round_scope_rereview_after_an_amend_and_a_base_merge_reads_only_
                  False, marks=pytest.mark.variant("a product path among the finding's paths")),
     pytest.param(2, True, [], "Blocker: tests are thin.",
                  False, marks=pytest.mark.variant("flagged tests-only with no path to check")),
+    pytest.param(2, True, ["tests/work.py"], "Blocker: tests/work.py:1 asserts nothing.",
+                 True, marks=pytest.mark.variant("a test file sharing its name with the product file")),
+    pytest.param(2, True, ["tests/work.py"], "Blocker: tests/work.py:1 misses that work.py:1 is wrong.",
+                 False, marks=pytest.mark.variant("the product citation follows a same-named test citation")),
     (2, False, ["tests/test_work.py"], "Blocker: tests/test_work.py:1 asserts nothing.", False),
     (1, True, ["tests/test_work.py"], "Blocker: tests/test_work.py:1 asserts nothing.", False),
 ])
@@ -964,6 +976,7 @@ def test_review_round_scope_tests_only_findings_past_the_cap(db, repo, monkeypat
     path = Path(ws.path)
     (path / "tests").mkdir()
     (path / "tests" / "test_work.py").write_text("def test_work(): pass\n")
+    (path / "tests" / "work.py").write_text("helper = 1\n")
     sh("git add tests && git commit -qm tests", path)
     db.update_agent("w1", pipeline_rounds=rounds)
     add(db, ws, "rev1", "review", "reviewer", parent="boss", status="processing")
@@ -982,6 +995,6 @@ def test_review_round_scope_tests_only_findings_past_the_cap(db, repo, monkeypat
     if merges:
         assert not reopened
         assert any("Merged feat" in b for b in told), told
-        assert sum("tests/test_work.py:1" in b for b in told if "Merged feat" not in b) == 1, told
+        assert sum(summary in b for b in told if "Merged feat" not in b) == 1, told
     else:
         assert len(reopened) == 1 and db.get_agent("w1").pipeline == "fixing"
