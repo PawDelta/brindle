@@ -277,7 +277,7 @@ def agent_env(ws: Workspace, agent_id: str, agent: Agent | None = None,
             if k in no_stored:
                 continue
             sess_val, sess_time = session_creds.get(k, (None, 0.0))
-            env_val = os.environ.get(k)
+            env_val = (_resume_keys.get() or {}).get(k) or os.environ.get(k)
             if env_val and not secrets.is_job_secret(k) and agent and agent.status == "failed":
                 recovery_keys[k] = env_val
             elif sess_val:
@@ -1791,16 +1791,23 @@ def resume(db: DB, root_id: str, *, watch_pane: bool = True,
     the queued tasks it starts) goes through it: checked during the preflight
     and held only from the launch's first change of what runs (_gate_commit),
     so a slow preflight (an identity probe) never holds the caller's stop up."""
-    if gate is None:
-        return _resume(db, root_id, watch_pane=watch_pane, only=only, recovery_env=recovery_env)
-    token = _launch_gate.set(gate)
+    keys = _resume_keys.set({})
     try:
-        return _resume(db, root_id, watch_pane=watch_pane, only=only, recovery_env=recovery_env)
+        if gate is None:
+            return _resume(db, root_id, watch_pane=watch_pane, only=only, recovery_env=recovery_env)
+        token = _launch_gate.set(gate)
+        try:
+            return _resume(db, root_id, watch_pane=watch_pane, only=only, recovery_env=recovery_env)
+        finally:
+            _launch_gate.reset(token)
     finally:
-        _launch_gate.reset(token)
+        _resume_keys.reset(keys)
 
 
 _launch_gate: ContextVar = ContextVar("brindle_launch_gate", default=None)   # resume's gate, for every launch it makes
+# The credentials this resume chose, for its own launches: os.environ is the whole
+# daemon's, and another session resuming beside this one writes its choice there too.
+_resume_keys: ContextVar[dict[str, str] | None] = ContextVar("brindle_resume_keys", default=None)
 
 
 def _gate_check() -> None:
@@ -1853,6 +1860,8 @@ def _resume(db: DB, root_id: str, *, watch_pane: bool, only, recovery_env) -> li
         if val:
             db.set_session_credential(root_id, k, val)
             os.environ[k] = val
+            if (chosen := _resume_keys.get()) is not None:
+                chosen[k] = val
 
     def restartable(a: Agent) -> bool:
         # One back at work left done: paused by a daemon from before finished_reporting

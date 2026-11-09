@@ -2287,6 +2287,12 @@ class DB:
 
     _STAMP = "status_since = CASE WHEN status = ? THEN status_since ELSE ? END"
 
+    def last_activity(self, root_id: str, before: float) -> float | None:
+        """When session ``root_id`` last did anything before ``before``, by
+        the event bus (short-lived: None once its events are pruned)."""
+        return self.conn.execute("SELECT MAX(ts) FROM events WHERE root_id=? AND ts<?",
+                                 (root_id, before)).fetchone()[0]
+
     def set_status(self, agent_id: str, status: str, only_if: str | None = None) -> None:
         guard, args = ("", ()) if only_if is None else (" AND status=?", (only_if,))
         # A row already in ``status`` is left as is (its status_since kept),

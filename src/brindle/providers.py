@@ -18,6 +18,7 @@ import re
 import shlex
 import shutil
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -1745,7 +1746,7 @@ def set_agy_model_provider(value: str | None) -> None:
         mode = os.stat(path).st_mode & 0o777
     except OSError:
         mode = 0o600
-    tmp = f"{path}.tmp{os.getpid()}"
+    tmp = f"{path}.tmp{os.getpid()}.{threading.get_ident()}"    # two launches in this process write at once
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
         with os.fdopen(fd, "w") as f:
