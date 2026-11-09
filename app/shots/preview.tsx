@@ -16,6 +16,7 @@ import { ONBOARDED_KEY, markOnboarded } from "../src/api/providers";
 import type { Route } from "../src/routes";
 import { createAppStore } from "../src/store/store";
 import { startSync } from "../src/store/sync";
+import { usageScenario } from "../src/test/usage";
 import { FakeDaemon, freshProviders } from "../src/test/fakeDaemon";
 import { ORGS, REPO, data } from "./fixtures";
 import { installProbe, probeSocket, swipe, swipeDeltas } from "./probe";
@@ -77,6 +78,8 @@ const SCENES: Record<string, Route> = {
   "account-free": { screen: "account" },
   "account-signed-out": { screen: "account" },
   session: { screen: "session", root: "sup-42", repo: REPO, agent: "a7aaa807" },
+  "sidebar-foot-calm": { screen: "session", root: "sup-42", repo: REPO, agent: "a7aaa807" },
+  "sidebar-foot-busy": { screen: "session", root: "sup-42", repo: REPO, agent: "a7aaa807" },
   "sidebar-resize": { screen: "session", root: "sup-42", repo: REPO, agent: "a7aaa807" },
   "session-review": { screen: "session", root: "sup-42", repo: REPO, agent: "sup-42", sheet: { kind: "review" } },
   // One scene per agent of the session: the supervisor, each worker, the reviewer, in the state its row shows.
@@ -90,7 +93,7 @@ const SCENES: Record<string, Route> = {
   pty:{ screen: "session", root: "sup-42", repo: REPO, agent: "a7aaa807" },
   "session-paused": { screen: "session", root: "sup-39", repo: REPO },
   "session-done": { screen: "session", root: "sup-42", repo: REPO, agent: "sup-42" },
-  // The app's own update offered (the strip on every screen), Update now under way, set aside into the sidebar's pill.
+  // The app's own update offered (the strip on every screen), Update now under way, set aside.
   "update-inbox": { screen: "inbox" },
   "update-downloading": { screen: "inbox" },
   "update-later": { screen: "inbox" },
@@ -98,6 +101,13 @@ const SCENES: Record<string, Route> = {
 };
 
 const daemon = new FakeDaemon(structuredClone(data));
+if (scene.startsWith("sidebar-foot-")) {
+  const busy = scene === "sidebar-foot-busy";
+  daemon.data.usage = usageScenario(busy ? "several" : "normal");
+  const claude = daemon.data.usage.providers.find((p) => p.provider === "claude")!;
+  claude.windows.find((w) => w.minutes === 10080)!.used = busy ? 88 : 41;
+  daemon.data.providers = freshProviders({ claude: { path: "/bin/claude", version: "2" } });
+}
 if (scene === "knowledge-map") {
   // The reported 0.5.12 account has no hosted docs in any of its scopes.
   daemon.data.docScopes = [
@@ -211,13 +221,13 @@ const store = createAppStore();
 /* The update scenes: the shell's app updates as a release build sees one on offer (updates.rs), its
    Update now downloading and never done, Later setting it aside. */
 let appUpdates: AppUpdates | undefined;
-if (scene.startsWith("update-")) {
+if (scene.startsWith("update-") || scene === "sidebar-foot-busy") {
   const offered: AppUpdateStatus = {
     version: "0.2.10",
     automatic: true,
     pending: null,
     available: { version: "0.2.11", notes: "## Fixes\n- Fixes slowdowns that showed os error 35 under load.\n- Adds wait-for-room for forced starts." },
-    later: scene === "update-later",
+    later: scene === "update-later" || scene === "sidebar-foot-busy",
     updated: null,
     last_checked: Math.floor(Date.now() / 1000) - 120,
     checking: false,

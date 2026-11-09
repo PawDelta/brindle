@@ -100,6 +100,28 @@ _keychain_lock = threading.RLock()
 _uncached_reads: contextvars.ContextVar[bool] = contextvars.ContextVar("keystore_uncached_reads", default=False)
 
 
+@dataclass
+class ReadTiming(spawn.ReadTiming):
+    """Aggregate observations only: no credential names, records or values."""
+
+    backend_reads: int = 0
+    cached_reads: int = 0
+    lock_seconds: float = 0.0
+
+
+_read_timing: contextvars.ContextVar[ReadTiming | None] = contextvars.ContextVar("keystore_read_timing", default=None)
+
+
+@contextlib.contextmanager
+def measure_reads(timing: ReadTiming | None) -> Iterator[None]:
+    """Observe this caller's loads without changing caching or read policy."""
+    token = _read_timing.set(timing)
+    try:
+        yield
+    finally:
+        _read_timing.reset(token)
+
+
 @contextlib.contextmanager
 def uncached_reading() -> Iterator[None]:
     """Read current credentials while holding a cross-process mutation lock.
@@ -163,14 +185,22 @@ class KeychainStore:
             # Run to an outcome: stopped when a client goes away, a dialog it was
             # waiting on would just come back at the next poll. A read cut short
             # isn't a refusal either, so nothing could be held back for it.
-            return spawn.read(["security", *args], timeout=STORE_LIMIT, to_its_end=True)
+            timing = _read_timing.get()
+            return spawn.read(["security", *args], timeout=STORE_LIMIT, to_its_end=True,
+                              **({"timing": timing} if timing is not None else {}))
         return spawn.action(["security", *args], input=stdin, timeout=STORE_WRITE_LIMIT)
 
     def load(self) -> dict | None:
         # Serialize a miss with writes and other readers: an in-flight read must
         # not put an old value back after save/delete invalidates it.
+        timing = _read_timing.get()
+        began = time.monotonic() if timing is not None else None
         with self._read.lock:
+            if began is not None:
+                timing.lock_seconds += time.monotonic() - began
             if not _uncached_reads.get() and time.monotonic() < self._read.expires:
+                if timing is not None:
+                    timing.cached_reads += 1
                 return _decode(self._read.blob) if self._read.blob is not None else None
             self._read.invalidate()
             if _refused_marker().exists():
@@ -178,6 +208,8 @@ class KeychainStore:
                                       "brindle won't raise that dialog again by itself: once it's unlocked, "
                                       "`brindle keys unblock` lets brindle read it")
             try:
+                if timing is not None:
+                    timing.backend_reads += 1
                 r = self._run(["find-generic-password", "-a", self.account, "-s", self.service, "-w"])
             except subprocess.TimeoutExpired:    # a dialog nobody answered
                 _note_refused()
@@ -467,7 +499,10 @@ def get_key(name: str) -> str | None:
 
 
 def get_key_info(name: str) -> tuple[str | None, float]:
-    rec = _key_store(name).load()
+    store = _key_store(name)
+    if (timing := _read_timing.get()) is not None and not isinstance(store, KeychainStore):
+        timing.backend_reads += 1
+    rec = store.load()
     if not rec:
         return None, 0.0
     val = rec.get("value")

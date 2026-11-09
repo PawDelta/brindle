@@ -1,11 +1,6 @@
 /* The app's own update, offered (src-tauri/src/updates.rs: the shell looks at
    its feed as it launches and every 6 h while it is open; nothing installs
-   unasked). A strip at the top of the main column on every screen: "brindle
-   X is available", a line from its release notes, What's new, Later and
-   Update now. Update now downloads and installs it, then the app restarts
-   into it, the strip saying how it goes. Later folds the strip into a pill
-   in the sidebar's foot (AppUpdatePill) until a look finds a newer one; the
-   pill's click is the same Update now. Only a build that updates by itself
+   unasked). Updates are offered in the Inbox and Settings › About. Only a build that updates by itself
    (`automatic`: not an rc or a staff build) offers one. */
 
 import { createContext, useCallback, useContext, useRef, useState, type ReactNode } from "react";
@@ -32,7 +27,7 @@ interface Install {
 
 const InstallContext = createContext<Install | null>(null);
 
-/* Update now's state, one for the banner and the pill alike. */
+/* Update now's state, shared by update surfaces. */
 export function AppUpdateProvider({ updates, children }: { updates?: AppUpdates; children: ReactNode }) {
   const [phase, setPhase] = useState<UpdatePhase>({ kind: "idle" });
   // One Update now at a time, whichever button started it (the shell refuses a second install too).
@@ -56,7 +51,7 @@ export function AppUpdateProvider({ updates, children }: { updates?: AppUpdates;
         running.current = false;
       });
   }, [updates]);
-  // Later: the offer set aside, and a failed Update now with it, so the pill shows (never one under way).
+  // Later: the offer set aside, and a failed Update now with it, when no update is under way.
   const later = useCallback(() => {
     if (!updates || running.current) return;
     void updates.later().then(() => {
@@ -107,7 +102,7 @@ function copy(phase: UpdatePhase, version: string, notes: string | null, rollbac
 const BUTTON = "inline-flex min-h-8 shrink-0 items-center whitespace-nowrap rounded-md px-s2 text-[13px] disabled:opacity-60";
 
 /* The strip: the offer, or Update now under way (a thin bar as it downloads).
-   Set aside ("Later"), it shows only while an Update now from the pill runs or failed. */
+   Set aside ("Later"), it shows only while an Update now runs or failed. */
 export function AppUpdateBanner({ openUrl }: { openUrl: OpenUrl }) {
   const offer = useOffer();
   if (!offer) return null;
@@ -146,28 +141,5 @@ export function AppUpdateBanner({ openUrl }: { openUrl: OpenUrl }) {
         </div>
       )}
     </div>
-  );
-}
-
-/* The offer set aside: a small pill beside this build's version in the
-   sidebar's foot, until a look finds a newer one. Its click is Update now
-   (the strip comes back to say how it goes). */
-export function AppUpdatePill() {
-  const offer = useOffer();
-  if (!offer || !offer.status.later || offer.install.phase.kind !== "idle") return null;
-  const { status, version, install } = offer;
-  return (
-    <span className="flex shrink-0 items-center gap-1.5 text-[11.5px]">
-      <span className="font-mono text-ink-3" title={`brindle ${status.version}`}>brindle {status.version}</span>
-      <button
-        type="button"
-        className="rounded-full border border-pass/40 bg-pass-soft px-2 py-px font-medium text-pass hover:bg-pass/20"
-        title={`Install brindle ${version} and restart`}
-        onClick={install.start}
-        data-testid="app-update-pill"
-      >
-        {version} · Update
-      </button>
-    </span>
   );
 }

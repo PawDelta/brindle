@@ -964,6 +964,7 @@ CREATE TABLE IF NOT EXISTS visuals (
     options TEXT,                  -- JSON [{id, label, detail}] of the current revision
     answer TEXT,                   -- JSON {option, note, at, rev}
     read_rev INTEGER NOT NULL DEFAULT 0,
+    dismissed_rev INTEGER NOT NULL DEFAULT 0,  -- the revision the person dismissed without answering
     kept_at REAL,
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
@@ -1445,6 +1446,9 @@ class DB:
             self.conn.execute("ALTER TABLE visual_grants ADD COLUMN scope TEXT NOT NULL DEFAULT 'visual'")
             # Earlier grants did not distinguish conditional requests or artifact scope.
             self.conn.execute("UPDATE visual_grants SET remaining=0")
+        visual_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(visuals)")}
+        if "dismissed_rev" not in visual_cols:
+            self.conn.execute("ALTER TABLE visuals ADD COLUMN dismissed_rev INTEGER NOT NULL DEFAULT 0")
         review_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(reviews)")}
         for col, kind in (("review_slot", "TEXT"), ("reviewer_created_at", "REAL")):
             if col not in review_cols:

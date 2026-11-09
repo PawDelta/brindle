@@ -59,7 +59,7 @@ class World:
         self.codex_probes += 1
         return self.codex
 
-    def resume(self, db, root_id, *, watch_pane=True, only=None):
+    def resume(self, db, root_id, *, watch_pane=True, only=None, unstarted=None):
         if self.fail_resume:
             raise RuntimeError("the session failed to restart")
         out =[a for a in agents.tree(db, root_id) if a.status == "paused" and (only is None or a.id in only)]

@@ -27,15 +27,14 @@ export interface Sync {
 export function startSync({ client, store, repo, connect, backoff }: SyncOptions): Sync {
   let running: Promise<void> | null = null;
   let again = false;
-  let lifecycleVersion = 0;
 
   const fetchOnce = async () => {
-    const version = lifecycleVersion;
+    const version = store.getState().lifecycleVersion;
     try {
       const [workspaces, inbox] = await Promise.all([client.snapshot(repo), client.inbox(repo)]);
       // A close/rewind applied while these reads were pending is newer than
       // their rows. The queued fetch may resume an agent; this one cannot.
-      if (version !== lifecycleVersion) return;
+      if (version !== store.getState().lifecycleVersion) return;
       store.dispatch({ type: "snapshot", workspaces, inbox });
     } catch (e) {
       store.dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
@@ -68,8 +67,6 @@ export function startSync({ client, store, repo, connect, backoff }: SyncOptions
       if (state === "open") void refresh();
     },
     onMessage(message) {
-      if (message.type === "event" && (message.kind === "agent.closed"
-        || (message.kind === "agent.status" && message.payload.status === "rewound"))) lifecycleVersion++;
       store.dispatch({ type: "stream", message });
       if (store.getState().stale) void refresh();
     },

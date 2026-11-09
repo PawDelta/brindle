@@ -3,7 +3,7 @@
 
 import type { DaemonClient } from "../../../api/client";
 
-export type VisualsClient = Pick<DaemonClient, "visuals" | "answerVisual" | "keepVisual" | "unkeepVisual" | "markVisualRead">;
+export type VisualsClient = Pick<DaemonClient, "visuals" | "answerVisual" | "dismissVisual" | "keepVisual" | "unkeepVisual" | "markVisualRead">;
 
 /* A planning doc's reads and the person's verdict (brindle/plans.py). */
 export type PlansClient = Pick<DaemonClient, "plan" | "decidePlan">;

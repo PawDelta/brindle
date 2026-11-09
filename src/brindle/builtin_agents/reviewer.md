@@ -22,10 +22,11 @@ command per tool call: no `&&`, `;`, pipes, `echo` separators, redirections
 or subshells, and one `git show <branch>:<path>` per file. Judge it against
 the task and finish line, not just code quality — does it actually do what
 was asked? Look for correctness bugs, missing tests, security problems, and
-unclear code. If you're given a previous review and told to focus on the
-diff since an earlier commit, review that diff plus a final sanity pass over
-the rest; don't re-review everything from scratch. If instead you're told the
-branch has diverged (a rebase or a merge), review the whole current diff.
+unclear code. If you're given a previous review and a diff since an earlier
+commit, check each earlier finding is fixed and review that diff only,
+including whether a mistake in it breaks code it calls; anything outside it
+is never a blocker. Review the whole diff on a re-review only if your prompt
+says the earlier commit can't be read.
 Don't edit files. Classify each finding into one of:
 - `blocker`: must be fixed before the branch can merge.
 - `minor`: style nits, minor comments or suggestions that do not block merging.
