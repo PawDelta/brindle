@@ -528,7 +528,7 @@ function usePanesReady(client: DaemonClient | null, refresh?: () => Promise<void
       clearTimeout(next);
       clearTimeout(deadline);
       if (pid !== null) shownFrom.current = pid;
-      setPanes((p) => (p.ready ? p : { ready: true, epoch: p.epoch + 1 }));
+      setPanes((p) => (p.ready ? p : { ready: true, epoch: p.epoch + 1, recovery: null }));
     };
     const hide = () => setPanes((p) => (p.ready ? { ...p, ready: false } : p));
     const deadline = setTimeout(() => settle(null), STARTUP_WAIT);
@@ -542,6 +542,8 @@ function usePanesReady(client: DaemonClient | null, refresh?: () => Promise<void
         if (first && round > 0 && meta.pid === shownFrom.current && !meta.resuming) return settle(meta.pid);
         first = false;
         hide();
+        const recovery = meta.resuming ? meta.recovery ?? null : null;
+        setPanes((p) => (p.recovery?.done === recovery?.done && p.recovery?.total === recovery?.total ? p : { ...p, recovery }));
         if (!meta.resuming) {
           const workspaces = await client.snapshot();
           if (!unchanged()) return;
