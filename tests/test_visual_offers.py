@@ -110,7 +110,6 @@ def test_accept_and_explicit_ask_allow_one_publish(db, session):
         assert any(e["kind"] == "visual.offer_resolved" for e in feed.events())
         assert client.post(path, json={"offer": oid, "accept": True}).status_code == 409
         assert terminal_input(client, boss.id)("").status_code == 200
-        assert any(e["kind"] == "visual.offer_resolved" for e in feed.events())
         messages = db.conn.execute("SELECT body FROM inbox WHERE agent_id=?", (boss.id,)).fetchall()
         assert len(messages) == 1 and "Which layout?" in messages[0]["body"]
         with pytest.raises(ServiceError):
@@ -123,6 +122,7 @@ def test_accept_and_explicit_ask_allow_one_publish(db, session):
         assert any(e["kind"] == "visual.offers_setting" for e in feed.events())
         assert client.get("/v1/user-settings").json()["visuals"] == "off"
         agents.send_message(db, boss.id, "Please make a visual of this layout", person=True)
+        assert any(e["kind"] == "visual.offer_resolved" for e in feed.events())
         with pytest.raises(ServiceError):
             visuals.publish(db, worker, "Not a planning request", "<p>no</p>", kind="plan")
         # A failed publication must preserve the grant for a corrected page.
