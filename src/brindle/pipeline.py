@@ -24,8 +24,11 @@ With ``pipeline`` on (the default), brindle runs those stages itself:
    The reviewer requests changes: brindle sends the findings straight to the
    worker, which fixes them and reports again, back to step 1; after
    ``review_rounds`` rounds it suggests the supervisor reconsider the approach,
-   while fix rounds continue. Findings needing supervisor action still go
-   straight to the supervisor.
+   while fix rounds continue. Past those rounds, findings that only concern
+   test code no longer block: the branch proceeds as approved and they go to
+   the supervisor as a note. Findings needing supervisor action still go
+   straight to the supervisor. Every review after a branch's first covers
+   only what changed since the last reviewed commit (``agents.review_base``).
 3. A branch whose sync with its base conflicts goes back to its worker to
    resolve (a light worker in its worktree if that one has finished); its
    next report starts a fresh review, and the checks run again, before it
@@ -55,6 +58,7 @@ import re
 import threading
 import time
 from contextlib import contextmanager
+from pathlib import PurePosixPath
 
 from brindle import (
     agents, autopilot, bus, codemap, codemap_docs, conflicts, events, gates, git, history, learning, policy,
@@ -1156,6 +1160,104 @@ def _actionable_section(rest: str) -> bool:
     if re.match(r"(?:none|no|n a|na|nil|nothing)\b", cleaned):
         return False
     return True
+
+
+TESTS_ONLY_WAIVED = ("[brindle] Passed as approved: past the standard review rounds, the reviewer's "
+                     "only findings concern test code. They went to the supervisor as a follow-up.")
+_TEST_DIRS = {"tests", "test", "__tests__", "spec", "specs"}
+_TEST_FILE = re.compile(r"test_.*\.py|.*_test\.(?:py|go|rb)|.*\.(?:test|spec)\.[cm]?[jt]sx?|conftest\.py")
+_CITED_DIRS = re.compile(r"[\w./~+@-]*$")
+
+
+def is_test_path(path: str) -> bool:
+    """Whether ``path``, relative to the repo root, is test code. An absolute
+    path, or one climbing out through ``..``, never is: anything this can't
+    place counts as product code, which blocks."""
+    parts = PurePosixPath(path).parts
+    if not parts or path.startswith("/") or ".." in parts:
+        return False
+    return bool(_TEST_DIRS.intersection(parts[:-1])) or _TEST_FILE.fullmatch(parts[-1]) is not None
+
+
+def _reviewed_paths(db: DB, ws: Workspace, sha: str) -> list[str]:
+    """The files the review of ``sha`` covered: what changed since the last
+    commit reviewed before it (``agents.review_base``), or for a first review,
+    the whole branch."""
+    prev = next((r for r in reversed(db.workspace_reviews(ws.id)) if r.sha != sha), None)
+    start = agents.review_base(ws, prev.sha).sha if prev else None
+    if start is None:
+        start = git.merge_base(ws.path, git.base_ref(ws.path, ws.base_branch))
+    return git.paths(["diff", "--no-renames", "--name-only", start, sha], ws.path)
+
+
+def _in_workspace(cited: str, root: str) -> str | None:
+    """The absolute citation ``cited`` as a path relative to the workspace at
+    ``root``; None when it isn't absolute or lies outside it."""
+    if not cited.startswith("/"):
+        return None
+    full = os.path.normpath(cited)
+    for r in {root, os.path.realpath(root)}:
+        prefix = f"{r.rstrip('/')}/"
+        if full.startswith(prefix):
+            return full.removeprefix(prefix)
+    return None
+
+
+def _cites(summary: str, path: str, root: str) -> bool:
+    """Whether ``summary`` names the changed non-test file ``path``, in the
+    workspace at ``root``: in full, by more or less of its directories
+    (``brindle/pipeline.py``, ``b/src/brindle/pipeline.py``), by an absolute
+    path to it, or by its bare name (``pipeline.py:12``), which may mean it
+    and blocks. The name inside a test file's own path, or inside some other
+    file's, doesn't cite it."""
+    if re.search(rf"(?<![\w./-]){re.escape(path)}(?![\w-])", summary):
+        return True
+    name = PurePosixPath(path).name
+    if "." not in name:
+        return False
+    for m in re.finditer(rf"(?:(?<![\w.-])|(?<=/)){re.escape(name)}(?![\w-])", summary):
+        cited = (_CITED_DIRS.search(summary[:m.start()]).group() + name).removeprefix("./")
+        inside = _in_workspace(cited, root)
+        if inside is not None:
+            if inside == path:
+                return True
+            continue
+        if "/" not in cited:
+            return True
+        if not is_test_path(cited) and (path.endswith(f"/{cited}") or cited.endswith(f"/{path}")):
+            return True
+    return False
+
+
+def tests_only_waived(db: DB, ws: Workspace, sha: str, summary: str, finding_paths: list[str]) -> bool:
+    """Whether a request for changes at ``sha`` that its reviewer flagged as
+    tests-only doesn't hold the merge. Only for a piped branch past
+    ``review_rounds``, and the flag is checked rather than believed: the
+    finding names test files and nothing but (a line number is fine), the
+    summary cites no non-test file the review covered, and nothing in it
+    needs the supervisor. Any doubt blocks."""
+    worker = piped_worker(db, ws)
+    paths = [re.sub(r":\d+(?:[-:]\d+)*$", "", p.strip()).removeprefix("./") for p in finding_paths]
+    if worker is None or worker.pipeline != "reviewing" or not ws.base_branch \
+            or not paths or not all(is_test_path(p) for p in paths) or has_supervisor_action(summary):
+        return False
+    try:
+        cfg = load_repo_config(ws.repo_root, branch=ws.base_branch)
+        if not enabled(cfg, worker, ws) or (worker.pipeline_rounds or 0) + 1 <= cfg.review_rounds \
+                or gates.head(ws) != sha:
+            return False
+        return not any(_cites(summary, p, ws.path) for p in _reviewed_paths(db, ws, sha) if not is_test_path(p))
+    except (git.GitError, ValueError):
+        return False
+
+
+def note_tests_only(db: DB, ws: Workspace, reviewer: Agent, summary: str) -> None:
+    """Send the supervisor the findings ``tests_only_waived`` let through."""
+    worker = piped_worker(db, ws)
+    _tell(db, worker.parent_id if worker else None,
+          f"[brindle pipeline] `{ws.branch}` is past its standard review rounds and its only open "
+          f"findings concern tests, so they aren't holding the merge. Follow up if they matter:\n\n{summary}",
+          reviewer.id)
 
 
 def _superseded(ws: Workspace, worker: Agent, reviewer: Agent) -> bool:

@@ -58,17 +58,16 @@ def test_incremental_review_focuses_on_diff_since_previous_sha(db, worker_ws, mo
     assert f"git diff {sha1}..HEAD" in prompt
 
 
-def test_incremental_review_falls_back_to_full_review_after_a_rebase(db, worker_ws, monkeypatch):
-    sha1 = gates.head(worker_ws)
-    db.add_review(worker_ws.id, sha1, "revA", False, "off-by-one in the loop bound")
-    sh("git commit --amend -qm 'work (reworded)'", Path(worker_ws.path))  # rewrites sha1 away
+def test_incremental_review_falls_back_to_full_review_when_the_reviewed_commit_is_gone(db, worker_ws, monkeypatch):
+    gone = "deadbeef" * 5   # pruned from the repo: there is no tree to diff from
+    db.add_review(worker_ws.id, gone, "revA", False, "off-by-one in the loop bound")
 
     captured = capture_spawn(monkeypatch)
     agents.request_review(db, None, worker_ws, "reviewer")
     prompt = captured["prompt"]
     assert "off-by-one in the loop bound" in prompt
-    assert "diverged" in prompt
-    assert f"git diff {sha1}..HEAD" not in prompt
+    assert f"git diff {gone}..HEAD" not in prompt
+    assert agents.review_base_ref(worker_ws.id) not in prompt
 
 
 # -- raw task storage ---------------------------------------------------------------
