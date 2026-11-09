@@ -154,6 +154,24 @@ function fileAttachment(file: File): Promise<Attachment> {
 /* The question, the options as host buttons, a note, and Send. Answered: what was picked. */
 function AnswerBar({ client, visual, picked, onPick, onAnswered }: { client: VisualsClient & Partial<Pick<DaemonClient, "attach">>; visual: VisualDTO; picked: string | null; onPick(option: string): void; onAnswered(v: VisualDTO): void }) {
   const [note, setNote] = useState("");
+  // Insert text immediately so later edits and pastes keep their normal order.
+  // Tag only the inserted characters: a native file result removes its filename,
+  // while text-only results and clipboard errors leave the person's edits intact.
+  type NoteChar = { char: string; paste?: symbol; offset?: number };
+  const noteChars = useRef<NoteChar[]>([]);
+  const replacedNotes = useRef(new Map<symbol, NoteChar[]>());
+  const pendingPastes = useRef(0);
+  const showNote = () => setNote(noteChars.current.map(part => part.char).join(""));
+  const editNote = (value: string) => {
+    const before = noteChars.current.map(part => part.char).join("");
+    let start = 0;
+    while (start < before.length && start < value.length && before[start] === value[start]) start++;
+    let end = before.length;
+    let nextEnd = value.length;
+    while (end > start && nextEnd > start && before[end - 1] === value[nextEnd - 1]) { end--; nextEnd--; }
+    noteChars.current.splice(start, end - start, ...value.slice(start, nextEnd).split("").map(char => ({ char })));
+    showNote();
+  };
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const noteInput = useRef<HTMLInputElement>(null);
@@ -258,17 +276,71 @@ function AnswerBar({ client, visual, picked, onPick, onAnswered }: { client: Vis
               Something else…
             </button>
           </div>
-          <input ref={noteInput} type="text" className={`${field} min-w-40 flex-1`} aria-label={ownWords ? "Your answer" : "Add a note"} placeholder={ownWords ? "Your answer" : "Add a note (optional)"} value={note} onChange={(e) => setNote(e.target.value)}
+          <input ref={noteInput} type="text" className={`${field} min-w-40 flex-1`} aria-label={ownWords ? "Your answer" : "Add a note"} placeholder={ownWords ? "Your answer" : "Add a note (optional)"} value={note} onChange={(e) => editNote(e.target.value)}
             onPaste={(e) => {
               if (!canAttach) return;
               const files = Array.from(e.clipboardData.files);
-              if (files.length) {
+              // A text input strips CR/LF; stored characters and DOM offsets must agree.
+              const rawText = e.clipboardData.getData?.("text") ?? "";
+              const text = rawText.replace(/[\r\n]/g, "");
+              if (isTauri()) {
+                // Finder also supplies filename text; remove that insertion if native files are found.
+                e.preventDefault();
+                const input = e.currentTarget;
+                const start = input.selectionStart ?? note.length;
+                const end = input.selectionEnd ?? start;
+                const paste = Symbol();
+                replacedNotes.current.set(paste, text ? noteChars.current.splice(start, end - start, ...text.split("").map((char, offset) => ({ char, paste, offset }))) : []);
+                showNote();
+                input.value = noteChars.current.map(part => part.char).join("");
+                input.setSelectionRange(start + text.length, start + text.length);
+                pendingPastes.current++;
+                void upload(async () => {
+                  try {
+                    const copied = await clipboardAttachments();
+                    if (!active.current) return [];
+                    if (copied.length) {
+                      const selected = replacedNotes.current.get(paste) ?? [];
+                      // An insertion can be split between the live note and later
+                      // selections. Its earliest surviving character owns restoration.
+                      let owner: NoteChar[] | undefined;
+                      let offset = Infinity;
+                      for (const chars of [noteChars.current, ...replacedNotes.current.values()]) {
+                        for (const part of chars) {
+                          if (part.paste === paste && part.offset! < offset) {
+                            owner = chars;
+                            offset = part.offset!;
+                          }
+                        }
+                      }
+                      const restore = (chars: NoteChar[]) => {
+                        const first = chars.findIndex(part => part.paste === paste);
+                        const kept = chars.filter(part => part.paste !== paste);
+                        if (chars === owner) kept.splice(first, 0, ...selected);
+                        return kept;
+                      };
+                      noteChars.current = restore(noteChars.current);
+                      // Later pastes may retain this insertion in their replaced selection.
+                      // Reconcile those snapshots too, so they cannot resurrect a filename.
+                      for (const [other, chars] of replacedNotes.current) {
+                        if (other !== paste) replacedNotes.current.set(other, restore(chars));
+                      }
+                      replacedNotes.current.delete(paste);
+                      showNote();
+                      return copied;
+                    }
+                    if (!rawText) return Promise.all(files.map(fileAttachment));
+                    return [];
+                  } finally {
+                    // A committed text paste still owns its replaced selection while
+                    // an earlier file lookup can restore characters inside it.
+                    pendingPastes.current--;
+                    if (!pendingPastes.current) replacedNotes.current.clear();
+                  }
+                });
+              } else if (files.length) {
                 e.preventDefault();
                 void upload(() => Promise.all(files.map(fileAttachment)));
-              } else if (isTauri() && !e.clipboardData.getData("text")) {
-                // The webview exposes no File: ask the native clipboard (Finder files, image bytes). Plain text pastes as usual.
-                e.preventDefault();
-                void upload(clipboardAttachments);
               }
             }} />
           {canAttach && (
