@@ -92,19 +92,22 @@ def test_dismiss_tells_the_agent_once_clears_the_inbox_and_a_new_revision_asks_a
     answered = visuals.publish(db, worker, "Answered", "<p>x</p>", "Which?", OPTIONS)
     visuals.answer(db, answered["id"], 1, "A")
     assert [i for i in inbox.items(db, None, panes={}) if i.kind == "visual"]
-    before = db.conn.execute("SELECT COUNT(*) FROM inbox WHERE agent_id=?", (boss.id,)).fetchone()[0]
+    def notices(agent):
+        return db.conn.execute("SELECT COUNT(*) FROM inbox WHERE agent_id=?", (agent,)).fetchone()[0]
+
+    before = (notices(worker.id), notices(boss.id))
 
     response = client.post(f"/v1/visuals/{v['id']}/dismiss", json={"rev": 1})
     assert response.status_code == 200
-    bodies = [r["body"] for r in db.conn.execute("SELECT body FROM inbox WHERE agent_id=?", (boss.id,))]
-    assert len(bodies) == before + 1 and "dismissed" in bodies[-1] and "without answering" in bodies[-1]
+    # The worker that published it stops waiting; its supervisor's session hears too.
+    assert (notices(worker.id), notices(boss.id)) == (before[0] + 1, before[1] + 1)
     assert not [i for i in inbox.items(db, None, panes={}) if i.kind == "visual"]
     assert v["id"] in [x["id"] for x in visuals.for_session(db, "boss")]
 
     # A repeat, and an already answered revision, are safe no-ops that tell nobody.
     assert client.post(f"/v1/visuals/{v['id']}/dismiss", json={"rev": 1}).status_code == 200
     assert client.post(f"/v1/visuals/{answered['id']}/dismiss", json={"rev": 1}).status_code == 200
-    assert db.conn.execute("SELECT COUNT(*) FROM inbox WHERE agent_id=?", (boss.id,)).fetchone()[0] == before + 1
+    assert (notices(worker.id), notices(boss.id)) == (before[0] + 1, before[1] + 1)
     assert visuals.get(db, answered["id"])["answer"]["option"] == "A"
 
     visuals.publish(db, worker, "Release flow", "<p>flow 2</p>", "Which flow?", OPTIONS, visual_id=v["id"])

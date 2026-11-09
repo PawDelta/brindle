@@ -455,9 +455,12 @@ def dismiss(db: DB, visual_id: str, rev: Any) -> dict:
         claimed = cur.rowcount == 1
     if not claimed:
         return get(db, v["id"])
+    # The publisher is the one waiting; the session's supervisor hears too when it is another agent.
+    text = (f"The person dismissed visual {v['id']} (r{rev}) without answering. "
+            "Don't wait for an answer; carry on without one.")
     try:
-        agents.send_message(db, v["root_id"], f"The person dismissed visual {v['id']} (r{rev}) without "
-                            "answering. Don't wait for an answer; carry on without one.", person=True)
+        for to in dict.fromkeys([v["by_agent"], v["root_id"]]):
+            agents.send_message(db, to, text, person=True)
     except BaseException:
         with db.tx() as c:
             c.execute("UPDATE visuals SET dismissed_rev=0 WHERE id=? AND dismissed_rev=?", (v["id"], rev))

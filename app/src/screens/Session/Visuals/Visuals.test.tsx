@@ -730,16 +730,18 @@ describe("visuals", () => {
   });
 
   it("can dismiss a visual prompt without answering, closing the reader like Back", async () => {
-    const client = new FakeDaemon().client();
-    const dismiss = vi.spyOn(client, "dismissVisual").mockResolvedValue(visual);
+    const daemon = new FakeDaemon();
+    daemon.visualRows = [visual];
+    daemon.data.inbox = [{ kind: "visual", agent_id: "sup1", root_id: visual.session, workspace_id: "proj", visual_id: visual.id, reason: "asks you to choose", detail: visual.title }];
+    const client = daemon.client();
     const answer = vi.spyOn(client, "answerVisual");
-    const onAnswered = vi.fn();
     const onBack = vi.fn();
-    render(<VisualReader client={client} visual={visual} onAnswered={onAnswered} onBack={onBack} Frame={() => <div />} />);
+    render(<VisualReader client={client} visual={visual} onAnswered={() => {}} onBack={onBack} Frame={() => <div />} />);
     fireEvent.click(screen.getByTestId("visual-dismiss"));
-    await waitFor(() => expect(onBack).toHaveBeenCalled());
-    expect(dismiss).toHaveBeenCalledWith(visual.id, visual.rev);
-    expect(onAnswered).toHaveBeenCalledWith(visual);
+    await waitFor(() => expect(onBack).toHaveBeenCalledTimes(1));
+    expect(daemon.visualDismissals).toEqual([{ id: visual.id, rev: visual.rev }]);
+    expect(daemon.data.inbox).toEqual([]);
+    expect((await client.visuals(visual.session)).map((v) => v.id)).toEqual([visual.id]);
     expect(answer).not.toHaveBeenCalled();
   });
 

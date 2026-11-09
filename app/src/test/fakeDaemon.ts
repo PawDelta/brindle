@@ -736,6 +736,10 @@ export class FakeDaemon {
   kbDocsPerFolder = 3;
   /* The edits PUT /workspaces/{id}/file committed, in order. */
   readonly edits: { workspace: string; path: string; content: string }[] = [];
+  /* Visuals in sessions (GET /sessions/{root}/visuals); POST /visuals/{id}/dismiss clears the visual's
+     Inbox card and tells the bus, and keeps the row (brindle.visuals.dismiss). */
+  visualRows: import("../api/client").VisualDTO[] = [];
+  readonly visualDismissals: { id: string; rev: number }[] = [];
   /* The permission requests POST /inbox/{id}/permission answered, in order. */
   readonly permissionAnswers: { agent: string; request: string; choice: string }[] = [];
   /* The edits PUT / DELETE /sessions/{root}/file committed (content null: deleted), in order. */
@@ -2558,6 +2562,15 @@ export class FakeDaemon {
         this.orgSwitches.push(fields.org);
         return json({ messages: [`Switched to org ${fields.org}.`] });
       }
+      if ((m = path.match(/^\/visuals\/([^/]+)\/dismiss$/))) {
+        const row = this.visualRows.find((v) => v.id === m![1]);
+        if (!row) return error("not_found", "no such visual", 404);
+        if (fields.rev !== row.rev) return error("stale", `the visual has a newer revision (r${row.rev}); dismiss that one`, 409);
+        this.visualDismissals.push({ id: row.id, rev: row.rev });
+        d.inbox = d.inbox.filter((i) => !(i.kind === "visual" && i.visual_id === row.id));
+        this.publish("visual.dismissed", { root_id: row.session, payload: { visual: row.id, rev: row.rev } });
+        return json(row);
+      }
       if ((m = path.match(/^\/inbox\/([^/]+)\/permission$/))) return this.answerPermission(m[1], fields);
       if ((m = path.match(/^\/inbox\/([^/]+)\/([^/]+)$/))) {
         const [id, action] = [m[1], m[2]];
@@ -2705,6 +2718,7 @@ export class FakeDaemon {
     }
     if ((m = path.match(/^\/providers\/([^/]+)\/preflight$/))) return json(this.preflightOf(m[1]));
     if ((m = path.match(/^\/providers\/([^/]+)\/connection$/))) return this.connectionOf(m[1]);
+    if ((m = path.match(/^\/sessions\/([^/]+)\/visuals$/))) return json(this.visualRows.filter((v) => v.session === m![1]));
     if ((m = path.match(/^\/sessions\/([^/]+)\/(pr\/readiness|pr\/draft|diff|tree|file)$/))) return this.sessionReviewRead(m[1], m[2], query);
     // The doc library, as an engine not signed in to a plan answers it (routes_actions._docs_entitlement).
     if (path === "/analysis-docs") return error("not_entitled", "analysis docs need brindle Pro", 402);
