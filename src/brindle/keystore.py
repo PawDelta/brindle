@@ -33,7 +33,6 @@ import tempfile
 import threading
 import time
 from collections.abc import Iterator
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -465,30 +464,6 @@ def get_key(name: str) -> str | None:
     if memo is not None:
         memo[name] = value
     return value
-
-
-WARM_READS = 8      # keychain reads at once in warm
-
-
-def warm() -> None:
-    """Read every known key once, side by side, so the reads that follow
-    within KEYCHAIN_READ_TTL come from the cache. The first alone: a keychain
-    that refuses it (locked) raises one dialog, and nothing more is read.
-    Never raises: the reads that follow fail or succeed as they would have."""
-    def read(name: str) -> None:
-        try:
-            _key_store(name).load()
-        except Exception:  # noqa: BLE001 - the resume's own read reports it
-            pass
-
-    try:
-        names = known_names()
-        if names:
-            _key_store(names[0]).load()
-    except Exception:  # noqa: BLE001 - see above
-        return
-    with ThreadPoolExecutor(max_workers=min(WARM_READS, os.cpu_count() or 1)) as pool:
-        list(pool.map(read, names[1:]))
 
 
 def get_key_info(name: str) -> tuple[str | None, float]:

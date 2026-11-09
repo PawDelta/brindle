@@ -561,7 +561,7 @@ def resume_after_start(recovery: Recovery | None = None) -> list[str]:
     ``recovery``: the daemon's (serve), which may be stopped meanwhile: then
     nothing more is launched, and what is left to resume stays in
     ``recovery.pending`` for its pause_for_exit to record again."""
-    from brindle import agents, keystore, secrets, tmux
+    from brindle import agents, secrets, tmux
     from brindle.db import DB
 
     recovery = recovery or Recovery()
@@ -577,7 +577,7 @@ def resume_after_start(recovery: Recovery | None = None) -> list[str]:
         recovery.idle.clear()
     began = time.monotonic()
     resumed: list[str] = []
-    ordered = warmed = 0.0
+    ordered = 0.0
     try:
         server = tmux.current_server()
         # The environment as this start found it, for every session: each resume writes the
@@ -589,8 +589,6 @@ def resume_after_start(recovery: Recovery | None = None) -> list[str]:
         finally:
             db.conn.close()
         ordered = time.monotonic() - began
-        keystore.warm()     # every resume reads every key: once here, not one by one in each
-        warmed = time.monotonic() - began - ordered
 
         def work() -> None:
             db = DB()       # its own: SQLite connections stay on their thread
@@ -628,8 +626,8 @@ def resume_after_start(recovery: Recovery | None = None) -> list[str]:
             thread.join()
     finally:
         recovery.idle.set()
-        log.warning("brindle: recovery of %d session(s) took %.2fs (%d back; ordering %.2fs, keychain %.2fs)",
-                    len(entries), time.monotonic() - began, len(resumed), ordered, warmed)
+        log.warning("brindle: recovery of %d session(s) took %.2fs (%d back; ordering %.2fs)",
+                    len(entries), time.monotonic() - began, len(resumed), ordered)
     return resumed
 
 
