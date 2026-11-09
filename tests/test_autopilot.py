@@ -1,5 +1,6 @@
 import json
 import time
+from concurrent.futures import Future
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1025,3 +1026,88 @@ def test_failed_milestone_shows_in_flight_work(db, root, monkeypatch, flight, ex
         db.update_autopilot("boss", checking_since=None)
         assert view.autopilot_entry(db, ws.repo_root, root_id="boss")["milestones"][0]["status"] == "passed"
         assert "✓" in autopilot.progress(db, "boss") and "failed" not in autopilot.progress(db, "boss")
+
+
+def _rollup(*checks, state="OPEN", mergeable="MERGEABLE"):
+    return {"state": state, "mergeable": mergeable, "statusCheckRollup": [
+        {"status": "COMPLETED", "conclusion": c} if c else {"status": "IN_PROGRESS"} for c in checks]}
+
+
+@pytest.mark.parametrize("payload, expected", [
+    (_rollup("SUCCESS", "SKIPPED"), ("ready", 2, 2)),
+    (_rollup("SUCCESS", None, None), ("ci", 1, 3)),
+    (_rollup("SUCCESS", "FAILURE", None), ("failed", 2, 3)),
+    (_rollup("SUCCESS", mergeable="CONFLICTING"), ("unknown", 1, 1)),    # never a false ready
+    (_rollup(), ("unknown", 0, 0)),                                        # no checks reported yet
+    (_rollup("SUCCESS", state="MERGED"), None),
+])
+def test_session_pr_state_of_a_payload(payload, expected):
+    from brindle.daemon import session_review
+
+    got = session_review.pr_state_of("https://github.com/o/r/pull/391", payload)
+    assert got == (expected and {"number": 391, "state": expected[0], "done": expected[1], "total": expected[2]})
+
+
+def test_session_pr_state_is_one_shared_cached_read(db, root, monkeypatch):
+    from brindle.daemon import session_review
+
+    class Deferred:
+        """A pool whose reads wait until the test lets them land."""
+        def __init__(self):
+            self.queue = []
+
+        def submit(self, fn, *args):
+            self.queue.append((fn, args))
+            return Future()
+
+        def land(self):
+            while self.queue:
+                fn, args = self.queue.pop(0)
+                fn(*args)
+
+    url, pool, answers = "https://github.com/o/r/pull/391", Deferred(), [None, _rollup("SUCCESS", None)]
+    unknown = {"number": 391, "state": "unknown", "done": 0, "total": 0}
+    db.conn.execute("INSERT INTO session_prs (root_id, branch, url, opened_at) VALUES ('boss', 'feat', ?, 1)", (url,))
+    monkeypatch.setattr(session_review, "_pr_pool", pool)
+    monkeypatch.setattr(session_review, "_pr_cache", {})
+    monkeypatch.setattr(session_review, "_pr_flights", {})
+    monkeypatch.setattr(session_review, "_pr_changed", set())
+    monkeypatch.setattr(workspaces, "pull_request_checks", lambda u, cwd: answers.pop(0))
+    announced = lambda: db.conn.execute("SELECT COUNT(*) FROM events WHERE kind = 'session.pr_checks'").fetchone()[0]
+
+    # Overlapping asks while the read is out share it; until it lands the line is unknown.
+    assert session_review.session_pr_state(db, "boss", url) == session_review.session_pr_state(db, "boss", url) == unknown
+    assert len(pool.queue) == 1 and session_review.session_pr_state(db, "boss", None) is None
+    pool.land()                                   # gh failed: unknown is cached like any answer, nothing to announce
+    session_review.refresh_pr_states(db)
+    assert session_review.session_pr_state(db, "boss", url) == unknown and not pool.queue and announced() == 0
+    # Once old, the sweep re-reads it without any row asking, and announces the change once.
+    session_review._pr_cache[url] = (0.0, unknown)
+    session_review.refresh_pr_states(db)
+    assert len(pool.queue) == 1
+    pool.land()
+    session_review.refresh_pr_states(db)
+    session_review.refresh_pr_states(db)
+    assert session_review.session_pr_state(db, "boss", url)["state"] == "ci" and announced() == 1 and not pool.queue
+
+    # A asks while the cache is old and is held up in its DB lookup; B asks, reads and lands meanwhile.
+    # A must then find the cache fresh instead of starting a second read.
+    session_review._pr_cache[url] = (0.0, unknown)
+    answers.append(_rollup("SUCCESS"))
+
+    class Held:
+        def __init__(self, real):
+            self.real, self.held = real, False
+
+        def __getattr__(self, name):
+            return getattr(self.real, name)
+
+        def get_agent(self, *args):
+            if not self.held:
+                self.held = True
+                session_review.session_pr_state(self.real, "boss", url)
+                pool.land()
+            return self.real.get_agent(*args)
+
+    assert session_review.session_pr_state(Held(db), "boss", url)["state"] == "ready"
+    assert not pool.queue and not answers

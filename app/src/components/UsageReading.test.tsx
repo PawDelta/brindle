@@ -48,13 +48,20 @@ function app(scenario: UsageScenario, data: Partial<DaemonData> = {}) {
 
 const statusLine = () => screen.getByTestId("status-line");
 const usageAsked = (daemon: FakeDaemon) => daemon.requests.filter((r) => r.method === "GET" && r.path === "/usage").length;
+/* The button renders as a plain "Usage" before the first load lands, so finding it says nothing about its data. */
+const loadedReading = () =>
+  waitFor(() => {
+    const reading = screen.getByTestId("usage-reading");
+    expect(reading.dataset.state).toBe("reading");
+    return reading;
+  });
 
 describe("the sidebar's weekly usage reading", () => {
   it.each(["normal", "several"] as const)("sidebar foot usage line shows weekly usage and warnings, initials open Account, and theme choices live in Settings (%s)", async (scenario) => {
     const { daemon, stop } = app(scenario, { account: { signed_in: true, name: "Hannah Lerner", plan: "pro" } });
     await waitFor(() => expect(usageAsked(daemon)).toBeGreaterThan(0));
     await waitFor(() => expect(screen.getByTestId("pages")).toBeTruthy());
-    const reading = await screen.findByTestId("usage-reading");
+    const reading = await loadedReading();
     expect(reading.dataset.provider).toBe("codex");
     expect(reading.className).toContain(scenario === "normal" ? "text-ink-3" : "text-sap");
     expect(within(statusLine()).getByRole("progressbar").getAttribute("aria-valuenow")).toBe(scenario === "normal" ? "41" : "82");
@@ -107,7 +114,7 @@ describe("the sidebar's weekly usage reading", () => {
     const scrolled = vi.fn();
     Element.prototype.scrollIntoView = scrolled;
     const { stop } = app("near");
-    const reading = await screen.findByTestId("usage-reading");
+    const reading = await loadedReading();
     expect(reading.dataset.provider).toBe("claude");
     expect(within(reading).getByRole("progressbar").getAttribute("aria-valuenow")).toBe("63");
     expect(reading.className).toContain("text-sap");

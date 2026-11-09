@@ -997,6 +997,42 @@ def test_installs_at_different_paths_share_one_hook_definition(tmp_path, monkeyp
     assert run_hook() == "app"
 
 
+@pytest.mark.parametrize("bundled", [True, False])
+@pytest.mark.variant("nightly 42656843590: shell execution and its outside-engine bypass are invisible to Python coverage")
+def test_bundle_smoke_runs_codex_launcher(tmp_path, monkeypatch, bundled):
+    import shlex
+    from brindle import spawn
+
+    engine = tmp_path / "An App.app" / "engine"
+    bin_dir = engine / "python" / "bin"
+    bin_dir.mkdir(parents=True)
+    exe = (bin_dir if bundled else tmp_path) / "brindle"
+    exe.write_text('#!/bin/sh\ncase "$1" in --version) echo "brindle 0.6.3";; _hook) exit 0;; *) exit 1;; esac\n')
+    exe.chmod(0o755)
+    monkeypatch.setenv("BRINDLE_HOME", str(tmp_path / "home" / "brindle"))
+    monkeypatch.setattr(codex_hook, "_stable_invocation", lambda: [str(exe)])
+    command = codex_hook.hook_command()
+    python = bin_dir / "python3"
+    python.write_text("#!/bin/sh\nprintf '%s\\n' " + shlex.quote(command) + "\n")
+    python.chmod(0o755)
+    smoke = (Path(__file__).parents[1] / "app/scripts/smoke_bundle.sh").read_text()
+    block = smoke.split("check_codex_hook() {\n", 1)[1].split("\n}\n", 1)[0]
+    setup = '''
+set -eu
+FAILED=0
+VERSION=0.6.3
+pass() { :; }
+fail() { echo "$*"; FAILED=1; }
+check_version() { [ "$2" = "brindle $VERSION" ] || fail version; }
+engine_home() { :; }
+isolated() { local home="$1"; shift; env -i HOME="$home" BRINDLE_HOME="$home/brindle" "$@"; }
+'''
+    result = spawn.action(["bash", "-c", setup + "check_codex_hook() {\n" + block +
+                           '\n}\ncheck_codex_hook\nexit "$FAILED"'], env={
+        "ENGINE_DIR": str(engine), "ENGINE_HOME": str(tmp_path / "home"), "PATH": "/usr/bin:/bin"})
+    assert result.returncode == (0 if bundled else 1), result.stdout + result.stderr
+
+
 def test_codex_hook_ignores_a_relocated_console_scripts_missing_interpreter(tmp_path, monkeypatch):
     bin_dir = tmp_path / "engine" / "python" / "bin"
     bin_dir.mkdir(parents=True)

@@ -304,11 +304,15 @@ def publish(db: DB, caller: Agent | None, title: str, html: str, question: str |
     return get(db, vid)
 
 
-def mark_read(db: DB, visual_id: str) -> dict:
+def mark_read(db: DB, visual_id: str, rev: int | None = None) -> dict:
+    """Mark read up to ``rev``, the revision on the person's screen: one
+    published since keeps its notice. None (an older app): the current one."""
     v = get(db, visual_id)
     _unlocked(v["root_id"])
+    if rev is not None and rev < 1:
+        raise ServiceError("invalid", "rev must be a revision of this visual", 400)
     with db.tx() as c:
-        c.execute("UPDATE visuals SET read_rev=MAX(read_rev, rev) WHERE id=?", (v["id"],))
+        c.execute("UPDATE visuals SET read_rev=MAX(read_rev, MIN(rev, COALESCE(?, rev))) WHERE id=?", (rev, v["id"]))
     # Both entry points use this state: the Inbox card and the session's list.
     # Tell connected clients to refresh their Inbox after either opens the reader.
     bus.publish(db, "visual.read", repo_root=v["repo_root"], root_id=v["root_id"], visual=v["id"])
