@@ -317,6 +317,29 @@ def test_a_sweep_that_read_too_early_leaves_a_newer_identity_alone(w, monkeypatc
     assert identity_lock.locked_by("x") == kept
 
 
+def test_a_sweep_that_read_too_early_cannot_make_an_owned_agent_adoptable(w, monkeypatch):
+    from brindle import identity_lock
+
+    w.agent("c1")
+    w.agent("x")
+    login = [True]
+    monkeypatch.setattr(signin_pause, "_brindle_signed_in", lambda: login[0])
+    real = signin_pause.check
+
+    def check(provider, cache=False):
+        if not cache:       # the sweep has read the file; x launches owned, then brindle signs out
+            signin_pause.record_launch(w.db.get_agent("x"))
+            login[0] = False
+        return real(provider, cache)
+
+    monkeypatch.setattr(signin_pause, "check", check)
+    signin_pause.run(w.db)      # it would record the same identity for x, but as nobody's
+    assert "x" not in signin_pause._load()["unowned"]
+    signin_pause.adopt(PERSONAL.ident)
+    w.claude = PERSONAL
+    assert identity_lock.locked_by("x") == OK.ident
+
+
 def test_unrecorded_agent_with_nothing_known_never_auto_resumes_and_resumes_by_hand(w):
     w.agent("c1")
     w.claude = OUT

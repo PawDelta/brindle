@@ -144,35 +144,42 @@ def _save(state: dict) -> None:
         # worst case: agents stay paused and `brindle continue` brings them back
 
 
+def _owner(state: dict, agent_id: str) -> tuple[str | None, bool]:
+    """Who ``agent_id`` belongs to in ``state``: its identity, and whether it's unowned."""
+    return state["identity"].get(agent_id), agent_id in state["unowned"]
+
+
 def _commit(state: dict, base: dict) -> None:
     """Save what a sweep changed since it read ``base`` onto the file as it
     is now. A sweep keeps its state across CLI checks and resumes, too long
     to hold the lock (the launches it resumes record themselves under it),
-    and a launch or a sign-in may have written meanwhile: theirs stays, also
-    for an agent the sweep would change. An identity written or adopted since
-    the sweep read it is newer than the sweep's, and an agent is only ever
-    locked to the account it really belongs to (identity_lock)."""
+    and a launch or a sign-in may have written meanwhile.
+
+    An agent's identity and whether it is unowned are one record (_owner),
+    which decides who its conversation belongs to (identity_lock, adopt): the
+    sweep's change to it applies only if that record is still as the sweep
+    read it. Otherwise it was written since, and is newer than the sweep's."""
     with _locked():
         now = _load()
-        for section in _SECTIONS:
+        for section in (s for s in _SECTIONS if s != "identity"):
             ours, was, theirs = state[section], base[section], now[section]
             for key in {*ours, *was}:
-                if ours.get(key) == was.get(key):
-                    continue
-                if section == "identity" and theirs.get(key) != ours.get(key) and (
-                        theirs.get(key) != was.get(key)
-                        or (key in base["unowned"] and key not in now["unowned"])):   # adopted meanwhile
-                    continue
-                if key in ours:
-                    theirs[key] = ours[key]
-                else:
+                if key not in ours:
                     theirs.pop(key, None)
-        # Who owns an agent follows its identity: changed only where the sweep's identity stands.
-        stands = {a for a in {*base["unowned"], *state["unowned"]}
-                  if now["identity"].get(a) == state["identity"].get(a)}
-        added = (set(state["unowned"]) - set(base["unowned"])) & stands
-        gone = (set(base["unowned"]) - set(state["unowned"])) & stands
-        now["unowned"] = sorted((set(now["unowned"]) | added) - gone)
+                elif key not in was or ours[key] != was[key]:
+                    theirs[key] = ours[key]
+        unowned = set(now["unowned"])
+        for aid in {*state["identity"], *base["identity"], *state["unowned"], *base["unowned"]}:
+            ours, was = _owner(state, aid), _owner(base, aid)
+            if ours == was or _owner(now, aid) != was:
+                continue
+            ident, nobodys = ours
+            if ident is None:
+                now["identity"].pop(aid, None)
+            else:
+                now["identity"][aid] = ident
+            (unowned.add if nobodys else unowned.discard)(aid)
+        now["unowned"] = sorted(unowned)
         _save(now)
 
 
