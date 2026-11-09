@@ -13,10 +13,13 @@ vi.mock("../api/attachments", async (original) => ({
   listenForDrops: (handler: typeof files.drop) => { files.drop = handler; return files.listen(); },
 }));
 const native = vi.hoisted(() => ({ enabled: false }));
-const windowDrop = vi.hoisted(() => ({ handle: (_event: { payload: unknown }) => {} }));
-vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => ({
-  onDragDropEvent: async (handle: typeof windowDrop.handle) => { windowDrop.handle = handle; return () => {}; },
+// The webview's, not the window's: the app's multi-webview feature makes the main webview a child, and Tauri sends a
+// child's drags only to listeners on that webview. One listening on the window never hears them.
+const webviewDrop = vi.hoisted(() => ({ handle: (_event: { payload: unknown }) => {} }));
+vi.mock("@tauri-apps/api/webview", () => ({ getCurrentWebview: () => ({
+  onDragDropEvent: async (handle: typeof webviewDrop.handle) => { webviewDrop.handle = handle; return () => {}; },
 }) }));
+vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => ({ onDragDropEvent: async () => () => {} }) }));
 vi.mock("@tauri-apps/api/core", async original => ({
   ...await original<typeof import("@tauri-apps/api/core")>(),
   isTauri: () => native.enabled,
@@ -83,7 +86,7 @@ it("converts drag position to CSS coordinates per platform", async () => {
     platform.mockReturnValue(os);
     const received: unknown[] = [];
     const stop = await listenForDrops(drop => received.push(drop));
-    windowDrop.handle({ payload: { type: "drop", position: { x: 160, y: 240 }, paths: ["/photo.png"] } });
+    webviewDrop.handle({ payload: { type: "drop", position: { x: 160, y: 240 }, paths: ["/photo.png"] } });
     expect(received).toEqual([{ type: "drop", x, y, paths: ["/photo.png"] }]);
     stop();
   }
@@ -102,6 +105,11 @@ it("attaches native drops only under the cursor and keeps typing behind the retu
   expect(view.queryByTestId("terminal-drop")).toBeNull();
   act(() => files.drop({ type: "drop", x: 300, y: 40, paths: ["/outside"] }));
   await settled();
+  expect(attach).not.toHaveBeenCalled();
+  expect(view.queryByRole("alert")).toBeNull();
+  // A drag over the view with no file behind it is told, not silently lost.
+  act(() => files.drop({ type: "drop", x: 30, y: 40, paths: [] }));
+  expect(view.queryByRole("alert")).not.toBeNull();
   expect(attach).not.toHaveBeenCalled();
   act(() => files.drop({ type: "drop", x: 30, y: 40, paths: ["/photo.png", "/notes.txt"] }));
   act(() => term().input("x", true));
