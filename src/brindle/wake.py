@@ -34,7 +34,6 @@ import os
 import re
 import secrets
 import signal
-import sqlite3
 import sys
 import time
 import uuid
@@ -186,7 +185,22 @@ def _finish_claim(db: DB, agent_id: str, taken: list) -> None:
     except OSError:
         pass   # the database below is still the usual record
     db.set_mark(agent_id, f"{WAITER_CLAIM}{os.getpid()}", None)
-    handed.unlink(missing_ok=True)
+    _discard(handed)
+
+
+def _discard(path: Path) -> None:
+    """Remove a receipt no longer needed: one left behind only takes up a name."""
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _was_handed(path: Path) -> bool:
+    try:
+        return path.exists()
+    except OSError:
+        return False   # can't tell: at worst it is handed over twice
 
 
 def _gone(state: dict) -> bool:
@@ -207,9 +221,9 @@ def reclaim(db: DB, agent_id: str | None = None) -> None:
     for row in db.waiter_claims(agent_id):
         state = json.loads(row["value"])
         handed = _handed_path(row["agent_id"], state["ids"])
-        if handed.exists():   # it reached the agent; only the claim's cleanup failed
+        if _was_handed(handed):   # it reached the agent; only the claim's cleanup failed
             db.set_mark(row["agent_id"], row["kind"], None)
-            handed.unlink(missing_ok=True)
+            _discard(handed)
         elif _gone(state):
             db.reclaim_waiter_claim(row["agent_id"], row["kind"], row["value"])
 
@@ -303,6 +317,6 @@ def main(db: DB, agent_id: str) -> int:
                  lambda: db.set_status(agent_id, "processing", only_if="idle")):  # it wakes with this
         try:
             step()
-        except sqlite3.Error:
-            pass   # reclaim reads the claim's record; its prompt-submit hook sets the status too
+        except Exception:  # noqa: BLE001 - the mail is written: nothing here may cost it its exit code
+            pass   # not logged: stderr is what the model reads, and reclaim reads the claim's record
     return 2

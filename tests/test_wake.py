@@ -239,7 +239,8 @@ def test_mail_a_waiter_died_holding_is_recovered(db, boss, monkeypatch, found_by
     assert text.count("the answer") == 1
 
 
-def test_mail_handed_over_is_not_replayed_when_its_claim_cant_be_cleared(db, boss, monkeypatch):
+@pytest.mark.parametrize("fails", ["the claim's cleanup", "the receipt's cleanup"])
+def test_mail_handed_over_is_not_replayed_when_its_cleanup_fails(db, boss, monkeypatch, fails):
     db.enqueue("boss", "the answer", None)
     real = db.set_mark
 
@@ -248,16 +249,24 @@ def test_mail_handed_over_is_not_replayed_when_its_claim_cant_be_cleared(db, bos
             raise sqlite3.OperationalError("database is locked")
         real(agent_id, kind, value)
 
+    def no_permission(self, **k):
+        raise PermissionError("denied")
+
     monkeypatch.setattr(wake, "wait", lambda db, agent_id: wake.take(db, db.get_agent(agent_id)))
     monkeypatch.setattr(wake.signal, "signal", lambda *a: None)
     monkeypatch.setattr(sys, "stderr", io.StringIO())
-    with monkeypatch.context() as busy:
-        busy.setattr(db, "set_mark", locked)
-        assert wake.main(db, "boss") == 2
-    assert db.waiter_claims("boss")   # the database couldn't be told
+    with monkeypatch.context() as broken:
+        if fails == "the claim's cleanup":
+            broken.setattr(db, "set_mark", locked)
+        else:
+            broken.setattr(wake.Path, "unlink", no_permission)
+        assert wake.main(db, "boss") == 2   # any other exit code and Claude Code never reads it
+    assert bool(db.waiter_claims("boss")) is (fails == "the claim's cleanup")
 
     monkeypatch.setattr(wake, "_gone", lambda state: True)
-    wake.reclaim(db)
+    with monkeypatch.context() as broken:
+        broken.setattr(wake.Path, "unlink", no_permission)
+        wake.reclaim(db)
     assert db.pending_count("boss") == 0 and not db.waiter_claims("boss")
 
 
