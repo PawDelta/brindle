@@ -1571,9 +1571,8 @@ def _is_force(arg: str) -> bool:
 
 def _readonly_git(req: Request, argv: list[str]) -> bool:
     """Whether ``argv`` is a read-only git command: READONLY_GIT without unsafe
-    or force options, or grep with known search options. ``-C`` may only name
-    a checkout of the session (session_roots). Search patterns are arguments,
-    so their metacharacters do not change the command's classification."""
+    or force options. ``-C`` may only name a checkout of the session
+    (session_roots). Git grep is checked separately with its read paths."""
     if not argv or argv[0] != "git":
         return False
     args = argv[1:]
@@ -1584,12 +1583,38 @@ def _readonly_git(req: Request, argv: list[str]) -> bool:
         if not any(path == os.path.realpath(root) or _inside(path, root) for root in session_roots(req)):
             return False
         args = args[2:]
-    if args[:1] == ["grep"]:
-        # Search options are data only when the option reader knows them.
-        # In particular, don't admit pattern files or git's pager launcher.
-        return _grep_options_known(args[1:])
     return bool(args and args[0] in READONLY_GIT
                 and not any(a.startswith(GIT_UNSAFE_OPTIONS) or _is_force(a) for a in args[1:]))
+
+
+def _git_search(req: Request, words: list[str]) -> tuple[Request, list[str]] | None:
+    """A working-tree git grep, separately from the path-blind git preset.
+    Revisions and magic pathspecs need Git's own interpretation; refuse them.
+    Ordinary pathspec globs are checked against the whole working directory,
+    since unlike shell globs they can match at any depth."""
+    if words[0] != "git":
+        return None
+    args, cwd = words[1:], req.cwd or req.worktree
+    while args:
+        if args[0] == "--no-pager":
+            args = args[1:]
+        elif args[0] == "-C" and len(args) > 1:
+            cwd = os.path.realpath(os.path.join(cwd, args[1]))
+            args = args[2:]
+        else:
+            break
+    if not args or args[0] != "grep" or not _grep_options_known(args[1:]):
+        return None
+    if not any(cwd == os.path.realpath(root) or _inside(cwd, root) for root in session_roots(req)):
+        return None
+    paths = _search_paths(args)
+    if paths and ("--" not in args or paths != args[args.index("--") + 1:]):
+        return None  # a positional argument before -- could name a revision
+    if any(p.startswith(":") or "\\" in p for p in paths):
+        return None
+    if any(any(c in p for c in "*?[") for p in paths):
+        paths = ["."]
+    return replace(req, cwd=cwd), ["rg", "pattern", "--", *(paths or ["."])]
 
 
 # -- pushes -------------------------------------------------------------------------------------
@@ -1988,7 +2013,7 @@ _RG_VALUES = ("-e", "--regexp", "-m", "--max-count", "-A", "-B", "-C", "--after-
               "--before-context", "--context", "-t", "--type", "-T", "--type-not")
 
 
-def _grep_options_known(args: list[str]) -> bool:
+def _grep_options_known(args: list[str], filters: dict[int, tuple[str, str]] | None = None) -> bool:
     """Search flags and literal patterns, without a pattern file or an
     unknown option that might consume a path or launch another program."""
     i = 0
@@ -1997,11 +2022,15 @@ def _grep_options_known(args: list[str]) -> bool:
         if arg == "--":
             return True
         if arg.startswith("--"):
-            name, eq, _ = arg.partition("=")
+            name, eq, value = arg.partition("=")
             if name == "--file":
                 return False
             if eq and name not in _GREP_VALUES or not eq and name not in (*_GREP_FLAGS, *_GREP_VALUES):
                 return False
+            if name in ("--include", "--exclude", "--exclude-dir") and filters is not None:
+                if not eq and i + 1 >= len(args):
+                    return False
+                filters[i if eq else i + 1] = (name, value if eq else args[i + 1])
             if not eq and name in _GREP_VALUES and name not in _GREP_FLAGS:
                 i += 1  # its value is the next word
         elif arg.startswith("-") and arg != "-":
@@ -2015,6 +2044,35 @@ def _grep_options_known(args: list[str]) -> bool:
                 i += 1  # its value is the next word
         i += 1
     return True
+
+
+def _search_filters(words: list[str]) -> dict[int, tuple[str, str]]:
+    """Positions and values of grep's filename filters, which name no input
+    files. Option parsing matters: after --, or as another option's value,
+    a word spelled --include=... is not a filter."""
+    filters: dict[int, tuple[str, str]] = {}
+    if words[0] in ("grep", "egrep", "fgrep") and _grep_options_known(words[1:], filters):
+        return {i + 1: value for i, value in filters.items()}
+    return {}
+
+
+def _grep_selected(name: str, filters: tuple[tuple[str, str], ...], *, directory: bool = False) -> bool:
+    """Whether grep can search this basename. File filters are ordered:
+    the last matching include/exclude wins; directory exclusions prune walks.
+    Shell-style escapes and locale bracket classes aren't Python fnmatch,
+    so those filters cannot prove that a path is excluded."""
+    if any("\\" in p or any(c in p for c in ("[:", "[=", "[.")) for _, p in filters):
+        return True
+    filters = tuple((kind, p.replace("[^", "[!")) for kind, p in filters)
+    if directory:
+        return not any(kind == "--exclude-dir" and fnmatch.fnmatchcase(name, p.rstrip("/"))
+                       for kind, p in filters)
+    files = [(kind, p) for kind, p in filters if kind != "--exclude-dir"]
+    selected = not files or files[0][0] != "--include"
+    for kind, pattern in files:
+        if fnmatch.fnmatchcase(name, pattern):
+            selected = kind == "--include"
+    return selected
 
 
 def _reads_only_named(program: str, args: list[str], cwd: str) -> bool:
@@ -2076,13 +2134,13 @@ def _search_paths(words: list[str]) -> list[str]:
     return positional if patterned else positional[1:]
 
 
-def _tree(root: str, budget: list[int]) -> list[str] | None:
-    """Every file and directory under ``root`` (``.git`` aside), or None past
-    ``budget`` (shared across a command's walks)."""
+def _tree(root: str, budget: list[int], filters: tuple[tuple[str, str], ...] = ()) -> list[str] | None:
+    """Reachable files and directories under ``root`` (.git aside), or None
+    past ``budget``. Prune grep's exclusions before spending the shared budget."""
     out = []
     for top, dirs, files in os.walk(root):
-        dirs[:] = [d for d in dirs if d != ".git"]
-        for name in (*dirs, *files):
+        dirs[:] = [d for d in dirs if d != ".git" and _grep_selected(d, filters, directory=True)]
+        for name in (*dirs, *(f for f in files if _grep_selected(f, filters))):
             budget[0] -= 1
             if budget[0] < 0:
                 return None
@@ -2232,7 +2290,7 @@ def _readonly_part(req: Request, words: list[str]) -> bool:
     if program == "git":
         while args[:1] == ["--no-pager"]:
             args = args[1:]
-        return _readonly_git(req, ["git", *args])
+        return _readonly_git(req, ["git", *args]) or _git_search(req, words) is not None
     if not _reads_only_named(program, args, req.cwd or req.worktree):
         return False
     if program == "find":
@@ -2307,16 +2365,23 @@ def _bounded_glob(pattern: str, root: str | None) -> list[str] | None:
 
 def _reads_clear(req: Request, words: list[str], path_denies: list[Rule]) -> bool:
     """Whether no read deny in ``path_denies`` covers a file ``words`` may
-    read: every argument counts as a name it may read, an option's attached
+    read: every argument except grep's filename filters counts as a possible
+    read, an option's attached
     value too (``-fFILE``, ``--file=FILE``), each pattern expanded, and for
     a recursive grep or rg everything under each directory it names (the
     working directory when it names none). A pattern the expansion here
     can't read exactly (``[[:alpha:]]``), or a tree past WALK_LIMIT, is never clear."""
     if words[0] in NAME_ONLY or not path_denies:
         return True
+    search = _git_search(req, words)
+    if search is not None:
+        req, words = search
     cwd = req.cwd or req.worktree
     names: list[str] = []
-    for word in words[1:]:
+    filters = _search_filters(words)
+    for i, word in enumerate(words[1:], 1):
+        if i in filters or word in ("--include", "--exclude", "--exclude-dir") and i + 1 in filters:
+            continue
         if any(c in word for c in "*?[") and ("[:" in word or "[=" in word or "[." in word):
             return False
         expanded = _expanded(req, word)
@@ -2337,7 +2402,7 @@ def _reads_clear(req: Request, words: list[str], path_denies: list[Rule]) -> boo
                 else [cwd or "."])
         budget = [WALK_LIMIT]
         for d in dirs:
-            found = _tree(d, budget)
+            found = _tree(d, budget, tuple(filters.values()))
             if found is None:
                 return False
             names += found
@@ -2381,7 +2446,7 @@ def readonly_pipeline(req: Request, rules: list[Rule], checks: list[str] | None 
     if any(rule_matches(rule, part, checks) for rule in restrictions for part in parts):
         return False
     path_denies = [r for r in rules if r.kind == "read" and r.decision == "deny"]
-    if restrictions and _restriction_parts(command) is None:
+    if (restrictions or path_denies) and _restriction_parts(command) is None:
         # Unquoted pathname patterns: a restriction may match what they expand to.
         assigned: list[bool] = []
         redirects: list[tuple[str, str]] = []
@@ -3576,10 +3641,17 @@ def _globs_excluded(req: Request, parts: list[list[str]], rules: list[Rule],
     subcommand, option or file to act on."""
     readers = False
     for words in parts:
-        first = next((i for i, word in enumerate(words) if any(c in word for c in "*?[")), None)
+        filters = _search_filters(words) if not any(assigned) and not redirects else {}
+        # An unmatched attached filter glob stays an option value. It cannot
+        # add a file operand, so it needs no recursive-read proof here. If it
+        # actually expands, keep the existing proof: its resulting text could
+        # match a bash restriction even though it still names only a filter.
+        first = next((i for i, word in enumerate(words) if any(c in word for c in "*?[")
+                      and not (i in filters and word.startswith("--")
+                               and _bounded_glob(word, req.cwd or req.worktree) == [])), None)
         if first is None:
             continue
-        if words[0] in READERS:
+        if words[0] in READERS or _git_search(req, words) is not None:
             readers = True
             continue
         removal = _plain_rm(words)
@@ -3605,12 +3677,17 @@ def _globs_excluded(req: Request, parts: list[list[str]], rules: list[Rule],
     for words in parts:
         if words[0] == "ls" or words[0] == "git" and _readonly_git(req, words):
             continue
-        if words[0] not in READERS or not _readonly_part(req, words) or not _reads_clear(req, words, path_denies):
+        if (words[0] not in READERS and _git_search(req, words) is None
+                or not _readonly_part(req, words) or not _reads_clear(req, words, path_denies)):
             return False
         expanded = [_expanded(req, word) for word in words[1:]]
         if None in expanded:
             return False
         argv = [words[0], *(name for word, names in zip(words[1:], expanded) for name in (names[1:] or [word]))]
+        # Expansion can narrow a filter or add operands; check the command
+        # that will run as well as the literal spelling above.
+        if not _readonly_part(req, argv) or not _reads_clear(req, argv, path_denies):
+            return False
         if _matching_restriction([replace(req, command=" ".join(argv))], None, rules) is not None:
             return False
     return True
