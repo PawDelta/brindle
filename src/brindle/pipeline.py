@@ -546,6 +546,10 @@ def _on_report(db: DB, worker: Agent, ws: Workspace, result: str, outbox_id: int
     claim = dict(pipeline="reviewing", reviewing_since=report, merge_failed=None)
     if not db.outbox_deliver(outbox_id, agent_fields=claim):
         return True   # this report was handled already: its claim and review stand
+    if worker.reviewing_since is None and report > worker.created_at:
+        with db.tx() as c:
+            bus.record_stage(c, time.strftime("%Y-%m-%d", time.gmtime(report)), ws.repo_root,
+                             f"build:{worker.profile}", [report - worker.created_at])
     _start_review(db, cfg, parent, worker, ws, result, report)
     return True
 
