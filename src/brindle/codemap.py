@@ -575,6 +575,9 @@ def _tokens(line: str) -> list[tuple[str, str, bool]] | None:
         elif c == "\\" and i + 1 < len(line):
             i += 1
             word, started = word + line[i], True
+        elif c == "#" and not started:   # a comment runs to the end of the line
+            while i + 1 < len(line) and line[i + 1] != "\n":
+                i += 1
         elif c in ops:
             attached = started
             flush()
@@ -636,7 +639,9 @@ def _broad_search(command: str, cwd: str | None = None) -> bool:
         name, rest = os.path.basename(words[0]), words[1:]
         if before in ("||", "&") and cwd != start:
             cwd = None   # runs only if the cd failed, or in the background
-        if name in ("cd", "pushd", "popd") or "cd" in words:
+        if name in ("cd", "pushd", "popd") or (
+                name in ("{", "if", "then", "do", "else", "while", "until", "!", "time", "command", "builtin")
+                and any(os.path.basename(w) in ("cd", "pushd", "popd") for w in words)):
             # Later operands are read from there, when the cd surely ran in this shell.
             sure = (name == "cd" and not nested and before in ("", ";") or (before == "&&" and prev_cd))
             ok = (cwd and sure and name == "cd" and len(rest) == 1
