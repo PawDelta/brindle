@@ -352,6 +352,7 @@ def _recorded_sessions(db, root, monkeypatch, sessions):
     monkeypatch.setattr(procs, "stop", lambda ids, *a, **kw: 0)
 
 
+@pytest.mark.variant("concurrent recovery must overlap distinct tmux sessions while serializing chats sharing one session")
 def test_a_start_brings_sessions_back_at_once_most_recently_active_first(db, root, monkeypatch):
     import threading
 
@@ -372,6 +373,7 @@ def test_a_start_brings_sessions_back_at_once_most_recently_active_first(db, roo
     assert set(began[:2]) == {"recent", "older"} and set(began[2:]) == {"same-tmux", "oldest"}
 
 
+@pytest.mark.variant("stop racing concurrent recovery must finish an in-flight launch and retain preflight and unstarted sessions")
 def test_stopped_during_concurrent_recovery_a_launch_finishes_and_the_rest_stay_pending(db, root, monkeypatch, caplog):
     import re
     import threading
@@ -428,6 +430,7 @@ def test_a_start_waits_for_room_and_a_stop_ends_the_wait(db, root, monkeypatch):
     assert [e["id"] for e in recovery.stop()] == ["chat"]
 
 
+@pytest.mark.variant("another session changing the process environment must not replace a failed agent's recovery credential")
 def test_a_failed_agent_gets_its_own_sessions_key_while_another_session_resumes(db, root, monkeypatch):
     from brindle import procs
 
