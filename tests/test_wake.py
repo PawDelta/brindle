@@ -270,6 +270,29 @@ def test_mail_handed_over_is_not_replayed_when_its_cleanup_fails(db, boss, monke
     assert db.pending_count("boss") == 0 and not db.waiter_claims("boss")
 
 
+def test_a_receipt_that_cant_be_read_is_not_taken_for_no_receipt(db, boss, monkeypatch):
+    db.enqueue("boss", "the answer", None)
+    _, taken = wake.take(db, db.get_agent("boss"))
+    receipt = wake._handed_path("boss", [m.id for m in taken])
+    receipt.parent.mkdir(parents=True)
+    receipt.touch()
+    monkeypatch.setattr(wake, "_gone", lambda state: True)
+    real = wake.Path.exists
+
+    def denied(self, **k):
+        if self == receipt:
+            raise PermissionError("denied")
+        return real(self, **k)
+
+    with monkeypatch.context() as broken:
+        broken.setattr(wake.Path, "exists", denied)
+        wake.reclaim(db)
+    assert db.pending_count("boss") == 0 and db.waiter_claims("boss")   # unknown: neither replayed nor forgotten
+
+    wake.reclaim(db)
+    assert db.pending_count("boss") == 0 and not db.waiter_claims("boss") and not receipt.exists()
+
+
 def test_a_stopped_pane_delivery_doesnt_wedge_a_live_waiter(db, boss, monkeypatch):
     # The waiter can't take past the mark, and flush left the queue to the waiter.
     monkeypatch.setattr(agents, "_composer_settled", lambda a: True)

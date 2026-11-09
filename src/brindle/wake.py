@@ -196,11 +196,12 @@ def _discard(path: Path) -> None:
         pass
 
 
-def _was_handed(path: Path) -> bool:
+def _was_handed(path: Path) -> bool | None:
+    """Whether a receipt is there; None if it can't be told."""
     try:
         return path.exists()
     except OSError:
-        return False   # can't tell: at worst it is handed over twice
+        return None
 
 
 def _gone(state: dict) -> bool:
@@ -221,7 +222,10 @@ def reclaim(db: DB, agent_id: str | None = None) -> None:
     for row in db.waiter_claims(agent_id):
         state = json.loads(row["value"])
         handed = _handed_path(row["agent_id"], state["ids"])
-        if _was_handed(handed):   # it reached the agent; only the claim's cleanup failed
+        known = _was_handed(handed)
+        if known is None:
+            continue   # it may have reached the agent: the claim waits for a look that works
+        if known:   # it reached the agent; only the claim's cleanup failed
             db.set_mark(row["agent_id"], row["kind"], None)
             _discard(handed)
         elif _gone(state):
