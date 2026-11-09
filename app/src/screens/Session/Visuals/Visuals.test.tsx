@@ -744,13 +744,15 @@ describe("visuals", () => {
       render(<PtyViewsProvider value={standInViews}><App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "inbox", session: "sup1" }} /></PtyViewsProvider>);
       const card = (await screen.findAllByTestId("inbox-card")).find((candidate) => candidate.dataset.kind === "visual")!;
       await waitFor(() => expect((within(card).getByRole("button", { name: "Open visual" }) as HTMLButtonElement).disabled).toBe(false));
-      expect(store.getState().inbox).toHaveLength(1);
+      await waitFor(() => expect(screen.getByTestId("inbox-badge").textContent).toBe("1"));
       fireEvent.click(within(card).getByRole("button", { name: "Open visual" }));
       fireEvent.click(await screen.findByTestId("visual-dismiss"));
       // Back to the session, as Back does; the Inbox count and card clear, the visual stays in the session.
       expect((await screen.findByTestId("terminal")).textContent).toBe("sup1");
       expect(screen.queryByTestId("visual-reader")).toBeNull();
-      await waitFor(() => expect(store.getState().inbox).toEqual([]));
+      await waitFor(() => expect(screen.queryByTestId("inbox-badge")).toBeNull());
+      fireEvent.click(screen.getByTestId("inbox-link"));
+      await screen.findByRole("region", { name: "Inbox" });
       expect(screen.queryByTestId("inbox-card")).toBeNull();
       expect(daemon.visualDismissals).toEqual([{ id: visual.id, rev: visual.rev }]);
       expect((await client.visuals(visual.session)).map((v) => v.id)).toEqual([visual.id]);
