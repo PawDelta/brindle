@@ -1089,3 +1089,25 @@ def test_session_pr_state_is_one_shared_cached_read(db, root, monkeypatch):
     session_review.refresh_pr_states(db)
     session_review.refresh_pr_states(db)
     assert session_review.session_pr_state(db, "boss", url)["state"] == "ci" and announced() == 1 and not pool.queue
+
+    # A asks while the cache is old and is held up in its DB lookup; B asks, reads and lands meanwhile.
+    # A must then find the cache fresh instead of starting a second read.
+    session_review._pr_cache[url] = (0.0, unknown)
+    answers.append(_rollup("SUCCESS"))
+
+    class Held:
+        def __init__(self, real):
+            self.real, self.held = real, False
+
+        def __getattr__(self, name):
+            return getattr(self.real, name)
+
+        def get_agent(self, *args):
+            if not self.held:
+                self.held = True
+                session_review.session_pr_state(self.real, "boss", url)
+                pool.land()
+            return self.real.get_agent(*args)
+
+    assert session_review.session_pr_state(Held(db), "boss", url)["state"] == "ready"
+    assert not pool.queue and not answers
