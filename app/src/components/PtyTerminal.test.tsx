@@ -93,7 +93,7 @@ it("converts drag position to CSS coordinates per platform", async () => {
   platform.mockRestore();
 });
 
-it("attaches native drops only under the cursor and keeps typing behind the returned paste", async () => {
+it("attaches native drops only under the cursor and keeps typing behind the returned paste, showing the refusal reason", async () => {
   let finish: (value: { text: string }) => void = () => {};
   const attach = vi.fn(() => new Promise<{ text: string }>(ok => { finish = ok; }));
   const { view, term, opened, written } = mount(undefined, undefined, { acceptsFiles: true, attach });
@@ -120,11 +120,16 @@ it("attaches native drops only under the cursor and keeps typing behind the retu
   await act(async () => finish({ text: "@second" }));
   await settled();
   expect(written).toEqual(["\x1b[200~@first @second\x1b[201~", "x"]);
-  attach.mockRejectedValueOnce(new Error("credential files cannot be attached"));
-  act(() => files.drop({ type: "drop", x: 30, y: 40, paths: ["/refused"] }));
+  const reason = "refused.png is a credential file and cannot be attached.";
+  const otherReason = "missing.txt could not be found.";
+  attach.mockResolvedValueOnce({ text: "@before" });
+  attach.mockRejectedValueOnce(new Error(reason));
+  attach.mockResolvedValueOnce({ text: "@after" });
+  attach.mockRejectedValueOnce(otherReason);
+  act(() => files.drop({ type: "drop", x: 30, y: 40, paths: ["/before", "/refused.png", "/after", "/missing.txt"] }));
   await settled();
-  expect(view.queryByRole("alert")).not.toBeNull();
-  expect(written).toHaveLength(2);
+  expect(view.getByRole("alert").textContent).toBe(`${reason} ${otherReason}`);
+  expect(written.at(-1)).toBe("\x1b[200~@before @after\x1b[201~");
 });
 
 it.each(["MacIntel", "Win32"])("attaches a copied file before its filename text and preserves text pastes (%s)", async (os) => {
