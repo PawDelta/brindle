@@ -4537,7 +4537,8 @@ def pre_tool_decision(db: DB, agent: Agent, payload: dict) -> dict | None:
     from brindle import codemap
 
     note = codemap.search_nudge(db, agent, db.get_workspace(agent.workspace_id),
-                                str((payload.get("tool_input") or {}).get("command", "")))
+                                str((payload.get("tool_input") or {}).get("command", "")),
+                                payload.get("cwd") or None)
     if note is None:
         return out
     out = out or {"hookSpecificOutput": {"hookEventName": "PreToolUse"}}

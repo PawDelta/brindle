@@ -551,7 +551,8 @@ def _commands(command: str) -> list[list[str]]:
     A command that follows a pipe is left out: it reads stdin."""
     import shlex
 
-    lex = shlex.shlex(command.replace("\n", " ; "), posix=True, punctuation_chars=True)
+    # Not POSIX mode: a quoted token keeps its quotes, so a quoted "|" is told from a real one.
+    lex = shlex.shlex(command.replace("\n", " ; "), posix=False, punctuation_chars=True)
     lex.whitespace_split = True
     try:
         tokens = list(lex)
@@ -559,13 +560,16 @@ def _commands(command: str) -> list[list[str]]:
         return []
     out, cur, piped = [], [], False
     for tok in [*tokens, ";"]:
-        if tok in _OPERATORS or (tok and set(tok) <= set("&|;()<>")):
+        if tok and tok[0] not in "'\"" and set(tok) <= set("&|;()<>"):
             if cur and not piped:
                 out.append(cur)
             piped = tok in ("|", "|&")
             cur = []
         else:
-            cur.append(tok)
+            try:
+                cur.append("".join(shlex.split(tok)) if "'" in tok or '"' in tok else tok)
+            except ValueError:
+                return []
     return out
 
 
@@ -579,6 +583,10 @@ def _broad_search(command: str, cwd: str | None = None) -> bool:
         if not words:
             continue
         name, rest = os.path.basename(words[0]), words[1:]
+        if name == "cd":   # later operands are read from there; unknown when we can't tell
+            ok = cwd and len(rest) == 1 and not rest[0].startswith(("-", "~")) and "$" not in rest[0]
+            cwd = os.path.normpath(os.path.join(cwd, rest[0])) if ok else None
+            continue
         if name == "git" and rest[:1] == ["grep"]:
             name, rest = "git-grep", rest[1:]
         if name not in ("rg", "git-grep", "grep", "egrep", "fgrep"):
@@ -611,8 +619,8 @@ def _broad_search(command: str, cwd: str | None = None) -> bool:
         if not recursive:
             continue
         paths = positional if has_pattern_opt else positional[1:]
-        if paths and all(os.path.isfile(os.path.join(cwd or "", p)) for p in paths):
-            continue   # named files only
+        if paths and (cwd is None or all(os.path.isfile(os.path.join(cwd, p)) for p in paths)):
+            continue   # named files only (or where they are can't be told: stay quiet)
         return True
     return False
 
@@ -623,11 +631,12 @@ NUDGE = ("brindle: this repo has a code map. To find where something lives or wh
          "grep is still fine for an exact string. (Shown once.)")
 
 
-def search_nudge(db, agent, ws: Workspace | None, command: str) -> str | None:
+def search_nudge(db, agent, ws: Workspace | None, command: str, cwd: str | None = None) -> str | None:
     """The one-time note for an agent's first broad recursive search in a repo with a
-    graph; None otherwise. Never raises: it must not change the hook's answer."""
+    graph; None otherwise. ``cwd`` is the hook's working directory (default the
+    worktree). Never raises: it must not change the hook's answer."""
     try:
-        if ws is None or not _broad_search(command, ws.path):
+        if ws is None or not _broad_search(command, cwd or ws.path):
             return None
         path = graph_path(ws)
         if path is None or not db.claim_mark(agent.id, NUDGE_MARK, "1")[0]:
