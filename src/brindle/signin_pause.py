@@ -148,17 +148,30 @@ def _commit(state: dict, base: dict) -> None:
     """Save what a sweep changed since it read ``base`` onto the file as it
     is now. A sweep keeps its state across CLI checks and resumes, too long
     to hold the lock (the launches it resumes record themselves under it),
-    and a launch or a sign-in may have written meanwhile: theirs stays."""
+    and a launch or a sign-in may have written meanwhile: theirs stays, also
+    for an agent the sweep would change. An identity written or adopted since
+    the sweep read it is newer than the sweep's, and an agent is only ever
+    locked to the account it really belongs to (identity_lock)."""
     with _locked():
         now = _load()
         for section in _SECTIONS:
             ours, was, theirs = state[section], base[section], now[section]
             for key in {*ours, *was}:
-                if key not in ours:
-                    theirs.pop(key, None)
-                elif key not in was or ours[key] != was[key]:
+                if ours.get(key) == was.get(key):
+                    continue
+                if section == "identity" and theirs.get(key) != ours.get(key) and (
+                        theirs.get(key) != was.get(key)
+                        or (key in base["unowned"] and key not in now["unowned"])):   # adopted meanwhile
+                    continue
+                if key in ours:
                     theirs[key] = ours[key]
-        added, gone = set(state["unowned"]) - set(base["unowned"]), set(base["unowned"]) - set(state["unowned"])
+                else:
+                    theirs.pop(key, None)
+        # Who owns an agent follows its identity: changed only where the sweep's identity stands.
+        stands = {a for a in {*base["unowned"], *state["unowned"]}
+                  if now["identity"].get(a) == state["identity"].get(a)}
+        added = (set(state["unowned"]) - set(base["unowned"])) & stands
+        gone = (set(base["unowned"]) - set(state["unowned"])) & stands
         now["unowned"] = sorted((set(now["unowned"]) | added) - gone)
         _save(now)
 
