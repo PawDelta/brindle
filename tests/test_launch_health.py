@@ -1075,10 +1075,14 @@ CONNECT_FAILED = {"error": "Connection failed (404): Error POSTing to endpoint: 
 
 
 @pytest.mark.parametrize("files,failed", [
-    ([[CONNECTED, TOOL_ERROR]], False),                  # connected, then a rejected tool call
-    ([[CONNECT_FAILED], [CONNECTED]], False),            # failed in one log, connected in a later one
-    ([[STDERR]], False),                                 # server stderr is not a start failure
-    ([[CONNECT_FAILED]], True),                          # a genuine failed start is still caught
+    pytest.param([[CONNECTED, TOOL_ERROR]], False,
+                 marks=pytest.mark.variant("real incident: a rejected publish_visual reported a healthy worker as disconnected")),
+    pytest.param([[CONNECT_FAILED], [CONNECTED]], False,
+                 marks=pytest.mark.variant("a failed start in one log must not outvote a connection in a later one")),
+    pytest.param([[STDERR]], False,
+                 marks=pytest.mark.variant("warning-only server stderr has no connection marker and must not read as a failure")),
+    pytest.param([[CONNECT_FAILED]], True,
+                 marks=pytest.mark.variant("the real 'Connection failed' format, which the timeout test's row doesn't use, stays detected")),
 ])
 def test_mcp_tool_error_is_not_a_failed_start(tmp_path, monkeypatch, files, failed):
     from brindle import launch_health
