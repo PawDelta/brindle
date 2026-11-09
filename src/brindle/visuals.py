@@ -459,12 +459,18 @@ def dismiss(db: DB, visual_id: str, rev: Any) -> dict:
     text = (f"The person dismissed visual {v['id']} (r{rev}) without answering. "
             "Don't wait for an answer; carry on without one.")
     try:
-        for to in dict.fromkeys([v["by_agent"], v["root_id"]]):
-            agents.send_message(db, to, text, person=True)
+        agents.send_message(db, v["by_agent"], text, person=True)
     except BaseException:
         with db.tx() as c:
             c.execute("UPDATE visuals SET dismissed_rev=0 WHERE id=? AND dismissed_rev=?", (v["id"], rev))
         raise
+    if v["root_id"] != v["by_agent"]:
+        # The dismissal is delivered once the publisher has it; a supervisor that can't be told
+        # (paused, say) must not undo that or make a repeat tell the publisher again.
+        try:
+            agents.send_message(db, v["root_id"], text, person=True)
+        except Exception:
+            pass
     bus.publish(db, "visual.dismissed", repo_root=v["repo_root"], root_id=v["root_id"], visual=v["id"], rev=rev)
     return get(db, v["id"])
 

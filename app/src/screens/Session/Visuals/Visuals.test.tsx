@@ -13,7 +13,7 @@ import { REPO, question, root, waiting } from "../../../test/fixtures";
 import { standInViews } from "../../../test/panes";
 import type { PlansClient, VisualsClient } from "./client";
 import { VisualFrame, type VisualFrameProps, type VisualSource } from "./frame";
-import { StoreContext } from "../../../store/useStore";
+import { StoreContext, useAppState } from "../../../store/useStore";
 import { VisualReader } from "./VisualReader";
 import { useVisuals } from "./useVisuals";
 import { OfferChip } from "./OfferChip";
@@ -730,22 +730,33 @@ describe("visuals", () => {
   });
 
   it("can dismiss a visual prompt without answering, closing the reader like Back", async () => {
-    const daemon = new FakeDaemon();
+    const sup: SessionDTO = { id: "sup1", workspace_id: "proj", profile: "supervisor", status: "idle", mode: "interactive", created_at: 0, goal: "Ship" };
+    const daemon = new FakeDaemon({
+      repos: [{ repo_root: REPO, name: "proj" }], sessions: [sup], workspaces: [root],
+      inbox: [{ kind: "visual", agent_id: "sup1", root_id: visual.session, workspace_id: "proj", visual_id: visual.id, reason: "asks you to choose", detail: visual.title }],
+    });
     daemon.visualRows = [visual];
-    daemon.data.inbox = [{ kind: "visual", agent_id: "sup1", root_id: visual.session, workspace_id: "proj", visual_id: visual.id, reason: "asks you to choose", detail: visual.title }];
     const client = daemon.client();
+    const store = createAppStore();
+    const sync = startSync({ client, store, connect: daemon.connect });
     const answer = vi.spyOn(client, "answerVisual");
-    const onBack = vi.fn();
-    render(<VisualReader client={client} visual={visual} onAnswered={() => {}} onBack={onBack} Frame={() => <div />} />);
+    function Shell() {
+      const [open, setOpen] = useState(true);
+      const cards = useAppState((s) => s.inbox.length);
+      return <><p data-testid="inbox-count">{cards}</p>{open ? <VisualReader client={client} visual={visual} onAnswered={() => {}} onBack={() => setOpen(false)} Frame={() => <div />} /> : <div>Chat</div>}</>;
+    }
+    render(<StoreContext.Provider value={store}><Shell /></StoreContext.Provider>);
+    await waitFor(() => expect(screen.getByTestId("inbox-count").textContent).toBe("1"));
     fireEvent.click(screen.getByTestId("visual-dismiss"));
-    await waitFor(() => expect(onBack).toHaveBeenCalledTimes(1));
+    await screen.findByText("Chat");
+    await waitFor(() => expect(screen.getByTestId("inbox-count").textContent).toBe("0"));
     expect(daemon.visualDismissals).toEqual([{ id: visual.id, rev: visual.rev }]);
-    expect(daemon.data.inbox).toEqual([]);
     expect((await client.visuals(visual.session)).map((v) => v.id)).toEqual([visual.id]);
     expect(answer).not.toHaveBeenCalled();
+    sync.stop();
   });
 
-  const takesFiles: VisualDTO ={ ...visual, answer_agent_id: "a_sup", accepts_files: true };
+  const takesFiles: VisualDTO = {...visual, answer_agent_id: "a_sup", accepts_files: true };
   it("shows attach controls only when the provider accepts files, and sends uploaded paths after the uploads finish", async () => {
     const client = new FakeDaemon().client();
     let finish!: (r: { paths: string[]; text: string }) => void;

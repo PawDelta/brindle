@@ -2568,7 +2568,8 @@ export class FakeDaemon {
         if (fields.rev !== row.rev) return error("stale", `the visual has a newer revision (r${row.rev}); dismiss that one`, 409);
         this.visualDismissals.push({ id: row.id, rev: row.rev });
         d.inbox = d.inbox.filter((i) => !(i.kind === "visual" && i.visual_id === row.id));
-        this.publish("visual.dismissed", { root_id: row.session, payload: { visual: row.id, rev: row.rev } });
+        const session = d.sessions.find((s) => s.id === row.session);
+        this.publish("visual.dismissed", { root_id: row.session, repo_root: session ? this.repoOf(session) : null, payload: { visual: row.id, rev: row.rev } });
         return json(row);
       }
       if ((m = path.match(/^\/inbox\/([^/]+)\/permission$/))) return this.answerPermission(m[1], fields);
