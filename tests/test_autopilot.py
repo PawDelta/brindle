@@ -868,14 +868,48 @@ def test_goal_activity_commits_and_estimate(db, root, repo):
     assert (got["commits_last_hour"], got["eta_seconds"]) == (2, None)
 
 
+def test_goal_eta_survives_fixing_and_deleted_builders(db, root, monkeypatch):
+    from brindle import pipeline
+
+    _, ws = root
+    now = time.time()
+    monkeypatch.setattr(git, "out", lambda *args: "")
+    add_agent(db, ws, "fixer", mode="assign", parent="boss")
+    day = time.strftime("%Y-%m-%d", time.gmtime(now))
+    db.conn.execute("INSERT INTO stage_timings VALUES (?, ?, 'report_to_merge', 5, 1200, 1200, ?)",
+                    (day, ws.repo_root, json.dumps([1200] * 5)))
+    for elapsed, expected in [(300, 900), (1500, 60)]:
+        db.update_agent("fixer", pipeline="fixing", result="done", reviewing_since=now - elapsed)
+        got = autopilot.goal_activity(db, "boss", now=now)
+        assert (got["stage"], got["eta_seconds"]) == ("working", expected)
+
+    monkeypatch.setattr(pipeline, "enabled", lambda *args: True)
+    monkeypatch.setattr(pipeline, "_report_only", lambda *args: False)
+    monkeypatch.setattr(pipeline, "_start_review", lambda *args: None)
+    monkeypatch.setattr(git, "dirty_files", lambda *args, **kwargs: [])
+    monkeypatch.setattr(pipeline.time, "time", lambda: now)
+    db.update_agent("fixer", status="done", pipeline=None)
+    add_agent(db, ws, "writing", mode="assign", parent="boss")
+    db.update_agent("writing", profile="builder", created_at=now - 300)
+    for i in range(5):
+        worker = add_agent(db, ws, f"past{i}", mode="assign", parent="boss")
+        db.update_agent(worker.id, profile="builder", created_at=now - 1200)
+        assert pipeline.on_report(db, db.get_agent(worker.id), ws, "done")
+    db.conn.execute("DELETE FROM agents WHERE id LIKE 'past%'")
+    assert autopilot.goal_activity(db, "boss", now=now)["eta_seconds"] == 2100
+
+
 @pytest.mark.parametrize("runs, elapsed, queued, overhead, expected", [
     (5, 300, False, False, 2100),
-    (4, 300, False, False, None),
+    (4, 300, False, False, 1800),  # sparse profile falls back to the repo median
     (5, 1500, False, False, 1260),
     (5, 300, True, False, 4500),
     (5, 300, "chain", False, 6900),
     (5, 300, "slots", False, 5700),
     (5, 300, "attached", False, 3300),
+    (5, 300, "fixing", False, 3300),
+    pytest.param(5, 1500, "fixing", False, 2460,
+                 marks=pytest.mark.variant("A fixing occupant can outlast the report-to-merge median")),
     (5, 300, "other_session", False, 3300),
     (5, 300, "unknown_session", False, None),
     (5, 300, "unknown_session_room", False, 2400),
@@ -893,18 +927,19 @@ def test_goal_activity_eta_while_building(db, root, monkeypatch, runs, elapsed, 
     _, ws = root
     now = time.time()
     monkeypatch.setattr(git, "out", lambda *args: "")
-    monkeypatch.setattr(fair_share, "limit", lambda: 1 if queued == "slots" else
+    monkeypatch.setattr(fair_share, "limit", lambda: 1 if queued in ("slots", "fixing") else
                         3 if queued == "unknown_session_room" else 2)
     other_ws = replace(ws, id="elsewhere", repo_root="/another-repo", name="elsewhere", branch="feat/upstream")
     db.add_workspace(other_ws)
-    # Other profiles and repositories must not supply a worker's history.
+    # Prefer a profile's history; other repositories never supply the fallback.
     for i in range(5):
         add_agent(db, ws, f"past{i}", mode="assign", status="done")
         db.update_agent(f"past{i}", profile="builder" if i < runs else "other",
                         created_at=now - 4000, reviewing_since=now - 2800, result="done")
-        add_agent(db, other_ws, f"foreign{i}", mode="assign", status="done")
-        db.update_agent(f"foreign{i}", profile="builder", created_at=now - 4000,
-                        reviewing_since=now - 1000, result="done")
+        if "unknown" not in str(queued) and queued != "fixing":
+            add_agent(db, other_ws, f"foreign{i}", mode="assign", status="done")
+            db.update_agent(f"foreign{i}", profile="builder", created_at=now - 4000,
+                            reviewing_since=now - 1000, result="done")
         add_agent(db, ws, f"fast{i}", mode="handoff_detached", status="done")
         db.update_agent(f"fast{i}", profile="fast", created_at=now - 4000,
                         reviewing_since=now - 3400, result="done")
@@ -924,13 +959,18 @@ def test_goal_activity_eta_while_building(db, root, monkeypatch, runs, elapsed, 
             for i in range(2):
                 db.add_task(Task(f"slot{i}", ws.repo_root, None, "boss", ws.id, "builder", "next", "assign", 1,
                                  f"slot{i}", None, None, None, "pending", now + i + 1))
-        if queued == "attached":
+        if queued in ("attached", "fixing"):
             db.add_session_repo("boss", "other", other_ws.repo_root)
-            add_agent(db, other_ws, "upstream", mode="assign", parent="boss", status="idle")
-            db.update_agent("upstream", pipeline="reviewing", result="done", reviewing_since=now - 300)
+            add_agent(db, other_ws, "upstream", mode="assign", parent="boss",
+                      status="processing" if queued == "fixing" else "idle")
+            db.update_agent("upstream", pipeline="fixing" if queued == "fixing" else "reviewing",
+                            result="done", reviewing_since=now - elapsed)
             db.conn.execute("INSERT INTO stage_timings VALUES (?, ?, 'report_to_merge', 5, 1200, 1200, ?)",
                             (day, other_ws.repo_root, json.dumps([1200] * 5)))
-            db.update_task("later", depends_on=json.dumps([other_ws.branch]))
+            db.update_task("later", depends_on=json.dumps([other_ws.branch]) if queued == "attached" else None)
+            if queued == "fixing":
+                db.update_agent("writing", status="done")
+                db.update_agent("parallel", status="done")
         if queued == "chain":
             db.add_task(Task("last", ws.repo_root, None, "boss", ws.id, "builder", "last", "assign", 1,
                              "last", None, None, json.dumps(["task:later"]), "pending", now))
