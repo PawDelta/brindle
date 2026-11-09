@@ -30,6 +30,7 @@ REQUEST_DEADLINE = 50.0   # seconds a read request's processes get (the app wait
 
 async def meta(request: Request) -> JSONResponse:
     """What the app checks before anything else: which engine and API this is."""
+    recovery = getattr(request.app.state, "recovery", None)
     return JSONResponse({
         "engine_version": brindle.__version__,
         "api_version": API_VERSION,
@@ -40,6 +41,7 @@ async def meta(request: Request) -> JSONResponse:
         "pty_view": True,       # WS /v1/pty_view: the Windows app's WSL bridge
         "visuals": visuals.enabled(),   # the visuals capability: the app shows the feature only when on
         "resuming": getattr(request.app.state, "resuming", False),
+        "recovery": recovery.progress() if recovery else None,
     })
 
 

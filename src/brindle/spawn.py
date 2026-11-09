@@ -443,14 +443,20 @@ def _has_room(waits: bool = True) -> bool:
     return not _gated or not waits or _running == 0 or room() >= 1
 
 
-def wait_for_room(stop: threading.Event, limit: float = ACTION_WAIT) -> None:
+def wait_for_room(stop: threading.Event, limit: float = ACTION_WAIT, *, busy_limit: float | None = None) -> None:
     """Hold work that is many processes rather than one (a session coming
     back, lifecycle.resume_after_start) until the gate has room, ``stop`` is
     set, or ``limit`` seconds have passed: it then goes ahead, as an action
-    with no deadline does."""
-    end = time.monotonic() + limit
+    with no deadline does. ``busy_limit``: seconds that are enough when the
+    machine is short of CPU only; critical memory pressure gets all of ``limit``."""
+    began = time.monotonic()
+    end = began + limit
+    busy_end = end if busy_limit is None else min(end, began + busy_limit)
     with _cond:
-        while not _has_room() and not stop.is_set() and time.monotonic() < end:
+        while not _has_room() and not stop.is_set():
+            now = time.monotonic()
+            if now >= end or (now >= busy_end and pressure() < PRESSURE_CRITICAL):
+                break
             _cond.wait(POLL)
 
 

@@ -10,7 +10,7 @@ import time
 
 import pytest
 
-from brindle import agents, git, providers, sessions, tmux, workspaces
+from brindle import agents, git, providers, sessions, spawn, tmux, workspaces
 from brindle.db import Agent
 from git_snapshots import fast_host_tools, repo, workspaces_once  # noqa: F401  (fixtures)
 
@@ -416,6 +416,34 @@ def test_stopped_during_concurrent_recovery_a_launch_finishes_and_the_rest_stay_
     assert sorted(e["id"] for e in recovery.pending) == ["preflight", "unstarted"]
     # The log says how long the step it was cancelled in took: that may be the slow one.
     assert re.search(r"session preflight recovery: .*resume \d+\.\d+s \(cancelled\)", caplog.text)
+
+
+def test_recovery_progress_counts_sessions_as_they_finish(db, root, monkeypatch):
+    from brindle.daemon import lifecycle
+
+    _recorded_sessions(db, root, monkeypatch, [("first", "a"), ("second", "a")])    # one lane: one after another
+    recovery, seen = lifecycle.Recovery(), []
+    monkeypatch.setattr(agents, "resume", lambda db_, root_id, **kw: seen.append(recovery.progress()))
+    lifecycle.resume_after_start(recovery)
+    assert seen == [{"done": 0, "total": 2}, {"done": 1, "total": 2}]
+    assert recovery.progress() is None      # over: the app's line goes
+
+
+@pytest.mark.parametrize("level, checks", [(1, 1), (spawn.PRESSURE_CRITICAL, 2)])
+def test_a_recovery_wait_gives_up_on_busy_cpu_but_holds_for_critical_memory(monkeypatch, level, checks):
+    import threading
+
+    stop, seen = threading.Event(), []
+    monkeypatch.setattr(spawn, "POLL", 0)
+    monkeypatch.setattr(spawn, "_has_room", lambda waits=True: seen.append(1) and False)
+
+    def pressure():         # the wait goes round again only for critical pressure: this ends it then
+        stop.set()
+        return level
+
+    monkeypatch.setattr(spawn, "pressure", pressure)
+    spawn.wait_for_room(stop, busy_limit=0)
+    assert len(seen) == checks
 
 
 def test_a_start_waits_for_room_and_a_stop_ends_the_wait(db, root, monkeypatch):
