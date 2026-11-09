@@ -32,6 +32,34 @@ def test_graph_query_log_records_read_only_graphify_commands_per_agent(db, mappe
     assert len(codemap.graph_queries(db, ws.repo_root)) == 2
 
 
+def test_graph_nudge_once_on_broad_search_only_and_decision_unchanged(db, mapped, repo):
+    ws = workspaces.create(db, str(mapped), "feat").workspace
+    db.add_agent(Agent("w1", ws.id, "developer", "claude", None, "headless", "idle", "@0", None, time.time()))
+    a = db.get_agent("w1")
+
+    def run(cmd):
+        return agents.pre_tool_decision(db, a, {"tool_name": "Bash", "tool_input": {"command": cmd}})
+
+    def note(out):
+        return ((out or {}).get("hookSpecificOutput") or {}).get("additionalContext")
+
+    baseline = agents._pre_tool_decision(db, a, {"tool_name": "Bash", "tool_input": {"command": "grep -rn foo ."}})
+    assert note(run("grep -n foo src/a.py")) is None and note(run("rg foo src/a.py src/b.py")) is None
+    assert note(run("git log | grep -r foo")) is None
+    first = run("grep -rn foo .")
+    assert "graphify query" in note(first)
+    assert {k: v for k, v in (first or {}).get("hookSpecificOutput", {}).items() if k != "additionalContext"} == (
+        (baseline or {}).get("hookSpecificOutput") or {"hookEventName": "PreToolUse"})
+    assert note(run("rg foo")) is None   # once per agent
+    db.add_agent(Agent("w2", ws.id, "developer", "claude", None, "headless", "idle", "@0", None, time.time()))
+    assert note(agents.pre_tool_decision(db, db.get_agent("w2"), {
+        "tool_name": "Bash", "tool_input": {"command": "git grep foo"}})) is not None
+    (mapped / "graphify-out" / "graph.json").unlink()
+    db.add_agent(Agent("w3", ws.id, "developer", "claude", None, "headless", "idle", "@0", None, time.time()))
+    assert note(agents.pre_tool_decision(db, db.get_agent("w3"), {
+        "tool_name": "Bash", "tool_input": {"command": "rg foo"}})) is None
+
+
 def _fake_graph(path: Path, hub: str) -> None:
     nodes = [{"id": f"n{i}", "label": hub if i == 0 else f"f{i}", "community": i % 2,
               "community_name": "Alpha" if i % 2 == 0 else "Beta",

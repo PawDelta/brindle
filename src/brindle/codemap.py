@@ -539,6 +539,74 @@ def record_query(db, agent, ws: Workspace | None, command: str) -> None:
                           task=command.strip())
 
 
+_SPLIT_RE = re.compile(r"&&|\|\||;|\n")
+# Search options that take the next word as their value.
+_VALUE_OPTS = {"-e", "-f", "-g", "-t", "-T", "-m", "-A", "-B", "-C", "-d", "-D", "--glob", "--type",
+               "--max-count", "--include", "--exclude", "--exclude-dir", "--file", "--regexp"}
+
+
+def _broad_search(command: str) -> bool:
+    """Whether a command line starts a recursive search across a tree: ``grep -r``,
+    ``rg`` or ``git grep`` with no named files (a path that is a directory counts as broad)."""
+    import shlex
+
+    for part in _SPLIT_RE.split(command):
+        try:
+            words = shlex.split(part.split("|")[0])   # later pipe stages read stdin
+        except ValueError:
+            continue
+        while words and ("=" in words[0] and not words[0].startswith("-")):
+            words.pop(0)   # VAR=x prefixes
+        if not words:
+            continue
+        name = os.path.basename(words[0])
+        rest = words[1:]
+        if name == "git" and rest[:1] == ["grep"]:
+            name, rest = "git-grep", rest[1:]
+        recursive = name in ("rg", "git-grep") or (
+            name in ("grep", "egrep", "fgrep") and any(
+                w in ("--recursive", "--dereference-recursive")
+                or (w.startswith("-") and not w.startswith("--") and ("r" in w[1:] or "R" in w[1:]))
+                for w in rest if w.startswith("-")))
+        if not recursive:
+            continue
+        positional, skip, has_pattern_opt = [], False, False
+        for w in rest:
+            if skip:
+                skip = False
+            elif w in ("-e", "-f", "--regexp", "--file"):
+                skip, has_pattern_opt = True, True
+            elif w in _VALUE_OPTS:
+                skip = True
+            elif not w.startswith("-"):
+                positional.append(w)
+        paths = positional if has_pattern_opt else positional[1:]
+        if all(os.path.splitext(p)[1] and not p.endswith("/") for p in paths) and paths:
+            continue   # named files only
+        return True
+    return False
+
+
+NUDGE_MARK = "graph-nudge"
+NUDGE = ("brindle: this repo has a code map. To find where something lives or what calls what, "
+         "`graphify query \"<question>\" --graph {path}` is faster than a recursive search. "
+         "grep is still fine for an exact string. (Shown once.)")
+
+
+def search_nudge(db, agent, ws: Workspace | None, command: str) -> str | None:
+    """The one-time note for an agent's first broad recursive search in a repo with a
+    graph; None otherwise. Never raises: it must not change the hook's answer."""
+    try:
+        if ws is None or not _broad_search(command):
+            return None
+        path = graph_path(ws)
+        if path is None or not db.claim_mark(agent.id, NUDGE_MARK, "1")[0]:
+            return None
+        return NUDGE.format(path=path)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def graph_queries(db, repo_root: str, agent_id: str | None = None) -> list:
     """The recorded graph queries, newest first; one agent's if ``agent_id`` is given."""
     from brindle import history
