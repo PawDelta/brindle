@@ -13,7 +13,10 @@ import { REPO, question, root, waiting } from "../../../test/fixtures";
 import { standInViews } from "../../../test/panes";
 import type { PlansClient, VisualsClient } from "./client";
 import { VisualFrame, type VisualFrameProps, type VisualSource } from "./frame";
-import { StoreContext, useAppState } from "../../../store/useStore";
+import { StoreContext } from "../../../store/useStore";
+import { DaemonContext } from "../../../api/context";
+import { SessionsProvider } from "../../../store/sessions";
+import { InboxScreen } from "../../Inbox/InboxScreen";
 import { VisualReader } from "./VisualReader";
 import { useVisuals } from "./useVisuals";
 import { OfferChip } from "./OfferChip";
@@ -738,25 +741,30 @@ describe("visuals", () => {
     daemon.visualRows = [visual];
     const client = daemon.client();
     const store = createAppStore();
-    const sync = startSync({ client, store, connect: daemon.connect });
+    const sync = startSync({ client, store, repo: REPO, connect: daemon.connect });
     const answer = vi.spyOn(client, "answerVisual");
     function Shell() {
-      const [open, setOpen] = useState(true);
-      const cards = useAppState((s) => s.inbox.length);
-      return <><p data-testid="inbox-count">{cards}</p>{open ? <VisualReader client={client} visual={visual} onAnswered={() => {}} onBack={() => setOpen(false)} Frame={() => <div />} /> : <div>Chat</div>}</>;
+      const [open, setOpen] = useState(false);
+      return open
+        ? <VisualReader client={client} visual={visual} onAnswered={() => {}} onBack={() => setOpen(false)} Frame={() => <div />} />
+        : <InboxScreen client={client} refresh={sync.refresh} onOpen={() => setOpen(true)} onNavigate={() => {}} onOpenRule={() => {}} />;
     }
-    render(<StoreContext.Provider value={store}><Shell /></StoreContext.Provider>);
-    await waitFor(() => expect(screen.getByTestId("inbox-count").textContent).toBe("1"));
-    fireEvent.click(screen.getByTestId("visual-dismiss"));
-    await screen.findByText("Chat");
-    await waitFor(() => expect(screen.getByTestId("inbox-count").textContent).toBe("0"));
+    render(
+      <DaemonContext.Provider value={client}><StoreContext.Provider value={store}><SessionsProvider client={client}><Shell /></SessionsProvider></StoreContext.Provider></DaemonContext.Provider>,
+    );
+    await screen.findByRole("button", { name: "Open visual" });
+    expect(screen.getAllByTestId("inbox-card")).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: "Open visual" }));
+    fireEvent.click(await screen.findByTestId("visual-dismiss"));
+    await waitFor(() => expect(screen.queryByTestId("visual-reader")).toBeNull());
+    await waitFor(() => expect(screen.queryAllByTestId("inbox-card")).toHaveLength(0));
     expect(daemon.visualDismissals).toEqual([{ id: visual.id, rev: visual.rev }]);
     expect((await client.visuals(visual.session)).map((v) => v.id)).toEqual([visual.id]);
     expect(answer).not.toHaveBeenCalled();
     sync.stop();
   });
 
-  const takesFiles: VisualDTO = {...visual, answer_agent_id: "a_sup", accepts_files: true };
+  const takesFiles: VisualDTO = { ...visual, answer_agent_id: "a_sup", accepts_files: true };
   it("shows attach controls only when the provider accepts files, and sends uploaded paths after the uploads finish", async () => {
     const client = new FakeDaemon().client();
     let finish!: (r: { paths: string[]; text: string }) => void;
