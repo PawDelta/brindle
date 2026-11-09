@@ -539,49 +539,79 @@ def record_query(db, agent, ws: Workspace | None, command: str) -> None:
                           task=command.strip())
 
 
-_SPLIT_RE = re.compile(r"&&|\|\||;|\n")
-# Search options that take the next word as their value.
-_VALUE_OPTS = {"-e", "-f", "-g", "-t", "-T", "-m", "-A", "-B", "-C", "-d", "-D", "--glob", "--type",
-               "--max-count", "--include", "--exclude", "--exclude-dir", "--file", "--regexp"}
+# Search options that take a value: the letters of a short cluster, and the long names.
+_VALUE_LETTERS = "efgtTmABCdD"
+_VALUE_LONG = {"--glob", "--type", "--max-count", "--include", "--exclude", "--exclude-dir", "--file",
+               "--regexp", "--after-context", "--before-context", "--context"}
+_OPERATORS = {"&&", "||", ";", "|", "&", "|&"}
 
 
-def _broad_search(command: str) -> bool:
-    """Whether a command line starts a recursive search across a tree: ``grep -r``,
-    ``rg`` or ``git grep`` with no named files (a path that is a directory counts as broad)."""
+def _commands(command: str) -> list[list[str]]:
+    """The words of each command in a line, split at shell operators outside quotes.
+    A command that follows a pipe is left out: it reads stdin."""
     import shlex
 
-    for part in _SPLIT_RE.split(command):
-        try:
-            words = shlex.split(part.split("|")[0])   # later pipe stages read stdin
-        except ValueError:
-            continue
-        while words and ("=" in words[0] and not words[0].startswith("-")):
-            words.pop(0)   # VAR=x prefixes
+    lex = shlex.shlex(command.replace("\n", " ; "), posix=True, punctuation_chars=True)
+    lex.whitespace_split = True
+    try:
+        tokens = list(lex)
+    except ValueError:
+        return []
+    out, cur, piped = [], [], False
+    for tok in [*tokens, ";"]:
+        if tok in _OPERATORS or (tok and set(tok) <= set("&|;()<>")):
+            if cur and not piped:
+                out.append(cur)
+            piped = tok in ("|", "|&")
+            cur = []
+        else:
+            cur.append(tok)
+    return out
+
+
+def _broad_search(command: str, cwd: str | None = None) -> bool:
+    """Whether a command line starts a recursive search across a tree: ``grep -r``,
+    ``rg`` or ``git grep`` unless every path it names is an existing file (paths are
+    read against ``cwd``)."""
+    for words in _commands(command):
+        while words and "=" in words[0] and not words[0].startswith("-"):
+            words = words[1:]   # VAR=x prefixes
         if not words:
             continue
-        name = os.path.basename(words[0])
-        rest = words[1:]
+        name, rest = os.path.basename(words[0]), words[1:]
         if name == "git" and rest[:1] == ["grep"]:
             name, rest = "git-grep", rest[1:]
-        recursive = name in ("rg", "git-grep") or (
-            name in ("grep", "egrep", "fgrep") and any(
-                w in ("--recursive", "--dereference-recursive")
-                or (w.startswith("-") and not w.startswith("--") and ("r" in w[1:] or "R" in w[1:]))
-                for w in rest if w.startswith("-")))
-        if not recursive:
+        if name not in ("rg", "git-grep", "grep", "egrep", "fgrep"):
             continue
+        recursive = name in ("rg", "git-grep")
         positional, skip, has_pattern_opt = [], False, False
-        for w in rest:
+        for i, w in enumerate(rest):
             if skip:
                 skip = False
-            elif w in ("-e", "-f", "--regexp", "--file"):
-                skip, has_pattern_opt = True, True
-            elif w in _VALUE_OPTS:
-                skip = True
-            elif not w.startswith("-"):
+            elif w == "--":
+                positional += rest[i + 1:]
+                break
+            elif w.startswith("--"):
+                opt, eq, _ = w.partition("=")
+                if opt in ("--recursive", "--dereference-recursive"):
+                    recursive = True
+                if opt in ("--regexp", "--file"):
+                    has_pattern_opt = True
+                skip = opt in _VALUE_LONG and not eq
+            elif w.startswith("-") and len(w) > 1:
+                for j, ch in enumerate(w[1:], 1):
+                    if ch in "rR":
+                        recursive = True
+                    elif ch in _VALUE_LETTERS:
+                        has_pattern_opt = has_pattern_opt or ch in "ef"
+                        skip = j == len(w) - 1   # value attached, or the next word
+                        break
+            else:
                 positional.append(w)
+        if not recursive:
+            continue
         paths = positional if has_pattern_opt else positional[1:]
-        if all(os.path.splitext(p)[1] and not p.endswith("/") for p in paths) and paths:
+        if paths and all(os.path.isfile(os.path.join(cwd or "", p)) for p in paths):
             continue   # named files only
         return True
     return False
@@ -597,7 +627,7 @@ def search_nudge(db, agent, ws: Workspace | None, command: str) -> str | None:
     """The one-time note for an agent's first broad recursive search in a repo with a
     graph; None otherwise. Never raises: it must not change the hook's answer."""
     try:
-        if ws is None or not _broad_search(command):
+        if ws is None or not _broad_search(command, ws.path):
             return None
         path = graph_path(ws)
         if path is None or not db.claim_mark(agent.id, NUDGE_MARK, "1")[0]:

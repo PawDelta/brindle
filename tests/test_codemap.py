@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from brindle import agents, codemap, git, workspaces
+from brindle.codemap import _broad_search
 from brindle.db import Agent
 from brindle.profiles import load_profile
 from brindle.providers import ClaudeCode, LaunchContext, get_provider
@@ -44,8 +45,13 @@ def test_graph_nudge_once_on_broad_search_only_and_decision_unchanged(db, mapped
         return ((out or {}).get("hookSpecificOutput") or {}).get("additionalContext")
 
     baseline = agents._pre_tool_decision(db, a, {"tool_name": "Bash", "tool_input": {"command": "grep -rn foo ."}})
-    assert note(run("grep -n foo src/a.py")) is None and note(run("rg foo src/a.py src/b.py")) is None
-    assert note(run("git log | grep -r foo")) is None
+    (Path(ws.path) / "src.v2").mkdir()
+    (Path(ws.path) / "Makefile").write_text("")
+    (Path(ws.path) / "a.py").write_text("")
+    for named in ("grep -n foo a.py", "rg foo a.py Makefile", "rg foo Makefile", "rg -efoo a.py",
+                  "rg --regexp=foo a.py", "git log | grep -r foo"):
+        assert note(run(named)) is None, named
+    assert _broad_search('rg -n "foo|bar"', ws.path) and _broad_search("rg foo src.v2", ws.path)
     first = run("grep -rn foo .")
     assert "graphify query" in note(first)
     assert {k: v for k, v in (first or {}).get("hookSpecificOutput", {}).items() if k != "additionalContext"} == (
