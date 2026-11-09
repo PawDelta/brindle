@@ -241,6 +241,35 @@ def pane(db, boss, monkeypatch):
     return pasted
 
 
+def _mark(db, mid, pane, stage, **fields):
+    return json.dumps({"message_id": mid, "pane": pane, "server": agents.server_of(db.get_agent("boss")),
+                       "provider": "claude", "body": "m", "lead": "L", "stage": stage, **fields})
+
+
+def _reopen(db, ws, monkeypatch):
+    """The session comes back in window @new."""
+    monkeypatch.setattr(tmux, "ensure_session", lambda *a, **k: None)
+    monkeypatch.setattr(tmux, "new_window", lambda *a, **k: "@new")
+    monkeypatch.setattr(agents, "_window_environment", lambda *a: ({}, [], None, [], {}))
+    monkeypatch.setattr(agents, "_agent_env_policy", lambda ws: ({}, False))
+    monkeypatch.setattr(agents, "_record_env_drops", lambda *a: None)
+    agents._open_window(db, db.get_agent("boss"), ws, "chat", ["claude"], False)
+
+
+def test_a_delivery_into_the_new_window_survives_its_opening(db, pane, boss, monkeypatch):
+    # A flush reaching the new pane between its publication and the cleanup.
+    mid = db.enqueue("boss", "m", None)
+    real = db.update_agent
+
+    def publish(agent_id, **fields):
+        real(agent_id, **fields)
+        db.record_pane_delivery(mid, "boss", _mark(db, mid, fields["tmux_window"], "body"))
+
+    monkeypatch.setattr(db, "update_agent", publish)
+    _reopen(db, boss, monkeypatch)
+    assert json.loads(db.mark("boss", "pane-delivery"))["pane"] == "@new" and db.pop_pending("boss") is None
+
+
 @pytest.mark.parametrize("stage, fields, typed, delivered", [
     ("lead", {}, ["m", "n"], True),   # never sent: back in the queue, the same row
     ("submitted", {}, ["n"], True),
@@ -249,16 +278,9 @@ def pane(db, boss, monkeypatch):
 def test_a_delivery_into_a_pane_since_replaced_doesnt_hold_the_queue(db, pane, boss, monkeypatch, stage, fields,
                                                                      typed, delivered):
     mid = db.enqueue("boss", "m", None)
-    db.record_pane_delivery(mid, "boss", json.dumps(
-        {"message_id": mid, "pane": "@0", "server": agents.server_of(db.get_agent("boss")), "provider": "claude",
-         "body": "m", "lead": "L", "stage": stage, **fields}))
+    db.record_pane_delivery(mid, "boss", _mark(db, mid, "@0", stage, **fields))
     db.enqueue("boss", "n", None)
-    monkeypatch.setattr(tmux, "ensure_session", lambda *a, **k: None)
-    monkeypatch.setattr(tmux, "new_window", lambda *a, **k: "@new")
-    monkeypatch.setattr(agents, "_window_environment", lambda *a: ({}, [], None, [], {}))
-    monkeypatch.setattr(agents, "_agent_env_policy", lambda ws: ({}, False))
-    monkeypatch.setattr(agents, "_record_env_drops", lambda *a: None)
-    agents._open_window(db, db.get_agent("boss"), boss, "chat", ["claude"], False)   # its session comes back
+    _reopen(db, boss, monkeypatch)
     for _ in typed:
         db.set_status("boss", "idle")
         assert agents.flush(db, "boss") is True

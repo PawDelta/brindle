@@ -773,9 +773,10 @@ def _open_window(db: DB, agent: Agent, ws: Workspace, name: str, argv: list[str]
         # The pane id only means anything on the server that issued it (a
         # resumed agent may come back on a different one), so record both.
         server = tmux.current_server()
-        db.update_agent(agent.id, tmux_window=target, tmux_server=server)
-        agent.tmux_window, agent.tmux_server = target, server
-        _retire_orphaned_delivery(db, agent.id)
+        with delivery_lock(agent.id):   # no flush reads the pane, or types, while it changes
+            db.update_agent(agent.id, tmux_window=target, tmux_server=server)
+            agent.tmux_window, agent.tmux_server = target, server
+            _retire_orphaned_delivery(db, agent)
         from brindle import procs
 
         try:
@@ -2591,21 +2592,20 @@ def _partial_composer(agent: Agent, state: dict, stage: str) -> bool:
     return draft == expected.rstrip()
 
 
-def _retire_orphaned_delivery(db: DB, agent_id: str) -> None:
-    """The agent has a new window, so a delivery typed into its old one lost
-    its composer: nothing can finish it, and left in place its mark would
-    hold the queue for good. Sent is delivered; unknown is kept unresolved,
-    as in _resume_pane_delivery; any other goes back in the queue, the same row."""
-    saved = db.mark(agent_id, "pane-delivery")
-    if saved is None:
-        return
-    state = json.loads(saved)
-    if state.get("stage") == "submitted":
-        db.mark_delivered(state["message_id"])
-    elif state.get("turn_started"):
-        db.retain_unresolved(state["message_id"], agent_id)
-        return
-    db.set_mark(agent_id, "pane-delivery", None)
+def _retire_orphaned_delivery(db: DB, agent: Agent) -> None:
+    """``agent`` has a new window (the caller holds its delivery_lock), so a
+    delivery typed into any other lost its composer: nothing can finish it,
+    and left in place its mark would hold the queue for good. One into this
+    window is a live delivery, and stays."""
+    for _ in range(3):   # a hook changed the mark meanwhile: read it again
+        saved = db.mark(agent.id, "pane-delivery")
+        if saved is None:
+            return
+        state = json.loads(saved)
+        if state.get("pane") == agent.tmux_window and state.get("server") == server_of(agent):
+            return
+        if db.settle_pane_delivery(agent.id, saved):
+            return
 
 
 def _resume_pane_delivery(db: DB, agent: Agent, saved: str) -> bool:

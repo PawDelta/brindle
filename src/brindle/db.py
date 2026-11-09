@@ -1310,6 +1310,9 @@ def request_subagent(row) -> str | None:
     return subagent if isinstance(subagent, str) and subagent else None
 
 
+WAITER_CLAIM = "waiter-claim:"   # agent_marks kind prefix, then the waiter's pid (DB.pop_pending)
+
+
 def _pane_delivery_message(c: sqlite3.Connection, agent_id: str) -> int | None:
     """The id of the message ``agent_id``'s pane-delivery mark is typing in,
     while that message is still there. A mark whose message is gone (a
@@ -2510,12 +2513,14 @@ class DB:
                     c.execute("DELETE FROM permission_requests WHERE agent_id=? AND tool_use_id=?",
                               (agent_id, row["tool_use_id"]))
 
-    def pop_pending(self, agent_id: str, pane_mark: Callable[[Message], str] | None = None) -> Message | None:
+    def pop_pending(self, agent_id: str, pane_mark: Callable[[Message], str] | None = None,
+                    waiter_pid: int | None = None) -> Message | None:
         """Atomically claim the oldest undelivered message, if any. None while
         a pane delivery holds the queue (agents._resume_pane_delivery goes first).
         ``pane_mark``: the claim is a pane delivery's, whose mark (what this
         returns for the message) owns the undelivered row from here on, so a
-        process that dies before its first write loses nothing."""
+        process that dies before its first write loses nothing. ``waiter_pid``:
+        the claim is that waiter's, recorded with it (see ``waiter_claims``)."""
         with self.tx() as c:
             if _pane_delivery_message(c, agent_id) is not None:
                 return None
@@ -2533,7 +2538,56 @@ class DB:
                 c.execute("INSERT INTO agent_marks (agent_id, kind, value) VALUES (?,'pane-delivery',?)"
                           " ON CONFLICT(agent_id, kind) DO UPDATE SET value=excluded.value",
                           (agent_id, pane_mark(msg)))
+            if waiter_pid is not None:
+                kind = f"{WAITER_CLAIM}{waiter_pid}"
+                held = c.execute("SELECT value FROM agent_marks WHERE agent_id=? AND kind=?",
+                                 (agent_id, kind)).fetchone()
+                ids = (json.loads(held["value"])["ids"] if held else []) + [msg.id]
+                c.execute("INSERT INTO agent_marks (agent_id, kind, value) VALUES (?,?,?)"
+                          " ON CONFLICT(agent_id, kind) DO UPDATE SET value=excluded.value",
+                          (agent_id, kind, json.dumps({"pid": waiter_pid, "at": time.time(), "ids": ids})))
             return msg
+
+    def waiter_claims(self, agent_id: str | None = None) -> list[sqlite3.Row]:
+        """Mail a waiter (brindle.wake) has taken and not finished handing
+        over: the rows read delivered, so nothing else offers them, and this
+        record is what lets them be recovered if it dies holding them."""
+        sql, args = f"SELECT agent_id, kind, value FROM agent_marks WHERE kind LIKE '{WAITER_CLAIM}%'", ()
+        if agent_id is not None:
+            sql, args = sql + " AND agent_id=?", (agent_id,)
+        return self.conn.execute(sql, args).fetchall()
+
+    def reclaim_waiter_claim(self, agent_id: str, kind: str, value: str) -> bool:
+        """Put an abandoned waiter's mail back in the queue, the same rows, if
+        its claim is still ``value``."""
+        with self.tx() as c:
+            if not c.execute("DELETE FROM agent_marks WHERE agent_id=? AND kind=? AND value=?",
+                             (agent_id, kind, value)).rowcount:
+                return False
+            c.executemany("UPDATE inbox SET delivered_at=NULL WHERE id=? AND agent_id=?",
+                          [(i, agent_id) for i in json.loads(value)["ids"]])
+        return True
+
+    def settle_pane_delivery(self, agent_id: str, saved: str) -> bool:
+        """Retire a pane delivery whose window is gone, atomically and only
+        if its mark is still ``saved``: sent counts as delivered, unknown is
+        kept unresolved (see ``retain_unresolved``), any other row is queued."""
+        state = json.loads(saved)
+        with self.tx() as c:
+            if not c.execute("DELETE FROM agent_marks WHERE agent_id=? AND kind='pane-delivery' AND value=?",
+                             (agent_id, saved)).rowcount:
+                return False
+            if state.get("stage") == "submitted":
+                c.execute("UPDATE inbox SET delivered_at=? WHERE id=? AND agent_id=?",
+                          (time.time(), state.get("message_id"), agent_id))
+            elif state.get("turn_started"):
+                c.execute("UPDATE inbox SET held=2, delivered_at=NULL WHERE id=? AND agent_id=?",
+                          (state.get("message_id"), agent_id))
+        return True
+
+    def marks_of_kind(self, kind: str) -> list[sqlite3.Row]:
+        """Every ``agent_marks`` row of ``kind``."""
+        return self.conn.execute("SELECT agent_id, value FROM agent_marks WHERE kind=?", (kind,)).fetchall()
 
     def pane_delivery_holds(self, agent_id: str) -> bool:
         """Whether a pane delivery's mark is holding ``agent_id``'s queue."""

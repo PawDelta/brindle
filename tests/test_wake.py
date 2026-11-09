@@ -171,11 +171,11 @@ def test_mail_not_handed_over_is_queued_again(db, boss, monkeypatch):
     db.enqueue("boss", "two", None)
     real, calls = db.pop_pending, []
 
-    def flaky(agent_id):
+    def flaky(agent_id, **kw):
         calls.append(agent_id)
         if len(calls) == 2:
             raise RuntimeError("database is locked")
-        return real(agent_id)
+        return real(agent_id, **kw)
 
     monkeypatch.setattr(db, "pop_pending", flaky)
     with pytest.raises(RuntimeError):
@@ -192,7 +192,7 @@ def test_mail_not_handed_over_is_queued_again(db, boss, monkeypatch):
     monkeypatch.setattr(sys, "stderr", Broken())
     with pytest.raises(BrokenPipeError):
         wake.main(db, "boss")
-    assert db.pending_count("boss") == 2
+    assert db.pending_count("boss") == 2 and not db.waiter_claims("boss")
 
     # Written, it's handed over: exit code 2 wakes the model, now busy with it.
     out = io.StringIO()
@@ -200,6 +200,7 @@ def test_mail_not_handed_over_is_queued_again(db, boss, monkeypatch):
     assert wake.main(db, "boss") == 2
     assert sorted(b for _, b in _framed(out.getvalue(), _nonce(out.getvalue()))) == ["one", "two"]
     assert db.pending_count("boss") == 0 and db.get_agent("boss").status == "processing"
+    assert not db.waiter_claims("boss")   # or a later sweep would hand it over again
 
 
 def test_taken_mail_keeps_its_place_and_its_hand_over_survives_a_busy_db(db, boss, monkeypatch):
@@ -219,6 +220,23 @@ def test_taken_mail_keeps_its_place_and_its_hand_over_survives_a_busy_db(db, bos
     monkeypatch.setattr(db, "set_status", locked)
     assert wake.main(db, "boss") == 2   # any other exit code and Claude Code never reads it
     assert [b for _, b in _framed(out.getvalue(), _nonce(out.getvalue()))] == ["one", "two", "newer"]
+
+
+@pytest.mark.parametrize("found_by", ["the next waiter", "the sweep"])
+def test_mail_a_waiter_died_holding_is_recovered(db, boss, monkeypatch, found_by):
+    # Killed before anything reached stderr: nothing ran to give it back.
+    db.enqueue("boss", "the answer", None)
+    assert wake.take(db, db.get_agent("boss")) and db.pending_count("boss") == 0
+    assert db.waiter_claims("boss")
+    wake.reclaim(db, "boss")
+    assert db.pending_count("boss") == 0   # its waiter is alive: still mid hand-over
+
+    monkeypatch.setattr(wake, "_gone", lambda state: True)
+    if found_by == "the sweep":
+        wake.reclaim(db)
+        assert db.pending_count("boss") == 1 and not db.waiter_claims("boss")
+    text, _ = wake.wait(db, "boss", poll=0.01, limit=1)
+    assert text.count("the answer") == 1
 
 
 def test_a_stopped_pane_delivery_doesnt_wedge_a_live_waiter(db, boss, monkeypatch):

@@ -28,6 +28,7 @@ the agent is busy, or are typed into its pane if it's idle (agents.flush).
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import secrets
@@ -39,7 +40,7 @@ import uuid
 from pathlib import Path
 
 from brindle.config import brindle_home
-from brindle.db import DB, Agent
+from brindle.db import DB, WAITER_CLAIM, Agent
 
 EVENT = "await-mail"
 # Claude Code kills a hook at its timeout (seconds), asyncRewake ones
@@ -50,6 +51,7 @@ POLL = 0.5
 HEARTBEAT = 10.0       # a waiter whose file is older than this is gone
 ALIVE_EVERY = 15.0     # how often a waiter checks the agent's window is still there
 ENDED = ("paused", "done", "failed")
+CLAIM_EXPIRES = 120.0  # a hand-over takes milliseconds: mail held longer is abandoned, whatever its pid says
 
 
 def applies(provider: str, mode: str | None, headless: bool = False) -> bool:
@@ -148,7 +150,7 @@ def take(db: DB, agent: Agent) -> tuple[str, list] | None:
     taken: list = []
     parts = []
     try:
-        while (msg := db.pop_pending(agent.id)) is not None:
+        while (msg := db.pop_pending(agent.id, waiter_pid=os.getpid())) is not None:
             taken.append(msg)
             parts.append(frame(db, msg.body, msg.sender_id, nonce))
     except BaseException:
@@ -165,6 +167,27 @@ def give_back(db: DB, agent_id: str, taken: list) -> None:
     does when a send fails: the same rows, so ahead of anything newer."""
     for msg in taken:
         db.release_pending(msg.id, agent_id)
+    db.set_mark(agent_id, f"{WAITER_CLAIM}{os.getpid()}", None)
+
+
+def _gone(state: dict) -> bool:
+    if time.time() - state["at"] > CLAIM_EXPIRES:
+        return True
+    try:
+        os.kill(state["pid"], 0)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        pass
+    return False
+
+
+def reclaim(db: DB, agent_id: str | None = None) -> None:
+    """Put back mail a waiter took and died holding (killed before it could
+    hand it over): for the next waiter, or the sweep's flush, to deliver."""
+    for row in db.waiter_claims(agent_id):
+        if _gone(json.loads(row["value"])):
+            db.reclaim_waiter_claim(row["agent_id"], row["kind"], row["value"])
 
 
 def _heartbeat(agent_id: str) -> bool:
@@ -199,6 +222,7 @@ def wait(db: DB, agent_id: str, poll: float = POLL, limit: float = TIMEOUT - 60,
             checked = time.time()
             if not alive(agent):
                 return None
+        reclaim(db, agent_id)
         # A read first: taking is a write transaction, too much to hold every poll.
         if db.pending_count(agent_id) and not login_pause.holding(db, agent_id):
             got = take(db, agent)
@@ -251,8 +275,10 @@ def main(db: DB, agent_id: str) -> int:
     # Handed over: from here only exit code 2 makes Claude Code read it, so
     # neither a late stop signal nor a busy database may change that.
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
-    try:
-        db.set_status(agent_id, "processing", only_if="idle")  # it wakes with this
-    except sqlite3.Error:
-        pass   # its prompt-submit hook sets it too
+    for step in (lambda: db.set_mark(agent_id, f"{WAITER_CLAIM}{os.getpid()}", None),
+                 lambda: db.set_status(agent_id, "processing", only_if="idle")):  # it wakes with this
+        try:
+            step()
+        except sqlite3.Error:
+            pass   # at worst it's handed over twice; its prompt-submit hook sets the status too
     return 2

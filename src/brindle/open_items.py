@@ -19,6 +19,7 @@ Reviewers aren't tracked: the pipeline restarts or replaces its own.
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 
@@ -172,7 +173,7 @@ def sweep(db: DB, now: float, panes) -> list[str]:
     """One pass of the cull sweep: the next notice of each open item that is
     due one, and brindle's takeover of those past the hour. Runs in every
     brindle process, so each step is claimed in the database first."""
-    done = []
+    done = _recover_takeovers(db, now, panes)
     for item, worker in _live(db, panes=panes):
         if not agents.same_server(worker, panes):
             continue
@@ -332,48 +333,134 @@ def reassign(db: DB, item: OpenItem, now: float | None = None, *, actor: Agent |
                      f"`{ws.branch}`. Check `git log {ws.branch}` and reuse what fits. "
                      f"What it was stuck on: {item.detail})")
     pipeline.note_removed_unmerged(db, ws, actor=actor)
+    text = brief + unmerged_note
+    prior = _takeover_state(db, worker.id)
+    state = {"worker": worker.id, "supervisor": supervisor.id, "ws": ws.id, "repo": ws.repo_root,
+             "branch": ws.branch, "text": text, "old_task": task.id if task else None, "task": None,
+             "detail": item.detail, "opened_at": item.opened_at, "at": now, "moved": []}
+    _save_takeover(db, state)
     # A takeover that died part way (the claim held here has expired) left
-    # its unstarted replacement, which nothing else would start or drop.
-    new = next((t for t in db.list_tasks(ws.repo_root, state=tasks.UNANSWERED)
-                if t.caller_id == supervisor.id and t.task_text == brief + unmerged_note), None) or tasks.enqueue(
-        db, supervisor, caller_ws, worker.profile, brief + unmerged_note, "assign", isolate=True, branch=None,
+    # its unstarted replacement: this one carries on with it.
+    new = _unstarted(db, ws.repo_root, supervisor.id, text) or tasks.enqueue(
+        db, supervisor, caller_ws, worker.profile, text, "assign", isolate=True, branch=None,
         done_when=worker.done_when, files=tasks._loads(task.files) if task else None, depends_on=[],
         plan_first=None if worker.plan_first is None else bool(worker.plan_first), weight=worker.weight,
         analysis_doc=bool(task.analysis_doc) if task else False, unanswered=True,
     )
-    moved = _repoint(db, worker, ws, task, new)
-
-    def undo() -> None:
-        for task_id, before, after in moved:
-            tasks.set_dependencies(db, task_id, before, after)
-        tasks.drop_unanswered(db, [new.id])
+    state["task"] = new.id
+    if prior and prior["task"] == new.id:
+        state["moved"] = prior["moved"]
+    _save_takeover(db, state)
+    state["moved"] = state["moved"] + _repoint(db, worker, ws, task, new)
+    _save_takeover(db, state)
 
     # The last look, right before retiring it: the repo's event hooks ran just above.
     if _gone_or_back(db, item, ws):
-        undo()
+        _undo_takeover(db, state)
         _hold_off(db, item, now, actor)
         return None
     try:
         workspaces.remove(db, ws, force=True, delete_branch=False)
     except (workspaces.WorkspaceError, git.GitError, OSError) as e:
-        undo()
+        _undo_takeover(db, state)
         return _give_up(db, item, worker, f"removing its worktree failed: {e}", actor)
+    return _finish_takeover(db, state, now, actor)
 
-    close(db, worker.id)
-    if task is not None:
-        db.update_task(task.id, state="cancelled")
-        bus.publish(db, "task.cancelled", repo_root=task.repo_root, task_id=task.id,
-                    reason=f"its worker {worker.id} was stuck; replaced by task {new.id}")
-    tasks.move(db, new.id, tasks.UNANSWERED, "pending")
+
+TAKEOVER = "takeover"   # agent_marks kind: a takeover in progress, under _takeover_key
+
+
+def _takeover_key(worker_id: str) -> str:
+    """Not the worker's own id: retiring it deletes the marks kept under that."""
+    return f"takeover:{worker_id}"
+
+
+def _save_takeover(db: DB, state: dict) -> None:
+    db.set_mark(_takeover_key(state["worker"]), TAKEOVER, json.dumps(state))
+
+
+def _takeover_state(db: DB, worker_id: str) -> dict | None:
+    saved = db.mark(_takeover_key(worker_id), TAKEOVER)
+    return json.loads(saved) if saved else None
+
+
+def _unstarted(db: DB, repo_root: str, supervisor_id: str, text: str) -> Task | None:
+    return next((t for t in db.list_tasks(repo_root, state=tasks.UNANSWERED)
+                 if t.caller_id == supervisor_id and t.task_text == text), None)
+
+
+def _undo_takeover(db: DB, state: dict) -> None:
+    """Take back what was prepared for the replacement."""
+    for task_id, before, after in state["moved"]:
+        tasks.set_dependencies(db, task_id, before, after)
+    if state["task"]:
+        tasks.drop_unanswered(db, [state["task"]])
+    db.set_mark(_takeover_key(state["worker"]), TAKEOVER, None)
+
+
+def _finish_takeover(db: DB, state: dict, now: float, actor: Agent | None = None) -> str:
+    """The stuck worker is retired: its replacement starts, and the takeover's
+    record goes last, so one interrupted anywhere here is finished by a sweep."""
+    worker_id, new_id = state["worker"], state["task"]
+    close(db, worker_id)
+    old = db.get_task(state["old_task"]) if state["old_task"] else None
+    if old is not None:
+        db.update_task(old.id, state="cancelled")
+        bus.publish(db, "task.cancelled", repo_root=old.repo_root, task_id=old.id,
+                    reason=f"its worker {worker_id} was stuck; replaced by task {new_id}")
+    tasks.move(db, new_id, tasks.UNANSWERED, "pending")
     try:
-        started = tasks.start_requeued(db, db.get_task(new.id) or new, f"worker {worker.id}'s task")
+        started = tasks.start_requeued(db, db.get_task(new_id), f"worker {worker_id}'s task")
     except Exception as e:  # noqa: BLE001 - it is retired already, so the supervisor must hear of this
-        log.exception("brindle: couldn't start %s's replacement", worker.id)
-        started = f"couldn't start its replacement (task {new.id}): {e}"
-    minutes = int((now - item.opened_at) // 60)
-    body = (f"[brindle] Worker {worker.id} sat {minutes} min on an open item, so brindle took it over: retired it "
-            f"(branch `{ws.branch}` kept; any uncommitted changes are in the trash). {started} "
-            f"It was: {item.detail}")
+        log.exception("brindle: couldn't start %s's replacement", worker_id)
+        started = f"couldn't start its replacement (task {new_id}): {e}"
+    minutes = int((now - state["opened_at"]) // 60)
+    body = (f"[brindle] Worker {worker_id} sat {minutes} min on an open item, so brindle took it over: retired it "
+            f"(branch `{state['branch']}` kept; any uncommitted changes are in the trash). {started} "
+            f"It was: {state['detail']}")
     if actor is None:
-        _tell(db, item.supervisor_id, body)
+        _tell(db, state["supervisor"], body)
+    db.set_mark(_takeover_key(worker_id), TAKEOVER, None)
     return body
+
+
+def _recover_takeover(db: DB, key: str, saved: str, state: dict, now: float, panes) -> str | None:
+    """A takeover whose process died. Its worker gone: finish it. Its worker
+    answered or back at work: take back what was prepared. Otherwise its item
+    is still due, and the next takeover carries on with the replacement."""
+    task = (db.get_task(state["task"]) if state["task"]
+            else _unstarted(db, state["repo"], state["supervisor"], state["text"]))
+    if task is None or task.state != tasks.UNANSWERED:
+        db.set_mark(key, TAKEOVER, None)   # nothing prepared, or it got as far as the queue
+        return None
+    state = {**state, "task": task.id}
+    worker = db.get_agent(state["worker"])
+    retired = worker is None or db.get_workspace(state["ws"]) is None
+    if not retired:
+        if not agents.same_server(worker, panes):
+            return None
+        item = db.get_open_item(worker.id)
+        if item is not None and _takeover_due(item, now) and not _working(worker, panes):
+            return None
+    # Every brindle process sweeps: only the one that moves the record on acts on it.
+    if not db.replace_mark(key, TAKEOVER, saved, json.dumps({**state, "at": now})):
+        return None
+    if retired:
+        return _finish_takeover(db, state, now)
+    _undo_takeover(db, state)
+    return f"took back the replacement prepared for worker {state['worker']}"
+
+
+def _recover_takeovers(db: DB, now: float, panes) -> list[str]:
+    done = []
+    for row in db.marks_of_kind(TAKEOVER):
+        state = json.loads(row["value"])
+        if now - state["at"] < CLAIM_EXPIRES:
+            continue   # its takeover may still be at work
+        try:
+            line = _recover_takeover(db, row["agent_id"], row["value"], state, now, panes)
+            if line:
+                done.append(line)
+        except Exception:  # noqa: BLE001 - one worker's must never stop the sweep
+            log.exception("brindle: couldn't recover the takeover of %s", state["worker"])
+    return done
