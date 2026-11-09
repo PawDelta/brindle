@@ -72,7 +72,10 @@ pub fn open(app: &tauri::AppHandle) {
     tauri::async_runtime::spawn_blocking(move || {
         // Never hold the timing lock across daemon discovery or the backend:
         // marks and startup continue even when the account cannot be checked.
-        let staff = staff_after_recovery(|path| app.state::<crate::daemon::Engine>().get(path));
+        let staff = observe_after_recovery(
+            |path| app.state::<crate::daemon::Engine>().get(path),
+            || std::thread::park_timeout(std::time::Duration::from_millis(250)),
+        );
         let Ok(dir) = app.path().app_data_dir() else { return };
         let Some(timing) = TIMING.get() else { return };
         let Ok(mut timing) = timing.lock() else { return };
@@ -80,13 +83,29 @@ pub fn open(app: &tauri::AppHandle) {
     });
 }
 
-fn staff_after_recovery(get: impl Fn(&str) -> Result<(u16, String), String>) -> bool {
-    let ready = match get("/v1/meta") {
+fn observe_after_recovery(
+    get: impl Fn(&str) -> Result<(u16, String), String>,
+    mut pending: impl FnMut(),
+) -> bool {
+    loop {
+        if let Some(staff) = staff_after_recovery(&get) { return staff; }
+        // Only active recovery keeps authorization pending. Failed or unknown
+        // answers finish without a file; this observer never holds startup.
+        pending();
+    }
+}
+
+fn staff_after_recovery(get: impl Fn(&str) -> Result<(u16, String), String>) -> Option<bool> {
+    let resuming = match get("/v1/meta") {
         Ok((200, body)) => serde_json::from_str::<serde_json::Value>(&body).ok()
-            .and_then(|v| v.get("resuming").and_then(serde_json::Value::as_bool)) == Some(false),
-        _ => false,
+            .and_then(|v| v.get("resuming").and_then(serde_json::Value::as_bool)),
+        _ => None,
     };
-    ready && crate::updates::engine_says_staff(get)
+    match resuming {
+        Some(true) => None,
+        Some(false) => Some(crate::updates::engine_says_staff(get)),
+        None => Some(false),
+    }
 }
 
 impl Timing<File> {
@@ -118,30 +137,63 @@ mod tests {
     use std::io::Cursor;
 
     #[test]
+    fn deadline_during_recovery_keeps_startup_authorization_pending() {
+        let dir = std::env::current_dir().unwrap().join(format!("target/startup-deadline-{}", std::process::id()));
+        let mut timing = Timing::<File>::new();
+        timing.mark("panes_ready"); // the launch page's deadline settles while the engine is still resuming
+        let resuming = std::cell::Cell::new(true);
+        let observations = std::cell::Cell::new(0);
+        let staff = observe_after_recovery(|path| {
+            if path == "/v1/meta" {
+                observations.set(observations.get() + 1);
+                Ok((200, format!(r#"{{"resuming":{}}}"#, resuming.get())))
+            } else {
+                assert!(!resuming.get(), "account check must follow recovery");
+                Ok((200, r#"{"staff":true}"#.into()))
+            }
+        }, || {
+            assert!(!dir.exists() && timing.output.is_none());
+            resuming.set(false); // the background observer's next turn, without another startup mark
+        });
+        timing.open_in(&dir, staff);
+        assert!(timing.output.is_some(), "completed recovery must publish the buffered staff record");
+        assert_eq!(observations.get(), 2);
+        drop(timing);
+        let record: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("app-startup.log")).unwrap()).unwrap();
+        assert!(record["elapsed_ms"]["panes_ready"].is_number());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn non_staff_startup_leaves_no_file() {
         let dir = std::env::current_dir().unwrap().join(format!("target/startup-account-{}", std::process::id()));
         let mut timing = Timing::<File>::new();
         timing.mark("webview");
-        let non_staff = staff_after_recovery(|path| Ok((200, if path == "/v1/meta" {
+        let non_staff = observe_after_recovery(|path| Ok((200, if path == "/v1/meta" {
             r#"{"resuming":false}"#.into()
-        } else { r#"{"staff":false}"#.into() })));
+        } else { r#"{"staff":false}"#.into() })), || panic!("non-staff must finish without a file"));
         timing.open_in(&dir, non_staff);
         assert!(!dir.exists() && timing.output.is_none());
-        let unknown = staff_after_recovery(|path| if path == "/v1/meta" {
+        let unknown = observe_after_recovery(|path| if path == "/v1/meta" {
             Ok((200, r#"{"resuming":false}"#.into()))
-        } else { Err("offline".into()) });
+        } else { Err("offline".into()) }, || panic!("failed staff check must finish without a file"));
         timing.open_in(&dir, unknown);
+        assert!(!dir.exists());
+        let no_answer = observe_after_recovery(|path| Ok((200, if path == "/v1/meta" {
+            r#"{"resuming":false}"#.into()
+        } else { r#"{"staff":null}"#.into() })), || panic!("unknown staff must finish without a file"));
+        timing.open_in(&dir, no_answer);
         assert!(!dir.exists());
         let recovering = staff_after_recovery(|path| {
             assert_eq!(path, "/v1/meta");   // no backend account request while recovery runs
             Ok((200, r#"{"resuming":true}"#.into()))
         });
-        timing.open_in(&dir, recovering);
+        assert_eq!(recovering, None);
         assert!(!dir.exists());
         let staff = staff_after_recovery(|path| Ok((200, if path == "/v1/meta" {
             r#"{"resuming":false}"#.into()
         } else { r#"{"staff":true}"#.into() })));
-        timing.open_in(&dir, staff);
+        timing.open_in(&dir, staff.unwrap());
         drop(timing);
         let record: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("app-startup.log")).unwrap()).unwrap();
         assert!(record["elapsed_ms"]["webview"].is_number());
