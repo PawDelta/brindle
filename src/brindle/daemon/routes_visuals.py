@@ -118,6 +118,11 @@ def answer(db: DB, params: dict, body: dict) -> Any:
                                              _get(body, "note"), _get(body, "attachments", list)))
 
 
+def dismiss(db: DB, params: dict, body: dict) -> Any:
+    visuals.require_enabled()
+    return visuals.to_dto(db, visuals.dismiss(db, params["id"], body.get("rev")))
+
+
 def keep(db: DB, params: dict, body: dict) -> Any:
     visuals.require_enabled()
     return visuals.to_dto(db, visuals.keep(db, params["id"]))
@@ -186,6 +191,7 @@ ROUTES = [
     Route("/v1/sessions/{id:path}/visuals", session_visuals),
     Route("/v1/visuals/{id}/r/{n}", visual_page),
     Route("/v1/visuals/{id}/answer", _endpoint(answer), methods=["POST"]),
+    Route("/v1/visuals/{id}/dismiss", _endpoint(dismiss), methods=["POST"]),
     Route("/v1/visuals/{id}/keep", _endpoint(keep), methods=["POST"]),
     Route("/v1/visuals/{id}/keep", _endpoint(unkeep), methods=["DELETE"]),
     Route("/v1/visuals/{id}/read", _endpoint(mark_read), methods=["POST"]),

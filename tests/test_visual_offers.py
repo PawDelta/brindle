@@ -5,6 +5,7 @@ from starlette.testclient import TestClient
 
 from brindle import agents, config, mcp_server, visual_offers as offers, visuals
 from brindle.daemon.app import build_app
+from brindle.daemon.events import Feed
 from brindle.db import DB, Agent, Workspace
 from brindle.mcp_server import ToolError
 from brindle.service.errors import ServiceError
@@ -97,6 +98,7 @@ def test_offer_limits(db, session, monkeypatch, case, kind, counts, reason):
 
 def test_accept_and_explicit_ask_allow_one_publish(db, session):
     boss, worker = session
+    feed = Feed(db, repo_root=db.get_workspace(boss.workspace_id).repo_root)
     token = "t" * 43
     with TestClient(build_app(token), headers={"Authorization": f"Bearer {token}"}) as client:
         assert client.patch("/v1/user-settings", json={"visuals": "bad"}).status_code == 400
@@ -105,6 +107,7 @@ def test_accept_and_explicit_ask_allow_one_publish(db, session):
         path = f"/v1/sessions/{boss.id}/visual-offer"
         assert client.get(path).json()["id"] == oid
         assert client.post(path, json={"offer": oid, "accept": True}).json()["accepted"]
+        assert any(e["kind"] == "visual.offer_resolved" for e in feed.events())
         assert client.post(path, json={"offer": oid, "accept": True}).status_code == 409
         assert terminal_input(client, boss.id)("").status_code == 200
         messages = db.conn.execute("SELECT body FROM inbox WHERE agent_id=?", (boss.id,)).fetchall()
@@ -112,11 +115,14 @@ def test_accept_and_explicit_ask_allow_one_publish(db, session):
         with pytest.raises(ServiceError):
             visuals.publish(db, worker, "Unasked plan", "<p>no</p>", kind="plan")
         visuals.publish(db, worker, "Layout", "<p>layout</p>")
+        assert any(e["kind"] == "visual.offer_resolved" for e in feed.events())
         with pytest.raises(ServiceError, match="accept an offer"):
             visuals.publish(db, boss, "Another", "<p>no</p>")
         assert client.patch("/v1/user-settings", json={"visuals": "off"}).json()["visuals"] == "off"
+        assert any(e["kind"] == "visual.offers_setting" for e in feed.events())
         assert client.get("/v1/user-settings").json()["visuals"] == "off"
         agents.send_message(db, boss.id, "Please make a visual of this layout", person=True)
+        assert any(e["kind"] == "visual.offer_resolved" for e in feed.events())
         with pytest.raises(ServiceError):
             visuals.publish(db, worker, "Not a planning request", "<p>no</p>", kind="plan")
         # A failed publication must preserve the grant for a corrected page.
@@ -128,6 +134,8 @@ def test_accept_and_explicit_ask_allow_one_publish(db, session):
             visuals.publish(db, worker, "Unrequested", "<p>no</p>")
         agents.handle_hook(db, boss.id, "prompt-submit", {"prompt": "Create a planning doc for this change"})
         visuals.publish(db, worker, "Plan", "<p>plan</p>", kind="plan")
+        assert client.patch("/v1/user-settings", json={"visuals_enabled": "off"}).status_code == 200
+        assert any(e["kind"] == "visual.offers_setting" for e in feed.events())
 
 
 @pytest.mark.parametrize("text,scope,allowed", [

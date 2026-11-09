@@ -10,6 +10,10 @@
   last upload to ``POST /debug/logs`` on the account's brindle Pro base URL,
   every :data:`INTERVAL_S`, with the account's auth.
 
+Recovery timings are buffered separately, then emitted to the daemon log
+only for a confirmed staff account. Account checks run after recovery on
+a detached observer thread, independent of the debug-upload setting.
+
 Sidebar call site (watch.py, where it logs a caught draw error or a restart):
 ``debuglog.record("sidebar", "error", str(e), {"traceback": traceback.format_exc()})``.
 """
@@ -17,6 +21,7 @@ Sidebar call site (watch.py, where it logs a caught draw error or a restart):
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import fcntl
 import hashlib
 import json
@@ -245,6 +250,70 @@ def checked(fresh: bool = False) -> dict:
         config.set_user(SETTING, False)
         on = False
     return {"enabled": on, "staff": is_staff is True}
+
+
+class _TimingBuffer:
+    """One recovery's observations, shared by its copied thread contexts."""
+
+    def __init__(self):
+        self.records = []
+        self.lock = threading.Lock()
+        self.closed = False
+
+    def append(self, record):
+        with self.lock:
+            if not self.closed:
+                self.records.append(record)
+
+    def finish(self):
+        with self.lock:
+            self.closed = True
+            records, self.records = tuple(self.records), []
+        if records:
+            # Neither a backend failure nor failure to start the observer may
+            # change recovery's outcome. Late, abandoned workers drop timings.
+            with contextlib.suppress(Exception):
+                _publish_timings(records)
+
+
+_timing_buffer: contextvars.ContextVar[_TimingBuffer | None] = contextvars.ContextVar("recovery_timings", default=None)
+
+
+@contextlib.contextmanager
+def recovery_timings(enabled: bool = True):
+    """Buffer until all sessions are back, then ask staff off the resume path.
+
+    Nested resumes share the start's buffer; a standalone gated resume owns
+    its own. No account or backend lookup happens while collecting records.
+    """
+    if not enabled or _timing_buffer.get() is not None:
+        yield
+        return
+    buffer = _TimingBuffer()
+    token = _timing_buffer.set(buffer)
+    try:
+        yield
+    finally:
+        _timing_buffer.reset(token)
+        buffer.finish()
+
+
+def recovery_timing(logger, message, *args):
+    if (buffer := _timing_buffer.get()) is not None:
+        buffer.append((logger, message, args))
+
+
+def _write_timings(records):
+    try:
+        if staff() is True:
+            for logger, message, args in records:
+                logger.warning(message, *args)
+    except Exception:  # noqa: BLE001 - unavailable account diagnostics are discarded
+        pass
+
+
+def _publish_timings(records):
+    threading.Thread(target=_write_timings, args=(records,), name="brindle-recovery-timings", daemon=True).start()
 
 
 def set_enabled(on: bool) -> dict:

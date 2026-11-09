@@ -69,13 +69,32 @@ test("sidebar keeps its goal pinned and its lists reachable when resized", async
     expect((await box(sessions)).height).toBeGreaterThan(30);
     await sessions.evaluate((el) => { el.scrollTop = el.scrollHeight; });
     await fullyInView(sessions.locator("button[data-row]").last());
-    await fullyInView(sidebar.getByTestId("status-line"));
-    await fullyInView(sidebar.getByRole("navigation", { name: "Pages" }));
+    await fullyInView(sidebar.getByTestId("sidebar-foot"));
+    await fullyInView(sidebar.getByRole("group", { name: "Sidebar foot" }));
     expect(await sidebar.evaluate((el) => [el, ...el.querySelectorAll<HTMLElement>("*")]
       .filter((node) => node.clientWidth > 0 && getComputedStyle(node).overflowX !== "hidden")
       .filter((node) => node.scrollWidth > node.clientWidth + 1)
       .map((node) => node.className))).toEqual([]);
     await page.screenshot({ path: testInfo.outputPath(`sidebar-${name}.png`) });
+  }
+});
+
+test("sidebar foot pill stays compact in calm and busy states", async ({ page }, testInfo) => {
+  for (const state of ["calm", "busy"]) {
+    await open(page, `sidebar-foot-${state}`);
+    const foot = page.getByTestId("sidebar-foot");
+    const pill = foot.getByTestId("profile-pill");
+    const busy = state === "busy";
+    await expect(pill).toContainText(busy ? "88%" : "41%");
+    await expect(foot.getByTestId("provider-problem")).toHaveCount(0);
+    await expect(pill.getByTestId("usage-warning-dot")).toHaveCount(busy ? 1 : 0);
+    await expect(foot.getByTestId("app-update-pill")).toHaveCount(0);
+    await page.screenshot({ path: testInfo.outputPath(`sidebar-foot-${state}.png`) });
+    // The pill and strip shrink inside even a sidebar narrower than the app's usual rail.
+    await page.getByRole("complementary", { name: "Sidebar" }).evaluate((el) => { el.style.width = "190px"; });
+    expect(await foot.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
+    await pill.click();
+    await expect(page.getByRole("tab", { name: "Usage", exact: true })).toHaveAttribute("aria-selected", "true");
   }
 });
 
