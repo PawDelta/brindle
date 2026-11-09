@@ -201,23 +201,7 @@ describe("visuals", () => {
     hooked.close();
   });
 
-  it("keeps watching typing until the engine says visuals are off, and asks again after that", async () => {
-    let clock = 0, call = 0;
-    const answers = [() => Promise.reject(new Error("busy")), () => Promise.resolve({ visuals: false }), () => Promise.resolve({ visuals: true })];
-    const gate = visualsGate({ meta: () => answers[call++]!() }, () => clock);
-    await act(async () => undefined);
-    expect(gate.enabled()).toBe(true);          // a failed answer is not "off"
-    clock = 6000;
-    gate.enabled();
-    await act(async () => undefined);
-    expect(gate.enabled()).toBe(false);         // the engine said off
-    clock = 12000;
-    gate.enabled();
-    await act(async () => undefined);
-    expect(gate.enabled()).toBe(true);          // turned on later: picked up
-  });
-
-  it("test_typed_message_backs_a_visual: typing reaches the engine while /meta is failing or answering out of order", async () => {
+  it("test_typed_message_backs_a_visual: typing is reported while /meta fails, is pending or says off, and never as a tail", async () => {
     let clock = 0;
     const replies: ((v: { visuals: boolean }) => void)[] = [];
     let fail = true;
@@ -226,34 +210,22 @@ describe("visuals", () => {
     const words: string[] = [];
     const view = withTypedWords({ visualTypedWords: async (_id, text) => { words.push(text); return { observed: true }; } }, "claude",
       () => ({ write() {}, resize() {}, focus() {}, close() {} }), gate.enabled)({ server: null, target: "%1" }, { cols: 80, rows: 24 }, { onData() {}, onExit() {}, onError() {} });
-    const type = async (text: string) => { [...text, "\r"].forEach(c => view.write(c)); await act(async () => undefined); };
-    await type("failed answer");
+    const type = async (text: string, enter = true) => { [...text, ...(enter ? ["\r"] : [])].forEach(c => view.write(c)); await act(async () => undefined); };
+    await type("failed answer");                    // a failed answer is not "off"
     fail = false;
     clock = 6000;
-    gate.enabled();                       // asks again; the answer is slow
+    await type("pending answer");                   // asks again; the answer is slow
+    replies[0]!({ visuals: false });
+    await act(async () => undefined);
+    expect(replies).toHaveLength(1);                // one request at a time
+    await type("r", false);                         // off: begun, not reported
     clock = 12000;
-    await type("pending answer");
-    replies[0]!({ visuals: true });
+    await type("ender first", false);               // asks again, still off at this key
+    replies[1]!({ visuals: true });
     await act(async () => undefined);
-    expect(gate.enabled()).toBe(true);
-    expect(replies).toHaveLength(1);      // no overlapping request to answer out of order
-    await type("answered on");
-    expect(words).toEqual(["failed answer", "pending answer", "answered on"]);
-  });
-
-  it("never records the tail of a message that was begun while watching was off", async () => {
-    let on = false;
-    const words: string[] = [];
-    const view = withTypedWords({ visualTypedWords: async (_id, text) => { words.push(text); return { observed: true }; } }, "claude",
-      () => ({ write() {}, resize() {}, focus() {}, close() {} }), () => on)({ server: null, target: "%1" }, { cols: 80, rows: 24 }, { onData() {}, onExit() {}, onError() {} });
-    [..."r"].forEach(c => view.write(c));
-    on = true;                                  // the engine answers mid-draft
-    [..."ender first", "\r"].forEach(c => view.write(c));
-    await act(async () => undefined);
-    expect(words).toEqual(["render first"]);    // the whole draft, never the tail "ender first"
-    [..."\"x y\"", "\r"].forEach(c => view.write(c));
-    await act(async () => undefined);
-    expect(words.at(-1)).toBe("\"x y\"");
+    await type("", true);
+    await type("\"x y\"");
+    expect(words).toEqual(["failed answer", "pending answer", "render first", "\"x y\""]);   // never the tail "ender first"
   });
 
   it("observes Codex PTY submissions before forwarding Enter, including edits, pastes and uncertain history", async () => {
