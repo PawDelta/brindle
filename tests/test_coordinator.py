@@ -1,6 +1,7 @@
 import asyncio
 import json
 import time
+from types import SimpleNamespace
 
 import pytest
 from mcp.server.mcpserver.exceptions import ToolError
@@ -8,7 +9,40 @@ from typer.testing import CliRunner
 
 from brindle import agents, bus, cli, coordinator, knowledge, mcp_server, tasks, workspaces
 from brindle.db import Agent, Task
+from brindle.daemon.routes_actions import patch_config
 from brindle.pro import license
+from brindle.service.errors import ServiceError
+
+
+@pytest.mark.parametrize("setting,features,stop,expected", [
+    pytest.param(None, {coordinator.FEATURE}, False, True, id="unset-pro"),
+    pytest.param(None, set(), False, False, id="unset-free"),
+    pytest.param(None, RuntimeError(), False, False, id="unset-unknown"),
+    pytest.param(None, license.LicenseError(), False, False, id="unset-signed-out",
+                 marks=pytest.mark.variant("signed-out accounts have no stored entitlement")),
+    pytest.param(False, {coordinator.FEATURE}, False, False, id="explicit-off-pro"),
+    pytest.param(True, {coordinator.FEATURE}, True, False, id="stop-pro"),
+])
+def test_coordinator_default_for_pro(setting, features, stop, expected, db, repo, monkeypatch):
+    def current(*, refresh=True):
+        assert refresh is False, "the sweep must only read the cached license"
+        if isinstance(features, Exception):
+            raise features
+        return SimpleNamespace(features=features)
+
+    monkeypatch.setattr(license, "current", current)
+    (repo / ".brindle").mkdir(exist_ok=True)
+    (repo / ".brindle" / "config.json").write_text(
+        json.dumps({} if setting is None else {"coordinator": setting}))
+    with pytest.raises(ServiceError):
+        patch_config(db, {}, {"values": {"coordinator": "false"}})
+    if setting is not None:
+        patch_config(db, {}, {"scope": "shared", "repo": str(repo), "values": {"coordinator": setting}})
+    if stop:
+        assert coordinator.enabled(str(repo))
+        monkeypatch.chdir(repo)
+        assert CliRunner().invoke(cli.app, ["coordinator", "stop"]).exit_code == 0
+    assert coordinator.enabled(str(repo)) is expected
 
 
 def _repo_with_sessions(db, repo, monkeypatch, coord=True):
@@ -21,7 +55,7 @@ def _repo_with_sessions(db, repo, monkeypatch, coord=True):
     for aid, mode, parent, profile in rows:
         db.add_agent(Agent(aid, ws.id, profile, "claude", parent, mode, "processing", "", None,
                            time.time()))
-    monkeypatch.setattr(license, "has", lambda feature: feature == coordinator.FEATURE)
+    monkeypatch.setattr(license, "current", lambda **kw: SimpleNamespace(features={coordinator.FEATURE}))
     monkeypatch.setattr(license, "require", lambda feature, **kw: None)
     return ws
 
@@ -62,7 +96,7 @@ def _hold_task_only_pending_and_allowlisted(db, repo, monkeypatch):
 def _events_wake_one_coordinator(db, repo, monkeypatch):
     _repo_with_sessions(db, repo, monkeypatch, coord=False)
     (repo / ".brindle").mkdir(exist_ok=True)
-    (repo / ".brindle" / "config.json").write_text(json.dumps({"coordinator": True}))
+    (repo / ".brindle" / "config.json").write_text("{}")
     started, prompts = [], []
 
     def spawn(db, ws, profile, *, prompt, mode, **kw):
