@@ -7,7 +7,7 @@ import type { WebSocketFactory } from "./api/events";
 import type { GoalDTO, SessionDTO } from "./api/schema";
 import { LAST_SESSION_KEY } from "./routes";
 import { ONBOARDED_KEY } from "./api/providers";
-import { createAppStore } from "./store/store";
+import { createAppStore, initialState } from "./store/store";
 import { startSync } from "./store/sync";
 import { DaemonClient } from "./api/client";
 import { BASE_URL, FakeDaemon, TOKEN, flush, freshProviders } from "./test/fakeDaemon";
@@ -118,6 +118,54 @@ describe("App", () => {
       expect(paneWaits()).toBe(false);
       expect(screen.getByTestId("terminal").textContent).toBe("sup1");
     } finally { sync.stop(); vi.useRealTimers(); }
+  });
+
+  it.each(["running", "resuming", "no window", "recovered"])("a reopen onto a running daemon releases only ready panes from the first snapshot (%s)", async (state) => {
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root] });
+    const client = daemon.client();
+    const meta = client.meta.bind(client);
+    vi.spyOn(client, "meta").mockImplementation(async () => ({ ...await meta(), resuming: state === "resuming", recovered_at: state === "recovered" ? client.createdAt - 1 : undefined }));
+    const rows = state === "no window" ? [{ ...root, agents: root.agents?.map((a) => ({ ...a, window: null })) }] : [root];
+    vi.spyOn(client, "snapshot").mockResolvedValueOnce(rows).mockReturnValue(new Promise(() => {}));
+    vi.spyOn(client, "inbox").mockReturnValue(new Promise(() => {}));
+    const store = createAppStore({ ...initialState, workspaces: [{ ...root, agents: root.agents?.map((a) => ({ ...a, window: windowOf("old") })) }] });
+    const refresh = () => Promise.all([client.snapshot(), client.inbox()]).then(() => {});
+    renderApp(<App store={store} client={client} refresh={refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO }} />);
+    await screen.findByRole("complementary", { name: "Sidebar" });
+    await act(async () => { await flush(); });
+    if (state === "resuming" || state === "no window") {
+      await waitFor(() => expect(paneWaits()).toBe(true));
+    } else {
+      await screen.findByTestId("terminal");
+      expect(store.getState().workspaces).toEqual([root]);
+      expect(store.getState().synced).toBe(false);
+    }
+  });
+
+  it.each(["agent.closed", "rewound"])("discards the gate snapshot when %s arrives during its read", async (kind) => {
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker] });
+    const client = daemon.client();
+    const store = createAppStore();
+    const sync = startSync({ client, store, connect: daemon.connect });
+    try {
+      await sync.idle();
+      await flush();
+      await sync.idle();
+      let finish!: (rows: typeof daemon.data.workspaces) => void;
+      const snapshot = vi.spyOn(client, "snapshot").mockImplementationOnce(() => new Promise((ok) => { finish = ok; })).mockRejectedValue(new Error("offline"));
+      renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO }} />);
+      await waitFor(() => expect(snapshot).toHaveBeenCalledTimes(1));
+      await act(async () => {
+        daemon.publish(kind === "rewound" ? "agent.status" : kind, { repo_root: REPO, agent_id: "w1", payload: { status: "rewound" } });
+        await flush();
+        await sync.idle();
+        finish([root, worker]);
+        await flush();
+      });
+      expect(store.getState().pastWorkers).toContain("w1");
+      expect(store.getState().workspaces.flatMap((ws) => ws.agents ?? []).some((a) => a.id === "w1")).toBe(false);
+      expect(paneWaits()).toBe(true);
+    } finally { sync.stop(); }
   });
 
   it("panes per session: a session that is back shows its panes while another is still pending, and opening the pending one asks for it first", async () => {
@@ -243,6 +291,9 @@ describe("App", () => {
       await act(async () => { await vi.advanceTimersByTimeAsync(100); });
       await sync.idle();
       daemon.data.workspaces = [root];
+      // Recovery ended after sync began, but before the gate's first meta read.
+      const meta = client.meta.bind(client);
+      vi.spyOn(client, "meta").mockImplementation(async () => ({ ...await meta(), recovered_at: client.createdAt + 1 }));
       const failed = vi.spyOn(client, "inbox").mockRejectedValue(new Error("offline"));
       renderApp(<App store={store} client={client} refresh={sync.refresh} />);
       await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
@@ -395,10 +446,10 @@ describe("App", () => {
     const previousPage = screen.getByRole("region", { name: "Inbox" });
     const main = screen.getByRole("main");
     main.scrollTop = 180;
-    fireEvent.click(link("Open Account"));
-    expect(await screen.findByRole("region", { name: "Account" })).toBeTruthy();
+    fireEvent.click(link("Open Account › Usage"));
+    expect(await screen.findByTestId("usage")).toBeTruthy();
     expect(main.scrollTop).toBe(0);
-    expect(link("Open Account").getAttribute("aria-current")).toBe("page");
+    expect(link("Open Account › Usage").getAttribute("aria-current")).toBe("page");
     expect(within(main).queryByRole("tablist")).toBeNull();
     expect(within(nav()).getByRole("tablist", { name: "Settings" })).toBeTruthy();
     expect(within(nav()).queryByRole("navigation", { name: "Sessions" })).toBeNull();
@@ -412,13 +463,13 @@ describe("App", () => {
     // Clicked again from another of Settings' tabs, an entry opens its own tab again.
     const selected = (name: string) => screen.getByRole("tab", { name }).getAttribute("aria-selected");
     fireEvent.click(screen.getByRole("tab", { name: "Permissions" }));
-    fireEvent.click(link("Open Account"));
-    await waitFor(() => expect(selected("Account")).toBe("true"));
+    fireEvent.click(link("Open Account › Usage"));
+    await waitFor(() => expect(selected("Usage")).toBe("true"));
     main.scrollTop = 0;
     fireEvent.keyDown(window, { key: "Escape" });
     expect(screen.getByRole("region", { name: "Inbox" })).toBe(previousPage);
     expect(main.scrollTop).toBe(180);
-    fireEvent.click(link("Open Account"));
+    fireEvent.click(link("Open Account › Usage"));
     fireEvent.click(link("← Sessions"));
     expect(screen.getByRole("region", { name: "Inbox" })).toBe(previousPage);
     expect(main.scrollTop).toBe(180);
@@ -430,7 +481,7 @@ describe("App", () => {
     const sessionsList = within(nav()).getByRole("navigation", { name: "Sessions" });
     sessionsList.scrollTop = 64;
     terminal.scrollTop = 96;
-    fireEvent.click(link("Open Account"));
+    fireEvent.click(link("Open Account › Usage"));
     expect(within(nav()).getByRole("button", { name: "New session" })).toBeTruthy();
     expect(within(nav()).getByRole("button", { name: "Home" })).toBeTruthy();
     expect(within(nav()).getByRole("button", { name: "Knowledge" })).toBeTruthy();
@@ -474,10 +525,10 @@ describe("App", () => {
     const sync = startSync({ client, store, connect: daemon.connect });
     renderApp(<App store={store} client={client} refresh={sync.refresh} />);
     expect(await screen.findByRole("region", { name: "Session" }, { timeout: 4000 })).toBeTruthy();
-    expect(within(screen.getByTestId("pages")).queryByRole("button", { name: "Knowledge" })).toBeNull();
-    expect(within(screen.getByTestId("pages")).queryByRole("button", { name: "Agents" })).toBeNull();
+    expect(within(screen.getByTestId("sidebar-foot-row")).queryByRole("button", { name: "Knowledge" })).toBeNull();
+    expect(within(screen.getByTestId("sidebar-foot-row")).queryByRole("button", { name: "Agents" })).toBeNull();
 
-    fireEvent.click(link("Open Account"));
+    fireEvent.click(link("Open Account › Usage"));
     for (const name of ["Knowledge", "Agents"]) {
       fireEvent.click(link(name));
       expect(await screen.findByRole("region", { name })).toBeTruthy();
@@ -500,7 +551,7 @@ describe("App", () => {
     const client = daemon.client();
     const sync = startSync({ client, store, connect: daemon.connect });
     renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "new" }} />);
-    // The second repo's heading: its Project settings, and a shell from the status line starts at that repo.
+    // The second repo's heading: its Project settings, and a shell from the foot starts at that repo.
     await screen.findByRole("complementary", { name: "Sidebar" });
     fireEvent.click(await within(nav()).findByRole("button", { name: "Project settings for other" }));
     await screen.findByRole("region", { name: "Project settings" });
@@ -510,7 +561,7 @@ describe("App", () => {
     await waitFor(() => expect(daemon.shells.map((s) => s.cwd)).toEqual([OTHER]));
     // Settings (opened from the profile) has a Project tab on the current session's repo (here the second), with a picker for the others.
     localStorage.setItem(LAST_SESSION_KEY, JSON.stringify({ root: "sup2", repo: OTHER }));
-    fireEvent.click(link("Open Account"));
+    fireEvent.click(link("Open Account › Usage"));
     fireEvent.click(await screen.findByRole("tab", { name: "Project" }));
     await screen.findByRole("region", { name: "Project settings" });
     expect(screen.getByRole("combobox", { name: "Repo" })).toHaveProperty("value", OTHER);
@@ -690,7 +741,7 @@ describe("App", () => {
     await waitFor(() => expect(screen.getByTestId("inbox-badge").textContent).toBe("1"));
     expect(screen.queryByTestId("engine-banner")).toBeNull();
 
-    fireEvent.click(link("Open Account"));
+    fireEvent.click(link("Open Account › Usage"));
     fireEvent.click(await screen.findByRole("tab", { name: "About" }));
     const engineSection = screen.getByTestId("engine");
     fireEvent.click(within(engineSection).getByRole("button", { name: /Details/ }));
@@ -721,7 +772,7 @@ describe("App", () => {
     await waitFor(() => expect(screen.queryByTestId("reconnecting")).toBeNull());
     expect(screen.queryByTestId("engine-banner")).toBeNull();
     await waitFor(() => expect(screen.queryByTestId("inbox-badge")).toBeNull());
-    fireEvent.click(link("Open Account"));
+    fireEvent.click(link("Open Account › Usage"));
     fireEvent.click(await screen.findByRole("tab", { name: "About" }));
     fireEvent.click(within(screen.getByTestId("engine")).getByRole("button", { name: /Details/ }));
     expect(within(screen.getByTestId("engine")).getByTestId("connection").textContent).toBe("daemon · connected");
@@ -739,9 +790,6 @@ describe("App", () => {
     vi.useFakeTimers();
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root] });
     const client = daemon.client();
-    let resuming = false;
-    const meta = client.meta.bind(client);
-    vi.spyOn(client, "meta").mockImplementation(async () => ({ ...await meta(), resuming }));
     const store = createAppStore();
     const sync = startSync({ client, store, connect: daemon.connect, backoff: () => 1000 });
     const advance = (ms: number) => act(async () => { await vi.advanceTimersByTimeAsync(ms); });
@@ -807,9 +855,10 @@ describe("App", () => {
       await advance(0);
       expect(daemon.requests.filter((r) => r.path === "/meta").length).toBeGreaterThan(asked);
 
-      // Back as a new process, still bringing its sessions back: the overlay goes as soon as it
-      // answers; the pane waits on a calm card (no "Disconnected", no missing window) until it can show.
-      resuming = true;
+      // Back as a new process that finished recovery before reconnect: old sync rows still
+      // need the barrier. The overlay goes at once; only the pane waits for fresh rows.
+      let resolveInbox!: (items: []) => void;
+      vi.spyOn(client, "inbox").mockReturnValueOnce(new Promise((ok) => { resolveInbox = ok; }));
       daemon.revive();
       await advance(1000);
       expect(screen.queryByTestId("reconnecting")).toBeNull();
@@ -817,7 +866,7 @@ describe("App", () => {
       // The focus goes back where it was.
       expect(document.activeElement).toBe(focused);
       expect(paneWaits()).toBe(true);
-      resuming = false;
+      resolveInbox([]);
       await advance(1000);
       expect(paneWaits()).toBe(false);
       expect(screen.getByTestId("terminal").textContent).toBe("sup1");
@@ -906,7 +955,6 @@ describe("App", () => {
 
 describe("providers in the sidebar", () => {
   beforeEach(() => localStorage.setItem(ONBOARDED_KEY, "1"));
-  const statusLine = () => within(nav()).getByTestId("status-line");
   const start = (providers = freshProviders({ claude: { path: "/home/u/.local/bin/claude", version: "2.1.47" } })) => {
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], providers });
     const store = createAppStore();
@@ -916,7 +964,7 @@ describe("providers in the sidebar", () => {
     return { daemon, stop: () => sync.stop() };
   };
 
-  it("providers: the sidebar has no providers block, and its status line says nothing about providers while none has a problem", async () => {
+  it("providers: the sidebar has no providers block, and its provider strip says nothing about providers while none has a problem", async () => {
     const { daemon, stop } = start();
     await waitFor(() => expect(treeSession("sup1")).toBeTruthy());
     await waitFor(() => expect(daemon.requests.some((r) => r.path === "/providers/installed")).toBe(true));
@@ -924,58 +972,10 @@ describe("providers in the sidebar", () => {
     expect(nav().textContent).not.toMatch(/providers/i);
     expect(nav().textContent).not.toContain("Claude Code");
     expect(within(nav()).queryByRole("button", { name: /Connect|Sign in/ })).toBeNull();
-    expect(within(nav()).queryByTestId("provider-problem")).toBeNull();
-    expect(within(nav()).getByRole("button", { name: "Open Account" })).toBeTruthy();
+    expect(within(nav()).getByRole("button", { name: "Open Account › Usage" })).toBeTruthy();
     stop();
   });
 
-  it("providers: a signed-out provider and a failed install show as warm words in the status line, signed out first, and open Settings › Providers", async () => {
-    const before = Element.prototype.scrollIntoView;
-    const scrolled = vi.fn();
-    Element.prototype.scrollIntoView = scrolled;
-    const { daemon, stop } = start(
-      freshProviders({ claude: { path: "/home/u/.local/bin/claude", version: "2.1.47" }, codex: { path: "/opt/homebrew/bin/codex", version: "0.48.0", signed_in: false } }),
-    );
-    await waitFor(() => expect(treeSession("sup1")).toBeTruthy());
-    const problem = await within(nav()).findByTestId("provider-problem");
-    expect(statusLine().lastElementChild).toBe(problem);
-    expect(within(statusLine()).getByTestId("usage-reading")).toBeTruthy();
-    // Claude works, so Codex's missing sign-in is setup to do: quiet words, not a warning.
-    expect(problem.textContent).toBe("Set up Codex");
-    expect(problem.getAttribute("data-kind")).toBe("set_up");
-    expect(problem.className).not.toContain("text-sap");
-    expect(within(statusLine()).queryByTestId("provider-problem-more")).toBeNull();
-    expect(statusLine().className).toContain("whitespace-nowrap");
-    // Clicking the words: Settings, scrolled to Providers, where the row has its Sign in.
-    fireEvent.click(problem);
-    const codex = await screen.findByTestId("provider-codex");
-    expect(within(codex).getByRole("button", { name: "Sign in to Codex" })).toBeTruthy();
-    await waitFor(() => expect(scrolled.mock.contexts.some((el) => (el as Element).id === "providers")).toBe(true));
-    expect(within(nav()).getByRole("button", { name: "Open Account" }).getAttribute("aria-current")).toBe("page");
-
-    // An install that fails reaches the status line too, after the sign-out: "+1", still there on another page.
-    daemon.installFails.opencode = 1;
-    fireEvent.click(within(screen.getByTestId("provider-opencode")).getByRole("button", { name: "Install OpenCode" }));
-    await screen.findByTestId("provider-install-opencode-failed");
-    await waitFor(() => expect(within(statusLine()).getByTestId("provider-problem-more").textContent).toBe("+1"));
-    expect(within(statusLine()).getByTestId("provider-problem").textContent).toContain("OpenCode install failed");
-    fireEvent.click(link("Knowledge"));
-    expect(within(statusLine()).getByTestId("provider-problem-more").textContent).toBe("+1");
-    // Back through the words; the failed install let go, the sign-out is all that's left.
-    fireEvent.click(within(statusLine()).getByTestId("provider-problem"));
-    fireEvent.click(within(await screen.findByTestId("provider-install-opencode-failed")).getByRole("button", { name: "Dismiss" }));
-    await waitFor(() => expect(within(statusLine()).queryByTestId("provider-problem-more")).toBeNull());
-    // An install failure alone says so in its own words.
-    fireEvent.click(within(screen.getByTestId("provider-codex")).getByRole("button", { name: "Connection details" }));
-    fireEvent.click(within(screen.getByTestId("provider-codex")).getByRole("button", { name: "Remove Codex from brindle" }));
-    await waitFor(() => expect(within(nav()).queryByTestId("provider-problem")).toBeNull());
-    daemon.installFails.antigravity = 1;
-    fireEvent.click(within(screen.getByTestId("provider-antigravity")).getByRole("button", { name: "Install Antigravity" }));
-    await waitFor(() => expect(within(nav()).getByTestId("provider-problem").textContent).toBe("Antigravity install failed"));
-    expect(screen.queryByRole("dialog")).toBeNull();
-    Element.prototype.scrollIntoView = before;
-    stop();
-  });
 });
 
 describe("closing a session", () => {
@@ -994,9 +994,9 @@ describe("closing a session", () => {
     const sync = startSync({ client, store, connect: daemon.connect });
     renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO, agent: "sup1" }} />);
     await waitFor(() => expect(screen.getByTestId("terminal").textContent).toBe("sup1"));
-    const context = within(nav()).getByTestId("session-context");
     // Finished: the count line is green, with no phase label; Close session sits under the milestone list.
-    const close = await within(context).findByRole("button", { name: "Close session" });
+    const close = await within(nav()).findByRole("button", { name: "Close session" });
+    const context = within(nav()).getByTestId("session-context");
     expect(within(context).getByTestId("goal-line").className).toContain("text-pass");
     expect(within(context).queryByTestId("goal-phase")).toBeNull();
     expect(within(context).getByRole("list", { name: "Milestones" }).compareDocumentPosition(close) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
@@ -1191,7 +1191,8 @@ describe("the sign-in gate", () => {
     localStorage.setItem(ONBOARDED_KEY, "1");
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }] });
     const { sync } = start(daemon);
-    fireEvent.click(await screen.findByRole("button", { name: "Open Account" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Open Account › Usage" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Account" }));
     fireEvent.click(await screen.findByRole("button", { name: "Sign out" }));
     await gate();
     onlySignIn();

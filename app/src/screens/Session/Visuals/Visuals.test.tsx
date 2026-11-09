@@ -553,7 +553,7 @@ describe("visuals", () => {
       expect(screen.getByTestId("terminal")).toBe(terminal);
 
       // Knowledge › Kept visuals: the kept copy opens in the same reader, read-only, on its own scheme path.
-      fireEvent.click(within(sidebar()).getByRole("button", { name: "Open Account" }));
+      fireEvent.click(within(sidebar()).getByRole("button", { name: "Open Account › Usage" }));
       fireEvent.click(within(sidebar()).getByRole("button", { name: "Knowledge" }));
       fireEvent.click(await screen.findByRole("tab", { name: /Kept visuals/ }));
       fireEvent.click(await screen.findByTestId("kept-k_1"));
