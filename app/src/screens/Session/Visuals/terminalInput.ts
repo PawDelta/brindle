@@ -123,7 +123,8 @@ export function visualsGate(client: { meta(): Promise<{ visuals?: boolean }> } |
     if (!client || closed || inFlight || now() - asked < RECHECK) return;
     asked = now();
     inFlight = true;
-    client.meta().then(meta => { if (!closed) known = meta.visuals === true; }, () => {}).finally(() => { inFlight = false; });
+    // A failed re-check leaves it unknown again, not stuck on an older "off".
+    client.meta().then(meta => { if (!closed) known = meta.visuals === true; }, () => { known = null; }).finally(() => { inFlight = false; });
   };
   ask();
   return {

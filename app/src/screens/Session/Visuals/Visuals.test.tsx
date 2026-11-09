@@ -223,7 +223,13 @@ describe("visuals", () => {
     await type("ender first", false);               // asks again, still off at this key
     await type("");                                 // sent while that answer is still pending
     expect(replies).toHaveLength(2);                // one request at a time
-    expect(words).toEqual(["failed answer", "pending answer", "render first"]);   // never the tail "ender first"
+    replies[1]!({ visuals: false });
+    await type("", false);
+    clock = 18000;
+    fail = true;
+    await type("a", false);                         // a re-check of "off" that fails leaves it unknown
+    await type("nother");
+    expect(words).toEqual(["failed answer", "pending answer", "render first", "another"]);   // never the tail "ender first"
   });
 
   it("observes Codex PTY submissions before forwarding Enter, including edits, pastes and uncertain history", async () => {
