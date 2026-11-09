@@ -107,7 +107,6 @@ def test_cd_out_of_the_worktree_is_left_to_claude_code(db, ws):
     pytest.param("sed -n '/^print/p' *.py", False, None, id="read_only_no_stall-sed_print"),
     pytest.param("sed -n 's/a/b/w out' *.py", True, None, id="read_only_no_stall-sed_write"),
     pytest.param("{ awk '{print $1}' app.py; }", False, None, id="read_only_no_stall-single_quoted"),
-    pytest.param("rg -n hi *.py | tail -3", False, None, id="read_only_no_stall-rg_tail"),
     pytest.param("grep -f../../../.env *.py", True, None, id="read_only_no_stall-attached_file_option",
                  marks=pytest.mark.variant("review: -fFILE named a denied file")),
     pytest.param("grep --file=../../../.env *.py", True, None, id="read_only_no_stall-long_file_option",

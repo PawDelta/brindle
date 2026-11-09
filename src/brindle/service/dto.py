@@ -128,6 +128,7 @@ class AgentDTO(_DTO):
     id: str
     profile: str
     provider: str
+    accepts_files: bool = False
     status: str
     mode: str
     dismissed_at: float | None = None
@@ -221,6 +222,22 @@ class InboxActionDTO(_DTO):
     path: str
 
 
+class AnalysisOfferMilestoneDTO(_DTO):
+    title: str
+    verified: bool
+
+
+class AnalysisOfferDTO(_DTO):
+    """Current session context for deciding whether to request an analysis doc."""
+    session_name: str
+    goal: str
+    detail: str | None = None
+    milestones: list[AnalysisOfferMilestoneDTO]
+    workers: int
+    repos: int
+    reasons: list[str]
+
+
 class InboxItemDTO(_DTO):
     kind: str
     reason: str
@@ -237,6 +254,7 @@ class InboxItemDTO(_DTO):
     permission: PermissionDTO | None = None
     action: InboxActionDTO | None = None
     visual_id: str | None = None   # a visual's open question: GET /v1/sessions/{root_id}/visuals
+    analysis_offer: AnalysisOfferDTO | None = None
 
 
 class VisualOptionDTO(_DTO):
@@ -249,6 +267,7 @@ class VisualAnswerDTO(_DTO):
     option: str | None
     note: str | None = None
     at: float
+    attachments: list[str] = []
 
 
 class VisualDTO(_DTO):
@@ -258,6 +277,8 @@ class VisualDTO(_DTO):
 
     id: str
     session: str
+    answer_agent_id: str
+    accepts_files: bool
     title: str
     by: str
     kind: Literal["visual", "plan"]

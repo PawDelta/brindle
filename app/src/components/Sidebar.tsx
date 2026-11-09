@@ -7,7 +7,7 @@
    (SessionContext: its goal with milestones, progress and checks, and the
    one lifecycle that carries its PR step); a handle that drags the split between them (kept in
    localStorage); then "Sessions": every open session grouped by repo, each
-   row its short goal and supervisor/model tag, a caret that folds its
+   row its short goal, model and status word, a root dot that folds its
    workers, and a close ("✕", on hover or focus; "Done · Close", always
    there, once its goal is Done or, with no goal, all in it is at rest)
    that closes the session in one click, nothing asked, the row just
@@ -303,12 +303,6 @@ function modelOf(a: { model?: string | null; profile: string; provider: string }
   return word ?? (a.profile === a.provider ? "" : a.provider);
 }
 
-/* "feat/logo-goes-home" as "Logo goes home": the row's title when a worker has no milestone. */
-function branchWords(branch: string): string {
-  const words = (branch.split("/").pop() ?? branch).replace(/[-_]+/g, " ").trim();
-  return words ? words[0].toUpperCase() + words.slice(1) : branch;
-}
-
 /* The stage word and colour a row shares with the milestones view; none when at rest. */
 type RowStage = "code" | "review" | "done";
 const STAGE_CLASS: Record<RowStage, string> = { code: "working", review: "review", done: "done" };
@@ -321,23 +315,20 @@ function stageOf(tone: DotTone, a: { mode: string }, reviewState?: string | null
   return tone === "work" ? "code" : null;
 }
 
-/* One agent in a session's tree, and its children under it: a dot, its
-   milestone's title with "role · model" muted (the id, profile and branch are
-   in the tooltip), its stage at the right. Double-clicked, it copies its info. */
+/* One agent in a session's tree, and its children under it: a dot, its role
+   in words, its stage at the right. The tooltip carries id, role, profile,
+   model, branch and milestone. Double-clicked, it copies its info. */
 function AgentRow({ node, route, navigate, repo, root, cursor, setCursor }: { node: AgentNode; repo: string; root: string; cursor: string | null; setCursor(key: string): void } & Pick<SidebarProps, "route" | "navigate">) {
   const a = node.agent;
   const alive = useAppState((s) => s.alive[a.id]);
   const active = route.screen === "session" && route.root === root && (route.agent ?? root) === a.id;
   const status = cliStatus(a, node.workspace, alive);
   const key = `agent:${a.id}`;
-  const role = a.id === root ? "supervisor" : a.profile ? roleOf(a.profile) : "";
+  const role = a.id === root ? "supervisor" : a.profile
+    ? a.profile === a.provider ? (a.mode === "review" ? "reviewer" : "developer") : roleOf(a.profile)
+    : a.mode === "review" ? "reviewer" : "developer";
   const tone = dotTone(status, a.status);
   const stage = stageOf(tone, a, node.workspace.review_state);
-  const reviewer = a.mode === "review";
-  const supervisor = role === "supervisor";
-  // A worker reads as its milestone's title (else its branch in words); a reviewer, nested, only as its role.
-  const title = a.id === root || reviewer ? "" : a.milestone || branchWords(node.workspace.branch);
-  const muted = [role, modelOf(a)].filter(Boolean).join(" · ");
   const info = [`id: ${a.id}`, `role: ${role}`, `profile: ${a.profile}`, `branch: ${node.workspace.branch}`, `milestone: ${a.milestone ?? ""}`].join("\n");
   return (
     <li className="session-tree-node">
@@ -348,7 +339,7 @@ function AgentRow({ node, route, navigate, repo, root, cursor, setCursor }: { no
         current={active ? "page" : undefined}
         treeAgent={a.id}
         row={key}
-        title={`${a.id} · ${status.glyph} ${status.label} · ${a.profile} · ${node.workspace.branch} (double-click to copy its info)`}
+        title={`${a.id} · ${status.glyph} ${status.label} · ${role} · ${a.profile} · ${a.model || modelOf(a) || "no model"} · ${node.workspace.branch}${a.milestone ? ` · milestone: ${a.milestone}` : ""} (double-click to copy its info)`}
         className={`flex w-full items-center gap-s1 rounded-r-md py-[3px] pr-s1 text-left hover:bg-surface ${active ? "bg-branch-soft" : ""} ${cursor === key ? CURSOR : ""}`}
         onOpen={() => {
           setCursor(key);
@@ -357,10 +348,8 @@ function AgentRow({ node, route, navigate, repo, root, cursor, setCursor }: { no
       >
         <Dot tone={tone} className={stage ? `st-${STAGE_CLASS[stage]}` : ""} />
         <span className="min-w-0 flex-1 truncate text-xs text-ink">
-          {title && <span data-testid="agent-title">{title} </span>}
-          {!supervisor && <span className="text-ink-3" data-testid="agent-role">{muted}</span>}
+          <span className="text-ink-3" data-testid="agent-role">{[role, modelOf(a)].filter(Boolean).join(" · ")}</span>
         </span>
-        {supervisor && <SupervisorTag model={modelOf(a)} />}
         <span className={`max-w-[50%] shrink truncate text-[11px] ${stage ? `st-${STAGE_CLASS[stage]} stage-word` : "text-ink-3"}`} data-testid="agent-status">
           {stage ?? plainLabel(status, a.status)}
         </span>
@@ -417,8 +406,37 @@ function useRowGoal(repo: string, root: string) {
 /* The goal is reached: Done, whatever the session's process is doing (live or paused). */
 const goalDone = (goal: GoalDTO | null | undefined) => !!goal && goalPhase(goal, UNKNOWN).phase === "done";
 
-function SupervisorTag({ model }: { model: string }) {
-  return <span className="supervisor-tag shrink-0 whitespace-nowrap rounded-sm border border-line-strong px-[5px] text-[10.5px] leading-4 text-ink-2">supervisor{model && <span className="text-ink-3"> · {model}</span>}</span>;
+/* The supervisor's live activity, even when its workers are folded away.
+   A finished goal wins; a paused process cannot still be doing its last stage. */
+function sessionStatusWord(session: SessionDTO, goal: GoalDTO | null | undefined) {
+  if (goalDone(goal)) return "Done";
+  if (isPaused(session)) return "Paused";
+  switch (goal?.stage) {
+    case "working":
+    case "checks": return "Working";
+    case "review": return "Reviewing";
+    case "merging": return "Merging";
+  }
+  return session.status === "processing" || session.status === "starting" ? "Working" : "Idle";
+}
+
+function sessionStageClass(word: string) {
+  switch (word) {
+    case "Working": return "st-working";
+    case "Reviewing": return "st-review";
+    case "Merging": return "st-merging";
+    case "Done": return "st-done";
+    default: return "text-ink-3";
+  }
+}
+
+function SessionStatus({ word }: { word: string }) {
+  const stageClass = sessionStageClass(word);
+  return (
+    <span className={`max-w-[50%] shrink truncate text-[11px] ${stageClass}${stageClass === "text-ink-3" ? "" : " stage-word"}`} data-testid="session-status">
+      {word}
+    </span>
+  );
 }
 
 /* The session row is its supervisor; workers branch directly from it. */
@@ -428,6 +446,7 @@ function SessionRows({ session, repo, index, route, navigate, cursor, setCursor,
   const alive = useAppState((s) => s.alive);
   const { hidden } = useSessions();
   const goal = useRowGoal(repo, root);
+  const word = sessionStatusWord(session, goal);
   const tree = useMemo(() => sessionTree(workspaces, root, hidden), [workspaces, root, hidden]);
   const members = useMemo(() => agentIds(tree), [tree]);
   const open = route.screen === "session" && route.root === root;
@@ -438,16 +457,14 @@ function SessionRows({ session, repo, index, route, navigate, cursor, setCursor,
   const done = goalDone(goal) || (goal === null && idle);
   return (
     <li className="flex flex-col gap-px" data-testid={`tree-session-${root}`} data-session={root}>
-      <div className={`group flex items-center gap-0.5 rounded-md ${open ? "bg-branch-soft" : "hover:bg-surface/60"}`}>
+      <div className={`session-root-row group flex items-center rounded-md ${open ? "bg-branch-soft" : "hover:bg-surface/60"}`} data-connected={!folded && !!tree?.children.length}>
         <button
           type="button"
-          className="ml-s1 w-[9px] shrink-0 text-center text-[10px] text-ink-3 hover:text-ink"
+          className={`session-root-dot ${sessionStageClass(word)}`}
           aria-label={folded ? `Show ${root}'s agents` : `Hide ${root}'s agents`}
           aria-expanded={!folded}
           onClick={toggle}
-        >
-          {folded ? "▸" : "▾"}
-        </button>
+        />
         <SessionGoal
           text={goal?.goal || session.goal}
           enterCopies={false}
@@ -462,7 +479,8 @@ function SessionRows({ session, repo, index, route, navigate, cursor, setCursor,
           }}
         >
           <span data-testid="session-title" className="min-w-0 flex-1 truncate text-[13px] font-medium leading-[1.35] text-ink">{session.name || goal?.summary || session.goal || goal?.goal || <span className="italic text-ink-3">No goal set</span>}</span>
-          <SupervisorTag model={tree ? modelOf(tree.agent) : modelOf({ profile: session.profile, provider: "", model: null })} />
+          <span className="shrink-0 text-[11px] text-ink-3" data-testid="session-model">{tree ? modelOf(tree.agent) : modelOf({ profile: session.profile, provider: "", model: null })}</span>
+          <SessionStatus word={word} />
         </SessionGoal>
         <RowClose root={root} done={done} onClose={onClose} list={list} />
       </div>
@@ -524,7 +542,9 @@ function PausedRow({ session, repo, route, navigate, refresh, cursor, setCursor,
   const open = route.screen === "session" && route.root === root;
   const key = `session:${root}`;
   const age = formatAge(Date.now() / 1000 - (session.status_since ?? session.created_at));
-  const done = goalDone(useRowGoal(repo, root));
+  const goal = useRowGoal(repo, root);
+  const done = goalDone(goal);
+  const word = sessionStatusWord(session, goal);
   return (
     <li className="group flex flex-wrap items-start gap-0.5 pr-[18px]">
       <button
@@ -538,7 +558,7 @@ function PausedRow({ session, repo, route, navigate, refresh, cursor, setCursor,
           navigate({ screen: "session", root, repo, agent: root });
         }}
       >
-        <Dot tone={session.status === "failed" ? "fail" : "paused"} className="mt-[6px]" />
+        <Dot tone="paused" className={`mt-[6px] ${sessionStageClass(word)}`} />
         <span className="min-w-0 flex-1">
           <span className="block truncate text-[13px] leading-[1.35] text-ink-3">{session.name || session.goal || <span className="italic">No goal set</span>}</span>
           <span className="block truncate text-[11.5px] text-ink-3">
@@ -546,6 +566,7 @@ function PausedRow({ session, repo, route, navigate, refresh, cursor, setCursor,
             {age !== "just now" && ` ${age}`}
           </span>
         </span>
+        <SessionStatus word={word} />
       </button>
       {client && <ResumeButton client={client} root={root} repo={repo} navigate={navigate} refresh={refresh} />}
       <RowClose root={root} done={done} onClose={onClose} list={list} />

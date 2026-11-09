@@ -24,6 +24,7 @@ import { useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { AgentDTO, InboxItemDTO } from "../../api/schema";
 import { DaemonContext } from "../../api/context";
 import { usePtyViews } from "../../api/ptyView";
+import type { Attachment } from "../../api/attachments";
 import { LoadingButton } from "../../components/LoadingButton";
 import { Preflight } from "../../components/Preflight";
 import { PtyTerminal, type TerminalView } from "../../components/PtyTerminal";
@@ -196,6 +197,10 @@ export function ProviderSurface({ repo, agent: listedAgent, alive, sessionStatus
     ? (["claude", "opencode"].includes(agent.provider) ? withTypedWords : withVisualInput)(client, agent.id, ready.open, () => visualsEnabled.current)
     : ready?.open, [ready?.open, client, agent?.id, agent?.provider]);
   const target = agent?.window ?? null;
+  const attachments = useMemo(() => client && agent ? {
+    acceptsFiles: agent.accepts_files === true,
+    attach: (file: Attachment) => client.attach(agent.id, file),
+  } : undefined, [client, agent?.id, agent?.accepts_files]);
   const left = agent && card && card.kind !== "starting" && card.kind !== "returning" && !(card.kind === "ended" && card.locked) && !!target && !!ready && (alive === false || STOPPED.has(agent.status));
 
   return (
@@ -204,7 +209,7 @@ export function ProviderSurface({ repo, agent: listedAgent, alive, sessionStatus
       {/* Mounted under the "starting" card too: the card leaves once this view is live, and an agent
           that stays "starting" while it waits on a startup prompt (trust, permission) is shown by it. */}
       {agent && (live || card?.kind === "starting") && ready && target && (
-        <PtyTerminal key={`${agent.id}:${recovery.attempt}:${reconnects}:${epoch}`} at={{ server: agent.tmux_server ?? null, target }} open={observedOpen!} copy={ready.copy} paste={ready.paste} onView={setView} />
+        <PtyTerminal key={`${agent.id}:${recovery.attempt}:${reconnects}:${epoch}`} at={{ server: agent.tmux_server ?? null, target }} open={observedOpen!} copy={ready.copy} paste={ready.paste} attachments={attachments} onView={setView} />
       )}
       {/* The engine's preflight items, from either Continue, whatever this pane shows: over a live
           worker's pane (the supervisor's chat is what the continue brings back) as a strip, else as the surface. */}

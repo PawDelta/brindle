@@ -304,6 +304,12 @@ body {
 .side-handle i { display: block; width: 36px; height: 4px; border-radius: 2px; background: var(--line-strong); }
 .side-handle:hover i, .side-handle[data-dragging="true"] i, .side-handle:focus-visible i { background: var(--branch); }
 .side-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--ink-3); }
+/* The root's centre shares the tree's 12px inset. Extend the trunk behind
+   the solid dot to bridge the row's lower half and the 1px gap below it. */
+.session-root-row { position: relative; gap: 7px; }
+.session-root-row[data-connected="true"]::before { content: ""; position: absolute; left: 12px; top: 50%; bottom: -1px; width: 1px; background: var(--line-strong); }
+.session-root-dot { position: relative; flex: none; width: 12px; height: 12px; margin-left: 6px; padding: 0; border-radius: 50%; background: var(--st, currentColor); cursor: pointer; }
+.session-root-dot:focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; }
 .session-tree { margin-left: 12px; }
 .session-tree-node { position: relative; padding-left: 14px; }
 .session-tree-node::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 1px; background: var(--line-strong); }

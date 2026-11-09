@@ -4363,6 +4363,10 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
     if covering:
         task += f"\n\n{covering}"
 
+    if ws.base_branch:
+        from brindle import new_tests
+        task += new_tests.review_section(ws.path, ws.base_branch)
+
     if check_summary:
         task += (f"\n\nThe repo's checks have already run on this commit:\n\n{check_summary}\n\n"
                  "Take these results into account; don't run the whole suite yourself.")
