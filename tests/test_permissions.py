@@ -131,11 +131,23 @@ def test_shell_forms(tmp_path, command, expected):
                  marks=pytest.mark.variant("bypass: negated bracket includes denied file")),
     pytest.param('grep -r x . --exclude=secret*', "ask",
                  marks=pytest.mark.variant("bypass: shell expansion narrows the exclusion")),
+    pytest.param('grep -r confidential . --include="./sub/*.py"', "ask",
+                 marks=pytest.mark.variant("bypass: BSD grep includes full paths as well as basenames")),
+    pytest.param('grep -r confidential nested --include="nested*.py"', "ask",
+                 marks=pytest.mark.variant("bypass: BSD grep wildcard can include directory separators")),
     pytest.param('git grep confidential -- secret.py', "ask", marks=pytest.mark.variant("bypass: git preset skips read deny")),
     pytest.param('git grep confidential', "ask", marks=pytest.mark.variant("bypass: implicit git search reads denied file")),
     pytest.param('git grep confidential -- .', "ask", marks=pytest.mark.variant("bypass: git directory contains denied file")),
     pytest.param('git grep confidential -- "*.py"', "ask", marks=pytest.mark.variant("bypass: git pathspec reaches denied file")),
     pytest.param('git -C nested grep confidential -- secret.py', "ask", marks=pytest.mark.variant("bypass: git -C changes read root")),
+    pytest.param('git -C nested grep confidential -- "../secret*.py"', "ask",
+                 marks=pytest.mark.variant("bypass: Git parent pathspec escapes the current directory")),
+    pytest.param('git -C nested grep confidential -- "{root}/secret*.py"', "ask",
+                 marks=pytest.mark.variant("bypass: absolute Git pathspec reaches parent directory")),
+    pytest.param('git -C nested grep confidential -- "../secret.py" "*.txt"', "ask",
+                 marks=pytest.mark.variant("bypass: Git glob must not discard another operand")),
+    pytest.param('git -C nested grep confidential -- "../*/../secret.py"', "ask",
+                 marks=pytest.mark.variant("bypass: parent traversal after a Git wildcard cannot be bounded by its prefix")),
     ('git -C nested grep confidential -- public.txt', "allow"),
     pytest.param('cat *.env', "ask", marks=pytest.mark.variant("bypass: a real file glob still reaches a read deny")),
     pytest.param('grep x secrets/*', "ask", marks=pytest.mark.variant("bypass: search operands still reach read denies")),
@@ -166,13 +178,19 @@ def test_quoted_search(tmp_path, command, expected):
     (tmp_path / "nested").mkdir()
     if "confidential" in command or "grep -r x" in command:
         (tmp_path / "secret.py").touch()
-        (tmp_path / "nested/secret.py").touch()
+        if "../" not in command and "{root}" not in command:
+            (tmp_path / "nested/secret.py").touch()
+    if "./sub/" in command:
+        (tmp_path / "sub").mkdir()
+        (tmp_path / "sub/secret.py").touch()
+        permissions.add_rule("read", str(tmp_path / "sub/secret.py"), "deny", "exact")
     (tmp_path / "nested/public.txt").touch()
     if "--include=blocked*.env" in command:
         (tmp_path / "--include=blocked.env").touch()
     if "--exclude=secret*" in command:
         (tmp_path / "--exclude=secret-other.py").touch()
     here = str(tmp_path)
+    command = command.replace("{root}", here)
     decision = permissions.decide(permissions.Request("claude", "bash", "Bash", here, here, here, command=command))
     assert decision.decision == expected, decision.reason
     if "check_new_tests" in command:

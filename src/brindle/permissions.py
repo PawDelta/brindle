@@ -1590,8 +1590,8 @@ def _readonly_git(req: Request, argv: list[str]) -> bool:
 def _git_search(req: Request, words: list[str]) -> tuple[Request, list[str]] | None:
     """A working-tree git grep, separately from the path-blind git preset.
     Revisions and magic pathspecs need Git's own interpretation; refuse them.
-    Ordinary pathspec globs are checked against the whole working directory,
-    since unlike shell globs they can match at any depth."""
+    Each pathspec glob is checked below its literal directory prefix, since
+    unlike shell globs it can match at any depth. Keep other operands intact."""
     if words[0] != "git":
         return None
     args, cwd = words[1:], req.cwd or req.worktree
@@ -1612,9 +1612,17 @@ def _git_search(req: Request, words: list[str]) -> tuple[Request, list[str]] | N
         return None  # a positional argument before -- could name a revision
     if any(p.startswith(":") or "\\" in p for p in paths):
         return None
-    if any(any(c in p for c in "*?[") for p in paths):
-        paths = ["."]
-    return replace(req, cwd=cwd), ["rg", "pattern", "--", *(paths or ["."])]
+    scopes = []
+    for path in paths:
+        first = next((i for i, c in enumerate(path) if c in "*?["), None)
+        if first is not None:
+            # A wildcard followed by parent traversal can escape the literal
+            # prefix; don't guess which directories Git will resolve it to.
+            if ".." in path[first:].split("/"):
+                return None
+            path = os.path.dirname(path[:first]) or "."
+        scopes.append(path)
+    return replace(req, cwd=cwd), ["rg", "pattern", "--", *(scopes or ["."])]
 
 
 # -- pushes -------------------------------------------------------------------------------------
@@ -2059,9 +2067,10 @@ def _search_filters(words: list[str]) -> dict[int, tuple[str, str]]:
 def _grep_selected(name: str, filters: tuple[tuple[str, str], ...], *, directory: bool = False) -> bool:
     """Whether grep can search this basename. File filters are ordered:
     the last matching include/exclude wins; directory exclusions prune walks.
-    Shell-style escapes and locale bracket classes aren't Python fnmatch,
-    so those filters cannot prove that a path is excluded."""
-    if any("\\" in p or any(c in p for c in ("[:", "[=", "[.")) for _, p in filters):
+    BSD grep also matches full paths, so a filter containing a slash cannot
+    prove exclusion from a basename alone. Shell-style escapes and locale
+    bracket classes likewise aren't faithfully handled by Python fnmatch."""
+    if any(any(c in p for c in ("/", "\\", "[:", "[=", "[.")) for _, p in filters):
         return True
     filters = tuple((kind, p.replace("[^", "[!")) for kind, p in filters)
     if directory:
@@ -2070,7 +2079,12 @@ def _grep_selected(name: str, filters: tuple[tuple[str, str], ...], *, directory
     files = [(kind, p) for kind, p in filters if kind != "--exclude-dir"]
     selected = not files or files[0][0] != "--include"
     for kind, pattern in files:
-        if fnmatch.fnmatchcase(name, pattern):
+        # BSD wildcards can consume directory separators even without a slash
+        # in the pattern (nested*.py includes nested/secret.py). An uncertain
+        # include can select a file; only a later definite exclude can prune it.
+        if kind == "--include" and any(c in pattern for c in "*?["):
+            selected = True
+        elif fnmatch.fnmatchcase(name, pattern):
             selected = kind == "--include"
     return selected
 
