@@ -12,7 +12,7 @@ import App from "../src/App";
 import { PtyViewsProvider, wsPtyView, type PtyViews } from "../src/api/ptyView";
 import type { AppUpdateStatus, AppUpdates } from "../src/api/tauri";
 import { THEME_KEY, applyTheme } from "../src/components/ThemeToggle";
-import { ONBOARDED_KEY, SIGNED_IN_SEEN_KEY, markOnboarded } from "../src/api/providers";
+import { ONBOARDED_KEY, markOnboarded } from "../src/api/providers";
 import type { Route } from "../src/routes";
 import { createAppStore } from "../src/store/store";
 import { startSync } from "../src/store/sync";
@@ -103,11 +103,10 @@ const SCENES: Record<string, Route> = {
 const daemon = new FakeDaemon(structuredClone(data));
 if (scene.startsWith("sidebar-foot-")) {
   const busy = scene === "sidebar-foot-busy";
-  localStorage.setItem(SIGNED_IN_SEEN_KEY, JSON.stringify(busy ? ["codex"] : []));
   daemon.data.usage = usageScenario(busy ? "several" : "normal");
   const claude = daemon.data.usage.providers.find((p) => p.provider === "claude")!;
   claude.windows.find((w) => w.minutes === 10080)!.used = busy ? 88 : 41;
-  daemon.data.providers = freshProviders({ claude: { path: "/bin/claude", version: "2" }, ...(busy ? { codex: { path: "/bin/codex", version: "1", signed_in: false } } : {}) });
+  daemon.data.providers = freshProviders({ claude: { path: "/bin/claude", version: "2" } });
 }
 if (scene === "knowledge-map") {
   // The reported 0.5.12 account has no hosted docs in any of its scopes.

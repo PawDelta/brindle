@@ -1,7 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../App";
-import { ONBOARDED_KEY, SIGNED_IN_SEEN_KEY } from "../api/providers";
+import { ONBOARDED_KEY } from "../api/providers";
 import { DaemonContext } from "../api/context";
 import type { SessionDTO } from "../api/schema";
 import type { Route } from "../routes";
@@ -10,7 +10,7 @@ import { createAppStore } from "../store/store";
 import { startSync } from "../store/sync";
 import { UsageProvider } from "../store/usage";
 import { StoreContext } from "../store/useStore";
-import { FakeDaemon, freshProviders, type DaemonData } from "../test/fakeDaemon";
+import { FakeDaemon, type DaemonData } from "../test/fakeDaemon";
 import { REPO, root } from "../test/fixtures";
 import { PtyViewsProvider } from "../api/ptyView";
 import { standInViews } from "../test/panes";
@@ -178,32 +178,6 @@ describe("the sidebar's weekly usage reading", () => {
     expect(second.querySelector("[role=progressbar]")).toBeNull();
     expect(second.className).toContain("text-sap");
     sync.stop();
-  });
-
-  it("a provider with no sign-in yet is quiet setup while another works, and a real sign-out stays a warning", async () => {
-    const codexOut = { codex: { path: "/bin/codex", version: "1", signed_in: false } };
-    const first = app("normal", { providers: freshProviders({ claude: { path: "/bin/claude", version: "2" }, ...codexOut }) });
-    const quiet = await screen.findByTestId("provider-problem", {}, { timeout: 3000 });
-    expect(quiet.textContent).toContain("Set up Codex");
-    expect(quiet.className).not.toContain("text-sap");
-    first.stop();
-    cleanup();
-    // Codex worked before and lost its sign-in while Claude still works: that is a real warning.
-    const working = app("normal", { providers: freshProviders({ claude: { path: "/bin/claude", version: "2" }, codex: { path: "/bin/codex", version: "1" } }) });
-    await waitFor(() => expect(localStorage.getItem(SIGNED_IN_SEEN_KEY)).toContain("codex"), { timeout: 3000 });
-    expect(screen.queryByTestId("provider-problem")).toBeNull();
-    working.stop();
-    cleanup();
-    const lapsed = app("normal", { providers: freshProviders({ claude: { path: "/bin/claude", version: "2" }, ...codexOut }) });
-    await waitFor(() => expect(screen.getByTestId("provider-problem").textContent).toContain("Codex signed out"), { timeout: 3000 });
-    expect(screen.getByTestId("provider-problem").className).toContain("text-sap");
-    lapsed.stop();
-    cleanup();
-    localStorage.removeItem(SIGNED_IN_SEEN_KEY);
-    const second = app("normal", { providers: freshProviders({ claude: { path: "/bin/claude", version: "2", signed_in: false }, ...codexOut }) });
-    await waitFor(() => expect(screen.getByTestId("provider-problem").textContent).toContain("Claude Code signed out"), { timeout: 3000 });
-    expect(screen.getByTestId("provider-problem").className).toContain("text-sap");
-    second.stop();
   });
 
   it("clicked again with Account already open, scrolls back to Usage", async () => {
