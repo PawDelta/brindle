@@ -539,6 +539,176 @@ def record_query(db, agent, ws: Workspace | None, command: str) -> None:
                           task=command.strip())
 
 
+# Search options that take a value: the letters of a short cluster, and the long names.
+_VALUE_LETTERS = "efgtTmABCdD"
+_VALUE_LONG = {"--glob", "--type", "--max-count", "--include", "--exclude", "--exclude-dir", "--file",
+               "--regexp", "--after-context", "--before-context", "--context"}
+_OPERATORS = {"&&", "||", ";", "|", "&", "|&"}
+
+
+def _tokens(line: str) -> list[tuple[str, str, bool]] | None:
+    """Shell words and operators of a line as (kind, text, attached): words get
+    POSIX quote and escape handling, operators are only those outside quotes;
+    ``attached`` is whether no space came before it. None when a quote is unclosed."""
+    out: list[tuple[str, str, bool]] = []
+    word, started, quote, i, attached = "", False, "", 0, False
+    ops = "&|;()<>"
+
+    def flush() -> None:
+        nonlocal word, started
+        if started:
+            out.append(("w", word, False))
+        word, started = "", False
+
+    while i < len(line):
+        c = line[i]
+        if quote:
+            if c == quote:
+                quote = ""
+            elif c == "\\" and quote == '"' and i + 1 < len(line) and line[i + 1] in '$`"\\':
+                i += 1
+                word += line[i]
+            else:
+                word += c
+        elif c in "'\"":
+            quote, started = c, True
+        elif c == "\\" and i + 1 < len(line):
+            i += 1
+            word, started = word + line[i], True
+        elif c == "#" and not started:   # a comment runs to the end of the line
+            while i + 1 < len(line) and line[i + 1] != "\n":
+                i += 1
+        elif c in ops:
+            attached = started
+            flush()
+            j = i
+            while j + 1 < len(line) and line[j + 1] in ops and line[j + 1] != "(" and c not in "()":
+                j += 1
+            out.append(("op", line[i:j + 1], attached))
+            i = j
+        elif c.isspace():
+            flush()
+            if c == "\n":
+                out.append(("op", ";", False))
+        else:
+            word, started = word + c, True
+        i += 1
+    if quote:
+        return None
+    flush()
+    return out
+
+
+def _commands(command: str) -> list[tuple[list[str], bool, str]]:
+    """Each command of a line as (words, inside parentheses, the operator before it),
+    split at shell operators outside quotes. A command after a pipe is left out (it reads
+    stdin); redirections are dropped from the words."""
+    tokens = _tokens(command)
+    if tokens is None:
+        return []
+    out, cur, piped, prev, depth, skip = [], [], False, "", 0, False
+    for kind, text, attached in [*tokens, ("op", ";", False)]:
+        if kind == "w":
+            if skip:
+                skip = False
+            else:
+                cur.append(text)
+        elif "<" in text or ">" in text:
+            if attached and cur and cur[-1].isdigit():
+                cur.pop()   # 2>&1
+            skip = True
+        else:
+            if cur and not piped:
+                out.append((cur, depth > 0, prev))
+            piped = text in ("|", "|&")
+            depth += text.count("(") - text.count(")")
+            prev, cur, skip = text, [], False
+    return out
+
+
+def _broad_search(command: str, cwd: str | None = None) -> bool:
+    """Whether a command line starts a recursive search across a tree: ``grep -r``,
+    ``rg`` or ``git grep`` unless every path it names is an existing file (paths are
+    read against ``cwd``)."""
+    prev_cd, start = False, cwd
+    for words, nested, before in _commands(command):
+        while words and "=" in words[0] and not words[0].startswith("-"):
+            words = words[1:]   # VAR=x prefixes
+        if not words:
+            continue
+        name, rest = os.path.basename(words[0]), words[1:]
+        if before in ("||", "&") and cwd != start:
+            cwd = None   # runs only if the cd failed, or in the background
+        if name in ("cd", "pushd", "popd") or (
+                name in ("{", "if", "then", "do", "else", "while", "until", "!", "time", "command", "builtin")
+                and any(os.path.basename(w) in ("cd", "pushd", "popd") for w in words)):
+            # Later operands are read from there, when the cd surely ran in this shell.
+            sure = (name == "cd" and not nested and before in ("", ";") or (before == "&&" and prev_cd))
+            ok = (cwd and sure and name == "cd" and len(rest) == 1
+                  and not rest[0].startswith(("-", "~")) and "$" not in rest[0])
+            cwd = os.path.normpath(os.path.join(cwd, rest[0])) if ok else None
+            prev_cd = bool(ok)
+            continue
+        prev_cd = False
+        if name == "git" and rest[:1] == ["grep"]:
+            name, rest = "git-grep", rest[1:]
+        if name not in ("rg", "git-grep", "grep", "egrep", "fgrep"):
+            continue
+        recursive = name in ("rg", "git-grep")
+        positional, skip, has_pattern_opt = [], False, False
+        for i, w in enumerate(rest):
+            if skip:
+                skip = False
+            elif w == "--":
+                positional += rest[i + 1:]
+                break
+            elif w.startswith("--"):
+                opt, eq, _ = w.partition("=")
+                if opt in ("--recursive", "--dereference-recursive"):
+                    recursive = True
+                if opt in ("--regexp", "--file"):
+                    has_pattern_opt = True
+                skip = opt in _VALUE_LONG and not eq
+            elif w.startswith("-") and len(w) > 1:
+                for j, ch in enumerate(w[1:], 1):
+                    if ch in "rR":
+                        recursive = True
+                    elif ch in _VALUE_LETTERS:
+                        has_pattern_opt = has_pattern_opt or ch in "ef"
+                        skip = j == len(w) - 1   # value attached, or the next word
+                        break
+            else:
+                positional.append(w)
+        if not recursive:
+            continue
+        paths = positional if has_pattern_opt else positional[1:]
+        if paths and (cwd is None or nested or any(c in p for p in paths for c in "$*?[`~") or all(os.path.isfile(os.path.join(cwd, p)) for p in paths)):
+            continue   # named files only (or where they are can't be told: stay quiet)
+        return True
+    return False
+
+
+NUDGE_MARK = "graph-nudge"
+NUDGE = ("brindle: this repo has a code map. To find where something lives or what calls what, "
+         "`graphify query \"<question>\" --graph {path}` is faster than a recursive search. "
+         "grep is still fine for an exact string. (Shown once.)")
+
+
+def search_nudge(db, agent, ws: Workspace | None, command: str, cwd: str | None = None) -> str | None:
+    """The one-time note for an agent's first broad recursive search in a repo with a
+    graph; None otherwise. ``cwd`` is the hook's working directory (default the
+    worktree). Never raises: it must not change the hook's answer."""
+    try:
+        if ws is None or not _broad_search(command, cwd or ws.path):
+            return None
+        path = graph_path(ws)
+        if path is None or not db.claim_mark(agent.id, NUDGE_MARK, "1")[0]:
+            return None
+        return NUDGE.format(path=path)
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def graph_queries(db, repo_root: str, agent_id: str | None = None) -> list:
     """The recorded graph queries, newest first; one agent's if ``agent_id`` is given."""
     from brindle import history
