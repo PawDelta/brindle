@@ -915,11 +915,13 @@ def test_merge_reuses_checks_only_when_the_base_brought_in_disjoint_files(db, re
 
 
 @pytest.mark.parametrize("amend, base_file, second, delta", [
-    (True, None, False, "work.py"),
+    pytest.param(True, None, False, "work.py",
+                 marks=pytest.mark.variant("an amended commit leaves the reviewed commit out of the branch's history")),
     (True, "base.py", False, "work.py"),
     pytest.param(True, "work.py", False, "work.py",
                  marks=pytest.mark.variant("the base merge conflicts with the reviewed code")),
-    (False, None, False, ""),      # the worker reported again with no new commit
+    pytest.param(False, None, False, "",
+                 marks=pytest.mark.variant("the worker reported again with no new commit")),
     pytest.param(False, None, True, None,
                  marks=pytest.mark.variant("a second reviewer of the commit reads the branch for itself")),
 ])
@@ -953,7 +955,8 @@ def test_review_round_scope_rereview_after_an_amend_and_a_base_merge_reads_only_
 
 
 @pytest.mark.parametrize("rounds, tests_only, paths, summary, merges", [
-    (2, True, ["tests/test_work.py"], "Blocker: tests/test_work.py:1 asserts nothing.", True),
+    pytest.param(2, True, ["tests/test_work.py"], "Blocker: tests/test_work.py:1 asserts nothing.", True,
+                 marks=pytest.mark.variant("past the cap, a tests-only review merges and notifies once")),
     pytest.param(2, True, ["tests/test_work.py"], "Blocker: work.py:1 is wrong, tests/test_work.py:1 misses it.",
                  False, marks=pytest.mark.variant("a product finding flagged tests-only, citing the delta")),
     pytest.param(2, True, ["work.py"], "Blocker: this is wrong.",
@@ -970,7 +973,8 @@ def test_review_round_scope_rereview_after_an_amend_and_a_base_merge_reads_only_
                  False, marks=pytest.mark.variant("an absolute link to the product file")),
     pytest.param(2, True, ["tests/work.py"], "Blocker: see {ws}/tests/../work.py:1.",
                  False, marks=pytest.mark.variant("an absolute link climbing out of tests/ to the product file")),
-    (2, False, ["tests/test_work.py"], "Blocker: tests/test_work.py:1 asserts nothing.", False),
+    pytest.param(2, False, ["tests/test_work.py"], "Blocker: tests/test_work.py:1 asserts nothing.", False,
+                 marks=pytest.mark.variant("a test finding not flagged tests-only still blocks past the cap")),
     (1, True, ["tests/test_work.py"], "Blocker: tests/test_work.py:1 asserts nothing.", False),
 ])
 def test_review_round_scope_tests_only_findings_past_the_cap(db, repo, monkeypatch, rounds, tests_only,

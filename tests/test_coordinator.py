@@ -15,13 +15,18 @@ from brindle.service.errors import ServiceError
 
 
 @pytest.mark.parametrize("setting,features,stop,expected", [
-    pytest.param(None, {coordinator.FEATURE}, False, True, id="unset-pro"),
-    pytest.param(None, set(), False, False, id="unset-free"),
-    pytest.param(None, RuntimeError(), False, False, id="unset-unknown"),
+    pytest.param(None, {coordinator.FEATURE}, False, True, id="unset-pro",
+                 marks=pytest.mark.variant("a Pro account that never opted in gets the coordinator")),
+    pytest.param(None, set(), False, False, id="unset-free",
+                 marks=pytest.mark.variant("a plan without the feature stays off")),
+    pytest.param(None, RuntimeError(), False, False, id="unset-unknown",
+                 marks=pytest.mark.variant("an unreadable entitlement fails closed")),
     pytest.param(None, license.LicenseError(), False, False, id="unset-signed-out",
                  marks=pytest.mark.variant("signed-out accounts have no stored entitlement")),
-    pytest.param(False, {coordinator.FEATURE}, False, False, id="explicit-off-pro"),
-    pytest.param(True, {coordinator.FEATURE}, True, False, id="stop-pro"),
+    pytest.param(False, {coordinator.FEATURE}, False, False, id="explicit-off-pro",
+                 marks=pytest.mark.variant("a repo that set it off stays off on a Pro plan")),
+    pytest.param(True, {coordinator.FEATURE}, True, False, id="stop-pro",
+                 marks=pytest.mark.variant("coordinator stop beats an explicit on")),
 ])
 def test_coordinator_default_for_pro(setting, features, stop, expected, db, repo, monkeypatch):
     def current(*, refresh=True):
