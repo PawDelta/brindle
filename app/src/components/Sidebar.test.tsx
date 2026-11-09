@@ -78,6 +78,18 @@ describe("Sidebar", () => {
     }
   });
 
+  it("pr line: a paused session keeps it, and clicking it doesn't open the session", async () => {
+    const openUrl = vi.fn(async () => undefined);
+    const url = "https://github.com/o/r/pull/390";
+    const { sync, navigate } = mount({ workspaces: [root, worker], sessions: [paused], goal: { ...goal, root_id: "sup0", goal_phase: "pr_open", pr_url: url, pr_state: { number: 390, state: "ready", done: 2, total: 2 } } }, undefined, undefined, openUrl);
+    onTestFinished(() => sync.stop());
+    const line = await screen.findByTestId("session-pr");
+    expect(line.textContent).toBe("PR #390 · Ready to merge");
+    fireEvent.click(line);
+    expect(openUrl).toHaveBeenCalledWith(url);
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
   it.each([
     [{ number: 391, state: "ci", done: 14, total: 18 }, "PR #391 · In CI, 14 of 18", "text-sap"],
     [{ number: 387, state: "ready", done: 4, total: 4 }, "PR #387 · Ready to merge", "text-pass"],

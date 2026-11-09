@@ -1039,7 +1039,6 @@ def _rollup(*checks, state="OPEN", mergeable="MERGEABLE"):
     (_rollup("SUCCESS", "FAILURE", None), ("failed", 2, 3)),
     (_rollup("SUCCESS", mergeable="CONFLICTING"), ("unknown", 1, 1)),    # never a false ready
     (_rollup(), ("unknown", 0, 0)),                                        # no checks reported yet
-    (None, ("unknown", 0, 0)),                                             # the read failed
     (_rollup("SUCCESS", state="MERGED"), None),
 ])
 def test_session_pr_state_of_a_payload(payload, expected):
@@ -1052,17 +1051,41 @@ def test_session_pr_state_of_a_payload(payload, expected):
 def test_session_pr_state_is_one_shared_cached_read(db, root, monkeypatch):
     from brindle.daemon import session_review
 
-    class Inline:
-        def submit(self, fn, *args):
-            future = Future()
-            future.set_result(fn(*args))
-            return future
+    class Deferred:
+        """A pool whose reads wait until the test lets them land."""
+        def __init__(self):
+            self.queue = []
 
-    url, reads = "https://github.com/o/r/pull/391", []
-    monkeypatch.setattr(session_review, "_pr_pool", Inline())
+        def submit(self, fn, *args):
+            self.queue.append((fn, args))
+            return Future()
+
+        def land(self):
+            while self.queue:
+                fn, args = self.queue.pop(0)
+                fn(*args)
+
+    url, pool, answers = "https://github.com/o/r/pull/391", Deferred(), [None, _rollup("SUCCESS", None)]
+    unknown = {"number": 391, "state": "unknown", "done": 0, "total": 0}
+    db.conn.execute("INSERT INTO session_prs (root_id, branch, url, opened_at) VALUES ('boss', 'feat', ?, 1)", (url,))
+    monkeypatch.setattr(session_review, "_pr_pool", pool)
     monkeypatch.setattr(session_review, "_pr_cache", {})
-    monkeypatch.setattr(workspaces, "pull_request_checks", lambda u, cwd: reads.append(u))   # gh fails: None
-    first = session_review.session_pr_state(db, "boss", url)      # nothing known yet: unknown, read started
-    second = session_review.session_pr_state(db, "boss", url)     # the failed read is cached too
-    assert first == second == {"number": 391, "state": "unknown", "done": 0, "total": 0}
-    assert reads == [url] and session_review.session_pr_state(db, "boss", None) is None
+    monkeypatch.setattr(session_review, "_pr_flights", {})
+    monkeypatch.setattr(session_review, "_pr_changed", set())
+    monkeypatch.setattr(workspaces, "pull_request_checks", lambda u, cwd: answers.pop(0))
+    announced = lambda: db.conn.execute("SELECT COUNT(*) FROM events WHERE kind = 'session.pr_checks'").fetchone()[0]
+
+    # Overlapping asks while the read is out share it; until it lands the line is unknown.
+    assert session_review.session_pr_state(db, "boss", url) == session_review.session_pr_state(db, "boss", url) == unknown
+    assert len(pool.queue) == 1 and session_review.session_pr_state(db, "boss", None) is None
+    pool.land()                                   # gh failed: unknown is cached like any answer, nothing to announce
+    session_review.refresh_pr_states(db)
+    assert session_review.session_pr_state(db, "boss", url) == unknown and not pool.queue and announced() == 0
+    # Once old, the sweep re-reads it without any row asking, and announces the change once.
+    session_review._pr_cache[url] = (0.0, unknown)
+    session_review.refresh_pr_states(db)
+    assert len(pool.queue) == 1
+    pool.land()
+    session_review.refresh_pr_states(db)
+    session_review.refresh_pr_states(db)
+    assert session_review.session_pr_state(db, "boss", url)["state"] == "ci" and announced() == 1 and not pool.queue

@@ -203,6 +203,7 @@ _pr_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="pr-checks")
 _pr_lock = threading.RLock()
 _pr_cache: dict[str, tuple[float, dict[str, Any] | None]] = {}
 _pr_flights: dict[str, Future] = {}
+_pr_changed: set[str] = set()      # PRs whose line changed, until refresh_pr_states announces them
 
 
 def pr_state_of(url: str, payload: dict | None) -> dict[str, Any] | None:
@@ -245,32 +246,64 @@ def _read_pr_state(url: str, cwd: str) -> None:
         log.exception("brindle: couldn't read a session PR's checks")
         state = pr_state_of(url, None)
     with _pr_lock:
+        before = _pr_cache[url][1] if url in _pr_cache else pr_state_of(url, None)
         _pr_cache[url] = (time.monotonic(), state)
         _pr_flights.pop(url, None)
+        if state != before:
+            _pr_changed.add(url)
+
+
+def _ask_pr_state(url: str, cwd: str) -> None:
+    """Start a read of the PR's checks unless the cache is fresh or one is
+    already running (decided together under the lock, so overlapping askers
+    make one read between them)."""
+    with _pr_lock:
+        cached = _pr_cache.get(url)
+        if url in _pr_flights or (cached and time.monotonic() - cached[0] < PR_STATE_TTL):
+            return
+        flight = _pr_pool.submit(_read_pr_state, url, cwd)
+        if not flight.done():
+            _pr_flights[url] = flight
 
 
 def session_pr_state(db: DB, root_id: str, url: str | None) -> dict[str, Any] | None:
     """The PR line for the session's open PR at ``url``: one cached read per
     PR however many rows or clients ask (refreshed in the background once
     ``PR_STATE_TTL`` old, a failed read cached like any other, so GitHub is
-    asked at most once per window). Until the first read lands: unknown."""
+    asked at most once per window). Until the first read lands: unknown.
+    ``refresh_pr_states`` keeps it fresh and tells the app when it changes."""
     if not url:
         return None
-    now = time.monotonic()
     with _pr_lock:
         cached = _pr_cache.get(url)
-        stale = cached is None or now - cached[0] >= PR_STATE_TTL
-        flying = url in _pr_flights
-    if stale and not flying:
+    if cached is None or time.monotonic() - cached[0] >= PR_STATE_TTL:
         root = db.get_agent(root_id)
         ws = db.get_workspace(root.workspace_id) if root else None
         if ws is not None:
+            _ask_pr_state(url, ws.repo_root)
             with _pr_lock:
-                if url not in _pr_flights:
-                    flight = _pr_pool.submit(_read_pr_state, url, ws.repo_root)
-                    if not flight.done():
-                        _pr_flights[url] = flight
+                cached = _pr_cache.get(url)
     return cached[1] if cached else pr_state_of(url, None)
+
+
+def refresh_pr_states(db: DB) -> None:
+    """Daemon thread, every sweep: keep each open session PR's checks fresh
+    and announce (``session.pr_checks``, which the app's goal reloads on) the
+    ones whose line changed since it was last shown."""
+    for row in db.conn.execute("SELECT root_id, url FROM session_prs WHERE url IS NOT NULL"
+                               " AND merged_at IS NULL").fetchall():
+        root = db.get_agent(row["root_id"])
+        ws = db.get_workspace(root.workspace_id) if root else None
+        if ws is not None:
+            _ask_pr_state(row["url"], ws.repo_root)
+    with _pr_lock:
+        changed = set(_pr_changed)
+        _pr_changed.clear()
+    if not changed:
+        return
+    for row in db.conn.execute("SELECT root_id, url FROM session_prs WHERE url IS NOT NULL").fetchall():
+        if row["url"] in changed:
+            bus.publish_agent(db, "session.pr_checks", row["root_id"], url=row["url"])
 
 
 MERGE_POLL_SECONDS = 60.0
@@ -967,6 +1000,10 @@ class ReadinessWatch:
         if spawn.room() < 1:
             return []
         poll_merged(db)
+        try:
+            refresh_pr_states(db)
+        except Exception:  # noqa: BLE001 - a missed refresh never stops the sweep
+            log.exception("brindle: couldn't refresh session PR checks")
         try:
             session_sync.tell_refused_fetches(db)
         except Exception:  # noqa: BLE001 - a missed notice never stops the sweep

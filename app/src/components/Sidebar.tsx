@@ -564,7 +564,7 @@ function ResumeButton({ client, root, repo, navigate, refresh }: { client: Daemo
 }
 
 /* A paused or failed session, dimmed at the foot of its repo's group: its goal, and how long ago it stopped; Resume; a close on hover or focus, "Done · Close" once its goal is Done. */
-function PausedRow({ session, repo, route, navigate, refresh, cursor, setCursor, onClose, list }: { session: SessionDTO; repo: string; refresh: () => Promise<void>; cursor: string | null; setCursor(key: string): void; onClose: CloseRow; list: RefObject<HTMLElement | null> } & Pick<SidebarProps, "route" | "navigate">) {
+function PausedRow({ session, repo, route, navigate, refresh, cursor, setCursor, onClose, list, openUrl }: { session: SessionDTO; repo: string; refresh: () => Promise<void>; cursor: string | null; setCursor(key: string): void; onClose: CloseRow; list: RefObject<HTMLElement | null>; openUrl: OpenUrl } & Pick<SidebarProps, "route" | "navigate">) {
   const root = session.id;
   const client = useContext(DaemonContext);
   const open = route.screen === "session" && route.root === root;
@@ -598,6 +598,7 @@ function PausedRow({ session, repo, route, navigate, refresh, cursor, setCursor,
       </button>
       {client && <ResumeButton client={client} root={root} repo={repo} navigate={navigate} refresh={refresh} />}
       <RowClose root={root} done={done} onClose={onClose} list={list} />
+      <div className="basis-full"><PrLine goal={goal} openUrl={openUrl} /></div>
     </li>
   );
 }
@@ -924,7 +925,7 @@ export function Sidebar({ route, navigate, refresh, openUrl, onBackFromSettings 
                   {rested
                     .filter(({ session }) => pausedOpen.has(repo.repo_root) || session.id === selected?.root)
                     .map(({ session }) => (
-                      <PausedRow key={session.id} session={session} repo={repo.repo_root} route={route} navigate={navigate} refresh={refresh ?? noRefresh} cursor={cursor} setCursor={setCursor} onClose={closeRow} list={list} />
+                      <PausedRow key={session.id} session={session} repo={repo.repo_root} route={route} navigate={navigate} refresh={refresh ?? noRefresh} cursor={cursor} setCursor={setCursor} onClose={closeRow} list={list} openUrl={openUrl ?? openExternal} />
                     ))}
                 </ul>
               </div>
