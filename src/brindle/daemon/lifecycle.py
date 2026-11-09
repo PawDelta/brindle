@@ -882,6 +882,7 @@ def serve(*, unix: bool = True, tcp: bool = False, idle_exit: bool = False) -> d
             try:
                 await asyncio.to_thread(resume_after_start, recovery)
             finally:
+                activity.state.recovered_at = time.time()
                 activity.state.resuming = False
 
         watcher = asyncio.create_task(_watch(server, activity, idle_exit, parent=parent))

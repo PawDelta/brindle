@@ -41,6 +41,7 @@ async def meta(request: Request) -> JSONResponse:
         "pty_view": True,       # WS /v1/pty_view: the Windows app's WSL bridge
         "visuals": visuals.enabled(),   # the visuals capability: the app shows the feature only when on
         "resuming": getattr(request.app.state, "resuming", False),
+        "recovered_at": getattr(request.app.state, "recovered_at", None),
         "recovery": recovery.progress() if recovery else None,
     })
 
