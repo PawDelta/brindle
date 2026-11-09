@@ -1635,8 +1635,8 @@ export class DaemonClient {
     return this.delete<VisualDTO>(`/visuals/${encodeURIComponent(id)}/keep`, {});
   }
 
-  markVisualRead(id: string) {
-    return this.post<unknown>(`/visuals/${encodeURIComponent(id)}/read`, {});
+  markVisualRead(id: string, rev: number) {
+    return this.post<unknown>(`/visuals/${encodeURIComponent(id)}/read`, { rev });
   }
 
   /* A planning doc: the visual of kind "plan" with the same id. */
