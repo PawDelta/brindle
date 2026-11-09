@@ -70,6 +70,23 @@ describe("App", () => {
       });
     } finally { sync.stop(); native.mockRestore(); invoke.mockRestore(); }
   });
+  it("a sync read superseded by the gate's snapshot is read again, so the inbox still syncs without another event", async () => {
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root] });
+    const client = daemon.client();
+    const store = createAppStore();
+    // The sync's first inbox read is still out when the gate (daemon not recovering) applies its own snapshot.
+    const read = client.inbox.bind(client);
+    let finish!: () => void;
+    vi.spyOn(client, "inbox").mockImplementationOnce(() => new Promise((ok) => { finish = () => void read().then(ok); }));
+    const sync = startSync({ client, store, connect: daemon.connect });
+    try {
+      renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO }} />);
+      await screen.findByTestId("terminal");
+      expect(store.getState().synced).toBe(false);
+      await act(async () => { finish(); await flush(); await sync.idle(); });
+      expect(store.getState().synced).toBe(true);
+    } finally { sync.stop(); }
+  });
   it("shows the app at once while sessions come back; only the pane waits until they are ready", async () => {
     vi.useFakeTimers();
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root] });
@@ -188,6 +205,36 @@ describe("App", () => {
       await act(async () => { await vi.advanceTimersByTimeAsync(500); });
       expect(paneWaits()).toBe(true);
       expect(daemon.prioritized).toEqual(["sup2"]);
+    } finally { sync.stop(); vi.useRealTimers(); }
+  });
+
+  it("panes per session: a session released while others are pending shows after one read, without waiting for a slow store refresh", async () => {
+    vi.useFakeTimers();
+    const rootB = { ...root, id: "proj2", agents: root.agents?.map((a) => ({ ...a, id: "sup2", window: null })) };
+    const daemon = new FakeDaemon({
+      repos: [{ repo_root: REPO, name: "proj" }],
+      sessions: [session, { ...session, id: "sup2" }],
+      workspaces: [root, rootB],
+    });
+    const client = daemon.client();
+    const store = createAppStore();
+    const meta = client.meta.bind(client);
+    vi.spyOn(client, "meta").mockImplementation(async () => ({ ...await meta(), resuming: true, recovery: { done: 1, total: 2, pending: ["sup2"] } }));
+    // The slow daemon: the sync's first read (rows from before recovery) is still out; only the gate's read comes back.
+    let finish!: (rows: typeof daemon.data.workspaces) => void;
+    const read = client.snapshot.bind(client);
+    // Sync's first read, then the gate's; every later one (the background refresh) is still out too.
+    vi.spyOn(client, "snapshot").mockImplementationOnce(() => new Promise((ok) => { finish = ok; })).mockImplementationOnce(read).mockReturnValue(new Promise(() => {}));
+    const sync = startSync({ client, store, connect: daemon.connect });
+    try {
+      renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO }} />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(300); });
+      expect(screen.getByTestId("terminal").textContent).toBe("sup1");
+      // The old read comes back late: it must not put the pre-recovery window under the released session.
+      await act(async () => { finish([{ ...root, agents: root.agents?.map((a) => ({ ...a, window: windowOf("old") })) }, rootB]); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(300); });
+      expect(store.getState().workspaces.find((w) => w.id === "proj")?.agents?.[0].window).toBe(windowOf("sup1"));
+      expect(screen.getByTestId("terminal").textContent).toBe("sup1");
     } finally { sync.stop(); vi.useRealTimers(); }
   });
 
