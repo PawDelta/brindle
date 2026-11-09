@@ -42,7 +42,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import brindle
-from brindle import procs, spawn, upgrade
+from brindle import procs, spawn, staff_build, upgrade
 from brindle.config import brindle_home
 
 HOST = "127.0.0.1"
@@ -596,7 +596,8 @@ def _resume_session(db, entry: dict, server: str | None, recovery: Recovery, env
                               gate=recovery.launching, recovery_env=env)
         finally:
             # A warning, so it's seen: the daemon's log is its stderr (app-daemon.log), warnings only.
-            log.warning("brindle: session %s recovery: %s", root.id, ", ".join(steps))
+            if staff_build():
+                log.warning("brindle: session %s recovery: %s", root.id, ", ".join(steps))
         if agents.panes_match(db, root.id, held):
             recovery.settled(entry)
         return True
@@ -700,8 +701,9 @@ def resume_after_start(recovery: Recovery | None = None) -> list[str]:
         _join(threads, recovery)
     finally:
         recovery.idle.set()
-        log.warning("brindle: recovery of %d session(s) took %.2fs (%d back; ordering %.2fs)",
-                    len(entries), time.monotonic() - began, len(resumed), ordered)
+        if staff_build():
+            log.warning("brindle: recovery of %d session(s) took %.2fs (%d back; ordering %.2fs)",
+                        len(entries), time.monotonic() - began, len(resumed), ordered)
     return resumed
 
 

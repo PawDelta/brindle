@@ -254,10 +254,10 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    startup::begin();
     #[cfg(unix)]
     raise_open_files();
     let context = context();
+    startup::begin(&context.package_info().version.to_string());
     match std::env::args().nth(1).as_deref() {
         Some("--version") => {
             println!("brindle {}", context.package_info().version);

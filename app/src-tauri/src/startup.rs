@@ -1,4 +1,4 @@
-//! One fixed-size JSON line per process, updated in place as steps arrive.
+//! Staff builds only: one fixed-size JSON line, updated in place as steps arrive.
 //! Incomplete starts remain useful, including starts with no terminal to attach.
 use std::fs::File;
 use std::io::{Seek, SeekFrom, Write};
@@ -60,8 +60,13 @@ impl<W: Write + Seek> Timing<W> {
 
 static TIMING: OnceLock<Mutex<Timing<File>>> = OnceLock::new();
 
-pub fn begin() {
+pub fn begin(version: &str) {
+    if !crate::updates::is_staff_build(version) { return; }
     let _ = TIMING.set(Mutex::new(Timing::new()));
+}
+
+pub(crate) fn staff_build() -> bool {
+    TIMING.get().is_some()
 }
 
 pub fn open(app: &tauri::AppHandle) {

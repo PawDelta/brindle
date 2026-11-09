@@ -357,6 +357,7 @@ def test_stopped_during_concurrent_recovery_a_launch_finishes_and_the_rest_stay_
 
     from brindle.daemon import lifecycle
 
+    monkeypatch.setenv("BRINDLE_STAFF_BUILD", "1")
     _recorded_sessions(db, root, monkeypatch, [("launching", "a"), ("preflight", "b"), ("unstarted", "c")])
     monkeypatch.setattr(lifecycle, "RESUME_PARALLEL", 2)
     monkeypatch.setattr(lifecycle, "RESUME_WAIT", 0)    # only the launch in flight holds stop up
@@ -745,6 +746,7 @@ def test_critical_memory_holds_a_recovery_even_with_nothing_running(monkeypatch)
 def test_resume_key_timing(db, root, monkeypatch, caplog):
     from brindle import autopilot, identity_lock, keystore, tasks
 
+    monkeypatch.setenv("BRINDLE_STAFF_BUILD", "1")
     now, names = [100.0], ["TIMING_KEY_A", "TIMING_KEY_B"]
 
     def advance(seconds, result=None):
@@ -804,6 +806,25 @@ def test_resume_key_timing(db, root, monkeypatch, caplog):
                         "credential_writes_s": 0.5, "identity_s": 0.75, "goals_s": 0.5,
                         "provider_prep_s": 1.0, "launch_s": 3.0, "pipeline_s": 1.25, "tasks_s": 1.5}]
     assert "secret-timing-value" not in caplog.text and all(name not in caplog.text for name in names)
+    # Exercise both lifecycle timing lines through the real startup dispatcher.
+    db.update_agent("chat", tmux_server=tmux.current_server())
+    monkeypatch.setattr(lifecycle, "_read_resume", lambda: [{"id": "chat", "server": tmux.current_server()}])
+    monkeypatch.setattr(lifecycle, "_record_resume", lambda entries: True)
+    monkeypatch.setattr(agents, "panes_match", lambda *a: True)
+    monkeypatch.setattr(procs, "stop", lambda *a, **kw: 0)
+    caplog.clear()
+    assert lifecycle.resume_after_start() == ["chat"]
+    assert len(caplog.records) == 4
+    monkeypatch.delenv("BRINDLE_STAFF_BUILD")
+    caplog.clear()
+    assert lifecycle.resume_after_start() == ["chat"]
+    assert not caplog.records
+    real_resume = agents.resume
+    monkeypatch.setattr(agents, "resume", mock.Mock(side_effect=agents.AgentError("unavailable")))
+    assert lifecycle.resume_after_start() == []
+    assert len(caplog.records) == 1 and caplog.records[0].exc_info
+    monkeypatch.setattr(agents, "resume", real_resume)
+    monkeypatch.setenv("BRINDLE_STAFF_BUILD", "1")
     caplog.clear()
     agents.resume(db, "chat")
     assert not caplog.records
