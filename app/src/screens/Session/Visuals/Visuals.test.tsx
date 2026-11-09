@@ -821,6 +821,25 @@ describe("visuals", () => {
     await act(async () => finish[3]({ paths: ["/up/late.txt"], text: "" }));
     expect(screen.queryByText("late.txt")).toBeNull();
     expect(screen.queryByRole("alert")).toBeNull();
+    const currentNote = screen.getByLabelText("Add a note") as HTMLInputElement;
+    drops.clipboard = () => Promise.resolve([]);
+    await act(async () => { fireEvent.paste(currentNote, { clipboardData: { files: [], getData: () => "a\r\nb" } }); });
+    currentNote.setSelectionRange(currentNote.value.length, currentNote.value.length);
+    await act(async () => { fireEvent.paste(currentNote, { clipboardData: { files: [], getData: () => "x" } }); });
+    const outcomes = [currentNote.value];
+    attach.mockResolvedValue({ paths: [], text: "" });
+    for (const order of [[0, 1], [1, 0]]) {
+      fireEvent.change(currentNote, { target: { value: "keep" } });
+      const pending: ((files: unknown[]) => void)[] = [];
+      drops.clipboard = () => new Promise(done => pending.push(done));
+      for (const name of ["one.png", "two.png"]) {
+        currentNote.select();
+        fireEvent.paste(currentNote, { clipboardData: { files: [], getData: () => name } });
+      }
+      for (const index of order) await act(async () => pending[index]([{ path: index ? "/two.png" : "/one.png" }]));
+      outcomes.push(currentNote.value);
+    }
+    expect(outcomes).toEqual(["abx", "keep", "keep"]);
   });
 
   const open: VisualSource = { kind: "session", id: visual.id, rev: visual.rev };

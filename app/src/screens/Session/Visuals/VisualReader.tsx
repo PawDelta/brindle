@@ -157,7 +157,9 @@ function AnswerBar({ client, visual, picked, onPick, onAnswered }: { client: Vis
   // Insert text immediately so later edits and pastes keep their normal order.
   // Tag only the inserted characters: a native file result removes its filename,
   // while text-only results and clipboard errors leave the person's edits intact.
-  const noteChars = useRef<{ char: string; paste?: symbol }[]>([]);
+  type NoteChar = { char: string; paste?: symbol };
+  const noteChars = useRef<NoteChar[]>([]);
+  const replacedNotes = useRef(new Map<symbol, NoteChar[]>());
   const showNote = () => setNote(noteChars.current.map(part => part.char).join(""));
   const editNote = (value: string) => {
     const before = noteChars.current.map(part => part.char).join("");
@@ -277,7 +279,9 @@ function AnswerBar({ client, visual, picked, onPick, onAnswered }: { client: Vis
             onPaste={(e) => {
               if (!canAttach) return;
               const files = Array.from(e.clipboardData.files);
-              const text = e.clipboardData.getData?.("text") ?? "";
+              // A text input strips CR/LF; stored characters and DOM offsets must agree.
+              const rawText = e.clipboardData.getData?.("text") ?? "";
+              const text = rawText.replace(/[\r\n]/g, "");
               if (isTauri()) {
                 // Finder also supplies filename text; remove that insertion if native files are found.
                 e.preventDefault();
@@ -285,22 +289,36 @@ function AnswerBar({ client, visual, picked, onPick, onAnswered }: { client: Vis
                 const start = input.selectionStart ?? note.length;
                 const end = input.selectionEnd ?? start;
                 const paste = Symbol();
-                const selected = text ? noteChars.current.splice(start, end - start, ...text.split("").map(char => ({ char, paste }))) : [];
+                replacedNotes.current.set(paste, text ? noteChars.current.splice(start, end - start, ...text.split("").map(char => ({ char, paste }))) : []);
                 showNote();
                 input.value = noteChars.current.map(part => part.char).join("");
                 input.setSelectionRange(start + text.length, start + text.length);
                 void upload(async () => {
-                  const copied = await clipboardAttachments();
-                  if (!active.current) return [];
-                  if (copied.length) {
-                    const first = noteChars.current.findIndex(part => part.paste === paste);
-                    noteChars.current = noteChars.current.filter(part => part.paste !== paste);
-                    if (first >= 0) noteChars.current.splice(first, 0, ...selected);
-                    showNote();
-                    return copied;
+                  try {
+                    const copied = await clipboardAttachments();
+                    if (!active.current) return [];
+                    if (copied.length) {
+                      const selected = replacedNotes.current.get(paste) ?? [];
+                      const restore = (chars: NoteChar[]) => {
+                        const first = chars.findIndex(part => part.paste === paste);
+                        const kept = chars.filter(part => part.paste !== paste);
+                        if (first >= 0) kept.splice(first, 0, ...selected);
+                        return kept;
+                      };
+                      noteChars.current = restore(noteChars.current);
+                      // Later pastes may retain this insertion in their replaced selection.
+                      // Reconcile those snapshots too, so they cannot resurrect a filename.
+                      for (const [other, chars] of replacedNotes.current) {
+                        if (other !== paste) replacedNotes.current.set(other, restore(chars));
+                      }
+                      showNote();
+                      return copied;
+                    }
+                    if (!rawText) return Promise.all(files.map(fileAttachment));
+                    return [];
+                  } finally {
+                    replacedNotes.current.delete(paste);
                   }
-                  if (!text) return Promise.all(files.map(fileAttachment));
-                  return [];
                 });
               } else if (files.length) {
                 e.preventDefault();
