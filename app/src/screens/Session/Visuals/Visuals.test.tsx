@@ -14,9 +14,6 @@ import { standInViews } from "../../../test/panes";
 import type { PlansClient, VisualsClient } from "./client";
 import { VisualFrame, type VisualFrameProps, type VisualSource } from "./frame";
 import { StoreContext } from "../../../store/useStore";
-import { DaemonContext } from "../../../api/context";
-import { SessionsProvider } from "../../../store/sessions";
-import { InboxScreen } from "../../Inbox/InboxScreen";
 import { VisualReader } from "./VisualReader";
 import { useVisuals } from "./useVisuals";
 import { OfferChip } from "./OfferChip";
@@ -743,25 +740,22 @@ describe("visuals", () => {
     const store = createAppStore();
     const sync = startSync({ client, store, repo: REPO, connect: daemon.connect });
     const answer = vi.spyOn(client, "answerVisual");
-    function Shell() {
-      const [open, setOpen] = useState(false);
-      return open
-        ? <VisualReader client={client} visual={visual} onAnswered={() => {}} onBack={() => setOpen(false)} Frame={() => <div />} />
-        : <InboxScreen client={client} refresh={sync.refresh} onOpen={() => setOpen(true)} onNavigate={() => {}} onOpenRule={() => {}} />;
-    }
-    render(
-      <DaemonContext.Provider value={client}><StoreContext.Provider value={store}><SessionsProvider client={client}><Shell /></SessionsProvider></StoreContext.Provider></DaemonContext.Provider>,
-    );
-    await screen.findByRole("button", { name: "Open visual" });
-    expect(screen.getAllByTestId("inbox-card")).toHaveLength(1);
-    fireEvent.click(screen.getByRole("button", { name: "Open visual" }));
-    fireEvent.click(await screen.findByTestId("visual-dismiss"));
-    await waitFor(() => expect(screen.queryByTestId("visual-reader")).toBeNull());
-    await waitFor(() => expect(screen.queryAllByTestId("inbox-card")).toHaveLength(0));
-    expect(daemon.visualDismissals).toEqual([{ id: visual.id, rev: visual.rev }]);
-    expect((await client.visuals(visual.session)).map((v) => v.id)).toEqual([visual.id]);
-    expect(answer).not.toHaveBeenCalled();
-    sync.stop();
+    try {
+      render(<PtyViewsProvider value={standInViews}><App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "inbox", session: "sup1" }} /></PtyViewsProvider>);
+      const card = (await screen.findAllByTestId("inbox-card")).find((candidate) => candidate.dataset.kind === "visual")!;
+      await waitFor(() => expect((within(card).getByRole("button", { name: "Open visual" }) as HTMLButtonElement).disabled).toBe(false));
+      expect(store.getState().inbox).toHaveLength(1);
+      fireEvent.click(within(card).getByRole("button", { name: "Open visual" }));
+      fireEvent.click(await screen.findByTestId("visual-dismiss"));
+      // Back to the session, as Back does; the Inbox count and card clear, the visual stays in the session.
+      expect((await screen.findByTestId("terminal")).textContent).toBe("sup1");
+      expect(screen.queryByTestId("visual-reader")).toBeNull();
+      await waitFor(() => expect(store.getState().inbox).toEqual([]));
+      expect(screen.queryByTestId("inbox-card")).toBeNull();
+      expect(daemon.visualDismissals).toEqual([{ id: visual.id, rev: visual.rev }]);
+      expect((await client.visuals(visual.session)).map((v) => v.id)).toEqual([visual.id]);
+      expect(answer).not.toHaveBeenCalled();
+    } finally { sync.stop(); }
   });
 
   const takesFiles: VisualDTO = { ...visual, answer_agent_id: "a_sup", accepts_files: true };
