@@ -233,6 +233,7 @@ export function ProviderSurface({ repo, agent: listedAgent, alive, sessionStatus
                     <span className="size-3 shrink-0 animate-spin rounded-full border-2 border-branch border-t-transparent" aria-hidden />
                     <h2 className="text-base font-semibold">Bringing {name} back…</h2>
                   </div>
+                  {panes.recovery && <p className="text-xs text-ink-3" data-testid="recovery-progress">Reopening sessions, {panes.recovery.done} of {panes.recovery.total}</p>}
                   <p className="text-sm text-ink-2">brindle is reopening your sessions. The conversation shows here in a moment; everything else already works.</p>
                 </>
               )}

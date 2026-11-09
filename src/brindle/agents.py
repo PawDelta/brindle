@@ -1354,8 +1354,11 @@ def _launch_resolved(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
         # Resuming a conversation without delivering a new task must not
         # classify the previous turn's error as a current launch failure.
         db.conn.execute("DELETE FROM launch_health WHERE agent_id=?", (agent.id,))
+    opening = time.monotonic()
     target = _open_window(db, agent, ws, f"{profile.name}-{agent.id[:4]}", argv, watch_pane,
                           **({"m": m} if m is not None else {}))
+    if (spent := _window_seconds.get()) is not None:
+        spent.append(time.monotonic() - opening)
     from brindle import launch_health
     launch_health.bind(db, agent, target)
     if provider.name != "shell":
@@ -1792,6 +1795,7 @@ def resume(db: DB, root_id: str, *, watch_pane: bool = True,
     and held only from the launch's first change of what runs (_gate_commit),
     so a slow preflight (an identity probe) never holds the caller's stop up."""
     keys = _resume_keys.set({})
+    windows = _window_seconds.set([])
     try:
         if gate is None:
             return _resume(db, root_id, watch_pane=watch_pane, only=only, recovery_env=recovery_env)
@@ -1801,10 +1805,12 @@ def resume(db: DB, root_id: str, *, watch_pane: bool = True,
         finally:
             _launch_gate.reset(token)
     finally:
+        _window_seconds.reset(windows)
         _resume_keys.reset(keys)
 
 
 _launch_gate: ContextVar = ContextVar("brindle_launch_gate", default=None)   # resume's gate, for every launch it makes
+_window_seconds: ContextVar[list[float] | None] = ContextVar("brindle_window_seconds", default=None)   # this resume's _open_windows
 # The credentials this resume chose, for its own launches: os.environ is the whole
 # daemon's, and another session resuming beside this one writes its choice there too.
 _resume_keys: ContextVar[dict[str, str] | None] = ContextVar("brindle_resume_keys", default=None)
@@ -1831,6 +1837,7 @@ def _resume(db: DB, root_id: str, *, watch_pane: bool, only, recovery_env) -> li
     from brindle import identity_lock, providers
 
     _gate_check()
+    began = time.monotonic()
     providers.invalidate_signed_in()
     from brindle import keystore, secrets
 
@@ -1862,6 +1869,8 @@ def _resume(db: DB, root_id: str, *, watch_pane: bool, only, recovery_env) -> li
             os.environ[k] = val
             if (chosen := _resume_keys.get()) is not None:
                 chosen[k] = val
+
+    keys_took = time.monotonic() - began
 
     def restartable(a: Agent) -> bool:
         # One back at work left done: paused by a daemon from before finished_reporting
@@ -1962,6 +1971,10 @@ def _resume(db: DB, root_id: str, *, watch_pane: bool, only, recovery_env) -> li
             db.update_autopilot(root_id, state="running", note=None)
     if resumed:
         bus.publish_agent(db, "session.resumed", root_id, agents=[a.id for a in resumed])
+    if _launch_gate.get() is not None:      # a start's recovery: where its resume went, in the daemon's log
+        windows = sum(_window_seconds.get() or ())
+        log.warning("brindle: session %s resume: keys %.2fs, windows %.2fs, checks and the rest %.2fs",
+                    root_id, keys_took, windows, time.monotonic() - began - keys_took - windows)
     return resumed
 
 

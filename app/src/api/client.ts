@@ -328,6 +328,8 @@ export interface Meta {
   visuals?: boolean;
   /* The daemon is still bringing back sessions from its previous shutdown. */
   resuming?: boolean;
+  /* How far that has come: sessions finished with, of those it is bringing back. */
+  recovery?: { done: number; total: number } | null;
   engine_version: string;
   api_version: string;
   pid: number;
