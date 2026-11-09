@@ -17,6 +17,8 @@ export interface AppState {
   connection: StreamState | "idle";
   /* Changes monotonically even when a reconnect returns to the same state. */
   connectionGeneration: number;
+  /* Invalidates pending reads that could restore a closed or rewound agent. */
+  lifecycleVersion: number;
   /* Shared identity, refreshed by the sidebar and Account page. */
   account: AccountDTO | null;
   /* The newest bus event id applied: what a reconnect resumes from. */
@@ -53,6 +55,7 @@ export type Action =
 export const initialState: AppState = {
   connection: "idle",
   connectionGeneration: 0,
+  lifecycleVersion: 0,
   account: null,
   lastEventId: 0,
   workspaces: [],
@@ -85,8 +88,12 @@ export function reduce(state: AppState, action: Action): AppState {
         snapshotVersion: state.snapshotVersion + 1 };
     case "error":
       return { ...state, error: action.message };
-    case "stream":
-      return applyMessage(state, action.message);
+    case "stream": {
+      const message = action.message;
+      const ended = message.type === "event" && (message.kind === "agent.closed"
+        || (message.kind === "agent.status" && message.payload.status === "rewound"));
+      return applyMessage(ended ? { ...state, lifecycleVersion: state.lifecycleVersion + 1 } : state, message);
+    }
   }
 }
 

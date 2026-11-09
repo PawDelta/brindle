@@ -578,9 +578,13 @@ function usePanesReady(client: DaemonClient | null, refresh?: () => Promise<void
     const hide = () => setPanes((p) => (p.ready ? { ...p, ready: false } : p));
     const deadline = setTimeout(() => settle(null), STARTUP_WAIT);
     const check = async () => {
-      const { connectionGeneration } = store.getState();
+      const { connectionGeneration, lifecycleVersion } = store.getState();
       // A read from before the stream dropped and came back may be the old daemon's.
-      const unchanged = () => current && store.getState().connectionGeneration === connectionGeneration;
+      // A close/rewind also invalidates rows, even on an uninterrupted stream.
+      const unchanged = () => {
+        const state = store.getState();
+        return current && state.connectionGeneration === connectionGeneration && state.lifecycleVersion === lifecycleVersion;
+      };
       try {
         const meta = await client.meta();
         if (!unchanged()) return;

@@ -142,6 +142,32 @@ describe("App", () => {
     }
   });
 
+  it.each(["agent.closed", "rewound"])("discards the gate snapshot when %s arrives during its read", async (kind) => {
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker] });
+    const client = daemon.client();
+    const store = createAppStore();
+    const sync = startSync({ client, store, connect: daemon.connect });
+    try {
+      await sync.idle();
+      await flush();
+      await sync.idle();
+      let finish!: (rows: typeof daemon.data.workspaces) => void;
+      const snapshot = vi.spyOn(client, "snapshot").mockImplementationOnce(() => new Promise((ok) => { finish = ok; })).mockRejectedValue(new Error("offline"));
+      renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO }} />);
+      await waitFor(() => expect(snapshot).toHaveBeenCalledTimes(1));
+      await act(async () => {
+        daemon.publish(kind === "rewound" ? "agent.status" : kind, { repo_root: REPO, agent_id: "w1", payload: { status: "rewound" } });
+        await flush();
+        await sync.idle();
+        finish([root, worker]);
+        await flush();
+      });
+      expect(store.getState().pastWorkers).toContain("w1");
+      expect(store.getState().workspaces.flatMap((ws) => ws.agents ?? []).some((a) => a.id === "w1")).toBe(false);
+      expect(paneWaits()).toBe(true);
+    } finally { sync.stop(); }
+  });
+
   it("panes per session: a session that is back shows its panes while another is still pending, and opening the pending one asks for it first", async () => {
     vi.useFakeTimers();
     const sessionB: SessionDTO = { ...session, id: "sup2", goal: "Slow one" };
