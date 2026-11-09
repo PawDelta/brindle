@@ -22,8 +22,7 @@
    on that agent. Keys, as in the CLI: ↑ ↓ (or j k) move, Enter opens, ⌘1-9
    jump to a session, ⌘N starts one. At the foot, the profile pill combines
    initials and usage and opens Account › Usage; the terminal switch sits
-   beside it. A provider problem strip above the row opens Settings › Providers.
-   Updates live in the Inbox and Settings › About. There is no right-hand panel: this is
+   beside it. Updates live in the Inbox and Settings › About. There is no right-hand panel: this is
    where brindle's layer lives. The site's surfaces, purple (branch) only
    as the accent (styles.css .side-*). */
 
@@ -43,8 +42,6 @@ import { waitingCount } from "../store/appUpdates";
 import { cliStatus, formatAge, isPaused, type CliStatus } from "../store/overview";
 import { planWindows, providerName, WARN } from "../screens/Account/usage";
 import { useSessions } from "../store/sessions";
-import { providerProblems, rememberSignedIn, type ProviderProblem } from "../api/providers";
-import { useProviders } from "../store/providers";
 import { useUsage } from "../store/usage";
 import { useAppState, useStore } from "../store/useStore";
 import Logo from "./Logo";
@@ -126,32 +123,6 @@ function AccountButton({ route, navigate, provider, warning, failed }: Pick<Side
       <AccountAvatar />
       {warning && <span aria-hidden="true" data-testid="usage-warning-dot" className="absolute left-6 top-0 size-1.5 rounded-full bg-sap ring-2 ring-canvas-2" />}
       <UsageReading provider={provider} warning={warning} failed={failed} />
-    </button>
-  );
-}
-
-/* Provider problems alone fill the soft strip above the profile pill. */
-let providerAsks = 0;
-function ProviderProblemLine({ problems, navigate }: { problems: ProviderProblem[] } & Pick<SidebarProps, "navigate">) {
-  const first = problems[0];
-  if (!first) return null;
-  return (
-    <button
-      type="button"
-      className={`group flex w-full min-w-0 items-center gap-1 whitespace-nowrap rounded-md px-2 py-1.5 text-left font-mono text-[10.5px] ${first.kind === "set_up" ? "bg-surface-2 text-ink-3" : "bg-sap-soft font-medium text-sap"}`}
-      aria-label={`${first.text}: open Settings › Providers`}
-      data-testid="provider-problem"
-      data-provider={first.provider}
-      data-kind={first.kind}
-      onClick={() => navigate({ screen: "settings", section: "providers", ask: ++providerAsks })}
-    >
-      <span className="min-w-0 truncate group-hover:underline group-hover:underline-offset-2">{first.text}</span>
-      {problems.length > 1 && (
-        <span className="flex-none font-normal text-ink-3" data-testid="provider-problem-more">
-          +{problems.length - 1} more
-        </span>
-      )}
-      <span aria-hidden="true" className="ml-auto shrink-0">›</span>
     </button>
   );
 }
@@ -680,8 +651,6 @@ export function Sidebar({ route, navigate, refresh, openUrl, onBackFromSettings 
   const noRefresh = useCallback(() => Promise.resolve(), []);
   const { usage, error: usageError } = useUsage();
   const mostUsed = usage?.providers.filter((provider) => weeklyWindow(provider)).sort((a, b) => weeklyWindow(b)!.used - weeklyWindow(a)!.used)[0];
-  const { rows: providerRows, installs } = useProviders();
-  const problems = useMemo(() => providerProblems(providerRows, installs, rememberSignedIn(providerRows)), [providerRows, installs]);
 
   // The live sessions in reading order (⌘1-9), and the paused ones after them.
   const live = useMemo(() => (repos ?? []).flatMap((repo) => (sessions[repo.repo_root] ?? []).filter((s) => !isPaused(s)).map((session) => ({ session, repo: repo.repo_root }))), [repos, sessions]);
@@ -905,7 +874,6 @@ export function Sidebar({ route, navigate, refresh, openUrl, onBackFromSettings 
       </nav>
       </div>
       <div className="flex shrink-0 flex-col gap-2 border-t border-line px-s1 pt-s1" data-testid="sidebar-foot">
-        <ProviderProblemLine problems={problems} navigate={navigate} />
         <div className="flex h-10 min-w-0 shrink-0 flex-nowrap items-center gap-1 whitespace-nowrap" role="group" aria-label="Sidebar foot" data-testid="sidebar-foot-row">
           <AccountButton route={route} navigate={navigate} provider={shown} warning={warning} failed={usageError != null} />
           <span className="flex-1" />

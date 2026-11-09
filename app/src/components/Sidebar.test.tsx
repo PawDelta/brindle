@@ -56,7 +56,7 @@ const sessionRow = (id: string) => document.querySelector<HTMLButtonElement>(`bu
 const list = () => screen.getByRole("navigation", { name: "Sessions" });
 
 describe("Sidebar", () => {
-  it("sidebar foot pill combines identity and usage, with only provider problems above it and no update pill", async () => {
+  it("sidebar foot is one row with the profile pill and terminal, even with provider problems", async () => {
     const { sync, store, navigate } = mount({ account: { signed_in: true, name: "Alex Brown" }, usage: usageScenario("normal"), providers: freshProviders({ claude: { path: "/bin/claude", version: "2" } }) });
     onTestFinished(() => sync.stop());
     await waitFor(() => expect(store.getState().account?.name).toBe("Alex Brown"));
@@ -75,11 +75,10 @@ describe("Sidebar", () => {
     cleanup();
     const busy = mount({ usage: usageScenario("several"), providers: freshProviders({ claude: { path: "/bin/claude", version: "2" }, codex: { path: "/bin/codex", version: "1", signed_in: false } }) });
     onTestFinished(() => busy.sync.stop());
-    const strip = await screen.findByTestId("provider-problem");
-    expect(strip.nextElementSibling?.contains(screen.getByTestId("profile-pill"))).toBe(true);
+    await waitFor(() => expect(screen.getByTestId("sidebar-foot").children).toHaveLength(1));
+    expect(screen.queryByTestId("provider-problem")).toBeNull();
+    expect(within(screen.getByTestId("sidebar-foot-row")).getByTestId("profile-pill")).toBeTruthy();
     expect(screen.getByTestId("usage-warning-dot")).toBeTruthy();
-    fireEvent.click(strip);
-    expect(busy.navigate).toHaveBeenLastCalledWith({ screen: "settings", section: "providers", ask: expect.any(Number) });
   });
   it.each([
     ["processing", null, undefined, "Working", "working"],

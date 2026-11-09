@@ -955,7 +955,6 @@ describe("App", () => {
 
 describe("providers in the sidebar", () => {
   beforeEach(() => localStorage.setItem(ONBOARDED_KEY, "1"));
-  const foot = () => within(nav()).getByTestId("sidebar-foot");
   const start = (providers = freshProviders({ claude: { path: "/home/u/.local/bin/claude", version: "2.1.47" } })) => {
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], providers });
     const store = createAppStore();
@@ -973,58 +972,10 @@ describe("providers in the sidebar", () => {
     expect(nav().textContent).not.toMatch(/providers/i);
     expect(nav().textContent).not.toContain("Claude Code");
     expect(within(nav()).queryByRole("button", { name: /Connect|Sign in/ })).toBeNull();
-    expect(within(nav()).queryByTestId("provider-problem")).toBeNull();
     expect(within(nav()).getByRole("button", { name: "Open Account › Usage" })).toBeTruthy();
     stop();
   });
 
-  it("providers: a signed-out provider and a failed install show as warm words in the provider strip, signed out first, and open Settings › Providers", async () => {
-    const before = Element.prototype.scrollIntoView;
-    const scrolled = vi.fn();
-    Element.prototype.scrollIntoView = scrolled;
-    const { daemon, stop } = start(
-      freshProviders({ claude: { path: "/home/u/.local/bin/claude", version: "2.1.47" }, codex: { path: "/opt/homebrew/bin/codex", version: "0.48.0", signed_in: false } }),
-    );
-    await waitFor(() => expect(treeSession("sup1")).toBeTruthy());
-    const problem = await within(nav()).findByTestId("provider-problem");
-    expect(foot().firstElementChild).toBe(problem);
-    expect(within(foot()).getByTestId("profile-usage")).toBeTruthy();
-    // Claude works, so Codex's missing sign-in is setup to do: quiet words, not a warning.
-    expect(problem.textContent).toContain("Set up Codex");
-    expect(problem.getAttribute("data-kind")).toBe("set_up");
-    expect(problem.className).not.toContain("text-sap");
-    expect(within(foot()).queryByTestId("provider-problem-more")).toBeNull();
-    expect(problem.className).toContain("whitespace-nowrap");
-    // Clicking the words: Settings, scrolled to Providers, where the row has its Sign in.
-    fireEvent.click(problem);
-    const codex = await screen.findByTestId("provider-codex");
-    expect(within(codex).getByRole("button", { name: "Sign in to Codex" })).toBeTruthy();
-    await waitFor(() => expect(scrolled.mock.contexts.some((el) => (el as Element).id === "providers")).toBe(true));
-    expect(within(nav()).getByRole("button", { name: "Open Account › Usage" }).getAttribute("aria-current")).toBe("page");
-
-    // An install that fails reaches the provider strip too, after the sign-out: "+1", still there on another page.
-    daemon.installFails.opencode = 1;
-    fireEvent.click(within(screen.getByTestId("provider-opencode")).getByRole("button", { name: "Install OpenCode" }));
-    await screen.findByTestId("provider-install-opencode-failed");
-    await waitFor(() => expect(within(foot()).getByTestId("provider-problem-more").textContent).toBe("+1 more"));
-    expect(within(foot()).getByTestId("provider-problem").textContent).toContain("OpenCode install failed");
-    fireEvent.click(link("Knowledge"));
-    expect(within(foot()).getByTestId("provider-problem-more").textContent).toBe("+1 more");
-    // Back through the words; the failed install let go, the sign-out is all that's left.
-    fireEvent.click(within(foot()).getByTestId("provider-problem"));
-    fireEvent.click(within(await screen.findByTestId("provider-install-opencode-failed")).getByRole("button", { name: "Dismiss" }));
-    await waitFor(() => expect(within(foot()).queryByTestId("provider-problem-more")).toBeNull());
-    // An install failure alone says so in its own words.
-    fireEvent.click(within(screen.getByTestId("provider-codex")).getByRole("button", { name: "Connection details" }));
-    fireEvent.click(within(screen.getByTestId("provider-codex")).getByRole("button", { name: "Remove Codex from brindle" }));
-    await waitFor(() => expect(within(nav()).queryByTestId("provider-problem")).toBeNull());
-    daemon.installFails.antigravity = 1;
-    fireEvent.click(within(screen.getByTestId("provider-antigravity")).getByRole("button", { name: "Install Antigravity" }));
-    await waitFor(() => expect(within(nav()).getByTestId("provider-problem").textContent).toContain("Antigravity install failed"));
-    expect(screen.queryByRole("dialog")).toBeNull();
-    Element.prototype.scrollIntoView = before;
-    stop();
-  });
 });
 
 describe("closing a session", () => {

@@ -86,7 +86,7 @@ test("sidebar foot pill stays compact in calm and busy states", async ({ page },
     const pill = foot.getByTestId("profile-pill");
     const busy = state === "busy";
     await expect(pill).toContainText(busy ? "88%" : "41%");
-    await expect(foot.getByTestId("provider-problem")).toHaveCount(busy ? 1 : 0);
+    await expect(foot.getByTestId("provider-problem")).toHaveCount(0);
     await expect(pill.getByTestId("usage-warning-dot")).toHaveCount(busy ? 1 : 0);
     await expect(foot.getByTestId("app-update-pill")).toHaveCount(0);
     await page.screenshot({ path: testInfo.outputPath(`sidebar-foot-${state}.png`) });
