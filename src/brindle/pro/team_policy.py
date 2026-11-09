@@ -1227,8 +1227,8 @@ class ProPolicy(PolicyPlugin):
                 fix = (f"it is the default model of org {p.org_id}'s Claude route; an org admin must change "
                        "agent_setup" if route and info.model and info.model == route.default_model
                        else "set `model` in the profile")
-                return deny(f"{who} uses {got}; org {p.org_id} allows only "
-                            f"{', '.join(p.allowed_models) or 'no models'} ({fix})")
+                return deny(model_refusal(p.org_id, p.allowed_models, got, who=who, fix=fix,
+                                          store=self._store, client=self._client))
         if p.allowed_profiles is not None and info.profile not in p.allowed_profiles:
             got = who if info.profile else "a delegation with no profile"
             return deny(f"{got} is not allowed; org {p.org_id} allows only "
@@ -1251,6 +1251,30 @@ class ProPolicy(PolicyPlugin):
 
 
 CLI_NAMES = {"claude": "Claude Code", "codex": "Codex", "antigravity": "Google Antigravity", "opencode": "OpenCode"}
+
+
+def model_refusal(org_id: str, allowed_models: tuple[str, ...] | None, got: str, *,
+                  who: str, fix: str = "set `model` in the profile", store=None, client=None) -> str:
+    """Explain a model denial and link to the enforcing org's Models page.
+
+    The browser may be signed in to a different org. Always put the policy's
+    org in the link, using the account server this installation is using.
+    Opening onboarding exposes the controls needed to change the model list.
+    """
+    from urllib.parse import quote, urljoin
+
+    from brindle.pro import auth, credentials
+
+    if client is not None:
+        base = client.base
+    else:
+        creds = (store or credentials.default_store()).load() or {}
+        base = auth.base_url(creds.get("base_url"))
+    url = urljoin(base, f"/brindle/account/orgs/{quote(org_id, safe='')}/settings"
+                        "?section=models&onboard=1")
+    return (f"{who} uses {got}; org {org_id} allows only "
+            f"{', '.join(allowed_models or ()) or 'no models'} ({fix}). "
+            f"To allow this model, an admin of org {org_id} must change that org's Models: {url}")
 
 
 def claude_route(org_id: str | None, setup: AgentSetup | None, provider: str | None) -> ClaudeSetup | None:

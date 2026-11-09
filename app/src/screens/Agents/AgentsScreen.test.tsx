@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import App from "../../App";
+import { openExternal } from "../../api/open";
 import { ONBOARDED_KEY } from "../../api/providers";
 import { DaemonClient } from "../../api/client";
 import { PtyViewsProvider } from "../../api/ptyView";
@@ -14,6 +15,7 @@ import { standInViews } from "../../test/panes";
 import { AgentsScreen } from ".";
 
 vi.mock("../../components/PtyTerminal", () => import("../../test/panes"));
+vi.mock("../../api/open", () => ({ openExternal: vi.fn(() => Promise.resolve()), pickFolder: undefined }));
 
 afterEach(cleanup);
 
@@ -451,6 +453,26 @@ describe("agents tab", () => {
     expect(screen.getByTestId("custom-agents").textContent).toContain("quick-fix (2 problems)");
     // Checks are automatic: there's no lint or check button anywhere.
     expect(screen.queryByRole("button", { name: /lint|check every|check agents/i })).toBeNull();
+    stop();
+  });
+
+  it("org refusal link", async () => {
+    const url = "https://brindle.example/org/models";
+    const refuse = (d: FakeDaemon) => (input: RequestInfo | URL, init?: RequestInit) =>
+      init?.method === "PUT" && String(input).endsWith("/routing")
+        ? Promise.resolve(new Response(JSON.stringify({ error: { code: "org_refused", message: `Your org doesn't allow that model. See ${url}` } }), { status: 409, headers: { "content-type": "application/json" } }))
+        : d.fetch(input, init);
+    const { stop } = setup({}, refuse);
+    await screen.findByTestId("kind-medium");
+    fireEvent.click(runsOn("medium"));
+    const list = within(row("medium")).getByRole("group", { name: "Choices for Medium" });
+    fireEvent.click(option(list, "developer-heavy")!);
+
+    // The refusal's https link is a real link that opens in the system browser; the text stays as it was.
+    const link = await screen.findByRole("link", { name: url });
+    expect(link.closest('[role="alert"]')!.textContent).toContain(`Could not save: Your org doesn't allow that model. See ${url}`);
+    fireEvent.click(link);
+    expect(openExternal).toHaveBeenCalledWith(url);
     stop();
   });
 });
