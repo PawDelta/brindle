@@ -102,6 +102,26 @@ describe("App", () => {
     } finally { sync.stop(); vi.useRealTimers(); }
   });
 
+  it("recovery progress line: counts sessions on the waiting pane and goes once it is ready", async () => {
+    vi.useFakeTimers();
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root] });
+    const client = daemon.client();
+    const store = createAppStore();
+    const sync = startSync({ client, store, connect: daemon.connect });
+    let live: { resuming: boolean; recovery: { done: number; total: number } | null } = { resuming: true, recovery: { done: 3, total: 6 } };
+    const meta = client.meta.bind(client);
+    vi.spyOn(client, "meta").mockImplementation(async () => ({ ...await meta(), ...live }));
+    try {
+      renderApp(<App store={store} client={client} refresh={sync.refresh} />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+      expect(screen.getByTestId("recovery-progress").textContent).toBe("Reopening sessions, 3 of 6");
+      live = { resuming: false, recovery: null };
+      await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+      expect(paneWaits()).toBe(false);
+      expect(screen.queryByTestId("recovery-progress")).toBeNull();
+    } finally { sync.stop(); vi.useRealTimers(); }
+  });
+
   it("keeps the pane waiting when a ready probe is followed by a failed store refresh", async () => {
     vi.useFakeTimers();
     const old = { ...root, agents: root.agents?.map((a) => ({ ...a, window: windowOf("old") })) };

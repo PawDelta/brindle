@@ -134,6 +134,25 @@ def test_keychain_read_cached(monkeypatch, record, external):
     assert started == [] and not keystore._refused_marker().exists()     # ...so nothing asked, nothing held back
 
 
+@pytest.mark.parametrize("refused, reads", [(False, ["A", "B", "C"]), (True, ["A"])])
+def test_warm_reads_every_key_unless_the_first_is_refused(monkeypatch, refused, reads):
+    seen = []
+
+    class Store:
+        def __init__(self, name):
+            self.name = name
+
+        def load(self):
+            seen.append(self.name)
+            if refused:
+                raise CredentialError("locked")
+
+    monkeypatch.setattr(keystore, "known_names", lambda: ["A", "B", "C"])
+    monkeypatch.setattr(keystore, "_key_store", Store)
+    keystore.warm()
+    assert sorted(seen) == reads
+
+
 def test_file_backend_refuses_loose_permissions(brindle_home):
     store = keystore.default_store("brindle-keys", "OPENAI_API_KEY")
     store.save({"value": "sk-test-1"})
