@@ -1190,12 +1190,26 @@ def _reviewed_paths(db: DB, ws: Workspace, sha: str) -> list[str]:
     return git.paths(["diff", "--no-renames", "--name-only", start, sha], ws.path)
 
 
-def _cites(summary: str, path: str) -> bool:
-    """Whether ``summary`` names the changed non-test file ``path``: in full,
-    by more or less of its directories (``brindle/pipeline.py``,
-    ``b/src/brindle/pipeline.py``), or by its bare name (``pipeline.py:12``),
-    which may mean it and blocks. The name inside a test file's own path, or
-    inside some other file's, doesn't cite it."""
+def _in_workspace(cited: str, root: str) -> str | None:
+    """The absolute citation ``cited`` as a path relative to the workspace at
+    ``root``; None when it isn't absolute or lies outside it."""
+    if not cited.startswith("/"):
+        return None
+    full = os.path.normpath(cited)
+    for r in {root, os.path.realpath(root)}:
+        prefix = f"{r.rstrip('/')}/"
+        if full.startswith(prefix):
+            return full.removeprefix(prefix)
+    return None
+
+
+def _cites(summary: str, path: str, root: str) -> bool:
+    """Whether ``summary`` names the changed non-test file ``path``, in the
+    workspace at ``root``: in full, by more or less of its directories
+    (``brindle/pipeline.py``, ``b/src/brindle/pipeline.py``), by an absolute
+    path to it, or by its bare name (``pipeline.py:12``), which may mean it
+    and blocks. The name inside a test file's own path, or inside some other
+    file's, doesn't cite it."""
     if re.search(rf"(?<![\w./-]){re.escape(path)}(?![\w-])", summary):
         return True
     name = PurePosixPath(path).name
@@ -1203,6 +1217,11 @@ def _cites(summary: str, path: str) -> bool:
         return False
     for m in re.finditer(rf"(?:(?<![\w.-])|(?<=/)){re.escape(name)}(?![\w-])", summary):
         cited = (_CITED_DIRS.search(summary[:m.start()]).group() + name).removeprefix("./")
+        inside = _in_workspace(cited, root)
+        if inside is not None:
+            if inside == path:
+                return True
+            continue
         if "/" not in cited:
             return True
         if not is_test_path(cited) and (path.endswith(f"/{cited}") or cited.endswith(f"/{path}")):
@@ -1227,7 +1246,7 @@ def tests_only_waived(db: DB, ws: Workspace, sha: str, summary: str, finding_pat
         if not enabled(cfg, worker, ws) or (worker.pipeline_rounds or 0) + 1 <= cfg.review_rounds \
                 or gates.head(ws) != sha:
             return False
-        return not any(_cites(summary, p) for p in _reviewed_paths(db, ws, sha) if not is_test_path(p))
+        return not any(_cites(summary, p, ws.path) for p in _reviewed_paths(db, ws, sha) if not is_test_path(p))
     except (git.GitError, ValueError):
         return False
 

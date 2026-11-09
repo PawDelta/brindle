@@ -964,6 +964,12 @@ def test_review_round_scope_rereview_after_an_amend_and_a_base_merge_reads_only_
                  True, marks=pytest.mark.variant("a test file sharing its name with the product file")),
     pytest.param(2, True, ["tests/work.py"], "Blocker: tests/work.py:1 misses that work.py:1 is wrong.",
                  False, marks=pytest.mark.variant("the product citation follows a same-named test citation")),
+    pytest.param(2, True, ["tests/work.py"], "Blocker: [tests/work.py]({ws}/tests/work.py:1) asserts nothing.",
+                 True, marks=pytest.mark.variant("an absolute link to the same-named test file")),
+    pytest.param(2, True, ["tests/work.py"], "Blocker: see {ws}/work.py:1.",
+                 False, marks=pytest.mark.variant("an absolute link to the product file")),
+    pytest.param(2, True, ["tests/work.py"], "Blocker: see {ws}/tests/../work.py:1.",
+                 False, marks=pytest.mark.variant("an absolute link climbing out of tests/ to the product file")),
     (2, False, ["tests/test_work.py"], "Blocker: tests/test_work.py:1 asserts nothing.", False),
     (1, True, ["tests/test_work.py"], "Blocker: tests/test_work.py:1 asserts nothing.", False),
 ])
@@ -988,6 +994,7 @@ def test_review_round_scope_tests_only_findings_past_the_cap(db, repo, monkeypat
     monkeypatch.setattr(agents, "_stop", lambda db_, a: None)
     monkeypatch.setattr(agents, "close_later", lambda agent_id, delay=5.0: None)
 
+    summary = summary.replace("{ws}", ws.path)
     agents.submit_review(db, "rev1", False, summary, tests_only=tests_only, finding_paths=paths)
 
     assert (repo / "work.py").exists() is merges
