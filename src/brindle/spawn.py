@@ -443,6 +443,17 @@ def _has_room(waits: bool = True) -> bool:
     return not _gated or not waits or _running == 0 or room() >= 1
 
 
+def wait_for_room(stop: threading.Event, limit: float = ACTION_WAIT) -> None:
+    """Hold work that is many processes rather than one (a session coming
+    back, lifecycle.resume_after_start) until the gate has room, ``stop`` is
+    set, or ``limit`` seconds have passed: it then goes ahead, as an action
+    with no deadline does."""
+    end = time.monotonic() + limit
+    with _cond:
+        while not _has_room() and not stop.is_set() and time.monotonic() < end:
+            _cond.wait(POLL)
+
+
 def stats() -> dict:
     """How many gated processes run now, how many starts were refused
     (skipped or stopped for want of room), and how many reads were stopped

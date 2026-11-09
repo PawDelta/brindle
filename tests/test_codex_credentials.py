@@ -113,6 +113,27 @@ def test_set_agy_gemini_failed_write_leaves_the_original(tmp_path, monkeypatch):
     assert stat.S_IMODE(path.stat().st_mode) == 0o640
 
 
+def test_set_agy_gemini_from_two_launches_at_once_keeps_their_temp_files_apart(tmp_path, monkeypatch):
+    import threading
+
+    path = tmp_path / "settings.json"
+    monkeypatch.setenv("BRINDLE_AGY_SETTINGS", str(path))
+    real, both, temps = os.replace, threading.Barrier(2), []
+
+    def replace(src, dst):
+        temps.append(src)
+        both.wait(5)        # both have written their file
+        real(src, dst)
+
+    monkeypatch.setattr(providers.os, "replace", replace)
+    launches = [threading.Thread(target=providers.set_agy_gemini) for _ in range(2)]
+    for launch in launches:
+        launch.start()
+    for launch in launches:
+        launch.join(5)
+    assert len(set(temps)) == 2 and [p.name for p in tmp_path.iterdir()] == ["settings.json"]
+
+
 def test_exec_api_key_accepts_a_stored_codex_key_under_chatgpt(codex, repo):
     chatgpt(codex)
     p = codex_profile(repo, "api_key")
