@@ -1982,16 +1982,29 @@ def _resume(db: DB, root_id: str, *, watch_pane: bool, only, recovery_env, settl
     timing.call("invalidate_s", providers.invalidate_signed_in)
     from brindle import keystore, secrets
 
+    # A resume refreshes only credentials its session can use. Use the same
+    # provider/profile boundary as agent_env, including repo-local profiles.
+    # Include the whole tree: workers may come back during the root's launch.
+    # `only` limits launches; the session's shared credentials stay coherent.
+    needed_keys = set()
+    identities = {(a.provider, a.profile, a.workspace_id) for a in tree(db, root_id)}
+    for provider, profile, workspace_id in identities:
+        ws = db.get_workspace(workspace_id)
+        needed_keys.update(secrets.agent_credentials(provider, profile, ws.repo_root if ws else None))
+    # Keep known_names' exclusions and ordering, without touching any store
+    # outside this session's credentials (each read can ask for keychain access).
+    key_names = [k for k in timing.call("known_names_s", keystore.known_names) if k in needed_keys]
+
     # Explicit recovery replacements (from recovery_env or current process environment)
     env_keys = recovery_env if recovery_env is not None else {
-        k: os.environ[k] for k in timing.call("known_names_s", keystore.known_names)
+        k: os.environ[k] for k in key_names
         if k in os.environ and os.environ[k] and not secrets.is_job_secret(k)
     }
 
     session_creds = db.get_session_credentials_with_timestamps(root_id)
     reads = keystore.ReadTiming() if timing.enabled else None
     with keystore.measure_reads(reads):
-        for k in timing.call("known_names_s", keystore.known_names):
+        for k in key_names:
             try:
                 ks_val, ks_time = timing.call("key_loads_s", keystore.get_key_info, k)
             except Exception:
