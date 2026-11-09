@@ -381,28 +381,37 @@ export function TerminalPanel() {
         aria-label="Terminal"
         data-testid="terminal-panel"
       >
-        <div className="flex h-8 flex-none items-stretch border-b border-shell-line bg-shell-bg-2 pr-1.5 text-[12px] text-shell-dim" role="tablist" aria-label="Shells">
-          {tabs.map((tab) => {
-            const on = tab.terminal === active?.terminal;
-            return (
-              <button
-                key={tab.terminal}
-                type="button"
-                role="tab"
-                aria-selected={on}
-                className={`relative inline-flex items-center gap-[7px] whitespace-nowrap border-r border-shell-line px-3 ${on ? "bg-shell-bg text-shell-ink after:absolute after:inset-x-0 after:-bottom-px after:h-px after:bg-shell-bg" : "hover:text-shell-ink"}`}
-                title={tab.cwd}
-                onClick={() => select(tab.terminal)}
-              >
-                <span className={`font-mono text-[11px] font-bold tracking-[-0.04em] ${on ? "text-shell-acc" : ""}`} aria-hidden>
-                  &gt;_
-                </span>
-                Terminal
-                <span className="font-mono text-[11.5px] opacity-85">{tab.name}</span>
-              </button>
-            );
-          })}
-          <button type="button" className="border-r border-shell-line px-2.5 text-[15px] leading-none hover:text-shell-ink disabled:opacity-50" title={here ? `Another shell in ${here.name}` : "Another shell"} aria-label="Another shell" disabled={!here} onClick={add}>
+        <div className="flex h-8 min-w-0 flex-none items-stretch border-b border-shell-line bg-shell-bg-2 pr-1.5 text-[12px] text-shell-dim">
+          <div className="flex min-w-0 overflow-x-auto" role="tablist" aria-label="Shells">
+            {tabs.map((tab) => {
+              const on = tab.terminal === active?.terminal;
+              return (
+                <div
+                  key={tab.terminal}
+                  className={`flex flex-none items-stretch border-r border-shell-line ${on ? "bg-shell-bg text-shell-ink" : ""}`}
+                >
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={on}
+                    className="inline-flex items-center gap-[7px] whitespace-nowrap pl-3 pr-1 hover:text-shell-ink"
+                    title={tab.cwd}
+                    onClick={() => select(tab.terminal)}
+                  >
+                    <span className={`font-mono text-[11px] font-bold tracking-[-0.04em] ${on ? "text-shell-acc" : ""}`} aria-hidden>
+                      &gt;_
+                    </span>
+                    Terminal
+                    <span className="font-mono text-[11.5px] opacity-85">{tab.name}</span>
+                  </button>
+                  <button type="button" className={`${BAR_BUTTON} mr-1`} title={`Close ${tab.name}`} aria-label={`Close ${tab.name}`} onClick={() => void close(tab.terminal)}>
+                    ×
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+          <button type="button" className="flex-none border-r border-shell-line px-2.5 text-[15px] leading-none hover:text-shell-ink disabled:opacity-50" title={here ? `Another shell in ${here.name}` : "Another shell"} aria-label="Another shell" disabled={!here} onClick={add}>
             +
           </button>
           <span className="inline-flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden whitespace-nowrap px-3 text-[11.5px]" data-testid="terminal-where">
@@ -419,9 +428,6 @@ export function TerminalPanel() {
           </span>
           <button type="button" className="mr-1 flex-none self-center rounded-sm border border-shell-line px-1.5 py-px font-mono text-[10.5px] leading-[1.5] text-shell-dim hover:text-shell-ink" title="Hide the Terminal (⌃`)" aria-label="Hide the Terminal" onClick={collapse}>
             ⌃`
-          </button>
-          <button type="button" className={BAR_BUTTON} title="Close this shell" aria-label="Close this shell" disabled={!active} onClick={() => active && void close(active.terminal)}>
-            ×
           </button>
         </div>
         {/* A start or close that failed, whichever shell is shown: that one stays as it was. */}

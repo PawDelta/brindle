@@ -331,6 +331,9 @@ def _shell_part(req: Request, words: list[str], rules: list[Rule], checks: list[
     program = os.path.basename(words[0])
     if program == "git":
         sub = _git(req, words)
+        if (sub == "readonly" and permissions._git_search(req, words) is not None
+                and not permissions.readonly_pipeline(replace(req, command=shlex.join(words)), rules, checks)):
+            sub = "other"
         if unknown and sub in ("readonly", "push-feature"):
             return ("git", "other" if sub == "readonly" else "push-protected")
         return ("git", sub)

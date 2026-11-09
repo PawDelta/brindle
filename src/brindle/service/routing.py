@@ -70,8 +70,8 @@ class RoutingPolicy:
             return why
         if not acc.allows_run(provider, model):
             model = acc.route_model(provider, model)
-            return (f"profile {profile.name!r} runs {model or 'no declared model'}; org {acc.org_id} "
-                    f"allows only {', '.join(acc.allowed_models or ()) or 'no models'}")
+            return team_policy.model_refusal(acc.org_id, acc.allowed_models, model or "no declared model",
+                                             who=f"profile {profile.name!r}")
         if acc.allowed_profiles is not None and profile.name not in acc.allowed_profiles:
             return (f"org {acc.org_id} allows only the profiles "
                     f"{', '.join(acc.allowed_profiles) or '(none)'}, not {profile.name!r}")

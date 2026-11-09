@@ -331,6 +331,124 @@ def _the_app_daemon_pauses_on_its_way_out_and_the_next_start_resumes(db, root, m
     assert lifecycle.resume_after_start() == [] and len(events) == 3
 
 
+def _recorded_sessions(db, root, monkeypatch, sessions):
+    """Paused sessions on the resume record, given as (id, tmux session) most
+    recently active first. All paused at the same moment and recorded in the
+    opposite order: only what they did before the pause tells them apart."""
+    import dataclasses
+
+    from brindle import procs
+    from brindle.daemon import lifecycle
+
+    here, paused_at = tmux.current_server(), time.time() + 1000
+    for rank, (aid, session) in enumerate(sessions):
+        if db.get_workspace(f"ws-{session}") is None:
+            db.add_workspace(dataclasses.replace(root, id=f"ws-{session}", name=session, tmux_session=session))
+        db.add_agent(Agent(aid, f"ws-{session}", "supervisor", "claude", None, "interactive", "paused", "", None,
+                           time.time(), paused_at, "t", tmux_server=here))
+        db.conn.execute("INSERT INTO events (ts, kind, root_id) VALUES (?, 'agent.status', ?)",
+                        (paused_at - rank - 1, aid))
+    lifecycle._record_resume([{"id": aid, "server": here, "paused": True} for aid, _ in reversed(sessions)])
+    monkeypatch.setattr(procs, "stop", lambda ids, *a, **kw: 0)
+
+
+@pytest.mark.variant("concurrent recovery must overlap distinct tmux sessions while serializing chats sharing one session")
+def test_a_start_brings_sessions_back_at_once_most_recently_active_first(db, root, monkeypatch):
+    import threading
+
+    from brindle.daemon import lifecycle
+
+    # Two chats in one tmux session: one's pause would close the other's windows.
+    _recorded_sessions(db, root, monkeypatch, [("recent", "a"), ("same-tmux", "a"), ("older", "b"), ("oldest", "c")])
+    monkeypatch.setattr(lifecycle, "RESUME_PARALLEL", 2)
+    together, began = threading.Barrier(2), []
+
+    def resume(db_, root_id, *, gate, **kw):
+        began.append(db_.get_agent(root_id).id)     # each thread on its own connection, or sqlite refuses
+        with gate():                                # launches overlap too: the gate doesn't line them up
+            together.wait(5)
+
+    monkeypatch.setattr(agents, "resume", resume)
+    assert sorted(lifecycle.resume_after_start()) == ["older", "oldest", "recent", "same-tmux"]
+    assert set(began[:2]) == {"recent", "older"} and set(began[2:]) == {"same-tmux", "oldest"}
+
+
+@pytest.mark.variant("stop racing concurrent recovery must finish an in-flight launch and retain preflight and unstarted sessions")
+def test_stopped_during_concurrent_recovery_a_launch_finishes_and_the_rest_stay_pending(db, root, monkeypatch, caplog):
+    import re
+    import threading
+
+    from brindle.daemon import lifecycle
+
+    _recorded_sessions(db, root, monkeypatch, [("launching", "a"), ("preflight", "b"), ("unstarted", "c")])
+    monkeypatch.setattr(lifecycle, "RESUME_PARALLEL", 2)
+    monkeypatch.setattr(lifecycle, "RESUME_WAIT", 0)    # only the launch in flight holds stop up
+    recovery = lifecycle.Recovery()
+    under_way, finish, launched = threading.Barrier(3), threading.Event(), []
+
+    def resume(db_, root_id, *, gate, **kw):
+        if root_id == "launching":
+            with gate():
+                under_way.wait(5)
+                finish.wait(5)
+                launched.append(root_id)
+        else:
+            under_way.wait(5)
+            recovery.stopping.wait(5)
+            with gate():                # past the stop: agents.Cancelled, nothing launched
+                launched.append(root_id)
+
+    monkeypatch.setattr(agents, "resume", resume)
+    result = []
+    start = threading.Thread(target=lambda: result.extend(lifecycle.resume_after_start(recovery)))
+    start.start()
+    under_way.wait(5)
+    stopped = []
+    stop = threading.Thread(target=lambda: stopped.append((recovery.stop(), list(launched))))
+    stop.start()
+    assert recovery.stopping.wait(5)
+    finish.set()
+    stop.join(5)
+    start.join(5)
+    pending, seen = stopped[0]
+    assert seen == ["launching"] and result == ["launching"]    # stop returned after the launch under way, none later
+    assert {"preflight", "unstarted"} <= {e["id"] for e in pending}     # handed to the way out to record again
+    assert sorted(e["id"] for e in recovery.pending) == ["preflight", "unstarted"]
+    # The log says how long the step it was cancelled in took: that may be the slow one.
+    assert re.search(r"session preflight recovery: .*resume \d+\.\d+s \(cancelled\)", caplog.text)
+
+
+def test_a_start_waits_for_room_and_a_stop_ends_the_wait(db, root, monkeypatch):
+    from brindle import spawn
+    from brindle.daemon import lifecycle
+
+    _recorded_sessions(db, root, monkeypatch, [("chat", "a")])
+    recovery, began = lifecycle.Recovery(), []
+    monkeypatch.setattr(spawn, "_has_room", lambda waits=True: recovery.stopping.set())
+    monkeypatch.setattr(agents, "resume", lambda db_, root_id, **kw: began.append(root_id))
+    assert lifecycle.resume_after_start(recovery) == [] and began == []
+    assert [e["id"] for e in recovery.stop()] == ["chat"]
+
+
+@pytest.mark.variant("another session changing the process environment must not replace a failed agent's recovery credential")
+def test_a_failed_agent_gets_its_own_sessions_key_while_another_session_resumes(db, root, monkeypatch):
+    from brindle import procs
+
+    name = "ANTHROPIC_API_KEY"
+    monkeypatch.setenv(name, "unrelated")
+    monkeypatch.setattr(procs, "stop", lambda ids, *a, **kw: 0)
+    add(db, root, "boss", status="failed")
+    seen = []
+
+    def launch(db_, a, ws, **kw):
+        os.environ[name] = "another-sessions-choice"
+        seen.append(agents.agent_env(ws, a.id, a).get(name))
+
+    monkeypatch.setattr(agents, "_launch", launch)
+    agents.resume(db, "boss", recovery_env={name: "this-sessions-choice"})
+    assert seen == ["this-sessions-choice"]
+
+
 @pytest.mark.parametrize("mode, result, stage, session, plan, queued, status, says", [
     ("assign", "reported", "fixing", True, None, False, "processing", "continue your task"),    # agent 44196488's incident
     ("assign", "reported", "fixing", False, None, False, "processing", "missing check for None"),
