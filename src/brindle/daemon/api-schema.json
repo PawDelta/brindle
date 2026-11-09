@@ -2345,6 +2345,35 @@
           ],
           "title": "MilestoneDTO",
           "type": "object"
+        },
+        "PrStateDTO": {
+          "description": "The sidebar's PR line (session_review.session_pr_state): state is\nci | ready | failed | unknown; ``done`` of ``total`` checks have finished.",
+          "properties": {
+            "done": {
+              "default": 0,
+              "title": "Done",
+              "type": "integer"
+            },
+            "number": {
+              "title": "Number",
+              "type": "integer"
+            },
+            "state": {
+              "title": "State",
+              "type": "string"
+            },
+            "total": {
+              "default": 0,
+              "title": "Total",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "number",
+            "state"
+          ],
+          "title": "PrStateDTO",
+          "type": "object"
         }
       },
       "properties": {
@@ -2456,6 +2485,17 @@
           ],
           "default": null,
           "title": "Note"
+        },
+        "pr_state": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PrStateDTO"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         },
         "pr_url": {
           "anyOf": [
@@ -6013,6 +6053,35 @@
         "title"
       ],
       "title": "PlanWorkerDTO",
+      "type": "object"
+    },
+    "PrStateDTO": {
+      "description": "The sidebar's PR line (session_review.session_pr_state): state is\nci | ready | failed | unknown; ``done`` of ``total`` checks have finished.",
+      "properties": {
+        "done": {
+          "default": 0,
+          "title": "Done",
+          "type": "integer"
+        },
+        "number": {
+          "title": "Number",
+          "type": "integer"
+        },
+        "state": {
+          "title": "State",
+          "type": "string"
+        },
+        "total": {
+          "default": 0,
+          "title": "Total",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "number",
+        "state"
+      ],
+      "title": "PrStateDTO",
       "type": "object"
     },
     "PreflightActionDTO": {

@@ -1065,3 +1065,34 @@ def test_failed_brindle_mcp_start_is_told_to_the_supervisor(db, health, monkeypa
     assert db.conn.execute("SELECT outcome FROM launch_health WHERE agent_id=?",
                            (a.id,)).fetchone()[0] == outcome
     assert [to for to, _ in reports] == (["boss"] if outcome else [])
+
+
+CONNECTED = {"debug": "Successfully connected (transport: stdio) in 2542ms", "sessionId": "sess-ok"}
+TOOL_ERROR = {"error": "Error executing tool publish_visual: nothing shows the person asked for this.",
+              "sessionId": "sess-ok"}
+STDERR = {"error": "Server stderr: WARNING something was slow", "sessionId": "sess-ok"}
+CONNECT_FAILED = {"error": "Connection failed (404): Error POSTing to endpoint: not found", "sessionId": "sess-ok"}
+
+
+@pytest.mark.parametrize("files,failed", [
+    pytest.param([[CONNECTED, TOOL_ERROR]], False,
+                 marks=pytest.mark.variant("real incident: a rejected publish_visual reported a healthy worker as disconnected")),
+    pytest.param([[CONNECT_FAILED], [CONNECTED]], False,
+                 marks=pytest.mark.variant("a failed start in one log must not outvote a connection in a later one")),
+    pytest.param([[STDERR]], False,
+                 marks=pytest.mark.variant("warning-only server stderr has no connection marker and must not read as a failure")),
+    pytest.param([[CONNECT_FAILED]], True,
+                 marks=pytest.mark.variant("the real 'Connection failed' format, which the timeout test's row doesn't use, stays detected")),
+])
+def test_mcp_tool_error_is_not_a_failed_start(tmp_path, monkeypatch, files, failed):
+    from brindle import launch_health
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    worktree = str(tmp_path / "wt")
+    logs = launch_health.mcp_log_dir(worktree)
+    logs.mkdir(parents=True)
+    for n, rows in enumerate(files):
+        (logs / f"2026-11-09T17-50-{37 + n:02d}-437Z.jsonl").write_text(
+            "".join(json.dumps(row) + "\n" for row in rows))
+
+    assert launch_health.mcp_failed(worktree, "sess-ok", 0.0) is failed

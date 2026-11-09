@@ -166,6 +166,10 @@ def test_pr_not_now(db, tmp_path, monkeypatch):
         restarted.conn.execute("UPDATE session_pr_prep SET state = 'passed'")
         head = "head2"
         assert cards(restarted) == ["pr_ready"]
+        # Not now on a card still showing head1 speaks for head1: head2's own result still appears.
+        inbox_action(restarted, {"id": "r1", "action": "pr-not-now"}, {})
+        restarted.conn.execute("UPDATE session_pr_prep SET sha = 'head2'")
+        assert cards(restarted) == ["pr_ready"]
     finally:
         restarted.conn.close()
 

@@ -746,6 +746,8 @@ export class FakeDaemon {
   readonly prPushes: string[] = [];
   events: BusEvent[] = [];
   readonly requests: Request[] = [];
+  /* The session roots POST /recovery/prioritize was asked to bring back first. */
+  readonly prioritized: string[] = [];
   readonly sockets: FakeSocket[] = [];
   private nextId = 1;
   private nextSession = 1;
@@ -2484,6 +2486,11 @@ export class FakeDaemon {
       const fields = (body ?? {}) as Record<string, unknown>;
       if (method === "POST" && this.holdGithub) return new Promise<Response>((resolve) => (this.releaseGithub = () => resolve(this.githubConnection(method, fields))));
       return this.githubConnection(method, fields);
+    }
+    if (method === "POST" && path === "/recovery/prioritize") {
+      const root = ((body ?? {}) as { root?: string }).root ?? "";
+      this.prioritized.push(root);
+      return json({ prioritized: root });
     }
     if (method === "POST" && path === "/demo") return this.startDemo();
     if (method === "DELETE" && path === "/demo") return this.cancelDemo();

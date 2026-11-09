@@ -2127,11 +2127,21 @@ def _recurses(words: list[str]) -> bool:
                                                           if a.startswith("-"))
 
 
+def _follows_links(words: list[str]) -> bool:
+    """Whether a recursive grep may follow every symbolic link it meets (GNU's -R)."""
+    return words[0] in ("grep", "egrep", "fgrep") and any(
+        a == "--dereference-recursive" or re.fullmatch(r"-[^-]*R.*", a) for a in words[1:])
+
+
 def _search_paths(words: list[str]) -> list[str]:
     """The paths a grep or rg command ``words`` searches: its operands after
-    the pattern (none when the pattern came from -e or -f)."""
+    the pattern (none when the pattern came from -e or -f). Only what surely
+    takes its value as the next word skips it: --color's is only ever attached
+    (--color=always), and BSD grep's --context needs none, so a word after
+    either may be the pattern and the operands stay operands."""
     values = (_RG_VALUES if words[0] == "rg"
-              else ("-e", "-f", "-m", "-A", "-B", "-C", "-d", "-D", *_GREP_VALUES))
+              else ("-e", "-f", "-m", "-A", "-B", "-C", "-d", "-D",
+                    *(v for v in _GREP_VALUES if v not in (*_GREP_FLAGS, "--context"))))
     positional, patterned, i = [], False, 1
     while i < len(words):
         arg = words[i]
@@ -2152,11 +2162,12 @@ def _search_paths(words: list[str]) -> list[str]:
 
 
 def _tree(root: str, budget: list[int], filters: tuple[tuple[str, str], ...] = (), *,
-          spelling: str) -> list[str] | None:
+          spelling: str, follow: bool = False) -> list[str] | None:
     """Reachable files and directories under ``root`` (.git aside), or None
-    past ``budget``. Prune grep's exclusions before spending the shared budget."""
+    past ``budget``. Prune grep's exclusions before spending the shared budget.
+    ``follow``: through symlinked directories too (a loop just spends the budget)."""
     out = []
-    for top, dirs, files in os.walk(root):
+    for top, dirs, files in os.walk(root, followlinks=follow):
         relative = os.path.relpath(top, root)
         searched = spelling if relative == "." else os.path.join(spelling, relative)
         dirs[:] = [d for d in dirs if d != ".git" and _grep_selected(d, filters, directory=True)]
@@ -2419,9 +2430,13 @@ def _reads_clear(req: Request, words: list[str], path_denies: list[Rule]) -> boo
             return False
         paths = [name for names in expanded for name in names]
         dirs = ([n for n in paths if n and os.path.isdir(os.path.join(cwd, n))] if paths else ["."])
+        # GNU's --context takes the next word (BSD's doesn't): its operands may be fewer, even none, so here too.
+        if words[0] != "rg" and "--context" in words and "." not in dirs:
+            dirs.append(".")
         budget = [WALK_LIMIT]
         for d in dirs:
-            found = _tree(os.path.join(cwd, d), budget, tuple(filters.values()), spelling=d)
+            found = _tree(os.path.join(cwd, d), budget, tuple(filters.values()), spelling=d,
+                          follow=_follows_links(words))
             if found is None:
                 return False
             names += found
@@ -3659,8 +3674,10 @@ def _globs_excluded(req: Request, parts: list[list[str]], rules: list[Rule],
     argument names). Any other program may treat an expanded name as a
     subcommand, option or file to act on."""
     readers = False
+    # 2>/dev/null feeds a program nothing: only a redirect it reads from matters here.
+    fed = any(op in ("<", "<>") or op == "<&" and not operand.isdigit() for op, operand in redirects)
     for words in parts:
-        filters = _search_filters(words) if not any(assigned) and not redirects else {}
+        filters = _search_filters(words) if not any(assigned) and not fed else {}
         # An unmatched attached filter glob stays an option value. It cannot
         # add a file operand, so it needs no recursive-read proof here. If it
         # actually expands, keep the existing proof: its resulting text could
@@ -3691,7 +3708,7 @@ def _globs_excluded(req: Request, parts: list[list[str]], rules: list[Rule],
         return True
     if any(assigned):
         return False  # an assignment (LD_PRELOAD=..., a tool's config path) changes what any program does
-    if any(op in ("<", "<>") or op == "<&" and not operand.isdigit() for op, operand in redirects):
+    if fed:
         return False
     for words in parts:
         if words[0] == "ls" or words[0] == "git" and _readonly_git(req, words):
@@ -5330,7 +5347,9 @@ class _PartReader:
             if part.writes or part.reads:
                 raise ValueError("a redirection without a command")
             return
-        evaluating = program in _EVALUATES_NAMES or program == "printf" and "-v" in part.words
+        # printf -v takes its name attached too (-va[...]).
+        evaluating = program in _EVALUATES_NAMES or program == "printf" and any(
+            word.startswith("-v") for word in part.words)
         if evaluating and any(_SUBSCRIPT.search(word) for word in part.written):
             raise _Unverifiable(f"{program} evaluates its words, which may run what they hold")
         if program == "eval" and not (part.unknown or part.expanded or part.writes or part.reads):

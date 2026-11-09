@@ -30,19 +30,23 @@ import { Preflight } from "../../components/Preflight";
 import { PtyTerminal, type TerminalView } from "../../components/PtyTerminal";
 import { button, card as cardClass, main, quiet } from "../../components/ui";
 import { providerName } from "../../store/overview";
-import { PanesReadyContext } from "../../store/panes";
+import { PanesReadyContext, panesReadyFor } from "../../store/panes";
 import type { Recovery } from "./useContinue";
 import { withTypedWords, withVisualInput } from "./Visuals/terminalInput";
 
 export interface ProviderSurfaceProps {
   /* The session's repo (a preflight sign-in checks the provider there). */
   repo: string;
+  /* The session's root: whether its panes may show is asked of it alone (store/panes). */
+  root?: string;
   /* The agent shown; null for a session with no agents in the snapshot (paused). */
   agent: AgentDTO | null;
   /* Whether its process is alive, from the liveness sweep (undefined: not known yet). */
   alive?: boolean;
   /* The root's listed state; omitted when showing a worker. */
   sessionStatus?: string | null;
+  /* The session's name or goal: with no agent to show, what tells one stopped session's card from another's. */
+  sessionName?: string | null;
   /* A credentials item for this agent: its card says what lapsed. */
   credentials?: InboxItemDTO | null;
   /* The session's Continue / Restart: shared with the bar (useContinue). */
@@ -96,7 +100,7 @@ interface PaneCheck {
   found: AgentDTO;
 }
 
-export function ProviderSurface({ repo, agent: listedAgent, alive, sessionStatus, credentials, recovery }: ProviderSurfaceProps) {
+export function ProviderSurface({ repo, root, agent: listedAgent, alive, sessionStatus, sessionName, credentials, recovery }: ProviderSurfaceProps) {
   const [view, setView] = useState<TerminalView | null>(null);
   const client = useContext(DaemonContext);
   const visualsEnabled = useRef(false);
@@ -146,7 +150,8 @@ export function ProviderSurface({ repo, agent: listedAgent, alive, sessionStatus
   // Panes ready again after the engine was away (store/panes.ts): whatever the old view said is
   // forgotten, and the pane opens afresh on the rows read since.
   const panes = useContext(PanesReadyContext);
-  const epoch = panes.epoch;
+  // A session released ahead of the rest is a fresh view of its own too, without touching the others'.
+  const epoch = `${panes.epoch}:${root ? panes.back?.indexOf(root) ?? -1 : -1}`;
   const lifecycle = JSON.stringify([agent?.id, agent?.status, agent?.window, agent?.tmux_server, alive, recovery.attempt, epoch]);
   const [seen, setSeen] = useState({ lifecycle, attempt, epoch });
   if (seen.lifecycle !== lifecycle) {
@@ -172,7 +177,7 @@ export function ProviderSurface({ repo, agent: listedAgent, alive, sessionStatus
   // The engine is still bringing its sessions back (a launch, or a new daemon after a restart): the
   // rows may name windows from before, so no pane yet, and none of the cards a missing window or a
   // closed view would bring. What it finished or failed with still shows.
-  const returning = !panes.ready && !!agent && !agent.locked && agent.status !== "done" && agent.status !== "failed";
+  const returning = !panesReadyFor(panes, root) && !!agent && !agent.locked && agent.status !== "done" && agent.status !== "failed";
   const card: Card | null = returning ? { kind: "returning" } : surfaceCard(agent, alive, sessionStatus, view, credentials, unshowable);
   const name = agent ? providerName(agent.provider) : "the session";
   const { resume, busy, notice, preflight, setPreflight } = recovery;
@@ -251,6 +256,7 @@ export function ProviderSurface({ repo, agent: listedAgent, alive, sessionStatus
               {(card.kind === "ended" || card.kind === "failed") && (
                 <>
                   <h2 className={`text-base font-semibold ${card.kind === "failed" ? "text-sap" : ""}`}>{card.title}</h2>
+                  {!agent && sessionName && <p className="truncate text-sm font-medium text-ink" data-testid="state-card-session" title={sessionName}>{sessionName}</p>}
                   {card.why && <p className="text-sm text-ink-2">{card.why}</p>}
                   {!card.why && <p className="text-sm text-ink-2">Nothing of {name} is on screen until it runs again.</p>}
                   <div className="flex flex-wrap items-center gap-s1">

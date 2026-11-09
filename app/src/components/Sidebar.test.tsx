@@ -23,7 +23,7 @@ const paused: SessionDTO = { ...live, id: "sup0", status: "paused", status_since
 const child = { ...worker.agents![0], id: "c1", parent_id: "w1" };
 const goal: GoalDTO = { root_id: "sup1", enabled: true, goal: "Ship ls --json", state: "running", progress: 3, milestones: [{ id: 1, position: 1, title: "Parse flags", status: "passed", check_cmd: "npm test" }, { id: 2, position: 2, title: "Print JSON", status: "running", check_cmd: "npm run build" }] };
 
-function mount(data: Partial<DaemonData>, route: Route = { screen: "new" }, fetch?: (daemon: FakeDaemon) => typeof globalThis.fetch) {
+function mount(data: Partial<DaemonData>, route: Route = { screen: "new" }, fetch?: (daemon: FakeDaemon) => typeof globalThis.fetch, openUrl?: (url: string) => Promise<void>) {
   const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [live, paused], ...data });
   const client = new DaemonClient({ baseUrl: BASE_URL, token: TOKEN, fetch: fetch?.(daemon) ?? daemon.fetch });
   const store = createAppStore();
@@ -34,7 +34,7 @@ function mount(data: Partial<DaemonData>, route: Route = { screen: "new" }, fetc
       <StoreContext.Provider value={store}>
         <SessionsProvider client={client}>
           <UsageProvider client={client}>
-            <Sidebar route={route} navigate={navigate} refresh={sync.refresh} />
+            <Sidebar route={route} navigate={navigate} refresh={sync.refresh} openUrl={openUrl} />
           </UsageProvider>
         </SessionsProvider>
       </StoreContext.Provider>
@@ -56,6 +56,7 @@ describe("Sidebar", () => {
     ["idle", "merging", undefined, "Merging", "merging"],
     ["idle", null, undefined, "Idle", null],
     ["paused", "review", undefined, "Paused", null],
+    ["failed", "review", undefined, "Failed", null],
     ["paused", "review", "done", "Done", "done"],
     ["idle", "merging", "done", "Done", "done"],
   ])("session status word: %s / %s / %s reads as %s", async (status, stage, goal_phase, word, colour) => {
@@ -66,16 +67,62 @@ describe("Sidebar", () => {
     const label = within(row).getByTestId("session-status");
     expect(label.className).toContain(colour ? `st-${colour} stage-word` : "text-ink-3");
     expect(label.classList.contains("stage-word")).toBe(colour !== null);
-    const marker = status === "paused" ? row.querySelector(".side-dot")! : screen.getByRole("button", { name: "Hide sup1's agents" });
+    const rested = status === "paused" || status === "failed";
+    const marker = rested ? row.querySelector(".side-dot")! : screen.getByRole("button", { name: "Hide sup1's agents" });
     expect(marker.className).toContain(colour ? `st-${colour}` : "text-ink-3");
     expect(row.querySelector(".supervisor-tag")).toBeNull();
     expect(row.textContent).not.toContain("supervisor");
-    if (status !== "paused") {
+    if (!rested) {
       expect(within(row).getByTestId("session-model").textContent).toBe("sonnet");
       fireEvent.click(screen.getByRole("button", { name: "Hide sup1's agents" }));
       expect(agentRow("w1")).toBeNull();
       expect(within(row).getByTestId("session-status").textContent).toBe(word);
     }
+  });
+
+  it("pr line: a paused session keeps it, and clicking it doesn't open the session", async () => {
+    const openUrl = vi.fn(async () => undefined);
+    const url = "https://github.com/o/r/pull/390";
+    const { sync, navigate } = mount({ workspaces: [root, worker], sessions: [paused], goal: { ...goal, root_id: "sup0", goal_phase: "pr_open", pr_url: url, pr_state: { number: 390, state: "ready", done: 2, total: 2 } } }, undefined, undefined, openUrl);
+    onTestFinished(() => sync.stop());
+    const line = await screen.findByTestId("session-pr");
+    expect(line.textContent).toBe("PR #390 · Ready to merge");
+    fireEvent.click(line);
+    expect(openUrl).toHaveBeenCalledWith(url);
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [{ number: 391, state: "ci", done: 14, total: 18 }, "PR #391 · In CI, 14 of 18", "text-sap"],
+    [{ number: 387, state: "ready", done: 4, total: 4 }, "PR #387 · Ready to merge", "text-pass"],
+    [{ number: 389, state: "failed", done: 5, total: 6 }, "PR #389 · CI failed", "text-fail"],
+    [{ number: 391, state: "unknown", done: 0, total: 0 }, "PR #391", "text-ink-3"],
+    [undefined, null, null],
+  ])("pr line: %j reads %s", async (pr_state, text, tone) => {
+    const openUrl = vi.fn(async () => undefined);
+    const url = "https://github.com/o/r/pull/391";
+    const { sync, navigate } = mount({ workspaces: [root, worker], sessions: [live], goal: { ...goal, goal_phase: "pr_open", pr_url: url, pr_state } }, undefined, undefined, openUrl);
+    onTestFinished(() => sync.stop());
+    await waitFor(() => expect(within(sessionRow("sup1")!).getByTestId("session-status").textContent).toBe("Idle"));
+    if (text === null) {
+      await waitFor(() => expect(sessionRow("sup1")).toBeTruthy());
+      expect(screen.queryByTestId("session-pr")).toBeNull();
+      return;
+    }
+    fireEvent.click(screen.getByRole("button", { name: "Hide sup1's agents" }));    // folded rows show it too
+    const line = await screen.findByTestId("session-pr");
+    expect(line.textContent).toBe(text);
+    expect(line.className).toContain(tone!);
+    fireEvent.click(line);
+    expect(openUrl).toHaveBeenCalledWith(url);
+    expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it("names the selected session in its context at once, while its goal is still loading", async () => {
+    const { sync } = mount({}, { screen: "session", root: "sup0", repo: REPO }, (daemon) => (url, init) => (String(url).includes("/goal") ? new Promise(() => {}) : daemon.fetch(url, init)));
+    onTestFinished(() => sync.stop());
+    await waitFor(() => expect(screen.getByTestId("session-context").textContent).toContain("Refactor the cache"));
+    expect(screen.getByTestId("session-context").textContent).toContain("Loading goal…");
   });
 
   it("branches workers from the root dot, folds from it, and opens the supervisor from the row", async () => {

@@ -28,6 +28,8 @@ the agent is busy, or are typed into its pane if it's idle (agents.flush).
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
 import secrets
@@ -38,7 +40,7 @@ import uuid
 from pathlib import Path
 
 from brindle.config import brindle_home
-from brindle.db import DB, Agent
+from brindle.db import DB, WAITER_CLAIM, Agent
 
 EVENT = "await-mail"
 # Claude Code kills a hook at its timeout (seconds), asyncRewake ones
@@ -49,6 +51,7 @@ POLL = 0.5
 HEARTBEAT = 10.0       # a waiter whose file is older than this is gone
 ALIVE_EVERY = 15.0     # how often a waiter checks the agent's window is still there
 ENDED = ("paused", "done", "failed")
+CLAIM_EXPIRES = 120.0  # a hand-over takes milliseconds: mail held longer is abandoned, whatever its pid says
 
 
 def applies(provider: str, mode: str | None, headless: bool = False) -> bool:
@@ -147,7 +150,7 @@ def take(db: DB, agent: Agent) -> tuple[str, list] | None:
     taken: list = []
     parts = []
     try:
-        while (msg := db.pop_pending(agent.id)) is not None:
+        while (msg := db.pop_pending(agent.id, waiter_pid=os.getpid())) is not None:
             taken.append(msg)
             parts.append(frame(db, msg.body, msg.sender_id, nonce))
     except BaseException:
@@ -160,9 +163,73 @@ def take(db: DB, agent: Agent) -> tuple[str, list] | None:
 
 
 def give_back(db: DB, agent_id: str, taken: list) -> None:
-    """Queue taken messages again, as agents.flush does when a send fails."""
+    """Put taken messages back where they were in the queue, as agents.flush
+    does when a send fails: the same rows, so ahead of anything newer."""
     for msg in taken:
-        db.enqueue(agent_id, msg.body, msg.sender_id, notice=msg.noticed_at is not None)
+        db.release_pending(msg.id, agent_id)
+    db.set_mark(agent_id, f"{WAITER_CLAIM}{os.getpid()}", None)
+
+
+def _handed_path(agent_id: str, ids: list[int]) -> Path:
+    """Where a claim's completed hand-over is recorded: a file, as it has to
+    hold when the database is what just failed. Named for the claim's rows."""
+    return brindle_home() / "wake-handed" / hashlib.sha256(f"{agent_id}:{ids}".encode()).hexdigest()[:32]
+
+
+def _finish_claim(db: DB, agent_id: str, taken: list) -> None:
+    """The mail is written: this claim must never be read as abandoned."""
+    handed = _handed_path(agent_id, [m.id for m in taken])
+    try:
+        handed.parent.mkdir(parents=True, exist_ok=True)
+        handed.touch()
+    except OSError:
+        pass   # the database below is still the usual record
+    db.set_mark(agent_id, f"{WAITER_CLAIM}{os.getpid()}", None)
+    _discard(handed)
+
+
+def _discard(path: Path) -> None:
+    """Remove a receipt no longer needed: one left behind only takes up a name."""
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _was_handed(path: Path) -> bool | None:
+    """Whether a receipt is there; None if it can't be told."""
+    try:
+        return path.exists()
+    except OSError:
+        return None
+
+
+def _gone(state: dict) -> bool:
+    if time.time() - state["at"] > CLAIM_EXPIRES:
+        return True
+    try:
+        os.kill(state["pid"], 0)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        pass
+    return False
+
+
+def reclaim(db: DB, agent_id: str | None = None) -> None:
+    """Put back mail a waiter took and died holding (killed before it could
+    hand it over): for the next waiter, or the sweep's flush, to deliver."""
+    for row in db.waiter_claims(agent_id):
+        state = json.loads(row["value"])
+        handed = _handed_path(row["agent_id"], state["ids"])
+        known = _was_handed(handed)
+        if known is None:
+            continue   # it may have reached the agent: the claim waits for a look that works
+        if known:   # it reached the agent; only the claim's cleanup failed
+            db.set_mark(row["agent_id"], row["kind"], None)
+            _discard(handed)
+        elif _gone(state):
+            db.reclaim_waiter_claim(row["agent_id"], row["kind"], row["value"])
 
 
 def _heartbeat(agent_id: str) -> bool:
@@ -197,6 +264,7 @@ def wait(db: DB, agent_id: str, poll: float = POLL, limit: float = TIMEOUT - 60,
             checked = time.time()
             if not alive(agent):
                 return None
+        reclaim(db, agent_id)
         # A read first: taking is a write transaction, too much to hold every poll.
         if db.pending_count(agent_id) and not login_pause.holding(db, agent_id):
             got = take(db, agent)
@@ -246,5 +314,13 @@ def main(db: DB, agent_id: str) -> int:
     except BaseException:
         give_back(db, agent_id, taken)
         raise
-    db.set_status(agent_id, "processing", only_if="idle")  # it wakes with this
+    # Handed over: from here only exit code 2 makes Claude Code read it, so
+    # neither a late stop signal nor a busy database may change that.
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    for step in (lambda: _finish_claim(db, agent_id, taken),
+                 lambda: db.set_status(agent_id, "processing", only_if="idle")):  # it wakes with this
+        try:
+            step()
+        except Exception:  # noqa: BLE001 - the mail is written: nothing here may cost it its exit code
+            pass   # not logged: stderr is what the model reads, and reclaim reads the claim's record
     return 2

@@ -168,9 +168,16 @@ def test_visual_ready_notice_and_answers_for_the_revision_on_screen(db, session,
         assert client.post(f"/v1/visuals/{ready['id']}/read").json()["unread"] is False
         assert not [i for i in inbox.items(db, None, panes={}) if i.kind == "visual"]
     assert len(bus.tail(db, kinds=("visual.read",), repo_root=ws.repo_root)) == 2
+    # r1's read lands after r2 was published: r2 hasn't been seen, so its notice stands.
+    late = visuals.publish(db, worker, "Late", "<p>1</p>")
+    visuals.publish(db, worker, "Late", "<p>2</p>", visual_id=late["id"])
+    assert client.post(f"/v1/visuals/{late['id']}/read", json={"rev": 0}).status_code == 400
+    assert client.post(f"/v1/visuals/{late['id']}/read", json={"rev": 1}).json()["unread"] is True
+    assert [i.visual_id for i in inbox.items(db, None, panes={}) if i.kind == "visual"] == [late["id"]]
+    assert client.post(f"/v1/visuals/{late['id']}/read", json={"rev": 2}).json()["unread"] is False
     monkeypatch.setenv("BRINDLE_AGENT_ID", worker.id)
     mcp_server.publish_visual("Release flow", "<p>r1</p>", "Which flow?", OPTIONS)
-    [v] = [v for v in client.get(f"/v1/sessions/{boss.id}/visuals").json() if v["id"] != ready["id"]]
+    [v] = [v for v in client.get(f"/v1/sessions/{boss.id}/visuals").json() if v["id"] not in (ready["id"], late["id"])]
     assert (v["rev"], v["unread"], v["by"]) == (1, True, "w1")
     [item] = [i for i in inbox.items(db, None, panes={}) if i.kind == "visual"]
     assert (item.visual_id, item.root_id) == (v["id"], boss.id)

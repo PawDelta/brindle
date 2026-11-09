@@ -880,6 +880,7 @@ def existing_pull_request(ws: Workspace) -> str | None:
 
 
 PR_STATE_SECONDS = 3.0
+PR_CHECKS_SECONDS = 15.0
 
 
 def pull_request_merged(url: str, cwd: str) -> bool:
@@ -892,6 +893,20 @@ def pull_request_merged(url: str, cwd: str) -> bool:
     except (OSError, subprocess.SubprocessError, spawn.Busy):
         return False
     return out.returncode == 0 and out.stdout.strip() == "MERGED"
+
+
+def pull_request_checks(url: str, cwd: str) -> dict | None:
+    """``gh``'s view of the PR at ``url``: state, mergeable and its check rollup
+    (None when ``gh`` is missing or can't say)."""
+    if not shutil.which("gh"):
+        return None
+    try:
+        out = spawn.read(["gh", "pr", "view", url, "--json", "state,mergeable,statusCheckRollup"],
+                         cwd=cwd, text=True, timeout=PR_CHECKS_SECONDS)
+        payload = json.loads(out.stdout) if out.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError, spawn.Busy, ValueError):
+        return None
+    return payload if isinstance(payload, dict) else None
 
 
 def pull_request_merge_commit(url: str, cwd: str) -> str | None:

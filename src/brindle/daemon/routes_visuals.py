@@ -130,7 +130,7 @@ def unkeep(db: DB, params: dict, body: dict) -> Any:
 
 def mark_read(db: DB, params: dict, body: dict) -> Any:
     visuals.require_enabled()
-    return visuals.to_dto(db, visuals.mark_read(db, params["id"]))
+    return visuals.to_dto(db, visuals.mark_read(db, params["id"], _get(body, "rev", int)))
 
 
 def snapshot(db: DB, params: dict, body: dict) -> Any:

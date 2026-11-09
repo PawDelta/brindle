@@ -516,6 +516,7 @@ describe("visuals", () => {
       expect(screen.getByTestId("visuals-button").querySelector("svg")).toBeTruthy();
       expect(screen.getByTestId("visuals-button").textContent).toBe("");
       expect(read).toHaveBeenCalledTimes(1);
+      expect(read).toHaveBeenCalledWith("v_8f2c", 2);
       // The ask there at opening badges nothing, read again or not; the supervisor asking anew (the same row) does.
       expect(screen.queryByTestId("visual-back-asking")).toBeNull();
       ask(supervisorAsks);
@@ -589,6 +590,7 @@ describe("visuals", () => {
     try {
       render(<PtyViewsProvider value={standInViews}><App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "inbox", session: "sup1" }} /></PtyViewsProvider>);
       const card = (await screen.findAllByTestId("inbox-card")).find((candidate) => candidate.dataset.kind === "visual")!;
+      await waitFor(() => expect((within(card).getByRole("button", { name: "Open visual" }) as HTMLButtonElement).disabled).toBe(false));
       fireEvent.click(within(card).getByRole("button", { name: "Open visual" }));
       await waitFor(() => expect(screen.getByTestId("visual-frame").dataset.src).toBe("brindle-visual://v_8f2c/r2"));
       expect(screen.queryByRole("complementary", { name: "Sidebar" })).toBeNull();

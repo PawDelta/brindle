@@ -77,6 +77,21 @@ def _percentile(ordered: list[float], q: float) -> float:
     return ordered[max(0, math.ceil(q * len(ordered)) - 1)]
 
 
+def record_stage(c, day: str, repo: str, stage: str, new: list[float]) -> None:
+    """Append durable stage samples inside the caller's write transaction.
+
+    Build stages use ``build:<profile>`` so estimates retain profile history
+    after worker cleanup, without changing the shared timing table's key.
+    """
+    old = c.execute("SELECT samples FROM stage_timings WHERE day=? AND repo_root=? AND stage=?",
+                    (day, repo, stage)).fetchone()
+    values = (json.loads(old["samples"]) if old else []) + new
+    c.execute("INSERT OR REPLACE INTO stage_timings (day, repo_root, stage, n, median_s, p90_s, samples)"
+              " VALUES (?, ?, ?, ?, ?, ?, ?)",
+              (day, repo, stage, len(values), statistics.median(values),
+               _percentile(sorted(values), 0.9), json.dumps(values)))
+
+
 def _rollup(c, cutoff: float) -> None:
     """Fold the pipeline stage durations of events older than ``cutoff`` into
     ``stage_timings`` (median and p90 per UTC day and repo), so they outlive
@@ -122,13 +137,7 @@ def _rollup(c, cutoff: float) -> None:
         if kind in ("pipeline.merged", "pipeline.removed"):
             open_at = {k: v for k, v in open_at.items() if k[0] != ws}
     for (day, repo, stage), new in samples.items():
-        old = c.execute("SELECT samples FROM stage_timings WHERE day=? AND repo_root=? AND stage=?",
-                        (day, repo, stage)).fetchone()
-        values = (json.loads(old["samples"]) if old else []) + new
-        c.execute("INSERT OR REPLACE INTO stage_timings (day, repo_root, stage, n, median_s, p90_s, samples)"
-                  " VALUES (?, ?, ?, ?, ?, ?, ?)",
-                  (day, repo, stage, len(values), statistics.median(values),
-                   _percentile(sorted(values), 0.9), json.dumps(values)))
+        record_stage(c, day, repo, stage, new)
     c.execute("DELETE FROM stage_open")
     c.executemany("INSERT INTO stage_open (workspace_id, stage, who, ts) VALUES (?, ?, ?, ?)",
                   [(*k, v) for k, v in open_at.items()])
