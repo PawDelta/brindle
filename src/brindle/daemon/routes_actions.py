@@ -1370,8 +1370,11 @@ def patch_user_settings(db: DB, params: dict, body: Body) -> Any:
             raise ServiceError("invalid", f"{key} must be one of: {', '.join(allowed[key])}")
     for key, mode in changes.items():
         config.set_user(key, mode)
-    if "visuals" in changes:
+    if "visuals" in changes or "visuals_enabled" in changes:
+        # The setting applies to every repo; scoped feeds need their own row.
         bus.publish(db, "visual.offers_setting")
+        for row in db.conn.execute("SELECT DISTINCT repo_root FROM workspaces"):
+            bus.publish(db, "visual.offers_setting", repo_root=row["repo_root"])
     return {"visuals": config.visuals_setting(), "claude_permission_mode": config.claude_permission_mode(),
             "opencode_permission_mode": config.opencode_permission_mode(),
             "visuals_enabled": "on" if config.visuals_enabled_setting() else "off"}

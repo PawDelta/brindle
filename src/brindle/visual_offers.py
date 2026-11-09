@@ -140,7 +140,7 @@ def resolve(db: DB, root: str, oid: str, accept: bool) -> dict:
         agents.flush(db, root)
     log.debug("visual offer %s", "accepted" if accept else "dismissed")
     debuglog.record("visuals", "debug", "accept" if accept else "dismiss", {"count": 1})
-    bus.publish(db, "visual.offer_resolved", root_id=root, offer=oid)
+    bus.publish_agent(db, "visual.offer_resolved", root, offer=oid)
     return {"accepted": accept}
 
 
@@ -299,7 +299,7 @@ def person_spoke(db: DB, agent: Agent, text: str, *, expires_at: float | None = 
     for this same prompt quotable."""
     if not visuals.enabled():
         return
-    root, _ = visuals._session(db, agent)
+    root, ws = visuals._session(db, agent)
     if root.id != agent.id:
         return
     scope, clear = request_intent(text)
@@ -346,7 +346,7 @@ def person_spoke(db: DB, agent: Agent, text: str, *, expires_at: float | None = 
             c.execute("INSERT INTO visual_requests VALUES (?,?,?,?)",
                       (root.id, "r_" + secrets.token_hex(6), scope, time.time()))
             _link(c, root.id, text, "request")
-    bus.publish(db, "visual.offer_resolved", root_id=root.id)
+    bus.publish(db, "visual.offer_resolved", repo_root=ws.repo_root, root_id=root.id)
 
 
 def keep_typed(db: DB, agent: Agent, text: str, expires_at: float, submitted_at: float) -> None:
