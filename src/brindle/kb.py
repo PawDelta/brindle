@@ -304,17 +304,17 @@ class _Doc:
     text: str
 
 
-def _folder_paths(root: Path) -> list[tuple[str, Path]]:
+def _folder_paths(root: Path, limit: int | None = MAX_DOC_BYTES) -> list[tuple[str, Path]]:
     """The documents under ``root`` as (external id, path), leaving out
     anything in a dot-directory or dot-file, symlinks, anything that resolves
-    outside ``root`` and files over MAX_DOC_BYTES."""
+    outside ``root`` and files over ``limit`` (None: any size)."""
     root = root.resolve()
     out = []
     for path in sorted(root.rglob("*")):
         rel = path.relative_to(root)
         if (path.suffix.lower() in DOC_SUFFIXES and not any(p.startswith(".") for p in rel.parts)
                 and not path.is_symlink() and path.resolve().is_relative_to(root) and path.is_file()
-                and path.stat().st_size <= MAX_DOC_BYTES):
+                and (limit is None or path.stat().st_size <= limit)):
             out.append((rel.as_posix(), path))
     return out
 
