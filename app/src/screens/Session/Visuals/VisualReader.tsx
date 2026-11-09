@@ -154,6 +154,21 @@ function fileAttachment(file: File): Promise<Attachment> {
 /* The question, the options as host buttons, a note, and Send. Answered: what was picked. */
 function AnswerBar({ client, visual, picked, onPick, onAnswered }: { client: VisualsClient & Partial<Pick<DaemonClient, "attach">>; visual: VisualDTO; picked: string | null; onPick(option: string): void; onAnswered(v: VisualDTO): void }) {
   const [note, setNote] = useState("");
+  // Insert text immediately so later edits and pastes keep their normal order.
+  // Tag only the inserted characters: a native file result removes its filename,
+  // while text-only results and clipboard errors leave the person's edits intact.
+  const noteChars = useRef<{ char: string; paste?: symbol }[]>([]);
+  const showNote = () => setNote(noteChars.current.map(part => part.char).join(""));
+  const editNote = (value: string) => {
+    const before = noteChars.current.map(part => part.char).join("");
+    let start = 0;
+    while (start < before.length && start < value.length && before[start] === value[start]) start++;
+    let end = before.length;
+    let nextEnd = value.length;
+    while (end > start && nextEnd > start && before[end - 1] === value[nextEnd - 1]) { end--; nextEnd--; }
+    noteChars.current.splice(start, end - start, ...value.slice(start, nextEnd).split("").map(char => ({ char })));
+    showNote();
+  };
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const noteInput = useRef<HTMLInputElement>(null);
@@ -258,25 +273,33 @@ function AnswerBar({ client, visual, picked, onPick, onAnswered }: { client: Vis
               Something else…
             </button>
           </div>
-          <input ref={noteInput} type="text" className={`${field} min-w-40 flex-1`} aria-label={ownWords ? "Your answer" : "Add a note"} placeholder={ownWords ? "Your answer" : "Add a note (optional)"} value={note} onChange={(e) => setNote(e.target.value)}
+          <input ref={noteInput} type="text" className={`${field} min-w-40 flex-1`} aria-label={ownWords ? "Your answer" : "Add a note"} placeholder={ownWords ? "Your answer" : "Add a note (optional)"} value={note} onChange={(e) => editNote(e.target.value)}
             onPaste={(e) => {
               if (!canAttach) return;
               const files = Array.from(e.clipboardData.files);
               const text = e.clipboardData.getData?.("text") ?? "";
               if (isTauri()) {
-                // Finder also supplies filename text. Ask for native files before inserting that text.
+                // Finder also supplies filename text; remove that insertion if native files are found.
                 e.preventDefault();
                 const input = e.currentTarget;
                 const start = input.selectionStart ?? note.length;
                 const end = input.selectionEnd ?? start;
-                const before = input.value;
+                const paste = Symbol();
+                const selected = text ? noteChars.current.splice(start, end - start, ...text.split("").map(char => ({ char, paste }))) : [];
+                showNote();
+                input.value = noteChars.current.map(part => part.char).join("");
+                input.setSelectionRange(start + text.length, start + text.length);
                 void upload(async () => {
                   const copied = await clipboardAttachments();
-                  if (copied.length) return copied;
-                  if (!text) return Promise.all(files.map(fileAttachment));
-                  if (active.current && input.value === before) {
-                    setNote(before.slice(0, start) + text + before.slice(end));
+                  if (!active.current) return [];
+                  if (copied.length) {
+                    const first = noteChars.current.findIndex(part => part.paste === paste);
+                    noteChars.current = noteChars.current.filter(part => part.paste !== paste);
+                    if (first >= 0) noteChars.current.splice(first, 0, ...selected);
+                    showNote();
+                    return copied;
                   }
+                  if (!text) return Promise.all(files.map(fileAttachment));
                   return [];
                 });
               } else if (files.length) {
