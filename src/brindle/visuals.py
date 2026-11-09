@@ -432,6 +432,40 @@ def answer(db: DB, visual_id: str, rev: Any, option: Any = None, note: Any = Non
     return get(db, v["id"])
 
 
+def dismiss(db: DB, visual_id: str, rev: Any) -> dict:
+    """The person doesn't want to answer the revision on their screen. It
+    leaves the Inbox, stays viewable, and the agent is told so it stops
+    waiting. Claimed in the row first, so a repeat, or a revision that was
+    answered, changes nothing and tells the agent nothing. A newer revision
+    asks again."""
+    from brindle import agents
+
+    v = get(db, visual_id)
+    _unlocked(v["root_id"])
+    if not v["options"]:
+        raise ServiceError("invalid", "this visual asks nothing to dismiss", 400)
+    if not isinstance(rev, int) or isinstance(rev, bool):
+        raise ServiceError("invalid", "rev (the revision on screen) is required", 400)
+    if rev != v["rev"]:
+        raise ServiceError("stale", f"the visual has a newer revision (r{v['rev']}); dismiss that one", 409,
+                           rev=v["rev"])
+    with db.tx() as c:
+        cur = c.execute("UPDATE visuals SET dismissed_rev=rev, read_rev=MAX(read_rev, rev) "
+                        "WHERE id=? AND rev=? AND answer IS NULL AND dismissed_rev < rev", (v["id"], rev))
+        claimed = cur.rowcount == 1
+    if not claimed:
+        return get(db, v["id"])
+    try:
+        agents.send_message(db, v["root_id"], f"The person dismissed visual {v['id']} (r{rev}) without "
+                            "answering. Don't wait for an answer; carry on without one.", person=True)
+    except BaseException:
+        with db.tx() as c:
+            c.execute("UPDATE visuals SET dismissed_rev=0 WHERE id=? AND dismissed_rev=?", (v["id"], rev))
+        raise
+    bus.publish(db, "visual.dismissed", repo_root=v["repo_root"], root_id=v["root_id"], visual=v["id"], rev=rev)
+    return get(db, v["id"])
+
+
 def inbox_pending(db: DB, repo_root: str | None) -> list[dict]:
     """Visuals needing attention, oldest first, for the Inbox.
 
@@ -441,7 +475,7 @@ def inbox_pending(db: DB, repo_root: str | None) -> list[dict]:
     if not enabled():
         return []
     sql = ("SELECT * FROM visuals WHERE ("
-           "(options IS NOT NULL AND answer IS NULL) OR "
+           "(options IS NOT NULL AND answer IS NULL AND dismissed_rev < rev) OR "
            "(options IS NULL AND read_rev < rev))")
     args = []
     if repo_root is not None:

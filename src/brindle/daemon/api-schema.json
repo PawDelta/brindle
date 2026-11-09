@@ -9076,6 +9076,10 @@
       "path": "/v1/visuals/{id}/answer"
     },
     {
+      "method": "POST",
+      "path": "/v1/visuals/{id}/dismiss"
+    },
+    {
       "method": "DELETE",
       "path": "/v1/visuals/{id}/keep"
     },

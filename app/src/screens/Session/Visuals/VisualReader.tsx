@@ -229,6 +229,21 @@ function AnswerBar({ client, visual, picked, onPick, onAnswered }: { client: Vis
   const ownWords = picked === "";
   const canSend = picked !== null && (!ownWords || !!note.trim()) && uploading === 0;
   const answered = visual.answer ? options.find((o) => o.id === visual.answer!.option) : null;
+  const dismiss = async () => {
+    if (sending) return;
+    setSending(true);
+    setError(null);
+    try {
+      const result = await client.dismissVisual(visual.id, visual.rev);
+      if (!active.current) return;
+      onAnswered(result);
+    } catch (e) {
+      if (!active.current) return;
+      setError(e instanceof DaemonError && e.status === 409 ? "The agent changed this visual since you opened it. Read the new version first." : `Couldn't dismiss it: ${message(e)}`);
+    } finally {
+      if (active.current) setSending(false);
+    }
+  };
   const send = async () => {
     if (!canSend || sending) return;
     setSending(true);
@@ -352,6 +367,7 @@ function AnswerBar({ client, visual, picked, onPick, onAnswered }: { client: Vis
           <LoadingButton className={main} busy={sending} disabled={!canSend || sending} data-testid="visual-send" onClick={() => void send()}>
             Send answer
           </LoadingButton>
+          <button type="button" className={button} disabled={sending} data-testid="visual-dismiss" onClick={() => void dismiss()}>Dismiss</button>
         </div>
       )}
       {!visual.answer && (attached.length > 0 || uploading > 0) && (

@@ -729,7 +729,21 @@ describe("visuals", () => {
     expect(onAnswered).not.toHaveBeenCalled();
   });
 
-  const takesFiles: VisualDTO = { ...visual, answer_agent_id: "a_sup", accepts_files: true };
+  it("can dismiss a visual prompt without answering, closing the reader like Back", async () => {
+    const client = new FakeDaemon().client();
+    const dismiss = vi.spyOn(client, "dismissVisual").mockResolvedValue(visual);
+    const answer = vi.spyOn(client, "answerVisual");
+    const onAnswered = vi.fn();
+    const onBack = vi.fn();
+    render(<VisualReader client={client} visual={visual} onAnswered={onAnswered} onBack={onBack} Frame={() => <div />} />);
+    fireEvent.click(screen.getByTestId("visual-dismiss"));
+    await waitFor(() => expect(onBack).toHaveBeenCalled());
+    expect(dismiss).toHaveBeenCalledWith(visual.id, visual.rev);
+    expect(onAnswered).toHaveBeenCalledWith(visual);
+    expect(answer).not.toHaveBeenCalled();
+  });
+
+  const takesFiles: VisualDTO ={ ...visual, answer_agent_id: "a_sup", accepts_files: true };
   it("shows attach controls only when the provider accepts files, and sends uploaded paths after the uploads finish", async () => {
     const client = new FakeDaemon().client();
     let finish!: (r: { paths: string[]; text: string }) => void;
@@ -860,6 +874,7 @@ describe("visuals", () => {
     let hold = false;
     const held: (() => void)[] = [];
     const fake: VisualsClient = {
+      dismissVisual: async () => visual,
       visuals: () => {
         const asked = rows;
         return new Promise((ok) => (hold ? held.push(() => ok(asked)) : ok(asked)));
@@ -923,7 +938,7 @@ describe("visuals", () => {
     const replies: ((p: Plan) => void)[] = [];
     const sent: PlanVerdict[] = [];
     const fake: VisualsClient & PlansClient = {
-      visuals: async () => [], answerVisual: async () => visual, keepVisual: async () => visual, unkeepVisual: async () => visual, markVisualRead: async () => ({}),
+      visuals: async () => [], answerVisual: async () => visual, dismissVisual: async () => visual, keepVisual: async () => visual, unkeepVisual: async () => visual, markVisualRead: async () => ({}),
       plan: () => new Promise<Plan>((ok) => { reads.push(ok); }),
       decidePlan: (_id, verdict) => { sent.push(verdict); return new Promise<Plan>((ok) => { replies.push(ok); }); },
     };
