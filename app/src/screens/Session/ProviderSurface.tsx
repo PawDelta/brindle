@@ -43,6 +43,8 @@ export interface ProviderSurfaceProps {
   alive?: boolean;
   /* The root's listed state; omitted when showing a worker. */
   sessionStatus?: string | null;
+  /* The session's name or goal: with no agent to show, what tells one stopped session's card from another's. */
+  sessionName?: string | null;
   /* A credentials item for this agent: its card says what lapsed. */
   credentials?: InboxItemDTO | null;
   /* The session's Continue / Restart: shared with the bar (useContinue). */
@@ -96,7 +98,7 @@ interface PaneCheck {
   found: AgentDTO;
 }
 
-export function ProviderSurface({ repo, agent: listedAgent, alive, sessionStatus, credentials, recovery }: ProviderSurfaceProps) {
+export function ProviderSurface({ repo, agent: listedAgent, alive, sessionStatus, sessionName, credentials, recovery }: ProviderSurfaceProps) {
   const [view, setView] = useState<TerminalView | null>(null);
   const client = useContext(DaemonContext);
   const visualsEnabled = useRef(false);
@@ -251,6 +253,7 @@ export function ProviderSurface({ repo, agent: listedAgent, alive, sessionStatus
               {(card.kind === "ended" || card.kind === "failed") && (
                 <>
                   <h2 className={`text-base font-semibold ${card.kind === "failed" ? "text-sap" : ""}`}>{card.title}</h2>
+                  {!agent && sessionName && <p className="truncate text-sm font-medium text-ink" data-testid="state-card-session" title={sessionName}>{sessionName}</p>}
                   {card.why && <p className="text-sm text-ink-2">{card.why}</p>}
                   {!card.why && <p className="text-sm text-ink-2">Nothing of {name} is on screen until it runs again.</p>}
                   <div className="flex flex-wrap items-center gap-s1">

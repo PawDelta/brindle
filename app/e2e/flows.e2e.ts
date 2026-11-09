@@ -79,6 +79,31 @@ test("sidebar keeps its goal pinned and its lists reachable when resized", async
   }
 });
 
+test("sidebar: a deep worker tree stays inside the list, and a tall split leaves the list in reach", async ({ page }) => {
+  await open(page, "sidebar-resize");
+  await page.evaluate(() => {
+    type Ws = { id: string; path: string; agents: { id: string; parent_id?: string | null; mode: string }[] };
+    const { fake } = window as unknown as { fake: { data: { workspaces: Ws[] }; publish(kind: string, fields: object): void } };
+    const home = fake.data.workspaces.find((w) => w.id === "pawdelta")!;
+    const agents = Array.from({ length: 12 }, (_, i) => ({ ...home.agents[0], id: `deep${i}`, mode: "worker", parent_id: i ? `deep${i - 1}` : "sup-42" }));
+    fake.data.workspaces.push({ ...home, id: "pawdelta/deep", path: `${home.path}/.brindle/worktrees/deep`, agents });
+    fake.publish("agent.status", { agent_id: "not-listed-yet", payload: {} }); // the store reads the snapshot again
+  });
+  const sessions = page.getByRole("navigation", { name: "Sessions", exact: true });
+  const deepest = sessions.locator('[data-tree-agent="deep11"]');
+  await expect(deepest).toBeVisible();
+  expect(await sessions.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
+  expect((await deepest.boundingBox())!.width).toBeGreaterThan(120);
+
+  const handle = (await page.getByTestId("split-handle").boundingBox())!;
+  await page.mouse.move(handle.x + handle.width / 2, handle.y + 4);
+  await page.mouse.down();
+  await page.mouse.move(handle.x + handle.width / 2, 950, { steps: 4 });
+  await page.mouse.up();
+  await page.setViewportSize({ width: 1200, height: 480 }); // the app window's minimum height
+  await expect.poll(async () => (await sessions.boundingBox())!.height).toBeGreaterThanOrEqual(70);
+});
+
 test("New Session: the project search filters, and closes on an outside click and on Esc", async ({ page }) => {
   await open(page, "new");
   await expect(page.getByRole("button", { name: "Start the demo" })).toHaveCount(0); // the offer stays hidden once decided
