@@ -68,6 +68,7 @@ import "@xterm/xterm/css/xterm.css";
 import { useContext, useEffect, useRef, useState } from "react";
 import { logDebug } from "../api/debug";
 import { clipboardAttachments, listenForDrops, type Attachment } from "../api/attachments";
+import { startupStep } from "../api/startup";
 import { openExternal, type OpenUrl } from "../api/open";
 import type { Crop, PtyViewOpener, PtyViewTarget } from "../api/ptyView";
 import { visualLink } from "../screens/Session/Visuals/client";
@@ -328,6 +329,7 @@ export function PtyTerminal({ at, open, copy, paste, attachments, openUrl, onVie
     const lookAttached = () => {
       if (gone || attached || term.buffer.active.type !== "alternate") return;
       attached = true;
+      startupStep("terminal_attached");
       wake();
     };
     const pty = open({ server, target }, { cols: term.cols, rows: term.rows }, {
