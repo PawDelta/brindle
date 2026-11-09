@@ -203,6 +203,7 @@ def test_mail_not_handed_over_is_queued_again(db, boss, monkeypatch):
     assert not db.waiter_claims("boss")   # or a later sweep would hand it over again
 
 
+@pytest.mark.variant("Returned mail stays ahead of newer mail and a status-write failure after handover must still exit with code 2")
 def test_taken_mail_keeps_its_place_and_its_hand_over_survives_a_busy_db(db, boss, monkeypatch):
     for body in ("one", "two"):
         db.enqueue("boss", body, None)
@@ -222,7 +223,10 @@ def test_taken_mail_keeps_its_place_and_its_hand_over_survives_a_busy_db(db, bos
     assert [b for _, b in _framed(out.getvalue(), _nonce(out.getvalue()))] == ["one", "two", "newer"]
 
 
-@pytest.mark.parametrize("found_by", ["the next waiter", "the sweep"])
+@pytest.mark.parametrize("found_by", [
+    pytest.param("the next waiter", marks=pytest.mark.variant("The next waiter's real dispatch must recover mail claimed by a dead predecessor")),
+    pytest.param("the sweep", marks=pytest.mark.variant("The global sweep must recover a dead waiter's mail before a successor starts")),
+])
 def test_mail_a_waiter_died_holding_is_recovered(db, boss, monkeypatch, found_by):
     # Killed before anything reached stderr: nothing ran to give it back.
     db.enqueue("boss", "the answer", None)
@@ -239,7 +243,10 @@ def test_mail_a_waiter_died_holding_is_recovered(db, boss, monkeypatch, found_by
     assert text.count("the answer") == 1
 
 
-@pytest.mark.parametrize("fails", ["the claim's cleanup", "the receipt's cleanup"])
+@pytest.mark.parametrize("fails", [
+    "the claim's cleanup",
+    pytest.param("the receipt's cleanup", marks=pytest.mark.variant("Receipt unlink permission failure after claim cleanup must preserve exit code 2 and never replay delivered mail")),
+])
 def test_mail_handed_over_is_not_replayed_when_its_cleanup_fails(db, boss, monkeypatch, fails):
     db.enqueue("boss", "the answer", None)
     real = db.set_mark
@@ -293,6 +300,7 @@ def test_a_receipt_that_cant_be_read_is_not_taken_for_no_receipt(db, boss, monke
     assert db.pending_count("boss") == 0 and not db.waiter_claims("boss") and not receipt.exists()
 
 
+@pytest.mark.variant("A live waiter behind a stopped pane delivery needs the stop hook to leave the agent idle so flush can unblock it")
 def test_a_stopped_pane_delivery_doesnt_wedge_a_live_waiter(db, boss, monkeypatch):
     # The waiter can't take past the mark, and flush left the queue to the waiter.
     monkeypatch.setattr(agents, "_composer_settled", lambda a: True)

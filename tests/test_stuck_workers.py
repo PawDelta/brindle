@@ -227,6 +227,7 @@ def test_an_item_nothing_can_close_does_not_refuse_stops(db, boss, worker, told,
     assert open_items.stop_block(db, boss) is None
 
 
+@pytest.mark.variant("A crash during worktree removal must reuse the prepared replacement rather than enqueue another")
 def test_a_takeover_that_died_part_way_reuses_its_replacement(db, boss, takeover, monkeypatch):
     def die(*a, **k):
         raise KeyboardInterrupt   # as a process dying: nothing below handles it
@@ -242,7 +243,8 @@ def test_a_takeover_that_died_part_way_reuses_its_replacement(db, boss, takeover
 
 
 @pytest.mark.parametrize("after", [
-    "answered", pytest.param("working", marks=pytest.mark.variant("back at work with its open item still there")), "retired",
+    pytest.param("answered", marks=pytest.mark.variant("An answer after a crash during worktree removal cancels the prepared takeover and restores dependencies")),
+    pytest.param("working", marks=pytest.mark.variant("back at work with its open item still there")), "retired",
 ])
 def test_a_takeover_that_died_is_settled_without_its_open_item(db, boss, worker, takeover, told, monkeypatch, after):
     """Whatever became of the worker, the sweep finishes or takes back what was prepared."""
@@ -275,7 +277,8 @@ def test_a_takeover_that_died_is_settled_without_its_open_item(db, boss, worker,
 
 
 @pytest.mark.parametrize("dies", [
-    "after its dependency write", pytest.param("while resuming", marks=pytest.mark.variant("a second kill, during the resume")),
+    pytest.param("after its dependency write", marks=pytest.mark.variant("A crash immediately after rewriting dependencies must leave enough state to restore the original worker")),
+    pytest.param("while resuming", marks=pytest.mark.variant("a second kill, during the resume")),
 ])
 def test_a_killed_takeover_can_always_restore_the_dependencies(db, boss, worker, takeover, monkeypatch, dies):
     waiting = tasks.enqueue(db, boss, db.get_workspace(boss.workspace_id), "developer", "after it", "assign",

@@ -310,7 +310,10 @@ def test_a_process_dying_right_after_the_claim_loses_nothing(db, pane, monkeypat
     assert agents.flush(db, "boss") is True and pane == ["m"] and db.message_delivered(mid)
 
 
-@pytest.mark.parametrize("how", ["blocked", "paste"])
+@pytest.mark.parametrize("how", [
+    pytest.param("blocked", marks=pytest.mark.variant("A pre-paste block preserves status_since so stop notices do not repeat")),
+    pytest.param("paste", marks=pytest.mark.variant("A block raised during paste restores the original stop timestamp")),
+])
 def test_a_failed_delivery_leaves_the_agent_on_the_same_stop(db, pane, monkeypatch, how):
     # Notices about a stop go by status_since: a new one would repeat them.
     db.update_agent("boss", status_since=1000.0)
@@ -326,7 +329,8 @@ def test_a_failed_delivery_leaves_the_agent_on_the_same_stop(db, pane, monkeypat
 
 
 @pytest.mark.parametrize("failure", [
-    tmux.TmuxError("pane gone"),
+    pytest.param(tmux.TmuxError("pane gone"),
+                 marks=pytest.mark.variant("A vanished pane after enqueue must return queued so callers do not duplicate the message")),
     pytest.param(agents.AgentError("signed in as someone else"), marks=pytest.mark.variant("identity lock raised mid-flush")),
 ])
 def test_a_message_already_queued_is_never_reported_as_failed(db, pane, monkeypatch, failure):

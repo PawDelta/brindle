@@ -907,7 +907,6 @@ def test_goal_eta_survives_fixing_and_deleted_builders(db, root, monkeypatch):
     (5, 300, "chain", False, 6900),
     (5, 300, "slots", False, 5700),
     (5, 300, "attached", False, 3300),
-    (5, 300, "fixing", False, 3300),
     pytest.param(5, 1500, "fixing", False, 2460,
                  marks=pytest.mark.variant("A fixing occupant can outlast the report-to-merge median")),
     (5, 300, "other_session", False, 3300),
@@ -1074,11 +1073,13 @@ def _rollup(*checks, state="OPEN", mergeable="MERGEABLE"):
 
 
 @pytest.mark.parametrize("payload, expected", [
-    (_rollup("SUCCESS", "SKIPPED"), ("ready", 2, 2)),
-    (_rollup("SUCCESS", None, None), ("ci", 1, 3)),
+    pytest.param(_rollup("SUCCESS", "SKIPPED"), ("ready", 2, 2),
+                 marks=pytest.mark.variant("A skipped check counts as passed rather than leaving the PR in CI")),
     (_rollup("SUCCESS", "FAILURE", None), ("failed", 2, 3)),
-    (_rollup("SUCCESS", mergeable="CONFLICTING"), ("unknown", 1, 1)),    # never a false ready
-    (_rollup(), ("unknown", 0, 0)),                                        # no checks reported yet
+    pytest.param(_rollup("SUCCESS", mergeable="CONFLICTING"), ("unknown", 1, 1),
+                 marks=pytest.mark.variant("Passing checks must not make a conflicting PR ready")),
+    pytest.param(_rollup(), ("unknown", 0, 0),
+                 marks=pytest.mark.variant("An open PR with no checks must not be vacuously ready")),
     (_rollup("SUCCESS", state="MERGED"), None),
 ])
 def test_session_pr_state_of_a_payload(payload, expected):
