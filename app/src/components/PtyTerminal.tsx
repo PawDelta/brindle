@@ -72,6 +72,7 @@ import { openExternal, type OpenUrl } from "../api/open";
 import type { Crop, PtyViewOpener, PtyViewTarget } from "../api/ptyView";
 import { visualLink } from "../screens/Session/Visuals/client";
 import { VISUAL_LINK, VisualLinkContext } from "../screens/Session/Visuals/link";
+import { message } from "../screens/Session/Visuals/chrome";
 import { scrollByWheel } from "./terminalScroll";
 
 /* What the view is doing: opening, showing the pane, closed (the client
@@ -456,6 +457,7 @@ export function PtyTerminal({ at, open, copy, paste, attachments, openUrl, onVie
       }
       setFileNotice(null);
       const texts: string[] = [];
+      const errors: string[] = [];
       for (const file of files) {
         if (gone || attaching.current !== destination) break;
         try {
@@ -463,7 +465,10 @@ export function PtyTerminal({ at, open, copy, paste, attachments, openUrl, onVie
           if (gone || attaching.current !== destination) return null;
           texts.push(result.text);
         } catch (err) {
-          if (!gone && attaching.current === destination) setFileNotice({ error: true, text: `Couldn't attach file: ${String(err)}` });
+          if (!gone && attaching.current === destination) {
+            errors.push(message(err));
+            setFileNotice({ error: true, text: errors.join(" ") });
+          }
         }
       }
       return texts.join(" ") || null;

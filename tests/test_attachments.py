@@ -7,7 +7,89 @@ import pytest
 
 from brindle import attachments, git, identity_lock, providers, view
 from brindle.service.dto import AgentDTO
+from brindle.service.errors import ServiceError
 from test_daemon_actions import _send, world  # noqa: F401
+
+
+def test_attachment_system_alias(repo, tmp_path, monkeypatch):
+    target = tmp_path / "private"
+    target.mkdir()
+    source = target / "photo.png"
+    source.write_bytes(b"photo")
+    alias = tmp_path / "system"
+    alias.symlink_to(Path("private"), target_is_directory=True)
+    monkeypatch.setattr(attachments, "SYSTEM_ALIASES", {alias: target}, raising=False)
+    provider = providers.PROVIDERS["claude"]
+    result = attachments.attach(str(repo), provider, {"path": str(alias / source.name)})
+    assert Path(result["paths"][0]).read_bytes() == b"photo"
+    for denied in (alias / source.name, source):
+        with monkeypatch.context() as patch:
+            patch.setattr(attachments.permissions, "CREDENTIAL_DENIES", (
+                attachments.permissions.Rule("read", str(denied), "exact", "deny"),))
+            with pytest.raises(ServiceError) as caught:
+                attachments.attach(str(repo), provider, {"path": str(alias / source.name)})
+            assert caught.value.code == "forbidden"
+    nested = target / "nested"
+    nested.symlink_to(target, target_is_directory=True)
+    with pytest.raises(ServiceError) as caught:
+        attachments.attach(str(repo), provider, {"path": str(alias / "nested" / source.name)})
+    assert caught.value.code == "symlink"
+    alias.unlink()
+    alias.symlink_to(tmp_path, target_is_directory=True)
+    with pytest.raises(ServiceError) as caught:
+        attachments.attach(str(repo), provider, {"path": str(alias / "private" / source.name)})
+    assert caught.value.code == "symlink"
+    alias.unlink()
+    alias.mkdir()
+    (alias / source.name).write_bytes(b"ordinary directory")
+    result = attachments.attach(str(repo), provider, {"path": str(alias / source.name)})
+    assert Path(result["paths"][0]).read_bytes() == b"ordinary directory"
+
+
+@pytest.mark.parametrize("reason, expected", [
+    ("folder", "directory"),
+    pytest.param("link", "symlink", marks=pytest.mark.variant("Final file link instead of a linked parent")),
+    ("hardlink", "hardlink"), ("missing", "missing"),
+    ("permission", "unreadable"), ("large", "too_large"),
+    pytest.param("credential", "forbidden", marks=pytest.mark.variant("Credential filename contains a control character")),
+    pytest.param("os_error", "invalid", marks=pytest.mark.variant("Source open failure includes sensitive OS details")),
+    pytest.param("value_error", "invalid", marks=pytest.mark.variant("Malformed path instead of OS failure")),
+])
+def test_attachment_refusal_reason(repo, tmp_path, monkeypatch, reason, expected):
+    source = tmp_path / f"unsafe\nname.{reason}"
+    if reason == "folder":
+        source.mkdir()
+        for suffix in (".pages", ".app", ".rtfd"):
+            package = source.with_suffix(suffix)
+            package.mkdir()
+            with pytest.raises(ServiceError) as caught:
+                attachments.attach(str(repo), providers.PROVIDERS["claude"], {"path": str(package)})
+            assert caught.value.code == expected
+    elif reason != "missing":
+        source.write_bytes(b"contents")
+    if reason in {"link", "hardlink"}:
+        other = tmp_path / "other"
+        source.rename(other)
+        if reason == "link":
+            source.symlink_to(other)
+        else:
+            source.hardlink_to(other)
+    elif reason in {"permission", "os_error", "value_error"}:
+        error = {"permission": PermissionError, "os_error": OSError, "value_error": ValueError}[reason]
+
+        def refuse(_):
+            raise error("sensitive OS details /private/secret")
+
+        monkeypatch.setattr(attachments, "_open_file", refuse)
+    elif reason == "large":
+        monkeypatch.setattr(attachments, "MAX_BYTES", 4)
+    elif reason == "credential":
+        monkeypatch.setattr(providers, "_codex_denied_reads", lambda: [str(source)])
+    with pytest.raises(ServiceError) as caught:
+        attachments.attach(str(repo), providers.PROVIDERS["claude"], {"path": str(source)})
+    assert caught.value.code == expected
+    assert "\n" not in caught.value.message and str(tmp_path) not in caught.value.message
+    assert "sensitive OS details" not in caught.value.message and "/private/secret" not in caught.value.message
 
 
 def test_attachment_route(db, repo, world, tmp_path, monkeypatch):
@@ -43,18 +125,7 @@ def test_attachment_route(db, repo, world, tmp_path, monkeypatch):
 def test_attachment_refusals(db, repo, world, tmp_path, monkeypatch):
     source = tmp_path / "source"
     source.write_bytes(b"private contents")
-    link = tmp_path / "link"
-    link.symlink_to(source)
-    parent_link = tmp_path / "linked-dir"
-    parent_link.symlink_to(tmp_path, target_is_directory=True)
     monkeypatch.setattr(providers, "_codex_denied_reads", lambda: [str(source)])
-    for path in (source, link, parent_link / "source", tmp_path, tmp_path / "missing"):
-        code, result = _send("POST", "/v1/agents/wk/attachments", {"path": str(path)})
-        assert code in (400, 403) and "private contents" not in str(result)
-    hardlink = tmp_path / "hardlink"
-    hardlink.hardlink_to(source)
-    assert _send("POST", "/v1/agents/wk/attachments", {"path": str(hardlink)})[0] == 400
-    hardlink.unlink()
     with monkeypatch.context() as patch:
         patch.setenv("HOME", str(tmp_path))
         credential = tmp_path / ".aws" / "credentials"
@@ -68,7 +139,7 @@ def test_attachment_refusals(db, repo, world, tmp_path, monkeypatch):
             assert _send("POST", "/v1/agents/wk/attachments", {
                 "path": str(tmp_path / spelling)})[0] == 403
             assert not (repo / ".brindle" / "attachments").exists()
-    for body in ({}, {"name": "x", "data_base64": "!"}, {"path": str(link), "name": "x"},
+    for body in ({}, {"name": "x", "data_base64": "!"}, {"path": str(source), "name": "x"},
                  {"name": [], "data_base64": "YQ=="}, {"path": 1}):
         assert _send("POST", "/v1/agents/wk/attachments", body)[0] == 400
     # Synthetic Windows paths only: an attempted open can read just our fixture.
@@ -111,7 +182,6 @@ def test_attachment_refusals(db, repo, world, tmp_path, monkeypatch):
     env.write_bytes(b"secret")
     assert _send("POST", "/v1/agents/wk/attachments", {"path": str(env)})[0] == 403
     assert _send("POST", "/v1/agents/wk/attachments", {"path": str(repo / ".ENV.LOCAL")})[0] == 403
-    assert _send("POST", "/v1/agents/wk/attachments", {"path": str(source)})[0] == 413
     assert _send("POST", "/v1/agents/wk/attachments", {
         "name": "x", "data_base64": base64.b64encode(b"large").decode()})[0] == 413
     assert _send("POST", "/v1/agents/wk/attachments", {"name": "x", "data_base64": "A" * 5000})[0] == 413
