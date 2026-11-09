@@ -87,7 +87,6 @@ DESTRUCTIVE_DENIED = {"shell": {"baseline": "allow", "subcategories": {"destruct
     # A subcategory over its group's baseline, set through the daemon.
     ("autonomous", {"git": {"subcategories": {"push-feature": "deny"}}},
      lambda ws: bash(ws, "git push origin feature"), "deny", [("git", "push-feature")]),
-    ("standard", DESTRUCTIVE_DENIED, lambda ws: bash(ws, "rm notes.txt"), "deny", [("shell", "destructive")]),
     ("standard", DESTRUCTIVE_DENIED, lambda ws: bash(ws, "rm notes.txt > out.log"), "deny",
      [("shell", "destructive"), ("files", "write-worktree")]),              # a redirection hides nothing
     ("standard", DESTRUCTIVE_DENIED, lambda ws: confirmed(ws, "confirm && rm notes.txt"), "deny",

@@ -28,7 +28,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from brindle import bus, redact
+from brindle import bus, providers, redact
 from brindle.db import DB, Agent, Workspace
 from brindle.service.errors import ServiceError
 
@@ -207,14 +207,17 @@ def for_session(db: DB, root_id: str) -> list[dict]:
     return [_decode(r) for r in rows]
 
 
-def to_dto(v: dict) -> dict:
+def to_dto(db: DB, v: dict) -> dict:
     from brindle.service.dto import VisualDTO
 
     answer = v["answer"]
+    receiver = db.get_agent(v["root_id"])
+    provider = providers.PROVIDERS.get(receiver.provider, providers.Provider()) if receiver else providers.Provider()
     return VisualDTO(
         id=v["id"], session=v["root_id"], title=v["title"], by=v["by_agent"], kind=v["kind"], rev=v["rev"],
+        answer_agent_id=v["root_id"], accepts_files=provider.accepts_files,
         question=v["question"], options=v["options"],
-        answer={k: answer[k] for k in ("option", "note", "at")} if answer else None,
+        answer={k: answer[k] for k in ("option", "note", "at", "attachments") if k in answer} if answer else None,
         kept=v["kept_at"] is not None, unread=v["read_rev"] < v["rev"], created_at=v["created_at"],
     ).to_json()
 
@@ -330,7 +333,42 @@ def page(db: DB, visual_id: str, rev: Any) -> Path:
 # -- answers --------------------------------------------------------------------------
 
 
-def answer(db: DB, visual_id: str, rev: Any, option: Any = None, note: Any = None) -> dict:
+def _answer_attachments(db: DB, root_id: str, attachments: Any) -> tuple[list[str], list[str]]:
+    """Validate uploaded files before claiming an answer; store names, send CLI references."""
+    if attachments is None:
+        return [], []
+    if not isinstance(attachments, list) or any(not isinstance(p, str) or not p for p in attachments):
+        raise ServiceError("invalid", "attachments must be a list of file paths", 400)
+    if not attachments:
+        return [], []
+    receiver = db.get_agent(root_id)
+    workspace = db.get_workspace(receiver.workspace_id) if receiver else None
+    provider = providers.PROVIDERS.get(receiver.provider, providers.Provider()) if receiver else providers.Provider()
+    if not provider.accepts_files:
+        raise ServiceError("invalid", "this agent's provider does not accept file attachments", 400)
+    if workspace is None:
+        raise ServiceError("invalid", "attachment receiver has no workspace", 400)
+    # Do not resolve the attachments directory: if it is a symlink out of the
+    # workspace, its target must not become an allowed root.
+    folder = Path(workspace.path).resolve() / ".brindle" / "attachments"
+    names, references = [], []
+    for raw in attachments:
+        try:
+            path = Path(raw)
+            if not path.is_absolute() or ".." in path.parts:
+                raise ValueError
+            path = path.resolve(strict=True)
+            if not path.is_relative_to(folder) or not path.is_file():
+                raise ValueError
+        except (OSError, ValueError, RuntimeError):
+            raise ServiceError("invalid", "attach a file inside the receiving agent's attachments folder", 400) from None
+        names.append(path.name)
+        references.append(provider.format_attachment(str(path)))
+    return names, references
+
+
+def answer(db: DB, visual_id: str, rev: Any, option: Any = None, note: Any = None,
+           attachments: Any = None) -> dict:
     """The person's answer to the revision on their screen (``rev``). The
     answer is claimed in the row first, so a second answer (a double click,
     another window) is refused instead of delivered twice; if the message
@@ -353,8 +391,12 @@ def answer(db: DB, visual_id: str, rev: Any, option: Any = None, note: Any = Non
         raise ServiceError("invalid", "not one of this revision's options", 400)
     # The note is stored, can be kept, and goes to the agent: never a secret.
     _refuse_secrets([("your note", note)])
+    names, references = _answer_attachments(db, v["root_id"], attachments)
     at = time.time()
-    record = json.dumps({"option": option, "note": note, "at": at, "rev": rev})
+    data = {"option": option, "note": note, "at": at, "rev": rev}
+    if names:
+        data["attachments"] = names
+    record = json.dumps(data)
     with db.tx() as c:
         cur = c.execute("UPDATE visuals SET answer=?, read_rev=MAX(read_rev, rev) "
                         "WHERE id=? AND rev=? AND answer IS NULL", (record, v["id"], rev))
@@ -369,6 +411,8 @@ def answer(db: DB, visual_id: str, rev: Any, option: Any = None, note: Any = Non
     message += f": option {option}." if option is not None else ":"
     if note:
         message += f"\nTheir note: {note}"
+    if references:
+        message += "\n" + "\n".join(references)
     try:
         agents.send_message(db, v["root_id"], message, person=True)
     except BaseException:
@@ -471,7 +515,7 @@ def kept_to_dto(k: dict) -> dict:
     answer = json.loads(k["answer"]) if k["answer"] else None
     return KeptVisualDTO(
         id=k["id"], title=k["title"], from_session_name=k["from_session_name"], repo=k["repo"],
-        answer={key: answer[key] for key in ("option", "note", "at")} if answer else None,
+        answer={key: answer[key] for key in ("option", "note", "at", "attachments") if key in answer} if answer else None,
         kept_at=k["kept_at"],
     ).to_json()
 

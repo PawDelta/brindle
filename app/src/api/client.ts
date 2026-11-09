@@ -33,6 +33,7 @@ import type {
   SessionDTO,
   WorkspaceDTO,
 } from "./schema";
+import { engineAttachment, type Attachment } from "./attachments";
 
 /* PUT /routing (routes_actions.put_routing): what to write and where. The
    tiers given replace their lists in that scope's file; the others, and a
@@ -349,11 +350,16 @@ export interface VisualAnswer {
   option: string | null;
   note: string;
   at: number;
+  /* Paths of the files attached to the answer. */
+  attachments?: string[];
 }
 
 export interface VisualDTO {
   id: string;
   session: string;
+  /* The agent that receives the answer, and whether its provider takes files. */
+  answer_agent_id?: string;
+  accepts_files?: boolean;
   title: string;
   /* The agent that published it. */
   by: string;
@@ -1429,6 +1435,10 @@ export class DaemonClient {
     return this.post<MessageResult>(`/agents/${encodeURIComponent(id)}/message`, { text });
   }
 
+  async attach(id: string, file: Attachment) {
+    return this.post<{ paths: string[]; text: string }>(`/agents/${encodeURIComponent(id)}/attachments`, await engineAttachment(file));
+  }
+
   /* Hide the agent for good, stopping it first if it runs; its record and work stay. */
   close(id: string) {
     return this.post<CloseResult>(`/agents/${encodeURIComponent(id)}/close`, {});
@@ -1607,8 +1617,8 @@ export class DaemonClient {
   }
 
   /* The person's answer to the revision on screen; a newer revision makes this a 409. */
-  answerVisual(id: string, rev: number, option: string | undefined, note: string) {
-    return this.post<VisualDTO>(`/visuals/${encodeURIComponent(id)}/answer`, { rev, option, note });
+  answerVisual(id: string, rev: number, option: string | undefined, note: string, attachments?: string[]) {
+    return this.post<VisualDTO>(`/visuals/${encodeURIComponent(id)}/answer`, { rev, option, note, ...(attachments?.length ? { attachments } : {}) });
   }
 
   exportVisual(id: string, rev: number, html: string, destination: ExportDestination = "download", markdown?: string) {

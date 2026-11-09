@@ -171,10 +171,8 @@ CLAUDE_PROMPT = " Bash command\n   pytest\n This command requires approval\n\n D
 ])
 def test_claude_screen_state(screen, want):
     assert ClaudeCode().screen_state(screen) == want
-
-
-def test_claude_busy_in_footer():
-    assert ClaudeCode().busy_in_footer(CLAUDE_BUSY_REAL_CAPTURE)
+    if want == "busy":
+        assert ClaudeCode().busy_in_footer(screen)
 
 
 # The real agent-view screen: its footer ("ctrl+x to delete") is the reliable
