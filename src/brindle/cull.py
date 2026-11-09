@@ -271,6 +271,10 @@ def sweep(db: DB, now: float | None = None) -> list[str]:
     # person typing, say): an idle agent with no turn-end hook (agy), or one
     # just waiting, would never get them otherwise. flush itself still waits
     # for typed input, a held login, and claims the agent before pasting.
+    # First, mail a waiter died holding: no later Stop may ever start another.
+    from brindle import wake
+
+    wake.reclaim(db)
     for a in db.list_agents():
         oldest = db.oldest_pending(a.id)
         if (oldest is not None and now - oldest >= FLUSH_RETRY_AFTER and a.status == "idle"

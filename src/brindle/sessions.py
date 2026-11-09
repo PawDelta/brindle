@@ -231,6 +231,9 @@ def handover_to(db: DB, old_root_id: str, dest: Workspace, note: str | None = No
             (old_root_id, old_root_id),
         )
         c.execute("UPDATE agents SET parent_id=? WHERE parent_id=?", (new.id, old_root_id))
+        # What its workers wait on is the new supervisor's to settle: left
+        # here it would refuse the old session's stops, and it can't close it.
+        c.execute("UPDATE open_items SET supervisor_id=? WHERE supervisor_id=?", (new.id, old_root_id))
         # A queued task for the session's own repo is cut from the new
         # supervisor's checkout; one for an attached repo keeps its own.
         c.execute("UPDATE tasks SET caller_id=?, caller_ws_id=? WHERE caller_id=? "

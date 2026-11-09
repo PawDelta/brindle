@@ -5,6 +5,7 @@ real CLIs)."""
 import io
 import json
 import re
+import sqlite3
 import sys
 import time
 
@@ -170,11 +171,11 @@ def test_mail_not_handed_over_is_queued_again(db, boss, monkeypatch):
     db.enqueue("boss", "two", None)
     real, calls = db.pop_pending, []
 
-    def flaky(agent_id):
+    def flaky(agent_id, **kw):
         calls.append(agent_id)
         if len(calls) == 2:
             raise RuntimeError("database is locked")
-        return real(agent_id)
+        return real(agent_id, **kw)
 
     monkeypatch.setattr(db, "pop_pending", flaky)
     with pytest.raises(RuntimeError):
@@ -191,7 +192,7 @@ def test_mail_not_handed_over_is_queued_again(db, boss, monkeypatch):
     monkeypatch.setattr(sys, "stderr", Broken())
     with pytest.raises(BrokenPipeError):
         wake.main(db, "boss")
-    assert db.pending_count("boss") == 2
+    assert db.pending_count("boss") == 2 and not db.waiter_claims("boss")
 
     # Written, it's handed over: exit code 2 wakes the model, now busy with it.
     out = io.StringIO()
@@ -199,3 +200,116 @@ def test_mail_not_handed_over_is_queued_again(db, boss, monkeypatch):
     assert wake.main(db, "boss") == 2
     assert sorted(b for _, b in _framed(out.getvalue(), _nonce(out.getvalue()))) == ["one", "two"]
     assert db.pending_count("boss") == 0 and db.get_agent("boss").status == "processing"
+    assert not db.waiter_claims("boss")   # or a later sweep would hand it over again
+
+
+def test_taken_mail_keeps_its_place_and_its_hand_over_survives_a_busy_db(db, boss, monkeypatch):
+    for body in ("one", "two"):
+        db.enqueue("boss", body, None)
+    _, taken = wake.take(db, db.get_agent("boss"))
+    db.enqueue("boss", "newer", None)
+    wake.give_back(db, "boss", taken)
+
+    def locked(*a, **k):
+        raise sqlite3.OperationalError("database is locked")
+
+    out = io.StringIO()
+    monkeypatch.setattr(wake, "wait", lambda db, agent_id: wake.take(db, db.get_agent(agent_id)))
+    monkeypatch.setattr(wake.signal, "signal", lambda *a: None)
+    monkeypatch.setattr(sys, "stderr", out)
+    monkeypatch.setattr(db, "set_status", locked)
+    assert wake.main(db, "boss") == 2   # any other exit code and Claude Code never reads it
+    assert [b for _, b in _framed(out.getvalue(), _nonce(out.getvalue()))] == ["one", "two", "newer"]
+
+
+@pytest.mark.parametrize("found_by", ["the next waiter", "the sweep"])
+def test_mail_a_waiter_died_holding_is_recovered(db, boss, monkeypatch, found_by):
+    # Killed before anything reached stderr: nothing ran to give it back.
+    db.enqueue("boss", "the answer", None)
+    assert wake.take(db, db.get_agent("boss")) and db.pending_count("boss") == 0
+    assert db.waiter_claims("boss")
+    wake.reclaim(db, "boss")
+    assert db.pending_count("boss") == 0   # its waiter is alive: still mid hand-over
+
+    monkeypatch.setattr(wake, "_gone", lambda state: True)
+    if found_by == "the sweep":
+        wake.reclaim(db)
+        assert db.pending_count("boss") == 1 and not db.waiter_claims("boss")
+    text, _ = wake.wait(db, "boss", poll=0.01, limit=1)
+    assert text.count("the answer") == 1
+
+
+@pytest.mark.parametrize("fails", ["the claim's cleanup", "the receipt's cleanup"])
+def test_mail_handed_over_is_not_replayed_when_its_cleanup_fails(db, boss, monkeypatch, fails):
+    db.enqueue("boss", "the answer", None)
+    real = db.set_mark
+
+    def locked(agent_id, kind, value):
+        if kind.startswith("waiter-claim:"):
+            raise sqlite3.OperationalError("database is locked")
+        real(agent_id, kind, value)
+
+    def no_permission(self, **k):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(wake, "wait", lambda db, agent_id: wake.take(db, db.get_agent(agent_id)))
+    monkeypatch.setattr(wake.signal, "signal", lambda *a: None)
+    monkeypatch.setattr(sys, "stderr", io.StringIO())
+    with monkeypatch.context() as broken:
+        if fails == "the claim's cleanup":
+            broken.setattr(db, "set_mark", locked)
+        else:
+            broken.setattr(wake.Path, "unlink", no_permission)
+        assert wake.main(db, "boss") == 2   # any other exit code and Claude Code never reads it
+    assert bool(db.waiter_claims("boss")) is (fails == "the claim's cleanup")
+
+    monkeypatch.setattr(wake, "_gone", lambda state: True)
+    with monkeypatch.context() as broken:
+        broken.setattr(wake.Path, "unlink", no_permission)
+        wake.reclaim(db)
+    assert db.pending_count("boss") == 0 and not db.waiter_claims("boss")
+
+
+def test_a_receipt_that_cant_be_read_is_not_taken_for_no_receipt(db, boss, monkeypatch):
+    db.enqueue("boss", "the answer", None)
+    _, taken = wake.take(db, db.get_agent("boss"))
+    receipt = wake._handed_path("boss", [m.id for m in taken])
+    receipt.parent.mkdir(parents=True)
+    receipt.touch()
+    monkeypatch.setattr(wake, "_gone", lambda state: True)
+    real = wake.Path.exists
+
+    def denied(self, **k):
+        if self == receipt:
+            raise PermissionError("denied")
+        return real(self, **k)
+
+    with monkeypatch.context() as broken:
+        broken.setattr(wake.Path, "exists", denied)
+        wake.reclaim(db)
+    assert db.pending_count("boss") == 0 and db.waiter_claims("boss")   # unknown: neither replayed nor forgotten
+
+    wake.reclaim(db)
+    assert db.pending_count("boss") == 0 and not db.waiter_claims("boss") and not receipt.exists()
+
+
+def test_a_stopped_pane_delivery_doesnt_wedge_a_live_waiter(db, boss, monkeypatch):
+    # The waiter can't take past the mark, and flush left the queue to the waiter.
+    monkeypatch.setattr(agents, "_composer_settled", lambda a: True)
+    monkeypatch.setattr(agents, "_partial_composer", lambda a, state, stage: False)
+    monkeypatch.setattr(agents, "_composer_taken", lambda a: False)
+    monkeypatch.setattr(agents, "_paste_blocked", lambda a: False)
+    monkeypatch.setattr(agents, "_pane_input", lambda a: None)
+    pasted = []
+    monkeypatch.setattr(agents.tmux, "paste", lambda target, body, **k: pasted.append(body))
+    wake._register("boss")
+    mid = db.enqueue("boss", "typed", None)
+    db.record_pane_delivery(mid, "boss", json.dumps(
+        {"message_id": mid, "pane": "@0", "server": agents.server_of(db.get_agent("boss")), "provider": "claude",
+         "body": "typed", "lead": "brindle delivered this message:", "stage": "lead", "stopped": True}))
+    db.enqueue("boss", "the answer", None)
+
+    assert agents._stop_decision(db, db.get_agent("boss"), {}, via_inbox=True, waiter=True) is None
+    assert db.get_agent("boss").status == "idle"   # the sweep's flush needs it idle
+    assert agents.flush(db, "boss") is True and pasted == ["typed"]
+    assert "the answer" in wake.take(db, db.get_agent("boss"))[0]

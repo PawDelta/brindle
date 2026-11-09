@@ -54,6 +54,7 @@ def test_handover_moves_goal_workers_tasks_and_carries_the_note(db, repo, monkey
     db.add_task(Task("t1", str(repo), None, "old", root.id, "developer", "later", "assign", 1, None,
                      None, None, '["w1"]', "pending", time.time()))
     autopilot.wait_on(db, "old", until=time.time() + 60, note="training")
+    db.add_open_item("w1", "old", "question", "which db?", time.time(), time.time())
 
     spawned = {}
 
@@ -71,6 +72,7 @@ def test_handover_moves_goal_workers_tasks_and_carries_the_note(db, repo, monkey
     new = sessions.handover(db, "old", dest, "rule: never push to main")
 
     assert new.id == "new" and spawned["ws"].id == dest.id and paused == ["old"]
+    assert [i.worker_id for i in db.open_items("new")] == ["w1"] and db.open_items("old") == []
     assert spawned["profile"] == "supervisor"
     assert "rule: never push to main" in spawned["prompt"] and "w1" in spawned["prompt"]
     ap = db.get_autopilot("new")

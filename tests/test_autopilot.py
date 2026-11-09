@@ -206,7 +206,7 @@ def test_outside_wait_sweep_wakes_idle_supervisor_once(db, root, monkeypatch):
     monkeypatch.setattr(agents, "_paste_blocked", paste_blocked)
 
     def paste(target, body, **kw):
-        assert db.pending_count(agent.id) == 0  # fail after dequeue, not before dispatch
+        assert db.pane_delivery_holds(agent.id)  # fail after dequeue, not before dispatch
         rows = db.conn.execute("SELECT id FROM inbox WHERE agent_id=?", (agent.id,)).fetchall()
         assert len(rows) == 1
         claimed.append(rows[0][0])
