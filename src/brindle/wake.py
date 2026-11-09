@@ -28,6 +28,7 @@ the agent is busy, or are typed into its pane if it's idle (agents.flush).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -170,6 +171,24 @@ def give_back(db: DB, agent_id: str, taken: list) -> None:
     db.set_mark(agent_id, f"{WAITER_CLAIM}{os.getpid()}", None)
 
 
+def _handed_path(agent_id: str, ids: list[int]) -> Path:
+    """Where a claim's completed hand-over is recorded: a file, as it has to
+    hold when the database is what just failed. Named for the claim's rows."""
+    return brindle_home() / "wake-handed" / hashlib.sha256(f"{agent_id}:{ids}".encode()).hexdigest()[:32]
+
+
+def _finish_claim(db: DB, agent_id: str, taken: list) -> None:
+    """The mail is written: this claim must never be read as abandoned."""
+    handed = _handed_path(agent_id, [m.id for m in taken])
+    try:
+        handed.parent.mkdir(parents=True, exist_ok=True)
+        handed.touch()
+    except OSError:
+        pass   # the database below is still the usual record
+    db.set_mark(agent_id, f"{WAITER_CLAIM}{os.getpid()}", None)
+    handed.unlink(missing_ok=True)
+
+
 def _gone(state: dict) -> bool:
     if time.time() - state["at"] > CLAIM_EXPIRES:
         return True
@@ -186,7 +205,12 @@ def reclaim(db: DB, agent_id: str | None = None) -> None:
     """Put back mail a waiter took and died holding (killed before it could
     hand it over): for the next waiter, or the sweep's flush, to deliver."""
     for row in db.waiter_claims(agent_id):
-        if _gone(json.loads(row["value"])):
+        state = json.loads(row["value"])
+        handed = _handed_path(row["agent_id"], state["ids"])
+        if handed.exists():   # it reached the agent; only the claim's cleanup failed
+            db.set_mark(row["agent_id"], row["kind"], None)
+            handed.unlink(missing_ok=True)
+        elif _gone(state):
             db.reclaim_waiter_claim(row["agent_id"], row["kind"], row["value"])
 
 
@@ -275,10 +299,10 @@ def main(db: DB, agent_id: str) -> int:
     # Handed over: from here only exit code 2 makes Claude Code read it, so
     # neither a late stop signal nor a busy database may change that.
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
-    for step in (lambda: db.set_mark(agent_id, f"{WAITER_CLAIM}{os.getpid()}", None),
+    for step in (lambda: _finish_claim(db, agent_id, taken),
                  lambda: db.set_status(agent_id, "processing", only_if="idle")):  # it wakes with this
         try:
             step()
         except sqlite3.Error:
-            pass   # at worst it's handed over twice; its prompt-submit hook sets the status too
+            pass   # reclaim reads the claim's record; its prompt-submit hook sets the status too
     return 2

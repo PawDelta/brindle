@@ -270,18 +270,20 @@ def _caller_ws(db: DB, supervisor: Agent, ws: Workspace | None, task: Task | Non
     return db.get_workspace(task.caller_ws_id) if task else None
 
 
-def _repoint(db: DB, worker: Agent, ws: Workspace, task: Task | None, new: Task) -> list[tuple[str, list[str], list[str]]]:
+def _repoint(db: DB, worker: Agent, ws: Workspace, task: Task | None, new: Task, state: dict) -> None:
     """Queued tasks waiting on the stuck worker now wait on its replacement.
-    Returns (task, what it waited on, what it waits on now) for each."""
-    moved = []
+    Each change is journaled in ``state`` before it is made: undoing one only
+    applies if the task still waits on the replacement, so an entry whose
+    write never happened is harmless, while a write with no entry couldn't be undone."""
     for t in tasks.queued(db):
         deps = tasks._loads(t.depends_on)
         now_deps = [f"task:{new.id}" if d in (worker.id, f"workspace:{ws.id}")
                     or (d == ws.branch and t.repo_root == ws.repo_root)
                     or (task is not None and tasks._refers_to(d, task, t.repo_root)) else d for d in deps]
-        if t.id != new.id and now_deps != deps and tasks.set_dependencies(db, t.id, now_deps, deps):
-            moved.append((t.id, deps, now_deps))
-    return moved
+        if t.id != new.id and now_deps != deps:
+            state["moved"] = state["moved"] + [[t.id, deps, now_deps]]
+            _save_takeover(db, state)
+            tasks.set_dependencies(db, t.id, now_deps, deps)
 
 
 def _tell(db: DB, supervisor_id: str, body: str) -> None:
@@ -336,8 +338,10 @@ def reassign(db: DB, item: OpenItem, now: float | None = None, *, actor: Agent |
     text = brief + unmerged_note
     prior = _takeover_state(db, worker.id)
     state = {"worker": worker.id, "supervisor": supervisor.id, "ws": ws.id, "repo": ws.repo_root,
-             "branch": ws.branch, "text": text, "old_task": task.id if task else None, "task": None,
-             "detail": item.detail, "opened_at": item.opened_at, "at": now, "moved": []}
+             "branch": ws.branch, "text": text, "old_task": task.id if task else None,
+             "detail": item.detail, "opened_at": item.opened_at, "at": now,
+             # What an earlier attempt prepared is still this takeover's to undo.
+             "task": prior["task"] if prior else None, "moved": prior["moved"] if prior else []}
     _save_takeover(db, state)
     # A takeover that died part way (the claim held here has expired) left
     # its unstarted replacement: this one carries on with it.
@@ -348,11 +352,8 @@ def reassign(db: DB, item: OpenItem, now: float | None = None, *, actor: Agent |
         analysis_doc=bool(task.analysis_doc) if task else False, unanswered=True,
     )
     state["task"] = new.id
-    if prior and prior["task"] == new.id:
-        state["moved"] = prior["moved"]
     _save_takeover(db, state)
-    state["moved"] = state["moved"] + _repoint(db, worker, ws, task, new)
-    _save_takeover(db, state)
+    _repoint(db, worker, ws, task, new, state)
 
     # The last look, right before retiring it: the repo's event hooks ran just above.
     if _gone_or_back(db, item, ws):
