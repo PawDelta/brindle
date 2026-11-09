@@ -28,6 +28,7 @@ mod pty_bridge;
 /// Every pane the webview shows, through a real tmux client on a pty.
 pub mod pty_view;
 mod setup;
+mod startup;
 mod updates;
 /// The sandbox each agent-written visual renders in: a child webview on the
 /// `brindle-visual://` scheme that can reach nothing but the shell.
@@ -210,6 +211,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         oauth::provider_http,
         open_local_path,
         daemon::daemon_connect,
+        startup::app_startup_step,
         daemon::daemon_start_step,
         daemon::daemon_request,
         daemon::daemon_stream_open,
@@ -252,6 +254,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    startup::begin();
     #[cfg(unix)]
     raise_open_files();
     let context = context();
@@ -312,6 +315,7 @@ pub fn run() {
     builder
         .invoke_handler(invoke_handler())
         .setup(move |app| {
+            startup::open(app.handle());
             let _ = visuals_app.set(app.handle().clone());
             let mut tray = TrayIconBuilder::with_id(TRAY_ID)
                 .tooltip("brindle")

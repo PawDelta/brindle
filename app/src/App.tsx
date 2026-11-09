@@ -38,6 +38,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { DaemonError, type DaemonClient, type Meta, type ProviderInstalled } from "./api/client";
 import { plain } from "./api/wording";
+import { startupStep } from "./api/startup";
 import { DaemonContext } from "./api/context";
 import { checkEngine, type EngineStatus } from "./api/engine";
 import { openExternal, pickFolder as nativePicker, type OpenUrl, type PickFolder } from "./api/open";
@@ -248,6 +249,14 @@ function Banner({ status, connection, onRetry, client, store }: { status: Engine
 
 /* `firstRun`: the app opens right after the first launch's setup, so the walkthrough offers itself. */
 function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, pickFolder = nativePicker, installCli, appUpdater, appUpdates, releaseBuildUpdater, readAbout, firstRun = false }: AppProps & { firstRun?: boolean }) {
+  useEffect(() => {
+    // The second frame runs after the browser has had a paint opportunity.
+    let painted = 0;
+    const frame = requestAnimationFrame(() => {
+      painted = requestAnimationFrame(() => startupStep("shell_painted"));
+    });
+    return () => { cancelAnimationFrame(frame); cancelAnimationFrame(painted); };
+  }, []);
   // Until the sessions are known the app shows the empty state, quietly; then it lands.
   const [route, setRoute] = useState<Route | null>(initialRoute ?? null);
   /* Counts the navigations: one to the route already open still counts (Settings opens its tab again). */
@@ -529,6 +538,7 @@ function usePanesReady(client: DaemonClient | null, refresh?: () => Promise<void
     let first = true;
     let next: ReturnType<typeof setTimeout>;
     const settle = (pid: number | null) => {
+      startupStep("panes_ready");
       current = false;
       clearTimeout(next);
       clearTimeout(deadline);

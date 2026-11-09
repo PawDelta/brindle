@@ -1,5 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import type { ReactElement } from "react";
+import * as shell from "@tauri-apps/api/core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App, { landing } from "./App";
 import type { WebSocketFactory } from "./api/events";
@@ -15,6 +16,7 @@ import { REPO, question, root, windowOf, worker } from "./test/fixtures";
 import { standInViews } from "./test/panes";
 
 vi.mock("./components/PtyTerminal", () => import("./test/panes"));
+vi.mock("@tauri-apps/api/core", { spy: true });
 
 beforeEach(() => localStorage.clear());
 afterEach(cleanup);
@@ -52,6 +54,22 @@ const paneWaits = () => screen.queryByTestId("state-card")?.dataset.kind === "re
 
 describe("App", () => {
   beforeEach(() => localStorage.setItem(ONBOARDED_KEY, "1"));
+  it("startup steps are timed", async () => {
+    const native = vi.spyOn(shell, "isTauri").mockReturnValue(true);
+    const invoke = vi.spyOn(shell, "invoke").mockResolvedValue(undefined);
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root] });
+    const client = daemon.client();
+    const store = createAppStore();
+    const sync = startSync({ client, store, connect: daemon.connect });
+    try {
+      renderApp(<App store={store} client={client} refresh={sync.refresh} />);
+      await screen.findByTestId("terminal");
+      await waitFor(() => {
+        const steps = invoke.mock.calls.filter(([command]) => command === "app_startup_step").map(([, args]) => (args as { step: string }).step);
+        expect(steps).toEqual(expect.arrayContaining(["meta", "snapshot", "sessions_feed", "shell_painted", "panes_ready"]));
+      });
+    } finally { sync.stop(); native.mockRestore(); invoke.mockRestore(); }
+  });
   it("shows the app at once while sessions come back; only the pane waits until they are ready", async () => {
     vi.useFakeTimers();
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root] });
