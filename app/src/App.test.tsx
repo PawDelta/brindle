@@ -203,13 +203,22 @@ describe("App", () => {
     const store = createAppStore();
     const meta = client.meta.bind(client);
     vi.spyOn(client, "meta").mockImplementation(async () => ({ ...await meta(), resuming: true, recovery: { done: 1, total: 2, pending: ["sup2"] } }));
-    // The slow daemon: the store's own refresh never comes back in time; only the gate's one snapshot does.
-    const refresh = vi.fn(() => new Promise<void>(() => {}));
+    // The slow daemon: the sync's first read (rows from before recovery) is still out; only the gate's read comes back.
+    let finish!: (rows: typeof daemon.data.workspaces) => void;
+    const read = client.snapshot.bind(client);
+    // Sync's first read, then the gate's; every later one (the background refresh) is still out too.
+    vi.spyOn(client, "snapshot").mockImplementationOnce(() => new Promise((ok) => { finish = ok; })).mockImplementationOnce(read).mockReturnValue(new Promise(() => {}));
+    const sync = startSync({ client, store, connect: daemon.connect });
     try {
-      renderApp(<App store={store} client={client} refresh={refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO }} />);
+      renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO }} />);
       await act(async () => { await vi.advanceTimersByTimeAsync(300); });
       expect(screen.getByTestId("terminal").textContent).toBe("sup1");
-    } finally { vi.useRealTimers(); }
+      // The old read comes back late: it must not put the pre-recovery window under the released session.
+      await act(async () => { finish([{ ...root, agents: root.agents?.map((a) => ({ ...a, window: windowOf("old") })) }, rootB]); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(300); });
+      expect(store.getState().workspaces.find((w) => w.id === "proj")?.agents?.[0].window).toBe(windowOf("sup1"));
+      expect(screen.getByTestId("terminal").textContent).toBe("sup1");
+    } finally { sync.stop(); vi.useRealTimers(); }
   });
 
   it("panes per session: a session that finishes coming back while its rows are being read is not shown from the old rows", async () => {
