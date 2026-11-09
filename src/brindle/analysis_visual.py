@@ -18,9 +18,11 @@ from __future__ import annotations
 import html as html_lib
 import logging
 import re
+from pathlib import Path
 
 from brindle import visuals
 from brindle.db import DB, Agent, Workspace
+from brindle.service.errors import ServiceError
 
 log = logging.getLogger(__name__)
 
@@ -146,27 +148,47 @@ def _page(title: str, files: list[dict]) -> str:
             f"<style>{STYLE}</style></head><body>{''.join(parts)}</body></html>")
 
 
+def _whole_doc(folder: Path) -> list[dict]:
+    """Every document in the docs folder, whole, or an error: a page showing
+    only some of a doc would read as all of it. Reads stop at what a visual
+    can hold."""
+    from brindle import kb
+
+    if folder.is_symlink() or not folder.is_dir():
+        return []
+    files, room = [], visuals.MAX_BYTES
+    for name, path in kb._folder_paths(folder, limit=None):
+        with open(path, "rb") as fh:
+            data = fh.read(room + 1)
+        if len(data) > room:
+            raise ServiceError("too_big", f"the doc is over the {visuals.MAX_BYTES // (1024 * 1024)} MB "
+                               f"a visual may be, at {name}", 400)
+        room -= len(data)
+        files.append({"name": name, "md": data.decode("utf-8")})
+    return files
+
+
 def _publish(db: DB, agent: Agent, ws: Workspace) -> None:
     from brindle import plans
-    from brindle.pro import analysis_brief, analysis_docs
+    from brindle.pro import analysis_brief
 
     if not visuals.enabled():
         return
-    docs = analysis_docs.collect(ws.repo_root, ws.branch, {})
-    if not docs:
-        return
+    folder = analysis_brief.docs_dir(ws.repo_root, ws.branch)
     # The folder's top-level files first: the doc itself before its notes.
-    files = sorted(docs[0].files, key=lambda f: ("/" in f["name"], f["name"]))
+    files = sorted(_whole_doc(folder), key=lambda f: ("/" in f["name"], f["name"]))
+    if not files:
+        return
     # What the agent wrote, before escaping can change how a secret looks.
     visuals._refuse_secrets([(f"the doc {f['name']}", f["md"]) for f in files])
     title = next(filter(None, (plans._title(f["md"]) for f in files)), None)
     title = title or f"Analysis doc: {ws.branch}"[:visuals.MAX_TITLE]
-    visuals.publish_analysis_doc(db, agent, str(analysis_brief.docs_dir(ws.repo_root, ws.branch)),
-                                 title, _page(title, files))
+    visuals.publish_analysis_doc(db, agent, str(folder), title, _page(title, files))
 
 
 def on_report(db: DB, agent: Agent, ws: Workspace | None) -> None:
-    """A worker reported: open the doc its brief asked for. Never raises."""
+    """A worker reported, or a subagent's outcome was recorded: open the doc
+    its brief asked for. Never raises."""
     try:
         from brindle.pro import analysis_brief
 

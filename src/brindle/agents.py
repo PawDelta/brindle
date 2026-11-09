@@ -3041,6 +3041,7 @@ def complete_subagent(db: DB, agent_id: str, result: str) -> Agent:
         )
     db.set_result(agent.id, result)
     db.set_status(agent.id, "done")
+    _open_analysis_doc(db, agent, db.get_workspace(agent.workspace_id))
     return db.get_agent(agent.id) or agent
 
 
