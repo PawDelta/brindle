@@ -87,9 +87,10 @@ describe("review", () => {
     await waitFor(() => expect(refused).toBeGreaterThan(0));
     // Every milestone passed, but readiness can't be read: nothing about a PR anywhere, not from the milestones.
     const context = () => within(nav()).getByTestId("session-context");
-    await waitFor(() => expect(context().textContent).toContain("Ship ls --json"));
+    // The title also shows while the goal loads, so wait for the phase, which only the loaded goal has.
+    await waitFor(() => expect(within(context()).getByTestId("goal-phase").textContent).toBe("In review"));
+    expect(context().textContent).toContain("Ship ls --json");
     expect(context().textContent).not.toMatch(/PR/);
-    expect(within(context()).getByTestId("goal-phase").textContent).toBe("In review");
     expect(screen.queryByTestId("goal-review")).toBeNull();
     expect(screen.queryByRole("dialog")).toBeNull();
     // Readable, and not ready: still nothing.
