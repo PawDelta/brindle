@@ -262,13 +262,26 @@ function AnswerBar({ client, visual, picked, onPick, onAnswered }: { client: Vis
             onPaste={(e) => {
               if (!canAttach) return;
               const files = Array.from(e.clipboardData.files);
-              if (files.length) {
+              const text = e.clipboardData.getData?.("text") ?? "";
+              if (isTauri()) {
+                // Finder also supplies filename text. Ask for native files before inserting that text.
+                e.preventDefault();
+                const input = e.currentTarget;
+                const start = input.selectionStart ?? note.length;
+                const end = input.selectionEnd ?? start;
+                const before = input.value;
+                void upload(async () => {
+                  const copied = await clipboardAttachments();
+                  if (copied.length) return copied;
+                  if (!text) return Promise.all(files.map(fileAttachment));
+                  if (active.current && input.value === before) {
+                    setNote(before.slice(0, start) + text + before.slice(end));
+                  }
+                  return [];
+                });
+              } else if (files.length) {
                 e.preventDefault();
                 void upload(() => Promise.all(files.map(fileAttachment)));
-              } else if (isTauri() && !e.clipboardData.getData("text")) {
-                // The webview exposes no File: ask the native clipboard (Finder files, image bytes). Plain text pastes as usual.
-                e.preventDefault();
-                void upload(clipboardAttachments);
               }
             }} />
           {canAttach && (
