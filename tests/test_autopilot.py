@@ -1,5 +1,6 @@
 import json
 import time
+from concurrent.futures import Future
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -205,7 +206,7 @@ def test_outside_wait_sweep_wakes_idle_supervisor_once(db, root, monkeypatch):
     monkeypatch.setattr(agents, "_paste_blocked", paste_blocked)
 
     def paste(target, body, **kw):
-        assert db.pending_count(agent.id) == 0  # fail after dequeue, not before dispatch
+        assert db.pane_delivery_holds(agent.id)  # fail after dequeue, not before dispatch
         rows = db.conn.execute("SELECT id FROM inbox WHERE agent_id=?", (agent.id,)).fetchall()
         assert len(rows) == 1
         claimed.append(rows[0][0])
@@ -867,14 +868,47 @@ def test_goal_activity_commits_and_estimate(db, root, repo):
     assert (got["commits_last_hour"], got["eta_seconds"]) == (2, None)
 
 
+def test_goal_eta_survives_fixing_and_deleted_builders(db, root, monkeypatch):
+    from brindle import pipeline
+
+    _, ws = root
+    now = time.time()
+    monkeypatch.setattr(git, "out", lambda *args: "")
+    add_agent(db, ws, "fixer", mode="assign", parent="boss")
+    day = time.strftime("%Y-%m-%d", time.gmtime(now))
+    db.conn.execute("INSERT INTO stage_timings VALUES (?, ?, 'report_to_merge', 5, 1200, 1200, ?)",
+                    (day, ws.repo_root, json.dumps([1200] * 5)))
+    for elapsed, expected in [(300, 900), (1500, 60)]:
+        db.update_agent("fixer", pipeline="fixing", result="done", reviewing_since=now - elapsed)
+        got = autopilot.goal_activity(db, "boss", now=now)
+        assert (got["stage"], got["eta_seconds"]) == ("working", expected)
+
+    monkeypatch.setattr(pipeline, "enabled", lambda *args: True)
+    monkeypatch.setattr(pipeline, "_report_only", lambda *args: False)
+    monkeypatch.setattr(pipeline, "_start_review", lambda *args: None)
+    monkeypatch.setattr(git, "dirty_files", lambda *args, **kwargs: [])
+    monkeypatch.setattr(pipeline.time, "time", lambda: now)
+    db.update_agent("fixer", status="done", pipeline=None)
+    add_agent(db, ws, "writing", mode="assign", parent="boss")
+    db.update_agent("writing", profile="builder", created_at=now - 300)
+    for i in range(5):
+        worker = add_agent(db, ws, f"past{i}", mode="assign", parent="boss")
+        db.update_agent(worker.id, profile="builder", created_at=now - 1200)
+        assert pipeline.on_report(db, db.get_agent(worker.id), ws, "done")
+    db.conn.execute("DELETE FROM agents WHERE id LIKE 'past%'")
+    assert autopilot.goal_activity(db, "boss", now=now)["eta_seconds"] == 2100
+
+
 @pytest.mark.parametrize("runs, elapsed, queued, overhead, expected", [
     (5, 300, False, False, 2100),
-    (4, 300, False, False, None),
+    (4, 300, False, False, 1800),  # sparse profile falls back to the repo median
     (5, 1500, False, False, 1260),
     (5, 300, True, False, 4500),
     (5, 300, "chain", False, 6900),
     (5, 300, "slots", False, 5700),
     (5, 300, "attached", False, 3300),
+    pytest.param(5, 1500, "fixing", False, 2460,
+                 marks=pytest.mark.variant("A fixing occupant can outlast the report-to-merge median")),
     (5, 300, "other_session", False, 3300),
     (5, 300, "unknown_session", False, None),
     (5, 300, "unknown_session_room", False, 2400),
@@ -892,18 +926,19 @@ def test_goal_activity_eta_while_building(db, root, monkeypatch, runs, elapsed, 
     _, ws = root
     now = time.time()
     monkeypatch.setattr(git, "out", lambda *args: "")
-    monkeypatch.setattr(fair_share, "limit", lambda: 1 if queued == "slots" else
+    monkeypatch.setattr(fair_share, "limit", lambda: 1 if queued in ("slots", "fixing") else
                         3 if queued == "unknown_session_room" else 2)
     other_ws = replace(ws, id="elsewhere", repo_root="/another-repo", name="elsewhere", branch="feat/upstream")
     db.add_workspace(other_ws)
-    # Other profiles and repositories must not supply a worker's history.
+    # Prefer a profile's history; other repositories never supply the fallback.
     for i in range(5):
         add_agent(db, ws, f"past{i}", mode="assign", status="done")
         db.update_agent(f"past{i}", profile="builder" if i < runs else "other",
                         created_at=now - 4000, reviewing_since=now - 2800, result="done")
-        add_agent(db, other_ws, f"foreign{i}", mode="assign", status="done")
-        db.update_agent(f"foreign{i}", profile="builder", created_at=now - 4000,
-                        reviewing_since=now - 1000, result="done")
+        if "unknown" not in str(queued) and queued != "fixing":
+            add_agent(db, other_ws, f"foreign{i}", mode="assign", status="done")
+            db.update_agent(f"foreign{i}", profile="builder", created_at=now - 4000,
+                            reviewing_since=now - 1000, result="done")
         add_agent(db, ws, f"fast{i}", mode="handoff_detached", status="done")
         db.update_agent(f"fast{i}", profile="fast", created_at=now - 4000,
                         reviewing_since=now - 3400, result="done")
@@ -923,13 +958,18 @@ def test_goal_activity_eta_while_building(db, root, monkeypatch, runs, elapsed, 
             for i in range(2):
                 db.add_task(Task(f"slot{i}", ws.repo_root, None, "boss", ws.id, "builder", "next", "assign", 1,
                                  f"slot{i}", None, None, None, "pending", now + i + 1))
-        if queued == "attached":
+        if queued in ("attached", "fixing"):
             db.add_session_repo("boss", "other", other_ws.repo_root)
-            add_agent(db, other_ws, "upstream", mode="assign", parent="boss", status="idle")
-            db.update_agent("upstream", pipeline="reviewing", result="done", reviewing_since=now - 300)
+            add_agent(db, other_ws, "upstream", mode="assign", parent="boss",
+                      status="processing" if queued == "fixing" else "idle")
+            db.update_agent("upstream", pipeline="fixing" if queued == "fixing" else "reviewing",
+                            result="done", reviewing_since=now - elapsed)
             db.conn.execute("INSERT INTO stage_timings VALUES (?, ?, 'report_to_merge', 5, 1200, 1200, ?)",
                             (day, other_ws.repo_root, json.dumps([1200] * 5)))
-            db.update_task("later", depends_on=json.dumps([other_ws.branch]))
+            db.update_task("later", depends_on=json.dumps([other_ws.branch]) if queued == "attached" else None)
+            if queued == "fixing":
+                db.update_agent("writing", status="done")
+                db.update_agent("parallel", status="done")
         if queued == "chain":
             db.add_task(Task("last", ws.repo_root, None, "boss", ws.id, "builder", "last", "assign", 1,
                              "last", None, None, json.dumps(["task:later"]), "pending", now))
@@ -1025,3 +1065,90 @@ def test_failed_milestone_shows_in_flight_work(db, root, monkeypatch, flight, ex
         db.update_autopilot("boss", checking_since=None)
         assert view.autopilot_entry(db, ws.repo_root, root_id="boss")["milestones"][0]["status"] == "passed"
         assert "✓" in autopilot.progress(db, "boss") and "failed" not in autopilot.progress(db, "boss")
+
+
+def _rollup(*checks, state="OPEN", mergeable="MERGEABLE"):
+    return {"state": state, "mergeable": mergeable, "statusCheckRollup": [
+        {"status": "COMPLETED", "conclusion": c} if c else {"status": "IN_PROGRESS"} for c in checks]}
+
+
+@pytest.mark.parametrize("payload, expected", [
+    pytest.param(_rollup("SUCCESS", "SKIPPED"), ("ready", 2, 2),
+                 marks=pytest.mark.variant("A skipped check counts as passed rather than leaving the PR in CI")),
+    (_rollup("SUCCESS", "FAILURE", None), ("failed", 2, 3)),
+    pytest.param(_rollup("SUCCESS", mergeable="CONFLICTING"), ("unknown", 1, 1),
+                 marks=pytest.mark.variant("Passing checks must not make a conflicting PR ready")),
+    pytest.param(_rollup(), ("unknown", 0, 0),
+                 marks=pytest.mark.variant("An open PR with no checks must not be vacuously ready")),
+    (_rollup("SUCCESS", state="MERGED"), None),
+])
+def test_session_pr_state_of_a_payload(payload, expected):
+    from brindle.daemon import session_review
+
+    got = session_review.pr_state_of("https://github.com/o/r/pull/391", payload)
+    assert got == (expected and {"number": 391, "state": expected[0], "done": expected[1], "total": expected[2]})
+
+
+def test_session_pr_state_is_one_shared_cached_read(db, root, monkeypatch):
+    from brindle.daemon import session_review
+
+    class Deferred:
+        """A pool whose reads wait until the test lets them land."""
+        def __init__(self):
+            self.queue = []
+
+        def submit(self, fn, *args):
+            self.queue.append((fn, args))
+            return Future()
+
+        def land(self):
+            while self.queue:
+                fn, args = self.queue.pop(0)
+                fn(*args)
+
+    url, pool, answers = "https://github.com/o/r/pull/391", Deferred(), [None, _rollup("SUCCESS", None)]
+    unknown = {"number": 391, "state": "unknown", "done": 0, "total": 0}
+    db.conn.execute("INSERT INTO session_prs (root_id, branch, url, opened_at) VALUES ('boss', 'feat', ?, 1)", (url,))
+    monkeypatch.setattr(session_review, "_pr_pool", pool)
+    monkeypatch.setattr(session_review, "_pr_cache", {})
+    monkeypatch.setattr(session_review, "_pr_flights", {})
+    monkeypatch.setattr(session_review, "_pr_changed", set())
+    monkeypatch.setattr(workspaces, "pull_request_checks", lambda u, cwd: answers.pop(0))
+    announced = lambda: db.conn.execute("SELECT COUNT(*) FROM events WHERE kind = 'session.pr_checks'").fetchone()[0]
+
+    # Overlapping asks while the read is out share it; until it lands the line is unknown.
+    assert session_review.session_pr_state(db, "boss", url) == session_review.session_pr_state(db, "boss", url) == unknown
+    assert len(pool.queue) == 1 and session_review.session_pr_state(db, "boss", None) is None
+    pool.land()                                   # gh failed: unknown is cached like any answer, nothing to announce
+    session_review.refresh_pr_states(db)
+    assert session_review.session_pr_state(db, "boss", url) == unknown and not pool.queue and announced() == 0
+    # Once old, the sweep re-reads it without any row asking, and announces the change once.
+    session_review._pr_cache[url] = (0.0, unknown)
+    session_review.refresh_pr_states(db)
+    assert len(pool.queue) == 1
+    pool.land()
+    session_review.refresh_pr_states(db)
+    session_review.refresh_pr_states(db)
+    assert session_review.session_pr_state(db, "boss", url)["state"] == "ci" and announced() == 1 and not pool.queue
+
+    # A asks while the cache is old and is held up in its DB lookup; B asks, reads and lands meanwhile.
+    # A must then find the cache fresh instead of starting a second read.
+    session_review._pr_cache[url] = (0.0, unknown)
+    answers.append(_rollup("SUCCESS"))
+
+    class Held:
+        def __init__(self, real):
+            self.real, self.held = real, False
+
+        def __getattr__(self, name):
+            return getattr(self.real, name)
+
+        def get_agent(self, *args):
+            if not self.held:
+                self.held = True
+                session_review.session_pr_state(self.real, "boss", url)
+                pool.land()
+            return self.real.get_agent(*args)
+
+    assert session_review.session_pr_state(Held(db), "boss", url)["state"] == "ready"
+    assert not pool.queue and not answers

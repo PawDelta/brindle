@@ -329,7 +329,7 @@ export interface Meta {
   /* The daemon is still bringing back sessions from its previous shutdown. */
   resuming?: boolean;
   /* How far that has come: sessions finished with, of those it is bringing back. */
-  recovery?: { done: number; total: number } | null;
+  recovery?: { done: number; total: number; pending?: string[] } | null;
   engine_version: string;
   api_version: string;
   pid: number;
@@ -1253,6 +1253,11 @@ export class DaemonClient {
     return this.get<Meta>("/meta");
   }
 
+  /* Ask the engine to bring this session back next (a no-op when it already has). */
+  prioritize(root: string) {
+    return this.post<unknown>("/recovery/prioritize", { root });
+  }
+
   repos() {
     return this.get<Repo[]>("/repos");
   }
@@ -1635,8 +1640,8 @@ export class DaemonClient {
     return this.delete<VisualDTO>(`/visuals/${encodeURIComponent(id)}/keep`, {});
   }
 
-  markVisualRead(id: string) {
-    return this.post<unknown>(`/visuals/${encodeURIComponent(id)}/read`, {});
+  markVisualRead(id: string, rev: number) {
+    return this.post<unknown>(`/visuals/${encodeURIComponent(id)}/read`, { rev });
   }
 
   /* A planning doc: the visual of kind "plan" with the same id. */

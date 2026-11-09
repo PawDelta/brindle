@@ -34,7 +34,7 @@
 import { useCallback, useContext, useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent as ReactMouseEvent, type RefObject } from "react";
 import type { DaemonClient, ProviderUsage } from "../api/client";
 import { DaemonContext } from "../api/context";
-import type { OpenUrl } from "../api/open";
+import { openExternal, type OpenUrl } from "../api/open";
 import type { GoalDTO, SessionDTO } from "../api/schema";
 import { inProfileRail, railPage, readLastSession, routeSession, settingsTab, type Route, type SessionRef } from "../routes";
 import { AccountAvatar, SettingsRail } from "./SettingsRail";
@@ -410,6 +410,7 @@ const goalDone = (goal: GoalDTO | null | undefined) => !!goal && goalPhase(goal,
    A finished goal wins; a paused process cannot still be doing its last stage. */
 function sessionStatusWord(session: SessionDTO, goal: GoalDTO | null | undefined) {
   if (goalDone(goal)) return "Done";
+  if (session.status === "failed") return "Failed";
   if (isPaused(session)) return "Paused";
   switch (goal?.stage) {
     case "working":
@@ -439,8 +440,35 @@ function SessionStatus({ word }: { word: string }) {
   );
 }
 
+const PR_LINE: Record<string, { word: string; tone: string }> = {
+  ci: { word: "In CI", tone: "text-sap" },
+  ready: { word: "Ready to merge", tone: "text-pass" },
+  failed: { word: "CI failed", tone: "text-fail" },
+};
+
+/* A session with an open PR: a small line under its goal, "PR #391 · In CI, 14 of 18". Unknown
+   (or unread) state is just "PR #391", never a guess. Its own button: it opens the PR, not the session. */
+function PrLine({ goal, openUrl }: { goal: GoalDTO | null | undefined; openUrl: OpenUrl }) {
+  const pr = goal?.pr_state;
+  if (!pr || !goal?.pr_url) return null;
+  const url = goal.pr_url;
+  const known = PR_LINE[pr.state];
+  const text = known ? `PR #${pr.number} · ${known.word}${pr.state === "ci" && pr.total ? `, ${pr.done} of ${pr.total}` : ""}` : `PR #${pr.number}`;
+  return (
+    <button
+      type="button"
+      className={`block max-w-full truncate py-px pb-[5px] pl-[34px] pr-s1 text-left text-[11.5px] hover:underline ${known?.tone ?? "text-ink-3"}`}
+      data-testid="session-pr"
+      title={`Open ${url}`}
+      onClick={() => void openUrl(url).catch(() => undefined)}
+    >
+      {text}
+    </button>
+  );
+}
+
 /* The session row is its supervisor; workers branch directly from it. */
-function SessionRows({ session, repo, index, route, navigate, cursor, setCursor, folded, toggle, onClose, list }: { session: SessionDTO; repo: string; index: number; cursor: string | null; setCursor(key: string): void; folded: boolean; toggle(): void; onClose: CloseRow; list: RefObject<HTMLElement | null> } & Pick<SidebarProps, "route" | "navigate">) {
+function SessionRows({ session, repo, index, route, navigate, cursor, setCursor, folded, toggle, onClose, list, openUrl }: { session: SessionDTO; repo: string; index: number; cursor: string | null; setCursor(key: string): void; folded: boolean; toggle(): void; onClose: CloseRow; list: RefObject<HTMLElement | null>; openUrl: OpenUrl } & Pick<SidebarProps, "route" | "navigate">) {
   const root = session.id;
   const workspaces = useAppState((s) => s.workspaces);
   const alive = useAppState((s) => s.alive);
@@ -484,6 +512,7 @@ function SessionRows({ session, repo, index, route, navigate, cursor, setCursor,
         </SessionGoal>
         <RowClose root={root} done={done} onClose={onClose} list={list} />
       </div>
+      <PrLine goal={goal} openUrl={openUrl} />
       {folded ? null : tree ? (
         <ul className="session-tree mb-1">
           {tree.children.map((child) => <AgentRow key={child.agent.id} node={child} route={route} navigate={navigate} repo={repo} root={root} cursor={cursor} setCursor={setCursor} />)}
@@ -536,7 +565,7 @@ function ResumeButton({ client, root, repo, navigate, refresh }: { client: Daemo
 }
 
 /* A paused or failed session, dimmed at the foot of its repo's group: its goal, and how long ago it stopped; Resume; a close on hover or focus, "Done · Close" once its goal is Done. */
-function PausedRow({ session, repo, route, navigate, refresh, cursor, setCursor, onClose, list }: { session: SessionDTO; repo: string; refresh: () => Promise<void>; cursor: string | null; setCursor(key: string): void; onClose: CloseRow; list: RefObject<HTMLElement | null> } & Pick<SidebarProps, "route" | "navigate">) {
+function PausedRow({ session, repo, route, navigate, refresh, cursor, setCursor, onClose, list, openUrl }: { session: SessionDTO; repo: string; refresh: () => Promise<void>; cursor: string | null; setCursor(key: string): void; onClose: CloseRow; list: RefObject<HTMLElement | null>; openUrl: OpenUrl } & Pick<SidebarProps, "route" | "navigate">) {
   const root = session.id;
   const client = useContext(DaemonContext);
   const open = route.screen === "session" && route.root === root;
@@ -570,6 +599,7 @@ function PausedRow({ session, repo, route, navigate, refresh, cursor, setCursor,
       </button>
       {client && <ResumeButton client={client} root={root} repo={repo} navigate={navigate} refresh={refresh} />}
       <RowClose root={root} done={done} onClose={onClose} list={list} />
+      <div className="basis-full"><PrLine goal={goal} openUrl={openUrl} /></div>
     </li>
   );
 }
@@ -873,6 +903,7 @@ export function Sidebar({ route, navigate, refresh, openUrl, onBackFromSettings 
                       toggle={() => setFolded((f) => (f.has(session.id) ? new Set([...f].filter((id) => id !== session.id)) : new Set([...f, session.id])))}
                       onClose={closeRow}
                       list={list}
+                      openUrl={openUrl ?? openExternal}
                     />
                   ))}
                   {rested.length > 0 && (
@@ -895,7 +926,7 @@ export function Sidebar({ route, navigate, refresh, openUrl, onBackFromSettings 
                   {rested
                     .filter(({ session }) => pausedOpen.has(repo.repo_root) || session.id === selected?.root)
                     .map(({ session }) => (
-                      <PausedRow key={session.id} session={session} repo={repo.repo_root} route={route} navigate={navigate} refresh={refresh ?? noRefresh} cursor={cursor} setCursor={setCursor} onClose={closeRow} list={list} />
+                      <PausedRow key={session.id} session={session} repo={repo.repo_root} route={route} navigate={navigate} refresh={refresh ?? noRefresh} cursor={cursor} setCursor={setCursor} onClose={closeRow} list={list} openUrl={openUrl ?? openExternal} />
                     ))}
                 </ul>
               </div>
