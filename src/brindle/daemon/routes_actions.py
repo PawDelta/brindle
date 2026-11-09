@@ -122,9 +122,18 @@ def _call(fn: Action, params: dict[str, str], body: Body) -> Any:
 
 def _endpoint(fn: Action):
     async def endpoint(request: Request) -> JSONResponse:
-        raw = await request.body()
+        if fn is attach_agent:
+            from brindle.attachments import request_limit
+
+            raw = bytearray()
+            async for chunk in request.stream():
+                if len(raw) + len(chunk) > request_limit():
+                    return _error(ServiceError("too_large", "attachment request exceeds the size limit", 413))
+                raw.extend(chunk)
+        else:
+            raw = await request.body()
         try:
-            body = await request.json() if raw.strip() else {}
+            body = json.loads(raw) if raw.strip() else {}
         except ValueError:
             body = None
         if not isinstance(body, dict):
@@ -500,6 +509,17 @@ def inbox_action(db: DB, params: dict, body: Body) -> Any:
 
 def message_agent(db: DB, params: dict, body: Body) -> Any:
     return {"status": svc.send(db, _agent(db, params["id"]).id, _get(body, "text", required=True))}
+
+
+def attach_agent(db: DB, params: dict, body: Body) -> Any:
+    from brindle import attachments, providers
+
+    a = _agent(db, params["id"])
+    identity_lock.ensure(a)
+    if a.status not in ("starting", "idle", "processing", "waiting"):
+        raise ServiceError("conflict", "attach files to a running agent", 409)
+    provider = providers.PROVIDERS.get(a.provider, providers.Provider())
+    return attachments.attach(_workspace(db, a.workspace_id).path, provider, body)
 
 
 def close_agent(db: DB, params: dict, body: Body) -> Any:
@@ -2666,6 +2686,7 @@ ROUTES = [
     _post("/sessions/{root:path}/pr", open_session_pr),
     _post("/inbox/{id}/{action}", inbox_action),
     _post("/agents/{id}/message", message_agent),
+    _post("/agents/{id}/attachments", attach_agent),
     _post("/agents/{id}/close", close_agent),
     _post("/agents/{id}/kill", kill_agent),
     _post("/agents/{id}/peek", peek_agent),

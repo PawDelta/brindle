@@ -4536,7 +4536,27 @@ def approve_plan(db: DB, caller_id: str | None, agent_id: str, feedback: str = "
 
 
 def pre_tool_decision(db: DB, agent: Agent, payload: dict) -> dict | None:
-    """Claude Code's PreToolUse hook: approve a Bash command when every
+    """Claude Code's PreToolUse hook: the decision of ``_pre_tool_decision``, plus
+    a one-time ``additionalContext`` nudge toward the code map on a broad search.
+    The nudge never changes or delays the decision."""
+    out = _pre_tool_decision(db, agent, payload)
+    if payload.get("tool_name") != "Bash" or (out or {}).get("hookSpecificOutput", {}).get(
+            "permissionDecision") == "deny":
+        return out
+    from brindle import codemap
+
+    note = codemap.search_nudge(db, agent, db.get_workspace(agent.workspace_id),
+                                str((payload.get("tool_input") or {}).get("command", "")),
+                                payload.get("cwd") or None)
+    if note is None:
+        return out
+    out = out or {"hookSpecificOutput": {"hookEventName": "PreToolUse"}}
+    out["hookSpecificOutput"]["additionalContext"] = note
+    return out
+
+
+def _pre_tool_decision(db: DB, agent: Agent, payload: dict) -> dict | None:
+    """Approve a Bash command when every
     simple command in it matches one of the profile's ``allowed_tools``
     rules (``cd`` into the worker's own worktree counts), the same reading
     the native loop gives those rules. Claude Code matches a rule against a

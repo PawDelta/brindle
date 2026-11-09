@@ -289,6 +289,8 @@ def _venv_path_env(ctx: LaunchContext) -> dict[str, str]:
 
 class Provider:
     name = "base"
+    accepts_files = False
+
     uses_hooks = False
     # Whether a hook reports each turn's start (or a resume), so an 'idle'
     # status means no turn is running. Only meaningful with uses_hooks.
@@ -315,6 +317,12 @@ class Provider:
     # brindle.prompt_answer), so a sweep can run it again on a worker that
     # outlived its 30 seconds on one.
     startup_prompts = False
+
+    def format_attachment(self, path: str) -> str:
+        """Quoted path for the CLI's paste handler; images become inline attachments."""
+        if not self.accepts_files:
+            raise ValueError("this provider does not accept file attachments")
+        return '"' + path.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
     def warmup(self, profile: Profile) -> str | None:
         """A message to send before the first prompt, for CLIs that need a
@@ -782,6 +790,11 @@ def _pre_tool_matcher(ctx: "LaunchContext") -> str:
 
 class ClaudeCode(Provider):
     name = "claude"
+    accepts_files = True
+
+    def format_attachment(self, path: str) -> str:
+        return "@" + super().format_attachment(path)
+
     uses_hooks = True
     startup_prompts = True
 
@@ -1887,6 +1900,7 @@ def unusable(provider: str, env: dict[str, str] | None = None) -> str | None:
 
 class Codex(Provider):
     name = "codex"
+    accepts_files = True
     startup_prompts = True
     # Status comes from Codex's `notify` command (turn complete); it has no
     # ready or turn-start event, so after_launch says when it's ready.
@@ -2089,6 +2103,7 @@ class Antigravity(Provider):
     """Google Antigravity's terminal agent, agy (see brindle.antigravity)."""
 
     name = "antigravity"
+    accepts_files = True
     startup_prompts = True
     uses_hooks = True
     announces_start = False
@@ -2229,6 +2244,7 @@ class OpenCode(Provider):
     brindle's plugin; the screen only says when it's ready for input."""
 
     name = "opencode"
+    accepts_files = True
     uses_hooks = True
     announces_start = False
 
@@ -2322,6 +2338,7 @@ class Native(Provider):
     agent's own word, never a guess from the screen)."""
 
     name = "native"
+    accepts_files = True
     uses_hooks = True
     runner = "_native"
 

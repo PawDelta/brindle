@@ -157,7 +157,12 @@ describe("App", () => {
     renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={selected ? { screen: "session", root: "sup0", repo: REPO } : { screen: "new" }} />);
     await screen.findByRole("complementary", { name: "Sidebar" });
     if (!selected) fireEvent.click(await within(nav()).findByRole("button", { name: /Paused · 1/ }));
-    const row = (await waitFor(() => nav().querySelector('[data-tree-session="sup0"]')!)).closest("li")!;
+    // waitFor only retries on a throw: a null row would otherwise end the wait early.
+    const row = await waitFor(() => {
+      const found = nav().querySelector('[data-tree-session="sup0"]')?.closest("li");
+      if (!found) throw new Error("the paused session isn't listed yet");
+      return found;
+    });
     expect(row.textContent).toContain("Refactor the cache");
     // Opened paused, the session says nothing of being paused under it.
     expect(screen.queryByText("This session was paused")).toBeNull();
@@ -219,7 +224,7 @@ describe("App", () => {
     expect(screen.queryByRole("complementary", { name: "Session panel" })).toBeNull();
     const context = within(nav()).getByTestId("session-context");
     await waitFor(() => expect(within(context).getByTestId("goal-count").textContent).toBe("1 of 1"));
-    fireEvent.click(within(context).getByRole("button", { name: "1 done" }));
+    fireEvent.click(within(context).getByRole("button", { name: /finished milestones/ }));
     expect(within(context).getByRole("list", { name: "Milestones" }).textContent).toContain("Client wired");
     expect(within(nav()).getByTestId("split-handle")).toBeTruthy();
     expect(daemon.requests.find((r) => r.path === "/goal")?.query).toEqual({ repo: REPO, root: "sup1" });
