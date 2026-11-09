@@ -50,7 +50,8 @@ def test_graph_nudge_once_on_broad_search_only_and_decision_unchanged(db, mapped
     (Path(ws.path) / "a.py").write_text("")
     for named in ("grep -n foo a.py", "rg foo a.py Makefile", "rg foo Makefile", "rg -efoo a.py",
                   "rg --regexp=foo a.py", "git log | grep -r foo", 'rg -F "|" a.py', 'rg -F ";" a.py',
-                  "cd src.v2 && rg foo ../a.py", "cd $X && rg foo a.py"):
+                  "cd src.v2 && rg foo ../a.py", "cd $X && rg foo a.py", 'rg foo "a".py', r"rg foo ./a\.py",
+                  "(cd src.v2 && pwd); rg foo a.py", "cd nope || rg foo a.py", "rg foo a.py 2>&1"):
         assert note(run(named)) is None, named
     assert _broad_search('rg -n "foo|bar"', ws.path) and _broad_search("rg foo src.v2", ws.path)
     first = run("grep -rn foo .")
