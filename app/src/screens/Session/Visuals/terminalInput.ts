@@ -109,6 +109,25 @@ function observed(open: PtyViewOpener, enabled: () => boolean, recorder: () => R
   };
 }
 
+/* Whether the app should watch the person's typing. Nothing is known until the engine answers /meta, and
+   a failed or slow answer must not switch the watching off for good: only an answer of "off" does, and
+   then it asks again (at most every RECHECK seconds) so turning visuals on takes effect. The engine
+   refuses input it doesn't want either way. */
+const RECHECK = 5000;
+export function visualsGate(client: { meta(): Promise<{ visuals?: boolean }> } | null | undefined, now: () => number = Date.now) {
+  let known: boolean | null = null, asked = -Infinity, closed = false;
+  const ask = () => {
+    if (!client || closed || now() - asked < RECHECK) return;
+    asked = now();
+    client.meta().then(meta => { if (!closed) known = meta.visuals === true; }, () => {});
+  };
+  ask();
+  return {
+    enabled: () => { if (known !== true) ask(); return known !== false; },
+    close: () => { closed = true; },
+  };
+}
+
 export function withVisualInput(client: Pick<DaemonClient, "visualInput" | "beginVisualInput" | "refreshVisualInput">, agent: string, open: PtyViewOpener, enabled: () => boolean = () => true): PtyViewOpener {
   return observed(open, enabled, () => {
     let observer: Promise<number> | null = null;

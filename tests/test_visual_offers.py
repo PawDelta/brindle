@@ -340,6 +340,15 @@ def test_asked_quote_accepts_what_the_person_typed(db, session, typed, asked, te
     assert visuals.publish(db, boss, "Asked", "<p>yes</p>", asked=asked)["rev"] == 1
 
 
+def test_typed_message_backs_a_visual(db, session):
+    """The reported message, typed in the app, through the app's route and the CLI hook."""
+    boss, _ = session
+    typed = "YOU SHOULD BE OPENING THAT BY DEFAULT IN VISUALS WITH A NOTIFICATION WHEN IT IS READY"
+    typed_into_cli(db, boss, typed)
+    assert db.conn.execute("SELECT COUNT(*) FROM visual_person_words WHERE root_id=?", (boss.id,)).fetchone()[0] == 1
+    assert visuals.publish(db, boss, "Asked", "<p>yes</p>", asked=typed)["rev"] == 1
+
+
 def _report_came_late(db, boss, worker):
     assert app_vouches(boss, "render first", offers.time.time() - 1).status_code == 409
     typed_into_cli(db, boss, "render first", vouched=False)

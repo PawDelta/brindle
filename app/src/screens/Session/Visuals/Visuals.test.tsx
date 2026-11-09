@@ -18,7 +18,7 @@ import { VisualReader } from "./VisualReader";
 import { useVisuals } from "./useVisuals";
 import { OfferChip } from "./OfferChip";
 import { VisualsSetting } from "../../Settings/VisualsSetting";
-import { withTypedWords, withVisualInput } from "./terminalInput";
+import { visualsGate, withTypedWords, withVisualInput } from "./terminalInput";
 
 vi.mock("../../../components/PtyTerminal", () => import("../../../test/panes"));
 const native = vi.hoisted(() => ({
@@ -199,6 +199,22 @@ describe("visuals", () => {
     expect(words).toEqual([]);                  // a paste is never vouched for
     expect(bytes.at(-1)).toBe("\r");
     hooked.close();
+  });
+
+  it("keeps watching typing until the engine says visuals are off, and asks again after that", async () => {
+    let clock = 0, call = 0;
+    const answers = [() => Promise.reject(new Error("busy")), () => Promise.resolve({ visuals: false }), () => Promise.resolve({ visuals: true })];
+    const gate = visualsGate({ meta: () => answers[call++]!() }, () => clock);
+    await act(async () => undefined);
+    expect(gate.enabled()).toBe(true);          // a failed answer is not "off"
+    clock = 6000;
+    gate.enabled();
+    await act(async () => undefined);
+    expect(gate.enabled()).toBe(false);         // the engine said off
+    clock = 12000;
+    gate.enabled();
+    await act(async () => undefined);
+    expect(gate.enabled()).toBe(true);          // turned on later: picked up
   });
 
   it("observes Codex PTY submissions before forwarding Enter, including edits, pastes and uncertain history", async () => {
