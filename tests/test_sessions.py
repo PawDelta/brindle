@@ -457,8 +457,16 @@ def _open_pane(db, a, launched=True):   # what a launch leaves in tmux
 
 
 @pytest.mark.parametrize("step, who", [
-    *((step, "w1") for step in ("status", "session", "tag", "self_tag", "record", "helper", "mark", "finished")),
-    ("status", "chat"), ("gate", "chat"),
+    pytest.param("status", "w1", marks=pytest.mark.variant("worker launch dies before its status write, after its chat has launched")),
+    pytest.param("session", "w1", marks=pytest.mark.variant("worker has a starting status but dies before ensuring its tmux session")),
+    pytest.param("tag", "w1", marks=pytest.mark.variant("worker pane exists when the parent dies before writing its ownership tag")),
+    pytest.param("self_tag", "w1", marks=pytest.mark.variant("untagged child wakes after recovery and must not become a second worker")),
+    pytest.param("record", "w1", marks=pytest.mark.variant("owned worker pane exists before its window is recorded in the database")),
+    pytest.param("helper", "w1", marks=pytest.mark.variant("worker window is recorded but its after-launch helper has not started")),
+    pytest.param("mark", "w1", marks=pytest.mark.variant("worker helper started but the pane has no launch completion mark")),
+    pytest.param("finished", "w1", marks=pytest.mark.variant("all launches finished before the crash so recovery must reuse their panes")),
+    pytest.param("status", "chat", marks=pytest.mark.variant("root launch dies before its status write, leaving no live chat to recover around")),
+    pytest.param("gate", "chat", marks=pytest.mark.variant("root pane exists but its child has not been released through the launch gate")),
 ])
 def test_recovery_reconciles_from_tmux_after_a_crash_at_each_step_of_a_launch(db, root, monkeypatch, step, who):
     _recorded_sessions(db, root, monkeypatch, [("chat", "a")])
@@ -502,7 +510,11 @@ def test_recovery_reconciles_from_tmux_after_a_crash_at_each_step_of_a_launch(db
     assert sum("w1" in name for name in tmux.windows(root.tmux_session)) == 1 and lifecycle._read_resume() is None
 
 
-@pytest.mark.parametrize("hangs_in", ["commit", "ensure_session", "new_window"])
+@pytest.mark.parametrize("hangs_in", [
+    pytest.param("commit", marks=pytest.mark.variant("committed launch wakes after shutdown before its starting status was written")),
+    pytest.param("ensure_session", marks=pytest.mark.variant("launch wakes after shutdown while ensuring its tmux session, before any pane exists")),
+    "new_window",
+])
 def test_recovery_reconciles_from_tmux_after_a_launch_the_way_out_gave_up_on(db, root, monkeypatch, hangs_in):
     from brindle.service import sessions as svc
 
@@ -550,7 +562,10 @@ def test_a_resume_that_hangs_ends_the_start_and_stays_on_the_record(db, root, mo
     [t.join(5) for t in threading.enumerate() if t.name.startswith("brindle-resume-")]
 
 
-@pytest.mark.parametrize("clean_stops", [False, True])      # a daemon dying between starts, or stopped cleanly
+@pytest.mark.parametrize("clean_stops", [
+    pytest.param(False, marks=pytest.mark.variant("repeated daemon crashes must preserve the accumulated failed recovery attempts")),
+    pytest.param(True, marks=pytest.mark.variant("clean shutdown between failed recoveries must not reset the attempt cap")),
+])
 def test_a_session_that_cant_come_back_is_tried_a_few_times_then_left_paused(db, root, monkeypatch, clean_stops):
     from brindle.service import sessions as svc
 
@@ -567,9 +582,9 @@ def test_a_session_that_cant_come_back_is_tried_a_few_times_then_left_paused(db,
 
 
 @pytest.mark.parametrize("tries, launched, chat_stays, status", [
-    (0, ["w1", "w2"], True, "idle"),        # only what's missing comes back, the chat left running
-    (2, [], False, "idle"),                 # given up on: closed whole, not left half-running
-    (0, ["chat", "w1", "w2"], False, "failed"),     # marked failed, its pane alive: closed, and it all comes back
+    pytest.param(0, ["w1", "w2"], True, "idle", marks=pytest.mark.variant("live root is kept while missing workers return and the sign-in-held worker stays paused")),
+    pytest.param(2, [], False, "idle", marks=pytest.mark.variant("exhausted recovery attempts must close a live root rather than leave a half-running session")),
+    pytest.param(0, ["chat", "w1", "w2"], False, "failed", marks=pytest.mark.variant("failed root still owns an unfinished pane that must be replaced before the session returns")),
 ])
 def test_recovery_of_a_half_running_session(db, root, monkeypatch, tries, launched, chat_stays, status):
     _recorded_sessions(db, root, monkeypatch, [("chat", "a")])
@@ -590,9 +605,10 @@ def test_recovery_of_a_half_running_session(db, root, monkeypatch, tries, launch
 
 
 @pytest.mark.parametrize("kill, stray, launches, status", [
-    ("raises", "chat", [], "starting"), ("does nothing", "chat", [], "starting"),   # left by an earlier launch
-    ("does nothing", "chat", [], "failed"),                 # its chat marked failed since: still not closed
-    ("does nothing", "w1", ["w1"], "starting"),             # its own launch failed past its window: marked failed
+    pytest.param("raises", "chat", [], "starting", marks=pytest.mark.variant("tmux refuses root-pane teardown, so recovery must retain the record even past the attempt cap")),
+    pytest.param("does nothing", "chat", [], "starting", marks=pytest.mark.variant("tmux reports successful teardown but the root pane stays alive, so recovery must check liveness")),
+    pytest.param("does nothing", "chat", [], "failed", marks=pytest.mark.variant("failed database status must not hide a root pane that survives teardown")),
+    pytest.param("does nothing", "w1", ["w1"], "starting", marks=pytest.mark.variant("worker launch fails after opening a pane that survives cleanup while its root is already live")),
 ])
 def test_a_pane_that_wont_close_holds_its_session_back_however_long_that_takes(db, root, monkeypatch, kill, stray, launches, status):
     _recorded_sessions(db, root, monkeypatch, [("chat", "a")])
@@ -617,6 +633,7 @@ def test_a_pane_that_wont_close_holds_its_session_back_however_long_that_takes(d
     assert not _live_windows() and lifecycle._read_resume() is None
 
 
+@pytest.mark.variant("an old launch writes into a reused pane id; only the new launch token counts, and duplicate owned panes invalidate confirmation")
 def test_only_one_pane_whose_own_launch_finished_confirms_a_session(db, root):
     add(db, root, "chat", status="idle")
     pane = _open_pane(db, db.get_agent("chat"), launched=False)
@@ -683,7 +700,11 @@ def test_a_worker_the_sign_in_sweep_has_brought_back_is_left_to_it(db, root, mon
     assert launched == ["w1", "chat"] and "w1" not in stopped and len(_live_windows("w1")) == 1
 
 
-@pytest.mark.parametrize("lookup_fails, status", [(False, "idle"), (False, "failed"), (True, "failed")])
+@pytest.mark.parametrize("lookup_fails, status", [
+    pytest.param(False, "idle", marks=pytest.mark.variant("pausing one live chat must preserve a second chat sharing its tmux session")),
+    pytest.param(False, "failed", marks=pytest.mark.variant("a second chat marked failed still has a live pane that prevents shared-session teardown")),
+    pytest.param(True, "failed", marks=pytest.mark.variant("failed pane-placement lookup must preserve the shared session even when its other chat is marked failed")),
+])
 def test_pausing_a_chat_leaves_another_chat_in_its_tmux_session_running(db, root, monkeypatch, lookup_fails, status):
     def chat(aid, *make):
         pane = tmux._tmux(*make, "-P", "-F", "#{pane_id}", "cat").stdout.strip()
@@ -701,12 +722,12 @@ def test_pausing_a_chat_leaves_another_chat_in_its_tmux_session_running(db, root
 
 
 @pytest.mark.parametrize("failing, error, status, carries_on, live_chat, collected, opens", [
-    ("boss", agents.AgentError, "paused", False, False, False, False),      # nothing of it runs: paused as it was
-    ("boss", OSError, "paused", False, False, False, True),                 # failed past its window: that goes too
-    ("w1", agents.AgentError, "failed", True, False, False, False),         # the others still come back
-    ("w1", agents.LaunchTaken, "starting", True, False, False, False),      # another path has it: not ours to mark
-    ("w1", agents.AgentError, "failed", True, True, False, False),          # the chat was up already, not launched here
-    ("w1", agents.AgentError, "paused", True, True, True, False),           # left for its caller to try again
+    pytest.param("boss", agents.AgentError, "paused", False, False, False, False, marks=pytest.mark.variant("root failure before a pane opens restores paused status and prevents worker launches")),
+    pytest.param("boss", OSError, "paused", False, False, False, True, marks=pytest.mark.variant("root launch raises an operating-system error after opening its pane, which must be cleaned up")),
+    pytest.param("w1", agents.AgentError, "failed", True, False, False, False, marks=pytest.mark.variant("worker failure after this resume launched its root must not prevent sibling workers returning")),
+    pytest.param("w1", agents.LaunchTaken, "starting", True, False, False, False, marks=pytest.mark.variant("a competing path owns the worker launch, so this resume must not mark that worker failed")),
+    pytest.param("w1", agents.AgentError, "failed", True, True, False, False, marks=pytest.mark.variant("worker-only resume against an already live root must mark the failed worker and continue its siblings")),
+    pytest.param("w1", agents.AgentError, "paused", True, True, True, False, marks=pytest.mark.variant("caller collecting unstarted workers must receive the failed worker paused for a later attempt")),
 ])
 def test_a_launch_that_fails_in_a_resume(db, root, monkeypatch, failing, error, status, carries_on, live_chat, collected, opens):
     add(db, root, "boss")
@@ -745,6 +766,7 @@ def test_a_second_resume_of_a_session_waits_and_never_launches_beside_the_first(
     assert launched == []
 
 
+@pytest.mark.variant("critical pressure must override the real admission gate's zero-running-children escape")
 def test_critical_memory_holds_a_recovery_even_with_nothing_running(monkeypatch):
     stop = threading.Event()
     monkeypatch.setattr(spawn, "_gated", True)
@@ -890,6 +912,7 @@ def test_recovery_opened_session_first(db, root, monkeypatch):
     assert order == ["busy", "opened", "second"]
 
 
+@pytest.mark.variant("generated child shell must refuse to execute its payload when its tmux ownership write fails")
 def test_a_pane_that_cant_say_whose_it_is_runs_nothing(tmp_path, monkeypatch):
     tmux._tmux("new-session", "-d", "-s", "own", "cat")
     ran, real_base = tmp_path / "ran", tmux._base
