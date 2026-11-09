@@ -49,6 +49,7 @@ def test_listing_failures_stop_the_check_worth_committing(tmp_path, monkeypatch)
         gate.run_with_coverage(["tests/test_a.py"], tmp_path / ".coverage", append=False)
 
 
+@pytest.mark.slow("really repeats a pytest run under -n 2, twice: six interpreter starts; 2-5s alone, 17-26s in a full check run on a loaded host")
 def test_a_test_that_passes_only_sometimes_fails_the_check_worth_committing(tmp_path, monkeypatch):
     (tmp_path / "tests").mkdir()
     (tmp_path / "tests/test_f.py").write_text(
