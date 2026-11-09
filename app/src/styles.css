@@ -294,7 +294,8 @@ body {
    that drags. Every colour here is a token. */
 .side-handle { cursor: row-resize; }
 .side-context { flex-shrink: 1; min-height: 100px; max-height: 55%; }
-.side-sessions { flex-basis: 80px; }
+/* The context gives way first when the window is short, however tall its split was dragged. */
+.side-sessions { flex-basis: 80px; flex-shrink: 0; }
 .side > .contents > [data-testid="inbox-link"] { flex-shrink: 0; }
 @media (max-height: 500px) {
   .side { gap: 4px; padding-top: 8px; padding-bottom: 8px; }
@@ -315,6 +316,8 @@ body {
 .session-tree-node::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 1px; background: var(--line-strong); }
 .session-tree-node:last-child::before { bottom: auto; height: 13px; }
 .session-tree-node::after { content: ""; position: absolute; left: 0; top: 13px; width: 10px; height: 1px; background: var(--line-strong); }
+/* Five levels in, the tree stops stepping right: deeper rows would have no width left to say anything. */
+.session-tree-node .session-tree-node .session-tree-node .session-tree-node .session-tree-node > .session-tree { margin-left: -14px; }
 .side-dot[data-tone="work"] { background: var(--branch); }
 .side-dot[data-tone="wait"] { background: var(--sap); }
 .side-dot[data-tone="done"] { background: var(--pass); }

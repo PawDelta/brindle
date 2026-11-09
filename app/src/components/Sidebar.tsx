@@ -410,6 +410,7 @@ const goalDone = (goal: GoalDTO | null | undefined) => !!goal && goalPhase(goal,
    A finished goal wins; a paused process cannot still be doing its last stage. */
 function sessionStatusWord(session: SessionDTO, goal: GoalDTO | null | undefined) {
   if (goalDone(goal)) return "Done";
+  if (session.status === "failed") return "Failed";
   if (isPaused(session)) return "Paused";
   switch (goal?.stage) {
     case "working":
