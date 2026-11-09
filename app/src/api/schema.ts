@@ -58,6 +58,7 @@ export interface ApiSchema {
   PlanSectionDTO: PlanSectionDTO;
   PlanVerdictDTO: PlanVerdictDTO;
   PlanWorkerDTO: PlanWorkerDTO;
+  PrStateDTO: PrStateDTO;
   PreflightActionDTO: PreflightActionDTO;
   PreflightItemDTO: PreflightItemDTO;
   ProfileDTO: ProfileDTO;
@@ -478,6 +479,7 @@ export interface GoalDTO {
   last_commit_at?: number | null;
   milestones?: MilestoneDTO[];
   note?: string | null;
+  pr_state?: PrStateDTO | null;
   pr_url?: string | null;
   progress: number;
   root_id: string;
@@ -506,6 +508,19 @@ export interface MilestoneDTO {
   state_why?: string | null;
   status: string;
   title: string;
+}
+/**
+ * The sidebar's PR line (session_review.session_pr_state): state is
+ * ci | ready | failed | unknown; ``done`` of ``total`` checks have finished.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PrStateDTO".
+ */
+export interface PrStateDTO {
+  done?: number;
+  number: number;
+  state: string;
+  total?: number;
 }
 /**
  * A route the app can call to act on the item itself.

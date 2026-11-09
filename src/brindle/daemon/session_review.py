@@ -196,6 +196,83 @@ def goal_phase(db: DB, root_id: str) -> tuple[str, str | None]:
             else "in_progress"), None
 
 
+PR_STATE_TTL = 90.0    # how long a PR's checks are believed; a failed read is believed as long
+_PR_FAILED = ("CANCELLED", "ERROR", "FAILURE", "STARTUP_FAILURE", "TIMED_OUT", "ACTION_REQUIRED")
+_PR_PASSED = ("SUCCESS", "NEUTRAL", "SKIPPED")
+_pr_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="pr-checks")
+_pr_lock = threading.RLock()
+_pr_cache: dict[str, tuple[float, dict[str, Any] | None]] = {}
+_pr_flights: dict[str, Future] = {}
+
+
+def pr_state_of(url: str, payload: dict | None) -> dict[str, Any] | None:
+    """What the sidebar's PR line says about the PR at ``url``, from ``gh pr
+    view --json state,mergeable,statusCheckRollup``: ``{number, state, done,
+    total}`` with state ``ci`` (checks still running; ``done`` of ``total``
+    finished), ``failed``, ``ready`` (every check passed, no conflicts) or
+    ``unknown`` (no payload, no checks yet, conflicts: never a guess at
+    ready). None when the PR is no longer open."""
+    found = re.search(r"/pull/(\d+)", url)
+    if not found:
+        return None
+    out: dict[str, Any] = {"number": int(found.group(1)), "state": "unknown", "done": 0, "total": 0}
+    if not payload:
+        return out
+    if payload.get("state") not in (None, "OPEN"):
+        return None
+    marks = []      # per check: "pass", "fail" or "wait" (a check run not completed, a status still pending)
+    for check in payload.get("statusCheckRollup") or []:
+        if "status" in check and check["status"] != "COMPLETED":
+            marks.append("wait")
+            continue
+        verdict = str(check.get("conclusion") or check.get("state") or "").upper()
+        marks.append("fail" if verdict in _PR_FAILED else "pass" if verdict in _PR_PASSED else "wait")
+    out["total"] = len(marks)
+    out["done"] = marks.count("pass") + marks.count("fail")
+    if "fail" in marks:
+        out["state"] = "failed"
+    elif "wait" in marks:
+        out["state"] = "ci"
+    elif marks and payload.get("mergeable") == "MERGEABLE":
+        out["state"] = "ready"
+    return out
+
+
+def _read_pr_state(url: str, cwd: str) -> None:
+    try:
+        state = pr_state_of(url, workspaces.pull_request_checks(url, cwd))
+    except Exception:  # noqa: BLE001 - an unreadable PR is just unknown
+        log.exception("brindle: couldn't read a session PR's checks")
+        state = pr_state_of(url, None)
+    with _pr_lock:
+        _pr_cache[url] = (time.monotonic(), state)
+        _pr_flights.pop(url, None)
+
+
+def session_pr_state(db: DB, root_id: str, url: str | None) -> dict[str, Any] | None:
+    """The PR line for the session's open PR at ``url``: one cached read per
+    PR however many rows or clients ask (refreshed in the background once
+    ``PR_STATE_TTL`` old, a failed read cached like any other, so GitHub is
+    asked at most once per window). Until the first read lands: unknown."""
+    if not url:
+        return None
+    now = time.monotonic()
+    with _pr_lock:
+        cached = _pr_cache.get(url)
+        stale = cached is None or now - cached[0] >= PR_STATE_TTL
+        flying = url in _pr_flights
+    if stale and not flying:
+        root = db.get_agent(root_id)
+        ws = db.get_workspace(root.workspace_id) if root else None
+        if ws is not None:
+            with _pr_lock:
+                if url not in _pr_flights:
+                    flight = _pr_pool.submit(_read_pr_state, url, ws.repo_root)
+                    if not flight.done():
+                        _pr_flights[url] = flight
+    return cached[1] if cached else pr_state_of(url, None)
+
+
 MERGE_POLL_SECONDS = 60.0
 MERGE_CHECK_SECONDS = 3.0
 _merge_polled = 0.0

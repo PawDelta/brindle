@@ -1,5 +1,6 @@
 import json
 import time
+from concurrent.futures import Future
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1025,3 +1026,43 @@ def test_failed_milestone_shows_in_flight_work(db, root, monkeypatch, flight, ex
         db.update_autopilot("boss", checking_since=None)
         assert view.autopilot_entry(db, ws.repo_root, root_id="boss")["milestones"][0]["status"] == "passed"
         assert "✓" in autopilot.progress(db, "boss") and "failed" not in autopilot.progress(db, "boss")
+
+
+def _rollup(*checks, state="OPEN", mergeable="MERGEABLE"):
+    return {"state": state, "mergeable": mergeable, "statusCheckRollup": [
+        {"status": "COMPLETED", "conclusion": c} if c else {"status": "IN_PROGRESS"} for c in checks]}
+
+
+@pytest.mark.parametrize("payload, expected", [
+    (_rollup("SUCCESS", "SKIPPED"), ("ready", 2, 2)),
+    (_rollup("SUCCESS", None, None), ("ci", 1, 3)),
+    (_rollup("SUCCESS", "FAILURE", None), ("failed", 2, 3)),
+    (_rollup("SUCCESS", mergeable="CONFLICTING"), ("unknown", 1, 1)),    # never a false ready
+    (_rollup(), ("unknown", 0, 0)),                                        # no checks reported yet
+    (None, ("unknown", 0, 0)),                                             # the read failed
+    (_rollup("SUCCESS", state="MERGED"), None),
+])
+def test_session_pr_state_of_a_payload(payload, expected):
+    from brindle.daemon import session_review
+
+    got = session_review.pr_state_of("https://github.com/o/r/pull/391", payload)
+    assert got == (expected and {"number": 391, "state": expected[0], "done": expected[1], "total": expected[2]})
+
+
+def test_session_pr_state_is_one_shared_cached_read(db, root, monkeypatch):
+    from brindle.daemon import session_review
+
+    class Inline:
+        def submit(self, fn, *args):
+            future = Future()
+            future.set_result(fn(*args))
+            return future
+
+    url, reads = "https://github.com/o/r/pull/391", []
+    monkeypatch.setattr(session_review, "_pr_pool", Inline())
+    monkeypatch.setattr(session_review, "_pr_cache", {})
+    monkeypatch.setattr(workspaces, "pull_request_checks", lambda u, cwd: reads.append(u))   # gh fails: None
+    first = session_review.session_pr_state(db, "boss", url)      # nothing known yet: unknown, read started
+    second = session_review.session_pr_state(db, "boss", url)     # the failed read is cached too
+    assert first == second == {"number": 391, "state": "unknown", "done": 0, "total": 0}
+    assert reads == [url] and session_review.session_pr_state(db, "boss", None) is None
