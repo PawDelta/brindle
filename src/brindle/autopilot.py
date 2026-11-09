@@ -1910,6 +1910,9 @@ def _goal_eta(db: DB, tree: list[Agent], live: list[Agent], now: float) -> float
             medians[key] = statistics.median(samples) if len(samples) >= ESTIMATE_RUNS else None
         return medians[key]
 
+    def report_remaining(merge: float, reported: float) -> float:
+        return max(60.0, merge - max(0, now - reported))
+
     remaining: dict[str, float] = {}
     for a in live:
         ws = db.get_workspace(a.workspace_id)
@@ -1917,7 +1920,7 @@ def _goal_eta(db: DB, tree: list[Agent], live: list[Agent], now: float) -> float
         if merge is None:
             return None
         if a.pipeline in ("ready", "reviewing", "fixing") and a.reviewing_since:
-            remaining[a.id] = max(60.0, merge - max(0, now - a.reviewing_since))
+            remaining[a.id] = report_remaining(merge, a.reviewing_since)
         else:
             build = typical(ws.repo_root, a.profile)
             if build is None:
@@ -1969,8 +1972,16 @@ def _goal_eta(db: DB, tree: list[Agent], live: list[Agent], now: float) -> float
 
             for a in occupants:
                 ws = db.get_workspace(a.workspace_id)
-                releases.append(0.0 if a.pipeline in ("ready", "reviewing") and a.reviewing_since else
-                                release_at(ws.repo_root if ws else None, a.profile, a.created_at))
+                if a.pipeline == "fixing" and a.reviewing_since:
+                    merge = typical(ws.repo_root) if ws else None
+                    # Fixing occupies a process slot until its next report;
+                    # report-to-merge history bounds that remaining work.
+                    release = report_remaining(merge, a.reviewing_since) if merge is not None else float("inf")
+                elif a.pipeline in ("ready", "reviewing") and a.reviewing_since:
+                    release = 0.0
+                else:
+                    release = release_at(ws.repo_root if ws else None, a.profile, a.created_at)
+                releases.append(release)
             for t in claims:
                 release = release_at(t.repo_root, t.profile, t.started_at or t.created_at)
                 releases.append(release)
