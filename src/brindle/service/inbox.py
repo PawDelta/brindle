@@ -23,7 +23,14 @@ from brindle.config import load_repo_config
 from brindle.daemon.holds import HOLDS, LEASE_SECONDS
 from brindle.db import DB, Agent, request_subagent
 from brindle.providers import get_provider
-from brindle.service.dto import InboxActionDTO, InboxItemDTO, PermissionChoiceDTO, PermissionDTO
+from brindle.service.dto import (
+    AnalysisOfferDTO,
+    AnalysisOfferMilestoneDTO,
+    InboxActionDTO,
+    InboxItemDTO,
+    PermissionChoiceDTO,
+    PermissionDTO,
+)
 from brindle.service.errors import ServiceError
 
 WORKERS = ("assign", "handoff")
@@ -291,6 +298,8 @@ def _analysis_offer_items(db: DB, repo_root: str | None) -> list[InboxItemDTO]:
     """brindle's one-time offer of an analysis doc, answered Yes / Not now from here
     (POST /goal/analysis-offer names the offer id, carried in request_id). Listed
     from the stored offer, not the live snapshot: a paused session keeps its offer."""
+    from brindle.pro import analysis_brief
+
     out = []
     for r in db.conn.execute("SELECT root_id FROM goal_doc_requests WHERE offer LIKE 'open:%' ORDER BY rowid"):
         root = db.get_agent(r["root_id"])
@@ -299,9 +308,15 @@ def _analysis_offer_items(db: DB, repo_root: str | None) -> list[InboxItemDTO]:
         if (ap is None or ws is None or (repo_root and ws.repo_root != repo_root)
                 or identity_lock.locked_by(root.id)):
             continue
+        milestones, repos, workers, text = autopilot.analysis_offer_scope(db, root.id, ap)
+        context = AnalysisOfferDTO(
+            session_name=root.name or ap.goal or ws.name, goal=ap.goal or "", detail=ap.detail,
+            milestones=[AnalysisOfferMilestoneDTO(title=m.title, verified=m.status == "passed")
+                        for m in milestones], workers=workers, repos=repos,
+            reasons=analysis_brief.offer_reasons(len(milestones), repos, text, workers))
         out.append(InboxItemDTO(kind="analysis_offer", reason="offers to write an analysis doc",
                                 detail=ap.goal, request_id=ap.analysis_offer[5:], agent_id=root.id,
-                                workspace_id=ws.id, root_id=root.id))
+                                workspace_id=ws.id, root_id=root.id, analysis_offer=context))
     return out
 
 

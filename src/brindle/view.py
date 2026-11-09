@@ -8,7 +8,7 @@ import logging
 import os
 import time
 
-from brindle import agents, git, identity_lock, pipeline, status_cache, tmux
+from brindle import agents, git, identity_lock, pipeline, providers, status_cache, tmux
 from brindle import usage as usage_mod
 from brindle.db import DB, NATIVE_SUBAGENT_STALE, Agent, NativeSubagent, Workspace
 
@@ -170,7 +170,8 @@ def agent_entry(db: DB, a: Agent, *, detail: bool = False,
     else:
         status = "exited"
     entry = {"id": a.id, "profile": a.profile, "provider": a.provider,
-             "status": status, "mode": a.mode}
+             "status": status, "mode": a.mode,
+             "accepts_files": providers.PROVIDERS.get(a.provider, providers.Provider()).accepts_files}
     if status == "failed" and a.failed_why:
         entry["failed_why"] = a.failed_why
     milestone = db.agent_milestone(a.id)

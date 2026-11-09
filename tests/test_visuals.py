@@ -3,7 +3,7 @@ import time
 import pytest
 from starlette.testclient import TestClient
 
-from brindle import agents, bus, mcp_server, visual_offers, visuals
+from brindle import agents, bus, git, mcp_server, visual_offers, visuals
 from brindle.daemon.app import build_app
 from brindle.db import Agent, Workspace
 from brindle.service import inbox
@@ -84,6 +84,76 @@ def test_note_only_answers_reach_the_supervisor(db, session, client):
     bodies = [r["body"] for r in db.conn.execute("SELECT body FROM inbox WHERE agent_id=?", (boss.id,))]
     assert len(bodies) == 2 and all("Stage it first" in body for body in bodies)
     assert not [i for i in inbox.items(db, None, panes={}) if i.kind == "visual"]
+
+
+def test_answer_attachments_reach_receiver_and_kept_visual(db, session, client, tmp_path, monkeypatch):
+    ws, boss, worker = session
+    receiving = tmp_path / "receiving"
+    receiving.mkdir()
+    db.conn.execute("UPDATE workspaces SET path=? WHERE id=?", (str(receiving), ws.id))
+    db.conn.commit()
+    monkeypatch.setattr(git, "exclude", lambda *args: None)
+    v = visuals.publish(db, worker, "Flow", "<p>flow</p>", "Which?", OPTIONS)
+    [dto] = client.get(f"/v1/sessions/{boss.id}/visuals").json()
+    assert (dto["answer_agent_id"], dto["accepts_files"]) == (boss.id, True)
+    paths = []
+    for name in ("diagram.png", "notes.txt"):
+        uploaded = client.post(f"/v1/agents/{dto['answer_agent_id']}/attachments",
+                               json={"name": name, "data_base64": "aGk="})
+        assert uploaded.status_code == 200, uploaded.text
+        paths.extend(uploaded.json()["paths"])
+    client.post(f"/v1/visuals/{v['id']}/keep")
+    response = client.post(f"/v1/visuals/{v['id']}/answer",
+                           json={"rev": 1, "option": "A", "attachments": paths})
+    assert response.status_code == 200
+    names = [path.rsplit("/", 1)[-1] for path in paths]
+    assert response.json()["answer"]["attachments"] == names
+    assert visuals.get(db, v["id"])["answer"]["attachments"] == names
+    assert client.get(f"/v1/kept-visuals/{v['id']}").json()["answer"]["attachments"] == names
+    client.post(f"/v1/visuals/{v['id']}/keep")
+    assert client.get("/v1/kept-visuals").json()[0]["answer"]["attachments"] == names
+    [body] = [r["body"] for r in db.conn.execute("SELECT body FROM inbox WHERE agent_id=?", (boss.id,))]
+    assert all('@"' + path + '"' in body for path in paths)
+
+
+def test_answer_attachments_refused_before_claim(db, session, client, tmp_path):
+    _, boss, worker = session
+    folder = tmp_path / "repo" / ".brindle" / "attachments"
+    folder.mkdir(parents=True)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside")
+    path = folder / "file.txt"
+    path.write_text("uploaded")
+    v = visuals.publish(db, worker, "Flow", "<p>flow</p>", "Which?", OPTIONS)
+
+    def refused(paths):
+        response = client.post(f"/v1/visuals/{v['id']}/answer",
+                               json={"rev": 1, "option": "A", "attachments": paths})
+        assert response.status_code == 400, paths
+        assert visuals.get(db, v["id"])["answer"] is None
+        assert db.conn.execute("SELECT COUNT(*) FROM inbox WHERE agent_id=?", (boss.id,)).fetchone()[0] == 0
+
+    # Outside, traversal, a directory, missing, a scalar in place of the list, a non-path item.
+    for paths in ([str(outside)], [str(folder / ".." / ".." / ".." / outside.name)], [str(folder)],
+                  [str(folder / "absent")], str(path), [42]):
+        refused(paths)
+    # An uploaded path linked to an outside file.
+    path.unlink()
+    path.symlink_to(outside)
+    refused([str(path)])
+    path.unlink()
+    path.write_text("uploaded")
+    # The attachments folder itself points outside.
+    folder.rename(tmp_path / "moved")
+    folder.symlink_to(tmp_path / "moved", target_is_directory=True)
+    refused([str(path)])
+    folder.unlink()
+    (tmp_path / "moved").rename(folder)
+    # A provider that takes no files.
+    db.update_agent(boss.id, provider="shell")
+    [dto] = client.get(f"/v1/sessions/{boss.id}/visuals").json()
+    assert dto["accepts_files"] is False
+    refused([str(path)])
 
 
 def test_visual_ready_notice_and_answers_for_the_revision_on_screen(db, session, client,

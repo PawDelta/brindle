@@ -2,8 +2,25 @@ import { act, cleanup, render } from "@testing-library/react";
 import type { ILink, ILinkProvider } from "@xterm/xterm";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { PtyViewHandlers, PtyViewOpener } from "../api/ptyView";
+import { DaemonClient } from "../api/client";
 import { VisualLinkContext } from "../screens/Session/Visuals/link";
 import { ATTACH_WAIT, COPIED_SHOWN, COPY_OR_INTERRUPT, LATE_PASTE_WINDOW, PASTE_WAIT, PtyTerminal, selectionIn } from "./PtyTerminal";
+
+const files = vi.hoisted(() => ({ read: vi.fn(), listen: vi.fn(), drop: (_event: unknown) => {} }));
+vi.mock("../api/attachments", async (original) => ({
+  ...await original<typeof import("../api/attachments")>(),
+  clipboardAttachments: () => files.read(),
+  listenForDrops: (handler: typeof files.drop) => { files.drop = handler; return files.listen(); },
+}));
+const native = vi.hoisted(() => ({ enabled: false }));
+vi.mock("@tauri-apps/api/core", async original => ({
+  ...await original<typeof import("@tauri-apps/api/core")>(),
+  isTauri: () => native.enabled,
+  invoke: async (command: string, args: { path: string }) => {
+    if (command !== "pty_view_attachment_path") throw new Error("unexpected native command");
+    return args.path.replace(/^C:\\/, "/windows/c/").replaceAll("\\", "/");
+  },
+}));
 
 /* What goes to the debug log. */
 const logs = vi.hoisted(() => [] as unknown[][]);
@@ -23,9 +40,13 @@ vi.mock("@xterm/xterm", async (original) => {
 });
 
 beforeEach(() => {
+  files.read.mockResolvedValue([]);
+  files.listen.mockResolvedValue(() => {});
+  Object.defineProperty(document, "elementFromPoint", { configurable: true, value: (x: number, y: number) => x < 100 && y < 100 ? document.querySelector('[data-testid="terminal"]') : document.body });
   vi.stubGlobal("matchMedia", () => ({ matches: false, addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {} }));
 });
 afterEach(() => {
+  native.enabled = false;
   cleanup();
   xterms.length = 0;
   logs.length = 0;
@@ -33,7 +54,7 @@ afterEach(() => {
 });
 
 /* `write`: how the app's clipboard takes a copy (settled, or failed where it can't be written). */
-function mount(paste?: () => Promise<string>, write: (text: string) => Promise<void> = () => Promise.resolve()) {
+function mount(paste?: () => Promise<string>, write: (text: string) => Promise<void> = () => Promise.resolve(), attachments?: import("./PtyTerminal").PtyTerminalProps["attachments"]) {
   const written: string[] = [];
   const copied: string[] = [];
   const opened: { at: unknown; handlers?: PtyViewHandlers; closed: boolean; focused: number } = { at: null, closed: false, focused: 0 };
@@ -43,11 +64,150 @@ function mount(paste?: () => Promise<string>, write: (text: string) => Promise<v
     return { write: (d) => written.push(d), resize() {}, focus: () => void opened.focused++, close: () => void (opened.closed = true) };
   };
   const clipboard = { text: "" };
-  const view = render(<PtyTerminal at={{ server: "brindle", target: "s:@1" }} open={open} copy={(text) => (copied.push(text), write(text))} paste={paste ?? (() => Promise.resolve(clipboard.text))} />);
+  const view = render(<PtyTerminal at={{ server: "brindle", target: "s:@1" }} open={open} copy={(text) => (copied.push(text), write(text))} paste={paste ?? (() => Promise.resolve(clipboard.text))} attachments={attachments} />);
   return { written, copied, clipboard, opened, view, term: () => xterms.at(-1)! };
 }
 
 const parsed = (term: import("@xterm/xterm").Terminal) => act(() => new Promise<void>((r) => term.write("", r)));
+
+it("attaches native drops only under the cursor and keeps typing behind the returned paste", async () => {
+  let finish: (value: { text: string }) => void = () => {};
+  const attach = vi.fn(() => new Promise<{ text: string }>(ok => { finish = ok; }));
+  const { view, term, opened, written } = mount(undefined, undefined, { acceptsFiles: true, attach });
+  act(() => opened.handlers!.onData(new TextEncoder().encode("\x1b[?1049h")));
+  await parsed(term());
+  act(() => files.drop({ type: "over", x: 30, y: 40 }));
+  expect(view.queryByTestId("terminal-drop")).not.toBeNull();
+  act(() => files.drop({ type: "leave" }));
+  expect(view.queryByTestId("terminal-drop")).toBeNull();
+  act(() => files.drop({ type: "drop", x: 300, y: 40, paths: ["/outside"] }));
+  await settled();
+  expect(attach).not.toHaveBeenCalled();
+  act(() => files.drop({ type: "drop", x: 30, y: 40, paths: ["/photo.png", "/notes.txt"] }));
+  act(() => term().input("x", true));
+  await settled();
+  expect(written).toEqual([]);
+  await act(async () => finish({ text: "@first" }));
+  await settled();
+  await act(async () => finish({ text: "@second" }));
+  await settled();
+  expect(written).toEqual(["\x1b[200~@first @second\x1b[201~", "x"]);
+  attach.mockRejectedValueOnce(new Error("credential files cannot be attached"));
+  act(() => files.drop({ type: "drop", x: 30, y: 40, paths: ["/refused"] }));
+  await settled();
+  expect(view.queryByRole("alert")).not.toBeNull();
+  expect(written).toHaveLength(2);
+});
+
+it.each(["MacIntel", "Win32"])("attaches clipboard files and image bytes on an empty paste while preserving text pastes (%s)", async (os) => {
+  const platform = vi.spyOn(navigator, "platform", "get").mockReturnValue(os);
+  const attach = vi.fn(async (file: { path?: string; name?: string }) => ({ text: file.path ?? file.name! }));
+  const { view, term, opened, written, clipboard } = mount(undefined, undefined, { acceptsFiles: true, attach });
+  act(() => opened.handlers!.onData(new TextEncoder().encode("\x1b[?1049h")));
+  await parsed(term());
+  files.read.mockResolvedValue([{ path: "/finder/photo.png" }, { name: "clipboard.png", data_base64: "aQ==" }]);
+  const press = () => {
+    act(() => void term().textarea!.dispatchEvent(new KeyboardEvent("keydown", { key: "v", ctrlKey: os !== "MacIntel", metaKey: os === "MacIntel", bubbles: true, cancelable: true })));
+    if (os === "MacIntel") webviewPaste(term().textarea!, clipboard.text);
+  };
+  press();
+  await settled();
+  expect(written).toEqual(["\x1b[200~/finder/photo.png clipboard.png\x1b[201~"]);
+  expect(attach.mock.calls).toHaveLength(2);
+  clipboard.text = "ordinary text";
+  press();
+  await settled();
+  expect(written.at(-1)).toBe("\x1b[200~ordinary text\x1b[201~");
+  expect(attach.mock.calls).toHaveLength(2);
+  attach.mockRejectedValueOnce(new Error("attachment exceeds the file size limit"));
+  clipboard.text = "";
+  press();
+  await settled();
+  expect(view.queryByRole("alert")).not.toBeNull();
+  files.read.mockRejectedValueOnce(new Error("clipboard image exceeds the file size limit"));
+  press();
+  await settled();
+  expect(view.queryByRole("alert")).not.toBeNull();
+  if (os === "MacIntel") {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      let answer: (files: { path: string }[]) => void = () => {};
+      files.read.mockClear();
+      files.read.mockImplementation(() => new Promise(ok => { answer = ok; }));
+      act(() => void term().textarea!.dispatchEvent(new KeyboardEvent("keydown", { key: "v", metaKey: true, bubbles: true })));
+      await act(() => vi.advanceTimersByTimeAsync(PASTE_WAIT));
+      // The empty webview event arrives while the native read is already in flight.
+      webviewPaste(term().textarea!, "");
+      await settled();
+      expect(files.read).toHaveBeenCalledTimes(1);
+      await act(async () => answer([{ path: "/late-file" }]));
+      await settled();
+      expect(written.at(-1)).toBe("\x1b[200~/late-file\x1b[201~");
+      files.read.mockResolvedValue([{ path: "/completed" }]);
+      act(() => void term().textarea!.dispatchEvent(new KeyboardEvent("keydown", { key: "v", metaKey: true, bubbles: true })));
+      await act(() => vi.advanceTimersByTimeAsync(PASTE_WAIT));
+      await settled();
+      const uploads = attach.mock.calls.length;
+      const writes = written.length;
+      webviewPaste(term().textarea!, "");
+      await settled();
+      expect(attach.mock.calls).toHaveLength(uploads);
+      expect(written).toHaveLength(writes);
+      // The late answer is consumed once; another menu paste is a new attachment.
+      webviewPaste(term().textarea!, "");
+      await settled();
+      expect(attach.mock.calls).toHaveLength(uploads + 1);
+    } finally {
+      vi.useRealTimers();
+      platform.mockRestore();
+    }
+  }
+  platform.mockRestore();
+});
+
+it("attaches Windows drop and clipboard paths through the native engine path conversion", async () => {
+  native.enabled = true;
+  const client = new DaemonClient({ baseUrl: "http://localhost", token: "test", fetch: async (_url, init) => {
+    const file = JSON.parse(init!.body as string);
+    if (!file.path.startsWith("/windows/c/")) return new Response(JSON.stringify({ error: { code: "invalid", message: "Linux path required" } }), { status: 400 });
+    return new Response(JSON.stringify({ paths: [file.path], text: `@${file.path}` }));
+  } });
+  const { term, opened, written } = mount(undefined, undefined, { acceptsFiles: true, attach: file => client.attach("agent", file) });
+  act(() => opened.handlers!.onData(new TextEncoder().encode("\x1b[?1049h")));
+  await parsed(term());
+  act(() => files.drop({ type: "drop", x: 20, y: 20, paths: ["C:\\Users\\name\\photo.png"] }));
+  await settled();
+  expect(written).toEqual(["\x1b[200~@/windows/c/Users/name/photo.png\x1b[201~"]);
+  files.read.mockResolvedValue([{ path: "C:\\Users\\name\\notes.txt" }]);
+  webviewPaste(term().textarea!, "");
+  await settled();
+  expect(written.at(-1)).toBe("\x1b[200~@/windows/c/Users/name/notes.txt\x1b[201~");
+});
+
+it("refuses attachments for unsupported agents and discards an attachment after unmount", async () => {
+  const attach = vi.fn(async () => ({ text: "@file" }));
+  const first = mount(undefined, undefined, { acceptsFiles: false, attach });
+  act(() => files.drop({ type: "drop", x: 20, y: 20, paths: ["/file"] }));
+  await settled();
+  expect(first.view.queryByRole("status")).not.toBeNull();
+  expect(attach).not.toHaveBeenCalled();
+  cleanup();
+  let finish: (value: { text: string }) => void = () => {};
+  files.read.mockResolvedValue([{ path: "/file" }]);
+  const next = mount(undefined, undefined, { acceptsFiles: true, attach: () => new Promise(ok => { finish = ok; }) });
+  webviewPaste(next.term().textarea!, "");
+  await settled();
+  next.view.unmount();
+  await act(async () => finish({ text: "@stale" }));
+  expect(next.written).toEqual([]);
+  files.read.mockClear();
+  files.listen.mockClear();
+  const signIn = mount();
+  webviewPaste(signIn.term().textarea!, "");
+  await settled();
+  expect(files.listen).not.toHaveBeenCalled();
+  expect(files.read).not.toHaveBeenCalled();
+});
 
 it("sends Caps Lock letters on keydown exactly once without invoking clipboard shortcuts", async () => {
   const { written, copied, term } = mount();
