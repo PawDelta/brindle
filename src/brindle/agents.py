@@ -775,6 +775,7 @@ def _open_window(db: DB, agent: Agent, ws: Workspace, name: str, argv: list[str]
         server = tmux.current_server()
         db.update_agent(agent.id, tmux_window=target, tmux_server=server)
         agent.tmux_window, agent.tmux_server = target, server
+        _retire_orphaned_delivery(db, agent.id)
         from brindle import procs
 
         try:
@@ -2590,20 +2591,21 @@ def _partial_composer(agent: Agent, state: dict, stage: str) -> bool:
     return draft == expected.rstrip()
 
 
-def _retire_orphaned_delivery(db: DB, agent: Agent, message_id: int, state: dict) -> bool:
-    """A delivery typed into a pane the agent no longer runs in (its session
-    came back in a new one), whose composer went with it: nothing can finish
-    it, and left in place its mark would hold the queue for good. Sent is
-    delivered; unknown is kept unresolved, as in _resume_pane_delivery; any
-    other goes back in the queue, the same row, and the queue moves on."""
+def _retire_orphaned_delivery(db: DB, agent_id: str) -> None:
+    """The agent has a new window, so a delivery typed into its old one lost
+    its composer: nothing can finish it, and left in place its mark would
+    hold the queue for good. Sent is delivered; unknown is kept unresolved,
+    as in _resume_pane_delivery; any other goes back in the queue, the same row."""
+    saved = db.mark(agent_id, "pane-delivery")
+    if saved is None:
+        return
+    state = json.loads(saved)
     if state.get("stage") == "submitted":
-        db.mark_delivered(message_id)
-        db.set_mark(agent.id, "pane-delivery", None)
+        db.mark_delivered(state["message_id"])
     elif state.get("turn_started"):
-        db.retain_unresolved(message_id, agent.id)
-    else:
-        db.set_mark(agent.id, "pane-delivery", None)
-    return _flush_messages(db, agent.id)
+        db.retain_unresolved(state["message_id"], agent_id)
+        return
+    db.set_mark(agent_id, "pane-delivery", None)
 
 
 def _resume_pane_delivery(db: DB, agent: Agent, saved: str) -> bool:
@@ -2617,10 +2619,9 @@ def _resume_pane_delivery(db: DB, agent: Agent, saved: str) -> bool:
         db.set_mark(agent.id, "pane-delivery", None)
         return False
     identity_lock.ensure(agent)
-    if (agent.tmux_window != state.get("pane") or server_of(agent) != state.get("server")
-            or agent.provider != state.get("provider") or row["body"] != state["body"]):
-        return _retire_orphaned_delivery(db, agent, row["id"], state)
-    if (agent.status not in ("idle", "processing")
+    if (agent.tmux_window != state["pane"] or server_of(agent) != state["server"]
+            or agent.provider != state["provider"] or row["body"] != state["body"]
+            or agent.status not in ("idle", "processing")
             or (agent.status == "processing" and not get_provider(agent.provider).types_midturn)):
         return False
     if state["stage"] == "submitted":

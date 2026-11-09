@@ -246,12 +246,19 @@ def pane(db, boss, monkeypatch):
     ("submitted", {}, ["n"], True),
     ("body", {"turn_started": True}, ["n"], False),   # may have gone in: kept unresolved
 ])
-def test_a_delivery_into_a_pane_since_replaced_doesnt_hold_the_queue(db, pane, stage, fields, typed, delivered):
+def test_a_delivery_into_a_pane_since_replaced_doesnt_hold_the_queue(db, pane, boss, monkeypatch, stage, fields,
+                                                                     typed, delivered):
     mid = db.enqueue("boss", "m", None)
     db.record_pane_delivery(mid, "boss", json.dumps(
-        {"message_id": mid, "pane": "@old", "server": agents.server_of(db.get_agent("boss")), "provider": "claude",
+        {"message_id": mid, "pane": "@0", "server": agents.server_of(db.get_agent("boss")), "provider": "claude",
          "body": "m", "lead": "L", "stage": stage, **fields}))
     db.enqueue("boss", "n", None)
+    monkeypatch.setattr(tmux, "ensure_session", lambda *a, **k: None)
+    monkeypatch.setattr(tmux, "new_window", lambda *a, **k: "@new")
+    monkeypatch.setattr(agents, "_window_environment", lambda *a: ({}, [], None, [], {}))
+    monkeypatch.setattr(agents, "_agent_env_policy", lambda ws: ({}, False))
+    monkeypatch.setattr(agents, "_record_env_drops", lambda *a: None)
+    agents._open_window(db, db.get_agent("boss"), boss, "chat", ["claude"], False)   # its session comes back
     for _ in typed:
         db.set_status("boss", "idle")
         assert agents.flush(db, "boss") is True
