@@ -742,47 +742,6 @@ def test_critical_memory_holds_a_recovery_even_with_nothing_running(monkeypatch)
     assert stop.is_set()        # it looked at memory, though nothing runs, and held until told to stop
 
 
-def test_recovery_reads_skip_the_cpu_wait(db, monkeypatch):
-    from brindle import keystore
-
-    waited, started, observed = [], [], []
-    load, memory = [4], [1]
-    monkeypatch.setattr(spawn, "_gated", True)
-    monkeypatch.setattr(spawn, "_cores", lambda: 4)
-    monkeypatch.setattr(spawn, "_load", lambda: load[0])
-    monkeypatch.setattr(spawn, "pressure", lambda: memory[0])
-    monkeypatch.setattr(keystore, "known_names", lambda: ["OPENAI_API_KEY"])
-    monkeypatch.setattr(keystore, "_keychain_reads", {})
-    store = keystore.KeychainStore("recovery-admission-probe")
-    monkeypatch.setattr(keystore, "_key_store", lambda name: store)
-
-    def run(argv, *args):
-        started.append(argv[0])
-        load[0] = 4
-        memory[0] = spawn.PRESSURE_CRITICAL if critical else 1
-        return subprocess.CompletedProcess(argv, 44 if argv[0] == "security" else 0, "", "")
-
-    def room_available(seconds):
-        waited.append(seconds)
-        load[0], memory[0] = 0, 1
-
-    monkeypatch.setattr(spawn, "_run_read", run)
-    monkeypatch.setattr(spawn._cond, "wait", room_available)
-    # No launch candidates: exercise the real keys and pane reconciliation reads.
-    for recovery, critical in ((True, False), (False, False), (True, True), (False, True)):
-        waited.clear()
-        started.clear()
-        store._read.invalidate()
-        monkeypatch.setattr(spawn, "_running", 0 if critical else 1)
-        load[0], memory[0] = 4, spawn.PRESSURE_CRITICAL if critical else 1
-        with spawn.waits_for_room():
-            agents.resume(db, "absent", gate=lifecycle.Recovery().launching if recovery else None)
-        assert started == ["security", tmux._bin()]
-        observed.append(len(waited))
-        assert spawn._running == (0 if critical else 1)
-    assert observed == [0, 2, 2, 2]
-
-
 def test_recovery_opened_session_first(db, root, monkeypatch):
     from starlette.applications import Starlette
     from starlette.routing import Route

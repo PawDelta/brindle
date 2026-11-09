@@ -1853,7 +1853,7 @@ def resume(db: DB, root_id: str, *, watch_pane: bool = True,
     windows = _window_seconds.set([])
     token = _launch_gate.set(gate) if gate is not None else None
     try:
-        with resume_lock(root_id), processes.recovery_reads(gate is not None):
+        with resume_lock(root_id):
             return _resume(db, root_id, watch_pane=watch_pane, only=only, recovery_env=recovery_env,
                            settle=settle, unstarted=unstarted)
     finally:

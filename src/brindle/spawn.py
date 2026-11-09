@@ -47,12 +47,6 @@ The gate (waiting for room, background reads) is on only in the daemon
 (:func:`enable`); in the CLI, MCP server and hooks, reads and actions start
 at once, as they always have. Deadlines and the read's clean stop apply
 everywhere.
-
-A start's recovery uses :func:`recovery_reads`: its keychain, pane and
-preflight reads bypass CPU admission after the session's bounded initial
-wait. They still wait on critical memory pressure, including when no child
-is running. This applies only to :func:`read`; actions and launches keep
-their admission rules, and reads keep their deadlines and cancellation.
 """
 
 from __future__ import annotations
@@ -211,24 +205,6 @@ def waits_for_room() -> Iterator[None]:
         yield
     finally:
         _waits.reset(token)
-
-
-_recovery_reads: contextvars.ContextVar[bool] = contextvars.ContextVar("brindle_recovery_reads", default=False)
-
-
-@contextlib.contextmanager
-def recovery_reads(enabled: bool) -> Iterator[None]:
-    """A start's recovery reads need no CPU room, but still need memory.
-
-    Keep the waiting lane intact for actions and launches. Like the other
-    admission contexts, this follows copied thread contexts and is restored
-    even when recovery fails or is cancelled.
-    """
-    token = _recovery_reads.set(enabled)
-    try:
-        yield
-    finally:
-        _recovery_reads.reset(token)
 
 
 def begin_write() -> None:
@@ -464,10 +440,7 @@ def forced_starts() -> int:
 
 
 def _has_room(waits: bool = True) -> bool:
-    if not _gated or not waits:
-        return True
-    # The single-process escape is for CPU contention, never critical memory.
-    return pressure() < PRESSURE_CRITICAL and (_running == 0 or room() >= 1)
+    return not _gated or not waits or _running == 0 or room() >= 1
 
 
 def wait_for_room(stop: threading.Event, limit: float = ACTION_WAIT, *, busy_limit: float | None = None) -> None:
@@ -476,7 +449,7 @@ def wait_for_room(stop: threading.Event, limit: float = ACTION_WAIT, *, busy_lim
     set, or ``limit`` seconds have passed: it then goes ahead, as an action
     with no deadline does. ``busy_limit``: seconds that are enough when the
     machine is short of CPU only; critical memory pressure gets all of ``limit``,
-    even with nothing running."""
+    even with nothing running (which lets a single process through, _has_room)."""
     began = time.monotonic()
     end = began + limit
     busy_end = end if busy_limit is None else min(end, began + busy_limit)
@@ -504,22 +477,15 @@ def _count_stopped() -> None:
         _stopped += 1
 
 
-def _admit(end: float, dl: Deadline | None, skip: bool, what: str, start_anyway: bool = False,
-           *, recovery_read: bool = False) -> None:
+def _admit(end: float, dl: Deadline | None, skip: bool, what: str, start_anyway: bool = False) -> None:
     """Count a start in, once there's room. Raises Skipped (``skip``) or
     Busy (``end`` passed, or ``dl`` stopped) instead; with ``start_anyway``
-    it starts at ``end`` instead of failing.
-
-    ``recovery_read`` exempts only a read's CPU admission, without changing
-    the caller's waiting lane or committing its request to an action.
-    """
+    it starts at ``end`` instead of failing."""
     global _running, _refused
     waits = skip or _waits.get()
     with _cond:
         while True:
-            # Recovery's quick reads must not queue behind CPU sampling or
-            # load; critical memory still holds them until their deadline.
-            fits = (not _gated or pressure() < PRESSURE_CRITICAL) if recovery_read else _has_room(waits)
+            fits = _has_room(waits)   # first: sampling the CPU takes a moment, which counts against the deadline
             if dl is not None and dl.stopped:
                 _refused += 1
                 raise Busy(f"{what} was not started: {dl.reason}")
@@ -634,10 +600,6 @@ def read(argv: list[str], *, cwd: Any = None, env: dict[str, str] | None = None,
     """Run a command that changes nothing and return what it printed, like
     ``subprocess.run(capture_output=True)``.
 
-    In :func:`recovery_reads`, CPU contention cannot delay admission. Memory
-    admission still applies with the gate on; the same request and command
-    deadlines bound that wait, including for a ``to_its_end`` lookup.
-
     It gets only the time left on the request's deadline (and at most
     ``timeout``), including any wait for room. Past that, or when the
     request is stopped, its process group is stopped (SIGTERM, then SIGKILL
@@ -656,7 +618,7 @@ def read(argv: list[str], *, cwd: Any = None, env: dict[str, str] | None = None,
     now = time.monotonic()
     own_end = now + timeout if timeout is not None else math.inf
     end = min(own_end, dl.at) if dl is not None else own_end
-    _admit(end, dl, skip, _name(argv), recovery_read=_recovery_reads.get())
+    _admit(end, dl, skip, _name(argv))
     if to_its_end:
         dl, end = None, own_end
     try:
