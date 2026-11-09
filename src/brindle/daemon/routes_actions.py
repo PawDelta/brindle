@@ -467,13 +467,14 @@ def inbox_action(db: DB, params: dict, body: Body) -> Any:
     if action == "pr-not-now":
         identity_lock.ensure(a)
         ws = _workspace(db, a.workspace_id)
-        ready = db.conn.execute("SELECT 1 FROM session_pr_prep WHERE root_id = ? AND branch = ?"
+        ready = db.conn.execute("SELECT sha FROM session_pr_prep WHERE root_id = ? AND branch = ?"
                                 " AND state = 'passed'", (a.id, ws.branch)).fetchone()
         if not ready:
             raise ServiceError("conflict", "no longer a PR ready for approval", 409)
-        head = git.out(["rev-parse", "HEAD"], ws.path)
+        # The commit the card is about: a newer one's result still gets its own card.
         db.conn.execute("INSERT INTO session_pr_declined (root_id, branch, sha) VALUES (?, ?, ?)"
-                        " ON CONFLICT(root_id, branch) DO UPDATE SET sha = excluded.sha", (a.id, ws.branch, head))
+                        " ON CONFLICT(root_id, branch) DO UPDATE SET sha = excluded.sha",
+                        (a.id, ws.branch, ready["sha"]))
         bus.publish_agent(db, "session.pr_declined", a.id)
         return {"dismissed": a.id}
     if action in ("approve", "reject"):
