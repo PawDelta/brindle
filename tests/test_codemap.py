@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from brindle import agents, codemap, git, workspaces
+from brindle.codemap import _broad_search
 from brindle.db import Agent
 from brindle.profiles import load_profile
 from brindle.providers import ClaudeCode, LaunchContext, get_provider
@@ -30,6 +31,43 @@ def test_graph_query_log_records_read_only_graphify_commands_per_agent(db, mappe
     rows = codemap.graph_queries(db, ws.repo_root, "w1")
     assert [(r.agent_id, r.branch, r.task) for r in rows] == [("w1", "feat", "graphify query 'auth'")]
     assert len(codemap.graph_queries(db, ws.repo_root)) == 2
+
+
+def test_graph_nudge_once_on_broad_search_only_and_decision_unchanged(db, mapped, repo):
+    ws = workspaces.create(db, str(mapped), "feat").workspace
+    db.add_agent(Agent("w1", ws.id, "developer", "claude", None, "headless", "idle", "@0", None, time.time()))
+    a = db.get_agent("w1")
+
+    def run(cmd):
+        return agents.pre_tool_decision(db, a, {"tool_name": "Bash", "tool_input": {"command": cmd}})
+
+    def note(out):
+        return ((out or {}).get("hookSpecificOutput") or {}).get("additionalContext")
+
+    baseline = agents._pre_tool_decision(db, a, {"tool_name": "Bash", "tool_input": {"command": "grep -rn foo ."}})
+    (Path(ws.path) / "src.v2").mkdir()
+    (Path(ws.path) / "Makefile").write_text("")
+    (Path(ws.path) / "a.py").write_text("")
+    for named in ("grep -n foo a.py", "rg foo a.py Makefile", "rg foo Makefile", "rg -efoo a.py",
+                  "rg --regexp=foo a.py", "git log | grep -r foo", 'rg -F "|" a.py', 'rg -F ";" a.py',
+                  "cd src.v2 && rg foo ../a.py", "cd $X && rg foo a.py", 'rg foo "a".py', r"rg foo ./a\.py",
+                  "(cd src.v2 && pwd); rg foo a.py", "cd nope || rg foo a.py", "rg foo a.py 2>&1",
+                  "rg foo a.py # exact file", "{ cd src.v2; }; rg foo a.py"):
+        assert note(run(named)) is None, named
+    assert _broad_search("rg cd src", ws.path) and _broad_search("rg foo a.py \\# x", ws.path)
+    assert _broad_search('rg -n "foo|bar"', ws.path) and _broad_search("rg foo src.v2", ws.path)
+    first = run("grep -rn foo .")
+    assert "graphify query" in note(first)
+    assert {k: v for k, v in (first or {}).get("hookSpecificOutput", {}).items() if k != "additionalContext"} == (
+        (baseline or {}).get("hookSpecificOutput") or {"hookEventName": "PreToolUse"})
+    assert note(run("rg foo")) is None   # once per agent
+    db.add_agent(Agent("w2", ws.id, "developer", "claude", None, "headless", "idle", "@0", None, time.time()))
+    assert note(agents.pre_tool_decision(db, db.get_agent("w2"), {
+        "tool_name": "Bash", "tool_input": {"command": "git grep foo"}})) is not None
+    (mapped / "graphify-out" / "graph.json").unlink()
+    db.add_agent(Agent("w3", ws.id, "developer", "claude", None, "headless", "idle", "@0", None, time.time()))
+    assert note(agents.pre_tool_decision(db, db.get_agent("w3"), {
+        "tool_name": "Bash", "tool_input": {"command": "rg foo"}})) is None
 
 
 def _fake_graph(path: Path, hub: str) -> None:

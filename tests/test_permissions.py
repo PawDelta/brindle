@@ -111,6 +111,122 @@ def test_shell_forms(tmp_path, command, expected):
     assert decision.decision == expected, decision.reason
 
 
+@pytest.mark.parametrize("command, expected", [
+    pytest.param(r'grep -rln "check_new_tests\|MAX_NEW_TESTS" . --include=*.py --include=*.md --exclude-dir=node_modules', "allow",
+                 marks=pytest.mark.variant("reported search with regex and bare globs")),
+    pytest.param("grep -rln 'sidebar-resize' shots scripts e2e . --include=*.ts --include=*.tsx", "allow",
+                 marks=pytest.mark.variant("reported search with multiple paths")),
+    pytest.param('grep -rIl "KeyError: \'permission_grants\'" "/Users/x/Library/Application Support/y"', "allow",
+                 marks=pytest.mark.variant("reported search with nested quotes and spaced path")),
+    pytest.param("grep -n '$(blocked) `blocked` >out | blocked' . --include='*.py' --exclude-dir=\"node*\"", "allow",
+                 marks=pytest.mark.variant("single-quoted shell operators are literal search text; live substitutions remain denied")),
+    pytest.param('grep -n "a|b" README.md --include=*.env --exclude=*.env --exclude-dir=*.env', "allow",
+                 marks=pytest.mark.variant("filter option values naming denied files must not be treated as read operands")),
+    pytest.param('grep -r x . --include=*.py --exclude=secret.py --exclude-dir=node_modules', "allow",
+                 marks=pytest.mark.variant("excluding the denied file allows a search; reversing filter order must still ask")),
+    pytest.param('grep -r x . --include "*.py" --exclude secret.py --exclude-dir node_modules', "allow",
+                 marks=pytest.mark.variant("separate filter arguments must exclude denied files just as attached values do")),
+    pytest.param('grep -r "included files" . --include="*.py"', "allow",
+                 marks=pytest.mark.variant("include filters must prune denied env files and unrelated trees beyond the walk limit")),
+    pytest.param('grep -r x . --exclude=secret.py --include=*.py --exclude-dir=node_modules', "ask",
+                 marks=pytest.mark.variant("bypass: last matching include overrides exclude")),
+    pytest.param('grep -r x . --include=*.py', "ask",
+                 marks=pytest.mark.variant("bypass: reachable denied file")),
+    pytest.param('grep -r x . --include="[^x]*.py"', "ask",
+                 marks=pytest.mark.variant("bypass: negated bracket includes denied file")),
+    pytest.param('grep -r x . --exclude=secret*', "ask",
+                 marks=pytest.mark.variant("bypass: shell expansion narrows the exclusion")),
+    pytest.param('grep -r confidential . --include="./sub/*.py"', "ask",
+                 marks=pytest.mark.variant("bypass: BSD grep includes full paths as well as basenames")),
+    pytest.param('grep -r confidential nested --include="nested*.py"', "ask",
+                 marks=pytest.mark.variant("bypass: BSD grep wildcard can include directory separators")),
+    pytest.param('grep -r "trailing slash" . --exclude-dir="nested/"', "ask",
+                 marks=pytest.mark.variant("bypass: BSD grep does not exclude a directory with a trailing-slash pattern")),
+    pytest.param('git grep confidential -- secret.py', "ask", marks=pytest.mark.variant("bypass: git preset skips read deny")),
+    pytest.param('git grep confidential', "ask", marks=pytest.mark.variant("bypass: implicit git search reads denied file")),
+    pytest.param('git grep confidential -- .', "ask", marks=pytest.mark.variant("bypass: git directory contains denied file")),
+    pytest.param('git grep confidential -- "*.py"', "ask", marks=pytest.mark.variant("bypass: git pathspec reaches denied file")),
+    pytest.param('git -C nested grep confidential -- secret.py', "ask", marks=pytest.mark.variant("bypass: git -C changes read root")),
+    pytest.param('git -C nested grep confidential -- "../secret*.py"', "ask",
+                 marks=pytest.mark.variant("bypass: Git parent pathspec escapes the current directory")),
+    pytest.param('git -C nested grep confidential -- "{root}/secret*.py"', "ask",
+                 marks=pytest.mark.variant("bypass: absolute Git pathspec reaches parent directory")),
+    pytest.param('git -C nested grep confidential -- "../secret.py" "*.txt"', "ask",
+                 marks=pytest.mark.variant("bypass: Git glob must not discard another operand")),
+    pytest.param('git -C nested grep confidential -- "../*/../secret.py"', "ask",
+                 marks=pytest.mark.variant("bypass: parent traversal after a Git wildcard cannot be bounded by its prefix")),
+    pytest.param('git -C nested grep confidential -- public.txt', "allow",
+                 marks=pytest.mark.variant("git -C may read a public operand while a denied sibling and parent remain protected")),
+    pytest.param('cat *.env', "ask", marks=pytest.mark.variant("bypass: a real file glob still reaches a read deny")),
+    pytest.param('grep x secrets/*', "ask", marks=pytest.mark.variant("bypass: search operands still reach read denies")),
+    pytest.param('grep x -- --include=*.env', "ask", marks=pytest.mark.variant("bypass: after -- this is a file operand")),
+    pytest.param('grep -f --include=*.env README.md', "ask", marks=pytest.mark.variant("bypass: a pattern-file argument")),
+    pytest.param('grep x README.md --include=blocked*.env', "ask", marks=pytest.mark.variant("bypass: shell expansion can match a bash deny")),
+    pytest.param('grep "$(blocked)" . --include=*.py', "deny", marks=pytest.mark.variant("bypass: live substitution")),
+    pytest.param('grep "`blocked`" .', "deny", marks=pytest.mark.variant("bypass: live backticks")),
+    pytest.param('grep "x|y" . >out', "ask", marks=pytest.mark.variant("bypass: output redirect")),
+    pytest.param('grep "x|y" . | tee out', "ask", marks=pytest.mark.variant("bypass: pipeline writer")),
+    pytest.param('grep -f patterns . --include=*.py', "ask", marks=pytest.mark.variant("bypass: pattern file")),
+    pytest.param('grep --file=patterns .', "ask", marks=pytest.mark.variant("bypass: long pattern-file option")),
+    pytest.param('git grep --open-files-in-pager=blocked "x|y"', "ask", marks=pytest.mark.variant("bypass: git pager")),
+    pytest.param('rg --pre=blocked "x|y" .', "ask", marks=pytest.mark.variant("bypass: search preprocessor")),
+    pytest.param('grep "x|y .', "ask", marks=pytest.mark.variant("bypass: unclosed quote")),
+])
+def test_quoted_search(tmp_path, command, expected):
+    from dataclasses import replace
+    from brindle import permissions
+
+    permissions.apply_preset("standard")
+    permissions.add_rule("bash", "blocked", "deny", "prefix")
+    permissions.add_rule("bash", "*blocked.env*", "deny", "glob")
+    permissions.add_rule("read", "*.env", "deny", "glob")
+    permissions.add_rule("read", "*/secrets/*", "deny", "glob")
+    for name in ("secret.py", "nested/secret.py", "node_modules"):
+        permissions.add_rule("read", str(tmp_path / name), "deny", "exact")
+    (tmp_path / "nested").mkdir()
+    if "confidential" in command or "grep -r x" in command:
+        (tmp_path / "secret.py").touch()
+        if "../" not in command and "{root}" not in command:
+            (tmp_path / "nested/secret.py").touch()
+    if "./sub/" in command:
+        (tmp_path / "sub").mkdir()
+        (tmp_path / "sub/secret.py").touch()
+        permissions.add_rule("read", str(tmp_path / "sub/secret.py"), "deny", "exact")
+    (tmp_path / "nested/public.txt").touch()
+    if "trailing slash" in command:
+        (tmp_path / "nested/secret.py").touch()
+    if "included files" in command:
+        (tmp_path / "public.py").touch()
+        (tmp_path / "secret.env").touch()
+    if "--include=blocked*.env" in command:
+        (tmp_path / "--include=blocked.env").touch()
+    if "--exclude=secret*" in command:
+        (tmp_path / "--exclude=secret-other.py").touch()
+    here = str(tmp_path)
+    command = command.replace("{root}", here)
+    decision = permissions.decide(permissions.Request("claude", "bash", "Bash", here, here, here, command=command))
+    if "included files" in command:
+        (tmp_path / "secret.env").unlink()
+        assets = tmp_path / "assets"
+        assets.mkdir()
+        for i in range(permissions.WALK_LIMIT + 1):
+            (assets / f"{i}.txt").touch()
+        request = permissions.Request("claude", "bash", "Bash", here, here, here, command=command)
+        assert (decision.decision, permissions.decide(request).decision) == (expected, expected)
+    else:
+        assert decision.decision == expected, decision.reason
+    if "check_new_tests" in command:
+        # Real pruned tree above the normal limit; no permissive fallback.
+        excluded = tmp_path / "node_modules"
+        excluded.mkdir()
+        for i in range(permissions.WALK_LIMIT + 1):
+            (excluded / f"{i}.py").touch()
+        request = permissions.Request("claude", "bash", "Bash", here, here, here, command=command)
+        assert permissions.decide(request).decision == "allow"
+        rules = [r for r in permissions.all_rules() if r.match != str(excluded)]
+        assert permissions.decide(replace(request, command='grep -r x .'), rules=rules).decision == "ask"
+
+
 def _bypass(command):
     return pytest.param(command, "deny", marks=pytest.mark.variant("bypass attempt"))
 

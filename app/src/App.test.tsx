@@ -224,7 +224,7 @@ describe("App", () => {
     expect(screen.queryByRole("complementary", { name: "Session panel" })).toBeNull();
     const context = within(nav()).getByTestId("session-context");
     await waitFor(() => expect(within(context).getByTestId("goal-count").textContent).toBe("1 of 1"));
-    fireEvent.click(within(context).getByRole("button", { name: "1 done" }));
+    fireEvent.click(within(context).getByRole("button", { name: /finished milestones/ }));
     expect(within(context).getByRole("list", { name: "Milestones" }).textContent).toContain("Client wired");
     expect(within(nav()).getByTestId("split-handle")).toBeTruthy();
     expect(daemon.requests.find((r) => r.path === "/goal")?.query).toEqual({ repo: REPO, root: "sup1" });

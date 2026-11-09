@@ -45,7 +45,7 @@ test("sidebar keeps its goal pinned and its lists reachable when resized", async
   };
 
   await expect(count).toHaveText("9 of 15");
-  await goal.getByRole("button", { name: "9 done" }).click();
+  await count.click();
   await goal.getByRole("button", { name: "5 pending" }).click();
   for (const [name, width, height] of [["normal", 1440, 960], ["short", 1440, 420], ["narrow", 760, 960]] as const) {
     await page.setViewportSize({ width, height });
