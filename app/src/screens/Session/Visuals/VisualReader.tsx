@@ -157,7 +157,7 @@ function AnswerBar({ client, visual, picked, onPick, onAnswered }: { client: Vis
   // Insert text immediately so later edits and pastes keep their normal order.
   // Tag only the inserted characters: a native file result removes its filename,
   // while text-only results and clipboard errors leave the person's edits intact.
-  type NoteChar = { char: string; paste?: symbol };
+  type NoteChar = { char: string; paste?: symbol; offset?: number };
   const noteChars = useRef<NoteChar[]>([]);
   const replacedNotes = useRef(new Map<symbol, NoteChar[]>());
   const showNote = () => setNote(noteChars.current.map(part => part.char).join(""));
@@ -289,7 +289,7 @@ function AnswerBar({ client, visual, picked, onPick, onAnswered }: { client: Vis
                 const start = input.selectionStart ?? note.length;
                 const end = input.selectionEnd ?? start;
                 const paste = Symbol();
-                replacedNotes.current.set(paste, text ? noteChars.current.splice(start, end - start, ...text.split("").map(char => ({ char, paste }))) : []);
+                replacedNotes.current.set(paste, text ? noteChars.current.splice(start, end - start, ...text.split("").map((char, offset) => ({ char, paste, offset }))) : []);
                 showNote();
                 input.value = noteChars.current.map(part => part.char).join("");
                 input.setSelectionRange(start + text.length, start + text.length);
@@ -299,10 +299,22 @@ function AnswerBar({ client, visual, picked, onPick, onAnswered }: { client: Vis
                     if (!active.current) return [];
                     if (copied.length) {
                       const selected = replacedNotes.current.get(paste) ?? [];
+                      // An insertion can be split between the live note and later
+                      // selections. Its earliest surviving character owns restoration.
+                      let owner: NoteChar[] | undefined;
+                      let offset = Infinity;
+                      for (const chars of [noteChars.current, ...replacedNotes.current.values()]) {
+                        for (const part of chars) {
+                          if (part.paste === paste && part.offset! < offset) {
+                            owner = chars;
+                            offset = part.offset!;
+                          }
+                        }
+                      }
                       const restore = (chars: NoteChar[]) => {
                         const first = chars.findIndex(part => part.paste === paste);
                         const kept = chars.filter(part => part.paste !== paste);
-                        if (first >= 0) kept.splice(first, 0, ...selected);
+                        if (chars === owner) kept.splice(first, 0, ...selected);
                         return kept;
                       };
                       noteChars.current = restore(noteChars.current);
