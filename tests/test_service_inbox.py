@@ -94,6 +94,50 @@ def test_a_user_prompt_clears_the_question_card_but_a_brindle_message_does_not(d
     assert db.get_autopilot("r1").question is None
 
 
+@pytest.mark.variant("the reported bug: other tests reach this card but assert nothing of what it tells the person")
+@pytest.mark.parametrize("count, repos, workers, detail, reasons", [
+    (2, 2, 0, "Keep existing behavior", 1),
+    (2, 1, 3, "Keep existing behavior", 1),
+])
+def test_analysis_offer_explains_current_paused_session(db, tmp_path, monkeypatch,
+                                                       count, repos, workers, detail, reasons):
+    from brindle import autopilot
+
+    repo = str(tmp_path)
+    db.add_workspace(Workspace("ws", repo, "project", "root", "main", None, repo, None, "", 0))
+    db.add_agent(Agent("r1", "ws", "supervisor", "claude", None, "interactive", "paused", "", None,
+                       0))
+    db.update_agent("r1", name="Storage rollout")
+    db.add_autopilot("r1")
+    db.update_autopilot("r1", goal="Ship storage", detail=detail, analysis_goal_at=10)
+    db.set_milestones("r1", [(f"Step {i}", None, None, None, "web" if repos == 2 and i == 0 else None)
+                              for i in range(count)])
+    # Workers from an older goal and non-worker agents do not count toward this offer.
+    for i in range(workers + 2):
+        db.add_agent(Agent(f"w{i}", "ws", "developer", "claude", "r1",
+                           "interactive" if i == workers + 1 else "assign", "exited", "", None,
+                           0 if i == workers else 11))
+    autopilot.consider_analysis_offer(db, "r1")
+    monkeypatch.setattr(inbox.view, "snapshot", lambda *a, **k: [])
+
+    def card():
+        return next(i for i in inbox.items(db, repo) if i.kind == "analysis_offer")
+
+    first = card()
+    context = first.model_dump().get("analysis_offer")
+    assert context is not None
+    assert (context["session_name"], context["goal"], context["detail"]) == (
+        "Storage rollout", "Ship storage", detail)
+    assert (context["repos"], context["workers"], len(context["reasons"])) == (repos, workers, reasons)
+    assert context["milestones"] == [{"title": f"Step {i}", "verified": False} for i in range(count)]
+    db.record_check(db.milestones("r1")[0].id, True, "done")
+    db.update_agent("r1", name="Storage launch")
+    current = card()
+    assert current.analysis_offer.session_name == "Storage launch"
+    assert [m.verified for m in current.analysis_offer.milestones] == [True] + [False] * (count - 1)
+    assert (current.root_id, current.request_id) == ("r1", first.request_id)
+
+
 def test_pr_not_now(db, tmp_path, monkeypatch):
     from brindle import git
     from brindle.daemon.routes_actions import inbox_action
