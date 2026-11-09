@@ -358,9 +358,21 @@ function Field({ id, s, value, disabled, onChange }: { id: string; s: Setting; v
       return <Toggle id={id} label={s.label} checked={value === true} disabled={disabled} onChange={onChange} />;
     case "choice":
       return (
-        <select id={id} className={`${field} max-w-72`} aria-label={s.label} value={typeof value === "string" ? value : ""} disabled={disabled} onChange={(e) => onChange(e.target.value === "" ? null : e.target.value)}>
+        <select
+          id={id}
+          className={`${field} max-w-72`}
+          aria-label={s.label}
+          value={value == null ? "" : String(value)}
+          disabled={disabled}
+          onChange={(e) => {
+            // Preserve the choice's type: coordinator writes booleans,
+            // while the other choices write strings or the default null.
+            const choice = s.choices?.find((c) => String(c.value ?? "") === e.target.value);
+            onChange(choice?.value ?? null);
+          }}
+        >
           {(s.choices ?? []).map((c) => (
-            <option key={c.value ?? ""} value={c.value ?? ""}>
+            <option key={String(c.value ?? "")} value={String(c.value ?? "")}>
               {c.label}
             </option>
           ))}

@@ -935,14 +935,14 @@ def test_a_new_worker_waits_for_room_visibly_and_starts_when_load_falls(db, repo
     assert sum("did A" in m for m in told) == 1, told
 
 
-@pytest.mark.parametrize("merged, edit, shared, want_edited, want_both", [
-    ("main", None, None, None, []),                      # a clean merge of the base, then a fix
-    ("main", "a.txt", None, ["a.txt"], []),              # the merge commit was edited by hand
-    ("other", None, None, [], []),                       # a branch that isn't in the base
-    ("main", "shared.txt", ("mine", "theirs"), ["shared.txt"], []),   # conflict resolved by hand
-    ("main", None, ("same", "same"), None, ["shared.txt"]),           # identical edit on both sides
+@pytest.mark.parametrize("merged, edit, shared, want_edited, want_both, want_diff", [
+    ("main", None, None, [], [], "c.txt"),                                # a clean merge of the base, then a fix
+    ("main", "a.txt", None, ["a.txt"], [], "a.txt c.txt"),                # the merge commit was edited by hand
+    ("other", None, None, [], [], "b.txt c.txt"),                         # a branch that isn't in the base
+    ("main", "shared.txt", ("mine", "theirs"), ["shared.txt"], ["shared.txt"], "c.txt shared.txt"),   # conflict resolved by hand
+    ("main", None, ("same", "same"), [], ["shared.txt"], "c.txt"),        # identical edit on both sides
 ])
-def test_review_base_after_merge(tmp_path, merged, edit, shared, want_edited, want_both):
+def test_review_base_after_merge(tmp_path, merged, edit, shared, want_edited, want_both, want_diff):
     from types import SimpleNamespace
 
     sh("git init -q -b main && git config user.name t && git config user.email t@t", tmp_path)
@@ -972,11 +972,6 @@ def test_review_base_after_merge(tmp_path, merged, edit, shared, want_edited, wa
 
     ws = SimpleNamespace(path=str(tmp_path), base_branch="main", id="w1")
     rb = agents.review_base(ws, prev)
-    if want_edited is None:
-        assert rb.sha == agents.review_base_ref("w1")
-        assert rb.both == want_both
-        assert sh(f"git diff --name-only {rb.sha}..HEAD", tmp_path) == "c.txt"
-    else:
-        assert rb.sha is None
-        assert rb.edited == want_edited
+    assert rb.edited == want_edited and rb.both == want_both
+    assert sh(f"git diff --name-only {rb.sha}..HEAD", tmp_path).split() == want_diff.split()
 

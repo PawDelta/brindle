@@ -1225,8 +1225,11 @@ def patch_config(db: DB, params: dict, body: Body) -> Any:
     if unknown := sorted((set(values) | set(unset)) - known):
         raise ServiceError("invalid", f"unknown setting(s): {', '.join(unknown)}")
     for key, value in values.items():
-        if not _fits(value, getattr(defaults, key)):
-            raise ServiceError("invalid", f"{key} must be a {type(getattr(defaults, key)).__name__}")
+        # Coordinator is a nullable boolean: its plan-dependent default is
+        # None, which would otherwise let _fits accept values of any type.
+        default = False if key == "coordinator" else getattr(defaults, key)
+        if not _fits(value, default):
+            raise ServiceError("invalid", f"{key} must be a {type(default).__name__}")
     for key, value in values.items():
         if scope == "user":
             path = config.set_user(key, value)

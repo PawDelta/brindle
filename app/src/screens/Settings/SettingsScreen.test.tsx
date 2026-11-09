@@ -182,7 +182,13 @@ describe("settings screen", () => {
     // More: the other settings; what the person has set beyond the rows is listed to read.
     fireEvent.click(within(mine).getByRole("button", { name: /^More/ }));
     expect(screen.getByRole("combobox", { name: "Overlapping tasks" })).toBeTruthy();
-    expect(screen.getByRole("switch", { name: "Coordinator" })).toBeTruthy();
+    const coordinator = screen.getByRole("combobox", { name: "Coordinator" });
+    for (const [option, stored] of [["false", false], ["true", true], ["", null]] as const) {
+      fireEvent.change(coordinator, { target: { value: option } });
+      fireEvent.click(screen.getByRole("button", { name: "Save your settings" }));
+      await waitFor(() => expect(daemon.data.config.user.coordinator).toBe(stored));
+      await waitFor(() => expect(screen.queryByRole("button", { name: "Save your settings" })).toBeNull());
+    }
     fireEvent.click(screen.getByRole("button", { name: /Other settings you have/ }));
     expect(screen.getByTestId("user-rest").textContent).toContain("supervisor");
     stop();

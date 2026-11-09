@@ -1,11 +1,11 @@
-"""The coordinator: an opt-in agent above a repo's supervisors (brindle Pro).
+"""The coordinator: an agent above a repo's supervisors (brindle Pro).
 
 It is one more client of the knowledge store (brindle.knowledge). The sweep
 (brindle.cull) wakes one per repo, on the ``coordinator`` profile, when
 something it watches has happened there since it last looked: a new or
 changed intent, a cross-session clash, a decision, or a task queued longer
-than :data:`QUEUED_TOO_LONG`. Off unless ``coordinator`` is on in the repo's
-config.
+than :data:`QUEUED_TOO_LONG`. On when the plan includes it, unless
+``coordinator`` is explicitly false in the repo's effective config.
 
 It may message supervisors, hold, release or reorder queued tasks from any
 session and propose decisions. It may never cancel or pause running workers,
@@ -53,7 +53,7 @@ RECALL = 8
 # What undo can put back; advice can't be unsent.
 UNDOABLE = ("hold_task", "release_task", "reorder_queue", "propose_decision")
 PRO_MESSAGE = ("The coordinator is a brindle Pro feature: `brindle account login` with a Pro "
-               "plan, then set \"coordinator\": true in .brindle/config.json.")
+               "plan. It is on by default; `brindle coordinator stop` turns it off.")
 
 
 class CoordinatorError(ValueError):
@@ -81,10 +81,11 @@ def refusal(agent: Agent | None, tool: str) -> str | None:
 
 
 def entitled() -> bool:
+    """Check the stored entitlement without a network refresh from the sweep."""
     from brindle.pro import license
 
     try:
-        return license.has(FEATURE)
+        return FEATURE in license.current(refresh=False).features
     except Exception:  # noqa: BLE001 - fail closed
         return False
 
@@ -100,7 +101,13 @@ def require() -> None:
 
 
 def enabled(repo_root: str) -> bool:
-    return load_repo_config(repo_root).coordinator is True
+    """The configured switch, using the cached plan when left unset.
+
+    Explicit true still goes through wake's entitlement gate; explicit
+    false wins without needing to inspect the account.
+    """
+    setting = load_repo_config(repo_root).coordinator
+    return entitled() if setting is None else setting is True
 
 
 # -- actions ----------------------------------------------------------------------
