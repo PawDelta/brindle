@@ -109,6 +109,10 @@ describe("GoalPanel", () => {
     expect(line.nextElementSibling).toBe(list);
     expect(line.classList.contains("absolute")).toBe(true);
     expect(line.textContent).toBe("Planned work1 of 1");
+    // The next heading under the line: the line would name the phase above and hide the one the rows below are in.
+    nextTop = 115;
+    fireEvent.scroll(list);
+    expect(view.queryByTestId("goal-phase-line")).toBeNull();
     nextTop = 99;
     fireEvent.scroll(list);
     expect(view.queryByTestId("goal-phase-line")).toBeNull();

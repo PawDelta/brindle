@@ -56,6 +56,7 @@ describe("Sidebar", () => {
     ["idle", "merging", undefined, "Merging", "merging"],
     ["idle", null, undefined, "Idle", null],
     ["paused", "review", undefined, "Paused", null],
+    ["failed", "review", undefined, "Failed", null],
     ["paused", "review", "done", "Done", "done"],
     ["idle", "merging", "done", "Done", "done"],
   ])("session status word: %s / %s / %s reads as %s", async (status, stage, goal_phase, word, colour) => {
@@ -66,16 +67,24 @@ describe("Sidebar", () => {
     const label = within(row).getByTestId("session-status");
     expect(label.className).toContain(colour ? `st-${colour} stage-word` : "text-ink-3");
     expect(label.classList.contains("stage-word")).toBe(colour !== null);
-    const marker = status === "paused" ? row.querySelector(".side-dot")! : screen.getByRole("button", { name: "Hide sup1's agents" });
+    const rested = status === "paused" || status === "failed";
+    const marker = rested ? row.querySelector(".side-dot")! : screen.getByRole("button", { name: "Hide sup1's agents" });
     expect(marker.className).toContain(colour ? `st-${colour}` : "text-ink-3");
     expect(row.querySelector(".supervisor-tag")).toBeNull();
     expect(row.textContent).not.toContain("supervisor");
-    if (status !== "paused") {
+    if (!rested) {
       expect(within(row).getByTestId("session-model").textContent).toBe("sonnet");
       fireEvent.click(screen.getByRole("button", { name: "Hide sup1's agents" }));
       expect(agentRow("w1")).toBeNull();
       expect(within(row).getByTestId("session-status").textContent).toBe(word);
     }
+  });
+
+  it("names the selected session in its context at once, while its goal is still loading", async () => {
+    const { sync } = mount({}, { screen: "session", root: "sup0", repo: REPO }, (daemon) => (url, init) => (String(url).includes("/goal") ? new Promise(() => {}) : daemon.fetch(url, init)));
+    onTestFinished(() => sync.stop());
+    await waitFor(() => expect(screen.getByTestId("session-context").textContent).toContain("Refactor the cache"));
+    expect(screen.getByTestId("session-context").textContent).toContain("Loading goal…");
   });
 
   it("branches workers from the root dot, folds from it, and opens the supervisor from the row", async () => {

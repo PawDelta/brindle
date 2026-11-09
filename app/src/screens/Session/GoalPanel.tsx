@@ -385,7 +385,11 @@ function PhaseFoldList({ folds, open, onToggle, isDone, large, rowsClass, row, r
   );
 }
 
-/* Overlay the current phase only while its own fold header is above the scroller. */
+/* How far the phase line reaches over the scroller, its text and padding. */
+const PHASE_LINE_HEIGHT = 26;
+
+/* Overlay the current phase only while its own fold header is above the scroller, and no later header is
+   under the line: it would name the phase above while hiding the heading of the rows below it. */
 function PhaseScroll({ folds, isDone, children, className }: {
   folds: PhaseFold[] | null;
   isDone(m: MilestoneDTO): boolean;
@@ -402,7 +406,7 @@ function PhaseScroll({ folds, isDone, children, className }: {
     let next: number | null = null;
     for (const header of list.querySelectorAll<HTMLElement>("[data-phase-key]")) {
       const bounds = header.getBoundingClientRect();
-      if (bounds.top <= top) next = bounds.bottom <= top ? Number(header.dataset.phaseKey) : null;
+      if (bounds.top < top + PHASE_LINE_HEIGHT) next = bounds.bottom <= top ? Number(header.dataset.phaseKey) : null;
     }
     setKey(next);
   }, [folds]);
@@ -510,6 +514,8 @@ export interface GoalPanelProps {
   compact?: boolean;
   /* The sidebar's editable session title, sharing the goal's count line. */
   title?(onOpen: () => void): ReactNode;
+  /* The session's name as the list has it, shown while the goal is read. */
+  loadingTitle?: string | null;
   request?: string | null;
   /* Opens the session's Review & open PR sheet: the Ready for PR step's action. */
   onReview?(): void;
@@ -521,7 +527,7 @@ export interface GoalPanelProps {
   onOpenDocs?(): void;
 }
 
-export function GoalPanel({ client, repo, root, store, compact = false, title, request, onReview, openUrl = openExternal, onCloseSession, onOpenDocs }: GoalPanelProps) {
+export function GoalPanel({ client, repo, root, store, compact = false, title, loadingTitle, request, onReview, openUrl = openExternal, onCloseSession, onOpenDocs }: GoalPanelProps) {
   const [goal, setGoal] = useState<GoalDTO | null>(null);
   // The docs this session wrote or used; null while unknown or unreachable (the line stays hidden).
   const [docSummary, setDocSummary] = useState<{ total: number; writing: number; updated: number; using: number } | null>(null);
@@ -645,8 +651,11 @@ export function GoalPanel({ client, repo, root, store, compact = false, title, r
     );
   }
   if (!loaded) {
+    // The read can take seconds (it asks git); the session's name is already known, so it shows meanwhile. As
+    // text only: the title's own controls mount elsewhere once the goal is in, which would drop a rename begun here.
     return (
       <section className={`${compact ? "px-s1 py-1" : `${card} px-s2 py-s1`} text-sm text-ink-3`} aria-label="Goal">
+        {loadingTitle && <p className="truncate text-[13px] font-medium text-ink" data-testid="goal-loading-title">{loadingTitle}</p>}
         Loading goal…
       </section>
     );

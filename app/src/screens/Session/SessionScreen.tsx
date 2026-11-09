@@ -257,6 +257,7 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
               agent={node?.agent ?? null}
               alive={node ? alive[node.agent.id] : undefined}
               sessionStatus={!node || node.agent.id === root ? session?.status ?? null : null}
+              sessionName={session?.name || session?.goal}
               credentials={credentials}
               recovery={recovery}
             />
@@ -341,11 +342,10 @@ function SessionBar({ client, root, repo, node, alive, sessionStatus, paused, re
         <span className="truncate text-sm font-semibold" data-testid="surface-title">
           {provider} · {who}
         </span>
-        {node && (
-          <span className={`${mono} hidden text-xs text-ink-3 sm:inline`} data-testid="agent-id" title={node.workspace.branch}>
-            {node.agent.id}
-          </span>
-        )}
+        {/* No agent shown (a paused root is in no snapshot): the session's own id, so each one still reads as itself. */}
+        <span className={`${mono} hidden text-xs text-ink-3 sm:inline`} data-testid={node ? "agent-id" : "session-id"} title={node?.workspace.branch}>
+          {node?.agent.id ?? root}
+        </span>
         <span className={`flex items-center gap-1 text-xs ${status.style === "alert" ? "text-sap" : "text-ink-2"}`} data-testid="session-status">
           <span className={`font-mono ${CLI_INK[status.style]}`} aria-hidden>
             {status.glyph}
