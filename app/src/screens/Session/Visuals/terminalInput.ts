@@ -115,11 +115,13 @@ function observed(open: PtyViewOpener, enabled: () => boolean, recorder: () => R
    refuses input it doesn't want either way. */
 const RECHECK = 5000;
 export function visualsGate(client: { meta(): Promise<{ visuals?: boolean }> } | null | undefined, now: () => number = Date.now) {
-  let known: boolean | null = null, asked = -Infinity, closed = false;
+  let known: boolean | null = null, asked = -Infinity, closed = false, inFlight = false;
   const ask = () => {
-    if (!client || closed || now() - asked < RECHECK) return;
+    // One request at a time, so a slow older answer can't overwrite a newer one.
+    if (!client || closed || inFlight || now() - asked < RECHECK) return;
     asked = now();
-    client.meta().then(meta => { if (!closed) known = meta.visuals === true; }, () => {});
+    inFlight = true;
+    client.meta().then(meta => { if (!closed) known = meta.visuals === true; }, () => {}).finally(() => { inFlight = false; });
   };
   ask();
   return {

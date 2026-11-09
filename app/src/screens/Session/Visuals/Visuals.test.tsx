@@ -217,6 +217,30 @@ describe("visuals", () => {
     expect(gate.enabled()).toBe(true);          // turned on later: picked up
   });
 
+  it("test_typed_message_backs_a_visual: typing reaches the engine while /meta is failing or answering out of order", async () => {
+    let clock = 0;
+    const replies: ((v: { visuals: boolean }) => void)[] = [];
+    let fail = true;
+    const meta = () => fail ? Promise.reject(new Error("busy")) : new Promise<{ visuals: boolean }>(ok => { replies.push(ok); });
+    const gate = visualsGate({ meta }, () => clock);
+    const words: string[] = [];
+    const view = withTypedWords({ visualTypedWords: async (_id, text) => { words.push(text); return { observed: true }; } }, "claude",
+      () => ({ write() {}, resize() {}, focus() {}, close() {} }), gate.enabled)({ server: null, target: "%1" }, { cols: 80, rows: 24 }, { onData() {}, onExit() {}, onError() {} });
+    const type = async (text: string) => { [...text, "\r"].forEach(c => view.write(c)); await act(async () => undefined); };
+    await type("failed answer");
+    fail = false;
+    clock = 6000;
+    gate.enabled();                       // asks again; the answer is slow
+    clock = 12000;
+    await type("pending answer");
+    replies[0]!({ visuals: true });
+    await act(async () => undefined);
+    expect(gate.enabled()).toBe(true);
+    expect(replies).toHaveLength(1);      // no overlapping request to answer out of order
+    await type("answered on");
+    expect(words).toEqual(["failed answer", "pending answer", "answered on"]);
+  });
+
   it("observes Codex PTY submissions before forwarding Enter, including edits, pastes and uncertain history", async () => {
     const submitted: string[] = [], bytes: string[] = [];
     let recorded: (() => void) | undefined;
