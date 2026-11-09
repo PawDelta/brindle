@@ -594,11 +594,22 @@ def detach(argv: list[str], **popen: Any) -> subprocess.Popen:
     return start(argv, start_new_session=True, **popen)
 
 
+@dataclass
+class ReadTiming:
+    """Process wall time for an observed read, excluding admission waits."""
+
+    process_seconds: float = 0.0
+
+
 def read(argv: list[str], *, cwd: Any = None, env: dict[str, str] | None = None,
          input: str | bytes | None = None, text: bool = True, timeout: float | None = None,
-         skip: bool = False, reap: bool = False, to_its_end: bool = False) -> subprocess.CompletedProcess:
+         skip: bool = False, reap: bool = False, to_its_end: bool = False,
+         timing: ReadTiming | None = None) -> subprocess.CompletedProcess:
     """Run a command that changes nothing and return what it printed, like
     ``subprocess.run(capture_output=True)``.
+
+    ``timing`` accumulates process wall time (including cleanup), separately
+    from any admission wait; it does not change the command's budget.
 
     It gets only the time left on the request's deadline (and at most
     ``timeout``), including any wait for room. Past that, or when the
@@ -621,9 +632,12 @@ def read(argv: list[str], *, cwd: Any = None, env: dict[str, str] | None = None,
     _admit(end, dl, skip, _name(argv))
     if to_its_end:
         dl, end = None, own_end
+    began = time.monotonic() if timing is not None else None
     try:
         return _run_read(argv, cwd, env, input, text, timeout, dl, end, own_end, reap)
     finally:
+        if began is not None:
+            timing.process_seconds += time.monotonic() - began
         _release()
 
 

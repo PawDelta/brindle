@@ -315,7 +315,6 @@ pub fn run() {
     builder
         .invoke_handler(invoke_handler())
         .setup(move |app| {
-            startup::open(app.handle());
             let _ = visuals_app.set(app.handle().clone());
             let mut tray = TrayIconBuilder::with_id(TRAY_ID)
                 .tooltip("brindle")
