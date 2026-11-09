@@ -82,7 +82,9 @@ function observed(open: PtyViewOpener, enabled: () => boolean, recorder: () => R
         // Later input, including Ctrl-C, always releases an earlier held Enter.
         held?.release();
         if (!enabled()) {
-          draft = pending = ""; cursor = 0; valid = true; paste = pasted = false;
+          // Keep following the draft while off, so that turning on halfway through a message
+          // can't make the rest of it look like a whole typed message.
+          submitted(data);
           view.write(data);
           return;
         }
@@ -106,6 +108,29 @@ function observed(open: PtyViewOpener, enabled: () => boolean, recorder: () => R
       },
       close() { closed = true; held?.release(); view.close(); },
     };
+  };
+}
+
+/* Whether the app should watch the person's typing. Nothing is known until the engine answers /meta, and
+   a failed or slow answer must not switch the watching off for good: only an answer of "off" does, and
+   then it asks again (at most every RECHECK seconds) so turning visuals on takes effect. The engine
+   refuses input it doesn't want either way. */
+const RECHECK = 5000;
+export function visualsGate(client: { meta(): Promise<{ visuals?: boolean }> } | null | undefined, now: () => number = Date.now) {
+  let known: boolean | null = null, asked = -Infinity, closed = false, inFlight = false;
+  const ask = () => {
+    // One request at a time, so a slow older answer can't overwrite a newer one.
+    if (!client || closed || inFlight || now() - asked < RECHECK) return;
+    asked = now();
+    inFlight = true;
+    // A failed re-check leaves it unknown again, not stuck on an older "off".
+    client.meta().then(meta => { if (!closed) known = meta.visuals === true; }, () => { known = null; }).finally(() => { inFlight = false; });
+  };
+  ask();
+  return {
+    // While an answer is pending, a cached "off" may be out of date: keep recording (the engine decides).
+    enabled: () => { if (known !== true) ask(); return known !== false || inFlight; },
+    close: () => { closed = true; },
   };
 }
 

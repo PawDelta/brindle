@@ -18,7 +18,7 @@ import { VisualReader } from "./VisualReader";
 import { useVisuals } from "./useVisuals";
 import { OfferChip } from "./OfferChip";
 import { VisualsSetting } from "../../Settings/VisualsSetting";
-import { withTypedWords, withVisualInput } from "./terminalInput";
+import { visualsGate, withTypedWords, withVisualInput } from "./terminalInput";
 
 vi.mock("../../../components/PtyTerminal", () => import("../../../test/panes"));
 const native = vi.hoisted(() => ({
@@ -199,6 +199,37 @@ describe("visuals", () => {
     expect(words).toEqual([]);                  // a paste is never vouched for
     expect(bytes.at(-1)).toBe("\r");
     hooked.close();
+  });
+
+  it("test_typed_message_backs_a_visual: typing is reported while /meta fails, is pending or says off, and never as a tail", async () => {
+    let clock = 0;
+    const replies: ((v: { visuals: boolean }) => void)[] = [];
+    let fail = true;
+    const meta = () => fail ? Promise.reject(new Error("busy")) : new Promise<{ visuals: boolean }>(ok => { replies.push(ok); });
+    const gate = visualsGate({ meta }, () => clock);
+    const words: string[] = [];
+    const view = withTypedWords({ visualTypedWords: async (_id, text) => { words.push(text); return { observed: true }; } }, "claude",
+      () => ({ write() {}, resize() {}, focus() {}, close() {} }), gate.enabled)({ server: null, target: "%1" }, { cols: 80, rows: 24 }, { onData() {}, onExit() {}, onError() {} });
+    const type = async (text: string, enter = true) => { [...text, ...(enter ? ["\r"] : [])].forEach(c => view.write(c)); await act(async () => undefined); };
+    await type("failed answer");                    // a failed answer is not "off"
+    fail = false;
+    clock = 6000;
+    await type("pending answer");                   // asks again; the answer is slow
+    replies[0]!({ visuals: false });
+    await type("", false);
+    expect(gate.enabled()).toBe(false);
+    await type("r", false);                        // off: begun, not reported
+    clock = 12000;
+    await type("ender first", false);               // asks again, still off at this key
+    await type("");                                 // sent while that answer is still pending
+    expect(replies).toHaveLength(2);                // one request at a time
+    replies[1]!({ visuals: false });
+    await type("", false);
+    clock = 18000;
+    fail = true;
+    await type("a", false);                         // a re-check of "off" that fails leaves it unknown
+    await type("nother");
+    expect(words).toEqual(["failed answer", "pending answer", "render first", "another"]);   // never the tail "ender first"
   });
 
   it("observes Codex PTY submissions before forwarding Enter, including edits, pastes and uncertain history", async () => {
