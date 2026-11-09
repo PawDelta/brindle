@@ -8847,6 +8847,10 @@
       "path": "/v1/pty_view"
     },
     {
+      "method": "POST",
+      "path": "/v1/recovery/prioritize"
+    },
+    {
       "method": "GET",
       "path": "/v1/repos"
     },

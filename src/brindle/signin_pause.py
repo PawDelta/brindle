@@ -506,7 +506,7 @@ def _resume(db, state, provider, res: Check) -> list[str]:
     resumed, failed = [], set()
     for root, ids in by_root.items():
         try:
-            resumed += [a for a in agents.resume(db, root, only=ids)]
+            resumed += [a for a in agents.resume(db, root, only=ids, unstarted=failed)]
         except Exception:  # noqa: BLE001 - one session failing to resume doesn't stop the rest
             failed |= ids  # stays paused and listed; the next tick retries it
     for a in resumed:

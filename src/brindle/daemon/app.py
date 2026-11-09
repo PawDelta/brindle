@@ -45,7 +45,18 @@ async def meta(request: Request) -> JSONResponse:
     })
 
 
-ROUTES = [Route("/v1/meta", meta), *routes_read.ROUTES,
+async def prioritize_recovery(request: Request) -> JSONResponse:
+    """The person has opened a session recovery hasn't reached: it goes next.
+    Always 200: if it has begun or none is under way, there's nothing to do."""
+    recovery = getattr(request.app.state, "recovery", None)
+    root = (await request.json()).get("root")
+    if recovery and isinstance(root, str):
+        recovery.prioritize(root)
+    return JSONResponse({"ok": True})
+
+
+ROUTES = [Route("/v1/meta", meta), Route("/v1/recovery/prioritize", prioritize_recovery, methods=["POST"]),
+          *routes_read.ROUTES,
           WebSocketRoute("/v1/events", events), WebSocketRoute("/v1/pty_view", pty_view),
           *ACTIONS, *HOLD_ROUTES, *ORG_PERMISSION_ROUTES, *VISUAL_ROUTES]
 
