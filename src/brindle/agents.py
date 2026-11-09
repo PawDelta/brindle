@@ -129,6 +129,14 @@ class Cancelled(Exception):
     session is launched."""
 
 
+class LaunchTaken(AgentError):
+    """Another path (a reviewer's death recovery) has already seen to this launch."""
+
+
+class StrayPane(AgentError):
+    """A pane that should be closed won't, or tmux can't say: nothing is launched beside it."""
+
+
 # Modes whose workers must finish with report_result. A handoff whose caller
 # stopped waiting becomes "handoff_detached": its result is then forwarded to
 # the caller as a message, like an assign.
@@ -1203,7 +1211,7 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
                     or current.tmux_window != agent.tmux_window
                     or current.tmux_server != agent.tmux_server
                     or (resume is not None and alive_or_starting(current))):
-                raise AgentError(f"Reviewer {agent.id}'s launch has already been handled.")
+                raise LaunchTaken(f"Reviewer {agent.id}'s launch has already been handled.")
             return _launch_checked(db, agent, ws, prompt=prompt, resume=resume, watch_pane=watch_pane,
                                    background_setup=background_setup, model_checked=model_checked)
     return _launch_checked(db, agent, ws, prompt=prompt, resume=resume, watch_pane=watch_pane,
@@ -1394,6 +1402,7 @@ def _launch_resolved(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
         from brindle import prompt_answer
 
         prompt_answer.finish_launch(db, agent)
+    tmux.mark_launched(target)
 
 
 def _prepare_launch_health(db: DB, agent: Agent, ws: Workspace, profile, m=_UNREAD,
@@ -1460,6 +1469,7 @@ def _launch_headless(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
         from brindle import launch_health
         _detach([*brindle_invocation(), "_launch-health", agent.id,
                  *launch_health.helper_token(agent), "--startup"])
+    tmux.mark_launched(target)
 
 
 def _preview(text: str, lines: int = 6) -> str:
@@ -1648,7 +1658,8 @@ def pause(db: DB, root_id: str, *, stop_procs: bool = True,
         from brindle import procs
 
         procs.stop([a.id for a in tree(db, root_id)], grace=2.0)
-    for session in closing.sessions:
+    others = _sessions_in_use(closing)
+    for session in closing.sessions - others:
         if closing.closes(session, tmux.windows(session)):
             tmux.kill_session(session)
     if stop_local_models:
@@ -1681,6 +1692,19 @@ class Closing:
         so an attached terminal gets its prompt back every time. Workers'
         sessions close once they hold nothing but the idle starter shell."""
         return session == self.root_session or set(names) <= {"shell"}
+
+
+def _sessions_in_use(closing: Closing) -> set[str]:
+    """The tmux sessions with a live pane of an agent outside this pause, by
+    tmux: two chats can share one, and closing it for one would take the
+    other's windows."""
+    mine = {a.id for a in closing.agents}
+    try:
+        others = {p.pane for p in tmux.agent_panes() if p.alive and p.agent not in mine}
+        places = tmux.pane_places() if others else {}
+    except tmux.TmuxError:
+        return set(closing.sessions)    # can't tell who else is in them: none is closed
+    return {places[pane].session for pane in others if pane in places}
 
 
 def _record_pause(db: DB, root_id: str) -> Closing:
@@ -1780,9 +1804,25 @@ def latest_paused(db: DB, ws: Workspace) -> Agent | None:
     return max(roots, key=lambda a: a.status_since or 0, default=None)
 
 
+@contextmanager
+def resume_lock(root_id: str):
+    """One resume of session ``root_id`` at a time, across processes (a
+    start's recovery, `brindle continue`, the sign-in sweep), and for the whole
+    of a recovery's reconcile. Reentrant in a thread.
+    AgentError when the one under way hasn't ended within RESUME_LOCK_WAIT."""
+    from brindle import pipeline
+
+    try:
+        with pipeline._reentrant_lock(f"resume-{root_id}", timeout=RESUME_LOCK_WAIT):
+            yield
+    except pipeline.LockTimeout as e:
+        raise AgentError(f"session {root_id} is still being resumed elsewhere") from e
+
+
 def resume(db: DB, root_id: str, *, watch_pane: bool = True,
            only: set[str] | list[str] | None = None,
-           recovery_env: dict[str, str] | None = None, gate=None) -> list[Agent]:
+           recovery_env: dict[str, str] | None = None, gate=None, settle: bool = False,
+           unstarted: set[str] | None = None) -> list[Agent]:
     """Bring a paused session back: the supervisor and its paused workers
     restart in their own workspaces. Claude Code picks up its previous
     conversation (--resume); other CLIs restart on their original task. A
@@ -1795,20 +1835,35 @@ def resume(db: DB, root_id: str, *, watch_pane: bool = True,
     stopped. Every launch this resume makes (its agents', and the workers of
     the queued tasks it starts) goes through it: checked during the preflight
     and held only from the launch's first change of what runs (_gate_commit),
-    so a slow preflight (an identity probe) never holds the caller's stop up."""
+    so a slow preflight (an identity probe) never holds the caller's stop up.
+
+    What already runs is decided by tmux, not by statuses (settle_panes): a
+    resume leaves an agent's launched pane alone, closes any other of its
+    panes and launches only what is missing. ``settle``: a daemon's recovery,
+    for which an agent whose status says it is at work is in question too, and
+    what still runs of those not running is stopped.
+
+    ``unstarted``: filled with the workers that couldn't be launched while the
+    chat runs, left as they were for the caller to try again; without it they
+    are marked failed and the chat is told.
+
+    Under resume_lock: the next resume reads what is paused once the first is
+    over, so nothing is launched twice."""
     keys = _resume_keys.set({})
     windows = _window_seconds.set([])
+    token = _launch_gate.set(gate) if gate is not None else None
     try:
-        if gate is None:
-            return _resume(db, root_id, watch_pane=watch_pane, only=only, recovery_env=recovery_env)
-        token = _launch_gate.set(gate)
-        try:
-            return _resume(db, root_id, watch_pane=watch_pane, only=only, recovery_env=recovery_env)
-        finally:
-            _launch_gate.reset(token)
+        with resume_lock(root_id):
+            return _resume(db, root_id, watch_pane=watch_pane, only=only, recovery_env=recovery_env,
+                           settle=settle, unstarted=unstarted)
     finally:
+        if token is not None:
+            _launch_gate.reset(token)
         _window_seconds.reset(windows)
         _resume_keys.reset(keys)
+
+
+RESUME_LOCK_WAIT = 60.0     # seconds a resume waits for another resume of the same session (resume)
 
 
 _launch_gate: ContextVar = ContextVar("brindle_launch_gate", default=None)   # resume's gate, for every launch it makes
@@ -1826,6 +1881,64 @@ def _gate_check() -> None:
             pass
 
 
+def settle_panes(db: DB, agents: list[Agent], *, keep: bool = True) -> set[str]:
+    """Make tmux's panes of ``agents`` what should be: for each, its one
+    launched pane if there is one (``keep``; not a failed agent's), and no
+    other. A pane is closed only as far as listing again says it is gone, or
+    StrayPane and the caller launches nothing. Returns the agents left running.
+    Statuses follow from this and are never evidence for it, so a status or
+    window id written late or not at all can't lead to a second window."""
+    ids = {a.id: a for a in agents}
+    kept: dict[str, str] = {}
+    try:
+        stale = []
+        for p in tmux.agent_panes():
+            if p.agent not in ids:
+                continue
+            if keep and p.alive and p.launched and p.agent not in kept and ids[p.agent].status != "failed":
+                kept[p.agent] = p.pane
+            else:
+                stale.append(p.pane)
+        for pane in stale:
+            tmux.kill_window(pane)
+        if stale and (left := {p.pane for p in tmux.agent_panes()} & set(stale)):
+            raise StrayPane(f"pane(s) {sorted(left)} of an earlier launch won't close")
+    except tmux.TmuxError as e:
+        raise StrayPane(f"can't tell what still runs of agents {sorted(ids)}") from e
+    for a in agents:
+        if a.id in kept:
+            db.update_agent(a.id, tmux_window=kept[a.id], tmux_server=tmux.current_server())
+            status = a.status if a.status not in ("paused", "done") else "unknown"
+        else:
+            status = a.status if a.status in ("paused", "done", "failed") else "paused"
+        if status != a.status:
+            db.set_status(a.id, status)
+            a.status = status
+    return set(kept)
+
+
+def panes_match(db: DB, root_id: str, held: set[str]) -> bool:
+    """Whether tmux shows session ``root_id`` as it should be: every agent
+    that should run has its launched pane, and no agent has any other live
+    pane (a finished worker's is left be). ``held``: not this recovery's to
+    bring back, though a pane of theirs has to be a launched one too."""
+    agents = {a.id: a for a in tree(db, root_id)}
+    try:
+        mine = [p for p in tmux.agent_panes() if p.alive and p.agent in agents and agents[p.agent].status != "done"]
+    except tmux.TmuxError:
+        return False
+    if any(not p.launched or agents[p.agent].status == "failed" for p in mine):
+        return False
+    up = [p.agent for p in mine]
+
+    def should_run(a: Agent) -> bool:
+        ws = db.get_workspace(a.workspace_id)
+        return (runs_process(a) and a.id not in held and a.status not in ("done", "failed")
+                and ws is not None and os.path.isdir(ws.path))
+
+    return len(up) == len(set(up)) and all(a.id in up for a in agents.values() if should_run(a))
+
+
 def _gate_commit(hold: ExitStack | None) -> None:
     """A launch is about to change what runs: from here to its end it holds
     the resume's gate (or is refused, Cancelled), so a stop waiting on that
@@ -1835,7 +1948,7 @@ def _gate_commit(hold: ExitStack | None) -> None:
         hold.enter_context(gate())
 
 
-def _resume(db: DB, root_id: str, *, watch_pane: bool, only, recovery_env) -> list[Agent]:
+def _resume(db: DB, root_id: str, *, watch_pane: bool, only, recovery_env, settle=False, unstarted=None) -> list[Agent]:
     from brindle import identity_lock, providers
 
     _gate_check()
@@ -1878,13 +1991,23 @@ def _resume(db: DB, root_id: str, *, watch_pane: bool, only, recovery_env) -> li
         # One back at work left done: paused by a daemon from before finished_reporting
         # knew of it (the update itself), or its pane died during the round.
         return ((a.status in ("paused", "failed")
-                 or (a.status == "done" and a.pipeline in BACK_AT_WORK and not finished_reporting(a)))
+                 or (a.status == "done" and a.pipeline in BACK_AT_WORK and not finished_reporting(a))
+                 or (settle and a.status != "done" and runs_process(a)))
                 and (only is None or a.id in only))
 
     candidates = [a for a in tree(db, root_id) if restartable(a)]
     for a in candidates:   # all or nothing: a session never half-resumes under another identity
         identity_lock.ensure(a)
     _gate_check()
+    running = settle_panes(db, candidates)
+    candidates = [a for a in candidates if a.id not in running]
+    if settle:
+        # What a cull that may never have run left, of all that isn't running: once
+        # these run again it would leave the old processes be.
+        from brindle import procs
+
+        procs.stop([a.id for a in tree(db, root_id) if a.id not in running and (only is None or a.id in only)],
+                   grace=2.0)
     if any(a.id == root_id for a in candidates):
         from brindle import autopilot as pilot
 
@@ -1935,8 +2058,25 @@ def _resume(db: DB, root_id: str, *, watch_pane: bool, only, recovery_env) -> li
         _gate_check()
         if a.dismissed_at is not None:
             db.update_agent(a.id, dismissed_at=None)  # running again: show it again
-        _launch(db, a, ws, prompt=prompt, resume=ref,
-                watch_pane=watch_pane and a.id == root_id, background_setup=True)
+        before = "paused" if a.status == "done" else a.status    # a launch records its status before its window opens
+        try:
+            _launch(db, a, ws, prompt=prompt, resume=ref,
+                    watch_pane=watch_pane and a.id == root_id, background_setup=True)
+        except Cancelled:
+            raise
+        except LaunchTaken:
+            continue        # someone else's now: its status with it
+        except Exception as e:  # noqa: BLE001 - told to its chat, or raised
+            _close_failed_launch(db, a)
+            db.set_status(a.id, before)
+            if not _chat_is_up(db, root_id, resumed, candidates):
+                raise       # nothing of the session runs: it stays as it was, for the caller to hear
+            if unstarted is None:
+                _worker_not_restarted(db, root_id, a, e)
+            else:
+                unstarted.add(a.id)
+                log.warning("brindle: worker %s of session %s didn't restart", a.id, root_id, exc_info=e)
+            continue
         resumed.append(a)
         if a.id == root_id:
             # A verdict held for this resume (pipeline._send_back) while the chat was still
@@ -1978,6 +2118,41 @@ def _resume(db: DB, root_id: str, *, watch_pane: bool, only, recovery_env) -> li
         log.warning("brindle: session %s resume: keys %.2fs, windows %.2fs, checks and the rest %.2fs",
                     root_id, keys_took, windows, time.monotonic() - began - keys_took - windows)
     return resumed
+
+
+def _close_failed_launch(db: DB, a: Agent) -> None:
+    """Whatever ``a``'s failed launch opened goes now; if it won't, the next
+    resume finds its pane and launches nothing beside it (settle_panes)."""
+    from brindle import procs
+
+    for step in (lambda: settle_panes(db, [a], keep=False), lambda: procs.stop([a.id], grace=2.0)):
+        try:
+            step()
+        except Exception:  # noqa: BLE001 - the failure being handled is the one to report
+            log.warning("brindle: couldn't close agent %s's failed launch", a.id, exc_info=True)
+
+
+def _chat_is_up(db: DB, root_id: str, resumed: list[Agent], candidates: list[Agent]) -> bool:
+    """Whether session ``root_id``'s chat runs: this resume launched it, or
+    it wasn't this resume's to launch and is alive."""
+    if any(r.id == root_id for r in resumed):
+        return True
+    root = db.get_agent(root_id)
+    return (all(c.id != root_id for c in candidates) and root is not None
+            and root.status not in ("paused", "done", "failed") and is_alive(root))
+
+
+def _worker_not_restarted(db: DB, root_id: str, a: Agent, e: Exception) -> None:
+    """Worker ``a`` couldn't be launched by a resume whose chat is running:
+    the session carries on without it, the worker marked failed (`brindle
+    continue` starts those again) and the chat told."""
+    db.set_status(a.id, "failed")
+    log.warning("brindle: worker %s of session %s didn't restart", a.id, root_id, exc_info=e)
+    why = str(e).strip() if isinstance(e, AgentError) and str(e).strip() else type(e).__name__
+    try:
+        send_message(db, root_id, f"[brindle] Worker {a.id} couldn't restart after the pause: {why}.", sender_id=None)
+    except Exception:  # noqa: BLE001 - the log and its status still say so
+        log.debug("brindle: couldn't tell session %s", root_id, exc_info=True)
 
 
 def _needs_a_turn(db: DB, a: Agent) -> bool:
