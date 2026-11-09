@@ -202,10 +202,23 @@ describe("inbox", () => {
   });
 
   it.each([[true, "Yes"], [false, "Not now"]])("an analysis doc offer is an Inbox card answered %s with %s through the goal route", async (accepted, label) => {
-    const offer: InboxItemDTO = { kind: "analysis_offer", agent_id: "sup1", root_id: "sup1", workspace_id: "proj", request_id: "o1", reason: "offers to write an analysis doc", detail: "Ship ls --json" };
+    const context = { session_name: "Command tools", goal: "Ship ls --json", detail: "Support shell scripts", workers: 3, repos: 2,
+      milestones: [{ title: "Parse arguments", verified: true }, { title: "Encode output", verified: false }],
+      reasons: ["This work spans 2 repositories.", "3 workers have been assigned to this goal."] };
+    const offer: InboxItemDTO = { kind: "analysis_offer", agent_id: "sup1", root_id: "sup1", workspace_id: "proj", request_id: "o1", reason: "offers to write an analysis doc", detail: context.goal, analysis_offer: context };
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], inbox: [offer], goal: { root_id: "sup1", analysis_offer: "o1" } as GoalDTO });
-    const { sync } = mount(daemon);
+    const { sync, onOpen } = mount(daemon);
     await screen.findByText("Write an analysis doc for this goal?");
+    const body = within(card("analysis_offer")).getByTestId("card-detail");
+    for (const value of [context.session_name, context.goal, context.detail, ...context.milestones.map((m) => m.title), ...context.reasons]) {
+      expect(body.textContent).toContain(value);
+    }
+    expect(body.querySelectorAll("li")).toHaveLength(context.milestones.length);
+    expect(within(body).getByTestId("analysis-progress").textContent?.match(/\d+/g)).toEqual(["1", "2"]);
+    expect(within(body).getByTestId("analysis-scale").textContent?.match(/\d+/g)).toEqual([String(context.workers), String(context.repos)]);
+    expect(body.className).not.toContain("line-clamp");
+    fireEvent.click(within(card("analysis_offer")).getByRole("button", { name: "Go to session ›" }));
+    expect(onOpen).toHaveBeenLastCalledWith("sup1", REPO, "sup1");
     fireEvent.click(within(card("analysis_offer")).getByRole("button", { name: label }));
     await waitFor(() => expect(posts(daemon).find((r) => r.path === "/goal/analysis-offer")?.body).toMatchObject({ root: "sup1", offer: "o1", accept: accepted }));
     sync.stop();

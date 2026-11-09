@@ -748,6 +748,16 @@ def _repo_identities(db: DB, root_id: str, milestones: list[Milestone]) -> set[s
     return found
 
 
+def analysis_offer_scope(db: DB, root_id: str, ap: Autopilot) -> tuple[list[Milestone], int, int, str]:
+    """Current work used both to qualify an offer and explain it in the Inbox."""
+    milestones = db.milestones(root_id)
+    workers = db.conn.execute("SELECT COUNT(*) FROM agents WHERE parent_id=? AND created_at>=? "
+                              "AND mode IN ('assign','handoff','handoff_detached')",
+                              (root_id, ap.analysis_goal_at or 0)).fetchone()[0]
+    text = "\n".join([ap.goal or "", ap.detail or "", *(m.title for m in milestones)])
+    return milestones, len(_repo_identities(db, root_id, milestones)), workers, text
+
+
 def consider_analysis_offer(db: DB, root_id: str) -> None:
     """Open the one analysis-doc offer if this goal now deserves it: large, by
     milestones, repos (an omitted repo is the root checkout) or workers, or
@@ -759,13 +769,8 @@ def consider_analysis_offer(db: DB, root_id: str) -> None:
         ap = db.get_autopilot(root_id)
         if ap is None or not ap.goal or ap.analysis_offer is not None or ap.analysis_doc:
             return
-        milestones = db.milestones(root_id)
-        workers = db.conn.execute("SELECT COUNT(*) FROM agents WHERE parent_id=? AND created_at>=? "
-                                  "AND mode IN ('assign','handoff','handoff_detached')",
-                                  (root_id, ap.analysis_goal_at or 0)).fetchone()[0]
-        text = "\n".join([ap.goal, ap.detail or "", *(m.title for m in milestones)])
-        if analysis_brief.deserves_offer(len(milestones), len(_repo_identities(db, root_id, milestones)),
-                                         text, workers) \
+        milestones, repos, workers, text = analysis_offer_scope(db, root_id, ap)
+        if analysis_brief.deserves_offer(len(milestones), repos, text, workers) \
                 and db.open_analysis_offer(root_id, ap.goal, "open:" + secrets.token_hex(4)):
             bus.publish_agent(db, "autopilot.goal", root_id)
     except Exception:  # noqa: BLE001 - an offer is never a reason to fail a plan or a spawn
