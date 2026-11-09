@@ -175,10 +175,11 @@ def server(tmp_path_factory):
 @pytest.fixture
 def sign_in(server, monkeypatch, pro_env):  # noqa: F811
     """``sign_in(name)``: brindle signed in as that person, with the entitlement
-    of their org fetched by the real client; rotated tokens are kept for the next test."""
+    of their org fetched by the real client and docs explicitly opted in;
+    rotated tokens are kept for the next test."""
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
-    from brindle.pro import auth, credentials, license
+    from brindle.pro import analysis_docs, auth, credentials, license
 
     monkeypatch.setenv("BRINDLE_PRO_DEV", "1")
     monkeypatch.setenv("BRINDLE_PRO_BASE_URL", server["base"])
@@ -193,6 +194,10 @@ def sign_in(server, monkeypatch, pro_env):  # noqa: F811
                     "access_expires_at": time.time() + int(person["expires_in"]) - 120})
         ent = auth.switch_org(auth.Client(server["base"]), store, person["org_id"])
         current[:] = [name]
+        for state in analysis_docs.switch_states():
+            if (state["name"] in ("store", "share", "assist", "import_upload")
+                    and not state["locked"] and not state["on"]):
+                analysis_docs.set_switch(True, name=state["name"])
         return ent
 
     with license._test_signing_key(server["kid"], key):
@@ -258,7 +263,7 @@ def test_import_upload_and_removal(sign_in, db, tmp_path):
     from brindle.pro import analysis_imports as imports
 
     sign_in("team-admin")           # not "pro": the backend limits entitlement fetches per user
-    assert {s["name"]: s["on"] for s in analysis_docs.switch_states()}["import_upload"]   # on by default
+    assert {s["name"]: s["on"] for s in analysis_docs.switch_states()}["import_upload"]   # explicitly opted in
     folder = tmp_path / "imported"
     (folder / "notes").mkdir(parents=True)
     (folder / "notes" / "a.md").write_text("# Import A\n\nFirst imported note.\n")
@@ -347,16 +352,16 @@ def test_brief_and_map_neighbourhood(sign_in, db, tmp_path):
     from brindle.pro import analysis_brief, analysis_docs
 
     ent = sign_in("pro")
-    merge_upload(db, tmp_path, "w-brief", "feat/brief")
+    ws, _ = merge_upload(db, tmp_path, "w-brief", "feat/brief")
     doc_id = uploaded("sess-w-brief")
 
     task = "Make the checkout cache warm after a deploy"
-    block = analysis_brief.server_brief(db, "task-1", task, ["api/checkout.py"])    # assist is on by default
+    block = analysis_brief.server_brief(db, "task-1", task, ["api/checkout.py"])    # assist explicitly opted in
     assert "UNTRUSTED REFERENCE" in block and "checkout" in block.lower()
     assert (analysis_brief.DOC_ITEM, doc_id, "1") in knowledge.receipt(db, "task-1")
 
     status, got = daemon_get(routes_read.analysis_doc_map, scope_kind="user", scope_id=ent.sub,
-                             paths=json.dumps(["api/checkout.py"]), depth="1")
+                             repo=ws.repo_root, paths=json.dumps(["api/checkout.py"]), depth="1")
     assert status == 200, got
     assert got["paths"] == ["api/checkout.py"]
     assert doc_id in {n.get("id") for n in got["nodes"]}, got["nodes"]
@@ -386,7 +391,7 @@ def test_share_and_unshare_with_the_team(sign_in, server, db, tmp_path):
     assert {"kind": "group", "id": GROUP, "name": "web", "can_share": True} in got["scopes"]
     merge_upload(db, tmp_path, "w-share", "feat/share")
     doc_id = uploaded("sess-w-share")
-    status, got = daemon_get(routes_read.analysis_doc_switches)                # the defaults, as the app shows them
+    status, got = daemon_get(routes_read.analysis_doc_switches)                # the opted-in settings, as the app shows them
     assert status == 200, got
     assert {s["name"]: s["on"] for s in got["switches"]} == {
         "store": True, "share": True, "assist": True, "prompt_analysis": False, "import_upload": True}
@@ -469,7 +474,7 @@ def test_org_policy_enforced_off_blocks_upload(sign_in, server, db, tmp_path):
         assert analysis_policy.fetch(org, client, store)["switches"]["store"] == "enforced_off"
         assert analysis_policy.resolve_switch("store", {"store": "on"}, store=store) is False
         status, got = daemon_get(routes_read.analysis_doc_switches)            # shown locked, with the org's value
-        assert status == 200 and {"name": "store", "on": False, "choice": None, "locked": True,
+        assert status == 200 and {"name": "store", "on": False, "choice": "on", "locked": True,
                                   "org": "enforced_off"} in got["switches"], got
         with pytest.raises(ServiceError) as locked:                            # and the toggle refuses it
             routes_actions.put_doc_switch(db, {}, {"name": "store", "on": True})
