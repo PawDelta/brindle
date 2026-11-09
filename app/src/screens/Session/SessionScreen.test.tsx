@@ -743,7 +743,7 @@ describe("SessionScreen", () => {
     sync.stop();
   });
 
-  it("shows a paused session as a card with its goal in the bar, and continues it from the bar: the engine's preflight first when it asks", async () => {
+  it("shows a paused session as a card that names it, and continues it from the bar: the engine's preflight first when it asks", async () => {
     const paused: SessionDTO = { ...session, id: "sup0", status: "paused", goal: "Refactor the cache" };
     const goal: GoalDTO = { root_id: "sup0", enabled: false, goal: "Refactor the cache", state: "paused", progress: 0, milestones: [{ id: 1, position: 1, title: "Read it", status: "passed" }, { id: 2, position: 2, title: "Write it", status: "pending" }] };
     const { daemon, sync } = mount({}, { sessions: [session, paused], goal, preflight: { claude: [{ id: "trust", kind: "trust", label: "Trust the folder /home/u/proj", detail: "Claude Code asks once per folder.", done: false }] } }, undefined, "sup0");
@@ -753,6 +753,9 @@ describe("SessionScreen", () => {
     expect(fake.Xterm.all).toHaveLength(0);
     expect(screen.getByTestId("session-status").textContent).toContain("paused");
     expect(screen.getByTestId("session-bar").textContent).not.toContain("Refactor the cache"); // the goal is the sidebar's
+    // A paused root is in no snapshot, so with nothing of its own here every paused session would look the same.
+    expect(screen.getByTestId("session-id").textContent).toBe("sup0");
+    expect(screen.getByTestId("state-card-session").textContent).toBe("Refactor the cache");
     // A paused session's changes open too, read-only; ← Chat brings the card back.
     fireEvent.click(screen.getByTestId("open-changes"));
     await within(screen.getByTestId("session-changes")).findByRole("navigation", { name: "Changed files" });

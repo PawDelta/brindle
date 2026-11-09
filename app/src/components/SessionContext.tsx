@@ -90,6 +90,7 @@ function Context({ client, session, route, navigate, openUrl, style }: Pick<Sess
         store={store}
         paused={paused}
         compact
+        loadingTitle={row?.name || row?.goal}
         request={row?.request}
         title={(onOpen) => (
           <div className="flex min-w-0 flex-1 items-center gap-1">
