@@ -213,7 +213,12 @@ def test_the_state_file_holds_ids_only_and_is_private(w, brindle_home):
     assert "token" not in path.read_text().lower()
 
 
-@pytest.mark.parametrize("beside", ["a second launch", "a sign-in adopting agents"])
+@pytest.mark.parametrize("beside", [
+    pytest.param("a second launch", marks=pytest.mark.variant(
+        "two launches writing together must retain both identity locks instead of losing the second write")),
+    pytest.param("a sign-in adopting agents", marks=pytest.mark.variant(
+        "sign-in adoption racing a launch must retain both adopted and launched identity locks")),
+])
 def test_a_write_beside_a_launch_is_not_lost_and_both_stay_locked_to_their_identity(w, monkeypatch, beside):
     import threading
 
@@ -269,6 +274,7 @@ def test_a_write_beside_a_launch_is_not_lost_and_both_stay_locked_to_their_ident
     assert contended.is_set()
 
 
+@pytest.mark.variant("a sweep saving its earlier snapshot must not erase a paused agent's concurrent launch identity")
 def test_a_launch_during_a_sweep_keeps_its_identity(w, monkeypatch):
     w.agent("c1")
     w.agent("launching", status="paused")   # not one the sweep would record itself
@@ -285,10 +291,14 @@ def test_a_launch_during_a_sweep_keeps_its_identity(w, monkeypatch):
 
 
 @pytest.mark.parametrize("during, kept, unowned", [
-    ("launch", OK.ident, []),
-    ("adopt", OK.ident, []),
-    ("adopted as it was", "old", []),               # no longer unowned: the sweep may not adopt it now
-    ("moved, no brindle login", OK.ident, ["x"]),   # still unowned: the sweep's own adoption stands aside
+    pytest.param("launch", OK.ident, [], marks=pytest.mark.variant(
+        "a stale sweep must not overwrite a concurrent launch's identity with the newly probed account")),
+    pytest.param("adopt", OK.ident, [], marks=pytest.mark.variant(
+        "a stale sweep must not overwrite the account chosen by a concurrent sign-in adoption")),
+    pytest.param("adopted as it was", "old", [], marks=pytest.mark.variant(
+        "adoption can clear unowned without changing identity; a stale sweep must still respect ownership")),
+    pytest.param("moved, no brindle login", OK.ident, ["x"], marks=pytest.mark.variant(
+        "a concurrent unsigned-in adoption leaves unowned intact but its newer identity must survive the sweep")),
 ])
 def test_a_sweep_that_read_too_early_leaves_a_newer_identity_alone(w, monkeypatch, during, kept, unowned):
     from brindle import identity_lock
@@ -317,6 +327,7 @@ def test_a_sweep_that_read_too_early_leaves_a_newer_identity_alone(w, monkeypatc
     assert identity_lock.locked_by("x") == kept
 
 
+@pytest.mark.variant("logout during a stale sweep must not make a concurrently launched owned conversation adoptable by another account")
 def test_a_sweep_that_read_too_early_cannot_make_an_owned_agent_adoptable(w, monkeypatch):
     from brindle import identity_lock
 
