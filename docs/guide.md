@@ -1537,6 +1537,9 @@ removes the worktree, and sends the supervisor one message with the worker's rep
 and the review. Findings go straight back to the worker to fix (`review_rounds`
 times) before they reach the supervisor, and anything the pipeline can't settle (a
 conflict, a failing check, no reviewer) arrives as "needs you" with the details.
+After a branch's first review, each round reviews only what changed since the last
+reviewed commit. Past `review_rounds`, findings that only concern test code stop
+blocking: the branch merges and the supervisor gets them as a note.
 `"pipeline": false` restores the manual flow. Supervisors are also told to keep task
 briefs short: writing a long brief holds up every worker waiting on it.
 
