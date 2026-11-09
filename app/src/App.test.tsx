@@ -191,6 +191,27 @@ describe("App", () => {
     } finally { sync.stop(); vi.useRealTimers(); }
   });
 
+  it("panes per session: a session released while others are pending shows after one read, without waiting for a slow store refresh", async () => {
+    vi.useFakeTimers();
+    const rootB = { ...root, id: "proj2", agents: root.agents?.map((a) => ({ ...a, id: "sup2", window: null })) };
+    const daemon = new FakeDaemon({
+      repos: [{ repo_root: REPO, name: "proj" }],
+      sessions: [session, { ...session, id: "sup2" }],
+      workspaces: [root, rootB],
+    });
+    const client = daemon.client();
+    const store = createAppStore();
+    const meta = client.meta.bind(client);
+    vi.spyOn(client, "meta").mockImplementation(async () => ({ ...await meta(), resuming: true, recovery: { done: 1, total: 2, pending: ["sup2"] } }));
+    // The slow daemon: the store's own refresh never comes back in time; only the gate's one snapshot does.
+    const refresh = vi.fn(() => new Promise<void>(() => {}));
+    try {
+      renderApp(<App store={store} client={client} refresh={refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO }} />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(300); });
+      expect(screen.getByTestId("terminal").textContent).toBe("sup1");
+    } finally { vi.useRealTimers(); }
+  });
+
   it("panes per session: a session that finishes coming back while its rows are being read is not shown from the old rows", async () => {
     vi.useFakeTimers();
     const at = (id: string, proj: string, window: string | null) => ({ ...root, id: proj, agents: root.agents?.map((a) => ({ ...a, id, window })) });
