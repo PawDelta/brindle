@@ -113,6 +113,7 @@ def test_set_agy_gemini_failed_write_leaves_the_original(tmp_path, monkeypatch):
     assert stat.S_IMODE(path.stat().st_mode) == 0o640
 
 
+@pytest.mark.variant("two launches racing on one CLI config must not share a temp file")
 @pytest.mark.parametrize("cli", ["antigravity", "opencode"])
 def test_two_launches_writing_a_clis_file_at_once_keep_their_temp_files_apart(tmp_path, monkeypatch, cli):
     import threading
