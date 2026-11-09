@@ -341,7 +341,8 @@ function PhaseFoldList({ folds, open, onToggle, isDone, large, rowsClass, row, r
         const n = f.milestones.length;
         const count = f.state === "done" ? `✓ ${n} of ${n}` : f.state === "todo" ? `${n} upcoming` : `${passed} of ${n}`;
         const toggles = !!onFinishedToggle && passed > 0;
-        const finished = finishedOpen?.[f.key] ?? false;
+        // Finished rows show only while the phase is open too: the count reads as expanded only when they do.
+        const finished = (finishedOpen?.[f.key] ?? false) && isOpen;
         return (
           <li key={f.key} data-st={f.state}>
             <div className={toggles ? "flex min-w-0 items-center" : undefined}>
@@ -364,8 +365,11 @@ function PhaseFoldList({ folds, open, onToggle, isDone, large, rowsClass, row, r
                   aria-expanded={finished}
                   aria-label={`${count}: ${finished ? "hide" : "show"} finished milestones in ${f.name}`}
                   onClick={() => {
-                    if (!finished && !isOpen) onToggle(f.key, true);
-                    onFinishedToggle!(f.key, !finished);
+                    // Showing opens the phase too; hiding only clears the finished rows.
+                    if (!finished) {
+                      if (!isOpen) onToggle(f.key, true);
+                      onFinishedToggle!(f.key, true);
+                    } else onFinishedToggle!(f.key, false);
                   }}
                   className={`ms-count shrink-0 cursor-pointer rounded px-1.5 py-1 font-mono text-[10.5px] hover:text-ink ${f.state === "done" ? "text-pass" : "text-ink-3"}`}
                 >
@@ -749,6 +753,9 @@ export function GoalPanel({ client, repo, root, store, compact = false, title, r
     // The stage the active step is at; none once the goal is finished or while nothing runs.
     const barStages = [...activeStage.values()].filter((s): s is Stage => s !== null);
     const activity = finished ? null : activityLine(goal);
+    // The fold whose finished rows the goal count toggles: the list without phases (key 0), or the leading unnamed
+    // group when phases exist. Undefined when that group has no finished row, so the count is plain.
+    const countKey = folds ? folds.find((f) => f.name === null && f.milestones.some(isDone))?.key : passed > 0 ? 0 : undefined;
     const stateOf = (m: MilestoneDTO): "done" | "now" | "pending" => (isDone(m) ? "done" : isPending(m) ? "pending" : "now");
     const sideRow = (m: MilestoneDTO) => {
       const state = stateOf(m);
@@ -801,13 +808,13 @@ export function GoalPanel({ client, repo, root, store, compact = false, title, r
         <div className="flex shrink-0 flex-col gap-1.5" data-testid="goal-header">
         <div data-testid="goal-line" className={`flex min-w-0 flex-nowrap items-center gap-s1 px-0.5 text-[13px] font-medium ${finished ? "text-pass" : "text-ink"}`}>
           {contextTitle ?? <SessionGoal text={goal.goal} className="block w-full truncate text-left" onOpen={() => setFullGoalOpen((o) => !o)}>{goal.summary || goal.goal}</SessionGoal>}
-          {!folds && total > 0 && passed > 0 ? (
+          {countKey !== undefined && total > 0 ? (
             <button
               type="button"
               data-testid="goal-count"
-              aria-expanded={doneOpen[0] ?? false}
-              aria-label={`${passed} of ${total} milestones: ${doneOpen[0] ? "hide" : "show"} finished milestones`}
-              onClick={() => setDoneOpen((o) => ({ ...o, [0]: !(o[0] ?? false) }))}
+              aria-expanded={doneOpen[countKey] ?? false}
+              aria-label={`${passed} of ${total} milestones: ${doneOpen[countKey] ? "hide" : "show"} finished milestones`}
+              onClick={() => setDoneOpen((o) => ({ ...o, [countKey]: !(o[countKey] ?? false) }))}
               className="shrink-0 cursor-pointer whitespace-nowrap rounded font-mono text-[11px] font-normal text-ink-3 hover:text-ink"
             >
               {`${passed} of ${total}`}

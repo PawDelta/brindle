@@ -404,6 +404,41 @@ describe("GoalPanel", () => {
     expect(sidebar.getByRole("button", { name: /finished milestones/ }).getAttribute("aria-expanded")).toBe("false");
   });
 
+  /* A done fold for a leading unnamed group (the goal count) and for a phase (its count): each reveals its finished
+     rows, and a phase's count reads collapsed while the phase is folded, so its click reveals the rows again. */
+  it("reveals a done fold in the leading unnamed group and in a folded phase", async () => {
+    const base = goal.milestones![1];
+    const milestones: MilestoneDTO[] = [
+      { ...base, id: 1, position: 1, title: "Alpha", state: "passed", status: "passed", phase_name: null },
+      { ...base, id: 2, position: 2, title: "Beta", state: "passed", status: "passed", phase_name: "Build" },
+      { ...base, id: 3, position: 3, title: "Gamma", state: "not_done", status: "pending", phase_name: "Build" },
+    ];
+    const daemon = new FakeDaemon({ goal: { ...structuredClone(goal), milestones } });
+    const sidebar = render(<GoalPanel client={daemon.client()} repo={REPO} root={ROOT} store={createAppStore()} compact />);
+    await waitFor(() => expect(sidebar.getByRole("region", { name: "Goal" }).dataset.phase).toBe("in_progress"));
+    const count = sidebar.getByTestId("goal-count");
+    expect(sidebar.queryByText("Alpha")).toBeNull();
+    fireEvent.click(count);
+    expect(count.getAttribute("aria-expanded")).toBe("true");
+    expect(sidebar.getByText("Alpha")).toBeTruthy();
+    fireEvent.click(count);
+    expect(sidebar.queryByText("Alpha")).toBeNull();
+
+    const phaseCount = sidebar.getByTestId("phase-done-toggle");
+    expect(sidebar.queryByText("Beta")).toBeNull();
+    fireEvent.click(phaseCount);
+    expect(sidebar.getByText("Beta")).toBeTruthy();
+    expect(phaseCount.getAttribute("aria-expanded")).toBe("true");
+    // Fold the phase by its name: its rows hide, so the count reads collapsed and its click shows them again.
+    fireEvent.click(sidebar.getByTestId("phase-fold"));
+    expect(sidebar.queryByText("Beta")).toBeNull();
+    expect(phaseCount.getAttribute("aria-expanded")).toBe("false");
+    expect(phaseCount.getAttribute("aria-label")).toContain("show finished milestones");
+    fireEvent.click(phaseCount);
+    expect(sidebar.getByText("Beta")).toBeTruthy();
+    expect(sidebar.getByTestId("phase-fold").getAttribute("aria-expanded")).toBe("true");
+  });
+
   /* Every milestone a live worker is linked to is active, in the stage's colour and word; one nobody works on is not. */
   it("marks several active milestones and opens a later phase with linked workers", async () => {
     const milestones: MilestoneDTO[] = [
