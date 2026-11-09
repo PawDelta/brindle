@@ -184,6 +184,13 @@ describe("App", () => {
       live = { pid: 1, pending: ["sup3"] };
       await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
       expect(screen.getByTestId("terminal").textContent).toBe("sup2");
+      // Another session coming back leaves this one's pane be.
+      const pane = screen.getByTestId("terminal");
+      daemon.data.workspaces = [root, at("sup2", "proj2", windowOf("sup2")), at("sup3", "proj3", windowOf("sup3"))];
+      live = { pid: 1, pending: [] };
+      await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
+      expect(store.getState().workspaces.find((w) => w.id === "proj3")?.agents?.[0].window).toBe(windowOf("sup3"));
+      expect(screen.getByTestId("terminal")).toBe(pane);
     } finally { sync.stop(); vi.useRealTimers(); }
   });
 
