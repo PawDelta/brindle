@@ -468,23 +468,24 @@ export function PtyTerminal({ at, open, copy, paste, attachments, openUrl, onVie
       }
       return texts.join(" ") || null;
     };
-    const fromApp = async (onRead?: (text: string) => void): Promise<string | null> => {
+    const fromApp = async (onRead?: (text: string) => void, webviewText?: string, latestText?: () => string): Promise<string | null> => {
       const pasteFrom = pasted.current;
       const destination = attaching.current;
-      if (gone || !pasteFrom) return null;
-      const text = await pasteFrom().catch((err) => {
+      if (gone) return null;
+      const text = webviewText || await pasteFrom?.().catch((err) => {
         dropPaste(`couldn't read the app's clipboard: ${String(err)}`, 0);
         return null;
       });
       onRead?.(text ?? "");
-      if (text || gone || !destination) return text;
+      const fallback = () => latestText?.() || (text ?? null);
+      if (gone || !destination) return fallback();
       try {
         const files = await clipboardAttachments();
         if (gone || attaching.current !== destination) return null;
-        return await attachFiles(files);
+        return files.length ? await attachFiles(files) : fallback();
       } catch (err) {
         if (!gone && attaching.current === destination) setFileNotice({ error: true, text: `Couldn't read clipboard files: ${String(err)}` });
-        return null;
+        return fallback();
       }
     };
     // Its place in the line kept from now, however long the text takes to come.
@@ -531,7 +532,7 @@ export function PtyTerminal({ at, open, copy, paste, attachments, openUrl, onVie
       }
       const waiter = awaiting.shift();
       if (waiter) return waiter(text);
-      pasteInLine(text ? Promise.resolve(text) : fromApp());
+      pasteInLine(fromApp(undefined, text));
     };
     el.addEventListener("paste", pasting, true);
     const selected = () => (crop.cols ? selectionIn(term, crop.left, crop.left + shownCols()) : term.getSelection());
@@ -618,10 +619,12 @@ export function PtyTerminal({ at, open, copy, paste, attachments, openUrl, onVie
         pasteInLine(new Promise<string | null>((ok) => {
           let reading: Promise<string | null> | undefined;
           let clipboardText = "";
-          const read = () => reading ??= fromApp(text => { clipboardText = text; });
+          let webviewText = "";
+          const read = () => reading ??= fromApp(text => { clipboardText = text; }, undefined, () => webviewText);
           const waiter = (text: string) => {
             clearTimeout(timer);
-            ok(text || read());
+            webviewText = text;
+            ok(attaching.current ? reading ?? fromApp(undefined, text) : text || read());
           };
           const timer = setTimeout(() => {
             if (!gone) logDebug("pty_view", "warning", `⌘V: the webview's paste didn't come within ${PASTE_WAIT} ms: reading the app's clipboard`, { target });

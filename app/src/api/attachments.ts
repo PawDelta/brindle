@@ -14,12 +14,14 @@ export async function engineAttachment(file: Attachment): Promise<Attachment> {
     : file;
 }
 
-// Tauri positions are physical pixels; the terminal's bounds are CSS pixels.
+// Wry reports logical points on macOS and GTK; only WebView2 uses physical pixels.
+// Hit testing in both the terminal and visual answer bar needs CSS pixels.
 export async function listenForDrops(handle: (drop: FileDrop) => void): Promise<() => void> {
   if (!isTauri()) return () => {};
   return getCurrentWindow().onDragDropEvent(({ payload }) => {
     if (payload.type === "leave") return handle({ type: "leave" });
-    handle({ type: payload.type, x: payload.position.x / window.devicePixelRatio, y: payload.position.y / window.devicePixelRatio,
+    const scale = /Win/.test(navigator.platform) ? window.devicePixelRatio : 1;
+    handle({ type: payload.type, x: payload.position.x / scale, y: payload.position.y / scale,
       paths: "paths" in payload ? payload.paths : undefined });
   });
 }
