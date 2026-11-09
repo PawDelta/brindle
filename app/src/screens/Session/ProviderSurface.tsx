@@ -30,13 +30,15 @@ import { Preflight } from "../../components/Preflight";
 import { PtyTerminal, type TerminalView } from "../../components/PtyTerminal";
 import { button, card as cardClass, main, quiet } from "../../components/ui";
 import { providerName } from "../../store/overview";
-import { PanesReadyContext } from "../../store/panes";
+import { PanesReadyContext, panesReadyFor } from "../../store/panes";
 import type { Recovery } from "./useContinue";
 import { withTypedWords, withVisualInput } from "./Visuals/terminalInput";
 
 export interface ProviderSurfaceProps {
   /* The session's repo (a preflight sign-in checks the provider there). */
   repo: string;
+  /* The session's root: whether its panes may show is asked of it alone (store/panes). */
+  root?: string;
   /* The agent shown; null for a session with no agents in the snapshot (paused). */
   agent: AgentDTO | null;
   /* Whether its process is alive, from the liveness sweep (undefined: not known yet). */
@@ -98,7 +100,7 @@ interface PaneCheck {
   found: AgentDTO;
 }
 
-export function ProviderSurface({ repo, agent: listedAgent, alive, sessionStatus, sessionName, credentials, recovery }: ProviderSurfaceProps) {
+export function ProviderSurface({ repo, root, agent: listedAgent, alive, sessionStatus, sessionName, credentials, recovery }: ProviderSurfaceProps) {
   const [view, setView] = useState<TerminalView | null>(null);
   const client = useContext(DaemonContext);
   const visualsEnabled = useRef(false);
@@ -174,7 +176,7 @@ export function ProviderSurface({ repo, agent: listedAgent, alive, sessionStatus
   // The engine is still bringing its sessions back (a launch, or a new daemon after a restart): the
   // rows may name windows from before, so no pane yet, and none of the cards a missing window or a
   // closed view would bring. What it finished or failed with still shows.
-  const returning = !panes.ready && !!agent && !agent.locked && agent.status !== "done" && agent.status !== "failed";
+  const returning = !panesReadyFor(panes, root) && !!agent && !agent.locked && agent.status !== "done" && agent.status !== "failed";
   const card: Card | null = returning ? { kind: "returning" } : surfaceCard(agent, alive, sessionStatus, view, credentials, unshowable);
   const name = agent ? providerName(agent.provider) : "the session";
   const { resume, busy, notice, preflight, setPreflight } = recovery;

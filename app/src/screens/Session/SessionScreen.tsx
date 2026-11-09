@@ -19,6 +19,7 @@ import { LoadingButton } from "../../components/LoadingButton";
 import { button, main, mono } from "../../components/ui";
 import type { SheetRef } from "../../routes";
 import { CLI_INK, agentName, cliStatus, isPaused, liveWorkers, needsYou, providerName } from "../../store/overview";
+import { PanesReadyContext } from "../../store/panes";
 import { SessionsContext } from "../../store/sessions";
 import type { AppStore } from "../../store/store";
 import { useAppState } from "../../store/useStore";
@@ -127,6 +128,11 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
     [feed, refresh],
   );
   const recovery = useContinue(client, root, reload);
+  // Opening a session the engine hasn't brought back yet asks it to do this one next; no answer matters.
+  const comingBack = useContext(PanesReadyContext).pending?.includes(root) === true;
+  useEffect(() => {
+    if (comingBack) client.prioritize(root).catch(() => {});
+  }, [client, root, comingBack]);
   // The engine's word on a PR: the Review & open PR entry exists only once it says ready.
   const readiness = usePrReadiness(client, root, store);
   const changes = useSessionDiff(client, root, store);
@@ -254,6 +260,7 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
               // A sidebar Resume also needs a fresh pane when this session was already selected.
               key={`${selected}:${paused}`}
               repo={repo}
+              root={root}
               agent={node?.agent ?? null}
               alive={node ? alive[node.agent.id] : undefined}
               sessionStatus={!node || node.agent.id === root ? session?.status ?? null : null}

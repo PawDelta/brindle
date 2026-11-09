@@ -102,6 +102,29 @@ describe("App", () => {
     } finally { sync.stop(); vi.useRealTimers(); }
   });
 
+  it("panes per session: a session that is back shows its panes while another is still pending, and opening the pending one asks for it first", async () => {
+    vi.useFakeTimers();
+    const sessionB: SessionDTO = { ...session, id: "sup2", goal: "Slow one" };
+    const rootB = { ...root, id: "proj2", agents: root.agents?.map((a) => ({ ...a, id: "sup2", window: null })) };
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session, sessionB], workspaces: [root, rootB] });
+    const client = daemon.client();
+    const store = createAppStore();
+    const sync = startSync({ client, store, connect: daemon.connect });
+    const meta = client.meta.bind(client);
+    vi.spyOn(client, "meta").mockImplementation(async () => ({ ...await meta(), resuming: true, recovery: { done: 1, total: 2, pending: ["sup2"] } }));
+    try {
+      renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO }} />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
+      expect(paneWaits()).toBe(false);
+      expect(screen.getByTestId("terminal").textContent).toBe("sup1");
+      expect(daemon.prioritized).toEqual([]);
+      fireEvent.click(treeSession("sup2"));
+      await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+      expect(paneWaits()).toBe(true);
+      expect(daemon.prioritized).toEqual(["sup2"]);
+    } finally { sync.stop(); vi.useRealTimers(); }
+  });
+
   it("recovery progress line: counts sessions on the waiting pane and goes once it is ready", async () => {
     vi.useFakeTimers();
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root] });
