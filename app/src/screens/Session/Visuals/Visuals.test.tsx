@@ -828,18 +828,18 @@ describe("visuals", () => {
     await act(async () => { fireEvent.paste(currentNote, { clipboardData: { files: [], getData: () => "x" } }); });
     const outcomes = [currentNote.value];
     attach.mockResolvedValue({ paths: [], text: "" });
-    for (const [end, order] of [[null, [0, 1]], [null, [1, 0]], [3, [0, 1]], [3, [1, 0]]] as const) {
+    for (const [end, order, secondFile] of [[null, [0, 1], true], [null, [1, 0], true], [3, [0, 1], true], [3, [1, 0], true], [3, [0, 1], false], [3, [1, 0], false]] as const) {
       fireEvent.change(currentNote, { target: { value: "keep" } });
       const pending: ((files: unknown[]) => void)[] = [];
       drops.clipboard = () => new Promise(done => pending.push(done));
-      for (const name of ["one.png", "two.png"]) {
+      for (const name of ["one.png", secondFile ? "two.png" : "two"]) {
         currentNote.setSelectionRange(0, name === "one.png" ? currentNote.value.length : end ?? currentNote.value.length);
         fireEvent.paste(currentNote, { clipboardData: { files: [], getData: () => name } });
       }
-      for (const index of order) await act(async () => pending[index]([{ path: index ? "/two.png" : "/one.png" }]));
+      for (const index of order) await act(async () => pending[index](index && !secondFile ? [] : [{ path: index ? "/two.png" : "/one.png" }]));
       outcomes.push(currentNote.value);
     }
-    expect(outcomes).toEqual(["abx", "keep", "keep", "keep", "keep"]);
+    expect(outcomes).toEqual(["abx", "keep", "keep", "keep", "keep", "two", "two"]);
   });
 
   const open: VisualSource = { kind: "session", id: visual.id, rev: visual.rev };

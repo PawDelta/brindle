@@ -160,6 +160,7 @@ function AnswerBar({ client, visual, picked, onPick, onAnswered }: { client: Vis
   type NoteChar = { char: string; paste?: symbol; offset?: number };
   const noteChars = useRef<NoteChar[]>([]);
   const replacedNotes = useRef(new Map<symbol, NoteChar[]>());
+  const pendingPastes = useRef(0);
   const showNote = () => setNote(noteChars.current.map(part => part.char).join(""));
   const editNote = (value: string) => {
     const before = noteChars.current.map(part => part.char).join("");
@@ -293,6 +294,7 @@ function AnswerBar({ client, visual, picked, onPick, onAnswered }: { client: Vis
                 showNote();
                 input.value = noteChars.current.map(part => part.char).join("");
                 input.setSelectionRange(start + text.length, start + text.length);
+                pendingPastes.current++;
                 void upload(async () => {
                   try {
                     const copied = await clipboardAttachments();
@@ -323,13 +325,17 @@ function AnswerBar({ client, visual, picked, onPick, onAnswered }: { client: Vis
                       for (const [other, chars] of replacedNotes.current) {
                         if (other !== paste) replacedNotes.current.set(other, restore(chars));
                       }
+                      replacedNotes.current.delete(paste);
                       showNote();
                       return copied;
                     }
                     if (!rawText) return Promise.all(files.map(fileAttachment));
                     return [];
                   } finally {
-                    replacedNotes.current.delete(paste);
+                    // A committed text paste still owns its replaced selection while
+                    // an earlier file lookup can restore characters inside it.
+                    pendingPastes.current--;
+                    if (!pendingPastes.current) replacedNotes.current.clear();
                   }
                 });
               } else if (files.length) {
