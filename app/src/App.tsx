@@ -36,8 +36,9 @@
    nothing but brindle's sign-in until the account reads signed in. */
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { DaemonError, type DaemonClient, type ProviderInstalled } from "./api/client";
+import { DaemonError, type DaemonClient, type Meta, type ProviderInstalled } from "./api/client";
 import { plain } from "./api/wording";
+import { startupStep } from "./api/startup";
 import { DaemonContext } from "./api/context";
 import { checkEngine, type EngineStatus } from "./api/engine";
 import { openExternal, pickFolder as nativePicker, type OpenUrl, type PickFolder } from "./api/open";
@@ -64,6 +65,7 @@ import { SettingsScreen } from "./screens/Settings";
 import { isPaused } from "./store/overview";
 import { SessionsProvider, useCloseSession, useSessions } from "./store/sessions";
 import { PanesReadyContext, type PanesReady } from "./store/panes";
+import { agentIds, sessionTree } from "./screens/Session/tree";
 import { ProvidersProvider } from "./store/providers";
 import { UsageProvider } from "./store/usage";
 import type { AppState, AppStore } from "./store/store";
@@ -247,6 +249,14 @@ function Banner({ status, connection, onRetry, client, store }: { status: Engine
 
 /* `firstRun`: the app opens right after the first launch's setup, so the walkthrough offers itself. */
 function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, pickFolder = nativePicker, installCli, appUpdater, appUpdates, releaseBuildUpdater, readAbout, firstRun = false }: AppProps & { firstRun?: boolean }) {
+  useEffect(() => {
+    // The second frame runs after the browser has had a paint opportunity.
+    let painted = 0;
+    const frame = requestAnimationFrame(() => {
+      painted = requestAnimationFrame(() => startupStep("shell_painted"));
+    });
+    return () => { cancelAnimationFrame(frame); cancelAnimationFrame(painted); };
+  }, []);
   // Until the sessions are known the app shows the empty state, quietly; then it lands.
   const [route, setRoute] = useState<Route | null>(initialRoute ?? null);
   /* Counts the navigations: one to the route already open still counts (Settings opens its tab again). */
@@ -486,9 +496,10 @@ function FirstLaunch(props: AppProps) {
 const STARTUP_WAIT = 30000;
 const STARTUP_CHECK = 500;
 
-function waitingForPanes(workspaces: WorkspaceDTO[]): boolean {
+/* `only`: just those agents (one session's own), else every agent in every session. */
+function waitingForPanes(workspaces: WorkspaceDTO[], only?: Set<string>): boolean {
   return workspaces.flatMap((ws) => ws.agents ?? []).some((a) =>
-    a.provider !== "subagent" && !a.headless && !a.locked
+    (!only || only.has(a.id)) && a.provider !== "subagent" && !a.headless && !a.locked
     && !["paused", "done", "failed", "closed", "rewound", "exited"].includes(a.status) && !a.window);
 }
 
@@ -518,17 +529,48 @@ function usePanesReady(client: DaemonClient | null, refresh?: () => Promise<void
   }, [connection]);
   // The daemon the panes were last shown from.
   const shownFrom = useRef<number | null>(null);
+  // The sessions released one by one while the rest come back, and the daemon they were released by.
+  const backNow = useRef<Set<string>>(new Set());
+  const backPid = useRef<number | null>(null);
   useEffect(() => {
     if (!client) return;
     let current = true;
     let first = true;
     let next: ReturnType<typeof setTimeout>;
     const settle = (pid: number | null) => {
+      startupStep("panes_ready");
       current = false;
       clearTimeout(next);
       clearTimeout(deadline);
       if (pid !== null) shownFrom.current = pid;
       setPanes((p) => (p.ready ? p : { ready: true, epoch: p.epoch + 1, recovery: null }));
+    };
+    // Per session (an engine that names the sessions still to come back): each one whose own agents have
+    // windows in rows read after it came back is released at once, whatever the others are doing.
+    const releaseBack = async (meta: Meta, pending: string[], workspaces: WorkspaceDTO[], unchanged: () => boolean) => {
+      const fresh = (rows: WorkspaceDTO[], not: string[]) => rows.flatMap((w) => w.agents ?? []).filter((a) => !a.parent_id).map((a) => a.id)
+        .filter((id) => !not.includes(id) && !backNow.current.has(id) && !waitingForPanes(rows, agentIds(sessionTree(rows, id))));
+      // Only those back when these rows were read: one that came back since needs a read of its own.
+      const eligible = fresh(workspaces, pending);
+      if (!eligible.length) return;
+      const version = store.getState().snapshotVersion;
+      if (refresh) await Promise.all([reload(), refresh()]);
+      else {
+        const inbox = await client.inbox();
+        if (!unchanged()) return;
+        store.dispatch({ type: "snapshot", workspaces, inbox });
+        await reload();
+      }
+      if (!unchanged()) return;
+      // Still the same daemon, and none of these sent back to pending since.
+      const latest = await client.meta();
+      const stillPending = latest.recovery?.pending;
+      if (!unchanged() || latest.pid !== meta.pid || !latest.resuming || !stillPending) return;
+      const applied = store.getState();
+      if (applied.snapshotVersion === version || applied.error || applied.stale) return;
+      const ready = fresh(applied.workspaces, stillPending).filter((id) => eligible.includes(id));
+      for (const id of ready) backNow.current.add(id);
+      if (ready.length) setPanes((p) => ({ ...p, back: [...backNow.current] }));
     };
     const hide = () => setPanes((p) => (p.ready ? { ...p, ready: false } : p));
     const deadline = setTimeout(() => settle(null), STARTUP_WAIT);
@@ -543,7 +585,20 @@ function usePanesReady(client: DaemonClient | null, refresh?: () => Promise<void
         first = false;
         hide();
         const recovery = meta.resuming ? meta.recovery ?? null : null;
-        setPanes((p) => (p.recovery?.done === recovery?.done && p.recovery?.total === recovery?.total ? p : { ...p, recovery }));
+        const pending = meta.resuming ? recovery?.pending : undefined;
+        // Another daemon: whatever was back with the last one is not known to be back with this.
+        if (backPid.current !== meta.pid) {
+          backPid.current = meta.pid;
+          backNow.current = new Set();
+        }
+        const back = [...backNow.current];
+        setPanes((p) => (p.recovery?.done === recovery?.done && p.recovery?.total === recovery?.total && p.pending?.join() === pending?.join() && p.back?.join() === back.join()
+          ? p : { ...p, recovery, pending: pending ?? null, back }));
+        if (pending) {
+          const workspaces = await client.snapshot();
+          if (!unchanged()) return;
+          await releaseBack(meta, pending, workspaces, unchanged);
+        }
         if (!meta.resuming) {
           const workspaces = await client.snapshot();
           if (!unchanged()) return;

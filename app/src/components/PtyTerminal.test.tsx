@@ -3,9 +3,11 @@ import type { ILink, ILinkProvider } from "@xterm/xterm";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { PtyViewHandlers, PtyViewOpener } from "../api/ptyView";
 import { DaemonClient } from "../api/client";
+import { startupStep } from "../api/startup";
 import { VisualLinkContext } from "../screens/Session/Visuals/link";
 import { ATTACH_WAIT, COPIED_SHOWN, COPY_OR_INTERRUPT, LATE_PASTE_WINDOW, PASTE_WAIT, PtyTerminal, selectionIn } from "./PtyTerminal";
 
+vi.mock("../api/startup", { spy: true });
 const files = vi.hoisted(() => ({ read: vi.fn(), listen: vi.fn(), drop: (_event: unknown) => {} }));
 vi.mock("../api/attachments", async (original) => ({
   ...await original<typeof import("../api/attachments")>(),
@@ -13,10 +15,13 @@ vi.mock("../api/attachments", async (original) => ({
   listenForDrops: (handler: typeof files.drop) => { files.drop = handler; return files.listen(); },
 }));
 const native = vi.hoisted(() => ({ enabled: false }));
-const windowDrop = vi.hoisted(() => ({ handle: (_event: { payload: unknown }) => {} }));
-vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => ({
-  onDragDropEvent: async (handle: typeof windowDrop.handle) => { windowDrop.handle = handle; return () => {}; },
+// The webview's, not the window's: the app's multi-webview feature makes the main webview a child, and Tauri sends a
+// child's drags only to listeners on that webview. One listening on the window never hears them.
+const webviewDrop = vi.hoisted(() => ({ handle: (_event: { payload: unknown }) => {} }));
+vi.mock("@tauri-apps/api/webview", () => ({ getCurrentWebview: () => ({
+  onDragDropEvent: async (handle: typeof webviewDrop.handle) => { webviewDrop.handle = handle; return () => {}; },
 }) }));
+vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => ({ onDragDropEvent: async () => () => {} }) }));
 vi.mock("@tauri-apps/api/core", async original => ({
   ...await original<typeof import("@tauri-apps/api/core")>(),
   isTauri: () => native.enabled,
@@ -83,14 +88,14 @@ it("converts drag position to CSS coordinates per platform", async () => {
     platform.mockReturnValue(os);
     const received: unknown[] = [];
     const stop = await listenForDrops(drop => received.push(drop));
-    windowDrop.handle({ payload: { type: "drop", position: { x: 160, y: 240 }, paths: ["/photo.png"] } });
+    webviewDrop.handle({ payload: { type: "drop", position: { x: 160, y: 240 }, paths: ["/photo.png"] } });
     expect(received).toEqual([{ type: "drop", x, y, paths: ["/photo.png"] }]);
     stop();
   }
   platform.mockRestore();
 });
 
-it("attaches native drops only under the cursor and keeps typing behind the returned paste", async () => {
+it("attaches native drops only under the cursor and keeps typing behind the returned paste, showing the refusal reason", async () => {
   let finish: (value: { text: string }) => void = () => {};
   const attach = vi.fn(() => new Promise<{ text: string }>(ok => { finish = ok; }));
   const { view, term, opened, written } = mount(undefined, undefined, { acceptsFiles: true, attach });
@@ -103,6 +108,11 @@ it("attaches native drops only under the cursor and keeps typing behind the retu
   act(() => files.drop({ type: "drop", x: 300, y: 40, paths: ["/outside"] }));
   await settled();
   expect(attach).not.toHaveBeenCalled();
+  expect(view.queryByRole("alert")).toBeNull();
+  // A drag over the view with no file behind it is told, not silently lost.
+  act(() => files.drop({ type: "drop", x: 30, y: 40, paths: [] }));
+  expect(view.queryByRole("alert")).not.toBeNull();
+  expect(attach).not.toHaveBeenCalled();
   act(() => files.drop({ type: "drop", x: 30, y: 40, paths: ["/photo.png", "/notes.txt"] }));
   act(() => term().input("x", true));
   await settled();
@@ -112,11 +122,16 @@ it("attaches native drops only under the cursor and keeps typing behind the retu
   await act(async () => finish({ text: "@second" }));
   await settled();
   expect(written).toEqual(["\x1b[200~@first @second\x1b[201~", "x"]);
-  attach.mockRejectedValueOnce(new Error("credential files cannot be attached"));
-  act(() => files.drop({ type: "drop", x: 30, y: 40, paths: ["/refused"] }));
+  const reason = "refused.png is a credential file and cannot be attached.";
+  const otherReason = "missing.txt could not be found.";
+  attach.mockResolvedValueOnce({ text: "@before" });
+  attach.mockRejectedValueOnce(new Error(reason));
+  attach.mockResolvedValueOnce({ text: "@after" });
+  attach.mockRejectedValueOnce(otherReason);
+  act(() => files.drop({ type: "drop", x: 30, y: 40, paths: ["/before", "/refused.png", "/after", "/missing.txt"] }));
   await settled();
-  expect(view.queryByRole("alert")).not.toBeNull();
-  expect(written).toHaveLength(2);
+  expect(view.getByRole("alert").textContent).toBe(`${reason} ${otherReason}`);
+  expect(written.at(-1)).toBe("\x1b[200~@before @after\x1b[201~");
 });
 
 it.each(["MacIntel", "Win32"])("attaches a copied file before its filename text and preserves text pastes (%s)", async (os) => {
@@ -309,7 +324,9 @@ function webviewPaste(target: EventTarget, text: string | null): Event {
 const settled = (ms = 0) => act(() => new Promise((r) => setTimeout(r, ms)));
 
 it("off a Mac, ⌘V pastes the app's clipboard (bracketed where asked), and ⌘C copies xterm.js's selection onto it, taking the keys", async () => {
+  vi.mocked(startupStep).mockClear();
   const { written, copied, clipboard, opened, term } = mount();
+  expect(startupStep).not.toHaveBeenCalled();
   const textarea = term().textarea!;
   const press = (key: string) => {
     const e = new KeyboardEvent("keydown", { key, metaKey: true, bubbles: true, cancelable: true });
@@ -319,6 +336,7 @@ it("off a Mac, ⌘V pastes the app's clipboard (bracketed where asked), and ⌘C
   // tmux has the view's terminal.
   act(() => opened.handlers!.onData(new TextEncoder().encode("\x1b[?1049hhello pty")));
   await parsed(term());
+  expect(startupStep).toHaveBeenCalledWith("terminal_attached");
   clipboard.text = "from the clipboard ✓";
   // jsdom's platform is no Mac's: ⌘V taken (no webview paste follows), the app's clipboard read.
   expect(press("v").defaultPrevented, "the webview's own paste doesn't follow").toBe(true);

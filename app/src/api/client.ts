@@ -4,6 +4,7 @@
    {"error": {"code", "message"}} (brindle/service/errors.py) and is thrown as a
    DaemonError with that code. */
 
+import { startupStep } from "./startup";
 import type {
   AccountDTO,
   AgentDTO,
@@ -329,7 +330,7 @@ export interface Meta {
   /* The daemon is still bringing back sessions from its previous shutdown. */
   resuming?: boolean;
   /* How far that has come: sessions finished with, of those it is bringing back. */
-  recovery?: { done: number; total: number } | null;
+  recovery?: { done: number; total: number; pending?: string[] } | null;
   engine_version: string;
   api_version: string;
   pid: number;
@@ -1253,6 +1254,11 @@ export class DaemonClient {
     return this.get<Meta>("/meta");
   }
 
+  /* Ask the engine to bring this session back next (a no-op when it already has). */
+  prioritize(root: string) {
+    return this.post<unknown>("/recovery/prioritize", { root });
+  }
+
   repos() {
     return this.get<Repo[]>("/repos");
   }
@@ -1635,8 +1641,8 @@ export class DaemonClient {
     return this.delete<VisualDTO>(`/visuals/${encodeURIComponent(id)}/keep`, {});
   }
 
-  markVisualRead(id: string) {
-    return this.post<unknown>(`/visuals/${encodeURIComponent(id)}/read`, {});
+  markVisualRead(id: string, rev: number) {
+    return this.post<unknown>(`/visuals/${encodeURIComponent(id)}/read`, { rev });
   }
 
   /* A planning doc: the visual of kind "plan" with the same id. */
@@ -2171,6 +2177,9 @@ export class DaemonClient {
       }
       throw new DaemonError(err?.code ?? "http", err?.message ?? response.statusText, response.status, undefined, undefined, Array.isArray(got?.reasons) ? got.reasons : undefined);
     }
+    const route = new URL(url).pathname;
+    if (route === "/v1/meta") startupStep("meta");
+    if (route === "/v1/snapshot") startupStep("snapshot");
     return body as T;
   }
 }

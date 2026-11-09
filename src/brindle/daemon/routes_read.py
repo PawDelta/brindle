@@ -182,10 +182,12 @@ def goal(db: DB, request: Request) -> Any:
         return None
     from brindle.autopilot import goal_activity, milestone_phases
 
+    phase = session_review.goal_phase(db, ap.root_id)
     return GoalDTO.from_autopilot(ap, db.milestones(ap.root_id),
-                                  milestone_phases(db, ap.root_id),
-                                  session_review.goal_phase(db, ap.root_id),
-                                  goal_activity(db, ap.root_id)).to_json()
+                                  milestone_phases(db, ap.root_id), phase,
+                                  goal_activity(db, ap.root_id),
+                                  session_review.session_pr_state(
+                                      db, ap.root_id, phase[1] if phase[0] == "pr_open" else None)).to_json()
 
 
 @_json

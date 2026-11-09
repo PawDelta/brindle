@@ -385,6 +385,15 @@ class MilestoneDTO(_DTO):
         return cls.model_validate({**vars(m), "label": state_text(m), "phase": phase})
 
 
+class PrStateDTO(_DTO):
+    """The sidebar's PR line (session_review.session_pr_state): state is
+    ci | ready | failed | unknown; ``done`` of ``total`` checks have finished."""
+    number: int
+    state: str
+    done: int = 0
+    total: int = 0
+
+
 class GoalDTO(_DTO):
     root_id: str
     enabled: bool
@@ -399,6 +408,7 @@ class GoalDTO(_DTO):
     usage_resets_at: float | None = None
     goal_phase: str = "in_progress"  # in_progress | in_review | ready_for_pr | pr_open | done (session_review.goal_phase)
     pr_url: str | None = None        # the session's PR, from pr_open on
+    pr_state: PrStateDTO | None = None   # where its checks stand; None: no open PR
     # What runs now (autopilot.goal_activity): the active step's stage, working | checks | review |
     # merging (None: nothing runs), the session's commits, and seconds left when history allows.
     stage: str | None = None
@@ -413,7 +423,7 @@ class GoalDTO(_DTO):
     def from_autopilot(cls, ap: Autopilot, milestones: list[Milestone],
                        phases: dict[int, str] | None = None,
                        goal_phase: tuple[str, str | None] = ("in_progress", None),
-                       activity: dict | None = None) -> GoalDTO:
+                       activity: dict | None = None, pr_state: dict | None = None) -> GoalDTO:
         from brindle.autopilot import person_note
 
         phases = phases or {}
@@ -422,7 +432,7 @@ class GoalDTO(_DTO):
                    goal=ap.goal, summary=ap.summary, detail=ap.detail,
                    state=ap.state, note=person_note(ap), progress=ap.progress,
                    usage_resets_at=ap.usage_resets_at,
-                   goal_phase=goal_phase[0], pr_url=goal_phase[1],
+                   goal_phase=goal_phase[0], pr_url=goal_phase[1], pr_state=pr_state,
                    milestones=[MilestoneDTO.from_row(m, phases.get(m.id, "in_progress"))
                                for m in milestones])
 

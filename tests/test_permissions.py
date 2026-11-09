@@ -171,8 +171,19 @@ def test_shell_forms(tmp_path, command, expected):
     pytest.param('git grep --open-files-in-pager=blocked "x|y"', "ask", marks=pytest.mark.variant("bypass: git pager")),
     pytest.param('rg --pre=blocked "x|y" .', "ask", marks=pytest.mark.variant("bypass: search preprocessor")),
     pytest.param('grep "x|y .', "ask", marks=pytest.mark.variant("bypass: unclosed quote")),
+    pytest.param('grep -r --color x {outside}', "ask",
+                 marks=pytest.mark.variant("bypass: --color takes no separate value, so its next word is no value")),
+    pytest.param('grep -r --context x {outside}', "ask",
+                 marks=pytest.mark.variant("bypass: BSD grep's --context value is optional")),
+    pytest.param('grep -r --context 2 "no operand"', "ask",
+                 marks=pytest.mark.variant("bypass: GNU grep's --context takes 2, leaving no operand, so it searches here")),
+    pytest.param('grep -R x .', "ask",
+                 marks=pytest.mark.variant("bypass: GNU grep -R follows a symlink to a folder with a denied file")),
+    pytest.param('grep --dereference-recursive x .', "ask",
+                 marks=pytest.mark.variant("bypass: the long spelling of -R")),
 ])
 def test_quoted_search(tmp_path, command, expected):
+    import os
     from dataclasses import replace
     from brindle import permissions
 
@@ -193,6 +204,15 @@ def test_quoted_search(tmp_path, command, expected):
         (tmp_path / "sub/secret.py").touch()
         permissions.add_rule("read", str(tmp_path / "sub/secret.py"), "deny", "exact")
     (tmp_path / "nested/public.txt").touch()
+    if "no operand" in command:
+        (tmp_path / "secret.env").touch()
+    outside = tmp_path.parent / f"{tmp_path.name}-outside"
+    if "{outside}" in command or "grep -R" in command or "--dereference-recursive" in command:
+        outside.mkdir()
+        (outside / "secret.env").touch()
+        command = command.replace("{outside}", str(outside))
+        if command.endswith(" ."):
+            os.symlink(outside, tmp_path / "linked")
     if "trailing slash" in command:
         (tmp_path / "nested/secret.py").touch()
     if "included files" in command:
@@ -225,6 +245,18 @@ def test_quoted_search(tmp_path, command, expected):
         assert permissions.decide(request).decision == "allow"
         rules = [r for r in permissions.all_rules() if r.match != str(excluded)]
         assert permissions.decide(replace(request, command='grep -r x .'), rules=rules).decision == "ask"
+
+
+@pytest.mark.variant("real incident: this piped grep with 2>/dev/null, over a tree too big to walk, caused the flood of permission prompts")
+def test_a_stderr_redirect_leaves_a_filtered_search_alone(tmp_path, monkeypatch):
+    from brindle import permissions
+
+    permissions.apply_preset("autonomous")
+    monkeypatch.setattr(permissions, "WALK_LIMIT", 0)   # a tree too big to prove read-only
+    (tmp_path / "a.py").touch()
+    here = str(tmp_path)
+    command = 'grep -rn x --include=*.py . 2>/dev/null | head -5'
+    assert permissions.decide(permissions.Request("claude", "bash", "Bash", here, here, here, command=command)).decision == "allow"
 
 
 def _bypass(command):
@@ -578,6 +610,7 @@ LOOP = "until s=$(gh run view 1 --json status --jq .status); [[ $s == completed*
     _split("let 'a[$(git push --force origin x)]=1'"),
     _split("declare -i n='a[$(printenv)]'"),
     _split("printf -v 'a[$(printenv)]' x"),
+    _split("printf -va'[$(printenv)]' x"),
     # A cd brindle can't follow, with a file named after it.
     _split("cd $X; grep x id_rsa"),
     _split("CDPATH=~; cd sub; grep x id_rsa"),

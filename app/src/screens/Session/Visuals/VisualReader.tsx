@@ -101,7 +101,7 @@ export function VisualReader({ client, visual, loading, onBack, asking, onAnswer
   readRef.current = onRead;
   useEffect(() => {
     // Update the list locally for this revision; the read event refreshes the Inbox too.
-    if (id && unread) client.markVisualRead(id).then(() => readRef.current?.(id, rev), () => undefined);
+    if (id && unread) client.markVisualRead(id, rev).then(() => readRef.current?.(id, rev), () => undefined);
   }, [client, id, rev, unread]);
   const [picked, setPicked] = useState<{ key: string; option: string } | null>(null);
   const key = visual ? `${visual.id}:${visual.rev}` : "";

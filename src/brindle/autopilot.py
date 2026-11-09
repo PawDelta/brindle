@@ -1888,14 +1888,30 @@ def _goal_eta(db: DB, tree: list[Agent], live: list[Agent], now: float) -> float
                     "SELECT samples FROM stage_timings WHERE repo_root=? AND stage='report_to_merge' AND day>=?",
                     (repo, day)) for s in json.loads(r["samples"])]
             else:
-                samples = [r[0] for r in db.conn.execute(
-                    "SELECT a.reviewing_since-a.created_at FROM agents a JOIN workspaces w ON w.id=a.workspace_id"
-                    " WHERE w.repo_root=? AND a.profile=? AND a.created_at>=? AND a.reviewing_since<=?"
+                history = list(db.conn.execute(
+                    "SELECT stage, samples FROM stage_timings WHERE repo_root=? AND stage GLOB 'build:*' AND day>=?",
+                    (repo, day)))
+                legacy = list(db.conn.execute(
+                    "SELECT a.profile, a.reviewing_since-a.created_at AS duration"
+                    " FROM agents a JOIN workspaces w ON w.id=a.workspace_id"
+                    " WHERE w.repo_root=? AND a.created_at>=? AND a.reviewing_since<=?"
                     " AND a.reviewing_since>a.created_at AND a.result IS NOT NULL"
                     " AND a.mode IN ('assign', 'handoff', 'handoff_detached')",
-                    (repo, profile, since, now))]
+                    (repo, since, now)))
+                # Prefer durable profile history, then legacy profile rows while
+                # it fills. Never combine them: the same build may be in both.
+                candidates = (
+                    [s for r in history if r["stage"] == f"build:{profile}" for s in json.loads(r["samples"])],
+                    [r["duration"] for r in legacy if r["profile"] == profile],
+                    [s for r in history for s in json.loads(r["samples"])],
+                    [r["duration"] for r in legacy],
+                )
+                samples = next((s for s in candidates if len(s) >= ESTIMATE_RUNS), [])
             medians[key] = statistics.median(samples) if len(samples) >= ESTIMATE_RUNS else None
         return medians[key]
+
+    def report_remaining(merge: float, reported: float) -> float:
+        return max(60.0, merge - max(0, now - reported))
 
     remaining: dict[str, float] = {}
     for a in live:
@@ -1903,8 +1919,8 @@ def _goal_eta(db: DB, tree: list[Agent], live: list[Agent], now: float) -> float
         merge = typical(ws.repo_root) if ws else None
         if merge is None:
             return None
-        if a.pipeline in ("ready", "reviewing") and a.reviewing_since:
-            remaining[a.id] = max(60.0, merge - max(0, now - a.reviewing_since))
+        if a.pipeline in ("ready", "reviewing", "fixing") and a.reviewing_since:
+            remaining[a.id] = report_remaining(merge, a.reviewing_since)
         else:
             build = typical(ws.repo_root, a.profile)
             if build is None:
@@ -1956,8 +1972,16 @@ def _goal_eta(db: DB, tree: list[Agent], live: list[Agent], now: float) -> float
 
             for a in occupants:
                 ws = db.get_workspace(a.workspace_id)
-                releases.append(0.0 if a.pipeline in ("ready", "reviewing") and a.reviewing_since else
-                                release_at(ws.repo_root if ws else None, a.profile, a.created_at))
+                if a.pipeline == "fixing" and a.reviewing_since:
+                    merge = typical(ws.repo_root) if ws else None
+                    # Fixing occupies a process slot until its next report;
+                    # report-to-merge history bounds that remaining work.
+                    release = report_remaining(merge, a.reviewing_since) if merge is not None else float("inf")
+                elif a.pipeline in ("ready", "reviewing") and a.reviewing_since:
+                    release = 0.0
+                else:
+                    release = release_at(ws.repo_root if ws else None, a.profile, a.created_at)
+                releases.append(release)
             for t in claims:
                 release = release_at(t.repo_root, t.profile, t.started_at or t.created_at)
                 releases.append(release)

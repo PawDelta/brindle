@@ -15,7 +15,7 @@ import sqlite3
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, fields
-from typing import Iterator
+from typing import Callable, Iterator
 
 from brindle import bus
 from brindle.config import db_path
@@ -1310,6 +1310,9 @@ def request_subagent(row) -> str | None:
     return subagent if isinstance(subagent, str) and subagent else None
 
 
+WAITER_CLAIM = "waiter-claim:"   # agent_marks kind prefix, then the waiter's pid (DB.pop_pending)
+
+
 def _pane_delivery_message(c: sqlite3.Connection, agent_id: str) -> int | None:
     """The id of the message ``agent_id``'s pane-delivery mark is typing in,
     while that message is still there. A mark whose message is gone (a
@@ -2270,20 +2273,34 @@ class DB:
             c.execute(f"UPDATE agents SET {field}=? WHERE id=? AND {field} IS ?",
                       (previous, agent_id, since))
 
-    def claim_idle(self, agent_id: str) -> float | None:
+    def claim_idle(self, agent_id: str) -> tuple[float, float | None] | None:
         """Atomically flip idle -> processing. Only the caller that wins may type
         into the agent's terminal, so two senders never interleave keystrokes.
-        Return this claim's status_since for rollback, or None if already busy."""
+        Return (this claim's status_since, the one it replaced) for
+        ``unclaim_idle``, or None if already busy."""
         with self.tx() as c:
+            row = c.execute("SELECT status_since FROM agents WHERE id=? AND status='idle'", (agent_id,)).fetchone()
+            if row is None:
+                return None
             claimed_at = time.time()
-            cur = c.execute(
-                "UPDATE agents SET status='processing', status_since=? WHERE id=? AND status='idle'",
-                (claimed_at, agent_id),
-            )
-            claimed = cur.rowcount == 1
-        if claimed:
-            bus.publish_agent(self, "agent.status", agent_id, status="processing")
-        return claimed_at if claimed else None
+            c.execute("UPDATE agents SET status='processing', status_since=? WHERE id=?", (claimed_at, agent_id))
+        bus.publish_agent(self, "agent.status", agent_id, status="processing")
+        return claimed_at, row["status_since"]
+
+    def unclaim_idle(self, agent_id: str, claim: tuple[float, float | None]) -> None:
+        """Undo ``claim_idle`` when nothing was delivered: idle again, on the
+        same stop as before (no turn ran, and the notices about a stop go by
+        its status_since), unless a newer hook or pause has moved the status."""
+        with self.tx() as c:
+            changed = self._unclaim_idle(c, agent_id, claim)
+        if changed:
+            bus.publish_agent(self, "agent.status", agent_id, status="idle")
+
+    @staticmethod
+    def _unclaim_idle(c: sqlite3.Connection, agent_id: str, claim: tuple[float, float | None]) -> int:
+        return c.execute("UPDATE agents SET status='idle', status_since=? "
+                         "WHERE id=? AND status='processing' AND status_since=?",
+                         (claim[1], agent_id, claim[0])).rowcount
 
     _STAMP = "status_since = CASE WHEN status = ? THEN status_since ELSE ? END"
 
@@ -2496,9 +2513,14 @@ class DB:
                     c.execute("DELETE FROM permission_requests WHERE agent_id=? AND tool_use_id=?",
                               (agent_id, row["tool_use_id"]))
 
-    def pop_pending(self, agent_id: str) -> Message | None:
+    def pop_pending(self, agent_id: str, pane_mark: Callable[[Message], str] | None = None,
+                    waiter_pid: int | None = None) -> Message | None:
         """Atomically claim the oldest undelivered message, if any. None while
-        a pane delivery holds the queue (agents._resume_pane_delivery goes first)."""
+        a pane delivery holds the queue (agents._resume_pane_delivery goes first).
+        ``pane_mark``: the claim is a pane delivery's, whose mark (what this
+        returns for the message) owns the undelivered row from here on, so a
+        process that dies before its first write loses nothing. ``waiter_pid``:
+        the claim is that waiter's, recorded with it (see ``waiter_claims``)."""
         with self.tx() as c:
             if _pane_delivery_message(c, agent_id) is not None:
                 return None
@@ -2509,14 +2531,84 @@ class DB:
             ).fetchone()
             if not row:
                 return None
-            c.execute("UPDATE inbox SET delivered_at=? WHERE id=?", (time.time(), row["id"]))
-            return _load(Message, row)
+            msg = _load(Message, row)
+            if pane_mark is None:
+                c.execute("UPDATE inbox SET delivered_at=? WHERE id=?", (time.time(), row["id"]))
+            else:
+                c.execute("INSERT INTO agent_marks (agent_id, kind, value) VALUES (?,'pane-delivery',?)"
+                          " ON CONFLICT(agent_id, kind) DO UPDATE SET value=excluded.value",
+                          (agent_id, pane_mark(msg)))
+            if waiter_pid is not None:
+                kind = f"{WAITER_CLAIM}{waiter_pid}"
+                held = c.execute("SELECT value FROM agent_marks WHERE agent_id=? AND kind=?",
+                                 (agent_id, kind)).fetchone()
+                ids = (json.loads(held["value"])["ids"] if held else []) + [msg.id]
+                c.execute("INSERT INTO agent_marks (agent_id, kind, value) VALUES (?,?,?)"
+                          " ON CONFLICT(agent_id, kind) DO UPDATE SET value=excluded.value",
+                          (agent_id, kind, json.dumps({"pid": waiter_pid, "at": time.time(), "ids": ids})))
+            return msg
+
+    def waiter_claims(self, agent_id: str | None = None) -> list[sqlite3.Row]:
+        """Mail a waiter (brindle.wake) has taken and not finished handing
+        over: the rows read delivered, so nothing else offers them, and this
+        record is what lets them be recovered if it dies holding them."""
+        sql, args = f"SELECT agent_id, kind, value FROM agent_marks WHERE kind LIKE '{WAITER_CLAIM}%'", ()
+        if agent_id is not None:
+            sql, args = sql + " AND agent_id=?", (agent_id,)
+        return self.conn.execute(sql, args).fetchall()
+
+    def reclaim_waiter_claim(self, agent_id: str, kind: str, value: str) -> bool:
+        """Put an abandoned waiter's mail back in the queue, the same rows, if
+        its claim is still ``value``."""
+        with self.tx() as c:
+            if not c.execute("DELETE FROM agent_marks WHERE agent_id=? AND kind=? AND value=?",
+                             (agent_id, kind, value)).rowcount:
+                return False
+            c.executemany("UPDATE inbox SET delivered_at=NULL WHERE id=? AND agent_id=?",
+                          [(i, agent_id) for i in json.loads(value)["ids"]])
+        return True
+
+    def settle_pane_delivery(self, agent_id: str, saved: str) -> bool:
+        """Retire a pane delivery whose window is gone, atomically and only
+        if its mark is still ``saved``: sent counts as delivered, unknown is
+        kept unresolved (see ``retain_unresolved``), any other row is queued."""
+        state = json.loads(saved)
+        with self.tx() as c:
+            if not c.execute("DELETE FROM agent_marks WHERE agent_id=? AND kind='pane-delivery' AND value=?",
+                             (agent_id, saved)).rowcount:
+                return False
+            if state.get("stage") == "submitted":
+                c.execute("UPDATE inbox SET delivered_at=? WHERE id=? AND agent_id=?",
+                          (time.time(), state.get("message_id"), agent_id))
+            elif state.get("turn_started"):
+                c.execute("UPDATE inbox SET held=2, delivered_at=NULL WHERE id=? AND agent_id=?",
+                          (state.get("message_id"), agent_id))
+        return True
+
+    def marks_of_kind(self, kind: str) -> list[sqlite3.Row]:
+        """Every ``agent_marks`` row of ``kind``."""
+        return self.conn.execute("SELECT agent_id, value FROM agent_marks WHERE kind=?", (kind,)).fetchall()
+
+    def pane_delivery_holds(self, agent_id: str) -> bool:
+        """Whether a pane delivery's mark is holding ``agent_id``'s queue."""
+        return _pane_delivery_message(self.conn, agent_id) is not None
+
+    @staticmethod
+    def _drop_unwritten_pane_mark(c: sqlite3.Connection, agent_id: str, message_id: int) -> None:
+        """A claim given up before its first write has nothing left to resume."""
+        row = c.execute("SELECT value FROM agent_marks WHERE agent_id=? AND kind='pane-delivery'",
+                        (agent_id,)).fetchone()
+        if row is not None:
+            state = json.loads(row["value"])
+            if state.get("message_id") == message_id and state.get("stage") is None:
+                c.execute("DELETE FROM agent_marks WHERE agent_id=? AND kind='pane-delivery'", (agent_id,))
 
     def release_pending(self, message_id: int, agent_id: str) -> None:
         """Put a message pop_pending claimed back in the queue, as it was."""
         with self.tx() as c:
             c.execute("UPDATE inbox SET delivered_at=NULL WHERE id=? AND agent_id=?",
                       (message_id, agent_id))
+            self._drop_unwritten_pane_mark(c, agent_id, message_id)
 
     PANE_STAGES = (None, "lead", "body", "submitted")
 
@@ -2553,18 +2645,20 @@ class DB:
                       (agent_id, json.dumps(merged)))
         return merged
 
-    def retry_pending(self, message_id: int, agent_id: str, idle_since: float) -> None:
+    def requeue_claimed(self, message_id: int, agent_id: str, claim: tuple[float, float | None]) -> None:
         """Release the caller's failed delivery claim without creating a second message.
 
-        Restore idle only if this delivery still owns the processing status;
-        a newer hook or pause must keep its status. Both releases are atomic.
+        Restore idle only if this delivery still owns the processing status
+        (see ``unclaim_idle``); a newer hook or pause must keep its status.
+        Both releases are atomic.
         """
         with self.tx() as c:
             c.execute("UPDATE inbox SET delivered_at=NULL WHERE id=? AND agent_id=?",
                       (message_id, agent_id))
-            c.execute("UPDATE agents SET status='idle', status_since=? "
-                      "WHERE id=? AND status='processing' AND status_since=?",
-                      (time.time(), agent_id, idle_since))
+            self._drop_unwritten_pane_mark(c, agent_id, message_id)
+            changed = self._unclaim_idle(c, agent_id, claim)
+        if changed:
+            bus.publish_agent(self, "agent.status", agent_id, status="idle")
 
     def drop_pending(self, agent_id: str, sender_id: str) -> int:
         with self.tx() as c:
