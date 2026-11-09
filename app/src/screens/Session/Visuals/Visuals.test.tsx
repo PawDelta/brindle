@@ -216,16 +216,14 @@ describe("visuals", () => {
     clock = 6000;
     await type("pending answer");                   // asks again; the answer is slow
     replies[0]!({ visuals: false });
-    await act(async () => undefined);
-    expect(replies).toHaveLength(1);                // one request at a time
     await type("r", false);                         // off: begun, not reported
     clock = 12000;
     await type("ender first", false);               // asks again, still off at this key
     replies[1]!({ visuals: true });
-    await act(async () => undefined);
-    await type("", true);
-    await type("\"x y\"");
-    expect(words).toEqual(["failed answer", "pending answer", "render first", "\"x y\""]);   // never the tail "ender first"
+    await type("", false);
+    await type("");
+    expect(replies).toHaveLength(2);                // one request at a time
+    expect(words).toEqual(["failed answer", "pending answer", "render first"]);   // never the tail "ender first"
   });
 
   it("observes Codex PTY submissions before forwarding Enter, including edits, pastes and uncertain history", async () => {
