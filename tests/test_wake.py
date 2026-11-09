@@ -5,6 +5,7 @@ real CLIs)."""
 import io
 import json
 import re
+import sqlite3
 import sys
 import time
 
@@ -199,3 +200,44 @@ def test_mail_not_handed_over_is_queued_again(db, boss, monkeypatch):
     assert wake.main(db, "boss") == 2
     assert sorted(b for _, b in _framed(out.getvalue(), _nonce(out.getvalue()))) == ["one", "two"]
     assert db.pending_count("boss") == 0 and db.get_agent("boss").status == "processing"
+
+
+def test_taken_mail_keeps_its_place_and_its_hand_over_survives_a_busy_db(db, boss, monkeypatch):
+    for body in ("one", "two"):
+        db.enqueue("boss", body, None)
+    _, taken = wake.take(db, db.get_agent("boss"))
+    db.enqueue("boss", "newer", None)
+    wake.give_back(db, "boss", taken)
+
+    def locked(*a, **k):
+        raise sqlite3.OperationalError("database is locked")
+
+    out = io.StringIO()
+    monkeypatch.setattr(wake, "wait", lambda db, agent_id: wake.take(db, db.get_agent(agent_id)))
+    monkeypatch.setattr(wake.signal, "signal", lambda *a: None)
+    monkeypatch.setattr(sys, "stderr", out)
+    monkeypatch.setattr(db, "set_status", locked)
+    assert wake.main(db, "boss") == 2   # any other exit code and Claude Code never reads it
+    assert [b for _, b in _framed(out.getvalue(), _nonce(out.getvalue()))] == ["one", "two", "newer"]
+
+
+def test_a_stopped_pane_delivery_doesnt_wedge_a_live_waiter(db, boss, monkeypatch):
+    # The waiter can't take past the mark, and flush left the queue to the waiter.
+    monkeypatch.setattr(agents, "_composer_settled", lambda a: True)
+    monkeypatch.setattr(agents, "_partial_composer", lambda a, state, stage: False)
+    monkeypatch.setattr(agents, "_composer_taken", lambda a: False)
+    monkeypatch.setattr(agents, "_paste_blocked", lambda a: False)
+    monkeypatch.setattr(agents, "_pane_input", lambda a: None)
+    pasted = []
+    monkeypatch.setattr(agents.tmux, "paste", lambda target, body, **k: pasted.append(body))
+    wake._register("boss")
+    mid = db.enqueue("boss", "typed", None)
+    db.record_pane_delivery(mid, "boss", json.dumps(
+        {"message_id": mid, "pane": "@0", "server": agents.server_of(db.get_agent("boss")), "provider": "claude",
+         "body": "typed", "lead": "brindle delivered this message:", "stage": "lead", "stopped": True}))
+    db.enqueue("boss", "the answer", None)
+
+    assert agents._stop_decision(db, db.get_agent("boss"), {}, via_inbox=True, waiter=True) is None
+    assert db.get_agent("boss").status == "idle"   # the sweep's flush needs it idle
+    assert agents.flush(db, "boss") is True and pasted == ["typed"]
+    assert "the answer" in wake.take(db, db.get_agent("boss"))[0]

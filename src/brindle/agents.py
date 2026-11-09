@@ -2330,6 +2330,16 @@ def _send_message(db: DB, agent: Agent, body: str, sender_id: str | None,
             db.mark_delivered(kept)
         return "delivered"
     message_id = db.enqueue(agent.id, text, sender_id, notice=notice)
+    try:
+        return _hand_over(db, agent, message_id, text, sender_id)
+    except (AgentError, tmux.TmuxError):
+        # It is queued and stays queued for the next flush: reported as a
+        # failure, its sender would send it again (or queue a second copy).
+        return "queued"
+
+
+def _hand_over(db: DB, agent: Agent, message_id: int, text: str, sender_id: str | None) -> str:
+    """Try to get a message just queued for ``agent`` to it now."""
     from brindle import login_pause
 
     if login_pause.holding(db, agent.id):
@@ -2580,6 +2590,22 @@ def _partial_composer(agent: Agent, state: dict, stage: str) -> bool:
     return draft == expected.rstrip()
 
 
+def _retire_orphaned_delivery(db: DB, agent: Agent, message_id: int, state: dict) -> bool:
+    """A delivery typed into a pane the agent no longer runs in (its session
+    came back in a new one), whose composer went with it: nothing can finish
+    it, and left in place its mark would hold the queue for good. Sent is
+    delivered; unknown is kept unresolved, as in _resume_pane_delivery; any
+    other goes back in the queue, the same row, and the queue moves on."""
+    if state.get("stage") == "submitted":
+        db.mark_delivered(message_id)
+        db.set_mark(agent.id, "pane-delivery", None)
+    elif state.get("turn_started"):
+        db.retain_unresolved(message_id, agent.id)
+    else:
+        db.set_mark(agent.id, "pane-delivery", None)
+    return _flush_messages(db, agent.id)
+
+
 def _resume_pane_delivery(db: DB, agent: Agent, saved: str) -> bool:
     """Resume the same queued message before any other transport can take it."""
     from brindle import identity_lock
@@ -2591,9 +2617,10 @@ def _resume_pane_delivery(db: DB, agent: Agent, saved: str) -> bool:
         db.set_mark(agent.id, "pane-delivery", None)
         return False
     identity_lock.ensure(agent)
-    if (agent.tmux_window != state["pane"] or server_of(agent) != state["server"]
-            or agent.provider != state["provider"] or row["body"] != state["body"]
-            or agent.status not in ("idle", "processing")
+    if (agent.tmux_window != state.get("pane") or server_of(agent) != state.get("server")
+            or agent.provider != state.get("provider") or row["body"] != state["body"]):
+        return _retire_orphaned_delivery(db, agent, row["id"], state)
+    if (agent.status not in ("idle", "processing")
             or (agent.status == "processing" and not get_provider(agent.provider).types_midturn)):
         return False
     if state["stage"] == "submitted":
@@ -2689,11 +2716,15 @@ def _flush_messages(db: DB, agent_id: str) -> bool:
     from brindle import wake
 
     agent = db.get_agent(agent_id)
-    if _delivery_held(db, agent):
+    if _delivery_held(db, agent, waiter=False):
         return False
     partial = db.mark(agent_id, "pane-delivery")
     if partial is not None:
+        # Even with a live waiter: its take() can't pass this mark, so only
+        # finishing the delivery here lets the queue move again.
         return _resume_pane_delivery(db, agent, partial)
+    if wake.enabled(agent) and wake.live(agent):
+        return False
     if not wake.enabled(agent) and inbox.usable(agent):
         delivered = False
         while (msg := db.pop_pending(agent_id)) is not None:
@@ -2727,16 +2758,16 @@ def delivery_lock(agent_id: str):
     return pipeline._reentrant_lock("deliver-" + hashlib.sha1(agent_id.encode()).hexdigest()[:16])
 
 
-def _delivery_held(db: DB, agent: Agent | None) -> bool:
+def _delivery_held(db: DB, agent: Agent | None, waiter: bool = True) -> bool:
     """Whether ``flush`` must leave the queue alone: the agent is gone or
     headless (its runner takes messages from the inbox itself), its session
-    waits on an expired cloud login (resuming flushes it), or a live waiter
-    hands the queue over (brindle.wake)."""
+    waits on an expired cloud login (resuming flushes it), or, with
+    ``waiter``, a live waiter hands the queue over (brindle.wake)."""
     from brindle import login_pause
     from brindle import wake
 
     return (agent is None or agent.headless or login_pause.holding(db, agent.id)
-            or (wake.enabled(agent) and wake.live(agent)))
+            or (waiter and wake.enabled(agent) and wake.live(agent)))
 
 
 # A chat the person pressed a key in this recently is theirs: a queued message
@@ -2748,6 +2779,13 @@ class _PasteBlocked(Exception):
     """Raised inside a delivery's protected block when the pane became blocked."""
 
 
+def _pane_mark(db: DB, agent: Agent, msg) -> str:
+    """The mark of a pane delivery of ``msg`` that has written nothing yet."""
+    return json.dumps({"message_id": msg.id, "pane": agent.tmux_window, "server": server_of(agent),
+                       "provider": agent.provider, "body": msg.body,
+                       "lead": message_lead(db, agent, msg.sender_id), "stage": None})
+
+
 def _flush_pane(db: DB, agent_id: str) -> bool:
     """``flush``'s typed delivery, under its delivery_lock. The queue and the
     agent are read afresh: while it waited, another sender may have delivered,
@@ -2756,19 +2794,19 @@ def _flush_pane(db: DB, agent_id: str) -> bool:
 
     if _delivery_held(db, db.get_agent(agent_id)) or db.pending_count(agent_id) == 0:
         return False
-    claimed_at = db.claim_idle(agent_id)
-    if claimed_at is None:
+    claim = db.claim_idle(agent_id)
+    if claim is None:
         return _flush_midturn(db, agent_id)
     agent = db.get_agent(agent_id)
     assert agent is not None
     if _paste_blocked(agent):
         # Leave it queued: the next flush (a later message, or a resumed
         # session's start-up) gets another chance.
-        db.set_status(agent_id, "idle", only_if="processing")
+        db.unclaim_idle(agent_id, claim)
         return False
-    msg = db.pop_pending(agent_id)
+    msg = db.pop_pending(agent_id, pane_mark=lambda m: _pane_mark(db, agent, m))
     if not msg:
-        db.set_status(agent_id, "idle", only_if="processing")
+        db.unclaim_idle(agent_id, claim)
         return False
     from brindle import antigravity
     warmup = agent.provider == "antigravity" and antigravity.WARMUP_END in msg.body
@@ -2781,7 +2819,7 @@ def _flush_pane(db: DB, agent_id: str) -> bool:
     except BaseException as exc:
         # pop_pending claimed this row before the external send. Release the
         # same row and our idle claim so the next flush can try it once more.
-        db.retry_pending(msg.id, agent_id, claimed_at)
+        db.requeue_claimed(msg.id, agent_id, claim)
         if isinstance(exc, _PasteBlocked):
             return False
         raise
@@ -2806,7 +2844,7 @@ def _flush_midturn(db: DB, agent_id: str) -> bool:
         return False
     if get_provider(agent.provider).screen_state(screen) == "waiting" or _paste_blocked(agent):
         return False
-    msg = db.pop_pending(agent_id)
+    msg = db.pop_pending(agent_id, pane_mark=lambda m: _pane_mark(db, agent, m))
     if not msg:
         return False
     try:
@@ -5285,8 +5323,8 @@ def _stop_decision(db: DB, agent: Agent, payload: dict, via_inbox: bool = False,
             tasks.sweep(db)
         except Exception:  # noqa: BLE001 -- must never break the Stop hook
             log.exception("brindle: queued-task sweep failed")
-    if waiter and db.pending_count(agent.id):
-        db.set_status(agent.id, "processing")
+    if waiter and db.pending_count(agent.id) and not db.pane_delivery_holds(agent.id):
+        db.set_status(agent.id, "processing")   # the waiter wakes it at once
         return None
     msg = None if waiter else db.pop_pending(agent.id)
     if msg:

@@ -1,11 +1,12 @@
 """message_delivery "pull": agents' messages to an interactive supervisor wait
 unread behind one notice until read_messages (no real CLIs)."""
 
+import json
 import time
 
 import pytest
 
-from brindle import agents, tmux, workspaces
+from brindle import agents, launch_health, tmux, workspaces
 from brindle.db import Agent
 
 REAL_PULLS = agents.pulls_messages  # conftest patches it off for the other tests
@@ -226,3 +227,81 @@ def test_tool_hooks_leave_a_paused_agent_alone(db, boss):
     db.set_status("boss", "paused")
     agents.handle_hook(db, "boss", "tool-done", {})
     assert db.get_agent("boss").status == "paused"
+
+
+@pytest.fixture
+def pane(db, boss, monkeypatch):
+    """An idle supervisor whose pane takes anything typed; what went in."""
+    db.set_status("boss", "idle")
+    monkeypatch.setattr(agents, "_paste_blocked", lambda a: False)
+    monkeypatch.setattr(agents, "_composer_taken", lambda a: False)
+    monkeypatch.setattr(agents, "_pane_input", lambda a: None)
+    pasted = []
+    monkeypatch.setattr(tmux, "paste", lambda target, body, **k: pasted.append(body))
+    return pasted
+
+
+@pytest.mark.parametrize("stage, fields, typed, delivered", [
+    ("lead", {}, ["m", "n"], True),   # never sent: back in the queue, the same row
+    ("submitted", {}, ["n"], True),
+    ("body", {"turn_started": True}, ["n"], False),   # may have gone in: kept unresolved
+])
+def test_a_delivery_into_a_pane_since_replaced_doesnt_hold_the_queue(db, pane, stage, fields, typed, delivered):
+    mid = db.enqueue("boss", "m", None)
+    db.record_pane_delivery(mid, "boss", json.dumps(
+        {"message_id": mid, "pane": "@old", "server": agents.server_of(db.get_agent("boss")), "provider": "claude",
+         "body": "m", "lead": "L", "stage": stage, **fields}))
+    db.enqueue("boss", "n", None)
+    for _ in typed:
+        db.set_status("boss", "idle")
+        assert agents.flush(db, "boss") is True
+    assert pane == typed and db.message_delivered(mid) is delivered and db.pending_count("boss") == 0
+
+
+def _raises(exc):
+    def fail(*a, **k):
+        raise exc
+    return fail
+
+
+@pytest.mark.variant("a process dying between its claim and its first write")
+def test_a_process_dying_right_after_the_claim_loses_nothing(db, pane, monkeypatch):
+    real = launch_health.before_delivery
+    mid = db.enqueue("boss", "m", None)
+    monkeypatch.setattr(launch_health, "before_delivery", _raises(KeyboardInterrupt))
+    monkeypatch.setattr(db, "requeue_claimed", lambda *a: None)   # a dead process cleans nothing up
+    with pytest.raises(KeyboardInterrupt):
+        agents.flush(db, "boss")
+    assert not db.message_delivered(mid)
+
+    monkeypatch.setattr(launch_health, "before_delivery", real)
+    monkeypatch.setattr(agents, "_composer_settled", lambda a: True)
+    monkeypatch.setattr(agents, "_partial_composer", lambda a, state, stage: False)
+    db.set_status("boss", "idle")
+    assert agents.flush(db, "boss") is True and pane == ["m"] and db.message_delivered(mid)
+
+
+@pytest.mark.parametrize("how", ["blocked", "paste"])
+def test_a_failed_delivery_leaves_the_agent_on_the_same_stop(db, pane, monkeypatch, how):
+    # Notices about a stop go by status_since: a new one would repeat them.
+    db.update_agent("boss", status_since=1000.0)
+    mid = db.enqueue("boss", "m", None)
+    if how == "blocked":
+        monkeypatch.setattr(agents, "_paste_blocked", lambda a: True)
+    else:
+        monkeypatch.setattr(tmux, "paste", _raises(agents._PasteBlocked))
+    assert agents.flush(db, "boss") is False
+    a = db.get_agent("boss")
+    assert (a.status, a.status_since) == ("idle", 1000.0)
+    assert not db.message_delivered(mid) and db.mark("boss", "pane-delivery") is None
+
+
+@pytest.mark.parametrize("failure", [
+    tmux.TmuxError("pane gone"),
+    pytest.param(agents.AgentError("signed in as someone else"), marks=pytest.mark.variant("identity lock raised mid-flush")),
+])
+def test_a_message_already_queued_is_never_reported_as_failed(db, pane, monkeypatch, failure):
+    # A caller told it failed sends it again, or queues a second copy.
+    monkeypatch.setattr(agents, "flush", _raises(failure))
+    assert agents.send_message(db, "boss", "m", person=True) == "queued"
+    assert db.pending_count("boss") == 1

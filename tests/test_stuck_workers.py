@@ -216,6 +216,31 @@ def test_a_skipped_takeover_restarts_the_hour_and_the_stop_refusal(db, boss, wor
     assert [ws for ws, _ in takeover["removed"]] == ["w"]
 
 
+def test_an_item_nothing_can_close_does_not_refuse_stops(db, boss, worker, told, monkeypatch):
+    """Dead, so no message reaches it; in a shared checkout, so neither a
+    takeover nor remove_workspace applies."""
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id == "boss")
+    db.update_agent("w1", workspace_id=boss.workspace_id, status="failed")
+    open_items.track(db, db.get_agent("w1"), "stopped without calling report_result", time.time())
+    assert "w1" in autopilot.on_stop(db, boss, {})["reason"]
+    assert "shared checkout" in mcp_server.requeue("w1")
+    assert open_items.stop_block(db, boss) is None
+
+
+def test_a_takeover_that_died_part_way_reuses_its_replacement(db, boss, takeover, monkeypatch):
+    def die(*a, **k):
+        raise KeyboardInterrupt   # as a process dying: nothing below handles it
+
+    finish = workspaces.remove
+    monkeypatch.setattr(workspaces, "remove", die)
+    with pytest.raises(KeyboardInterrupt):
+        open_items.sweep(db, T0 + open_items.AUTO_REASSIGN_AFTER, panes())
+    monkeypatch.setattr(workspaces, "remove", finish)
+    open_items.sweep(db, T0 + open_items.AUTO_REASSIGN_AFTER + open_items.CLAIM_EXPIRES + 1, panes())
+    assert [ws for ws, _ in takeover["removed"]] == ["w"] and len(takeover["started"]) == 1
+    assert len(db.list_tasks()) == 1 and db.list_tasks(state=tasks.UNANSWERED) == []
+
+
 def test_a_plan_waiting_for_approval_is_not_a_stuck_worker(db, boss, worker, takeover, monkeypatch):
     # Another supervisor can't requeue this worker while its open item exists.
     db.add_agent(Agent("other", boss.workspace_id, "supervisor", "claude", None, "interactive", "idle", "@2", None, T0))

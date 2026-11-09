@@ -32,6 +32,7 @@ import os
 import re
 import secrets
 import signal
+import sqlite3
 import sys
 import time
 import uuid
@@ -160,9 +161,10 @@ def take(db: DB, agent: Agent) -> tuple[str, list] | None:
 
 
 def give_back(db: DB, agent_id: str, taken: list) -> None:
-    """Queue taken messages again, as agents.flush does when a send fails."""
+    """Put taken messages back where they were in the queue, as agents.flush
+    does when a send fails: the same rows, so ahead of anything newer."""
     for msg in taken:
-        db.enqueue(agent_id, msg.body, msg.sender_id, notice=msg.noticed_at is not None)
+        db.release_pending(msg.id, agent_id)
 
 
 def _heartbeat(agent_id: str) -> bool:
@@ -246,5 +248,11 @@ def main(db: DB, agent_id: str) -> int:
     except BaseException:
         give_back(db, agent_id, taken)
         raise
-    db.set_status(agent_id, "processing", only_if="idle")  # it wakes with this
+    # Handed over: from here only exit code 2 makes Claude Code read it, so
+    # neither a late stop signal nor a busy database may change that.
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    try:
+        db.set_status(agent_id, "processing", only_if="idle")  # it wakes with this
+    except sqlite3.Error:
+        pass   # its prompt-submit hook sets it too
     return 2

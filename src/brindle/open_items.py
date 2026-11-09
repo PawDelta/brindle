@@ -123,12 +123,24 @@ def _named(db: DB, item: OpenItem, worker: Agent) -> str:
     return f"Worker {worker.id}{where} {said}: {item.detail}"
 
 
+def _cannot_close(db: DB, item: OpenItem, worker: Agent) -> bool:
+    """Nothing the supervisor has would close this: brindle gave up taking
+    it over, its process is gone so no message reaches it, and it has no
+    worktree of its own to remove (a shared checkout isn't the worker's)."""
+    if item.level < GAVE_UP or agents.is_alive(worker):
+        return False
+    ws = db.get_workspace(worker.workspace_id)
+    return ws is None or ws.kind != "worktree"
+
+
 def stop_block(db: DB, supervisor: Agent) -> dict | None:
     """The Stop hook's "block" while ``supervisor`` has open items, naming the
     first of them in the one line the chat shows. An item whose takeover is
-    due doesn't block: that waits for this supervisor to be idle."""
+    due doesn't block: that waits for this supervisor to be idle. Nor does
+    one it has no way to close."""
     now = time.time()
-    items = [(i, w) for i, w in _live(db, supervisor.id) if not _takeover_due(i, now)]
+    items = [(i, w) for i, w in _live(db, supervisor.id)
+             if not _takeover_due(i, now) and not _cannot_close(db, i, w)]
     if not items:
         return None
     named = "\n".join(_named(db, i, w) for i, w in items)
@@ -320,7 +332,10 @@ def reassign(db: DB, item: OpenItem, now: float | None = None, *, actor: Agent |
                      f"`{ws.branch}`. Check `git log {ws.branch}` and reuse what fits. "
                      f"What it was stuck on: {item.detail})")
     pipeline.note_removed_unmerged(db, ws, actor=actor)
-    new = tasks.enqueue(
+    # A takeover that died part way (the claim held here has expired) left
+    # its unstarted replacement, which nothing else would start or drop.
+    new = next((t for t in db.list_tasks(ws.repo_root, state=tasks.UNANSWERED)
+                if t.caller_id == supervisor.id and t.task_text == brief + unmerged_note), None) or tasks.enqueue(
         db, supervisor, caller_ws, worker.profile, brief + unmerged_note, "assign", isolate=True, branch=None,
         done_when=worker.done_when, files=tasks._loads(task.files) if task else None, depends_on=[],
         plan_first=None if worker.plan_first is None else bool(worker.plan_first), weight=worker.weight,
