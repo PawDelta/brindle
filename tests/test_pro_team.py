@@ -117,6 +117,7 @@ def test_undeclared_model_is_denied_when_a_list_is_set(team):
     assert not d.allowed and "no declared model" in d.reason
 
 
+@pytest.mark.variant("the reported bug: other tests reach these refusals but none asserts the org and link each one tells the person")
 @pytest.mark.parametrize("path", ["assign", "routing", "create"])
 def test_model_refusal_points_at_the_org_to_change(team, monkeypatch, path):
     from types import SimpleNamespace
