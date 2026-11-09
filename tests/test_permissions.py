@@ -247,6 +247,7 @@ def test_quoted_search(tmp_path, command, expected):
         assert permissions.decide(replace(request, command='grep -r x .'), rules=rules).decision == "ask"
 
 
+@pytest.mark.variant("real incident: this piped grep with 2>/dev/null, over a tree too big to walk, caused the flood of permission prompts")
 def test_a_stderr_redirect_leaves_a_filtered_search_alone(tmp_path, monkeypatch):
     from brindle import permissions
 
