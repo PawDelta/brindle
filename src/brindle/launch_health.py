@@ -650,25 +650,41 @@ def _log_started(name: str) -> float | None:
 def mcp_failed(worktree: str, session_id: str, launched_at: float) -> bool:
     """Did the brindle MCP server fail to start for this session since this launch?
 
-    Reads only the explicit error rows Claude Code logs; a missing directory or
-    an unfamiliar format reads as healthy, and nothing here raises.
+    A start failure is an error row (such as "Connection failed (404)") logged for
+    the session before it ever connected. A session that connected counts as
+    healthy whatever tool errors follow, and a rejected tool call ("Error executing
+    tool ...") is never a start failure. A missing directory or an unfamiliar
+    format reads as healthy, and nothing here raises.
     """
     try:
         for path in mcp_log_dir(worktree).iterdir():
             started = _log_started(path.name)
             if started is None or started < launched_at:
                 continue
+            connected = False
+            failed = False
             for line in path.read_text(errors="replace").splitlines():
                 try:
                     row = json.loads(line)
                 except ValueError:
                     continue
-                if (isinstance(row, dict) and row.get("sessionId") == session_id
-                        and isinstance(row.get("error"), str) and row["error"]):
-                    return True
+                if not isinstance(row, dict) or row.get("sessionId") != session_id:
+                    continue
+                debug = row.get("debug")
+                if isinstance(debug, str) and debug.startswith(_CONNECTED_MARKERS):
+                    connected = True
+                error = row.get("error")
+                if (isinstance(error, str) and error
+                        and not error.startswith("Error executing tool")):
+                    failed = True
+            if failed and not connected:
+                return True
     except (OSError, ValueError, TypeError):
         pass
     return False
+
+
+_CONNECTED_MARKERS = ("Successfully connected", "Connection established")
 
 
 def has_mcp_failure(db, agent, ws) -> bool:
