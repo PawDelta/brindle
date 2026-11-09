@@ -381,16 +381,78 @@ def new_window(session: str, name: str, cwd: str, command: list[str], env: dict[
     else:
         unset = secrets.pane_unset([n for n in names if secrets.is_job_secret(n)], keep=(*keep, *env),
                                    allow=allow, deny=deny)
+    launch = uuid.uuid4().hex[:12]
     proc = _tmux(
         "new-window", "-d", "-P", "-F", "#{pane_id}", "-t", f"={session}:",
-        "-n", name, "-c", cwd, "--", *_short(scrubbed(in_dir(cwd, command), unset), env),
+        "-n", name, "-c", cwd, "--", *_tags_itself(_short(scrubbed(in_dir(cwd, command), unset), env), tag, launch),
     )
-    target = proc.stdout.strip()
-    if tag:
+    target = NewPane(proc.stdout.strip())
+    target.launch = launch
+    if tag and tag[0] == AGENT_TAG:
+        _set_for_launch(target, launch, *tag)
+    elif tag:
         set_pane_tag(target, *tag)
     # Keep the agent's pane around after it exits so its output can be read.
     _tmux("set-option", "-p", "-t", target, "remain-on-exit", "on", check=False)
     return target
+
+
+class NewPane(str):
+    """A pane id as new_window returns it, with the launch that opened it (mark_launched)."""
+    launch = ""
+
+
+def _tags_itself(command: list[str], tag: tuple[str, str] | None, launch: str = "") -> list[str]:
+    """``command`` run only once its agent's pane has tagged itself. Whose it
+    is doesn't then depend on whoever opened the window living to say so: the
+    tag and the launch are arguments here, so tmux's start command names both
+    from the moment the pane exists (agent_panes), before this has even run,
+    and nothing can change them after."""
+    if not tag or tag[0] != AGENT_TAG:
+        return command
+    setter = shlex.join([shutil.which(_bin()) or _bin(), *_base()[1:], "set-option", "-p", "-t"])
+    return ["/bin/sh", "-c", f'{setter} "$TMUX_PANE" "$0" "$1" 2>/dev/null && shift 2 && exec "$@"; '
+            "echo 'brindle: this pane could not say whose it is, so nothing was started' >&2; exit 1",
+            *tag, launch or "-", *command]
+
+
+def _set_for_launch(pane: str, launch: str, key: str, value: str) -> None:
+    """Set ``key`` on ``pane`` only if it is still the one ``launch`` opened.
+    Pane ids come round again after a tmux restart; tmux itself decides this,
+    so nothing can come between the look and the write."""
+    _tmux("if-shell", "-F", "-t", pane, f"#{{m:*{AGENT_TAG} * {launch} *,#{{pane_start_command}}}}",
+          f"set-option -p -t {pane} {key} {value}", check=False)
+
+
+def mark_launched(pane: str) -> None:
+    """The last step of a launch. A pane new_window didn't return has no launch to finish."""
+    if launch := getattr(pane, "launch", ""):
+        _set_for_launch(pane, launch, LAUNCHED_TAG, launch)
+
+
+@dataclass(frozen=True)
+class AgentPane:
+    pane: str
+    agent: str
+    alive: bool
+    launched: bool      # the launch that opened it finished (mark_launched): one cut off part way isn't set up to run
+
+
+def agent_panes() -> list[AgentPane]:
+    """Every pane on this server that is an agent's, from tmux alone: the only
+    record of what is running (agents.settle_panes). Empty when no server runs;
+    TmuxError when one doesn't answer."""
+    fmt = "\t".join(["#{pane_id}", "#{pane_dead}", f"#{{{AGENT_TAG}}}", f"#{{{LAUNCHED_TAG}}}", "#{pane_start_command}"])
+    proc = _tmux("list-panes", "-a", "-F", fmt, check=False)
+    if proc.returncode != 0:
+        return []
+    panes = []
+    for line in proc.stdout.splitlines():
+        pane, dead, tag, finished, command = line.split("\t", 4)
+        named = re.match(rf'/bin/sh -c .*? {AGENT_TAG} "?([\w.-]+)"? "?([\w.-]+)', command)
+        if agent := named.group(1) if named else tag:   # what a pane was started as can't be written over
+            panes.append(AgentPane(pane, agent, dead.strip() == "0", bool(named and finished == named.group(2))))
+    return panes
 
 
 def gated(command: list[str]) -> tuple[list[str], str]:
@@ -610,6 +672,7 @@ def window_alive(target: str, server: object = _THIS_SERVER) -> bool:
 # call, so no caller needs a second one.
 AGENT_TAG = "@brindle_agent"
 SIDEBAR_TAG = "@brindle_sidebar"
+LAUNCHED_TAG = "@brindle_launched"      # on an agent's pane: the launch that finished in it (mark_launched)
 PANE_TAGS = (AGENT_TAG, SIDEBAR_TAG)
 
 

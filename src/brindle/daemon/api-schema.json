@@ -8916,6 +8916,10 @@
       "path": "/v1/pty_view"
     },
     {
+      "method": "POST",
+      "path": "/v1/recovery/prioritize"
+    },
+    {
       "method": "GET",
       "path": "/v1/repos"
     },
@@ -9070,6 +9074,10 @@
     {
       "method": "POST",
       "path": "/v1/visuals/{id}/answer"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/visuals/{id}/dismiss"
     },
     {
       "method": "DELETE",

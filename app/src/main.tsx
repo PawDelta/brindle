@@ -15,6 +15,9 @@ import { startSync, type Sync } from "./store/sync";
 import { Launch } from "./screens/FirstRun";
 import { tauriSink, watchInbox } from "./screens/Inbox";
 import "./styles.css";
+import { startupStep } from "./api/startup";
+
+startupStep("webview");
 
 // The theme the person picked last time, before the first paint.
 applyTheme(readTheme());

@@ -38,6 +38,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { DaemonError, type DaemonClient, type Meta, type ProviderInstalled } from "./api/client";
 import { plain } from "./api/wording";
+import { startupStep } from "./api/startup";
 import { DaemonContext } from "./api/context";
 import { checkEngine, type EngineStatus } from "./api/engine";
 import { openExternal, pickFolder as nativePicker, type OpenUrl, type PickFolder } from "./api/open";
@@ -248,6 +249,14 @@ function Banner({ status, connection, onRetry, client, store }: { status: Engine
 
 /* `firstRun`: the app opens right after the first launch's setup, so the walkthrough offers itself. */
 function Shell({ store, client, refresh, initialRoute, openUrl = openExternal, pickFolder = nativePicker, installCli, appUpdater, appUpdates, releaseBuildUpdater, readAbout, firstRun = false }: AppProps & { firstRun?: boolean }) {
+  useEffect(() => {
+    // The second frame runs after the browser has had a paint opportunity.
+    let painted = 0;
+    const frame = requestAnimationFrame(() => {
+      painted = requestAnimationFrame(() => startupStep("shell_painted"));
+    });
+    return () => { cancelAnimationFrame(frame); cancelAnimationFrame(painted); };
+  }, []);
   // Until the sessions are known the app shows the empty state, quietly; then it lands.
   const [route, setRoute] = useState<Route | null>(initialRoute ?? null);
   /* Counts the navigations: one to the route already open still counts (Settings opens its tab again). */
@@ -523,12 +532,16 @@ function usePanesReady(client: DaemonClient | null, refresh?: () => Promise<void
   // The sessions released one by one while the rest come back, and the daemon they were released by.
   const backNow = useRef<Set<string>>(new Set());
   const backPid = useRef<number | null>(null);
+  // Sticky across probes and stream drops: a later calm meta response alone
+  // cannot make sync's pre-recovery rows safe. Clear only after the barrier.
+  const recovering = useRef(false);
   useEffect(() => {
     if (!client) return;
     let current = true;
     let first = true;
     let next: ReturnType<typeof setTimeout>;
     const settle = (pid: number | null) => {
+      startupStep("panes_ready");
       current = false;
       clearTimeout(next);
       clearTimeout(deadline);
@@ -565,13 +578,21 @@ function usePanesReady(client: DaemonClient | null, refresh?: () => Promise<void
     const hide = () => setPanes((p) => (p.ready ? { ...p, ready: false } : p));
     const deadline = setTimeout(() => settle(null), STARTUP_WAIT);
     const check = async () => {
-      const { connectionGeneration } = store.getState();
+      const { connectionGeneration, lifecycleVersion } = store.getState();
       // A read from before the stream dropped and came back may be the old daemon's.
-      const unchanged = () => current && store.getState().connectionGeneration === connectionGeneration;
+      // A close/rewind also invalidates rows, even on an uninterrupted stream.
+      const unchanged = () => {
+        const state = store.getState();
+        return current && state.connectionGeneration === connectionGeneration && state.lifecycleVersion === lifecycleVersion;
+      };
       try {
         const meta = await client.meta();
         if (!unchanged()) return;
-        if (first && round > 0 && meta.pid === shownFrom.current && !meta.resuming) return settle(meta.pid);
+        if (first && round > 0 && meta.pid === shownFrom.current && !meta.resuming && !recovering.current) return settle(meta.pid);
+        // Recovery may finish between sync starting and our first meta read.
+        // A replacement daemon also needs the barrier even if already settled.
+        if (meta.resuming || (meta.recovered_at ?? 0) >= client.createdAt
+          || (round > 0 && meta.pid !== shownFrom.current)) recovering.current = true;
         first = false;
         hide();
         const recovery = meta.resuming ? meta.recovery ?? null : null;
@@ -593,6 +614,13 @@ function usePanesReady(client: DaemonClient | null, refresh?: () => Promise<void
           const workspaces = await client.snapshot();
           if (!unchanged()) return;
           if (!waitingForPanes(workspaces)) {
+            if (!recovering.current) {
+              // Already running on this connection: these rows can mount terminals
+              // immediately, independently of sync's inbox and any queued reads.
+              store.dispatch({ type: "snapshot", workspaces });
+              settle(meta.pid);
+              return;
+            }
             // A snapshot read before recovery may still be in flight in sync.
             // Queue a fresh one before mounting terminals on the store's rows.
             const version = store.getState().snapshotVersion;
@@ -611,6 +639,7 @@ function usePanesReady(client: DaemonClient | null, refresh?: () => Promise<void
             // Sync reports failures in the store and still resolves its promise.
             // Only newly applied, ready rows may be used to mount terminals.
             if (applied.snapshotVersion === version || applied.error || applied.stale || waitingForPanes(applied.workspaces)) return;
+            recovering.current = false;
             settle(meta.pid);
             return;
           }

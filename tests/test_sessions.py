@@ -6,12 +6,16 @@ import shutil
 import struct
 import subprocess
 import termios
+import threading
 import time
+from unittest import mock
 
 import pytest
 
-from brindle import agents, git, providers, sessions, spawn, tmux, workspaces
-from brindle.db import Agent
+from brindle import (agents, company_identity, git, knowledge, pipeline, procs, providers, sessions, signin_pause,
+                     spawn, tmux, workspaces)
+from brindle.daemon import lifecycle
+from brindle.db import DB, Agent
 from git_snapshots import fast_host_tools, repo, workspaces_once  # noqa: F401  (fixtures)
 
 
@@ -25,6 +29,14 @@ def add(db, ws, aid, mode="interactive", parent=None, status="paused", since=Non
 @pytest.fixture
 def root(db, repo):
     return workspaces.adopt_root(db, str(repo))
+
+
+@pytest.fixture(autouse=True)
+def no_timing_backend(monkeypatch):
+    from brindle import debuglog
+
+    monkeypatch.setattr(debuglog, "staff", lambda: False)
+    monkeypatch.setattr(debuglog, "_publish_timings", debuglog._write_timings)
 
 
 @pytest.mark.variant("live legacy --no-autopilot sessions have no driver row")
@@ -237,70 +249,42 @@ def _the_app_daemon_pauses_on_its_way_out_and_the_next_start_resumes(db, root, m
     assert [db.get_agent(a).status for a in ("chat", "helper", "foreign")] == ["paused", "paused", "idle"]
     assert not tmux.has_session(root.tmux_session) and tmux.has_session("shared-name")
     assert not tmux.has_session("side") and db.get_sidebar_pane("chat") is None
-    assert lifecycle._read_resume() == [{"id": "chat", "server": here, "paused": True}]
+    assert lifecycle._read_resume() == [{"id": "chat", "server": here}]
     # It told the app to wait for its pause (daemon.rs stop_daemon), and not past it.
     assert saying == [f"{os.getpid()}\n"] and not lifecycle._pausing_path().exists()
-    # The next app's daemon is stopped as its start takes that record, past the way out's wait
-    # for it (RESUME_WAIT 0): the record the way out writes again isn't taken after it.
     recoveries = []
-
-    class Watched:
-        """A Recovery's lock, saying when the way out has to wait for it."""
-
-        def __init__(self):
-            self.inner = threading.Lock()
-
-        def __enter__(self):
-            if not self.inner.acquire(blocking=False):
-                go.set()
-                self.inner.acquire()
-
-        def __exit__(self, *exc):
-            self.inner.release()
 
     class Recovery(lifecycle.Recovery):
         def __init__(self):
             super().__init__()
-            self.lock = Watched()
             recoveries.append(self)
 
-    real_record, real_path = lifecycle._record_resume, lifecycle._resume_path
+    real_record = lifecycle._record_resume
 
     def record(entries):
         written = real_record(entries)
-        go.set()
+        if recoveries[-1].stopping.is_set():    # the way out's, not the start's counting a try
+            go.set()
         return written
 
-    class Held(type(real_path())):
-        def unlink(self, missing_ok=False):
-            if holding:
-                hold(holding.pop())
-            super().unlink(missing_ok=missing_ok)
-
-    taken = threading.Event()
-    holding.append(taken)
     monkeypatch.setattr(lifecycle, "Recovery", Recovery)
     monkeypatch.setattr(lifecycle, "RESUME_WAIT", 0)
     monkeypatch.setattr(lifecycle, "_record_resume", record)
-    monkeypatch.setattr(lifecycle, "_resume_path", lambda: Held(real_path()))
-    serve(app_gone=False, after=taken)
-    assert recoveries[-1].idle.wait(10), "the start never ended"
-    assert events == [] and lifecycle._read_resume() == [{"id": "chat", "server": here, "paused": True}]
     # The next is stopped while it brings the session back (having stopped what the cull never
     # did), its launch held up in its identity probe: the way out records and pauses without
     # waiting for that probe, nothing is launched past its pause, and the session is recorded again.
-    go.clear()
     probed = threading.Event()
     probing.append(probed)
     serve(app_gone=False, after=probed)
     assert recoveries[-1].idle.wait(10), "the held resume never ended"
     assert events == [("stop", ["chat", "helper"])] and db.get_agent("chat").status == "paused"
-    assert lifecycle._read_resume() == [{"id": "chat", "server": here, "paused": True}]
+    assert lifecycle._read_resume() == [{"id": "chat", "server": here, "tries": 1}]     # still under way when recorded
     # The start after that brings it back, once, having stopped what the cull never did first.
     events.clear()
     db.set_status("helper", "processing")   # launched past the pause (a queued task's helper): comes back too
     assert lifecycle.resume_after_start() == ["chat"]
     assert events == [("stop", ["chat", "helper"]), ("launch", "chat"), ("launch", "helper")]
+    lifecycle._resume_path().unlink()       # these counted windows can't confirm it to tmux
 
     # The app is force quit, and the tmux server stops answering: the pause is cut short at its
     # budget (the server answers with a failure once the daemon has gone).
@@ -308,6 +292,7 @@ def _the_app_daemon_pauses_on_its_way_out_and_the_next_start_resumes(db, root, m
     for aid in ("chat", "helper"):
         db.set_status(aid, "idle")
     db.update_agent("chat", tmux_window=window(root.tmux_session))
+    tmux.set_pane_tag(db.get_agent("chat").tmux_window, tmux.AGENT_TAG, "chat")
     answer = threading.Event()
 
     def close(**targets):
@@ -320,14 +305,14 @@ def _the_app_daemon_pauses_on_its_way_out_and_the_next_start_resumes(db, root, m
     answer.set()
     assert [db.get_agent(a).status for a in ("chat", "helper", "foreign")] == ["paused", "paused", "idle"]
     assert tmux.has_session(root.tmux_session) and tmux.has_session("shared-name")
-    assert lifecycle._read_resume() == [{"id": "chat", "server": here, "paused": False}]
-    # The next start finishes that pause (its session closed) and stops what is left first.
+    assert lifecycle._read_resume() == [{"id": "chat", "server": here}]
+    # The next start closes what that pause left and stops what is left first.
     assert lifecycle.resume_after_start() == ["chat"]
     assert not tmux.has_session(root.tmux_session)
     assert events == [("stop", ["chat", "helper"]), ("launch", "chat"), ("launch", "helper")]
 
     # A record made on another tmux server isn't resumed here.
-    lifecycle._record_resume([{"id": "chat", "server": "elsewhere", "paused": True}])
+    lifecycle._record_resume([{"id": "chat", "server": "elsewhere"}])
     assert lifecycle.resume_after_start() == [] and len(events) == 3
 
 
@@ -348,7 +333,7 @@ def _recorded_sessions(db, root, monkeypatch, sessions):
                            time.time(), paused_at, "t", tmux_server=here))
         db.conn.execute("INSERT INTO events (ts, kind, root_id) VALUES (?, 'agent.status', ?)",
                         (paused_at - rank - 1, aid))
-    lifecycle._record_resume([{"id": aid, "server": here, "paused": True} for aid, _ in reversed(sessions)])
+    lifecycle._record_resume([{"id": aid, "server": here} for aid, _ in reversed(sessions)])
     monkeypatch.setattr(procs, "stop", lambda ids, *a, **kw: 0)
 
 
@@ -380,6 +365,10 @@ def test_stopped_during_concurrent_recovery_a_launch_finishes_and_the_rest_stay_
 
     from brindle.daemon import lifecycle
 
+    from brindle import debuglog
+
+    monkeypatch.setattr(debuglog, "staff", lambda: True)
+    monkeypatch.setattr(debuglog, "_publish_timings", debuglog._write_timings)
     _recorded_sessions(db, root, monkeypatch, [("launching", "a"), ("preflight", "b"), ("unstarted", "c")])
     monkeypatch.setattr(lifecycle, "RESUME_PARALLEL", 2)
     monkeypatch.setattr(lifecycle, "RESUME_WAIT", 0)    # only the launch in flight holds stop up
@@ -414,6 +403,7 @@ def test_stopped_during_concurrent_recovery_a_launch_finishes_and_the_rest_stay_
     assert seen == ["launching"] and result == ["launching"]    # stop returned after the launch under way, none later
     assert {"preflight", "unstarted"} <= {e["id"] for e in pending}     # handed to the way out to record again
     assert sorted(e["id"] for e in recovery.pending) == ["preflight", "unstarted"]
+    assert not any(e.get("tries") for e in recovery.pending)    # stopped: that's no failed try
     # The log says how long the step it was cancelled in took: that may be the slow one.
     assert re.search(r"session preflight recovery: .*resume \d+\.\d+s \(cancelled\)", caplog.text)
 
@@ -421,12 +411,518 @@ def test_stopped_during_concurrent_recovery_a_launch_finishes_and_the_rest_stay_
 def test_recovery_progress_counts_sessions_as_they_finish(db, root, monkeypatch):
     from brindle.daemon import lifecycle
 
-    _recorded_sessions(db, root, monkeypatch, [("first", "a"), ("second", "a")])    # one lane: one after another
+    _recorded_sessions(db, root, monkeypatch, [("back", "a"), ("bad", "a"), ("later", "a")])   # one lane, in turn
     recovery, seen = lifecycle.Recovery(), []
-    monkeypatch.setattr(agents, "resume", lambda db_, root_id, **kw: seen.append(recovery.progress()))
+
+    def resume(db_, root_id, **kw):
+        seen.append(recovery.progress())
+        if root_id == "bad":
+            raise agents.AgentError("no")
+        if root_id == "back":
+            _open_pane(db_, db_.get_agent(root_id))
+
+    monkeypatch.setattr(agents, "resume", resume)
     lifecycle.resume_after_start(recovery)
-    assert seen == [{"done": 0, "total": 2}, {"done": 1, "total": 2}]
+    assert [(p["done"], p["total"]) for p in seen] == [(0, 3), (1, 3), (2, 3)]
+    assert sorted(seen[2]["pending"]) == ["bad", "later"]   # confirmed back: gone at once; failed: still to come
     assert recovery.progress() is None      # over: the app's line goes
+
+
+class Crash(BaseException):
+    """The daemon dying at this point: nothing in brindle handles it."""
+
+
+def _real_launches(monkeypatch):        # on the suite's tmux server, with a harmless program for the CLI
+    monkeypatch.setattr(providers.ClaudeCode, "command", lambda self, ctx: ["/bin/sh", "-c", "exec cat"])
+    monkeypatch.setattr(providers.ClaudeCode, "can_resume", staticmethod(lambda ref: True))
+    monkeypatch.setattr(company_identity, "launch_check", lambda provider, home=None: (None, None, None))
+    monkeypatch.setattr(agents, "_detach", lambda args: None)
+    monkeypatch.setattr(agents, "_ensure_sidebar", lambda *a, **kw: None)
+    monkeypatch.setattr(spawn, "start", lambda argv, **kw: None)
+
+
+def _live_windows(agent_id=None):
+    return [p for p in tmux.agent_panes() if p.alive and agent_id in (None, p.agent)]
+
+
+def _open_pane(db, a, launched=True):   # what a launch leaves in tmux
+    ws = db.get_workspace(a.workspace_id)
+    tmux.ensure_session(ws.tmux_session, ws.path, {})
+    pane = tmux.new_window(ws.tmux_session, a.id, ws.path, ["cat"], {}, tag=(tmux.AGENT_TAG, a.id))
+    if launched:
+        tmux.mark_launched(pane)
+    db.set_status(a.id, "starting")
+    db.update_agent(a.id, tmux_window=pane, tmux_server=tmux.current_server())
+    return pane
+
+
+@pytest.mark.parametrize("step, who", [
+    pytest.param("status", "w1", marks=pytest.mark.variant("worker launch dies before its status write, after its chat has launched")),
+    pytest.param("session", "w1", marks=pytest.mark.variant("worker has a starting status but dies before ensuring its tmux session")),
+    pytest.param("tag", "w1", marks=pytest.mark.variant("worker pane exists when the parent dies before writing its ownership tag")),
+    pytest.param("self_tag", "w1", marks=pytest.mark.variant("untagged child wakes after recovery and must not become a second worker")),
+    pytest.param("record", "w1", marks=pytest.mark.variant("owned worker pane exists before its window is recorded in the database")),
+    pytest.param("helper", "w1", marks=pytest.mark.variant("worker window is recorded but its after-launch helper has not started")),
+    pytest.param("mark", "w1", marks=pytest.mark.variant("worker helper started but the pane has no launch completion mark")),
+    pytest.param("finished", "w1", marks=pytest.mark.variant("all launches finished before the crash so recovery must reuse their panes")),
+    pytest.param("status", "chat", marks=pytest.mark.variant("root launch dies before its status write, leaving no live chat to recover around")),
+    pytest.param("gate", "chat", marks=pytest.mark.variant("root pane exists but its child has not been released through the launch gate")),
+])
+def test_recovery_reconciles_from_tmux_after_a_crash_at_each_step_of_a_launch(db, root, monkeypatch, step, who):
+    _recorded_sessions(db, root, monkeypatch, [("chat", "a")])
+    add(db, root, "w1", mode="assign", parent="chat")
+    _real_launches(monkeypatch)
+    armed, current, real_launch, real_self_tag = [True], [None], agents._launch, tmux._tags_itself
+
+    def crash_before(owner, attr, when=lambda *a, **kw: True):
+        real = getattr(owner, attr)
+
+        def wrapped(*a, **kw):
+            if armed[0] and current[0] == who and when(*a, **kw):
+                armed[0] = False
+                raise Crash
+            return real(*a, **kw)
+
+        monkeypatch.setattr(owner, attr, wrapped)
+
+    def held_self_tag(command, tag, launch):    # the pane's own tagging hasn't run when recovery looks
+        wait = shlex.join([*tmux._base(), "wait-for", "held"])
+        tagged = real_self_tag(command, tag, launch)
+        return ["/bin/sh", "-c", f'{wait}; exec "$@"', "x", *tagged] if armed[0] else tagged
+
+    monkeypatch.setattr(agents, "_launch", lambda db_, a, ws, **kw: current.__setitem__(0, a.id) or real_launch(db_, a, ws, **kw))
+    monkeypatch.setattr(tmux, "_tags_itself", held_self_tag if step == "self_tag" else real_self_tag)
+    agent_tag = (tmux, "_set_for_launch", lambda pane, launch, key, value: key == tmux.AGENT_TAG)
+    points = {"status": (DB, "set_status", lambda s, aid, status, *a, **kw: status != "paused"),
+              "session": (tmux, "ensure_session"), "tag": agent_tag, "self_tag": agent_tag,
+              "record": (DB, "update_agent", lambda s, aid, **kw: "tmux_window" in kw), "gate": (tmux, "open_gate"),
+              "helper": (spawn, "start", lambda argv, **kw: "_after-launch" in argv),
+              "mark": (tmux, "mark_launched"),
+              "finished": (knowledge, "note")}      # every launch done, the first thing after
+    crash_before(*points[step])
+    with pytest.raises(Crash):
+        agents.resume(db, "chat", settle=True)
+    assert lifecycle.resume_after_start() == ["chat"]
+    if step == "self_tag":
+        tmux._tmux("wait-for", "-S", "held")    # the old child, let go now: it must have been closed
+    panes = _live_windows()
+    assert sorted(p.agent for p in panes) == ["chat", "w1"] and all(p.launched for p in panes)
+    assert sum("w1" in name for name in tmux.windows(root.tmux_session)) == 1 and lifecycle._read_resume() is None
+
+
+@pytest.mark.parametrize("hangs_in", [
+    pytest.param("commit", marks=pytest.mark.variant("committed launch wakes after shutdown before its starting status was written")),
+    pytest.param("ensure_session", marks=pytest.mark.variant("launch wakes after shutdown while ensuring its tmux session, before any pane exists")),
+    "new_window",
+])
+def test_recovery_reconciles_from_tmux_after_a_launch_the_way_out_gave_up_on(db, root, monkeypatch, hangs_in):
+    from brindle.service import sessions as svc
+
+    _recorded_sessions(db, root, monkeypatch, [("chat", "a")])
+    _real_launches(monkeypatch)
+    monkeypatch.setattr(lifecycle, "RESUME_WAIT", 0)
+    monkeypatch.setattr(lifecycle, "LAUNCH_WAIT", 0)
+    monkeypatch.setattr(svc, "cull_detached", lambda repo_root=None: None)
+    inside, release, real_commit = threading.Event(), threading.Event(), agents._gate_commit
+
+    def hang(step):
+        if step == hangs_in and not inside.is_set():
+            inside.set()
+            release.wait(10)
+
+    def held(owner, attr):
+        real = getattr(owner, attr)
+        monkeypatch.setattr(owner, attr, lambda *a, **kw: hang(attr) or real(*a, **kw))
+
+    monkeypatch.setattr(agents, "_gate_commit", lambda hold: real_commit(hold) or hang("commit"))   # status not yet written
+    held(tmux, "ensure_session")
+    held(tmux, "new_window")
+    recovery = lifecycle.Recovery()
+    start = threading.Thread(target=lifecycle.resume_after_start, args=(recovery,))
+    start.start()
+    assert inside.wait(5)
+    leaving = threading.Thread(target=lifecycle.pause_for_exit, args=(recovery,))
+    leaving.start()
+    leaving.join(10)
+    assert not leaving.is_alive() and [e["id"] for e in lifecycle._read_resume()] == ["chat"]
+    release.set()           # it wakes past the pause, and writes and opens what it likes
+    start.join(10)
+    assert lifecycle.resume_after_start() == ["chat"]
+    assert len(_live_windows("chat")) == 1 and lifecycle._read_resume() is None
+
+
+def test_a_resume_that_hangs_ends_the_start_and_stays_on_the_record(db, root, monkeypatch):
+    _recorded_sessions(db, root, monkeypatch, [("hung", "a")])
+    monkeypatch.setattr(lifecycle, "RESUME_STALL", 0)
+    recovery, release = lifecycle.Recovery(), threading.Event()
+    monkeypatch.setattr(agents, "resume", lambda db_, root_id, **kw: release.wait(10))
+    assert lifecycle.resume_after_start(recovery) == [] and recovery.progress() is None
+    assert [e["id"] for e in lifecycle._read_resume()] == ["hung"]
+    release.set()
+    [t.join(5) for t in threading.enumerate() if t.name.startswith("brindle-resume-")]
+
+
+@pytest.mark.parametrize("clean_stops", [
+    pytest.param(False, marks=pytest.mark.variant("repeated daemon crashes must preserve the accumulated failed recovery attempts")),
+    pytest.param(True, marks=pytest.mark.variant("clean shutdown between failed recoveries must not reset the attempt cap")),
+])
+def test_a_session_that_cant_come_back_is_tried_a_few_times_then_left_paused(db, root, monkeypatch, clean_stops):
+    from brindle.service import sessions as svc
+
+    _recorded_sessions(db, root, monkeypatch, [("chat", "a")])
+    tried = []      # each try as a launch does it, the daemon dying before its window
+    monkeypatch.setattr(agents, "resume", lambda db_, root_id, **kw: tried.append(root_id) or db_.set_status(root_id, "starting"))
+    monkeypatch.setattr(svc, "cull_detached", lambda repo_root=None: None)
+    for _ in range(lifecycle.RESUME_TRIES):
+        lifecycle.resume_after_start()
+        clean_stops and lifecycle.pause_for_exit()
+        assert lifecycle._read_resume()
+    assert lifecycle.resume_after_start() == [] and len(tried) == lifecycle.RESUME_TRIES
+    assert db.get_agent("chat").status == "paused" and lifecycle._read_resume() is None
+
+
+@pytest.mark.parametrize("tries, launched, chat_stays, status", [
+    pytest.param(0, ["w1", "w2"], True, "idle", marks=pytest.mark.variant("live root is kept while missing workers return and the sign-in-held worker stays paused")),
+    pytest.param(2, [], False, "idle", marks=pytest.mark.variant("exhausted recovery attempts must close a live root rather than leave a half-running session")),
+    pytest.param(0, ["chat", "w1", "w2"], False, "failed", marks=pytest.mark.variant("failed root still owns an unfinished pane that must be replaced before the session returns")),
+])
+def test_recovery_of_a_half_running_session(db, root, monkeypatch, tries, launched, chat_stays, status):
+    _recorded_sessions(db, root, monkeypatch, [("chat", "a")])
+    add(db, root, "w1", mode="assign", parent="chat")
+    add(db, root, "w2", mode="assign", parent="chat", status="starting")    # its launch died before its window
+    add(db, root, "w3", mode="assign", parent="chat")       # held for sign-in: that sweep's to bring back
+    state = signin_pause._load()
+    state["paused"]["w3"] = {"provider": "claude", "reason": signin_pause.NO_IDENTITY, "identity": ""}
+    signin_pause._save(state)
+    chat = _open_pane(db, db.get_agent("chat"), launched=status != "failed")
+    db.set_status("chat", status)
+    lifecycle._record_resume([{"id": "chat", "server": tmux.current_server(), "tries": tries}])
+    opened = []
+    monkeypatch.setattr(agents, "_launch", lambda db_, a, ws, **kw: opened.append(a.id) or _open_pane(db_, a))
+    lifecycle.resume_after_start()
+    assert sorted(opened) == launched and tmux.window_alive(chat) == chat_stays
+    assert db.get_agent("w2").status == ("starting" if launched else "paused") and lifecycle._read_resume() is None
+
+
+@pytest.mark.parametrize("kill, stray, launches, status", [
+    pytest.param("raises", "chat", [], "starting", marks=pytest.mark.variant("tmux refuses root-pane teardown, so recovery must retain the record even past the attempt cap")),
+    pytest.param("does nothing", "chat", [], "starting", marks=pytest.mark.variant("tmux reports successful teardown but the root pane stays alive, so recovery must check liveness")),
+    pytest.param("does nothing", "chat", [], "failed", marks=pytest.mark.variant("failed database status must not hide a root pane that survives teardown")),
+    pytest.param("does nothing", "w1", ["w1"], "starting", marks=pytest.mark.variant("worker launch fails after opening a pane that survives cleanup while its root is already live")),
+])
+def test_a_pane_that_wont_close_holds_its_session_back_however_long_that_takes(db, root, monkeypatch, kill, stray, launches, status):
+    _recorded_sessions(db, root, monkeypatch, [("chat", "a")])
+    opened, real_kill = [], tmux.kill_window
+
+    def launch(db_, a, ws, **kw):
+        opened.append(a.id)
+        _open_pane(db_, a, launched=False)
+        raise agents.AgentError("no helper")
+
+    if stray == "w1":
+        add(db, root, "w1", mode="assign", parent="chat")
+    _open_pane(db, db.get_agent("chat"), launched=stray == "w1")
+    db.set_status("chat", status)
+    monkeypatch.setattr(agents, "_launch", launch)
+    monkeypatch.setattr(tmux, "kill_window", mock.Mock(side_effect=tmux.TmuxError("busy") if kill == "raises" else None))
+    for _ in range(lifecycle.RESUME_TRIES + 1):      # past giving up on it, too
+        lifecycle.resume_after_start()
+        assert opened == launches and _live_windows(stray) and lifecycle._read_resume()
+    monkeypatch.setattr(tmux, "kill_window", real_kill)
+    assert lifecycle.resume_after_start() == [] and opened == launches
+    assert not _live_windows() and lifecycle._read_resume() is None
+
+
+@pytest.mark.variant("an old launch writes into a reused pane id; only the new launch token counts, and duplicate owned panes invalidate confirmation")
+def test_only_one_pane_whose_own_launch_finished_confirms_a_session(db, root):
+    add(db, root, "chat", status="idle")
+    pane = _open_pane(db, db.get_agent("chat"), launched=False)
+    older = tmux.NewPane(pane)      # an older launch, waking after a tmux restart gave this id to the new pane
+    older.launch = "older"
+    tmux.mark_launched(older)
+    tmux._set_for_launch(pane, "older", tmux.AGENT_TAG, "someone-else")     # its ownership write, likewise refused
+    assert tmux.get_pane_tag(pane, tmux.LAUNCHED_TAG) is None and tmux.get_pane_tag(pane, tmux.AGENT_TAG) == "chat"
+    tmux.set_pane_tag(pane, tmux.LAUNCHED_TAG, "older")     # and should its mark land anyway, it counts for nothing
+    tmux.set_pane_tag(pane, tmux.AGENT_TAG, "someone-else")     # nor does its claim to the pane
+    assert not agents.panes_match(db, "chat", set()) and _live_windows("chat") and not _live_windows("someone-else")
+    tmux.mark_launched(pane)
+    assert agents.panes_match(db, "chat", set()) and agents.settle_panes(db, [db.get_agent("chat")]) == {"chat"}
+    _open_pane(db, db.get_agent("chat"))
+    assert not agents.panes_match(db, "chat", set())
+
+
+def test_a_try_that_cant_be_counted_launches_nothing(db, root, monkeypatch):
+    _recorded_sessions(db, root, monkeypatch, [("chat", "a")])
+    real, tried = lifecycle._record_resume, []
+    monkeypatch.setattr(lifecycle, "_record_resume", lambda entries: False)
+    monkeypatch.setattr(agents, "resume", lambda db_, root_id, **kw: tried.append(root_id))
+    lifecycle.resume_after_start()
+    assert tried == [] and [e["id"] for e in lifecycle._read_resume()] == ["chat"]
+    monkeypatch.setattr(lifecycle, "_record_resume", real)
+    lifecycle.resume_after_start()
+    assert tried == ["chat"]
+
+
+def test_a_worker_the_sign_in_sweep_has_brought_back_is_left_to_it(db, root, monkeypatch):
+    _recorded_sessions(db, root, monkeypatch, [("chat", "a")])
+    add(db, root, "w1", mode="assign", parent="chat")
+    state = signin_pause._load()
+    state["paused"]["w1"] = {"provider": "claude", "reason": "signed out", "identity": "me"}
+    signin_pause._save(state)
+    stopped, launched, inside, release = [], [], threading.Event(), threading.Event()
+    committed, real_held = threading.Event(), signin_pause.paused_for_signin
+    monkeypatch.setattr(procs, "stop", lambda ids, *a, **kw: stopped.extend(ids) or 0)
+
+    def launch(db_, a, ws, **kw):
+        _open_pane(db_, a)
+        launched.append(a.id)
+        if a.id == "w1":
+            inside.set()
+            release.wait(10)
+
+    def sweep():                # to its end: its record of the worker goes with it
+        state, base = signin_pause._load(), signin_pause._load()
+        signin_pause._resume(DB(), state, "claude", signin_pause.Check("ok", ident="me"))
+        signin_pause._commit(state, base)
+        committed.set()
+
+    monkeypatch.setattr(agents, "_launch", launch)
+    # What recovery reads, it reads once that record has gone.
+    monkeypatch.setattr(signin_pause, "paused_for_signin", lambda: committed.wait(10) and real_held())
+    sweeping = threading.Thread(target=sweep)
+    sweeping.start()
+    assert inside.wait(5)
+    recovering = threading.Thread(target=lifecycle.resume_after_start)
+    recovering.start()
+    release.set()
+    sweeping.join(10)
+    recovering.join(10)
+    assert launched == ["w1", "chat"] and "w1" not in stopped and len(_live_windows("w1")) == 1
+
+
+@pytest.mark.parametrize("lookup_fails, status", [
+    pytest.param(False, "idle", marks=pytest.mark.variant("pausing one live chat must preserve a second chat sharing its tmux session")),
+    pytest.param(False, "failed", marks=pytest.mark.variant("a second chat marked failed still has a live pane that prevents shared-session teardown")),
+    pytest.param(True, "failed", marks=pytest.mark.variant("failed pane-placement lookup must preserve the shared session even when its other chat is marked failed")),
+])
+def test_pausing_a_chat_leaves_another_chat_in_its_tmux_session_running(db, root, monkeypatch, lookup_fails, status):
+    def chat(aid, *make):
+        pane = tmux._tmux(*make, "-P", "-F", "#{pane_id}", "cat").stdout.strip()
+        tmux.set_pane_tag(pane, tmux.AGENT_TAG, aid)
+        add(db, root, aid, status=status)       # marked failed, its pane can still be alive
+        db.update_agent(aid, tmux_window=pane, tmux_server=tmux.current_server())
+        return pane
+
+    mine = chat("one", "new-session", "-d", "-s", root.tmux_session)
+    other = chat("two", "new-window", "-t", f"={root.tmux_session}:")
+    if lookup_fails:
+        monkeypatch.setattr(tmux, "pane_places", mock.Mock(side_effect=tmux.TmuxTimeout("no answer")))
+    agents.pause(db, "one", stop_procs=False, stop_local_models=False)
+    assert not tmux.window_alive(mine) and tmux.window_alive(other)
+
+
+@pytest.mark.parametrize("failing, error, status, carries_on, live_chat, collected, opens", [
+    pytest.param("boss", agents.AgentError, "paused", False, False, False, False, marks=pytest.mark.variant("root failure before a pane opens restores paused status and prevents worker launches")),
+    pytest.param("boss", OSError, "paused", False, False, False, True, marks=pytest.mark.variant("root launch raises an operating-system error after opening its pane, which must be cleaned up")),
+    pytest.param("w1", agents.AgentError, "failed", True, False, False, False, marks=pytest.mark.variant("worker failure after this resume launched its root must not prevent sibling workers returning")),
+    pytest.param("w1", agents.LaunchTaken, "starting", True, False, False, False, marks=pytest.mark.variant("a competing path owns the worker launch, so this resume must not mark that worker failed")),
+    pytest.param("w1", agents.AgentError, "failed", True, True, False, False, marks=pytest.mark.variant("worker-only resume against an already live root must mark the failed worker and continue its siblings")),
+    pytest.param("w1", agents.AgentError, "paused", True, True, True, False, marks=pytest.mark.variant("caller collecting unstarted workers must receive the failed worker paused for a later attempt")),
+])
+def test_a_launch_that_fails_in_a_resume(db, root, monkeypatch, failing, error, status, carries_on, live_chat, collected, opens):
+    add(db, root, "boss")
+    add(db, root, "w1", mode="assign", parent="boss")
+    add(db, root, "w2", mode="assign", parent="boss")
+    launched = []
+    monkeypatch.setattr(procs, "stop", lambda ids, *a, **kw: 0)
+
+    def launch(db_, a, ws, **kw):
+        db_.set_status(a.id, "starting")    # as a launch does before its window opens
+        if a.id == failing:
+            opens and _open_pane(db_, a, launched=False)
+            raise error("no")
+        launched.append(a.id)
+
+    monkeypatch.setattr(agents, "_launch", launch)
+    if live_chat:
+        db.set_status("boss", "idle")
+        monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id == "boss")
+    kw = {"only": {"w1", "w2"}} if live_chat else {}
+    left = set() if collected else None
+    with mock.MagicMock() if carries_on else pytest.raises(error):
+        agents.resume(db, "boss", unstarted=left, **kw)
+    assert db.get_agent(failing).status == status and ("w2" in launched) == carries_on
+    assert left == ({"w1"} if collected else None) and not _live_windows(failing)
+
+
+def test_a_second_resume_of_a_session_waits_and_never_launches_beside_the_first(db, root, monkeypatch):
+    add(db, root, "boss")
+    monkeypatch.setattr(agents, "RESUME_LOCK_WAIT", 0.01)
+    launched = []
+    monkeypatch.setattr(agents, "_launch", lambda db_, a, ws, **kw: launched.append(a.id))
+    with pipeline._file_lock("resume-boss"):
+        with pytest.raises(agents.AgentError, match="still being resumed"):
+            agents.resume(db, "boss")
+    assert launched == []
+
+
+@pytest.mark.variant("critical pressure must override the real admission gate's zero-running-children escape")
+def test_critical_memory_holds_a_recovery_even_with_nothing_running(monkeypatch):
+    stop = threading.Event()
+    monkeypatch.setattr(spawn, "_gated", True)
+    monkeypatch.setattr(spawn, "_running", 0)
+    monkeypatch.setattr(spawn, "pressure", lambda: stop.set() or spawn.PRESSURE_CRITICAL)
+    spawn.wait_for_room(stop)
+    assert stop.is_set()        # it looked at memory, though nothing runs, and held until told to stop
+
+
+def test_resume_key_timing(db, root, monkeypatch, caplog):
+    from brindle import autopilot, debuglog, identity_lock, keystore, tasks
+
+    pending, checked, answer = [], [], [True]
+
+    def staff():
+        checked.append(answer[0])
+        if isinstance(answer[0], Exception):
+            raise answer[0]
+        return answer[0]
+
+    monkeypatch.setattr(debuglog, "staff", staff)
+    monkeypatch.setattr(debuglog, "_publish_timings", pending.append, raising=False)
+    now, names = [100.0], ["TIMING_KEY_A", "TIMING_KEY_B"]
+
+    def advance(seconds, result=None):
+        now[0] += seconds
+        return result
+
+    clock = mock.Mock(wraps=time)
+    clock.monotonic = lambda: now[0]
+    for module in (agents, keystore, spawn):
+        monkeypatch.setattr(module, "time", clock)
+    monkeypatch.setattr(keystore, "_keychain_reads", {})
+    stores = {name: keystore.KeychainStore("timing", name) for name in names}
+    blob = keystore._encode({"value": "secret-timing-value", "updated_at": 7})
+    stores[names[1]]._read.blob, stores[names[1]]._read.expires = blob, 1000.0
+
+    class ReadLock:
+        def __enter__(self):
+            advance(2)
+
+        def __exit__(self, *args):
+            pass
+
+    for name, store in stores.items():
+        store._read.lock = ReadLock()
+        monkeypatch.setenv(name, "")   # restore the environment changed by resume
+    monkeypatch.setattr(keystore, "_key_store", lambda name: stores[name])
+    monkeypatch.setattr(keystore, "known_names", lambda: advance(1, names))
+    monkeypatch.setattr(providers, "invalidate_signed_in", lambda: advance(0.5))
+    real_admit = spawn._admit
+    monkeypatch.setattr(spawn, "_admit", lambda *a, **kw: advance(0.5, real_admit(*a, **kw)))
+    monkeypatch.setattr(spawn, "_run_read", lambda argv, *a: advance(3, subprocess.CompletedProcess(argv, 0, blob, "")))
+    real_write = db.set_session_credential
+    monkeypatch.setattr(db, "set_session_credential", lambda *a: advance(0.25, real_write(*a)))
+    monkeypatch.setattr(identity_lock, "ensure", lambda a: advance(0.75))
+    monkeypatch.setattr(agents, "settle_panes", lambda *a: set())
+    monkeypatch.setattr(autopilot, "reload_goals_file", lambda *a: advance(0.5))
+    monkeypatch.setattr(providers.ClaudeCode, "can_resume", staticmethod(lambda ref: advance(1, True)))
+    monkeypatch.setattr(pipeline, "on_resumed", lambda *a: advance(1.25))
+
+    def queued_tasks(*a):
+        advance(1.5)
+        agents._window_seconds.get().append(0.5)   # a queued launch's window belongs to tasks
+
+    monkeypatch.setattr(tasks, "on_resumed", queued_tasks)
+
+    def launch(*a, **kw):
+        advance(7)
+        agents._window_seconds.get().append(4)
+
+    monkeypatch.setattr(agents, "_launch", launch)
+    add(db, root, "chat")
+    agents.resume(db, "chat", gate=lifecycle.Recovery().launching)
+    assert len(pending) == 1 and not checked and not caplog.records
+    debuglog._write_timings(pending.pop())
+    details = [r.args[1] for r in caplog.records if isinstance(r.args, tuple)
+               and len(r.args) == 2 and isinstance(r.args[1], dict)]
+    assert details == [{"invalidate_s": 0.5, "known_names_s": 2.0, "key_loads_s": 7.5,
+                        "key_reads": 1, "key_cached": 1, "key_lock_s": 4.0, "security_s": 3.0,
+                        "credential_writes_s": 0.5, "identity_s": 0.75, "goals_s": 0.5,
+                        "provider_prep_s": 1.0, "launch_s": 3.0, "pipeline_s": 1.25, "tasks_s": 1.5}]
+    assert "secret-timing-value" not in caplog.text and all(name not in caplog.text for name in names)
+    # Exercise both lifecycle timing lines through the real startup dispatcher.
+    db.update_agent("chat", tmux_server=tmux.current_server())
+    monkeypatch.setattr(lifecycle, "_read_resume", lambda: [{"id": "chat", "server": tmux.current_server()}])
+    monkeypatch.setattr(lifecycle, "_record_resume", lambda entries: True)
+    monkeypatch.setattr(agents, "panes_match", lambda *a: True)
+    monkeypatch.setattr(procs, "stop", lambda *a, **kw: 0)
+    caplog.clear()
+    assert lifecycle.resume_after_start() == ["chat"]
+    assert not caplog.records and len(pending) == 1
+    debuglog._write_timings(pending.pop())
+    assert len(caplog.records) == 4
+    for value in (False, None, RuntimeError("offline")):
+        answer[0] = value
+        caplog.clear()
+        before = len(checked)
+        assert lifecycle.resume_after_start() == ["chat"]
+        assert len(checked) == before and len(pending) == 1 and not caplog.records
+        debuglog._write_timings(pending.pop())
+        assert not caplog.records
+    real_resume = agents.resume
+    monkeypatch.setattr(agents, "resume", mock.Mock(side_effect=agents.AgentError("unavailable")))
+    assert lifecycle.resume_after_start() == []
+    debuglog._write_timings(pending.pop())
+    assert len(caplog.records) == 1 and caplog.records[0].exc_info
+    monkeypatch.setattr(agents, "resume", real_resume)
+    answer[0] = True
+    caplog.clear()
+    agents.resume(db, "chat")
+    assert not caplog.records
+
+
+def test_recovery_opened_session_first(db, root, monkeypatch):
+    from starlette.applications import Starlette
+    from starlette.routing import Route
+    from starlette.testclient import TestClient
+
+    from brindle.daemon.app import prioritize_recovery
+
+    _recorded_sessions(db, root, monkeypatch, [("busy", "a"), ("second", "b"), ("opened", "c")])
+    monkeypatch.setattr(lifecycle, "RESUME_PARALLEL", 1)
+    recovery, inside, go, order = lifecycle.Recovery(), threading.Event(), threading.Event(), []
+
+    def resume(db_, root_id, **kw):
+        order.append(root_id)
+        if root_id == "busy":
+            inside.set()
+            go.wait(10)
+
+    monkeypatch.setattr(agents, "resume", resume)
+    app = Starlette(routes=[Route("/p", prioritize_recovery, methods=["POST"])])
+    app.state.recovery = recovery
+    start = threading.Thread(target=lifecycle.resume_after_start, args=(recovery,))
+    start.start()
+    assert inside.wait(5)
+    with TestClient(app) as client:
+        for opened in ("opened", "busy", "nobody"):     # already launching, or none such: nothing happens
+            assert client.post("/p", json={"root": opened}).status_code == 200
+    go.set()
+    start.join(10)
+    assert order == ["busy", "opened", "second"]
+
+
+@pytest.mark.variant("generated child shell must refuse to execute its payload when its tmux ownership write fails")
+def test_a_pane_that_cant_say_whose_it_is_runs_nothing(tmp_path, monkeypatch):
+    tmux._tmux("new-session", "-d", "-s", "own", "cat")
+    ran, real_base = tmp_path / "ran", tmux._base
+    monkeypatch.setattr(tmux, "_base", lambda: [real_base()[0], "-L", "no-such-server"])
+    command = tmux._tags_itself(["/bin/sh", "-c", f"touch {ran}"], (tmux.AGENT_TAG, "chat"))
+    monkeypatch.setattr(tmux, "_base", real_base)
+    over = shlex.join([*real_base(), "wait-for", "-S", "over"])
+    tmux._tmux("new-window", "-t", "=own:", "--", "/bin/sh", "-c", f'"$@"; {over}', "x", *command)
+    tmux._tmux("wait-for", "over")
+    assert not ran.exists()
 
 
 @pytest.mark.parametrize("level, checks", [(1, 1), (spawn.PRESSURE_CRITICAL, 2)])

@@ -448,12 +448,13 @@ def wait_for_room(stop: threading.Event, limit: float = ACTION_WAIT, *, busy_lim
     back, lifecycle.resume_after_start) until the gate has room, ``stop`` is
     set, or ``limit`` seconds have passed: it then goes ahead, as an action
     with no deadline does. ``busy_limit``: seconds that are enough when the
-    machine is short of CPU only; critical memory pressure gets all of ``limit``."""
+    machine is short of CPU only; critical memory pressure gets all of ``limit``,
+    even with nothing running (which lets a single process through, _has_room)."""
     began = time.monotonic()
     end = began + limit
     busy_end = end if busy_limit is None else min(end, began + busy_limit)
     with _cond:
-        while not _has_room() and not stop.is_set():
+        while not (_has_room() and not (_gated and pressure() >= PRESSURE_CRITICAL)) and not stop.is_set():
             now = time.monotonic()
             if now >= end or (now >= busy_end and pressure() < PRESSURE_CRITICAL):
                 break
@@ -593,11 +594,22 @@ def detach(argv: list[str], **popen: Any) -> subprocess.Popen:
     return start(argv, start_new_session=True, **popen)
 
 
+@dataclass
+class ReadTiming:
+    """Process wall time for an observed read, excluding admission waits."""
+
+    process_seconds: float = 0.0
+
+
 def read(argv: list[str], *, cwd: Any = None, env: dict[str, str] | None = None,
          input: str | bytes | None = None, text: bool = True, timeout: float | None = None,
-         skip: bool = False, reap: bool = False, to_its_end: bool = False) -> subprocess.CompletedProcess:
+         skip: bool = False, reap: bool = False, to_its_end: bool = False,
+         timing: ReadTiming | None = None) -> subprocess.CompletedProcess:
     """Run a command that changes nothing and return what it printed, like
     ``subprocess.run(capture_output=True)``.
+
+    ``timing`` accumulates process wall time (including cleanup), separately
+    from any admission wait; it does not change the command's budget.
 
     It gets only the time left on the request's deadline (and at most
     ``timeout``), including any wait for room. Past that, or when the
@@ -620,9 +632,12 @@ def read(argv: list[str], *, cwd: Any = None, env: dict[str, str] | None = None,
     _admit(end, dl, skip, _name(argv))
     if to_its_end:
         dl, end = None, own_end
+    began = time.monotonic() if timing is not None else None
     try:
         return _run_read(argv, cwd, env, input, text, timeout, dl, end, own_end, reap)
     finally:
+        if began is not None:
+            timing.process_seconds += time.monotonic() - began
         _release()
 
 

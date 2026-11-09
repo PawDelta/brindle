@@ -4,6 +4,7 @@ section is negated isn't an escalation."""
 import contextlib
 import json
 import os
+import re
 import shutil
 import signal
 import sys
@@ -911,3 +912,100 @@ def test_merge_reuses_checks_only_when_the_base_brought_in_disjoint_files(db, re
 
     out = pipeline.merge(db, None, ws)
     assert out.startswith("Merged") is reused, out
+
+
+@pytest.mark.parametrize("amend, base_file, second, delta", [
+    pytest.param(True, None, False, "work.py",
+                 marks=pytest.mark.variant("an amended commit leaves the reviewed commit out of the branch's history")),
+    (True, "base.py", False, "work.py"),
+    pytest.param(True, "work.py", False, "work.py",
+                 marks=pytest.mark.variant("the base merge conflicts with the reviewed code")),
+    pytest.param(False, None, False, "",
+                 marks=pytest.mark.variant("the worker reported again with no new commit")),
+    pytest.param(False, None, True, None,
+                 marks=pytest.mark.variant("a second reviewer of the commit reads the branch for itself")),
+])
+def test_review_round_scope_rereview_after_an_amend_and_a_base_merge_reads_only_the_delta(
+        db, repo, monkeypatch, amend, base_file, second, delta):
+    """The commit a re-review follows was amended away, and the base may have
+    been merged in on top: its diff is still only what the worker changed."""
+    ws = _reported(db, repo)
+    path = Path(ws.path)
+    db.add_review(ws.id, gates.head(ws), "rev0", False, "Blocker: x is wrong in work.py.")
+    if amend:
+        (path / "work.py").write_text("x = 2\n")
+        sh("git add work.py && git commit -q --amend --no-edit", path)
+    if base_file:
+        (repo / base_file).write_text("b = 1\n")
+        sh(f"git add {base_file} && git commit -qm base", repo)
+        sh("git merge -q --no-edit main || true", path)
+        (path / "work.py").write_text("x = 2\n")   # the worker's resolution, when it conflicted
+        sh("git add work.py && git commit -q --no-edit || true", path)
+    prompts = []
+    monkeypatch.setattr(agents, "spawn", lambda db_, ws_, prof, **kw: prompts.append(kw["prompt"]))
+
+    agents._request_review(db, None, ws, "reviewer", None, RepoConfig(), None, second=second)
+
+    scope = re.search(r"`git diff (\S+?)(?<!\.)\.\.HEAD`", prompts[0])   # not the opening base...HEAD
+    if delta is None:
+        assert scope is None, prompts[0]
+    else:
+        assert scope, prompts[0]
+        assert sh(f"git diff --name-only {scope.group(1)}..HEAD", path) == delta
+
+
+@pytest.mark.parametrize("rounds, tests_only, paths, summary, merges", [
+    pytest.param(2, True, ["tests/test_work.py"], "Blocker: tests/test_work.py:1 asserts nothing.", True,
+                 marks=pytest.mark.variant("past the cap, a tests-only review merges and notifies once")),
+    pytest.param(2, True, ["tests/test_work.py"], "Blocker: work.py:1 is wrong, tests/test_work.py:1 misses it.",
+                 False, marks=pytest.mark.variant("a product finding flagged tests-only, citing the delta")),
+    pytest.param(2, True, ["work.py"], "Blocker: this is wrong.",
+                 False, marks=pytest.mark.variant("a product path among the finding's paths")),
+    pytest.param(2, True, [], "Blocker: tests are thin.",
+                 False, marks=pytest.mark.variant("flagged tests-only with no path to check")),
+    pytest.param(2, True, ["tests/work.py"], "Blocker: tests/work.py:1 asserts nothing.",
+                 True, marks=pytest.mark.variant("a test file sharing its name with the product file")),
+    pytest.param(2, True, ["tests/work.py"], "Blocker: tests/work.py:1 misses that work.py:1 is wrong.",
+                 False, marks=pytest.mark.variant("the product citation follows a same-named test citation")),
+    pytest.param(2, True, ["tests/work.py"], "Blocker: [tests/work.py]({ws}/tests/work.py:1) asserts nothing.",
+                 True, marks=pytest.mark.variant("an absolute link to the same-named test file")),
+    pytest.param(2, True, ["tests/work.py"], "Blocker: see {ws}/work.py:1.",
+                 False, marks=pytest.mark.variant("an absolute link to the product file")),
+    pytest.param(2, True, ["tests/work.py"], "Blocker: see {ws}/tests/../work.py:1.",
+                 False, marks=pytest.mark.variant("an absolute link climbing out of tests/ to the product file")),
+    pytest.param(2, False, ["tests/test_work.py"], "Blocker: tests/test_work.py:1 asserts nothing.", False,
+                 marks=pytest.mark.variant("a test finding not flagged tests-only still blocks past the cap")),
+    (1, True, ["tests/test_work.py"], "Blocker: tests/test_work.py:1 asserts nothing.", False),
+])
+def test_review_round_scope_tests_only_findings_past_the_cap(db, repo, monkeypatch, rounds, tests_only,
+                                                             paths, summary, merges):
+    """Past the standard rounds a review whose findings are all about tests
+    merges, with one note to the supervisor; anything else goes back."""
+    ws = _reported(db, repo, reviewing_since=time.time())
+    (repo / ".brindle" / "config.local.json").write_text('{"auto_merge_default_branch": true}')
+    path = Path(ws.path)
+    (path / "tests").mkdir()
+    (path / "tests" / "test_work.py").write_text("def test_work(): pass\n")
+    (path / "tests" / "work.py").write_text("helper = 1\n")
+    sh("git add tests && git commit -qm tests", path)
+    db.update_agent("w1", pipeline_rounds=rounds)
+    add(db, ws, "rev1", "review", "reviewer", parent="boss", status="processing")
+    db.update_agent("rev1", review_sha=gates.head(ws))
+    reopened = []
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id == "boss")
+    monkeypatch.setattr(agents, "reconcile", lambda db_, a, **kw: a)
+    monkeypatch.setattr(agents, "reopen_worker", lambda db_, a, ws_, prompt: reopened.append(prompt) or True)
+    monkeypatch.setattr(agents, "_stop", lambda db_, a: None)
+    monkeypatch.setattr(agents, "close_later", lambda agent_id, delay=5.0: None)
+
+    summary = summary.replace("{ws}", ws.path)
+    agents.submit_review(db, "rev1", False, summary, tests_only=tests_only, finding_paths=paths)
+
+    assert (repo / "work.py").exists() is merges
+    told = drain(db)
+    if merges:
+        assert not reopened
+        assert any("Merged feat" in b for b in told), told
+        assert sum(summary in b for b in told if "Merged feat" not in b) == 1, told
+    else:
+        assert len(reopened) == 1 and db.get_agent("w1").pipeline == "fixing"

@@ -183,7 +183,7 @@ class RepoConfig:
     # A task whose files overlap a running one: "block", "warn" or "queue" (wait
     # for it to merge). None: block within a session, queue behind another session's.
     overlap: str | None = None
-    coordinator: bool = False          # wake a coordinator above this repo's sessions on events (brindle Pro; see brindle.coordinator)
+    coordinator: bool | None = None    # None: on when the plan includes it; False: off, including after coordinator stop
     # Paths/globs whose merge conflicts brindle never hands to a worker to
     # resolve (migrations, lockfiles, generated code): they go to the person.
     protected_paths: list[str] = field(default_factory=list)
