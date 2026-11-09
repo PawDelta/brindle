@@ -216,6 +216,96 @@ def test_a_skipped_takeover_restarts_the_hour_and_the_stop_refusal(db, boss, wor
     assert [ws for ws, _ in takeover["removed"]] == ["w"]
 
 
+def test_an_item_nothing_can_close_does_not_refuse_stops(db, boss, worker, told, monkeypatch):
+    """Dead, so no message reaches it; in a shared checkout, so neither a
+    takeover nor remove_workspace applies."""
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id == "boss")
+    db.update_agent("w1", workspace_id=boss.workspace_id, status="failed")
+    open_items.track(db, db.get_agent("w1"), "stopped without calling report_result", time.time())
+    assert "w1" in autopilot.on_stop(db, boss, {})["reason"]
+    assert "shared checkout" in mcp_server.requeue("w1")
+    assert open_items.stop_block(db, boss) is None
+
+
+def test_a_takeover_that_died_part_way_reuses_its_replacement(db, boss, takeover, monkeypatch):
+    def die(*a, **k):
+        raise KeyboardInterrupt   # as a process dying: nothing below handles it
+
+    finish = workspaces.remove
+    monkeypatch.setattr(workspaces, "remove", die)
+    with pytest.raises(KeyboardInterrupt):
+        open_items.sweep(db, T0 + open_items.AUTO_REASSIGN_AFTER, panes())
+    monkeypatch.setattr(workspaces, "remove", finish)
+    open_items.sweep(db, T0 + open_items.AUTO_REASSIGN_AFTER + open_items.CLAIM_EXPIRES + 1, panes())
+    assert [ws for ws, _ in takeover["removed"]] == ["w"] and len(takeover["started"]) == 1
+    assert len(db.list_tasks()) == 1 and db.list_tasks(state=tasks.UNANSWERED) == []
+
+
+@pytest.mark.parametrize("after", [
+    "answered", pytest.param("working", marks=pytest.mark.variant("back at work with its open item still there")), "retired",
+])
+def test_a_takeover_that_died_is_settled_without_its_open_item(db, boss, worker, takeover, told, monkeypatch, after):
+    """Whatever became of the worker, the sweep finishes or takes back what was prepared."""
+    waiting = tasks.enqueue(db, boss, db.get_workspace(boss.workspace_id), "developer", "after it", "assign",
+                            isolate=True, branch=None, done_when=None, files=None, depends_on=["w1"])
+
+    def die(*a, **k):
+        if after == "retired":   # it had finished removing the worktree
+            db.delete_workspace("w")
+            db.delete_agent("w1")
+        raise KeyboardInterrupt
+
+    finish = workspaces.remove
+    monkeypatch.setattr(workspaces, "remove", die)
+    with pytest.raises(KeyboardInterrupt):
+        open_items.sweep(db, T0 + open_items.AUTO_REASSIGN_AFTER, panes())
+    monkeypatch.setattr(workspaces, "remove", finish)
+    if after == "answered":
+        open_items.close(db, "w1")
+    elif after == "working":
+        db.update_agent("w1", status="processing")
+
+    open_items.sweep(db, T0 + open_items.AUTO_REASSIGN_AFTER + open_items.CLAIM_EXPIRES + 1, panes())
+    assert db.list_tasks(state=tasks.UNANSWERED) == [] and db.marks_of_kind(open_items.TAKEOVER) == []
+    if after == "retired":
+        assert len(takeover["started"]) == 1 and "took it over" in told[-1][1]
+    else:
+        assert takeover["started"] == [] and takeover["removed"] == []
+        assert tasks._loads(db.get_task(waiting.id).depends_on) == ["w1"]
+
+
+@pytest.mark.parametrize("dies", [
+    "after its dependency write", pytest.param("while resuming", marks=pytest.mark.variant("a second kill, during the resume")),
+])
+def test_a_killed_takeover_can_always_restore_the_dependencies(db, boss, worker, takeover, monkeypatch, dies):
+    waiting = tasks.enqueue(db, boss, db.get_workspace(boss.workspace_id), "developer", "after it", "assign",
+                            isolate=True, branch=None, done_when=None, files=None, depends_on=["w1"])
+    write = tasks.set_dependencies
+
+    def wrote_then_died(*a):
+        write(*a)
+        raise KeyboardInterrupt
+
+    def die(*a, **k):
+        raise KeyboardInterrupt
+
+    at = T0 + open_items.AUTO_REASSIGN_AFTER
+    with monkeypatch.context() as killed, pytest.raises(KeyboardInterrupt):
+        killed.setattr(tasks, "set_dependencies", wrote_then_died)
+        open_items.sweep(db, at, panes())
+    assert tasks._loads(db.get_task(waiting.id).depends_on) != ["w1"]
+    if dies == "while resuming":
+        at += open_items.CLAIM_EXPIRES + 1
+        with monkeypatch.context() as killed, pytest.raises(KeyboardInterrupt):
+            killed.setattr(open_items, "_unstarted", die)
+            open_items.sweep(db, at, panes())
+
+    open_items.close(db, "w1")   # its supervisor answers
+    open_items.sweep(db, at + open_items.CLAIM_EXPIRES + 1, panes())
+    assert tasks._loads(db.get_task(waiting.id).depends_on) == ["w1"]
+    assert db.list_tasks(state=tasks.UNANSWERED) == [] and db.marks_of_kind(open_items.TAKEOVER) == []
+
+
 def test_a_plan_waiting_for_approval_is_not_a_stuck_worker(db, boss, worker, takeover, monkeypatch):
     # Another supervisor can't requeue this worker while its open item exists.
     db.add_agent(Agent("other", boss.workspace_id, "supervisor", "claude", None, "interactive", "idle", "@2", None, T0))
