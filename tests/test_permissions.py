@@ -123,6 +123,7 @@ def test_shell_forms(tmp_path, command, expected):
     ('grep -n "a|b" README.md --include=*.env --exclude=*.env --exclude-dir=*.env', "allow"),
     ('grep -r x . --include=*.py --exclude=secret.py --exclude-dir=node_modules', "allow"),
     ('grep -r x . --include "*.py" --exclude secret.py --exclude-dir node_modules', "allow"),
+    ('grep -r "included files" . --include="*.py"', "allow"),
     pytest.param('grep -r x . --exclude=secret.py --include=*.py --exclude-dir=node_modules', "ask",
                  marks=pytest.mark.variant("bypass: last matching include overrides exclude")),
     pytest.param('grep -r x . --include=*.py', "ask",
@@ -185,6 +186,9 @@ def test_quoted_search(tmp_path, command, expected):
         (tmp_path / "sub/secret.py").touch()
         permissions.add_rule("read", str(tmp_path / "sub/secret.py"), "deny", "exact")
     (tmp_path / "nested/public.txt").touch()
+    if "included files" in command:
+        (tmp_path / "public.py").touch()
+        (tmp_path / "secret.env").touch()
     if "--include=blocked*.env" in command:
         (tmp_path / "--include=blocked.env").touch()
     if "--exclude=secret*" in command:
@@ -192,7 +196,16 @@ def test_quoted_search(tmp_path, command, expected):
     here = str(tmp_path)
     command = command.replace("{root}", here)
     decision = permissions.decide(permissions.Request("claude", "bash", "Bash", here, here, here, command=command))
-    assert decision.decision == expected, decision.reason
+    if "included files" in command:
+        (tmp_path / "secret.env").unlink()
+        assets = tmp_path / "assets"
+        assets.mkdir()
+        for i in range(permissions.WALK_LIMIT + 1):
+            (assets / f"{i}.txt").touch()
+        request = permissions.Request("claude", "bash", "Bash", here, here, here, command=command)
+        assert (decision.decision, permissions.decide(request).decision) == (expected, expected)
+    else:
+        assert decision.decision == expected, decision.reason
     if "check_new_tests" in command:
         # Real pruned tree above the normal limit; no permissive fallback.
         excluded = tmp_path / "node_modules"

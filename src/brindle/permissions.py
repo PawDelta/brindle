@@ -2064,29 +2064,29 @@ def _search_filters(words: list[str]) -> dict[int, tuple[str, str]]:
     return {}
 
 
-def _grep_selected(name: str, filters: tuple[tuple[str, str], ...], *, directory: bool = False) -> bool:
-    """Whether grep can search this basename. File filters are ordered:
+def _grep_selected(name: str, filters: tuple[tuple[str, str], ...], *,
+                   path: str = "", directory: bool = False) -> bool:
+    """Whether grep can search this file. File filters are ordered:
     the last matching include/exclude wins; directory exclusions prune walks.
-    BSD grep also matches full paths, so a filter containing a slash cannot
-    prove exclusion from a basename alone. Shell-style escapes and locale
-    bracket classes likewise aren't faithfully handled by Python fnmatch."""
-    if any(any(c in p for c in ("/", "\\", "[:", "[=", "[.")) for _, p in filters):
+    Check both basename-only and BSD basename-or-path matching. Keep the
+    operand's spelling (including ./), plus its normalized spelling, since
+    traversal implementations can normalize directory components differently.
+    Escapes and locale bracket classes cannot safely prove exclusion."""
+    if any(any(c in p for c in ("\\", "[:", "[=", "[.")) for _, p in filters):
         return True
     filters = tuple((kind, p.replace("[^", "[!")) for kind, p in filters)
     if directory:
         return not any(kind == "--exclude-dir" and fnmatch.fnmatchcase(name, p.rstrip("/"))
                        for kind, p in filters)
     files = [(kind, p) for kind, p in filters if kind != "--exclude-dir"]
-    selected = not files or files[0][0] != "--include"
-    for kind, pattern in files:
-        # BSD wildcards can consume directory separators even without a slash
-        # in the pattern (nested*.py includes nested/secret.py). An uncertain
-        # include can select a file; only a later definite exclude can prune it.
-        if kind == "--include" and any(c in pattern for c in "*?["):
-            selected = True
-        elif fnmatch.fnmatchcase(name, pattern):
-            selected = kind == "--include"
-    return selected
+    for candidate in (name, path, os.path.normpath(path)):
+        selected = not files or files[0][0] != "--include"
+        for kind, pattern in files:
+            if fnmatch.fnmatchcase(name, pattern) or fnmatch.fnmatchcase(candidate, pattern):
+                selected = kind == "--include"
+        if selected:
+            return True
+    return False
 
 
 def _reads_only_named(program: str, args: list[str], cwd: str) -> bool:
@@ -2148,13 +2148,16 @@ def _search_paths(words: list[str]) -> list[str]:
     return positional if patterned else positional[1:]
 
 
-def _tree(root: str, budget: list[int], filters: tuple[tuple[str, str], ...] = ()) -> list[str] | None:
+def _tree(root: str, budget: list[int], filters: tuple[tuple[str, str], ...] = (), *,
+          spelling: str) -> list[str] | None:
     """Reachable files and directories under ``root`` (.git aside), or None
     past ``budget``. Prune grep's exclusions before spending the shared budget."""
     out = []
     for top, dirs, files in os.walk(root):
+        relative = os.path.relpath(top, root)
+        searched = spelling if relative == "." else os.path.join(spelling, relative)
         dirs[:] = [d for d in dirs if d != ".git" and _grep_selected(d, filters, directory=True)]
-        for name in (*dirs, *(f for f in files if _grep_selected(f, filters))):
+        for name in (*dirs, *(f for f in files if _grep_selected(f, filters, path=os.path.join(searched, f)))):
             budget[0] -= 1
             if budget[0] < 0:
                 return None
@@ -2412,11 +2415,10 @@ def _reads_clear(req: Request, words: list[str], path_denies: list[Rule]) -> boo
         if None in expanded:
             return False
         paths = [name for names in expanded for name in names]
-        dirs = ([p for p in (os.path.join(cwd, n) for n in paths if n) if os.path.isdir(p)] if paths
-                else [cwd or "."])
+        dirs = ([n for n in paths if n and os.path.isdir(os.path.join(cwd, n))] if paths else ["."])
         budget = [WALK_LIMIT]
         for d in dirs:
-            found = _tree(d, budget, tuple(filters.values()))
+            found = _tree(os.path.join(cwd, d), budget, tuple(filters.values()), spelling=d)
             if found is None:
                 return False
             names += found
