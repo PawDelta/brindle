@@ -216,7 +216,9 @@ describe("visuals", () => {
     clock = 6000;
     await type("pending answer");                   // asks again; the answer is slow
     replies[0]!({ visuals: false });
-    await type("r", false);                         // off: begun, not reported
+    await type("", false);
+    expect(gate.enabled()).toBe(false);
+    await type("r", false);                        // off: begun, not reported
     clock = 12000;
     await type("ender first", false);               // asks again, still off at this key
     await type("");                                 // sent while that answer is still pending
