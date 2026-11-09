@@ -388,8 +388,8 @@ describe("Onboarding", () => {
     launch(daemon);
     await waitFor(() => expect(sidebar()).toBeTruthy(), { timeout: 3000 });
     expect(screen.queryByTestId("onboarding")).toBeNull();
-    // The gate asked nothing; the app's own look at the providers reports the problem in the strip.
-    await waitFor(() => expect(screen.getByTestId("provider-problem").textContent).toContain("Claude Code signed out"));
+    // The gate asked nothing; provider status stays out of the sidebar.
+    expect(screen.queryByTestId("provider-problem")).toBeNull();
     expect(daemon.requests.filter((r) => r.path === "/providers/installed").length).toBe(asked + 1);
   });
 
