@@ -34,11 +34,19 @@ AWS account and role, GCP project, Azure subscription), never tokens.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
+import threading
 import time
+import uuid
 from dataclasses import dataclass
+
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
 
 from brindle import agents, company_identity, company_login, config
 
@@ -78,13 +86,41 @@ def _path():
     return config.brindle_home() / STATE_FILE
 
 
+_SECTIONS = ("paused", "identity", "different", "warned", "settled")
+_state_lock = threading.Lock()
+
+
+@contextlib.contextmanager
+def _locked():
+    """One read, change and write of the state file at a time: among this
+    process's threads (a daemon's recovery launches sessions side by side,
+    lifecycle.resume_after_start) and, through a lock file, with every other
+    process that writes it (each pane's watcher, the CLI). Not nested, and
+    held for no CLI or resume: a sweep merges its changes in (_commit)."""
+    with _state_lock:
+        fd = None
+        try:
+            if fcntl is not None:
+                path = _path()
+                path.parent.mkdir(parents=True, exist_ok=True)
+                fd = os.open(path.with_name(f"{path.name}.lock"), os.O_RDWR | os.O_CREAT, 0o600)
+                fcntl.flock(fd, fcntl.LOCK_EX)
+        except OSError:
+            log.debug("sign-in pause: couldn't lock the state file", exc_info=True)  # nor write it, then
+        try:
+            yield
+        finally:
+            if fd is not None:
+                os.close(fd)     # closing drops the flock
+
+
 def _load() -> dict:
     try:
         got = json.loads(_path().read_text())
     except (OSError, ValueError):
         got = {}
     got = got if isinstance(got, dict) else {}
-    for key in ("paused", "identity", "different", "warned", "settled"):
+    for key in _SECTIONS:
         if not isinstance(got.get(key), dict):
             got[key] = {}
     unowned = got.get("unowned")   # missing from state files written before it existed
@@ -94,16 +130,37 @@ def _load() -> dict:
 
 def _save(state: dict) -> None:
     path = _path()
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w") as f:
             os.fchmod(f.fileno(), 0o600)
             f.write(json.dumps(state))
         os.replace(tmp, path)
     except OSError:
-        pass  # worst case: agents stay paused and `brindle continue` brings them back
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        # worst case: agents stay paused and `brindle continue` brings them back
+
+
+def _commit(state: dict, base: dict) -> None:
+    """Save what a sweep changed since it read ``base`` onto the file as it
+    is now. A sweep keeps its state across CLI checks and resumes, too long
+    to hold the lock (the launches it resumes record themselves under it),
+    and a launch or a sign-in may have written meanwhile: theirs stays."""
+    with _locked():
+        now = _load()
+        for section in _SECTIONS:
+            ours, was, theirs = state[section], base[section], now[section]
+            for key in {*ours, *was}:
+                if key not in ours:
+                    theirs.pop(key, None)
+                elif key not in was or ours[key] != was[key]:
+                    theirs[key] = ours[key]
+        added, gone = set(state["unowned"]) - set(base["unowned"]), set(base["unowned"]) - set(state["unowned"])
+        now["unowned"] = sorted((set(now["unowned"]) | added) - gone)
+        _save(now)
 
 
 def paused_for_signin() -> dict[str, dict]:
@@ -206,10 +263,11 @@ def adopt(ident: str, signed_in: bool = True) -> list[str]:
     try:
         if not isinstance(ident, str) or not ident:
             return []
-        state = _load()
-        ids = _adopt_into(state, ident, signed_in)
-        if ids:
-            _save(state)
+        with _locked():
+            state = _load()
+            ids = _adopt_into(state, ident, signed_in)
+            if ids:
+                _save(state)
         return ids
     except Exception:  # noqa: BLE001 - a sign-in never fails over this
         return []
@@ -224,10 +282,14 @@ def record_launch(agent) -> None:
         got = check("claude", cache=True)
         if got is None or got[0].kind != "ok" or not got[0].ident:
             return
-        state = _load()
-        if agent.id not in state["identity"]:   # a resume keeps the identity it first ran under
-            _record(state, agent.id, got[0].ident)
-            _save(state)
+        if agent.id in _load()["identity"]:     # a resume keeps the identity it first ran under
+            return
+        signed_in = _brindle_signed_in()        # first: the lock is held for the file alone
+        with _locked():
+            state = _load()
+            if agent.id not in state["identity"]:
+                _record(state, agent.id, got[0].ident, signed_in)
+                _save(state)
     except Exception:  # noqa: BLE001 - a launch never fails over this
         pass
 
@@ -264,6 +326,7 @@ def run(db) -> list[str]:
     """One check of every provider that has running or sign-in-paused agents."""
     state = _load()
     before = json.dumps(state, sort_keys=True)
+    base = json.loads(before)
     # Forget agents that are gone, or that someone else already resumed.
     for aid in list(state["paused"]):
         a = db.get_agent(aid)
@@ -283,9 +346,9 @@ def run(db) -> list[str]:
         except Exception:  # noqa: BLE001 - an unreadable answer is an undetermined one
             got = (Check("undetermined", line=f"{NAMES[provider]}: the check failed"), False)
         if got is not None:
-            done.extend(_handle(db, state, provider, running.get(provider, []), *got))
+            done.extend(_handle(db, state, base, provider, running.get(provider, []), *got))
     if json.dumps(state, sort_keys=True) != before:
-        _save(state)
+        _commit(state, base)
     return done
 
 
@@ -308,7 +371,7 @@ def _unwarn(state, provider: str, prefix: str) -> None:
         warned[:] = [k for k in warned if not (isinstance(k, str) and k.startswith(prefix))]
 
 
-def _handle(db, state, provider, running, res: Check, enforce: bool) -> list[str]:
+def _handle(db, state, base, provider, running, res: Check, enforce: bool) -> list[str]:
     name = NAMES[provider]
     if res.kind == "undetermined":
         state["settled"][provider] = 0
@@ -320,7 +383,7 @@ def _handle(db, state, provider, running, res: Check, enforce: bool) -> list[str
     if settled >= SETTLED_SWEEPS:
         _unwarn(state, provider, "undetermined")
     if res.kind == "signed_out":
-        return _pause(db, state, provider, running, f"{name} signed out",
+        return _pause(db, state, base, provider, running, f"{name} signed out",
                       f"{name} is signed out. Run `brindle login` or `brindle doctor --fix` "
                       "(or the CLI's own login) and they resume on their own.")
     if res.ident and not res.problem:
@@ -338,7 +401,7 @@ def _handle(db, state, provider, running, res: Check, enforce: bool) -> list[str
             if signed_in:
                 _adopt_into(state, res.ident)
     if res.problem and enforce:
-        return _pause(db, state, provider, running, f"{name} signed in as the wrong identity",
+        return _pause(db, state, base, provider, running, f"{name} signed in as the wrong identity",
                       f"{name}'s sign-in doesn't match the org policy ({res.problem}) and the policy "
                       "enforces it. Fix it and they resume on their own.")
     out: list[str] = []
@@ -359,7 +422,7 @@ def _expected() -> str | None:
     return company_identity.expected_ident(claude)
 
 
-def _pause(db, state, provider, running, reason: str, advice: str) -> list[str]:
+def _pause(db, state, base, provider, running, reason: str, advice: str) -> list[str]:
     if not running:
         return []
     expect = _expected() if provider == "claude" else None
@@ -376,7 +439,7 @@ def _pause(db, state, provider, running, reason: str, advice: str) -> list[str]:
         entry_reason = reason if must else NO_IDENTITY
         # Record and save each one as it pauses, so a later failure can't leave it untracked.
         state["paused"][a.id] = {"provider": provider, "reason": entry_reason, "identity": must or ""}
-        _save(state)
+        _commit(state, base)
         paused.append(a)
         done.append(f"paused agent {a.id}: {entry_reason}")
     if paused:

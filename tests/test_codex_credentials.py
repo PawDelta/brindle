@@ -113,11 +113,15 @@ def test_set_agy_gemini_failed_write_leaves_the_original(tmp_path, monkeypatch):
     assert stat.S_IMODE(path.stat().st_mode) == 0o640
 
 
-def test_set_agy_gemini_from_two_launches_at_once_keeps_their_temp_files_apart(tmp_path, monkeypatch):
+@pytest.mark.parametrize("cli", ["antigravity", "opencode"])
+def test_two_launches_writing_a_clis_file_at_once_keep_their_temp_files_apart(tmp_path, monkeypatch, cli):
     import threading
+
+    from brindle import opencode
 
     path = tmp_path / "settings.json"
     monkeypatch.setenv("BRINDLE_AGY_SETTINGS", str(path))
+    write = providers.set_agy_gemini if cli == "antigravity" else lambda: opencode._write(path, "plugin")
     real, both, temps = os.replace, threading.Barrier(2), []
 
     def replace(src, dst):
@@ -126,7 +130,7 @@ def test_set_agy_gemini_from_two_launches_at_once_keeps_their_temp_files_apart(t
         real(src, dst)
 
     monkeypatch.setattr(providers.os, "replace", replace)
-    launches = [threading.Thread(target=providers.set_agy_gemini) for _ in range(2)]
+    launches = [threading.Thread(target=write) for _ in range(2)]
     for launch in launches:
         launch.start()
     for launch in launches:

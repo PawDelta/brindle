@@ -372,7 +372,8 @@ def test_a_start_brings_sessions_back_at_once_most_recently_active_first(db, roo
     assert set(began[:2]) == {"recent", "older"} and set(began[2:]) == {"same-tmux", "oldest"}
 
 
-def test_stopped_during_concurrent_recovery_a_launch_finishes_and_the_rest_stay_pending(db, root, monkeypatch):
+def test_stopped_during_concurrent_recovery_a_launch_finishes_and_the_rest_stay_pending(db, root, monkeypatch, caplog):
+    import re
     import threading
 
     from brindle.daemon import lifecycle
@@ -411,6 +412,8 @@ def test_stopped_during_concurrent_recovery_a_launch_finishes_and_the_rest_stay_
     assert seen == ["launching"] and result == ["launching"]    # stop returned after the launch under way, none later
     assert {"preflight", "unstarted"} <= {e["id"] for e in pending}     # handed to the way out to record again
     assert sorted(e["id"] for e in recovery.pending) == ["preflight", "unstarted"]
+    # The log says how long the step it was cancelled in took: that may be the slow one.
+    assert re.search(r"session preflight recovery: .*resume \d+\.\d+s \(cancelled\)", caplog.text)
 
 
 def test_a_start_waits_for_room_and_a_stop_ends_the_wait(db, root, monkeypatch):

@@ -213,6 +213,51 @@ def test_the_state_file_holds_ids_only_and_is_private(w, brindle_home):
     assert "token" not in path.read_text().lower()
 
 
+@pytest.mark.parametrize("beside", ["a second launch", "a sign-in adopting agents"])
+def test_a_write_beside_a_launch_is_not_lost_and_both_stay_locked_to_their_identity(w, monkeypatch, beside):
+    import threading
+
+    from brindle import identity_lock
+
+    w.agent("c1")
+    if beside == "a second launch":
+        w.agent("c2")
+        second = w.db.get_agent("c2")
+        other, write = "c2", lambda: signin_pause.record_launch(second)
+    else:
+        other, write = "u1", lambda: signin_pause.adopt(OK.ident)
+        signin_pause._save({"identity": {"u1": "launched before the sign-in"}, "unowned": ["u1"]})
+    real, started = signin_pause._save, []
+
+    def save(state):
+        if not started:     # the launch has read the file: the other write goes first, if it can
+            started.append(threading.Thread(target=write))
+            started[0].start()
+            started[0].join(0.5)
+        real(state)
+
+    monkeypatch.setattr(signin_pause, "_save", save)
+    signin_pause.record_launch(w.db.get_agent("c1"))
+    started[0].join(5)
+    w.claude = PERSONAL     # another account signs in: neither conversation may go on under it
+    assert [identity_lock.locked_by(a) for a in ("c1", other)] == [OK.ident, OK.ident]
+
+
+def test_a_launch_during_a_sweep_keeps_its_identity(w, monkeypatch):
+    w.agent("c1")
+    w.agent("launching", status="paused")   # not one the sweep would record itself
+    real = signin_pause.check
+
+    def check(provider, cache=False):
+        if not cache:       # the sweep's own look (a launch's asks the cache)
+            signin_pause.record_launch(w.db.get_agent("launching"))
+        return real(provider, cache)
+
+    monkeypatch.setattr(signin_pause, "check", check)
+    signin_pause.run(w.db)
+    assert signin_pause._load()["identity"] == {"c1": OK.ident, "launching": OK.ident}
+
+
 def test_unrecorded_agent_with_nothing_known_never_auto_resumes_and_resumes_by_hand(w):
     w.agent("c1")
     w.claude = OUT

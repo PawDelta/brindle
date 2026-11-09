@@ -482,6 +482,23 @@ def _lanes(db, entries: list[dict]) -> deque[list[dict]]:
     return deque(lanes.values())
 
 
+@contextmanager
+def _timed(steps: list[str], step: str):
+    """Note in ``steps`` how long ``step`` took and how it ended, however it
+    ended: the step that fails may well be the slow one."""
+    from brindle import agents
+
+    began, outcome = time.monotonic(), "failed"
+    try:
+        yield
+        outcome = "ok"
+    except agents.Cancelled:
+        outcome = "cancelled"
+        raise
+    finally:
+        steps.append(f"{step} {time.monotonic() - began:.2f}s ({outcome})")
+
+
 def _resume_session(db, entry: dict, server: str | None, recovery: Recovery, env: dict[str, str]) -> bool:
     """Bring back the one session of ``entry``, on its thread's own ``db``.
     Whether it came back. Raises agents.Cancelled once the daemon is stopping."""
@@ -493,27 +510,25 @@ def _resume_session(db, entry: dict, server: str | None, recovery: Recovery, env
     if entry.get("server") != server or not agents.same_server(root):
         log.info("brindle: session %s is on another tmux server; not resumed here", root.id)
         return False
-    marks = [time.monotonic()]
+    steps: list[str] = []
     try:
-        # Paused again as well if something got launched past the pause (a task's
-        # helper, an assign under way): stopped below, it must come back too.
-        if not entry.get("paused") or any(
-                a.status not in ("paused", "done", "failed") for a in agents.tree(db, root.id)):
-            # The local model server stays: this session and those launching beside it want it.
-            agents.pause(db, root.id, stop_procs=False, stop_local_models=False)
-            with recovery.lock:
-                entry["paused"] = True
-        marks.append(time.monotonic())
-        procs.stop([a.id for a in agents.tree(db, root.id)], grace=2.0)
-        marks.append(time.monotonic())
-        agents.resume(db, root.id, gate=recovery.launching, recovery_env=env)
-        marks.append(time.monotonic())
+        with _timed(steps, "pause"):
+            # Paused again as well if something got launched past the pause (a task's
+            # helper, an assign under way): stopped below, it must come back too.
+            if not entry.get("paused") or any(
+                    a.status not in ("paused", "done", "failed") for a in agents.tree(db, root.id)):
+                # The local model server stays: this session and those launching beside it want it.
+                agents.pause(db, root.id, stop_procs=False, stop_local_models=False)
+                with recovery.lock:
+                    entry["paused"] = True
+        with _timed(steps, "stop"):
+            procs.stop([a.id for a in agents.tree(db, root.id)], grace=2.0)
+        with _timed(steps, "resume"):
+            agents.resume(db, root.id, gate=recovery.launching, recovery_env=env)
         return True
     finally:
         # A warning, so it's seen: the daemon's log is its stderr (app-daemon.log), warnings only.
-        log.warning("brindle: session %s recovery: %s", root.id,
-                    ", ".join(f"{step} {end - begin:.2f}s" for step, begin, end
-                              in zip(("pause", "stop", "resume"), marks, marks[1:])) or "failed in its pause")
+        log.warning("brindle: session %s recovery: %s", root.id, ", ".join(steps))
 
 
 def resume_after_start(recovery: Recovery | None = None) -> list[str]:
