@@ -216,12 +216,8 @@ fn is_rc(version: &str) -> bool {
 /// anyone else keeps it as installed. Nor does a staff release-branch build
 /// (`<version>+release.<run>.<sha>`): staff move it on from Settings too.
 pub fn checks_at_launch(version: &str) -> bool {
-    !is_rc(version) && !is_staff_build(version)
-}
-
-/// The offline build marker, independent of the signed-in account.
-pub(crate) fn is_staff_build(version: &str) -> bool {
-    Version::parse(version).ok().and_then(|v| release_run(&v)).is_some()
+    let staff_build = Version::parse(version).ok().and_then(|v| release_run(&v)).is_some();
+    !is_rc(version) && !staff_build
 }
 
 /// The version this launch was updated to, once: the first run of `current`

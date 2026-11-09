@@ -31,6 +31,14 @@ def root(db, repo):
     return workspaces.adopt_root(db, str(repo))
 
 
+@pytest.fixture(autouse=True)
+def no_timing_backend(monkeypatch):
+    from brindle import debuglog
+
+    monkeypatch.setattr(debuglog, "staff", lambda: False)
+    monkeypatch.setattr(debuglog, "_publish_timings", debuglog._write_timings)
+
+
 @pytest.mark.variant("live legacy --no-autopilot sessions have no driver row")
 def test_continue_backfills_a_live_legacy_root_without_enabling_workers(db, root, monkeypatch):
     from brindle import autopilot
@@ -357,7 +365,10 @@ def test_stopped_during_concurrent_recovery_a_launch_finishes_and_the_rest_stay_
 
     from brindle.daemon import lifecycle
 
-    monkeypatch.setenv("BRINDLE_STAFF_BUILD", "1")
+    from brindle import debuglog
+
+    monkeypatch.setattr(debuglog, "staff", lambda: True)
+    monkeypatch.setattr(debuglog, "_publish_timings", debuglog._write_timings)
     _recorded_sessions(db, root, monkeypatch, [("launching", "a"), ("preflight", "b"), ("unstarted", "c")])
     monkeypatch.setattr(lifecycle, "RESUME_PARALLEL", 2)
     monkeypatch.setattr(lifecycle, "RESUME_WAIT", 0)    # only the launch in flight holds stop up
@@ -744,9 +755,18 @@ def test_critical_memory_holds_a_recovery_even_with_nothing_running(monkeypatch)
 
 
 def test_resume_key_timing(db, root, monkeypatch, caplog):
-    from brindle import autopilot, identity_lock, keystore, tasks
+    from brindle import autopilot, debuglog, identity_lock, keystore, tasks
 
-    monkeypatch.setenv("BRINDLE_STAFF_BUILD", "1")
+    pending, checked, answer = [], [], [True]
+
+    def staff():
+        checked.append(answer[0])
+        if isinstance(answer[0], Exception):
+            raise answer[0]
+        return answer[0]
+
+    monkeypatch.setattr(debuglog, "staff", staff)
+    monkeypatch.setattr(debuglog, "_publish_timings", pending.append, raising=False)
     now, names = [100.0], ["TIMING_KEY_A", "TIMING_KEY_B"]
 
     def advance(seconds, result=None):
@@ -799,6 +819,8 @@ def test_resume_key_timing(db, root, monkeypatch, caplog):
     monkeypatch.setattr(agents, "_launch", launch)
     add(db, root, "chat")
     agents.resume(db, "chat", gate=lifecycle.Recovery().launching)
+    assert len(pending) == 1 and not checked and not caplog.records
+    debuglog._write_timings(pending.pop())
     details = [r.args[1] for r in caplog.records if isinstance(r.args, tuple)
                and len(r.args) == 2 and isinstance(r.args[1], dict)]
     assert details == [{"invalidate_s": 0.5, "known_names_s": 2.0, "key_loads_s": 7.5,
@@ -814,17 +836,24 @@ def test_resume_key_timing(db, root, monkeypatch, caplog):
     monkeypatch.setattr(procs, "stop", lambda *a, **kw: 0)
     caplog.clear()
     assert lifecycle.resume_after_start() == ["chat"]
+    assert not caplog.records and len(pending) == 1
+    debuglog._write_timings(pending.pop())
     assert len(caplog.records) == 4
-    monkeypatch.delenv("BRINDLE_STAFF_BUILD")
-    caplog.clear()
-    assert lifecycle.resume_after_start() == ["chat"]
-    assert not caplog.records
+    for value in (False, None, RuntimeError("offline")):
+        answer[0] = value
+        caplog.clear()
+        before = len(checked)
+        assert lifecycle.resume_after_start() == ["chat"]
+        assert len(checked) == before and len(pending) == 1 and not caplog.records
+        debuglog._write_timings(pending.pop())
+        assert not caplog.records
     real_resume = agents.resume
     monkeypatch.setattr(agents, "resume", mock.Mock(side_effect=agents.AgentError("unavailable")))
     assert lifecycle.resume_after_start() == []
+    debuglog._write_timings(pending.pop())
     assert len(caplog.records) == 1 and caplog.records[0].exc_info
     monkeypatch.setattr(agents, "resume", real_resume)
-    monkeypatch.setenv("BRINDLE_STAFF_BUILD", "1")
+    answer[0] = True
     caplog.clear()
     agents.resume(db, "chat")
     assert not caplog.records

@@ -42,7 +42,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import brindle
-from brindle import procs, spawn, staff_build, upgrade
+from brindle import debuglog, procs, spawn, upgrade
 from brindle.config import brindle_home
 
 HOST = "127.0.0.1"
@@ -596,8 +596,7 @@ def _resume_session(db, entry: dict, server: str | None, recovery: Recovery, env
                               gate=recovery.launching, recovery_env=env)
         finally:
             # A warning, so it's seen: the daemon's log is its stderr (app-daemon.log), warnings only.
-            if staff_build():
-                log.warning("brindle: session %s recovery: %s", root.id, ", ".join(steps))
+            debuglog.recovery_timing(log, "brindle: session %s recovery: %s", root.id, ", ".join(steps))
         if agents.panes_match(db, root.id, held):
             recovery.settled(entry)
         return True
@@ -620,6 +619,12 @@ def _join(threads: list[threading.Thread], recovery: Recovery) -> None:
 
 
 def resume_after_start(recovery: Recovery | None = None) -> list[str]:
+    """Recover sessions before optional timing authorization can contact the backend."""
+    with debuglog.recovery_timings():
+        return _resume_after_start(recovery)
+
+
+def _resume_after_start(recovery: Recovery | None = None) -> list[str]:
     """Bring back the sessions on the record (pause_for_exit), each by one
     reconcile with tmux (_resume_session). A session stays on the record until
     tmux confirms it, so a start that dies leaves the rest to the next; each is
@@ -701,9 +706,8 @@ def resume_after_start(recovery: Recovery | None = None) -> list[str]:
         _join(threads, recovery)
     finally:
         recovery.idle.set()
-        if staff_build():
-            log.warning("brindle: recovery of %d session(s) took %.2fs (%d back; ordering %.2fs)",
-                        len(entries), time.monotonic() - began, len(resumed), ordered)
+        debuglog.recovery_timing(log, "brindle: recovery of %d session(s) took %.2fs (%d back; ordering %.2fs)",
+                                len(entries), time.monotonic() - began, len(resumed), ordered)
     return resumed
 
 

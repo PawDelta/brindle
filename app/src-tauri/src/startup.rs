@@ -1,7 +1,8 @@
-//! Staff builds only: one fixed-size JSON line, updated in place as steps arrive.
+//! Startup marks stay in memory until the engine confirms a staff account.
 //! Incomplete starts remain useful, including starts with no terminal to attach.
 use std::fs::File;
 use std::io::{Seek, SeekFrom, Write};
+use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tauri::Manager;
@@ -60,24 +61,32 @@ impl<W: Write + Seek> Timing<W> {
 
 static TIMING: OnceLock<Mutex<Timing<File>>> = OnceLock::new();
 
-pub fn begin(version: &str) {
-    if !crate::updates::is_staff_build(version) { return; }
+pub fn begin() {
     let _ = TIMING.set(Mutex::new(Timing::new()));
 }
 
-pub(crate) fn staff_build() -> bool {
-    TIMING.get().is_some()
+pub fn open(app: &tauri::AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        // Never hold the timing lock across daemon discovery or the backend:
+        // marks and startup continue even when the account cannot be checked.
+        let staff = crate::updates::engine_says_staff(|path| app.state::<crate::daemon::Engine>().get(path));
+        let Ok(dir) = app.path().app_data_dir() else { return };
+        let Some(timing) = TIMING.get() else { return };
+        let Ok(mut timing) = timing.lock() else { return };
+        timing.open_in(&dir, staff);
+    });
 }
 
-pub fn open(app: &tauri::AppHandle) {
-    let Some(timing) = TIMING.get() else { return };
-    let Ok(mut timing) = timing.lock() else { return };
-    let Ok(dir) = app.path().app_data_dir() else { return };
-    if std::fs::create_dir_all(&dir).is_err() { return; }
-    let Ok(mut file) = File::options().create(true).truncate(false).write(true).open(dir.join("app-startup.log")) else { return };
-    let Ok(offset) = file.seek(SeekFrom::End(0)) else { return };
-    timing.output = Some((file, offset));
-    timing.persist();
+impl Timing<File> {
+    fn open_in(&mut self, dir: &Path, staff: bool) {
+        if !staff { return; }
+        if std::fs::create_dir_all(dir).is_err() { return; }
+        let Ok(mut file) = File::options().create(true).truncate(false).write(true).open(dir.join("app-startup.log")) else { return };
+        let Ok(offset) = file.seek(SeekFrom::End(0)) else { return };
+        self.output = Some((file, offset));
+        self.persist();
+    }
 }
 
 pub fn mark(step: &str) {
@@ -95,6 +104,25 @@ pub fn app_startup_step(step: String) {
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    #[test]
+    fn non_staff_startup_leaves_no_file() {
+        let dir = std::env::current_dir().unwrap().join(format!("target/startup-account-{}", std::process::id()));
+        let mut timing = Timing::<File>::new();
+        timing.mark("webview");
+        let non_staff = crate::updates::engine_says_staff(|_| Ok((200, r#"{"staff":false}"#.into())));
+        timing.open_in(&dir, non_staff);
+        assert!(!dir.exists() && timing.output.is_none());
+        let unknown = crate::updates::engine_says_staff(|_| Err("offline".into()));
+        timing.open_in(&dir, unknown);
+        assert!(!dir.exists());
+        let staff = crate::updates::engine_says_staff(|_| Ok((200, r#"{"staff":true}"#.into())));
+        timing.open_in(&dir, staff);
+        drop(timing);
+        let record: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("app-startup.log")).unwrap()).unwrap();
+        assert!(record["elapsed_ms"]["webview"].is_number());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn startup_record_keeps_one_line_and_first_times() {

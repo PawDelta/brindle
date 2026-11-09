@@ -329,27 +329,15 @@ fn daemon_command(bin: &Path, path: &OsStr) -> Command {
 /// launchd job's program is signed code of the app's team, not a script: the
 /// engine's helper app, which macOS names brindle when the daemon, tmux or an
 /// agent's pane needs its permission (without one, the engine's Python).
-/// Only a staff app build passes the timing marker; other builds clear it
-/// even when the app inherited one from its own parent.
 #[cfg_attr(windows, allow(dead_code))]
 pub(crate) fn start_command(bin: &Path, path: &OsStr, engine: Option<&Path>) -> Command {
-    start_command_for_build(bin, path, engine, crate::startup::staff_build())
-}
-
-fn start_command_for_build(bin: &Path, path: &OsStr, engine: Option<&Path>, staff_build: bool) -> Command {
     let direct = engine
         .filter(|engine| crate::engine::is_launcher(engine, bin))
         .and_then(|engine| crate::engine::launcher_exec(engine, path));
-    let mut cmd = match direct {
+    match direct {
         Some((python, before, path)) => daemon_process(&python, &before, &path),
         None => daemon_command(bin, path),
-    };
-    if staff_build {
-        cmd.env("BRINDLE_STAFF_BUILD", "1");
-    } else {
-        cmd.env_remove("BRINDLE_STAFF_BUILD");
     }
-    cmd
 }
 
 /// `program`, given `before` ahead of `daemon --idle-exit`: see `daemon_command`.
@@ -2081,28 +2069,6 @@ mod tests {
         let staged = own.replace("daemon-helper", "staged");
         assert_eq!(reuse(&engine, Ok("00b2"), &staged), Reuse::Replace);
         let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn only_staff_versions_enable_daemon_timing() {
-        for (version, staff) in [
-            ("0.6.2", false),
-            ("0.6.3-rc.1", false),
-            ("0.6.2+release.42.abcdef012345", true),
-            ("0.6.2+release.42.bad", false),
-        ] {
-            let cmd = start_command_for_build(
-                Path::new("brindle"), OsStr::new("/bin"), None,
-                crate::updates::is_staff_build(version),
-            );
-            let marker = cmd.get_envs().find(|(key, _)| *key == "BRINDLE_STAFF_BUILD").unwrap().1;
-            assert_eq!(marker, staff.then(|| OsStr::new("1")), "{version}");
-            #[cfg(target_os = "macos")]
-            {
-                let plist = daemon_plist("staff-test", &cmd, Path::new("/the/log"));
-                assert_eq!(plist.contains("<key>BRINDLE_STAFF_BUILD</key>"), staff, "{version}");
-            }
-        }
     }
 
     /// A process `ps` shows as `argv0 … args` (a daemon's command line), and

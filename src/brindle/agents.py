@@ -25,7 +25,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 
-from brindle import bus, cloud_credential, company_identity, company_login, git, keystore, knowledge, pane_auth, providers, secrets, staff_build, tmux, upgrade, workspaces
+from brindle import bus, cloud_credential, company_identity, company_login, debuglog, git, keystore, knowledge, pane_auth, providers, secrets, tmux, upgrade, workspaces
 from brindle import spawn as processes   # this module's own spawn() starts an agent
 from brindle.assembler import DECISIONS, DOCUMENT_CHUNKS, OTHER_SESSIONS, TASK_AND_RULES, Block, assemble
 from brindle.config import RepoConfig
@@ -1853,7 +1853,7 @@ def resume(db: DB, root_id: str, *, watch_pane: bool = True,
     windows = _window_seconds.set([])
     token = _launch_gate.set(gate) if gate is not None else None
     try:
-        with resume_lock(root_id):
+        with resume_lock(root_id), debuglog.recovery_timings(_launch_gate.get() is not None):
             return _resume(db, root_id, watch_pane=watch_pane, only=only, recovery_env=recovery_env,
                            settle=settle, unstarted=unstarted)
     finally:
@@ -1978,7 +1978,7 @@ def _resume(db: DB, root_id: str, *, watch_pane: bool, only, recovery_env, settl
 
     _gate_check()
     began = time.monotonic()
-    timing = _ResumeTiming(_launch_gate.get() is not None and staff_build())
+    timing = _ResumeTiming(_launch_gate.get() is not None)
     timing.call("invalidate_s", providers.invalidate_signed_in)
     from brindle import keystore, secrets
 
@@ -2143,16 +2143,16 @@ def _resume(db: DB, root_id: str, *, watch_pane: bool, only, recovery_env, settl
             db.update_autopilot(root_id, state="running", note=None)
     if resumed:
         bus.publish_agent(db, "session.resumed", root_id, agents=[a.id for a in resumed])
-    if timing.enabled:      # a staff build's recovery: where its resume went, in the daemon's log
+    if timing.enabled:      # authorized after recovery, without holding any resume on the account lookup
         windows = sum(_window_seconds.get() or ())
-        log.warning("brindle: session %s resume: keys %.2fs, windows %.2fs, checks and the rest %.2fs",
+        debuglog.recovery_timing(log, "brindle: session %s resume: keys %.2fs, windows %.2fs, checks and the rest %.2fs",
                     root_id, keys_took, windows, time.monotonic() - began - keys_took - windows)
         detail = {name: round(timing.seconds.get(name, 0.0), 3) for name in (
             "invalidate_s", "known_names_s", "key_loads_s", "credential_writes_s", "identity_s",
             "goals_s", "provider_prep_s", "launch_s", "pipeline_s", "tasks_s")}
         detail.update(key_reads=reads.backend_reads, key_cached=reads.cached_reads,
                       key_lock_s=round(reads.lock_seconds, 3), security_s=round(reads.process_seconds, 3))
-        log.warning("brindle: session %s resume detail: %s", root_id, detail)
+        debuglog.recovery_timing(log, "brindle: session %s resume detail: %s", root_id, detail)
     return resumed
 
 
