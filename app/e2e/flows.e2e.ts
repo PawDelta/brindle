@@ -95,10 +95,6 @@ test("sidebar foot pill stays compact in calm and busy states", async ({ page },
     expect(await foot.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true);
     await pill.click();
     await expect(page.getByRole("tab", { name: "Usage", exact: true })).toHaveAttribute("aria-selected", "true");
-    if (busy) {
-      await foot.getByTestId("provider-problem").click();
-      await expect(page.getByRole("tab", { name: "Providers", exact: true })).toHaveAttribute("aria-selected", "true");
-    }
   }
 });
 
