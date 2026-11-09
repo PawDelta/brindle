@@ -146,7 +146,7 @@ describe("TerminalPanel", () => {
     expect(screen.getByTestId("terminal").dataset.target).toBe(daemon.actions[2].target);
   });
 
-  it("opens a shell from the status line's toggle, another on +, and closes the shown one on ×, saying when either fails", async () => {
+  it("opens shells with the toggle and +, with tab close controls that close an inactive shell and report failures", async () => {
     const { daemon, failing } = setup();
     const calls = () => daemon.requests.filter((r) => r.path.startsWith("/terminals")).map((r) => `${r.method} ${r.path}`);
     expect(screen.queryByTestId("terminal-panel")).toBeNull();
@@ -175,25 +175,45 @@ describe("TerminalPanel", () => {
     expect(within(panel).getAllByRole("tab")[1].getAttribute("aria-selected")).toBe("true");
     expect(within(panel).getByTestId("terminal").dataset.target).toBe(daemon.actions[1].target);
 
-    // × refused: it says so, and the tab stays, for × to try again.
-    failing.push(`DELETE /v1/terminals/${daemon.actions[1].id}`);
-    fireEvent.click(within(panel).getByRole("button", { name: "Close this shell" }));
+    const tabs = within(panel).getAllByRole("tab");
+    const closes = tabs.map((tab) => {
+      const name = tab.textContent!.replace(">_Terminal", "");
+      const control = within(tab.parentElement!).getByRole("button", { name: `Close ${name}` });
+      expect(control.parentElement).toBe(tab.parentElement);
+      control.focus();
+      expect(document.activeElement).toBe(control);
+      return control;
+    });
+    expect(within(panel).getAllByRole("button", { name: /^Close / })).toHaveLength(2);
+    const strip = within(panel).getByRole("tablist", { name: "Shells" });
+    expect(strip.classList.contains("overflow-x-auto")).toBe(true);
+    expect(strip.classList.contains("min-w-0")).toBe(true);
+    for (const name of ["Another shell", "Hide the Terminal"]) {
+      const control = within(panel).getByRole("button", { name });
+      expect(strip.contains(control)).toBe(false);
+      expect(control.classList.contains("flex-none")).toBe(true);
+    }
+
+    // Closing an inactive tab must never select it, even while the close fails.
+    failing.push(`DELETE /v1/terminals/${daemon.actions[0].id}`);
+    fireEvent.click(closes[0]);
+    expect(within(panel).getByTestId("terminal").dataset.target).toBe(daemon.actions[1].target);
     expect((await within(panel).findByRole("alert")).textContent).toBe("Couldn't close the shell: tmux said no.");
     expect(within(panel).getAllByRole("tab")).toHaveLength(2);
     expect(daemon.closedTerminals).toEqual([]);
 
-    // × again: the shown shell is closed on the daemon; the other stays, shown.
-    fireEvent.click(within(panel).getByRole("button", { name: "Close this shell" }));
-    await waitFor(() => expect(daemon.closedTerminals).toEqual([daemon.actions[1].id]));
+    // × again: the inactive shell closes; the shown shell stays selected.
+    fireEvent.click(closes[0]);
+    await waitFor(() => expect(daemon.closedTerminals).toEqual([daemon.actions[0].id]));
     await waitFor(() => expect(within(panel).getAllByRole("tab")).toHaveLength(1));
-    expect(within(panel).getByTestId("terminal").dataset.target).toBe(daemon.actions[0].target);
-    expect(calls()).toEqual(["POST /terminals/shell", "POST /terminals/shell", `DELETE /terminals/${daemon.actions[1].id}`]);
+    expect(within(panel).getByTestId("terminal").dataset.target).toBe(daemon.actions[1].target);
+    expect(calls()).toEqual(["POST /terminals/shell", "POST /terminals/shell", `DELETE /terminals/${daemon.actions[0].id}`]);
 
     // Collapsed (⌃`), the shell keeps running; open again, it is shown again without a new one.
     fireEvent.keyDown(window, { key: "`", code: "Backquote", ctrlKey: true });
     await waitFor(() => expect(screen.queryByTestId("terminal-panel")).toBeNull());
     fireEvent.click(screen.getByTestId("terminal-toggle"));
-    expect(within(await screen.findByTestId("terminal-panel")).getByTestId("terminal").dataset.target).toBe(daemon.actions[0].target);
+    expect(within(await screen.findByTestId("terminal-panel")).getByTestId("terminal").dataset.target).toBe(daemon.actions[1].target);
     expect(calls()).toHaveLength(3);
   });
 
@@ -206,7 +226,7 @@ describe("TerminalPanel", () => {
 
     // × on the first and + for a second, both answered only once both are asked; then together.
     holding.push(`DELETE /v1/terminals/${first}`, "POST /v1/terminals/shell");
-    fireEvent.click(within(panel).getByRole("button", { name: "Close this shell" }));
+    fireEvent.click(within(panel).getByRole("button", { name: "Close pawdelta" }));
     fireEvent.click(within(panel).getByRole("button", { name: "Another shell" }));
     release();
     await waitFor(() => expect(daemon.closedTerminals).toEqual([first]));
