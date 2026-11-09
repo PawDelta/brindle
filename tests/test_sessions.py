@@ -742,6 +742,73 @@ def test_critical_memory_holds_a_recovery_even_with_nothing_running(monkeypatch)
     assert stop.is_set()        # it looked at memory, though nothing runs, and held until told to stop
 
 
+def test_resume_key_timing(db, root, monkeypatch, caplog):
+    from brindle import autopilot, identity_lock, keystore, tasks
+
+    now, names = [100.0], ["TIMING_KEY_A", "TIMING_KEY_B"]
+
+    def advance(seconds, result=None):
+        now[0] += seconds
+        return result
+
+    clock = mock.Mock(wraps=time)
+    clock.monotonic = lambda: now[0]
+    for module in (agents, keystore, spawn):
+        monkeypatch.setattr(module, "time", clock)
+    monkeypatch.setattr(keystore, "_keychain_reads", {})
+    stores = {name: keystore.KeychainStore("timing", name) for name in names}
+    blob = keystore._encode({"value": "secret-timing-value", "updated_at": 7})
+    stores[names[1]]._read.blob, stores[names[1]]._read.expires = blob, 1000.0
+
+    class ReadLock:
+        def __enter__(self):
+            advance(2)
+
+        def __exit__(self, *args):
+            pass
+
+    for name, store in stores.items():
+        store._read.lock = ReadLock()
+        monkeypatch.setenv(name, "")   # restore the environment changed by resume
+    monkeypatch.setattr(keystore, "_key_store", lambda name: stores[name])
+    monkeypatch.setattr(keystore, "known_names", lambda: advance(1, names))
+    monkeypatch.setattr(providers, "invalidate_signed_in", lambda: advance(0.5))
+    real_admit = spawn._admit
+    monkeypatch.setattr(spawn, "_admit", lambda *a, **kw: advance(0.5, real_admit(*a, **kw)))
+    monkeypatch.setattr(spawn, "_run_read", lambda argv, *a: advance(3, subprocess.CompletedProcess(argv, 0, blob, "")))
+    real_write = db.set_session_credential
+    monkeypatch.setattr(db, "set_session_credential", lambda *a: advance(0.25, real_write(*a)))
+    monkeypatch.setattr(identity_lock, "ensure", lambda a: advance(0.75))
+    monkeypatch.setattr(agents, "settle_panes", lambda *a: set())
+    monkeypatch.setattr(autopilot, "reload_goals_file", lambda *a: advance(0.5))
+    monkeypatch.setattr(providers.ClaudeCode, "can_resume", staticmethod(lambda ref: advance(1, True)))
+    monkeypatch.setattr(pipeline, "on_resumed", lambda *a: advance(1.25))
+
+    def queued_tasks(*a):
+        advance(1.5)
+        agents._window_seconds.get().append(0.5)   # a queued launch's window belongs to tasks
+
+    monkeypatch.setattr(tasks, "on_resumed", queued_tasks)
+
+    def launch(*a, **kw):
+        advance(7)
+        agents._window_seconds.get().append(4)
+
+    monkeypatch.setattr(agents, "_launch", launch)
+    add(db, root, "chat")
+    agents.resume(db, "chat", gate=lifecycle.Recovery().launching)
+    details = [r.args[1] for r in caplog.records if isinstance(r.args, tuple)
+               and len(r.args) == 2 and isinstance(r.args[1], dict)]
+    assert details == [{"invalidate_s": 0.5, "known_names_s": 2.0, "key_loads_s": 7.5,
+                        "key_reads": 1, "key_cached": 1, "key_lock_s": 4.0, "security_s": 3.0,
+                        "credential_writes_s": 0.5, "identity_s": 0.75, "goals_s": 0.5,
+                        "provider_prep_s": 1.0, "launch_s": 3.0, "pipeline_s": 1.25, "tasks_s": 1.5}]
+    assert "secret-timing-value" not in caplog.text and all(name not in caplog.text for name in names)
+    caplog.clear()
+    agents.resume(db, "chat")
+    assert not caplog.records
+
+
 def test_recovery_opened_session_first(db, root, monkeypatch):
     from starlette.applications import Starlette
     from starlette.routing import Route
