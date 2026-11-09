@@ -1479,6 +1479,7 @@ impl Engine {
     fn refresh(&self) -> Result<DaemonInfo, String> {
         let mut info = self.info.lock().map_err(|e| e.to_string())?;
         let found = (self.discover)()?;
+        crate::startup::mark("daemon");
         *info = Some(found.clone());
         Ok(found)
     }

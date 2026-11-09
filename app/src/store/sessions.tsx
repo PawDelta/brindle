@@ -14,6 +14,7 @@ import type { Route } from "../routes";
 import { unknownAncestors, type Hidden } from "../screens/Session/tree";
 import { isPaused } from "./overview";
 import { useAppState } from "./useStore";
+import { startupStep } from "../api/startup";
 
 export interface SessionsFeed {
   /* null until the first load answers. */
@@ -102,6 +103,7 @@ export function SessionsProvider({ client, children }: { client: DaemonClient | 
       setRepos(found);
       setSessions(Object.fromEntries(found.map((r, i) => [r.repo_root, lists[i]])));
       setError(null);
+      startupStep("sessions_feed");
       const settled = [...closedAt.current].filter(([, at]) => seq > at).map(([root]) => root);
       if (settled.length > 0) {
         for (const root of settled) closedAt.current.delete(root);

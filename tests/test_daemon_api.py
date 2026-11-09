@@ -98,8 +98,10 @@ def test_requests_need_the_token_and_no_foreign_origin(headers, status):
         app = build_app(TOKEN)
         for resuming in (True, False):
             app.state.resuming = resuming
+            app.state.recovered_at = None if resuming else 123.5
             code, body = asyncio.run(_read_request(app, "/v1/meta", headers))
             assert code == 200 and body["resuming"] is resuming
+            assert body["recovered_at"] == app.state.recovered_at
 
 
 @pytest.mark.variant("a token sent in the URL must never open the socket, only the first frame")

@@ -14,6 +14,23 @@ function setup() {
 }
 
 describe("startSync", () => {
+  it("answered visual leaves the inbox through a repo-scoped event without an Inbox screen mounted", async () => {
+    const { daemon, store, sync } = setup();
+    try {
+      await flush();
+      await sync.idle();
+      expect(store.getState().inbox).toEqual([question]);
+      daemon.data.inbox = [];
+      // Engine publishers carry repo context (covered by test_visual_offers.py).
+      daemon.publish("visual.offer_resolved", { repo_root: REPO, root_id: "sup1", payload: { offer: "o_1" } });
+      await flush();
+      await sync.idle();
+      expect(store.getState().inbox).toEqual([]);
+    } finally {
+      sync.stop();
+    }
+  });
+
   it.each(["agent.closed", "rewound"])("discards a snapshot started before %s even if the queued refresh fails", async (kind) => {
     const { daemon, client, store, sync } = setup();
     await flush();
