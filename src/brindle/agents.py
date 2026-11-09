@@ -3514,10 +3514,13 @@ def collect(db: DB, parent_id: str | None, worker_id: str) -> None:
         db.drop_pending(parent_id, worker_id)
 
 
-def submit_review(db: DB, caller_id: str, approved: bool, summary: str) -> str:
+def submit_review(db: DB, caller_id: str, approved: bool, summary: str,
+                  tests_only: bool = False, finding_paths: list[str] | None = None) -> str:
     """A reviewer's verdict: recorded for the merge gate, handed to the
     pipeline if the branch is piped, else sent to the supervisor. The
-    reviewer is closed shortly after."""
+    reviewer is closed shortly after. ``tests_only`` and ``finding_paths``:
+    the reviewer's claim that its findings concern only those test files,
+    which brindle checks (``pipeline.tests_only_waived``)."""
     from brindle import autopilot, gates, pipeline
 
     caller = db.get_agent(caller_id)
@@ -3561,6 +3564,9 @@ def submit_review(db: DB, caller_id: str, approved: bool, summary: str) -> str:
     # For the commit it was started on: a branch that moved on since then
     # needs a review of its own, not this one carried over to its new head.
     sha = caller.review_sha or head
+    if not approved and tests_only and pipeline.tests_only_waived(db, ws, sha, summary, finding_paths or []):
+        pipeline.note_tests_only(db, ws, caller, summary)
+        approved, summary = True, f"{pipeline.TESTS_ONLY_WAIVED}\n\n{summary}"
     db.add_review(ws.id, sha, caller.id, approved, summary)
     bus.publish_agent(db, "review.submitted", caller.id, approved=approved, sha=sha)
     if approved:
@@ -3967,7 +3973,8 @@ def workspace_worker(db: DB, ws: Workspace) -> Agent | None:
 DELTA_SCOPE = ("First check each earlier finding is fixed. Then look for problems the new "
                "changes introduce, including in code they call or that calls them. Don't raise "
                "new findings about code an earlier round already reviewed and these changes "
-               "don't touch.")
+               "don't touch: anything you notice outside these changes is at most `minor`, "
+               "never a blocker.")
 
 
 def review_base_ref(ws_id: str) -> str:
@@ -3976,9 +3983,9 @@ def review_base_ref(ws_id: str) -> str:
 
 @dataclass
 class ReviewBase:
-    """Where a re-review's diff starts. ``sha`` None: no safe base, review the
-    whole diff. ``merged`` is the newest base commit merged in since;
-    ``edited`` the files a merge commit changed by hand."""
+    """Where a re-review's diff starts. ``sha`` None: the last reviewed commit
+    can't be read, review the whole diff. ``merged`` is the newest base commit
+    merged in since; ``edited`` the files a merge commit changed by hand."""
     sha: str | None = None
     merged: str | None = None
     edited: list[str] = field(default_factory=list)
@@ -3987,54 +3994,64 @@ class ReviewBase:
 
 def review_base(ws: Workspace, prev_sha: str) -> ReviewBase:
     """The commit to diff from so a re-review reads only the worker's new
-    changes. ``prev_sha`` itself when nothing was merged since. When only clean
-    merges of already-reviewed base commits came in, a commit pinned at
-    ``refs/brindle/review-base/<id>`` holding ``prev_sha`` merged with the
-    newest of them, so ``git diff <it>..HEAD`` is the worker's own work. Any
-    doubt or git error: ``sha`` None (the whole diff)."""
+    changes: it compares trees, so an amend or a rebase needs no shared
+    history. ``prev_sha`` itself when no base commits came in since. Otherwise
+    a commit pinned at ``refs/brindle/review-base/<id>`` holding ``prev_sha``
+    merged with the newest base commit the branch now has, so ``git diff
+    <it>..HEAD`` leaves out what the base brought in. A merge the worker
+    resolved or edited by hand stays in that diff, and is named in ``edited``.
+    ``sha`` None only when ``prev_sha`` is gone or git fails (the whole diff)."""
     try:
-        if not git.ok(["merge-base", "--is-ancestor", prev_sha, "HEAD"], ws.path):
+        if not git.ok(["cat-file", "-e", f"{prev_sha}^{{commit}}"], ws.path):
             return ReviewBase()
-        merges = git.out(["rev-list", "--merges", "--reverse", f"{prev_sha}..HEAD"], ws.path).split()
-        if not merges:
-            return ReviewBase(sha=prev_sha)
+        edited = _hand_edited_merges(ws, prev_sha)
         if not ws.base_branch:
-            return ReviewBase()
-        newest = ""
-        for m in merges:
-            parents = git.out(["rev-list", "--parents", "-n", "1", m], ws.path).split()[1:]
-            if len(parents) != 2:
-                return ReviewBase()
-            p1, p2 = parents
-            if not git.ok(["merge-base", "--is-ancestor", p2, ws.base_branch], ws.path):
-                return ReviewBase()
-            clean = git.run(["merge-tree", "--write-tree", p1, p2], ws.path, check=False)
-            # Exit 1 is a conflict: git still wrote a tree (with markers), which
-            # a hand resolution differs from. Any other failure is git failing.
-            if clean.returncode not in (0, 1) or not clean.stdout.split():
-                return ReviewBase()
-            actual = git.out(["rev-parse", f"{m}^{{tree}}"], ws.path)
-            tree = clean.stdout.split()[0]
-            if tree != actual or clean.returncode == 1:
-                edited = git.paths(["diff", "--name-only", tree, actual], ws.path)
-                return ReviewBase(edited=edited)
-            newest = p2
-        merged = git.run(["merge-tree", "--write-tree", prev_sha, newest], ws.path, check=False)
-        if merged.returncode != 0:
-            return ReviewBase()
+            return ReviewBase(sha=prev_sha, edited=edited)
+        base = git.base_ref(ws.path, ws.base_branch)
+        newest = git.out(["merge-base", "HEAD", base], ws.path)
+        if newest == git.out(["merge-base", prev_sha, base], ws.path):
+            return ReviewBase(sha=prev_sha, edited=edited)
+        merged = git.run(["merge-tree", "--write-tree", "--name-only", prev_sha, newest], ws.path, check=False)
+        # Exit 1 is a conflict: git still wrote a tree (with markers), and the
+        # worker's resolution of it is exactly what the diff should show.
+        if merged.returncode not in (0, 1) or not merged.stdout.split():
+            return ReviewBase(edited=edited)
+        tree, *conflicted = merged.stdout.split("\n\n", 1)[0].splitlines()
         commit = git.out(["-c", "user.name=brindle", "-c", "user.email=brindle@localhost",
-                          "commit-tree", merged.stdout.split()[0], "-p", prev_sha,
-                          "-m", "review base"], ws.path)
-        # Files the merged base commits touched, and files the worker's own
-        # commits since prev touched (not the merges): an identical edit on
-        # both sides leaves no residual diff but is still worth a look.
+                          "commit-tree", tree, "-p", prev_sha, "-m", "review base"], ws.path)
+        # Files the merged base commits touched, and files the worker changed
+        # since prev (an identical edit on both sides leaves no residual diff
+        # but is still worth a look; a rewritten history has no commits to read).
         theirs = set(git.paths(["diff", "--name-only", f"{prev_sha}...{newest}"], ws.path))
-        mine = set(git.paths(["log", "--first-parent", "--no-merges", "--name-only",
-                              "--format=", f"{prev_sha}..HEAD"], ws.path))
+        mine = set(git.paths(["diff", "--name-only", commit, "HEAD"], ws.path))
+        if git.ok(["merge-base", "--is-ancestor", prev_sha, "HEAD"], ws.path):
+            mine |= set(git.paths(["log", "--first-parent", "--no-merges", "--name-only",
+                                   "--format=", f"{prev_sha}..HEAD"], ws.path))
         git.run(["update-ref", review_base_ref(ws.id), commit], ws.path)
-        return ReviewBase(sha=review_base_ref(ws.id), merged=newest, both=sorted(theirs & mine))
+        return ReviewBase(sha=review_base_ref(ws.id), merged=newest, both=sorted(theirs & mine),
+                          edited=sorted({*edited, *conflicted}))
     except git.GitError:
         return ReviewBase()
+
+
+def _hand_edited_merges(ws: Workspace, prev_sha: str) -> list[str]:
+    """Files the two-parent merges made since ``prev_sha`` differ in from what
+    git would have merged on its own: a resolved conflict, or a hand edit."""
+    edited: set[str] = set()
+    for m in git.out(["rev-list", "--merges", f"{prev_sha}..HEAD"], ws.path).split():
+        parents = git.out(["rev-list", "--parents", "-n", "1", m], ws.path).split()[1:]
+        if len(parents) != 2:
+            continue
+        clean = git.run(["merge-tree", "--write-tree", *parents], ws.path, check=False)
+        # Exit 1 is a conflict: git still wrote a tree (with markers), which
+        # a hand resolution differs from. Any other failure is git failing.
+        if clean.returncode not in (0, 1) or not clean.stdout.split():
+            continue
+        tree = clean.stdout.split()[0]
+        actual = git.out(["rev-parse", f"{m}^{{tree}}"], ws.path)
+        if tree != actual:
+            edited.update(git.paths(["diff", "--name-only", tree, actual], ws.path))
+    return sorted(edited)
 
 
 def default_review_profile(cfg: RepoConfig, worker: Agent | None, db: DB | None = None,
@@ -4648,23 +4665,24 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
         prior = f"\n\nA previous review at {prev.sha[:8]} found:\n{(prev.summary or '').strip()}\n\n"
         rb = review_base(ws, prev.sha)
         if rb.sha == prev.sha:
-            task += (prior + f"Review only what changed since then (`git diff {prev.sha}..HEAD`). "
-                     + DELTA_SCOPE)
+            task += (prior + f"Review only what changed since then (`git diff {prev.sha}..HEAD`), "
+                     "not the whole branch. " + DELTA_SCOPE)
         elif rb.sha:
-            task += (prior + f"Since then {base} was merged in cleanly (up to {rb.merged[:8]}); "
-                     "those changes were reviewed on their own branches. Focus on the worker's "
-                     f"own changes since your last review: `git diff {rb.sha}..HEAD`. " + DELTA_SCOPE)
+            task += (prior + f"Since then {base} was merged in (up to {rb.merged[:8]}); "
+                     "those changes were reviewed on their own branches. Review only the worker's "
+                     f"own changes since your last review, not the whole branch: `git diff {rb.sha}..HEAD`. "
+                     + DELTA_SCOPE)
             both = rb.both
             if both:
                 task += ("\n\nFiles changed on both sides (by the merged base commits and by the "
                          "worker); check these interact correctly: " + ", ".join(both))
         else:
-            task += (prior + "The branch has diverged since then (for example a rebase or a "
-                     "merge), so review the whole current diff rather than just the recent "
-                     "changes.")
-            if rb.edited:
-                task += ("\n\nA merge commit was edited by hand in these files: "
-                         + ", ".join(rb.edited))
+            task += (prior + "That commit can no longer be read here, so there is nothing to "
+                     "diff from: review the whole current diff.")
+        if rb.edited:
+            task += ("\n\nA merge commit was edited by hand in these files, so check those edits "
+                     "(where a conflict was resolved, the old side of the diff shows git's "
+                     "conflict markers): " + ", ".join(rb.edited))
 
     if focus:
         task += f"\n\nFocus: {focus}"
@@ -4680,6 +4698,7 @@ def _request_review(db: DB, caller: Agent | None, ws: Workspace, profile: str | 
         task += " If you judged checks without running Bash, state clearly which checks you ran and which you read from history."
     task += (
         "\n\nApprove (`approved=true`) only if there are no blockers and no supervisor-action items. If only minor findings remain, approve and list them under minor findings."
+        "\n\nIf you request changes and every finding concerns test code only, pass `tests_only=true` to `submit_review`, with `finding_paths` listing the test files, and cite only those files in your summary. If any finding concerns product code, leave `tests_only` false."
     )
     # Automatic reviews share the primary slot even if the learner changes
     # its pick. Explicit profiles and required second reviews have their own

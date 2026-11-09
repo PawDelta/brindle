@@ -1566,14 +1566,19 @@ async def request_review(workspace: str, focus: str | None = None, profile: str 
 
 
 @mcp.tool()
-def submit_review(approved: bool, summary: str) -> str:
+def submit_review(approved: bool, summary: str, tests_only: bool = False,
+                  finding_paths: list[str] | None = None) -> str:
     """Reviewers: call this once with your verdict. approved=true only if the
-    branch can merge as is. summary: your findings, most severe first."""
+    branch can merge as is. summary: your findings, most severe first.
+    tests_only: every finding concerns test code only; finding_paths: the
+    test files they concern. Leave tests_only false if any finding concerns
+    product code."""
     db = DB()
     caller, _ = _caller(db)
     if not caller:
         return "Only a reviewer started with request_review can submit a review."
-    return agents.submit_review(db, caller.id, approved, summary)
+    return agents.submit_review(db, caller.id, approved, summary,
+                                tests_only=tests_only, finding_paths=finding_paths)
 
 
 @mcp.tool()
