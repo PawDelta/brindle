@@ -282,12 +282,6 @@ export type Stage = "working" | "checks" | "review" | "merging";
 const STAGES: readonly string[] = ["working", "checks", "review", "merging"];
 const isStage = (s: string | null | undefined): s is Stage => !!s && STAGES.includes(s);
 
-/* A milestone's name as a sidebar step: its title up to the first ": " or " — ", or the whole title. */
-export function shortName(title: string): string {
-  const cut = title.search(/: | — /);
-  return cut > 0 ? title.slice(0, cut) : title;
-}
-
 /* "15m", "2h", "3d": how long ago, as the activity line says it (bus seconds). */
 function shortAgo(at: number, now: number): string {
   const s = Math.max(0, now - at);
@@ -778,7 +772,7 @@ export function GoalPanel({ client, repo, root, store, compact = false, title, l
           <span className="i" aria-hidden>
             {state === "done" ? "✓" : active ? "●" : state === "pending" ? "○" : "·"}
           </span>
-          <span className="t">{shortName(m.title)}</span>
+          <span className="t" title={m.title}>{m.title}</span>
           {active && stage && <span className="tag" data-testid="goal-stage">{stage}</span>}
         </li>
       );
