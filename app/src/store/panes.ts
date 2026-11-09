@@ -12,6 +12,8 @@ import { createContext } from "react";
 export interface PanesReady {
   ready: boolean;
   epoch: number;
+  /* How far the engine's recovery has come, while it is under way. */
+  recovery?: { done: number; total: number } | null;
 }
 
 export const PanesReadyContext = createContext<PanesReady>({ ready: true, epoch: 0 });
