@@ -1313,7 +1313,7 @@ fn clipboard_image(image: arboard::ImageData<'_>) -> Result<ClipboardAttachment,
     })
 }
 
-/// Called only for a paste with no text. File lists use native clipboard formats
+/// Files take precedence over text; images are returned only without text. File lists use native clipboard formats
 /// (Finder file URLs, Windows HDROP, Linux URI lists), never file names as text.
 #[tauri::command]
 pub async fn pty_view_files() -> Result<Vec<ClipboardAttachment>, String> {
@@ -1322,15 +1322,25 @@ pub async fn pty_view_files() -> Result<Vec<ClipboardAttachment>, String> {
 
 fn clipboard_files() -> Result<Vec<ClipboardAttachment>, String> {
     let mut clipboard = arboard::Clipboard::new().map_err(|_| "couldn't open the clipboard")?;
-    if clipboard.get_text().is_ok_and(|text| !text.is_empty()) {
-        return Ok(Vec::new());
-    }
-    match clipboard.get().file_list() {
+    let has_text = clipboard.get_text().is_ok_and(|text| !text.is_empty());
+    let files = clipboard.get().file_list();
+    clipboard_contents(has_text, files, || clipboard.get_image())
+}
+
+fn clipboard_contents<'a>(
+    has_text: bool,
+    files: Result<Vec<std::path::PathBuf>, arboard::Error>,
+    image: impl FnOnce() -> Result<arboard::ImageData<'a>, arboard::Error>,
+) -> Result<Vec<ClipboardAttachment>, String> {
+    match files {
         Ok(paths) if !paths.is_empty() => return Ok(paths.into_iter().map(|path| ClipboardAttachment::File { path }).collect()),
         Ok(_) | Err(arboard::Error::ContentNotAvailable) => {},
         Err(_) => return Err("couldn't read clipboard files".into()),
     }
-    match clipboard.get_image() {
+    if has_text {
+        return Ok(Vec::new());
+    }
+    match image() {
         Ok(image) => Ok(vec![clipboard_image(image)?]),
         Err(arboard::Error::ContentNotAvailable) => Ok(Vec::new()),
         Err(_) => Err("couldn't read clipboard image".into()),
@@ -1342,8 +1352,12 @@ mod tests {
     #[test]
     fn clipboard_attachment_encodes_png_and_bounds_pixels() {
         use base64::Engine;
+        let copied = super::clipboard_contents(true, Ok(vec!["/finder/photo.png".into()]), || panic!("files take precedence")).unwrap();
+        assert!(matches!(&copied[..], [super::ClipboardAttachment::File { path }] if path == std::path::Path::new("/finder/photo.png")));
+        assert!(super::clipboard_contents(true, Ok(vec![]), || panic!("text suppresses images")).unwrap().is_empty());
         let image = arboard::ImageData { width: 1, height: 1, bytes: std::borrow::Cow::Borrowed(&[11, 22, 33, 255]) };
-        let super::ClipboardAttachment::Image { data_base64, .. } = super::clipboard_image(image).unwrap() else { panic!("expected image") };
+        let images = super::clipboard_contents(false, Err(arboard::Error::ContentNotAvailable), || Ok(image)).unwrap();
+        let [super::ClipboardAttachment::Image { data_base64, .. }] = &images[..] else { panic!("expected image") };
         let png = base64::engine::general_purpose::STANDARD.decode(data_base64).unwrap();
         assert_eq!(image::load_from_memory(&png).unwrap().to_rgba8().as_raw(), &[11, 22, 33, 255]);
         for (width, height) in [(usize::MAX, 2), (10000, 10000), (1, 1)] {

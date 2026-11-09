@@ -752,7 +752,7 @@ describe("visuals", () => {
     expect(screen.getByTestId("visual-answered").textContent).toContain("attached a.png");
   });
 
-  it("attach: pasted files and drops over the bar upload, chips are removable, failures show, and a stale upload is dropped", async () => {
+  it("attach: a copied file with filename text and drops upload, chips are removable, failures show, and a stale upload is dropped", async () => {
     const client = new FakeDaemon().client();
     const finish: ((r: { paths: string[]; text: string }) => void)[] = [];
     const attach = vi.spyOn(client, "attach").mockImplementation(() => new Promise((done) => { finish.push(done); }));
@@ -775,29 +775,71 @@ describe("visuals", () => {
     attach.mockRejectedValueOnce(new Error("too big"));
     await act(async () => drops.handle({ type: "drop", x: 5, y: 1, paths: ["/big"] }));
     expect(screen.getByRole("alert").textContent).toContain("too big");
-    // An empty browser paste falls back to the native clipboard (text pastes are left alone), read across a revision change.
+    // Text suppresses image bytes; Finder's filename text still allows native files, across revision changes.
     native.enabled = true;
-    fireEvent.paste(screen.getByLabelText("Add a note"), { clipboardData: { files: [], getData: () => "plain" } });
+    await act(async () => { fireEvent.paste(screen.getByLabelText("Add a note"), { clipboardData: { files: [new File(["z"], "image.png", { type: "image/png" })], getData: () => "plain" } }); });
+    expect((screen.getByLabelText("Add a note") as HTMLInputElement).value).toBe("plain");
     expect(attach).toHaveBeenCalledTimes(3);
+    const note = screen.getByLabelText("Add a note") as HTMLInputElement;
+    fireEvent.change(note, { target: { value: "" } });
+    const reads: ((files: unknown[]) => void)[] = [];
+    drops.clipboard = () => new Promise(done => reads.push(done));
+    fireEvent.paste(note, { clipboardData: { files: [], getData: () => "pasted" } });
+    fireEvent.change(note, { target: { value: `${note.value}x` } });
+    note.setSelectionRange(note.value.length, note.value.length);
+    fireEvent.paste(note, { clipboardData: { files: [], getData: () => "two" } });
+    await act(async () => reads[1]([]));
+    await act(async () => reads[0]([]));
+    const ordered = note.value;
+    drops.clipboard = () => Promise.reject(new Error("clipboard unavailable"));
+    note.setSelectionRange(note.value.length, note.value.length);
+    await act(async () => { fireEvent.paste(note, { clipboardData: { files: [], getData: () => "fallback" } }); });
+    expect([ordered, note.value]).toEqual(["pastedxtwo", "pastedxtwofallback"]);
+    expect(screen.getByRole("alert").textContent).toContain("clipboard unavailable");
+    fireEvent.change(note, { target: { value: "" } });
     let clip!: (files: unknown[]) => void;
     drops.clipboard = () => new Promise((done) => { clip = done; });
     fireEvent.click(screen.getAllByRole("radio")[0]);
     const send = screen.getByTestId("visual-send") as HTMLButtonElement;
     expect(send.disabled).toBe(false);
-    fireEvent.paste(screen.getByLabelText("Add a note"), { clipboardData: { files: [], getData: () => "" } });
+    fireEvent.paste(screen.getByLabelText("Add a note"), { clipboardData: { files: [], getData: () => "old.png" } });
     expect(send.disabled).toBe(true);
     view.rerender(reader({ ...takesFiles, rev: 3 }));
     await act(async () => clip([{ path: "/clip/old.png" }]));
     expect(attach).toHaveBeenCalledTimes(3);
-    drops.clipboard = () => Promise.resolve([{ path: "/clip/new.png" }]);
-    fireEvent.paste(screen.getByLabelText("Add a note"), { clipboardData: { files: [], getData: () => "" } });
+    const revisedNote = screen.getByLabelText("Add a note") as HTMLInputElement;
+    fireEvent.change(revisedNote, { target: { value: "keep" } });
+    revisedNote.setSelectionRange(1, 3);
+    fireEvent.paste(revisedNote, { clipboardData: { files: [], getData: () => "new.png" } });
+    fireEvent.change(revisedNote, { target: { value: `${revisedNote.value}x` } });
+    await act(async () => clip([{ path: "/clip/new.png" }]));
     await waitFor(() => expect(attach).toHaveBeenLastCalledWith("a_sup", { path: "/clip/new.png" }));
+    expect(revisedNote.value).toBe("keepx");
     // A result that lands after the revision changed is dropped.
     await act(async () => drops.handle({ type: "drop", x: 5, y: 1, paths: ["/late"] }));
     view.rerender(reader({ ...takesFiles, rev: 4 }));
     await act(async () => finish[3]({ paths: ["/up/late.txt"], text: "" }));
     expect(screen.queryByText("late.txt")).toBeNull();
     expect(screen.queryByRole("alert")).toBeNull();
+    const currentNote = screen.getByLabelText("Add a note") as HTMLInputElement;
+    drops.clipboard = () => Promise.resolve([]);
+    await act(async () => { fireEvent.paste(currentNote, { clipboardData: { files: [], getData: () => "a\r\nb" } }); });
+    currentNote.setSelectionRange(currentNote.value.length, currentNote.value.length);
+    await act(async () => { fireEvent.paste(currentNote, { clipboardData: { files: [], getData: () => "x" } }); });
+    const outcomes = [currentNote.value];
+    attach.mockResolvedValue({ paths: [], text: "" });
+    for (const [end, order, secondFile] of [[null, [0, 1], true], [null, [1, 0], true], [3, [0, 1], true], [3, [1, 0], true], [3, [0, 1], false], [3, [1, 0], false]] as const) {
+      fireEvent.change(currentNote, { target: { value: "keep" } });
+      const pending: ((files: unknown[]) => void)[] = [];
+      drops.clipboard = () => new Promise(done => pending.push(done));
+      for (const name of ["one.png", secondFile ? "two.png" : "two"]) {
+        currentNote.setSelectionRange(0, name === "one.png" ? currentNote.value.length : end ?? currentNote.value.length);
+        fireEvent.paste(currentNote, { clipboardData: { files: [], getData: () => name } });
+      }
+      for (const index of order) await act(async () => pending[index](index && !secondFile ? [] : [{ path: index ? "/two.png" : "/one.png" }]));
+      outcomes.push(currentNote.value);
+    }
+    expect(outcomes).toEqual(["abx", "keep", "keep", "keep", "keep", "two", "two"]);
   });
 
   const open: VisualSource = { kind: "session", id: visual.id, rev: visual.rev };

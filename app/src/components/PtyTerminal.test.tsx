@@ -13,6 +13,10 @@ vi.mock("../api/attachments", async (original) => ({
   listenForDrops: (handler: typeof files.drop) => { files.drop = handler; return files.listen(); },
 }));
 const native = vi.hoisted(() => ({ enabled: false }));
+const windowDrop = vi.hoisted(() => ({ handle: (_event: { payload: unknown }) => {} }));
+vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => ({
+  onDragDropEvent: async (handle: typeof windowDrop.handle) => { windowDrop.handle = handle; return () => {}; },
+}) }));
 vi.mock("@tauri-apps/api/core", async original => ({
   ...await original<typeof import("@tauri-apps/api/core")>(),
   isTauri: () => native.enabled,
@@ -70,6 +74,22 @@ function mount(paste?: () => Promise<string>, write: (text: string) => Promise<v
 
 const parsed = (term: import("@xterm/xterm").Terminal) => act(() => new Promise<void>((r) => term.write("", r)));
 
+it("converts drag position to CSS coordinates per platform", async () => {
+  const { listenForDrops } = await vi.importActual<typeof import("../api/attachments")>("../api/attachments");
+  native.enabled = true;
+  vi.stubGlobal("devicePixelRatio", 2);
+  const platform = vi.spyOn(navigator, "platform", "get");
+  for (const [os, x, y] of [["MacIntel", 160, 240], ["Linux x86_64", 160, 240], ["Win32", 80, 120]] as const) {
+    platform.mockReturnValue(os);
+    const received: unknown[] = [];
+    const stop = await listenForDrops(drop => received.push(drop));
+    windowDrop.handle({ payload: { type: "drop", position: { x: 160, y: 240 }, paths: ["/photo.png"] } });
+    expect(received).toEqual([{ type: "drop", x, y, paths: ["/photo.png"] }]);
+    stop();
+  }
+  platform.mockRestore();
+});
+
 it("attaches native drops only under the cursor and keeps typing behind the returned paste", async () => {
   let finish: (value: { text: string }) => void = () => {};
   const attach = vi.fn(() => new Promise<{ text: string }>(ok => { finish = ok; }));
@@ -99,27 +119,31 @@ it("attaches native drops only under the cursor and keeps typing behind the retu
   expect(written).toHaveLength(2);
 });
 
-it.each(["MacIntel", "Win32"])("attaches clipboard files and image bytes on an empty paste while preserving text pastes (%s)", async (os) => {
+it.each(["MacIntel", "Win32"])("attaches a copied file before its filename text and preserves text pastes (%s)", async (os) => {
   const platform = vi.spyOn(navigator, "platform", "get").mockReturnValue(os);
   const attach = vi.fn(async (file: { path?: string; name?: string }) => ({ text: file.path ?? file.name! }));
   const { view, term, opened, written, clipboard } = mount(undefined, undefined, { acceptsFiles: true, attach });
   act(() => opened.handlers!.onData(new TextEncoder().encode("\x1b[?1049h")));
   await parsed(term());
   files.read.mockResolvedValue([{ path: "/finder/photo.png" }, { name: "clipboard.png", data_base64: "aQ==" }]);
+  clipboard.text = "photo.png";
   const press = () => {
     act(() => void term().textarea!.dispatchEvent(new KeyboardEvent("keydown", { key: "v", ctrlKey: os !== "MacIntel", metaKey: os === "MacIntel", bubbles: true, cancelable: true })));
     if (os === "MacIntel") webviewPaste(term().textarea!, clipboard.text);
   };
   press();
+  act(() => term().input("x", true));
   await settled();
-  expect(written).toEqual(["\x1b[200~/finder/photo.png clipboard.png\x1b[201~"]);
+  expect(written).toEqual(["\x1b[200~/finder/photo.png clipboard.png\x1b[201~", "x"]);
   expect(attach.mock.calls).toHaveLength(2);
   clipboard.text = "ordinary text";
+  files.read.mockResolvedValue([]);
   press();
   await settled();
   expect(written.at(-1)).toBe("\x1b[200~ordinary text\x1b[201~");
   expect(attach.mock.calls).toHaveLength(2);
   attach.mockRejectedValueOnce(new Error("attachment exceeds the file size limit"));
+  files.read.mockResolvedValue([{ name: "clipboard.png", data_base64: "aQ==" }]);
   clipboard.text = "";
   press();
   await settled();
@@ -134,27 +158,29 @@ it.each(["MacIntel", "Win32"])("attaches clipboard files and image bytes on an e
       let answer: (files: { path: string }[]) => void = () => {};
       files.read.mockClear();
       files.read.mockImplementation(() => new Promise(ok => { answer = ok; }));
+      clipboard.text = "late-file";
       act(() => void term().textarea!.dispatchEvent(new KeyboardEvent("keydown", { key: "v", metaKey: true, bubbles: true })));
       await act(() => vi.advanceTimersByTimeAsync(PASTE_WAIT));
-      // The empty webview event arrives while the native read is already in flight.
-      webviewPaste(term().textarea!, "");
+      // The filename text arrives while the native file read is already in flight.
+      webviewPaste(term().textarea!, "late-file");
       await settled();
       expect(files.read).toHaveBeenCalledTimes(1);
       await act(async () => answer([{ path: "/late-file" }]));
       await settled();
       expect(written.at(-1)).toBe("\x1b[200~/late-file\x1b[201~");
+      clipboard.text = "completed";
       files.read.mockResolvedValue([{ path: "/completed" }]);
       act(() => void term().textarea!.dispatchEvent(new KeyboardEvent("keydown", { key: "v", metaKey: true, bubbles: true })));
       await act(() => vi.advanceTimersByTimeAsync(PASTE_WAIT));
       await settled();
       const uploads = attach.mock.calls.length;
       const writes = written.length;
-      webviewPaste(term().textarea!, "");
+      webviewPaste(term().textarea!, "completed");
       await settled();
       expect(attach.mock.calls).toHaveLength(uploads);
       expect(written).toHaveLength(writes);
       // The late answer is consumed once; another menu paste is a new attachment.
-      webviewPaste(term().textarea!, "");
+      webviewPaste(term().textarea!, "completed");
       await settled();
       expect(attach.mock.calls).toHaveLength(uploads + 1);
     } finally {
