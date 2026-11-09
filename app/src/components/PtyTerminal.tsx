@@ -501,7 +501,10 @@ export function PtyTerminal({ at, open, copy, paste, attachments, openUrl, onVie
         const underCursor = event.type === "leave" ? null : document.elementFromPoint(event.x!, event.y!);
         const inside = !!underCursor && el.contains(underCursor);
         setDropShown(inside && event.type !== "drop" && !!attaching.current?.acceptsFiles);
-        if (inside && event.type === "drop") {
+        if (inside && event.type === "drop" && !event.paths?.length) {
+          // A drag with no file on disk behind it (macOS can offer a promise of one instead): said, not silently lost.
+          setFileNotice({ error: true, text: "That drag didn't include a file. Drag the saved file instead." });
+        } else if (inside && event.type === "drop") {
           // Reserve the whole drop's position before any upload starts.
           const destination = attaching.current;
           queued(async () => {
