@@ -25,7 +25,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 
-from brindle import bus, cloud_credential, company_identity, company_login, git, keystore, knowledge, pane_auth, providers, secrets, tmux, upgrade, workspaces
+from brindle import bus, cloud_credential, company_identity, company_login, debuglog, git, keystore, knowledge, pane_auth, providers, secrets, tmux, upgrade, workspaces
 from brindle import spawn as processes   # this module's own spawn() starts an agent
 from brindle.assembler import DECISIONS, DOCUMENT_CHUNKS, OTHER_SESSIONS, TASK_AND_RULES, Block, assemble
 from brindle.config import RepoConfig
@@ -1853,7 +1853,7 @@ def resume(db: DB, root_id: str, *, watch_pane: bool = True,
     windows = _window_seconds.set([])
     token = _launch_gate.set(gate) if gate is not None else None
     try:
-        with resume_lock(root_id):
+        with resume_lock(root_id), debuglog.recovery_timings(_launch_gate.get() is not None):
             return _resume(db, root_id, watch_pane=watch_pane, only=only, recovery_env=recovery_env,
                            settle=settle, unstarted=unstarted)
     finally:
@@ -1948,42 +1948,70 @@ def _gate_commit(hold: ExitStack | None) -> None:
         hold.enter_context(gate())
 
 
+@dataclass
+class _ResumeTiming:
+    enabled: bool
+    seconds: dict[str, float] = field(default_factory=dict)
+
+    @contextmanager
+    def part(self, name: str, *, exclude_windows: bool = False):
+        if not self.enabled:
+            yield
+            return
+        began = time.monotonic()
+        windows = sum(_window_seconds.get() or ()) if exclude_windows else 0.0
+        try:
+            yield
+        finally:
+            elapsed = time.monotonic() - began
+            if exclude_windows:
+                elapsed -= sum(_window_seconds.get() or ()) - windows
+            self.seconds[name] = self.seconds.get(name, 0.0) + elapsed
+
+    def call(self, name, fn, *args, **kwargs):
+        with self.part(name):
+            return fn(*args, **kwargs)
+
+
 def _resume(db: DB, root_id: str, *, watch_pane: bool, only, recovery_env, settle=False, unstarted=None) -> list[Agent]:
     from brindle import identity_lock, providers
 
     _gate_check()
     began = time.monotonic()
-    providers.invalidate_signed_in()
+    timing = _ResumeTiming(_launch_gate.get() is not None)
+    timing.call("invalidate_s", providers.invalidate_signed_in)
     from brindle import keystore, secrets
 
     # Explicit recovery replacements (from recovery_env or current process environment)
     env_keys = recovery_env if recovery_env is not None else {
-        k: os.environ[k] for k in keystore.known_names()
+        k: os.environ[k] for k in timing.call("known_names_s", keystore.known_names)
         if k in os.environ and os.environ[k] and not secrets.is_job_secret(k)
     }
 
     session_creds = db.get_session_credentials_with_timestamps(root_id)
-    for k in keystore.known_names():
-        try:
-            ks_val, ks_time = keystore.get_key_info(k)
-        except Exception:
-            ks_val, ks_time = None, 0.0
-        sess_val, sess_time = session_creds.get(k, (None, 0.0))
-        env_val = env_keys.get(k)
+    reads = keystore.ReadTiming() if timing.enabled else None
+    with keystore.measure_reads(reads):
+        for k in timing.call("known_names_s", keystore.known_names):
+            try:
+                ks_val, ks_time = timing.call("key_loads_s", keystore.get_key_info, k)
+            except Exception:
+                ks_val, ks_time = None, 0.0
+            sess_val, sess_time = session_creds.get(k, (None, 0.0))
+            env_val = env_keys.get(k)
 
-        val = None
-        if ks_val and (ks_time > sess_time or (sess_val and env_val == sess_val and ks_val != sess_val) or not env_val):
-            val = ks_val
-        elif env_val:
-            val = env_val
-        elif ks_val:
-            val = ks_val
+            val = None
+            if ks_val and (ks_time > sess_time or (sess_val and env_val == sess_val and ks_val != sess_val) or not env_val):
+                val = ks_val
+            elif env_val:
+                val = env_val
+            elif ks_val:
+                val = ks_val
 
-        if val:
-            db.set_session_credential(root_id, k, val)
-            os.environ[k] = val
-            if (chosen := _resume_keys.get()) is not None:
-                chosen[k] = val
+            if val:
+                timing.call("credential_writes_s", db.set_session_credential, root_id, k, val)
+                os.environ[k] = val
+                if (chosen := _resume_keys.get()) is not None:
+                    chosen[k] = val
 
     keys_took = time.monotonic() - began
 
@@ -1997,7 +2025,7 @@ def _resume(db: DB, root_id: str, *, watch_pane: bool, only, recovery_env, settl
 
     candidates = [a for a in tree(db, root_id) if restartable(a)]
     for a in candidates:   # all or nothing: a session never half-resumes under another identity
-        identity_lock.ensure(a)
+        timing.call("identity_s", identity_lock.ensure, a)
     _gate_check()
     running = settle_panes(db, candidates)
     candidates = [a for a in candidates if a.id not in running]
@@ -2014,7 +2042,7 @@ def _resume(db: DB, root_id: str, *, watch_pane: bool, only, recovery_env, settl
         root = db.get_agent(root_id)
         if root and root.parent_id is None and root.mode == "interactive":
             db.add_autopilot(root_id)
-        pilot.reload_goals_file(db, root_id)   # edits the person made to this session's goal file
+        timing.call("goals_s", pilot.reload_goals_file, db, root_id)   # edits the person made to this session's goal file
     resumed = []
     for a in candidates:    # the chat comes first, and may add to this as it starts
         if a.status == "done":
@@ -2047,21 +2075,23 @@ def _resume(db: DB, root_id: str, *, watch_pane: bool, only, recovery_env, settl
             if pipeline._settled(db, ws):   # merged by hand meanwhile: the round is over
                 db.set_status(a.id, "done")
                 continue
-        provider = get_provider(a.provider)
-        ref = a.session_ref if provider.name in ("claude", "antigravity", "opencode", "native") and a.session_ref else None
-        if ref and not provider.can_resume(ref):
-            ref = None  # nothing was ever said in it: start that agent fresh
-        note = _fix_round_note(db, a)
-        prompt = None if ref else _fresh_start_prompt(db, a, ws, provider, RESUME_NOTE + note)
-        if ref and _needs_a_turn(db, a):
-            prompt = HEADLESS_CONTINUE + note   # the same words, for any worker resumed at its input box
+        with timing.part("provider_prep_s"):
+            provider = get_provider(a.provider)
+            ref = a.session_ref if provider.name in ("claude", "antigravity", "opencode", "native") and a.session_ref else None
+            if ref and not provider.can_resume(ref):
+                ref = None  # nothing was ever said in it: start that agent fresh
+            note = _fix_round_note(db, a)
+            prompt = None if ref else _fresh_start_prompt(db, a, ws, provider, RESUME_NOTE + note)
+            if ref and _needs_a_turn(db, a):
+                prompt = HEADLESS_CONTINUE + note   # the same words, for any worker resumed at its input box
         _gate_check()
         if a.dismissed_at is not None:
             db.update_agent(a.id, dismissed_at=None)  # running again: show it again
         before = "paused" if a.status == "done" else a.status    # a launch records its status before its window opens
         try:
-            _launch(db, a, ws, prompt=prompt, resume=ref,
-                    watch_pane=watch_pane and a.id == root_id, background_setup=True)
+            with timing.part("launch_s", exclude_windows=True):
+                _launch(db, a, ws, prompt=prompt, resume=ref,
+                        watch_pane=watch_pane and a.id == root_id, background_setup=True)
         except Cancelled:
             raise
         except LaunchTaken:
@@ -2095,11 +2125,11 @@ def _resume(db: DB, root_id: str, *, watch_pane: bool, only, recovery_env, settl
         from brindle import pipeline, tasks
 
         try:
-            pipeline.on_resumed(db, root_id)
+            timing.call("pipeline_s", pipeline.on_resumed, db, root_id)
         except Exception:  # noqa: BLE001 - nor may a branch: the sweep and its stall notice still see it
             log.exception("brindle: picking %s's branches back up on resume failed", root_id)
         try:
-            tasks.on_resumed(db, root_id)   # queued tasks the pause held back (their launches gated too)
+            timing.call("tasks_s", tasks.on_resumed, db, root_id)   # queued tasks the pause held back (their launches gated too)
         except Cancelled:
             raise
         except Exception:  # noqa: BLE001 - a queued task must never keep the session from resuming
@@ -2113,10 +2143,16 @@ def _resume(db: DB, root_id: str, *, watch_pane: bool, only, recovery_env, settl
             db.update_autopilot(root_id, state="running", note=None)
     if resumed:
         bus.publish_agent(db, "session.resumed", root_id, agents=[a.id for a in resumed])
-    if _launch_gate.get() is not None:      # a start's recovery: where its resume went, in the daemon's log
+    if timing.enabled:      # authorized after recovery, without holding any resume on the account lookup
         windows = sum(_window_seconds.get() or ())
-        log.warning("brindle: session %s resume: keys %.2fs, windows %.2fs, checks and the rest %.2fs",
+        debuglog.recovery_timing(log, "brindle: session %s resume: keys %.2fs, windows %.2fs, checks and the rest %.2fs",
                     root_id, keys_took, windows, time.monotonic() - began - keys_took - windows)
+        detail = {name: round(timing.seconds.get(name, 0.0), 3) for name in (
+            "invalidate_s", "known_names_s", "key_loads_s", "credential_writes_s", "identity_s",
+            "goals_s", "provider_prep_s", "launch_s", "pipeline_s", "tasks_s")}
+        detail.update(key_reads=reads.backend_reads, key_cached=reads.cached_reads,
+                      key_lock_s=round(reads.lock_seconds, 3), security_s=round(reads.process_seconds, 3))
+        debuglog.recovery_timing(log, "brindle: session %s resume detail: %s", root_id, detail)
     return resumed
 
 
