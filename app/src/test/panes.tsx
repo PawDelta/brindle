@@ -16,13 +16,15 @@ import type { PtyTerminalProps } from "../components/PtyTerminal";
 export const STAND_IN_SIZE = { cols: 80, rows: 24 };
 
 /* PtyTerminal's stand-in: it names the window it shows by its last part, the agent's id as fixtures.windowOf names it. */
-export function PtyTerminal({ at, onSize }: PtyTerminalProps) {
+export function PtyTerminal({ at, onSize, onView }: PtyTerminalProps) {
   const sized = useRef(onSize);
   sized.current = onSize;
   useEffect(() => sized.current?.(STAND_IN_SIZE.cols, STAND_IN_SIZE.rows), []);
   return (
     <div data-testid="terminal" data-target={at.target}>
       {at.target.slice(at.target.lastIndexOf(":") + 1)}
+      {/* A test's way to have the view report that its client exited. */}
+      <button type="button" data-testid="terminal-close" onClick={() => onView?.({ kind: "closed" })} hidden />
     </div>
   );
 }

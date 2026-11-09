@@ -102,6 +102,98 @@ describe("App", () => {
     } finally { sync.stop(); vi.useRealTimers(); }
   });
 
+  it("panes per session: a session that is back shows its panes while another is still pending, and opening the pending one asks for it first", async () => {
+    vi.useFakeTimers();
+    const sessionB: SessionDTO = { ...session, id: "sup2", goal: "Slow one" };
+    const rootB = { ...root, id: "proj2", agents: root.agents?.map((a) => ({ ...a, id: "sup2", window: null })) };
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session, sessionB], workspaces: [root, rootB] });
+    const client = daemon.client();
+    const store = createAppStore();
+    const sync = startSync({ client, store, connect: daemon.connect });
+    const meta = client.meta.bind(client);
+    vi.spyOn(client, "meta").mockImplementation(async () => ({ ...await meta(), resuming: true, recovery: { done: 1, total: 2, pending: ["sup2"] } }));
+    try {
+      renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO }} />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
+      expect(paneWaits()).toBe(false);
+      expect(screen.getByTestId("terminal").textContent).toBe("sup1");
+      expect(daemon.prioritized).toEqual([]);
+      fireEvent.click(treeSession("sup2"));
+      await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+      expect(paneWaits()).toBe(true);
+      expect(daemon.prioritized).toEqual(["sup2"]);
+    } finally { sync.stop(); vi.useRealTimers(); }
+  });
+
+  it("panes per session: a session that finishes coming back while its rows are being read is not shown from the old rows", async () => {
+    vi.useFakeTimers();
+    const at = (id: string, proj: string, window: string | null) => ({ ...root, id: proj, agents: root.agents?.map((a) => ({ ...a, id, window })) });
+    const daemon = new FakeDaemon({
+      repos: [{ repo_root: REPO, name: "proj" }],
+      sessions: [session, { ...session, id: "sup2" }, { ...session, id: "sup3" }],
+      workspaces: [root, at("sup2", "proj2", windowOf("old")), at("sup3", "proj3", null)],
+    });
+    const client = daemon.client();
+    const store = createAppStore();
+    const sync = startSync({ client, store, connect: daemon.connect });
+    let pending = ["sup2", "sup3"];
+    const meta = client.meta.bind(client);
+    vi.spyOn(client, "meta").mockImplementation(async () => ({ ...await meta(), resuming: true, recovery: { done: 1, total: 3, pending } }));
+    const snapshot = client.snapshot.bind(client);
+    // sup2 finishes coming back after its rows were read, before the engine is asked again.
+    let reads = 0;
+    // The sync's own first read comes first; the gate's read is the second.
+    vi.spyOn(client, "snapshot").mockImplementation(async () => { const rows = await snapshot(); if (++reads === 2) pending = ["sup3"]; return rows; });
+    try {
+      renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO }} />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(300); });
+      expect(screen.getByTestId("terminal").textContent).toBe("sup1");
+      fireEvent.click(treeSession("sup2"));
+      await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+      expect(paneWaits()).toBe(true);
+    } finally { sync.stop(); vi.useRealTimers(); }
+  });
+
+  it("panes per session: a released session reopens a pane that closed while the engine was away, though its agent row is unchanged", async () => {
+    vi.useFakeTimers();
+    const at = (id: string, proj: string, window: string | null) => ({ ...root, id: proj, agents: root.agents?.map((a) => ({ ...a, id, window })) });
+    const daemon = new FakeDaemon({
+      repos: [{ repo_root: REPO, name: "proj" }],
+      sessions: [session, { ...session, id: "sup2" }, { ...session, id: "sup3" }],
+      workspaces: [root, at("sup2", "proj2", windowOf("sup2")), at("sup3", "proj3", null)],
+    });
+    const client = daemon.client();
+    const store = createAppStore();
+    const sync = startSync({ client, store, connect: daemon.connect });
+    let live = { pid: 0, pending: ["sup3"] };
+    const meta = client.meta.bind(client);
+    vi.spyOn(client, "meta").mockImplementation(async () => {
+      const got = await meta();
+      return { ...got, pid: got.pid + live.pid, resuming: true, recovery: { done: 1, total: 3, pending: live.pending } };
+    });
+    try {
+      renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup2", repo: REPO }} />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
+      expect(screen.getByTestId("terminal").textContent).toBe("sup2");
+      fireEvent.click(screen.getByTestId("terminal-close"));
+      expect(screen.queryByTestId("terminal")).toBeNull();
+      // A new engine brings sup2 back: the same row, so only the session's release says its pane is new.
+      live = { pid: 1, pending: ["sup2", "sup3"] };
+      await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+      expect(paneWaits()).toBe(true);
+      live = { pid: 1, pending: ["sup3"] };
+      await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
+      expect(screen.getByTestId("terminal").textContent).toBe("sup2");
+      // Another session coming back leaves this one's pane be.
+      const pane = screen.getByTestId("terminal");
+      daemon.data.workspaces = [root, at("sup2", "proj2", windowOf("sup2")), at("sup3", "proj3", windowOf("sup3"))];
+      live = { pid: 1, pending: [] };
+      await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
+      expect(store.getState().workspaces.find((w) => w.id === "proj3")?.agents?.[0].window).toBe(windowOf("sup3"));
+      expect(screen.getByTestId("terminal")).toBe(pane);
+    } finally { sync.stop(); vi.useRealTimers(); }
+  });
+
   it("recovery progress line: counts sessions on the waiting pane and goes once it is ready", async () => {
     vi.useFakeTimers();
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root] });
