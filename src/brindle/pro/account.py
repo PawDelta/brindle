@@ -36,7 +36,7 @@ FEATURES = (
     ("guardrails", "pro", "write scope and env allowlist per profile",
      "write_scope, read_scope, env_allow in a profile"),
     ("coordinator", "pro", "a coordinator that holds and orders queued work across sessions",
-     '"coordinator": true in .brindle/config.json'),
+     'on by default; `brindle coordinator stop` turns it off'),
     ("team", "team", "org policies + team audit feed", "`brindle account org policy`"),
     ("ci", "team", "Brindle-CI: fixes builds, issues into verified PRs", "`brindle ci init`"),
     ("org_profiles", "team", "org profile and rule-pack library, pinned",
