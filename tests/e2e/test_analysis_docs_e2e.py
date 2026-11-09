@@ -363,7 +363,7 @@ def test_brief_and_map_neighbourhood(sign_in, db, tmp_path):
     status, got = daemon_get(routes_read.analysis_doc_map, scope_kind="user", scope_id=ent.sub,
                              repo=ws.repo_root, paths=json.dumps(["api/checkout.py"]), depth="1")
     assert status == 200, got
-    assert got["paths"] == ["api/checkout.py"]
+    assert "api/checkout.py" in {n.get("path") for n in got["nodes"] if n.get("kind") == "path"}
     assert doc_id in {n.get("id") for n in got["nodes"]}, got["nodes"]
 
     from typer.testing import CliRunner
