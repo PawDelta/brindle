@@ -426,7 +426,7 @@
     "AllowAllGrantDTO": {
       "$defs": {
         "AskScopeDTO": {
-          "description": "One rung of an ask's scope ladder: ``value`` exact | general |\nrepository | remote | server | all, ``pattern`` what a grant of it covers.",
+          "description": "One rung of an ask's scope ladder: ``value`` exact | general |\nrepository | remote | server | all, ``pattern`` what a grant of it covers.\n``modes`` lists the decisions this request accepts at this scope.",
           "properties": {
             "label": {
               "title": "Label",
@@ -443,6 +443,21 @@
               ],
               "default": null,
               "title": "Level"
+            },
+            "modes": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Modes"
             },
             "pattern": {
               "title": "Pattern",
@@ -593,7 +608,7 @@
           "type": "object"
         },
         "AskScopeDTO": {
-          "description": "One rung of an ask's scope ladder: ``value`` exact | general |\nrepository | remote | server | all, ``pattern`` what a grant of it covers.",
+          "description": "One rung of an ask's scope ladder: ``value`` exact | general |\nrepository | remote | server | all, ``pattern`` what a grant of it covers.\n``modes`` lists the decisions this request accepts at this scope.",
           "properties": {
             "label": {
               "title": "Label",
@@ -610,6 +625,21 @@
               ],
               "default": null,
               "title": "Level"
+            },
+            "modes": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Modes"
             },
             "pattern": {
               "title": "Pattern",
@@ -1019,7 +1049,7 @@
           "type": "object"
         },
         "AskScopeDTO": {
-          "description": "One rung of an ask's scope ladder: ``value`` exact | general |\nrepository | remote | server | all, ``pattern`` what a grant of it covers.",
+          "description": "One rung of an ask's scope ladder: ``value`` exact | general |\nrepository | remote | server | all, ``pattern`` what a grant of it covers.\n``modes`` lists the decisions this request accepts at this scope.",
           "properties": {
             "label": {
               "title": "Label",
@@ -1036,6 +1066,21 @@
               ],
               "default": null,
               "title": "Level"
+            },
+            "modes": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Modes"
             },
             "pattern": {
               "title": "Pattern",
@@ -1340,7 +1385,7 @@
           "type": "object"
         },
         "AskScopeDTO": {
-          "description": "One rung of an ask's scope ladder: ``value`` exact | general |\nrepository | remote | server | all, ``pattern`` what a grant of it covers.",
+          "description": "One rung of an ask's scope ladder: ``value`` exact | general |\nrepository | remote | server | all, ``pattern`` what a grant of it covers.\n``modes`` lists the decisions this request accepts at this scope.",
           "properties": {
             "label": {
               "title": "Label",
@@ -1357,6 +1402,21 @@
               ],
               "default": null,
               "title": "Level"
+            },
+            "modes": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Modes"
             },
             "pattern": {
               "title": "Pattern",
@@ -1519,6 +1579,18 @@
           "default": null,
           "title": "Rule"
         },
+        "save_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Save Reason"
+        },
         "scopes": {
           "items": {
             "$ref": "#/$defs/AskScopeDTO"
@@ -1579,7 +1651,7 @@
       "type": "object"
     },
     "AskScopeDTO": {
-      "description": "One rung of an ask's scope ladder: ``value`` exact | general |\nrepository | remote | server | all, ``pattern`` what a grant of it covers.",
+      "description": "One rung of an ask's scope ladder: ``value`` exact | general |\nrepository | remote | server | all, ``pattern`` what a grant of it covers.\n``modes`` lists the decisions this request accepts at this scope.",
       "properties": {
         "label": {
           "title": "Label",
@@ -1596,6 +1668,21 @@
           ],
           "default": null,
           "title": "Level"
+        },
+        "modes": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Modes"
         },
         "pattern": {
           "title": "Pattern",

@@ -1310,14 +1310,18 @@ def eligible(ask: PendingAsk, scope: dict, mode: str, minutes: float | None) -> 
         return "blocked by a deny rule"
     if mode in ("deny", "always-deny"):
         return None
-    if not all(scope_matches(ask.ask.kind, scope["pattern"], key, req=ask.request) for key in ask_keys(ask.request)):
+    keys = ask_keys(ask.request)
+    if ask.ask.kind == "push" and any(UNKNOWN_REF in (permissions.push_pattern(key) or ()) for key in keys):
+        if mode != "once" or not _is_exact(ask, scope):
+            return "This push doesn't name its branch, so it can only be allowed once."
+    if not all(scope_matches(ask.ask.kind, scope["pattern"], key, req=ask.request) for key in keys):
         if not _is_exact(ask, scope):
             return "pushes outside this scope"     # a command pushing to more than the scope covers
         if mode != "once":
             # Its own exact form, which no pattern fits: a push whose branch
             # only git knows (git push origin HEAD). The held request itself
             # can be let through, but a saved grant could cover any branch.
-            return "only git knows which branch it pushes: approve it once, or at a wider scope"
+            return "This push doesn't name its branch, so it can only be allowed once."
     if mode == "once":
         return None
     life = {"session": "session", "timed": "time", "forever": "forever"}[mode]
@@ -1409,8 +1413,8 @@ def decide_group(db, key: str, scope_value: str, mode: str, minutes: float | Non
         else:
             hits.append(a)
     if not hits:
-        raise _error("conflict", "nothing in this scope can be approved: "
-                     + "; ".join(sorted(set(reasons.values()))), 409)
+        own = eligible(g.rep, scope, mode, minutes)
+        raise _error("conflict", own or "This approval no longer applies. Refresh the Inbox and choose again.", 409)
     # What is saved is the decision on this item: it must be one its own ask permits.
     own = eligible(g.rep, scope, mode, minutes) if mode in ("session", "timed", "forever") else None
     if own:
