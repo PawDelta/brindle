@@ -33,7 +33,6 @@ import { Review, ReviewStrip, type Draft, type ReviewTab, type ThreadActions, ty
 import { DocText, changeBetween, selectedRange, toPoints, toUnits, type Mark } from "./DocText";
 import { ExportButton } from "./ExportButton";
 import { Avatar, Decision, Tasks, overlaps, passChip, personName } from "./PlanCards";
-import { changeUnsentReplies, useUnsentReplies } from "./unsentReplies";
 import { StoreContext } from "../../../store/useStore";
 
 type Client = VisualsClient & PlansClient & PlanDocClient & Partial<ExportClient> & Partial<Pick<DaemonClient, "attach">>;
@@ -65,15 +64,6 @@ function storedCollapsed(): boolean {
   } catch {
     return false;
   }
-}
-
-/* The unsent replies (unsentReplies.ts) left once `plan`'s verdict is counted: it delivered every reply written
-   before it. A reply this snapshot doesn't hold is kept: nothing says a verdict has carried it. */
-function undelivered(ids: number[], plan: Plan): number[] {
-  const at = plan.verdict?.at;
-  if (at == null) return ids;
-  const written = new Map((plan.threads ?? []).flatMap((t) => (t.replies ?? []).map((r): [number, number] => [r.id, r.at])));
-  return ids.filter((id) => (written.get(id) ?? Infinity) > at);
 }
 
 export function PlanReader({ client, visual, repo, onBack, asking, onChanged }: {
@@ -234,14 +224,6 @@ function DesignDoc({ client, plan, visual, mode, writes }: {
   const [box, setEditing] = useState<{ section: string; text: string; source: string } | null>(null);
   // A section's box belongs to Suggesting and Editing: back in Viewing (or decided), it is closed.
   const editing = mode === "viewing" ? null : box;
-  // The person's replies no verdict has carried to the supervisor yet: the device's one record
-  // (unsentReplies.ts), which this reader follows and only ever adds to or takes from. A verdict
-  // delivered every reply older than it: this reader's own, counted when its answer arrives
-  // (`decide`, whether or not the reader is still open then), or one seen on the plan.
-  const unsent = useUnsentReplies(plan.id);
-  useEffect(() => {
-    if (undelivered(unsent, plan).length < unsent.length) changeUnsentReplies(plan.id, (ids) => undelivered(ids, plan));
-  }, [unsent, plan]);
   const [followed, setFollowed] = useState<{ thread: string } | null>(null);
   const [tab, setTab] = useState<ReviewTab>("review");
   const [collapsed, setCollapsed] = useState(storedCollapsed);
@@ -343,15 +325,8 @@ function DesignDoc({ client, plan, visual, mode, writes }: {
     }
   };
   const write = async (work: () => Promise<Plan>) => (await send(work)) !== null;
-  const repliesOn = (p: Plan, thread: number) => (p.threads?.find((t) => t.id === thread)?.replies ?? []).filter((r) => r.author === "person").map((r) => r.id);
   const actions: ThreadActions = {
-    reply: async (thread, text) => {
-      const had = repliesOn(plan, thread);
-      const now = await send(() => client.replyPlan(plan.id, thread, text));
-      // The reply's id is the one the thread didn't have: kept as unsent, whether or not this reader is still open.
-      if (now) changeUnsentReplies(plan.id, (ids) => [...ids, ...repliesOn(now, thread).filter((id) => !had.includes(id))]);
-      return now !== null;
-    },
+    reply: (thread, text) => write(() => client.replyPlan(plan.id, thread, text)),
     resolve: (thread, resolved) => write(() => client.resolvePlanThread(plan.id, thread, resolved)),
     accept: (thread) => write(() => client.acceptPlanSuggestion(plan.id, thread, plan.rev)),
     reject: (thread) => write(() => client.rejectPlanSuggestion(plan.id, thread)),
@@ -447,35 +422,20 @@ function DesignDoc({ client, plan, visual, mode, writes }: {
       if (alive.current) setUploading((n) => n - 1);
     }
   };
-  // What the supervisor hasn't had: the person's open threads, and their replies. A reply carries
-  // no "sent" of its own. One written after the supervisor's last revision can't have been sent
-  // (a verdict since would have closed the plan until a newer revision); one older than that was
-  // sent only if a verdict followed it, which is what `unsent` keeps track of on this device.
+  // What the supervisor hasn't had: the person's open threads, and their replies, each of which
+  // the engine marks `sent` once a verdict has carried it.
   const proposals = (plan.revisions ?? []).filter((r) => r.author === "supervisor");
-  const proposedAt = Math.max(0, ...proposals.map((r) => r.at));
   const myReplies = threads.flatMap((t) => t.replies ?? []).filter((r) => r.author === "person");
-  const pending = threads.some((t) => t.author === "person" && t.status === "open" && !t.sent) || myReplies.some((r) => r.at > proposedAt);
-  // Replies only this device's record calls unsent. It can be behind (a verdict sent from another
-  // window, or one whose answer never arrived), so the engine has the last word: see `decide`.
-  const recorded = myReplies.filter((r) => unsent.includes(r.id)).map((r) => r.id);
+  const pending = threads.some((t) => t.author === "person" && t.status === "open" && !t.sent) || myReplies.some((r) => !r.sent);
   const lastProposal = Math.max(0, ...proposals.map((r) => r.rev));
   const edited = (plan.revisions ?? []).some((r) => r.author === "person" && r.rev > lastProposal);
   const differs = plan.decisions.some((d) => (drafted(d) ?? d.confirmed ?? d.mine) !== d.mine);
   const said = !!note.trim() || pending || edited || differs;
-  const canRequest = said || recorded.length > 0;
+  const canRequest = said;
   const drafts = Object.fromEntries(plan.decisions.flatMap((d) => (drafted(d) ? [[d.id, drafted(d)!]] : [])));
   const decide = async (approved: boolean) => {
     setSending(approved ? "approve" : "changes");
-    // Sent on the strength of recorded replies alone and refused as saying nothing: the engine
-    // holds none of those replies any more, so the record was behind on them. Those, the ones
-    // this request stood on, are taken from the record; a reply written since is not among them.
-    const stoodOn = !approved && !said && attached.length === 0 ? recorded : [];
-    const now = await send(() => client.decidePlan(plan.id, { rev: plan.rev, approved, picks: drafts, comments: [], note: note.trim(), ...(attached.length ? { attachments: attached } : {}) }),
-      (e) => { if (stoodOn.length && e instanceof DaemonError && e.status === 400) changeUnsentReplies(plan.id, (ids) => ids.filter((id) => !stoodOn.includes(id))); });
-    // The verdict delivered the replies written before it. That is recorded here, from its own
-    // answer, even if the reader was closed meanwhile: the next revision clears the verdict from
-    // the plan, and nothing later would say those replies had gone.
-    if (now) changeUnsentReplies(plan.id, (ids) => undelivered(ids, now));
+    const now = await send(() => client.decidePlan(plan.id, { rev: plan.rev, approved, picks: drafts, comments: [], note: note.trim(), ...(attached.length ? { attachments: attached } : {}) }));
     if (!alive.current) return;
     setSending(null);
     if (now) {
