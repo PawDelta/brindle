@@ -6065,6 +6065,11 @@
               "title": "Id",
               "type": "integer"
             },
+            "sent": {
+              "default": false,
+              "title": "Sent",
+              "type": "boolean"
+            },
             "text": {
               "title": "Text",
               "type": "string"
@@ -7083,6 +7088,11 @@
           "title": "Id",
           "type": "integer"
         },
+        "sent": {
+          "default": false,
+          "title": "Sent",
+          "type": "boolean"
+        },
         "text": {
           "title": "Text",
           "type": "string"
@@ -7676,6 +7686,11 @@
             "id": {
               "title": "Id",
               "type": "integer"
+            },
+            "sent": {
+              "default": false,
+              "title": "Sent",
+              "type": "boolean"
             },
             "text": {
               "title": "Text",

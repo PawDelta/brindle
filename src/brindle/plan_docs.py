@@ -695,6 +695,7 @@ def _thread_dto(t: dict, cur: dict, replies: list[dict]) -> dict:
                                                                           json.loads(t["attachments"])],
            "status": t["status"], "sent": t["sent_rev"] is not None, "at": t["created_at"],
            "replies": [{"id": r["id"], "author": r["author"], "text": r["body"], "at": r["created_at"],
+                        "sent": r["sent_rev"] is not None,
                         "attachments": [f["name"] for f in json.loads(r["attachments"])]} for r in replies]}
     if t["kind"] == "suggestion":
         out.update(before=json.loads(t["anchor"])["quote"], after=t["after"])
