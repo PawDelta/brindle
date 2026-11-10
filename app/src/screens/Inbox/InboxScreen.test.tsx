@@ -281,13 +281,20 @@ describe("inbox", () => {
     sync.stop();
   });
 
-  it.each([[true, "Yes"], [false, "Not now"]])("an offer to plan first is an Inbox card answered %s with %s through the goal route", async (accepted, label) => {
+  it.each([[true, "Yes", false], [false, "Not now", false], [true, "Yes", true]])("plan offer opens the session after the answer (failure: %s)", async (accepted, label, fails) => {
     const context = { session_name: "Command tools", goal: "Ship ls --json", detail: "Support shell scripts", workers: 3, repos: 2,
       milestones: [{ title: "Parse arguments", verified: true }, { title: "Encode output", verified: false }],
       reasons: ["This work spans 2 repositories.", "3 workers have been assigned to this goal."] };
     const offer: InboxItemDTO = { kind: "plan_offer", agent_id: "sup1", root_id: "sup1", workspace_id: "proj", request_id: "o1", reason: "This looks big: plan it first?", detail: context.goal, plan_offer: context };
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], inbox: [offer], goal: { root_id: "sup1", plan_offer: "o1" } as GoalDTO });
-    const { sync, onOpen } = mount(daemon);
+    const client = daemon.client();
+    const actionClient = fails
+      ? new DaemonClient({ baseUrl: client.baseUrl, token: client.token, fetch: async (input, init) => {
+        if (String(input).endsWith("/goal/plan-offer")) throw new Error("offer unavailable");
+        return daemon.fetch(input, init);
+      } })
+      : client;
+    const { sync, onOpen } = mount(daemon, actionClient);
     await screen.findByText("This looks big: plan it first?");
     const body = within(card("plan_offer")).getByTestId("card-detail");
     for (const value of [context.session_name, context.goal, context.detail, ...context.milestones.map((m) => m.title), ...context.reasons]) {
@@ -300,13 +307,22 @@ describe("inbox", () => {
     // The link appears once the session list has loaded, which may land after the inbox.
     fireEvent.click(await within(card("plan_offer")).findByRole("button", { name: "Go to session ›" }));
     expect(onOpen).toHaveBeenLastCalledWith("sup1", REPO, "sup1");
+    onOpen.mockClear();
     act(() => {
       const button = within(card("plan_offer")).getByRole("button", { name: label });
       fireEvent.click(button);
       fireEvent.click(button);
     });
-    await waitFor(() => expect(posts(daemon).find((r) => r.path === "/goal/plan-offer")?.body).toMatchObject({ root: "sup1", offer: "o1", accept: accepted }));
-    expect(posts(daemon).filter((r) => r.path === "/goal/plan-offer")).toHaveLength(1);
+    if (fails) {
+      expect(await screen.findByText("offer unavailable")).toBeTruthy();
+      expect(onOpen).not.toHaveBeenCalled();
+      expect(screen.getByTestId("inbox-card")).toBeTruthy();
+    } else {
+      await waitFor(() => expect(posts(daemon).find((r) => r.path === "/goal/plan-offer")?.body).toMatchObject({ root: "sup1", offer: "o1", accept: accepted }));
+      expect(posts(daemon).filter((r) => r.path === "/goal/plan-offer")).toHaveLength(1);
+      await waitFor(() => expect(onOpen).toHaveBeenCalledTimes(1));
+      expect(onOpen).toHaveBeenLastCalledWith("sup1", REPO, "sup1");
+    }
     sync.stop();
   });
 
@@ -432,6 +448,28 @@ describe("inbox", () => {
 
     fireEvent.click(within(held).getByRole("button", { name: "Allow once" }));
     await waitFor(() => expect(posts(daemon).find((r) => r.path === "/permissions/asks/decide")?.body).toEqual({ key: pushes.key, scope: "general", mode: "once" }));
+    sync.stop();
+  });
+
+  it("a bare push offers only Allow once and Deny, explains why, and translates a stale refusal", async () => {
+    const reason = "This push doesn't name its branch, so it can only be allowed once.";
+    const exact = { ...pushes.scopes[0], pattern: "? → ? @ ?", modes: ["once", "deny"] };
+    const bare: AskGroupDTO = {
+      ...pushes, general: exact, scopes: [exact], modes: ["once", "deny"], limits: null,
+      save_reason: reason, items: [{ ...pushes.items[0], summary: "git push", exact: exact.pattern }],
+    };
+    const daemon = new FakeDaemon({ sessions: [session], workspaces: [root, worker], inbox: [permission], asks: [bare] });
+    const client = daemon.client();
+    vi.spyOn(client, "decidePermissionAsks").mockRejectedValue(new Error("nothing in this scope can be approved: pushes outside this scope"));
+    const { sync } = mount(daemon, client);
+    const held = await screen.findByRole("article", { name: bare.title });
+    expect(within(within(held).getByRole("group", { name: "Decision" })).getAllByRole("button").map((b) => b.textContent)).toEqual(["Deny", "Allow once"]);
+    expect(within(held).getByText(reason)).toBeTruthy();
+    fireEvent.click(within(held).getByRole("button", { name: "Allow once" }));
+    const refusal = await screen.findByRole("alert");
+    expect(refusal.textContent).not.toContain("nothing in this scope can be approved");
+    expect(refusal.textContent).not.toContain("pushes outside this scope");
+    expect(refusal.textContent).toContain("Allow once");
     sync.stop();
   });
 
