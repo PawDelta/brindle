@@ -100,34 +100,56 @@ def test_assign_queues_behind_open_plan_until_the_person_approves(db, session, m
         assert tasks.sweep(db) == 0 and started == ["build the preset schema"]
 
 
-@pytest.mark.parametrize("accept", [True, pytest.param(False, marks=pytest.mark.variant(
-    "No must start the task queued behind the offer; the other offer tests answer with nothing queued"))])
+@pytest.mark.parametrize("accept", [
+    True,
+    pytest.param(False, marks=pytest.mark.variant(
+        "No must start the task queued behind the offer; the other offer tests answer with nothing queued")),
+    pytest.param("legacy", marks=pytest.mark.variant(
+        "an upgraded row: the retired analysis-doc offer's 'accepted' must neither hold work nor allow a plan")),
+])
 def test_big_goal_offers_a_planning_doc(accept, db, session, monkeypatch):
-    """A big goal asks the person "This looks big: plan it first?". While that
-    is open, assign queues; Yes grants the plan and keeps the task queued
-    until the plan is approved, No starts it."""
+    """A big goal offers to plan it first. While that is open, assign queues;
+    Yes grants the plan and keeps the task queued until the plan is approved,
+    No starts it. An accepted analysis-doc offer from before does neither."""
     from brindle import autopilot
     from brindle.service import inbox
 
     boss, started = session
     monkeypatch.setattr(autopilot, "_commit", lambda ws, tracked_only=False: "abc123")
     db.add_autopilot("boss")
-    reply = mcp_server.set_goal("Org presets", [{"title": f"M{i}", "check": "true"} for i in range(4)])
-    assert "plan it first" in reply
-    [offer] = [i for i in inbox.items(db, None) if i.kind == "plan_offer"]
-    assert offer.reason == "This looks big: plan it first?" and offer.plan_offer.milestones
+    grants = lambda: [r["scope"] for r in db.conn.execute(  # noqa: E731
+        "SELECT scope FROM visual_grants WHERE root_id='boss' AND remaining > 0")]
+    milestones = [{"title": f"M{i}", "check": "true"} for i in range(4)]
+    if accept == "legacy":
+        db.update_autopilot("boss", goal="Org presets")
+        with db.tx() as c:
+            c.execute("INSERT INTO goal_doc_requests (root_id, requested, offer) VALUES ('boss', 1, 'accepted')")
+        mcp_server.set_goal("Org presets", milestones)     # the same goal: no new offer
+        assert not [i for i in inbox.items(db, None) if i.kind == "plan_offer"]
+        asyncio.run(mcp_server.assign("developer", "build the preset schema"))
+        assert started == ["build the preset schema"] and grants() == []
+        with pytest.raises(ToolError):
+            mcp_server.propose_plan(PLAN)
+        return
 
-    assert "offer to plan" in asyncio.run(mcp_server.assign("developer", "build the preset schema"))
+    mcp_server.set_goal("Org presets", milestones)
+    [offer] = [i for i in inbox.items(db, None) if i.kind == "plan_offer"]
+    assert (offer.root_id, offer.request_id) == ("boss", plans.open_offer_id(db.get_autopilot("boss").plan_offer))
+    assert [m.title for m in offer.plan_offer.milestones] == [m["title"] for m in milestones]
+
+    asyncio.run(mcp_server.assign("developer", "build the preset schema"))
+    assert [t.task_text for t in db.list_tasks(state="pending")] == ["build the preset schema"]
     assert tasks.sweep(db) == 0 and started == []
     with TestClient(build_app(TOKEN), headers=AUTH) as client:
         answer = {"root": "boss", "offer": offer.request_id, "accept": accept}
         assert client.post("/v1/goal/plan-offer", json=answer).status_code == 200
         assert client.post("/v1/goal/plan-offer", json=answer).status_code == 409   # answered once
         assert not [i for i in inbox.items(db, None) if i.kind == "plan_offer"]
+        assert messages(db)                                  # the supervisor is told either way
         if not accept:
-            assert "not to plan" in messages(db)[0] and started == ["build the preset schema"]
+            assert started == ["build the preset schema"] and grants() == []
             return
-        assert "propose_plan" in messages(db)[-1]
+        assert grants() == ["plan"]
         assert tasks.sweep(db) == 0 and started == []       # Yes: it waits for the plan now
         pid = mcp_server.propose_plan(PLAN).split()[2]      # the Yes is the person's ask
         assert started == [] and plans.holding(db, "boss")["id"] == pid

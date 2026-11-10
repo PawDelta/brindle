@@ -178,7 +178,8 @@ CREATE TABLE IF NOT EXISTS goal_summaries (
 CREATE TABLE IF NOT EXISTS goal_doc_requests (
     root_id TEXT PRIMARY KEY REFERENCES autopilot(root_id) ON DELETE CASCADE,
     requested INTEGER NOT NULL,
-    offer TEXT,                 -- brindle's one-time offer to plan first: open:<id> | accepted | planned | dismissed
+    offer TEXT,                 -- brindle's one-time offer to plan first: plan:open:<id> | plan:accepted | plan:planned | plan:dismissed
+                                -- (open:<id> | accepted | dismissed: the retired analysis-doc offer; inert)
     goal_at REAL                -- when this goal began: only workers assigned since count toward its offer
 );
 -- Repos attached to a session (brindle Pro multi_repo; see brindle.repos):
@@ -1084,7 +1085,7 @@ class Autopilot:
     proposal: str | None = None        # JSON {checks, rules, at}: checks awaiting the user's answer
     external_wait: str | None = None   # JSON {pid, until, path, note}: an outside job
     offer_goal_at: float | None = None  # when the current goal began (workers since count toward its offer)
-    plan_offer: str | None = None  # the offer to plan first: open:<id> | accepted | planned | dismissed (None: never made)
+    plan_offer: str | None = None  # the offer to plan first, see brindle.plans.OFFER_* (None: never made)
     summary: str | None = None        # a short goal label for the sidebar
 
 

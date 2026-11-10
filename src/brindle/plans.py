@@ -40,13 +40,16 @@ MAX_DECISIONS = 12
 MAX_WORKERS = 20
 MAX_COMMENTS = 50
 HOLDING = ("open", "redirected")
-# The offer to plan a goal first (goal_doc_requests.offer): open:<id> until
-# answered, then accepted (waiting for the plan), planned (a plan was
-# proposed) or dismissed. Open and accepted hold the session's tasks.
-OFFER_OPEN = "open:"
-OFFER_ACCEPTED = "accepted"
-OFFER_PLANNED = "planned"
-OFFER_DISMISSED = "dismissed"
+# The offer to plan a goal first (goal_doc_requests.offer): plan:open:<id>
+# until answered, then plan:accepted (waiting for the plan), plan:planned (a
+# plan was proposed) or plan:dismissed. Open and accepted hold the session's
+# tasks. The retired analysis-doc offer's values (open:<id>, accepted,
+# dismissed) still in old rows mean nothing here: they hold nothing, show no
+# card and grant nothing, and (being set) keep that goal from a second offer.
+OFFER_OPEN = "plan:open:"
+OFFER_ACCEPTED = "plan:accepted"
+OFFER_PLANNED = "plan:planned"
+OFFER_DISMISSED = "plan:dismissed"
 OFFER_YES = ("The person wants to plan this goal first (brindle asked because it looks big). Write a "
              "planning doc with propose_plan before you assign more work; the tasks you assigned meanwhile "
              "start once they approve it.")
@@ -174,6 +177,11 @@ def get(db: DB, plan_id: str) -> dict:
     p = _row(db, plan_id)
     p["visual"] = visuals.get(db, p["id"])
     return p
+
+
+def open_offer_id(offer: str | None) -> str | None:
+    """The id of an unanswered offer to plan first, from its stored value; None otherwise."""
+    return offer[len(OFFER_OPEN):] if offer and offer.startswith(OFFER_OPEN) else None
 
 
 def open_plan(db: DB, root_id: str) -> dict | None:

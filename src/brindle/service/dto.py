@@ -424,10 +424,11 @@ class GoalDTO(_DTO):
                        goal_phase: tuple[str, str | None] = ("in_progress", None),
                        activity: dict | None = None, pr_state: dict | None = None) -> GoalDTO:
         from brindle.autopilot import person_note
+        from brindle.plans import open_offer_id
 
         phases = phases or {}
         return cls(**(activity or {}), root_id=ap.root_id, enabled=bool(ap.enabled),
-                   plan_offer=(ap.plan_offer or "")[5:] if (ap.plan_offer or "").startswith("open:") else None,
+                   plan_offer=open_offer_id(ap.plan_offer),
                    goal=ap.goal, summary=ap.summary, detail=ap.detail,
                    state=ap.state, note=person_note(ap), progress=ap.progress,
                    usage_resets_at=ap.usage_resets_at,

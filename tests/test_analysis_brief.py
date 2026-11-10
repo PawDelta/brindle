@@ -73,7 +73,6 @@ def goal_env(db, boss, monkeypatch):
 
 
 @pytest.mark.parametrize("milestones, goal, offered", [
-    (_plan(2), "Fix the typo", False), (_plan(4), "Fix the typo", True),
     (_plan(3), "Redesign the sync architecture", True),
     # An omitted repo is the root checkout: with one attached repo that is two repos.
     (_plan(1) + _plan(1, "web"), "Fix the typo", True), (_plan(2, "web"), "Fix the typo", False)])

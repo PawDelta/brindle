@@ -298,14 +298,17 @@ def _plan_offer_items(db: DB, repo_root: str | None) -> list[InboxItemDTO]:
     """brindle's one-time offer to plan a big goal first, answered Yes / Not now from here
     (POST /goal/plan-offer names the offer id, carried in request_id). Listed
     from the stored offer, not the live snapshot: a paused session keeps its offer."""
+    from brindle import plans
     from brindle.pro import analysis_brief
 
     out = []
-    for r in db.conn.execute("SELECT root_id FROM goal_doc_requests WHERE offer LIKE 'open:%' ORDER BY rowid"):
+    for r in db.conn.execute("SELECT root_id FROM goal_doc_requests WHERE offer LIKE ? ORDER BY rowid",
+                             (plans.OFFER_OPEN + "%",)):
         root = db.get_agent(r["root_id"])
         ap = db.get_autopilot(r["root_id"])
         ws = db.get_workspace(root.workspace_id) if root else None
-        if (ap is None or ws is None or (repo_root and ws.repo_root != repo_root)
+        offer_id = plans.open_offer_id(ap.plan_offer) if ap else None
+        if (offer_id is None or ws is None or (repo_root and ws.repo_root != repo_root)
                 or identity_lock.locked_by(root.id)):
             continue
         milestones, repos, workers, text = autopilot.plan_offer_scope(db, root.id, ap)
@@ -315,7 +318,7 @@ def _plan_offer_items(db: DB, repo_root: str | None) -> list[InboxItemDTO]:
                         for m in milestones], workers=workers, repos=repos,
             reasons=analysis_brief.offer_reasons(len(milestones), repos, text, workers))
         out.append(InboxItemDTO(kind="plan_offer", reason="This looks big: plan it first?",
-                                detail=ap.goal, request_id=ap.plan_offer[5:], agent_id=root.id,
+                                detail=ap.goal, request_id=offer_id, agent_id=root.id,
                                 workspace_id=ws.id, root_id=root.id, plan_offer=context))
     return out
 
