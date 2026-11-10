@@ -348,6 +348,22 @@ def test_asked_quote_accepts_what_the_person_typed(db, session, typed, asked, te
     assert visuals.publish(db, boss, "Asked", "<p>yes</p>", asked=asked)["rev"] == 1
 
 
+def test_typed_words_reach_the_engine(db, session, monkeypatch):
+    """The app's order: the vouch, held Enter, then the prompt's hook. That makes the words quotable;
+    a vouch landing after its own prompt's hook is refused, and the refusal is in the debug log."""
+    from brindle import debuglog
+
+    boss, _ = session
+    monkeypatch.setattr(debuglog, "enabled", lambda: True)
+    typed_into_cli(db, boss, "test it now")
+    assert visuals.publish(db, boss, "Asked", "<p>yes</p>", asked="test it now")["rev"] == 1
+    submitted_at = offers.time.time()
+    agents.handle_hook(db, boss.id, "prompt-submit", {"prompt": "show me again"})
+    assert app_vouches(boss, "show me again", offers.time.time() + 60, submitted_at).status_code == 409
+    refused = [line for line in debuglog.log_path().read_text().splitlines() if "typed words refused" in line]
+    assert len(refused) == 1 and "predates" in refused[0] and "show me again" not in refused[0]
+
+
 def _report_came_late(db, boss, worker):
     assert app_vouches(boss, "render first", offers.time.time() - 1).status_code == 409
     typed_into_cli(db, boss, "render first", vouched=False)
