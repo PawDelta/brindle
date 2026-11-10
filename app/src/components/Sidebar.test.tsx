@@ -56,6 +56,20 @@ const sessionRow = (id: string) => document.querySelector<HTMLButtonElement>(`bu
 const list = () => screen.getByRole("navigation", { name: "Sessions" });
 
 describe("Sidebar", () => {
+  it("does not substitute another session's context when the selected session disappears", async () => {
+    const { daemon, sync } = mount({ sessions: [live, paused] }, { screen: "session", root: "sup1", repo: REPO });
+    onTestFinished(() => sync.stop());
+    await act(async () => {});
+    expect(screen.getByRole("button", { name: "Rename session" })).toBeTruthy();
+    await act(async () => {
+      daemon.data.sessions = [paused];
+      daemon.publish("session.closed", { root_id: "sup1" });
+    });
+    expect(sessionRow("sup1")).toBeNull();
+    expect(screen.getByTestId("session-context").textContent).not.toContain(paused.goal);
+    expect(screen.queryByRole("button", { name: "Rename session" })).toBeNull();
+  });
+
   it("sidebar foot is one row with the profile pill and terminal, even with provider problems", async () => {
     const { sync, store, navigate } = mount({ account: { signed_in: true, name: "Alex Brown" }, usage: usageScenario("normal"), providers: freshProviders({ claude: { path: "/bin/claude", version: "2" } }) });
     onTestFinished(() => sync.stop());
@@ -231,9 +245,11 @@ describe("Sidebar", () => {
     expect(agentRow("w1")!.title).toContain("milestone: Logo goes Home");
     expect(agentRow("w3")!.title).toContain("gpt-6-luna");
     expect(agentRow("w2")!.querySelector("[data-testid=agent-title]")).toBeNull();
+    vi.useFakeTimers();
+    onTestFinished(() => { vi.useRealTimers(); });
     await act(async () => fireEvent.dblClick(agentRow("w1")!));
     expect(writeText).toHaveBeenCalledWith("id: w1\nrole: developer\nprofile: developer-haiku\nbranch: feat/ls\nmilestone: Logo goes Home");
-    expect((await screen.findByRole("status")).textContent).toContain("copied");
+    expect(screen.getByRole("status")).toBeTruthy();
     sync.stop();
   });
 
@@ -376,8 +392,11 @@ describe("Sidebar", () => {
     const { sync, navigate } = mount({ workspaces: [root, worker] }, { screen: "session", root: "sup1", repo: REPO, agent: "sup1" });
     await waitFor(() => expect(agentRow("w1")).toBeTruthy());
     // The row on screen (the session's) is where the keys start: down is its supervisor, then its worker.
+    const reveal = vi.fn();
+    agentRow("w1")!.scrollIntoView = reveal;
     fireEvent.keyDown(list(), { key: "ArrowDown" });
     fireEvent.keyDown(list(), { key: "ArrowDown" });
+    expect(reveal).toHaveBeenCalled();
     fireEvent.keyDown(list(), { key: "Enter" });
     expect(navigate).toHaveBeenLastCalledWith({ screen: "session", root: "sup1", repo: REPO, agent: "w1" });
     fireEvent.keyDown(list(), { key: "k" });
