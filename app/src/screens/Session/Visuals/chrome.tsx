@@ -1,6 +1,6 @@
 /* The readers' shared chrome: Back (Esc) and Keep, for a framed visual and a plan alike. */
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { VisualDTO } from "../../../api/client";
 import { plain } from "../../../api/wording";
 import { LoadingButton } from "../../../components/LoadingButton";
@@ -46,15 +46,24 @@ export function BackButton({ onBack, label = "Back", asking }: { onBack(): void;
 export function KeepButton({ client, visual, onKept }: { client: VisualsClient; visual: VisualDTO; onKept(v: VisualDTO): void }) {
   const [keeping, setKeeping] = useState(false);
   const [keepError, setKeepError] = useState<string | null>(null);
+  const scope = useRef<object | null>(null);
+  useLayoutEffect(() => {
+    scope.current = {};
+    setKeeping(false);
+    setKeepError(null);
+    return () => { scope.current = null; };
+  }, [client, visual.id, visual.rev]);
   const keep = async () => {
+    const request = scope.current;
     setKeeping(true);
     setKeepError(null);
     try {
-      onKept(await (visual.kept ? client.unkeepVisual(visual.id) : client.keepVisual(visual.id)));
+      const result = await (visual.kept ? client.unkeepVisual(visual.id) : client.keepVisual(visual.id));
+      if (scope.current === request) onKept(result);
     } catch (e) {
-      setKeepError(message(e));
+      if (scope.current === request) setKeepError(message(e));
     } finally {
-      setKeeping(false);
+      if (scope.current === request) setKeeping(false);
     }
   };
   return (

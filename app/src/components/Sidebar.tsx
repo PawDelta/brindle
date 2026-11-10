@@ -39,7 +39,7 @@ import { UNKNOWN } from "../screens/Session/review";
 import { agentIds, sessionTree, type AgentNode } from "../screens/Session/tree";
 import { useContinue } from "../screens/Session/useContinue";
 import { waitingCount } from "../store/appUpdates";
-import { cliStatus, formatAge, isPaused, type CliStatus } from "../store/overview";
+import { cliStatus, formatAge, isPastWorker, isPaused, type CliStatus } from "../store/overview";
 import { planWindows, providerName, WARN } from "../screens/Account/usage";
 import { useSessions } from "../store/sessions";
 import { useUsage } from "../store/usage";
@@ -668,6 +668,10 @@ export function Sidebar({ route, navigate, refresh, openUrl, onBackFromSettings 
 
   // The model the selected session's own agent last ran on, from the agents the snapshot already lists.
   const workspaces = useAppState((s) => s.workspaces);
+  const alive = useAppState((s) => s.alive);
+  const runningAgents = useMemo(() => workspaces.flatMap((ws) => ws.agents ?? []).filter((a) =>
+    !isPastWorker(a) && !["paused", "done", "failed"].includes(a.status) && alive[a.id] !== false,
+  ).length, [workspaces, alive]);
   const agent = useMemo(() => workspaces.flatMap((ws) => ws.agents ?? []).find((a) => a.id === selected?.root), [workspaces, selected]);
   // Follow the selected session's provider when it has a model; otherwise show the fullest week.
   const model = agent?.model;
@@ -805,7 +809,19 @@ export function Sidebar({ route, navigate, refresh, openUrl, onBackFromSettings 
       <div className="mx-2 h-px shrink-0 bg-line" role="separator" data-testid="inbox-divider" />
       <SessionContext session={selected} route={route} navigate={navigate} refresh={refresh ?? noRefresh} openUrl={openUrl} style={{ height: split }} />
       <Handle height={split} onChange={resize} />
-      <div className="side-h shrink-0">Sessions</div>
+      <div className="side-h shrink-0">
+        Sessions
+        {runningAgents > 0 && (
+          <span
+            className="ml-auto inline-flex h-[18px] items-center gap-1 rounded-full bg-pass-soft px-1.5 font-mono text-[11px] font-bold leading-none text-pass"
+            title={`${runningAgents} agent${runningAgents === 1 ? "" : "s"} running`}
+            aria-label={`${runningAgents} agent${runningAgents === 1 ? "" : "s"} running`}
+          >
+            <span className="size-1.5 rounded-full bg-pass" aria-hidden="true" />
+            {runningAgents}
+          </span>
+        )}
+      </div>
       <nav ref={list} aria-label="Sessions" className="side-sessions flex min-h-0 flex-1 flex-col gap-[14px] overflow-auto outline-none focus-visible:ring-1 focus-visible:ring-branch" tabIndex={0} onKeyDown={keys}>
         {/* A close the engine refused: the session is back in its place, and this says why. */}
         {closeError && (
