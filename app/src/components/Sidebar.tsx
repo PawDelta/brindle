@@ -661,7 +661,9 @@ export function Sidebar({ route, navigate, refresh, openUrl, onBackFromSettings 
   const selected = useMemo<SessionRef | null>(() => {
     const here = routeSession(route);
     const listed = (ref: SessionRef | null) => (ref && all.some((r) => r.session.id === ref.root && r.repo === ref.repo) ? ref : null);
-    return listed(here) ?? listed(readLastSession()) ?? (all[0] ? { root: all[0].session.id, repo: all[0].repo } : null);
+    // A session route must never show another session's goal or actions when its row leaves the feed.
+    if (here) return listed(here);
+    return listed(readLastSession()) ?? (all[0] ? { root: all[0].session.id, repo: all[0].repo } : null);
   }, [route, all]);
 
   // The model the selected session's own agent last ran on, from the agents the snapshot already lists.
@@ -731,14 +733,20 @@ export function Sidebar({ route, navigate, refresh, openUrl, onBackFromSettings 
     const rowsNow = rows();
     if (rowsNow.length === 0) return;
     const at = rowsNow.findIndex((r) => r.key === cursor);
+    const move = (row: RowRef) => {
+      setCursor(row.key);
+      // The cursor is kept on the list rather than focusing each button: bring its row into view explicitly.
+      const button = [...(list.current?.querySelectorAll<HTMLButtonElement>("button[data-row]") ?? [])].find((el) => el.dataset.row === row.key);
+      button?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+    };
     switch (e.key) {
       case "ArrowDown":
       case "j":
-        setCursor(rowsNow[Math.min(at + 1, rowsNow.length - 1)].key);
+        move(rowsNow[Math.min(at + 1, rowsNow.length - 1)]);
         break;
       case "ArrowUp":
       case "k":
-        setCursor(rowsNow[Math.max(at - 1, 0)].key);
+        move(rowsNow[Math.max(at - 1, 0)]);
         break;
       case "Enter": {
         const row = rowsNow[at] ?? rowsNow[0];
