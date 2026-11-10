@@ -323,7 +323,10 @@ class KeychainStore:
             if r.returncode in KEYCHAIN_DIALOG_EXITS:
                 _note_refused()
                 raise CredentialError(f"keychain listing failed (security exit {r.returncode})")
-            listing.items = _parse_listing(r.stdout or "") if r.returncode == 0 else None
+            # `security` reports an item it couldn't print on stderr and still exits 0, so any
+            # complaint means the listing may be partial. Never logged: it names other apps' items.
+            complete = r.returncode == 0 and not (r.stderr or "").strip()
+            listing.items = _parse_listing(r.stdout or "") if complete else None
             listing.expires = time.monotonic() + KEYCHAIN_READ_TTL
             return listing.items, listing.expires
 
