@@ -1590,11 +1590,8 @@ def _finish_locked(db: DB, worker: Agent, ws: Workspace, reviewer: Agent | None)
         latest = db.get_agent(worker.id)
         if latest is not None and latest.pipeline not in (None, "ready"):
             return text   # the worker moved on meanwhile (a new report): its new state stands
-        # The checks failed: a stronger model gets one go at it. Not when they
-        # timed out: that says nothing about the code, and nothing for it to fix.
-        if text.startswith("Not merged. ") and not text.startswith(f"Not merged. {gates.CHECKS_TIMED_OUT}") \
-                and _retry_on_heavy(db, worker, ws, cfg, text, report):
-            return text
+        if text.startswith("Not merged. ") and _retry_on_heavy(db, worker, ws, cfg, text, report):
+            return text   # the checks failed: a stronger model gets one go at it
         db.update_agent(worker.id, pipeline=None, merge_failed=text)
         _escalate(db, ws, worker)
         # The supervisor sees the first line: it carries the action, and the
@@ -1688,6 +1685,8 @@ def _retry_on_heavy(db: DB, worker: Agent, ws: Workspace, cfg: RepoConfig, why: 
     worker could start; the caller then escalates as before."""
     if worker.profile == ESCALATION_PROFILE or not fable_enabled(cfg, worker, ws):
         return False
+    if why.startswith(f"Not merged. {gates.CHECKS_TIMED_OUT}"):
+        return False   # checks that timed out say nothing about the code: nothing to fix
     if cfg.max_weight and cfg.max_weight in ("light", "medium"):
         return False
     if ESCALATION_PROFILE not in cfg.routing.get("heavy", []):

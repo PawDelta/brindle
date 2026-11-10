@@ -100,7 +100,7 @@ def test_fable_is_off_by_default_on_a_cloud_account(db, heavy, monkeypatch):
     assert "needs you" in db.pop_pending("boss").body
 
 
-def test_merge_checks_timing_out_are_not_a_failure_to_retry_on_heavy(db, heavy, monkeypatch):
+def test_merge_checks_timing_out_go_to_the_supervisor_not_developer_heavy(db, heavy, monkeypatch):
     """A merge whose checks timed out twice says nothing about the code: the
     approved branch goes to the supervisor, its worker isn't replaced."""
     from brindle import autopilot, gates
