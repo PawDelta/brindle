@@ -12,8 +12,6 @@ export interface ApiSchema {
   AgentDTO: AgentDTO;
   AllowAllGrantDTO: AllowAllGrantDTO;
   AllowAllPlanDTO: AllowAllPlanDTO;
-  AnalysisOfferDTO: AnalysisOfferDTO;
-  AnalysisOfferMilestoneDTO: AnalysisOfferMilestoneDTO;
   AskDTO: AskDTO;
   AskDecisionDTO: AskDecisionDTO;
   AskGroupDTO: AskGroupDTO;
@@ -55,6 +53,9 @@ export interface ApiSchema {
   PlanCommentDTO: PlanCommentDTO;
   PlanDTO: PlanDTO;
   PlanDecisionDTO: PlanDecisionDTO;
+  PlanOfferDTO: PlanOfferDTO;
+  PlanOfferMilestoneDTO: PlanOfferMilestoneDTO;
+  PlanOptionDTO: PlanOptionDTO;
   PlanSectionDTO: PlanSectionDTO;
   PlanVerdictDTO: PlanVerdictDTO;
   PlanWorkerDTO: PlanWorkerDTO;
@@ -240,29 +241,6 @@ export interface SavedActionDTO {
   };
   scope: string;
   session?: string | null;
-}
-/**
- * Current session context for deciding whether to request an analysis doc.
- *
- * This interface was referenced by `ApiSchema`'s JSON-Schema
- * via the `definition` "AnalysisOfferDTO".
- */
-export interface AnalysisOfferDTO {
-  detail?: string | null;
-  goal: string;
-  milestones: AnalysisOfferMilestoneDTO[];
-  reasons: string[];
-  repos: number;
-  session_name: string;
-  workers: number;
-}
-/**
- * This interface was referenced by `ApiSchema`'s JSON-Schema
- * via the `definition` "AnalysisOfferMilestoneDTO".
- */
-export interface AnalysisOfferMilestoneDTO {
-  title: string;
-  verified: boolean;
 }
 /**
  * One pending request, generalized. ``blocked``: a deny rule covers it
@@ -466,8 +444,6 @@ export interface GitHubConnectionDTO {
  * via the `definition` "GoalDTO".
  */
 export interface GoalDTO {
-  analysis_doc?: boolean;
-  analysis_offer?: string | null;
   auditing?: boolean;
   checking?: boolean;
   commits_last_hour?: number;
@@ -479,6 +455,7 @@ export interface GoalDTO {
   last_commit_at?: number | null;
   milestones?: MilestoneDTO[];
   note?: string | null;
+  plan_offer?: string | null;
   pr_state?: PrStateDTO | null;
   pr_url?: string | null;
   progress: number;
@@ -539,13 +516,13 @@ export interface InboxActionDTO {
 export interface InboxItemDTO {
   action?: InboxActionDTO | null;
   agent_id?: string | null;
-  analysis_offer?: AnalysisOfferDTO | null;
   detail?: string | null;
   doc?: number | string | null;
   fix?: string | null;
   kind: string;
   notice_id?: string | null;
   permission?: PermissionDTO | null;
+  plan_offer?: PlanOfferDTO | null;
   reason: string;
   request_id?: string | null;
   root_id?: string | null;
@@ -588,6 +565,29 @@ export interface PermissionChoiceDTO {
   choice: string;
   label: string;
   rule?: string | null;
+}
+/**
+ * Current session context for deciding whether to plan the goal first.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PlanOfferDTO".
+ */
+export interface PlanOfferDTO {
+  detail?: string | null;
+  goal: string;
+  milestones: PlanOfferMilestoneDTO[];
+  reasons: string[];
+  repos: number;
+  session_name: string;
+  workers: number;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PlanOfferMilestoneDTO".
+ */
+export interface PlanOfferMilestoneDTO {
+  title: string;
+  verified: boolean;
 }
 /**
  * A kept visual: outlives its session. Its page: /v1/kept-visuals/{id}/html.
@@ -835,6 +835,7 @@ export interface PlanCommentDTO {
  * via the `definition` "PlanDTO".
  */
 export interface PlanDTO {
+  ask?: string | null;
   created_at: number;
   decisions: PlanDecisionDTO[];
   id: string;
@@ -859,17 +860,23 @@ export interface PlanDecisionDTO {
   challenge?: string | null;
   id: string;
   mine?: string | null;
-  options: VisualOptionDTO[];
+  options: PlanOptionDTO[];
   title: string;
 }
 /**
+ * One alternative of a plan's decision, as its card shows it: trade-offs
+ * as + (``pros``) and − (``cons``) lines, and the files it ``touches``.
+ *
  * This interface was referenced by `ApiSchema`'s JSON-Schema
- * via the `definition` "VisualOptionDTO".
+ * via the `definition` "PlanOptionDTO".
  */
-export interface VisualOptionDTO {
+export interface PlanOptionDTO {
+  cons?: string[];
   detail?: string | null;
   id: string;
   label: string;
+  pros?: string[];
+  touches?: string[];
 }
 /**
  * One ``##`` section of a plan's markdown: what a comment anchors to.
@@ -883,12 +890,21 @@ export interface PlanSectionDTO {
   title: string;
 }
 /**
+ * One worker of the proposed split: the files it expects to change and
+ * the one test that proves its task done.
+ *
  * This interface was referenced by `ApiSchema`'s JSON-Schema
  * via the `definition` "PlanWorkerDTO".
  */
 export interface PlanWorkerDTO {
   after?: string[];
+  agent_id?: string | null;
+  files?: string[];
   id: string;
+  state?: "queued" | "working" | "in review" | "merged" | "cancelled";
+  task_id?: string | null;
+  test?: string | null;
+  test_state?: "not run" | "failing" | "passing";
   title: string;
 }
 /**
@@ -1192,13 +1208,22 @@ export interface VisualDTO {
   created_at: number;
   id: string;
   kept: boolean;
-  kind: "visual" | "plan" | "analysis_doc";
+  kind: "visual" | "plan";
   options?: VisualOptionDTO[] | null;
   question?: string | null;
   rev: number;
   session: string;
   title: string;
   unread: boolean;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "VisualOptionDTO".
+ */
+export interface VisualOptionDTO {
+  detail?: string | null;
+  id: string;
+  label: string;
 }
 /**
  * This interface was referenced by `ApiSchema`'s JSON-Schema

@@ -490,11 +490,55 @@ describe("visuals", () => {
     }
   });
 
+  it("visuals unread dot clears on view while Inbox removes notices and keeps unanswered prompts", async () => {
+    const session: SessionDTO = { id: "sup1", workspace_id: "proj", profile: "supervisor", status: "idle", mode: "interactive", created_at: now };
+    const item: InboxItemDTO = { kind: "visual", agent_id: "sup1", root_id: "sup1", workspace_id: "proj", visual_id: "v_notice", reason: "visual is ready" };
+    const prompt: InboxItemDTO = { ...item, visual_id: visual.id, reason: "asks you to choose" };
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root], inbox: [item, prompt] });
+    const client = daemon.client();
+    let rows = [{ ...visual, id: "v_notice", question: undefined, options: undefined }, visual, answered];
+    vi.spyOn(client, "visuals").mockImplementation(async () => rows);
+    vi.spyOn(client, "markVisualRead").mockImplementation(async (id) => {
+      rows = rows.map((v) => v.id === id ? { ...v, unread: false } : v);
+      const row = rows.find((v) => v.id === id)!;
+      if (!row.options) daemon.data.inbox = daemon.data.inbox.filter((i) => i.visual_id !== id);
+      daemon.publish("visual.read", { repo_root: REPO, root_id: row.session, payload: { visual: row.id } });
+      return row;
+    });
+    const store = createAppStore();
+    const sync = startSync({ client, store, connect: daemon.connect });
+    try {
+      render(<PtyViewsProvider value={standInViews}><App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO }} /></PtyViewsProvider>);
+      const entry = await screen.findByTestId("visuals-button");
+      expect(within(entry).getByLabelText("unread")).toBeTruthy();
+      await waitFor(() => expect(screen.getByTestId("inbox-badge").textContent).toBe("2"));
+      fireEvent.click(entry);
+      fireEvent.click(screen.getByTestId("visual-row-v_notice"));
+      await screen.findByTestId("visual-reader");
+      await waitFor(() => expect(store.getState().inbox).toEqual([prompt]));
+      expect(within(entry).getByLabelText("unread")).toBeTruthy();
+      fireEvent.click(screen.getByTestId("visual-back"));
+      expect(screen.getByTestId("inbox-badge").textContent).toBe("1");
+      fireEvent.click(entry);
+      fireEvent.click(screen.getByTestId(`visual-row-${visual.id}`));
+      await screen.findByTestId("visual-reader");
+      await waitFor(() => expect(within(entry).queryByLabelText("unread")).toBeNull());
+      await act(async () => { await sync.idle(); });
+      expect(store.getState().inbox).toEqual([prompt]);
+      fireEvent.click(screen.getByTestId("visual-back"));
+      expect(screen.getByTestId("inbox-badge").textContent).toBe("1");
+      fireEvent.click(screen.getByTestId("inbox-link"));
+      const cards = await screen.findAllByTestId("inbox-card");
+      expect(cards).toHaveLength(1);
+      expect(cards[0].dataset.kind).toBe("visual");
+    } finally { sync.stop(); }
+  });
+
   it("opens from the header over the whole window with the sidebar hidden, and Esc or Back returns to the same sidebar and terminal", async () => {
     const session: SessionDTO = { id: "sup1", workspace_id: "proj", profile: "supervisor", status: "idle", mode: "interactive", created_at: now - 600, goal: "Ship it" };
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root] });
     const client = daemon.client();
-    // The engine's rows: marking read and keeping change them, as the daemon's store would (no bus event for a read).
+    // The engine's rows: marking read and keeping change them, as the daemon's store would.
     let rows = [visual, answered];
     const edit = (id: string, fields: Partial<VisualDTO>) => (rows = rows.map((v) => (v.id === id ? { ...v, ...fields } : v))).find((v) => v.id === id)!;
     vi.spyOn(client, "visuals").mockImplementation(async () => rows);
@@ -519,11 +563,11 @@ describe("visuals", () => {
       const aside = sidebar();
       // The person folds the open session's agents away; Back must find them still folded.
       fireEvent.click(await within(aside).findByRole("button", { name: "Hide sup1's agents" }));
-      // The header uses an icon without exposing the old count text or an unread dot.
+      // The header uses an icon with an unread dot and no count text.
       const entry = await screen.findByTestId("visuals-button");
       expect(entry.querySelector("svg")).toBeTruthy();
       expect(entry.textContent).toBe("");
-      expect(within(entry).queryByLabelText("unread")).toBeNull();
+      expect(within(entry).getByLabelText("unread")).toBeTruthy();
       needUser(1, "Which database should the cache use?");
       ask(supervisorAsks);
       fireEvent.click(entry);
@@ -1000,7 +1044,10 @@ describe("visuals", () => {
     expect(document.querySelector("img, iframe")).toBeNull();
     const redirect = screen.getByRole("button", { name: "Redirect" }) as HTMLButtonElement;
     expect(redirect.disabled).toBe(true);
+    const next = () => fireEvent.click(screen.getByRole("button", { name: /^Next/ }));
+    next();
     fireEvent.click(screen.getByRole("radio", { name: "A file in each repo" }));
+    next();
     fireEvent.click(within(screen.getByRole("region", { name: "Goal" })).getByRole("button", { name: "Comment" }));
     fireEvent.change(screen.getByLabelText("Comment on Goal"), { target: { value: "Repo file first." } });
     // Another change to the row starts a read that is still out when the verdict lands.
@@ -1024,7 +1071,87 @@ describe("visuals", () => {
     view.unmount();
     render(reader(row));
     await act(async () => reads[4](redirected));
+    next();
     expect(screen.getByRole("radio", { name: "A file in each repo" }).getAttribute("aria-checked")).toBe("true");
     expect(screen.getByRole("radio", { name: /Org policy/ }).getAttribute("aria-checked")).toBe("false");
+  });
+
+  it("plan reader steps through the ask, decision cards and the split's task cards, then redirects with every step's comments", async () => {
+    const plan: Plan = {
+      id: "v_p2", session: "sup1", title: "Cloud workers", rev: 1, state: "open", markdown: "…", created_at: now, queued: 0,
+      ask: "Pro users close the laptop and come back to reviewed PRs.", lede: "Three workers.",
+      sections: [{ id: "s1", title: "Risks", markdown: "Sign-in rules." }],
+      decisions: [{ id: "where", title: "Where should cloud workers run?", mine: "own", options: [
+        { id: "own", label: "Your own server", pros: ["No compute cost"], cons: ["They set up a machine"], touches: ["spawn.py", "tmux.py"] },
+        { id: "hosted", label: "PawDelta-hosted", pros: ["One click"], cons: ["We hold their code"] },
+      ] }],
+      split: [
+        { id: "w1", title: "Remote launch", after: [], files: ["spawn.py", "tmux.py"], test: "test_remote_spawn" },
+        { id: "w2", title: "Pro gate", after: ["w1"], files: ["pro/account.py", "spawn.py"] },
+      ],
+    };
+    const sent: PlanVerdict[] = [];
+    const fake: VisualsClient & PlansClient = {
+      visuals: async () => [], answerVisual: async () => visual, dismissVisual: async () => visual, keepVisual: async () => visual, unkeepVisual: async () => visual, markVisualRead: async () => ({}),
+      plan: async () => plan,
+      decidePlan: async (_id, verdict) => { sent.push(verdict); return { ...plan, state: "redirected" }; },
+    };
+    const row: VisualDTO = { ...visual, id: plan.id, kind: "plan", title: plan.title, rev: 1, question: undefined, options: undefined, unread: false };
+    render(<VisualReader client={fake} visual={row} onBack={() => {}} onAnswered={() => {}} />);
+    await screen.findByText("Three workers.");
+    const progress = () => screen.getByTestId("plan-progress").textContent;
+    const next = () => fireEvent.click(screen.getByRole("button", { name: /^Next/ }));
+    const current = () => within(screen.getByRole("navigation", { name: "Plan steps" })).getByRole("button", { current: "step" }).textContent;
+    // Overview, the decision, Risks, the split, then the verdict: four to settle.
+    expect(progress()).toContain("0 of 4 settled");
+    // The restated ask sits on every step; Correct it is a comment on the ask.
+    fireEvent.click(within(screen.getByTestId("plan-ask")).getByRole("button", { name: "Correct it" }));
+    fireEvent.change(screen.getByLabelText("Comment on What I understood"), { target: { value: "Teams too." } });
+    next();
+    expect(progress()).toContain("1 of 4 settled");
+    expect(current()).toContain("Where should cloud workers run?");
+    expect(screen.getByTestId("plan-ask").textContent).toContain("you corrected it");
+    // One decision on screen as option cards: Recommended on the supervisor's pick, trade-offs, and what each touches.
+    const own = screen.getByRole("radio", { name: "Your own server" });
+    expect(own.getAttribute("aria-checked")).toBe("true");
+    expect(within(own).getByText("Recommended")).toBeTruthy();
+    expect(within(screen.getByRole("radio", { name: "PawDelta-hosted" })).queryByText("Recommended")).toBeNull();
+    expect(own.textContent).toContain("+ No compute cost");
+    expect(own.textContent).toContain("− They set up a machine");
+    expect(within(screen.getByTestId("touches-own")).getByText("tmux.py")).toBeTruthy();
+    expect(screen.queryByTestId("touches-hosted")).toBeNull();
+    fireEvent.click(screen.getByRole("radio", { name: "PawDelta-hosted" }));
+    fireEvent.click(within(screen.getByRole("region", { name: "Where should cloud workers run?" })).getByRole("button", { name: "Comment" }));
+    fireEvent.change(screen.getByLabelText("Comment on Where should cloud workers run?"), { target: { value: "Ask legal first." } });
+    expect(progress()).toContain("2 of 4 settled");
+    // Scrolled down to Next, the next step still opens at its top.
+    const pane = screen.getByTestId("plan-step-pane");
+    pane.scrollTop = 400;
+    expect(pane.scrollTop).toBe(400);
+    next();
+    expect(pane.scrollTop).toBe(0);
+    expect(screen.getByRole("region", { name: "Risks" }).textContent).toContain("Sign-in rules.");
+    expect(screen.getByTestId("plan-ask")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "← Back" }));
+    expect(current()).toContain("Where should cloud workers run?");
+    expect(screen.getByRole("radio", { name: "PawDelta-hosted" }).getAttribute("aria-checked")).toBe("true");
+    next();
+    next();
+    // The split as task cards: worker, files, the proving test; a file two workers change is flagged before approval.
+    const w1 = screen.getByTestId("task-w1");
+    expect(w1.textContent).toContain("worker w1");
+    expect(w1.textContent).toContain("proves it: test_remote_spawn");
+    expect(within(w1).getByText("tmux.py").getAttribute("data-overlap")).toBeNull();
+    expect(within(w1).getByText(/spawn\.py/).getAttribute("data-overlap")).toBe("true");
+    expect(screen.getByTestId("task-w2").textContent).toContain("no test named");
+    expect(screen.getByTestId("split-overlaps").textContent).toContain("spawn.py is in w1 and w2");
+    expect(screen.getByTestId("plan-verdict").textContent).toContain("1 file is in more than one worker");
+    next();
+    expect(progress()).toContain("4 of 4 settled");
+    expect(screen.queryByRole("button", { name: /^Next/ })).toBeNull();
+    expect(screen.getByRole("region", { name: "Your verdict" }).textContent).toContain("PawDelta-hosted (not the supervisor's pick)");
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Redirect" })));
+    expect(sent).toEqual([{ rev: 1, approved: false, picks: { where: "hosted" }, note: "",
+      comments: [{ section: "ask", text: "Teams too." }, { section: "decision:where", text: "Ask legal first." }] }]);
   });
 });

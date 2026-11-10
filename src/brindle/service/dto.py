@@ -222,17 +222,17 @@ class InboxActionDTO(_DTO):
     path: str
 
 
-class AnalysisOfferMilestoneDTO(_DTO):
+class PlanOfferMilestoneDTO(_DTO):
     title: str
     verified: bool
 
 
-class AnalysisOfferDTO(_DTO):
-    """Current session context for deciding whether to request an analysis doc."""
+class PlanOfferDTO(_DTO):
+    """Current session context for deciding whether to plan the goal first."""
     session_name: str
     goal: str
     detail: str | None = None
-    milestones: list[AnalysisOfferMilestoneDTO]
+    milestones: list[PlanOfferMilestoneDTO]
     workers: int
     repos: int
     reasons: list[str]
@@ -254,7 +254,7 @@ class InboxItemDTO(_DTO):
     permission: PermissionDTO | None = None
     action: InboxActionDTO | None = None
     visual_id: str | None = None   # a visual's open question: GET /v1/sessions/{root_id}/visuals
-    analysis_offer: AnalysisOfferDTO | None = None
+    plan_offer: PlanOfferDTO | None = None
 
 
 class VisualOptionDTO(_DTO):
@@ -281,7 +281,7 @@ class VisualDTO(_DTO):
     accepts_files: bool
     title: str
     by: str
-    kind: Literal["visual", "plan", "analysis_doc"]
+    kind: Literal["visual", "plan"]
     rev: int
     question: str | None = None
     options: list[VisualOptionDTO] | None = None
@@ -299,20 +299,38 @@ class PlanSectionDTO(_DTO):
     markdown: str
 
 
+class PlanOptionDTO(VisualOptionDTO):
+    """One alternative of a plan's decision, as its card shows it: trade-offs
+    as + (``pros``) and − (``cons``) lines, and the files it ``touches``."""
+
+    pros: list[str] = []
+    cons: list[str] = []
+    touches: list[str] = []
+
+
 class PlanDecisionDTO(_DTO):
     """A decision that shapes the plan: its alternatives and the supervisor's pick."""
 
     id: str
     title: str
-    options: list[VisualOptionDTO]
+    options: list[PlanOptionDTO]
     mine: str | None = None
     challenge: str | None = None
 
 
 class PlanWorkerDTO(_DTO):
+    """One worker of the proposed split: the files it expects to change and
+    the one test that proves its task done."""
+
     id: str
     title: str
     after: list[str] = []
+    files: list[str] = []
+    test: str | None = None
+    task_id: str | None = None
+    agent_id: str | None = None
+    state: Literal["queued", "working", "in review", "merged", "cancelled"] = "queued"
+    test_state: Literal["not run", "failing", "passing"] = "not run"
 
 
 class PlanCommentDTO(_DTO):
@@ -340,6 +358,9 @@ class PlanDTO(_DTO):
     title: str
     rev: int
     state: Literal["open", "redirected", "approved"]
+    # The person's request as the supervisor restated it; a comment on it
+    # names the section "ask".
+    ask: str | None = None
     markdown: str
     lede: str
     sections: list[PlanSectionDTO]
@@ -397,8 +418,7 @@ class PrStateDTO(_DTO):
 class GoalDTO(_DTO):
     root_id: str
     enabled: bool
-    analysis_doc: bool = False
-    analysis_offer: str | None = None   # id of the analysis doc offer brindle is making for this goal
+    plan_offer: str | None = None   # id of brindle's open offer to plan this goal first
     goal: str | None = None
     summary: str | None = None
     detail: str | None = None
@@ -425,10 +445,11 @@ class GoalDTO(_DTO):
                        goal_phase: tuple[str, str | None] = ("in_progress", None),
                        activity: dict | None = None, pr_state: dict | None = None) -> GoalDTO:
         from brindle.autopilot import person_note
+        from brindle.plans import open_offer_id
 
         phases = phases or {}
-        return cls(**(activity or {}), root_id=ap.root_id, enabled=bool(ap.enabled), analysis_doc=bool(ap.analysis_doc),
-                   analysis_offer=(ap.analysis_offer or "")[5:] if (ap.analysis_offer or "").startswith("open:") else None,
+        return cls(**(activity or {}), root_id=ap.root_id, enabled=bool(ap.enabled),
+                   plan_offer=open_offer_id(ap.plan_offer),
                    goal=ap.goal, summary=ap.summary, detail=ap.detail,
                    state=ap.state, note=person_note(ap), progress=ap.progress,
                    usage_resets_at=ap.usage_resets_at,

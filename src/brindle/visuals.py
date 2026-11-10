@@ -17,7 +17,6 @@ capability) until it ships: tools and routes refuse, the Inbox shows nothing."""
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
@@ -41,7 +40,6 @@ MAX_QUESTION = 500
 MAX_LABEL = 120
 MAX_DETAIL = 500
 MAX_NOTE = 2000
-ANALYSIS_DOC = "analysis_doc"   # the kind of brindle's own page of a finished analysis doc
 
 ID = re.compile(r"v_[0-9a-f]{12}")
 OPTION_ID = re.compile(r"[A-Za-z0-9_-]{1,32}")
@@ -216,7 +214,9 @@ def to_dto(db: DB, v: dict) -> dict:
     receiver = db.get_agent(v["root_id"])
     provider = providers.PROVIDERS.get(receiver.provider, providers.Provider()) if receiver else providers.Provider()
     return VisualDTO(
-        id=v["id"], session=v["root_id"], title=v["title"], by=v["by_agent"], kind=v["kind"], rev=v["rev"],
+        id=v["id"], session=v["root_id"], title=v["title"], by=v["by_agent"],
+        kind="plan" if v["kind"] == "plan" else "visual",   # an older finished-doc page reads as a visual
+        rev=v["rev"],
         answer_agent_id=v["root_id"], accepts_files=provider.accepts_files,
         question=v["question"], options=v["options"],
         answer={k: answer[k] for k in ("option", "note", "at", "attachments") if k in answer} if answer else None,
@@ -243,33 +243,6 @@ def publish(db: DB, caller: Agent | None, title: str, html: str, question: str |
     question: an answer to an earlier one is cleared. ``extra(c, id, rev)``
     writes what goes with the row (a plan's own row) in its transaction.
     ``asked``: the person's own words asking to see it (visual_offers.authorize)."""
-    return _publish(db, caller, title, html, question, options, visual_id, kind, extra, asked)
-
-
-def publish_analysis_doc(db: DB, caller: Agent | None, key: str, title: str, html: str) -> dict | None:
-    """brindle's own publication of a finished analysis doc (brindle.analysis_visual),
-    which no agent can reach: it needs no grant. ``key`` names the doc, so
-    each doc is one visual, its id fixed by the session and the key. None
-    when that visual's current page is already this page."""
-    root, _ = _session(db, caller)
-    vid = "v_" + hashlib.sha256(f"{root.id}\0{key}".encode()).hexdigest()[:12]
-    return _publish(db, caller, title, html, visual_id=vid, kind=ANALYSIS_DOC, system=True)
-
-
-def _same_page(path: Path, data: bytes) -> bool:
-    try:
-        return path.read_bytes() == data
-    except OSError:
-        return False
-
-
-def _publish(db: DB, caller: Agent | None, title: str, html: str, question: str | None = None,
-             options: list[dict] | None = None, visual_id: str | None = None, kind: str = "visual",
-             extra: Callable[[Any, str, int], None] | None = None, asked: str | None = None,
-             system: bool = False) -> dict | None:
-    """``publish``. With ``system`` (brindle's own page, never an agent's) no
-    grant is spent, ``visual_id`` is created if it doesn't exist yet, and the
-    page it already shows is not published again (None)."""
     require_enabled()
     root, ws = _session(db, caller)
     title = _text(title, "title", MAX_TITLE, required=True)
@@ -299,14 +272,11 @@ def _publish(db: DB, caller: Agent | None, title: str, html: str, question: str 
 
         row = c.execute("SELECT root_id, rev, kind, answer FROM visuals WHERE id=?", (visual_id,)).fetchone() \
             if isinstance(visual_id, str) and ID.fullmatch(visual_id) else None
-        if not system:
-            visual_offers.authorize(c, root.id, kind, supervisor=caller.id == root.id, asked=asked,
-                                    answered=row["answer"] if row and row["root_id"] == root.id
-                                    and row["kind"] == kind else None)
-        elif row is not None and _same_page(page_path(ws.repo_root, root.id, visual_id, row["rev"]), data):
-            return None     # checked under the write lock: two reports can't both publish it
-        if visual_id is None or (system and row is None):
-            vid, rev = visual_id or "v_" + secrets.token_hex(6), 1
+        visual_offers.authorize(c, root.id, kind, supervisor=caller.id == root.id, asked=asked,
+                                answered=row["answer"] if row and row["root_id"] == root.id
+                                and row["kind"] == kind else None)
+        if visual_id is None:
+            vid, rev = "v_" + secrets.token_hex(6), 1
         else:
             if row is None or row["root_id"] != root.id or row["kind"] != kind:
                 raise ServiceError("not_found", "no such visual in this session", 404)

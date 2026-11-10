@@ -349,7 +349,7 @@ def reassign(db: DB, item: OpenItem, now: float | None = None, *, actor: Agent |
         db, supervisor, caller_ws, worker.profile, text, "assign", isolate=True, branch=None,
         done_when=worker.done_when, files=tasks._loads(task.files) if task else None, depends_on=[],
         plan_first=None if worker.plan_first is None else bool(worker.plan_first), weight=worker.weight,
-        analysis_doc=bool(task.analysis_doc) if task else False, unanswered=True,
+        unanswered=True,
     )
     state["task"] = new.id
     _save_takeover(db, state)

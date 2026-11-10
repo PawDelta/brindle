@@ -834,101 +834,6 @@
       "title": "AllowAllPlanDTO",
       "type": "object"
     },
-    "AnalysisOfferDTO": {
-      "$defs": {
-        "AnalysisOfferMilestoneDTO": {
-          "properties": {
-            "title": {
-              "title": "Title",
-              "type": "string"
-            },
-            "verified": {
-              "title": "Verified",
-              "type": "boolean"
-            }
-          },
-          "required": [
-            "title",
-            "verified"
-          ],
-          "title": "AnalysisOfferMilestoneDTO",
-          "type": "object"
-        }
-      },
-      "description": "Current session context for deciding whether to request an analysis doc.",
-      "properties": {
-        "detail": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Detail"
-        },
-        "goal": {
-          "title": "Goal",
-          "type": "string"
-        },
-        "milestones": {
-          "items": {
-            "$ref": "#/$defs/AnalysisOfferMilestoneDTO"
-          },
-          "title": "Milestones",
-          "type": "array"
-        },
-        "reasons": {
-          "items": {
-            "type": "string"
-          },
-          "title": "Reasons",
-          "type": "array"
-        },
-        "repos": {
-          "title": "Repos",
-          "type": "integer"
-        },
-        "session_name": {
-          "title": "Session Name",
-          "type": "string"
-        },
-        "workers": {
-          "title": "Workers",
-          "type": "integer"
-        }
-      },
-      "required": [
-        "session_name",
-        "goal",
-        "milestones",
-        "workers",
-        "repos",
-        "reasons"
-      ],
-      "title": "AnalysisOfferDTO",
-      "type": "object"
-    },
-    "AnalysisOfferMilestoneDTO": {
-      "properties": {
-        "title": {
-          "title": "Title",
-          "type": "string"
-        },
-        "verified": {
-          "title": "Verified",
-          "type": "boolean"
-        }
-      },
-      "required": [
-        "title",
-        "verified"
-      ],
-      "title": "AnalysisOfferMilestoneDTO",
-      "type": "object"
-    },
     "AskDTO": {
       "$defs": {
         "PermissionLimitsDTO": {
@@ -2377,23 +2282,6 @@
         }
       },
       "properties": {
-        "analysis_doc": {
-          "default": false,
-          "title": "Analysis Doc",
-          "type": "boolean"
-        },
-        "analysis_offer": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Analysis Offer"
-        },
         "auditing": {
           "default": false,
           "title": "Auditing",
@@ -2485,6 +2373,18 @@
           ],
           "default": null,
           "title": "Note"
+        },
+        "plan_offer": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Plan Offer"
         },
         "pr_state": {
           "anyOf": [
@@ -2588,81 +2488,6 @@
     },
     "InboxItemDTO": {
       "$defs": {
-        "AnalysisOfferDTO": {
-          "description": "Current session context for deciding whether to request an analysis doc.",
-          "properties": {
-            "detail": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "title": "Detail"
-            },
-            "goal": {
-              "title": "Goal",
-              "type": "string"
-            },
-            "milestones": {
-              "items": {
-                "$ref": "#/$defs/AnalysisOfferMilestoneDTO"
-              },
-              "title": "Milestones",
-              "type": "array"
-            },
-            "reasons": {
-              "items": {
-                "type": "string"
-              },
-              "title": "Reasons",
-              "type": "array"
-            },
-            "repos": {
-              "title": "Repos",
-              "type": "integer"
-            },
-            "session_name": {
-              "title": "Session Name",
-              "type": "string"
-            },
-            "workers": {
-              "title": "Workers",
-              "type": "integer"
-            }
-          },
-          "required": [
-            "session_name",
-            "goal",
-            "milestones",
-            "workers",
-            "repos",
-            "reasons"
-          ],
-          "title": "AnalysisOfferDTO",
-          "type": "object"
-        },
-        "AnalysisOfferMilestoneDTO": {
-          "properties": {
-            "title": {
-              "title": "Title",
-              "type": "string"
-            },
-            "verified": {
-              "title": "Verified",
-              "type": "boolean"
-            }
-          },
-          "required": [
-            "title",
-            "verified"
-          ],
-          "title": "AnalysisOfferMilestoneDTO",
-          "type": "object"
-        },
         "InboxActionDTO": {
           "description": "A route the app can call to act on the item itself.",
           "properties": {
@@ -2853,6 +2678,81 @@
           ],
           "title": "PermissionDTO",
           "type": "object"
+        },
+        "PlanOfferDTO": {
+          "description": "Current session context for deciding whether to plan the goal first.",
+          "properties": {
+            "detail": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Detail"
+            },
+            "goal": {
+              "title": "Goal",
+              "type": "string"
+            },
+            "milestones": {
+              "items": {
+                "$ref": "#/$defs/PlanOfferMilestoneDTO"
+              },
+              "title": "Milestones",
+              "type": "array"
+            },
+            "reasons": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Reasons",
+              "type": "array"
+            },
+            "repos": {
+              "title": "Repos",
+              "type": "integer"
+            },
+            "session_name": {
+              "title": "Session Name",
+              "type": "string"
+            },
+            "workers": {
+              "title": "Workers",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "session_name",
+            "goal",
+            "milestones",
+            "workers",
+            "repos",
+            "reasons"
+          ],
+          "title": "PlanOfferDTO",
+          "type": "object"
+        },
+        "PlanOfferMilestoneDTO": {
+          "properties": {
+            "title": {
+              "title": "Title",
+              "type": "string"
+            },
+            "verified": {
+              "title": "Verified",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "title",
+            "verified"
+          ],
+          "title": "PlanOfferMilestoneDTO",
+          "type": "object"
         }
       },
       "properties": {
@@ -2878,17 +2778,6 @@
           ],
           "default": null,
           "title": "Agent Id"
-        },
-        "analysis_offer": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/AnalysisOfferDTO"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
         },
         "detail": {
           "anyOf": [
@@ -2949,6 +2838,17 @@
           "anyOf": [
             {
               "$ref": "#/$defs/PermissionDTO"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "plan_offer": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PlanOfferDTO"
             },
             {
               "type": "null"
@@ -5608,7 +5508,7 @@
             },
             "options": {
               "items": {
-                "$ref": "#/$defs/VisualOptionDTO"
+                "$ref": "#/$defs/PlanOptionDTO"
               },
               "title": "Options",
               "type": "array"
@@ -5624,6 +5524,61 @@
             "options"
           ],
           "title": "PlanDecisionDTO",
+          "type": "object"
+        },
+        "PlanOptionDTO": {
+          "description": "One alternative of a plan's decision, as its card shows it: trade-offs\nas + (``pros``) and \u2212 (``cons``) lines, and the files it ``touches``.",
+          "properties": {
+            "cons": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Cons",
+              "type": "array"
+            },
+            "detail": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Detail"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "label": {
+              "title": "Label",
+              "type": "string"
+            },
+            "pros": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Pros",
+              "type": "array"
+            },
+            "touches": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Touches",
+              "type": "array"
+            }
+          },
+          "required": [
+            "id",
+            "label"
+          ],
+          "title": "PlanOptionDTO",
           "type": "object"
         },
         "PlanSectionDTO": {
@@ -5702,6 +5657,7 @@
           "type": "object"
         },
         "PlanWorkerDTO": {
+          "description": "One worker of the proposed split: the files it expects to change and\nthe one test that proves its task done.",
           "properties": {
             "after": {
               "default": [],
@@ -5711,8 +5667,74 @@
               "title": "After",
               "type": "array"
             },
+            "agent_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Agent Id"
+            },
+            "files": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Files",
+              "type": "array"
+            },
             "id": {
               "title": "Id",
+              "type": "string"
+            },
+            "state": {
+              "default": "queued",
+              "enum": [
+                "queued",
+                "working",
+                "in review",
+                "merged",
+                "cancelled"
+              ],
+              "title": "State",
+              "type": "string"
+            },
+            "task_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Task Id"
+            },
+            "test": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Test"
+            },
+            "test_state": {
+              "default": "not run",
+              "enum": [
+                "not run",
+                "failing",
+                "passing"
+              ],
+              "title": "Test State",
               "type": "string"
             },
             "title": {
@@ -5726,40 +5748,22 @@
           ],
           "title": "PlanWorkerDTO",
           "type": "object"
-        },
-        "VisualOptionDTO": {
-          "properties": {
-            "detail": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "title": "Detail"
-            },
-            "id": {
-              "title": "Id",
-              "type": "string"
-            },
-            "label": {
-              "title": "Label",
-              "type": "string"
-            }
-          },
-          "required": [
-            "id",
-            "label"
-          ],
-          "title": "VisualOptionDTO",
-          "type": "object"
         }
       },
       "description": "A planning doc (brindle.plans): markdown brindle renders itself, split\ninto its ``##`` sections. ``state``: open (the person hasn't decided),\nredirected (their comments went back; a new revision is coming) or\napproved. While open or redirected, the session's assign calls queue.",
       "properties": {
+        "ask": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ask"
+        },
         "created_at": {
           "title": "Created At",
           "type": "number"
@@ -5853,8 +5857,17 @@
     },
     "PlanDecisionDTO": {
       "$defs": {
-        "VisualOptionDTO": {
+        "PlanOptionDTO": {
+          "description": "One alternative of a plan's decision, as its card shows it: trade-offs\nas + (``pros``) and \u2212 (``cons``) lines, and the files it ``touches``.",
           "properties": {
+            "cons": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Cons",
+              "type": "array"
+            },
             "detail": {
               "anyOf": [
                 {
@@ -5874,13 +5887,29 @@
             "label": {
               "title": "Label",
               "type": "string"
+            },
+            "pros": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Pros",
+              "type": "array"
+            },
+            "touches": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Touches",
+              "type": "array"
             }
           },
           "required": [
             "id",
             "label"
           ],
-          "title": "VisualOptionDTO",
+          "title": "PlanOptionDTO",
           "type": "object"
         }
       },
@@ -5916,7 +5945,7 @@
         },
         "options": {
           "items": {
-            "$ref": "#/$defs/VisualOptionDTO"
+            "$ref": "#/$defs/PlanOptionDTO"
           },
           "title": "Options",
           "type": "array"
@@ -5932,6 +5961,156 @@
         "options"
       ],
       "title": "PlanDecisionDTO",
+      "type": "object"
+    },
+    "PlanOfferDTO": {
+      "$defs": {
+        "PlanOfferMilestoneDTO": {
+          "properties": {
+            "title": {
+              "title": "Title",
+              "type": "string"
+            },
+            "verified": {
+              "title": "Verified",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "title",
+            "verified"
+          ],
+          "title": "PlanOfferMilestoneDTO",
+          "type": "object"
+        }
+      },
+      "description": "Current session context for deciding whether to plan the goal first.",
+      "properties": {
+        "detail": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Detail"
+        },
+        "goal": {
+          "title": "Goal",
+          "type": "string"
+        },
+        "milestones": {
+          "items": {
+            "$ref": "#/$defs/PlanOfferMilestoneDTO"
+          },
+          "title": "Milestones",
+          "type": "array"
+        },
+        "reasons": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Reasons",
+          "type": "array"
+        },
+        "repos": {
+          "title": "Repos",
+          "type": "integer"
+        },
+        "session_name": {
+          "title": "Session Name",
+          "type": "string"
+        },
+        "workers": {
+          "title": "Workers",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "session_name",
+        "goal",
+        "milestones",
+        "workers",
+        "repos",
+        "reasons"
+      ],
+      "title": "PlanOfferDTO",
+      "type": "object"
+    },
+    "PlanOfferMilestoneDTO": {
+      "properties": {
+        "title": {
+          "title": "Title",
+          "type": "string"
+        },
+        "verified": {
+          "title": "Verified",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "title",
+        "verified"
+      ],
+      "title": "PlanOfferMilestoneDTO",
+      "type": "object"
+    },
+    "PlanOptionDTO": {
+      "description": "One alternative of a plan's decision, as its card shows it: trade-offs\nas + (``pros``) and \u2212 (``cons``) lines, and the files it ``touches``.",
+      "properties": {
+        "cons": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Cons",
+          "type": "array"
+        },
+        "detail": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Detail"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "label": {
+          "title": "Label",
+          "type": "string"
+        },
+        "pros": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Pros",
+          "type": "array"
+        },
+        "touches": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Touches",
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "label"
+      ],
+      "title": "PlanOptionDTO",
       "type": "object"
     },
     "PlanSectionDTO": {
@@ -6030,6 +6209,7 @@
       "type": "object"
     },
     "PlanWorkerDTO": {
+      "description": "One worker of the proposed split: the files it expects to change and\nthe one test that proves its task done.",
       "properties": {
         "after": {
           "default": [],
@@ -6039,8 +6219,74 @@
           "title": "After",
           "type": "array"
         },
+        "agent_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Agent Id"
+        },
+        "files": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Files",
+          "type": "array"
+        },
         "id": {
           "title": "Id",
+          "type": "string"
+        },
+        "state": {
+          "default": "queued",
+          "enum": [
+            "queued",
+            "working",
+            "in review",
+            "merged",
+            "cancelled"
+          ],
+          "title": "State",
+          "type": "string"
+        },
+        "task_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Task Id"
+        },
+        "test": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Test"
+        },
+        "test_state": {
+          "default": "not run",
+          "enum": [
+            "not run",
+            "failing",
+            "passing"
+          ],
+          "title": "Test State",
           "type": "string"
         },
         "title": {
@@ -7962,8 +8208,7 @@
         "kind": {
           "enum": [
             "visual",
-            "plan",
-            "analysis_doc"
+            "plan"
           ],
           "title": "Kind",
           "type": "string"
@@ -8642,19 +8887,15 @@
     },
     {
       "method": "POST",
-      "path": "/v1/goal/analysis-doc"
-    },
-    {
-      "method": "POST",
-      "path": "/v1/goal/analysis-offer"
-    },
-    {
-      "method": "POST",
       "path": "/v1/goal/check"
     },
     {
       "method": "POST",
       "path": "/v1/goal/enabled"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/goal/plan-offer"
     },
     {
       "method": "POST",
