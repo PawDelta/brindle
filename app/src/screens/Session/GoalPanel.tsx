@@ -298,7 +298,10 @@ export function activityLine(goal: GoalDTO, now = Date.now() / 1000): { what: st
   const what = commits > 0
     ? `${commits} ${commits === 1 ? "commit" : "commits"} in the last hour`
     : goal.last_commit_at != null ? `last commit ${shortAgo(goal.last_commit_at, now)} ago` : null;
-  const minutes = isStage(goal.stage) && goal.eta_seconds != null ? Math.max(1, Math.round(goal.eta_seconds / 60)) : null;
+  const estimate = goal.eta_seconds;
+  // An expired estimate carries no useful remaining duration; keep the activity without inventing time left.
+  const minutes = isStage(goal.stage) && estimate != null && Number.isFinite(estimate) && estimate >= 0
+    ? Math.max(1, Math.round(estimate / 60)) : null;
   const eta = minutes === null ? null : minutes < 90 ? `~${minutes}m left` : `~${Math.round(minutes / 60)}h left`;
   return what || eta ? { what, eta, checks: false } : null;
 }
