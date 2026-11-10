@@ -254,6 +254,7 @@ def test_visual_ready_notice_and_answers_for_the_revision_on_screen(db, session,
     assert client.get(f"/v1/kept-visuals/{v['id']}").json()["answer"] is None
 
 
+@pytest.mark.variant("real incident: a status board the person asked for was refused on every update (0.6.3, Nov 10)")
 def test_asked_visual_updates_without_a_new_request(db, session, monkeypatch):
     ws, boss, worker = session
     monkeypatch.setattr(visual_offers, "consume", REAL_CONSUME)
