@@ -892,31 +892,55 @@ def test_resume_reads_only_needed_keys_and_key_timing(db, root, monkeypatch, cap
     assert not caplog.records
 
 
-@pytest.mark.parametrize("staff", [True, False])
-def test_resume_launch_step_timing(db, root, monkeypatch, caplog, staff):
-    from brindle import debuglog
+def test_resume_launch_step_timing(db, root, monkeypatch, caplog):
+    """The real launch, its slow dependencies replaced by ones that move a fake clock."""
+    from types import SimpleNamespace
 
-    monkeypatch.setattr(debuglog, "staff", lambda: staff)
+    from brindle import company_identity, debuglog, launch_health, preflight, provider_homes, upgrade
+
+    monkeypatch.setattr(debuglog, "staff", lambda: True)
     now = [100.0]
     clock = mock.Mock(wraps=time)
     clock.monotonic = lambda: now[0]
     monkeypatch.setattr(agents, "time", clock)
+
+    def slow(module, name, seconds, result=None):
+        def fn(*a, **kw):
+            now[0] += seconds
+            return result() if callable(result) else result
+        monkeypatch.setattr(module, name, fn)
+
     monkeypatch.setattr(agents, "settle_panes", lambda *a: set())
-
-    def launch(db_, agent, *a, **kw):    # each agent's steps, as _launch_resolved records them
-        for name, seconds in (("preflight_s", 1.0), ("command_s", 0.5)) if agent.id == "chat" else (("codex_trust_s", 4.0),):
-            with agents._launch_step(name):
-                now[0] += seconds
-
-    monkeypatch.setattr(agents, "_launch", launch)
+    monkeypatch.setattr(agents, "_profile_for", lambda *a: SimpleNamespace(name="p", model="m"))
+    for module, name, result in ((upgrade, "check_launch", None), (preflight, "turned_off", None),
+                                 (agents, "model_problem", None), (agents, "launch_blockers", []),
+                                 (company_identity, "launch_check", (None, None, None)),
+                                 (agents, "launch_identity", ({}, None, ())),
+                                 (agents.pane_auth, "key_problem", None), (providers, "trust_folder", None),
+                                 (providers, "claude_chrome_chosen", None), (agents, "_open_window", "%1"),
+                                 (launch_health, "bind", None), (launch_health, "helper_token", ()),
+                                 (spawn, "start", None), (tmux, "mark_launched", None)):
+        slow(module, name, 0.0, result)
+    slow(provider_homes, "decide", 0.0)
+    slow(providers.ClaudeCode, "command", 1.5, ["claude"])
+    slow(providers, "trust_codex_project", 0.25)
+    slow(providers.Codex, "command", 4.0, ["codex"])
+    slow(company_identity, "launch_check", 0.75, (None, None, None))
+    monkeypatch.setattr(agents, "managed", lambda root: None)
+    monkeypatch.setattr(agents, "_add_dirs_warning", lambda *a: None)
+    monkeypatch.setattr(agents, "_window_environment", lambda *a: ({}, [], None, [], None))
+    monkeypatch.setattr(signin_pause, "record_launch", lambda a: None)
     add(db, root, "chat")
-    worker = add(db, root, "w1", mode="assign", parent="chat")
+    add(db, root, "w1", mode="assign", parent="chat")
     db.update_agent("w1", provider="codex")
     agents.resume(db, "chat", gate=lifecycle.Recovery().launching)
-    lines = [r.args for r in caplog.records if "launch steps" in r.getMessage()]
-    assert lines == ([("chat", "chat", "claude", {"preflight_s": 1.0, "command_s": 0.5}),
-                      ("chat", "w1", "codex", {"codex_trust_s": 4.0})] if staff else [])
-    assert worker.id == "w1"
+    details = [r.args[1] for r in caplog.records if isinstance(r.args, tuple)
+               and len(r.args) == 2 and isinstance(r.args[1], dict)]
+    steps = details[0]["launch_steps"]
+    assert {k: steps["chat"][k] for k in ("provider", "command_s", "company_identity_s")} == {
+        "provider": "claude", "command_s": 1.5, "company_identity_s": 0.75}
+    assert {k: steps["w1"][k] for k in ("provider", "command_s", "codex_trust_s")} == {
+        "provider": "codex", "command_s": 4.0, "codex_trust_s": 0.25}
 
 
 def test_recovery_opened_session_first(db, root, monkeypatch):

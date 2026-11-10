@@ -2092,6 +2092,7 @@ def _resume(db: DB, root_id: str, *, watch_pane: bool, only, recovery_env, settl
             db.add_autopilot(root_id)
         timing.call("goals_s", pilot.reload_goals_file, db, root_id)   # edits the person made to this session's goal file
     resumed = []
+    launch_steps: dict[str, dict] = {}   # per agent: its provider and each launch step's seconds
     for a in candidates:    # the chat comes first, and may add to this as it starts
         if a.status == "done":
             # Read when a verdict may have been reopening it (_send_back, under this lock, from
@@ -2160,8 +2161,7 @@ def _resume(db: DB, root_id: str, *, watch_pane: bool, only, recovery_env, settl
         finally:
             _launch_steps.reset(step_token)
             if steps:
-                debuglog.recovery_timing(log, "brindle: session %s resume launch steps: agent %s (%s): %s", root_id,
-                                         a.id, a.provider, {k: round(v, 3) for k, v in steps.items()})
+                launch_steps[a.id] = {"provider": a.provider, **{k: round(v, 3) for k, v in steps.items()}}
         resumed.append(a)
         if a.id == root_id:
             # A verdict held for this resume (pipeline._send_back) while the chat was still
@@ -2207,6 +2207,8 @@ def _resume(db: DB, root_id: str, *, watch_pane: bool, only, recovery_env, settl
             "goals_s", "provider_prep_s", "launch_s", "pipeline_s", "tasks_s")}
         detail.update(key_reads=reads.backend_reads, key_cached=reads.cached_reads,
                       key_lock_s=round(reads.lock_seconds, 3), security_s=round(reads.process_seconds, 3))
+        if launch_steps:
+            detail["launch_steps"] = launch_steps
         debuglog.recovery_timing(log, "brindle: session %s resume detail: %s", root_id, detail)
     return resumed
 
