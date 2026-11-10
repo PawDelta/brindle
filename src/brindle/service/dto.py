@@ -299,20 +299,34 @@ class PlanSectionDTO(_DTO):
     markdown: str
 
 
+class PlanOptionDTO(VisualOptionDTO):
+    """One alternative of a plan's decision, as its card shows it: trade-offs
+    as + (``pros``) and − (``cons``) lines, and the files it ``touches``."""
+
+    pros: list[str] = []
+    cons: list[str] = []
+    touches: list[str] = []
+
+
 class PlanDecisionDTO(_DTO):
     """A decision that shapes the plan: its alternatives and the supervisor's pick."""
 
     id: str
     title: str
-    options: list[VisualOptionDTO]
+    options: list[PlanOptionDTO]
     mine: str | None = None
     challenge: str | None = None
 
 
 class PlanWorkerDTO(_DTO):
+    """One worker of the proposed split: the files it expects to change and
+    the one test that proves its task done."""
+
     id: str
     title: str
     after: list[str] = []
+    files: list[str] = []
+    test: str | None = None
 
 
 class PlanCommentDTO(_DTO):
@@ -340,6 +354,9 @@ class PlanDTO(_DTO):
     title: str
     rev: int
     state: Literal["open", "redirected", "approved"]
+    # The person's request as the supervisor restated it; a comment on it
+    # names the section "ask".
+    ask: str | None = None
     markdown: str
     lede: str
     sections: list[PlanSectionDTO]

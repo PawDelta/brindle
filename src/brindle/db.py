@@ -991,11 +991,12 @@ CREATE TABLE IF NOT EXISTS plans (
     rev INTEGER NOT NULL,
     markdown TEXT NOT NULL,        -- the current revision, as the supervisor wrote it
     decisions TEXT NOT NULL,       -- JSON [{id, title, options, mine, challenge}]
-    split TEXT NOT NULL,           -- JSON [{id, title, after}]
+    split TEXT NOT NULL,           -- JSON [{id, title, after, files, test}]
     state TEXT NOT NULL,           -- open | redirected | approved
     decision TEXT,                 -- JSON {approved, picks, comments, note, at, rev}: the person's
     created_at REAL NOT NULL,
-    updated_at REAL NOT NULL
+    updated_at REAL NOT NULL,
+    ask TEXT                       -- the person's request restated by the supervisor, if given
 );
 CREATE INDEX IF NOT EXISTS plans_root ON plans(root_id, state);
 """
@@ -1450,6 +1451,8 @@ class DB:
         visual_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(visuals)")}
         if "dismissed_rev" not in visual_cols:
             self.conn.execute("ALTER TABLE visuals ADD COLUMN dismissed_rev INTEGER NOT NULL DEFAULT 0")
+        if "ask" not in {r["name"] for r in self.conn.execute("PRAGMA table_info(plans)")}:
+            self.conn.execute("ALTER TABLE plans ADD COLUMN ask TEXT")
         review_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(reviews)")}
         for col, kind in (("review_slot", "TEXT"), ("reviewer_created_at", "REAL")):
             if col not in review_cols:

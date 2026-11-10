@@ -235,10 +235,16 @@ def publish_visual(title: str, html: str, question: str | None = None,
     return f"Published {v['id']} r{v['rev']} (brindle://visual/{v['id']}).{asks}"
 
 
+class PlanOption(VisualOption):
+    pros: list[str] = Field(default_factory=list, description="what speaks for it, a short line each")
+    cons: list[str] = Field(default_factory=list, description="what it costs, a short line each")
+    touches: list[str] = Field(default_factory=list, description="the files it would change")
+
+
 class PlanDecision(BaseModel):
     id: str = Field(description="1-32 letters, digits, _ or -")
     title: str = Field(description="the decision, in a line")
-    options: list[VisualOption] = Field(description="2-12 alternatives you weighed, yours among them")
+    options: list[PlanOption] = Field(description="2-12 alternatives you weighed, yours among them")
     mine: str | None = Field(default=None, description="the option id you'd pick")
     challenge: str | None = Field(default=None, description="your own strongest argument against your pick")
 
@@ -247,12 +253,14 @@ class PlanWorker(BaseModel):
     id: str = Field(description="1-32 letters, digits, _ or -, e.g. w1")
     title: str
     after: list[str] = Field(default_factory=list, description="ids of workers listed earlier that must merge first")
+    files: list[str] = Field(default_factory=list, description="the files this worker expects to change")
+    test: str | None = Field(default=None, description="the one test that proves its task done")
 
 
 @mcp.tool()
 def propose_plan(markdown: str, decisions: list[PlanDecision] | None = None,
                  split: list[PlanWorker] | None = None, title: str | None = None,
-                 plan_id: str | None = None) -> str:
+                 plan_id: str | None = None, ask: str | None = None) -> str:
     """Supervisors: show the person a planning doc, ONLY when they explicitly
     asked for one (never on your own because a request is large). markdown:
     the plan (goal, split, decisions with your challenge to each, what's hard
@@ -260,7 +268,8 @@ def propose_plan(markdown: str, decisions: list[PlanDecision] | None = None,
     per section. brindle renders it itself. While it's open, every assign in
     this session is queued and starts only once the person approves; their
     approval or redirect (their picks and comments) arrives as a message from
-    them. plan_id: publish the revision a redirect asked for."""
+    them. plan_id: publish the revision a redirect asked for. ask: their
+    request restated in your own words, which they confirm or correct."""
     from brindle import plans
     from brindle.service.errors import ServiceError
 
@@ -268,7 +277,7 @@ def propose_plan(markdown: str, decisions: list[PlanDecision] | None = None,
     caller, _ = _caller(db)
     dump = lambda items: [i.model_dump() if isinstance(i, BaseModel) else i for i in items or []]  # noqa: E731
     try:
-        p = plans.propose(db, caller, markdown, dump(decisions), dump(split), title, plan_id)
+        p = plans.propose(db, caller, markdown, dump(decisions), dump(split), title, plan_id, ask)
     except ServiceError as e:
         raise ToolError(e.message) from e
     return (f"Proposed plan {p['id']} r{p['rev']} (brindle://visual/{p['id']}). Assign calls queue behind it "
