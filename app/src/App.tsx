@@ -556,22 +556,18 @@ function usePanesReady(client: DaemonClient | null, refresh?: () => Promise<void
       // Only those back when these rows were read: one that came back since needs a read of its own.
       const eligible = fresh(workspaces, pending);
       if (!eligible.length) return;
-      const version = store.getState().snapshotVersion;
-      if (refresh) await Promise.all([reload(), refresh()]);
-      else {
-        const inbox = await client.inbox();
-        if (!unchanged()) return;
-        store.dispatch({ type: "snapshot", workspaces, inbox });
-        await reload();
-      }
-      if (!unchanged()) return;
+      // These rows were read after the meta that left them out of pending, so they are the session's
+      // own: apply them as they are (as the settled path does) rather than wait for a slow store
+      // refresh, which only follows in the background to catch the inbox and anything newer.
+      store.dispatch({ type: "snapshot", workspaces });
       // Still the same daemon, and none of these sent back to pending since.
       const latest = await client.meta();
       const stillPending = latest.recovery?.pending;
       if (!unchanged() || latest.pid !== meta.pid || !latest.resuming || !stillPending) return;
       const applied = store.getState();
-      if (applied.snapshotVersion === version || applied.error || applied.stale) return;
+      if (applied.error || applied.stale) return;
       const ready = fresh(applied.workspaces, stillPending).filter((id) => eligible.includes(id));
+      void Promise.all([reload(), refresh?.()]).catch(() => {});
       for (const id of ready) backNow.current.add(id);
       if (ready.length) setPanes((p) => ({ ...p, back: [...backNow.current] }));
     };

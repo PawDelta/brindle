@@ -776,8 +776,9 @@ def test_critical_memory_holds_a_recovery_even_with_nothing_running(monkeypatch)
     assert stop.is_set()        # it looked at memory, though nothing runs, and held until told to stop
 
 
-def test_resume_key_timing(db, root, monkeypatch, caplog):
-    from brindle import autopilot, debuglog, identity_lock, keystore, tasks
+def test_resume_reads_only_needed_keys_and_key_timing(db, root, monkeypatch, caplog):
+    from dataclasses import replace
+    from brindle import autopilot, debuglog, identity_lock, keystore, profiles, tasks
 
     pending, checked, answer = [], [], [True]
 
@@ -789,7 +790,10 @@ def test_resume_key_timing(db, root, monkeypatch, caplog):
 
     monkeypatch.setattr(debuglog, "staff", staff)
     monkeypatch.setattr(debuglog, "_publish_timings", pending.append, raising=False)
-    now, names = [100.0], ["TIMING_KEY_A", "TIMING_KEY_B"]
+    now, names = [100.0], ["ANTHROPIC_API_KEY", "PROFILE_API_KEY", "GEMINI_API_KEY"]
+    real_profile = profiles.load_profile
+    monkeypatch.setattr(profiles, "load_profile", lambda name, repo_root=None:
+                        replace(real_profile(name, repo_root), api_key_env=names[1]))
 
     def advance(seconds, result=None):
         now[0] += seconds
@@ -814,6 +818,9 @@ def test_resume_key_timing(db, root, monkeypatch, caplog):
     for name, store in stores.items():
         store._read.lock = ReadLock()
         monkeypatch.setenv(name, "")   # restore the environment changed by resume
+    for name, value in zip(names, ("saved-session-value", "fresh-recovery-value")):
+        db.set_session_credential("chat", name, "saved-session-value")
+        monkeypatch.setenv(name, value)
     monkeypatch.setattr(keystore, "_key_store", lambda name: stores[name])
     monkeypatch.setattr(keystore, "known_names", lambda: advance(1, names))
     monkeypatch.setattr(providers, "invalidate_signed_in", lambda: advance(0.5))
@@ -840,12 +847,15 @@ def test_resume_key_timing(db, root, monkeypatch, caplog):
 
     monkeypatch.setattr(agents, "_launch", launch)
     add(db, root, "chat")
-    agents.resume(db, "chat", gate=lifecycle.Recovery().launching)
+    agents.resume(db, "chat", gate=lifecycle.Recovery().launching,
+                  recovery_env={names[0]: "saved-session-value", names[1]: "fresh-recovery-value"})
+    assert db.get_session_credentials("chat") == {
+        names[0]: "secret-timing-value", names[1]: "fresh-recovery-value"}
     assert len(pending) == 1 and not checked and not caplog.records
     debuglog._write_timings(pending.pop())
     details = [r.args[1] for r in caplog.records if isinstance(r.args, tuple)
                and len(r.args) == 2 and isinstance(r.args[1], dict)]
-    assert details == [{"invalidate_s": 0.5, "known_names_s": 2.0, "key_loads_s": 7.5,
+    assert details == [{"invalidate_s": 0.5, "known_names_s": 1.0, "key_loads_s": 7.5,
                         "key_reads": 1, "key_cached": 1, "key_lock_s": 4.0, "security_s": 3.0,
                         "credential_writes_s": 0.5, "identity_s": 0.75, "goals_s": 0.5,
                         "provider_prep_s": 1.0, "launch_s": 3.0, "pipeline_s": 1.25, "tasks_s": 1.5}]
