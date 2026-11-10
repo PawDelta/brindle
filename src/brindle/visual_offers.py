@@ -290,13 +290,16 @@ def refresh_input(db: DB, agent: Agent, observer: int, submitted_at: float, expi
 
 def person_spoke(db: DB, agent: Agent, text: str, *, expires_at: float | None = None,
                  observation: tuple[int, int] | None = None, submitted_at: float | None = None,
-                 fold_only: bool = False, typed: bool = False, cli_prompt: bool = False) -> None:
+                 fold_only: bool = False, typed: bool = False, cli_prompt: bool = False,
+                 said_at: float | None = None) -> None:
     """Called only for authenticated person input, never for agent messages.
 
     ``typed``: the app watched the person key in all of ``text`` themselves.
     Only then can its words back a publish_visual ``asked``. ``cli_prompt``:
     this is a CLI hook's report of ``text``, which makes words the app staged
-    for this same prompt quotable."""
+    for this same prompt quotable. ``said_at``: when the person sent ``text``,
+    if that was earlier than now (a message read back after the fact): a cancel
+    then ends only the words they typed before it."""
     if not visuals.enabled():
         return
     root, ws = visuals._session(db, agent)
@@ -332,7 +335,8 @@ def person_spoke(db: DB, agent: Agent, text: str, *, expires_at: float | None = 
             c.execute("DELETE FROM visual_grants WHERE root_id=?", (root.id,))
             _unlink(c, root.id, "grant")
         if cancelled:
-            c.execute("DELETE FROM visual_person_words WHERE root_id=?", (root.id,))
+            c.execute("DELETE FROM visual_person_words WHERE root_id=? AND created_at<=?",
+                      (root.id, time.time() if said_at is None else min(said_at, time.time())))
         elif typed and not fold_only:
             _keep_words(c, root.id, text)
         elif cli_prompt:
@@ -456,6 +460,10 @@ def _spend_quote(c, root: str, asked: str, now: float) -> bool:
             elif row["source"] == "request":
                 c.execute("DELETE FROM visual_requests WHERE root_id=?", (root,))
             return True
+    if c.execute("SELECT 1 FROM visual_person_words WHERE root_id=? AND staged=1 AND created_at>? AND instr(words, ?)",
+                 (root, now - FOLD, quote)).fetchone():
+        # The app vouched for these words, but no prompt of the CLI's has said it took that message in.
+        debuglog.record("visuals", "warning", "asked words refused: their message is still staged", {"agent": root})
     return False
 
 
