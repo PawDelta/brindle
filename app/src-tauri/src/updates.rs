@@ -170,6 +170,9 @@ async fn engine_allows(
 /// costs that at most, and never holds up the window, which opens regardless.
 const FEED_LIMIT: Duration = Duration::from_secs(15);
 
+/// Give a download this long without receiving bytes before releasing its install.
+const DOWNLOAD_STALL_LIMIT: Duration = Duration::from_secs(60);
+
 /// How often an app left open looks again (`wait_after`), and how often it
 /// asks whether one is due, by the wall clock (`due`): a Mac suspended
 /// overnight wakes due at once.
@@ -985,16 +988,17 @@ async fn update_now<G: Future<Output = Result<(), String>>>(
     report: impl FnMut(ReleaseProgress) + Send,
     restart: impl FnOnce(),
 ) -> Result<Option<String>, String> {
-    let wanted = |current: &Version, found: &str, rollback: bool| {
-        Version::parse(found)
-            .map(|found| update_wanted(current, &found, rollback))
-            .map_err(|_| format!("the update feed names {found:?}, not a version"))
-    };
-    let got = install_build(installs, gate, current, feed, wanted, report).await?;
+    let got = install_build(installs, gate, current, feed, own_update_wanted, report).await?;
     if got.is_some() {
         restart();
     }
     Ok(got)
+}
+
+fn own_update_wanted(current: &Version, found: &str, rollback: bool) -> Result<bool, String> {
+    Version::parse(found)
+        .map(|found| update_wanted(current, &found, rollback))
+        .map_err(|_| format!("the update feed names {found:?}, not a version"))
 }
 
 /// Settings' staff-only Update (owner decision; how an rc build updates):
@@ -1004,8 +1008,9 @@ async fn update_now<G: Future<Output = Result<(), String>>>(
 /// (`staff_gate`); one install at a time (`exclusive`).
 #[tauri::command]
 pub async fn app_update_install<R: Runtime>(app: AppHandle<R>) -> Result<Option<String>, String> {
-    staff_gate_now(&app).await?;
-    exclusive(&app.state::<Installs>(), || install(&app)).await
+    let installs = app.state::<Installs>();
+    let mut feed = PluginFeed { app: app.clone(), which: Feed::Own, update: None };
+    install_build(&installs, || staff_gate_now(&app), &app.package_info().version, &mut feed, own_update_wanted, |_| {}).await
 }
 
 /// Restart the app into the update `app_update_install` or
@@ -1116,20 +1121,38 @@ async fn install_build<G: Future<Output = Result<(), String>>>(
 ) -> Result<Option<String>, String> {
     gate().await?;
     exclusive(installs, || async {
-        let Some(version) = feed.check().await? else {
+        let found = tokio::time::timeout(FEED_LIMIT, feed.check())
+            .await
+            .map_err(|_| format!("the update feed didn't answer within {}s", FEED_LIMIT.as_secs()))??;
+        let Some(version) = found else {
             return Ok(None);
         };
         if !wanted(current, &version, feed.rollback())? {
             return Ok(None);
         }
         report(ReleaseProgress::Found { version: version.clone() });
-        let mut downloaded = 0;
-        let bytes = feed
-            .download(|chunk, total| {
+        let bytes = {
+            // Keep the same download future across deadline extensions. Only
+            // received bytes extend the limit; empty progress cannot keep a
+            // stalled connection holding the install guard forever.
+            let deadline = Mutex::new(tokio::time::Instant::now() + DOWNLOAD_STALL_LIMIT);
+            let mut downloaded = 0;
+            let mut download = std::pin::pin!(feed.download(|chunk, total| {
+                if chunk > 0 {
+                    *deadline.lock().unwrap() = tokio::time::Instant::now() + DOWNLOAD_STALL_LIMIT;
+                }
                 downloaded += chunk;
                 report(ReleaseProgress::Downloading { downloaded, total });
-            })
-            .await?;
+            }));
+            loop {
+                let expires = *deadline.lock().unwrap();
+                match tokio::time::timeout_at(expires, download.as_mut()).await {
+                    Ok(got) => break got?,
+                    Err(_) if *deadline.lock().unwrap() > expires => continue,
+                    Err(_) => return Err(format!("the update download made no progress for {}s", DOWNLOAD_STALL_LIMIT.as_secs())),
+                }
+            }
+        };
         gate().await?;
         report(ReleaseProgress::Installing);
         feed.install(&bytes)?;
@@ -1252,25 +1275,6 @@ pub async fn app_stable_check<R: Runtime>(app: AppHandle<R>) -> Result<Option<St
     let mut feed = PluginFeed { app: app.clone(), which: Feed::Stable, update: None };
     let Some(found) = feed.check().await? else { return Ok(None) };
     Ok(stable_return_wanted(&current, &found)?.then_some(found))
-}
-
-/// Check this build's feed (`endpoint`) and install an update found
-/// (`update_wanted`: newer, or a marked rollback), answering its version.
-async fn install<R: Runtime>(app: &AppHandle<R>) -> Result<Option<String>, String> {
-    let found = app_updater(app)?
-        .check()
-        .await
-        .map_err(|e| e.to_string())?;
-    let Some(update) = found else { return Ok(None) };
-    let remote = Version::parse(&update.version).map_err(|e| e.to_string())?;
-    if !update_wanted(&app.package_info().version, &remote, marks_rollback(&update.raw_json)) {
-        return Ok(None);
-    }
-    update
-        .download_and_install(|_, _| {}, || {})
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(Some(update.version))
 }
 
 #[cfg(test)]
@@ -2012,9 +2016,27 @@ mod tests {
 
     #[test]
     fn a_failed_install_leaves_the_next_free_to_start() {
-        let installs = Installs::default();
-        let failed = tauri::async_runtime::block_on(exclusive(&installs, || async { Err("offline".to_string()) }));
-        assert!(failed.is_err());
-        assert!(matches!(installs.begin(), Begin::Go(_)));
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
+        runtime.block_on(async {
+            tokio::time::pause();
+            for reach in [Reach::Hung, Reach::Up] {
+                let installs = Installs::default();
+                let current = Version::parse("0.2.10").unwrap();
+                let paused = Cell::new(true);
+                let mut feed = FakeFeed { paused: Some(&paused), ..fake_feed(Some("0.2.11"), reach) };
+                {
+                    let mut attempt = std::pin::pin!(update_now(&installs, || async { Ok(()) }, &current, &mut feed, |_| {}, || panic!("failed install restarted")));
+                    assert!(std::future::poll_fn(|cx| Poll::Ready(attempt.as_mut().poll(cx).is_pending())).await);
+                    tokio::time::advance(DOWNLOAD_STALL_LIMIT + Duration::from_millis(1)).await;
+                    let outcome = std::future::poll_fn(|cx| Poll::Ready(attempt.as_mut().poll(cx))).await;
+                    assert!(matches!(outcome, Poll::Ready(Err(_))), "{reach:?}: install must return an error");
+                    assert!(matches!(*installs.state(), Install::Idle));
+                }
+                let mut good = fake_feed(Some("0.2.11"), Reach::Up);
+                let restarted = Cell::new(false);
+                assert_eq!(update_now(&installs, || async { Ok(()) }, &current, &mut good, |_| {}, || restarted.set(true)).await, Ok(Some("0.2.11".into())));
+                assert!(restarted.get());
+            }
+        });
     }
 }
