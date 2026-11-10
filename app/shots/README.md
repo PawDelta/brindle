@@ -71,6 +71,13 @@ own update, over a fake shell (not in the default list, so pass `--scene`):
 pill) and `update-session` (the strip over a session). Themes
 (`--theme`): `dark`, `light`.
 
+## The plan reader
+
+`node shots/plan-shots.mjs --out <dir> [--channel chrome]` opens the plan in
+`visuals.tsx` and takes its overview, a decision's option cards, another
+option picked with the ask being corrected, the split's task cards and the
+approved live board, in both themes.
+
 ## Timing the wheel over a live Claude Code
 
 `npm run test:e2e -- --grep smooth` swipes a live Claude Code (the `pty`

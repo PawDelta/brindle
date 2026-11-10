@@ -52,3 +52,48 @@ it("keeps an approved plan board live from recorded worker events and drops stal
   expect(within(board()).getByTestId("task-schema").textContent).toContain("merged");
   view.unmount();
 });
+
+it("plan reader layout", async () => {
+  const visual: VisualDTO = { id: "v_plan", session: "boss", title: "Presets", by: "supervisor", kind: "plan", rev: 1, kept: false, unread: false, created_at: 1 };
+  const plan: Plan = { id: visual.id, session: "boss", title: visual.title, rev: 1, state: "open", markdown: "…", ask: "Presets per org.", lede: "One worker.", sections: [], queued: 0, created_at: 1,
+    decisions: [{ id: "where", title: "Where presets live", mine: "org", options: [
+      { id: "org", label: "Org policy", pros: ["One place"], cons: ["Needs a migration"], touches: ["policy.py"] },
+      { id: "repo", label: "A file in each repo", pros: ["No server change"], cons: ["Drifts"], touches: ["config.py"] },
+    ] }],
+    split: [{ id: "schema", title: "Schema", test: "pytest schema" }] };
+  const client: PlansClient & VisualsClient = {
+    visuals: async () => [visual], answerVisual: async () => visual, dismissVisual: async () => visual,
+    keepVisual: async () => visual, unkeepVisual: async () => visual, markVisualRead: async () => {},
+    plan: async () => plan, decidePlan: async () => plan,
+  };
+  render(<PlanReader client={client} visual={visual} onBack={() => {}} onChanged={() => {}} />);
+  // A steps column: every step, and how many are settled as a bar at its foot.
+  const steps = await screen.findByRole("navigation", { name: "Plan steps" });
+  expect(within(steps).getAllByRole("button").length).toBe(4);
+  const settled = () => within(steps).getByRole("progressbar").getAttribute("aria-valuenow");
+  expect(within(steps).getByRole("progressbar").getAttribute("aria-valuemax")).toBe("3");
+  expect(settled()).toBe("0");
+  // A bottom answer bar holds the way on, outside the pane that scrolls.
+  const bar = screen.getByTestId("plan-verdict");
+  fireEvent.click(within(bar).getByRole("button", { name: /^Next/ }));
+  expect(settled()).toBe("1");
+  expect(within(screen.getByTestId("plan-step-pane")).queryByRole("button", { name: /Next|Back/ })).toBeNull();
+  expect(within(bar).getByRole("button", { name: /Back/ })).toBeTruthy();
+  expect(within(bar).getByRole("textbox")).toBeTruthy();
+  // Option cards carry their trade-offs; what the picked one touches is a row under the cards.
+  const cards = screen.getByRole("radiogroup");
+  const picked = within(cards).getByRole("radio", { checked: true });
+  expect(picked.querySelectorAll("[data-tradeoff='pro']").length).toBe(1);
+  expect(picked.querySelectorAll("[data-tradeoff='con']").length).toBe(1);
+  const touches = screen.getByTestId("touches-org");
+  expect(cards.contains(touches)).toBe(false);
+  expect(cards.compareDocumentPosition(touches) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(within(bar).getByTestId("plan-picked").textContent).toContain("Org policy");
+  fireEvent.click(within(cards).getByRole("radio", { checked: false }));
+  expect(within(bar).getByTestId("plan-picked").textContent).toContain("A file in each repo");
+  expect(within(screen.getByTestId("touches-repo")).getByText("config.py")).toBeTruthy();
+  expect(screen.queryByTestId("touches-org")).toBeNull();
+  // Correct the ask, from the bar, opens the correction on the restated ask.
+  fireEvent.click(within(bar).getByRole("button", { name: "Correct the ask" }));
+  expect(within(screen.getByTestId("plan-ask")).getByRole("textbox")).toBeTruthy();
+});
