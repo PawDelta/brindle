@@ -1,4 +1,5 @@
 import threading
+from datetime import datetime, timezone
 
 import pytest
 from starlette.testclient import TestClient
@@ -357,6 +358,45 @@ def test_typed_words_reach_the_engine(db, session, monkeypatch):
     assert app_vouches(session[0], "show me again", offers.time.time() + 60, submitted_at).status_code == 409
     log = offers.debuglog.log_path().read_text()
     assert "typed words refused: this submission predates" in log and "show me again" not in log
+
+
+def test_mid_turn_message_backs_a_visual(db, session, tmp_path):
+    """Claude Code takes a message typed while it works into the running turn: no prompt hook runs,
+    only its transcript records it. Its words back ``asked`` once; an agent's note with the same words doesn't."""
+    boss, _ = session
+    ask = "PLEASE RENDER FOR ME BEFORE YOU IMPLEMENT"
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text('{"type":"user","message":{"role":"user","content":"plan the reader"}}\n')
+    hook = {"transcript_path": str(transcript), "tool_name": "Read", "tool_input": {"file_path": str(transcript)}}
+    agents.handle_hook(db, boss.id, "prompt-submit", {**hook, "prompt": "plan the reader"})
+    agents.handle_hook(db, boss.id, "pre-tool", hook)
+    absorbed = []
+
+    def typed_mid_turn(text, origin="human", mode="prompt"):
+        assert app_vouches(boss, text, offers.time.time() + 60).status_code == 200   # keyed in, before Enter
+        at = datetime.fromtimestamp(offers.time.time(), timezone.utc).isoformat(timespec="milliseconds")
+        absorbed.append({"type": "attachment", "isSidechain": False, "attachment": {
+            "type": "queued_command", "prompt": text, "commandMode": mode, "origin": {"kind": origin},
+            "timestamp": at.replace("+00:00", "Z")}})
+
+    def turn_takes_them_in():
+        with transcript.open("a") as f:
+            f.writelines(offers.json.dumps(line) + "\n" for line in absorbed)
+        absorbed.clear()
+        agents.handle_hook(db, boss.id, "tool-done", hook)
+        agents.handle_hook(db, boss.id, "pre-tool", {**hook, "tool_name": "mcp__brindle__publish_visual"})
+
+    typed_mid_turn(ask, "task-notification", "task-notification")
+    turn_takes_them_in()
+    with pytest.raises(ServiceError):
+        visuals.publish(db, boss, "Not yet", "<p>no</p>", asked=ask)
+    typed_mid_turn("never mind")   # one hook takes in both: the cancel ends only what came before it
+    typed_mid_turn(ask)
+    turn_takes_them_in()
+    assert visuals.publish(db, boss, "Directions", "<p>yes</p>", asked=ask)["rev"] == 1
+    agents.handle_hook(db, boss.id, "stop", hook)   # read again: the same message isn't counted twice
+    with pytest.raises(ServiceError):
+        visuals.publish(db, boss, "Twice", "<p>no</p>", asked=ask)
 
 
 def _report_came_late(db, boss, worker):
