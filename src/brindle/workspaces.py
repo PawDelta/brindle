@@ -367,7 +367,10 @@ def _reuse_registered(db: DB, repo_root: str, branch: str, base: str) -> Created
         # left in the dead copy, so the session ends first, as remove() ends it.
         _rescue_sidebar(db, ws)
         tmux.kill_session(ws.tmux_session)
-        git.remove_worktree(repo_root, ws.path, force=True)
+        try:
+            git.remove_worktree(repo_root, ws.path, force=True)
+        except git.GitError:
+            pass  # add_worktree below says why if the folder is still there
         git.run(["worktree", "prune"], repo_root, check=False)
         how = git.add_worktree(repo_root, ws.path, branch, base)
     return Created(ws, how, branch, [], None)

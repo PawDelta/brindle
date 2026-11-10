@@ -271,7 +271,10 @@ def sweep(db: DB, repo_root: str, cfg: RepoConfig | None = None) -> None:
                 cwds = disk._cwds(disk.live_check_ignore(repo_root))   # read once for the whole sweep
             if disk.live_in(db, path, cwds):
                 continue  # a forgotten row's folder something still runs in: kept
-            git.remove_worktree(repo_root, path, force=True)
+            try:
+                git.remove_worktree(repo_root, path, force=True)
+            except git.GitError:
+                continue  # kept for a later sweep; the rest still gets cleaned
     git.run(["worktree", "prune"], repo_root, check=False)
 
     live_branches = {

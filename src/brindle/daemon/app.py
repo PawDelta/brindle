@@ -56,7 +56,20 @@ async def prioritize_recovery(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True})
 
 
+async def viewed_session(request: Request) -> JSONResponse:
+    """The app is showing session ``root``: kept on disk, so the next daemon's
+    recovery brings it back first (lifecycle.record_viewed)."""
+    from brindle.daemon import lifecycle
+
+    root = (await request.json()).get("root")
+    if not isinstance(root, str) or not root:
+        return JSONResponse({"error": "root must be a session id"}, status_code=400)
+    lifecycle.record_viewed(root)   # on the loop, a few bytes: switches land in the order they were made
+    return JSONResponse({"ok": True})
+
+
 ROUTES = [Route("/v1/meta", meta), Route("/v1/recovery/prioritize", prioritize_recovery, methods=["POST"]),
+          Route("/v1/recovery/viewed", viewed_session, methods=["POST"]),
           *routes_read.ROUTES,
           WebSocketRoute("/v1/events", events), WebSocketRoute("/v1/pty_view", pty_view),
           *ACTIONS, *HOLD_ROUTES, *ORG_PERMISSION_ROUTES, *VISUAL_ROUTES]

@@ -544,13 +544,14 @@ function usePanesReady(client: DaemonClient | null, refresh?: () => Promise<void
       startupStep("panes_ready");
       current = false;
       clearTimeout(next);
+      clearTimeout(poll);
       clearTimeout(deadline);
       if (pid !== null) shownFrom.current = pid;
       setPanes((p) => (p.ready ? p : { ready: true, epoch: p.epoch + 1, recovery: null }));
     };
     // Per session (an engine that names the sessions still to come back): each one whose own agents have
     // windows in rows read after it came back is released at once, whatever the others are doing.
-    const releaseBack = async (meta: Meta, pending: string[], workspaces: WorkspaceDTO[], unchanged: () => boolean) => {
+    const releaseBack = async (meta: Meta, pending: string[], seq: number, workspaces: WorkspaceDTO[], unchanged: () => boolean) => {
       const fresh = (rows: WorkspaceDTO[], not: string[]) => rows.flatMap((w) => w.agents ?? []).filter((a) => !a.parent_id).map((a) => a.id)
         .filter((id) => !not.includes(id) && !backNow.current.has(id) && !waitingForPanes(rows, agentIds(sessionTree(rows, id))));
       // Only those back when these rows were read: one that came back since needs a read of its own.
@@ -559,13 +560,19 @@ function usePanesReady(client: DaemonClient | null, refresh?: () => Promise<void
       // These rows were read after the meta that left them out of pending, so they are the session's
       // own: apply them as they are (as the settled path does) rather than wait for a slow store
       // refresh, which only follows in the background to catch the inbox and anything newer.
-      store.dispatch({ type: "snapshot", workspaces });
-      // Still the same daemon, and none of these sent back to pending since.
+      // (Unless a newer gate read has landed: its rows are later still.)
+      apply(seq, workspaces);
+      // Still the same daemon, and none of these sent back to pending since. A recovery that ended
+      // meanwhile has every session back (on a restart the last ones follow the viewed one closely):
+      // these rows are still the session's own, so throwing them away would only wait out another read.
       const latest = await client.meta();
-      const stillPending = latest.recovery?.pending;
-      if (!unchanged() || latest.pid !== meta.pid || !latest.resuming || !stillPending) return;
+      const stillPending = latest.resuming ? latest.recovery?.pending : [];
+      if (!unchanged() || latest.pid !== meta.pid || !stillPending) return;
+      // Not stale, though: while sessions come back the stream rarely stops marking it so (each one says it is
+      // starting), and the refresh that clears it is behind them. What counts is the rows applied now: those
+      // read above, or a later read (sync drops a read older than them), still giving the session's own windows.
       const applied = store.getState();
-      if (applied.error || applied.stale) return;
+      if (applied.error) return;
       const ready = fresh(applied.workspaces, stillPending).filter((id) => eligible.includes(id));
       void Promise.all([reload(), refresh?.()]).catch(() => {});
       for (const id of ready) backNow.current.add(id);
@@ -573,7 +580,57 @@ function usePanesReady(client: DaemonClient | null, refresh?: () => Promise<void
     };
     const hide = () => setPanes((p) => (p.ready ? { ...p, ready: false } : p));
     const deadline = setTimeout(() => settle(null), STARTUP_WAIT);
-    const check = async () => {
+    // Whether a session the engine named pending at `then` is back by `now` (or `now` is another daemon):
+    // a read begun at `then` cannot show it. One that ends recovery with none newly back changes nothing.
+    const cameBack = (then: Meta, now: Meta) => now.pid !== then.pid
+      || (then.resuming && (then.recovery?.pending ?? []).some((id) => !now.resuming || !now.recovery?.pending?.includes(id)));
+    let poll: ReturnType<typeof setTimeout> | undefined;
+    /* A snapshot can take seconds while sessions launch (a cold git status per worktree), so while
+       the gate's reads are out the engine keeps being asked: a session that comes back meanwhile gets
+       a read of its own at once (an extra pass of `check`), not after the reads out end and another
+       after that. The reads already out still count for the sessions back when they began. */
+    // The engine's word the newest read began under (or the newest an extra pass was asked for).
+    let asked: Meta | null = null;
+    let out = 0;
+    let watching = false;
+    const watch = async () => {
+      if (watching) return;
+      watching = true;
+      try {
+        while (current && out > 0) {
+          await new Promise((ok) => { poll = setTimeout(ok, STARTUP_CHECK); });
+          if (!current || out === 0) break;
+          const now = await client.meta().catch(() => null);
+          if (current && now && asked && cameBack(asked, now)) {
+            asked = now;
+            void check(true);
+          }
+        }
+      } finally {
+        watching = false;
+      }
+    };
+    // Gate reads in the order they began, and the newest whose rows the store has: an older read
+    // that ends later must not put its rows over a newer one's.
+    let reads = 0;
+    let appliedRead = 0;
+    const readAfter = async (meta: Meta) => {
+      const seq = ++reads;
+      asked = meta;
+      out++;
+      void watch();
+      try {
+        return { seq, workspaces: await client.snapshot() };
+      } finally {
+        out--;
+      }
+    };
+    const apply = (seq: number, workspaces: WorkspaceDTO[]) => {
+      if (seq < appliedRead) return;
+      appliedRead = seq;
+      store.dispatch({ type: "snapshot", workspaces });
+    };
+    const check = async (extra = false) => {
       const { connectionGeneration, lifecycleVersion } = store.getState();
       // A read from before the stream dropped and came back may be the old daemon's.
       // A close/rewind also invalidates rows, even on an uninterrupted stream.
@@ -602,12 +659,12 @@ function usePanesReady(client: DaemonClient | null, refresh?: () => Promise<void
         setPanes((p) => (p.recovery?.done === recovery?.done && p.recovery?.total === recovery?.total && p.pending?.join() === pending?.join() && p.back?.join() === back.join()
           ? p : { ...p, recovery, pending: pending ?? null, back }));
         if (pending) {
-          const workspaces = await client.snapshot();
+          const { seq, workspaces } = await readAfter(meta);
           if (!unchanged()) return;
-          await releaseBack(meta, pending, workspaces, unchanged);
+          await releaseBack(meta, pending, seq, workspaces, unchanged);
         }
         if (!meta.resuming) {
-          const workspaces = await client.snapshot();
+          const { seq, workspaces } = await readAfter(meta);
           if (!unchanged()) return;
           if (!waitingForPanes(workspaces)) {
             if (recovering.current) {
@@ -617,7 +674,7 @@ function usePanesReady(client: DaemonClient | null, refresh?: () => Promise<void
               if (!unchanged() || latest.resuming || latest.pid !== meta.pid) return;
             }
             // Applying this read also supersedes sync's in-flight pre-recovery rows.
-            store.dispatch({ type: "snapshot", workspaces });
+            apply(seq, workspaces);
             recovering.current = false;
             settle(meta.pid);
             void Promise.all([reload(), refresh?.()]).catch(() => {});
@@ -627,13 +684,15 @@ function usePanesReady(client: DaemonClient | null, refresh?: () => Promise<void
       } catch {
         // Not answering yet: ask again shortly.
       } finally {
-        if (current) next = setTimeout(() => void check(), STARTUP_CHECK);
+        // An extra pass (a session back while reads were out) is one look: the loop goes on as it was.
+        if (current && !extra) next = setTimeout(() => void check(), STARTUP_CHECK);
       }
     };
     void check();
     return () => {
       current = false;
       clearTimeout(next);
+      clearTimeout(poll);
       clearTimeout(deadline);
     };
   }, [client, round, reload, refresh, store]);
