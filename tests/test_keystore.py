@@ -16,7 +16,7 @@ FAKE = "sk-ant-test-0123456789abcd"
     ({"value": FAKE, "updated_at": 7}, {"value": "external-replacement"}),
     (None, None),
 ])
-def test_keychain_read_cached(monkeypatch, tmp_path, record, external):
+def test_keychain_read_cached(monkeypatch, record, external):
     from starlette.requests import Request
     from brindle import preflight, providers
     from brindle.daemon.routes_read import provider_preflight
@@ -35,10 +35,9 @@ def test_keychain_read_cached(monkeypatch, tmp_path, record, external):
                                 keystore._encode(stored[0]) if stored[0] else "", "")
 
     monkeypatch.setattr(keystore.KeychainStore, "_run", run)
+    monkeypatch.setattr(keystore.KeychainStore, "_listed", lambda self: (None, 0.0))    # each item read
     monkeypatch.setattr(keystore.time, "monotonic", lambda: now[0])
     monkeypatch.setattr(keystore, "_keychain_reads", {}, raising=False)
-    (tmp_path / "login.keychain-db").touch()
-    monkeypatch.setattr(keystore, "_keychain_files", lambda: [tmp_path / "login.keychain-db"])
     monkeypatch.setenv(keystore.FORCE_ENV, "keychain")
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.setattr(preflight, "turned_off", lambda provider: None)
@@ -57,18 +56,17 @@ def test_keychain_read_cached(monkeypatch, tmp_path, record, external):
     assert calls.count("find-generic-password") == 3
     now[0] += keystore.KEYCHAIN_READ_TTL
     assert store.load() == record
-    assert calls.count("find-generic-password") == 3 + (record is not None)     # a miss stays known
+    assert calls.count("find-generic-password") == 4
     stored[0] = external  # another process mutates the key without invalidating our cache
     assert not keystore.set_check(account, "verified", FAKE)
     assert stored[0] == external
     store.save({"value": "replacement"})
     assert keystore.KeychainStore(service, account).load() == {"value": "replacement"}
-    assert calls.count("find-generic-password") == 5 + (record is not None)
+    assert calls.count("find-generic-password") == 6
     store.delete()
     assert keystore.KeychainStore(service, account).load() is None
     assert store.load() is None
-    assert calls.count("find-generic-password") == 6 + (record is not None)
-    store.save({"value": "replacement"})    # the reads below are of a stored key
+    assert calls.count("find-generic-password") == 7
 
     def fails_twice(fake_run, reads: int) -> None:
         now[0] += keystore.KEYCHAIN_READ_TTL
@@ -137,52 +135,52 @@ def test_keychain_read_cached(monkeypatch, tmp_path, record, external):
     assert started == [] and not keystore._refused_marker().exists()     # ...so nothing asked, nothing held back
 
 
-def test_resume_skips_keys_never_saved(monkeypatch, tmp_path):
+def test_resume_skips_keys_never_saved(monkeypatch):
     import re
 
-    calls, keychain_file = [], tmp_path / "login.keychain-db"
-    keychain_file.touch()
-    # An install from before the index: one key saved, no index yet.
+    now, calls, listing_fails = [100.0], [], [False]
     chain = {(keystore.KEYS_SERVICE, "ANTHROPIC_API_KEY"): keystore._encode({"value": FAKE})}
-
-    def write(service, account, blob):      # any keychain write changes its file
-        chain[(service, account)] = blob
-        os.utime(keychain_file, ns=(len(chain), len(chain)))
-
-    def other_process_saves():      # the CLI: its own cache, the same index
-        with monkeypatch.context() as other_process:
-            other_process.setattr(keystore, "_keychain_reads", {})
-            keystore.set_key("OPENAI_API_KEY", "sk-openai")
-
-    racing = {"OPENAI_API_KEY": other_process_saves}
 
     def security(self, args, stdin=None):
         if args[0] == "-i":
-            write(self.service, re.search(r'-a "([^"]+)"', stdin).group(1), re.search(r'-w "([^"]+)"', stdin).group(1))
+            chain[(self.service, re.search(r'-a "([^"]+)"', stdin).group(1))] = re.search(r'-w "([^"]+)"', stdin).group(1)
             return CompletedProcess(args, 0, "", "")
+        if args[0] == "dump-keychain":     # as macOS prints it: attributes only, never a secret
+            calls.append("<listing>")
+            if listing_fails[0]:
+                return CompletedProcess(args, 1, "", "security: SecKeychainSearchCopyNext: error")
+            out = ['keychain: "/Library/Keychains/System.keychain"', "version: 256", "class: 0x80001000",
+                   "attributes:", '    "alis"<blob>="com.apple.systemdefault"']
+            for service, account in chain:
+                out += ['keychain: "/Users/u/Library/Keychains/login.keychain-db"', "version: 512",
+                        'class: "genp"', "attributes:", '    0x00000007 <blob>="brindle key"',
+                        f'    "acct"<blob>="{account}"', '    "desc"<blob>=<NULL>', f'    "svce"<blob>="{service}"']
+            return CompletedProcess(args, 0, "\n".join(out) + "\n", "")
         if self.service == keystore.KEYS_SERVICE:    # not brindle Pro's sign-in, which other code may load
             calls.append(args[2])
         blob = chain.get((self.service, args[2]))
-        if args[2] in racing:       # saved just as this read answers "missing"
-            racing.pop(args[2])()
         return CompletedProcess(args, 0 if blob else 44, blob or "", "")
 
     monkeypatch.setattr(keystore.KeychainStore, "_run", security)
-    monkeypatch.setattr(keystore, "_keychain_files", lambda: [keychain_file])
+    monkeypatch.setattr(keystore.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(keystore, "_keychain_reads", {})
     monkeypatch.setenv(keystore.FORCE_ENV, "keychain")
     names = keystore.known_names()
-    both = {"ANTHROPIC_API_KEY": FAKE, "OPENAI_API_KEY": "sk-openai"}
-    three = {**both, "GEMINI_API_KEY": "gemini"}
-    for found, read in (({"ANTHROPIC_API_KEY": FAKE}, names),     # nothing trusted until each name was seen
-                        (both, list(both)), (three, names), (three, list(three))):
-        if found == three and (keystore.KEYS_SERVICE, "GEMINI_API_KEY") not in chain:
-            # Stored by a writer that never touches the index: an older brindle, Keychain Access,
-            # or a save that died before tidying up. Every listed miss is read again, once.
-            write(keystore.KEYS_SERVICE, "GEMINI_API_KEY", keystore._encode({"value": "gemini"}))
-        monkeypatch.setattr(keystore, "_keychain_reads", {})    # a restart
+
+    def resume() -> dict:
+        now[0] += keystore.KEYCHAIN_READ_TTL
         calls.clear()
-        assert {n: v for n in names if (v := keystore.get_key_info(n)[0])} == found
-        assert sorted(calls) == sorted(read)
+        return {n: v for n in names if (v := keystore.get_key_info(n)[0])}
+
+    assert resume() == {"ANTHROPIC_API_KEY": FAKE}
+    assert calls == ["<listing>", "ANTHROPIC_API_KEY"]     # one listing; only the saved key is read
+    with monkeypatch.context() as other_process:     # the CLI: its own caches
+        other_process.setattr(keystore, "_keychain_reads", {})
+        keystore.set_key("OPENAI_API_KEY", "sk-openai")
+    both = {"ANTHROPIC_API_KEY": FAKE, "OPENAI_API_KEY": "sk-openai"}
+    assert resume() == both and calls == ["<listing>", *both]     # the next listing shows it
+    listing_fails[0] = True
+    assert resume() == both and calls == ["<listing>", *names]    # no listing: every name is read
 
 
 def test_file_backend_refuses_loose_permissions(brindle_home):

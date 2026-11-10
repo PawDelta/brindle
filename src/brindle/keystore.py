@@ -80,161 +80,6 @@ def forget_refused() -> None:
         _refused_marker().unlink(missing_ok=True)
 
 
-# Names a real keychain read found missing, per service, shared by brindle's processes
-# through a file: a restart asks `security` only about names that may be stored (each
-# missing one cost a `security` call). Names only, never values. Nothing is assumed: a
-# name is listed only after a read saw it missing, so an install without the index reads
-# everything once, as before. The misses hold only while the keychain files are exactly
-# as they were before those reads (identity, mtime, size: a read leaves them as they are,
-# any write changes them), so a key stored by anything at all (another brindle process,
-# an older brindle that never heard of the index, Keychain Access, a save that died
-# halfway) makes every listed miss read again. brindle's own save and delete carry the
-# misses over to the keychain as they leave it, holding the index lock throughout so no
-# other brindle process writes meanwhile.
-KEYCHAIN_INDEX_FILE = "keychain-index.json"
-_index_lock = threading.RLock()     # held across brindle's own keychain writes
-_index_seen: dict[str, tuple[tuple[int, int, int], dict]] = {}   # path: (file identity, parsed)
-_index_seen_lock = threading.Lock()     # never held for long: lookups don't wait for writes
-
-
-def _index_path() -> Path:
-    from brindle.config import brindle_home
-
-    return brindle_home() / KEYCHAIN_INDEX_FILE
-
-
-def _keychain_files() -> list[Path]:
-    """The keychain files ``security`` searches by default: the user's keychains and System's."""
-    user = Path.home() / "Library" / "Keychains"
-    try:
-        found = [p for p in user.iterdir() if p.suffix in (".keychain-db", ".keychain")]
-    except OSError:
-        return []
-    return sorted(found) + [Path("/Library/Keychains/System.keychain")]
-
-
-def _keychain_state() -> list | None:
-    """The keychain files' identities, or None when they can't be seen (then no miss is trusted)."""
-    state = []
-    for path in _keychain_files():
-        try:
-            st = os.stat(path)
-        except FileNotFoundError:
-            continue
-        except OSError:
-            return None
-        state.append([str(path), st.st_ino, st.st_mtime_ns, st.st_size])
-    return state or None
-
-
-def _index_read() -> dict:
-    """``{"keychain": state | None, "absent": {service: [account, ...]}}``: the misses seen while
-    the keychain files were in ``state``. Empty when missing or unreadable."""
-    empty = {"keychain": None, "absent": {}}
-    path = _index_path()
-    try:
-        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-    except OSError:
-        return empty
-    with os.fdopen(fd, "r", encoding="utf-8", errors="replace") as fh:
-        st = os.fstat(fh.fileno())
-        sig = (st.st_ino, st.st_mtime_ns, st.st_size)   # replaced whole, so a new file each write
-        with _index_seen_lock:
-            seen = _index_seen.get(str(path))
-        if seen is not None and seen[0] == sig:
-            return seen[1]
-        try:
-            data = json.loads(fh.read(MAX_BLOB + 1))
-        except ValueError:
-            return empty
-    absent = data.get("absent") if isinstance(data, dict) else None
-    if not (isinstance(absent, dict) and isinstance(data.get("keychain"), list)
-            and all(isinstance(v, list) and all(isinstance(a, str) for a in v) for v in absent.values())):
-        return empty
-    with _index_seen_lock:
-        _index_seen[str(path)] = (sig, data)
-    return data
-
-
-def _index_misses(service: str) -> tuple[list | None, tuple]:
-    """The keychain's state now, and the misses under ``service`` that still hold in it."""
-    state, index = _keychain_state(), _index_read()
-    return state, (tuple(index["absent"].get(service, ())) if state is not None and index["keychain"] == state else ())
-
-
-@contextlib.contextmanager
-def _index_locked() -> Iterator[bool]:
-    """The index's lock, across threads and processes; False when it couldn't be taken."""
-    with _index_lock:
-        fd = None
-        with contextlib.suppress(OSError):
-            path = _index_path()
-            path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            fd = os.open(path.parent / "keychain-index.lock", os.O_RDWR | os.O_CREAT, 0o600)
-            try:
-                if fcntl is not None:
-                    fcntl.flock(fd, fcntl.LOCK_EX)
-            except OSError:
-                os.close(fd)
-                fd = None
-        try:
-            yield fd is not None
-        finally:
-            if fd is not None:
-                os.close(fd)     # closing drops the flock
-
-
-def _index_write(index: dict) -> None:
-    path = _index_path()
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".keychain-index.", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(index, fh, separators=(",", ":"))
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp, path)
-    except BaseException:
-        with contextlib.suppress(FileNotFoundError):
-            os.unlink(tmp)
-        raise
-
-
-def _index_note_absent(service: str, account: str, before: list | None) -> None:
-    """A read begun with the keychain in state ``before`` found the item missing."""
-    if before is None:
-        return
-    with _index_locked() as held:
-        if not held or _keychain_state() != before:
-            return      # written since the read began: a miss under `before` would never hold, and
-                        # writing it would replace misses that still do
-        index = _index_read()
-        absent = index["absent"] if index["keychain"] == before else {}
-        if account in absent.get(service, ()):
-            return
-        absent = {s: list(a) for s, a in absent.items()}
-        absent.setdefault(service, []).append(account)
-        with contextlib.suppress(OSError):      # unrecorded just means it is read again next time
-            _index_write({"keychain": before, "absent": absent})
-
-
-@contextlib.contextmanager
-def _index_writing(service: str, account: str) -> Iterator[None]:
-    """Around brindle's own write of one item: keep the other misses past the change it makes.
-    Whatever goes wrong, the misses are at worst dropped (the keychain changed), never kept wrongly."""
-    with _index_locked() as held:
-        before = _keychain_state() if held else None
-        try:
-            yield
-        finally:
-            after = _keychain_state()
-            index = _index_read()
-            if before is not None and after is not None and index["keychain"] == before:
-                absent = {s: [a for a in names if (s, a) != (service, account)]
-                          for s, names in index["absent"].items()}
-                with contextlib.suppress(OSError):
-                    _index_write({"keychain": after, "absent": absent})
-
-
 @dataclass
 class _KeychainRead:
     # One lock per identity lets unrelated keys load in parallel while readers
@@ -242,16 +87,67 @@ class _KeychainRead:
     lock: threading.RLock = field(default_factory=threading.RLock)
     expires: float = 0.0
     blob: str | None = None
+    items: frozenset[tuple[str, str]] | None = None   # the listing's entry only: what it shows
 
     def invalidate(self) -> None:
         self.expires = 0.0
         self.blob = None
+        self.items = None
 
 
 # Stores are recreated by default_store, so instances must share reads, including
 # missing items. Keep immutable blobs here so callers cannot mutate cached records.
 _keychain_reads: dict[tuple[str, str], _KeychainRead] = {}
 _keychain_lock = threading.RLock()
+# One metadata-only listing of the keychain search list (`security dump-keychain` without
+# -d: each item's attributes, never a secret) tells which items exist, so a lookup of an
+# item it doesn't show costs no `security` call. It is shared like the reads, for
+# KEYCHAIN_READ_TTL, under this entry of _keychain_reads (no real service is empty). A
+# listing that fails or isn't fully understood shows nothing: each lookup reads its item.
+_LISTING = ("", "dump-keychain")
+_DUMP_ATTR = re.compile(r'\s+"(svce|acct)"<blob>=(?:"(.*)"|0x([0-9A-Fa-f]*)(?:\s.*)?|(<NULL>))\s*$')
+
+
+def _listing() -> _KeychainRead:
+    with _keychain_lock:
+        return _keychain_reads.setdefault(_LISTING, _KeychainRead())
+
+
+def _parse_listing(out: str) -> frozenset[tuple[str, str]] | None:
+    """(service, account) of every generic password a ``dump-keychain`` listing shows, or
+    None unless every record in it was understood: then nothing may be concluded from it."""
+    records: list[list[str]] = []
+    for line in out.splitlines():
+        if line.startswith("keychain: "):
+            records.append([])
+        elif records:
+            records[-1].append(line)
+        elif line.strip():
+            return None
+    items = set()
+    for lines in records:
+        kind = next((ln[len("class: "):].strip() for ln in lines if ln.startswith("class: ")), None)
+        if kind is None:
+            return None
+        if kind != '"genp"':
+            continue
+        attrs: dict[str, str | None] = {}
+        for ln in lines:
+            if ln.lstrip().startswith(('"svce"', '"acct"')):
+                m = _DUMP_ATTR.match(ln)
+                if m is None:
+                    return None
+                name, quoted, hexed, _null = m.groups()
+                try:
+                    attrs[name] = (quoted if quoted is not None else
+                                   bytes.fromhex(hexed).decode("utf-8", "replace") if hexed is not None else None)
+                except ValueError:
+                    return None
+        if "svce" not in attrs or "acct" not in attrs:
+            return None
+        if attrs["svce"] is not None and attrs["acct"] is not None:
+            items.add((attrs["svce"], attrs["acct"]))
+    return frozenset(items) if records else None
 _uncached_reads: contextvars.ContextVar[bool] = contextvars.ContextVar("keystore_uncached_reads", default=False)
 
 
@@ -327,9 +223,8 @@ class KeychainStore:
     Cached records are decoded afresh so callers can safely modify them.
     A read refused at a dialog, or never answered, stops later reads until the
     person acts (KEYCHAIN_DIALOG_EXITS): polling never repeats a dialog.
-    An item a read found missing is listed in the index of missing items
-    (KEYCHAIN_INDEX_FILE) while the keychain files stay unchanged, so later
-    lookups, in any process, cost no ``security`` call.
+    A lookup first consults one shared metadata-only listing of the search list
+    (_LISTING): an item it doesn't show is missing without a ``security`` call.
     """
     name = "keychain"
 
@@ -339,7 +234,7 @@ class KeychainStore:
             self._read = _keychain_reads.setdefault((service, account), _KeychainRead())
 
     def _run(self, args: list[str], stdin: str | None = None) -> subprocess.CompletedProcess:
-        if args[0] == "find-generic-password":     # a lookup: a brindle.spawn read
+        if args[0] in ("find-generic-password", "dump-keychain"):     # a lookup: a brindle.spawn read
             # Run to an outcome: stopped when a client goes away, a dialog it was
             # waiting on would just come back at the next poll. A read cut short
             # isn't a refusal either, so nothing could be held back for it.
@@ -365,12 +260,13 @@ class KeychainStore:
                 raise CredentialError("the keychain refused an earlier read (locked, or its dialog cancelled), and "
                                       "brindle won't raise that dialog again by itself: once it's unlocked, "
                                       "`brindle keys unblock` lets brindle read it")
-            before, misses = _index_misses(self.service)
-            if not _uncached_reads.get() and self.account in misses:
-                if timing is not None:
-                    timing.cached_reads += 1    # seen missing, and not saved since
-                self._read.expires = time.monotonic() + KEYCHAIN_READ_TTL
-                return None
+            if not _uncached_reads.get():
+                items, until = self._listed()
+                if items is not None and (self.service, self.account) not in items:
+                    if timing is not None:
+                        timing.cached_reads += 1    # the listing doesn't show it
+                    self._read.expires = until      # no longer than the listing holds
+                    return None
             try:
                 if timing is not None:
                     timing.backend_reads += 1
@@ -380,7 +276,6 @@ class KeychainStore:
                 raise CredentialError("keychain read timed out") from None
             if r.returncode == 44:   # errSecItemNotFound
                 blob, value = None, None
-                _index_note_absent(self.service, self.account, before)
             elif r.returncode != 0:
                 if r.returncode in KEYCHAIN_DIALOG_EXITS:
                     _note_refused()
@@ -392,24 +287,50 @@ class KeychainStore:
             self._read.expires = time.monotonic() + KEYCHAIN_READ_TTL
             return value
 
+    def _listed(self) -> tuple[frozenset[tuple[str, str]] | None, float]:
+        """The shared listing's items (None: not to be trusted) and when it expires.
+        A listing refused at a dialog, or never answered, is held back like a read."""
+        listing = _listing()
+        with listing.lock:
+            if time.monotonic() < listing.expires:
+                return listing.items, listing.expires
+            listing.invalidate()
+            if (timing := _read_timing.get()) is not None:
+                timing.backend_reads += 1
+            try:
+                r = self._run(["dump-keychain"])
+            except subprocess.TimeoutExpired:
+                _note_refused()
+                raise CredentialError("keychain listing timed out") from None
+            if r.returncode in KEYCHAIN_DIALOG_EXITS:
+                _note_refused()
+                raise CredentialError(f"keychain listing failed (security exit {r.returncode})")
+            listing.items = _parse_listing(r.stdout or "") if r.returncode == 0 else None
+            listing.expires = time.monotonic() + KEYCHAIN_READ_TTL
+            return listing.items, listing.expires
+
     def save(self, creds: dict) -> None:
         # The blob is base64 (no quotes, spaces or backslashes), so quoting is safe;
         # account, service and label are brindle's own fixed strings and variable names.
         line = (f'add-generic-password -U -a "{self.account}" -s "{self.service}" '
                 f'-l "{self.label}" -w "{_encode(creds)}"\n')
-        with self._read.lock:
+        listing = _listing()
+        with self._read.lock, listing.lock:
             # Invalidate even on failure: a command may have changed the store
             # before reporting an error. Never retain a possibly obsolete secret.
+            # The listing's lock is held throughout, so no listing sees the store mid-write.
             self._read.invalidate()
-            with _index_writing(self.service, self.account):
-                r = self._run(["-i"], stdin=line)
+            listing.invalidate()
+            r = self._run(["-i"], stdin=line)
             if r.returncode != 0 or "error" in (r.stderr or "").lower():
                 raise CredentialError(f"keychain write failed (security exit {r.returncode})")
             forget_refused()
 
     def delete(self) -> None:
-        with self._read.lock, _index_writing(self.service, self.account):
+        listing = _listing()
+        with self._read.lock, listing.lock:
             self._read.invalidate()
+            listing.invalidate()
             self._run(["delete-generic-password", "-a", self.account, "-s", self.service])
 
 
