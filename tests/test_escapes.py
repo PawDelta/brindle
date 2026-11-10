@@ -228,6 +228,7 @@ def test_either_reviewer_asking_for_changes_blocks_the_merge(db, repo, piped, mo
     assert merged(repo)
 
 
+@pytest.mark.variant("a counter, not a branch: two rejecting reviewers on one report counted two rounds (0.6.3 stress test)")
 def test_both_reviewers_asking_for_changes_is_one_fix_round(db, repo, piped):
     """Two verdicts on one report send the worker both sets of findings, but
     count one round: the second must not bring the cap, or the tests-only

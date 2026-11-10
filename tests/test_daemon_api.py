@@ -415,6 +415,7 @@ def test_read_routes_answer_from_the_db(seeded, path, check):
     assert check(body, seeded)
 
 
+@pytest.mark.variant("a budget, not a branch: the slow goal read the owner reported re-ran git log on every read")
 def test_goal_read_is_fast_with_unchanged_heads(seeded, db, monkeypatch):
     from brindle import autopilot, quota, status_cache
 

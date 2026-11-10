@@ -28,7 +28,9 @@ DAY = 86400
 
 
 @pytest.mark.parametrize("metadata", [None, {"repo_root": None}, {"branch": []},
-    {"removed_at": "yesterday"}, {"size": -1}, {"removed_at": float("inf")},
+    pytest.param({"removed_at": "yesterday"}, marks=pytest.mark.variant("corrupt trash: a timestamp written as text")),
+    pytest.param({"size": -1}, marks=pytest.mark.variant("corrupt trash: a negative size")),
+    pytest.param({"removed_at": float("inf")}, marks=pytest.mark.variant("corrupt trash: an infinite timestamp")),
     pytest.param({"removed_at": 10 ** 400}, marks=pytest.mark.variant(
         "corrupt JSON timestamp exceeds float range; retention must not overflow"))])
 def test_corrupt_trash_does_not_block_retention(brindle_home, monkeypatch, metadata):

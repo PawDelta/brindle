@@ -358,7 +358,7 @@ def test_a_start_brings_sessions_back_at_once_most_recently_active_first(db, roo
     assert set(began[:2]) == {"recent", "older"} and set(began[2:]) == {"same-tmux", "oldest"}
 
 
-@pytest.mark.parametrize("case", ["back", "hung", "switched", pytest.param("unreadable", marks=pytest.mark.variant(
+@pytest.mark.parametrize("case", ["back", "hung", pytest.param("switched", marks=pytest.mark.variant("reported wait: switching sessions during the head start kept the new one waiting")), pytest.param("unreadable", marks=pytest.mark.variant(
     "a viewed-session file that isn't UTF-8 raised past the OSError handler and stopped every session coming back"))])
 def test_viewed_session_comes_back_first(db, root, monkeypatch, case):
     """The session the app showed last comes back first and alone, though it
