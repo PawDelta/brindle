@@ -22,6 +22,9 @@ describe("inbox actions", () => {
   it("rejects changed permission digests and keeps a repeated action attached to its in-flight request", async () => {
     const item: InboxItemDTO = { ...plan, kind: "permission", permission: { via: "hook", request_id: "r", digest: "old" } };
     const daemon = new FakeDaemon({ workspaces: [root], inbox: [item] });
+    const send = daemon.fetch;
+    let finish!: () => void;
+    vi.spyOn(daemon, "fetch").mockImplementation((input, init) => new Promise((resolve) => { finish = () => { void send(input, init).then(resolve); }; }));
     const out: { actions?: InboxActions } = {};
     const { rerender } = render(<Harness daemon={daemon} inbox={[item]} out={out} />);
     const changed = { ...item, permission: { ...item.permission!, digest: "new" } };
@@ -29,11 +32,16 @@ describe("inbox actions", () => {
     act(() => out.actions!.run(item, "permission", { choice: "allow_once" }));
     expect(daemon.requests.filter((r) => r.method === "POST")).toHaveLength(0);
     act(() => {
-      out.actions!.run(changed, "permission", { choice: "allow_once" });
+      out.actions!.run(changed, "permission", { request: "r", digest: "new", choice: "allow_once" });
       out.actions!.run(changed, "permission", { choice: "deny" });
     });
+    // A new request arrives before the old answer's acknowledgement.
+    const replacement = { ...changed, permission: { ...changed.permission, request_id: "next" } };
+    rerender(<Harness daemon={daemon} inbox={[...Array.from({ length: 60 }, (_, i) => ({ ...plan, agent_id: `w${i}` })), replacement]} out={out} />);
+    await act(async () => finish());
     await waitFor(() => expect(out.actions!.busy.size).toBe(0));
     expect(daemon.requests.filter((r) => r.method === "POST")).toHaveLength(1);
+    expect(out.actions!.hidden.size).toBe(0);
   });
 
   it("binds a decision to what the card showed: an item the inbox has since replaced isn't acted on, and the card says so", async () => {
@@ -54,11 +62,12 @@ describe("inbox actions", () => {
     expect(refresh).toHaveBeenCalledOnce();
   });
 
-  it("drops the card and refetches when the engine says nothing waits on it any more, but keeps it for another refusal", async () => {
+  it.each([409, 500])("drops a stale card but keeps it for an action refusal with status %s", async (status) => {
     const daemon = new FakeDaemon({ workspaces: [root], inbox: [plan] });
     let refused = "sup1 has no plan awaiting a decision";
+    let code = 409;
     const client = daemon.client();
-    vi.spyOn(client, "inboxAction").mockImplementation(() => Promise.reject(new DaemonError("conflict", refused, 409)));
+    vi.spyOn(client, "inboxAction").mockImplementation(() => Promise.reject(new DaemonError("conflict", refused, code)));
     let refreshes = 0;
     const out: { actions?: InboxActions } = {};
     const inbox = [plan];   // one array: a new one each render would read as a fresh snapshot
@@ -72,6 +81,7 @@ describe("inbox actions", () => {
     expect(screen.getByTestId("note").textContent).toBe("|plan:sup1:proj");
     // A refusal about the action itself still brings the card back with the message.
     refused = "sup1's plan couldn't be sent: its pane is gone";
+    code = status;
     cleanup();
     render(<Probe />);
     act(() => out.actions!.run(plan, "approve", {}));
