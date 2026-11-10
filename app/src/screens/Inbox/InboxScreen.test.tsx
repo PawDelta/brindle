@@ -222,8 +222,13 @@ describe("inbox", () => {
     // The link appears once the session list has loaded, which may land after the inbox.
     fireEvent.click(await within(card("plan_offer")).findByRole("button", { name: "Go to session ›" }));
     expect(onOpen).toHaveBeenLastCalledWith("sup1", REPO, "sup1");
-    fireEvent.click(within(card("plan_offer")).getByRole("button", { name: label }));
+    act(() => {
+      const button = within(card("plan_offer")).getByRole("button", { name: label });
+      fireEvent.click(button);
+      fireEvent.click(button);
+    });
     await waitFor(() => expect(posts(daemon).find((r) => r.path === "/goal/plan-offer")?.body).toMatchObject({ root: "sup1", offer: "o1", accept: accepted }));
+    expect(posts(daemon).filter((r) => r.path === "/goal/plan-offer")).toHaveLength(1);
     sync.stop();
   });
 

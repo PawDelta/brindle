@@ -2,6 +2,7 @@
 
 import json
 import time
+from unittest.mock import patch
 
 import pytest
 
@@ -147,6 +148,15 @@ def test_pr_not_now(db, tmp_path, monkeypatch):
                    str(tmp_path / "checkout"), None, "pr-card", time.time())
     db.add_workspace(ws)
     db.add_agent(Agent("r1", ws.id, "supervisor", "claude", None, "interactive", "idle", "@1", None, time.time()))
+    # A failed decision must stay answerable, just as a newer PR stays visible below.
+    _proposal(db, "r1")
+    proposal = db.get_autopilot("r1").proposal
+    with patch("brindle.autopilot.add_checks", side_effect=OSError("disk full")), pytest.raises(OSError):
+        inbox_action(db, {"id": "r1", "action": "accept"}, {})
+    assert db.get_autopilot("r1").proposal == proposal
+    with patch("brindle.autopilot.add_checks", return_value="written"):
+        inbox_action(db, {"id": "r1", "action": "accept"}, {})
+    assert db.get_autopilot("r1").proposal is None
     db.conn.execute("INSERT INTO session_pr_prep (root_id, branch, sha, state, prepared_at) VALUES (?, ?, ?, ?, ?)",
                     ("r1", ws.branch, "head1", "passed", time.time()))
     head = "head1"
