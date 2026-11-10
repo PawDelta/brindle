@@ -2983,6 +2983,18 @@
           "default": null,
           "title": "Section"
         },
+        "url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Url"
+        },
         "visual_id": {
           "anyOf": [
             {
