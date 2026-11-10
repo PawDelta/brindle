@@ -55,17 +55,18 @@ def test_keychain_read_cached(monkeypatch, record, external):
     assert calls.count("find-generic-password") == 3
     now[0] += keystore.KEYCHAIN_READ_TTL
     assert store.load() == record
-    assert calls.count("find-generic-password") == 4
+    assert calls.count("find-generic-password") == 3 + (record is not None)     # a miss stays known
     stored[0] = external  # another process mutates the key without invalidating our cache
     assert not keystore.set_check(account, "verified", FAKE)
     assert stored[0] == external
     store.save({"value": "replacement"})
     assert keystore.KeychainStore(service, account).load() == {"value": "replacement"}
-    assert calls.count("find-generic-password") == 6
+    assert calls.count("find-generic-password") == 5 + (record is not None)
     store.delete()
     assert keystore.KeychainStore(service, account).load() is None
     assert store.load() is None
-    assert calls.count("find-generic-password") == 7
+    assert calls.count("find-generic-password") == 6 + (record is not None)
+    store.save({"value": "replacement"})    # the reads below are of a stored key
 
     def fails_twice(fake_run, reads: int) -> None:
         now[0] += keystore.KEYCHAIN_READ_TTL
@@ -132,6 +133,43 @@ def test_keychain_read_cached(monkeypatch, record, external):
                     request.stop("the client went away")
                 keystore.KeychainStore(service, account).load()
     assert started == [] and not keystore._refused_marker().exists()     # ...so nothing asked, nothing held back
+
+
+def test_resume_skips_keys_never_saved(monkeypatch):
+    import re
+
+    calls = []
+    # An install from before the index: one key saved, no index yet.
+    chain = {(keystore.KEYS_SERVICE, "ANTHROPIC_API_KEY"): keystore._encode({"value": FAKE})}
+
+    def other_process_saves():      # the CLI: its own cache, the same index
+        with monkeypatch.context() as other_process:
+            other_process.setattr(keystore, "_keychain_reads", {})
+            keystore.set_key("OPENAI_API_KEY", "sk-openai")
+
+    racing = {"OPENAI_API_KEY": other_process_saves}
+
+    def security(self, args, stdin=None):
+        if args[0] == "-i":
+            account = re.search(r'-a "([^"]+)"', stdin).group(1)
+            chain[(self.service, account)] = re.search(r'-w "([^"]+)"', stdin).group(1)
+            return CompletedProcess(args, 0, "", "")
+        calls.append(args[2])
+        blob = chain.get((self.service, args[2]))
+        if args[2] in racing:       # saved just as this read answers "missing"
+            racing.pop(args[2])()
+        return CompletedProcess(args, 0 if blob else 44, blob or "", "")
+
+    monkeypatch.setattr(keystore.KeychainStore, "_run", security)
+    monkeypatch.setenv(keystore.FORCE_ENV, "keychain")
+    names = keystore.known_names()
+    both = {"ANTHROPIC_API_KEY": FAKE, "OPENAI_API_KEY": "sk-openai"}
+    for found, read in (({"ANTHROPIC_API_KEY": FAKE}, names),     # nothing trusted until each name was seen
+                        (both, list(both)), (both, list(both))):
+        monkeypatch.setattr(keystore, "_keychain_reads", {})    # a restart
+        calls.clear()
+        assert {n: v for n in names if (v := keystore.get_key_info(n)[0])} == found
+        assert calls == read
 
 
 def test_file_backend_refuses_loose_permissions(brindle_home):
