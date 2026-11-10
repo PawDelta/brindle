@@ -55,7 +55,7 @@ export interface KnowledgeScreenProps {
 
 const TABS: [KnowledgeView, string][] = [
   ["map", "Map"],
-  ["docs", "Plan library"],
+  ["docs", "Library"],
   ["imported", "Imported"],
   ["decisions", "Decisions"],
   ["kept", "Kept visuals"],

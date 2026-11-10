@@ -290,7 +290,7 @@ export function Reader({ client, repo, id, targets, titles, pickFolder, onBack, 
     <section className="flex flex-col gap-s2" aria-label="Doc" data-testid="reader">
       <div className="flex flex-wrap items-center justify-between gap-s1">
         <button type="button" className={quiet} onClick={onBack}>
-          ← Plan library
+          ← Library
         </button>
         {!local && <div className="relative flex flex-wrap gap-1">
           <button type="button" className={button} disabled={!doc || busy} aria-expanded={menu === "share"} onClick={() => setMenu(menu === "share" ? null : "share")}>
@@ -556,7 +556,7 @@ export function DocsView({ client, repo, session: initialSession, doc, pickFolde
   );
 
   return (
-    <section className="flex flex-col gap-s2" aria-label="Plan library" data-testid="docs">
+    <section className="flex flex-col gap-s2" aria-label="Library" data-testid="docs">
       <ResultsPanel results={results} error={resultsError} docs={docs} />
       {(session || onBack) && (
         <div className="flex flex-wrap items-center gap-s1" data-testid="session-filter">
@@ -578,7 +578,7 @@ export function DocsView({ client, repo, session: initialSession, doc, pickFolde
         </div>
       )}
       <div className="flex flex-wrap items-center justify-between gap-s1">
-        <input type="search" className={`${field} min-w-56 flex-1`} aria-label="Search the plan library" placeholder="Search the plan library: titles, summaries, topics…" value={query} onChange={(e) => setQuery(e.target.value)} />
+        <input type="search" className={`${field} min-w-56 flex-1`} aria-label="Search the library" placeholder="Search the library: titles, summaries, topics…" value={query} onChange={(e) => setQuery(e.target.value)} />
         <div className="flex flex-wrap gap-1" role="group" aria-label="Scope">
           {chips.map(([spec, name]) => (
             <button key={spec || "all"} type="button" aria-pressed={scope === spec} className={`rounded-full border px-s1 py-0.5 text-xs ${scope === spec ? "border-transparent bg-fawn-soft font-medium text-ink" : "border-line text-ink-2 hover:bg-surface-2"}`} onClick={() => setScope(spec)}>
@@ -589,14 +589,14 @@ export function DocsView({ client, repo, session: initialSession, doc, pickFolde
       </div>
       {listing.state === "unavailable" && (
         <div className={`${card} flex flex-col gap-1 px-s2 py-s2 text-sm`} data-testid="docs-unavailable">
-          <h2 className={h2}>Plans live in brindle Pro's plan library</h2>
-          <p className="text-ink-2">When you approve a plan, or request an analysis doc for a goal or task, it records what was built, decided and left open. With brindle Pro it's stored encrypted in your plan library and briefs the next related task. On the free plan the docs are written to ~/.brindle/docs and show up under Imported.</p>
+          <h2 className={h2}>The library is part of brindle Pro</h2>
+          <p className="text-ink-2">When you approve a plan, brindle Pro stores it encrypted in your library, with what you picked and why, and uses it to brief related work later.</p>
           <p className="text-xs text-ink-3">{listing.error}</p>
         </div>
       )}
       {listing.state === "failed" && (
         <div role="alert" className={`${alert} flex items-center justify-between gap-s2`}>
-          <span>Could not load the plan library: {listing.error}</span>
+          <span>Could not load the library: {listing.error}</span>
           <button type="button" className={button} onClick={load}>
             Try again
           </button>
@@ -615,7 +615,7 @@ export function DocsView({ client, repo, session: initialSession, doc, pickFolde
           </nav>
           <div className="flex min-w-0 flex-col gap-s1">
             {listing.state === "loading" && <p className="text-sm text-ink-3">Loading…</p>}
-            {listing.state === "loaded" && docs.length === 0 && <p className="text-sm text-ink-2">Nothing in the plan library yet. Approved plans are stored here.</p>}
+            {listing.state === "loaded" && docs.length === 0 && <p className="text-sm text-ink-2">Nothing in the library yet. Approved plans are stored here.</p>}
             {listing.state === "loaded" && docs.length > 0 && shown.length === 0 && <p className="text-sm text-ink-2">No doc matches.</p>}
             {shown.length > 0 && !shown.some((d) => d.category) && <ul className="flex flex-col gap-s1">{shown.map(docCard)}</ul>}
             {shown.some((d) => d.category) && byCategory(shown).map(([name, list]) => {
