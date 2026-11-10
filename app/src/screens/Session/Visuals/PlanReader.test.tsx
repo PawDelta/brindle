@@ -233,7 +233,7 @@ it("design doc writes go one at a time, a read sent before one came back can't u
   reopened.unmount();
   await act(async () => decided({ ...delivered(second), state: "redirected", verdict: { approved: false, at: 21, rev: 2 } }));
   const third = render(reader({ ...visual, rev: 3 }));
-  const revised = { ...delivered(second), rev: 3, revisions: [...second.revisions!, { rev: 3, author: "supervisor", source: "proposal", at: 30 }] };
+  const revised: Plan = { ...delivered(second), rev: 3, revisions: [...second.revisions!, { rev: 3, author: "supervisor" as const, source: "proposal", at: 30 }] };
   await act(async () => reads[reads.length - 1](revised));
   expect((bar().getByRole("button", { name: "Request changes" }) as HTMLButtonElement).disabled).toBe(true);
   // Another device wrote a reply this one never saw, older than the supervisor's latest revision:
