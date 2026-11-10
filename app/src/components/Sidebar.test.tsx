@@ -59,10 +59,13 @@ describe("Sidebar", () => {
   it("does not substitute another session's context when the selected session disappears", async () => {
     const { daemon, sync } = mount({ sessions: [live, paused] }, { screen: "session", root: "sup1", repo: REPO });
     onTestFinished(() => sync.stop());
-    await screen.findByRole("button", { name: "Rename session" });
-    daemon.data.sessions = [paused];
-    daemon.publish("session.closed", { root_id: "sup1" });
-    await waitFor(() => expect(sessionRow("sup1")).toBeNull());
+    await act(async () => {});
+    expect(screen.getByRole("button", { name: "Rename session" })).toBeTruthy();
+    await act(async () => {
+      daemon.data.sessions = [paused];
+      daemon.publish("session.closed", { root_id: "sup1" });
+    });
+    expect(sessionRow("sup1")).toBeNull();
     expect(screen.getByTestId("session-context").textContent).not.toContain(paused.goal);
     expect(screen.queryByRole("button", { name: "Rename session" })).toBeNull();
   });
