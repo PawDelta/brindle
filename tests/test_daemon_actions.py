@@ -1930,7 +1930,8 @@ def test_pr_waits_for_approval(db, lead, tmp_path, monkeypatch, passed):
     sess, called, runs, told = Path(lead.path), tmp_path / "gh-called", [], []
     fake = tmp_path / "bin" / "gh"
     fake.parent.mkdir()
-    fake.write_text(f"#!/bin/sh\necho \"$@\" >> {called}\necho https://github.com/o/r/pull/7\n")
+    # `pr list` is the inbox's background look for a PR already open on HEAD: not an opening.
+    fake.write_text(f"#!/bin/sh\n[ \"$2\" = list ] || echo \"$@\" >> {called}\necho https://github.com/o/r/pull/7\n")
     fake.chmod(0o755)
     monkeypatch.setenv("PATH", f"{fake.parent}:{os.environ['PATH']}")
     config.set_local(lead.repo_root, "checks", ["validate"])

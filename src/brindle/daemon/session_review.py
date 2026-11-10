@@ -37,7 +37,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from brindle import agents, autopilot, bus, git, knowledge, pipeline, session_sync, spawn, tasks, workspaces
+from brindle import agents, autopilot, bus, git, knowledge, pipeline, session_sync, spawn, status_cache, tasks, workspaces
 from brindle.config import load_repo_config
 from brindle.db import DB, Agent, Workspace
 from brindle.service.errors import ServiceError
@@ -174,8 +174,10 @@ def adopt_head_pr(db: DB, root_id: str) -> None:
         return
     try:
         root, ws = session(db, root_id)
-        head = git.out(["rev-parse", "HEAD"], ws.path)
+        head = status_cache.read_head(ws.path)    # a file read: this runs on every goal read
     except (ServiceError, git.GitError, workspaces.WorkspaceError, OSError):
+        return
+    if not head:
         return
     found = open_pr_for_head(head, ws.path)
     if found and found.get("url"):

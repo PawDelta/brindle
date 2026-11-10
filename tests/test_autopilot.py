@@ -1023,7 +1023,7 @@ def test_goal_phase(db, root, monkeypatch, passed, checking, ready, pr, merged, 
     if pr is True:
         db.conn.execute("INSERT INTO session_prs (root_id, branch, url, opened_at, merged_at)"
                         " VALUES ('boss', 'feat', 'https://x/pr/1', 1, ?)", (2 if merged else None,))
-    monkeypatch.setattr(session_review.git, "out", lambda args, path: "head1")
+    monkeypatch.setattr(session_review.status_cache, "read_head", lambda path: "head1")
     monkeypatch.setattr(session_review, "open_pr_for_head",
                         lambda sha, cwd: {"url": "https://x/pr/1"} if pr == "gh" else None)
     monkeypatch.setattr(session_review, "session",
