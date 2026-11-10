@@ -20,7 +20,8 @@ def _open_readiness_prs(db, count):
                         (key, key, f"https://github.com/o/r/pull/{n}"))
 
 
-def _readiness_reuses_unchanged_sessions(db, tmp_path, monkeypatch, gitlink):
+def _readiness_reuses_unchanged_sessions(db, tmp_path, monkeypatch, gitlink, outcome="none"):
+    import time
     from types import SimpleNamespace
     from brindle import git, spawn
     from brindle.daemon import routes_actions, session_review as review
@@ -60,12 +61,45 @@ def _readiness_reuses_unchanged_sessions(db, tmp_path, monkeypatch, gitlink):
     watch.sweep(db)
     assert watch.ready == {"s": False}
     tracked.write_text("original")
+    # GitHub's look is held: first pending, then failed (unknown, not "none"), and only then "none open".
+    monkeypatch.setattr(review._pr_pool, "submit", lambda *a: SimpleNamespace(done=lambda: False))
+    review._head_cache.clear()
+    key = ("a" * 40, str(tmp_path))
     assert watch.sweep(db) == ["s"]
+    assert bus.tail(db, kinds=("session.pr_ready",)) == []     # not announced on a guess
+    review._head_cache[key] = (time.monotonic(), None)
+    watch.sweep(db)
+    assert bus.tail(db, kinds=("session.pr_ready",)) == []
+    if outcome == "open":
+        # The lookup finishes between the helper starting it and reading the answer: a supervisor's PR is there.
+        def finishes_meanwhile(sha, cwd, root_id=None):
+            review._head_cache[key] = (time.monotonic(), {"url": "https://github.com/o/r/pull/8", "number": 8})
+        monkeypatch.setattr(review, "open_pr_for_head", finishes_meanwhile)
+    else:
+        review._head_cache[key] = (time.monotonic(), {})
+    watch.sweep(db)
+    said = [e["agent_id"] for e in bus.tail(db, kinds=("session.pr_ready",))]
+    assert said == ([] if outcome == "open" else ["s"])   # said once the look answered "none", never for an open PR
     reads.clear()
     monkeypatch.setattr(spawn, "room", lambda: 0)
     monkeypatch.setattr(review, "_merge_polled", 0)
     watch.sweep(db)
     assert reads == [] and watch.ready == {"s": True} and review._merge_polled == 0
+
+
+@pytest.mark.parametrize("recorded, expected", [(False, None), (True, True)])
+def test_missing_gh_is_not_confirmed_absence(db, monkeypatch, recorded, expected):
+    from types import SimpleNamespace
+    from brindle import status_cache, workspaces
+    from brindle.daemon import session_review as review
+    monkeypatch.setattr(review, "session", lambda db, root: (None, SimpleNamespace(path="/p")))
+    monkeypatch.setattr(status_cache, "read_head", lambda path: "h")
+    monkeypatch.setattr(workspaces.shutil, "which", lambda *a: None)
+    monkeypatch.setattr(review._pr_pool, "submit", lambda fn, *a: fn(*a) or SimpleNamespace(done=lambda: True))
+    review._head_cache.clear()
+    if recorded:
+        db.conn.execute("INSERT INTO session_prs (root_id, branch, url, opened_at) VALUES ('s', 'b', 'https://x/pull/1', 0)")
+    assert review._pr_open_state(db, "s") is expected    # not "none open": nothing was asked of GitHub
 
 
 def _readiness_slow_gh_is_parallel_and_bounded(db, monkeypatch):
@@ -238,8 +272,10 @@ def _status_fingerprint(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("scenario, params", [
-    pytest.param(_readiness_reuses_unchanged_sessions, {"gitlink": False}, id="readiness-reuses",
+    pytest.param(_readiness_reuses_unchanged_sessions, {"gitlink": False, "outcome": "none"}, id="readiness-reuses",
                  marks=pytest.mark.variant("an unchanged tracked file is not re-read: a sweep runs no git at all")),
+    pytest.param(_readiness_reuses_unchanged_sessions, {"gitlink": False, "outcome": "open"}, id="readiness-pr-open",
+                 marks=pytest.mark.variant("a lookup completing mid-check with a supervisor's PR must not announce the PR as ready")),
     pytest.param(_readiness_slow_gh_is_parallel_and_bounded, {}, id="readiness-slow-gh"),
     pytest.param(_readiness_deferred_prs_get_a_turn, {"queued": "expired"}, id="readiness-deferred-expired",
                  marks=pytest.mark.variant("a queued check starts after deadline expiry before the sweep can cancel it")),

@@ -1744,6 +1744,7 @@ def test_session_review_readiness_says_what_is_missing(db, lead, monkeypatch):
     db.update_agent("wf", merge_failed="conflict in a.py")     # as the pipeline records it
     real_head = gates.head
     monkeypatch.setattr(gates, "head", lambda ws: head if ws.id == "proj/w-f" else real_head(ws))
+    monkeypatch.setattr(session_review, "_pr_open_state", lambda *a: False)    # readiness is under test, not GitHub
     assert missing() == 5 and _send("GET", "/v1/sessions/lead/pr/draft")[0] == 409
     assert watch.sweep(db) == []
     db.set_merged("proj/w-f", head)
@@ -1930,7 +1931,8 @@ def test_pr_waits_for_approval(db, lead, tmp_path, monkeypatch, passed):
     sess, called, runs, told = Path(lead.path), tmp_path / "gh-called", [], []
     fake = tmp_path / "bin" / "gh"
     fake.parent.mkdir()
-    fake.write_text(f"#!/bin/sh\necho \"$@\" >> {called}\necho https://github.com/o/r/pull/7\n")
+    # `pr list` is the inbox's background look for a PR already open on HEAD: not an opening.
+    fake.write_text(f"#!/bin/sh\n[ \"$2\" = list ] || echo \"$@\" >> {called}\necho https://github.com/o/r/pull/7\n")
     fake.chmod(0o755)
     monkeypatch.setenv("PATH", f"{fake.parent}:{os.environ['PATH']}")
     config.set_local(lead.repo_root, "checks", ["validate"])
@@ -1963,7 +1965,8 @@ def test_pr_waits_for_approval(db, lead, tmp_path, monkeypatch, passed):
     config.set_local(lead.repo_root, "checks", ["validate", "lint"])
     assert _send("POST", "/v1/sessions/lead/pr", {"title": "Ship it"})[0] == 202
     # The sha brindle checked; the Inbox item goes.
-    assert (remote(), runs, called.read_text().count("pr create"), asked()) == (head, ["validate", "lint"], 1, [])
+    assert (remote(), runs, called.read_text().count("pr create"), asked()) == (head, ["validate", "lint"], 1,
+                                                                                  [("pr_opened", "PR opened")])
     newer = _commit(sess, "a.py", "b\n")
     watch.sweep(db)
     _, ready = _send("GET", "/v1/sessions/lead/pr/readiness")
@@ -1971,6 +1974,10 @@ def test_pr_waits_for_approval(db, lead, tmp_path, monkeypatch, passed):
     assert _send("POST", "/v1/sessions/lead/pr/push")[0] == 202
     _, ready = _send("GET", "/v1/sessions/lead/pr/readiness")
     assert (remote(), ready["pr"]["unpushed"], runs) == (newer, 0, ["validate", "lint", "validate", "lint"])
+    # A PR gh opened from another branch name is adopted, but a Push to the session branch would not reach it.
+    db.conn.execute("INSERT INTO session_pr_heads (root_id, branch, head_ref) SELECT root_id, branch, 'stress/other' FROM session_prs")
+    code, refused = _send("POST", "/v1/sessions/lead/pr/push")
+    assert code == 409 and "stress/other" in json.dumps(refused)
 
 
 def _provider_setup(tmp_path, monkeypatch, onboarded: bool = True) -> tuple:

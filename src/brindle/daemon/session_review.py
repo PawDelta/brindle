@@ -37,7 +37,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from brindle import agents, autopilot, bus, git, knowledge, pipeline, session_sync, spawn, tasks, workspaces
+from brindle import agents, autopilot, bus, git, knowledge, pipeline, session_sync, spawn, status_cache, tasks, workspaces
 from brindle.config import load_repo_config
 from brindle.db import DB, Agent, Workspace
 from brindle.service.errors import ServiceError
@@ -165,6 +165,33 @@ def has_pr_target(ws: Workspace) -> bool:
         git.ahead_behind(ws.path, git.base_ref(ws.path, ws.base_branch))[1])
 
 
+def adopt_head_pr(db: DB, root_id: str) -> None:
+    """Record, as brindle's own Open PR does (``session_prs``), the open PR a
+    supervisor made with ``gh`` when it holds the session's HEAD, so the
+    sidebar's PR line, its checks and its merge are followed too. Never waits
+    on ``gh`` (``open_pr_for_head``); a session that has a PR already keeps it."""
+    if db.conn.execute("SELECT 1 FROM session_prs WHERE root_id = ? AND url IS NOT NULL", (root_id,)).fetchone():
+        return
+    try:
+        root, ws = session(db, root_id)
+        head = status_cache.read_head(ws.path)    # a file read: this runs on every goal read
+    except (ServiceError, git.GitError, workspaces.WorkspaceError, OSError):
+        return
+    if not head:
+        return
+    found = open_pr_for_head(head, ws.path, root_id)
+    if found and found.get("url"):
+        # head_ref: where the PR really lives, when that isn't the session's branch: a Push must not go to ws.branch.
+        db.conn.execute("INSERT INTO session_prs (root_id, branch, url, pushed_sha, opened_at) VALUES (?, ?, ?, ?, ?)"
+                        " ON CONFLICT (root_id, branch) DO UPDATE SET url = excluded.url,"
+                        " pushed_sha = excluded.pushed_sha, opened_at = excluded.opened_at",
+                        (root_id, ws.branch, found["url"], head, time.time()))
+        db.conn.execute("DELETE FROM session_pr_heads WHERE root_id = ? AND branch = ?", (root_id, ws.branch))
+        # Every adopted PR is managed outside brindle (its head may be another branch or a fork): Push is refused.
+        db.conn.execute("INSERT INTO session_pr_heads (root_id, branch, head_ref) VALUES (?, ?, ?)",
+                        (root_id, ws.branch, found.get("headRefName") or ws.branch))
+
+
 def goal_phase(db: DB, root_id: str) -> tuple[str, str | None]:
     """The session goal's one path: (``in_progress`` | ``in_review`` |
     ``ready_for_pr`` | ``pr_open`` | ``done``, the PR's URL or None).
@@ -176,6 +203,7 @@ def goal_phase(db: DB, root_id: str) -> tuple[str, str | None]:
     done on that decision alone; any other reached goal awaits its PR, however
     temporarily it isn't ready (dirty checkout, workers running)."""
     ap, ms = db.get_autopilot(root_id), db.milestones(root_id)
+    adopt_head_pr(db, root_id)
     pr = db.conn.execute("SELECT url, merged_at FROM session_prs WHERE root_id = ? AND url IS NOT NULL"
                          " ORDER BY opened_at DESC LIMIT 1", (root_id,)).fetchone()
     # Brindle's own decision that the goal is reached (the audit approved it, or
@@ -288,6 +316,86 @@ def session_pr_state(db: DB, root_id: str, url: str | None) -> dict[str, Any] | 
     return cached[1] if cached else pr_state_of(url, None)
 
 
+_head_cache: dict[tuple[str, str], tuple[float, dict[str, Any] | None]] = {}
+_head_flights: set[tuple[str, str]] = set()
+_head_roots: dict[tuple[str, str], str] = {}     # the session each lookup is for
+_head_changed: set[tuple[str, str]] = set()      # lookups whose answer changed, until refresh_pr_states announces
+
+
+def _read_head_pr(key: tuple[str, str]) -> None:
+    sha, cwd = key
+    try:
+        with spawn.deadline(workspaces.PR_CHECKS_SECONDS):
+            found = workspaces.open_pull_request_for_commit(sha, cwd)
+    except Exception:  # noqa: BLE001 - an unreadable answer is just no PR
+        log.exception("brindle: couldn't look up the PR holding a session's HEAD")
+        found = None
+    with _pr_lock:
+        before = _head_cache[key][1] if key in _head_cache else None
+        _head_cache[key] = (time.monotonic(), found)
+        _head_flights.discard(key)
+        if (found or {}).get("url") != (before or {}).get("url") and key in _head_roots:
+            _head_changed.add(key)    # refresh_pr_states tells the Inbox
+
+
+def note_head_pr(sha: str, cwd: str, pr: dict[str, Any]) -> None:
+    """A PR brindle itself just opened on ``sha``: known at once, so the Inbox
+    doesn't wait on (or trust an older "none" from) a read of GitHub."""
+    with _pr_lock:
+        _head_cache[(sha, cwd)] = (time.monotonic(), pr)
+
+
+def open_pr_for_head(sha: str, cwd: str, root_id: str | None = None) -> dict[str, Any] | None:
+    """The open PR (``{number, title, url, headRefName}``) containing ``sha``,
+    whatever branch it was pushed under, as last read: never waits on ``gh``.
+    A read is started in the background when the answer is missing or older
+    than ``PR_STATE_TTL``; until the first lands: None. ``root_id``: the
+    session to announce a change to (``refresh_pr_states``)."""
+    key = (sha, cwd)
+    with _pr_lock:
+        if root_id:
+            _head_roots[key] = root_id
+        cached = _head_cache.get(key)
+        if key not in _head_flights and (cached is None or time.monotonic() - cached[0] >= PR_STATE_TTL):
+            flight = _pr_pool.submit(_read_head_pr, key)
+            if not flight.done():
+                _head_flights.add(key)
+    return (cached[1] or None) if cached else None
+
+
+def head_pr_known_none(sha: str, cwd: str) -> bool:
+    """GitHub answered that no PR is open on ``sha`` (not merely: no answer yet)."""
+    with _pr_lock:
+        cached = _head_cache.get((sha, cwd))
+    return cached is not None and cached[1] == {}
+
+
+def _pr_open_state(db: DB, root_id: str) -> bool | None:
+    """Whether the session has an open PR: True (GitHub found one on its HEAD, or brindle recorded
+    one and GitHub hasn't said otherwise), False (GitHub says none is open), or None while that
+    isn't known (the first look is on its way, or GitHub couldn't be asked and nothing recorded says).
+    One snapshot of the lookup decides, so a read finishing meanwhile can't split the answer."""
+    try:
+        _, ws = session(db, root_id)
+        head = status_cache.read_head(ws.path)
+    except (ServiceError, git.GitError, workspaces.WorkspaceError, OSError):
+        return False
+    if not head:
+        return False
+    open_pr_for_head(head, ws.path, root_id)     # starts a read when none is fresh
+    with _pr_lock:
+        cached = _head_cache.get((head, ws.path))
+    if cached is None:
+        return None
+    if cached[1]:
+        return True
+    if cached[1] == {}:
+        return False
+    recorded = db.conn.execute("SELECT 1 FROM session_prs WHERE root_id = ? AND url IS NOT NULL AND merged_at IS NULL",
+                               (root_id,)).fetchone()
+    return True if recorded else None
+
+
 def refresh_pr_states(db: DB) -> None:
     """Daemon thread, every sweep: keep each open session PR's checks fresh
     and announce (``session.pr_checks``, which the app's goal reloads on) the
@@ -298,6 +406,11 @@ def refresh_pr_states(db: DB) -> None:
         ws = db.get_workspace(root.workspace_id) if root else None
         if ws is not None:
             _ask_pr_state(row["url"], ws.repo_root)
+    with _pr_lock:
+        found = {_head_roots[k] for k in _head_changed if k in _head_roots}
+        _head_changed.clear()
+    for root_id in found:
+        bus.publish_agent(db, "session.pr_opened", root_id)    # the Inbox and goal read again
     with _pr_lock:
         changed = set(_pr_changed)
         _pr_changed.clear()
@@ -938,6 +1051,7 @@ class ReadinessWatch:
         self.ready: dict[str, bool] | None = None
         self.fingerprints: dict[str, tuple] = {}
         self._tracked: dict[str, tuple[tuple[str, int], list[str] | None]] = {}
+        self.announce: set[str] = set()    # became ready while GitHub's first look at its PR was pending
 
     def _working_tree(self, ws: Workspace, fp: _Fingerprint) -> tuple | None:
         """Stat only tracked paths, including files below nested directories.
@@ -1034,8 +1148,14 @@ class ReadinessWatch:
         if was is None:
             return []
         flipped = [r for r, ok in now.items() if ok and not was.get(r)]
-        for r in flipped:
-            bus.publish_agent(db, "session.pr_ready", r)
+        self.announce = {r for r in self.announce | set(flipped) if now.get(r)}
+        for r in sorted(self.announce):
+            opened = _pr_open_state(db, r)
+            if opened is None:
+                continue        # asked again next sweep: "open the PR" would be stale advice if one exists
+            self.announce.discard(r)
+            if not opened:
+                bus.publish_agent(db, "session.pr_ready", r)
         from brindle.daemon import routes_actions
 
         for r, ok in now.items():

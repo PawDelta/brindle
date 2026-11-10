@@ -527,6 +527,7 @@ export interface InboxItemDTO {
   request_id?: string | null;
   root_id?: string | null;
   section?: string | null;
+  url?: string | null;
   visual_id?: string | null;
   workspace_id?: string | null;
 }
