@@ -14,6 +14,8 @@ from brindle import agents, mcp_server, plans, tasks, visual_offers
 from brindle.daemon.app import build_app
 from brindle.db import DB, Agent, Workspace
 from brindle.service.errors import ServiceError
+from pro_fixtures import backend, fixed_identity, pro_env, signing_key  # noqa: F401 - fixtures
+from test_pro_remote_learning import login_as
 
 TOKEN = "t" * 43
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
@@ -148,6 +150,38 @@ def test_plan_board_links_dispatch_and_reads_recorded_checks(db, session, monkey
         ("merged", "passing"), ("working", "passing")]
     db.delete_workspace(ws.id)
     assert (board()[0]["state"], board()[0]["test_state"]) == ("merged", "passing")
+
+
+def test_approved_plan_goes_to_the_library(db, session, tmp_path, monkeypatch, backend, fixed_identity):
+    """The approved plan is sent to the library, and a failed upload never undoes the approval."""
+    from brindle.pro import analysis_docs as ad
+    from brindle.pro import auth, credentials
+
+    boss, _ = session
+    backend.docs, backend.switches = [], {"store": "on", "assist": "on"}
+    backend.routes["POST /analysis-docs"] = lambda form, headers: (
+        (backend.docs.append(dict(form)), (500, {"id": "d1"}))[1])
+    backend.routes["GET /me/analysis-docs/settings"] = lambda f, h: (200, {"switches": backend.switches})
+    store = credentials.FileStore(tmp_path / "pro")
+    login_as(backend, store, features=("analysis_docs",))
+    up = ad.AnalysisDocs(str(tmp_path), client=auth.Client(None, backend), store=store,
+                         key_store=credentials.FileStore(tmp_path / "pro", account="learning-keys"),
+                         identity=lambda: "a" * 40, notice=lambda t: None, start_thread=False)
+    monkeypatch.setattr(ad, "_instances", {str(tmp_path): up})
+
+    visual_offers.person_spoke(db, boss, "Make a planning doc.")
+    split = [{"id": "w1", "title": "Schema", "files": ["src/brindle/db.py"], "test": "tests/test_x.py::test_a"},
+             {"id": "w2", "title": "UI", "after": ["w1"]}]
+    pid = mcp_server.propose_plan(PLAN, DECISIONS, split).split()[2]
+    out = plans.decide(db, pid, 1, True, picks={"d1": "repo"},
+                       comments=[{"section": "s1", "text": "Keep it small."}], person=True)
+    assert up.flush()
+    [sent] = backend.docs                         # exactly one attempt, whatever the answer
+    assert plans.get(db, pid)["state"] == "approved" and out["state"] == "approved"
+    assert sent["source"] == {"kind": "goal", "ref": pid, "session": "boss"}
+    md = sent["files"][0]["md"]
+    assert PLAN in md and "A file in each repo" in md and "Keep it small." in md
+    assert "after: w1" in md and "src/brindle/db.py" in md and "tests/test_x.py::test_a" in md
 
 
 def test_assign_queues_behind_open_plan_until_the_person_approves(db, session, monkeypatch):
