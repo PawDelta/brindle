@@ -76,6 +76,10 @@ def _readiness_slow_gh_is_parallel_and_bounded(db, monkeypatch):
     _open_readiness_prs(db, 2)
     release, both, finished = threading.Event(), threading.Event(), threading.Event()
     started, lock = [], threading.Lock()
+    # Only the merged-PR polling is under test: the checks refresh has its own pool.
+    monkeypatch.setattr(review, "refresh_pr_states", lambda db: None)
+    # Wait for both reads to start rather than for a 50ms deadline a loaded host can miss.
+    monkeypatch.setattr(review, "wait", lambda pending, **_: both.wait(1))
     def slow(*args, **kwargs):
         assert spawn.current() is not None
         with lock:
@@ -107,6 +111,19 @@ def _readiness_slow_gh_is_parallel_and_bounded(db, monkeypatch):
     finally:
         release.set()
         worker.join(1)
+
+
+def test_slow_gh_read_has_its_slot(monkeypatch):
+    """The checks refresh reads on a pool thread, which copies no context: the
+    read still runs under a deadline (a slot), never with none."""
+    from brindle import spawn, workspaces
+    from brindle.daemon import session_review as review
+    url = "https://github.com/o/r/pull/9"
+    seen = []
+    monkeypatch.setattr(review, "_pr_cache", {})
+    monkeypatch.setattr(workspaces, "pull_request_checks", lambda *a: seen.append(spawn.current()))
+    review._pr_pool.submit(review._read_pr_state, url, "/repo").result()
+    assert seen and seen[0] is not None
 
 
 def _readiness_deferred_prs_get_a_turn(db, monkeypatch, queued):
