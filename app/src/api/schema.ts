@@ -55,6 +55,7 @@ export interface ApiSchema {
   PlanDecisionDTO: PlanDecisionDTO;
   PlanOfferDTO: PlanOfferDTO;
   PlanOfferMilestoneDTO: PlanOfferMilestoneDTO;
+  PlanOptionDTO: PlanOptionDTO;
   PlanSectionDTO: PlanSectionDTO;
   PlanVerdictDTO: PlanVerdictDTO;
   PlanWorkerDTO: PlanWorkerDTO;
@@ -834,6 +835,7 @@ export interface PlanCommentDTO {
  * via the `definition` "PlanDTO".
  */
 export interface PlanDTO {
+  ask?: string | null;
   created_at: number;
   decisions: PlanDecisionDTO[];
   id: string;
@@ -858,17 +860,23 @@ export interface PlanDecisionDTO {
   challenge?: string | null;
   id: string;
   mine?: string | null;
-  options: VisualOptionDTO[];
+  options: PlanOptionDTO[];
   title: string;
 }
 /**
+ * One alternative of a plan's decision, as its card shows it: trade-offs
+ * as + (``pros``) and − (``cons``) lines, and the files it ``touches``.
+ *
  * This interface was referenced by `ApiSchema`'s JSON-Schema
- * via the `definition` "VisualOptionDTO".
+ * via the `definition` "PlanOptionDTO".
  */
-export interface VisualOptionDTO {
+export interface PlanOptionDTO {
+  cons?: string[];
   detail?: string | null;
   id: string;
   label: string;
+  pros?: string[];
+  touches?: string[];
 }
 /**
  * One ``##`` section of a plan's markdown: what a comment anchors to.
@@ -882,12 +890,17 @@ export interface PlanSectionDTO {
   title: string;
 }
 /**
+ * One worker of the proposed split: the files it expects to change and
+ * the one test that proves its task done.
+ *
  * This interface was referenced by `ApiSchema`'s JSON-Schema
  * via the `definition` "PlanWorkerDTO".
  */
 export interface PlanWorkerDTO {
   after?: string[];
+  files?: string[];
   id: string;
+  test?: string | null;
   title: string;
 }
 /**
@@ -1198,6 +1211,15 @@ export interface VisualDTO {
   session: string;
   title: string;
   unread: boolean;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "VisualOptionDTO".
+ */
+export interface VisualOptionDTO {
+  detail?: string | null;
+  id: string;
+  label: string;
 }
 /**
  * This interface was referenced by `ApiSchema`'s JSON-Schema

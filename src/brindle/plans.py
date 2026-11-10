@@ -39,6 +39,16 @@ MAX_MARKDOWN = 256 * 1024
 MAX_DECISIONS = 12
 MAX_WORKERS = 20
 MAX_COMMENTS = 50
+MAX_LINES = 8          # an option's + or − lines, each
+MAX_FILES = 40         # files an option touches, or a worker changes
+MAX_PATH = 300
+# Comment anchors besides the ## sections (s1, s2, ...): the restated ask,
+# the lede, the split, and each decision (decision:<id>), so the person can
+# say something on every step of the reader.
+ASK = "ask"
+LEDE = "lede"
+SPLIT = "split"
+DECISION = "decision:"
 HOLDING = ("open", "redirected")
 # The offer to plan a goal first (goal_doc_requests.offer): plan:open:<id>
 # until answered, then plan:accepted (waiting for the plan), plan:planned (a
@@ -109,6 +119,26 @@ def _queue_message(c, root_id: str, text: str) -> int:
                          (root_id, redact.mask(text), time.time())).lastrowid)
 
 
+def _strings(raw: Any, name: str, most: int, limit: int) -> list[str]:
+    """An optional list of short strings (an option's trade-offs, a worker's files): blanks dropped."""
+    if raw is None:
+        return []
+    if not isinstance(raw, list) or len(raw) > most:
+        raise ServiceError("invalid", f"{name} must be a list of at most {most}", 400)
+    return [t for t in (visuals._text(s, name, limit) for s in raw) if t]
+
+
+def _option_extras(raw: list, options: list[dict]) -> list[dict]:
+    """A decision's options with what the reader shows on their cards: the
+    trade-offs (``pros`` as + lines, ``cons`` as − lines) and the files the
+    option ``touches``. All optional: an option without them is just its label."""
+    for o, r in zip(options, raw, strict=True):
+        o["pros"] = _strings(r.get("pros"), "an option's pros", MAX_LINES, visuals.MAX_LABEL)
+        o["cons"] = _strings(r.get("cons"), "an option's cons", MAX_LINES, visuals.MAX_LABEL)
+        o["touches"] = _strings(r.get("touches"), "an option's touches", MAX_FILES, MAX_PATH)
+    return options
+
+
 def _decisions(raw: Any) -> list[dict]:
     if raw is None:
         return []
@@ -129,7 +159,7 @@ def _decisions(raw: Any) -> list[dict]:
         if mine is not None and mine not in {o["id"] for o in options}:
             raise ServiceError("invalid", f"decision {did}'s pick isn't one of its options", 400)
         out.append({"id": did, "title": visuals._text(d.get("title"), "a decision's title", visuals.MAX_QUESTION, True),
-                    "options": options, "mine": mine,
+                    "options": _option_extras(d["options"], options), "mine": mine,
                     "challenge": visuals._text(d.get("challenge"), "a decision's challenge", visuals.MAX_DETAIL)})
     return out
 
@@ -142,7 +172,7 @@ def _split(raw: Any) -> list[dict]:
     out, seen = [], set()
     for w in raw:
         if not isinstance(w, dict):
-            raise ServiceError("invalid", "each worker in the split is {id, title, after?}", 400)
+            raise ServiceError("invalid", "each worker in the split is {id, title, after?, files?, test?}", 400)
         wid = w.get("id")
         if not isinstance(wid, str) or not visuals.OPTION_ID.fullmatch(wid) or wid in seen:
             raise ServiceError("invalid", "each worker in the split needs its own id", 400)
@@ -152,7 +182,9 @@ def _split(raw: Any) -> list[dict]:
             raise ServiceError("invalid", f"worker {wid} may only come after workers listed before it", 400)
         seen.add(wid)
         out.append({"id": wid, "title": visuals._text(w.get("title"), "a worker's title", visuals.MAX_LABEL, True),
-                    "after": list(after)})
+                    "after": list(after),
+                    "files": _strings(w.get("files"), "a worker's files", MAX_FILES, MAX_PATH),
+                    "test": visuals._text(w.get("test"), "a worker's test", MAX_PATH)})
     return out
 
 
@@ -219,7 +251,7 @@ def to_dto(db: DB, p: dict) -> dict:
 
     lede, parts = sections(p["markdown"])
     return PlanDTO(id=p["id"], session=p["root_id"], title=p["visual"]["title"], rev=p["rev"],
-                   state=p["state"],
+                   state=p["state"], ask=p.get("ask"),
                    markdown=p["markdown"], lede=lede, sections=parts, decisions=p["decisions"], split=p["split"],
                    verdict=p["decision"], queued=_queued(db, p["root_id"]) if p["state"] in HOLDING else 0,
                    created_at=p["created_at"]).to_json()
@@ -238,10 +270,12 @@ def _page(title: str, markdown: str) -> str:
 
 
 def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, split: Any = None,
-            title: str | None = None, plan_id: str | None = None) -> dict:
+            title: str | None = None, plan_id: str | None = None, ask: Any = None) -> dict:
     """The session's supervisor proposes a plan, or (``plan_id``) a new
     revision of its open or redirected one. Each publication spends the
-    person's request: their ask for a planning doc, or their Redirect."""
+    person's request: their ask for a planning doc, or their Redirect.
+    ``ask``: the person's request restated in the supervisor's words, shown
+    on every step of the reader for them to correct."""
     visuals.require_enabled()
     root, _ws = visuals._session(db, caller)
     if caller.id != root.id:
@@ -252,13 +286,15 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
     if len(markdown.encode("utf-8")) > MAX_MARKDOWN:
         raise ServiceError("too_big", f"a plan may be at most {MAX_MARKDOWN // 1024} KB of markdown", 400)
     decisions, split = _decisions(decisions), _split(split)
+    ask = visuals._text(ask, "ask", visuals.MAX_NOTE)
     title = visuals._text(title, "title", visuals.MAX_TITLE) or _title(markdown) or "Plan"
     visuals._refuse_secrets([
-        ("the plan", markdown), ("the title", title),
+        ("the plan", markdown), ("the title", title), ("the ask", ask),
         *((f"decision {d['id']}", "\n".join([d["title"], d["challenge"] or "",
-                                              *(f"{o['label']}\n{o['detail'] or ''}" for o in d["options"])]))
+                                              *(f"{o['label']}\n{o['detail'] or ''}\n" + "\n".join(
+                                                  o["pros"] + o["cons"] + o["touches"]) for o in d["options"])]))
           for d in decisions),
-        *((f"worker {w['id']}", w["title"]) for w in split)])
+        *((f"worker {w['id']}", "\n".join([w["title"], w["test"] or "", *w["files"]])) for w in split)])
     current_plan = open_plan(db, root.id)
     if plan_id is None and current_plan is not None:
         raise ServiceError("open_plan", f"plan {current_plan['id']} is still open: revise it with plan_id, "
@@ -274,10 +310,10 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
 
     def write(c, vid: str, rev: int) -> None:
         now = time.time()
-        args = (rev, markdown, json.dumps(decisions), json.dumps(split), now)
+        args = (rev, markdown, json.dumps(decisions), json.dumps(split), ask, now)
         if rev == 1:
-            c.execute("INSERT INTO plans (id, root_id, rev, markdown, decisions, split, state, created_at, updated_at)"
-                      " VALUES (?,?,?,?,?,?,'open',?,?)", (vid, root.id, *args[:4], now, now))
+            c.execute("INSERT INTO plans (id, root_id, rev, markdown, decisions, split, ask, state, created_at,"
+                      " updated_at) VALUES (?,?,?,?,?,?,?,'open',?,?)", (vid, root.id, *args[:5], now, now))
             # The plan now holds the session's tasks: the offer to plan first is settled
             # (an open one too: the person asked for a plan in their own words).
             settled.append(c.execute("UPDATE goal_doc_requests SET offer=? WHERE root_id=? AND (offer LIKE ? OR offer=?)",
@@ -285,7 +321,8 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
         else:
             # Only a plan still waiting on the person takes a revision: one
             # approved since the check above stays approved.
-            changed = c.execute("UPDATE plans SET rev=?, markdown=?, decisions=?, split=?, updated_at=?, state='open',"
+            changed = c.execute("UPDATE plans SET rev=?, markdown=?, decisions=?, split=?, ask=?, updated_at=?,"
+                                " state='open',"
                                 " decision=NULL WHERE id=? AND state IN ('open','redirected')", (*args, vid)).rowcount
             if not changed:
                 raise ServiceError("approved", "that plan is approved; propose a new plan instead", 409)
@@ -313,6 +350,22 @@ def _picks(raw: Any, decisions: list[dict]) -> dict[str, str]:
     if not isinstance(raw, dict) or any(k not in by_id or v not in by_id[k] for k, v in raw.items()):
         raise ServiceError("invalid", "a pick names one of this revision's decisions and one of its options", 400)
     return dict(raw)
+
+
+def anchors(p: dict) -> dict[str, str]:
+    """What a comment on revision ``p`` may name, with the title the
+    supervisor reads it under: each ``##`` section and, when the plan has
+    them, the restated ask, the lede, the split and each decision."""
+    lede, parts = sections(p["markdown"])
+    out = {s["id"]: s["title"] for s in parts}
+    if p.get("ask"):
+        out[ASK] = "What I understood (your restated ask)"
+    if lede:
+        out[LEDE] = "The overview"
+    if p["split"]:
+        out[SPLIT] = "The split"
+    out.update({DECISION + d["id"]: f"Decision {d['id']} ({d['title']})" for d in p["decisions"]})
+    return out
 
 
 def _comments(raw: Any, section_ids: set[str]) -> list[dict]:
@@ -378,8 +431,7 @@ def decide(db: DB, plan_id: str, rev: Any, approved: bool, picks: Any = None, co
         raise ServiceError("stale", f"the plan has a newer revision (r{p['rev']}); read that one", 409, rev=p["rev"])
     if p["state"] != "open":
         raise ServiceError("decided", "this revision is already decided", 409)
-    _lede, parts = sections(p["markdown"])
-    titles = {s["id"]: s["title"] for s in parts}
+    titles = anchors(p)
     picks = _picks(picks, p["decisions"])
     comments = _comments(comments, set(titles))
     note = visuals._text(note, "note", visuals.MAX_NOTE)

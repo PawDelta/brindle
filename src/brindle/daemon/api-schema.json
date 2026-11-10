@@ -5508,7 +5508,7 @@
             },
             "options": {
               "items": {
-                "$ref": "#/$defs/VisualOptionDTO"
+                "$ref": "#/$defs/PlanOptionDTO"
               },
               "title": "Options",
               "type": "array"
@@ -5524,6 +5524,61 @@
             "options"
           ],
           "title": "PlanDecisionDTO",
+          "type": "object"
+        },
+        "PlanOptionDTO": {
+          "description": "One alternative of a plan's decision, as its card shows it: trade-offs\nas + (``pros``) and \u2212 (``cons``) lines, and the files it ``touches``.",
+          "properties": {
+            "cons": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Cons",
+              "type": "array"
+            },
+            "detail": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Detail"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "label": {
+              "title": "Label",
+              "type": "string"
+            },
+            "pros": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Pros",
+              "type": "array"
+            },
+            "touches": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Touches",
+              "type": "array"
+            }
+          },
+          "required": [
+            "id",
+            "label"
+          ],
+          "title": "PlanOptionDTO",
           "type": "object"
         },
         "PlanSectionDTO": {
@@ -5602,6 +5657,7 @@
           "type": "object"
         },
         "PlanWorkerDTO": {
+          "description": "One worker of the proposed split: the files it expects to change and\nthe one test that proves its task done.",
           "properties": {
             "after": {
               "default": [],
@@ -5611,9 +5667,29 @@
               "title": "After",
               "type": "array"
             },
+            "files": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Files",
+              "type": "array"
+            },
             "id": {
               "title": "Id",
               "type": "string"
+            },
+            "test": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Test"
             },
             "title": {
               "title": "Title",
@@ -5626,40 +5702,22 @@
           ],
           "title": "PlanWorkerDTO",
           "type": "object"
-        },
-        "VisualOptionDTO": {
-          "properties": {
-            "detail": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "title": "Detail"
-            },
-            "id": {
-              "title": "Id",
-              "type": "string"
-            },
-            "label": {
-              "title": "Label",
-              "type": "string"
-            }
-          },
-          "required": [
-            "id",
-            "label"
-          ],
-          "title": "VisualOptionDTO",
-          "type": "object"
         }
       },
       "description": "A planning doc (brindle.plans): markdown brindle renders itself, split\ninto its ``##`` sections. ``state``: open (the person hasn't decided),\nredirected (their comments went back; a new revision is coming) or\napproved. While open or redirected, the session's assign calls queue.",
       "properties": {
+        "ask": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ask"
+        },
         "created_at": {
           "title": "Created At",
           "type": "number"
@@ -5753,8 +5811,17 @@
     },
     "PlanDecisionDTO": {
       "$defs": {
-        "VisualOptionDTO": {
+        "PlanOptionDTO": {
+          "description": "One alternative of a plan's decision, as its card shows it: trade-offs\nas + (``pros``) and \u2212 (``cons``) lines, and the files it ``touches``.",
           "properties": {
+            "cons": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Cons",
+              "type": "array"
+            },
             "detail": {
               "anyOf": [
                 {
@@ -5774,13 +5841,29 @@
             "label": {
               "title": "Label",
               "type": "string"
+            },
+            "pros": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Pros",
+              "type": "array"
+            },
+            "touches": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Touches",
+              "type": "array"
             }
           },
           "required": [
             "id",
             "label"
           ],
-          "title": "VisualOptionDTO",
+          "title": "PlanOptionDTO",
           "type": "object"
         }
       },
@@ -5816,7 +5899,7 @@
         },
         "options": {
           "items": {
-            "$ref": "#/$defs/VisualOptionDTO"
+            "$ref": "#/$defs/PlanOptionDTO"
           },
           "title": "Options",
           "type": "array"
@@ -5929,6 +6012,61 @@
       "title": "PlanOfferMilestoneDTO",
       "type": "object"
     },
+    "PlanOptionDTO": {
+      "description": "One alternative of a plan's decision, as its card shows it: trade-offs\nas + (``pros``) and \u2212 (``cons``) lines, and the files it ``touches``.",
+      "properties": {
+        "cons": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Cons",
+          "type": "array"
+        },
+        "detail": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Detail"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "label": {
+          "title": "Label",
+          "type": "string"
+        },
+        "pros": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Pros",
+          "type": "array"
+        },
+        "touches": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Touches",
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "label"
+      ],
+      "title": "PlanOptionDTO",
+      "type": "object"
+    },
     "PlanSectionDTO": {
       "description": "One ``##`` section of a plan's markdown: what a comment anchors to.",
       "properties": {
@@ -6025,6 +6163,7 @@
       "type": "object"
     },
     "PlanWorkerDTO": {
+      "description": "One worker of the proposed split: the files it expects to change and\nthe one test that proves its task done.",
       "properties": {
         "after": {
           "default": [],
@@ -6034,9 +6173,29 @@
           "title": "After",
           "type": "array"
         },
+        "files": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Files",
+          "type": "array"
+        },
         "id": {
           "title": "Id",
           "type": "string"
+        },
+        "test": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Test"
         },
         "title": {
           "title": "Title",

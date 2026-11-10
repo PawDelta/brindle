@@ -54,7 +54,13 @@ def messages(db) -> list[str]:
 def test_assign_queues_behind_open_plan_until_the_person_approves(db, session, monkeypatch):
     boss, started = session
     visual_offers.person_spoke(db, boss, "Make a planning doc.")
-    out = mcp_server.propose_plan(PLAN, DECISIONS, [{"id": "w1", "title": "Schema"}])
+    # The reader's optional data: the restated ask, each option's trade-offs and files, each worker's files and test.
+    cards = [{**DECISIONS[0], "options": [{**DECISIONS[0]["options"][0], "pros": ["One place", " "],
+                                           "cons": ["Admins only"], "touches": ["src/brindle/pro/policy.py"]},
+                                          DECISIONS[0]["options"][1]]}]
+    out = mcp_server.propose_plan(PLAN, cards, [{"id": "w1", "title": "Schema", "files": ["src/brindle/db.py"],
+                                                 "test": "tests/test_presets.py::test_schema"}],
+                                  ask="Admins set presets once for their whole org.")
     pid = out.split()[2]
     assert plans.sections(PLAN)[1][0]["title"] == "Goal" and len(plans.sections(PLAN)[1]) == 2
 
@@ -65,12 +71,24 @@ def test_assign_queues_behind_open_plan_until_the_person_approves(db, session, m
     with TestClient(build_app(TOKEN), headers=AUTH) as client:
         got = client.get(f"/v1/plans/{pid}").json()
         assert got["queued"] == 1 and [s["id"] for s in got["sections"]] == ["s1", "s2"]
-        # Redirect: the person's pick and comment reach the supervisor; nothing starts.
+        assert got["ask"] == "Admins set presets once for their whole org."
+        org, repo = got["decisions"][0]["options"]
+        assert (org["pros"], org["cons"], org["touches"]) == (["One place"], ["Admins only"],
+                                                               ["src/brindle/pro/policy.py"])
+        assert (repo["pros"], repo["touches"]) == ([], [])
+        assert (got["split"][0]["files"], got["split"][0]["test"]) == (["src/brindle/db.py"],
+                                                                       "tests/test_presets.py::test_schema")
+        # Redirect: the person's pick and comments (on a section, the ask, a decision) reach the supervisor.
         r = client.post(f"/v1/plans/{pid}/decide", json={
             "rev": 1, "approved": False, "picks": {"d1": "repo"},
-            "comments": [{"section": "s1", "text": "Repo file first; org policy later."}]})
+            "comments": [{"section": "s1", "text": "Repo file first; org policy later."},
+                         {"section": "ask", "text": "Teams, not the whole org."},
+                         {"section": "decision:d1", "text": "Policy needs Pro."}]})
         assert r.json()["state"] == "redirected", r.json()
-        assert "chose repo" in messages(db)[-1] and "Repo file first" in messages(db)[-1]
+        said = messages(db)[-1]
+        assert "chose repo" in said and "Repo file first" in said
+        assert 'On "What I understood (your restated ask)": Teams' in said
+        assert 'On "Decision d1 (Where presets live)": Policy needs Pro.' in said
         assert started == [] and tasks.sweep(db) == 0
 
         # The redirect allows exactly the one revision it asked for.
