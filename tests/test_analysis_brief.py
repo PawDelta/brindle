@@ -67,6 +67,7 @@ def _plan(count, repo=None):
 
 @pytest.fixture
 def goal_env(db, boss, monkeypatch):
+    monkeypatch.setattr("brindle.daemon.events.connected", 1)
     monkeypatch.setattr(autopilot, "_commit", lambda ws, tracked_only=False: "abc123")
     monkeypatch.setattr(agents, "flush", lambda db_, agent_id: None)   # no terminal to push the answer to
     db.add_autopilot("boss")

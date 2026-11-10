@@ -103,6 +103,7 @@ def test_plan_offer_explains_current_paused_session(db, tmp_path, monkeypatch,
                                                    count, repos, workers, detail, reasons):
     from brindle import autopilot
 
+    monkeypatch.setattr("brindle.daemon.events.connected", 1)
     repo = str(tmp_path)
     db.add_workspace(Workspace("ws", repo, "project", "root", "main", None, repo, None, "", 0))
     db.add_agent(Agent("r1", "ws", "supervisor", "claude", None, "interactive", "paused", "", None,

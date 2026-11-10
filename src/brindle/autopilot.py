@@ -766,17 +766,18 @@ def consider_plan_offer(db: DB, root_id: str) -> None:
     by milestones, repos (an omitted repo is the root checkout) or workers, or
     design-heavy (brindle.pro.analysis_brief.offer_reasons). Never re-offers a
     goal already offered or answered, and never while a plan is already open
-    or plans can't be shown (visuals off). While the offer is open the
-    session's tasks queue behind it (brindle.plans.holding); the person
+    or plans can't be answered (visuals off or no app connected). While the
+    offer is open the session's tasks queue behind it (brindle.plans.holding); the person
     answers it from the Inbox (brindle.plans.answer_offer). Run when the goal
     changes and when a worker is assigned; never raises."""
     try:
         from brindle import plans, visuals
+        from brindle.daemon import events
         from brindle.pro import analysis_brief
 
         ap = db.get_autopilot(root_id)
         if ap is None or not ap.goal or ap.plan_offer is not None or not visuals.enabled() \
-                or plans.open_plan(db, root_id) is not None:
+                or not events.connected or plans.open_plan(db, root_id) is not None:
             return
         milestones, repos, workers, text = plan_offer_scope(db, root_id, ap)
         if analysis_brief.deserves_offer(len(milestones), repos, text, workers) \

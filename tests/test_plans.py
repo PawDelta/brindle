@@ -11,6 +11,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from starlette.testclient import TestClient
 
 from brindle import agents, mcp_server, plans, tasks, visual_offers
+from brindle.daemon import events
 from brindle.daemon.app import build_app
 from brindle.db import DB, Agent, Workspace
 from brindle.service.errors import ServiceError
@@ -30,6 +31,7 @@ def session(db, tmp_path, monkeypatch):
     real queue and start (tasks.*), and agents.delegate makes the worker row."""
     monkeypatch.setenv("BRINDLE_VISUALS", "1")
     monkeypatch.setenv("BRINDLE_AGENT_ID", "boss")
+    monkeypatch.setattr(events, "connected", 1)
     monkeypatch.setattr(agents, "is_alive", lambda agent, panes=None: True)
     ws = Workspace("ws1", str(tmp_path), "main", "main", "main", None, str(tmp_path), None, "brindle-ws1", time.time())
     db.add_workspace(ws)
@@ -184,7 +186,8 @@ def test_approved_plan_goes_to_the_library(db, session, tmp_path, monkeypatch, b
     assert "after: w1" in md and "src/brindle/db.py" in md and "tests/test_x.py::test_a" in md
 
 
-def test_assign_queues_behind_open_plan_until_the_person_approves(db, session, monkeypatch):
+@pytest.mark.parametrize("app_connected", [0, 1])
+def test_assign_queues_behind_open_plan_until_the_person_approves(db, session, monkeypatch, app_connected):
     boss, started = session
     visual_offers.person_spoke(db, boss, "Make a planning doc.")
     # The reader's optional data: the restated ask, each option's trade-offs and files, each worker's files and test.
@@ -197,7 +200,13 @@ def test_assign_queues_behind_open_plan_until_the_person_approves(db, session, m
     pid = out.split()[2]
     assert plans.sections(PLAN)[1][0]["title"] == "Goal" and len(plans.sections(PLAN)[1]) == 2
 
+    monkeypatch.setattr(events, "connected", app_connected)
     reply = asyncio.run(mcp_server.assign("developer", "build the preset schema"))
+    if not app_connected:
+        plans.decide(db, pid, 1, False, note="Revise the split.", person=True)
+        asyncio.run(mcp_server.assign("developer", "build the UI"))
+        assert started == ["build the preset schema", "build the UI"]
+        return
     assert "behind plan" in reply and started == []
     assert tasks.sweep(db) == 0 and started == []      # nothing wakes a held task
 
@@ -306,6 +315,20 @@ def test_big_goal_offers_a_planning_doc(accept, db, session, monkeypatch):
         assert started == [] and plans.holding(db, "boss")["id"] == pid
         assert client.post(f"/v1/plans/{pid}/decide", json={"rev": 1, "approved": True}).json()["state"] == "approved"
     assert started == ["build the preset schema"]
+
+
+def test_plan_offer_without_app(db, session, monkeypatch):
+    from brindle import autopilot
+
+    boss, started = session
+    monkeypatch.setattr(events, "connected", 0)
+    monkeypatch.setattr(autopilot, "_commit", lambda ws, tracked_only=False: "abc123")
+    db.add_autopilot(boss.id)
+    mcp_server.set_goal("Org presets", [{"title": f"M{i}", "check": "true"} for i in range(4)])
+    asyncio.run(mcp_server.assign("developer", "build the preset schema"))
+    assert started == ["build the preset schema"]
+    assert db.get_autopilot(boss.id).plan_offer is None
+    assert plans.holding(db, boss.id) is None
 
 
 def test_a_failed_verdict_leaves_nothing_behind_and_a_failed_push_loses_nothing(db, session, monkeypatch):
