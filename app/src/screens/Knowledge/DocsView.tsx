@@ -1,4 +1,4 @@
-/* Knowledge › Docs: the analysis docs people requested, from
+/* Knowledge › Docs: the approved plans in the Library, from
    brindle Pro's library through the daemon (GET /v1/analysis-docs and its
    topics; nothing is kept on disk). On top, the results panel
    (GET /v1/analysis-docs/results, worked out on this machine): review rounds

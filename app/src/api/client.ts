@@ -481,7 +481,7 @@ export interface KbHit {
   updated: string | null;
 }
 
-/* brindle Pro's analysis-doc library, proxied by the daemon (routes_read.analysis_docs).
+/* brindle Pro's Library of approved plans, proxied by the daemon (routes_read.analysis_docs).
    The Wire* types are the server's own shapes (pawdelta-web pro_api.analysis_docs: _listed,
    _view, topics); the client methods turn them into the AnalysisDoc* below. A scope is
    {kind: user | group | org, id}; the daemon's filter spells it `user`, `team:<id>` or `org:<id>`. */
@@ -1687,7 +1687,7 @@ export class DaemonClient {
     return this.get<KeptVisualDTO>(`/kept-visuals/${encodeURIComponent(id)}`);
   }
 
-  /* The analysis-doc library (brindle Pro), through the daemon; nothing is kept on disk.
+  /* The Library of approved plans (brindle Pro), through the daemon; nothing is kept on disk.
      A plan without it throws DaemonError "not_entitled". */
   async docs(query: DocsQuery = {}): Promise<{ docs: AnalysisDoc[] }> {
     const got = await this.get<{ docs?: WireListedDoc[] }>("/analysis-docs", { ...query });
