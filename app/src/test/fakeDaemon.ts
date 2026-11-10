@@ -2584,7 +2584,7 @@ export class FakeDaemon {
         const answer = INBOX_ACTIONS[action];
         if (!answer) return error("invalid", `unknown inbox action '${action}'`, 400);
         const item = d.inbox.find((i) => (action === "dismiss" ? i.request_id : action === "read" ? i.notice_id : i.agent_id) === id
-          && (action !== "pr-not-now" || i.kind === "pr_ready"));
+          && (action !== "pr-not-now" || i.kind === "pr_ready" || i.kind === "pr_opened"));
         if (!item) return error("not_found", `no agent ${id}`, 404);
         // The action settles the item, and the bus row it writes sends clients for a fresh inbox.
         d.inbox = d.inbox.filter((i) => i !== item);
@@ -2965,6 +2965,8 @@ export class FakeDaemon {
       const url = `https://github.com/example/proj/pull/${this.prs.length + 1}`;
       this.prs.push({ root, title: body.title as string | undefined, body: body.body as string | undefined, draft: body.draft as boolean | undefined, url });
       review.pr = { url, unpushed: 0 };
+      // The engine's next inbox: the prepared PR's card is now "PR opened" (service/inbox._pr_items).
+      d.inbox = d.inbox.map((i) => (i.kind === "pr_ready" && i.root_id === root ? { ...i, kind: "pr_opened", reason: "PR opened", detail: `#${this.prs.length} ${body.title ?? i.detail ?? ""}`.trim(), url } : i));
       this.setGoalPhase(root, "pr_open", url);
       setTimeout(() => this.publish("job.done", { root_id: root, agent_id: root, payload: { job, job_kind: "session.pr", result: { url, keeps_merged_branches: true } } }), 0);
       return json({ job, kind: "session.pr" }, 202);
