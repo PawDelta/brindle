@@ -399,6 +399,25 @@ export interface PlanVerdict {
   picks: Record<string, string>;
   comments: PlanComment[];
   note: string;
+  /* Paths of the files attached to the note. */
+  attachments?: string[];
+}
+
+/* Where a new comment on the design doc is anchored (brindle/plan_docs.py): a text range of a
+   section (`start` is a hint, `quote` the section's own text there), a diagram, a decision, or a
+   whole part of the doc (a section, "ask", "lede", "split"). */
+export type PlanAnchor =
+  | { kind: "text"; section: string; start: number; quote: string }
+  | { kind: "diagram"; section: string }
+  | { kind: "decision"; decision: string; option?: string }
+  | { kind: "section"; section: string };
+
+/* A change to a section's text: `before` at `start` becomes `after` (an empty `before` inserts). */
+export interface PlanChange {
+  section: string;
+  start: number;
+  before: string;
+  after: string;
 }
 
 export type Repo = RepoDTO;
@@ -1695,6 +1714,44 @@ export class DaemonClient {
   /* Approve or redirect the revision on screen; a newer revision, or a second verdict, is a 409. */
   decidePlan(id: string, verdict: PlanVerdict) {
     return this.postInbox<Plan>(`/plans/${encodeURIComponent(id)}/decide`, verdict);
+  }
+
+  /* The design doc's writes (brindle/plan_docs.py). Each names the revision on screen where the
+     engine checks it (a newer one is a 409) and answers with the plan as it is now. */
+  commentPlan(id: string, rev: number, anchor: PlanAnchor, text: string) {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/comments`, { rev, anchor, text });
+  }
+
+  replyPlan(id: string, thread: number, text: string) {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/comments`, { parent: thread, text });
+  }
+
+  /* Resolve a comment thread, or (resolved false) reopen it. */
+  resolvePlanThread(id: string, thread: number, resolved = true) {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/threads/${thread}/resolve`, { resolved });
+  }
+
+  suggestPlan(id: string, rev: number, change: PlanChange, text = "") {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/suggestions`, { rev, ...change, text });
+  }
+
+  /* Accepting a suggestion makes its change: a new revision. */
+  acceptPlanSuggestion(id: string, thread: number, rev: number) {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/threads/${thread}/accept`, { rev });
+  }
+
+  rejectPlanSuggestion(id: string, thread: number) {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/threads/${thread}/reject`, {});
+  }
+
+  /* The person's direct edit: a new revision. */
+  editPlan(id: string, rev: number, change: PlanChange) {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/edit`, { rev, ...change });
+  }
+
+  /* The person's pick on one decision (Confirm A); the verdict starts from these. */
+  confirmPlan(id: string, rev: number, decision: string, option: string) {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/confirm`, { rev, decision, option });
   }
 
   async keptVisuals(): Promise<KeptVisualDTO[]> {

@@ -38,6 +38,8 @@
   --shell-bg: #070b09; --shell-bg-2: color-mix(in srgb, var(--shell-bg), white 5%); --shell-ink: #e8f0eb; --shell-dim: #859a8e; --shell-acc: #34d399; --shell-cursor: #a4aba7; --shell-bad: #f08c88; --shell-line: rgba(52, 96, 74, 0.5);
   --sans: "Geist", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   --mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  /* A design doc's own text (screens/Session/Visuals/PlanReader.tsx) reads as a document. */
+  --serif: "Iowan Old Style", "Charter", "Georgia", serif;
   --ease: cubic-bezier(0.22, 1, 0.36, 1);
   --s-1: 8px; --s-2: 16px; --s-3: 24px; --s-4: 32px; --s-5: 40px; --s-6: 48px; --s-8: 64px; --s-10: 80px; --s-12: 96px;
   --r-sm: 2px; --r: 4px; --r-lg: 4px;
@@ -114,6 +116,7 @@
   /* Type */
   --font-sans: var(--sans);
   --font-mono: var(--mono);
+  --font-serif: var(--serif);
   /* 8px scale: p-s3, gap-s2, mt-s6 ... */
   --spacing-s1: var(--s-1);
   --spacing-s2: var(--s-2);

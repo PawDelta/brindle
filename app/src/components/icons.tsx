@@ -93,6 +93,20 @@ export const ArchiveIcon = (p: Props) => (
   </Icon>
 );
 
+/* Attach a file. */
+export const PaperclipIcon = (p: Props) => (
+  <Icon {...p}>
+    <path d="m20 11-8.5 8.5a5 5 0 0 1-7-7L13 4a3.3 3.3 0 0 1 4.7 4.7l-8.4 8.4a1.7 1.7 0 0 1-2.4-2.4L14.5 7" />
+  </Icon>
+);
+
+/* A comment: a speech bubble. */
+export const CommentIcon = (p: Props) => (
+  <Icon {...p}>
+    <path d="M4 5h16v11H9l-5 4z" />
+  </Icon>
+);
+
 /* Keep: a bookmark, filled once kept. */
 export const BookmarkIcon = ({ filled, ...p }: Props & { filled?: boolean }) => (
   <Icon {...p}>
