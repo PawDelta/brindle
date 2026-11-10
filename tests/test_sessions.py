@@ -910,7 +910,8 @@ def test_resume_launch_step_timing(db, root, monkeypatch, caplog):
             return result() if callable(result) else result
         monkeypatch.setattr(module, name, fn)
 
-    monkeypatch.setattr(agents, "settle_panes", lambda *a: set())
+    monkeypatch.setattr(agents, "settle_panes", lambda *a, **kw: set())
+    slow(agents, "_prepare_launch_health", 0.0)
     monkeypatch.setattr(agents, "_profile_for", lambda *a: SimpleNamespace(name="p", model="m"))
     for module, name, result in ((upgrade, "check_launch", None), (preflight, "turned_off", None),
                                  (agents, "model_problem", None), (agents, "launch_blockers", []),
@@ -922,6 +923,7 @@ def test_resume_launch_step_timing(db, root, monkeypatch, caplog):
                                  (spawn, "start", None), (tmux, "mark_launched", None)):
         slow(module, name, 0.0, result)
     slow(provider_homes, "decide", 0.0)
+    slow(tmux, "mark_launched", 0.5)
     slow(providers.ClaudeCode, "command", 1.5, ["claude"])
     slow(providers, "trust_codex_project", 0.25)
     slow(providers.Codex, "command", 4.0, ["codex"])
@@ -933,10 +935,12 @@ def test_resume_launch_step_timing(db, root, monkeypatch, caplog):
     add(db, root, "chat")
     add(db, root, "w1", mode="assign", parent="chat")
     db.update_agent("w1", provider="codex")
-    agents.resume(db, "chat", gate=lifecycle.Recovery().launching)
+    resumed = agents.resume(db, "chat", gate=lifecycle.Recovery().launching)
+    assert {a.id for a in resumed} == {"chat", "w1"}      # both launches ran to the end
     details = [r.args[1] for r in caplog.records if isinstance(r.args, tuple)
                and len(r.args) == 2 and isinstance(r.args[1], dict)]
     steps = details[0]["launch_steps"]
+    assert steps["w1"]["mark_launched_s"] == 0.5          # a step after the window opened
     assert {k: steps["chat"][k] for k in ("provider", "command_s", "company_identity_s")} == {
         "provider": "claude", "command_s": 1.5, "company_identity_s": 0.75}
     assert {k: steps["w1"][k] for k in ("provider", "command_s", "codex_trust_s")} == {
