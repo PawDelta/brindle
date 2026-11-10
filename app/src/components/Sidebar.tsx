@@ -28,13 +28,14 @@
    as the accent (styles.css .side-*). */
 
 import { useCallback, useContext, useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent as ReactMouseEvent, type RefObject } from "react";
-import type { DaemonClient, FolderGroup, FolderVisibility, ProviderUsage } from "../api/client";
+import type { DaemonClient, ProviderUsage } from "../api/client";
 import { DaemonContext } from "../api/context";
 import { openExternal, type OpenUrl } from "../api/open";
 import type { GoalDTO, SessionDTO } from "../api/schema";
 import { inLibrary, inProfileRail, railPage, readLastSession, routeSession, settingsTab, type Route, type SessionRef } from "../routes";
 import { LibraryIcon } from "./icons";
 import { LibraryRail, type LibraryCounts } from "./LibraryRail";
+import { useLibraryFolders } from "./useLibraryFolders";
 import { AccountAvatar, SettingsRail } from "./SettingsRail";
 import { pruneShown, seenKey } from "../screens/Inbox/items";
 import { goalPhase, SessionGoal, useGoal } from "../screens/Session/GoalPanel";
@@ -682,27 +683,9 @@ export function Sidebar({ route, navigate, refresh, openUrl, onBackFromSettings,
     else if (libraryOpen) back();
     else navigate({ screen: "knowledge" });
   }, [onToggleLibrary, libraryOpen, back, navigate]);
-  // The Library's folders, read when it opens and again after a change; a daemon that can't say shows none.
+  // The Library's folders (see useLibraryFolders); a daemon that can't say shows none.
   const folderClient = useContext(DaemonContext);
-  const [folders, setFolders] = useState<FolderGroup[]>([]);
-  const loadFolders = useCallback(async () => {
-    try {
-      setFolders((await folderClient!.libraryFolders()).scopes);
-    } catch {
-      setFolders([]);
-    }
-  }, [folderClient]);
-  useEffect(() => {
-    if (libraryOpen && folderClient) void loadFolders();
-  }, [libraryOpen, folderClient, loadFolders]);
-  const createFolder = useCallback(async (scope: string, name: string, visibility: FolderVisibility) => {
-    await folderClient!.createLibraryFolder(scope, name, visibility, visibility === "shared" ? "members" : "owner");
-    await loadFolders();
-  }, [folderClient, loadFolders]);
-  const moveDoc = useCallback(async (doc: string, scope: string, folder: string) => {
-    await folderClient!.moveDocToFolder(doc, scope, folder);
-    await loadFolders();
-  }, [folderClient, loadFolders]);
+  const { folders, create: createFolder, move: moveDoc } = useLibraryFolders(folderClient, libraryOpen);
   // Designs waiting on the person: the plans in the Inbox.
   const plansWaiting = useAppState((s) => s.inbox.filter((item) => item.kind === "plan").length);
   const { repos, sessions, error: feedError, closeError, close, after } = useSessions();

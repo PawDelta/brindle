@@ -10,7 +10,8 @@
    stages render nothing until they are given (`recent`, `pinned`, a stage's count):
    the doc engine turns them on by passing them. */
 
-import { useState, type FormEvent } from "react";
+import { useRef, useState, type FormEvent } from "react";
+import { useReaderDoc } from "../store/libraryReader";
 import type { DocScope, FolderGroup, FolderVisibility } from "../api/client";
 import { LIBRARY_STAGES, libraryView, type KnowledgeView, type LibraryStage, type Route } from "../routes";
 
@@ -68,22 +69,32 @@ const VISIBLE_TO = (scope: DocScope, visibility: FolderVisibility) => (visibilit
 /* The Folders group (design/planning-doc-round7.html §1): My folders, then each team and the org,
    each folder saying who can see it. "+ New" opens the New folder form; while a design is open, each
    folder offers "Move here". Nothing is listed until `folders` arrives. */
-function Folders({ folders, doc, onCreate, onMove }: { folders: FolderGroup[]; doc?: string; onCreate?(scope: string, name: string, visibility: FolderVisibility): Promise<void> | void; onMove?(doc: string, scope: string, folder: string): Promise<void> | void }) {
+type CreateFolder = (scope: string, name: string, visibility: FolderVisibility, canAdd: "owner" | "members") => Promise<void> | void;
+
+function Folders({ folders, doc, onCreate, onMove }: { folders: FolderGroup[]; doc?: string; onCreate?: CreateFolder; onMove?(doc: string, scope: string, folder: string): Promise<void> | void }) {
   const [adding, setAdding] = useState(false);
+  const [canAdd, setCanAdd] = useState<"owner" | "members">("owner");
+  const [pending, setPending] = useState(false);
+  const sending = useRef(false);     // set at once: a second click or Enter before the first renders is ignored
   const [name, setName] = useState("");
   const [where, setWhere] = useState("user");
   const [visibility, setVisibility] = useState<FolderVisibility>("private");
   const [error, setError] = useState<string | null>(null);
   const submit = async (event: FormEvent) => {
     event.preventDefault();
-    if (!name.trim()) return;
+    if (!name.trim() || sending.current) return;
+    sending.current = true;
+    setPending(true);
     try {
-      await onCreate?.(where, name.trim(), visibility);
+      await onCreate?.(where, name.trim(), visibility, canAdd);
       setAdding(false);
       setName("");
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Couldn't create the folder");
+    } finally {
+      sending.current = false;
+      setPending(false);
     }
   };
   const move = async (folder: string, scope: string) => {
@@ -118,7 +129,11 @@ function Folders({ folders, doc, onCreate, onMove }: { folders: FolderGroup[]; d
             <option value="private">Only me</option>
             <option value="shared">Everyone in the scope</option>
           </select>
-          <button type="submit" className="self-start rounded bg-surface-2 px-2 py-1 font-medium text-ink hover:bg-line">
+          <select aria-label="Who can add" className="rounded border border-line bg-surface px-1 py-1 text-ink" value={canAdd} onChange={(e) => setCanAdd(e.target.value as "owner" | "members")}>
+            <option value="owner">Only me</option>
+            <option value="members">Anyone who can see it</option>
+          </select>
+          <button type="submit" disabled={pending} className="self-start rounded bg-surface-2 px-2 py-1 font-medium text-ink hover:bg-line disabled:opacity-50">
             Create folder
           </button>
         </form>
@@ -153,8 +168,9 @@ function Folders({ folders, doc, onCreate, onMove }: { folders: FolderGroup[]; d
   );
 }
 
-export function LibraryRail({ route, counts = {}, recent = [], pinned = [], folders = [], navigate, onBack, onCreateFolder, onMoveDoc }: { route: LibraryRoute; counts?: LibraryCounts; recent?: LibraryEntry[]; pinned?: LibraryEntry[]; folders?: FolderGroup[]; navigate(route: Route): void; onBack(): void; onCreateFolder?(scope: string, name: string, visibility: FolderVisibility): Promise<void> | void; onMoveDoc?(doc: string, scope: string, folder: string): Promise<void> | void }) {
+export function LibraryRail({ route, counts = {}, recent = [], pinned = [], folders = [], navigate, onBack, onCreateFolder, onMoveDoc }: { route: LibraryRoute; counts?: LibraryCounts; recent?: LibraryEntry[]; pinned?: LibraryEntry[]; folders?: FolderGroup[]; navigate(route: Route): void; onBack(): void; onCreateFolder?: CreateFolder; onMoveDoc?(doc: string, scope: string, folder: string): Promise<void> | void }) {
   const view = libraryView(route);
+  const readerDoc = useReaderDoc();     // the design open in the Docs reader (not route.doc: opening a row never sets it)
   const stages = LIBRARY_STAGES.filter((stage) => stage.id === "needs-you" || counts.stages?.[stage.id] != null);
   const entries = (list: LibraryEntry[], glyph: string, pin = false) =>
     list.map((entry) => <Row key={entry.id} glyph={glyph} pin={pin} label={entry.title} on={view === "docs" && route.doc === entry.id} onClick={() => navigate({ screen: "knowledge", view: "docs", doc: entry.id })} />);
@@ -181,7 +197,7 @@ export function LibraryRail({ route, counts = {}, recent = [], pinned = [], fold
             onClick={() => navigate({ screen: "knowledge", view: "docs", stage: stage.id })}
           />
         ))}
-        <Folders folders={folders} doc={view === "docs" && route.doc != null ? String(route.doc) : undefined} onCreate={onCreateFolder} onMove={onMoveDoc} />
+        <Folders folders={folders} doc={readerDoc ?? undefined} onCreate={onCreateFolder} onMove={onMoveDoc} />
         <div className={HEADING}>Sources</div>
         {SOURCES.map((source) => (
           <Row key={source.id} glyph={source.glyph} label={source.label} count={source.count && counts[source.count]} on={view === source.id} onClick={() => navigate({ screen: "knowledge", view: source.id })} />
