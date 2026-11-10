@@ -29,12 +29,19 @@ export function startSync({ client, store, repo, connect, backoff }: SyncOptions
   let again = false;
 
   const fetchOnce = async () => {
-    const version = store.getState().lifecycleVersion;
+    const { lifecycleVersion: version, snapshotVersion: applied } = store.getState();
     try {
       const [workspaces, inbox] = await Promise.all([client.snapshot(repo), client.inbox(repo)]);
       // A close/rewind applied while these reads were pending is newer than
       // their rows. The queued fetch may resume an agent; this one cannot.
       if (version !== store.getState().lifecycleVersion) return;
+      // Likewise a snapshot someone else applied meanwhile (the panes gate's, read after
+      // recovery): this read began before it and could put older windows back.
+      // Its inbox is dropped with it, so read again rather than leave the inbox unsynced.
+      if (applied !== store.getState().snapshotVersion) {
+        again = true;
+        return;
+      }
       store.dispatch({ type: "snapshot", workspaces, inbox });
     } catch (e) {
       store.dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
