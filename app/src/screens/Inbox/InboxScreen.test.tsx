@@ -19,7 +19,8 @@ import { usePermissionAsks } from "./PermissionAsks";
 afterEach(cleanup);
 
 const notice: InboxItemDTO = { kind: "org_notice", reason: "Reviewer profiles now default to reviewer-codex.", detail: "admin", notice_id: "n-18" };
-const prReady: InboxItemDTO = { kind: "pr_ready", reason: "PR ready for your approval", agent_id: "sup1", workspace_id: "proj", root_id: "sup1", detail: "Ship ls --json" };
+const prOpened: InboxItemDTO = { kind: "pr_opened", reason: "PR opened", agent_id: "sup1", workspace_id: "proj", root_id: "sup1", detail: "#408 Ship ls --json", url: "https://github.com/o/r/pull/408" };
+const prReady: InboxItemDTO ={ kind: "pr_ready", reason: "PR ready for your approval", agent_id: "sup1", workspace_id: "proj", root_id: "sup1", detail: "Ship ls --json" };
 const session: SessionDTO = { id: "sup1", workspace_id: "proj", profile: "supervisor", status: "idle", mode: "interactive", created_at: 0, goal: "Ship ls --json" };
 
 function mount(daemon: FakeDaemon, client: DaemonClient = daemon.client(), props: Partial<InboxScreenProps> = {}) {
@@ -151,11 +152,17 @@ describe("inbox", () => {
       repos: [{ repo_root: REPO, name: "proj" }],
       sessions: [session],
       workspaces: [root, worker],
-      inbox: [question, waiting, notice, prReady],
+      inbox: [question, waiting, notice, prReady, prOpened],
     });
-    const { sync, onOpen } = mount(daemon);
+    const openUrl = vi.fn(async () => {});
+    const { sync, onOpen } = mount(daemon, daemon.client(), { openUrl });
     const group = await screen.findByRole("region", { name: "Ship ls --json" });
-    expect(within(group).getAllByTestId("inbox-card")).toHaveLength(3);
+    expect(within(group).getAllByTestId("inbox-card")).toHaveLength(4);
+    // A PR the supervisor opened itself: no Review & open PR, a link to the PR on GitHub.
+    expect(card("pr_opened").textContent).toContain("#408 Ship ls --json");
+    expect(within(card("pr_opened")).queryByRole("button", { name: "Review & open PR" })).toBeNull();
+    fireEvent.click(within(card("pr_opened")).getByRole("button", { name: "Open on GitHub" }));
+    expect(openUrl).toHaveBeenCalledWith("https://github.com/o/r/pull/408");
     // The PR brindle prepared (its checks passed, nothing pushed): Review & open PR opens the session's sheet.
     expect(card("pr_ready").textContent).toContain("PR ready for your approval");
     fireEvent.click(within(card("pr_ready")).getByRole("button", { name: "Review & open PR" }));

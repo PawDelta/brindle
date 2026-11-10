@@ -176,8 +176,19 @@ def _sign_in(provider: str) -> InboxActionDTO | None:
 
 def _pr_items(db: DB, root_id: str, branch: str, path: str, link: dict) -> list[InboxItemDTO]:
     """The session's PR as brindle prepared it (routes_actions.prepare_pr),
-    until the person opens it: ready for their approval, or its checks failed."""
-    rows = db.conn.execute(
+    until the person opens it: ready for their approval, or its checks failed.
+    An open PR already holding the session's HEAD (a supervisor's own
+    ``gh pr create``, from any branch name) is a ``pr_opened`` item instead."""
+    from brindle.daemon import session_review
+
+    try:
+        opened = session_review.open_pr_for_head(git.out(["rev-parse", "HEAD"], path), path)
+    except (git.GitError, OSError):
+        opened = None  # An unavailable checkout must not break the rest of the inbox.
+    if opened and opened.get("url"):
+        return [InboxItemDTO(kind="pr_opened", reason="PR opened", detail=f"#{opened.get('number')} {opened.get('title') or ''}".strip(),
+                             url=opened["url"], **link)]
+    rows =db.conn.execute(
         "SELECT state, title, check_cmd, output FROM session_pr_prep p WHERE root_id = ? AND branch = ?"
         " AND state IN ('passed', 'failed') AND NOT EXISTS (SELECT 1 FROM session_prs s WHERE"
         " s.root_id = p.root_id AND s.branch = p.branch AND s.url IS NOT NULL)", (root_id, branch)).fetchall()

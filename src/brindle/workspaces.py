@@ -912,6 +912,20 @@ def pull_request_checks(url: str, cwd: str) -> dict | None:
     return payload if isinstance(payload, dict) else None
 
 
+def open_pull_request_for_commit(sha: str, cwd: str) -> dict | None:
+    """The open PR (``{number, title, url}``) that contains commit ``sha``,
+    whatever its head branch, or None (also when ``gh`` is missing or can't say)."""
+    if not shutil.which("gh"):
+        return None
+    try:
+        out = spawn.read(["gh", "pr", "list", "--state", "open", "--search", sha, "--json", "number,title,url"],
+                         cwd=cwd, text=True, timeout=PR_CHECKS_SECONDS)
+        found = json.loads(out.stdout) if out.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError, spawn.Busy, ValueError):
+        return None
+    return found[0] if isinstance(found, list) and found and isinstance(found[0], dict) else None
+
+
 def pull_request_merge_commit(url: str, cwd: str) -> str | None:
     """The commit a merged PR landed as on its base (``gh``'s mergeCommit), or None."""
     if not shutil.which("gh"):

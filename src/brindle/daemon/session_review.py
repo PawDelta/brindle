@@ -288,6 +288,38 @@ def session_pr_state(db: DB, root_id: str, url: str | None) -> dict[str, Any] | 
     return cached[1] if cached else pr_state_of(url, None)
 
 
+_head_cache: dict[tuple[str, str], tuple[float, dict[str, Any] | None]] = {}
+_head_flights: set[tuple[str, str]] = set()
+
+
+def _read_head_pr(key: tuple[str, str]) -> None:
+    sha, cwd = key
+    try:
+        with spawn.deadline(workspaces.PR_CHECKS_SECONDS):
+            found = workspaces.open_pull_request_for_commit(sha, cwd)
+    except Exception:  # noqa: BLE001 - an unreadable answer is just no PR
+        log.exception("brindle: couldn't look up the PR holding a session's HEAD")
+        found = None
+    with _pr_lock:
+        _head_cache[key] = (time.monotonic(), found)
+        _head_flights.discard(key)
+
+
+def open_pr_for_head(sha: str, cwd: str) -> dict[str, Any] | None:
+    """The open PR (``{number, title, url}``) containing ``sha``, whatever
+    branch it was pushed under, as last read: never waits on ``gh``. A read
+    is started in the background when the answer is missing or older than
+    ``PR_STATE_TTL``; until the first lands: None."""
+    key = (sha, cwd)
+    with _pr_lock:
+        cached = _head_cache.get(key)
+        if key not in _head_flights and (cached is None or time.monotonic() - cached[0] >= PR_STATE_TTL):
+            flight = _pr_pool.submit(_read_head_pr, key)
+            if not flight.done():
+                _head_flights.add(key)
+    return cached[1] if cached else None
+
+
 def refresh_pr_states(db: DB) -> None:
     """Daemon thread, every sweep: keep each open session PR's checks fresh
     and announce (``session.pr_checks``, which the app's goal reloads on) the

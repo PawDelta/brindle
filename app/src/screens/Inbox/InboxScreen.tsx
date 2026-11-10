@@ -93,6 +93,7 @@ const TONE: Record<string, { bar: string; ink: string }> = {
   review: { bar: "before:bg-branch", ink: "text-branch" },
   pr_ready: { bar: "before:bg-branch", ink: "text-branch" },
   pr_failed: { bar: "before:bg-fail", ink: "text-fail" },
+  pr_opened: { bar: "before:bg-branch", ink: "text-branch" },
   org_notice: { bar: "before:bg-line-strong", ink: "text-ink-3" },
   org_blocked: { bar: "before:bg-line-strong", ink: "text-ink-3" },
   setup: { bar: "before:bg-fail", ink: "text-fail" },
@@ -265,7 +266,7 @@ export function InboxScreen({ client, refresh, onOpen, onNavigate, session = nul
               item.kind === "permission" ? (
                 <PermissionItemCard key={itemKey(item)} item={item} isNew={fresh.has(seenKey(item))} actions={actions} who={item.agent_id ? agentName(workspaces, item.agent_id) : "An agent"} onGo={sessionOf(item) && onOpen ? () => goTo(item) : undefined} />
               ) : (
-              <Banner key={itemKey(item)} item={item} actions={actions} who={item.agent_id ? agentName(workspaces, item.agent_id) : null} branch={workspaces.find((ws) => ws.id === item.workspace_id)?.branch ?? item.workspace_id ?? null} sessionTitle={group.root ? group.title : null} repo={group.repo ?? repos?.[0]?.repo_root ?? null} isNew={fresh.has(seenKey(item))} onDone={() => void refresh()} onGo={sessionOf(item) && onOpen ? () => goTo(item) : undefined} onReview={sessionOf(item) && onOpen ? () => goTo(item, { kind: "review" }) : undefined} onNavigate={onNavigate} />
+              <Banner key={itemKey(item)} item={item} actions={actions} who={item.agent_id ? agentName(workspaces, item.agent_id) : null} branch={workspaces.find((ws) => ws.id === item.workspace_id)?.branch ?? item.workspace_id ?? null} sessionTitle={group.root ? group.title : null} repo={group.repo ?? repos?.[0]?.repo_root ?? null} isNew={fresh.has(seenKey(item))} onDone={() => void refresh()} onGo={sessionOf(item) && onOpen ? () => goTo(item) : undefined} onReview={sessionOf(item) && onOpen ? () => goTo(item, { kind: "review" }) : undefined} onNavigate={onNavigate} openUrl={openUrl} />
               ),
             )}
           </section>
@@ -276,8 +277,9 @@ export function InboxScreen({ client, refresh, onOpen, onNavigate, session = nul
 }
 
 /* One banner card. */
-function Banner({ item, actions, who, branch, sessionTitle, repo, isNew, onDone, onGo, onReview, onNavigate }: {
+function Banner({ item, actions, who, branch, sessionTitle, repo, isNew, onDone, onGo, onReview, onNavigate, openUrl }: {
   item: InboxItemDTO;
+  openUrl?: OpenUrl;
   actions: ReturnType<typeof useInboxActions>;
   who: string | null;
   branch: string | null;
@@ -365,6 +367,14 @@ function Banner({ item, actions, who, branch, sessionTitle, repo, isNew, onDone,
     acts = <span className="text-[11px] text-ink-3">fixed from a terminal: brindle doctor says how</span>;
   } else if (item.kind === "credentials" || item.kind === "login" || item.kind === "doc") {
     acts = <ItemActions item={item} actions={actions} repo={repo} onDone={onDone} onGo={item.kind === "doc" ? onGo : undefined} onNavigate={onNavigate} compact />;
+  } else if (item.kind === "pr_opened" && item.url && openUrl) {
+    // The supervisor already opened it: nothing for brindle to push.
+    const url = item.url;
+    acts = (
+      <button type="button" className={`${ACT} ${PLAIN}`} onClick={() => void openUrl(url)}>
+        Open on GitHub
+      </button>
+    );
   } else if ((item.kind === "pr_ready" || item.kind === "pr_failed") && onReview) {
     // Nothing is pushed until the person's Open PR in the sheet.
     acts = (

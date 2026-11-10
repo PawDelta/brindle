@@ -191,5 +191,42 @@ def test_pr_not_now(db, tmp_path, monkeypatch):
         restarted.conn.close()
 
 
+def test_pr_opened_by_supervisor_replaces_the_ready_card(db, tmp_path, monkeypatch):
+    from brindle import git, workspaces
+    from brindle.daemon import session_review
+
+    ws = Workspace("pr-open", str(tmp_path), "pr-open", "session", "feat/pr-open", "main",
+                   str(tmp_path / "checkout"), None, "pr-open", time.time())
+    db.add_workspace(ws)
+    db.add_agent(Agent("r1", ws.id, "supervisor", "claude", None, "interactive", "idle", "@1", None, time.time()))
+    db.conn.execute("INSERT INTO session_pr_prep (root_id, branch, sha, state, prepared_at) VALUES (?, ?, ?, ?, ?)",
+                    ("r1", ws.branch, "head1", "passed", time.time()))
+    monkeypatch.setattr(git, "out", lambda args, path: "head1")
+    monkeypatch.setattr(inbox.view, "snapshot", lambda *args, **kwargs: [
+        {"id": ws.id, "branch": ws.branch, "agents": [{"id": "r1", "status": "idle"}]}])
+    pr = {"number": 408, "title": "Fix things", "url": "https://github.com/o/r/pull/408"}
+    asked = []
+    session_review._head_cache.clear()
+    monkeypatch.setattr(session_review._pr_pool, "submit", lambda fn, *a: asked.append(a) or fn(*a) or _Done())
+    monkeypatch.setattr(workspaces, "open_pull_request_for_commit", lambda sha, cwd: pr)
+
+    def cards():
+        return [i for i in inbox.items(db, ws.repo_root, panes={"@1": True}) if i.kind.startswith("pr_")]
+
+    # The first read starts in the background: this inbox read doesn't wait for gh.
+    assert [i.kind for i in cards()] == ["pr_ready"]
+    [card] = cards()
+    assert (card.kind, card.reason, card.detail, card.url) == ("pr_opened", "PR opened", "#408 Fix things", pr["url"])
+    assert len(asked) == 1   # cached: the second read didn't ask gh again
+    pr = None
+    session_review._head_cache.clear()
+    assert [i.kind for i in cards()] == ["pr_ready"]
+
+
+class _Done:
+    def done(self):
+        return True
+
+
 
 
