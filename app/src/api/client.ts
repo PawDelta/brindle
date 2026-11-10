@@ -1799,9 +1799,9 @@ export class DaemonClient {
     return this.post<Plan>(`/plans/${encodeURIComponent(id)}/policy-override`, override);
   }
 
-  /* The people of the person's org, to pick reviewers from; admin_org, the org whose rules they can override. */
+  /* The people of the person's org, to pick reviewers from, without the person (me); admin_org, the org whose rules they can override. */
   libraryPeople() {
-    return this.get<{ people: LibraryPerson[]; admin_org?: string | null }>("/library/people");
+    return this.get<{ people: LibraryPerson[]; me?: string; admin_org?: string | null }>("/library/people");
   }
 
   async keptVisuals(): Promise<KeptVisualDTO[]> {

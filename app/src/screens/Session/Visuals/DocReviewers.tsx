@@ -21,11 +21,12 @@ const STATUS: Record<PlanGateRowDTO["status"], { text: string; tone: string }> =
 const people = (plan: Plan): PlanReviewerChoice[] =>
   (plan.gate?.reviewers ?? []).flatMap((r) => (r.sub ? [{ sub: r.sub, required: r.required }] : []));
 
-export function Reviewers({ plan, client, directory, adminOrg, scopes, busy, nameOf, write }: {
+export function Reviewers({ plan, client, directory, adminOrg, me, scopes, busy, nameOf, write }: {
   plan: Plan;
   client?: PlanSharingClient;
   directory: LibraryPerson[];
   adminOrg: string | null;
+  me: string | null;
   scopes: DocScope[];
   busy: boolean;
   nameOf(sub: string): string;
@@ -84,7 +85,7 @@ export function Reviewers({ plan, client, directory, adminOrg, scopes, busy, nam
             )}
           </div>
         )}
-        <Policies plan={plan} client={client} directory={directory} adminOrg={adminOrg} busy={busy} nameOf={nameOf} write={write} />
+        <Policies plan={plan} client={client} directory={directory} adminOrg={adminOrg} me={me} busy={busy} nameOf={nameOf} write={write} />
         {draft && (
           <div className="grid max-w-[60ch] gap-2 rounded-md border border-line p-2.5" data-testid="plan-reviewers-edit" data-stale={stale || undefined}>
             {!gate && (

@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 from starlette.testclient import TestClient
 
-from brindle import plans
+from brindle import plan_docs, plans
 from brindle.daemon.app import build_app
 from brindle.pro import analysis_docs as ad
 from brindle.pro import review_policies as rp
@@ -14,7 +14,7 @@ from brindle.pro import shared_docs as sd
 from brindle.service.errors import ServiceError
 from pro_fixtures import backend, fixed_identity, pro_env, signing_key  # noqa: F401 - fixtures
 from test_plans import AUTH, TOKEN, session  # noqa: F401 - fixture
-from test_shared_plan_docs import DESIGN, TEAM, Library, parts  # noqa: F401 - fixture
+from test_shared_plan_docs import BASE, DESIGN, TEAM, Library, parts  # noqa: F401 - fixture
 
 ME = {"sub": "user_1", "required": True}
 ORG = "org_1"
@@ -32,31 +32,41 @@ class Governed(Library):
 
     def __init__(self, remote):
         super().__init__(remote)
-        self.rules, self.read_status, self.reviewers_status, self.override_status = [], 200, 200, 200
+        self.rules, self.override_status = [], 200
         self.garbled = {}                   # fields the server answers with, whatever the rules say
-        plain_set = self.set_reviewers
+        self.refusing = {}                  # route -> (status, error) while an org rule refuses it
 
-        def read(form, headers):
-            if self.read_status != 200:
-                return self.read_status, {"error": "key_unavailable", "error_description": "rules are sealed"}
-            return 200, self.view()
+        def guarded(route):
+            handler = remote.routes[route]
 
-        def put_reviewers(form, headers):
-            if self.reviewers_status != 200:
-                return self.reviewers_status, {"error": "policy_denied", "org_id": ORG, "policy": "security"}
-            return plain_set(form, headers)
+            def call(form, headers):
+                if route in self.refusing:
+                    status, error = self.refusing[route]
+                    return status, {"error": error, "org_id": ORG, "policy": "security"}
+                return handler(form, headers)
+            return call
 
-        remote.routes.update({f"GET {DESIGN}": read, f"PUT {DESIGN}/reviewers": put_reviewers,
-                              f"POST {DESIGN}/policy-overrides": self.override})
+        remote.routes.update({r: guarded(r) for r in (f"GET {DESIGN}", f"PUT {DESIGN}/permissions", f"PUT {DESIGN}/reviewers",
+                                                      f"POST {BASE}/share", f"PUT {DESIGN}/folder")})
+        remote.routes[f"POST {DESIGN}/policy-overrides"] = self.override
+
+    def applied(self, r):
+        """A stand-in's sign-off on this revision, made in time, meets their rule."""
+        met = [s["sub"] for s in self.sign_offs if s["rev"] == self.rev
+               and any(o["stand_in"] == s["sub"] and s["at"] <= o["until"] for o in r["stand_ins"])]
+        return {**r, "status": "met", "met_by": met} if met and r["status"] == "waiting" else r
 
     def view(self):
-        return {**super().view(), "policy_reviewers": list(self.rules),
-                "pending_policies": [{"org_id": r["org_id"], "policy": r["policy"]} for r in self.rules
+        rules = [self.applied(r) for r in self.rules]
+        return {**super().view(), "policy_reviewers": rules,
+                "pending_policies": [{"org_id": r["org_id"], "policy": r["policy"]} for r in rules
                                      if r["status"] == "waiting"], **self.garbled}
 
     def override(self, form, headers):
         if self.override_status != 200:
             return self.override_status, {"error": "forbidden"}
+        if form["rev"] != self.rev:
+            return 409, {"error": "stale", "rev": self.rev}
         for i, r in enumerate(self.rules):
             if r["policy"] == form["policy"] and form["action"] == "waive":
                 self.rules[i] = {**r, "status": "waived", "waiver": {"by": "user_1", "at": 9, "reason": form["reason"]}}
@@ -121,19 +131,29 @@ def test_a_rule_that_cant_be_believed_closes_the_gate(db, shared, review):
     assert e.value.code == "gate_closed" and plans.get(db, pid)["state"] == "open"
 
 
-@pytest.mark.parametrize("refuse", [
-    pytest.param(lambda lib, db, pid, net: (setattr(lib, "read_status", 503), sd.sync(db, pid, **net)), id="rules-unreadable"),
-    pytest.param(lambda lib, db, pid, net: (setattr(lib, "reviewers_status", 403), sd.set_reviewers(db, pid, [ME], **net)), id="rule-denies"),
+UNREADABLE = (503, "key_unavailable")
+
+
+@pytest.mark.parametrize("route, answer, act", [
+    pytest.param(f"GET {DESIGN}", UNREADABLE, lambda db, pid, net: sd.sync(db, pid, **net), id="rules-unreadable"),
+    pytest.param(f"GET {DESIGN}", UNREADABLE, lambda db, pid, net: sd.set_reviewers(db, pid, [ME], **net), id="unreadable-before-a-reviewer-edit"),
+    pytest.param(f"PUT {DESIGN}/permissions", UNREADABLE, lambda db, pid, net: sd.set_reviewers(db, pid, [ME, {"sub": "u_new", "required": True}], **net),
+                 id="unreadable-while-granting"),
+    pytest.param(f"PUT {DESIGN}/reviewers", (403, "policy_denied"), lambda db, pid, net: sd.set_reviewers(db, pid, [ME], **net), id="rule-denies"),
+    pytest.param(f"POST {BASE}/share", UNREADABLE, lambda db, pid, net: sd.share(db, pid, TEAM, **net), id="unreadable-while-sharing"),
+    pytest.param(f"PUT {DESIGN}/folder", UNREADABLE, lambda db, pid, net: sd.share(db, pid, TEAM, folder={"scope": TEAM, "id": "f_1"}, **net),
+                 id="unreadable-while-filing"),
 ])
-def test_a_refusal_closes_a_ready_gate_until_the_library_answers_whole(db, shared, refuse):
+def test_a_refusal_closes_a_ready_gate_until_the_library_answers_whole(db, shared, route, answer, act):
     pid, lib, net = shared
     assert gate(db, pid)["state"] == "ready"
+    lib.refusing[route] = answer
     with pytest.raises(RuntimeError):
-        refuse(lib, db, pid, net)
+        act(db, pid, net)
     now = gate(db, pid)
     assert (now["state"], now["signed"]) == ("waiting", 0)
 
-    lib.read_status, lib.reviewers_status = 200, 200
+    lib.refusing.clear()
     sd.sync(db, pid, **net)
     assert gate(db, pid)["state"] == "ready"
 
@@ -145,32 +165,40 @@ def test_a_refusal_closes_a_ready_gate_until_the_library_answers_whole(db, share
 def test_only_an_org_admin_is_offered_an_override(monkeypatch, role, offered):
     from brindle.daemon import routes_actions as actions
 
-    monkeypatch.setattr(actions, "_docs_entitlement", lambda repo: SimpleNamespace(org_id=ORG, sub="me", role=role))
+    monkeypatch.setattr(actions, "_docs_entitlement", lambda repo: SimpleNamespace(org_id=ORG, sub="u_me", role=role))
     monkeypatch.setattr(actions, "docs_api", lambda method, path: {"members": []})
     with TestClient(build_app(TOKEN), headers=AUTH) as app:
-        assert app.get("/v1/library/people").json()["admin_org"] == offered
+        people = app.get("/v1/library/people").json()
+    assert (people["admin_org"], people["me"]) == (offered, "u_me")
 
 
-def test_an_admin_waives_a_rule_once_and_the_doc_shows_it_through_the_daemon(db, shared, backend):  # noqa: F811 - fixture
+def test_an_admin_waives_the_revision_on_screen_through_the_daemon_under_the_librarys_number(db, shared):
+    """Two local edits reach the Library as one revision, so the numbers differ, and the fake refuses the wrong one."""
     pid, lib, _ = shared
     lib.rules = [rule()]
+    plan_docs.edit(db, pid, 1, "summary", 0, "Workers", "People")
+    plan_docs.edit(db, pid, 2, "summary", 0, "People", "Agents")
     with TestClient(build_app(TOKEN), headers=AUTH) as app:
         got = app.post(f"/v1/plans/{pid}/policy-override",
-                       json={"rev": 1, "org_id": ORG, "policy": "security", "action": "waive", "reason": "Security is at an offsite."})
-    assert got.status_code == 200, got.json()
-    policy = got.json()["gate"]["policies"][0]
-    assert (policy["status"], policy["waiver"]["by"]) == ("waived", "user_1")
-    assert got.json()["gate"]["state"] == "ready"
-    sent = [form for key, form, _ in backend.calls if key == f"POST {DESIGN}/policy-overrides"]
-    assert [(s["rev"], s["action"]) for s in sent] == [(1, "waive")]
+                       json={"rev": 3, "org_id": ORG, "policy": "security", "action": "waive", "reason": "Security is at an offsite."})
+        assert got.status_code == 200, got.json()
+        policy = got.json()["gate"]["policies"][0]
+        assert (policy["status"], policy["waiver"]["by"]) == ("waived", "user_1")
+        assert app.post(f"/v1/plans/{pid}/sign-off", json={"rev": 3}).json()["gate"]["state"] == "ready"
 
 
-def test_a_stand_in_is_named_for_the_rule_and_clears_nothing_until_they_sign(db, shared):
+def test_an_admin_names_themself_and_the_rule_waits_until_they_sign(db, shared):
     pid, lib, net = shared
+    lib.sign_offs.clear()
     lib.rules = [rule(needs={"kind": "person", "id": "alex", "name": "alex"})]
-    rp.override(db, pid, 1, ORG, "security", "stand_in", "Alex is away.", stand_in="sam", until=2_000, now=1_000, **net)
+    rp.override(db, pid, 1, ORG, "security", "stand_in", "Alex is away.", stand_in="user_1", until=2_000, now=1_000, **net)
     now = gate(db, pid)
-    assert now["state"] == "waiting" and now["policies"][0]["stand_ins"][0]["stand_in"] == "sam"
+    assert (now["state"], now["policies"][0]["status"]) == ("waiting", "waiting")
+    assert now["policies"][0]["stand_ins"][0]["stand_in"] == "user_1"
+
+    sd.sign_off(db, pid, 1, **net)
+    now = gate(db, pid)
+    assert (now["state"], now["policies"][0]["met_by"]) == ("ready", ["user_1"])
 
 
 @pytest.mark.parametrize("args", [

@@ -282,9 +282,9 @@ def plan_policy_override(db: DB, params: dict, body: dict) -> Any:
 
 @_json
 def library_people(db: DB, request: Request) -> Any:
-    """The people of the person's org, to pick reviewers from. ``admin_org``:
-    the org whose review rules the doc offers them an override of. Only what
-    to show: the Library decides who may."""
+    """The people of the person's org, to pick reviewers from, leaving out
+    the person (``me``). ``admin_org``: the org whose review rules the doc
+    offers them an override of. Only what to show: the Library decides who may."""
     from urllib.parse import quote
 
     from brindle.daemon import routes_actions as actions
@@ -295,7 +295,7 @@ def library_people(db: DB, request: Request) -> Any:
     members = actions.docs_api("GET", f"/orgs/{quote(ent.org_id, safe='')}/members").get("members")
     return {"people": [{"sub": m["sub"], "email": m.get("email") or ""} for m in members or []
                        if isinstance(m, dict) and isinstance(m.get("sub"), str) and m["sub"] != ent.sub],
-            "admin_org": ent.org_id if ent.role in ("owner", "admin") else None}
+            "me": ent.sub, "admin_org": ent.org_id if ent.role in ("owner", "admin") else None}
 
 
 @_json

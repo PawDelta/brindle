@@ -242,10 +242,11 @@ function DesignDoc({ client, plan, visual, mode, writes }: {
   const sharing: PlanSharingClient | undefined = client.sharePlan && client.setPlanReviewers && client.syncPlan && client.signOffPlan && client.overridePlanPolicy && client.libraryPeople && client.docScopes ? (client as PlanSharingClient) : undefined;
   const [directory, setDirectory] = useState<LibraryPerson[]>([]);
   const [adminOrg, setAdminOrg] = useState<string | null>(null);
+  const [me, setMe] = useState<string | null>(null);
   const [scopes, setScopes] = useState<DocScope[]>([]);
   useEffect(() => {
     if (!sharing) return;
-    sharing.libraryPeople().then((got) => { if (alive.current) { setDirectory(got.people); setAdminOrg(got.admin_org ?? null); } }, () => {});
+    sharing.libraryPeople().then((got) => { if (alive.current) { setDirectory(got.people); setAdminOrg(got.admin_org ?? null); setMe(got.me ?? null); } }, () => {});
     sharing.docScopes().then((got) => { if (alive.current) setScopes(got.scopes); }, () => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps -- once for this doc: the reader is keyed by plan
   }, []);
@@ -549,13 +550,13 @@ function DesignDoc({ client, plan, visual, mode, writes }: {
               <h1 className="m-0 font-serif text-[28px] font-semibold leading-[1.2] tracking-[-0.01em] text-ink">{plan.title}</h1>
               <dl className="m-0 grid grid-cols-[72px_minmax(0,1fr)] gap-x-3 gap-y-[5px] text-[12.5px] leading-[1.6] text-ink-2">
                 <dt className="text-ink-3">Status</dt>
-                <dd className="m-0 flex flex-wrap items-center gap-x-3.5 gap-y-0.5" data-testid="plan-status" data-state={plan.state}>
+                <dd className="m-0 flex flex-wrap items-center gap-x-3.5 gap-y-0.5" data-testid="plan-status" data-state={plan.state} data-held={policyHeld ? "policy" : undefined}>
                   <span className={`${pill} ${plan.state === "approved" || gate?.state === "ready" ? "text-pass" : "text-sap"}`}>{!open ? (plan.state === "approved" ? (gate ? "Review closed" : "Signed off") : "Changes requested") : gate ? (gate.state === "ready" ? "Ready to build" : gate.state === "changes_requested" ? "Changes requested" : policyHeld ? "Blocked by org policy" : "In team review") : "Needs your sign-off"}</span>
                   <span>{!open ? (plan.state === "approved" ? "Its workers are building it" : "The supervisor is revising it") : gate ? "Build starts when every required reviewer signs off" : "Nothing is built until you sign off"}</span>
                 </dd>
                 <dt className="text-ink-3">Authors</dt>
                 <dd className="m-0">You and the supervisor</dd>
-                <Reviewers plan={plan} client={sharing} directory={directory} adminOrg={adminOrg} scopes={scopes} busy={busy} nameOf={nameOf} write={write} />
+                <Reviewers plan={plan} client={sharing} directory={directory} adminOrg={adminOrg} me={me} scopes={scopes} busy={busy} nameOf={nameOf} write={write} />
                 {plan.ask && (
                   <>
                     <dt className="text-ink-3">Understood</dt>

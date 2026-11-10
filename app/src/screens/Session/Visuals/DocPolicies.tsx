@@ -31,13 +31,15 @@ function Standing({ p, nameOf }: { p: PlanGatePolicyDTO; nameOf(sub: string): st
   return <span className="text-ink-3">waiting</span>;
 }
 
-function Override({ plan, policy, action, client, directory, nameOf, busy, write, close }: {
+function Override({ plan, rev, policy, action, client, candidates, label, busy, write, close }: {
   plan: Plan;
+  /* The revision this was opened on: a waiver is of what the admin read, so it never follows a newer one. */
+  rev: number;
   policy: PlanGatePolicyDTO;
   action: PlanPolicyOverride["action"];
   client: PlanSharingClient;
-  directory: LibraryPerson[];
-  nameOf(sub: string): string;
+  candidates: string[];
+  label(sub: string): string;
   busy: boolean;
   write(work: () => Promise<Plan>): Promise<boolean>;
   close(): void;
@@ -46,24 +48,27 @@ function Override({ plan, policy, action, client, directory, nameOf, busy, write
   const [person, setPerson] = useState("");
   const [until, setUntil] = useState("");
   const standIn = action === "stand_in";
-  const ready = !!reason.trim() && (!standIn || (!!person && !!until));
+  const stale = rev !== plan.rev;
+  const ready = !stale && !!reason.trim() && (!standIn || (!!person && !!until));
   const send = async () => {
-    const base = { rev: plan.rev, org_id: policy.org_id, policy: policy.policy, action, reason: reason.trim() };
+    if (!ready) return;
+    const base = { rev, org_id: policy.org_id, policy: policy.policy, action, reason: reason.trim() };
     const body = standIn ? { ...base, stand_in: person, until: Math.floor(new Date(`${until}T23:59:59`).getTime() / 1000) } : base;
     if (await write(() => client.overridePlanPolicy(plan.id, body))) close();
   };
   return (
-    <div className="grid max-w-[60ch] gap-1.5 rounded-md border border-line p-2" data-testid={`plan-policy-override-${policy.policy}`}>
+    <div className="grid max-w-[60ch] gap-1.5 rounded-md border border-line p-2" data-testid={`plan-policy-override-${policy.policy}`} data-stale={stale || undefined}>
       {standIn && (
         <>
           <select className={`${field} text-[12.5px]`} aria-label="Stand-in" value={person} onChange={(e) => setPerson(e.target.value)}>
             <option value="">Who stands in…</option>
-            {directory.map((p) => <option key={p.sub} value={p.sub}>{nameOf(p.sub)}</option>)}
+            {candidates.map((sub) => <option key={sub} value={sub}>{label(sub)}</option>)}
           </select>
           <input type="date" className={`${field} text-[12.5px]`} aria-label="Stands in until" value={until} onChange={(e) => setUntil(e.target.value)} />
         </>
       )}
       <input className={`${field} text-[12.5px]`} aria-label="Reason" placeholder={standIn ? "Why they're standing in" : "Why it's waived for this revision"} value={reason} onChange={(e) => setReason(e.target.value)} />
+      {stale && <p role="alert" className="m-0 text-xs text-sap">This design has a new revision. Cancel, read it, and start again.</p>}
       <div className="flex items-center gap-1.5">
         <button type="button" className={`${main} text-xs`} disabled={busy || !ready} onClick={() => void send()}>{standIn ? "Name stand-in" : "Waive once"}</button>
         <button type="button" className={`${quiet} text-xs`} onClick={close}>Cancel</button>
@@ -72,19 +77,23 @@ function Override({ plan, policy, action, client, directory, nameOf, busy, write
   );
 }
 
-export function Policies({ plan, client, directory, adminOrg, busy, nameOf, write }: {
+export function Policies({ plan, client, directory, adminOrg, me, busy, nameOf, write }: {
   plan: Plan;
   client?: PlanSharingClient;
   directory: LibraryPerson[];
   adminOrg: string | null;
+  me: string | null;
   busy: boolean;
   nameOf(sub: string): string;
   write(work: () => Promise<Plan>): Promise<boolean>;
 }) {
-  const [open, setOpen] = useState<{ policy: string; action: PlanPolicyOverride["action"] } | null>(null);
+  const [open, setOpen] = useState<{ policy: string; action: PlanPolicyOverride["action"]; rev: number } | null>(null);
   const policies = plan.gate?.policies ?? [];
   if (policies.length === 0) return null;
   const closed = plan.state === "approved";
+  const label = (sub: string) => (sub === me ? "You" : nameOf(sub));
+  // The directory leaves the person out, and an admin may name themself.
+  const candidates = [...(me ? [me] : []), ...directory.map((p) => p.sub)];
   return (
     <div className="grid gap-1" data-testid="plan-policies">
       <span className="text-[11px] text-ink-3">Required by org policy · can't remove</span>
@@ -97,18 +106,21 @@ export function Policies({ plan, client, directory, adminOrg, busy, nameOf, writ
             <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
               <span className="text-ink">{who(p)}</span>
               <span className="text-[11px] text-ink-3">{`${p.name} · ${why(p)}`}</span>
-              <Standing p={p} nameOf={nameOf} />
+              <Standing p={p} nameOf={label} />
+              {!!client && !closed && unmet && standing.some((s) => s.stand_in === me) && (
+                <button type="button" className={`${quiet} -my-0.5 text-xs`} disabled={busy} onClick={() => void write(() => client.signOffPlan(plan.id, plan.rev))}>Sign off</button>
+              )}
               {canOverride && (
                 <>
-                  <button type="button" className={`${quiet} -my-0.5 text-xs`} onClick={() => setOpen({ policy: p.policy, action: "waive" })}>Waive once</button>
-                  {directory.length > 0 && <button type="button" className={`${quiet} -my-0.5 text-xs`} onClick={() => setOpen({ policy: p.policy, action: "stand_in" })}>Name a stand-in</button>}
+                  <button type="button" className={`${quiet} -my-0.5 text-xs`} onClick={() => setOpen({ policy: p.policy, action: "waive", rev: plan.rev })}>Waive once</button>
+                  {candidates.length > 0 && <button type="button" className={`${quiet} -my-0.5 text-xs`} onClick={() => setOpen({ policy: p.policy, action: "stand_in", rev: plan.rev })}>Name a stand-in</button>}
                 </>
               )}
             </span>
             {p.note && <span className="text-[11px] text-ink-3">{p.note}</span>}
-            {standing.map((s) => <span key={s.stand_in} className="text-[11px] text-ink-3">{`${nameOf(s.stand_in)} can stand in until ${day(s.until)}`}</span>)}
+            {standing.map((s) => <span key={s.stand_in} className="text-[11px] text-ink-3">{`${label(s.stand_in)} can stand in until ${day(s.until)}`}</span>)}
             {canOverride && open?.policy === p.policy && (
-              <Override key={open.action} plan={plan} policy={p} action={open.action} client={client} directory={directory} nameOf={nameOf} busy={busy} write={write} close={() => setOpen(null)} />
+              <Override key={`${open.action}:${open.rev}`} plan={plan} rev={open.rev} policy={p} action={open.action} client={client} candidates={candidates} label={label} busy={busy} write={write} close={() => setOpen(null)} />
             )}
           </div>
         );

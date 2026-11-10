@@ -126,16 +126,17 @@ def _remember(db: DB, plan_id: str, view: dict) -> bool:
                          (review, plan_id, review)).rowcount == 1
 
 
-def _grant(doc_id: str, reviewers: list[dict], permissions: dict | None, client, store) -> None:
+def _grant(db: DB, p: dict, doc_id: str, reviewers: list[dict], permissions: dict | None, client, store) -> None:
     """Scope members start read-only, and ``PUT /permissions`` replaces the
     list: add to what is there, giving each reviewer the right to comment and
     suggest. A reviewer taken off the list keeps the grant."""
-    held = ad.api("GET", _path(doc_id), client=client, store=store).get("permissions") or {}
+    held = review_policies.ask(db, p, "GET", _path(doc_id), client=client, store=store).get("permissions") or {}
     grants = {**held, **(permissions or {})}
     for r in reviewers:
         grants[r["sub"]] = {"can_edit": False, **grants.get(r["sub"], {}), **REVIEWER_GRANT}
     if grants != held:
-        ad.api("PUT", _path(doc_id, "/permissions"), {"permissions": grants}, client=client, store=store)
+        review_policies.ask(db, p, "PUT", _path(doc_id, "/permissions"), {"permissions": grants},
+                            client=client, store=store)
 
 
 # -- sharing -----------------------------------------------------------------------------
@@ -215,15 +216,15 @@ def share(db: DB, plan_id: str, scope: Any, *, reviewers: Any = None, permission
     row, resumed = _claim_new(db, p["id"], ent.sub, time.time() if now is None else now)
     _own(row, ent)
     doc_id = row["doc_id"] or _create(db, p, ent.sub, cur, content, resumed, client, store)
-    ad.api("POST", ad._doc_path(doc_id, "/share"), {"scope": scope}, client=client, store=store)
+    review_policies.ask(db, p, "POST", ad._doc_path(doc_id, "/share"), {"scope": scope}, client=client, store=store)
     if people or permissions:
-        _grant(doc_id, people or [], permissions, client, store)
+        _grant(db, p, doc_id, people or [], permissions, client, store)
     if people is not None:
         _remember(db, p["id"], review_policies.ask(db, p, "PUT", _path(doc_id, "/reviewers"), {"reviewers": people},
                                                    client=client, store=store))
     if folder is not None:
-        _remember(db, p["id"], ad.api("PUT", _path(doc_id, "/folder"), {"folder": folder},
-                                      client=client, store=store))
+        _remember(db, p["id"], review_policies.ask(db, p, "PUT", _path(doc_id, "/folder"), {"folder": folder},
+                                                   client=client, store=store))
     return link(db, p["id"])
 
 
@@ -234,7 +235,7 @@ def set_reviewers(db: DB, plan_id: str, reviewers: Any, *, client=None, store=No
     client, store = ad._session(client, store)
     share_ = _shared(db, p["id"], store)
     people = _reviewers(reviewers)
-    _grant(share_["doc_id"], people, None, client, store)
+    _grant(db, p, share_["doc_id"], people, None, client, store)
     if _remember(db, p["id"], review_policies.ask(db, p, "PUT", _path(share_["doc_id"], "/reviewers"),
                                                   {"reviewers": people}, client=client, store=store)):
         plan_docs._changed(db, p, p["rev"])
