@@ -444,8 +444,12 @@ def test_design_doc_round_trip_comment_reply_and_next_revision(db, session):
     assert [s["kind"] for s in plan_docs.revision(db, pid)["sections"]] == ["markdown", "mermaid"]
 
     tid = plan_docs.comment(db, pid, 1, {"kind": "text", "section": "goal", "quote": "per org"}, "Which orgs?")
+    sid = plan_docs.suggest(db, pid, 1, "goal", 0, "Presets", "Rules", "clearer")
     plans.decide(db, pid, 1, False, person=True)
     [msg] = messages(db)                                  # one message for the batch, naming the thread
+    with pytest.raises(ToolError):                        # a suggestion can't be resolved ...
+        mcp_server.reply_plan_thread(pid, sid, "no", resolve=True)
+    assert not next(t for t in plan_docs.fields(db, plans.get(db, pid))["threads"] if t["id"] == sid)["replies"]
     assert f"[thread #{tid}]" in msg and "Which orgs?" in msg
 
     assert f"#{tid}" in mcp_server.reply_plan_thread(pid, tid, "All of them.", resolve=True)
