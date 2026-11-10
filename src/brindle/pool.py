@@ -229,6 +229,26 @@ def discard(repo_root: str, entry: PoolEntry, cfg: RepoConfig | None = None) -> 
 # -- cleanup ------------------------------------------------------------------
 
 
+def _discard_row(db: DB, repo_root: str, entry: PoolEntry, cfg: RepoConfig) -> bool:
+    """Claim cleanup against concurrent pool claims, retaining failed entries.
+
+    Deleting first is necessary: a claim that already took this row owns its
+    checkout. If removal fails, restore the metadata so a later sweep still
+    knows its teardown, and so the orphan pass leaves the folder alone.
+    Teardown may already have dismantled setup, so a retained entry must
+    remain cleanup-only rather than being offered to a new worker.
+    """
+    if db.delete_pool_entry(entry.path) != 1:
+        return False
+    try:
+        discard(repo_root, entry, cfg)
+    except git.GitError:
+        entry.ready = 0
+        db.add_pool_entry(entry)
+        return False
+    return True
+
+
 def sweep(db: DB, repo_root: str, cfg: RepoConfig | None = None) -> None:
     """Clean up anything a crashed fill (or a config change since the last
     one) could have left behind: not-ready rows (safe to call this stale
@@ -241,8 +261,7 @@ def sweep(db: DB, repo_root: str, cfg: RepoConfig | None = None) -> None:
 
     for e in db.pool_entries(repo_root, ready_only=False):
         if not e.ready or e.base_branch != current_base:
-            if db.delete_pool_entry(e.path) == 1:
-                discard(repo_root, e, cfg)
+            _discard_row(db, repo_root, e, cfg)
 
     # Everything currently claimed -- by a pool row or by a live workspace --
     # is off limits, no matter what directory it happens to sit in. A claim
@@ -300,7 +319,6 @@ def trim(db: DB, repo_root: str) -> int:
         # entry between listing it above and deleting it here; only discard
         # the worktree when our delete actually removed the row -- otherwise
         # it's now a live workspace and must be left alone.
-        if db.delete_pool_entry(e.path) == 1:
-            discard(repo_root, e, cfg)
+        if _discard_row(db, repo_root, e, cfg):
             removed += 1
     return removed

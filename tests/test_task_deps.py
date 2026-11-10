@@ -318,6 +318,29 @@ def test_task_id_dependency_dispatches(db, dependency_rows, event):
     assert tasks.known_dependency(db, boss.repo_root, upstream.id)
 
 
+def test_failed_mcp_removal_keeps_dependencies_pending(db, dependency_rows, monkeypatch):
+    caller, boss, workspace, _ = dependency_rows
+    upstream = workspace("upstream", branch="feature", tracked=True)
+    db.conn.execute("UPDATE workspaces SET kind='worktree' WHERE id=?", (upstream.id,))
+    Path(upstream.path).mkdir(parents=True)
+    pending = tasks.enqueue(db, caller, boss, "developer", "dependent", "assign",
+                            isolate=True, branch="dependent", done_when=None, files=None,
+                            depends_on=[db.list_tasks(boss.repo_root)[0].id])
+    monkeypatch.setattr(mcp_server, "_caller", lambda db: (caller, boss))
+    monkeypatch.setattr(mcp_server.git, "ahead_behind", lambda *a: (0, 1))
+    def refuse(*a, **k):
+        raise workspaces.WorkspaceError("disk full")
+    monkeypatch.setattr(workspaces, "remove", refuse)
+    mcp_server.remove_workspace(upstream.id)
+    assert db.get_task(pending.id).state == "pending"
+    assert not bus.tail(db, kinds=("pipeline.removed",))
+    monkeypatch.setattr(workspaces, "remove", lambda db, ws, **k:
+                        (db.delete_workspace(ws.id) or workspaces.Removed(False, None, None)))
+    mcp_server.remove_workspace(upstream.id)
+    assert db.get_task(pending.id).state == "cancelled"
+    assert bus.tail(db, kinds=("pipeline.removed",))[0]["agent_id"] is not None
+
+
 @pytest.mark.parametrize(("event", "upstream_kind"), [
     ("merged", "task"), ("removed", "task"), ("requeue_merged", "task"),
     ("requeue_removed", "worker"), ("requeue_pending", "workspace"),
