@@ -55,7 +55,7 @@ const listed = () => [...screen.getByTestId("decisions").querySelectorAll("li[da
 describe("knowledge screen", () => {
   it("says what knowledge is, shows decisions as cards and documents as a list, searches both, and records a decision over the one in its way", async () => {
     const { daemon, failing, stop } = setup();
-    const page = screen.getByRole("region", { name: "Knowledge" });
+    const page = screen.getByRole("region", { name: "Library" });
     expect(page.textContent).toContain("What your agents know and remember about this repo");
     const decisions = await screen.findByTestId("decisions");
     await waitFor(() => expect(listed()).toEqual(["storage", "logging"]));
@@ -83,7 +83,7 @@ describe("knowledge screen", () => {
 
     // Search matches a decision's topic, text or rationale, as the engine's --query does, and asks
     // the engine for the documents' best passages: here a rollback note no decision mentions.
-    const box = screen.getByRole("searchbox", { name: "Search knowledge" });
+    const box = screen.getByRole("searchbox", { name: "Search the Library" });
     fireEvent.change(box, { target: { value: "SIMPLE" } });
     expect(listed()).toEqual(["storage"]);
     expect(screen.getByTestId("decision-count").textContent).toBe("1 of 2 match");
@@ -140,7 +140,7 @@ describe("knowledge screen", () => {
     expect(empty.textContent).toContain("You add a folder of documents");
     expect(empty.textContent).not.toMatch(/terminal|brindle kb/i);
     expect(within(empty).getByRole("button", { name: "Add folder" })).toBeTruthy();
-    expect(screen.queryByRole("searchbox", { name: "Search knowledge" })).toBeNull();
+    expect(screen.queryByRole("searchbox", { name: "Search the Library" })).toBeNull();
     expect(screen.queryByTestId("decisions")).toBeNull();
     fireEvent.click(within(empty).getByRole("button", { name: "Record a decision" }));
     expect(screen.queryByTestId("empty-state")).toBeNull();
@@ -151,7 +151,7 @@ describe("knowledge screen", () => {
     await waitFor(() => expect(listed()).toEqual(["logging"]));
     expect(daemon.data.decisions).toHaveLength(1);
     expect(screen.queryByTestId("empty-state")).toBeNull();
-    expect(screen.getByRole("searchbox", { name: "Search knowledge" })).toBeTruthy();
+    expect(screen.getByRole("searchbox", { name: "Search the Library" })).toBeTruthy();
     fireEvent.click(screen.getByRole("tab", { name: /Imported/ }));
     expect(screen.getByTestId("sources").textContent).toContain("No documents yet");
     stop();

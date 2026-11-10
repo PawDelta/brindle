@@ -659,7 +659,7 @@ describe("App", () => {
     fireEvent.click(link("Open Account › Usage"));
     expect(within(nav()).getByRole("button", { name: "New session" })).toBeTruthy();
     expect(within(nav()).getByRole("button", { name: "Home" })).toBeTruthy();
-    expect(within(nav()).getByRole("button", { name: "Knowledge" })).toBeTruthy();
+    expect(within(nav()).getByRole("button", { name: "Agents" })).toBeTruthy();
     fireEvent.keyDown(window, { key: "Escape" });
     expect(screen.getByTestId("terminal")).toBe(terminal);
     expect(terminal.scrollTop).toBe(96);
@@ -693,25 +693,57 @@ describe("App", () => {
     sync.stop();
   });
 
-  it("profile rail: Knowledge and Agents sit in the profile button's rail, open their screens with the rail kept, and are no longer page links", async () => {
-    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root] });
+  it("library sidebar: the foot's button opens the Library with the sidebar as its navigation, ← Sessions and ⌘L go back, and Settings keeps Agents", async () => {
+    const plan = { kind: "plan", reason: "plan awaiting approval", agent_id: "sup1", workspace_id: "proj", detail: "1. Keep the plan." };
+    const decided = { id: "a".repeat(32), repo_key: "proj", topic: "storage", body: "use sqlite", rationale: "", scope: [], status: "accepted", created_at: 1 };
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root], inbox: [plan], decisions: [decided] });
     const store = createAppStore();
     const client = daemon.client();
     const sync = startSync({ client, store, connect: daemon.connect });
     renderApp(<App store={store} client={client} refresh={sync.refresh} />);
-    expect(await screen.findByRole("region", { name: "Session" }, { timeout: 4000 })).toBeTruthy();
-    expect(within(screen.getByTestId("sidebar-foot-row")).queryByRole("button", { name: "Knowledge" })).toBeNull();
-    expect(within(screen.getByTestId("sidebar-foot-row")).queryByRole("button", { name: "Agents" })).toBeNull();
+    const sessionPage = await screen.findByRole("region", { name: "Session" }, { timeout: 4000 });
+    // The foot's button, beside the terminal switch: off, with the dot while a design waits on the person.
+    const foot = screen.getByTestId("sidebar-foot-row");
+    const button = await within(foot).findByRole("button", { name: /^Library, 1 needs you/ });
+    expect(button.nextElementSibling).toBe(screen.getByTestId("terminal-toggle"));
+    expect(button.getAttribute("aria-pressed")).toBe("false");
+    expect(within(button).getByTestId("library-dot")).toBeTruthy();
 
+    // Pressed: the Library's page, and the sidebar is its navigation in the sessions' place.
+    fireEvent.click(button);
+    expect(await screen.findByRole("region", { name: "Library" })).toBeTruthy();
+    expect(button.getAttribute("aria-pressed")).toBe("true");
+    expect(within(nav()).queryByRole("navigation", { name: "Sessions" })).toBeNull();
+    const rail = within(nav()).getByRole("navigation", { name: "Library" });
+    expect([...rail.querySelectorAll("button")].map((row) => row.textContent?.replace(/^\W+/, "").replace(/\s*\d*$/, ""))).toEqual(["Needs you", "In review", "Approved", "Building", "Shipped", "Map", "Imported docs", "Decisions", "Kept visuals"]);
+    expect(within(rail).getByRole("button", { name: /^Needs you/ }).textContent).toContain("1");
+    // A Source's row counts what it holds, opens today's view of it, and is marked.
+    await waitFor(() => expect(within(rail).getByRole("button", { name: /^Decisions/ }).textContent).toContain("1"));
+    fireEvent.click(within(rail).getByRole("button", { name: /^Decisions/ }));
+    expect(await screen.findByTestId("decisions")).toBeTruthy();
+    expect(within(rail).getByRole("button", { name: /^Decisions/ }).getAttribute("aria-current")).toBe("page");
+
+    // ← Sessions: the session as it was left, and the sessions list again.
+    fireEvent.click(link("← Sessions"));
+    expect(screen.getByRole("region", { name: "Session" })).toBe(sessionPage);
+    expect(within(nav()).getByRole("navigation", { name: "Sessions" })).toBeTruthy();
+    expect(button.getAttribute("aria-pressed")).toBe("false");
+
+    // Settings has no Library heading or Knowledge entry; Agents sits under "brindle", after General.
     fireEvent.click(link("Open Account › Usage"));
-    for (const name of ["Knowledge", "Agents"]) {
-      fireEvent.click(link(name));
-      expect(await screen.findByRole("region", { name })).toBeTruthy();
-      expect(link(name).getAttribute("aria-current")).toBe("page");
-      expect(link("← Sessions")).toBeTruthy();
-    }
+    expect(within(nav()).queryByRole("button", { name: "Knowledge" })).toBeNull();
+    expect(within(nav()).queryByText("Library")).toBeNull();
+    expect(screen.getByRole("tab", { name: "General" }).nextElementSibling).toBe(link("Agents"));
+    fireEvent.click(link("Agents"));
+    expect(await screen.findByRole("region", { name: "Agents" })).toBeTruthy();
+    expect(link("Agents").getAttribute("aria-current")).toBe("page");
+    // ⌘L from there opens the Library, and ⌘L again goes back to where the person was.
+    fireEvent.keyDown(window, { key: "l", metaKey: true });
+    expect(await screen.findByRole("region", { name: "Library" })).toBeTruthy();
+    fireEvent.keyDown(window, { key: "l", metaKey: true });
+    expect(await screen.findByRole("region", { name: "Agents" })).toBeTruthy();
     fireEvent.keyDown(window, { key: "Escape" });
-    expect(await screen.findByRole("region", { name: "Session" })).toBeTruthy();
+    expect(screen.getByRole("region", { name: "Session" })).toBe(sessionPage);
     sync.stop();
   });
 
@@ -976,8 +1008,8 @@ describe("App", () => {
     expect(after).toContain("/snapshot");
     expect(after).toContain("/inbox");
     expect(after).toContain("/meta");
-    fireEvent.click(link("Knowledge"));
-    expect(await screen.findByRole("region", { name: "Knowledge" })).toBeTruthy();
+    fireEvent.click(link("Library"));
+    expect(await screen.findByRole("region", { name: "Library" })).toBeTruthy();
     expect(screen.queryByRole("alert")).toBeNull();
     sync.stop();
   });

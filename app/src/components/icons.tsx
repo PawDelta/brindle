@@ -75,6 +75,16 @@ export const FileIcon = (p: Props) => (
   </Icon>
 );
 
+/* The Library: a page with two lines of text, and a second page behind it. */
+export const LibraryIcon = (p: Props) => (
+  <Icon {...p}>
+    <rect x="4" y="7" width="12" height="14" rx="2" />
+    <path d="M8 3.5h10a2 2 0 0 1 2 2V17" />
+    <path d="M7.5 12h5" />
+    <path d="M7.5 16h5" />
+  </Icon>
+);
+
 export const ArchiveIcon = (p: Props) => (
   <Icon {...p}>
     <rect x="3" y="4" width="18" height="5" rx="1" />

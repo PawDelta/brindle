@@ -627,15 +627,14 @@ describe("visuals", () => {
       expect(within(sidebar()).getByRole("button", { name: "Show sup1's agents" })).toBeTruthy();
       expect(screen.getByTestId("terminal")).toBe(terminal);
 
-      // Knowledge › Kept visuals: the kept copy opens in the same reader, read-only, on its own scheme path.
-      fireEvent.click(within(sidebar()).getByRole("button", { name: "Open Account › Usage" }));
-      fireEvent.click(within(sidebar()).getByRole("button", { name: "Knowledge" }));
-      fireEvent.click(await screen.findByRole("tab", { name: /Kept visuals/ }));
+      // Library › Kept visuals: the kept copy opens in the same reader, read-only, on its own scheme path.
+      fireEvent.click(within(sidebar()).getByRole("button", { name: /^Library/ }));
+      fireEvent.click(await within(sidebar()).findByRole("button", { name: /^Kept visuals/ }));
       fireEvent.click(await screen.findByTestId("kept-k_1"));
       const kept = screen.getByTestId("kept-reader");
       expect(within(kept).getByTestId("visual-frame").dataset.src).toBe("brindle-visual://kept/k_1");
       expect(within(kept).queryByTestId("visual-send")).toBeNull();
-      // Esc closes the reader and stays in Knowledge; the next Esc, with nothing nested open, leaves it.
+      // Esc closes the reader and stays in the Library; the next Esc, with nothing nested open, leaves it.
       fireEvent.keyDown(window, { key: "Escape" });
       expect(await screen.findByTestId("kept-k_1")).toBeTruthy();
       expect(screen.queryByTestId("kept-reader")).toBeNull();

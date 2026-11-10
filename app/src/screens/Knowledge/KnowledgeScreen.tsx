@@ -1,4 +1,6 @@
-/* Knowledge: what a repo's agents know and remember about it, said in one
+/* The Library's page (once "Knowledge"; opened from the sidebar foot's button,
+   with the sidebar as its navigation: components/LibraryRail.tsx): what a
+   repo's agents know and remember about it, said in one
    line at the top. Two kinds. Decisions (GET /v1/decisions): the rules
    every agent follows, each a card with what was decided, why, when, its
    state and the paths it covers, and a Record button for a new one
@@ -26,6 +28,7 @@ import type { BusEvent } from "../../api/events";
 import type { PickFolder } from "../../api/open";
 import type { DecisionDTO } from "../../api/schema";
 import { plain } from "../../api/wording";
+import type { LibraryCounts } from "../../components/LibraryRail";
 import { PageHeader } from "../../components/PageHeader";
 import { NO_REPO, RepoSelect, useRepo } from "../../components/RepoSelect";
 import { alert, button, card, field, h2, main, mono, notice, pill, quiet } from "../../components/ui";
@@ -41,8 +44,13 @@ export interface KnowledgeScreenProps {
   client: DaemonClient;
   /* The native folder picker (the app's shell); without one the path is typed. */
   pickFolder?: PickFolder;
-  /* The tab to open on (default Docs; an imported doc's number opens Imported). */
+  /* The view shown (default Docs; an imported doc's number opens Imported): the Library's
+     sidebar picks it, and the screen follows when it changes. */
   view?: KnowledgeView;
+  /* The screen moved to a view itself (a tab, the empty state's buttons): the sidebar follows. */
+  onView?(view: KnowledgeView): void;
+  /* What the repo on screen holds, for the sidebar's counts. */
+  onCounts?(counts: Pick<LibraryCounts, "imported" | "decisions" | "kept">): void;
   /* A library doc (its id) to open in the reader, or an imported one (its number). */
   doc?: number | string;
   /* Docs only of this session (its root agent id). */
@@ -361,10 +369,10 @@ function Source({ s, busy, indexing, library, onSync, onRemove }: { s: KbSource;
 /* How knowledge gets here, for a repo with none yet. */
 function EmptyState({ onRecord, onAddFolder }: { onRecord(): void; onAddFolder(): void }) {
   return (
-    <section className={`${card} flex flex-col gap-s2 px-s3 py-s3`} aria-label="How knowledge gets here" data-testid="empty-state">
+    <section className={`${card} flex flex-col gap-s2 px-s3 py-s3`} aria-label="How the Library fills up" data-testid="empty-state">
       <div>
         <h2 className={h2}>Nothing here yet</h2>
-        <p className="text-sm text-ink-2">Knowledge is what your agents know and remember about this repo. It builds up three ways:</p>
+        <p className="text-sm text-ink-2">The Library is what your agents know and remember about this repo. It builds up three ways:</p>
       </div>
       <ol className="flex flex-col gap-s1 text-sm">
         <li className="flex gap-s2">
@@ -398,10 +406,20 @@ function EmptyState({ onRecord, onAddFolder }: { onRecord(): void; onAddFolder()
   );
 }
 
-export function KnowledgeScreen({ client, pickFolder, view, doc, session, onBackToSession, fromRepo }: KnowledgeScreenProps) {
+export function KnowledgeScreen({ client, pickFolder, view, onView, onCounts, doc, session, onBackToSession, fromRepo }: KnowledgeScreenProps) {
   const pick = useRepo(fromRepo);
   const { repo, repos } = pick;
   const [tab, setTab] = useState<KnowledgeView>(view ?? (typeof doc === "number" ? "imported" : "docs"));
+  // The sidebar picked another view: follow it, keeping what is typed or open here.
+  const [asked, setAsked] = useState(view);
+  if (view !== asked) {
+    setAsked(view);
+    setTab(view ?? (typeof doc === "number" ? "imported" : "docs"));
+  }
+  const show = (next: KnowledgeView) => {
+    setTab(next);
+    onView?.(next);
+  };
   const [decisions, setDecisions] = useState<DecisionDTO[] | null>(null);
   const [sources, setSources] = useState<KbSource[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -452,6 +470,19 @@ export function KnowledgeScreen({ client, pickFolder, view, doc, session, onBack
   useEffect(() => {
     void load();
   }, [load, lastEventId]);
+
+  // The sidebar's counts: what this repo holds, and the visuals kept (they are kept from a session, so once is enough).
+  const [kept, setKept] = useState<number>();
+  useEffect(() => {
+    let current = true;
+    if (onCounts) void client.keptVisuals().then((rows) => current && setKept(rows.length), () => undefined);
+    return () => {
+      current = false;
+    };
+  }, [client, onCounts]);
+  useEffect(() => {
+    onCounts?.({ decisions: decisions?.length, imported: sources?.length, kept });
+  }, [onCounts, decisions, sources, kept]);
 
   // A job this screen started ends on the bus: it is forgotten, or its failure said.
   const ended = (e: BusEvent) => (e.kind === "job.done" || e.kind === "job.failed") && typeof e.payload.job === "string";
@@ -532,23 +563,23 @@ export function KnowledgeScreen({ client, pickFolder, view, doc, session, onBack
   const shown = decisions?.filter((d) => matches(d, query)) ?? [];
   const empty = decisions !== null && sources !== null && decisions.length === 0 && sources.length === 0 && !recording && !adding && !query && pending.length === 0;
   const startRecording = () => {
-    setTab("decisions");
+    show("decisions");
     setRecording(true);
     setRecorded(null);
   };
   const startAdding = () => {
-    setTab("imported");
+    show("imported");
     setAdding(true);
   };
   const local = tab === "imported" || tab === "decisions";
   const count = (t: KnowledgeView) =>
     t === "imported" && sources ? (sources.length === 1 ? "1 folder" : `${sources.length} folders`) : t === "decisions" && decisions ? String(decisions.length) : null;
   return (
-    <section className="flex flex-col gap-s3" aria-label="Knowledge">
-      <PageHeader title="Knowledge" lede="What your agents know and remember about this repo: docs they wrote, decisions they follow, and documents they can look up.">
+    <section className="flex flex-col gap-s3" aria-label="Library">
+      <PageHeader title="Library" lede="What your agents know and remember about this repo: docs they wrote, decisions they follow, and documents they can look up.">
         <RepoSelect {...pick} />
       </PageHeader>
-      <div role="tablist" aria-label="Knowledge views" className="-mt-s1 flex gap-0.5 border-b border-line text-sm">
+      <div role="tablist" aria-label="Library views" className="-mt-s1 flex gap-0.5 border-b border-line text-sm">
         {TABS.map(([t, name]) => (
           <button
             key={t}
@@ -556,7 +587,7 @@ export function KnowledgeScreen({ client, pickFolder, view, doc, session, onBack
             role="tab"
             aria-selected={tab === t}
             className={`-mb-px border-b-2 px-s1 py-1 ${tab === t ? "border-fawn font-medium text-ink" : "border-transparent text-ink-2 hover:text-ink"}`}
-            onClick={() => setTab(t)}
+            onClick={() => show(t)}
           >
             {name}
             {count(t) && <span className="ml-1 font-mono text-xs text-ink-3">{count(t)}</span>}
@@ -569,7 +600,7 @@ export function KnowledgeScreen({ client, pickFolder, view, doc, session, onBack
       {local && repos && repos.length === 0 && <p className="text-ink-3">{NO_REPO}</p>}
       {local && loadError && (
         <div role="alert" className={`${alert} flex items-center justify-between gap-s2`}>
-          <span>Could not load knowledge: {loadError}</span>
+          <span>Could not load the Library: {loadError}</span>
           <button type="button" className={button} onClick={() => void load()}>
             Retry
           </button>
@@ -579,7 +610,7 @@ export function KnowledgeScreen({ client, pickFolder, view, doc, session, onBack
         <input
           type="search"
           className={`${field} w-full py-s1`}
-          aria-label="Search knowledge"
+          aria-label="Search the Library"
           placeholder="Search everything: decisions and documents…"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
