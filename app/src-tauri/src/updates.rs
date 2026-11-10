@@ -103,7 +103,8 @@ pub enum EngineSays {
 /// Only an explicit `"airgap": true` turns updates off: a repo whose config
 /// can't be read is logged and passed over, since it can't arm the daemon
 /// either, and one such repo mustn't hold back everyone's updates. A daemon
-/// not answering `GET /v1/meta` is no answer at all (`engine_allows`).
+/// not answering `GET /v1/meta`, or omitting its boolean air-gap verdict,
+/// is no answer at all (`engine_allows`).
 pub fn engine_says(get: impl Fn(&str) -> Result<(u16, String), String>) -> EngineSays {
     let json = |path: &str| match get(path) {
         Ok((200, body)) => serde_json::from_str::<Value>(&body).ok(),
@@ -128,10 +129,10 @@ pub fn engine_says(get: impl Fn(&str) -> Result<(u16, String), String>) -> Engin
             _ => eprintln!("brindle: update check: couldn't read {root}'s config; passed over"),
         }
     }
-    match json("/v1/meta") {
+    match json("/v1/meta").and_then(|meta| meta.get("airgap").and_then(Value::as_bool)) {
+        Some(true) => EngineSays::Off,
+        Some(false) => EngineSays::On,
         None => EngineSays::NoAnswer,
-        Some(meta) if meta.get("airgap") == Some(&Value::Bool(true)) => EngineSays::Off,
-        Some(_) => EngineSays::On,
     }
 }
 
@@ -556,6 +557,9 @@ async fn may_check<R: Runtime>(app: &AppHandle<R>, brindle_home: &Path) -> Resul
 struct Record {
     last_version: Option<String>,
     last_checked: Option<u64>,
+    /// The update acknowledgement stays in the Inbox until explicitly dismissed.
+    #[serde(default)]
+    updated: Option<String>,
     #[serde(default)]
     later: Option<String>,
     /// The engine's last word was Off, until it says On (`engine_allows`).
@@ -578,7 +582,6 @@ pub struct Seen(Mutex<SeenState>, tokio::sync::Mutex<()>);
 struct SeenState {
     record: Record,
     path: Option<PathBuf>,
-    updated: Option<String>,
     available: Option<Offer>,
     looking: bool,
     /// Looks finished this launch, and the last one's outcome.
@@ -669,14 +672,19 @@ impl Seen {
 
 impl SeenState {
     fn load(path: Option<PathBuf>, current: &Version) -> Self {
-        let record: Record = path
+        let mut record: Record = path
             .as_ref()
             .and_then(|p| std::fs::read_to_string(p).ok())
             .and_then(|text| serde_json::from_str(&text).ok())
             .unwrap_or_default();
-        let updated = updated_to(record.last_version.as_deref(), current)
-            .filter(|_| checks_at_launch(&current.to_string()));
-        let mut seen = Self { record, path, updated, ..Self::default() };
+        let current_version = current.to_string();
+        if record.last_version.as_deref() != Some(&current_version) {
+            record.updated = updated_to(record.last_version.as_deref(), current);
+        }
+        if !checks_at_launch(&current_version) {
+            record.updated = None;
+        }
+        let mut seen = Self { record, path, ..Self::default() };
         // Preserve history written before per-version claims were introduced.
         for version in &seen.record.notified_versions {
             seen.claim_version(version);
@@ -778,7 +786,7 @@ fn status<R: Runtime>(app: &AppHandle<R>) -> UpdateStatus {
         pending,
         available: seen.available.clone(),
         later: seen.available.as_ref().is_some_and(|a| seen.record.later.as_ref() == Some(&a.version)),
-        updated: seen.updated.clone(),
+        updated: seen.record.updated.clone(),
         last_checked: seen.record.last_checked,
         checking: checking || seen.looking,
     }
@@ -909,7 +917,12 @@ pub async fn app_update_check<R: Runtime>(app: AppHandle<R>) -> Result<UpdateSta
 /// The person has read "Updated to brindle X": it goes.
 #[tauri::command]
 pub fn app_update_dismiss<R: Runtime>(app: AppHandle<R>) {
-    app.state::<Seen>().state().updated = None;
+    {
+        let seen = app.state::<Seen>();
+        let mut seen = seen.state();
+        seen.record.updated = None;
+        seen.save();
+    }
     announce(&app);
 }
 
@@ -1493,6 +1506,10 @@ mod tests {
             let fake = FakeEngine { env_airgap, ..engine(repos, configs.clone()) };
             assert_eq!(engine_says(|p| fake.get(p)), said, "{repos} {configs:?} {env_airgap}");
         }
+        let fake = engine("[]", vec![]);
+        assert_eq!(engine_says(|p| {
+            if p == "/v1/meta" { Ok((200, "{}".into())) } else { fake.get(p) }
+        }), EngineSays::NoAnswer);
     }
 
     #[test]
@@ -1907,6 +1924,30 @@ mod tests {
         let legacy = Ok(Some(Offer { version: "0.2.15".into(), notes: None, rollback: false }));
         relaunched.notify_available(&legacy, || false, |_| notifications.set(notifications.get() + 1));
         assert_eq!(notifications.get(), 4);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn an_updated_card_survives_relaunch_until_dismissed() {
+        let app = tauri::test::mock_builder()
+            .manage(Seen::default())
+            .manage(Installs::default())
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        let dir = std::env::temp_dir().join(format!("update-dismiss-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("app-update.json");
+        std::fs::write(&path, r#"{"last_version":"0.0.1","last_checked":null}"#).unwrap();
+        let current = app.package_info().version.clone();
+        let seen = app.state::<Seen>();
+        for _ in 0..2 {
+            *seen.state() = SeenState::load(Some(path.clone()), &current);
+            assert_eq!(status(app.handle()).updated, Some(current.to_string()));
+        }
+        app_update_dismiss(app.handle().clone());
+        assert_eq!(status(app.handle()).updated, None);
+        *seen.state() = SeenState::load(Some(path), &current);
+        assert_eq!(status(app.handle()).updated, None);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
