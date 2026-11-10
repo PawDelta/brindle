@@ -316,9 +316,14 @@ def mark_read(db: DB, visual_id: str, rev: int | None = None) -> dict:
     with db.tx() as c:
         c.execute("UPDATE visuals SET read_rev=MAX(read_rev, MIN(rev, COALESCE(?, rev))) WHERE id=?", (rev, v["id"]))
     # Both entry points use this state: the Inbox card and the session's list.
-    # Tell connected clients to refresh their Inbox after either opens the reader.
-    bus.publish(db, "visual.read", repo_root=v["repo_root"], root_id=v["root_id"], visual=v["id"])
-    return get(db, v["id"])
+    # Tell connected clients to refresh their Inbox after either opens the reader;
+    # ``pending``: whether it still waits there (a question until answered, a
+    # revision published since), so a client can drop the card at once when not.
+    read = get(db, v["id"])
+    pending = (read["answer"] is None and read["dismissed_rev"] < read["rev"]) if read["options"] \
+        else read["read_rev"] < read["rev"]
+    bus.publish(db, "visual.read", repo_root=v["repo_root"], root_id=v["root_id"], visual=v["id"], pending=pending)
+    return read
 
 
 def page(db: DB, visual_id: str, rev: Any) -> Path:

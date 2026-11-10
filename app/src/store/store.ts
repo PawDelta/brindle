@@ -40,6 +40,9 @@ export interface AppState {
   /* When the read whose rows are applied began (snapshotTicket): a read begun before it,
      ending later (the panes gate's, overtaken by sync's), never puts older rows over them. */
   snapshotBegan: number;
+  /* Visual id → the bus event that took it out of the Inbox (read, answered, dismissed): an inbox read
+     begun before that event still has it, and mustn't put it back. Gone once a later read is applied. */
+  settledVisuals: Record<string, number>;
   /* The newest bus events, oldest first (for notifications). */
   recent: BusEvent[];
   error: string | null;
@@ -51,7 +54,8 @@ export type Action =
   | { type: "account"; account: AccountDTO }
   | { type: "app_update"; status: AppUpdateStatus }
   | { type: "connection"; state: StreamState }
-  | { type: "snapshot"; workspaces: WorkspaceDTO[]; inbox?: InboxItemDTO[]; began?: number }
+  /* `since`: the newest bus event applied when the reads began (sync.ts); the store's own when absent. */
+  | { type: "snapshot"; workspaces: WorkspaceDTO[]; inbox?: InboxItemDTO[]; began?: number; since?: number }
   | { type: "stream"; message: StreamMessage }
   | { type: "error"; message: string };
 
@@ -70,6 +74,7 @@ export const initialState: AppState = {
   synced: false,
   snapshotVersion: 0,
   snapshotBegan: 0,
+  settledVisuals: {},
   recent: [],
   error: null,
   appUpdate: null,
@@ -91,13 +96,23 @@ export function reduce(state: AppState, action: Action): AppState {
     case "connection":
       return { ...state, connection: action.state,
         connectionGeneration: state.connectionGeneration + Number(state.connection !== action.state) };
-    case "snapshot":
+    case "snapshot": {
       if (action.began !== undefined && action.began < state.snapshotBegan) return state;
       // The pane gate can apply ready rows before inbox answers. Keep the
       // inbox's contents and initial-sync status until that read arrives.
-      return { ...state, ...liveSnapshot(action.workspaces, action.inbox ?? state.inbox, state.pastWorkers), stale: false,
+      let { inbox = state.inbox } = action;
+      let settledVisuals = state.settledVisuals;
+      if (action.inbox !== undefined) {
+        // A visual settled after these reads began stays out; one settled before is the engine's to say.
+        const since = action.since ?? state.lastEventId;
+        inbox = inbox.filter((i) => !i.visual_id || !((state.settledVisuals[i.visual_id] ?? 0) > since));
+        settledVisuals = Object.fromEntries(Object.entries(state.settledVisuals).filter(([, id]) => id > since));
+      }
+      return { ...state, ...liveSnapshot(action.workspaces, inbox, state.pastWorkers), stale: false,
         synced: state.synced || action.inbox !== undefined, error: null,
-        snapshotVersion: state.snapshotVersion + 1, snapshotBegan: Math.max(state.snapshotBegan, action.began ?? 0) };
+        snapshotVersion: state.snapshotVersion + 1, snapshotBegan: Math.max(state.snapshotBegan, action.began ?? 0),
+        settledVisuals };
+    }
     case "error":
       return { ...state, error: action.message };
     case "stream": {
@@ -183,6 +198,20 @@ function applyEvent(state: AppState, e: BusEvent): AppState {
           ...ws,
           agents: ws.agents?.map((a) => (a.id === e.agent_id ? { ...a, status, status_since: e.ts } : a)),
         })), state.inbox, state.pastWorkers),
+      };
+    }
+    case "visual.read":
+    case "visual.answered":
+    case "visual.dismissed": {
+      // Answered or dismissed, a visual asks nothing more; read, only when the engine says it no longer
+      // waits (a question waits for its answer). Out of the Inbox and its badge at once, then read afresh.
+      const id = e.payload.visual;
+      if (typeof id !== "string" || (e.kind === "visual.read" && e.payload.pending !== false)) return { ...state, stale: true };
+      return {
+        ...state,
+        stale: true,
+        inbox: state.inbox.filter((i) => i.visual_id !== id),
+        settledVisuals: { ...state.settledVisuals, [id]: e.id },
       };
     }
     case "workspace.removed":
