@@ -32,7 +32,7 @@ import { button, card as cardClass, main, quiet } from "../../components/ui";
 import { providerName } from "../../store/overview";
 import { PanesReadyContext, panesReadyFor } from "../../store/panes";
 import type { Recovery } from "./useContinue";
-import { withTypedWords, withVisualInput } from "./Visuals/terminalInput";
+import { visualsGate, withTypedWords, withVisualInput } from "./Visuals/terminalInput";
 
 export interface ProviderSurfaceProps {
   /* The session's repo (a preflight sign-in checks the provider there). */
@@ -103,12 +103,11 @@ interface PaneCheck {
 export function ProviderSurface({ repo, root, agent: listedAgent, alive, sessionStatus, sessionName, credentials, recovery }: ProviderSurfaceProps) {
   const [view, setView] = useState<TerminalView | null>(null);
   const client = useContext(DaemonContext);
-  const visualsEnabled = useRef(false);
+  const visualsGateRef = useRef<ReturnType<typeof visualsGate> | null>(null);
   useEffect(() => {
-    let current = true;
-    visualsEnabled.current = false;
-    client?.meta().then(meta => { if (current) visualsEnabled.current = meta.visuals === true; }, () => {});
-    return () => { current = false; visualsEnabled.current = false; };
+    const gate = visualsGate(client);
+    visualsGateRef.current = gate;
+    return () => { gate.close(); visualsGateRef.current = null; };
   }, [client]);
   const attempt = recovery.attempt;
   const [checked, setChecked] = useState<PaneCheck | null>(null);
@@ -199,7 +198,7 @@ export function ProviderSurface({ repo, root, agent: listedAgent, alive, session
   // CLIs need the shell's input observed before their native PTY write. The
   // hooks can't say what was typed rather than pasted, so those two report that.
   const observedOpen = useMemo(() => ready && client && agent
-    ? (["claude", "opencode"].includes(agent.provider) ? withTypedWords : withVisualInput)(client, agent.id, ready.open, () => visualsEnabled.current)
+    ? (["claude", "opencode"].includes(agent.provider) ? withTypedWords : withVisualInput)(client, agent.id, ready.open, () => visualsGateRef.current?.enabled() ?? true)
     : ready?.open, [ready?.open, client, agent?.id, agent?.provider]);
   const target = agent?.window ?? null;
   const attachments = useMemo(() => client && agent ? {
