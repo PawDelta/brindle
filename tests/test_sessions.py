@@ -358,6 +358,44 @@ def test_a_start_brings_sessions_back_at_once_most_recently_active_first(db, roo
     assert set(began[:2]) == {"recent", "older"} and set(began[2:]) == {"same-tmux", "oldest"}
 
 
+@pytest.mark.parametrize("hangs", [False, True], ids=["back", "hung"])
+def test_viewed_session_comes_back_first(db, root, monkeypatch, hangs):
+    """The session the app showed last comes back first and alone, though it
+    was the least recently at work; if it hangs, the others start once its
+    head start is over rather than wait on it."""
+    import threading
+
+    from brindle.daemon import lifecycle
+
+    _recorded_sessions(db, root, monkeypatch, [("recent", "a"), ("older", "b"), ("viewed", "c")])
+    lifecycle.record_viewed("viewed")
+    if hangs:
+        monkeypatch.setattr(lifecycle, "VIEWED_HEAD_START", 0)
+    recovery, lock = lifecycle.Recovery(), threading.Lock()
+    others_begun, viewed_done = threading.Event(), threading.Event()
+    waiting, began = [], []
+
+    def resume(db_, root_id, **kw):
+        if root_id == "viewed":
+            waiting.append(len(recovery.lanes))     # the others' lanes, not begun yet
+            if hangs:
+                others_begun.wait(10)
+            waiting.append(len(recovery.lanes))
+            viewed_done.set()
+            return
+        with lock:
+            began.append((root_id, viewed_done.is_set()))
+            if len(began) == 2:
+                others_begun.set()
+
+    monkeypatch.setattr(agents, "resume", resume)
+    assert sorted(lifecycle.resume_after_start(recovery)) == ["older", "recent", "viewed"]
+    if hangs:
+        assert sorted(began) == [("older", False), ("recent", False)]  # begun while it hung
+    else:
+        assert waiting == [2, 2] and all(done for _, done in began)     # none begun beside it
+
+
 @pytest.mark.variant("stop racing concurrent recovery must finish an in-flight launch and retain preflight and unstarted sessions")
 def test_stopped_during_concurrent_recovery_a_launch_finishes_and_the_rest_stay_pending(db, root, monkeypatch, caplog):
     import re

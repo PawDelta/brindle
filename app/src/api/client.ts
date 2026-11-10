@@ -1263,6 +1263,11 @@ export class DaemonClient {
     return this.post<unknown>("/recovery/prioritize", { root });
   }
 
+  /* Tell the engine which session is on screen: after a restart, it brings that one back first. */
+  viewed(root: string) {
+    return this.post<unknown>("/recovery/viewed", { root });
+  }
+
   repos() {
     return this.get<Repo[]>("/repos");
   }

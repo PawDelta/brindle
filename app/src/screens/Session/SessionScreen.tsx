@@ -133,6 +133,10 @@ export function SessionScreen({ client, root, repo, refresh, store, agent, sheet
   useEffect(() => {
     if (comingBack) client.prioritize(root).catch(() => {});
   }, [client, root, comingBack]);
+  // The engine keeps the session on screen, so the next one brings it back first; no answer matters.
+  useEffect(() => {
+    client.viewed(root).catch(() => {});
+  }, [client, root]);
   // The engine's word on a PR: the Review & open PR entry exists only once it says ready.
   const readiness = usePrReadiness(client, root, store);
   const changes = useSessionDiff(client, root, store);
