@@ -6,10 +6,12 @@
    rendering's.
 
    Only what is real shows. Today that is Stage › Needs you (the plans waiting in the
-   Inbox) and the Sources; Folders says when it arrives. Recent, Pinned and the other
+   Inbox), the Folders the server lists, and the Sources. Recent, Pinned and the other
    stages render nothing until they are given (`recent`, `pinned`, a stage's count):
    the doc engine turns them on by passing them. */
 
+import { useState, type FormEvent } from "react";
+import type { DocScope, FolderGroup, FolderVisibility } from "../api/client";
 import { LIBRARY_STAGES, libraryView, type KnowledgeView, type LibraryStage, type Route } from "../routes";
 
 /* What the rail counts: designs at each stage ("needs-you": waiting on the person; a
@@ -58,7 +60,100 @@ function Row({ glyph, pin = false, label, count, mine = false, on, onClick }: { 
   );
 }
 
-export function LibraryRail({ route, counts = {}, recent = [], pinned = [], navigate, onBack }: { route: LibraryRoute; counts?: LibraryCounts; recent?: LibraryEntry[]; pinned?: LibraryEntry[]; navigate(route: Route): void; onBack(): void }) {
+/* The scope in the daemon's spelling (user, team:<id>, org:<id>) and the heading the rail gives it. */
+const scopeSpec = (scope: DocScope) => (scope.kind === "user" ? "user" : `${scope.kind === "group" ? "team" : "org"}:${scope.id}`);
+const scopeName = (scope: DocScope) => (scope.kind === "user" ? "My folders" : scope.name || (scope.kind === "group" ? "Team" : "Org"));
+const VISIBLE_TO = (scope: DocScope, visibility: FolderVisibility) => (visibility === "private" ? "only me" : scope.kind === "group" ? "team" : scope.kind === "org" ? "org" : "shared");
+
+/* The Folders group (design/planning-doc-round7.html §1): My folders, then each team and the org,
+   each folder saying who can see it. "+ New" opens the New folder form; while a design is open, each
+   folder offers "Move here". Nothing is listed until `folders` arrives. */
+function Folders({ folders, doc, onCreate, onMove }: { folders: FolderGroup[]; doc?: string; onCreate?(scope: string, name: string, visibility: FolderVisibility): Promise<void> | void; onMove?(doc: string, scope: string, folder: string): Promise<void> | void }) {
+  const [adding, setAdding] = useState(false);
+  const [name, setName] = useState("");
+  const [where, setWhere] = useState("user");
+  const [visibility, setVisibility] = useState<FolderVisibility>("private");
+  const [error, setError] = useState<string | null>(null);
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!name.trim()) return;
+    try {
+      await onCreate?.(where, name.trim(), visibility);
+      setAdding(false);
+      setName("");
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Couldn't create the folder");
+    }
+  };
+  const move = async (folder: string, scope: string) => {
+    try {
+      await onMove?.(doc!, scope, folder);
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Couldn't move the design");
+    }
+  };
+  return (
+    <>
+      <div className={`${HEADING} flex items-center justify-between`}>
+        Folders
+        {onCreate && (
+          <button type="button" className="normal-case tracking-normal text-branch hover:underline" onClick={() => setAdding(!adding)}>
+            + New
+          </button>
+        )}
+      </div>
+      {adding && (
+        <form aria-label="New folder" className="flex flex-col gap-1 px-2 py-1 text-[12px]" onSubmit={submit}>
+          <input aria-label="Folder name" className="rounded border border-line bg-surface px-1.5 py-1 text-ink" value={name} onChange={(e) => setName(e.target.value)} />
+          <select aria-label="Folder in" className="rounded border border-line bg-surface px-1 py-1 text-ink" value={where} onChange={(e) => setWhere(e.target.value)}>
+            {folders.map(({ scope }) => (
+              <option key={scopeSpec(scope)} value={scopeSpec(scope)}>
+                {scopeName(scope)}
+              </option>
+            ))}
+          </select>
+          <select aria-label="Who can see it" className="rounded border border-line bg-surface px-1 py-1 text-ink" value={visibility} onChange={(e) => setVisibility(e.target.value as FolderVisibility)}>
+            <option value="private">Only me</option>
+            <option value="shared">Everyone in the scope</option>
+          </select>
+          <button type="submit" className="self-start rounded bg-surface-2 px-2 py-1 font-medium text-ink hover:bg-line">
+            Create folder
+          </button>
+        </form>
+      )}
+      {error && (
+        <p role="alert" className="px-2 py-1 text-[12px] text-fail">
+          {error}
+        </p>
+      )}
+      {folders.map(({ scope, folders: list }) => (
+        <div key={scopeSpec(scope)} className="flex flex-col gap-px" data-testid={`folders-${scopeSpec(scope)}`}>
+          <div className="flex items-center gap-2 px-2 py-1 text-[12.5px] text-ink-2">
+            <span className="w-3.5 shrink-0 text-center text-[12px] text-ink-3" aria-hidden>
+              ▾
+            </span>
+            {scopeName(scope)}
+          </div>
+          {list.map((folder) => (
+            <div key={folder.id} className="group flex items-center gap-2 rounded py-1 pl-7 pr-2 text-[12.5px] text-ink-2 hover:bg-surface-2">
+              <span className="min-w-0 flex-1 truncate">{folder.name}</span>
+              <span className="text-[11px] text-ink-3">{VISIBLE_TO(scope, folder.visibility)}</span>
+              {doc && onMove && (
+                <button type="button" aria-label={`Move here: ${folder.name}`} className="text-[11px] text-branch hover:underline" onClick={() => move(folder.id, scopeSpec(scope))}>
+                  Move here
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      ))}
+    </>
+  );
+}
+
+export function LibraryRail({ route, counts = {}, recent = [], pinned = [], folders = [], navigate, onBack, onCreateFolder, onMoveDoc }: { route: LibraryRoute; counts?: LibraryCounts; recent?: LibraryEntry[]; pinned?: LibraryEntry[]; folders?: FolderGroup[]; navigate(route: Route): void; onBack(): void; onCreateFolder?(scope: string, name: string, visibility: FolderVisibility): Promise<void> | void; onMoveDoc?(doc: string, scope: string, folder: string): Promise<void> | void }) {
   const view = libraryView(route);
   const stages = LIBRARY_STAGES.filter((stage) => stage.id === "needs-you" || counts.stages?.[stage.id] != null);
   const entries = (list: LibraryEntry[], glyph: string, pin = false) =>
@@ -86,8 +181,7 @@ export function LibraryRail({ route, counts = {}, recent = [], pinned = [], navi
             onClick={() => navigate({ screen: "knowledge", view: "docs", stage: stage.id })}
           />
         ))}
-        <div className={HEADING}>Folders</div>
-        <p className="px-2 py-1 text-[12px] text-ink-3">Folders arrive with team sharing.</p>
+        <Folders folders={folders} doc={view === "docs" && route.doc != null ? String(route.doc) : undefined} onCreate={onCreateFolder} onMove={onMoveDoc} />
         <div className={HEADING}>Sources</div>
         {SOURCES.map((source) => (
           <Row key={source.id} glyph={source.glyph} label={source.label} count={source.count && counts[source.count]} on={view === source.id} onClick={() => navigate({ screen: "knowledge", view: source.id })} />

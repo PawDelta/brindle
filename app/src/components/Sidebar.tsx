@@ -28,7 +28,7 @@
    as the accent (styles.css .side-*). */
 
 import { useCallback, useContext, useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent as ReactMouseEvent, type RefObject } from "react";
-import type { DaemonClient, ProviderUsage } from "../api/client";
+import type { DaemonClient, FolderGroup, FolderVisibility, ProviderUsage } from "../api/client";
 import { DaemonContext } from "../api/context";
 import { openExternal, type OpenUrl } from "../api/open";
 import type { GoalDTO, SessionDTO } from "../api/schema";
@@ -682,6 +682,27 @@ export function Sidebar({ route, navigate, refresh, openUrl, onBackFromSettings,
     else if (libraryOpen) back();
     else navigate({ screen: "knowledge" });
   }, [onToggleLibrary, libraryOpen, back, navigate]);
+  // The Library's folders, read when it opens and again after a change; a daemon that can't say shows none.
+  const folderClient = useContext(DaemonContext);
+  const [folders, setFolders] = useState<FolderGroup[]>([]);
+  const loadFolders = useCallback(async () => {
+    try {
+      setFolders((await folderClient!.libraryFolders()).scopes);
+    } catch {
+      setFolders([]);
+    }
+  }, [folderClient]);
+  useEffect(() => {
+    if (libraryOpen && folderClient) void loadFolders();
+  }, [libraryOpen, folderClient, loadFolders]);
+  const createFolder = useCallback(async (scope: string, name: string, visibility: FolderVisibility) => {
+    await folderClient!.createLibraryFolder(scope, name, visibility, visibility === "shared" ? "members" : "owner");
+    await loadFolders();
+  }, [folderClient, loadFolders]);
+  const moveDoc = useCallback(async (doc: string, scope: string, folder: string) => {
+    await folderClient!.moveDocToFolder(doc, scope, folder);
+    await loadFolders();
+  }, [folderClient, loadFolders]);
   // Designs waiting on the person: the plans in the Inbox.
   const plansWaiting = useAppState((s) => s.inbox.filter((item) => item.kind === "plan").length);
   const { repos, sessions, error: feedError, closeError, close, after } = useSessions();
@@ -853,7 +874,7 @@ export function Sidebar({ route, navigate, refresh, openUrl, onBackFromSettings,
         </button>
       </div>
       {railOpen && <SettingsRail tab={tab} page={railPage(route)} onBack={back} onTab={(tab) => navigate({ screen: "settings", tab, repo: "repo" in route ? route.repo : undefined })} onPage={(page) => navigate({ screen: page })} />}
-      {route.screen === "knowledge" && <LibraryRail route={route} counts={{ ...libraryCounts, stages: { "needs-you": plansWaiting } }} navigate={navigate} onBack={back} />}
+      {route.screen === "knowledge" && <LibraryRail route={route} counts={{ ...libraryCounts, stages: { "needs-you": plansWaiting } }} folders={folders} onCreateFolder={folderClient ? createFolder : undefined} onMoveDoc={folderClient ? moveDoc : undefined} navigate={navigate} onBack={back} />}
       <div hidden={railOpen || libraryOpen} className={railOpen || libraryOpen ? "hidden" : "contents"}>
       <InboxEntry route={route} navigate={navigate} />
       <div className="mx-2 h-px shrink-0 bg-line" role="separator" data-testid="inbox-divider" />
