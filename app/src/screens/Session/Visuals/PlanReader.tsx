@@ -66,6 +66,34 @@ function storedCollapsed(): boolean {
   }
 }
 
+/* The replies the person wrote on each plan that no verdict has carried to the supervisor yet,
+   by plan id. The engine's reply carries no "sent" of its own, and only a verdict delivers one
+   (a new revision does not), so the reader keeps their ids itself, on this device, across its
+   own closing and the supervisor's revisions, until a verdict later than the reply is seen. */
+export const UNSENT_REPLIES_KEY = "brindle.plan.unsentReplies";
+function allUnsentReplies(): Record<string, unknown> {
+  try {
+    const all: unknown = JSON.parse(localStorage.getItem(UNSENT_REPLIES_KEY) ?? "{}");
+    return all && typeof all === "object" && !Array.isArray(all) ? { ...all } : {};
+  } catch {
+    return {};
+  }
+}
+function storedUnsentReplies(plan: string): number[] {
+  const ids = allUnsentReplies()[plan];
+  return Array.isArray(ids) ? ids.filter((id): id is number => typeof id === "number") : [];
+}
+function storeUnsentReplies(plan: string, ids: number[]) {
+  const all = allUnsentReplies();
+  if (ids.length) all[plan] = ids;
+  else delete all[plan];
+  try {
+    localStorage.setItem(UNSENT_REPLIES_KEY, JSON.stringify(all));
+  } catch {
+    // Not kept (storage is off or full): they are still known while this reader stays open.
+  }
+}
+
 export function PlanReader({ client, visual, repo, onBack, asking, onChanged }: {
   client: Client;
   visual: VisualDTO;
@@ -224,8 +252,21 @@ function DesignDoc({ client, plan, visual, mode, writes }: {
   const [box, setEditing] = useState<{ section: string; text: string; source: string } | null>(null);
   // A section's box belongs to Suggesting and Editing: back in Viewing (or decided), it is closed.
   const editing = mode === "viewing" ? null : box;
-  // The person replied on a thread and no verdict has carried it to the supervisor yet.
-  const [replied, setReplied] = useState(false);
+  // The person's replies no verdict has carried to the supervisor yet (storedUnsentReplies). A
+  // verdict seen on the plan, from this window or another, delivered every reply older than it.
+  const [unsent, setUnsent] = useState(() => storedUnsentReplies(plan.id));
+  const keepUnsent = useCallback((ids: number[]) => {
+    setUnsent(ids);
+    storeUnsentReplies(plan.id, ids);
+  }, [plan.id]);
+  const deliveredAt = plan.verdict?.at;
+  useEffect(() => {
+    if (deliveredAt == null || unsent.length === 0) return;
+    const written = new Map(threads.flatMap((t) => (t.replies ?? []).map((r): [number, number] => [r.id, r.at])));
+    // A reply this snapshot doesn't hold yet is kept: nothing says a verdict has carried it.
+    const left = unsent.filter((id) => (written.get(id) ?? Infinity) > deliveredAt);
+    if (left.length < unsent.length) keepUnsent(left);
+  }, [deliveredAt, unsent, threads, keepUnsent]);
   const [followed, setFollowed] = useState<{ thread: string } | null>(null);
   const [tab, setTab] = useState<ReviewTab>("review");
   const [collapsed, setCollapsed] = useState(storedCollapsed);
@@ -309,26 +350,31 @@ function DesignDoc({ client, plan, visual, mode, writes }: {
   };
 
   /* One write to the doc, and only one at a time: the engine answers with the plan as it is now. */
-  const write = async (work: () => Promise<Plan>): Promise<boolean> => {
-    if (!writes.begin()) return false;
+  const send = async (work: () => Promise<Plan>): Promise<Plan | null> => {
+    if (!writes.begin()) return null;
     setBusy(true);
     setError(null);
     try {
-      writes.end(await work());
-      return true;
+      const now = await work();
+      writes.end(now);
+      return now;
     } catch (e) {
       writes.end(null);
       if (alive.current) setError(e instanceof DaemonError && e.status === 409 ? "This design changed since you opened it (a new revision, or it was already decided). It is being read again." : `Couldn't send: ${message(e)}`);
-      return false;
+      return null;
     } finally {
       if (alive.current) setBusy(false);
     }
   };
+  const write = async (work: () => Promise<Plan>) => (await send(work)) !== null;
+  const repliesOn = (p: Plan, thread: number) => (p.threads?.find((t) => t.id === thread)?.replies ?? []).filter((r) => r.author === "person").map((r) => r.id);
   const actions: ThreadActions = {
     reply: async (thread, text) => {
-      const ok = await write(() => client.replyPlan(plan.id, thread, text));
-      if (ok && alive.current) setReplied(true);
-      return ok;
+      const had = repliesOn(plan, thread);
+      const now = await send(() => client.replyPlan(plan.id, thread, text));
+      // The reply's id is the one the thread didn't have: kept as unsent, whether or not this reader is still open.
+      if (now) keepUnsent([...unsent, ...repliesOn(now, thread).filter((id) => !had.includes(id) && !unsent.includes(id))]);
+      return now !== null;
     },
     resolve: (thread, resolved) => write(() => client.resolvePlanThread(plan.id, thread, resolved)),
     accept: (thread) => write(() => client.acceptPlanSuggestion(plan.id, thread, plan.rev)),
@@ -426,11 +472,12 @@ function DesignDoc({ client, plan, visual, mode, writes }: {
     }
   };
   // What the supervisor hasn't had: the person's open threads, and their replies. A reply carries
-  // no "sent" of its own: one written after the supervisor's last revision hasn't been (every
-  // verdict that sent one was followed by a revision), nor has one written from this screen.
+  // no "sent" of its own. One written after the supervisor's last revision can't have been sent
+  // (a verdict since would have closed the plan until a newer revision); one older than that was
+  // sent only if a verdict followed it, which is what `unsent` keeps track of on this device.
   const proposals = (plan.revisions ?? []).filter((r) => r.author === "supervisor");
   const proposedAt = Math.max(0, ...proposals.map((r) => r.at));
-  const pending = replied || threads.some((t) => (t.author === "person" && t.status === "open" && !t.sent) || !!t.replies?.some((r) => r.author === "person" && r.at > proposedAt));
+  const pending = threads.some((t) => (t.author === "person" && t.status === "open" && !t.sent) || !!t.replies?.some((r) => r.author === "person" && (r.at > proposedAt || unsent.includes(r.id))));
   const lastProposal = Math.max(0, ...proposals.map((r) => r.rev));
   const edited = (plan.revisions ?? []).some((r) => r.author === "person" && r.rev > lastProposal);
   const differs = plan.decisions.some((d) => (drafted(d) ?? d.confirmed ?? d.mine) !== d.mine);
@@ -446,7 +493,6 @@ function DesignDoc({ client, plan, visual, mode, writes }: {
       setNote("");
       setAttached([]);
       setPicks({});
-      setReplied(false);
     }
   };
   const confirm = async () => {

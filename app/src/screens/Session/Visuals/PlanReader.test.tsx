@@ -4,12 +4,13 @@ import type { Plan, VisualDTO } from "../../../api/client";
 import { createAppStore } from "../../../store/store";
 import { StoreContext } from "../../../store/useStore";
 import { changeBetween } from "./DocText";
-import { PlanReader, REVIEW_COLLAPSED_KEY } from "./PlanReader";
+import { PlanReader, REVIEW_COLLAPSED_KEY, UNSENT_REPLIES_KEY } from "./PlanReader";
 import type { PlanDocClient, PlansClient, VisualsClient } from "./client";
 
 afterEach(() => {
   cleanup();
   localStorage.removeItem(REVIEW_COLLAPSED_KEY);
+  localStorage.removeItem(UNSENT_REPLIES_KEY);
 });
 
 const visual: VisualDTO = { id: "v_plan", session: "boss", title: "Presets", by: "supervisor", kind: "plan", rev: 1, kept: false, unread: false, created_at: 1 };
@@ -182,10 +183,11 @@ it("design doc writes go one at a time, a read sent before one came back can't u
   let reply!: (p: Plan) => void;
   const confirmed: string[] = [];
   const sent: boolean[] = [];
+  const redirected: Plan = { ...replied, state: "redirected", verdict: { approved: false, at: 13, rev: 1 } };
   const client: PlansClient & PlanDocClient & VisualsClient = {
     ...visuals, ...docWrites(() => replied),
     plan: () => new Promise<Plan>((resolve) => reads.push(resolve)),
-    decidePlan: async (_id, verdict) => { sent.push(verdict.approved); return { ...replied, state: "redirected" }; },
+    decidePlan: async (_id, verdict) => { sent.push(verdict.approved); return redirected; },
     replyPlan: () => new Promise<Plan>((resolve) => { reply = resolve; }),
     confirmPlan: async (_id, _rev, decision) => { confirmed.push(decision); return replied; },
   };
@@ -209,6 +211,21 @@ it("design doc writes go one at a time, a read sent before one came back can't u
   // The reply alone is something to send back to the supervisor.
   await act(async () => fireEvent.click(bar().getByRole("button", { name: "Request changes" })));
   expect(sent).toEqual([false]);
+  // That verdict delivered the reply. One more, written while the supervisor revises, is not
+  // delivered by the revision that follows: after the reader is closed and opened again on
+  // revision 2, it is still feedback to send.
+  const unsent = () => (JSON.parse(localStorage.getItem(UNSENT_REPLIES_KEY) ?? "{}") as Record<string, number[]>)[visual.id];
+  expect(unsent()).toBeUndefined();
+  const again = [...replied.threads![0].replies!, { id: 3, author: "person", text: "And spot instances.", at: 14 }];
+  fireEvent.click(within(screen.getByTestId("thread-1")).getByRole("button", { name: "Reply" }));
+  fireEvent.change(within(screen.getByTestId("thread-1")).getByRole("textbox"), { target: { value: "And spot instances." } });
+  fireEvent.click(within(screen.getByTestId("thread-1")).getByRole("button", { name: "Send" }));
+  await act(async () => reply({ ...redirected, threads: [{ ...redirected.threads![0], replies: again }] }));
+  view.unmount();
+  render(reader({ ...visual, rev: 2 }));
+  await act(async () => reads[reads.length - 1]({ ...base, rev: 2, revisions: [...base.revisions!, { rev: 2, author: "supervisor", source: "proposal", at: 20 }], threads: [{ ...base.threads![0], replies: again }] }));
+  await act(async () => fireEvent.click(bar().getByRole("button", { name: "Request changes" })));
+  expect(sent).toEqual([false, false]);
 });
 
 it("a design doc edit or comment begun on older text isn't sent over a newer revision's", async () => {
