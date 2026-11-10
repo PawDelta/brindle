@@ -173,11 +173,13 @@ CREATE TABLE IF NOT EXISTS goal_summaries (
     root_id TEXT PRIMARY KEY REFERENCES autopilot(root_id) ON DELETE CASCADE,
     summary TEXT NOT NULL
 );
--- The person's per-goal doc request, outside the released autopilot table.
+-- brindle's per-goal offer to plan first, outside the released autopilot table
+-- (requested: the retired analysis-doc request, kept for compatibility).
 CREATE TABLE IF NOT EXISTS goal_doc_requests (
     root_id TEXT PRIMARY KEY REFERENCES autopilot(root_id) ON DELETE CASCADE,
     requested INTEGER NOT NULL,
-    offer TEXT,                 -- brindle's one-time doc offer: open:<id> | accepted | dismissed
+    offer TEXT,                 -- brindle's one-time offer to plan first: plan:open:<id> | plan:accepted | plan:planned | plan:dismissed
+                                -- (open:<id> | accepted | dismissed: the retired analysis-doc offer; inert)
     goal_at REAL                -- when this goal began: only workers assigned since count toward its offer
 );
 -- Repos attached to a session (brindle Pro multi_repo; see brindle.repos):
@@ -446,6 +448,21 @@ CREATE TABLE IF NOT EXISTS tasks (
     started_at REAL
 );
 CREATE INDEX IF NOT EXISTS tasks_repo_root ON tasks(repo_root);
+CREATE TABLE IF NOT EXISTS plan_tasks (
+    plan_id TEXT NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
+    worker_id TEXT NOT NULL,
+    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    PRIMARY KEY (plan_id, worker_id)
+);
+-- Completed worker checks are outcomes, not reusable passing-cache entries.
+-- Task ownership keeps their evidence after the worker workspace is removed.
+CREATE TABLE IF NOT EXISTS task_check_outcomes (
+    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    command TEXT NOT NULL,
+    ok INTEGER NOT NULL,
+    checked_at REAL NOT NULL,
+    PRIMARY KEY (task_id, command)
+);
 -- A session's cloud login (brindle.login_pause), keyed by its root: when it
 -- was last looked at, and while only the person can renew it (state
 -- 'auth_paused'), what they run and how they were told. Back at 'ok', the
@@ -957,7 +974,7 @@ CREATE TABLE IF NOT EXISTS visuals (
     root_id TEXT NOT NULL,         -- the session (its root agent)
     repo_root TEXT NOT NULL,       -- the session's repo: pages are under its .brindle/visuals/
     by_agent TEXT NOT NULL,        -- who published the current revision
-    kind TEXT NOT NULL,            -- visual | plan | analysis_doc
+    kind TEXT NOT NULL,            -- visual | plan (analysis_doc: an older finished-doc page)
     title TEXT NOT NULL,
     rev INTEGER NOT NULL,
     question TEXT,
@@ -989,11 +1006,12 @@ CREATE TABLE IF NOT EXISTS plans (
     rev INTEGER NOT NULL,
     markdown TEXT NOT NULL,        -- the current revision, as the supervisor wrote it
     decisions TEXT NOT NULL,       -- JSON [{id, title, options, mine, challenge}]
-    split TEXT NOT NULL,           -- JSON [{id, title, after}]
+    split TEXT NOT NULL,           -- JSON [{id, title, after, files, test}]
     state TEXT NOT NULL,           -- open | redirected | approved
     decision TEXT,                 -- JSON {approved, picks, comments, note, at, rev}: the person's
     created_at REAL NOT NULL,
-    updated_at REAL NOT NULL
+    updated_at REAL NOT NULL,
+    ask TEXT                       -- the person's request restated by the supervisor, if given
 );
 CREATE INDEX IF NOT EXISTS plans_root ON plans(root_id, state);
 """
@@ -1082,9 +1100,8 @@ class Autopilot:
     nudged_time: float | None = None   # when the last nudge was sent; never cleared, the backoff ignores it once progress moves past nudged_at
     proposal: str | None = None        # JSON {checks, rules, at}: checks awaiting the user's answer
     external_wait: str | None = None   # JSON {pid, until, path, note}: an outside job
-    analysis_doc: int | None = None    # the person requested a doc for this goal
-    analysis_goal_at: float | None = None  # when the current goal began (workers since count toward its offer)
-    analysis_offer: str | None = None  # the doc offer: open | accepted | dismissed (None: never made)
+    offer_goal_at: float | None = None  # when the current goal began (workers since count toward its offer)
+    plan_offer: str | None = None  # the offer to plan first, see brindle.plans.OFFER_* (None: never made)
     summary: str | None = None        # a short goal label for the sidebar
 
 
@@ -1294,7 +1311,7 @@ class Task:
     started_at: float | None = None
     plan_first: int | None = None
     weight: str | None = None
-    analysis_doc: int | None = None    # an analysis doc was asked for (brindle.pro.analysis_brief)
+    analysis_doc: int | None = None    # retired (sessions no longer ask for analysis docs); kept for old rows
     waiting: str | None = None         # pending only for room on the machine: why (brindle.tasks.wait_for_room)
     waiting_since: float | None = None
     pipeline: str | None = None        # the pipeline state its worker starts in (brindle.pipeline)
@@ -1449,6 +1466,8 @@ class DB:
         visual_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(visuals)")}
         if "dismissed_rev" not in visual_cols:
             self.conn.execute("ALTER TABLE visuals ADD COLUMN dismissed_rev INTEGER NOT NULL DEFAULT 0")
+        if "ask" not in {r["name"] for r in self.conn.execute("PRAGMA table_info(plans)")}:
+            self.conn.execute("ALTER TABLE plans ADD COLUMN ask TEXT")
         review_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(reviews)")}
         for col, kind in (("review_slot", "TEXT"), ("reviewer_created_at", "REAL")):
             if col not in review_cols:
@@ -2879,11 +2898,10 @@ class DB:
         ap = _load(Autopilot, row) if row else None
         if ap:
             ap.enabled = 1  # Legacy off values no longer disable the goal driver.
-            request = self.conn.execute("SELECT requested, offer, goal_at FROM goal_doc_requests WHERE root_id=?",
+            request = self.conn.execute("SELECT offer, goal_at FROM goal_doc_requests WHERE root_id=?",
                                         (root_id,)).fetchone()
-            ap.analysis_doc = request["requested"] if request else None
-            ap.analysis_offer = request["offer"] if request else None
-            ap.analysis_goal_at = request["goal_at"] if request else None
+            ap.plan_offer = request["offer"] if request else None
+            ap.offer_goal_at = request["goal_at"] if request else None
             summary = self.conn.execute("SELECT summary FROM goal_summaries WHERE root_id=?", (root_id,)).fetchone()
             ap.summary = summary["summary"] if summary else None
         return ap
@@ -2905,9 +2923,8 @@ class DB:
     def update_autopilot(self, root_id: str, **fields: object) -> None:
         has_summary = "summary" in fields
         summary = fields.pop("summary", None)
-        requested = fields.pop("analysis_doc", None)
-        offer = fields.pop("analysis_offer", "keep")
-        goal_at = fields.pop("analysis_goal_at", None)
+        offer = fields.pop("plan_offer", "keep")
+        goal_at = fields.pop("offer_goal_at", None)
         cols = ", ".join(f"{k}=?" for k in fields)
         with self.tx() as c:
             if has_summary:
@@ -2918,10 +2935,6 @@ class DB:
                               "ON CONFLICT(root_id) DO UPDATE SET summary=excluded.summary", (root_id, summary))
             if fields:
                 c.execute(f"UPDATE autopilot SET {cols} WHERE root_id=?", (*fields.values(), root_id))
-            if requested is not None:
-                c.execute("INSERT INTO goal_doc_requests (root_id, requested) VALUES (?,?) "
-                          "ON CONFLICT(root_id) DO UPDATE SET requested=excluded.requested",
-                          (root_id, requested))
             if offer != "keep":
                 c.execute("INSERT INTO goal_doc_requests (root_id, requested, offer) VALUES (?,0,?) "
                           "ON CONFLICT(root_id) DO UPDATE SET offer=excluded.offer", (root_id, offer))
@@ -2932,34 +2945,18 @@ class DB:
             # Both the app and the terminal can settle proposed checks.
             bus.publish_agent(self, "checks.changed", root_id)
 
-    def open_analysis_offer(self, root_id: str, goal: str, offer: str) -> bool:
-        """Open ``offer`` only if ``goal`` is still the session's goal and it has
-        never been offered, answered or requested: one atomic write, so a
-        delayed evaluation cannot overwrite an answer or a newer goal's state."""
+    def open_plan_offer(self, root_id: str, goal: str, offer: str) -> bool:
+        """Open ``offer`` (to plan the goal first) only if ``goal`` is still the
+        session's goal and it has never been offered or answered: one atomic
+        write, so a delayed evaluation cannot overwrite an answer or a newer
+        goal's state. (``requested`` is a column of the retired doc request.)"""
         with self.tx() as c:
             row = c.execute("SELECT goal FROM autopilot WHERE root_id=?", (root_id,)).fetchone()
             if row is None or row["goal"] != goal:
                 return False
             c.execute("INSERT OR IGNORE INTO goal_doc_requests (root_id, requested) VALUES (?,0)", (root_id,))
-            return c.execute("UPDATE goal_doc_requests SET offer=? WHERE root_id=? AND offer IS NULL "
-                             "AND requested=0", (offer, root_id)).rowcount == 1
-
-    def answer_analysis_offer(self, root_id: str, offer: str, accept: bool) -> dict | None:
-        """Settle exactly the offer the person saw and, on acceptance, turn the
-        doc on, in one transaction. Returns the goal it belonged to (its text,
-        milestone titles, state and whether a doc was already requested), or
-        None when the offer was replaced or already answered."""
-        with self.tx() as c:
-            prev = c.execute("SELECT requested FROM goal_doc_requests WHERE root_id=? AND offer=?",
-                             (root_id, offer)).fetchone()
-            if prev is None:
-                return None
-            c.execute("UPDATE goal_doc_requests SET offer=?, requested=? WHERE root_id=?",
-                      ("accepted" if accept else "dismissed", int(accept), root_id))
-            ap = c.execute("SELECT goal, state FROM autopilot WHERE root_id=?", (root_id,)).fetchone()
-            titles = [r["title"] for r in c.execute(
-                "SELECT title FROM milestones WHERE root_id=? ORDER BY position", (root_id,))]
-        return {"goal": ap["goal"], "state": ap["state"], "titles": titles, "was_requested": bool(prev["requested"])}
+            return c.execute("UPDATE goal_doc_requests SET offer=? WHERE root_id=? AND offer IS NULL",
+                             (offer, root_id)).rowcount == 1
 
     def set_external_wait(self, root_id: str, wait: str) -> None:
         """A repeated declaration must leave the existing wait intact."""
@@ -3166,6 +3163,22 @@ class DB:
             (workspace_id, sha, command),
         ).fetchone()
         return _load(CheckResult, row) if row else None
+
+    def record_task_check(self, workspace_id: str, command: str, ok: bool) -> None:
+        rows = self.conn.execute(
+            "SELECT t.id, t.agent_id FROM tasks t JOIN agents a ON a.id=t.agent_id "
+            "WHERE a.workspace_id=? AND t.state='started'", (workspace_id,),
+        ).fetchall()
+        if not rows:
+            return
+        with self.tx() as c:
+            c.executemany(
+                "INSERT INTO task_check_outcomes (task_id, command, ok, checked_at) VALUES (?,?,?,?) "
+                "ON CONFLICT(task_id, command) DO UPDATE SET ok=excluded.ok, checked_at=excluded.checked_at",
+                [(r["id"], command, int(ok), time.time()) for r in rows],
+            )
+        for r in rows:
+            bus.publish_agent(self, "task.checked", r["agent_id"], task_id=r["id"], command=command, ok=ok)
 
     def set_check(self, workspace_id: str, sha: str, command: str, ok: bool, output: str) -> None:
         with self.tx() as c:
