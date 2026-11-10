@@ -185,6 +185,17 @@ def test_bare_push_offers_only_its_eligible_scope_and_lifetime():
     with pytest.raises(ServiceError, match="This push doesn't name its branch"):
         grants.decide_group(None, group.key, "general", "session", asks=[pending])
 
+    # HEAD hides only the source here: the named destination is safe to remember.
+    named = replace(req, command="git push origin HEAD:main")
+    pending = replace(pending, request=named, ask=grants.generalize(named))
+    [group] = grants.groups([pending])
+    offered = svc.group_dto(group)
+    assert offered.general.value == "general"
+    assert "session" in offered.general.modes
+    assert offered.save_reason is None
+    assert grants.eligible(pending, pending.ask.general, "session", None) is None
+    assert grants.eligible(pending, pending.ask.scope("exact"), "session", None) is not None
+
 
 def test_pending_asks_group_by_general_form_and_one_decision_resolves_the_group(db, ws, monkeypatch):
     # All pushes use this checkout; repository discovery is outside the

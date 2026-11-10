@@ -1311,7 +1311,8 @@ def eligible(ask: PendingAsk, scope: dict, mode: str, minutes: float | None) -> 
     if mode in ("deny", "always-deny"):
         return None
     keys = ask_keys(ask.request)
-    if ask.ask.kind == "push" and any(UNKNOWN_REF in (permissions.push_pattern(key) or ()) for key in keys):
+    # An unknown source can still be covered by a destination-scoped grant.
+    if ask.ask.kind == "push" and any(UNKNOWN_REF in (permissions.push_pattern(key) or ())[1:] for key in keys):
         if mode != "once" or not _is_exact(ask, scope):
             return "This push doesn't name its branch, so it can only be allowed once."
     if not all(scope_matches(ask.ask.kind, scope["pattern"], key, req=ask.request) for key in keys):
