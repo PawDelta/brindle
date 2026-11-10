@@ -9,6 +9,7 @@ import pytest
 from brindle import plan_docs, plans, visual_offers
 from brindle.pro import auth, credentials
 from brindle.pro import shared_docs as sd
+from brindle.service.errors import ServiceError
 from pro_fixtures import backend, fixed_identity, pro_env, signing_key  # noqa: F401 - fixtures
 from test_plans import DECISIONS, messages, session  # noqa: F401 - fixture
 from test_pro_remote_learning import login_as
@@ -16,7 +17,8 @@ from test_pro_remote_learning import login_as
 DOC = "doc_1"
 BASE = f"/analysis-docs/{DOC}"
 DESIGN = f"{BASE}/design"
-TEAM = {"kind": "group", "id": "t_1"}
+LIST = "/analysis-docs?scope_kind=user&scope_id=user_1&session=boss&design=true"
+TEAM ={"kind": "group", "id": "t_1"}
 TEAM_LOGIN = ("analysis_docs", "analysis_docs_team")
 SUMMARY = "Workers run on a machine the customer controls."
 
@@ -28,9 +30,9 @@ class Library:
     def __init__(self, remote):
         self.rev, self.content, self.threads, self.votes = 0, None, [], {}
         self.permissions, self.reviewers, self.create_status, self.share_status = {}, [], 200, 200
-        self.lose_answer = False
+        self.lose_answer, self.lose_create, self.list_status, self.plan = False, False, 200, None
         remote.routes.update({
-            "POST /analysis-docs": self.create, f"POST {BASE}/share": self.share,
+            "POST /analysis-docs": self.create, f"POST {BASE}/share": self.share, f"GET {LIST}": self.list,
             f"GET {DESIGN}": lambda f, h: (200, self.view()), f"POST {DESIGN}/revisions": self.revise,
             f"PUT {DESIGN}/permissions": self.set_permissions, f"PUT {DESIGN}/reviewers": self.set_reviewers,
             f"PUT {DESIGN}/folder": lambda f, h: (200, self.view()),
@@ -47,8 +49,16 @@ class Library:
     def create(self, form, headers):
         if self.create_status != 200:
             return self.create_status, {"error": "switch_off"}
-        self.rev, self.content = 1, copy.deepcopy(dict(form["design"]))
+        self.rev, self.content, self.plan = 1, copy.deepcopy(dict(form["design"])), form["source"]["ref"]
+        if self.lose_create:
+            raise auth.AuthError("offline", code="network")
         return 200, {"id": DOC, "version": 1}
+
+    def list(self, form, headers):
+        if self.list_status != 200:
+            return self.list_status, {"error": "unavailable"}
+        return 200, {"docs": [{"doc_id": DOC, "created_at": 1, "source": {"kind": "goal", "ref": self.plan}}]
+                     if self.plan else []}
 
     def share(self, form, headers):
         return self.share_status, {"id": DOC} if self.share_status == 200 else {"error": "too_many_scopes"}
@@ -57,6 +67,7 @@ class Library:
         if form["rev"] != self.rev:
             return 409, {"error": "stale", "rev": self.rev}
         self.rev, self.content = self.rev + 1, {k: copy.deepcopy(v) for k, v in form.items() if k != "rev"}
+        self.votes = {}                                    # votes belong to the revision they were cast on
         if self.lose_answer:
             raise auth.AuthError("offline", code="network")
         return 200, self.view()
@@ -125,12 +136,15 @@ def test_a_shared_plan_goes_to_the_library_and_what_teammates_write_comes_back(d
     lib.threads[0]["status"] = "open"
     sd.sync(db, pid, **net)
 
-    # The person takes a teammate's insertion; the new revision goes up on the Library's head.
+    # The person takes a teammate's insertion; the new revision goes up on the Library's head,
+    # and in that one sync the old revision's imported votes go, the person's own staying.
+    plan_docs.confirm(db, pid, 1, "d1", "org")
     plan_docs.accept(db, pid, suggestion["id"], 1)
     assert sd.sync(db, pid, **net)["pushed"] is True
     [pushed] = sent(backend, f"POST {DESIGN}/revisions")
     assert pushed["rev"] == 1 and pushed["sections"][0]["markdown"] == "Today, " + SUMMARY
     assert sd.link(db, pid)["remote_rev"] == 2
+    assert plan_docs.fields(db, plans.get(db, pid))["decisions"][0]["votes"] == {"org": ["person"]}
 
     # The Library moved on without this plan: the send is refused, the comments still arrive.
     lib.rev += 1
@@ -166,27 +180,44 @@ def test_reviewers_change_after_sharing_and_a_folder_is_only_used_when_named(db,
 
 def test_an_interrupted_share_or_send_keeps_one_document_and_one_revision(db, parts, backend):
     pid, lib, net = parts
-    # A failed create leaves no claim behind.
-    lib.create_status = 500
+    # A refused create leaves no claim behind.
+    lib.create_status = 403
     with pytest.raises(RuntimeError, match="switch_off"):
         sd.share(db, pid, TEAM, **net)
     assert sd.link(db, pid) is None
     lib.create_status = 200
 
-    # A second share while the first is creating the document leaves it alone; a dead claim is taken over.
+    # A claim that died before the Library got anything: nothing to find, so it creates.
     now = time.time()
     db.conn.execute("INSERT INTO plan_shares (plan_id, owner, claimed_at) VALUES (?, 'user_1', ?)", (pid, now))
+    assert sd.share(db, pid, TEAM, now=now + sd.CLAIM_FOR + 1, **net)["doc_id"] == DOC
+    assert len(sent(backend, "POST /analysis-docs")) == 2
+    db.conn.execute("DELETE FROM plan_shares WHERE plan_id=?", (pid,))
+    lib.plan = None
+
+    # A create that commits but whose answer is lost: the outcome is kept, and a second share leaves it alone.
+    lib.lose_create = True
+    with pytest.raises(auth.AuthError):
+        sd.share(db, pid, TEAM, now=now, **net)
+    lib.lose_create = False
+    assert sd.link(db, pid)["doc_id"] is None
     with pytest.raises(RuntimeError):
         sd.share(db, pid, TEAM, now=now + 1, **net)
-    assert len(sent(backend, "POST /analysis-docs")) == 1            # only the failed one
 
-    # A share that fails after the document exists finishes on the same document.
+    # When the Library can't say whether it landed, nothing is created.
+    lib.list_status = 500
+    with pytest.raises(RuntimeError):
+        sd.share(db, pid, TEAM, now=now + sd.CLAIM_FOR + 1, **net)
+    lib.list_status = 200
+    assert len(sent(backend, "POST /analysis-docs")) == 3 and sd.link(db, pid)["doc_id"] is None
+
+    # A later share finds that document; one that fails after it is known finishes on the same document.
     lib.share_status = 500
     with pytest.raises(RuntimeError, match="too_many_scopes"):
-        sd.share(db, pid, TEAM, now=now + sd.CLAIM_FOR + 1, **net)
+        sd.share(db, pid, TEAM, now=now + 2 * sd.CLAIM_FOR + 2, **net)
     lib.share_status = 200
     assert sd.share(db, pid, TEAM, **net)["doc_id"] == DOC
-    assert len(sent(backend, "POST /analysis-docs")) == 2 and len(sent(backend, f"POST {BASE}/share")) == 2
+    assert len(sent(backend, "POST /analysis-docs")) == 3 and len(sent(backend, f"POST {BASE}/share")) == 3
 
     # A send in flight is left alone.
     plan_docs.edit(db, pid, 1, "summary", 0, "Workers", "Hosts")
@@ -202,6 +233,31 @@ def test_an_interrupted_share_or_send_keeps_one_document_and_one_revision(db, pa
     lib.lose_answer = False
     assert sd.sync(db, pid, **net)["pushed"] is True
     assert len(sent(backend, f"POST {DESIGN}/revisions")) == 1 and sd.link(db, pid)["remote_rev"] == 2
+
+
+def test_an_insertion_the_library_cant_place_here_stays_detached(db, parts):
+    pid, lib, net = parts
+    sd.share(db, pid, TEAM, **net)
+
+    def insertion(tid, state):
+        return {"id": tid, "kind": "suggestion", "rev": 1, "author": "u_b", "text": "", "after": "Today, ",
+                "status": "open", "replies": [],
+                "anchor": {"kind": "text", "section": "summary", "start": 0, "end": 0, "quote": "", "state": state}}
+
+    def refused_last():
+        thread = plan_docs.fields(db, plans.get(db, pid))["threads"][-1]
+        assert thread["anchor"]["state"] == "detached"
+        with pytest.raises(ServiceError) as refused:
+            plan_docs.accept(db, pid, thread["id"], 1)
+        assert refused.value.code == "stale"
+
+    lib.threads = [insertion(1, "detached")]                # the Library says it is gone
+    sd.sync(db, pid, **net)
+    refused_last()
+    lib.rev += 1                                            # placed, but on text this plan doesn't have
+    lib.threads.append(insertion(2, "current"))
+    sd.sync(db, pid, **net)
+    refused_last()
 
 
 def test_nothing_is_sent_without_team_or_from_another_account(db, parts, backend):
