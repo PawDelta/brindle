@@ -456,6 +456,10 @@ def _spend_quote(c, root: str, asked: str, now: float) -> bool:
             elif row["source"] == "request":
                 c.execute("DELETE FROM visual_requests WHERE root_id=?", (root,))
             return True
+    if c.execute("SELECT 1 FROM visual_person_words WHERE root_id=? AND staged=1 AND created_at>? AND instr(words, ?)",
+                 (root, now - FOLD, quote)).fetchone():
+        # The app vouched for these words, but no prompt of the CLI's has said it took that message in.
+        debuglog.record("visuals", "warning", "asked words refused: their message is still staged", {"agent": root})
     return False
 
 
