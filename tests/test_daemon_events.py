@@ -113,6 +113,7 @@ def _readiness_slow_gh_is_parallel_and_bounded(db, monkeypatch):
         worker.join(1)
 
 
+@pytest.mark.variant("a race from a real incident: the pool thread read gh with no slot (main CI run 42855607818)")
 def test_slow_gh_read_has_its_slot(monkeypatch):
     """The checks refresh reads on a pool thread, which copies no context: the
     read still runs under a deadline (a slot), never with none."""
