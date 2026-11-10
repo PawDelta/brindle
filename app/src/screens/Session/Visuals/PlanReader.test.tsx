@@ -232,25 +232,49 @@ it("design doc writes go one at a time, a read sent before one came back can't u
   // reply, which the engine now reports as sent: opened again on revision 3, nothing is left to send.
   reopened.unmount();
   await act(async () => decided({ ...delivered(second), state: "redirected", verdict: { approved: false, at: 21, rev: 2 } }));
-  render(reader({ ...visual, rev: 3 }));
-  await act(async () => reads[reads.length - 1]({ ...delivered(second), rev: 3, revisions: [...second.revisions!, { rev: 3, author: "supervisor", source: "proposal", at: 30 }] }));
+  const third = render(reader({ ...visual, rev: 3 }));
+  const revised = { ...delivered(second), rev: 3, revisions: [...second.revisions!, { rev: 3, author: "supervisor", source: "proposal", at: 30 }] };
+  await act(async () => reads[reads.length - 1](revised));
+  expect((bar().getByRole("button", { name: "Request changes" }) as HTMLButtonElement).disabled).toBe(true);
+  // Another device wrote a reply this one never saw, older than the supervisor's latest revision:
+  // still feedback to send here, until a delivery from elsewhere marks it sent.
+  third.unmount();
+  const elsewhere = (sent: boolean): Plan => ({ ...revised, threads: [{ ...revised.threads![0], replies: [{ id: 9, author: "person", text: "From my laptop.", at: 5, sent }] }] });
+  const fresh = render(reader({ ...visual, rev: 3 }));
+  await act(async () => reads[reads.length - 1](elsewhere(false)));
+  expect((bar().getByRole("button", { name: "Request changes" }) as HTMLButtonElement).disabled).toBe(false);
+  fresh.rerender(reader({ ...visual, rev: 3, answer: { option: "x", note: "", at: 6 } }));
+  await act(async () => reads[reads.length - 1](elsewhere(true)));
   expect((bar().getByRole("button", { name: "Request changes" }) as HTMLButtonElement).disabled).toBe(true);
 });
 
-it("a design doc Request changes the engine refuses as nothing to send shows the refusal", async () => {
-  const plan = doc(2, "Workers run on your machine.", {
+it("a design doc Request changes the engine refuses as nothing to send shows the refusal, stops counting the reply it was delivered elsewhere, and keeps a newer one", async () => {
+  const at = (replies: { id: number; at: number; sent: boolean }[]): Plan => doc(2, "Workers run on your machine.", {
     revisions: [{ rev: 1, author: "supervisor", source: "proposal", at: 10 }],
     threads: [{ id: 1, kind: "comment", rev: 1, author: "supervisor", text: "Is a rented VM fine?", status: "open", at: 11, anchor: { kind: "section", section: "summary", state: "current" },
-      replies: [{ id: 2, author: "person", text: "reply 2", at: 12, sent: false }] }] });
+      replies: replies.map((r) => ({ ...r, author: "person", text: `reply ${r.id}` })) }] });
+  // This device sees reply 2 as unsent; a verdict from another window had already delivered it.
+  let plan = at([{ id: 2, at: 12, sent: false }]);
   const client: PlansClient & PlanDocClient & VisualsClient = {
     ...visuals, ...docWrites(() => plan), plan: async () => plan,
-    decidePlan: async () => { throw new DaemonError("invalid", "say what to change: a comment, a note or a different pick", 400); },
+    decidePlan: async () => {
+      plan = at([{ id: 2, at: 12, sent: true }]);
+      throw new DaemonError("invalid", "say what to change: a comment, a note or a different pick", 400);
+    },
+    replyPlan: async () => (plan = at([{ id: 2, at: 12, sent: true }, { id: 3, at: 25, sent: false }])),
   };
   render(<PlanReader client={client} visual={{ ...visual, rev: 2 }} onBack={() => {}} onChanged={() => {}} />);
-  const button = (await screen.findByRole("button", { name: "Request changes" })) as HTMLButtonElement;
-  expect(button.disabled).toBe(false);
-  await act(async () => fireEvent.click(button));
+  const request = async () => (await screen.findByRole("button", { name: "Request changes" })) as HTMLButtonElement;
+  expect((await request()).disabled).toBe(false);
+  await act(async () => fireEvent.click(await request()));
+  // The refusal is shown, and the read that follows reports reply 2 delivered: nothing left to send.
   expect(screen.getByRole("alert")).toBeTruthy();
+  expect((await request()).disabled).toBe(true);
+  // A reply written after that is still feedback to send.
+  fireEvent.click(within(await screen.findByTestId("thread-1")).getByRole("button", { name: "Reply" }));
+  fireEvent.change(within(screen.getByTestId("thread-1")).getByRole("textbox"), { target: { value: "reply 3" } });
+  await act(async () => fireEvent.click(within(screen.getByTestId("thread-1")).getByRole("button", { name: "Send" })));
+  expect((await request()).disabled).toBe(false);
 });
 
 it("a design doc edit or comment begun on older text isn't sent over a newer revision's", async () => {
