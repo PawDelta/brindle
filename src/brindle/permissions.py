@@ -1533,18 +1533,29 @@ def _git_calls(command: str, loose: bool = False) -> list[tuple[str, list[str]]]
 
 
 def _runs_no_command(words: list[str]) -> bool:
-    """Whether ``words`` is a READONLY_PROGRAMS program without an option that
-    runs another: its arguments are text (echo git push --force), never a command."""
-    audited = READONLY_PROGRAMS.get(words[0]) if words and "/" not in words[0] else None
+    """Whether ``words`` is an audited reader without an option that runs another:
+    its arguments are text (echo git push --force), never a command."""
+    if not words or os.path.dirname(words[0]) not in ("", "/bin", "/usr/bin"):
+        return False  # an arbitrary path named echo may itself be a launcher
+    program = os.path.basename(words[0])
+    if program == "git":
+        args = words[1:]
+        while args and args[0] in ("-C", "-c", "--no-pager"):
+            args = args[2:] if args[0] in ("-C", "-c") else args[1:]
+        return bool(args and (args[0] in READONLY_GIT and not any(
+            a.startswith(GIT_UNSAFE_OPTIONS) for a in args[1:])
+            or args[0] == "grep" and _grep_options_known(args[1:])))
+    audited = READONLY_PROGRAMS.get(program)
     return audited is not None and not _has_option(words[1:], *audited)
 
 
-def _git_invocations(command: str, loose: bool = False) -> list[tuple[list[str], str, list[str]]]:
-    """(its -C folders, subcommand, its arguments) for every git invocation in
-    ``command``: git as a part's first word or behind a plain wrapper. With
-    ``loose`` (a deny or an ask), a part whose program is neither may run its
-    arguments (uv run, find -exec, xargs), so its first word named git counts
-    too, unless the program only prints or reads its arguments (_runs_no_command)."""
+def _program_invocations(command: str, program: str, loose: bool = False) -> list[list[str]]:
+    """Commands headed by ``program``, including behind plain wrappers.
+
+    Restrictions also inspect every matching word behind unknown launchers.
+    An earlier operand with the same name must not hide the actual command.
+    Audited readers' arguments remain data, and allows never use this fallback.
+    """
     argv = simple_argv(command)
     if argv is not None:
         while argv and _ASSIGNMENT.match(argv[0]):
@@ -1562,12 +1573,21 @@ def _git_invocations(command: str, loose: bool = False) -> list[tuple[list[str],
     calls = []
     for segment in segments:
         forms = _wrapped_forms(segment)
-        words = next((w for w in forms if w and os.path.basename(w[0]) == "git"), None)
+        words = next((w for w in forms if w and os.path.basename(w[0]) == program), None)
         if words is None and loose and not _runs_no_command(forms[-1]):
-            at = next((i for i, w in enumerate(forms[-1]) if os.path.basename(w) == "git"), None)
-            words = forms[-1][at:] if at is not None else None
-        if words is None:
-            continue
+            calls.extend(forms[-1][i:] for i, w in enumerate(forms[-1]) if os.path.basename(w) == program)
+        elif words is not None:
+            calls.append(words)
+    return calls
+
+
+def _git_invocations(command: str, loose: bool = False) -> list[tuple[list[str], str, list[str]]]:
+    """(its -C folders, subcommand, its arguments) for every git invocation.
+
+    ``loose`` is only for deny/ask rules: see _program_invocations.
+    """
+    calls = []
+    for words in _program_invocations(command, "git", loose):
         rest, j, folders = words[1:], 0, []
         while j < len(rest) and rest[j].startswith("-"):
             if rest[j] == "-C" and j + 1 < len(rest):
@@ -2491,9 +2511,11 @@ def readonly_pipeline(req: Request, rules: list[Rule], checks: list[str] | None 
     if not all(_readonly_part(req, words) for words, _ in parsed):
         return False
     restrictions = [r for r in rules if r.kind == "bash" and r.decision in ("deny", "ask")]
-    parts = [req, *(replace(req, command=_joined(words)) for words, _ in parsed)]
-    if any(rule_matches(rule, part, checks) for rule in restrictions for part in parts):
-        return False
+    for rule in restrictions:
+        join = shlex.join if rule.match_type in _WORD_MATCHERS else _joined
+        parts = [req, *(replace(req, command=join(words)) for words, _ in parsed)]
+        if any(rule_matches(rule, part, checks) for part in parts):
+            return False
     path_denies = [r for r in rules if r.kind == "read" and r.decision == "deny"]
     if (restrictions or path_denies) and _restriction_parts(command) is None:
         # Unquoted pathname patterns: a restriction may match what they expand to.
@@ -2516,24 +2538,23 @@ def destructive_rm(command: str) -> bool:
     in any flag cluster or spelling) at the root, a top-level folder, the home
     directory or the working directory itself, or with ``--no-preserve-root``,
     itself or through a program that runs what it's given (sudo rm, xargs rm)."""
-    for words in _segments(command):
-        if not words:
-            continue
-        runs = [words]
-        if os.path.basename(words[0]) in (*_WRAPPERS, "find"):
-            runs = [words[i:] for i, word in enumerate(words) if os.path.basename(word) == "rm"]
-        for run in runs:
-            if os.path.basename(run[0]) != "rm":
-                continue
-            flags = [w for w in run[1:] if w.startswith("-")]
-            targets = [w for w in run[1:] if not w.startswith("-")]
-            if any(f == "--no-preserve-root" for f in flags):
-                return True
-            recursive = any(f in ("--recursive",) or (not f.startswith("--") and any(c in f for c in "rR"))
-                            for f in flags)
-            home = os.path.expanduser("~")
-            if recursive and any(DESTRUCTIVE_TARGETS.fullmatch(t) or t.rstrip("/") == home for t in targets):
-                return True
+    for run in _program_invocations(command, "rm", loose=True):
+        flags, targets, options = [], [], True
+        for word in run[1:]:
+            if options and word == "--":
+                options = False
+            elif options and word.startswith("-"):
+                flags.append(word)
+            else:
+                targets.append(word)
+        # GNU rm accepts unambiguous long-option prefixes.
+        if any(f.startswith("--no") and "--no-preserve-root".startswith(f) for f in flags):
+            return True
+        recursive = any(f.startswith("--r") and "--recursive".startswith(f)
+                        or not f.startswith("--") and any(c in f for c in "rR") for f in flags)
+        home = os.path.expanduser("~")
+        if recursive and any(DESTRUCTIVE_TARGETS.fullmatch(t) or t.rstrip("/") == home for t in targets):
+            return True
     return False
 
 
@@ -3761,7 +3782,7 @@ def _may_name_token(req: Request, word: str) -> bool:
 
 # Matchers that must tell a word from its neighbours (an option from a message
 # that mentions one), so they see the words quoted as written, not re-joined.
-_WORD_MATCHERS = ("git-force", "git-push", "push")
+_WORD_MATCHERS = ("git-force", "git-push", "push", "rm-destructive")
 
 # Wrappers that only run their arguments: per program, the options that take a
 # value in the next word, the flags that take none, and the options with a value
