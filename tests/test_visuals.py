@@ -14,6 +14,7 @@ TOKEN = "t" * 43
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
 OPTIONS = [{"id": "A", "label": "Tag first"}, {"id": "B", "label": "Gate on CI"}]
 SECRET = "api_key = " + "Zq8vR2mK7pX4tL9w" + "B3nY6cH1"   # secret-shaped, not a real one
+REAL_CONSUME = visual_offers.consume
 
 
 @pytest.fixture
@@ -249,6 +250,21 @@ def test_visual_ready_notice_and_answers_for_the_revision_on_screen(db, session,
     assert "answered: option C" in mcp_server.list_visuals()
     # The kept copy is still r1, so r2's answer isn't stamped on it.
     assert client.get(f"/v1/kept-visuals/{v['id']}").json()["answer"] is None
+
+
+@pytest.mark.variant("real incident: a status board the person asked for was refused on every update (0.6.3, Nov 10)")
+def test_asked_visual_updates_without_a_new_request(db, session, monkeypatch):
+    ws, boss, worker = session
+    monkeypatch.setattr(visual_offers, "consume", REAL_CONSUME)
+    visual_offers.person_spoke(db, boss, "render as you go", typed=True)
+    v = visuals.publish(db, boss, "Status", "<p>r1</p>", asked="render as you go")
+    # The board the person asked for stays the supervisor's to update, with no new quote.
+    assert visuals.publish(db, boss, "Status", "<p>r2</p>", visual_id=v["id"])["rev"] == 2
+    assert visuals.publish(db, boss, "Status", "<p>r3</p>", visual_id=v["id"])["rev"] == 3
+    for who, vid in ((boss, None), (worker, v["id"])):
+        with pytest.raises(ServiceError) as refused:
+            visuals.publish(db, who, "Other", "<p>no</p>", visual_id=vid)
+        assert refused.value.code == "visual_request_required"
 
 
 @pytest.mark.variant("publication race: another publisher writes r2 between the first publisher's checks and write")

@@ -990,6 +990,7 @@ CREATE TABLE IF NOT EXISTS visuals (
     answer TEXT,                   -- JSON {option, note, at, rev}
     read_rev INTEGER NOT NULL DEFAULT 0,
     dismissed_rev INTEGER NOT NULL DEFAULT 0,  -- the revision the person dismissed without answering
+    consented_by TEXT,             -- the session supervisor that published it with the person's consent
     kept_at REAL,
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
@@ -1474,6 +1475,8 @@ class DB:
         visual_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(visuals)")}
         if "dismissed_rev" not in visual_cols:
             self.conn.execute("ALTER TABLE visuals ADD COLUMN dismissed_rev INTEGER NOT NULL DEFAULT 0")
+        if "consented_by" not in visual_cols:
+            self.conn.execute("ALTER TABLE visuals ADD COLUMN consented_by TEXT")
         if "ask" not in {r["name"] for r in self.conn.execute("PRAGMA table_info(plans)")}:
             self.conn.execute("ALTER TABLE plans ADD COLUMN ask TEXT")
         review_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(reviews)")}
@@ -2239,6 +2242,12 @@ class DB:
                       "ON CONFLICT(agent_id, kind) DO UPDATE SET value=excluded.value",
                       (agent_id, kind, value))
         return True, row["value"] if row else None
+
+    def add_mark(self, agent_id: str, kind: str, value: str) -> bool:
+        """Create the mark unless one exists already. Returns whether it did."""
+        with self.tx() as c:
+            return bool(c.execute("INSERT INTO agent_marks (agent_id, kind, value) VALUES (?,?,?) "
+                                  "ON CONFLICT(agent_id, kind) DO NOTHING", (agent_id, kind, value)).rowcount)
 
     def replace_mark(self, agent_id: str, kind: str, old: str, new: str) -> bool:
         """Set an existing mark from ``old`` to ``new``, never recreating one

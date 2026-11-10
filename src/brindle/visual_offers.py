@@ -195,8 +195,10 @@ _ASKS_AGAIN = re.compile(r"(?:(?:please|just|then|instead|but|and|so|ok|okay|now
                          r"|(?:make|create|build|generate)\s+(?:(?:me|us|a|an|the|this|that)\s+)*" + _CANCEL_ARTIFACT + r")\b", re.I)
 _COURTESY = re.compile(r"(?:thanks|thank you|thx|please|sorry)\W*$", re.I)
 _CLAUSES = re.compile(r"(?<=[.!?,;:])\s+|[…。！？，；、]+\s*|\s+[-–—]+\s+|[–—]+\s*|\n+")
-_NOT = (r"(?<!why )\b(?:not|never|cannot|without|avoid|stop|no need to|rather than|instead of|"
-        r"(?:do|does|did|should|must|need)n['’]?t|(?:ca|could|wo|would)n['’]?t(?! you))"
+# "should you not…" / "shouldn't you…" ask why something hasn't been done: a request, not a negation.
+_ASKING = "".join(f"(?<!{a} you )" for a in ("should", "can", "could", "would", "will"))
+_NOT = (r"(?<!why )\b(?:" + _ASKING + r"not|never|cannot|without|avoid|stop|no need to|rather than|instead of|"
+        r"(?:do|does|did|must|need)n['’]?t|(?:should|ca|could|wo|would)n['’]?t(?! you))"
         r"(?: (?:ever|even|bother|need|needed|want|wanted|have|ask|asked|try|go|to|you|i|me|us|just|really|please|actually|yet))*")
 _NEGATED = re.compile(_NOT + " $")     # just before a quote it takes the quote back: "don't ever <quote>"
 _NEGATES = re.compile(_NOT + r" \w")    # the quote carries its own "don't"
@@ -290,13 +292,16 @@ def refresh_input(db: DB, agent: Agent, observer: int, submitted_at: float, expi
 
 def person_spoke(db: DB, agent: Agent, text: str, *, expires_at: float | None = None,
                  observation: tuple[int, int] | None = None, submitted_at: float | None = None,
-                 fold_only: bool = False, typed: bool = False, cli_prompt: bool = False) -> None:
+                 fold_only: bool = False, typed: bool = False, cli_prompt: bool = False,
+                 said_at: float | None = None) -> None:
     """Called only for authenticated person input, never for agent messages.
 
     ``typed``: the app watched the person key in all of ``text`` themselves.
     Only then can its words back a publish_visual ``asked``. ``cli_prompt``:
     this is a CLI hook's report of ``text``, which makes words the app staged
-    for this same prompt quotable."""
+    for this same prompt quotable. ``said_at``: when the person sent ``text``,
+    if that was earlier than now (a message read back after the fact): a cancel
+    then ends only the words they typed before it."""
     if not visuals.enabled():
         return
     root, ws = visuals._session(db, agent)
@@ -332,7 +337,8 @@ def person_spoke(db: DB, agent: Agent, text: str, *, expires_at: float | None = 
             c.execute("DELETE FROM visual_grants WHERE root_id=?", (root.id,))
             _unlink(c, root.id, "grant")
         if cancelled:
-            c.execute("DELETE FROM visual_person_words WHERE root_id=?", (root.id,))
+            c.execute("DELETE FROM visual_person_words WHERE root_id=? AND created_at<=?",
+                      (root.id, time.time() if said_at is None else min(said_at, time.time())))
         elif typed and not fold_only:
             _keep_words(c, root.id, text)
         elif cli_prompt:
@@ -456,23 +462,33 @@ def _spend_quote(c, root: str, asked: str, now: float) -> bool:
             elif row["source"] == "request":
                 c.execute("DELETE FROM visual_requests WHERE root_id=?", (root,))
             return True
+    if c.execute("SELECT 1 FROM visual_person_words WHERE root_id=? AND staged=1 AND created_at>? AND instr(words, ?)",
+                 (root, now - FOLD, quote)).fetchone():
+        # The app vouched for these words, but no prompt of the CLI's has said it took that message in.
+        debuglog.record("visuals", "warning", "asked words refused: their message is still staged", {"agent": root})
     return False
 
 
 def authorize(c, root: str, kind: str, *, supervisor: bool, asked: str | None = None,
-              answered: str | None = None) -> None:
+              answered: str | None = None, consented: bool = False) -> bool:
     """Allow one publication or refuse it, in the publishing transaction.
+    Whether the person consented to this one (a quote or a grant).
 
     ``answered`` is the stored answer of the visual being revised. Revising
-    clears it, so an answer allows one revision. That and ``asked`` are the
-    supervisor's own to use, and neither reaches a planning document."""
+    clears it, so an answer allows one revision. ``consented``: the visual
+    being revised was published by this supervisor with the person's
+    consent, so it stays theirs to update. These and ``asked`` are the
+    supervisor's own to use, and none reaches a planning document."""
     now = time.time()
     if kind == "visual" and supervisor:
+        if consented:
+            return True
         if answered and now - json.loads(answered)["at"] < FOLD:
-            return
+            return False
         if asked is not None and _spend_quote(c, root, asked, now):
-            return
+            return True
     consume(c, root, kind)
+    return True
 
 
 def consume(c, root: str, kind: str = "visual") -> None:

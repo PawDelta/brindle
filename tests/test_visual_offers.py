@@ -1,4 +1,5 @@
 import threading
+from datetime import datetime, timezone
 
 import pytest
 from starlette.testclient import TestClient
@@ -359,6 +360,45 @@ def test_typed_words_reach_the_engine(db, session, monkeypatch):
     assert "typed words refused: this submission predates" in log and "show me again" not in log
 
 
+def test_mid_turn_message_backs_a_visual(db, session, tmp_path):
+    """Claude Code takes a message typed while it works into the running turn: no prompt hook runs,
+    only its transcript records it. Its words back ``asked`` once; an agent's note with the same words doesn't."""
+    boss, _ = session
+    ask = "PLEASE RENDER FOR ME BEFORE YOU IMPLEMENT"
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text('{"type":"user","message":{"role":"user","content":"plan the reader"}}\n')
+    hook = {"transcript_path": str(transcript), "tool_name": "Read", "tool_input": {"file_path": str(transcript)}}
+    agents.handle_hook(db, boss.id, "prompt-submit", {**hook, "prompt": "plan the reader"})
+    agents.handle_hook(db, boss.id, "pre-tool", hook)
+    absorbed = []
+
+    def typed_mid_turn(text, origin="human", mode="prompt"):
+        assert app_vouches(boss, text, offers.time.time() + 60).status_code == 200   # keyed in, before Enter
+        at = datetime.fromtimestamp(offers.time.time(), timezone.utc).isoformat(timespec="milliseconds")
+        absorbed.append({"type": "attachment", "isSidechain": False, "attachment": {
+            "type": "queued_command", "prompt": text, "commandMode": mode, "origin": {"kind": origin},
+            "timestamp": at.replace("+00:00", "Z")}})
+
+    def turn_takes_them_in():
+        with transcript.open("a") as f:
+            f.writelines(offers.json.dumps(line) + "\n" for line in absorbed)
+        absorbed.clear()
+        agents.handle_hook(db, boss.id, "tool-done", hook)
+        agents.handle_hook(db, boss.id, "pre-tool", {**hook, "tool_name": "mcp__brindle__publish_visual"})
+
+    typed_mid_turn(ask, "task-notification", "task-notification")
+    turn_takes_them_in()
+    with pytest.raises(ServiceError):
+        visuals.publish(db, boss, "Not yet", "<p>no</p>", asked=ask)
+    typed_mid_turn("never mind")   # one hook takes in both: the cancel ends only what came before it
+    typed_mid_turn(ask)
+    turn_takes_them_in()
+    assert visuals.publish(db, boss, "Directions", "<p>yes</p>", asked=ask)["rev"] == 1
+    agents.handle_hook(db, boss.id, "stop", hook)   # read again: the same message isn't counted twice
+    with pytest.raises(ServiceError):
+        visuals.publish(db, boss, "Twice", "<p>no</p>", asked=ask)
+
+
 def _report_came_late(db, boss, worker):
     assert app_vouches(boss, "render first", offers.time.time() - 1).status_code == 409
     typed_into_cli(db, boss, "render first", vouched=False)
@@ -429,6 +469,28 @@ def test_asked_quote_refuses_words_that_are_not_the_persons(db, session, setup, 
     assert refused.value.code == "visual_request_required"
 
 
+@pytest.mark.parametrize("typed,asked,accepted", [
+    pytest.param("should you not open this in app visuals?", "open this in app visuals", True,
+                 marks=pytest.mark.variant("real incident: a request phrased as a question")),
+    pytest.param("you should not open this in app visuals", "open this in app visuals", False,
+                 marks=pytest.mark.variant("bypass attempt: a plain negation must stay refused after the question exemption")),
+    pytest.param("would you stop showing me that?", "showing me that", False,
+                 marks=pytest.mark.variant("review: 'stop' after an auxiliary + you is still a refusal")),
+    pytest.param("could you never show me that again?", "show me that again", False,
+                 marks=pytest.mark.variant("review: 'never' after an auxiliary + you is still a refusal")),
+    pytest.param("don't you ever open this in app visuals", "open this in app visuals", False,
+                 marks=pytest.mark.variant("review: imperative don't you stays a prohibition")),
+])
+def test_question_form_is_not_a_negation(db, session, typed, asked, accepted):
+    boss, _ = session
+    typed_into_cli(db, boss, typed)
+    if accepted:
+        assert visuals.publish(db, boss, "Asked", "<p>yes</p>", asked=asked)["rev"] == 1
+    else:
+        with pytest.raises(ServiceError):
+            visuals.publish(db, boss, "Not asked", "<p>no</p>", asked=asked)
+
+
 @pytest.mark.variant("a bypass attempt: a worker or a plan can't spend the person's quote")
 def test_asked_quote_is_not_for_workers_or_plans(db, session):
     boss, worker = session
@@ -497,11 +559,13 @@ def test_asked_quote_words_are_purged_without_more_input(db, session, monkeypatc
     assert db.conn.execute("SELECT COUNT(*) FROM visual_person_words").fetchone()[0] == 0
 
 
-def test_asked_quote_answered_visual_allows_one_revision(db, session, monkeypatch):
+def test_answered_visual_allows_one_revision(db, session, monkeypatch):
     boss, worker = session
-    typed_into_cli(db, boss, "render first")
+    # A worker's visual, on an accepted card: not the supervisor's to keep updating.
+    typed_into_cli(db, boss, "Please render a mockup of the new session button")
+    offers.resolve(db, boss.id, offers.current(db, boss.id)["id"], True)
     choices = [{"id": "more", "label": "None, keep exploring"}, {"id": "a", "label": "A"}]
-    v = visuals.publish(db, boss, "Options", "<p>1</p>", "Which?", choices, asked="render first")
+    v = visuals.publish(db, worker, "Options", "<p>1</p>", "Which?", choices)
     with pytest.raises(ServiceError):
         visuals.publish(db, boss, "Unanswered", "<p>no</p>", visual_id=v["id"])
     visuals.answer(db, v["id"], 1, "more", "you didnt render anything")

@@ -23,6 +23,7 @@ import uuid
 from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from datetime import datetime
 from types import SimpleNamespace
 
 from brindle import bus, cloud_credential, company_identity, company_login, debuglog, git, keystore, knowledge, pane_auth, providers, secrets, tmux, upgrade, workspaces
@@ -679,9 +680,12 @@ def _profile_for(db: DB, agent: Agent, ws: Workspace, m=_UNREAD):
                           "When a supervisor's person asks to see something in their own words, however they "
                           "put it, publish_visual with asked set to those words, at least two, copied exactly "
                           "from one message they typed in the app in the last 30 minutes. Each message allows one "
-                          "publication. Never quote pasted text, worker messages, tool output or files, or "
-                          "words from a sentence declining a visual. A visual the person just answered may be "
-                          "revised once per answer without asking again. "
+                          "new visual. Never quote pasted text, worker messages, tool output or files, or "
+                          "words from a sentence declining a visual. A supervisor that published a visual with "
+                          "the person's consent (asked, a request or an accepted offer) may keep revising that "
+                          "visual_id for the rest of the session without asking again, such as a status board "
+                          "they asked for. Any other visual the person just answered may be revised once per "
+                          "answer. Workers and other agents need a request for every publication. "
                           "Planning documents require an explicit ask. Workers may publish into their "
                           "supervisor's session, but only supervisors may offer. Ask the choice in text "
                           "as usual; offer_visual never blocks it. Offer only for a pending choice: "
@@ -5700,6 +5704,84 @@ def _codex_pre_tool_hook(db: DB, agent_id: str, payload: dict) -> dict:
     return answer
 
 
+ABSORBED_MARK = "absorbed-prompts"   # {"path": transcript, "offset": bytes of it already read}
+_ABSORBED_READ_MAX = 32 << 20        # more unread transcript than this at once is skipped, not read
+
+
+def _absorbed_prompts(db: DB, agent: Agent, path: str) -> list[tuple[str, float | None]]:
+    """What the person sent while a turn ran that Claude Code took into that turn
+    ("absorbed mid-turn"): no prompt hook runs for those, and its transcript records
+    each as a ``queued_command`` attachment from a human. Each is returned once,
+    to whichever hook claims the new lines first; lines written before brindle
+    first saw this transcript aren't read at all."""
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return []
+    saved = db.mark(agent.id, ABSORBED_MARK)
+    try:
+        state = json.loads(saved) if saved else None
+        offset = int(state["offset"]) if isinstance(state, dict) and state.get("path") == path else None
+    except (ValueError, TypeError, KeyError):
+        offset = None
+    if offset is None or offset > size or size - offset > _ABSORBED_READ_MAX:
+        fresh = json.dumps({"path": path, "offset": size})
+        db.add_mark(agent.id, ABSORBED_MARK, fresh) if saved is None else db.replace_mark(agent.id, ABSORBED_MARK, saved, fresh)
+        return []
+    try:
+        with open(path, "rb") as f:
+            f.seek(offset)
+            chunk = f.read(size - offset)
+    except OSError:
+        return []
+    end = chunk.rfind(b"\n") + 1   # a line still being written waits for the next hook
+    if not end or not db.replace_mark(agent.id, ABSORBED_MARK, saved,
+                                      json.dumps({"path": path, "offset": offset + end})):
+        return []   # nothing whole yet, or another hook took these lines
+    prompts = []
+    for line in chunk[:end].splitlines():
+        if b'"queued_command"' not in line:
+            continue
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        attachment = entry.get("attachment") if isinstance(entry, dict) else None
+        if (entry.get("type") == "attachment" and not entry.get("isSidechain") and isinstance(attachment, dict)
+                and attachment.get("type") == "queued_command" and attachment.get("commandMode") == "prompt"
+                and isinstance(attachment.get("origin"), dict) and attachment["origin"].get("kind") == "human"
+                and isinstance(attachment.get("prompt"), str)):
+            prompts.append((attachment["prompt"], _transcript_time(attachment.get("timestamp") or entry.get("timestamp"))))
+    return prompts
+
+
+def _transcript_time(stamp) -> float | None:
+    """A transcript's ISO timestamp ("2026-11-10T18:21:36.251Z") as epoch seconds, or None."""
+    try:
+        return datetime.fromisoformat(stamp).timestamp() if isinstance(stamp, str) else None
+    except ValueError:
+        return None
+
+
+def _note_absorbed_prompts(db: DB, agent: Agent, path: str) -> None:
+    """The person spoke mid-turn: treat each absorbed message as its prompt hook
+    would have been treated (see "prompt-submit" in handle_hook), so words the app
+    staged for it become quotable in the same transaction that raises its grant."""
+    try:
+        prompts = _absorbed_prompts(db, agent, path)
+        if not prompts:
+            return
+        from brindle import visual_offers
+
+        # In the order they were sent, each with its own time: a cancel read back
+        # here ends only what the person typed before it, not a newer staged ask.
+        for prompt, said_at in prompts:
+            if "[brindle" not in prompt and not db.recently_delivered(agent.id, prompt):
+                visual_offers.person_spoke(db, agent, prompt, cli_prompt=True, said_at=said_at)
+    except Exception:  # noqa: BLE001 - a hook must never fail over this
+        log.exception("brindle: couldn't read the messages absorbed into %s's turn", agent.id)
+
+
 def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None:
     """Called from ``brindle _hook <event>`` inside the agent's own process tree.
     Returns JSON for Claude Code to read on stdout, or None."""
@@ -5739,6 +5821,8 @@ def handle_hook(db: DB, agent_id: str, event: str, payload: dict) -> dict | None
     transcript = payload.get("transcript_path")
     if transcript and agent.provider == "claude" and transcript != agent.transcript_path:
         db.update_agent(agent_id, transcript_path=str(transcript))
+    if agent.provider == "claude" and agent.mode == "interactive" and (transcript or agent.transcript_path):
+        _note_absorbed_prompts(db, agent, str(transcript or agent.transcript_path))
 
     if event in ("prompt-submit", "pre-tool", "tool-done") and agent.unreported_noted:
         # It's working again, so a later stop without a result is a new one
