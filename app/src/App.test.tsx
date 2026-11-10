@@ -337,6 +337,39 @@ describe("App", () => {
     } finally { sync.stop(); vi.useRealTimers(); }
   });
 
+  it("shows once its session is back: one slow read after it, not after a read begun while it was pending and another behind that", async () => {
+    vi.useFakeTimers();
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root] });
+    const client = daemon.client();
+    const store = createAppStore();
+    // As on a real restart: the engine names the session pending, brings it back, and ends
+    // recovery a moment later, while every snapshot (cold git status, sessions launching) takes seconds.
+    const SLOW = 4000;
+    let live = { resuming: true, pending: ["sup1"] };
+    const meta = client.meta.bind(client);
+    vi.spyOn(client, "meta").mockImplementation(async () => ({ ...await meta(), resuming: live.resuming, recovery: live.resuming ? { done: 1 - live.pending.length, total: 1, pending: live.pending } : undefined }));
+    const read = client.snapshot.bind(client);
+    vi.spyOn(client, "snapshot").mockImplementation(async () => {
+      const rows = await read();
+      return new Promise((ok) => setTimeout(() => ok(rows), SLOW));
+    });
+    daemon.data.workspaces = [{ ...root, agents: root.agents?.map((a) => ({ ...a, window: null })) }];
+    const sync = startSync({ client, store, connect: daemon.connect });
+    try {
+      renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO }} />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+      expect(screen.queryByTestId("terminal")).toBeNull();
+      // Back (its window in the rows from now on); recovery ends during the read that releases it.
+      daemon.data.workspaces = [root];
+      live = { resuming: true, pending: [] };
+      await act(async () => { await vi.advanceTimersByTimeAsync(600); });
+      live = { resuming: false, pending: [] };
+      // A poll and one slow read after it came back; not the read in flight, nor another after this one.
+      await act(async () => { await vi.advanceTimersByTimeAsync(SLOW + 500); });
+      expect(screen.getByTestId("terminal").textContent).toBe("sup1");
+    } finally { sync.stop(); vi.useRealTimers(); }
+  });
+
   it("recovery progress line: counts sessions on the waiting pane and goes once it is ready", async () => {
     vi.useFakeTimers();
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root] });

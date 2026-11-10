@@ -544,6 +544,7 @@ function usePanesReady(client: DaemonClient | null, refresh?: () => Promise<void
       startupStep("panes_ready");
       current = false;
       clearTimeout(next);
+      clearTimeout(poll);
       clearTimeout(deadline);
       if (pid !== null) shownFrom.current = pid;
       setPanes((p) => (p.ready ? p : { ready: true, epoch: p.epoch + 1, recovery: null }));
@@ -560,10 +561,12 @@ function usePanesReady(client: DaemonClient | null, refresh?: () => Promise<void
       // own: apply them as they are (as the settled path does) rather than wait for a slow store
       // refresh, which only follows in the background to catch the inbox and anything newer.
       store.dispatch({ type: "snapshot", workspaces });
-      // Still the same daemon, and none of these sent back to pending since.
+      // Still the same daemon, and none of these sent back to pending since. A recovery that ended
+      // meanwhile has every session back (on a restart the last ones follow the viewed one closely):
+      // these rows are still the session's own, so throwing them away would only wait out another read.
       const latest = await client.meta();
-      const stillPending = latest.recovery?.pending;
-      if (!unchanged() || latest.pid !== meta.pid || !latest.resuming || !stillPending) return;
+      const stillPending = latest.resuming ? latest.recovery?.pending : [];
+      if (!unchanged() || latest.pid !== meta.pid || !stillPending) return;
       // Not stale, though: while sessions come back the stream rarely stops marking it so (each one says it is
       // starting), and the refresh that clears it is behind them. What counts is the rows applied now: those
       // read above, or a later read (sync drops a read older than them), still giving the session's own windows.
@@ -576,6 +579,37 @@ function usePanesReady(client: DaemonClient | null, refresh?: () => Promise<void
     };
     const hide = () => setPanes((p) => (p.ready ? { ...p, ready: false } : p));
     const deadline = setTimeout(() => settle(null), STARTUP_WAIT);
+    // Whether a session the engine named pending at `then` is back by `now` (or `now` is another daemon):
+    // a read begun at `then` cannot show it. One that ends recovery with none newly back changes nothing.
+    const cameBack = (then: Meta, now: Meta) => now.pid !== then.pid
+      || (then.resuming && (then.recovery?.pending ?? []).some((id) => !now.resuming || !now.recovery?.pending?.includes(id)));
+    let poll: ReturnType<typeof setTimeout> | undefined;
+    // Re-ask at once: the engine's word changed while a read was out.
+    let again = false;
+    /* The rows, read after `meta`; null once the engine's word changes before they come. A snapshot
+       can take seconds while sessions launch (a cold git status per worktree), so the engine keeps
+       being asked meanwhile: a session that comes back during the read gets a read of its own now,
+       not after this one ends and another after that. */
+    const readAfter = async (meta: Meta): Promise<WorkspaceDTO[] | null> => {
+      const rows = client.snapshot();
+      // Left behind if the word changes: its result, or failure, no longer matters.
+      rows.catch(() => {});
+      let watching = true;
+      const moved = (async () => {
+        for (;;) {
+          await new Promise((ok) => { poll = setTimeout(ok, STARTUP_CHECK); });
+          if (!watching || !current) return new Promise<never>(() => {});
+          const now = await client.meta().catch(() => null);
+          if (watching && now && cameBack(meta, now)) return null;
+        }
+      })();
+      try {
+        return await Promise.race([rows, moved]);
+      } finally {
+        watching = false;
+        clearTimeout(poll);
+      }
+    };
     const check = async () => {
       const { connectionGeneration, lifecycleVersion } = store.getState();
       // A read from before the stream dropped and came back may be the old daemon's.
@@ -605,13 +639,21 @@ function usePanesReady(client: DaemonClient | null, refresh?: () => Promise<void
         setPanes((p) => (p.recovery?.done === recovery?.done && p.recovery?.total === recovery?.total && p.pending?.join() === pending?.join() && p.back?.join() === back.join()
           ? p : { ...p, recovery, pending: pending ?? null, back }));
         if (pending) {
-          const workspaces = await client.snapshot();
+          const workspaces = await readAfter(meta);
           if (!unchanged()) return;
+          if (!workspaces) {
+            again = true;
+            return;
+          }
           await releaseBack(meta, pending, workspaces, unchanged);
         }
         if (!meta.resuming) {
-          const workspaces = await client.snapshot();
+          const workspaces = await readAfter(meta);
           if (!unchanged()) return;
+          if (!workspaces) {
+            again = true;
+            return;
+          }
           if (!waitingForPanes(workspaces)) {
             if (recovering.current) {
               // These rows were read after recovery ended. Validate their daemon
@@ -630,13 +672,17 @@ function usePanesReady(client: DaemonClient | null, refresh?: () => Promise<void
       } catch {
         // Not answering yet: ask again shortly.
       } finally {
-        if (current) next = setTimeout(() => void check(), STARTUP_CHECK);
+        const now = again;
+        again = false;
+        if (current && now) void check();
+        else if (current) next = setTimeout(() => void check(), STARTUP_CHECK);
       }
     };
     void check();
     return () => {
       current = false;
       clearTimeout(next);
+      clearTimeout(poll);
       clearTimeout(deadline);
     };
   }, [client, round, reload, refresh, store]);
