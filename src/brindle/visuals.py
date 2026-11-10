@@ -431,6 +431,9 @@ def answer(db: DB, visual_id: str, rev: Any, option: Any = None, note: Any = Non
     except BaseException:
         with db.tx() as c:
             c.execute("UPDATE visuals SET answer=NULL WHERE id=? AND answer=?", (v["id"], record))
+            # Keep may have copied the claim while delivery was in flight.
+            c.execute("UPDATE kept_visuals SET answer=NULL WHERE id=? AND rev=? AND answer=?",
+                      (v["id"], rev, record))
         raise
     with db.tx() as c:
         # Only a kept copy of this same revision takes the answer: a copy of
@@ -514,19 +517,21 @@ def _session_name(db: DB, root_id: str) -> str:
 def keep(db: DB, visual_id: str) -> dict:
     """Copy the visual's current revision to the kept store. Keeping a kept
     visual again keeps the revision now on screen."""
-    v = get(db, visual_id)
-    _unlocked(v["root_id"])
-    html = page(db, v["id"], str(v["rev"])).read_text(encoding="utf-8")
-    # Everything the kept copy stores, scanned again before anything is written.
-    # The session's name is resolved once, scanned, and that same value stored.
-    name = _session_name(db, v["root_id"])
-    _refuse_secrets([("the page", html), ("the title", v["title"]),
-                     ("the answer's note", (v["answer"] or {}).get("note")), ("the session's name", name)])
-    _private_dir(kept_root(v["repo_root"]).parent)
-    _write_atomic(kept_path(v["repo_root"], v["id"]), html.encode("utf-8"))
-    now = time.time()
-    answer = json.dumps(v["answer"]) if v["answer"] else None
+    # Read and copy under the same writer lock as answers, revisions and
+    # Unkeep, so the page and row always describe the same saved state.
     with db.tx() as c:
+        v = get(db, visual_id)
+        _unlocked(v["root_id"])
+        html = page(db, v["id"], str(v["rev"])).read_text(encoding="utf-8")
+        # Everything the kept copy stores, scanned again before anything is written.
+        # The session's name is resolved once, scanned, and that same value stored.
+        name = _session_name(db, v["root_id"])
+        _refuse_secrets([("the page", html), ("the title", v["title"]),
+                         ("the answer's note", (v["answer"] or {}).get("note")), ("the session's name", name)])
+        _private_dir(kept_root(v["repo_root"]).parent)
+        _write_atomic(kept_path(v["repo_root"], v["id"]), html.encode("utf-8"))
+        now = time.time()
+        answer = json.dumps(v["answer"]) if v["answer"] else None
         c.execute("INSERT INTO kept_visuals (id, title, from_session, from_session_name, repo, rev, answer,"
                   " kept_at) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET title=excluded.title,"
                   " rev=excluded.rev, answer=excluded.answer",
@@ -543,7 +548,7 @@ def unkeep(db: DB, visual_id: str) -> dict:
     with db.tx() as c:
         c.execute("DELETE FROM kept_visuals WHERE id=?", (v["id"],))
         c.execute("UPDATE visuals SET kept_at=NULL WHERE id=?", (v["id"],))
-    kept_path(v["repo_root"], v["id"]).unlink(missing_ok=True)
+        kept_path(v["repo_root"], v["id"]).unlink(missing_ok=True)
     bus.publish(db, "visual.kept", repo_root=v["repo_root"], root_id=v["root_id"], visual=v["id"], kept=False)
     return get(db, v["id"])
 

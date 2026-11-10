@@ -428,7 +428,11 @@ function Banner({ item, actions, who, branch, sessionTitle, repo, isNew, onDone,
 function PlanOfferActions({ item, actions, onDone, onGo }: { item: InboxItemDTO; actions: ReturnType<typeof useInboxActions>; onDone(): void; onGo?(): void }) {
   const client = useDaemon();
   const [saving, setSaving] = useState(false);
+  const pending = useRef(false);
   const answer = (accept: boolean) => {
+    // Guard synchronously: both choices can fire before React disables them.
+    if (pending.current) return;
+    pending.current = true;
     setSaving(true);
     actions.dismiss(itemKey(item));
     void client
@@ -438,6 +442,7 @@ function PlanOfferActions({ item, actions, onDone, onGo }: { item: InboxItemDTO;
         onGo?.();
       }, (e: unknown) => actions.report(item, e instanceof Error ? e.message : String(e), true))
       .finally(() => {
+        pending.current = false;
         setSaving(false);
         onDone();
       });

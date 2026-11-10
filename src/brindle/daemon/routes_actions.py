@@ -487,11 +487,20 @@ def inbox_action(db: DB, params: dict, body: Body) -> Any:
         if ap is None or not autopilot.proposing(ap):
             raise ServiceError("conflict", f"{a.id} has no checks waiting on an answer", 409)
         checks = json.loads(ap.proposal).get("checks") or []
-        db.update_autopilot(a.id, proposal=None)
-        if action == "decline":
-            return {"message": "nothing was written"}
-        return {"message": autopilot.add_checks(_workspace(db, a.workspace_id).repo_root, checks,
-                                                _get(body, "allow_commands", bool, False))}
+        # Keep the request answerable if writing the accepted checks fails.
+        # A proposal published during the write belongs to a new decision.
+        message = ("nothing was written" if action == "decline" else
+                   autopilot.add_checks(_workspace(db, a.workspace_id).repo_root, checks,
+                                        _get(body, "allow_commands", bool, False)))
+        with db.tx() as c:
+            cleared = c.execute("UPDATE autopilot SET proposal = NULL WHERE root_id = ? AND proposal = ?",
+                                (a.id, ap.proposal)).rowcount
+
+        # Other connected views need the same notification as update_autopilot.
+        # A replacement's publisher already announces its new decision.
+        if cleared:
+            bus.publish_agent(db, "checks.changed", a.id)
+        return {"message": message}
     if action == "answer":
         return {"status": svc.send(db, a.id, _get(body, "text", required=True))}
     if action == "permission":
