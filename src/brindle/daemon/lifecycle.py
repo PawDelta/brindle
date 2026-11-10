@@ -35,6 +35,7 @@ import resource
 import signal
 import socket
 import sys
+import tempfile
 import threading
 import time
 from collections import deque
@@ -391,12 +392,47 @@ def _read_resume() -> list[dict] | None:
     return [e for e in entries if isinstance(e, dict) and isinstance(e.get("id"), str)]
 
 
+VIEWED_FILE = "viewed-session"      # the session the app last showed (record_viewed)
+
+
+def _viewed_path() -> Path:
+    return brindle_home() / VIEWED_FILE
+
+
+def record_viewed(root_id: str) -> None:
+    """The app is showing session ``root_id``: the next start brings it back
+    first, alone (resume_after_start). Replaced in one step, through a staging
+    file of its own, so a reader sees one session or the other, never half."""
+    path = _viewed_path()
+    try:
+        fd, staged = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    except OSError:
+        log.warning("brindle: couldn't record the session on screen", exc_info=True)
+        return
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(root_id)
+        os.replace(staged, path)
+    except OSError:
+        Path(staged).unlink(missing_ok=True)
+        log.warning("brindle: couldn't record the session on screen", exc_info=True)
+
+
+def _read_viewed() -> str | None:
+    """The session the app last showed, or None when none is recorded."""
+    try:
+        return _viewed_path().read_text().strip() or None
+    except OSError:
+        return None
+
+
 RESUME_WAIT = 5.0     # seconds the way out waits for a start's resume still under way (Recovery)
 LAUNCH_WAIT = 8.0      # and in all, launches under way included (within daemon.rs PAUSE_GRACE, with PAUSE_BUDGET)
 RESUME_STALL = 120.0   # seconds with no session finished after which a start stops waiting (a resume that hangs)
 RESUME_TRIES = 2       # starts that may fail to bring one session back before it is left paused
 RESUME_PARALLEL = 4    # sessions a start brings back at once (resume_after_start)
 RESUME_BUSY_WAIT = 3.0  # seconds a session coming back waits on a machine short of CPU only: the person is waiting for it
+VIEWED_HEAD_START = 8.0     # seconds the session on screen comes back alone before the others start, if it hangs
 
 
 class Recovery:
@@ -636,6 +672,9 @@ def _resume_after_start(recovery: Recovery | None = None) -> list[str]:
     first (_most_recent_first), each when the machine has room for it
     (spawn.wait_for_room); sessions sharing a tmux session go one after
     another (_lanes). A session that fails doesn't hold up the others.
+    The session the app showed last (record_viewed) goes before all of them,
+    alone, so it is back sooner: the others start once it is, or after
+    VIEWED_HEAD_START seconds if it hangs.
 
     ``recovery``: the daemon's (serve), which may be stopped meanwhile: then
     nothing more is launched, and what is left stays on the record."""
@@ -665,11 +704,19 @@ def _resume_after_start(recovery: Recovery | None = None) -> list[str]:
             lanes = _lanes(db, _most_recent_first(db, entries))
         finally:
             db.conn.close()
+        # The session the app showed last comes back first, before its lane's others, and alone.
+        viewed = _read_viewed()
+        first = next((lane for lane in lanes if any(e["id"] == viewed for e in lane)), None)
+        if first is not None:
+            lanes.remove(first)
+            first.sort(key=lambda e: e["id"] != viewed)
+            lanes.appendleft(first)
+        alone = threading.Event()       # the viewed session's turn is over: the others may start
         with recovery.lock:
             recovery.lanes = lanes
         ordered = time.monotonic() - began
 
-        def work() -> None:
+        def work(lead: bool = False) -> None:
             db = DB()       # its own: SQLite connections stay on their thread
             try:
                 while not recovery.stopping.is_set():
@@ -694,14 +741,25 @@ def _resume_after_start(recovery: Recovery | None = None) -> list[str]:
                         except Exception:  # noqa: BLE001 - the others still come back
                             log.warning("brindle: couldn't resume session %s", entry["id"], exc_info=True)
                         recovery.finished(entry)
+                        if entry["id"] == viewed:
+                            alone.set()
             finally:
+                if lead:
+                    alone.set()
                 db.conn.close()
 
         # A copy of this context each (one can't be entered twice at once): a new thread starts with none.
-        threads = [threading.Thread(target=contextvars.copy_context().run, args=(work,),
+        threads = [threading.Thread(target=contextvars.copy_context().run, args=(work, n == 0),
                                     name=f"brindle-resume-{n}", daemon=True)
                    for n in range(min(RESUME_PARALLEL, len(lanes)))]
-        for thread in threads:
+        rest = threads
+        if first is not None:
+            # The CPU and the keychain to itself, for the head start at most: one that hangs holds up no other.
+            threads[0].start()
+            if not alone.wait(VIEWED_HEAD_START):
+                log.warning("brindle: session %s not back after %gs; the others start", viewed, VIEWED_HEAD_START)
+            rest = threads[1:]
+        for thread in rest:
             thread.start()
         _join(threads, recovery)
     finally:

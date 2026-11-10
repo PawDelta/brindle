@@ -1187,7 +1187,8 @@ def _launch(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
     """Serialize reviewer launches with death recovery before running preflight."""
     _gate_check()
     try:
-        upgrade.check_launch()
+        with _launch_step("install_check_s"):
+            upgrade.check_launch()
     except upgrade.StaleInstall as e:
         raise AgentError(str(e)) from e
     if agent.mode == "review":
@@ -1223,11 +1224,13 @@ def _launch_checked(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
 
     # A provider the person turned off in brindle never starts, and nothing
     # below (deciding its home, model check, identity probe) runs its CLI either.
-    off = preflight.turned_off(agent.provider)
+    with _launch_step("turned_off_s"):
+        off = preflight.turned_off(agent.provider)
     if off:
         raise PreflightBlocked([off])
     if agent.config_home is None:
-        agent.config_home = provider_homes.decide(agent.provider)
+        with _launch_step("config_home_s"):
+            agent.config_home = provider_homes.decide(agent.provider)
         if agent.config_home is not None:
             db.update_agent(agent.id, config_home=agent.config_home)
     with provider_homes.using(agent.provider, agent.config_home), ExitStack() as hold:
@@ -1243,7 +1246,8 @@ def _launch_resolved(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
     _airgap_check(profile, ws.repo_root)
     provider = get_provider(agent.provider)
     if not model_checked:
-        why = model_problem(agent.profile, ws, agent=agent, profile=profile, m=m)
+        with _launch_step("model_check_s"):
+            why = model_problem(agent.profile, ws, agent=agent, profile=profile, m=m)
         if why:
             raise AgentError(why)
     if not provider.launches_process:
@@ -1258,8 +1262,9 @@ def _launch_resolved(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
     from brindle import provider_homes
 
     _gate_check()
-    why, outcome, route = company_identity.launch_check(
-        provider.name, home=provider_homes.env_for(agent.provider, agent.config_home))
+    with _launch_step("company_identity_s"):
+        why, outcome, route = company_identity.launch_check(
+            provider.name, home=provider_homes.env_for(agent.provider, agent.config_home))
     if outcome:
         route_health.record(ws.repo_root, agent=provider.name, route=route, model=profile.model,
                             outcome=outcome)
@@ -1268,14 +1273,16 @@ def _launch_resolved(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
     from brindle import signin_pause
 
     signin_pause.record_launch(agent)   # who it runs as, so a resume never crosses accounts
-    env, org_key, deny = launch_identity(agent, ws, profile, m)
-    why = pane_auth.key_problem(profile, provider.name, deny, org_key)
+    with _launch_step("identity_s"):
+        env, org_key, deny = launch_identity(agent, ws, profile, m)
+        why = pane_auth.key_problem(profile, provider.name, deny, org_key)
     if why:
         raise AgentError(why)
     # What its CLI would stop on before the first turn (brindle.preflight),
     # with the identity it runs as. A person starting their own chat from a
     # terminal answers its first-run screens there; nobody watches a worker's.
-    blocking = launch_blockers(agent, ws, profile, m, identity=(env, org_key, deny))
+    with _launch_step("preflight_s"):
+        blocking = launch_blockers(agent, ws, profile, m, identity=(env, org_key, deny))
     # Installing a CLI or tmux shows when the window opens, as before.
     blocking = [b for b in blocking if b.kind != "setup"]
     if agent.parent_id is None and agent.mode == "interactive":
@@ -1290,7 +1297,8 @@ def _launch_resolved(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
     warning = _add_dirs_warning(profile, provider.name)
     if warning:
         print(f"brindle: {warning}", file=sys.stderr)
-    _gate_commit(hold)     # what follows changes what runs
+    with _launch_step("gate_commit_s"):
+        _gate_commit(hold)     # what follows changes what runs
     if agent.headless:
         _launch_headless(db, agent, ws, prompt=prompt, resume=resume, watch_pane=watch_pane, m=m)
         return
@@ -1313,10 +1321,12 @@ def _launch_resolved(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
     if provider.name == "claude":
         from brindle.providers import trust_folder
 
-        trust_folder(ws.path)  # no trust dialog for nobody to answer
+        with _launch_step("claude_trust_s"):
+            trust_folder(ws.path)  # no trust dialog for nobody to answer
     if provider.name == "codex":
         try:   # Codex keys trust by the main repository: one answer covers every worktree
-            providers.trust_codex_project(ws.repo_root)
+            with _launch_step("codex_trust_s"):
+                providers.trust_codex_project(ws.repo_root)
         except (OSError, ValueError):
             pass   # after_launch still answers the screen; preflight reports a config it can't read
     if provider.name == "antigravity" and m is not None and m.setup is not None and m.setup.antigravity is not None:
@@ -1332,22 +1342,25 @@ def _launch_resolved(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
     chrome_chosen = (providers.claude_chrome_chosen(_window_environment(agent, ws, m)[0])
                      if provider.name == "claude" else None)
     try:
-        argv = provider.command(LaunchContext(agent.id, profile, prompt, resume=resume, cwd=ws.path,
-                                              mode=agent.mode, plan_first=bool(agent.plan_first),
-                                              mcp_recovery=mcp_recovery, chrome_chosen=chrome_chosen))
+        with _launch_step("command_s"):
+            argv = provider.command(LaunchContext(agent.id, profile, prompt, resume=resume, cwd=ws.path,
+                                                  mode=agent.mode, plan_first=bool(agent.plan_first),
+                                                  mcp_recovery=mcp_recovery, chrome_chosen=chrome_chosen))
     except providers.CodexSandboxRefused as e:
         raise AgentError(str(e)) from e
     if provider.name == "codex":
         from brindle import codex_hook
 
         try:
-            codex_hook.tell_skipped(db, agent, ws.path)
-            codex_hook.tell_untrusted(db, agent, ws.path)  # launched without the hook it couldn't trust
+            with _launch_step("codex_hook_s"):
+                codex_hook.tell_skipped(db, agent, ws.path)
+                codex_hook.tell_untrusted(db, agent, ws.path)  # launched without the hook it couldn't trust
         except Exception:  # noqa: BLE001 - never stop a launch over this
             pass
     if prompt or db.pending_count(agent.id):
-        _prepare_launch_health(db, agent, ws, profile, m, argv_task=bool(prompt and provider.name != "shell"),
-                              submitted_prompt=argv[-1] if prompt and provider.name == "codex" else (prompt or ""))
+        with _launch_step("launch_health_s"):
+            _prepare_launch_health(db, agent, ws, profile, m, argv_task=bool(prompt and provider.name != "shell"),
+                                   submitted_prompt=argv[-1] if prompt and provider.name == "codex" else (prompt or ""))
     else:
         # Resuming a conversation without delivering a new task must not
         # classify the previous turn's error as a current launch failure.
@@ -1358,15 +1371,17 @@ def _launch_resolved(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
     if (spent := _window_seconds.get()) is not None:
         spent.append(time.monotonic() - opening)
     from brindle import launch_health
-    launch_health.bind(db, agent, target)
+    with _launch_step("health_bind_s"):
+        launch_health.bind(db, agent, target)
     if provider.name != "shell":
         from brindle import launch_health
         from brindle.providers import brindle_invocation
         # Observe early startup exits independently; a live startup must not
         # consume the follow-up before the CLI accepts its argv task.
         if launch_health.helper_token(agent):
-            _detach([*brindle_invocation(), "_launch-health", agent.id,
-                     *launch_health.helper_token(agent), "--startup"])
+            with _launch_step("startup_helper_s"):
+                _detach([*brindle_invocation(), "_launch-health", agent.id,
+                         *launch_health.helper_token(agent), "--startup"])
 
     if provider.name == "shell" and prompt:
         tmux.paste(target, prompt)
@@ -1381,16 +1396,19 @@ def _launch_resolved(db: DB, agent: Agent, ws: Workspace, *, prompt: str | None,
         # Without this process's own Claude Code inbox, if it has one: the
         # helper marks the agent ready, and must not take that inbox for it.
         base = {k: v for k, v in os.environ.items() if k not in (inbox.SOCKET_VAR, inbox.TOKEN_VAR)}
-        processes.start(
-            [*brindle_invocation(), "_after-launch", agent.id, *launch_health.helper_token(agent)],
-            start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            env={**base, **agent_env(ws, agent.id)},
-        )
+        with _launch_step("after_launch_helper_s"):
+            processes.start(
+                [*brindle_invocation(), "_after-launch", agent.id, *launch_health.helper_token(agent)],
+                start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                env={**base, **agent_env(ws, agent.id)},
+            )
     else:
         from brindle import prompt_answer
 
-        prompt_answer.finish_launch(db, agent)
-    tmux.mark_launched(target)
+        with _launch_step("finish_launch_s"):
+            prompt_answer.finish_launch(db, agent)
+    with _launch_step("mark_launched_s"):
+        tmux.mark_launched(target)
 
 
 def _prepare_launch_health(db: DB, agent: Agent, ws: Workspace, profile, m=_UNREAD,
@@ -1961,6 +1979,23 @@ class _ResumeTiming:
             return fn(*args, **kwargs)
 
 
+_launch_steps: ContextVar[dict[str, float] | None] = ContextVar("brindle_launch_steps", default=None)   # this launch's steps, when timed
+
+
+@contextmanager
+def _launch_step(name: str):
+    """Add the seconds the block takes to the launch being timed (a staff resume's)."""
+    steps = _launch_steps.get()
+    if steps is None:
+        yield
+        return
+    began = time.monotonic()
+    try:
+        yield
+    finally:
+        steps[name] = steps.get(name, 0.0) + time.monotonic() - began
+
+
 def _resume(db: DB, root_id: str, *, watch_pane: bool, only, recovery_env, settle=False, unstarted=None) -> list[Agent]:
     from brindle import identity_lock, providers
 
@@ -2045,6 +2080,7 @@ def _resume(db: DB, root_id: str, *, watch_pane: bool, only, recovery_env, settl
             db.add_autopilot(root_id)
         timing.call("goals_s", pilot.reload_goals_file, db, root_id)   # edits the person made to this session's goal file
     resumed = []
+    launch_steps: dict[str, dict] = {}   # per agent: its provider and each launch step's seconds
     for a in candidates:    # the chat comes first, and may add to this as it starts
         if a.status == "done":
             # Read when a verdict may have been reopening it (_send_back, under this lock, from
@@ -2089,6 +2125,8 @@ def _resume(db: DB, root_id: str, *, watch_pane: bool, only, recovery_env, settl
         if a.dismissed_at is not None:
             db.update_agent(a.id, dismissed_at=None)  # running again: show it again
         before = "paused" if a.status == "done" else a.status    # a launch records its status before its window opens
+        steps: dict[str, float] = {}
+        step_token = _launch_steps.set(steps if timing.enabled else None)
         try:
             with timing.part("launch_s", exclude_windows=True):
                 _launch(db, a, ws, prompt=prompt, resume=ref,
@@ -2108,6 +2146,10 @@ def _resume(db: DB, root_id: str, *, watch_pane: bool, only, recovery_env, settl
                 unstarted.add(a.id)
                 log.warning("brindle: worker %s of session %s didn't restart", a.id, root_id, exc_info=e)
             continue
+        finally:
+            _launch_steps.reset(step_token)
+            if steps:
+                launch_steps[a.id] = {"provider": a.provider, **{k: round(v, 3) for k, v in steps.items()}}
         resumed.append(a)
         if a.id == root_id:
             # A verdict held for this resume (pipeline._send_back) while the chat was still
@@ -2153,6 +2195,8 @@ def _resume(db: DB, root_id: str, *, watch_pane: bool, only, recovery_env, settl
             "goals_s", "provider_prep_s", "launch_s", "pipeline_s", "tasks_s")}
         detail.update(key_reads=reads.backend_reads, key_cached=reads.cached_reads,
                       key_lock_s=round(reads.lock_seconds, 3), security_s=round(reads.process_seconds, 3))
+        if launch_steps:
+            detail["launch_steps"] = launch_steps
         debuglog.recovery_timing(log, "brindle: session %s resume detail: %s", root_id, detail)
     return resumed
 
