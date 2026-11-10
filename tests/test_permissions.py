@@ -685,13 +685,18 @@ def test_a_command_answers_at_any_depth_as_it_does_alone(tmp_path, monkeypatch, 
     standard. A command allowed alone may ask only where standard asks for its neighbours' reads."""
     from brindle import permissions
 
+    # The temporary directory is not a checkout; no host Git probes are needed.
+    monkeypatch.setattr(permissions, "_push_git", lambda *args: None)
+    monkeypatch.setattr(permissions, "default_branch", lambda root: None)
     monkeypatch.setenv("HOME", str(tmp_path))
     for folder in ("wt", ".ssh", ".brindle"):
         (tmp_path / folder).mkdir()
-    permissions.apply_preset(preset)
+    store = permissions.apply_preset(preset)
     here = str(tmp_path / "wt")
     answer = lambda command: permissions.decide(permissions.Request("claude", "bash", "Bash", here, here, here,
-                                                                    command=command)).decision
+                                                                    command=command), rules=store.rules,
+                                                unmatched=store.unmatched, saved=store.saved,
+                                                groups=store.groups).decision
     for command in _ALONE:
         alone = answer(command)
         for form in _NESTED:
@@ -731,7 +736,6 @@ def test_stores_resolved_at_run_time(tmp_path, monkeypatch):
     assert answer("cat ~/notes.txt") == "allow"
 
 
-@pytest.mark.parametrize("preset", ["autonomous", "permissive", "standard", "secure"])
 @pytest.mark.parametrize("bare, wrapped", [
     ("rm -rf /", "uv run rm -rf /"),
     pytest.param("rm -rf /", "npm exec -- rm -rf /",
@@ -767,7 +771,7 @@ def test_stores_resolved_at_run_time(tmp_path, monkeypatch):
     pytest.param("git push origin main", "uv run git push origin main",   # the default-branch ask, behind an allowed `uv `
                  marks=pytest.mark.variant("reported bypass: the default-branch ask was skipped behind `uv run`")),
 ])
-def test_wrapped_git_still_guarded(tmp_path, bare, wrapped, preset):
+def test_wrapped_git_still_guarded(tmp_path, bare, wrapped):
     """Restrictions survive launchers and option spellings on every preset;
     literal arguments keep the harmless command's decision (#376, review 0.6.3 finding 1)."""
     from brindle import permissions
@@ -775,8 +779,9 @@ def test_wrapped_git_still_guarded(tmp_path, bare, wrapped, preset):
     here = str(tmp_path)
     answer = lambda command: permissions.decide(permissions.Request("claude", "bash", "Bash", here, here, here,
                                                                     command=command)).decision
-    permissions.apply_preset(preset)
-    if bare.startswith(("git push", "git reset", "rm -rf")):
-        assert answer(bare) in ("deny", "ask"), preset
-    decision = permissions.decide(permissions.Request("claude", "bash", "Bash", here, here, here, command=wrapped))
-    assert decision.decision == answer(bare), (preset, decision)
+    for preset in permissions.PRESETS:
+        permissions.apply_preset(preset)
+        if bare.startswith(("git push", "git reset", "rm -rf")):
+            assert answer(bare) in ("deny", "ask"), preset
+        decision = permissions.decide(permissions.Request("claude", "bash", "Bash", here, here, here, command=wrapped))
+        assert decision.decision == answer(bare), (preset, decision)
