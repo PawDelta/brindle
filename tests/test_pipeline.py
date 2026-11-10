@@ -449,7 +449,8 @@ def test_issue190_the_check_run_before_a_review_outlives_the_reporting_worker(db
         assert helper is not None and not ours
     finally:
         if helper is not None:
-            os.kill(helper, signal.SIGKILL)
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(helper, signal.SIGKILL)
 
 
 @pytest.mark.parametrize("check_run, delay", [("gone", 90), ("at work", 90), ("launching", 15)])
