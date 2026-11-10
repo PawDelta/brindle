@@ -380,6 +380,7 @@ class PlanReplyDTO(_DTO):
     text: str
     attachments: list[str] = []
     at: float
+    sent: bool = False
 
 
 class PlanThreadDTO(_DTO):

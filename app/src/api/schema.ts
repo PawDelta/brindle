@@ -992,6 +992,7 @@ export interface PlanReplyDTO {
   attachments?: string[];
   author: string;
   id: number;
+  sent?: boolean;
   text: string;
 }
 /**

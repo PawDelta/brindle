@@ -5,13 +5,11 @@ import { createAppStore } from "../../../store/store";
 import { StoreContext } from "../../../store/useStore";
 import { changeBetween } from "./DocText";
 import { PlanReader, REVIEW_COLLAPSED_KEY } from "./PlanReader";
-import { UNSENT_REPLIES_KEY } from "./unsentReplies";
 import type { PlanDocClient, PlansClient, VisualsClient } from "./client";
 
 afterEach(() => {
   cleanup();
   localStorage.removeItem(REVIEW_COLLAPSED_KEY);
-  localStorage.removeItem(UNSENT_REPLIES_KEY);
 });
 
 const visual: VisualDTO = { id: "v_plan", session: "boss", title: "Presets", by: "supervisor", kind: "plan", rev: 1, kept: false, unread: false, created_at: 1 };
@@ -184,7 +182,9 @@ it("design doc writes go one at a time, a read sent before one came back can't u
   let reply!: (p: Plan) => void;
   const confirmed: string[] = [];
   const sent: boolean[] = [];
-  const redirected: Plan = { ...replied, state: "redirected", verdict: { approved: false, at: 13, rev: 1 } };
+  // The engine marks a reply `sent` once a verdict has carried it.
+  const delivered = (p: Plan): Plan => ({ ...p, threads: p.threads!.map((t) => ({ ...t, replies: t.replies?.map((r) => ({ ...r, sent: true })) })) });
+  const redirected: Plan = { ...delivered(replied), state: "redirected", verdict: { approved: false, at: 13, rev: 1 } };
   let decided!: (p: Plan) => void;
   const client: PlansClient & PlanDocClient & VisualsClient = {
     ...visuals, ...docWrites(() => replied),
@@ -217,9 +217,7 @@ it("design doc writes go one at a time, a read sent before one came back can't u
   // That verdict delivered the reply. One more, written while the supervisor revises, is not
   // delivered by the revision that follows: after the reader is closed and opened again on
   // revision 2, it is still feedback to send.
-  const unsent = () => (JSON.parse(localStorage.getItem(UNSENT_REPLIES_KEY) ?? "{}") as Record<string, number[]>)[visual.id];
-  expect(unsent()).toBeUndefined();
-  const again = [...replied.threads![0].replies!, { id: 3, author: "person", text: "And spot instances.", at: 14 }];
+  const again = [...redirected.threads![0].replies!, { id: 3, author: "person", text: "And spot instances.", at: 14 }];
   fireEvent.click(within(screen.getByTestId("thread-1")).getByRole("button", { name: "Reply" }));
   fireEvent.change(within(screen.getByTestId("thread-1")).getByRole("textbox"), { target: { value: "And spot instances." } });
   fireEvent.click(within(screen.getByTestId("thread-1")).getByRole("button", { name: "Send" }));
@@ -231,60 +229,28 @@ it("design doc writes go one at a time, a read sent before one came back can't u
   await act(async () => fireEvent.click(bar().getByRole("button", { name: "Request changes" })));
   expect(sent).toEqual([false, false]);
   // The reader is closed before that verdict's answer arrives. The verdict still delivered the
-  // reply: opened again on revision 3, nothing is left to send.
+  // reply, which the engine now reports as sent: opened again on revision 3, nothing is left to send.
   reopened.unmount();
-  await act(async () => decided({ ...second, state: "redirected", verdict: { approved: false, at: 21, rev: 2 } }));
+  await act(async () => decided({ ...delivered(second), state: "redirected", verdict: { approved: false, at: 21, rev: 2 } }));
   render(reader({ ...visual, rev: 3 }));
-  await act(async () => reads[reads.length - 1]({ ...second, rev: 3, revisions: [...second.revisions!, { rev: 3, author: "supervisor", source: "proposal", at: 30 }] }));
+  await act(async () => reads[reads.length - 1]({ ...delivered(second), rev: 3, revisions: [...second.revisions!, { rev: 3, author: "supervisor", source: "proposal", at: 30 }] }));
   expect((bar().getByRole("button", { name: "Request changes" }) as HTMLButtonElement).disabled).toBe(true);
 });
 
-it("a design doc reply this device still records as unsent stops counting once the engine refuses it as nothing to send, and only that reply", async () => {
-  // A verdict from another window delivered reply 2; this device's record never saw it.
-  localStorage.setItem(UNSENT_REPLIES_KEY, JSON.stringify({ [visual.id]: [2] }));
-  const record = () => (JSON.parse(localStorage.getItem(UNSENT_REPLIES_KEY) ?? "{}") as Record<string, number[]>)[visual.id];
-  const at = (rev: number, replies: { id: number; at: number }[]): Plan => doc(rev, "Workers run on your machine.", {
-    revisions: [10, 20, 30].slice(0, rev).map((time, i) => ({ rev: i + 1, author: "supervisor", source: "proposal", at: time })),
+it("a design doc Request changes the engine refuses as nothing to send shows the refusal", async () => {
+  const plan = doc(2, "Workers run on your machine.", {
+    revisions: [{ rev: 1, author: "supervisor", source: "proposal", at: 10 }],
     threads: [{ id: 1, kind: "comment", rev: 1, author: "supervisor", text: "Is a rented VM fine?", status: "open", at: 11, anchor: { kind: "section", section: "summary", state: "current" },
-      replies: replies.map((r) => ({ ...r, author: "person", text: `reply ${r.id}` })) }] });
-  let plan = at(2, [{ id: 2, at: 12 }]);
-  const refusals: (() => void)[] = [];
+      replies: [{ id: 2, author: "person", text: "reply 2", at: 12, sent: false }] }] });
   const client: PlansClient & PlanDocClient & VisualsClient = {
     ...visuals, ...docWrites(() => plan), plan: async () => plan,
-    // Every verdict here is refused as saying nothing, when the test says so.
-    decidePlan: () => new Promise<Plan>((_, refuse) => refusals.push(() => refuse(new DaemonError("invalid", "say what to change: a comment, a note or a different pick", 400)))),
-    replyPlan: async () => (plan = at(2, [{ id: 2, at: 12 }, { id: 3, at: 25 }])),
+    decidePlan: async () => { throw new DaemonError("invalid", "say what to change: a comment, a note or a different pick", 400); },
   };
-  const open = (rev: number) => render(<PlanReader client={client} visual={{ ...visual, rev }} onBack={() => {}} onChanged={() => {}} />);
-  const request = async () => (await screen.findByRole("button", { name: "Request changes" })) as HTMLButtonElement;
-  const press = async () => {
-    const button = await request();
-    await act(async () => fireEvent.click(button));
-  };
-  // Request changes goes out on the strength of reply 2 alone, and the reader is closed before
-  // the engine's refusal arrives. Opened again, the person writes reply 3.
-  const first = open(2);
-  await press();
-  first.unmount();
-  const second = open(2);
-  fireEvent.click(within(await screen.findByTestId("thread-1")).getByRole("button", { name: "Reply" }));
-  fireEvent.change(within(screen.getByTestId("thread-1")).getByRole("textbox"), { target: { value: "reply 3" } });
-  await act(async () => fireEvent.click(within(screen.getByTestId("thread-1")).getByRole("button", { name: "Send" })));
-  expect(record()).toEqual([2, 3]);
-  // The old refusal says reply 2 was already delivered. It says nothing about reply 3, which
-  // is still feedback to send once revision 3 is out and the reader is opened again.
-  await act(async () => refusals[0]());
-  expect(record()).toEqual([3]);
-  second.unmount();
-  plan = at(3, [{ id: 2, at: 12 }, { id: 3, at: 25 }]);
-  open(3);
-  expect((await request()).disabled).toBe(false);
-  // And if reply 3 too turns out delivered elsewhere, the refusal is shown and it stops counting.
-  await press();
-  await act(async () => refusals[1]());
+  render(<PlanReader client={client} visual={{ ...visual, rev: 2 }} onBack={() => {}} onChanged={() => {}} />);
+  const button = (await screen.findByRole("button", { name: "Request changes" })) as HTMLButtonElement;
+  expect(button.disabled).toBe(false);
+  await act(async () => fireEvent.click(button));
   expect(screen.getByRole("alert")).toBeTruthy();
-  expect((await request()).disabled).toBe(true);
-  expect(record()).toBeUndefined();
 });
 
 it("a design doc edit or comment begun on older text isn't sent over a newer revision's", async () => {

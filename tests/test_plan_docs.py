@@ -94,6 +94,7 @@ def test_the_person_reviews_a_design_doc_through_the_routes(db, session, tmp_pat
         assert threads[text_t]["replies"][0]["text"] == "Any machine they hold the keys to."
         assert [threads[i]["status"] for i in (diagram_t, keep, drop)] == ["resolved", "accepted", "rejected"]
         assert threads[decision_t]["attachments"] == ["costs.png"]
+        assert threads[text_t]["replies"][0]["sent"] is False
 
         # Confirming a decision shapes the verdict; Request changes carries the doc to the supervisor.
         got = post("/confirm", rev=3, decision="d1", option="repo").json()
@@ -105,6 +106,7 @@ def test_the_person_reviews_a_design_doc_through_the_routes(db, session, tmp_pat
         assert "Does a rented VM count?" in said and "Repo first." in said and costs in said
         assert "Label the arrows." not in said             # resolved: not carried
         assert [t["sent"] for t in got["threads"]][:3] == [True, False, True]
+        assert got["threads"][0]["replies"][0]["sent"] is True   # the verdict carried the reply too
         assert post("/edit", rev=3, section="summary", start=0, before="Workers", after="W").status_code == 409
         assert started == []
 
