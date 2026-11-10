@@ -108,9 +108,9 @@ to be asked each step.
 - Keep task briefs short: the goal in a sentence or two, the files, and the
   test that proves it done. Workers read the tests and code themselves;
   never paste them. Writing is the slowest thing you do.
-- Only request an analysis doc when the person explicitly asks for one for
-  that goal or task. Relay that request with analysis_doc=true on set_goal,
-  assign or handoff. Size, weight and milestone count never imply a request.
+- For a big goal brindle may ask the person whether to plan it first. While
+  that question is open, workers you assign queue. If they say yes, you're
+  told to write a planning doc with propose_plan before assigning more work.
 - When a worker reports, brindle has its branch reviewed and, once approved and
   the checks pass, merges it and removes the worktree; you get one message
   per branch: merged, or "needs you" with the details. Don't request_review
@@ -684,9 +684,10 @@ def milestone_items(db: DB, root_id: str, milestones: list[dict]) -> list[tuple]
 
 def set_goal(db: DB, root_id: str, goal: str,
              milestones: list[tuple], detail: str | None = None, *,
-             analysis_doc: bool | None = None, summary: str | None = None) -> None:
+             summary: str | None = None) -> None:
     """Record the goal and its milestones, ``(title, check, detail[, profile[, repo[, phase]]])``.
-    A milestone that keeps its title and check keeps its last result."""
+    A milestone that keeps its title and check keeps its last result. A big
+    goal may open brindle's offer to plan it first (``consider_plan_offer``)."""
     if not goal.strip():
         raise AutopilotError("the goal needs a title")
     if not milestones:
@@ -706,9 +707,8 @@ def set_goal(db: DB, root_id: str, goal: str,
     fields["summary"] = short
     if ap is None or ap.goal != goal.strip():
         fields["audit_history"] = None
-        fields["analysis_doc"] = 0
-        fields["analysis_offer"] = None     # a new goal gets its own, single offer
-        fields["analysis_goal_at"] = time.time()
+        fields["plan_offer"] = None     # a new goal gets its own, single offer
+        fields["offer_goal_at"] = time.time()
     if ap is None or ap.goal != goal.strip() or not ap.goal_sha:
         root = db.get_agent(root_id)
         ws = db.get_workspace(root.workspace_id) if root else None
@@ -728,9 +728,12 @@ def set_goal(db: DB, root_id: str, goal: str,
     write_goals_file(db, root_id)
     knowledge.note(db, root_id, knowledge.INTENT,
                    {"summary": "\n".join([goal.strip(), *(m[0] for m in milestones)]), "paths": []})
-    if analysis_doc is not None:
-        set_goal_analysis_doc(db, root_id, analysis_doc)
-    consider_analysis_offer(db, root_id)
+    consider_plan_offer(db, root_id)
+    if "plan_offer" in fields and ap is not None and ap.plan_offer:
+        from brindle import plans, tasks
+
+        if plans.holding(db, root_id) is None:   # the old goal's offer held tasks; the new goal's doesn't
+            tasks.on_resumed(db, root_id, why="the new goal")
 
 
 def _repo_identities(db: DB, root_id: str, milestones: list[Milestone]) -> set[str]:
@@ -748,96 +751,39 @@ def _repo_identities(db: DB, root_id: str, milestones: list[Milestone]) -> set[s
     return found
 
 
-def analysis_offer_scope(db: DB, root_id: str, ap: Autopilot) -> tuple[list[Milestone], int, int, str]:
-    """Current work used both to qualify an offer and explain it in the Inbox."""
+def plan_offer_scope(db: DB, root_id: str, ap: Autopilot) -> tuple[list[Milestone], int, int, str]:
+    """Current work used both to qualify the offer to plan first and explain it in the Inbox."""
     milestones = db.milestones(root_id)
     workers = db.conn.execute("SELECT COUNT(*) FROM agents WHERE parent_id=? AND created_at>=? "
                               "AND mode IN ('assign','handoff','handoff_detached')",
-                              (root_id, ap.analysis_goal_at or 0)).fetchone()[0]
+                              (root_id, ap.offer_goal_at or 0)).fetchone()[0]
     text = "\n".join([ap.goal or "", ap.detail or "", *(m.title for m in milestones)])
     return milestones, len(_repo_identities(db, root_id, milestones)), workers, text
 
 
-def consider_analysis_offer(db: DB, root_id: str) -> None:
-    """Open the one analysis-doc offer if this goal now deserves it: large, by
-    milestones, repos (an omitted repo is the root checkout) or workers, or
-    design-heavy. Never re-offers a goal already offered, answered or requested.
-    Run when the plan changes and when a worker is assigned; never raises."""
+def consider_plan_offer(db: DB, root_id: str) -> None:
+    """Open the one offer to plan this goal first if it now deserves it: large,
+    by milestones, repos (an omitted repo is the root checkout) or workers, or
+    design-heavy (brindle.pro.analysis_brief.offer_reasons). Never re-offers a
+    goal already offered or answered, and never while a plan is already open
+    or plans can't be shown (visuals off). While the offer is open the
+    session's tasks queue behind it (brindle.plans.holding); the person
+    answers it from the Inbox (brindle.plans.answer_offer). Run when the goal
+    changes and when a worker is assigned; never raises."""
     try:
+        from brindle import plans, visuals
         from brindle.pro import analysis_brief
 
         ap = db.get_autopilot(root_id)
-        if ap is None or not ap.goal or ap.analysis_offer is not None or ap.analysis_doc:
+        if ap is None or not ap.goal or ap.plan_offer is not None or not visuals.enabled() \
+                or plans.open_plan(db, root_id) is not None:
             return
-        milestones, repos, workers, text = analysis_offer_scope(db, root_id, ap)
+        milestones, repos, workers, text = plan_offer_scope(db, root_id, ap)
         if analysis_brief.deserves_offer(len(milestones), repos, text, workers) \
-                and db.open_analysis_offer(root_id, ap.goal, "open:" + secrets.token_hex(4)):
+                and db.open_plan_offer(root_id, ap.goal, plans.OFFER_OPEN + secrets.token_hex(4)):
             bus.publish_agent(db, "autopilot.goal", root_id)
-    except Exception:  # noqa: BLE001 - an offer is never a reason to fail a plan or a spawn
-        log.info("analysis offer not evaluated", exc_info=True)
-
-
-def set_goal_analysis_doc(db: DB, root_id: str, requested: bool) -> None:
-    """Record the person's choice; commission the doc now if already reached."""
-    from brindle.pro import analysis_brief
-
-    ap = db.get_autopilot(root_id)
-    if ap is None or not ap.goal:
-        raise AutopilotError("no goal is set up for this session")
-    fields: dict[str, object] = {"analysis_doc": int(requested)}
-    if (ap.analysis_offer or "").startswith("open:"):   # the person answered another way: it is settled
-        fields["analysis_offer"] = "accepted" if requested else "dismissed"
-    db.update_autopilot(root_id, **fields)
-    bus.publish_agent(db, "autopilot.goal", root_id)
-    if requested and not ap.analysis_doc:
-        _commission_doc(db, root_id, ap.goal, [m.title for m in db.milestones(root_id)], ap.state)
-
-
-def _commission_doc(db: DB, root_id: str, goal: str, titles: list[str], state: str) -> None:
-    """Brief the supervisor on the doc for exactly the goal that was accepted."""
-    from brindle.pro import analysis_brief
-
-    root = db.get_agent(root_id)
-    ws = db.get_workspace(root.workspace_id) if root else None
-    if ws and analysis_brief.large_work(requested=True, branch=ws.branch):
-        brief = analysis_brief.server_brief(db, root_id, "\n".join([goal, *titles]), [])
-        if state == "done":
-            brief = "\n\n".join(part for part in (_goal_doc_rule(db, root_id, accepted=goal), brief) if part)
-        if brief:
-            db.enqueue(root_id, brief, None)
-
-
-def resolve_analysis_offer(db: DB, root_id: str, accept: bool, offer_id: str) -> None:
-    """The person's answer to the one-time analysis doc offer they saw
-    (``offer_id``): settled atomically, so an answer to an older goal's offer
-    can never change a newer goal."""
-    done = db.answer_analysis_offer(root_id, "open:" + offer_id, accept)
-    if done is None:
-        raise AutopilotError("this offer is no longer open")
-    bus.publish_agent(db, "autopilot.goal", root_id)
-    if accept and not done["was_requested"]:
-        _commission_doc(db, root_id, done["goal"], done["titles"], done["state"])
-
-
-def _goal_doc_rule(db: DB, root_id: str, accepted: str | None = None) -> str:
-    """For a reached goal whose person requested a doc: the rule to write it.
-    With ``accepted`` (the goal text the person said yes to) the request is
-    taken as given and named, never read from the session's current goal."""
-    from brindle.pro import analysis_brief
-
-    try:
-        root = db.get_agent(root_id)
-        ws = db.get_workspace(root.workspace_id) if root else None
-        ap = db.get_autopilot(root_id)
-        requested = accepted is not None or bool(ap and ap.analysis_doc)
-        if ws is None or not analysis_brief.large_work(requested=requested, branch=ws.branch):
-            return ""
-        what = f"the goal \"{accepted}\"" if accepted is not None else "this goal"
-        return (f"The person requested an analysis doc for {what}: write it before reporting.\n\n"
-                + analysis_brief.doc_rule(db, ws.repo_root, ws.branch))
-    except Exception:  # noqa: BLE001 - extra guidance, never a reason to lose the verdict
-        log.info("goal analysis doc rule not added", exc_info=True)
-        return ""
+    except Exception:  # noqa: BLE001 - an offer is never a reason to fail a goal or a spawn
+        log.info("plan offer not evaluated", exc_info=True)
 
 
 CLI_FOR_PROVIDER = {"claude": "claude", "codex": "codex", "antigravity": "agy", "opencode": "opencode"}
@@ -1787,10 +1733,9 @@ def record_audit(db: DB, root_id: str, approved: bool, summary: str) -> str:
         db.update_autopilot(root_id, state="done", note=None, audit_ok=1, auditor_id=None,
                             audit_history=new_history)
         db.bump_progress(root_id)
-        rule = _goal_doc_rule(db, root_id)
         return (f"[brindle] Completion audit of {sha}: APPROVED. Every milestone passes and the "
                 f"auditor found the goal fully delivered: the goal is reached. Tell the user."
-                f"\n\n{summary}" + (f"\n\n{rule}" if rule else ""))
+                f"\n\n{summary}")
     audit_fails = new_history.count("(gaps found)")
     if audit_fails >= MAX_AUDIT_PASSES:
         db.update_autopilot(root_id, state="blocked", note=summary.strip()[:4000], audit_ok=0,

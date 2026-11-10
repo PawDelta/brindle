@@ -2446,11 +2446,10 @@ export class FakeDaemon {
       goal.enabled = body.enabled;
       return json({ enabled: goal.enabled });
     }
-    if (path === "/goal/analysis-offer") {
+    if (path === "/goal/plan-offer") {
       if (typeof body.accept !== "boolean") return error("invalid", "accept is required", 400);
-      if (!goal.analysis_offer || goal.analysis_offer !== body.offer) return error("stale", "this offer is no longer open", 409);
-      goal.analysis_offer = null;
-      if (body.accept) goal.analysis_doc = true;
+      if (!goal.plan_offer || goal.plan_offer !== body.offer) return error("stale", "this offer is no longer open", 409);
+      goal.plan_offer = null;
       return json({ accepted: body.accept });
     }
     return error("not_found", `no route ${path}`, 404);
