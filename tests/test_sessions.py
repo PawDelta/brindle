@@ -855,8 +855,9 @@ def test_resume_reads_only_needed_keys_and_key_timing(db, root, monkeypatch, cap
     debuglog._write_timings(pending.pop())
     details = [r.args[1] for r in caplog.records if isinstance(r.args, tuple)
                and len(r.args) == 2 and isinstance(r.args[1], dict)]
-    assert details == [{"invalidate_s": 0.5, "known_names_s": 1.0, "key_loads_s": 7.5,
-                        "key_reads": 1, "key_cached": 1, "key_lock_s": 4.0, "security_s": 3.0,
+    # Two `security` calls: the keychain listing (not understood here, so it rules nothing out), then the key.
+    assert details == [{"invalidate_s": 0.5, "known_names_s": 1.0, "key_loads_s": 11.0,
+                        "key_reads": 2, "key_cached": 1, "key_lock_s": 4.0, "security_s": 6.0,
                         "credential_writes_s": 0.5, "identity_s": 0.75, "goals_s": 0.5,
                         "provider_prep_s": 1.0, "launch_s": 3.0, "pipeline_s": 1.25, "tasks_s": 1.5}]
     assert "secret-timing-value" not in caplog.text and all(name not in caplog.text for name in names)
