@@ -60,12 +60,13 @@ const textarea = () => screen.getByRole("textbox", { name: "Terminal input" });
 
 async function openInboxItem(agent: string) {
   const inbox = await screen.findByRole("region", { name: "Inbox" });
-  const card = await waitFor(() => {
+  // The button comes once the sessions feed says which session the card is in.
+  const go = await waitFor(() => {
     const cards = inbox.querySelectorAll('[data-kind="question"]');
     expect(cards.length).toBe(2);
-    return cards[agent === "sup1" ? 0 : 1] as HTMLElement;
+    return within(cards[agent === "sup1" ? 0 : 1] as HTMLElement).getByRole("button", { name: "Go to session ›" });
   });
-  fireEvent.click(within(card).getByRole("button", { name: "Go to session ›" }));
+  fireEvent.click(go);
 }
 
 it.each(["sup1", "w1"])("focus from inbox: opens the item's agent %s with keyboard focus in its terminal", async (agent) => {
