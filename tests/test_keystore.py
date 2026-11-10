@@ -160,7 +160,8 @@ def test_resume_skips_keys_never_saved(monkeypatch, tmp_path):
         if args[0] == "-i":
             write(self.service, re.search(r'-a "([^"]+)"', stdin).group(1), re.search(r'-w "([^"]+)"', stdin).group(1))
             return CompletedProcess(args, 0, "", "")
-        calls.append(args[2])
+        if self.service == keystore.KEYS_SERVICE:    # not brindle Pro's sign-in, which other code may load
+            calls.append(args[2])
         blob = chain.get((self.service, args[2]))
         if args[2] in racing:       # saved just as this read answers "missing"
             racing.pop(args[2])()
