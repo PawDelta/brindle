@@ -21,8 +21,9 @@ the CLI's rows (its glyphs, colours and labels, the needs-you markers),
 paused ones folded under "Paused · N" with their goal and a Resume button that
 continues them and opens their chat. A chat paused while on screen stays
 there and says "This session was paused", with Reopen. No home board and no right-hand panel.
-Behind the sidebar's foot the setup pages: Knowledge (a repo's
-decisions and document sources), Profiles (who brindle can run as, and which
+In the sidebar's foot, the Library button (⌘L): the Library (designs, a repo's
+decisions and document sources) takes the sidebar for its own navigation, with
+"← Sessions" back. Behind the foot's profile pill the setup pages: Profiles (who brindle can run as, and which
 providers are signed in), Routing (which models do each weight of work and
 who reviews), Settings (keys, the repo's settings, permission rules, doctor,
 the engine's update) and Account (the brindle Pro plan, sign-in through the

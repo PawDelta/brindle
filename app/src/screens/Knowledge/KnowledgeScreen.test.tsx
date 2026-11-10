@@ -40,22 +40,24 @@ function setup(data: Partial<DaemonData> = {}, pickFolder?: (title: string) => P
     [...failing].some((p) => String(input).includes(p)) ? Promise.reject(new Error("index locked")) : daemon.fetch(input, init);
   const client = new DaemonClient({ baseUrl: BASE_URL, token: TOKEN, fetch });
   const sync = startSync({ client, store, connect: daemon.connect });
-  render(
+  const page = (at: "imported" | "decisions") => (
     <StoreContext.Provider value={store}>
       <SessionsProvider client={client}>
-        <KnowledgeScreen client={client} pickFolder={pickFolder} view={view} />
+        <KnowledgeScreen client={client} pickFolder={pickFolder} view={at} />
       </SessionsProvider>
-    </StoreContext.Provider>,
+    </StoreContext.Provider>
   );
-  return { daemon, failing, stop: () => sync.stop() };
+  const { rerender } = render(page(view));
+  /* The Library's sidebar picks another view: the same screen follows. */
+  return { daemon, failing, show: (at: "imported" | "decisions") => rerender(page(at)), stop: () => sync.stop() };
 }
 
 const listed = () => [...screen.getByTestId("decisions").querySelectorAll("li[data-decision]")].map((li) => li.getAttribute("data-topic"));
 
 describe("knowledge screen", () => {
   it("says what knowledge is, shows decisions as cards and documents as a list, searches both, and records a decision over the one in its way", async () => {
-    const { daemon, failing, stop } = setup();
-    const page = screen.getByRole("region", { name: "Knowledge" });
+    const { daemon, failing, show, stop } = setup();
+    const page = screen.getByRole("region", { name: "Library" });
     expect(page.textContent).toContain("What your agents know and remember about this repo");
     const decisions = await screen.findByTestId("decisions");
     await waitFor(() => expect(listed()).toEqual(["storage", "logging"]));
@@ -70,7 +72,7 @@ describe("knowledge screen", () => {
     expect(storage.textContent).toContain("src/cache/**");
     expect(decisions.querySelector('li[data-topic="logging"]')!.textContent).toContain("the whole repo");
     // A document folder, under Imported: its name, where it is, what is indexed and when it was added; held-back text said in plain words.
-    fireEvent.click(screen.getByRole("tab", { name: /Imported/ }));
+    show("imported");
     const sources = screen.getByTestId("sources");
     expect(sources.textContent).toContain("docs");
     expect(sources.textContent).toContain("/home/u/proj/docs");
@@ -79,11 +81,11 @@ describe("knowledge screen", () => {
     expect(sources.textContent).toContain("some text held back");
     // No jargon anywhere on the page, and nobody sent to a terminal.
     expect(page.textContent).not.toMatch(/quarantin|chunk|terminal|brindle kb/i);
-    fireEvent.click(screen.getByRole("tab", { name: /Decisions/ }));
+    show("decisions");
 
     // Search matches a decision's topic, text or rationale, as the engine's --query does, and asks
     // the engine for the documents' best passages: here a rollback note no decision mentions.
-    const box = screen.getByRole("searchbox", { name: "Search knowledge" });
+    const box = screen.getByRole("searchbox", { name: "Search the Library" });
     fireEvent.change(box, { target: { value: "SIMPLE" } });
     expect(listed()).toEqual(["storage"]);
     expect(screen.getByTestId("decision-count").textContent).toBe("1 of 2 match");
@@ -133,14 +135,14 @@ describe("knowledge screen", () => {
   });
 
   it("explains how knowledge gets here when a repo has none yet, and records the first decision from there", async () => {
-    const { daemon, stop } = setup({ decisions: [], kbSources: [] });
+    const { daemon, show, stop } = setup({ decisions: [], kbSources: [] });
     const empty = await screen.findByTestId("empty-state");
     expect(empty.textContent).toContain("You record a decision");
     expect(empty.textContent).toContain("A session records one");
     expect(empty.textContent).toContain("You add a folder of documents");
     expect(empty.textContent).not.toMatch(/terminal|brindle kb/i);
     expect(within(empty).getByRole("button", { name: "Add folder" })).toBeTruthy();
-    expect(screen.queryByRole("searchbox", { name: "Search knowledge" })).toBeNull();
+    expect(screen.queryByRole("searchbox", { name: "Search the Library" })).toBeNull();
     expect(screen.queryByTestId("decisions")).toBeNull();
     fireEvent.click(within(empty).getByRole("button", { name: "Record a decision" }));
     expect(screen.queryByTestId("empty-state")).toBeNull();
@@ -151,8 +153,8 @@ describe("knowledge screen", () => {
     await waitFor(() => expect(listed()).toEqual(["logging"]));
     expect(daemon.data.decisions).toHaveLength(1);
     expect(screen.queryByTestId("empty-state")).toBeNull();
-    expect(screen.getByRole("searchbox", { name: "Search knowledge" })).toBeTruthy();
-    fireEvent.click(screen.getByRole("tab", { name: /Imported/ }));
+    expect(screen.getByRole("searchbox", { name: "Search the Library" })).toBeTruthy();
+    show("imported");
     expect(screen.getByTestId("sources").textContent).toContain("No documents yet");
     stop();
   });

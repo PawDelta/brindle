@@ -481,7 +481,7 @@ export function MapGraph({ nodes: given, edges: givenEdges, onOpen, onDeselect, 
     <div
       ref={frame}
       role="group"
-      aria-label="Knowledge graph"
+      aria-label="Library graph"
       className="relative cursor-grab touch-none select-none overflow-hidden rounded-lg border border-line bg-canvas-2 active:cursor-grabbing"
       style={{ height: "100%", minHeight: FRAME_H }}
       onPointerDown={down}

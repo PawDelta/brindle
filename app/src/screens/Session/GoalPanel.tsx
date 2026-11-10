@@ -586,7 +586,7 @@ export interface GoalPanelProps {
   openUrl?: OpenUrl;
   /* Closes the whole session, at once and unasked: the Done step's action. */
   onCloseSession?(): void;
-  /* Opens Knowledge › Docs filtered to this session: the docs line's action. */
+  /* Opens the Library's docs filtered to this session: the docs line's action. */
   onOpenDocs?(): void;
 }
 
@@ -742,7 +742,7 @@ export function GoalPanel({ client, repo, root, store, compact = false, title, l
   /* The session's docs, one quiet line under the milestones; hidden with none. */
   const docsLine =
     docSummary && docSummary.total > 0 ? (
-      <button type="button" className={`${quiet} self-start text-xs`} data-testid="goal-docs" title="Knowledge › Docs for this session" onClick={onOpenDocs}>
+      <button type="button" className={`${quiet} self-start text-xs`} data-testid="goal-docs" title="This session's docs in the Library" onClick={onOpenDocs}>
         {docSummary.total} {docSummary.total === 1 ? "doc" : "docs"} · writing {docSummary.writing}, using {docSummary.using} →
       </button>
     ) : null;
