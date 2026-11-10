@@ -2047,6 +2047,34 @@ def unshare_doc(db: DB, params: dict, body: Body) -> Any:
     return docs_api("DELETE", _doc_path(params, "share", kind, scope_id), repo=params.get("repo"))
 
 
+def _folder_call(body: Body, run: Callable) -> Any:
+    """Run a pro/library_folders write on the scope named by the body's ``scope``
+    (user, team:<id> or org:<id>), through docs_api; bad input is a 400."""
+    repo = _get(body, "repo")
+    kind, scope_id = doc_scope(_get(body, "scope", required=True), _docs_entitlement(repo).sub)
+    try:
+        return run(kind, scope_id, lambda m, p, b=None: docs_api(m, p, b, repo=repo))
+    except ValueError as e:
+        raise ServiceError("invalid", str(e)) from e
+
+
+def create_library_folder(db: DB, params: dict, body: Body) -> Any:
+    """Make a folder in ``scope`` with ``name``, ``visibility`` (private or shared) and ``can_add``."""
+    from brindle.pro import library_folders as folders
+
+    return _folder_call(body, lambda kind, scope_id, api: folders.create(
+        kind, scope_id, _get(body, "name", required=True), _get(body, "visibility", default="private"),
+        _get(body, "can_add", default="owner"), api=api))
+
+
+def move_doc_to_folder(db: DB, params: dict, body: Body) -> Any:
+    """Place the design in the ``folder`` (an id) of ``scope``."""
+    from brindle.pro import library_folders as folders
+
+    return _folder_call(body, lambda kind, scope_id, api: folders.move_doc(
+        params["id"], kind, scope_id, _get(body, "folder", required=True), api=api))
+
+
 def delete_doc(db: DB, params: dict, body: Body) -> Any:
     return docs_api("DELETE", _doc_path(params), repo=params.get("repo"))
 
@@ -2763,6 +2791,8 @@ ROUTES = [
     Route("/v1/analysis-docs/destination", _endpoint(put_doc_destination), methods=["PUT"]),
     Route("/v1/analysis-docs/destination", _endpoint(delete_doc_destination), methods=["DELETE"]),
     Route("/v1/analysis-docs/switches", _endpoint(put_doc_switch), methods=["PUT"]),
+    _post("/library/folders", create_library_folder),
+    Route("/v1/analysis-docs/{id}/folder", _endpoint(move_doc_to_folder), methods=["PUT"]),
     _post("/analysis-docs/{id}/share", share_doc),
     Route("/v1/analysis-docs/{id}/share", _endpoint(unshare_doc), methods=["DELETE"]),
     _post("/analysis-docs/{id}/export", export_doc),

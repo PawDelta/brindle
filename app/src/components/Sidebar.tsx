@@ -35,6 +35,7 @@ import type { GoalDTO, SessionDTO } from "../api/schema";
 import { inLibrary, inProfileRail, railPage, readLastSession, routeSession, settingsTab, type Route, type SessionRef } from "../routes";
 import { LibraryIcon } from "./icons";
 import { LibraryRail, type LibraryCounts } from "./LibraryRail";
+import { useLibraryFolders } from "./useLibraryFolders";
 import { AccountAvatar, SettingsRail } from "./SettingsRail";
 import { pruneShown, seenKey } from "../screens/Inbox/items";
 import { goalPhase, SessionGoal, useGoal } from "../screens/Session/GoalPanel";
@@ -682,6 +683,9 @@ export function Sidebar({ route, navigate, refresh, openUrl, onBackFromSettings,
     else if (libraryOpen) back();
     else navigate({ screen: "knowledge" });
   }, [onToggleLibrary, libraryOpen, back, navigate]);
+  // The Library's folders (see useLibraryFolders); a daemon that can't say shows none.
+  const folderClient = useContext(DaemonContext);
+  const { folders, create: createFolder, move: moveDoc } = useLibraryFolders(folderClient, libraryOpen);
   // Designs waiting on the person: the plans in the Inbox.
   const plansWaiting = useAppState((s) => s.inbox.filter((item) => item.kind === "plan").length);
   const { repos, sessions, error: feedError, closeError, close, after } = useSessions();
@@ -853,7 +857,7 @@ export function Sidebar({ route, navigate, refresh, openUrl, onBackFromSettings,
         </button>
       </div>
       {railOpen && <SettingsRail tab={tab} page={railPage(route)} onBack={back} onTab={(tab) => navigate({ screen: "settings", tab, repo: "repo" in route ? route.repo : undefined })} onPage={(page) => navigate({ screen: page })} />}
-      {route.screen === "knowledge" && <LibraryRail route={route} counts={{ ...libraryCounts, stages: { "needs-you": plansWaiting } }} navigate={navigate} onBack={back} />}
+      {route.screen === "knowledge" && <LibraryRail route={route} counts={{ ...libraryCounts, stages: { "needs-you": plansWaiting } }} folders={folders} onCreateFolder={folderClient ? createFolder : undefined} onMoveDoc={folderClient ? moveDoc : undefined} navigate={navigate} onBack={back} />}
       <div hidden={railOpen || libraryOpen} className={railOpen || libraryOpen ? "hidden" : "contents"}>
       <InboxEntry route={route} navigate={navigate} />
       <div className="mx-2 h-px shrink-0 bg-line" role="separator" data-testid="inbox-divider" />
