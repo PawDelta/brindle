@@ -175,9 +175,10 @@ def snapshot(db: DB, request: Request) -> Any:
 
 @_json
 def goal(db: DB, request: Request) -> Any:
-    entry = view.autopilot_entry(db, _need_repo(request), panes=tmux.list_panes(),
-                                 root_id=request.query_params.get("root"))
-    ap = entry and db.get_autopilot(entry["root_id"])
+    root_id = request.query_params.get("root")
+    root = view.autopilot_root(db, _need_repo(request),
+                              panes=None if root_id else tmux.list_panes(), root_id=root_id)
+    ap = root and db.get_autopilot(root.id)
     if not ap:
         return None
     from brindle.autopilot import goal_activity, milestone_phases
