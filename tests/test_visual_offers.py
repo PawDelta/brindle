@@ -348,6 +348,7 @@ def test_asked_quote_accepts_what_the_person_typed(db, session, typed, asked, te
     assert visuals.publish(db, boss, "Asked", "<p>yes</p>", asked=asked)["rev"] == 1
 
 
+@pytest.mark.variant("real incident: a vouch arriving after its own prompt's hook, logged without the person's words")
 def test_typed_words_reach_the_engine(db, session, monkeypatch):
     """A vouch landing after its own prompt's hook is refused, and the debug log says why, not what."""
     monkeypatch.setattr(offers.debuglog, "enabled", lambda: True)
