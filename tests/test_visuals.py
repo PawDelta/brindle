@@ -251,7 +251,6 @@ def test_visual_ready_notice_and_answers_for_the_revision_on_screen(db, session,
     assert client.get(f"/v1/kept-visuals/{v['id']}").json()["answer"] is None
 
 
-@pytest.mark.variant("publication race: another publisher writes r2 between the first publisher's checks and write")
 def test_asked_visual_updates_without_a_new_request(db, session, monkeypatch):
     ws, boss, worker = session
     monkeypatch.setattr(visual_offers, "consume", REAL_CONSUME)
@@ -266,6 +265,7 @@ def test_asked_visual_updates_without_a_new_request(db, session, monkeypatch):
         assert refused.value.code == "visual_request_required"
 
 
+@pytest.mark.variant("publication race: another publisher writes r2 between the first publisher's checks and write")
 def test_a_revision_published_meanwhile_keeps_its_page(db, session, monkeypatch):
     ws, boss, worker = session
     v = visuals.publish(db, boss, "First", "<p>r1</p>")
