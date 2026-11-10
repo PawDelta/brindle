@@ -68,7 +68,7 @@ import { PanesReadyContext, type PanesReady } from "./store/panes";
 import { agentIds, sessionTree } from "./screens/Session/tree";
 import { ProvidersProvider } from "./store/providers";
 import { UsageProvider } from "./store/usage";
-import type { AppState, AppStore } from "./store/store";
+import { snapshotTicket, type AppState, type AppStore } from "./store/store";
 import { StoreContext, useAppState, useStore } from "./store/useStore";
 
 export interface AppProps {
@@ -610,12 +610,10 @@ function usePanesReady(client: DaemonClient | null, refresh?: () => Promise<void
         watching = false;
       }
     };
-    // Gate reads in the order they began, and the newest whose rows the store has: an older read
-    // that ends later must not put its rows over a newer one's.
-    let reads = 0;
-    let appliedRead = 0;
+    // Each read's place among all snapshot reads, sync's too (snapshotTicket): the store keeps
+    // the rows of the newest begun, so an older read that ends later never puts its rows over them.
     const readAfter = async (meta: Meta) => {
-      const seq = ++reads;
+      const seq = snapshotTicket();
       asked = meta;
       out++;
       void watch();
@@ -625,11 +623,7 @@ function usePanesReady(client: DaemonClient | null, refresh?: () => Promise<void
         out--;
       }
     };
-    const apply = (seq: number, workspaces: WorkspaceDTO[]) => {
-      if (seq < appliedRead) return;
-      appliedRead = seq;
-      store.dispatch({ type: "snapshot", workspaces });
-    };
+    const apply = (seq: number, workspaces: WorkspaceDTO[]) => store.dispatch({ type: "snapshot", workspaces, began: seq });
     const check = async (extra = false) => {
       const { connectionGeneration, lifecycleVersion } = store.getState();
       // A read from before the stream dropped and came back may be the old daemon's.

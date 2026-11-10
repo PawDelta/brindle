@@ -5,7 +5,7 @@
 
 import type { DaemonClient } from "../api/client";
 import { EventStream, type EventStreamOptions } from "../api/events";
-import type { AppStore } from "./store";
+import { snapshotTicket, type AppStore } from "./store";
 
 export interface SyncOptions {
   client: DaemonClient;
@@ -31,6 +31,7 @@ export function startSync({ client, store, repo, connect, backoff }: SyncOptions
   const fetchOnce = async () => {
     const { lifecycleVersion: version, snapshotVersion: applied } = store.getState();
     const acknowledged = client.inboxGeneration;
+    const began = snapshotTicket();
     try {
       const [workspaces, inbox] = await Promise.all([client.snapshot(repo), client.inbox(repo)]);
       // Only action completions invalidate reads: ordinary queued refreshes
@@ -49,7 +50,7 @@ export function startSync({ client, store, repo, connect, backoff }: SyncOptions
         again = true;
         return;
       }
-      store.dispatch({ type: "snapshot", workspaces, inbox });
+      store.dispatch({ type: "snapshot", workspaces, inbox, began });
     } catch (e) {
       store.dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
     }
