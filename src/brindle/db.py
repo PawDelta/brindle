@@ -637,6 +637,14 @@ CREATE TABLE IF NOT EXISTS session_prs (
     merged_at REAL,                 -- when gh first reported the PR merged (session_review.poll_merged)
     PRIMARY KEY (root_id, branch)
 );
+-- A session PR adopted from one opened with gh on another branch name: where it really lives,
+-- so a Push of the session branch is refused instead of missing it.
+CREATE TABLE IF NOT EXISTS session_pr_heads (
+    root_id TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    head_ref TEXT NOT NULL,
+    PRIMARY KEY (root_id, branch)
+);
 -- A ready session's PR as brindle prepared it for the person's approval
 -- (routes_actions.prepare_pr): the pre-PR checks run on sha, nothing pushed.
 -- state: checking | passed | failed (check_cmd and output: the failing check);
