@@ -57,14 +57,16 @@ const posts = (daemon: FakeDaemon) => daemon.requests.filter((r) => r.method ===
 const card = (kind: string) => document.querySelector<HTMLElement>(`[data-testid="inbox-card"][data-kind="${kind}"]`)!;
 
 describe("inbox", () => {
-  it("PR card not now removes the ready card and calls the route", async () => {
+  it("inbox dismiss clears the PR card while a read from before Not now finishes", async () => {
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root], inbox: [prReady, { ...prReady, kind: "pr_failed" }] });
-    const { sync } = mount(daemon);
-    await screen.findByRole("region", { name: "Ship ls --json" });
+    const client = daemon.client(), reads: ((items: InboxItemDTO[]) => void)[] = [];
+    const { sync } = mount(daemon, client);
+    await screen.findByRole("region", { name: "Ship ls --json" }); await act(async () => sync.idle()); vi.spyOn(client, "inbox").mockImplementation(() => new Promise((resolve) => reads.push(resolve))); act(() => { void sync.refresh(); });
     expect(within(card("pr_failed")).queryByRole("button", { name: "Not now" })).toBeNull();
     fireEvent.click(within(card("pr_ready")).getByRole("button", { name: "Not now" }));
     await waitFor(() => expect(posts(daemon)).toEqual([{ method: "POST", path: "/inbox/sup1/pr-not-now", query: {}, body: {} }]));
     await waitFor(() => expect(card("pr_ready")).toBeNull());
+    await act(async () => reads[0]([prReady, { ...prReady, kind: "pr_failed" }])); expect(card("pr_ready")).toBeNull(); await act(async () => { reads[1](daemon.data.inbox); await sync.idle(); });
     expect(card("pr_failed")).toBeTruthy();
     sync.stop();
   });
