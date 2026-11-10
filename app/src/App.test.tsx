@@ -87,7 +87,7 @@ describe("App", () => {
       expect(store.getState().synced).toBe(true);
     } finally { sync.stop(); }
   });
-  it("a gate read that a later sync read overtook doesn't put its older rows over the newer ones", async () => {
+  it.each([windowOf("new"), null])("a gate read that a later sync read overtook doesn't put its older rows over the newer ones (newer window: %s)", async (newer) => {
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root] });
     const client = daemon.client();
     const store = createAppStore();
@@ -100,10 +100,12 @@ describe("App", () => {
     try {
       renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO }} />);
       await waitFor(() => expect(finishGate).toBeDefined());
-      daemon.data.workspaces = [{ ...root, agents: root.agents?.map((a) => ({ ...a, window: windowOf("new") })) }];
+      daemon.data.workspaces = [{ ...root, agents: root.agents?.map((a) => ({ ...a, window: newer })) }];
       await act(async () => { await sync.refresh(); });
       await act(async () => { finishGate!([{ ...root, agents: root.agents?.map((a) => ({ ...a, window: windowOf("old") })) }]); await flush(); });
-      expect(store.getState().workspaces[0].agents?.[0].window).toBe(windowOf("new"));
+      expect(store.getState().workspaces[0].agents?.[0].window).toBe(newer);
+      // The rows the store kept decide whether the pane may show, not the older ones it turned down.
+      expect(paneWaits()).toBe(newer === null);
     } finally { sync.stop(); }
   });
 

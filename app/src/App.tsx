@@ -669,6 +669,8 @@ function usePanesReady(client: DaemonClient | null, refresh?: () => Promise<void
             }
             // Applying this read also supersedes sync's in-flight pre-recovery rows.
             apply(seq, workspaces);
+            // Unless a read begun after it has landed first: the store kept those rows, and they decide.
+            if (waitingForPanes(store.getState().workspaces)) return;
             recovering.current = false;
             settle(meta.pid);
             void Promise.all([reload(), refresh?.()]).catch(() => {});
