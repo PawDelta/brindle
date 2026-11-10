@@ -70,7 +70,7 @@ describe("docs view", () => {
     expect(within(rail).getByRole("button", { name: /checkout/ }).textContent).toBe("checkout3");
     fireEvent.click(within(rail).getByRole("button", { name: /^Fees/ }));
     expect(shown()).toEqual(["d2"]);
-    fireEvent.change(screen.getByRole("searchbox", { name: "Search docs" }), { target: { value: "pricing" } });
+    fireEvent.change(screen.getByRole("searchbox", { name: "Search the library" }), { target: { value: "pricing" } });
     expect(screen.getByText("No doc matches.")).toBeTruthy();
     fireEvent.click(within(rail).getByRole("button", { name: /^Fees/ }));
     fireEvent.click(within(screen.getByTestId("docs").querySelector<HTMLElement>('li[data-doc="d1"]')!).getByRole("button"));

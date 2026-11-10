@@ -19,7 +19,7 @@ function setup(setDocSwitch = vi.fn()) {
 describe("DocSwitches", () => {
   it("sets an unlocked switch and shows a locked one with the org's value, unchangeable", async () => {
     const client = setup(vi.fn().mockResolvedValue([SWITCHES[0], { ...SWITCHES[1], on: false, choice: "off" }]));
-    const store = (await screen.findByRole("switch", { name: "Store docs" })) as HTMLButtonElement;
+    const store = (await screen.findByRole("switch", { name: "Store plans" })) as HTMLButtonElement;
     expect(store.disabled).toBe(true);
     expect(screen.getByText("Set by your organisation: off.")).toBeTruthy();
     fireEvent.click(screen.getByRole("switch", { name: "Sharing" }));
