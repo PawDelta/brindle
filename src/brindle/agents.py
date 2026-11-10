@@ -23,6 +23,7 @@ import uuid
 from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from datetime import datetime
 from types import SimpleNamespace
 
 from brindle import bus, cloud_credential, company_identity, company_login, debuglog, git, keystore, knowledge, pane_auth, providers, secrets, tmux, upgrade, workspaces
@@ -5704,7 +5705,7 @@ ABSORBED_MARK = "absorbed-prompts"   # {"path": transcript, "offset": bytes of i
 _ABSORBED_READ_MAX = 32 << 20        # more unread transcript than this at once is skipped, not read
 
 
-def _absorbed_prompts(db: DB, agent: Agent, path: str) -> list[str]:
+def _absorbed_prompts(db: DB, agent: Agent, path: str) -> list[tuple[str, float | None]]:
     """What the person sent while a turn ran that Claude Code took into that turn
     ("absorbed mid-turn"): no prompt hook runs for those, and its transcript records
     each as a ``queued_command`` attachment from a human. Each is returned once,
@@ -5747,8 +5748,16 @@ def _absorbed_prompts(db: DB, agent: Agent, path: str) -> list[str]:
                 and attachment.get("type") == "queued_command" and attachment.get("commandMode") == "prompt"
                 and isinstance(attachment.get("origin"), dict) and attachment["origin"].get("kind") == "human"
                 and isinstance(attachment.get("prompt"), str)):
-            prompts.append(attachment["prompt"])
+            prompts.append((attachment["prompt"], _transcript_time(attachment.get("timestamp") or entry.get("timestamp"))))
     return prompts
+
+
+def _transcript_time(stamp) -> float | None:
+    """A transcript's ISO timestamp ("2026-11-10T18:21:36.251Z") as epoch seconds, or None."""
+    try:
+        return datetime.fromisoformat(stamp).timestamp() if isinstance(stamp, str) else None
+    except ValueError:
+        return None
 
 
 def _note_absorbed_prompts(db: DB, agent: Agent, path: str) -> None:
@@ -5761,9 +5770,11 @@ def _note_absorbed_prompts(db: DB, agent: Agent, path: str) -> None:
             return
         from brindle import visual_offers
 
-        for prompt in prompts:
+        # In the order they were sent, each with its own time: a cancel read back
+        # here ends only what the person typed before it, not a newer staged ask.
+        for prompt, said_at in prompts:
             if "[brindle" not in prompt and not db.recently_delivered(agent.id, prompt):
-                visual_offers.person_spoke(db, agent, prompt, cli_prompt=True)
+                visual_offers.person_spoke(db, agent, prompt, cli_prompt=True, said_at=said_at)
     except Exception:  # noqa: BLE001 - a hook must never fail over this
         log.exception("brindle: couldn't read the messages absorbed into %s's turn", agent.id)
 
