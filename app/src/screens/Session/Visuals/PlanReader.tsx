@@ -33,6 +33,7 @@ import { Review, ReviewStrip, type Draft, type ReviewTab, type ThreadActions, ty
 import { DocText, changeBetween, selectedRange, toPoints, toUnits, type Mark } from "./DocText";
 import { ExportButton } from "./ExportButton";
 import { Avatar, Decision, Tasks, overlaps, passChip, personName } from "./PlanCards";
+import { changeUnsentReplies, useUnsentReplies } from "./unsentReplies";
 import { StoreContext } from "../../../store/useStore";
 
 type Client = VisualsClient & PlansClient & PlanDocClient & Partial<ExportClient> & Partial<Pick<DaemonClient, "attach">>;
@@ -66,35 +67,7 @@ function storedCollapsed(): boolean {
   }
 }
 
-/* The replies the person wrote on each plan that no verdict has carried to the supervisor yet,
-   by plan id. The engine's reply carries no "sent" of its own, and only a verdict delivers one
-   (a new revision does not), so the reader keeps their ids itself, on this device, across its
-   own closing and the supervisor's revisions, until a verdict later than the reply is seen. */
-export const UNSENT_REPLIES_KEY = "brindle.plan.unsentReplies";
-function allUnsentReplies(): Record<string, unknown> {
-  try {
-    const all: unknown = JSON.parse(localStorage.getItem(UNSENT_REPLIES_KEY) ?? "{}");
-    return all && typeof all === "object" && !Array.isArray(all) ? { ...all } : {};
-  } catch {
-    return {};
-  }
-}
-function storedUnsentReplies(plan: string): number[] {
-  const ids = allUnsentReplies()[plan];
-  return Array.isArray(ids) ? ids.filter((id): id is number => typeof id === "number") : [];
-}
-function storeUnsentReplies(plan: string, ids: number[]) {
-  const all = allUnsentReplies();
-  if (ids.length) all[plan] = ids;
-  else delete all[plan];
-  try {
-    localStorage.setItem(UNSENT_REPLIES_KEY, JSON.stringify(all));
-  } catch {
-    // Not kept (storage is off or full): they are still known while this reader stays open.
-  }
-}
-
-/* The unsent replies left once `plan`'s verdict is counted: it delivered every reply written
+/* The unsent replies (unsentReplies.ts) left once `plan`'s verdict is counted: it delivered every reply written
    before it. A reply this snapshot doesn't hold is kept: nothing says a verdict has carried it. */
 function undelivered(ids: number[], plan: Plan): number[] {
   const at = plan.verdict?.at;
@@ -261,20 +234,14 @@ function DesignDoc({ client, plan, visual, mode, writes }: {
   const [box, setEditing] = useState<{ section: string; text: string; source: string } | null>(null);
   // A section's box belongs to Suggesting and Editing: back in Viewing (or decided), it is closed.
   const editing = mode === "viewing" ? null : box;
-  // The person's replies no verdict has carried to the supervisor yet (storedUnsentReplies). A
-  // verdict delivered every reply older than it: this reader's own, counted when its reply
-  // arrives (`decide`, whether or not the reader is still open then), or one seen on the plan.
-  const [unsent, setUnsent] = useState(() => storedUnsentReplies(plan.id));
-  const keepUnsent = useCallback((ids: number[]) => {
-    setUnsent(ids);
-    storeUnsentReplies(plan.id, ids);
-  }, [plan.id]);
-  // What is kept is the device's record: this reader may have been closed and opened since.
-  const knownUnsent = () => [...new Set([...storedUnsentReplies(plan.id), ...unsent])];
+  // The person's replies no verdict has carried to the supervisor yet: the device's one record
+  // (unsentReplies.ts), which this reader follows and only ever adds to or takes from. A verdict
+  // delivered every reply older than it: this reader's own, counted when its answer arrives
+  // (`decide`, whether or not the reader is still open then), or one seen on the plan.
+  const unsent = useUnsentReplies(plan.id);
   useEffect(() => {
-    const left = undelivered(unsent, plan);
-    if (left.length < unsent.length) keepUnsent(left);
-  }, [unsent, plan, keepUnsent]);
+    if (undelivered(unsent, plan).length < unsent.length) changeUnsentReplies(plan.id, (ids) => undelivered(ids, plan));
+  }, [unsent, plan]);
   const [followed, setFollowed] = useState<{ thread: string } | null>(null);
   const [tab, setTab] = useState<ReviewTab>("review");
   const [collapsed, setCollapsed] = useState(storedCollapsed);
@@ -382,7 +349,7 @@ function DesignDoc({ client, plan, visual, mode, writes }: {
       const had = repliesOn(plan, thread);
       const now = await send(() => client.replyPlan(plan.id, thread, text));
       // The reply's id is the one the thread didn't have: kept as unsent, whether or not this reader is still open.
-      if (now) keepUnsent([...new Set([...knownUnsent(), ...repliesOn(now, thread).filter((id) => !had.includes(id))])]);
+      if (now) changeUnsentReplies(plan.id, (ids) => [...ids, ...repliesOn(now, thread).filter((id) => !had.includes(id))]);
       return now !== null;
     },
     resolve: (thread, resolved) => write(() => client.resolvePlanThread(plan.id, thread, resolved)),
@@ -490,24 +457,25 @@ function DesignDoc({ client, plan, visual, mode, writes }: {
   const pending = threads.some((t) => t.author === "person" && t.status === "open" && !t.sent) || myReplies.some((r) => r.at > proposedAt);
   // Replies only this device's record calls unsent. It can be behind (a verdict sent from another
   // window, or one whose answer never arrived), so the engine has the last word: see `decide`.
-  const recorded = myReplies.some((r) => unsent.includes(r.id));
+  const recorded = myReplies.filter((r) => unsent.includes(r.id)).map((r) => r.id);
   const lastProposal = Math.max(0, ...proposals.map((r) => r.rev));
   const edited = (plan.revisions ?? []).some((r) => r.author === "person" && r.rev > lastProposal);
   const differs = plan.decisions.some((d) => (drafted(d) ?? d.confirmed ?? d.mine) !== d.mine);
   const said = !!note.trim() || pending || edited || differs;
-  const canRequest = said || recorded;
+  const canRequest = said || recorded.length > 0;
   const drafts = Object.fromEntries(plan.decisions.flatMap((d) => (drafted(d) ? [[d.id, drafted(d)!]] : [])));
   const decide = async (approved: boolean) => {
     setSending(approved ? "approve" : "changes");
     // Sent on the strength of recorded replies alone and refused as saying nothing: the engine
-    // holds none of them any more, so the record was behind, and is dropped.
-    const onRecord = !approved && !said && attached.length === 0;
+    // holds none of those replies any more, so the record was behind on them. Those, the ones
+    // this request stood on, are taken from the record; a reply written since is not among them.
+    const stoodOn = !approved && !said && attached.length === 0 ? recorded : [];
     const now = await send(() => client.decidePlan(plan.id, { rev: plan.rev, approved, picks: drafts, comments: [], note: note.trim(), ...(attached.length ? { attachments: attached } : {}) }),
-      (e) => { if (onRecord && e instanceof DaemonError && e.status === 400) keepUnsent([]); });
+      (e) => { if (stoodOn.length && e instanceof DaemonError && e.status === 400) changeUnsentReplies(plan.id, (ids) => ids.filter((id) => !stoodOn.includes(id))); });
     // The verdict delivered the replies written before it. That is recorded here, from its own
     // answer, even if the reader was closed meanwhile: the next revision clears the verdict from
     // the plan, and nothing later would say those replies had gone.
-    if (now) keepUnsent(undelivered(knownUnsent(), now));
+    if (now) changeUnsentReplies(plan.id, (ids) => undelivered(ids, now));
     if (!alive.current) return;
     setSending(null);
     if (now) {
