@@ -16,7 +16,7 @@
    through the engine's own search (GET /v1/kb/search, the same ranking
    agents get). A repo with nothing yet gets an empty state that says how
    knowledge gets here. Nothing here sends anyone to a terminal.
-   Four tabs: Map, Docs (the analysis-doc library, DocsView),
+   Four tabs: Map, Docs (the Library of approved plans, DocsView),
    Imported (the folders above) and Decisions; the search box and the empty
    state serve the last two. */
 

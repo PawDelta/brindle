@@ -57,14 +57,16 @@ const posts = (daemon: FakeDaemon) => daemon.requests.filter((r) => r.method ===
 const card = (kind: string) => document.querySelector<HTMLElement>(`[data-testid="inbox-card"][data-kind="${kind}"]`)!;
 
 describe("inbox", () => {
-  it("PR card not now removes the ready card and calls the route", async () => {
+  it("inbox dismiss clears the PR card while a read from before Not now finishes", async () => {
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root], inbox: [prReady, { ...prReady, kind: "pr_failed" }] });
-    const { sync } = mount(daemon);
-    await screen.findByRole("region", { name: "Ship ls --json" });
+    const client = daemon.client(), reads: ((items: InboxItemDTO[]) => void)[] = [];
+    const { sync } = mount(daemon, client);
+    await screen.findByRole("region", { name: "Ship ls --json" }); await act(async () => sync.idle()); vi.spyOn(client, "inbox").mockImplementation(() => new Promise((resolve) => reads.push(resolve))); act(() => { void sync.refresh(); });
     expect(within(card("pr_failed")).queryByRole("button", { name: "Not now" })).toBeNull();
     fireEvent.click(within(card("pr_ready")).getByRole("button", { name: "Not now" }));
     await waitFor(() => expect(posts(daemon)).toEqual([{ method: "POST", path: "/inbox/sup1/pr-not-now", query: {}, body: {} }]));
     await waitFor(() => expect(card("pr_ready")).toBeNull());
+    await act(async () => reads[0]([prReady, { ...prReady, kind: "pr_failed" }])); expect(card("pr_ready")).toBeNull(); await act(async () => { reads[1](daemon.data.inbox); await sync.idle(); });
     expect(card("pr_failed")).toBeTruthy();
     sync.stop();
   });
@@ -201,13 +203,20 @@ describe("inbox", () => {
     sync.stop();
   });
 
-  it.each([[true, "Yes"], [false, "Not now"]])("an offer to plan first is an Inbox card answered %s with %s through the goal route", async (accepted, label) => {
+  it.each([[true, "Yes", false], [false, "Not now", false], [true, "Yes", true]])("plan offer opens the session after the answer (failure: %s)", async (accepted, label, fails) => {
     const context = { session_name: "Command tools", goal: "Ship ls --json", detail: "Support shell scripts", workers: 3, repos: 2,
       milestones: [{ title: "Parse arguments", verified: true }, { title: "Encode output", verified: false }],
       reasons: ["This work spans 2 repositories.", "3 workers have been assigned to this goal."] };
     const offer: InboxItemDTO = { kind: "plan_offer", agent_id: "sup1", root_id: "sup1", workspace_id: "proj", request_id: "o1", reason: "This looks big: plan it first?", detail: context.goal, plan_offer: context };
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], inbox: [offer], goal: { root_id: "sup1", plan_offer: "o1" } as GoalDTO });
-    const { sync, onOpen } = mount(daemon);
+    const client = daemon.client();
+    const actionClient = fails
+      ? new DaemonClient({ baseUrl: client.baseUrl, token: client.token, fetch: async (input, init) => {
+        if (String(input).endsWith("/goal/plan-offer")) throw new Error("offer unavailable");
+        return daemon.fetch(input, init);
+      } })
+      : client;
+    const { sync, onOpen } = mount(daemon, actionClient);
     await screen.findByText("This looks big: plan it first?");
     const body = within(card("plan_offer")).getByTestId("card-detail");
     for (const value of [context.session_name, context.goal, context.detail, ...context.milestones.map((m) => m.title), ...context.reasons]) {
@@ -220,8 +229,17 @@ describe("inbox", () => {
     // The link appears once the session list has loaded, which may land after the inbox.
     fireEvent.click(await within(card("plan_offer")).findByRole("button", { name: "Go to session ›" }));
     expect(onOpen).toHaveBeenLastCalledWith("sup1", REPO, "sup1");
+    onOpen.mockClear();
     fireEvent.click(within(card("plan_offer")).getByRole("button", { name: label }));
-    await waitFor(() => expect(posts(daemon).find((r) => r.path === "/goal/plan-offer")?.body).toMatchObject({ root: "sup1", offer: "o1", accept: accepted }));
+    if (fails) {
+      expect(await screen.findByText("offer unavailable")).toBeTruthy();
+      expect(onOpen).not.toHaveBeenCalled();
+      expect(screen.getByTestId("inbox-card")).toBeTruthy();
+    } else {
+      await waitFor(() => expect(posts(daemon).find((r) => r.path === "/goal/plan-offer")?.body).toMatchObject({ root: "sup1", offer: "o1", accept: accepted }));
+      await waitFor(() => expect(onOpen).toHaveBeenCalledTimes(1));
+      expect(onOpen).toHaveBeenLastCalledWith("sup1", REPO, "sup1");
+    }
     sync.stop();
   });
 

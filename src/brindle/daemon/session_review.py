@@ -241,7 +241,9 @@ def pr_state_of(url: str, payload: dict | None) -> dict[str, Any] | None:
 
 def _read_pr_state(url: str, cwd: str) -> None:
     try:
-        state = pr_state_of(url, workspaces.pull_request_checks(url, cwd))
+        # The pool's threads copy no context: bound the read with its own slot.
+        with spawn.deadline(workspaces.PR_CHECKS_SECONDS):
+            state = pr_state_of(url, workspaces.pull_request_checks(url, cwd))
     except Exception:  # noqa: BLE001 - an unreadable PR is just unknown
         log.exception("brindle: couldn't read a session PR's checks")
         state = pr_state_of(url, None)
