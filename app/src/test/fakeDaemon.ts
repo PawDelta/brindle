@@ -752,6 +752,8 @@ export class FakeDaemon {
   readonly requests: Request[] = [];
   /* The session roots POST /recovery/prioritize was asked to bring back first. */
   readonly prioritized: string[] = [];
+  /* The session roots POST /recovery/viewed said were on screen, in order. */
+  readonly viewed: string[] = [];
   readonly sockets: FakeSocket[] = [];
   private nextId = 1;
   private nextSession = 1;
@@ -2463,7 +2465,8 @@ export class FakeDaemon {
     const path = decodeURIComponent(url.pathname).replace(/^\/v1/, "");
     const method = init?.method ?? "GET";
     const body = typeof init?.body === "string" ? (JSON.parse(init.body) as unknown) : undefined;
-    this.requests.push({ method, path, query, body });
+    // The app's note of the session on screen goes with every session shown: kept in `viewed`, not here.
+    if (path !== "/recovery/viewed") this.requests.push({ method, path, query, body });
     if (this.dead) throw new TypeError("the brindle daemon is unreachable: connection refused");
     const auth = new Headers(init?.headers).get("authorization") ?? "";
     if (auth !== `Bearer ${this.token}`) {
@@ -2494,6 +2497,10 @@ export class FakeDaemon {
       const root = ((body ?? {}) as { root?: string }).root ?? "";
       this.prioritized.push(root);
       return json({ prioritized: root });
+    }
+    if (method === "POST" && path === "/recovery/viewed") {
+      this.viewed.push(((body ?? {}) as { root?: string }).root ?? "");
+      return json({ ok: true });
     }
     if (method === "POST" && path === "/demo") return this.startDemo();
     if (method === "DELETE" && path === "/demo") return this.cancelDemo();

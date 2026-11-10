@@ -766,17 +766,18 @@ def consider_plan_offer(db: DB, root_id: str) -> None:
     by milestones, repos (an omitted repo is the root checkout) or workers, or
     design-heavy (brindle.pro.analysis_brief.offer_reasons). Never re-offers a
     goal already offered or answered, and never while a plan is already open
-    or plans can't be shown (visuals off). While the offer is open the
-    session's tasks queue behind it (brindle.plans.holding); the person
+    or plans can't be answered (visuals off or no app connected). While the
+    offer is open the session's tasks queue behind it (brindle.plans.holding); the person
     answers it from the Inbox (brindle.plans.answer_offer). Run when the goal
     changes and when a worker is assigned; never raises."""
     try:
         from brindle import plans, visuals
+        from brindle.daemon import holds
         from brindle.pro import analysis_brief
 
         ap = db.get_autopilot(root_id)
         if ap is None or not ap.goal or ap.plan_offer is not None or not visuals.enabled() \
-                or plans.open_plan(db, root_id) is not None:
+                or not holds.app_connected() or plans.open_plan(db, root_id) is not None:
             return
         milestones, repos, workers, text = plan_offer_scope(db, root_id, ap)
         if analysis_brief.deserves_offer(len(milestones), repos, text, workers) \
@@ -2375,6 +2376,26 @@ def usage_sweep(db: DB, now: float | None = None) -> list[str]:
 # -- the Stop hook -------------------------------------------------------------------
 
 
+def claim_nudge(db: DB, ap: Autopilot, now: float) -> bool:
+    """Spend one Stop reminder from the shared budget, if it is due.
+
+    Open worker items and ordinary goal nudges must both back off and stop
+    after the same number of reminders without progress.
+    """
+    if ap.state == "stalled":
+        return False
+    if (ap.nudged_at == ap.progress and ap.nudged_time is not None
+            and now - ap.nudged_time < NUDGE_BACKOFF):
+        return False
+    nudges = ap.nudges if ap.nudged_at == ap.progress else 0
+    if nudges >= MAX_NUDGES:
+        db.update_autopilot(ap.root_id, state="stalled", nudges=0,
+                            note=f"no progress after {MAX_NUDGES} reminders to keep going")
+        return False
+    db.update_autopilot(ap.root_id, nudges=nudges + 1, nudged_at=ap.progress, nudged_time=now)
+    return True
+
+
 def on_stop(db: DB, agent: Agent, payload: dict) -> dict | None:
     """The supervisor is about to stop. Returns a "block" decision telling it
     to keep going, or None to let it stop."""
@@ -2463,16 +2484,8 @@ def on_stop(db: DB, agent: Agent, payload: dict) -> dict | None:
     if (db.outstanding(agent.id, NUDGE_HEAD) or db.outstanding(agent.id, WAIT_ENDED_HEAD)
             or db.outstanding(agent.id, QUESTION_REMINDER_HEAD)):
         return None  # (#209) the last reminder is still queued or unread: never pile up another
-    now = time.time()
-    if (ap.nudged_at == ap.progress and ap.nudged_time is not None
-            and now - ap.nudged_time < NUDGE_BACKOFF):
-        return None  # (#177) already reminded since the last step: it's legitimately waiting
-    nudges = ap.nudges if ap.nudged_at == ap.progress else 0
-    if nudges >= MAX_NUDGES:
-        db.update_autopilot(agent.id, state="stalled", nudges=0,
-                            note=f"no progress after {MAX_NUDGES} reminders to keep going")
+    if not claim_nudge(db, ap, time.time()):
         return None
-    db.update_autopilot(agent.id, nudges=nudges + 1, nudged_at=ap.progress, nudged_time=now)
     return {"decision": "block", "reason": nudge(db, ap, cfg, working, stalled)}
 
 

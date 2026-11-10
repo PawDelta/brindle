@@ -227,9 +227,13 @@ def holding(db: DB, root_id: str) -> dict | None:
     """What session ``root_id``'s queued tasks wait on, if anything: its plan
     the person hasn't approved yet or, before one is proposed, brindle's
     offer to plan the goal first, unanswered or accepted (``{"offer": state}``).
-    None while the visuals capability is off, so nothing waits on a plan
-    nobody can see."""
-    if not visuals.enabled() or not root_id:
+    None while the visuals capability is off or the app is disconnected,
+    so nothing waits on a verdict nobody can give. This also releases work
+    if the app disconnects after opening an offer or redirecting a plan;
+    the saved plan and its decision remain available when it reconnects."""
+    from brindle.daemon import holds
+
+    if not visuals.enabled() or not root_id or not holds.app_connected():
         return None
     plan = open_plan(db, root_id)
     if plan is not None:
