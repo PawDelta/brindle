@@ -257,7 +257,10 @@ describe("inbox", () => {
     const offer: InboxItemDTO = { kind: "plan_offer", agent_id: "sup1", root_id: "sup1", workspace_id: "proj", request_id: "o1", reason: "This looks big: plan it first?", detail: context.goal, plan_offer: context };
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], inbox: [offer], goal: { root_id: "sup1", plan_offer: "o1" } as GoalDTO });
     const client = daemon.client();
-    const failingClient = new DaemonClient({ baseUrl: client.baseUrl, token: client.token, fetch: async () => { throw new Error("offer unavailable"); } });
+    const failingClient = new DaemonClient({ baseUrl: client.baseUrl, token: client.token, fetch: async (input, init) => {
+      if (String(input).endsWith("/goal/plan-offer")) throw new Error("offer unavailable");
+      return daemon.fetch(input, init);
+    } });
     const { sync, onOpen } = mount(daemon, failingClient);
     await screen.findByText("This looks big: plan it first?");
     fireEvent.click(within(card("plan_offer")).getByRole("button", { name: "Yes" }));
