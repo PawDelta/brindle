@@ -512,6 +512,19 @@ export interface DocScope {
   can_share?: boolean;
 }
 
+/* A Library folder as the server lists it: private (its creator only) or shared (the scope's members). */
+export type FolderVisibility = "private" | "shared";
+export interface LibraryFolder {
+  id: string;
+  name: string;
+  visibility: FolderVisibility;
+}
+/* One scope's folders (GET /library/folders). */
+export interface FolderGroup {
+  scope: DocScope;
+  folders: LibraryFolder[];
+}
+
 export interface DocSource {
   kind?: string;
   ref?: string;
@@ -1769,6 +1782,20 @@ export class DaemonClient {
   /* Every scope the person reads (their own, their teams', their org's), with or without docs. */
   docScopes(repo?: string) {
     return this.get<{ scopes: DocScope[] }>("/analysis-docs/scopes", { repo });
+  }
+
+  /* The folders the person can see, per scope they read (GET /library/folders). */
+  libraryFolders() {
+    return this.get<{ scopes: FolderGroup[] }>("/library/folders", {});
+  }
+
+  /* `scope` is the daemon's spelling: user, team:<id> or org:<id>. */
+  createLibraryFolder(scope: string, name: string, visibility: FolderVisibility, canAdd: "owner" | "members" = "owner") {
+    return this.post<LibraryFolder>("/library/folders", { scope, name, visibility, can_add: canAdd });
+  }
+
+  moveDocToFolder(id: string, scope: string, folder: string) {
+    return this.put<unknown>(`/analysis-docs/${encodeURIComponent(id)}/folder`, { scope, folder });
   }
 
   async knowledgeMap(repo: string, scope: DocScope, paths: string[] = []): Promise<KnowledgeMap> {

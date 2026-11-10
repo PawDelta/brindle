@@ -10092,6 +10092,10 @@
       "path": "/v1/analysis-docs/{id}/export"
     },
     {
+      "method": "PUT",
+      "path": "/v1/analysis-docs/{id}/folder"
+    },
+    {
       "method": "DELETE",
       "path": "/v1/analysis-docs/{id}/share"
     },
@@ -10290,6 +10294,14 @@
     {
       "method": "POST",
       "path": "/v1/keys/{name}/test"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/library/folders"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/library/folders"
     },
     {
       "method": "GET",

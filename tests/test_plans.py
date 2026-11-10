@@ -433,6 +433,34 @@ def test_a_failed_verdict_leaves_nothing_behind_and_a_failed_push_loses_nothing(
     assert started == ["build the preset schema"]
 
 
+def test_design_doc_round_trip_comment_reply_and_next_revision(db, session):
+    from brindle import plan_docs
+
+    boss, _ = session
+    visual_offers.person_spoke(db, boss, "Make a planning doc.")
+    sections = [{"id": "goal", "title": "Goal", "markdown": "Presets per org."},
+                {"id": "flow", "title": "Flow", "kind": "mermaid", "markdown": "graph TD; A-->B"}]
+    pid = mcp_server.propose_plan("# Org presets", DECISIONS, sections=sections).split()[2]
+    assert [s["kind"] for s in plan_docs.revision(db, pid)["sections"]] == ["markdown", "mermaid"]
+
+    tid = plan_docs.comment(db, pid, 1, {"kind": "text", "section": "goal", "quote": "per org"}, "Which orgs?")
+    sid = plan_docs.suggest(db, pid, 1, "goal", 0, "Presets", "Rules", "clearer")
+    plans.decide(db, pid, 1, False, person=True)
+    [msg] = messages(db)                                  # one message for the batch, naming the thread
+    with pytest.raises(ToolError):                        # a suggestion can't be resolved ...
+        mcp_server.reply_plan_thread(pid, sid, "no", resolve=True)
+    assert not next(t for t in plan_docs.fields(db, plans.get(db, pid))["threads"] if t["id"] == sid)["replies"]
+    assert f"[thread #{tid}]" in msg and "Which orgs?" in msg
+
+    assert f"#{tid}" in mcp_server.reply_plan_thread(pid, tid, "All of them.", resolve=True)
+    thread = next(t for t in plan_docs.fields(db, plans.get(db, pid))["threads"] if t["id"] == tid)
+    assert thread["status"] == "resolved" and thread["replies"][0]["author"] == plan_docs.SUPERVISOR
+
+    sections[0]["markdown"] = "Presets per org, all orgs."
+    assert mcp_server.propose_plan("# Org presets", DECISIONS, sections=sections, plan_id=pid).split()[3] == "r2"
+    assert plans.get(db, pid)["state"] == "open"
+
+
 def test_only_the_person_decides_and_only_when_they_asked(db, session):
     boss, started = session
     with pytest.raises(ToolError, match="ask for one"):

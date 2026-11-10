@@ -14,6 +14,7 @@ import { ExportMenu, type ExportClient } from "./ExportMenu";
 import { Markdown } from "./Markdown";
 import { docMatch, useLibrarySearch, type LibraryHit, type LibraryType, type SearchClient } from "./librarySearch";
 import { ReaderChrome } from "../Session/Visuals/VisualReader";
+import { setReaderDoc } from "../../store/libraryReader";
 
 export type DocsClient = Pick<DaemonClient, "docs" | "docTopics" | "docScopes" | "doc" | "docResults" | "shareDoc" | "unshareDoc" | "deleteDoc"> & ExportClient & SearchClient;
 
@@ -446,6 +447,11 @@ export function DocsView({ client, repo, session: initialSession, doc, pickFolde
   const [results, setResults] = useState<DocResults | null>(null);
   const [resultsError, setResultsError] = useState<string | null>(null);
   const [open, setOpen] = useState<string | null>(doc ?? null);
+  // The Library rail moves the design that is open here, so it is told which, and when none.
+  useEffect(() => {
+    setReaderDoc(sourceOpen ? null : open);
+  }, [open, sourceOpen]);
+  useEffect(() => () => setReaderDoc(null), []);
   /* The scopes the person reads (GET /analysis-docs/scopes: theirs, their teams', their
      org's, named, with can_share), plus any other a listed or opened doc is in; a chip
      stays while another is picked. */
