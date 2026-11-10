@@ -2003,7 +2003,7 @@ def _resume(db: DB, root_id: str, *, watch_pane: bool, only, recovery_env, settl
 
     session_creds = db.get_session_credentials_with_timestamps(root_id)
     reads = keystore.ReadTiming() if timing.enabled else None
-    with keystore.measure_reads(reads):
+    with keystore.measure_reads(reads), keystore.listed_reads():    # most of these names were never saved
         for k in key_names:
             try:
                 ks_val, ks_time = timing.call("key_loads_s", keystore.get_key_info, k)
