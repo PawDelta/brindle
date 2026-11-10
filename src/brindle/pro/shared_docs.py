@@ -33,6 +33,7 @@ from urllib.parse import urlencode
 from brindle import plan_docs
 from brindle.db import DB
 from brindle.pro import analysis_docs as ad
+from brindle.pro import review_policies
 from brindle.redact import mask, mask_data
 from brindle.service.errors import ServiceError
 
@@ -125,16 +126,17 @@ def _remember(db: DB, plan_id: str, view: dict) -> bool:
                          (review, plan_id, review)).rowcount == 1
 
 
-def _grant(doc_id: str, reviewers: list[dict], permissions: dict | None, client, store) -> None:
+def _grant(db: DB, p: dict, doc_id: str, reviewers: list[dict], permissions: dict | None, client, store) -> None:
     """Scope members start read-only, and ``PUT /permissions`` replaces the
     list: add to what is there, giving each reviewer the right to comment and
     suggest. A reviewer taken off the list keeps the grant."""
-    held = ad.api("GET", _path(doc_id), client=client, store=store).get("permissions") or {}
+    held = review_policies.ask(db, p, "GET", _path(doc_id), client=client, store=store).get("permissions") or {}
     grants = {**held, **(permissions or {})}
     for r in reviewers:
         grants[r["sub"]] = {"can_edit": False, **grants.get(r["sub"], {}), **REVIEWER_GRANT}
     if grants != held:
-        ad.api("PUT", _path(doc_id, "/permissions"), {"permissions": grants}, client=client, store=store)
+        review_policies.ask(db, p, "PUT", _path(doc_id, "/permissions"), {"permissions": grants},
+                            client=client, store=store)
 
 
 # -- sharing -----------------------------------------------------------------------------
@@ -214,15 +216,15 @@ def share(db: DB, plan_id: str, scope: Any, *, reviewers: Any = None, permission
     row, resumed = _claim_new(db, p["id"], ent.sub, time.time() if now is None else now)
     _own(row, ent)
     doc_id = row["doc_id"] or _create(db, p, ent.sub, cur, content, resumed, client, store)
-    ad.api("POST", ad._doc_path(doc_id, "/share"), {"scope": scope}, client=client, store=store)
+    review_policies.ask(db, p, "POST", ad._doc_path(doc_id, "/share"), {"scope": scope}, client=client, store=store)
     if people or permissions:
-        _grant(doc_id, people or [], permissions, client, store)
+        _grant(db, p, doc_id, people or [], permissions, client, store)
     if people is not None:
-        _remember(db, p["id"], ad.api("PUT", _path(doc_id, "/reviewers"), {"reviewers": people},
-                                      client=client, store=store))
+        _remember(db, p["id"], review_policies.ask(db, p, "PUT", _path(doc_id, "/reviewers"), {"reviewers": people},
+                                                   client=client, store=store))
     if folder is not None:
-        _remember(db, p["id"], ad.api("PUT", _path(doc_id, "/folder"), {"folder": folder},
-                                      client=client, store=store))
+        _remember(db, p["id"], review_policies.ask(db, p, "PUT", _path(doc_id, "/folder"), {"folder": folder},
+                                                   client=client, store=store))
     return link(db, p["id"])
 
 
@@ -233,9 +235,9 @@ def set_reviewers(db: DB, plan_id: str, reviewers: Any, *, client=None, store=No
     client, store = ad._session(client, store)
     share_ = _shared(db, p["id"], store)
     people = _reviewers(reviewers)
-    _grant(share_["doc_id"], people, None, client, store)
-    if _remember(db, p["id"], ad.api("PUT", _path(share_["doc_id"], "/reviewers"), {"reviewers": people},
-                                     client=client, store=store)):
+    _grant(db, p, share_["doc_id"], people, None, client, store)
+    if _remember(db, p["id"], review_policies.ask(db, p, "PUT", _path(share_["doc_id"], "/reviewers"),
+                                                  {"reviewers": people}, client=client, store=store)):
         plan_docs._changed(db, p, p["rev"])
     return link(db, p["id"])
 
@@ -379,6 +381,7 @@ def _push(db: DB, p: dict, view: dict, client, store, now: float) -> bool:
                 raise RuntimeError(f"the Library's copy has a newer revision (r{resp.get('rev')}) that this plan "
                                    f"doesn't have, so r{cur['rev']} wasn't sent")
             if status != 200:
+                review_policies.refused(db, p, resp)
                 raise RuntimeError(resp.get("error") or f"HTTP {status}")
             remote = resp["rev"]
             _remember(db, p["id"], resp)
@@ -400,7 +403,7 @@ def sync(db: DB, plan_id: str, *, client=None, store=None, now: float | None = N
     p = plan_docs._plan(db, plan_id)
     client, store = ad._session(client, store)
     share_ = _shared(db, p["id"], store)
-    view = ad.api("GET", _path(share_["doc_id"]), client=client, store=store)
+    view = review_policies.ask(db, p, "GET", _path(share_["doc_id"]), client=client, store=store)
     pulled = _pull(db, p, share_, view)
     pushed = share_["local_rev"] != p["rev"] and _push(db, p, view, client, store,
                                                        time.time() if now is None else now)
@@ -420,8 +423,8 @@ def sign_off(db: DB, plan_id: str, rev: Any, *, client=None, store=None) -> dict
     share_ = sync(db, p["id"], client=client, store=store)
     if share_["local_rev"] != p["rev"]:
         raise RuntimeError(f"r{p['rev']} hasn't reached the Library yet, so it can't be signed off")
-    if _remember(db, p["id"], ad.api("POST", _path(share_["doc_id"], "/sign-offs"), {"rev": share_["remote_rev"]},
-                                     client=client, store=store)):
+    if _remember(db, p["id"], review_policies.ask(db, p, "POST", _path(share_["doc_id"], "/sign-offs"),
+                                                  {"rev": share_["remote_rev"]}, client=client, store=store)):
         plan_docs._changed(db, p, p["rev"])
     return link(db, p["id"])
 

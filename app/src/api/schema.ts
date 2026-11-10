@@ -55,10 +55,13 @@ export interface ApiSchema {
   PlanDTO: PlanDTO;
   PlanDecisionDTO: PlanDecisionDTO;
   PlanGateDTO: PlanGateDTO;
+  PlanGatePolicyDTO: PlanGatePolicyDTO;
   PlanGateRowDTO: PlanGateRowDTO;
   PlanOfferDTO: PlanOfferDTO;
   PlanOfferMilestoneDTO: PlanOfferMilestoneDTO;
   PlanOptionDTO: PlanOptionDTO;
+  PlanPolicyStandInDTO: PlanPolicyStandInDTO;
+  PlanPolicyWaiverDTO: PlanPolicyWaiverDTO;
   PlanReplyDTO: PlanReplyDTO;
   PlanRevisionDTO: PlanRevisionDTO;
   PlanRevisionDetailDTO: PlanRevisionDetailDTO;
@@ -919,18 +922,73 @@ export interface PlanOptionDTO {
 }
 /**
  * A shared plan's build gate (brindle.plans.gate). ``reason``: why it
- * can't build now; ``signed`` of ``required`` sign-offs are in.
+ * can't build now; ``signed`` of ``required`` sign-offs are in. ``policies``:
+ * every org review rule covering it, including those a listed reviewer meets.
  *
  * This interface was referenced by `ApiSchema`'s JSON-Schema
  * via the `definition` "PlanGateDTO".
  */
 export interface PlanGateDTO {
+  policies?: PlanGatePolicyDTO[];
   reason?: string | null;
   required: number;
   reviewers?: PlanGateRowDTO[];
   signed: number;
   state: "waiting" | "changes_requested" | "ready" | "closed";
   waiting_on?: string[];
+}
+/**
+ * An org review rule covering a shared plan, which nobody on the doc can
+ * remove. ``when``: paths, label or any; ``matched``: what in this revision
+ * set it off; ``needs_kind``: team, role or person; ``eligible``: how many
+ * people can meet it today.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PlanGatePolicyDTO".
+ */
+export interface PlanGatePolicyDTO {
+  approvals: number;
+  changes_by?: string[];
+  eligible?: number | null;
+  label?: string | null;
+  matched?: string[];
+  met_by?: string[];
+  name: string;
+  needs_kind?: string | null;
+  needs_name?: string | null;
+  note?: string | null;
+  org_id: string;
+  paths?: string[];
+  policy: string;
+  set_at?: number | null;
+  set_by?: string | null;
+  stand_ins?: PlanPolicyStandInDTO[];
+  status: "signed_off" | "changes_requested" | "waiting" | "waived";
+  waiver?: PlanPolicyWaiverDTO | null;
+  when?: string | null;
+}
+/**
+ * Someone an org admin named to sign for a review rule until ``until``.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PlanPolicyStandInDTO".
+ */
+export interface PlanPolicyStandInDTO {
+  at?: number | null;
+  by?: string | null;
+  stand_in: string;
+  until: number;
+}
+/**
+ * An org admin's waiver of a review rule, for the revision on screen.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PlanPolicyWaiverDTO".
+ */
+export interface PlanPolicyWaiverDTO {
+  at?: number | null;
+  by: string;
+  reason: string;
 }
 /**
  * One row of a plan's build gate: a reviewer (``sub``) or an org review

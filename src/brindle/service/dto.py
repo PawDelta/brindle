@@ -440,9 +440,54 @@ class PlanGateRowDTO(_DTO):
     you: bool = False
 
 
+class PlanPolicyWaiverDTO(_DTO):
+    """An org admin's waiver of a review rule, for the revision on screen."""
+
+    by: str
+    at: float | None = None
+    reason: str
+
+
+class PlanPolicyStandInDTO(_DTO):
+    """Someone an org admin named to sign for a review rule until ``until``."""
+
+    stand_in: str
+    until: float
+    by: str | None = None
+    at: float | None = None
+
+
+class PlanGatePolicyDTO(_DTO):
+    """An org review rule covering a shared plan, which nobody on the doc can
+    remove. ``when``: paths, label or any; ``matched``: what in this revision
+    set it off; ``needs_kind``: team, role or person; ``eligible``: how many
+    people can meet it today."""
+
+    org_id: str
+    policy: str
+    name: str
+    note: str | None = None
+    when: str | None = None
+    label: str | None = None
+    paths: list[str] = []
+    matched: list[str] = []
+    needs_kind: str | None = None
+    needs_name: str | None = None
+    approvals: int
+    eligible: int | None = None
+    status: Literal["signed_off", "changes_requested", "waiting", "waived"]
+    met_by: list[str] = []
+    changes_by: list[str] = []
+    waiver: PlanPolicyWaiverDTO | None = None
+    stand_ins: list[PlanPolicyStandInDTO] = []
+    set_by: str | None = None
+    set_at: float | None = None
+
+
 class PlanGateDTO(_DTO):
     """A shared plan's build gate (brindle.plans.gate). ``reason``: why it
-    can't build now; ``signed`` of ``required`` sign-offs are in."""
+    can't build now; ``signed`` of ``required`` sign-offs are in. ``policies``:
+    every org review rule covering it, including those a listed reviewer meets."""
 
     state: Literal["waiting", "changes_requested", "ready", "closed"]
     reason: str | None = None
@@ -450,6 +495,7 @@ class PlanGateDTO(_DTO):
     signed: int
     waiting_on: list[str] = []
     reviewers: list[PlanGateRowDTO] = []
+    policies: list[PlanGatePolicyDTO] = []
 
 
 class PlanDTO(_DTO):
