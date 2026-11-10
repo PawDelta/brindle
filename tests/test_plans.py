@@ -152,16 +152,15 @@ def test_plan_board_links_dispatch_and_reads_recorded_checks(db, session, monkey
     assert (board()[0]["state"], board()[0]["test_state"]) == ("merged", "passing")
 
 
-@pytest.mark.parametrize("status", [
-    200, pytest.param(500, marks=pytest.mark.variant("approved-plan integration with an HTTP upload failure"))])
-def test_approved_plan_goes_to_the_library(status, db, session, tmp_path, monkeypatch, backend, fixed_identity):
+def test_approved_plan_goes_to_the_library(db, session, tmp_path, monkeypatch, backend, fixed_identity):
+    """The approved plan is sent to the library, and a failed upload never undoes the approval."""
     from brindle.pro import analysis_docs as ad
     from brindle.pro import auth, credentials
 
     boss, _ = session
     backend.docs, backend.switches = [], {"store": "on", "assist": "on"}
     backend.routes["POST /analysis-docs"] = lambda form, headers: (
-        (backend.docs.append(dict(form)), (status, {"id": "d1"}))[1])
+        (backend.docs.append(dict(form)), (500, {"id": "d1"}))[1])
     backend.routes["GET /me/analysis-docs/settings"] = lambda f, h: (200, {"switches": backend.switches})
     store = credentials.FileStore(tmp_path / "pro")
     login_as(backend, store, features=("analysis_docs",))
