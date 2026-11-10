@@ -109,10 +109,26 @@ def test_plan_board_links_dispatch_and_reads_recorded_checks(db, session, monkey
     monkeypatch.setattr(gates.git, "out", lambda *a, **kw: f"tree-{sha[0]}")
     monkeypatch.setattr(gates.git, "dirty_files", lambda path: [])
     monkeypatch.setattr(gates, "_scoped", lambda ws_, cmd, diff: cmd)
+    run_queued = gates._run_queued
     monkeypatch.setattr(gates, "_run_queued", lambda *a: (outcome[0], "recorded output"))
+
+    def inconclusive():
+        with monkeypatch.context() as execution:
+            execution.setattr(gates, "_run_queued", run_queued)
+            execution.setattr(gates, "_run_once", lambda *a: (False, gates.autopilot.TIMED_OUT))
+            execution.setattr(gates, "_concurrency", lambda ws_: 1)
+            assert gates.timed_out(gates.run_checked(db, ws, check, {}, 30, full=True)[1])
+
+    sha[0] = "inconclusive-first"
+    inconclusive()
+    assert board()[0]["test_state"] == "not run"
+    sha[0] = "pass"
     gates.run_checked(db, ws, "unrelated", {}, 30, full=True)
     assert board()[0]["test_state"] == "not run"
     gates.run_checked(db, ws, check, {}, 30, full=True)
+    assert board()[0]["test_state"] == "passing"
+    sha[0] = "inconclusive-after-pass"
+    inconclusive()
     assert board()[0]["test_state"] == "passing"
     sha[0], outcome[0] = "fail", False
     gates.run_checked(db, ws, check, {}, 30, full=True)
