@@ -715,8 +715,10 @@ describe("App", () => {
     expect(button.getAttribute("aria-pressed")).toBe("true");
     expect(within(nav()).queryByRole("navigation", { name: "Sessions" })).toBeNull();
     const rail = within(nav()).getByRole("navigation", { name: "Library" });
-    expect([...rail.querySelectorAll("button")].map((row) => row.textContent?.replace(/^\W+/, "").replace(/\s*\d*$/, ""))).toEqual(["Needs you", "In review", "Approved", "Building", "Shipped", "Map", "Imported docs", "Decisions", "Kept visuals"]);
+    // Only what is real is listed: the plans waiting on the person, and the Sources. No tab strip on the page.
+    expect([...rail.querySelectorAll("button")].map((row) => row.textContent?.replace(/^\W+/, "").replace(/\s*\d*$/, ""))).toEqual(["Needs you", "Map", "Imported docs", "Decisions", "Kept visuals"]);
     expect(within(rail).getByRole("button", { name: /^Needs you/ }).textContent).toContain("1");
+    expect(within(screen.getByRole("main")).queryByRole("tablist")).toBeNull();
     // A Source's row counts what it holds, opens today's view of it, and is marked.
     await waitFor(() => expect(within(rail).getByRole("button", { name: /^Decisions/ }).textContent).toContain("1"));
     fireEvent.click(within(rail).getByRole("button", { name: /^Decisions/ }));

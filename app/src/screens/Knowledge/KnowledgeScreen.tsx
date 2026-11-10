@@ -18,9 +18,10 @@
    through the engine's own search (GET /v1/kb/search, the same ranking
    agents get). A repo with nothing yet gets an empty state that says how
    knowledge gets here. Nothing here sends anyone to a terminal.
-   Four tabs: Map, Docs (the Library of approved plans, DocsView),
-   Imported (the folders above) and Decisions; the search box and the empty
-   state serve the last two. */
+   Five views, picked in the Library's sidebar (no tabs here): Docs (the
+   approved plans, DocsView), Map, Imported (the folders above), Decisions
+   and Kept visuals; the search box and the empty state serve Imported and
+   Decisions. */
 
 import { useCallback, useContext, useEffect, useRef, useState, type FormEvent } from "react";
 import { DaemonError, type DaemonClient, type DecisionPut, type KbHit, type KbSource } from "../../api/client";
@@ -47,7 +48,7 @@ export interface KnowledgeScreenProps {
   /* The view shown (default Docs; an imported doc's number opens Imported): the Library's
      sidebar picks it, and the screen follows when it changes. */
   view?: KnowledgeView;
-  /* The screen moved to a view itself (a tab, the empty state's buttons): the sidebar follows. */
+  /* The screen moved to a view itself (the empty state's buttons): the sidebar follows. */
   onView?(view: KnowledgeView): void;
   /* What the repo on screen holds, for the sidebar's counts. */
   onCounts?(counts: Pick<LibraryCounts, "imported" | "decisions" | "kept">): void;
@@ -60,14 +61,6 @@ export interface KnowledgeScreenProps {
   /* The repo the session belongs to: Docs opens on it (else the first repo). */
   fromRepo?: string;
 }
-
-const TABS: [KnowledgeView, string][] = [
-  ["map", "Map"],
-  ["docs", "Library"],
-  ["imported", "Imported"],
-  ["decisions", "Decisions"],
-  ["kept", "Kept visuals"],
-];
 
 const message = (e: unknown) => plain(e instanceof Error ? e.message : String(e));
 
@@ -572,28 +565,11 @@ export function KnowledgeScreen({ client, pickFolder, view, onView, onCounts, do
     setAdding(true);
   };
   const local = tab === "imported" || tab === "decisions";
-  const count = (t: KnowledgeView) =>
-    t === "imported" && sources ? (sources.length === 1 ? "1 folder" : `${sources.length} folders`) : t === "decisions" && decisions ? String(decisions.length) : null;
   return (
     <section className="flex flex-col gap-s3" aria-label="Library">
       <PageHeader title="Library" lede="What your agents know and remember about this repo: docs they wrote, decisions they follow, and documents they can look up.">
         <RepoSelect {...pick} />
       </PageHeader>
-      <div role="tablist" aria-label="Library views" className="-mt-s1 flex gap-0.5 border-b border-line text-sm">
-        {TABS.map(([t, name]) => (
-          <button
-            key={t}
-            type="button"
-            role="tab"
-            aria-selected={tab === t}
-            className={`-mb-px border-b-2 px-s1 py-1 ${tab === t ? "border-fawn font-medium text-ink" : "border-transparent text-ink-2 hover:text-ink"}`}
-            onClick={() => show(t)}
-          >
-            {name}
-            {count(t) && <span className="ml-1 font-mono text-xs text-ink-3">{count(t)}</span>}
-          </button>
-        ))}
-      </div>
       {tab === "map" && <MapView key={repo} client={client} repo={repo ?? undefined} decisions={decisions ?? []} sources={sources ?? []} />}
       {tab === "kept" && <KeptVisuals client={client} />}
       {tab === "docs" && <DocsView client={client} repo={repo ?? undefined} session={session} onBack={onBackToSession} doc={typeof doc === "string" ? doc : undefined} pickFolder={pickFolder} />}
