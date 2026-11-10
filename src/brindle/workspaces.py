@@ -914,11 +914,10 @@ def pull_request_checks(url: str, cwd: str) -> dict | None:
 
 def open_pull_request_for_commit(sha: str, cwd: str) -> dict | None:
     """The open PR (``{number, title, url, headRefName}``) that contains commit
-    ``sha``, whatever its head branch; ``{}`` when GitHub says none is open (or
-    ``gh`` isn't installed, so none can have been opened with it); None when
-    ``gh`` couldn't say (nothing is known)."""
+    ``sha``, whatever its head branch; ``{}`` when GitHub says none is open; None
+    when ``gh`` is missing or couldn't say (nothing is known)."""
     if not shutil.which("gh"):
-        return {}
+        return None
     try:
         out = spawn.read(["gh", "pr", "list", "--state", "open", "--search", sha, "--json", "number,title,url,headRefName"],
                          cwd=cwd, text=True, timeout=PR_CHECKS_SECONDS)
