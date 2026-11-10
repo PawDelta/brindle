@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, expect, it } from "vitest";
-import type { Plan, VisualDTO } from "../../../api/client";
+import { DaemonError, type Plan, type VisualDTO } from "../../../api/client";
 import { createAppStore } from "../../../store/store";
 import { StoreContext } from "../../../store/useStore";
 import { changeBetween } from "./DocText";
@@ -184,10 +184,12 @@ it("design doc writes go one at a time, a read sent before one came back can't u
   const confirmed: string[] = [];
   const sent: boolean[] = [];
   const redirected: Plan = { ...replied, state: "redirected", verdict: { approved: false, at: 13, rev: 1 } };
+  let decided!: (p: Plan) => void;
   const client: PlansClient & PlanDocClient & VisualsClient = {
     ...visuals, ...docWrites(() => replied),
     plan: () => new Promise<Plan>((resolve) => reads.push(resolve)),
-    decidePlan: async (_id, verdict) => { sent.push(verdict.approved); return redirected; },
+    // The first verdict is answered at once; the second, when the test says so.
+    decidePlan: (_id, verdict) => (sent.push(verdict.approved) === 1 ? Promise.resolve(redirected) : new Promise<Plan>((resolve) => { decided = resolve; })),
     replyPlan: () => new Promise<Plan>((resolve) => { reply = resolve; }),
     confirmPlan: async (_id, _rev, decision) => { confirmed.push(decision); return replied; },
   };
@@ -222,10 +224,37 @@ it("design doc writes go one at a time, a read sent before one came back can't u
   fireEvent.click(within(screen.getByTestId("thread-1")).getByRole("button", { name: "Send" }));
   await act(async () => reply({ ...redirected, threads: [{ ...redirected.threads![0], replies: again }] }));
   view.unmount();
-  render(reader({ ...visual, rev: 2 }));
-  await act(async () => reads[reads.length - 1]({ ...base, rev: 2, revisions: [...base.revisions!, { rev: 2, author: "supervisor", source: "proposal", at: 20 }], threads: [{ ...base.threads![0], replies: again }] }));
+  const second: Plan = { ...base, rev: 2, revisions: [...base.revisions!, { rev: 2, author: "supervisor", source: "proposal", at: 20 }], threads: [{ ...base.threads![0], replies: again }] };
+  const reopened = render(reader({ ...visual, rev: 2 }));
+  await act(async () => reads[reads.length - 1](second));
   await act(async () => fireEvent.click(bar().getByRole("button", { name: "Request changes" })));
   expect(sent).toEqual([false, false]);
+  // The reader is closed before that verdict's answer arrives. The verdict still delivered the
+  // reply: opened again on revision 3, nothing is left to send.
+  reopened.unmount();
+  await act(async () => decided({ ...second, state: "redirected", verdict: { approved: false, at: 21, rev: 2 } }));
+  render(reader({ ...visual, rev: 3 }));
+  await act(async () => reads[reads.length - 1]({ ...second, rev: 3, revisions: [...second.revisions!, { rev: 3, author: "supervisor", source: "proposal", at: 30 }] }));
+  expect((bar().getByRole("button", { name: "Request changes" }) as HTMLButtonElement).disabled).toBe(true);
+});
+
+it("a design doc reply this device still records as unsent stops counting once the engine refuses it as nothing to send", async () => {
+  // A verdict from another window delivered reply 2; this device's record never saw it.
+  localStorage.setItem(UNSENT_REPLIES_KEY, JSON.stringify({ [visual.id]: [2] }));
+  const plan = doc(2, "Workers run on your machine.", {
+    revisions: [{ rev: 1, author: "supervisor", source: "proposal", at: 10 }, { rev: 2, author: "supervisor", source: "proposal", at: 20 }],
+    threads: [{ id: 1, kind: "comment", rev: 1, author: "supervisor", text: "Is a rented VM fine?", status: "open", at: 11, anchor: { kind: "section", section: "summary", state: "current" },
+      replies: [{ id: 2, author: "person", text: "Yes, rented too.", at: 12 }] }] });
+  const client: PlansClient & PlanDocClient & VisualsClient = {
+    ...visuals, ...docWrites(() => plan), plan: async () => plan,
+    decidePlan: async () => { throw new DaemonError("invalid", "say what to change: a comment, a note or a different pick", 400); },
+  };
+  render(<PlanReader client={client} visual={{ ...visual, rev: 2 }} onBack={() => {}} onChanged={() => {}} />);
+  const request = (await screen.findByRole("button", { name: "Request changes" })) as HTMLButtonElement;
+  await act(async () => fireEvent.click(request));
+  expect(screen.getByRole("alert")).toBeTruthy();
+  expect(request.disabled).toBe(true);
+  expect(localStorage.getItem(UNSENT_REPLIES_KEY)).toBe("{}");
 });
 
 it("a design doc edit or comment begun on older text isn't sent over a newer revision's", async () => {
