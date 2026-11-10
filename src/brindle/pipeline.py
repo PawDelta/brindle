@@ -396,8 +396,15 @@ def note_review(db: DB, ws: Workspace, approved: bool, reviewer: Agent | None = 
     _note(db, ws, approved=approved, actor=reviewer)
 
 
-def note_removed_unmerged(db: DB, ws: Workspace, actor: Agent | None = None) -> None:
-    _note(db, ws, merged=False, actor=actor)
+def note_removed_unmerged(db: DB, ws: Workspace, actor: Agent | None = None,
+                          worker: Agent | None = None) -> None:
+    """Record successful removal of an unmerged worktree.
+
+    Pass ``worker`` when removal has already deleted the workspace's agent
+    rows, so both the bus event and the repository's remove hooks still
+    identify the worker whose checkout was removed.
+    """
+    _note(db, ws, worker, merged=False, actor=actor)
 
 
 def on_workspace_cleanup(db: DB, ws: Workspace) -> None:
