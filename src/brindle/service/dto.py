@@ -423,6 +423,32 @@ class PlanRevisionDetailDTO(PlanRevisionDTO):
     ask: str | None = None
 
 
+class PlanGateRowDTO(_DTO):
+    """One row of a plan's build gate: a reviewer (``sub``) or an org review
+    rule no one on the list meets (``name``). ``meets``: the rules this
+    reviewer's sign-off also counts for. ``met_by``: who met a rule."""
+
+    sub: str | None = None
+    name: str | None = None
+    required: bool
+    status: Literal["signed_off", "changes_requested", "waiting", "waived"]
+    met_by: list[str] = []
+    meets: list[str] = []
+    you: bool = False
+
+
+class PlanGateDTO(_DTO):
+    """A shared plan's build gate (brindle.plans.gate). ``reason``: why it
+    can't build now; ``signed`` of ``required`` sign-offs are in."""
+
+    state: Literal["waiting", "changes_requested", "ready", "closed"]
+    reason: str | None = None
+    required: int
+    signed: int
+    waiting_on: list[str] = []
+    reviewers: list[PlanGateRowDTO] = []
+
+
 class PlanDTO(_DTO):
     """A planning doc (brindle.plans): markdown brindle renders itself, split
     into its ``##`` sections. ``state``: open (the person hasn't decided),
@@ -449,6 +475,8 @@ class PlanDTO(_DTO):
     threads: list[PlanThreadDTO] = []
     # The person may change the text now (direct edits, accepting suggestions): only while open.
     can_edit: bool = False
+    # Set once the plan is shared for team review (brindle.pro.shared_docs).
+    gate: PlanGateDTO | None = None
 
 
 class KeptVisualDTO(_DTO):

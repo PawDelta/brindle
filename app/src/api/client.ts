@@ -504,6 +504,16 @@ export interface KbHit {
    The Wire* types are the server's own shapes (pawdelta-web pro_api.analysis_docs: _listed,
    _view, topics); the client methods turn them into the AnalysisDoc* below. A scope is
    {kind: user | group | org, id}; the daemon's filter spells it `user`, `team:<id>` or `org:<id>`. */
+export interface PlanReviewerChoice {
+  sub: string;
+  required: boolean;
+}
+
+export interface LibraryPerson {
+  sub: string;
+  email: string;
+}
+
 export interface DocScope {
   kind: string;
   id: string;
@@ -1752,6 +1762,30 @@ export class DaemonClient {
   /* The person's pick on one decision (Confirm A); the verdict starts from these. */
   confirmPlan(id: string, rev: number, decision: string, option: string) {
     return this.post<Plan>(`/plans/${encodeURIComponent(id)}/confirm`, { rev, decision, option });
+  }
+
+  /* Team review through the Library (brindle/pro/shared_docs.py): each answers with the plan, its build gate included. */
+  sharePlan(id: string, scope: { kind: string; id: string }, reviewers: PlanReviewerChoice[]) {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/share`, { scope, reviewers });
+  }
+
+  setPlanReviewers(id: string, reviewers: PlanReviewerChoice[]) {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/reviewers`, { reviewers });
+  }
+
+  /* Bring back what teammates wrote; what changed reaches the reader as an event. */
+  syncPlan(id: string) {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/sync`, {});
+  }
+
+  /* The person's own sign-off, as one of the plan's reviewers, on the revision on screen. */
+  signOffPlan(id: string, rev: number) {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/sign-off`, { rev });
+  }
+
+  /* The people of the person's org, to pick reviewers from. */
+  libraryPeople() {
+    return this.get<{ people: LibraryPerson[] }>("/library/people");
   }
 
   async keptVisuals(): Promise<KeptVisualDTO[]> {

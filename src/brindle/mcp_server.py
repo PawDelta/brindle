@@ -915,6 +915,9 @@ async def handoff(
         if dry_run:
             return tasks.dry_run_text(db, ws, profile, why, files, depends_on,
                                       load_repo_config(ws.repo_root).overlap, caller.id)
+        shut = tasks.build_gate_refusal(db, caller.id)
+        if shut:
+            return shut
         linked = req.link_plan(db, caller, plan_worker)
         if linked:
             return linked
@@ -1055,6 +1058,9 @@ async def assign(
         if dry_run:
             return tasks.dry_run_text(db, ws, profile, why, files, depends_on,
                                       load_repo_config(ws.repo_root).overlap, caller.id)
+        shut = tasks.build_gate_refusal(db, caller.id)
+        if shut:
+            return shut
         linked = req.link_plan(db, caller, plan_worker)
         if linked:
             return linked
