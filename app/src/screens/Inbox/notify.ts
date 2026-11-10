@@ -10,14 +10,16 @@
    ReadinessWatch), announced once, as it arrives. */
 
 import { invoke } from "@tauri-apps/api/core";
-import { isPermissionGranted, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
+import { isPermissionGranted, onAction, registerActionTypes, requestPermission, sendNotification } from "@tauri-apps/plugin-notification";
+import { openExternal, type OpenUrl } from "../../api/open";
 import type { InboxItemDTO } from "../../api/schema";
 import { waitingCount } from "../../store/appUpdates";
 import type { AppStore } from "../../store/store";
 import { itemKey, kindLabel } from "./items";
 
 export interface InboxSink {
-  notify(title: string, body: string): void;
+  /* `link`: the page the notification is about (an opened PR), for a sink that can offer it as an action. */
+  notify(title: string, body: string, link?: string): void;
   /* The tray / menu-bar badge (src-tauri set_inbox_count). */
   count(n: number): void;
 }
@@ -34,6 +36,7 @@ export function watchInbox(store: AppStore, sink: InboxSink): () => void {
     const state = store.getState();
     const { inbox, synced, recent, lastEventId } = state;
     if (lastEventId !== lastEvent) {
+      // (The engine doesn't publish session.pr_ready for a session whose PR is already open.)
       for (const e of recent.filter((e) => e.id > lastEvent && e.kind === "session.pr_ready")) {
         sink.notify(READY_TITLE, `${e.root_id ?? e.agent_id ?? "a session"}: every milestone passed and nothing is running. Review its changes and open the PR.`);
       }
@@ -45,7 +48,7 @@ export function watchInbox(store: AppStore, sink: InboxSink): () => void {
       const keys = new Set(inbox.map(itemKey));
       if (seen) {
         for (const item of inbox) {
-          if (!seen.has(itemKey(item))) sink.notify(kindLabel(item), describe(item));
+          if (!seen.has(itemKey(item))) sink.notify(kindLabel(item), describe(item), item.kind === "pr_opened" ? (item.url ?? undefined) : undefined);
         }
       }
       seen = keys;
@@ -64,18 +67,52 @@ export function watchInbox(store: AppStore, sink: InboxSink): () => void {
 
 function describe(item: InboxItemDTO): string {
   const who = item.agent_id ? `${item.agent_id}: ` : "";
+  // An opened PR says which one, and where (the notification's "Open on GitHub" is its link).
+  if (item.kind === "pr_opened") return `${who}${item.reason}${item.detail ? `: ${item.detail}` : ""}${item.url ? ` · ${item.url}` : ""}`;
   return `${who}${item.reason}`;
 }
 
+/* The notification calls the sink uses: the plugin's, or a fake in a test. */
+export interface NotificationApi {
+  isPermissionGranted(): Promise<boolean>;
+  requestPermission(): Promise<string>;
+  sendNotification(options: { title: string; body: string; actionTypeId?: string; extra?: Record<string, unknown> }): void;
+  registerActionTypes(types: { id: string; actions: { id: string; title: string }[] }[]): Promise<void>;
+  onAction(cb: (event: { actionId: string; notification: { extra?: Record<string, unknown> } | null }) => void): Promise<unknown>;
+}
+
+const PR_ACTIONS = "pr-opened";
+export const OPEN_ON_GITHUB = "open-github";
+
 /* The real sink inside the Tauri shell. Notification permission is asked for
-   once, the first time there is something to say. */
-export function tauriSink(): InboxSink {
+   once, the first time there is something to say. A notification with a `link`
+   (an opened PR) carries an "Open on GitHub" action, and a click on it opens
+   the link in the system browser (the desktop plugin reports clicks and actions
+   only for notifications shown while a listener exists, so it is set up first). */
+export function tauriSink(api: NotificationApi = { isPermissionGranted, requestPermission, sendNotification, registerActionTypes, onAction } as NotificationApi, open: OpenUrl = openExternal): InboxSink {
   let allowed: Promise<boolean> | null = null;
+  let listening: Promise<unknown> | null = null;
   const permitted = () =>
-    (allowed ??= isPermissionGranted().then(async (ok) => ok || (await requestPermission()) === "granted"));
+    (allowed ??= api.isPermissionGranted().then(async (ok) => ok || (await api.requestPermission()) === "granted"));
+  const listen = () =>
+    (listening ??= Promise.all([
+      api.registerActionTypes([{ id: PR_ACTIONS, actions: [{ id: OPEN_ON_GITHUB, title: "Open on GitHub" }] }]),
+      api.onAction((event) => {
+        const url = event.notification?.extra?.url;
+        if ((event.actionId === OPEN_ON_GITHUB || event.actionId === "tap") && typeof url === "string") void open(url);
+      }),
+    ]).catch(() => {
+      // Without actions the notification still shows, as text.
+    }));
   return {
-    notify(title, body) {
-      void permitted().then((ok) => ok && sendNotification({ title, body }));
+    notify(title, body, link) {
+      void permitted().then(async (ok) => {
+        if (!ok) return;
+        if (link) {
+          await listen();
+          api.sendNotification({ title, body, actionTypeId: PR_ACTIONS, extra: { url: link } });
+        } else api.sendNotification({ title, body });
+      });
     },
     count(n) {
       invoke("set_inbox_count", { count: n }).catch(() => {

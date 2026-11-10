@@ -534,6 +534,50 @@ describe("visuals", () => {
     } finally { sync.stop(); }
   });
 
+  it("inbox drops a read visual without navigating", async () => {
+    const session: SessionDTO = { id: "sup1", workspace_id: "proj", profile: "supervisor", status: "idle", mode: "interactive", created_at: now };
+    const notice: InboxItemDTO = { kind: "visual", agent_id: "sup1", root_id: "sup1", workspace_id: "proj", visual_id: "v_notice", reason: "visual is ready", detail: "Flow notice" };
+    const prompt: InboxItemDTO = { ...notice, visual_id: visual.id, reason: "asks you to choose", detail: "Pick a flow" };
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root], inbox: [notice, prompt] });
+    const client = daemon.client();
+    const store = createAppStore();
+    const sync = startSync({ client, store, connect: daemon.connect });
+    // As brindle.visuals publishes them: the session's repo and root, the visual (and, on a read, whether
+    // it still waits) in the payload. Elsewhere: another window or the CLI, nothing this app asked for.
+    const engine = async (kind: string, id: string, pending?: boolean) => {
+      if (!pending) daemon.data.inbox = daemon.data.inbox.filter((i) => i.visual_id !== id);
+      await act(async () => { daemon.publish(kind, { repo_root: REPO, root_id: "sup1", payload: { visual: id, ...(pending === undefined ? {} : { pending }) } }); });
+    };
+    const cards = () => screen.queryAllByTestId("inbox-card").map((c) => c.textContent?.includes("Flow notice") ? "notice" : "prompt");
+    const badge = () => screen.queryByTestId("inbox-badge")?.textContent ?? null;
+    try {
+      render(<PtyViewsProvider value={standInViews}><App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "inbox" }} /></PtyViewsProvider>);
+      await waitFor(() => expect(cards()).toEqual(["notice", "prompt"]));
+      await act(async () => sync.idle());
+      expect(badge()).toBe("2");
+      // A busy daemon: the inbox reads the events start don't answer until let go, oldest first.
+      const reads: ((items: InboxItemDTO[]) => void)[] = [];
+      const held = vi.spyOn(client, "inbox").mockImplementation(() => new Promise((resolve) => reads.push(resolve)));
+      // Read, the question still waits for its answer; the read begun now still sees the notice.
+      const before = daemon.data.inbox;
+      await engine("visual.read", visual.id, true);
+      expect(cards()).toEqual(["notice", "prompt"]);
+      // The notice is read: gone at once, here and in the badge, with that read still out.
+      await engine("visual.read", "v_notice", false);
+      expect([cards(), badge()]).toEqual([["prompt"], "1"]);
+      // The read from before it lands: it doesn't put the notice back.
+      await act(async () => reads[0](before));
+      expect([cards(), badge()]).toEqual([["prompt"], "1"]);
+      await engine("visual.answered", visual.id);
+      expect([cards(), badge()]).toEqual([[], null]);
+      // The reads still out (one from before the answer) land, and the daemon answers again.
+      held.mockRestore();
+      await act(async () => { reads.slice(1).forEach((resolve, i) => resolve(i === 0 ? [prompt] : daemon.data.inbox)); });
+      await act(async () => sync.idle());
+      expect([cards(), badge()]).toEqual([[], null]);
+    } finally { sync.stop(); }
+  });
+
   it("opens from the header over the whole window with the sidebar hidden, and Esc or Back returns to the same sidebar and terminal", async () => {
     const session: SessionDTO = { id: "sup1", workspace_id: "proj", profile: "supervisor", status: "idle", mode: "interactive", created_at: now - 600, goal: "Ship it" };
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root] });
@@ -627,15 +671,14 @@ describe("visuals", () => {
       expect(within(sidebar()).getByRole("button", { name: "Show sup1's agents" })).toBeTruthy();
       expect(screen.getByTestId("terminal")).toBe(terminal);
 
-      // Knowledge › Kept visuals: the kept copy opens in the same reader, read-only, on its own scheme path.
-      fireEvent.click(within(sidebar()).getByRole("button", { name: "Open Account › Usage" }));
-      fireEvent.click(within(sidebar()).getByRole("button", { name: "Knowledge" }));
-      fireEvent.click(await screen.findByRole("tab", { name: /Kept visuals/ }));
+      // Library › Kept visuals: the kept copy opens in the same reader, read-only, on its own scheme path.
+      fireEvent.click(within(sidebar()).getByRole("button", { name: /^Library/ }));
+      fireEvent.click(await within(sidebar()).findByRole("button", { name: /^Kept visuals/ }));
       fireEvent.click(await screen.findByTestId("kept-k_1"));
       const kept = screen.getByTestId("kept-reader");
       expect(within(kept).getByTestId("visual-frame").dataset.src).toBe("brindle-visual://kept/k_1");
       expect(within(kept).queryByTestId("visual-send")).toBeNull();
-      // Esc closes the reader and stays in Knowledge; the next Esc, with nothing nested open, leaves it.
+      // Esc closes the reader and stays in the Library; the next Esc, with nothing nested open, leaves it.
       fireEvent.keyDown(window, { key: "Escape" });
       expect(await screen.findByTestId("kept-k_1")).toBeTruthy();
       expect(screen.queryByTestId("kept-reader")).toBeNull();

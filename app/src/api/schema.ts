@@ -179,6 +179,7 @@ export interface AllowAllGrantDTO {
 /**
  * One rung of an ask's scope ladder: ``value`` exact | general |
  * repository | remote | server | all, ``pattern`` what a grant of it covers.
+ * ``modes`` lists the decisions this request accepts at this scope.
  *
  * This interface was referenced by `ApiSchema`'s JSON-Schema
  * via the `definition` "AskScopeDTO".
@@ -186,6 +187,7 @@ export interface AllowAllGrantDTO {
 export interface AskScopeDTO {
   label: string;
   level?: string | null;
+  modes?: string[] | null;
   pattern: string;
   value: string;
 }
@@ -322,6 +324,7 @@ export interface AskGroupDTO {
   org?: OrgControlViewDTO | null;
   repo: string;
   rule?: string | null;
+  save_reason?: string | null;
   scopes: AskScopeDTO[];
   title: string;
 }
@@ -532,6 +535,7 @@ export interface InboxItemDTO {
   request_id?: string | null;
   root_id?: string | null;
   section?: string | null;
+  url?: string | null;
   visual_id?: string | null;
   workspace_id?: string | null;
 }

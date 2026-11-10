@@ -228,6 +228,8 @@ def test_visual_ready_notice_and_answers_for_the_revision_on_screen(db, session,
     assert (item.visual_id, item.root_id) == (v["id"], boss.id)
     assert client.post(f"/v1/visuals/{v['id']}/read").json()["unread"] is False
     assert [i.visual_id for i in inbox.items(db, None, panes={}) if i.kind == "visual"] == [v["id"]]
+    # Each read says whether its visual still waits in the Inbox: the app drops the card at once if not.
+    assert [e["payload"]["pending"] for e in bus.tail(db, kinds=("visual.read",))] == [False, False, True, False, True]
     assert client.post(f"/v1/visuals/{v['id']}/keep").json()["kept"] is True     # r1 is kept
 
     # A new revision arrives while r1 is on screen: r1's answer is refused, not read against r2.
