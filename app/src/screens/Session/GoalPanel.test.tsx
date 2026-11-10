@@ -543,6 +543,7 @@ describe("GoalPanel", () => {
     ["no commit this hour", { stage: "checks", commits_last_hour: 0, last_commit_at: ago(900), eta_seconds: 240 }, "last commit 15m ago", "about 4m left"],
     ["nothing running", { stage: null, commits_last_hour: 0, last_commit_at: ago(900), eta_seconds: 600 }, "last commit 15m ago", null],
     ["an older engine", {}, null, null],
+    ["expired estimate", { stage: "working", eta_seconds: -60 }, null, null],
   ])("says what happened lately: %s", async (_, fields, what, eta) => {
     const daemon = new FakeDaemon({ goal: { ...structuredClone(goal), ...fields } });
     const view = render(<GoalPanel client={daemon.client()} repo={REPO} root={ROOT} store={createAppStore()} compact />);

@@ -1661,16 +1661,19 @@ def remove_workspace(workspace: str, delete_branch: bool | None = None, force: b
     worker = agents.workspace_worker(db, ws)
     abandoned = bool(worker and worker.result is None and not db.merged_sha(ws.id))
     its_agents = [a.id for a in db.list_agents(ws.id)]
-    if unmerged or abandoned:
-        if unmerged:
-            tasks.on_removed_unmerged(db, ws)
-        pipeline.note_removed_unmerged(db, ws, actor=caller)
-    else:
-        pipeline.note_removed_merged(db, ws, actor=caller)
     try:
         removed = workspaces.remove(db, ws, force=force, delete_branch=delete_branch)
     except workspaces.WorkspaceError as e:
         return f"Not removed: {e}"
+    # Removal can refuse dirty, busy or unwritable checkouts. Only settle
+    # dependencies and publish its outcome after it succeeds. The worker's
+    # row may already be gone, so use the identity captured above.
+    if unmerged or abandoned:
+        if unmerged:
+            tasks.on_removed_unmerged(db, ws, worker=worker)
+        pipeline.note_removed_unmerged(db, ws, actor=caller, worker=worker)
+    else:
+        pipeline.note_removed_merged(db, ws, actor=caller, worker=worker)
     for agent_id in its_agents:
         open_items.close(db, agent_id)
     return f"Removed {ws.id}. {removed.branch_note or 'branch deleted'}"

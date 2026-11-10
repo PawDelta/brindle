@@ -419,10 +419,11 @@ def record_viewed(root_id: str) -> None:
 
 
 def _read_viewed() -> str | None:
-    """The session the app last showed, or None when none is recorded."""
+    """The session the app last showed, or None when none is recorded or it
+    can't be read (a hint only: recovery goes on without it)."""
     try:
         return _viewed_path().read_text().strip() or None
-    except OSError:
+    except (OSError, ValueError):
         return None
 
 
@@ -468,6 +469,10 @@ class Recovery:
         self.lanes: deque[list[dict]] = deque()     # those whose turn hasn't begun, under lock
         self.total = 0                  # how many entries the record had
         self.handed_over = False        # stop has returned: the record is the way out's now
+        self.ordered = False            # ``lanes`` is in place: a prioritize moves them at once
+        self.wanted: list[str] = []     # sessions opened before then, in order, under lock
+        self.viewed: str | None = None  # the session on screen, which comes back first (resume_after_start)
+        self.alone = threading.Event()  # its head start is over: the others may start
 
     def _save(self) -> bool:
         if self.handed_over:
@@ -501,13 +506,37 @@ class Recovery:
 
     def prioritize(self, root_id: str) -> None:
         """Bring session ``root_id``'s lane to the front of those not yet begun
-        (the person has opened it). Nothing, if it has begun or none is under way."""
+        (the person has opened it). Nothing, if it has begun or none is under way.
+        Opened before the start has put its sessions in order, it goes first
+        once it has (order). Another than the one on screen ends that one's
+        head start: the person isn't looking at it any more."""
         with self.lock:
-            for lane in self.lanes:
-                if any(e["id"] == root_id for e in lane):
-                    self.lanes.remove(lane)
-                    self.lanes.appendleft(lane)
-                    return
+            if not self.ordered:
+                self.wanted.append(root_id)
+                return
+            lane = self._forward(root_id)
+            if lane is not None and not any(e["id"] == self.viewed for e in lane):
+                self.alone.set()
+
+    def _forward(self, root_id: str) -> list[dict] | None:
+        for lane in self.lanes:
+            if any(e["id"] == root_id for e in lane):
+                self.lanes.remove(lane)
+                self.lanes.appendleft(lane)
+                return lane
+        return None
+
+    def order(self, lanes: deque[list[dict]], viewed: str | None) -> bool:
+        """The start's ``lanes`` in place, behind any session opened meanwhile:
+        whether ``viewed``'s still comes first, alone (its head start)."""
+        with self.lock:
+            self.lanes, self.ordered, self.viewed = lanes, True, viewed
+            for root_id in self.wanted:
+                self._forward(root_id)
+            head = bool(lanes) and any(e["id"] == viewed for e in lanes[0])
+            if not head:
+                self.alone.set()
+            return head
 
     def progress(self) -> dict | None:
         """How far the start's resume has come (the app's "3 of 6"): sessions
@@ -711,9 +740,8 @@ def _resume_after_start(recovery: Recovery | None = None) -> list[str]:
             lanes.remove(first)
             first.sort(key=lambda e: e["id"] != viewed)
             lanes.appendleft(first)
-        alone = threading.Event()       # the viewed session's turn is over: the others may start
-        with recovery.lock:
-            recovery.lanes = lanes
+        alone = recovery.alone      # the viewed session's turn is over: the others may start
+        head = recovery.order(lanes, viewed)     # behind any session the person opened meanwhile
         ordered = time.monotonic() - began
 
         def work(lead: bool = False) -> None:
@@ -753,7 +781,7 @@ def _resume_after_start(recovery: Recovery | None = None) -> list[str]:
                                     name=f"brindle-resume-{n}", daemon=True)
                    for n in range(min(RESUME_PARALLEL, len(lanes)))]
         rest = threads
-        if first is not None:
+        if head:
             # The CPU and the keychain to itself, for the head start at most: one that hangs holds up no other.
             threads[0].start()
             if not alone.wait(VIEWED_HEAD_START):

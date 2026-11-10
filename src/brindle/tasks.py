@@ -1400,11 +1400,13 @@ def sweep(db: DB) -> int:
     return started
 
 
-def on_removed_unmerged(db: DB, ws: Workspace) -> None:
+def on_removed_unmerged(db: DB, ws: Workspace, *, worker: Agent | None = None) -> None:
     """``ws`` was removed while its branch still had commits not in its base:
     cancel any pending task depending on it -- and, recursively, any pending
-    task that in turn depends on those -- and tell each one's caller."""
-    worker = agents.workspace_worker(db, ws)
+    task that in turn depends on those -- and tell each one's caller. Pass
+    ``worker`` when successful removal has already deleted its agent row:
+    pinned worker and task references must still resolve to that identity."""
+    worker = worker or agents.workspace_worker(db, ws)
     dep_ref = worker.id if worker else ws.branch
     worker_id = worker.id if worker else None
     for t in queued(db):

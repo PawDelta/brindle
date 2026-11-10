@@ -27,6 +27,24 @@ from git_snapshots import fast_host_tools, repo, restore_or_build, workspaces_on
 DAY = 86400
 
 
+@pytest.mark.parametrize("metadata", [None, {"repo_root": None}, {"branch": []},
+    {"removed_at": "yesterday"}, {"size": -1}, {"removed_at": float("inf")},
+    pytest.param({"removed_at": 10 ** 400}, marks=pytest.mark.variant(
+        "corrupt JSON timestamp exceeds float range; retention must not overflow"))])
+def test_corrupt_trash_does_not_block_retention(brindle_home, monkeypatch, metadata):
+    from brindle import trash
+
+    entry = {"repo_root": "/gone", "path": "/gone/tree", "branch": None,
+             "sha": None, "removed_at": 0, "size": 10}
+    for ident, data in (("broken", None if metadata is None else {**entry, **metadata}), ("old", entry)):
+        folder = trash.directory() / ident
+        (folder / "tree").mkdir(parents=True)
+        (folder / "entry.json").write_text(json.dumps(None if data is None else {**data, "id": ident}))
+    monkeypatch.setattr(trash, "_unpin", lambda *a: None)
+    assert trash.retain(now=1, cap=9) == ["old"]
+    assert (trash.directory() / "broken" / "tree").is_dir()
+
+
 @pytest.mark.parametrize("action", ["restore", "expiry", "refused", "path", "cap", "empty",
                                   "registration-failure", "moved", "deleted", "restore-race",
                                   "path-race", "locked", "prune"])
@@ -148,6 +166,8 @@ def test_removed_worktree_goes_to_trash(db, repo, monkeypatch, action):
             walked = []
             size_of = disk.size_of
             monkeypatch.setattr(disk, "size_of", lambda p: walked.append(p) or size_of(p))
+            if action == "cap":
+                assert trash.retain(now=entry["removed_at"], cap=entry["size"]) == []
             trash.retain(now=entry["removed_at"] + (trash.RETENTION + 1 if action == "expiry" else 0),
                          cap=0 if action == "cap" else trash.SIZE_CAP)
             assert walked == []   # sized once, when it was trashed
@@ -724,6 +744,7 @@ def test_low_free_disk_holds_a_launch(repo, monkeypatch, held):
     assert tasks.room_wait(str(repo)) == why
 
 
+@pytest.mark.slow("end-to-end clean/doctor CLI workflow uses real Git worktrees and verifies archived branch tips")
 def test_clean_lists_then_removes_merged_and_archives_stale_branches(db, repo, monkeypatch):
     wt = _worktree(repo, "feat", merge="merge")
     when = f"{int(time.time() - 30 * DAY)} +0000"

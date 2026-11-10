@@ -804,6 +804,20 @@ describe("visuals", () => {
     expect(onAnswered).not.toHaveBeenCalled();
   });
 
+  it.each([null, { ...visual, id: "v_other" }, { ...visual, rev: 3 }])("ignores a pending Keep after replacing its reader with %j", async (replacement) => {
+    let resolve!: (row: VisualDTO) => void;
+    const client = new FakeDaemon().client();
+    vi.spyOn(client, "keepVisual").mockImplementation(() => new Promise((done) => { resolve = done; }));
+    const onAnswered = vi.fn();
+    const reader = (row: VisualDTO) => <VisualReader client={client} visual={row} onAnswered={onAnswered} onBack={() => {}} Frame={() => <div />} />;
+    const view = render(reader(visual));
+    fireEvent.click(screen.getByTestId("visual-keep"));
+    view.rerender(replacement ? reader(replacement) : <div>Another session</div>);
+    await act(async () => resolve({ ...visual, kept: true }));
+    expect(onAnswered).not.toHaveBeenCalled();
+    if (replacement) expect((screen.getByTestId("visual-keep") as HTMLButtonElement).disabled).toBe(false);
+  });
+
   it("can dismiss a visual prompt without answering, closing the reader like Back", async () => {
     const sup: SessionDTO = { id: "sup1", workspace_id: "proj", profile: "supervisor", status: "idle", mode: "interactive", created_at: 0, goal: "Ship" };
     const daemon = new FakeDaemon({
