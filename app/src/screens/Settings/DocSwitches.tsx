@@ -12,7 +12,7 @@ import { alert, card, h2 } from "../../components/ui";
 export type DocSwitchesClient = Pick<DaemonClient, "docSwitches" | "setDocSwitch">;
 
 const ABOUT: Record<DocSwitchName, { name: string; help: string }> = {
-  store: { name: "Store docs", help: "Keep each branch's analysis doc in your library once it merges." },
+  store: { name: "Store plans and docs", help: "Keep approved plans, and each branch's analysis doc once it merges, in your plan library." },
   share: { name: "Sharing", help: "Let your docs be shared with your teams and organisation." },
   assist: { name: "Briefs", help: "Give new work a brief from the docs that match it." },
   prompt_analysis: { name: "Prompt analysis", help: "Record which docs your prompts matched (never the prompt itself)." },
@@ -55,9 +55,9 @@ export function DocSwitches({ client }: { client: DocSwitchesClient }) {
     <section id="doc-switches" aria-labelledby="doc-switches-title" className="flex scroll-mt-s2 flex-col gap-s1" data-testid="doc-switches">
       <header className="flex flex-wrap items-baseline gap-x-s2">
         <h2 id="doc-switches-title" className={h2}>
-          Analysis docs
+          Plan library
         </h2>
-        <span className="text-xs text-ink-3">What brindle Pro does with your analysis docs.</span>
+        <span className="text-xs text-ink-3">What brindle Pro does with your plans and docs.</span>
       </header>
       <div className={`${card} flex flex-col divide-y divide-line`}>
         {switches.map((s) => {

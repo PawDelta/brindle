@@ -589,14 +589,14 @@ export function DocsView({ client, repo, session: initialSession, doc, pickFolde
       </div>
       {listing.state === "unavailable" && (
         <div className={`${card} flex flex-col gap-1 px-s2 py-s2 text-sm`} data-testid="docs-unavailable">
-          <h2 className={h2}>Docs live in brindle Pro's library</h2>
-          <p className="text-ink-2">When you explicitly request an analysis doc for a goal or task, it records what was built, decided and left open. With brindle Pro it's stored encrypted in your library and briefs the next related task. On the free plan the docs are written to ~/.brindle/docs and show up under Imported.</p>
+          <h2 className={h2}>Plans live in brindle Pro's plan library</h2>
+          <p className="text-ink-2">When you approve a plan, or request an analysis doc for a goal or task, it records what was built, decided and left open. With brindle Pro it's stored encrypted in your plan library and briefs the next related task. On the free plan the docs are written to ~/.brindle/docs and show up under Imported.</p>
           <p className="text-xs text-ink-3">{listing.error}</p>
         </div>
       )}
       {listing.state === "failed" && (
         <div role="alert" className={`${alert} flex items-center justify-between gap-s2`}>
-          <span>Could not load the docs: {listing.error}</span>
+          <span>Could not load the plan library: {listing.error}</span>
           <button type="button" className={button} onClick={load}>
             Try again
           </button>
@@ -615,7 +615,7 @@ export function DocsView({ client, repo, session: initialSession, doc, pickFolde
           </nav>
           <div className="flex min-w-0 flex-col gap-s1">
             {listing.state === "loading" && <p className="text-sm text-ink-3">Loading…</p>}
-            {listing.state === "loaded" && docs.length === 0 && <p className="text-sm text-ink-2">No docs here yet. Request an analysis doc for a goal or task to have one written.</p>}
+            {listing.state === "loaded" && docs.length === 0 && <p className="text-sm text-ink-2">Nothing in the plan library yet. Approved plans are stored here.</p>}
             {listing.state === "loaded" && docs.length > 0 && shown.length === 0 && <p className="text-sm text-ink-2">No doc matches.</p>}
             {shown.length > 0 && !shown.some((d) => d.category) && <ul className="flex flex-col gap-s1">{shown.map(docCard)}</ul>}
             {shown.some((d) => d.category) && byCategory(shown).map(([name, list]) => {

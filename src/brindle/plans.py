@@ -509,8 +509,39 @@ def decide(db: DB, plan_id: str, rev: Any, approved: bool, picks: Any = None, co
     bus.publish(db, "visual.answered", repo_root=p["visual"]["repo_root"], root_id=p["root_id"], visual=p["id"],
                 rev=rev, option=state)
     if approved:
+        _to_library(p, picks, comments, note, titles)
         tasks.on_resumed(db, p["root_id"], why="the person's approval of the plan")
     return get(db, p["id"])
+
+
+def _record(p: dict, picks: dict, comments: list[dict], note: str | None, titles: dict) -> str:
+    """The approved revision with what the person decided under it."""
+    out = [p["markdown"].rstrip(), "", f"## What the person approved (r{p['rev']})", ""]
+    for d in p["decisions"]:
+        pick = picks.get(d["id"]) or d["mine"]
+        label = next((o["label"] for o in d["options"] if o["id"] == pick), pick)
+        out.append(f"- Decision {d['id']} ({d['title']}): {label}")
+    for s in p["split"] or []:
+        out.append(f"- Worker {s['id']}: {s['title']}")
+    out += [f"- On \"{titles[c['section']]}\": {c['text']}" for c in comments]
+    if note:
+        out.append(f"- Their note: {note}")
+    return "\n".join(out) + "\n"
+
+
+def _to_library(p: dict, picks: dict, comments: list[dict], note: str | None, titles: dict) -> None:
+    """Store the approved plan in the person's plan library. Entitlement, the
+    store switch and the network are the uploader's to judge; nothing here
+    blocks or fails an approval."""
+    try:
+        from brindle.pro import analysis_docs
+
+        md = _record(p, picks, comments, note, titles)
+        doc = analysis_docs.Doc(files=[{"name": f"plan-{p['id']}.md", "md": md}],
+                                source={"kind": "goal", "ref": p["id"], "session": p["root_id"]})
+        analysis_docs.on_merged(p["visual"]["repo_root"], [doc])
+    except Exception:  # noqa: BLE001 - the approval stands
+        log.info("brindle: plan %s not queued for the library", p["id"], exc_info=True)
 
 
 # -- the offer to plan first ------------------------------------------------------------
