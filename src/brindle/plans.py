@@ -205,9 +205,14 @@ def _row(db: DB, plan_id: str) -> dict:
 
 
 def get(db: DB, plan_id: str) -> dict:
-    """The plan and its visual's row, as ``{**plan, "visual": {...}}``."""
+    """The plan and its visual's row, as ``{**plan, "visual": {...}}``, with
+    the current revision's ``lede`` and ``sections`` (brindle.plan_docs)."""
+    from brindle import plan_docs
+
     p = _row(db, plan_id)
     p["visual"] = visuals.get(db, p["id"])
+    cur = plan_docs.revision(db, p["id"])
+    p["lede"], p["sections"] = cur["lede"], cur["sections"]
     return p
 
 
@@ -251,14 +256,13 @@ def _queued(db: DB, root_id: str) -> int:
 
 
 def to_dto(db: DB, p: dict) -> dict:
+    from brindle import plan_docs
     from brindle.service.dto import PlanDTO
 
-    lede, parts = sections(p["markdown"])
     return PlanDTO(id=p["id"], session=p["root_id"], title=p["visual"]["title"], rev=p["rev"],
-                   state=p["state"], ask=p.get("ask"),
-                   markdown=p["markdown"], lede=lede, sections=parts, decisions=p["decisions"], split=_board(db, p),
+                   state=p["state"], ask=p.get("ask"), markdown=p["markdown"], split=_board(db, p),
                    verdict=p["decision"], queued=_queued(db, p["root_id"]) if p["state"] in HOLDING else 0,
-                   created_at=p["created_at"]).to_json()
+                   created_at=p["created_at"], **plan_docs.fields(db, p)).to_json()
 
 
 def assignment(db: DB, caller: Agent, ref: str) -> tuple[str, str]:
@@ -314,19 +318,31 @@ def _page(title: str, markdown: str) -> str:
 
 
 def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, split: Any = None,
-            title: str | None = None, plan_id: str | None = None, ask: Any = None) -> dict:
+            title: str | None = None, plan_id: str | None = None, ask: Any = None,
+            sections: Any = None) -> dict:
     """The session's supervisor proposes a plan, or (``plan_id``) a new
     revision of its open or redirected one. Each publication spends the
     person's request: their ask for a planning doc, or their Redirect.
     ``ask``: the person's request restated in the supervisor's words, shown
-    on every step of the reader for them to correct."""
+    on every step of the reader for them to correct. ``sections``: the doc
+    as sections, markdown or diagrams (brindle.plan_docs.parse_sections);
+    then ``markdown`` is only the text before them (the title and lede).
+    Without it, the markdown's ``##`` headings make the sections."""
+    from brindle import plan_docs
+
     visuals.require_enabled()
     root, _ws = visuals._session(db, caller)
     if caller.id != root.id:
         raise ServiceError("forbidden", "only the session's supervisor proposes a plan", 403)
-    if not isinstance(markdown, str) or not markdown.strip():
+    if sections is not None:
+        parts = plan_docs.parse_sections(sections)
+        lede = plan_docs._body_text(markdown, "markdown", MAX_MARKDOWN).strip()
+        markdown = plan_docs.render(lede, parts)
+    elif not isinstance(markdown, str) or not markdown.strip():
         raise ServiceError("invalid", "markdown is required", 400)
-    markdown = markdown.strip()
+    else:
+        markdown = markdown.strip()
+        lede, parts = plan_docs.from_markdown(markdown)
     if len(markdown.encode("utf-8")) > MAX_MARKDOWN:
         raise ServiceError("too_big", f"a plan may be at most {MAX_MARKDOWN // 1024} KB of markdown", 400)
     decisions, split = _decisions(decisions), _split(split)
@@ -349,13 +365,18 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
             raise ServiceError("not_found", "no such plan in this session", 404)
         if current["state"] not in HOLDING:
             raise ServiceError("approved", "that plan is approved; propose a new plan instead", 409)
+    replaced = plan_docs.revision(db, plan_id) if plan_id else None
+    previous = {s["id"]: s for s in replaced["sections"]} if replaced else {}
 
     settled: list[int] = []
 
-    def write(c, vid: str, rev: int) -> None:
+    def write(c, vid: str, visual_rev: int) -> None:
         now = time.time()
+        # The plan's revisions count the person's own edits too, so they run
+        # ahead of its visual's (the supervisor's publications).
+        rev = 1 if visual_rev == 1 else c.execute("SELECT rev FROM plans WHERE id=?", (vid,)).fetchone()[0] + 1
         args = (rev, markdown, json.dumps(decisions), json.dumps(split), ask, now)
-        if rev == 1:
+        if visual_rev == 1:
             c.execute("INSERT INTO plans (id, root_id, rev, markdown, decisions, split, ask, state, created_at,"
                       " updated_at) VALUES (?,?,?,?,?,?,?,'open',?,?)", (vid, root.id, *args[:5], now, now))
             # The plan now holds the session's tasks: the offer to plan first is settled
@@ -370,6 +391,9 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
                                 " decision=NULL WHERE id=? AND state IN ('open','redirected')", (*args, vid)).rowcount
             if not changed:
                 raise ServiceError("approved", "that plan is approved; propose a new plan instead", 409)
+            plan_docs.keep(c, replaced)
+        plan_docs.insert_revision(c, vid, rev, plan_docs.SUPERVISOR, "proposal", lede, parts, markdown, decisions,
+                                  split, ask, [s["id"] for s in parts if previous.get(s["id"]) != s], now)
 
     try:
         v = visuals.publish(db, caller, title, _page(title, markdown), visual_id=plan_id, kind="plan", extra=write)
@@ -400,7 +424,7 @@ def anchors(p: dict) -> dict[str, str]:
     """What a comment on revision ``p`` may name, with the title the
     supervisor reads it under: each ``##`` section and, when the plan has
     them, the restated ask, the lede, the split and each decision."""
-    lede, parts = sections(p["markdown"])
+    lede, parts = (p["lede"], p["sections"]) if "sections" in p else sections(p["markdown"])
     out = {s["id"]: s["title"] for s in parts}
     if p.get("ask"):
         out[ASK] = "What I understood (your restated ask)"
@@ -427,7 +451,8 @@ def _comments(raw: Any, section_ids: set[str]) -> list[dict]:
     return out
 
 
-def _message(p: dict, approved: bool, picks: dict, comments: list[dict], note: str | None, titles: dict) -> str:
+def _message(p: dict, approved: bool, picks: dict, comments: list[dict], note: str | None, titles: dict,
+             doc: list[str] = (), files: list[str] = ()) -> str:
     verb = "approved" if approved else "redirected"
     lines = [f"The person {verb} plan {p['id']} (r{p['rev']})."]
     for d in p["decisions"]:
@@ -437,8 +462,11 @@ def _message(p: dict, approved: bool, picks: dict, comments: list[dict], note: s
             lines.append(f"Decision {d['id']} ({d['title']}): they chose {pick} ({label}) over yours.")
     for c in comments:
         lines.append(f"On \"{titles[c['section']]}\": {c['text']}")
+    lines.extend(doc)
     if note:
         lines.append(f"Their note: {note}")
+    if files:
+        lines.append(" ".join(["Attached to their note:", *files]))
     if approved:
         lines.append("The tasks you assigned behind the plan start now; assign the rest as planned.")
     else:
@@ -447,7 +475,7 @@ def _message(p: dict, approved: bool, picks: dict, comments: list[dict], note: s
 
 
 def decide(db: DB, plan_id: str, rev: Any, approved: bool, picks: Any = None, comments: Any = None,
-           note: Any = None, *, person: bool) -> dict:
+           note: Any = None, *, person: bool, attachments: Any = None) -> dict:
     """The person's verdict on the revision on their screen (``rev``):
     approve, or redirect with their picks and per-section comments. Only the
     person (the app, through the daemon's guarded route) decides: anyone
@@ -461,8 +489,13 @@ def decide(db: DB, plan_id: str, rev: Any, approved: bool, picks: Any = None, co
     starts unless the supervisor's message is queued with it. Pushing the
     message to the supervisor's terminal comes after, and failing that loses
     nothing: it stays queued for its next turn. Then an approval releases the
-    session's queued tasks."""
-    from brindle import agents, tasks
+    session's queued tasks.
+
+    The verdict starts from the decisions the person confirmed on the doc
+    (``picks`` given here win), and carries what they wrote on it that the
+    supervisor hasn't had (brindle.plan_docs.pending) and the files
+    ``attachments`` put on their note."""
+    from brindle import agents, plan_docs, tasks
 
     visuals.require_enabled()
     if not person:
@@ -476,24 +509,28 @@ def decide(db: DB, plan_id: str, rev: Any, approved: bool, picks: Any = None, co
     if p["state"] != "open":
         raise ServiceError("decided", "this revision is already decided", 409)
     titles = anchors(p)
-    picks = _picks(picks, p["decisions"])
+    picks = {**plan_docs.confirmed(db, p), **_picks(picks, p["decisions"])}
     comments = _comments(comments, set(titles))
     note = visuals._text(note, "note", visuals.MAX_NOTE)
-    if not approved and not comments and not note and not any(picks.get(d["id"]) not in (None, d["mine"])
-                                                              for d in p["decisions"]):
+    doc, doc_record, threads = plan_docs.pending(db, p)
+    if not approved and not comments and not note and not doc and not any(
+            picks.get(d["id"]) not in (None, d["mine"]) for d in p["decisions"]):
         raise ServiceError("invalid", "say what to change: a comment, a note or a different pick", 400)
     visuals._refuse_secrets([("your note", note), *((f"your comment on {titles[c['section']]}", c["text"])
                                                     for c in comments)])
+    files = plan_docs._attachments(db, p, attachments)
     at = time.time()
-    verdict = {"approved": bool(approved), "picks": picks, "comments": comments, "note": note, "at": at, "rev": rev}
+    verdict = {"approved": bool(approved), "picks": picks, "comments": comments, "note": note, "at": at, "rev": rev,
+               "attachments": [f["name"] for f in files]}
     record = json.dumps(verdict)
     answer = json.dumps({"option": "approve" if approved else "redirect", "note": note, "at": at, "rev": rev})
     state = "approved" if approved else "redirected"
-    text = _message(p, approved, picks, comments, note, titles)
+    text = _message(p, approved, picks, comments, note, titles, doc, [f["ref"] for f in files])
     with db.tx() as c:
         claimed = c.execute("UPDATE plans SET state=?, decision=?, updated_at=? WHERE id=? AND rev=? AND state='open'",
                             (state, record, at, p["id"], rev)).rowcount == 1
         if claimed:
+            plan_docs.mark_sent(c, threads, rev)
             c.execute("UPDATE visuals SET answer=?, read_rev=MAX(read_rev, rev) WHERE id=?", (answer, p["id"]))
             if not approved:
                 visual_offers._grant(c, p["root_id"], "plan")   # the one revision the redirect asks for
@@ -513,12 +550,13 @@ def decide(db: DB, plan_id: str, rev: Any, approved: bool, picks: Any = None, co
     bus.publish(db, "visual.answered", repo_root=p["visual"]["repo_root"], root_id=p["root_id"], visual=p["id"],
                 rev=rev, option=state)
     if approved:
-        _to_library(p, picks, comments, note, titles)
+        _to_library(p, picks, comments, note, titles, doc_record)
         tasks.on_resumed(db, p["root_id"], why="the person's approval of the plan")
     return get(db, p["id"])
 
 
-def _record(p: dict, picks: dict, comments: list[dict], note: str | None, titles: dict) -> str:
+def _record(p: dict, picks: dict, comments: list[dict], note: str | None, titles: dict,
+            doc: list[str] = ()) -> str:
     """The approved revision with what the person decided under it."""
     out = [p["markdown"].rstrip(), "", f"## What the person approved (r{p['rev']})", ""]
     for d in p["decisions"]:
@@ -534,19 +572,21 @@ def _record(p: dict, picks: dict, comments: list[dict], note: str | None, titles
         if s.get("test"):
             out.append(f"  - finish line (test): {s['test']}")
     out += [f"- On \"{titles[c['section']]}\": {c['text']}" for c in comments]
+    out += [f"- {line}" for line in doc]
     if note:
         out.append(f"- Their note: {note}")
     return "\n".join(out) + "\n"
 
 
-def _to_library(p: dict, picks: dict, comments: list[dict], note: str | None, titles: dict) -> None:
+def _to_library(p: dict, picks: dict, comments: list[dict], note: str | None, titles: dict,
+                doc: list[str] = ()) -> None:
     """Store the approved plan in the person's plan library. Entitlement, the
     store switch and the network are the uploader's to judge; nothing here
     blocks or fails an approval."""
     try:
         from brindle.pro import analysis_docs
 
-        md = _record(p, picks, comments, note, titles)
+        md = _record(p, picks, comments, note, titles, doc)
         doc = analysis_docs.Doc(files=[{"name": f"plan-{p['id']}.md", "md": md}],
                                 source={"kind": "goal", "ref": p["id"], "session": p["root_id"]})
         analysis_docs.on_merged(p["visual"]["repo_root"], [doc])

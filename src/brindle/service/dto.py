@@ -293,11 +293,15 @@ class VisualDTO(_DTO):
 
 
 class PlanSectionDTO(_DTO):
-    """One ``##`` section of a plan's markdown: what a comment anchors to."""
+    """One section of a plan's revision: what a comment anchors to.
+    ``kind``: markdown, or a diagram (``markdown`` then holds its mermaid or
+    SVG source, and ``caption`` its figure caption)."""
 
     id: str
     title: str
+    kind: Literal["markdown", "mermaid", "svg"] = "markdown"
     markdown: str
+    caption: str | None = None
 
 
 class PlanOptionDTO(VisualOptionDTO):
@@ -317,6 +321,10 @@ class PlanDecisionDTO(_DTO):
     options: list[PlanOptionDTO]
     mine: str | None = None
     challenge: str | None = None
+    # Who voted for which option ({option: [voter]}), and the person's own
+    # confirmed pick, which their verdict starts from.
+    votes: dict[str, list[str]] = {}
+    confirmed: str | None = None
 
 
 class PlanWorkerDTO(_DTO):
@@ -346,6 +354,73 @@ class PlanVerdictDTO(_DTO):
     note: str | None = None
     at: float
     rev: int
+    attachments: list[str] = []
+
+
+class PlanAnchorDTO(_DTO):
+    """Where a thread is anchored (brindle.plan_docs): a text range of a
+    section (``text``: ``quote`` between ``start`` and ``end``), a diagram
+    section, a decision (optionally one option) or a whole section, the
+    ask, the lede or the split. ``state``: where it is in the current
+    revision: ``current``, ``moved`` (found elsewhere) or ``detached`` (gone)."""
+
+    kind: Literal["text", "diagram", "decision", "section"]
+    section: str | None = None
+    start: int | None = None
+    end: int | None = None
+    quote: str | None = None
+    decision: str | None = None
+    option: str | None = None
+    state: Literal["current", "moved", "detached"] = "current"
+
+
+class PlanReplyDTO(_DTO):
+    id: int
+    author: str
+    text: str
+    attachments: list[str] = []
+    at: float
+
+
+class PlanThreadDTO(_DTO):
+    """A comment thread, or a suggestion (``before`` becomes ``after`` when
+    the author accepts it). ``sent``: a verdict carried it to the supervisor."""
+
+    id: int
+    kind: Literal["comment", "suggestion"]
+    rev: int
+    author: str
+    text: str
+    anchor: PlanAnchorDTO
+    before: str | None = None
+    after: str | None = None
+    attachments: list[str] = []
+    status: Literal["open", "resolved", "accepted", "rejected"]
+    sent: bool = False
+    at: float
+    replies: list[PlanReplyDTO] = []
+
+
+class PlanRevisionDTO(_DTO):
+    """One revision of a plan: the supervisor's proposal, or the person's
+    edit or accepted suggestion; ``changed``, the sections it changed."""
+
+    rev: int
+    author: Literal["supervisor", "person"]
+    source: Literal["proposal", "edit", "suggestion"]
+    changed: list[str] = []
+    at: float
+
+
+class PlanRevisionDetailDTO(PlanRevisionDTO):
+    """An earlier revision's content: GET /v1/plans/{id}/revisions/{n}."""
+
+    lede: str
+    sections: list[PlanSectionDTO]
+    markdown: str
+    decisions: list[PlanDecisionDTO]
+    split: list[PlanWorkerDTO]
+    ask: str | None = None
 
 
 class PlanDTO(_DTO):
@@ -370,6 +445,10 @@ class PlanDTO(_DTO):
     verdict: PlanVerdictDTO | None = None
     queued: int
     created_at: float
+    revisions: list[PlanRevisionDTO] = []
+    threads: list[PlanThreadDTO] = []
+    # The person may change the text now (direct edits, accepting suggestions): only while open.
+    can_edit: bool = False
 
 
 class KeptVisualDTO(_DTO):
