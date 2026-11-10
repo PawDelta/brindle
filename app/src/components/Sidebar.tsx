@@ -852,7 +852,7 @@ export function Sidebar({ route, navigate, refresh, openUrl, onBackFromSettings 
                         data-testid={`paused-toggle-${repo.name}`}
                         onClick={() => togglePaused(repo.repo_root)}
                       >
-                        <span className="w-[18px] shrink-0 text-center text-[11px] leading-none" aria-hidden>
+                        <span className="w-[18px] shrink-0 text-center text-[16px] leading-none" aria-hidden>
                           {pausedOpen.has(repo.repo_root) ? "▾" : "▸"}
                         </span>
                         Paused · {rested.length}
