@@ -20,14 +20,16 @@ QUOTE = "a machine the customer controls"
 def test_the_person_reviews_a_design_doc_through_the_routes(db, session, tmp_path):
     boss, started = session
     visual_offers.person_spoke(db, boss, "Make a planning doc.")
-    with pytest.raises(ServiceError, match="plain <svg>"):
+    with pytest.raises(ServiceError) as refused:
         plans.propose(db, boss, "# Cloud", sections=[{"title": "Flow", "kind": "svg",
                                                       "markdown": '<svg onload="steal()"></svg>'}])
+    assert (refused.value.code, refused.value.http_status) == ("invalid", 400)
+    drawing = '<svg viewBox="0 0 9 9"><use href="#r"/><rect id="r" width="4" fill="url(#g)"/></svg>'
     pid = plans.propose(db, boss, "# Cloud workers\n\nOne page.", DECISIONS, sections=[
         {"id": "summary", "title": "Summary", "markdown": SUMMARY},
         {"id": "arch", "title": "Architecture", "kind": "mermaid", "markdown": "graph LR; app-->daemon",
          "caption": "Figure 1"},
-        {"id": "flow", "title": "Flow", "kind": "svg", "markdown": '<svg viewBox="0 0 9 9"><rect width="4"/></svg>'},
+        {"id": "flow", "title": "Flow", "kind": "svg", "markdown": drawing},
     ])["id"]
     asyncio.run(mcp_server.assign("developer", "build it"))
     folder = tmp_path / ".brindle" / "attachments"
@@ -43,6 +45,14 @@ def test_the_person_reviews_a_design_doc_through_the_routes(db, session, tmp_pat
         assert [(s["id"], s["kind"]) for s in got["sections"]] == [
             ("summary", "markdown"), ("arch", "mermaid"), ("flow", "svg")]
         assert got["sections"][1]["caption"] == "Figure 1" and got["can_edit"]
+        # An SVG edit that would run or load something is refused, however it is spelled
+        # (reviewer's probes: an animated href to an external image, an entity-encoded javascript URL).
+        for probe in ('<svg xmlns="http://www.w3.org/2000/svg"><image><set attributeName="href" '
+                      'to="https://example.invalid/pixel.png"/></image></svg>',
+                      '<svg><a><animate attributeName="href" to="&#106;avascript:alert(1)"/></a></svg>',
+                      '<svg><rect fill="u&#114;l(https://example.invalid/x)"/></svg>'):
+            r = post("/edit", rev=1, section="flow", before=drawing, after=probe)
+            assert r.status_code == 400, probe
 
         # Comments on a text range, a diagram and a decision (with a file); a quote not in the text is refused.
         start = SUMMARY.index(QUOTE)
@@ -58,18 +68,21 @@ def test_the_person_reviews_a_design_doc_through_the_routes(db, session, tmp_pat
         post(f"/threads/{diagram_t}/resolve")
 
         # Suggestions and a direct edit: each change the person makes is a new revision.
-        at = SUMMARY.index("PawDelta")
-        post("/suggestions", rev=1, section="summary", start=at, before="PawDelta", after="our servers",
+        # Insertions are placed by the text around them: one whose surroundings the edit
+        # changes conflicts, one past the edit moves with its text.
+        post("/suggestions", rev=1, section="summary", start=0, before="", after="Today, ")
+        post("/suggestions", rev=1, section="summary", start=SUMMARY.index("."), before="", after=" at all",
              text="Clearer.")
         post("/suggestions", rev=1, section="summary", start=0, before="Workers", after="Hosts")
         assert post("/edit", rev=1, section="summary", start=0, before="Workers run",
                     after="Workers always run").json()["rev"] == 2
         assert post("/edit", rev=1, section="summary", start=0, before="Workers", after="W").status_code == 409
-        keep, drop = (t["id"] for t in client.get(f"/v1/plans/{pid}").json()["threads"][3:])
+        conflict, keep, drop = (t["id"] for t in client.get(f"/v1/plans/{pid}").json()["threads"][3:])
+        assert post(f"/threads/{conflict}/accept", rev=2).status_code == 409
         post(f"/threads/{drop}/reject")
         got = post(f"/threads/{keep}/accept", rev=2).json()
         assert got["rev"] == 3 and got["sections"][0]["markdown"] == (
-            "Workers always run on a machine the customer controls. Code never passes through our servers.")
+            "Workers always run on a machine the customer controls at all. Code never passes through PawDelta.")
         assert [(r["rev"], r["author"], r["source"]) for r in got["revisions"]] == [
             (1, "supervisor", "proposal"), (2, "person", "edit"), (3, "person", "suggestion")]
         assert client.get(f"/v1/plans/{pid}/revisions/1").json()["sections"][0]["markdown"] == SUMMARY
@@ -85,9 +98,10 @@ def test_the_person_reviews_a_design_doc_through_the_routes(db, session, tmp_pat
         assert (got["decisions"][0]["votes"], got["decisions"][0]["confirmed"]) == ({"repo": ["person"]}, "repo")
         got = post("/decide", rev=3, approved=False, note="See the numbers.", attachments=[costs]).json()
         assert got["state"] == "redirected" and got["verdict"]["attachments"] == ["costs.png"]
+        assert got["verdict"]["picks"] == {"d1": "repo"}
         said = messages(db)[-1]
-        assert "chose repo" in said and "Does a rented VM count?" in said and "Repo first." in said
-        assert "Label the arrows." not in said and "edited Summary (r2)" in said and costs in said
+        assert "Does a rented VM count?" in said and "Repo first." in said and costs in said
+        assert "Label the arrows." not in said             # resolved: not carried
         assert [t["sent"] for t in got["threads"]][:3] == [True, False, True]
         assert post("/edit", rev=3, section="summary", start=0, before="Workers", after="W").status_code == 409
         assert started == []
@@ -99,15 +113,27 @@ def test_the_person_reviews_a_design_doc_through_the_routes(db, session, tmp_pat
     assert started == ["build it"]
 
 
-def test_a_plan_from_before_revisions_stays_readable_and_editable(db, session):
+def test_a_plan_from_before_revisions_stays_readable_and_keeps_its_history(db, session):
+    """A plan with no revision rows (an older brindle's) reads, takes an edit
+    and a supervisor revision, and each keeps the revision it replaced."""
     boss, _ = session
     visual_offers.person_spoke(db, boss, "Make a planning doc.")
     pid = mcp_server.propose_plan(PLAN).split()[2]
     db.conn.execute("DELETE FROM plan_revisions")          # as an older brindle left it
     with TestClient(build_app(TOKEN), headers=AUTH) as client:
+        def section(rev, n):
+            return client.get(f"/v1/plans/{pid}/revisions/{rev}").json()["sections"][n]["markdown"]
+
         got = client.get(f"/v1/plans/{pid}").json()
         assert [s["id"] for s in got["sections"]] == ["s1", "s2"] and [r["rev"] for r in got["revisions"]] == [1]
         got = client.post(f"/v1/plans/{pid}/edit", json={"rev": 1, "section": "s2", "before": "Two workers.",
                                                            "after": "Three workers."}).json()
-        assert got["sections"][1]["markdown"] == "Three workers." and [r["rev"] for r in got["revisions"]] == [2]
-        assert "Three workers." in plans.get(db, pid)["markdown"]
+        assert [r["rev"] for r in got["revisions"]] == [1, 2]
+        assert (section(1, 1), section(2, 1)) == ("Two workers.", "Three workers.")
+
+        db.conn.execute("DELETE FROM plan_revisions")      # legacy again, now at r2
+        client.post(f"/v1/plans/{pid}/decide", json={"rev": 2, "approved": False, "note": "Fewer."})
+        mcp_server.propose_plan(PLAN.replace("Two workers.", "One worker."), plan_id=pid)
+        got = client.get(f"/v1/plans/{pid}").json()
+        assert [r["rev"] for r in got["revisions"]] == [2, 3]
+        assert (section(2, 1), section(3, 1)) == ("Three workers.", "One worker.")

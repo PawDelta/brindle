@@ -50,10 +50,31 @@ MAX_SECTION = 64 * 1024      # one section's text or diagram source
 MAX_QUOTE = 4000             # the anchored text of a comment or suggestion
 MAX_THREADS = 500            # threads and replies on one plan
 MAX_SNIPPET = 200            # quoted text in the supervisor's message
+CONTEXT = 32                 # text kept either side of an insertion point, to find it again
 # Section ids the comment anchors already use for something else.
 RESERVED = {"ask", "lede", "split"}
-_UNSAFE_SVG = re.compile(r"<\s*/?\s*(script|foreignobject|iframe|object|embed|style)\b|\bon[a-z]+\s*=|"
-                         r"javascript:|<!entity|<!doctype|\bhref\s*=\s*[\"']?\s*[^\"'#\s]", re.I)
+# What an SVG diagram may hold: drawing elements and presentation attributes
+# only. Nothing that runs (scripts, event handlers, animation that can set an
+# attribute), styles (CSS can load) or loads (images, links, foreign content).
+_SVG_NS = "http://www.w3.org/2000/svg"
+_XLINK_NS = "http://www.w3.org/1999/xlink"
+_SVG_ELEMENTS = frozenset({
+    "svg", "g", "defs", "title", "desc", "symbol", "use", "path", "rect", "circle", "ellipse", "line",
+    "polyline", "polygon", "text", "tspan", "textPath", "marker", "linearGradient", "radialGradient", "stop",
+    "clipPath", "mask", "pattern"})
+_SVG_ATTRIBUTES = frozenset({
+    "id", "class", "viewBox", "width", "height", "x", "y", "x1", "y1", "x2", "y2", "cx", "cy", "r", "rx", "ry",
+    "fx", "fy", "d", "points", "pathLength", "fill", "fill-opacity", "fill-rule", "stroke", "stroke-width",
+    "stroke-opacity", "stroke-dasharray", "stroke-dashoffset", "stroke-linecap", "stroke-linejoin",
+    "stroke-miterlimit", "opacity", "transform", "font-family", "font-size", "font-weight", "font-style",
+    "text-anchor", "dominant-baseline", "alignment-baseline", "baseline-shift", "letter-spacing",
+    "word-spacing", "dx", "dy", "rotate", "textLength", "lengthAdjust", "preserveAspectRatio", "offset",
+    "stop-color", "stop-opacity", "gradientUnits", "gradientTransform", "spreadMethod", "marker-start",
+    "marker-mid", "marker-end", "markerWidth", "markerHeight", "markerUnits", "refX", "refY", "orient",
+    "clip-path", "clip-rule", "clipPathUnits", "mask", "maskUnits", "maskContentUnits", "patternUnits",
+    "patternContentUnits", "patternTransform", "visibility", "display", "version", "role", "aria-label",
+    "aria-hidden", "vector-effect", "paint-order", "startOffset", "href"})
+_URL = re.compile(r"url\s*\(", re.I)
 
 
 # -- revisions --------------------------------------------------------------------------
@@ -86,10 +107,38 @@ def render(lede: str, sections: list[dict]) -> str:
 
 
 def _svg(body: str, where: str) -> None:
-    """An SVG diagram is shown in the app: drawing only, nothing that runs or loads."""
-    if not body.lstrip().lower().startswith("<svg") or _UNSAFE_SVG.search(body):
-        raise ServiceError("invalid", f"{where} must be a plain <svg> drawing: no scripts, styles, event "
-                           "handlers or links out", 400)
+    """An SVG diagram is shown in the app: drawing only, nothing that runs or
+    loads. It is parsed and every element and attribute checked against an
+    allowlist, with values as the renderer reads them (entities decoded):
+    a reference (``href``, ``url(...)``) may only name something in the
+    drawing itself (``#id``). No DTD, so no entity of our own making."""
+    from xml.etree import ElementTree
+
+    refused = ServiceError("invalid", f"{where} must be a plain <svg> drawing: no scripts, styles, "
+                           "animation, event handlers or links out", 400)
+    if "<!" in body.replace("<!--", "") or "<?" in body:
+        raise refused
+    try:
+        root = ElementTree.fromstring(body)
+    except ElementTree.ParseError:
+        raise refused from None
+
+    def local(name: str, allowed: tuple[str, ...]) -> str | None:
+        ns, _, tail = name[1:].partition("}") if name.startswith("{") else ("", "", name)
+        return tail if ns in allowed else None
+
+    if local(root.tag, ("", _SVG_NS)) != "svg":
+        raise refused
+    for el in root.iter():
+        tag = local(el.tag, ("", _SVG_NS)) if isinstance(el.tag, str) else None
+        if tag not in _SVG_ELEMENTS:
+            raise refused
+        for name, value in el.attrib.items():
+            attr = local(name, ("", _XLINK_NS))
+            if attr not in _SVG_ATTRIBUTES or (attr == "href" and not value.strip().startswith("#")):
+                raise refused
+            if any(not m.string[m.end():].lstrip().lstrip("'\"").startswith("#") for m in _URL.finditer(value)):
+                raise refused
 
 
 def _body_text(value: Any, name: str, limit: int, required: bool = False) -> str:
@@ -156,7 +205,21 @@ def revision(db: DB, plan_id: str, rev: int | None = None) -> dict:
     lede, parts = from_markdown(p["markdown"])
     return {"plan_id": p["id"], "rev": n, "author": SUPERVISOR, "source": "proposal", "lede": lede,
             "sections": parts, "markdown": p["markdown"], "decisions": p["decisions"], "split": p["split"],
-            "ask": p.get("ask"), "changed": [s["id"] for s in parts], "created_at": p["updated_at"]}
+            "ask": p.get("ask"), "changed": [s["id"] for s in parts], "created_at": p["updated_at"],
+            "stored": False}
+
+
+def keep(c, cur: dict) -> None:
+    """In the transaction that replaces revision ``cur``: if it is a plan's
+    from before revisions were kept (read from the plans row), store it
+    first, so the history keeps it once the plans row moves on."""
+    if cur.get("stored", True):
+        return
+    c.execute("INSERT OR IGNORE INTO plan_revisions (plan_id, rev, author, source, lede, sections, markdown,"
+              " decisions, split, ask, changed, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+              (cur["plan_id"], cur["rev"], cur["author"], cur["source"], cur["lede"], json.dumps(cur["sections"]),
+               cur["markdown"], json.dumps(cur["decisions"]), json.dumps(cur["split"]), cur["ask"],
+               json.dumps(cur["changed"]), cur["created_at"]))
 
 
 def _history(db: DB, p: dict) -> list[dict]:
@@ -257,6 +320,8 @@ def _where(cur: dict, anchor: dict) -> dict:
     """``anchor`` in revision ``cur``: where its text is now, and whether
     it is still ``current``, has ``moved`` or is ``detached`` (gone)."""
     out = dict(anchor, state="current")
+    if anchor["kind"] == "text" and not anchor["quote"]:
+        return _insertion(cur, anchor, out)
     if anchor["kind"] == "text":
         own = _body(cur, anchor["section"])
         if own is not None and own[anchor["start"]:anchor["end"]] == anchor["quote"]:
@@ -265,7 +330,7 @@ def _where(cur: dict, anchor: dict) -> dict:
         for sid in [anchor["section"], *(s for s in others if s != anchor["section"])]:
             body = _body(cur, sid)
             pos = _locate(body, anchor["start"], anchor["quote"]) if body is not None else None
-            if pos is not None and anchor["quote"]:
+            if pos is not None:
                 return dict(out, section=sid, start=pos, end=pos + len(anchor["quote"]), state="moved")
         return dict(out, state="detached")
     if anchor["kind"] == "diagram":
@@ -275,6 +340,31 @@ def _where(cur: dict, anchor: dict) -> dict:
     else:
         ok = True
     return out if ok else dict(out, state="detached")
+
+
+def _context(body: str, pos: int) -> dict:
+    """The text either side of an insertion point at ``pos``, to find it by later."""
+    return {"prefix": body[max(0, pos - CONTEXT):pos], "suffix": body[pos:pos + CONTEXT]}
+
+
+def _insertion(cur: dict, anchor: dict, out: dict) -> dict:
+    """An insertion point has no text of its own: it is found in its section
+    by the text either side of it. If that text changed, the point can't be
+    placed and is ``detached``, never guessed from a stale offset."""
+    body = _body(cur, anchor["section"])
+    prefix, suffix, start = anchor.get("prefix"), anchor.get("suffix"), anchor["start"]
+    if body is None or prefix is None or suffix is None:
+        return dict(out, state="detached")
+    needle = prefix + suffix
+    if not needle:                       # it was an empty section: only still placeable while empty
+        return out if body == "" else dict(out, state="detached")
+    if start >= len(prefix) and body[start - len(prefix):start + len(suffix)] == needle:
+        return out
+    hits = [m.start() + len(prefix) for m in re.finditer(re.escape(needle), body)]
+    if not hits:
+        return dict(out, state="detached")
+    pos = min(hits, key=lambda i: abs(i - start))
+    return dict(out, start=pos, end=pos, state="moved")
 
 
 def _attachments(db: DB, p: dict, raw: Any) -> list[dict]:
@@ -364,6 +454,8 @@ def suggest(db: DB, plan_id: str, rev: Any, section: Any, start: Any, before: An
     note = visuals._text(text, "a suggestion's note", visuals.MAX_NOTE) or ""
     visuals._refuse_secrets([("your suggestion", after), ("your note", note)])
     anchor = {"kind": "text", "section": sid, "start": pos, "end": pos + len(before), "quote": before}
+    if not before:
+        anchor.update(_context(_body(cur, sid), pos))
     return _add(db, p, p["rev"], "suggestion", anchor, author, note, _attachments(db, p, attachments), after=after)
 
 
@@ -445,6 +537,7 @@ def _apply(db: DB, p: dict, cur: dict, sid: str, pos: int, before: str, after: s
         claimed = c.execute("UPDATE plans SET rev=?, markdown=?, updated_at=? WHERE id=? AND rev=? AND state='open'",
                             (rev, markdown, now, p["id"], p["rev"])).rowcount == 1
         if claimed:
+            keep(c, cur)
             insert_revision(c, p["id"], rev, PERSON, source, lede, sections, markdown, cur["decisions"],
                             cur["split"], cur["ask"], [sid], now)
             if thread_id is not None and not c.execute(

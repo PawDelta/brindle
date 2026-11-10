@@ -365,7 +365,8 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
             raise ServiceError("not_found", "no such plan in this session", 404)
         if current["state"] not in HOLDING:
             raise ServiceError("approved", "that plan is approved; propose a new plan instead", 409)
-    previous = {s["id"]: s for s in plan_docs.revision(db, plan_id)["sections"]} if plan_id else {}
+    replaced = plan_docs.revision(db, plan_id) if plan_id else None
+    previous = {s["id"]: s for s in replaced["sections"]} if replaced else {}
 
     settled: list[int] = []
 
@@ -390,6 +391,7 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
                                 " decision=NULL WHERE id=? AND state IN ('open','redirected')", (*args, vid)).rowcount
             if not changed:
                 raise ServiceError("approved", "that plan is approved; propose a new plan instead", 409)
+            plan_docs.keep(c, replaced)
         plan_docs.insert_revision(c, vid, rev, plan_docs.SUPERVISOR, "proposal", lede, parts, markdown, decisions,
                                   split, ask, [s["id"] for s in parts if previous.get(s["id"]) != s], now)
 
