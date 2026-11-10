@@ -668,7 +668,7 @@ export function Sidebar({ route, navigate, refresh, openUrl, onBackFromSettings 
   const workspaces = useAppState((s) => s.workspaces);
   const alive = useAppState((s) => s.alive);
   const runningAgents = useMemo(() => workspaces.flatMap((ws) => ws.agents ?? []).filter((a) =>
-    !isPastWorker(a) && a.mode !== "interactive" && !["paused", "done", "failed"].includes(a.status) && alive[a.id] !== false,
+    !isPastWorker(a) && !["paused", "done", "failed"].includes(a.status) && alive[a.id] !== false,
   ).length, [workspaces, alive]);
   const agent = useMemo(() => workspaces.flatMap((ws) => ws.agents ?? []).find((a) => a.id === selected?.root), [workspaces, selected]);
   // Follow the selected session's provider when it has a model; otherwise show the fullest week.

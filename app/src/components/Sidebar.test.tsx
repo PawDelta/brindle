@@ -57,7 +57,7 @@ const list = () => screen.getByRole("navigation", { name: "Sessions" });
 
 describe("Sidebar", () => {
   it("running agents count includes supervisors and workers, describes the count on hover, and hides at zero", async () => {
-    const { sync, store } = mount({ workspaces: [root, worker] });
+    const { sync, store } = mount({ workspaces: [{ ...root, agents: [{ ...root.agents![0], mode: "interactive" }] }, worker] });
     onTestFinished(() => sync.stop());
     const pill = await screen.findByLabelText("2 agents running");
     expect(pill.textContent).toContain("2");
