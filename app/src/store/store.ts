@@ -37,6 +37,9 @@ export interface AppState {
   synced: boolean;
   /* Advances only when a successful snapshot is applied, not when a refresh settles. */
   snapshotVersion: number;
+  /* When the read whose rows are applied began (snapshotTicket): a read begun before it,
+     ending later (the panes gate's, overtaken by sync's), never puts older rows over them. */
+  snapshotBegan: number;
   /* Visual id → the bus event that took it out of the Inbox (read, answered, dismissed): an inbox read
      begun before that event still has it, and mustn't put it back. Gone once a later read is applied. */
   settledVisuals: Record<string, number>;
@@ -52,7 +55,7 @@ export type Action =
   | { type: "app_update"; status: AppUpdateStatus }
   | { type: "connection"; state: StreamState }
   /* `since`: the newest bus event applied when the reads began (sync.ts); the store's own when absent. */
-  | { type: "snapshot"; workspaces: WorkspaceDTO[]; inbox?: InboxItemDTO[]; since?: number }
+  | { type: "snapshot"; workspaces: WorkspaceDTO[]; inbox?: InboxItemDTO[]; began?: number; since?: number }
   | { type: "stream"; message: StreamMessage }
   | { type: "error"; message: string };
 
@@ -70,11 +73,19 @@ export const initialState: AppState = {
   stale: false,
   synced: false,
   snapshotVersion: 0,
+  snapshotBegan: 0,
   settledVisuals: {},
   recent: [],
   error: null,
   appUpdate: null,
 };
+
+let tickets = 0;
+
+/* A snapshot read's place among all of them, taken as it begins (sync's and the panes gate's alike). */
+export function snapshotTicket(): number {
+  return ++tickets;
+}
 
 export function reduce(state: AppState, action: Action): AppState {
   switch (action.type) {
@@ -86,6 +97,7 @@ export function reduce(state: AppState, action: Action): AppState {
       return { ...state, connection: action.state,
         connectionGeneration: state.connectionGeneration + Number(state.connection !== action.state) };
     case "snapshot": {
+      if (action.began !== undefined && action.began < state.snapshotBegan) return state;
       // The pane gate can apply ready rows before inbox answers. Keep the
       // inbox's contents and initial-sync status until that read arrives.
       let { inbox = state.inbox } = action;
@@ -98,7 +110,8 @@ export function reduce(state: AppState, action: Action): AppState {
       }
       return { ...state, ...liveSnapshot(action.workspaces, inbox, state.pastWorkers), stale: false,
         synced: state.synced || action.inbox !== undefined, error: null,
-        snapshotVersion: state.snapshotVersion + 1, settledVisuals };
+        snapshotVersion: state.snapshotVersion + 1, snapshotBegan: Math.max(state.snapshotBegan, action.began ?? 0),
+        settledVisuals };
     }
     case "error":
       return { ...state, error: action.message };

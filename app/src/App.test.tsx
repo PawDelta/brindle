@@ -87,6 +87,28 @@ describe("App", () => {
       expect(store.getState().synced).toBe(true);
     } finally { sync.stop(); }
   });
+  it.each([windowOf("new"), null])("a gate read that a later sync read overtook doesn't put its older rows over the newer ones (newer window: %s)", async (newer) => {
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root] });
+    const client = daemon.client();
+    const store = createAppStore();
+    const read = client.snapshot.bind(client);
+    let finishGate: ((rows: typeof daemon.data.workspaces) => void) | undefined;
+    // Sync's first read, then the gate's (slow), then a sync refresh begun after it that answers first; later reads are slow.
+    vi.spyOn(client, "snapshot").mockImplementationOnce(read).mockImplementationOnce(() => new Promise((ok) => { finishGate = ok; }))
+      .mockImplementationOnce(read).mockReturnValue(new Promise(() => {}));
+    const sync = startSync({ client, store, connect: daemon.connect });
+    try {
+      renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO }} />);
+      await waitFor(() => expect(finishGate).toBeDefined());
+      daemon.data.workspaces = [{ ...root, agents: root.agents?.map((a) => ({ ...a, window: newer })) }];
+      await act(async () => { await sync.refresh(); });
+      await act(async () => { finishGate!([{ ...root, agents: root.agents?.map((a) => ({ ...a, window: windowOf("old") })) }]); await flush(); });
+      expect(store.getState().workspaces[0].agents?.[0].window).toBe(newer);
+      // The rows the store kept decide whether the pane may show, not the older ones it turned down.
+      expect(paneWaits()).toBe(newer === null);
+    } finally { sync.stop(); }
+  });
+
   it("shows the app at once while sessions come back; only the pane waits until they are ready", async () => {
     vi.useFakeTimers();
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root] });

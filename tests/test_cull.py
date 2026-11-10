@@ -472,23 +472,34 @@ def live_pane(ws, agent_id):
                            tag=(agents.AGENT_TAG, agent_id))
 
 
-def test_sweep_on_another_server_leaves_a_live_agent_alone(db, ws, proc_cleanup, other_server,
-                                                           monkeypatch):
+def test_sweep_on_another_server_leaves_a_live_agent_alone(db, ws, monkeypatch):
     here = tmux.current_server()
-    pane = live_pane(ws, "abc12345")
-    add(db, ws, "abc12345", status="processing", tmux_window=pane)
+    pane = "%1"
+    add(db, ws, "abc12345", status="processing", tmux_window=pane, tmux_server=here)
+    config = json.dumps({"BRINDLE_AGENT_ID": "abc12345", "BRINDLE_HOME": os.environ["BRINDLE_HOME"]})
+    table = {1: procs.Proc(1, 0, "init"), 11: procs.Proc(11, 1, f"claude --mcp-config {config}")}
+    stopped = []
+    monkeypatch.setattr(procs, "table", lambda: table)
+    monkeypatch.setattr(procs, "terminate", lambda pids, **k: stopped.append(set(pids)) or len(pids))
+
+    def panes(server=None):
+        snapshot = tmux.PaneSnapshot(server or tmux.current_server())
+        if snapshot.server == here:
+            snapshot[pane] = True
+        return snapshot
+
+    monkeypatch.setattr(tmux, "list_panes", panes)
+    monkeypatch.setattr(tmux, "window_alive", lambda target, server=None:
+                        target == pane and (server or tmux.current_server()) == here)
     a = db.get_agent("abc12345")
     assert a.tmux_server == here and agents.is_alive(a)
-    p = launch_as("abc12345")
-    proc_cleanup.append(p)
 
-    monkeypatch.setenv("BRINDLE_TMUX_SOCKET", other_server)
+    monkeypatch.setenv("BRINDLE_TMUX_SOCKET", "brindle-test-other")
     assert not tmux.list_panes()  # that server knows nothing of the agent's pane
     notes = cull.sweep(db)
-    time.sleep(0.5)
 
     assert notes == []
-    assert alive(p.pid), "its process was stopped"
+    assert stopped == [], "its process was stopped"
     a = db.get_agent("abc12345")
     assert a.status == "processing" and a.dismissed_at is None
     # Asked from the other server, it is still known to be running: the

@@ -1,4 +1,5 @@
 import time
+from contextlib import contextmanager
 
 import pytest
 from starlette.testclient import TestClient
@@ -286,6 +287,57 @@ def test_a_revision_published_meanwhile_keeps_its_page(db, session, monkeypatch)
     assert (interleaved[0]["rev"], loser["rev"]) == (2, 3)
     assert visuals.page_path(ws.repo_root, boss.id, v["id"], 2).read_text() == "<p>winner</p>"
     assert visuals.page_path(ws.repo_root, boss.id, v["id"], 3).read_text() == "<p>later</p>"
+
+
+def test_failed_answer_removes_the_claim_from_a_concurrently_kept_copy(db, session, monkeypatch):
+    _, boss, _ = session
+    v = visuals.publish(db, boss, "Flow", "<p>flow</p>", "Which?", OPTIONS)
+
+    def fail(*args, **kwargs):
+        visuals.keep(db, v["id"])
+        raise ServiceError("paused", "session paused", 409)
+
+    monkeypatch.setattr(agents, "send_message", fail)
+    with pytest.raises(ServiceError):
+        visuals.answer(db, v["id"], 1, "A")
+    assert visuals.get(db, v["id"])["answer"] is None
+    assert visuals.get_kept(db, v["id"])["answer"] is None
+
+
+@pytest.mark.variant("Keep races answers, revisions and Unkeep at the writer transaction boundary")
+@pytest.mark.parametrize("interleaved", ["answer", "revision", "unkeep", "late_keep"])
+def test_keep_reads_and_copies_after_acquiring_the_write_lock(db, session, monkeypatch, interleaved):
+    from brindle.db import DB
+
+    _, boss, _ = session
+    v = visuals.publish(db, boss, "Flow", "<p>first</p>", "Which?", OPTIONS)
+    visuals.keep(db, v["id"])
+    other = DB()
+    tx = db.tx
+
+    @contextmanager
+    def preempted():
+        monkeypatch.setattr(db, "tx", tx)
+        if interleaved == "answer":
+            visuals.answer(other, v["id"], 1, "A")
+        elif interleaved == "revision":
+            visuals.publish(other, boss, "New flow", "<p>second</p>", "Which?", OPTIONS, visual_id=v["id"])
+        elif interleaved == "unkeep":
+            visuals.unkeep(other, v["id"])
+        with tx() as c:
+            yield c
+        if interleaved == "late_keep":
+            visuals.keep(other, v["id"])
+
+    monkeypatch.setattr(db, "tx", preempted)
+    try:
+        current = (visuals.unkeep if interleaved == "late_keep" else visuals.keep)(db, v["id"])
+        kept = visuals.get_kept(db, v["id"])
+        assert kept["rev"] == current["rev"]
+        assert visuals.kept_to_dto(kept)["answer"] == visuals.to_dto(db, current)["answer"]
+        assert visuals.kept_page(db, v["id"]).read_bytes() == visuals.page(db, v["id"], str(current["rev"])).read_bytes()
+    finally:
+        other.conn.close()
 
 
 def test_removing_a_session_deletes_its_visuals_but_not_the_kept_one(db, session, client):

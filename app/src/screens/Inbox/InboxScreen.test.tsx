@@ -4,6 +4,8 @@ import { DaemonClient } from "../../api/client";
 import { DaemonContext } from "../../api/context";
 import { scopesFor } from "../../api/permissions";
 import type { AskDTO, AskDecisionDTO, AskGroupDTO, GoalDTO, InboxItemDTO, SessionDTO } from "../../api/schema";
+import type { AppUpdateStatus, AppUpdates } from "../../api/tauri";
+import { AppUpdateBanner, AppUpdateProvider } from "../../components/AppUpdateBanner";
 import { SessionsProvider } from "../../store/sessions";
 import { createAppStore } from "../../store/store";
 import { startSync } from "../../store/sync";
@@ -57,6 +59,23 @@ const posts = (daemon: FakeDaemon) => daemon.requests.filter((r) => r.method ===
 const card = (kind: string) => document.querySelector<HTMLElement>(`[data-testid="inbox-card"][data-kind="${kind}"]`)!;
 
 describe("inbox", () => {
+  it("keeps a deferred update actionable, then replaces the offer with the installed card", async () => {
+    const updates = { updateNow: async () => null } as unknown as AppUpdates;
+    const { store, sync } = mount(new FakeDaemon(), undefined, { appUpdates: updates });
+    render(<StoreContext.Provider value={store}><AppUpdateProvider updates={updates}><AppUpdateBanner openUrl={async () => {}} /></AppUpdateProvider></StoreContext.Provider>);
+    const status: AppUpdateStatus = { version: "0.6.2", automatic: true, available: { version: "0.6.3", notes: null }, pending: null, updated: null, later: false, checking: false, last_checked: null };
+    act(() => store.dispatch({ type: "app_update", status }));
+    expect(screen.getByTestId("app-update-now")).toBeTruthy();
+    act(() => store.dispatch({ type: "app_update", status: { ...status, later: true } }));
+    fireEvent.click(screen.getByTestId("app-update-now"));
+    expect(screen.getByTestId("app-update-banner").dataset.phase).toBe("downloading");
+    act(() => store.dispatch({ type: "app_update", status: { ...status, pending: "0.6.3" } }));
+    expect(screen.getByTestId("app-update-card").dataset.kind).toBe("pending");
+    expect(screen.queryByTestId("app-update-banner")).toBeNull();
+    await act(async () => {});
+    sync.stop();
+  });
+
   it("inbox dismiss clears the PR card while a read from before Not now finishes", async () => {
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root], inbox: [prReady, { ...prReady, kind: "pr_failed" }] });
     const client = daemon.client(), reads: ((items: InboxItemDTO[]) => void)[] = [];
@@ -230,13 +249,18 @@ describe("inbox", () => {
     fireEvent.click(await within(card("plan_offer")).findByRole("button", { name: "Go to session ›" }));
     expect(onOpen).toHaveBeenLastCalledWith("sup1", REPO, "sup1");
     onOpen.mockClear();
-    fireEvent.click(within(card("plan_offer")).getByRole("button", { name: label }));
+    act(() => {
+      const button = within(card("plan_offer")).getByRole("button", { name: label });
+      fireEvent.click(button);
+      fireEvent.click(button);
+    });
     if (fails) {
       expect(await screen.findByText("offer unavailable")).toBeTruthy();
       expect(onOpen).not.toHaveBeenCalled();
       expect(screen.getByTestId("inbox-card")).toBeTruthy();
     } else {
       await waitFor(() => expect(posts(daemon).find((r) => r.path === "/goal/plan-offer")?.body).toMatchObject({ root: "sup1", offer: "o1", accept: accepted }));
+      expect(posts(daemon).filter((r) => r.path === "/goal/plan-offer")).toHaveLength(1);
       await waitFor(() => expect(onOpen).toHaveBeenCalledTimes(1));
       expect(onOpen).toHaveBeenLastCalledWith("sup1", REPO, "sup1");
     }

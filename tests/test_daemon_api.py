@@ -415,6 +415,46 @@ def test_read_routes_answer_from_the_db(seeded, path, check):
     assert check(body, seeded)
 
 
+@pytest.mark.variant("a budget, not a branch: the slow goal read the owner reported re-ran git log on every read")
+def test_goal_read_is_fast_with_unchanged_heads(seeded, db, monkeypatch):
+    from brindle import autopilot, quota, status_cache
+
+    calls = {"log": 0, "usage": 0, "quota": 0, "workers": 0}
+    head = "a" * 40
+    at = int(time.time())
+    monkeypatch.setattr(status_cache, "read_head", lambda path: head)
+
+    def log(args, path):
+        calls["log"] += 1
+        return f"{head} {at}"
+
+    def count(name, value):
+        def read(*args, **kwargs):
+            calls[name] += 1
+            return value
+        return read
+
+    monkeypatch.setattr(git, "out", log)
+    monkeypatch.setattr(autopilot, "usage", count("usage", None))
+    monkeypatch.setattr(quota, "notes", count("quota", []))
+    monkeypatch.setattr(autopilot, "working_workers", count("workers", []))
+    query = f"repo={seeded['repo']}&root=r1"
+    for _ in range(2):
+        code, body = _get("/v1/goal", AUTH, query)
+        assert code == 200 and body["commits_last_hour"] == 1
+    assert calls == {"log": 1, "usage": 0, "quota": 0, "workers": 0}
+    head = "b" * 40
+    assert _get("/v1/goal", AUTH, query)[0] == 200
+    assert calls["log"] == 2
+    # The rolling hour must advance even though history is cached.
+    assert autopilot.goal_activity(db, "r1", now=at + 3601)["commits_last_hour"] == 0
+    assert calls["log"] == 2
+    # A reset session boundary changes which commits belong to this goal read.
+    db.update_agent("r1", created_at=at + 1)
+    assert _get("/v1/goal", AUTH, query)[0] == 200
+    assert calls["log"] == 3
+
+
 @pytest.mark.parametrize("path", ["snapshot", "agents/w1", "agents/w2", "inbox", "inbox-doc", "sessions", "reassigned", "inbox-reassigned", "permissions/asks", "asks-reassigned"])
 def test_past_workers_are_history_not_live_rows(seeded, db, path):
     db.set_status("w1", "rewound")
