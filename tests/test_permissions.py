@@ -637,7 +637,8 @@ LOOP = "until s=$(gh run view 1 --json status --jq .status); [[ $s == completed*
     _split("rm -f $X"),
     _split("rm -f *"),
     _split("touch x; rm -f -*"),
-    _split("touch x; rm --rec a* /"),
+    pytest.param("touch x; rm --rec a* /", "deny",
+                 marks=pytest.mark.variant("a known recursive abbreviation denies the explicit root operand")),
     _split("rm -f {a,-rf} b*"),
     _split("touch x; rm -f `echo -rf` a*"),
     _split("touch x; rm -f ~/.brindle/d*"),
@@ -684,13 +685,18 @@ def test_a_command_answers_at_any_depth_as_it_does_alone(tmp_path, monkeypatch, 
     standard. A command allowed alone may ask only where standard asks for its neighbours' reads."""
     from brindle import permissions
 
+    # The temporary directory is not a checkout; no host Git probes are needed.
+    monkeypatch.setattr(permissions, "_push_git", lambda *args: None)
+    monkeypatch.setattr(permissions, "default_branch", lambda root: None)
     monkeypatch.setenv("HOME", str(tmp_path))
     for folder in ("wt", ".ssh", ".brindle"):
         (tmp_path / folder).mkdir()
-    permissions.apply_preset(preset)
+    store = permissions.apply_preset(preset)
     here = str(tmp_path / "wt")
     answer = lambda command: permissions.decide(permissions.Request("claude", "bash", "Bash", here, here, here,
-                                                                    command=command)).decision
+                                                                    command=command), rules=store.rules,
+                                                unmatched=store.unmatched, saved=store.saved,
+                                                groups=store.groups).decision
     for command in _ALONE:
         alone = answer(command)
         for form in _NESTED:
@@ -731,6 +737,25 @@ def test_stores_resolved_at_run_time(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("bare, wrapped", [
+    ("rm -rf /", "uv run rm -rf /"),
+    pytest.param("rm -rf /", "npm exec -- rm -rf /",
+                 marks=pytest.mark.variant("bypass: another preset-allowed launcher")),
+    pytest.param("rm -rf /", "arch -arm64 rm -rf /",
+                 marks=pytest.mark.variant("bypass: an unlisted launcher without a preset allow")),
+    ("rm -rf /", "rm --rec /"),
+    ("/bin/echo safe", "/bin/echo git push --force origin main"),
+    ("rm file", "rm -- -rf /"),
+    ("rm -rf /", "rm --no-pres file"),
+    ("git push origin main", "uv run --project git git push origin main"),
+    pytest.param("git push origin main", "find git -exec git push origin main \\;",
+                 marks=pytest.mark.variant("bypass: a find root named git hides the later invocation")),
+    ("env A=1 echo safe", "env A=1 echo rm -rf /"),
+    pytest.param("env A=1 grep safe README.md", "env A=1 grep -e rm -e -rf -e / README.md",
+                 marks=pytest.mark.variant("false denial: wrapped search patterns are data too")),
+    pytest.param("git grep safe -- README.md", "git grep -n 'rm -rf /' -- README.md",
+                 marks=pytest.mark.variant("control: keep quoted search text inert during restriction matching")),
+    pytest.param("git grep safe -- README.md", "git grep -e rm -e -rf -e / -- README.md",
+                 marks=pytest.mark.variant("control: git grep arguments must not become an rm invocation")),
     pytest.param("git push --force origin main", "find . -maxdepth 0 -exec git push --force origin main \\;",
                  marks=pytest.mark.variant("reported bypass: find -exec runs its arguments (review 0.6.3, finding 1)")),
     pytest.param("git push --force origin main", "arch -arm64 git push --force origin main",
@@ -747,15 +772,16 @@ def test_stores_resolved_at_run_time(tmp_path, monkeypatch):
                  marks=pytest.mark.variant("reported bypass: the default-branch ask was skipped behind `uv run`")),
 ])
 def test_wrapped_git_still_guarded(tmp_path, bare, wrapped):
-    """Git behind a program brindle doesn't know as a wrapper is still git to a
-    deny or ask rule: it answers as the git command alone does, on the default
-    preset and on one with `uv ` and `npm ` allows (review 0.6.3, finding 1)."""
+    """Restrictions survive launchers and option spellings on every preset;
+    literal arguments keep the harmless command's decision (#376, review 0.6.3 finding 1)."""
     from brindle import permissions
 
     here = str(tmp_path)
     answer = lambda command: permissions.decide(permissions.Request("claude", "bash", "Bash", here, here, here,
                                                                     command=command)).decision
-    for preset in ("autonomous", "standard"):
+    for preset in permissions.PRESETS:
         permissions.apply_preset(preset)
-        assert answer(bare) in ("deny", "ask"), preset
-        assert answer(wrapped) == answer(bare), preset
+        if bare.startswith(("git push", "git reset", "rm -rf")):
+            assert answer(bare) in ("deny", "ask"), preset
+        decision = permissions.decide(permissions.Request("claude", "bash", "Bash", here, here, here, command=wrapped))
+        assert decision.decision == answer(bare), (preset, decision)
