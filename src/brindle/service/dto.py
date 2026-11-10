@@ -222,17 +222,17 @@ class InboxActionDTO(_DTO):
     path: str
 
 
-class AnalysisOfferMilestoneDTO(_DTO):
+class PlanOfferMilestoneDTO(_DTO):
     title: str
     verified: bool
 
 
-class AnalysisOfferDTO(_DTO):
-    """Current session context for deciding whether to request an analysis doc."""
+class PlanOfferDTO(_DTO):
+    """Current session context for deciding whether to plan the goal first."""
     session_name: str
     goal: str
     detail: str | None = None
-    milestones: list[AnalysisOfferMilestoneDTO]
+    milestones: list[PlanOfferMilestoneDTO]
     workers: int
     repos: int
     reasons: list[str]
@@ -254,7 +254,7 @@ class InboxItemDTO(_DTO):
     permission: PermissionDTO | None = None
     action: InboxActionDTO | None = None
     visual_id: str | None = None   # a visual's open question: GET /v1/sessions/{root_id}/visuals
-    analysis_offer: AnalysisOfferDTO | None = None
+    plan_offer: PlanOfferDTO | None = None
 
 
 class VisualOptionDTO(_DTO):
@@ -281,7 +281,7 @@ class VisualDTO(_DTO):
     accepts_files: bool
     title: str
     by: str
-    kind: Literal["visual", "plan", "analysis_doc"]
+    kind: Literal["visual", "plan"]
     rev: int
     question: str | None = None
     options: list[VisualOptionDTO] | None = None
@@ -397,8 +397,7 @@ class PrStateDTO(_DTO):
 class GoalDTO(_DTO):
     root_id: str
     enabled: bool
-    analysis_doc: bool = False
-    analysis_offer: str | None = None   # id of the analysis doc offer brindle is making for this goal
+    plan_offer: str | None = None   # id of brindle's open offer to plan this goal first
     goal: str | None = None
     summary: str | None = None
     detail: str | None = None
@@ -427,8 +426,8 @@ class GoalDTO(_DTO):
         from brindle.autopilot import person_note
 
         phases = phases or {}
-        return cls(**(activity or {}), root_id=ap.root_id, enabled=bool(ap.enabled), analysis_doc=bool(ap.analysis_doc),
-                   analysis_offer=(ap.analysis_offer or "")[5:] if (ap.analysis_offer or "").startswith("open:") else None,
+        return cls(**(activity or {}), root_id=ap.root_id, enabled=bool(ap.enabled),
+                   plan_offer=(ap.plan_offer or "")[5:] if (ap.plan_offer or "").startswith("open:") else None,
                    goal=ap.goal, summary=ap.summary, detail=ap.detail,
                    state=ap.state, note=person_note(ap), progress=ap.progress,
                    usage_resets_at=ap.usage_resets_at,

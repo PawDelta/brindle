@@ -834,101 +834,6 @@
       "title": "AllowAllPlanDTO",
       "type": "object"
     },
-    "AnalysisOfferDTO": {
-      "$defs": {
-        "AnalysisOfferMilestoneDTO": {
-          "properties": {
-            "title": {
-              "title": "Title",
-              "type": "string"
-            },
-            "verified": {
-              "title": "Verified",
-              "type": "boolean"
-            }
-          },
-          "required": [
-            "title",
-            "verified"
-          ],
-          "title": "AnalysisOfferMilestoneDTO",
-          "type": "object"
-        }
-      },
-      "description": "Current session context for deciding whether to request an analysis doc.",
-      "properties": {
-        "detail": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Detail"
-        },
-        "goal": {
-          "title": "Goal",
-          "type": "string"
-        },
-        "milestones": {
-          "items": {
-            "$ref": "#/$defs/AnalysisOfferMilestoneDTO"
-          },
-          "title": "Milestones",
-          "type": "array"
-        },
-        "reasons": {
-          "items": {
-            "type": "string"
-          },
-          "title": "Reasons",
-          "type": "array"
-        },
-        "repos": {
-          "title": "Repos",
-          "type": "integer"
-        },
-        "session_name": {
-          "title": "Session Name",
-          "type": "string"
-        },
-        "workers": {
-          "title": "Workers",
-          "type": "integer"
-        }
-      },
-      "required": [
-        "session_name",
-        "goal",
-        "milestones",
-        "workers",
-        "repos",
-        "reasons"
-      ],
-      "title": "AnalysisOfferDTO",
-      "type": "object"
-    },
-    "AnalysisOfferMilestoneDTO": {
-      "properties": {
-        "title": {
-          "title": "Title",
-          "type": "string"
-        },
-        "verified": {
-          "title": "Verified",
-          "type": "boolean"
-        }
-      },
-      "required": [
-        "title",
-        "verified"
-      ],
-      "title": "AnalysisOfferMilestoneDTO",
-      "type": "object"
-    },
     "AskDTO": {
       "$defs": {
         "PermissionLimitsDTO": {
@@ -2377,23 +2282,6 @@
         }
       },
       "properties": {
-        "analysis_doc": {
-          "default": false,
-          "title": "Analysis Doc",
-          "type": "boolean"
-        },
-        "analysis_offer": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "title": "Analysis Offer"
-        },
         "auditing": {
           "default": false,
           "title": "Auditing",
@@ -2485,6 +2373,18 @@
           ],
           "default": null,
           "title": "Note"
+        },
+        "plan_offer": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Plan Offer"
         },
         "pr_state": {
           "anyOf": [
@@ -2588,81 +2488,6 @@
     },
     "InboxItemDTO": {
       "$defs": {
-        "AnalysisOfferDTO": {
-          "description": "Current session context for deciding whether to request an analysis doc.",
-          "properties": {
-            "detail": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "default": null,
-              "title": "Detail"
-            },
-            "goal": {
-              "title": "Goal",
-              "type": "string"
-            },
-            "milestones": {
-              "items": {
-                "$ref": "#/$defs/AnalysisOfferMilestoneDTO"
-              },
-              "title": "Milestones",
-              "type": "array"
-            },
-            "reasons": {
-              "items": {
-                "type": "string"
-              },
-              "title": "Reasons",
-              "type": "array"
-            },
-            "repos": {
-              "title": "Repos",
-              "type": "integer"
-            },
-            "session_name": {
-              "title": "Session Name",
-              "type": "string"
-            },
-            "workers": {
-              "title": "Workers",
-              "type": "integer"
-            }
-          },
-          "required": [
-            "session_name",
-            "goal",
-            "milestones",
-            "workers",
-            "repos",
-            "reasons"
-          ],
-          "title": "AnalysisOfferDTO",
-          "type": "object"
-        },
-        "AnalysisOfferMilestoneDTO": {
-          "properties": {
-            "title": {
-              "title": "Title",
-              "type": "string"
-            },
-            "verified": {
-              "title": "Verified",
-              "type": "boolean"
-            }
-          },
-          "required": [
-            "title",
-            "verified"
-          ],
-          "title": "AnalysisOfferMilestoneDTO",
-          "type": "object"
-        },
         "InboxActionDTO": {
           "description": "A route the app can call to act on the item itself.",
           "properties": {
@@ -2853,6 +2678,81 @@
           ],
           "title": "PermissionDTO",
           "type": "object"
+        },
+        "PlanOfferDTO": {
+          "description": "Current session context for deciding whether to plan the goal first.",
+          "properties": {
+            "detail": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Detail"
+            },
+            "goal": {
+              "title": "Goal",
+              "type": "string"
+            },
+            "milestones": {
+              "items": {
+                "$ref": "#/$defs/PlanOfferMilestoneDTO"
+              },
+              "title": "Milestones",
+              "type": "array"
+            },
+            "reasons": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Reasons",
+              "type": "array"
+            },
+            "repos": {
+              "title": "Repos",
+              "type": "integer"
+            },
+            "session_name": {
+              "title": "Session Name",
+              "type": "string"
+            },
+            "workers": {
+              "title": "Workers",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "session_name",
+            "goal",
+            "milestones",
+            "workers",
+            "repos",
+            "reasons"
+          ],
+          "title": "PlanOfferDTO",
+          "type": "object"
+        },
+        "PlanOfferMilestoneDTO": {
+          "properties": {
+            "title": {
+              "title": "Title",
+              "type": "string"
+            },
+            "verified": {
+              "title": "Verified",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "title",
+            "verified"
+          ],
+          "title": "PlanOfferMilestoneDTO",
+          "type": "object"
         }
       },
       "properties": {
@@ -2878,17 +2778,6 @@
           ],
           "default": null,
           "title": "Agent Id"
-        },
-        "analysis_offer": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/AnalysisOfferDTO"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
         },
         "detail": {
           "anyOf": [
@@ -2949,6 +2838,17 @@
           "anyOf": [
             {
               "$ref": "#/$defs/PermissionDTO"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "plan_offer": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PlanOfferDTO"
             },
             {
               "type": "null"
@@ -5934,6 +5834,101 @@
       "title": "PlanDecisionDTO",
       "type": "object"
     },
+    "PlanOfferDTO": {
+      "$defs": {
+        "PlanOfferMilestoneDTO": {
+          "properties": {
+            "title": {
+              "title": "Title",
+              "type": "string"
+            },
+            "verified": {
+              "title": "Verified",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "title",
+            "verified"
+          ],
+          "title": "PlanOfferMilestoneDTO",
+          "type": "object"
+        }
+      },
+      "description": "Current session context for deciding whether to plan the goal first.",
+      "properties": {
+        "detail": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Detail"
+        },
+        "goal": {
+          "title": "Goal",
+          "type": "string"
+        },
+        "milestones": {
+          "items": {
+            "$ref": "#/$defs/PlanOfferMilestoneDTO"
+          },
+          "title": "Milestones",
+          "type": "array"
+        },
+        "reasons": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Reasons",
+          "type": "array"
+        },
+        "repos": {
+          "title": "Repos",
+          "type": "integer"
+        },
+        "session_name": {
+          "title": "Session Name",
+          "type": "string"
+        },
+        "workers": {
+          "title": "Workers",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "session_name",
+        "goal",
+        "milestones",
+        "workers",
+        "repos",
+        "reasons"
+      ],
+      "title": "PlanOfferDTO",
+      "type": "object"
+    },
+    "PlanOfferMilestoneDTO": {
+      "properties": {
+        "title": {
+          "title": "Title",
+          "type": "string"
+        },
+        "verified": {
+          "title": "Verified",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "title",
+        "verified"
+      ],
+      "title": "PlanOfferMilestoneDTO",
+      "type": "object"
+    },
     "PlanSectionDTO": {
       "description": "One ``##`` section of a plan's markdown: what a comment anchors to.",
       "properties": {
@@ -7962,8 +7957,7 @@
         "kind": {
           "enum": [
             "visual",
-            "plan",
-            "analysis_doc"
+            "plan"
           ],
           "title": "Kind",
           "type": "string"
@@ -8642,19 +8636,15 @@
     },
     {
       "method": "POST",
-      "path": "/v1/goal/analysis-doc"
-    },
-    {
-      "method": "POST",
-      "path": "/v1/goal/analysis-offer"
-    },
-    {
-      "method": "POST",
       "path": "/v1/goal/check"
     },
     {
       "method": "POST",
       "path": "/v1/goal/enabled"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/goal/plan-offer"
     },
     {
       "method": "POST",

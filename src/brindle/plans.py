@@ -4,7 +4,11 @@ by the person before any worker starts.
 
 A plan is made only when the person explicitly asked for one (the
 ``plan``-scoped request grant in brindle.visual_offers): never on the
-supervisor's own judgement that a request is large. It is a ``visuals`` row
+supervisor's own judgement that a request is large. brindle itself may ask
+them, once per big goal (brindle.autopilot.consider_plan_offer): "This looks
+big: plan it first?". While that offer is open the session's tasks queue as
+behind a plan; Yes grants the plan request and keeps them queued until the
+plan is approved, No releases them (``answer_offer``). It is a ``visuals`` row
 of kind ``plan`` (so it lists, keeps and exports like any visual) with a
 ``plans`` row beside it: the markdown, the decisions that shape it with
 their alternatives, and the proposed split into workers.
@@ -36,6 +40,18 @@ MAX_DECISIONS = 12
 MAX_WORKERS = 20
 MAX_COMMENTS = 50
 HOLDING = ("open", "redirected")
+# The offer to plan a goal first (goal_doc_requests.offer): open:<id> until
+# answered, then accepted (waiting for the plan), planned (a plan was
+# proposed) or dismissed. Open and accepted hold the session's tasks.
+OFFER_OPEN = "open:"
+OFFER_ACCEPTED = "accepted"
+OFFER_PLANNED = "planned"
+OFFER_DISMISSED = "dismissed"
+OFFER_YES = ("The person wants to plan this goal first (brindle asked because it looks big). Write a "
+             "planning doc with propose_plan before you assign more work; the tasks you assigned meanwhile "
+             "start once they approve it.")
+OFFER_NO = ("The person chose not to plan this goal first. The tasks you assigned while they decided "
+            "start now; carry on.")
 log = logging.getLogger(__name__)
 
 _HEADING = re.compile(r"^##\s+(.*?)\s*#*\s*$")
@@ -160,15 +176,27 @@ def get(db: DB, plan_id: str) -> dict:
     return p
 
 
-def holding(db: DB, root_id: str) -> dict | None:
-    """The plan session ``root_id``'s queued tasks wait on, if any: one the
-    person hasn't approved yet. None while the visuals capability is off,
-    so nothing waits on a plan nobody can see."""
-    if not visuals.enabled() or not root_id:
-        return None
+def open_plan(db: DB, root_id: str) -> dict | None:
+    """Session ``root_id``'s plan the person hasn't approved yet, if any."""
     row = db.conn.execute(f"SELECT id FROM plans WHERE root_id=? AND state IN ({','.join('?' * len(HOLDING))}) "
                           "ORDER BY created_at LIMIT 1", (root_id, *HOLDING)).fetchone()
     return _row(db, row["id"]) if row else None
+
+
+def holding(db: DB, root_id: str) -> dict | None:
+    """What session ``root_id``'s queued tasks wait on, if anything: its plan
+    the person hasn't approved yet or, before one is proposed, brindle's
+    offer to plan the goal first, unanswered or accepted (``{"offer": state}``).
+    None while the visuals capability is off, so nothing waits on a plan
+    nobody can see."""
+    if not visuals.enabled() or not root_id:
+        return None
+    plan = open_plan(db, root_id)
+    if plan is not None:
+        return plan
+    row = db.conn.execute("SELECT offer FROM goal_doc_requests WHERE root_id=? AND (offer LIKE ? OR offer=?)",
+                          (root_id, OFFER_OPEN + "%", OFFER_ACCEPTED)).fetchone()
+    return {"offer": row["offer"]} if row else None
 
 
 def _queued(db: DB, root_id: str) -> int:
@@ -223,9 +251,9 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
                                               *(f"{o['label']}\n{o['detail'] or ''}" for o in d["options"])]))
           for d in decisions),
         *((f"worker {w['id']}", w["title"]) for w in split)])
-    open_plan = holding(db, root.id)
-    if plan_id is None and open_plan is not None:
-        raise ServiceError("open_plan", f"plan {open_plan['id']} is still open: revise it with plan_id, "
+    current_plan = open_plan(db, root.id)
+    if plan_id is None and current_plan is not None:
+        raise ServiceError("open_plan", f"plan {current_plan['id']} is still open: revise it with plan_id, "
                            "or wait for the person's decision", 409)
     if plan_id is not None:
         current = _row(db, plan_id)
@@ -234,12 +262,18 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
         if current["state"] not in HOLDING:
             raise ServiceError("approved", "that plan is approved; propose a new plan instead", 409)
 
+    settled: list[int] = []
+
     def write(c, vid: str, rev: int) -> None:
         now = time.time()
         args = (rev, markdown, json.dumps(decisions), json.dumps(split), now)
         if rev == 1:
             c.execute("INSERT INTO plans (id, root_id, rev, markdown, decisions, split, state, created_at, updated_at)"
                       " VALUES (?,?,?,?,?,?,'open',?,?)", (vid, root.id, *args[:4], now, now))
+            # The plan now holds the session's tasks: the offer to plan first is settled
+            # (an open one too: the person asked for a plan in their own words).
+            settled.append(c.execute("UPDATE goal_doc_requests SET offer=? WHERE root_id=? AND (offer LIKE ? OR offer=?)",
+                                     (OFFER_PLANNED, root.id, OFFER_OPEN + "%", OFFER_ACCEPTED)).rowcount)
         else:
             # Only a plan still waiting on the person takes a revision: one
             # approved since the check above stays approved.
@@ -253,8 +287,11 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
     except ServiceError as e:
         if e.code == "visual_request_required":
             raise ServiceError("plan_request_required", "a plan needs the person to ask for one: propose_plan "
-                               "only after they asked for a planning doc (or redirected this one)", 403) from e
+                               "only after they asked for a planning doc, said yes to planning the goal "
+                               "first, or redirected this one", 403) from e
         raise
+    if any(settled):
+        bus.publish_agent(db, "autopilot.goal", root.id)   # the offer's card goes
     return get(db, v["id"])
 
 
@@ -374,3 +411,38 @@ def decide(db: DB, plan_id: str, rev: Any, approved: bool, picks: Any = None, co
     if approved:
         tasks.on_resumed(db, p["root_id"], why="the person's approval of the plan")
     return get(db, p["id"])
+
+
+# -- the offer to plan first ------------------------------------------------------------
+
+
+def answer_offer(db: DB, root_id: str, offer_id: Any, accept: bool) -> None:
+    """The person's answer to brindle's offer to plan session ``root_id``'s goal
+    first: ``offer_id``, the offer on their screen, so an answer to an older
+    goal's offer never settles a newer one. One transaction settles it, and
+    on Yes grants the one planning doc it asks for, and queues the message
+    telling the supervisor. Yes keeps the tasks behind the offer queued until
+    the plan is approved; No releases them."""
+    from brindle import agents, tasks
+
+    if not isinstance(offer_id, str) or not offer_id:
+        raise ServiceError("invalid", "offer (the offer on screen) is required", 400)
+    with db.tx() as c:
+        claimed = c.execute("UPDATE goal_doc_requests SET offer=? WHERE root_id=? AND offer=?",
+                            (OFFER_ACCEPTED if accept else OFFER_DISMISSED, root_id,
+                             OFFER_OPEN + offer_id)).rowcount == 1
+        if claimed:
+            if accept:
+                visual_offers._grant(c, root_id, "plan")
+            queued = _queue_message(c, root_id, OFFER_YES if accept else OFFER_NO)
+    if not claimed:
+        raise ServiceError("stale", "this offer is no longer open", 409)
+    bus.publish_agent(db, "autopilot.goal", root_id)
+    bus.publish_agent(db, "message.queued", root_id, message_id=queued, sender_id=None)
+    try:
+        agents.flush(db, root_id)
+    except Exception:  # noqa: BLE001 - it stays queued: the supervisor gets it at its next turn
+        log.warning("brindle: couldn't push the plan offer's answer to %s now; it stays queued", root_id,
+                    exc_info=True)
+    if not accept:
+        tasks.on_resumed(db, root_id, why="the person's choice not to plan first")

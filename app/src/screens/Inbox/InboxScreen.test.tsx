@@ -172,13 +172,10 @@ describe("inbox", () => {
     const visualItem: InboxItemDTO = { kind: "visual", agent_id: "sup1", root_id: "sup1", workspace_id: "proj", visual_id: "v_8f2c", reason: "visual is ready", detail: "Flow A" };
     const visualB = { ...visualItem, visual_id: "v_b", detail: "Flow B" };
     const decision = { ...visualItem, visual_id: "v_question", reason: "asks you to choose", detail: "Pick a flow" };
-    const finishedDoc = { ...visualItem, kind: "analysis_doc", visual_id: "v_doc", reason: "analysis doc is ready", detail: "Cache TTL" };
-    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], inbox: [decision, visualItem, visualB, finishedDoc, question] });
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], inbox: [decision, visualItem, visualB, question] });
     const { sync, onOpen } = mount(daemon);
     await screen.findByRole("region", { name: "Ship ls --json" });
     expect(within(card("visual")).queryByRole("button", { name: "Go to session ›" })).toBeNull();
-    fireEvent.click(within(screen.getByText("Cache TTL").closest("article")!).getByRole("button", { name: "Open doc" }));
-    expect(onOpen).toHaveBeenLastCalledWith("sup1", REPO, "sup1", { kind: "visual", id: "v_doc" });
     fireEvent.click(within(screen.getByText("Flow A").closest("article")!).getByRole("button", { name: "Open visual" }));
     expect(onOpen).toHaveBeenLastCalledWith("sup1", REPO, "sup1", { kind: "visual", id: "v_8f2c" });
     expect(within(card("question")).getByRole("button", { name: "Go to session ›" }).className).toContain("btn-secondary");
@@ -204,26 +201,26 @@ describe("inbox", () => {
     sync.stop();
   });
 
-  it.each([[true, "Yes"], [false, "Not now"]])("an analysis doc offer is an Inbox card answered %s with %s through the goal route", async (accepted, label) => {
+  it.each([[true, "Yes"], [false, "Not now"]])("an offer to plan first is an Inbox card answered %s with %s through the goal route", async (accepted, label) => {
     const context = { session_name: "Command tools", goal: "Ship ls --json", detail: "Support shell scripts", workers: 3, repos: 2,
       milestones: [{ title: "Parse arguments", verified: true }, { title: "Encode output", verified: false }],
       reasons: ["This work spans 2 repositories.", "3 workers have been assigned to this goal."] };
-    const offer: InboxItemDTO = { kind: "analysis_offer", agent_id: "sup1", root_id: "sup1", workspace_id: "proj", request_id: "o1", reason: "offers to write an analysis doc", detail: context.goal, analysis_offer: context };
-    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], inbox: [offer], goal: { root_id: "sup1", analysis_offer: "o1" } as GoalDTO });
+    const offer: InboxItemDTO = { kind: "plan_offer", agent_id: "sup1", root_id: "sup1", workspace_id: "proj", request_id: "o1", reason: "This looks big: plan it first?", detail: context.goal, plan_offer: context };
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], inbox: [offer], goal: { root_id: "sup1", plan_offer: "o1" } as GoalDTO });
     const { sync, onOpen } = mount(daemon);
-    await screen.findByText("Write an analysis doc for this goal?");
-    const body = within(card("analysis_offer")).getByTestId("card-detail");
+    await screen.findByText("This looks big: plan it first?");
+    const body = within(card("plan_offer")).getByTestId("card-detail");
     for (const value of [context.session_name, context.goal, context.detail, ...context.milestones.map((m) => m.title), ...context.reasons]) {
       expect(body.textContent).toContain(value);
     }
     expect(body.querySelectorAll("li")).toHaveLength(context.milestones.length);
-    expect(within(body).getByTestId("analysis-progress").textContent?.match(/\d+/g)).toEqual(["1", "2"]);
-    expect(within(body).getByTestId("analysis-scale").textContent?.match(/\d+/g)).toEqual([String(context.workers), String(context.repos)]);
+    expect(within(body).getByTestId("offer-progress").textContent?.match(/\d+/g)).toEqual(["1", "2"]);
+    expect(within(body).getByTestId("offer-scale").textContent?.match(/\d+/g)).toEqual([String(context.workers), String(context.repos)]);
     expect(body.className).not.toContain("line-clamp");
-    fireEvent.click(within(card("analysis_offer")).getByRole("button", { name: "Go to session ›" }));
+    fireEvent.click(within(card("plan_offer")).getByRole("button", { name: "Go to session ›" }));
     expect(onOpen).toHaveBeenLastCalledWith("sup1", REPO, "sup1");
-    fireEvent.click(within(card("analysis_offer")).getByRole("button", { name: label }));
-    await waitFor(() => expect(posts(daemon).find((r) => r.path === "/goal/analysis-offer")?.body).toMatchObject({ root: "sup1", offer: "o1", accept: accepted }));
+    fireEvent.click(within(card("plan_offer")).getByRole("button", { name: label }));
+    await waitFor(() => expect(posts(daemon).find((r) => r.path === "/goal/plan-offer")?.body).toMatchObject({ root: "sup1", offer: "o1", accept: accepted }));
     sync.stop();
   });
 

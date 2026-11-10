@@ -299,21 +299,21 @@ function Banner({ item, actions, who, branch, sessionTitle, repo, isNew, onDone,
   const age = formatAge((Date.now() - seenAt(item)) / 1000);
 
   let body: ReactNode = null;
-  if (item.kind === "analysis_offer" && item.analysis_offer) {
-    const offer = item.analysis_offer;
+  if (item.kind === "plan_offer" && item.plan_offer) {
+    const offer = item.plan_offer;
     const verified = offer.milestones.filter((m) => m.verified).length;
     body = <div className="space-y-2 break-words" data-testid="card-detail">
       <p><strong>Session: {offer.session_name}</strong></p>
       <p className="whitespace-pre-wrap">{offer.goal}{offer.detail && `\n${offer.detail}`}</p>
       <div>
-        <p data-testid="analysis-progress">{verified} of {offer.milestones.length} milestones verified</p>
+        <p data-testid="offer-progress">{verified} of {offer.milestones.length} milestones verified</p>
         <ul className="list-disc pl-4">
           {offer.milestones.map((m, index) => <li key={index}>{m.title}{m.verified ? " — verified" : ""}</li>)}
         </ul>
       </div>
-      <p data-testid="analysis-scale">{offer.workers} {offer.workers === 1 ? "worker" : "workers"} · {offer.repos} {offer.repos === 1 ? "repository" : "repositories"}</p>
+      <p data-testid="offer-scale">{offer.workers} {offer.workers === 1 ? "worker" : "workers"} · {offer.repos} {offer.repos === 1 ? "repository" : "repositories"}</p>
       <p><strong>Why brindle is offering: </strong>{offer.reasons.join(" ") || "The work qualified when this offer was made; the plan has since changed."}</p>
-      <p>The doc would explain what was built, the decisions behind it, and how the work was checked.</p>
+      <p>Yes: the supervisor writes a planning doc for you to approve before more workers start. Not now: the work goes ahead as is.</p>
     </div>;
   } else if (item.kind === "proposed_checks" || item.kind === "plan") {
     // Approved or accepted from this card: shown whole, never cut short.
@@ -353,8 +353,8 @@ function Banner({ item, actions, who, branch, sessionTitle, repo, isNew, onDone,
         {act("Decline", "decline", {}, GHOST)}
       </>
     );
-  } else if (item.kind === "analysis_offer") {
-    acts = <AnalysisOfferActions item={item} actions={actions} onDone={onDone} />;
+  } else if (item.kind === "plan_offer") {
+    acts = <PlanOfferActions item={item} actions={actions} onDone={onDone} />;
   } else if (item.kind === "org_notice") {
     acts = act("Mark read", "read", {}, PLAIN);
   } else if (item.kind === "org_blocked") {
@@ -379,7 +379,7 @@ function Banner({ item, actions, who, branch, sessionTitle, repo, isNew, onDone,
     // A visual decision opens its reader (goTo), not the session it belongs to; disabled until that session has loaded.
     acts = (
       <button type="button" className={`${button} text-xs`} disabled={!onGo} onClick={onGo}>
-        {item.kind === "analysis_doc" ? "Open doc" : "Open visual"}
+        Open visual
       </button>
     );
   } else {
@@ -422,17 +422,17 @@ function Banner({ item, actions, who, branch, sessionTitle, repo, isNew, onDone,
   );
 }
 
-/* brindle's one-time offer of an analysis doc for a large goal: Yes / Not now, answered through
-   the goal route with the offer id the item carries (request_id). A refusal (the offer was replaced
+/* brindle's one-time offer to plan a big goal first: Yes / Not now, answered through the goal
+   route with the offer id the item carries (request_id). A refusal (the offer was replaced
    meanwhile) is the one line on the card; either way the inbox is read again. */
-function AnalysisOfferActions({ item, actions, onDone }: { item: InboxItemDTO; actions: ReturnType<typeof useInboxActions>; onDone(): void }) {
+function PlanOfferActions({ item, actions, onDone }: { item: InboxItemDTO; actions: ReturnType<typeof useInboxActions>; onDone(): void }) {
   const client = useDaemon();
   const [saving, setSaving] = useState(false);
   const answer = (accept: boolean) => {
     setSaving(true);
     actions.dismiss(itemKey(item));
     void client
-      .resolveAnalysisOffer(item.root_id ?? "", item.request_id ?? "", accept)
+      .resolvePlanOffer(item.root_id ?? "", item.request_id ?? "", accept)
       .then(() => actions.settle(item), (e: unknown) => actions.report(item, e instanceof Error ? e.message : String(e), true))
       .finally(() => {
         setSaving(false);

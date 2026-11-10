@@ -99,8 +99,8 @@ def test_a_user_prompt_clears_the_question_card_but_a_brindle_message_does_not(d
     (2, 2, 0, "Keep existing behavior", 1),
     (2, 1, 3, "Keep existing behavior", 1),
 ])
-def test_analysis_offer_explains_current_paused_session(db, tmp_path, monkeypatch,
-                                                       count, repos, workers, detail, reasons):
+def test_plan_offer_explains_current_paused_session(db, tmp_path, monkeypatch,
+                                                   count, repos, workers, detail, reasons):
     from brindle import autopilot
 
     repo = str(tmp_path)
@@ -109,7 +109,7 @@ def test_analysis_offer_explains_current_paused_session(db, tmp_path, monkeypatc
                        0))
     db.update_agent("r1", name="Storage rollout")
     db.add_autopilot("r1")
-    db.update_autopilot("r1", goal="Ship storage", detail=detail, analysis_goal_at=10)
+    db.update_autopilot("r1", goal="Ship storage", detail=detail, offer_goal_at=10)
     db.set_milestones("r1", [(f"Step {i}", None, None, None, "web" if repos == 2 and i == 0 else None)
                               for i in range(count)])
     # Workers from an older goal and non-worker agents do not count toward this offer.
@@ -117,14 +117,14 @@ def test_analysis_offer_explains_current_paused_session(db, tmp_path, monkeypatc
         db.add_agent(Agent(f"w{i}", "ws", "developer", "claude", "r1",
                            "interactive" if i == workers + 1 else "assign", "exited", "", None,
                            0 if i == workers else 11))
-    autopilot.consider_analysis_offer(db, "r1")
+    autopilot.consider_plan_offer(db, "r1")
     monkeypatch.setattr(inbox.view, "snapshot", lambda *a, **k: [])
 
     def card():
-        return next(i for i in inbox.items(db, repo) if i.kind == "analysis_offer")
+        return next(i for i in inbox.items(db, repo) if i.kind == "plan_offer")
 
     first = card()
-    context = first.model_dump().get("analysis_offer")
+    context = first.model_dump().get("plan_offer")
     assert context is not None
     assert (context["session_name"], context["goal"], context["detail"]) == (
         "Storage rollout", "Ship storage", detail)
@@ -133,8 +133,8 @@ def test_analysis_offer_explains_current_paused_session(db, tmp_path, monkeypatc
     db.record_check(db.milestones("r1")[0].id, True, "done")
     db.update_agent("r1", name="Storage launch")
     current = card()
-    assert current.analysis_offer.session_name == "Storage launch"
-    assert [m.verified for m in current.analysis_offer.milestones] == [True] + [False] * (count - 1)
+    assert current.plan_offer.session_name == "Storage launch"
+    assert [m.verified for m in current.plan_offer.milestones] == [True] + [False] * (count - 1)
     assert (current.root_id, current.request_id) == ("r1", first.request_id)
 
 

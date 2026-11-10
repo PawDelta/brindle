@@ -1128,7 +1128,7 @@ def set_goal(db: DB, params: dict, body: Body) -> Any:
     root, _ = _autopilot_root(db, body)
     items = autopilot.milestone_items(db, root.id, _get(body, "milestones", list, required=True))
     autopilot.set_goal(db, root.id, _get(body, "goal", required=True), items, _get(body, "detail"),
-                       analysis_doc=_get(body, "analysis_doc", bool), summary=_get(body, "summary"))
+                       summary=_get(body, "summary"))
     return {"progress": autopilot.progress(db, root.id)}
 
 
@@ -1151,20 +1151,13 @@ def enable_goal(db: DB, params: dict, body: Body) -> Any:
     return {"enabled": True}
 
 
-def goal_analysis_doc(db: DB, params: dict, body: Body) -> Any:
-    root, _ = _autopilot_root(db, body)
-    requested = _get(body, "analysis_doc", bool, required=True)
-    autopilot.set_goal_analysis_doc(db, root.id, requested)
-    return {"analysis_doc": requested}
+def goal_plan_offer(db: DB, params: dict, body: Body) -> Any:
+    """The person's Yes / Not now to brindle's offer to plan the goal first (brindle.plans.answer_offer)."""
+    from brindle import plans
 
-
-def goal_analysis_offer(db: DB, params: dict, body: Body) -> Any:
     root, _ = _autopilot_root(db, body)
     accept = _get(body, "accept", bool, required=True)
-    try:
-        autopilot.resolve_analysis_offer(db, root.id, accept, _get(body, "offer", str, required=True))
-    except autopilot.AutopilotError as e:
-        raise ServiceError("stale", str(e), 409) from e
+    plans.answer_offer(db, root.id, _get(body, "offer", str, required=True), accept)
     return {"accepted": accept}
 
 
@@ -2710,8 +2703,7 @@ ROUTES = [
     _post("/goal", set_goal),
     _post("/goal/check", check_goal),
     _post("/goal/enabled", enable_goal),
-    _post("/goal/analysis-doc", goal_analysis_doc),
-    _post("/goal/analysis-offer", goal_analysis_offer),
+    _post("/goal/plan-offer", goal_plan_offer),
     _post("/decisions", record_decision),
     _post("/coordinator/undo", coordinator_undo),
     _post("/kb/sources", add_kb_source),

@@ -100,6 +100,41 @@ def test_assign_queues_behind_open_plan_until_the_person_approves(db, session, m
         assert tasks.sweep(db) == 0 and started == ["build the preset schema"]
 
 
+@pytest.mark.parametrize("accept", [True, pytest.param(False, marks=pytest.mark.variant(
+    "No must start the task queued behind the offer; the other offer tests answer with nothing queued"))])
+def test_big_goal_offers_a_planning_doc(accept, db, session, monkeypatch):
+    """A big goal asks the person "This looks big: plan it first?". While that
+    is open, assign queues; Yes grants the plan and keeps the task queued
+    until the plan is approved, No starts it."""
+    from brindle import autopilot
+    from brindle.service import inbox
+
+    boss, started = session
+    monkeypatch.setattr(autopilot, "_commit", lambda ws, tracked_only=False: "abc123")
+    db.add_autopilot("boss")
+    reply = mcp_server.set_goal("Org presets", [{"title": f"M{i}", "check": "true"} for i in range(4)])
+    assert "plan it first" in reply
+    [offer] = [i for i in inbox.items(db, None) if i.kind == "plan_offer"]
+    assert offer.reason == "This looks big: plan it first?" and offer.plan_offer.milestones
+
+    assert "offer to plan" in asyncio.run(mcp_server.assign("developer", "build the preset schema"))
+    assert tasks.sweep(db) == 0 and started == []
+    with TestClient(build_app(TOKEN), headers=AUTH) as client:
+        answer = {"root": "boss", "offer": offer.request_id, "accept": accept}
+        assert client.post("/v1/goal/plan-offer", json=answer).status_code == 200
+        assert client.post("/v1/goal/plan-offer", json=answer).status_code == 409   # answered once
+        assert not [i for i in inbox.items(db, None) if i.kind == "plan_offer"]
+        if not accept:
+            assert "not to plan" in messages(db)[0] and started == ["build the preset schema"]
+            return
+        assert "propose_plan" in messages(db)[-1]
+        assert tasks.sweep(db) == 0 and started == []       # Yes: it waits for the plan now
+        pid = mcp_server.propose_plan(PLAN).split()[2]      # the Yes is the person's ask
+        assert started == [] and plans.holding(db, "boss")["id"] == pid
+        assert client.post(f"/v1/plans/{pid}/decide", json={"rev": 1, "approved": True}).json()["state"] == "approved"
+    assert started == ["build the preset schema"]
+
+
 def test_a_failed_verdict_leaves_nothing_behind_and_a_failed_push_loses_nothing(db, session, monkeypatch):
     boss, started = session
     visual_offers.person_spoke(db, boss, "Make a planning doc.")
