@@ -238,6 +238,36 @@ describe("App", () => {
     } finally { sync.stop(); vi.useRealTimers(); }
   });
 
+  it("the viewed session shows first: its terminal mounts while other sessions are still pending and their events keep the store stale", async () => {
+    vi.useFakeTimers();
+    const rootB = { ...root, id: "proj2", agents: root.agents?.map((a) => ({ ...a, id: "sup2", window: null })) };
+    const daemon = new FakeDaemon({
+      repos: [{ repo_root: REPO, name: "proj" }],
+      sessions: [session, { ...session, id: "sup2" }],
+      workspaces: [root, rootB],
+    });
+    const client = daemon.client();
+    const store = createAppStore();
+    const meta = client.meta.bind(client);
+    // The other session coming back says so on the stream while the app asks the engine about it.
+    vi.spyOn(client, "meta").mockImplementation(async () => {
+      const got = await meta();
+      daemon.publish("agent.status", { repo_root: REPO, agent_id: "sup2", payload: { status: "starting" } });
+      return { ...got, resuming: true, recovery: { done: 1, total: 2, pending: ["sup2"] } };
+    });
+    // The refreshes those events ask for are slow, as on a busy restart: after sync's first, their inbox never answers.
+    const inbox = client.inbox.bind(client);
+    vi.spyOn(client, "inbox").mockImplementationOnce(inbox).mockReturnValue(new Promise(() => {}));
+    const sync = startSync({ client, store, connect: daemon.connect });
+    try {
+      renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO }} />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
+      expect(screen.getByTestId("terminal").textContent).toBe("sup1");
+      // And the engine knows it is on screen, for the next restart to bring it back first.
+      expect(daemon.viewed).toEqual(["sup1"]);
+    } finally { sync.stop(); vi.useRealTimers(); }
+  });
+
   it("panes per session: a session that finishes coming back while its rows are being read is not shown from the old rows", async () => {
     vi.useFakeTimers();
     const at = (id: string, proj: string, window: string | null) => ({ ...root, id: proj, agents: root.agents?.map((a) => ({ ...a, id, window })) });

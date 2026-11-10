@@ -564,8 +564,11 @@ function usePanesReady(client: DaemonClient | null, refresh?: () => Promise<void
       const latest = await client.meta();
       const stillPending = latest.recovery?.pending;
       if (!unchanged() || latest.pid !== meta.pid || !latest.resuming || !stillPending) return;
+      // Not stale, though: while sessions come back the stream rarely stops marking it so (each one says it is
+      // starting), and the refresh that clears it is behind them. What counts is the rows applied now: those
+      // read above, or a later read (sync drops a read older than them), still giving the session's own windows.
       const applied = store.getState();
-      if (applied.error || applied.stale) return;
+      if (applied.error) return;
       const ready = fresh(applied.workspaces, stillPending).filter((id) => eligible.includes(id));
       void Promise.all([reload(), refresh?.()]).catch(() => {});
       for (const id of ready) backNow.current.add(id);
