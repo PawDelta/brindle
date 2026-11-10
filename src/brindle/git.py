@@ -776,6 +776,9 @@ def remove_worktree(root: str | Path, path: str | Path, force: bool = False) -> 
     if os.path.lexists(path):
         try:
             trash.put(root, path, force=force)
+        except trash.TrashUnavailable:
+            _remove_in_place(root, path, force)
+            return
         except OSError as e:
             raise GitError(f"worktree kept: {e}") from e
         try:
@@ -784,6 +787,19 @@ def remove_worktree(root: str | Path, path: str | Path, force: bool = False) -> 
             pass  # Removal succeeded; the hourly sweep can apply retention later.
     else:
         run(["worktree", "prune"], root, check=False)
+
+
+def _remove_in_place(root: str | Path, path: str | Path, force: bool) -> None:
+    """0.6.2's removal, for a checkout the trash can't take (another volume,
+    or no exclusive rename there): not recoverable. Unforced, git refuses a
+    checkout with changes or a lock."""
+    if force:
+        shutil.rmtree(path, ignore_errors=True)
+        if os.path.lexists(path):
+            raise GitError(f"could not delete {path}")
+    else:
+        run(["worktree", "remove", str(path)], root)
+    run(["worktree", "prune"], root, check=False)
 
 
 def list_worktrees(root: str | Path) -> list[dict[str, str]]:
