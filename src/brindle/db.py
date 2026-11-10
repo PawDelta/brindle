@@ -448,6 +448,21 @@ CREATE TABLE IF NOT EXISTS tasks (
     started_at REAL
 );
 CREATE INDEX IF NOT EXISTS tasks_repo_root ON tasks(repo_root);
+CREATE TABLE IF NOT EXISTS plan_tasks (
+    plan_id TEXT NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
+    worker_id TEXT NOT NULL,
+    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    PRIMARY KEY (plan_id, worker_id)
+);
+-- Completed worker checks are outcomes, not reusable passing-cache entries.
+-- Task ownership keeps their evidence after the worker workspace is removed.
+CREATE TABLE IF NOT EXISTS task_check_outcomes (
+    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    command TEXT NOT NULL,
+    ok INTEGER NOT NULL,
+    checked_at REAL NOT NULL,
+    PRIMARY KEY (task_id, command)
+);
 -- A session's cloud login (brindle.login_pause), keyed by its root: when it
 -- was last looked at, and while only the person can renew it (state
 -- 'auth_paused'), what they run and how they were told. Back at 'ok', the
@@ -3148,6 +3163,22 @@ class DB:
             (workspace_id, sha, command),
         ).fetchone()
         return _load(CheckResult, row) if row else None
+
+    def record_task_check(self, workspace_id: str, command: str, ok: bool) -> None:
+        rows = self.conn.execute(
+            "SELECT t.id, t.agent_id FROM tasks t JOIN agents a ON a.id=t.agent_id "
+            "WHERE a.workspace_id=? AND t.state='started'", (workspace_id,),
+        ).fetchall()
+        if not rows:
+            return
+        with self.tx() as c:
+            c.executemany(
+                "INSERT INTO task_check_outcomes (task_id, command, ok, checked_at) VALUES (?,?,?,?) "
+                "ON CONFLICT(task_id, command) DO UPDATE SET ok=excluded.ok, checked_at=excluded.checked_at",
+                [(r["id"], command, int(ok), time.time()) for r in rows],
+            )
+        for r in rows:
+            bus.publish_agent(self, "task.checked", r["agent_id"], task_id=r["id"], command=command, ok=ok)
 
     def set_check(self, workspace_id: str, sha: str, command: str, ok: bool, output: str) -> None:
         with self.tx() as c:

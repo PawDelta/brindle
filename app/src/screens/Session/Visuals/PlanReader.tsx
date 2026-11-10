@@ -9,7 +9,7 @@
    who publishes a new revision). Drafts belong to the revision on screen: a new revision is a
    fresh read, and a verdict on an older one is a 409. */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { DaemonError, type Plan, type VisualDTO } from "../../../api/client";
 import type { PlanDecisionDTO, PlanSectionDTO } from "../../../api/schema";
 import { LoadingButton } from "../../../components/LoadingButton";
@@ -19,12 +19,14 @@ import type { ExportClient } from "../../Knowledge/ExportMenu";
 import type { PlansClient, VisualsClient } from "./client";
 import { BackButton, KeepButton, message, useEscBack } from "./chrome";
 import { ExportButton } from "./ExportButton";
+import { StoreContext } from "../../../store/useStore";
 
 type Client = VisualsClient & PlansClient & Partial<ExportClient>;
 
 /* How far along a plan is: its revision, then decided or not. Revisions only grow and a decided
    revision never reopens, so a response with less progress than the one on screen is stale. */
 const progress = (p: Plan) => p.rev * 2 + (p.state === "open" ? 0 : 1);
+const noSubscribe = () => () => {};
 
 export function PlanReader({ client, visual, repo, onBack, asking, onChanged }: {
   client: Client;
@@ -39,6 +41,11 @@ export function PlanReader({ client, visual, repo, onBack, asking, onChanged }: 
   const [plan, setPlan] = useState<Plan | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
+  const store = useContext(StoreContext);
+  const updates = useSyncExternalStore(store?.subscribe ?? noSubscribe, () => {
+    const s = store?.getState();
+    return `${s?.recent.filter((e) => e.root_id === visual.session || e.payload.caller_id === visual.session).at(-1)?.id ?? 0}:${s?.snapshotVersion ?? 0}`;
+  });
   // Read again whenever the session's row says the plan changed (a revision, a verdict).
   const changed = `${visual.id}:${visual.rev}:${visual.answer?.at ?? ""}`;
   const seq = useRef(0);
@@ -46,14 +53,15 @@ export function PlanReader({ client, visual, repo, onBack, asking, onChanged }: 
   selected.current = visual.id;
   // Reads and verdict replies can land in any order: the plan on screen only ever moves forward
   // (a newer revision, or this revision decided), and only for the plan still open here.
-  const accept = useCallback((p: Plan) => {
+  const accept = useCallback((p: Plan, verdict = false) => {
     if (p.id !== selected.current) return;
-    setPlan((now) => (now && now.id === p.id && progress(now) > progress(p) ? now : p));
+    setPlan((now) => (now && now.id === p.id && (progress(now) > progress(p) || (verdict && progress(now) === progress(p))) ? now : p));
   }, []);
   useEffect(() => {
     const mine = ++seq.current;
     client.plan(visual.id).then(
       (p) => {
+        if (mine !== seq.current) return;
         accept(p);
         if (mine === seq.current) setError(null);
       },
@@ -61,7 +69,7 @@ export function PlanReader({ client, visual, repo, onBack, asking, onChanged }: 
         if (mine === seq.current) setError(message(e));
       },
     );
-  }, [client, visual.id, changed, accept]);
+  }, [client, visual.id, changed, accept, updates]);
   const shown = plan && plan.id === visual.id ? plan : null;
   const exportClient = client.exportVisual && client.exportDoc && client.docPolicy && client.docExportConfig ? (client as ExportClient) : undefined;
   return (
@@ -81,7 +89,13 @@ export function PlanReader({ client, visual, repo, onBack, asking, onChanged }: 
             <span>rendered by brindle from the plan's markdown</span>
             <span className="truncate">{`${visual.id} · r${shown?.rev ?? visual.rev} · ${visual.by}`}</span>
           </div>
-          {shown ? <PlanBody key={`${shown.id}:${shown.rev}`} client={client} plan={shown} by={visual.by} onDecided={accept} /> : <p className="p-s3 text-sm text-ink-3">{error ?? "Loading…"}</p>}
+          {shown ? <>
+            {shown.state === "approved" && <section aria-label="Plan board" className="overflow-auto border-b border-line p-s2">
+              <h3 className="mb-s1 text-sm font-semibold" data-testid="plan-board-progress">approved · {shown.split.filter((w) => w.test_state === "passing").length} of {shown.split.length} green</h3>
+              <Split plan={shown} shared={overlaps(shown)} />
+            </section>}
+            <PlanBody key={`${shown.id}:${shown.rev}`} client={client} plan={shown} by={visual.by} onDecided={(p) => accept(p, true)} />
+          </> : <p className="p-s3 text-sm text-ink-3">{error ?? "Loading…"}</p>}
         </div>
       </div>
     </div>
@@ -228,7 +242,7 @@ function PlanBody({ client, plan, by, onDecided }: { client: PlansClient; plan: 
               {step.kind === "section" && <Markdown text={step.section.markdown} />}
               {step.kind === "decision" && <Decision decision={step.decision} chosen={chosen(step.decision)} open={open}
                 onPick={(o) => { setPicks((p) => ({ ...p, [step.decision.id]: o })); settle(step.id); }} />}
-              {step.kind === "split" && <Split plan={plan} shared={shared} />}
+              {step.kind === "split" && plan.state !== "approved" && <Split plan={plan} shared={shared} />}
               {step.kind === "summary" && <Summary plan={plan} chosen={chosen} said={said} titles={titles} shared={shared} />}
               {step.kind !== "summary" && commentBox(step.id, step.title)}
             </section>
@@ -343,6 +357,11 @@ function Split({ plan, shared }: { plan: Plan; shared: Map<string, string[]> }) 
         {plan.split.map((w) => (
           <li key={w.id} className="flex min-w-0 flex-col gap-2 rounded-lg border border-line-strong bg-canvas p-s1 text-[12.5px]" data-testid={`task-${w.id}`}>
             <span className="text-[13.5px] font-semibold text-ink">{w.title}</span>
+            {plan.state === "approved" && <span className="text-xs text-ink-2">
+              {w.state ?? "queued"}
+              {w.task_id && <span className={mono}> · task {w.task_id}</span>}
+              {w.agent_id && <span className={mono}> · worker {w.agent_id}</span>}
+            </span>}
             <span className={`${mono} text-[11px] text-ink-3`}>
               {`worker ${w.id}`}
               {w.after?.length ? ` · after ${w.after.join(", ")}` : ""}
@@ -361,8 +380,9 @@ function Split({ plan, shared }: { plan: Plan; shared: Map<string, string[]> }) 
                 })}
               </span>
             )}
-            <span className={`${mono} rounded-md px-1.5 py-1 text-[11px] ${w.test ? "bg-surface-2 text-ink-2" : "text-ink-3"}`}>
+            <span data-test-state={w.test_state ?? "not run"} className={`${mono} rounded-md px-1.5 py-1 text-[11px] ${w.test_state === "passing" ? "bg-pass-soft text-pass" : w.test_state === "failing" ? "bg-fail-soft text-fail" : "bg-surface-2 text-ink-3"}`}>
               {w.test ? `proves it: ${w.test}` : "no test named"}
+              {plan.state === "approved" && ` · ${w.test_state ?? "not run"}`}
             </span>
           </li>
         ))}

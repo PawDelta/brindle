@@ -51,6 +51,105 @@ def messages(db) -> list[str]:
     return [r["body"] for r in db.conn.execute("SELECT body FROM inbox WHERE agent_id='boss' ORDER BY id")]
 
 
+def test_plan_board_links_dispatch_and_reads_recorded_checks(db, session, monkeypatch):
+    from dataclasses import replace
+    from brindle import gates
+
+    boss, started = session
+    visual_offers.person_spoke(db, boss, "Make a planning doc.")
+    check = "uv run pytest tests/test_presets.py -q"
+    pid = mcp_server.propose_plan(PLAN, split=[
+        {"id": "schema", "title": "Schema", "test": check},
+        {"id": "ui", "title": "UI", "test": "npx vitest run presets"},
+    ]).split()[2]
+    with monkeypatch.context() as transport:
+        transport.setattr(mcp_server._Request, "answer", mcp_server._Request.cancel)
+        asyncio.run(mcp_server.assign("developer", "schema", plan_worker=f"{pid}:schema"))
+    cancelled = db.list_tasks()[0]
+    assert cancelled.state == "cancelled"
+    link_plan = mcp_server._Request.link_plan
+
+    def competing_assignment(req, *args):
+        result = link_plan(req, *args)
+        # Another request claims the cancelled card after our precheck,
+        # before our enqueue's atomic claim. Both dispatch through the real queue.
+        with monkeypatch.context() as inner:
+            inner.setattr(mcp_server._Request, "link_plan", link_plan)
+            asyncio.run(mcp_server.assign("developer", "schema", plan_worker=f"{pid}:schema"))
+        return result
+
+    with monkeypatch.context() as race:
+        race.setattr(mcp_server._Request, "link_plan", competing_assignment)
+        asyncio.run(mcp_server.assign("developer", "competing schema request", plan_worker=f"{pid}:schema"))
+    assert plans.to_dto(db, plans.get(db, pid))["split"][0]["task_id"] != cancelled.id
+    asyncio.run(mcp_server.handoff("developer", "UI", plan_worker=f"{pid}:ui"))
+    board = lambda: plans.to_dto(db, plans.get(db, pid))["split"]  # noqa: E731
+    first, second = board()
+    assert first["task_id"] != second["task_id"]
+    assert [(w["state"], w["test_state"]) for w in board()] == [("queued", "not run")] * 2
+    asyncio.run(mcp_server.assign("developer", "a second trigger", plan_worker=f"{pid}:schema"))
+    assert len(db.list_tasks()) == 4 and started == []
+    # A different session cannot attach its task to this board.
+    with monkeypatch.context() as identity:
+        identity.setattr("brindle.autopilot.root_of", lambda db_, aid: "other")
+        asyncio.run(mcp_server.assign("developer", "foreign", plan_worker=f"{pid}:schema"))
+    assert len(db.list_tasks()) == 4
+    plans.decide(db, pid, 1, True, person=True)
+    first, second = board()
+    assert len(started) == 2
+    assert first["agent_id"] == db.get_task(first["task_id"]).agent_id
+    assert first["state"] == second["state"] == "working"
+    asyncio.run(mcp_server.assign("developer", "duplicate while working", plan_worker=f"{pid}:schema"))
+    assert len(db.list_tasks()) == 4 and len(started) == 2
+    ws = replace(db.get_workspace(boss.workspace_id), id="worker-ws", name="worker")
+    db.add_workspace(ws)
+    db.update_agent(first["agent_id"], workspace_id=ws.id)
+    sha, outcome = ["pass"], [True]
+    monkeypatch.setattr(gates, "head", lambda ws_: sha[0])
+    monkeypatch.setattr(gates.git, "out", lambda *a, **kw: f"tree-{sha[0]}")
+    monkeypatch.setattr(gates.git, "dirty_files", lambda path: [])
+    monkeypatch.setattr(gates, "_scoped", lambda ws_, cmd, diff: cmd)
+    run_queued = gates._run_queued
+    monkeypatch.setattr(gates, "_run_queued", lambda *a: (outcome[0], "recorded output"))
+
+    def inconclusive():
+        with monkeypatch.context() as execution:
+            execution.setattr(gates, "_run_queued", run_queued)
+            execution.setattr(gates, "_run_once", lambda *a: (False, gates.autopilot.TIMED_OUT))
+            execution.setattr(gates, "_concurrency", lambda ws_: 1)
+            assert gates.timed_out(gates.run_checked(db, ws, check, {}, 30, full=True)[1])
+
+    sha[0] = "inconclusive-first"
+    inconclusive()
+    assert board()[0]["test_state"] == "not run"
+    sha[0] = "pass"
+    gates.run_checked(db, ws, "unrelated", {}, 30, full=True)
+    assert board()[0]["test_state"] == "not run"
+    gates.run_checked(db, ws, check, {}, 30, full=True)
+    assert board()[0]["test_state"] == "passing"
+    sha[0] = "inconclusive-after-pass"
+    inconclusive()
+    assert board()[0]["test_state"] == "passing"
+    sha[0], outcome[0] = "fail", False
+    gates.run_checked(db, ws, check, {}, 30, full=True)
+    assert board()[0]["test_state"] == "failing"
+    db.update_agent(first["agent_id"], pipeline="reviewing", result="previous report")
+    assert board()[0]["state"] == "in review"
+    db.update_agent(first["agent_id"], pipeline="fixing")
+    assert board()[0]["state"] == "working"
+    sha[0], outcome[0] = "fixed", True
+    gates.run_checked(db, ws, check, {}, 30, full=True)
+    assert board()[0]["test_state"] == "passing"
+    db.set_milestones(boss.id, [("UI", second["test"], None)])
+    db.set_task_milestone(second["task_id"], "UI")
+    db.record_check(db.milestones(boss.id)[0].id, True, "passed", "sha")
+    db.update_task(first["task_id"], state="merged")
+    assert [(w["state"], w["test_state"]) for w in board()] == [
+        ("merged", "passing"), ("working", "passing")]
+    db.delete_workspace(ws.id)
+    assert (board()[0]["state"], board()[0]["test_state"]) == ("merged", "passing")
+
+
 def test_assign_queues_behind_open_plan_until_the_person_approves(db, session, monkeypatch):
     boss, started = session
     visual_offers.person_spoke(db, boss, "Make a planning doc.")

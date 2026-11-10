@@ -252,9 +252,49 @@ def to_dto(db: DB, p: dict) -> dict:
     lede, parts = sections(p["markdown"])
     return PlanDTO(id=p["id"], session=p["root_id"], title=p["visual"]["title"], rev=p["rev"],
                    state=p["state"], ask=p.get("ask"),
-                   markdown=p["markdown"], lede=lede, sections=parts, decisions=p["decisions"], split=p["split"],
+                   markdown=p["markdown"], lede=lede, sections=parts, decisions=p["decisions"], split=_board(db, p),
                    verdict=p["decision"], queued=_queued(db, p["root_id"]) if p["state"] in HOLDING else 0,
                    created_at=p["created_at"]).to_json()
+
+
+def assignment(db: DB, caller: Agent, ref: str) -> tuple[str, str]:
+    """An explicit plan-id:split-id reference, scoped to the caller's session."""
+    from brindle import autopilot
+
+    pid, _, wid = ref.partition(":")
+    p = _row(db, pid)
+    if p["root_id"] != autopilot.root_of(db, caller.id) or not any(w["id"] == wid for w in p["split"]):
+        raise ServiceError("invalid", "plan_worker must name a split in this session (plan-id:split-id)", 400)
+    return pid, wid
+
+
+def _board(db: DB, p: dict) -> list[dict]:
+    out = []
+    milestones = db.milestones(p["root_id"])
+    for card in p["split"]:
+        w = dict(card, state="queued", test_state="not run")
+        link = db.conn.execute("SELECT task_id FROM plan_tasks WHERE plan_id=? AND worker_id=?",
+                               (p["id"], w["id"])).fetchone()
+        task = db.get_task(link["task_id"]) if link else None
+        if task:
+            agent = db.get_agent(task.agent_id) if task.agent_id else None
+            w.update(task_id=task.id, agent_id=task.agent_id)
+            w["state"] = (task.state if task.state in ("merged", "cancelled") else
+                          "in review" if agent and (agent.pipeline in ("reviewing", "ready") or
+                                                   (not agent.pipeline and agent.result)) else
+                          "working" if agent else "queued")
+            # Only results for the named proving command count; an unrelated passing
+            # check or milestone must never turn this card green.
+            results = [(r["checked_at"], bool(r["ok"])) for r in db.conn.execute(
+                "SELECT checked_at, ok FROM task_check_outcomes WHERE task_id=? AND command=?",
+                (task.id, w.get("test")))]
+            results.extend((m.checked_at, m.status == "passed") for m in milestones
+                           if m.checked_at is not None and m.checked_at >= task.created_at
+                           and m.title == db.task_milestone(task.id) and m.check_cmd == w.get("test"))
+            if results:
+                w["test_state"] = "passing" if max(results, key=lambda r: r[0])[1] else "failing"
+        out.append(w)
+    return out
 
 
 def _page(title: str, markdown: str) -> str:
