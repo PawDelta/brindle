@@ -367,7 +367,7 @@ def test_what_the_person_does_on_the_doc_reaches_the_library_once(db, parts, bac
     assert got["decisions"][0]["votes"] == {"org": ["person"]}
 
 
-def test_an_accept_the_library_refuses_goes_up_in_the_revision_and_never_again(db, parts, backend):
+def test_an_accept_the_library_refuses_holds_the_text_until_it_goes_through(db, parts, backend):
     pid, lib, net = parts
     sd.share(db, pid, TEAM, **net)
     lib.threads = [{"id": 1, "kind": "suggestion", "rev": 1, "author": "u_b", "text": "", "after": "Agents",
@@ -375,15 +375,53 @@ def test_an_accept_the_library_refuses_goes_up_in_the_revision_and_never_again(d
                                                                 "end": 7, "quote": "Workers", "state": "current"}}]
     sd.sync(db, pid, **net)
     plan_docs.accept(db, pid, plan_docs.fields(db, plans.get(db, pid))["threads"][0]["id"], 1)
-    lib.refuse_accept = True
-    assert sd.sync(db, pid, **net)["pushed"] is True
-    assert lib.content["sections"][0]["markdown"].startswith("Agents")
 
-    # Sent now, on text already holding the change, it would be applied a second time.
-    plan_docs.edit(db, pid, 2, "summary", 0, "Agents", "Hosts")
+    # Refused: sending the text anyway would leave the Library's thread open for good.
+    lib.refuse_accept = True
+    with pytest.raises(RuntimeError):
+        sd.sync(db, pid, **net)
+    assert not sent(backend, f"POST {DESIGN}/revisions") and sd.link(db, pid)["local_rev"] == 1
+
+    # Once it goes through the thread is closed and the change applied once, and it is never sent again.
     lib.refuse_accept = False
     assert sd.sync(db, pid, **net)["pushed"] is True
-    assert len(sent(backend, f"POST {DESIGN}/threads/1")) == 1
+    assert lib.threads[0]["status"] == "accepted" and not sent(backend, f"POST {DESIGN}/revisions")
+    assert lib.content["sections"][0]["markdown"] == SUMMARY.replace("Workers", "Agents", 1)
+    plan_docs.edit(db, pid, 2, "summary", 0, "Agents", "Hosts")
+    sd.sync(db, pid, **net)
+    assert len(sent(backend, f"POST {DESIGN}/threads/1")) == 2
+
+
+def test_the_same_words_elsewhere_from_this_account_are_another_thread(db, parts, backend):
+    pid, lib, net = parts
+    sd.share(db, pid, TEAM, **net)
+    lib.threads = [{"id": 1, "kind": "comment", "rev": 1, "author": "user_1", "text": "Same words.", "status": "open",
+                    "replies": [], "anchor": {"kind": "text", "section": "summary", "start": 0, "end": 7,
+                                              "quote": "Workers", "state": "current"}}]
+    mine = plan_docs.comment(db, pid, 1, {"kind": "section", "section": "summary"}, "Same words.")
+    plan_docs.resolve(db, pid, mine)
+    sd.sync(db, pid, **net)
+    assert len(sent(backend, f"POST {DESIGN}/comments")) == 1 and not sent(backend, f"POST {DESIGN}/threads/1")
+    assert [t["status"] for t in lib.threads] == ["open", "resolved"]
+
+
+def test_a_thread_closed_before_its_first_send_still_goes_up_then_closes(db, parts, backend):
+    pid, lib, net = parts
+    sd.share(db, pid, TEAM, **net)
+    comment = plan_docs.comment(db, pid, 1, {"kind": "section", "section": "summary"}, "Settled already.")
+    plan_docs.comment(db, pid, text="Agreed.", parent=comment)
+    plan_docs.resolve(db, pid, comment)
+    plan_docs.reject(db, pid, plan_docs.suggest(db, pid, 1, "summary", 8, "run", "work"))
+    plan_docs.accept(db, pid, plan_docs.suggest(db, pid, 1, "summary", 0, "Workers", "Hosts"), 1)
+    assert sd.sync(db, pid, **net)["pushed"] is True
+
+    # The accepted one is placed on the text the Library holds and closes through the Library's accept.
+    assert not sent(backend, f"POST {DESIGN}/revisions")
+    assert lib.content["sections"][0]["markdown"] == SUMMARY.replace("Workers", "Hosts", 1)
+    by_text = {t.get("after") or t["text"]: t for t in lib.threads}
+    assert by_text["Settled already."]["status"] == "resolved"
+    assert [r["text"] for r in by_text["Settled already."]["replies"]] == ["Agreed."]
+    assert (by_text["work"]["status"], by_text["Hosts"]["status"]) == ("rejected", "accepted")
 
 
 @pytest.mark.variant("other approvals run these lines but none checks the upload, so an inverted guard would pass")

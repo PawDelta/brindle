@@ -1083,7 +1083,8 @@ CREATE TABLE IF NOT EXISTS plan_shares (
 );
 -- Which local thread or reply each Library thread or reply became, so a pull
 -- adds it once; status is the Library's as last seen. A negative remote_id is
--- a thread written before the plan was shared, which stays here.
+-- a thread with no Library thread: status 'sending' for one sent whose answer
+-- hasn't come back, otherwise one written before sharing, which stays here.
 CREATE TABLE IF NOT EXISTS plan_share_threads (
     plan_id TEXT NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
     remote_id INTEGER NOT NULL,
