@@ -428,13 +428,18 @@ function Banner({ item, actions, who, branch, sessionTitle, repo, isNew, onDone,
 function PlanOfferActions({ item, actions, onDone }: { item: InboxItemDTO; actions: ReturnType<typeof useInboxActions>; onDone(): void }) {
   const client = useDaemon();
   const [saving, setSaving] = useState(false);
+  const pending = useRef(false);
   const answer = (accept: boolean) => {
+    // Guard synchronously: both choices can fire before React disables them.
+    if (pending.current) return;
+    pending.current = true;
     setSaving(true);
     actions.dismiss(itemKey(item));
     void client
       .resolvePlanOffer(item.root_id ?? "", item.request_id ?? "", accept)
       .then(() => actions.settle(item), (e: unknown) => actions.report(item, e instanceof Error ? e.message : String(e), true))
       .finally(() => {
+        pending.current = false;
         setSaving(false);
         onDone();
       });
