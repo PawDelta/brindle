@@ -103,9 +103,11 @@ def test_a_rule_holds_the_build_and_shows_why_until_one_sign_off_meets_all_of_th
     pytest.param({"policy_reviewers": [rule(status="met", met_by=["u_s"], approvals="1")]}, id="approvals-unreadable"),
     pytest.param({"policy_reviewers": [rule(status="met", met_by=["u_s"])], "pending_policies": "security"}, id="pending-unreadable"),
     pytest.param({"policy_reviewers": [rule(status="met", met_by=["u_s"])], "pending_policies": [{"org_id": ORG, "policy": "security"}]},
-                 id="met-but-still-pending"),
-    pytest.param({"policy_reviewers": [rule(status="met", met_by=["u_s"], approvals=2)]}, id="met-short-of-approvals"),
-    pytest.param({"policy_reviewers": [rule(status="waived")]}, id="waived-with-no-waiver"),
+                 id="met-but-still-pending", marks=pytest.mark.variant("the Library contradicting itself must not open the gate")),
+    pytest.param({"policy_reviewers": [rule(status="met", met_by=["u_s"], approvals=2)]}, id="met-short-of-approvals",
+                 marks=pytest.mark.variant("a rule needing two approvals with one signer must not read as met")),
+    pytest.param({"policy_reviewers": [rule(status="waived")]}, id="waived-with-no-waiver",
+                 marks=pytest.mark.variant("a waiver nobody can be shown for must not clear the rule")),
     pytest.param({"policy_reviewers": [rule(status="denied")]}, id="status-unknown", marks=pytest.mark.variant(
         "a status this brindle doesn't know, a denial above all, must hold the gate rather than read as met")),
 ])
@@ -136,15 +138,10 @@ def test_a_refusal_closes_a_ready_gate_until_the_library_answers_whole(db, share
     assert gate(db, pid)["state"] == "ready"
 
 
-def test_another_failure_says_nothing_about_the_rules(db, shared, backend):  # noqa: F811 - fixture
-    pid, lib, net = shared
-    backend.routes[f"GET {DESIGN}"] = lambda f, h: (500, {"error": "boom"})
-    with pytest.raises(RuntimeError):
-        sd.sync(db, pid, **net)
-    assert rp.REFUSED not in sd.link(db, pid)["review"] and gate(db, pid)["state"] == "ready"
-
-
-@pytest.mark.parametrize("role, offered", [("owner", ORG), ("member", None)])
+@pytest.mark.parametrize("role, offered", [
+    ("owner", ORG),
+    pytest.param("member", None, marks=pytest.mark.variant("a member must not be offered what only an admin can do")),
+])
 def test_only_an_org_admin_is_offered_an_override(monkeypatch, role, offered):
     from brindle.daemon import routes_actions as actions
 
@@ -200,6 +197,7 @@ def test_a_refused_override_changes_nothing_and_a_closed_review_takes_none(db, s
     with pytest.raises(RuntimeError):
         rp.override(db, pid, 1, ORG, "security", "waive", "r", **net)
     assert gate(db, pid)["state"] == "waiting" and gate(db, pid)["policies"][0]["waiver"] is None
+    assert rp.REFUSED not in sd.link(db, pid)["review"]             # an admin check says nothing about the rules
 
     lib.rules = []
     plans.decide(db, pid, 1, True, person=True)
