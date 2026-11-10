@@ -727,29 +727,50 @@ describe("App", () => {
     sync.stop();
   });
 
-  it("a session whose status beat its window into the snapshot still opens running, not paused (#216)", async () => {
+  it.each(["before", "after"])("a session whose status beat its window into the snapshot still opens running, not paused (#216), read %s launch completes", async (readWhen) => {
     // The engine publishes the new chat's status before it records the chat's window: the snapshot that
     // status asks for lists it "exited" with no window, and nothing on the bus says when the window lands.
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [], workspaces: [{ ...root, agents: [] }] });
     daemon.holdLaunch = true;
     const store = createAppStore();
     const client = daemon.client();
+    const snapshot = client.snapshot.bind(client);
+    let readStarted!: () => void;
+    const reading = new Promise<void>((resolve) => { readStarted = resolve; });
+    let releaseRead!: () => void;
+    const held = new Promise<void>((resolve) => { releaseRead = resolve; });
+    vi.spyOn(client, "snapshot").mockImplementation(async (...args) => {
+      if (daemon.data.sessions.some((s) => s.id === "new1")) {
+        readStarted();
+        await held;
+      }
+      return snapshot(...args);
+    });
     const sync = startSync({ client, store, connect: daemon.connect });
-    renderApp(<App store={store} client={client} refresh={sync.refresh} />);
-    fireEvent.change(await screen.findByLabelText("What should brindle work on?"), { target: { value: "Fix the flaky test" } });
-    fireEvent.click(screen.getByRole("button", { name: "Start" }));
-    const early = () => store.getState().workspaces.flatMap((ws) => ws.agents ?? []).find((a) => a.id === "new1");
-    await waitFor(() => expect(early()).toMatchObject({ status: "exited", window: null }));
-    await sync.idle();
-    daemon.finishLaunch();
+    try {
+      renderApp(<App store={store} client={client} refresh={sync.refresh} />);
+      fireEvent.change(await screen.findByLabelText("What should brindle work on?"), { target: { value: "Fix the flaky test" } });
+      await act(async () => { await sync.idle(); });
+      fireEvent.click(screen.getByRole("button", { name: "Start" }));
+      await reading;
+      // A slow read can miss the early row altogether. Exercise both orders without waiting
+      // for that transient row in the store: only the running session after the ack matters.
+      await act(async () => {
+        if (readWhen === "after") daemon.finishLaunch();
+        releaseRead();
+        await sync.idle();
+        if (readWhen === "before") daemon.finishLaunch();
+      });
 
-    expect(await screen.findByRole("region", { name: "Session" })).toBeTruthy();
-    await waitFor(() => expect(screen.getByTestId("terminal").textContent).toBe("new1"));
-    const bar = screen.getByTestId("session-bar");
-    expect(bar.textContent).not.toContain("paused");
-    expect(within(bar).getByRole("button", { name: "Pause" })).toBeTruthy();
-    expect(screen.queryByTestId("state-card")).toBeNull();
-    sync.stop();
+      expect(await screen.findByRole("region", { name: "Session" })).toBeTruthy();
+      await waitFor(() => expect(screen.getByTestId("terminal").textContent).toBe("new1"));
+      const bar = screen.getByTestId("session-bar");
+      expect(bar.textContent).not.toContain("paused");
+      expect(within(bar).queryByRole("button", { name: "Continue" })).toBeNull();
+      expect(within(bar).getByRole("button", { name: "Pause" })).toBeTruthy();
+      expect(screen.queryByTestId("state-card")).toBeNull();
+      expect(daemon.requests.some((r) => r.path.endsWith("/pause"))).toBe(false);
+    } finally { releaseRead(); daemon.finishLaunch(); sync.stop(); }
   });
 
   it("says where the sessions failed to load, with a retry, instead of a blank main area", async () => {
