@@ -134,6 +134,57 @@ def test_keychain_read_cached(monkeypatch, record, external):
     assert started == [] and not keystore._refused_marker().exists()     # ...so nothing asked, nothing held back
 
 
+def test_resume_skips_keys_never_saved(monkeypatch):
+    import re
+
+    now, calls, listing_fails = [100.0], [], [None]
+    chain = {(keystore.KEYS_SERVICE, "ANTHROPIC_API_KEY"): keystore._encode({"value": FAKE})}
+
+    def security(self, args, stdin=None):
+        if args[0] == "-i":
+            chain[(self.service, re.search(r'-a "([^"]+)"', stdin).group(1))] = re.search(r'-w "([^"]+)"', stdin).group(1)
+            return CompletedProcess(args, 0, "", "")
+        if args[0] == "dump-keychain":     # as macOS prints it: attributes only, never a secret
+            calls.append("<listing>")
+            if listing_fails[0] == "exit":
+                return CompletedProcess(args, 1, "", "security: SecKeychainSearchCopyNext: error")
+            out = ['keychain: "/Library/Keychains/System.keychain"', "version: 256", "class: 0x80001000",
+                   "attributes:", '    "alis"<blob>="com.apple.systemdefault"']
+            if listing_fails[0] == "partial":    # an item it couldn't print: reported, yet exit 0
+                return CompletedProcess(args, 0, "\n".join(out) + "\n", "security: SecKeychainItemCopyKeychain: error")
+            for service, account in chain:
+                out += ['keychain: "/Users/u/Library/Keychains/login.keychain-db"', "version: 512",
+                        'class: "genp"', "attributes:", '    0x00000007 <blob>="brindle key"',
+                        f'    "acct"<blob>="{account}"', '    "desc"<blob>=<NULL>', f'    "svce"<blob>="{service}"']
+            return CompletedProcess(args, 0, "\n".join(out) + "\n", "")
+        if self.service == keystore.KEYS_SERVICE:    # not brindle Pro's sign-in, which other code may load
+            calls.append(args[2])
+        blob = chain.get((self.service, args[2]))
+        return CompletedProcess(args, 0 if blob else 44, blob or "", "")
+
+    monkeypatch.setattr(keystore.KeychainStore, "_run", security)
+    monkeypatch.setattr(keystore.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(keystore, "_keychain_reads", {})
+    monkeypatch.setenv(keystore.FORCE_ENV, "keychain")
+    names = keystore.known_names()
+
+    def resume() -> dict:
+        now[0] += keystore.KEYCHAIN_READ_TTL
+        calls.clear()
+        with keystore.listed_reads():    # as agents.resume reads them
+            return {n: v for n in names if (v := keystore.get_key_info(n)[0])}
+
+    assert resume() == {"ANTHROPIC_API_KEY": FAKE}
+    assert calls == ["<listing>", "ANTHROPIC_API_KEY"]     # one listing; only the saved key is read
+    with monkeypatch.context() as other_process:     # the CLI: its own caches
+        other_process.setattr(keystore, "_keychain_reads", {})
+        keystore.set_key("OPENAI_API_KEY", "sk-openai")
+    both = {"ANTHROPIC_API_KEY": FAKE, "OPENAI_API_KEY": "sk-openai"}
+    assert resume() == both and calls == ["<listing>", *both]     # the next listing shows it
+    for listing_fails[0] in ("exit", "partial"):     # no listing to go by: every name is read
+        assert resume() == both and calls == ["<listing>", *names], listing_fails[0]
+
+
 def test_file_backend_refuses_loose_permissions(brindle_home):
     store = keystore.default_store("brindle-keys", "OPENAI_API_KEY")
     store.save({"value": "sk-test-1"})
