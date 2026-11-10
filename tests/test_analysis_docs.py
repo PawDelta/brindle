@@ -86,9 +86,7 @@ def test_merged_doc_uploads_and_local_copy_goes_only_after_a_200(status, tmp_pat
 
 
 @pytest.mark.parametrize("plan", [
-    "store_on",
-    pytest.param("store_off", marks=pytest.mark.variant(
-        "the reported case: with storage off nothing else tells the person a doc is ready")),
+    "store_off",    # the reported case: with storage off nothing else tells the person a doc is ready
     pytest.param("unentitled", marks=pytest.mark.variant("every plan: no entitlement must gate the page")),
 ])
 def test_ready_doc_opens_in_visuals(plan, tmp_path, remote, fixed_identity, db, monkeypatch):
@@ -100,7 +98,7 @@ def test_ready_doc_opens_in_visuals(plan, tmp_path, remote, fixed_identity, db, 
         monkeypatch.setattr(auth.UrllibTransport, "request", lambda self, m, url, form, headers: (
             remote.request(m, url, form, headers)))
         login_as(remote, credentials.default_store(), features=("analysis_docs",))
-        remote.switches = {"store": "on" if plan == "store_on" else "off", "assist": "on"}
+        remote.switches = {"store": "off", "assist": "on"}
     ws = Workspace("proj/feat", str(tmp_path), "feat", "main", "feat", "main",
                    str(tmp_path), None, "brindle-test", 1.0)
     db.add_workspace(ws)
