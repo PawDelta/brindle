@@ -100,6 +100,23 @@ def test_fable_is_off_by_default_on_a_cloud_account(db, heavy, monkeypatch):
     assert "needs you" in db.pop_pending("boss").body
 
 
+def test_merge_checks_timing_out_go_to_the_supervisor_not_developer_heavy(db, heavy, monkeypatch):
+    """A merge whose checks timed out twice says nothing about the code: the
+    approved branch goes to the supervisor, its worker isn't replaced."""
+    from brindle import autopilot, gates
+
+    ws, retries, configure = heavy
+    configure(fable_escalation=True, checks=["suite"], pre_commit=False)
+    monkeypatch.setattr(autopilot, "run_check", lambda cmd, *a, **kw: (False, f"$ {cmd}\n(timed out after 5s)"))
+    agents.report_result(db, "w1", "did it")
+    db.add_review(ws.id, gates.head(ws), "rev0", True, "lgtm")
+    db.update_agent("w1", pipeline="ready")
+    pipeline._finish_locked(db, db.get_agent("w1"), ws, None)
+    assert retries == []
+    assert "timed out" in db.get_agent("w1").merge_failed
+    assert any("needs you" in b for b in drain(db))
+
+
 @pytest.mark.parametrize("queued", [False, True])
 def test_heavy_escalation_preserves_cap_notice(db, heavy, monkeypatch, queued):
     ws, retries, configure = heavy
@@ -128,6 +145,7 @@ def test_heavy_escalation_preserves_cap_notice(db, heavy, monkeypatch, queued):
     assert "check `pytest` failed" in retries[0][1]
     worker = next(a for a in db.list_agents(ws.id) if a.profile == pipeline.ESCALATION_PROFILE)
     for round_number in (1, 2):
+        db.update_agent(worker.id, pipeline="reviewing")   # each round follows a report
         pipeline._send_back(db, db.get_workspace(ws.id), db.get_agent(worker.id), cfg, "findings", False,
                             subject="Review", verb="requested changes", what="review", sender_id=None)
         current = db.get_agent(worker.id)
