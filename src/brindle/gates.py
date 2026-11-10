@@ -533,6 +533,7 @@ MAX_FAILURE_CHARS = 4_000
 
 
 TIMEOUT_VERDICT = "timed out, not a failure"
+CHECKS_TIMED_OUT = "Checks timed out, not a failure"   # opens the merge gate's reply for one
 
 
 def timed_out(out: str) -> bool:
@@ -708,7 +709,7 @@ def run(db: DB, ws: Workspace, cfg: RepoConfig, *, review_required: bool,
                 continue
             ok, out = run_checked(db, ws, cmd, env, cfg.check_timeout)
             if not ok and timed_out(out):
-                return r.fail(f"Checks timed out, not a failure, in {ws.branch}:\n{out}\n"
+                return r.fail(f"{CHECKS_TIMED_OUT}, in {ws.branch}:\n{out}\n"
                               "Nothing is merged; merge again once the machine is quieter.")
             if not ok:
                 return r.fail(f"Check failed in {ws.branch}:\n{out}\nSend this to the worker to fix.")

@@ -1179,14 +1179,11 @@ def is_test_path(path: str) -> bool:
     return bool(_TEST_DIRS.intersection(parts[:-1])) or _TEST_FILE.fullmatch(parts[-1]) is not None
 
 
-def _reviewed_paths(db: DB, ws: Workspace, sha: str) -> list[str]:
-    """The files the review of ``sha`` covered: what changed since the last
-    commit reviewed before it (``agents.review_base``), or for a first review,
-    the whole branch."""
-    prev = next((r for r in reversed(db.workspace_reviews(ws.id)) if r.sha != sha), None)
-    start = agents.review_base(ws, prev.sha).sha if prev else None
-    if start is None:
-        start = git.merge_base(ws.path, git.base_ref(ws.path, ws.base_branch))
+def _branch_paths(ws: Workspace, sha: str) -> list[str]:
+    """The files the branch at ``sha`` changes against its base. The whole
+    branch, not only a re-review's delta: a product file an earlier round
+    changed is still the branch's, and a finding citing it still blocks."""
+    start = git.merge_base(ws.path, git.base_ref(ws.path, ws.base_branch))
     return git.paths(["diff", "--no-renames", "--name-only", start, sha], ws.path)
 
 
@@ -1234,7 +1231,7 @@ def tests_only_waived(db: DB, ws: Workspace, sha: str, summary: str, finding_pat
     tests-only doesn't hold the merge. Only for a piped branch past
     ``review_rounds``, and the flag is checked rather than believed: the
     finding names test files and nothing but (a line number is fine), the
-    summary cites no non-test file the review covered, and nothing in it
+    summary cites no non-test file the branch changes, and nothing in it
     needs the supervisor. Any doubt blocks."""
     worker = piped_worker(db, ws)
     paths = [re.sub(r":\d+(?:[-:]\d+)*$", "", p.strip()).removeprefix("./") for p in finding_paths]
@@ -1246,7 +1243,7 @@ def tests_only_waived(db: DB, ws: Workspace, sha: str, summary: str, finding_pat
         if not enabled(cfg, worker, ws) or (worker.pipeline_rounds or 0) + 1 <= cfg.review_rounds \
                 or gates.head(ws) != sha:
             return False
-        return not any(_cites(summary, p, ws.path) for p in _reviewed_paths(db, ws, sha) if not is_test_path(p))
+        return not any(_cites(summary, p, ws.path) for p in _branch_paths(ws, sha) if not is_test_path(p))
     except (git.GitError, ValueError):
         return False
 
@@ -1387,7 +1384,9 @@ def _send_back(db: DB, ws: Workspace, worker: Agent, cfg: RepoConfig, summary: s
     fix message; ``what``: "review" or "checks", for the wording. Under the
     merge lock."""
     report = worker.result or ""
-    rounds = (worker.pipeline_rounds or 0) + 1
+    # One round per report: a second verdict on the report already sent back
+    # (the second review's, or a late one) adds its findings, not a round.
+    rounds = (worker.pipeline_rounds or 1) if worker.pipeline == "fixing" else (worker.pipeline_rounds or 0) + 1
     if not needs_sup:
         db.update_agent(worker.id, pipeline="fixing", pipeline_rounds=rounds)
         if rounds > cfg.review_rounds and db.claim_review_cap_notice(ws.id):
@@ -1591,8 +1590,11 @@ def _finish_locked(db: DB, worker: Agent, ws: Workspace, reviewer: Agent | None)
         latest = db.get_agent(worker.id)
         if latest is not None and latest.pipeline not in (None, "ready"):
             return text   # the worker moved on meanwhile (a new report): its new state stands
-        if text.startswith("Not merged. ") and _retry_on_heavy(db, worker, ws, cfg, text, report):
-            return text   # the checks failed: a stronger model gets one go at it
+        # The checks failed: a stronger model gets one go at it. Not when they
+        # timed out: that says nothing about the code, and nothing for it to fix.
+        if text.startswith("Not merged. ") and not text.startswith(f"Not merged. {gates.CHECKS_TIMED_OUT}") \
+                and _retry_on_heavy(db, worker, ws, cfg, text, report):
+            return text
         db.update_agent(worker.id, pipeline=None, merge_failed=text)
         _escalate(db, ws, worker)
         # The supervisor sees the first line: it carries the action, and the

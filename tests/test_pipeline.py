@@ -973,6 +973,9 @@ def test_review_round_scope_rereview_after_an_amend_and_a_base_merge_reads_only_
                  False, marks=pytest.mark.variant("an absolute link to the product file")),
     pytest.param(2, True, ["tests/work.py"], "Blocker: see {ws}/tests/../work.py:1.",
                  False, marks=pytest.mark.variant("an absolute link climbing out of tests/ to the product file")),
+    pytest.param(2, True, ["tests/test_work.py"], "{rereview}Blocker: work.py:1 is still wrong.", False,
+                 marks=pytest.mark.variant("a re-review whose delta is tests-only cites a product file "
+                                           "an earlier round changed")),
     pytest.param(2, False, ["tests/test_work.py"], "Blocker: tests/test_work.py:1 asserts nothing.", False,
                  marks=pytest.mark.variant("a test finding not flagged tests-only still blocks past the cap")),
     (1, True, ["tests/test_work.py"], "Blocker: tests/test_work.py:1 asserts nothing.", False),
@@ -984,6 +987,9 @@ def test_review_round_scope_tests_only_findings_past_the_cap(db, repo, monkeypat
     ws = _reported(db, repo, reviewing_since=time.time())
     (repo / ".brindle" / "config.local.json").write_text('{"auto_merge_default_branch": true}')
     path = Path(ws.path)
+    if summary.startswith("{rereview}"):   # an earlier round reviewed work.py: this one reads only tests/
+        summary = summary.removeprefix("{rereview}")
+        db.add_review(ws.id, gates.head(ws), None, False, "Blocker: work.py:1 is wrong.")
     (path / "tests").mkdir()
     (path / "tests" / "test_work.py").write_text("def test_work(): pass\n")
     (path / "tests" / "work.py").write_text("helper = 1\n")
