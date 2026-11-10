@@ -3265,6 +3265,7 @@ def complete_subagent(db: DB, agent_id: str, result: str) -> Agent:
         )
     db.set_result(agent.id, result)
     db.set_status(agent.id, "done")
+    _open_analysis_doc(db, agent, db.get_workspace(agent.workspace_id))
     return db.get_agent(agent.id) or agent
 
 
@@ -3303,6 +3304,7 @@ def report_result(db: DB, agent_id: str, result: str, forward: bool = True,
     # transaction, and a repeat call resumes at the step the last one reached.
     row = _receive_report(db, agent.id, ws, result)
     if row["state"] in ("delivered", "superseded"):
+        _open_analysis_doc(db, agent, ws)   # the same words can come with a changed doc
         return "result already recorded"
     first = bool(row["is_first"])
     if row["state"] in ("received", "rejected"):
@@ -3428,6 +3430,7 @@ def _handle_report(db: DB, agent: Agent, ws: Workspace | None, result: str, firs
         if first:
             pipeline.note_reported(db, ws, agent)
         warm_checks(ws)
+        _open_analysis_doc(db, agent, ws)   # before the pipeline: a merge can upload and delete the doc
         if forward and pipeline.on_report(db, agent, ws, forwarded, outbox_id=outbox_id):
             return ("result recorded. brindle is having your branch reviewed; it will merge it, "
                     "or send you the review's findings to fix.")
@@ -3445,6 +3448,12 @@ def _handle_report(db: DB, agent: Agent, ws: Workspace | None, result: str, firs
     if outbox_id is not None:
         db.outbox_deliver(outbox_id, nothing=True)   # no one to tell
     return "result recorded"
+
+
+def _open_analysis_doc(db: DB, agent: Agent, ws: Workspace | None) -> None:
+    from brindle import analysis_visual
+
+    analysis_visual.on_report(db, agent, ws)
 
 
 def warm_checks(ws: Workspace) -> None:
@@ -6020,10 +6029,13 @@ def stale_analysis_docs(db: DB, agent_id: str) -> str | None:
 def analysis_docs_turn(db: DB, agent: Agent) -> None:
     """At the end of a turn: tell the agent about analysis docs it read that
     have changed since, and settle drafts its session still owes the server
-    (brindle.pro.analysis_docs). Never raises."""
+    (brindle.pro.analysis_docs), and open a reached goal's doc in Visuals
+    (brindle.analysis_visual). Never raises."""
     try:
+        from brindle import analysis_visual
         from brindle.pro import analysis_docs
 
+        analysis_visual.on_turn(db, agent)
         analysis_docs.on_turn(db, agent)
     except Exception:  # noqa: BLE001
         log.exception("brindle: couldn't check %s's analysis docs", agent.id)

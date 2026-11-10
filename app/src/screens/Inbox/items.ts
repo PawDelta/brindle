@@ -39,6 +39,7 @@ export const KIND_LABEL: Record<string, string> = {
   setup: "Setup",
   idle_stopped: "Stopped while idle",
   analysis_offer: "Analysis doc offer",
+  analysis_doc: "Analysis doc ready",
 };
 
 /* What the app can repair itself for a `setup` item, by its `fix` (engine
@@ -77,7 +78,11 @@ export const KIND_SHORT: Record<string, string> = {
   setup: "setup",
   idle_stopped: "idle",
   analysis_offer: "doc offer",
+  analysis_doc: "doc",
 };
+
+/* An item whose card opens a visual in its reader: a finished analysis doc is one too. */
+export const opensVisual = (item: InboxItemDTO): boolean => item.kind === "visual" || item.kind === "analysis_doc";
 
 /* What is being asked, in a line the person can decide on. */
 export function describeItem(item: InboxItemDTO): string {
@@ -192,7 +197,7 @@ export const actionId = (item: InboxItemDTO) => (item.kind === "doc" ? item.requ
    A setup item belongs to no agent: it is told by what it fixes; an org Block by what it says. */
 export const itemKey = (item: InboxItemDTO) => {
   let id = actionId(item);
-  if (item.kind === "visual") {
+  if (opensVisual(item)) {
     // One session can have several independent notices and questions.
     id = item.visual_id ?? "";
   } else if (item.kind === "setup") {
@@ -210,7 +215,7 @@ export const FILTERS: { key: string; label: string; kinds: string[] }[] = [
   { key: "plans", label: "Plans", kinds: ["plan"] },
   { key: "reviews", label: "Reviews", kinds: ["review", "merge_failed"] },
   { key: "checks", label: "Checks", kinds: ["proposed_checks"] },
-  { key: "docs", label: "Docs", kinds: ["doc"] },
+  { key: "docs", label: "Docs", kinds: ["doc", "analysis_doc"] },
   { key: "other", label: "Other", kinds: ["credentials", "login", "org_notice", "org_blocked", "setup", "idle_stopped", "analysis_offer"] },
 ];
 
