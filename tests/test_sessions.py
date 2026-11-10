@@ -930,6 +930,7 @@ def test_resume_reads_only_needed_keys_and_key_timing(db, root, monkeypatch, cap
     assert not caplog.records
 
 
+@pytest.mark.variant("each launch step is timed per agent and provider through the real launch path")
 def test_resume_launch_step_timing(db, root, monkeypatch, caplog):
     """The real launch, its slow dependencies replaced by ones that move a fake clock."""
     from types import SimpleNamespace
