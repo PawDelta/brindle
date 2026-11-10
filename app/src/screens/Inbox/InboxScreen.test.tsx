@@ -217,7 +217,8 @@ describe("inbox", () => {
     expect(within(body).getByTestId("offer-progress").textContent?.match(/\d+/g)).toEqual(["1", "2"]);
     expect(within(body).getByTestId("offer-scale").textContent?.match(/\d+/g)).toEqual([String(context.workers), String(context.repos)]);
     expect(body.className).not.toContain("line-clamp");
-    fireEvent.click(within(card("plan_offer")).getByRole("button", { name: "Go to session ›" }));
+    // The link appears once the session list has loaded, which may land after the inbox.
+    fireEvent.click(await within(card("plan_offer")).findByRole("button", { name: "Go to session ›" }));
     expect(onOpen).toHaveBeenLastCalledWith("sup1", REPO, "sup1");
     fireEvent.click(within(card("plan_offer")).getByRole("button", { name: label }));
     await waitFor(() => expect(posts(daemon).find((r) => r.path === "/goal/plan-offer")?.body).toMatchObject({ root: "sup1", offer: "o1", accept: accepted }));
