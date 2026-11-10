@@ -56,6 +56,19 @@ const sessionRow = (id: string) => document.querySelector<HTMLButtonElement>(`bu
 const list = () => screen.getByRole("navigation", { name: "Sessions" });
 
 describe("Sidebar", () => {
+  it("running agents count includes supervisors and workers, describes the count on hover, and hides at zero", async () => {
+    const { sync, store } = mount({ workspaces: [{ ...root, agents: [{ ...root.agents![0], mode: "interactive" }] }, worker] });
+    onTestFinished(() => sync.stop());
+    const pill = await screen.findByLabelText("2 agents running");
+    expect(pill.textContent).toContain("2");
+    expect(pill.getAttribute("title")).toBe("2 agents running");
+
+    act(() => store.dispatch({ type: "snapshot", workspaces: [{ ...root, agents: [{ ...root.agents![0], status: "paused" }] }, worker] }));
+    expect(screen.getByLabelText("1 agent running").getAttribute("title")).toBe("1 agent running");
+
+    act(() => store.dispatch({ type: "snapshot", workspaces: [{ ...root, agents: [{ ...root.agents![0], status: "paused" }] }, { ...worker, agents: [{ ...worker.agents![0], status: "done" }] }] }));
+    expect(screen.queryByLabelText(/agent[s]? running/)).toBeNull();
+  });
   it("does not substitute another session's context when the selected session disappears", async () => {
     const { daemon, sync } = mount({ sessions: [live, paused] }, { screen: "session", root: "sup1", repo: REPO });
     onTestFinished(() => sync.stop());
@@ -69,7 +82,6 @@ describe("Sidebar", () => {
     expect(screen.getByTestId("session-context").textContent).not.toContain(paused.goal);
     expect(screen.queryByRole("button", { name: "Rename session" })).toBeNull();
   });
-
   it("sidebar foot is one row with the profile pill and terminal, even with provider problems", async () => {
     const { sync, store, navigate } = mount({ account: { signed_in: true, name: "Alex Brown" }, usage: usageScenario("normal"), providers: freshProviders({ claude: { path: "/bin/claude", version: "2" } }) });
     onTestFinished(() => sync.stop());
