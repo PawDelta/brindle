@@ -14,6 +14,7 @@ import { BASE_URL, FakeDaemon, TOKEN } from "../../test/fakeDaemon";
 import { REPO, permission, permissionInTerminal, question, root, waiting, worker } from "../../test/fixtures";
 import { Permissions } from "../Settings/Permissions";
 import { InboxScreen, type InboxScreenProps } from "./InboxScreen";
+import { watchInbox } from "./notify";
 import { usePermissionAsks } from "./PermissionAsks";
 
 afterEach(cleanup);
@@ -152,19 +153,12 @@ describe("inbox", () => {
       repos: [{ repo_root: REPO, name: "proj" }],
       sessions: [session],
       workspaces: [root, worker],
-      inbox: [question, waiting, notice, prReady, prOpened],
+      inbox: [question, waiting, notice, prReady],
     });
     const openUrl = vi.fn(async () => {});
     const { sync, onOpen } = mount(daemon, daemon.client(), { openUrl });
     const group = await screen.findByRole("region", { name: "Ship ls --json" });
-    expect(within(group).getAllByTestId("inbox-card")).toHaveLength(4);
-    // A PR the supervisor opened itself: no Review & open PR, a link to the PR on GitHub.
-    expect(card("pr_opened").textContent).toContain("#408 Ship ls --json");
-    expect(card("pr_opened").textContent).toContain("PR opened");
-    expect(within(card("pr_opened")).queryByRole("button", { name: "Review & open PR" })).toBeNull();
-    expect(within(card("pr_opened")).getByRole("button", { name: "Dismiss" })).toBeTruthy();
-    fireEvent.click(within(card("pr_opened")).getByRole("button", { name: "Open on GitHub" }));
-    expect(openUrl).toHaveBeenCalledWith("https://github.com/o/r/pull/408");
+    expect(within(group).getAllByTestId("inbox-card")).toHaveLength(3);
     // The PR brindle prepared (its checks passed, nothing pushed): one press of Open PR opens it, no review sheet.
     expect(card("pr_ready").textContent).toContain("PR ready");
     expect(card("pr_ready").textContent).toContain("Ship ls --json");
@@ -175,6 +169,15 @@ describe("inbox", () => {
     expect(within(card("pr_ready")).getByRole("button", { name: "Opening…" })).toHaveProperty("disabled", true);
     await waitFor(() => expect(daemon.prs).toHaveLength(1));
     expect(daemon.prs[0].title).toBe("Ship ls --json");
+    // The job ended with a real PR: the card becomes "PR opened" (one line, the PR, Open on GitHub, Dismiss), no review sheet.
+    await waitFor(() => expect(card("pr_opened")).toBeTruthy());
+    expect(card("pr_ready")).toBeNull();
+    expect(card("pr_opened").textContent).toContain("PR opened");
+    expect(card("pr_opened").textContent).toContain("#1 Ship ls --json");
+    expect(within(card("pr_opened")).queryByRole("button", { name: "Review & open PR" })).toBeNull();
+    expect(within(card("pr_opened")).getByRole("button", { name: "Dismiss" })).toBeTruthy();
+    fireEvent.click(within(card("pr_opened")).getByRole("button", { name: "Open on GitHub" }));
+    expect(openUrl).toHaveBeenCalledWith("https://github.com/example/proj/pull/1");
     expect(onOpen).not.toHaveBeenCalled();
     expect(group.textContent).toContain("sup1 · proj");
     fireEvent.click(within(group).getByRole("button", { name: "Open the session ›" }));
@@ -203,6 +206,32 @@ describe("inbox", () => {
     await waitFor(() => expect(posts(daemon).filter((p) => p.path.startsWith("/inbox/"))).toEqual([{ method: "POST", path: "/inbox/n-18/read", query: {}, body: {} }]));
     await waitFor(() => expect(screen.queryByRole("region", { name: "Your org" })).toBeNull());
     sync.stop();
+  });
+
+  it("Open PR when gh can't open the PR: no PR exists, so the card stays and offers the compare page; a PR opened elsewhere notifies with its number, title and link", async () => {
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root], inbox: [prReady] });
+    daemon.readyForPr("sup1");
+    const client = daemon.client(), openUrl = vi.fn(async () => {});
+    vi.spyOn(client, "openSessionPr").mockResolvedValue({ job: "j9", kind: "session.pr" } as never);
+    const { store } = mount(daemon, client, { openUrl });
+    await screen.findByRole("region", { name: "Ship ls --json" });
+    fireEvent.click(within(card("pr_ready")).getByRole("button", { name: "Open PR" }));
+    await waitFor(() => expect(client.openSessionPr).toHaveBeenCalled());
+    const compare = "https://github.com/o/r/compare/main...sess?expand=1";
+    act(() => daemon.publish("job.done", { root_id: "sup1", agent_id: "sup1", payload: { job: "j9", job_kind: "session.pr", result: { url: compare } } }));
+    await waitFor(() => expect(within(card("pr_ready")).getByRole("alert").textContent).toContain("compare page"));
+    fireEvent.click(within(card("pr_ready")).getByRole("button", { name: "Open on GitHub" }));
+    expect(openUrl).toHaveBeenCalledWith(compare);
+
+    // The OS notification for an opened PR carries which one and its link, and the "ready" one is not sent for it.
+    const notes: string[] = [];
+    const stop = watchInbox(store, { notify: (title, body) => notes.push(`${title}|${body}`), count: () => undefined });
+    act(() => store.dispatch({ type: "snapshot", workspaces: [], inbox: [prReady] }));
+    act(() => store.dispatch({ type: "snapshot", workspaces: [], inbox: [prReady, prOpened] }));
+    expect(notes).toEqual(["Pull request|sup1: PR opened: #408 Ship ls --json · https://github.com/o/r/pull/408"]);
+    act(() => store.dispatch({ type: "stream", message: { type: "event", id: 99, ts: 99, kind: "session.pr_ready", root_id: "sup1", agent_id: "sup1", repo_root: null, workspace_id: null, task_id: null, payload: {} } }));
+    expect(notes).toHaveLength(1);
+    stop();
   });
 
   it("visual ready card opens the reader and dismisses independently on a read refresh", async () => {

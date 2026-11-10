@@ -34,7 +34,9 @@ export function watchInbox(store: AppStore, sink: InboxSink): () => void {
     const state = store.getState();
     const { inbox, synced, recent, lastEventId } = state;
     if (lastEventId !== lastEvent) {
-      for (const e of recent.filter((e) => e.id > lastEvent && e.kind === "session.pr_ready")) {
+      // Not for a session whose PR is already open: "open the PR" would be stale advice.
+      const opened = (root: string | null | undefined) => inbox.some((i) => i.kind === "pr_opened" && i.root_id === root);
+      for (const e of recent.filter((e) => e.id > lastEvent && e.kind === "session.pr_ready" && !opened(e.root_id ?? e.agent_id))) {
         sink.notify(READY_TITLE, `${e.root_id ?? e.agent_id ?? "a session"}: every milestone passed and nothing is running. Review its changes and open the PR.`);
       }
       lastEvent = lastEventId;
@@ -64,6 +66,8 @@ export function watchInbox(store: AppStore, sink: InboxSink): () => void {
 
 function describe(item: InboxItemDTO): string {
   const who = item.agent_id ? `${item.agent_id}: ` : "";
+  // An opened PR says which one, and where (the notification's "Open on GitHub" is its link).
+  if (item.kind === "pr_opened") return `${who}${item.reason}${item.detail ? `: ${item.detail}` : ""}${item.url ? ` · ${item.url}` : ""}`;
   return `${who}${item.reason}`;
 }
 

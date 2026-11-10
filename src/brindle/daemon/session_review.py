@@ -179,12 +179,16 @@ def adopt_head_pr(db: DB, root_id: str) -> None:
         return
     if not head:
         return
-    found = open_pr_for_head(head, ws.path)
+    found = open_pr_for_head(head, ws.path, root_id)
     if found and found.get("url"):
-        db.conn.execute("INSERT INTO session_prs (root_id, branch, url, pushed_sha, opened_at) VALUES (?, ?, ?, ?, ?)"
+        # head_ref: where the PR really lives, when that isn't the session's branch: a Push must not go to ws.branch.
+        ref = found.get("headRefName")
+        db.conn.execute("INSERT INTO session_prs (root_id, branch, url, pushed_sha, opened_at, head_ref)"
+                        " VALUES (?, ?, ?, ?, ?, ?)"
                         " ON CONFLICT (root_id, branch) DO UPDATE SET url = excluded.url,"
-                        " pushed_sha = excluded.pushed_sha, opened_at = excluded.opened_at",
-                        (root_id, ws.branch, found["url"], head, time.time()))
+                        " pushed_sha = excluded.pushed_sha, opened_at = excluded.opened_at,"
+                        " head_ref = excluded.head_ref",
+                        (root_id, ws.branch, found["url"], head, time.time(), ref if ref and ref != ws.branch else None))
 
 
 def goal_phase(db: DB, root_id: str) -> tuple[str, str | None]:
@@ -313,6 +317,8 @@ def session_pr_state(db: DB, root_id: str, url: str | None) -> dict[str, Any] | 
 
 _head_cache: dict[tuple[str, str], tuple[float, dict[str, Any] | None]] = {}
 _head_flights: set[tuple[str, str]] = set()
+_head_roots: dict[tuple[str, str], str] = {}     # the session each lookup is for
+_head_changed: set[tuple[str, str]] = set()      # lookups whose answer changed, until refresh_pr_states announces
 
 
 def _read_head_pr(key: tuple[str, str]) -> None:
@@ -324,17 +330,30 @@ def _read_head_pr(key: tuple[str, str]) -> None:
         log.exception("brindle: couldn't look up the PR holding a session's HEAD")
         found = None
     with _pr_lock:
+        before = _head_cache[key][1] if key in _head_cache else None
         _head_cache[key] = (time.monotonic(), found)
         _head_flights.discard(key)
+        if (found or {}).get("url") != (before or {}).get("url") and key in _head_roots:
+            _head_changed.add(key)    # refresh_pr_states tells the Inbox
 
 
-def open_pr_for_head(sha: str, cwd: str) -> dict[str, Any] | None:
-    """The open PR (``{number, title, url}``) containing ``sha``, whatever
-    branch it was pushed under, as last read: never waits on ``gh``. A read
-    is started in the background when the answer is missing or older than
-    ``PR_STATE_TTL``; until the first lands: None."""
+def note_head_pr(sha: str, cwd: str, pr: dict[str, Any]) -> None:
+    """A PR brindle itself just opened on ``sha``: known at once, so the Inbox
+    doesn't wait on (or trust an older "none" from) a read of GitHub."""
+    with _pr_lock:
+        _head_cache[(sha, cwd)] = (time.monotonic(), pr)
+
+
+def open_pr_for_head(sha: str, cwd: str, root_id: str | None = None) -> dict[str, Any] | None:
+    """The open PR (``{number, title, url, headRefName}``) containing ``sha``,
+    whatever branch it was pushed under, as last read: never waits on ``gh``.
+    A read is started in the background when the answer is missing or older
+    than ``PR_STATE_TTL``; until the first lands: None. ``root_id``: the
+    session to announce a change to (``refresh_pr_states``)."""
     key = (sha, cwd)
     with _pr_lock:
+        if root_id:
+            _head_roots[key] = root_id
         cached = _head_cache.get(key)
         if key not in _head_flights and (cached is None or time.monotonic() - cached[0] >= PR_STATE_TTL):
             flight = _pr_pool.submit(_read_head_pr, key)
@@ -353,6 +372,11 @@ def refresh_pr_states(db: DB) -> None:
         ws = db.get_workspace(root.workspace_id) if root else None
         if ws is not None:
             _ask_pr_state(row["url"], ws.repo_root)
+    with _pr_lock:
+        found = {_head_roots[k] for k in _head_changed if k in _head_roots}
+        _head_changed.clear()
+    for root_id in found:
+        bus.publish_agent(db, "session.pr_opened", root_id)    # the Inbox and goal read again
     with _pr_lock:
         changed = set(_pr_changed)
         _pr_changed.clear()

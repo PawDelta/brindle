@@ -174,18 +174,31 @@ def _sign_in(provider: str) -> InboxActionDTO | None:
     return InboxActionDTO(method="POST", path=f"/v1/providers/{provider}/login") if provider in CLI_NAMES else None
 
 
-def opened_marker(path: str) -> str | None:
-    """What dismissing the "PR opened" card records: HEAD and the open PR's URL
-    (a new commit or another PR brings the card back), or None when no PR is
-    open on HEAD."""
+def _opened_pr(db: DB, root_id: str, branch: str, path: str) -> tuple[str, dict | None]:
+    """HEAD and the open PR holding it (``{number, title, url}``): GitHub's last
+    answer, else the one brindle recorded (Open PR, or adopted earlier), which
+    stands while that answer is stale or missing."""
     from brindle.daemon import session_review
 
     try:
         head = git.out(["rev-parse", "HEAD"], path)
+        opened = session_review.open_pr_for_head(head, path, root_id)
     except (git.GitError, OSError):
-        return None
-    found = session_review.open_pr_for_head(head, path)
-    return f"{head}|{found['url']}" if found and found.get("url") else None
+        head, opened = "", None  # An unavailable checkout must not break the rest of the inbox.
+    if not (opened and opened.get("url")):
+        mine = db.conn.execute("SELECT url FROM session_prs WHERE root_id = ? AND branch = ? AND url IS NOT NULL"
+                               " AND merged_at IS NULL", (root_id, branch)).fetchone()
+        number = re.search(r"/pull/(\d+)$", mine["url"]) if mine else None
+        opened = {"url": mine["url"], "number": number.group(1), "title": ""} if number else None
+    return head, opened
+
+
+def opened_marker(db: DB, root_id: str, branch: str, path: str) -> str | None:
+    """What dismissing the "PR opened" card records: HEAD and the open PR's URL
+    (a new commit or another PR brings the card back), or None when no PR is
+    open on HEAD."""
+    head, opened = _opened_pr(db, root_id, branch, path)
+    return f"{head}|{opened['url']}" if opened else None
 
 
 def _pr_items(db: DB, root_id: str, branch: str, path: str, link: dict) -> list[InboxItemDTO]:
@@ -193,21 +206,15 @@ def _pr_items(db: DB, root_id: str, branch: str, path: str, link: dict) -> list[
     until the person opens it: ready for their approval, or its checks failed.
     An open PR already holding the session's HEAD (a supervisor's own
     ``gh pr create``, from any branch name) is a ``pr_opened`` item instead."""
-    from brindle.daemon import session_review
-
-    try:
-        head = git.out(["rev-parse", "HEAD"], path)
-        opened = session_review.open_pr_for_head(head, path)
-    except (git.GitError, OSError):
-        head, opened = "", None  # An unavailable checkout must not break the rest of the inbox.
-    if opened and opened.get("url"):
+    head, opened = _opened_pr(db, root_id, branch, path)
+    if opened:
         gone = db.conn.execute("SELECT 1 FROM session_pr_declined WHERE root_id = ? AND branch = ? AND sha = ?",
                                (root_id, branch, f"{head}|{opened['url']}")).fetchone()
         if gone:
             return []
         return [InboxItemDTO(kind="pr_opened", reason="PR opened", detail=f"#{opened.get('number')} {opened.get('title') or ''}".strip(),
                              url=opened["url"], **link)]
-    rows =db.conn.execute(
+    rows = db.conn.execute(
         "SELECT state, title, check_cmd, output FROM session_pr_prep p WHERE root_id = ? AND branch = ?"
         " AND state IN ('passed', 'failed') AND NOT EXISTS (SELECT 1 FROM session_prs s WHERE"
         " s.root_id = p.root_id AND s.branch = p.branch AND s.url IS NOT NULL)", (root_id, branch)).fetchall()

@@ -225,6 +225,10 @@ def test_pr_opened_by_supervisor_replaces_the_ready_card(db, tmp_path, monkeypat
     pr = None
     session_review._head_cache.clear()
     assert [i.kind for i in cards()] == ["pr_ready"]
+    # A PR brindle recorded stands while GitHub's answer is missing: Open PR never makes the card vanish.
+    db.conn.execute("INSERT INTO session_prs (root_id, branch, url, opened_at) VALUES ('r1', ?, ?, 1)",
+                    (ws.branch, "https://github.com/o/r/pull/7"))
+    assert [(i.kind, i.detail) for i in cards()] == [("pr_opened", "#7")]
 
 
 class _Done:

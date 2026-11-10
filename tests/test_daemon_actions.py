@@ -1964,7 +1964,8 @@ def test_pr_waits_for_approval(db, lead, tmp_path, monkeypatch, passed):
     config.set_local(lead.repo_root, "checks", ["validate", "lint"])
     assert _send("POST", "/v1/sessions/lead/pr", {"title": "Ship it"})[0] == 202
     # The sha brindle checked; the Inbox item goes.
-    assert (remote(), runs, called.read_text().count("pr create"), asked()) == (head, ["validate", "lint"], 1, [])
+    assert (remote(), runs, called.read_text().count("pr create"), asked()) == (head, ["validate", "lint"], 1,
+                                                                                  [("pr_opened", "PR opened")])
     newer = _commit(sess, "a.py", "b\n")
     watch.sweep(db)
     _, ready = _send("GET", "/v1/sessions/lead/pr/readiness")
@@ -1972,6 +1973,10 @@ def test_pr_waits_for_approval(db, lead, tmp_path, monkeypatch, passed):
     assert _send("POST", "/v1/sessions/lead/pr/push")[0] == 202
     _, ready = _send("GET", "/v1/sessions/lead/pr/readiness")
     assert (remote(), ready["pr"]["unpushed"], runs) == (newer, 0, ["validate", "lint", "validate", "lint"])
+    # A PR gh opened from another branch name is adopted, but a Push to the session branch would not reach it.
+    db.conn.execute("UPDATE session_prs SET head_ref = 'stress/other'")
+    code, refused = _send("POST", "/v1/sessions/lead/pr/push")
+    assert code == 409 and "stress/other" in json.dumps(refused)
 
 
 def _provider_setup(tmp_path, monkeypatch, onboarded: bool = True) -> tuple:

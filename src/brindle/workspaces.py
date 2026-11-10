@@ -918,7 +918,7 @@ def open_pull_request_for_commit(sha: str, cwd: str) -> dict | None:
     if not shutil.which("gh"):
         return None
     try:
-        out = spawn.read(["gh", "pr", "list", "--state", "open", "--search", sha, "--json", "number,title,url"],
+        out = spawn.read(["gh", "pr", "list", "--state", "open", "--search", sha, "--json", "number,title,url,headRefName"],
                          cwd=cwd, text=True, timeout=PR_CHECKS_SECONDS)
         found = json.loads(out.stdout) if out.returncode == 0 else None
     except (OSError, subprocess.SubprocessError, spawn.Busy, ValueError):

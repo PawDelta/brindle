@@ -382,7 +382,7 @@ function Banner({ item, actions, who, branch, sessionTitle, repo, isNew, onDone,
     // One press opens it (the sheet's open-PR call, no diffs); the person's press is still the only push.
     acts = (
       <>
-        <OpenPr item={item} actions={actions} onDone={onDone} />
+        <OpenPr item={item} actions={actions} onDone={onDone} openUrl={openUrl} />
         {act("Dismiss", "pr-not-now", {}, GHOST)}
       </>
     );
@@ -503,10 +503,12 @@ function SetupFix({ item, actions, onDone }: { item: InboxItemDTO; actions: Retu
 
 /* Open PR on a prepared PR's card: the review sheet's own call (POST /sessions/{root}/pr, a job) with the
    draft's title and description, without its diffs. The button waits while the job runs; a refusal shows on the card. */
-function OpenPr({ item, actions, onDone }: { item: InboxItemDTO; actions: ReturnType<typeof useInboxActions>; onDone(): void }) {
+function OpenPr({ item, actions, onDone, openUrl }: { item: InboxItemDTO; actions: ReturnType<typeof useInboxActions>; onDone(): void; openUrl?: OpenUrl }) {
   const client = useDaemon();
   const job = useJob();
   const [drafting, setDrafting] = useState(false);
+  /* gh couldn't open it: the compare page, where the person finishes by hand (no PR exists yet). */
+  const [compare, setCompare] = useState<string | null>(null);
   const status = job.job?.status;
   const error = job.job?.error;
   useEffect(() => {
@@ -518,7 +520,14 @@ function OpenPr({ item, actions, onDone }: { item: InboxItemDTO; actions: Return
     setDrafting(true);
     try {
       const draft = await client.prDraft(root);
-      await job.start("Opening the PR", () => client.openSessionPr(root, { title: item.detail?.trim() || draft.title, body: draft.body }), () => {
+      await job.start("Opening the PR", () => client.openSessionPr(root, { title: item.detail?.trim() || draft.title, body: draft.body }), (result) => {
+        const url = (result as { url?: string } | undefined)?.url;
+        if (url && !/\/pull\/\d+/.test(url)) {
+          // No PR was created: nothing settles; the compare page is the way on.
+          setCompare(url);
+          actions.report(item, "GitHub's CLI couldn't open the PR; open it from the compare page.", true);
+          return;
+        }
         actions.settle(item);
         onDone();
       });
@@ -530,9 +539,16 @@ function OpenPr({ item, actions, onDone }: { item: InboxItemDTO; actions: Return
   };
   const busy = drafting || job.busy;
   return (
-    <button type="button" className={`${ACT} ${PLAIN}`} disabled={busy} onClick={() => void open()}>
-      {busy ? "Opening…" : "Open PR"}
-    </button>
+    <>
+      <button type="button" className={`${ACT} ${PLAIN}`} disabled={busy} onClick={() => void open()}>
+        {busy ? "Opening…" : "Open PR"}
+      </button>
+      {compare && openUrl && (
+        <button type="button" className={`${ACT} ${PLAIN}`} onClick={() => void openUrl(compare)}>
+          Open on GitHub
+        </button>
+      )}
+    </>
   );
 }
 
