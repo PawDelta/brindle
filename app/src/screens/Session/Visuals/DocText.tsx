@@ -214,6 +214,36 @@ export function DocText({ body, marks = [] }: { body: string; marks?: Mark[] }) 
   return <>{blocks}</>;
 }
 
+/* The engine counts a section's text in code points (brindle/plan_docs.py is Python); the DOM
+   and a JS string count UTF-16 units. The two part ways after any character outside the basic
+   plane (an emoji), so an offset is converted, against its section's text, on its way out
+   (toPoints) and on its way in (toUnits). */
+const ASTRAL = /[\uD800-\uDFFF]/;
+export const toPoints = (text: string, units: number) => (ASTRAL.test(text) ? Array.from(text.slice(0, units)).length : units);
+export function toUnits(text: string, points: number): number {
+  if (!ASTRAL.test(text)) return points;
+  let units = 0;
+  for (const ch of text) {
+    if (points-- <= 0) break;
+    units += ch.length;
+  }
+  return units;
+}
+
+/* What turns `source` into `next`, as one replaced range (`start` in code points): only the text
+   that differs, and never half of a character whose two units begin or end alike. */
+export function changeBetween(source: string, next: string): { start: number; before: string; after: string } {
+  const high = (s: string, i: number) => (s.charCodeAt(i) & 0xfc00) === 0xd800;
+  const low = (s: string, i: number) => (s.charCodeAt(i) & 0xfc00) === 0xdc00;
+  let head = 0;
+  while (head < source.length && head < next.length && source[head] === next[head]) head++;
+  if (head > 0 && high(source, head - 1)) head--;
+  let tail = 0;
+  while (tail < source.length - head && tail < next.length - head && source[source.length - 1 - tail] === next[next.length - 1 - tail]) tail++;
+  if (tail > 0 && low(source, source.length - tail)) tail--;
+  return { start: toPoints(source, head), before: source.slice(head, source.length - tail), after: next.slice(head, next.length - tail) };
+}
+
 /* The selection as a range of one section's source: its section (the nearest `data-section`)
    and the offsets its first and last selected leaves give. Null when nothing of a section's
    text is selected, or the selection runs across two sections. */

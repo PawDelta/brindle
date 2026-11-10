@@ -1112,19 +1112,21 @@ describe("visuals", () => {
     expect(screen.getByTestId("plan-decided").textContent).toContain("Repo file first.");
     expect(screen.queryByRole("button", { name: "Request changes" })).toBeNull();
     // The other order: a newer revision is read while an older verdict's reply is still out.
+    // (Every verdict is followed by one more read, so the read to answer is the latest one.)
     const settled = (rev: number): Plan => ({ ...plan, rev, decisions: plan.decisions.map((d) => ({ ...d, confirmed: "org" })) });
+    const latest = (p: Plan) => act(async () => reads[reads.length - 1](p));
     view.rerender(reader({ ...row, rev: 2 }));
-    await act(async () => reads[2](settled(2)));
+    await latest(settled(2));
     await act(async () => fireEvent.click(screen.getByRole("button", { name: "Sign off" })));
     view.rerender(reader({ ...row, rev: 3 }));
-    await act(async () => reads[3](settled(3)));
+    await latest(settled(3));
     await act(async () => replies[1]({ ...plan, rev: 2, state: "approved", verdict: { approved: true, at: now, rev: 2 } }));
     expect(screen.getByTestId("plan-rev").textContent).toBe("rev 3");
     expect(screen.getByRole("button", { name: "Sign off" })).toBeTruthy();
     // Reopened later, a decided plan shows the alternative the person sent, not the supervisor's.
     view.unmount();
     render(reader(row));
-    await act(async () => reads[4](redirected));
+    await latest(redirected);
     expect(screen.getByRole("radio", { name: "A file in each repo" }).getAttribute("aria-checked")).toBe("true");
     expect(screen.getByRole("radio", { name: /Org policy/ }).getAttribute("aria-checked")).toBe("false");
   });

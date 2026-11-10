@@ -124,16 +124,16 @@ const draftWords = {
   suggest: { name: "Why (optional)", placeholder: "Why (optional)", send: "Suggest" },
 };
 
-function DraftCard({ draft, busy, onSend, onCancel }: { draft: Draft; busy: boolean; onSend(text: string, after: string): void; onCancel(): void }) {
+function DraftCard({ draft, stale, busy, onSend, onCancel }: { draft: Draft; stale: boolean; busy: boolean; onSend(text: string, after: string): void; onCancel(): void }) {
   const [text, setText] = useState("");
   const [after, setAfter] = useState(draft.kind === "suggest" ? draft.before : "");
   const words = draftWords[draft.kind];
-  const ready = draft.kind === "suggest" ? after !== draft.before : !!text.trim();
+  const ready = !stale && (draft.kind === "suggest" ? after !== draft.before : !!text.trim());
   const send = () => {
     if (ready && !busy) onSend(text.trim(), after);
   };
   return (
-    <form className={`${card} bg-canvas-2`} aria-label={draft.kind === "suggest" ? "New suggestion" : "New comment"} data-testid="thread-draft"
+    <form className={`${card} bg-canvas-2`} aria-label={draft.kind === "suggest" ? "New suggestion" : "New comment"} data-testid="thread-draft" data-stale={stale || undefined}
       onSubmit={(e) => { e.preventDefault(); send(); }}
       onKeyDown={(e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) send(); }}>
       <span className={onLine}>
@@ -147,6 +147,7 @@ function DraftCard({ draft, busy, onSend, onCancel }: { draft: Draft; busy: bool
         </>
       )}
       <textarea className={`${field} ${draft.kind === "suggest" ? "min-h-8" : "min-h-16"} w-full text-[12.5px]`} aria-label={words.name} placeholder={words.placeholder} autoFocus={draft.kind !== "suggest"} value={text} onChange={(e) => setText(e.target.value)} />
+      {stale && <p role="alert" className="text-xs text-sap">This part of the doc changed in a newer revision. Cancel, and start again on the new text.</p>}
       <div className="flex items-center gap-1.5">
         <button type="submit" className={`${button} text-xs`} disabled={!ready || busy}>{words.send}</button>
         <button type="button" className={`${quiet} text-xs`} onClick={onCancel}>Cancel</button>
@@ -155,7 +156,7 @@ function DraftCard({ draft, busy, onSend, onCancel }: { draft: Draft; busy: bool
   );
 }
 
-export function Review({ plan, tab, onTab, todo, decided, onJump, where, draft, busy, onDraftSend, onDraftCancel, actions, onShow, shared, onCollapse }: {
+export function Review({ plan, tab, onTab, todo, decided, onJump, where, draft, draftStale, busy, onDraftSend, onDraftCancel, actions, onShow, shared, onCollapse }: {
   plan: Plan;
   tab: ReviewTab;
   onTab(tab: ReviewTab): void;
@@ -165,6 +166,8 @@ export function Review({ plan, tab, onTab, todo, decided, onJump, where, draft, 
   /* A thread's place in the doc, in words. */
   where(thread: PlanThreadDTO): string;
   draft: Draft | null;
+  /* What the draft is on changed in a newer revision: it can't be sent. */
+  draftStale: boolean;
   busy: boolean;
   onDraftSend(text: string, after: string): void;
   onDraftCancel(): void;
@@ -224,7 +227,7 @@ export function Review({ plan, tab, onTab, todo, decided, onJump, where, draft, 
             ))}
           </div>
         )}
-        {tab === "review" && draft && <DraftCard key={`${draft.kind}:${draft.where}`} draft={draft} busy={busy} onSend={onDraftSend} onCancel={onDraftCancel} />}
+        {tab === "review" && draft && <DraftCard key={`${draft.kind}:${draft.where}`} draft={draft} stale={draftStale} busy={busy} onSend={onDraftSend} onCancel={onDraftCancel} />}
         {shown.map((t) => <Thread key={t.id} thread={t} where={where(t)} busy={busy} can={plan.state === "open"} actions={actions} onShow={() => onShow(t)} />)}
         {body}
       </div>

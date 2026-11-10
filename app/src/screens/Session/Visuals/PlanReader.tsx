@@ -30,7 +30,7 @@ import type { PlanDocClient, PlansClient, VisualsClient } from "./client";
 import { BackButton, KeepButton, fileAttachment, fileName, message, useEscBack } from "./chrome";
 import { Diagram } from "./DocDiagram";
 import { Review, ReviewStrip, type Draft, type ReviewTab, type ThreadActions, type TodoItem } from "./DocReview";
-import { DocText, selectedRange, type Mark } from "./DocText";
+import { DocText, changeBetween, selectedRange, toPoints, toUnits, type Mark } from "./DocText";
 import { ExportButton } from "./ExportButton";
 import { Avatar, Decision, Tasks, overlaps, passChip, personName } from "./PlanCards";
 import { StoreContext } from "../../../store/useStore";
@@ -41,6 +41,13 @@ type Client = VisualsClient & PlansClient & PlanDocClient & Partial<ExportClient
    revision never reopens, so a response with less progress than the one on screen is stale. */
 const progress = (p: Plan) => p.rev * 2 + (p.state === "open" ? 0 : 1);
 const noSubscribe = () => () => {};
+
+/* The doc's writes, kept in order by the reader: `begin` is refused while another is out, and
+   `end` hands back the engine's reply (the plan as it is now), or null when the write failed. */
+interface Writes {
+  begin(): boolean;
+  end(plan: Plan | null): void;
+}
 
 type Mode = "viewing" | "suggesting" | "editing";
 const MODES: { id: Mode; name: string; hint: string }[] = [
@@ -73,7 +80,7 @@ export function PlanReader({ client, visual, repo, onBack, asking, onChanged }: 
   const [error, setError] = useState<string | null>(null);
   const [exporting, setExporting] = useState(false);
   const [mode, setMode] = useState<Mode>("viewing");
-  // A write the engine refused as out of date asks for the plan again.
+  // Every write to the doc is followed by one more read of it.
   const [again, setAgain] = useState(0);
   const store = useContext(StoreContext);
   const updates = useSyncExternalStore(store?.subscribe ?? noSubscribe, () => {
@@ -86,24 +93,50 @@ export function PlanReader({ client, visual, repo, onBack, asking, onChanged }: 
   const selected = useRef(visual.id);
   selected.current = visual.id;
   // Reads and replies to writes can land in any order: the plan on screen only ever moves forward
-  // (a newer revision, or this revision decided), and only for the plan still open here.
-  const accept = useCallback((p: Plan, verdict = false) => {
-    if (p.id !== selected.current) return;
-    setPlan((now) => (now && now.id === p.id && (progress(now) > progress(p) || (verdict && progress(now) === progress(p))) ? now : p));
+  // (a newer revision, or this revision decided), and only for the plan still open here. With
+  // `newer`, a plan no further along than the one on screen doesn't replace it.
+  const latest = useRef<Plan | null>(null);
+  const place = useCallback((p: Plan, newer = false) => {
+    if (p.id !== selected.current) return false;
+    const now = latest.current?.id === p.id ? latest.current : null;
+    if (now && (progress(now) > progress(p) || (newer && progress(now) === progress(p)))) return false;
+    latest.current = p;
+    setPlan(p);
+    return true;
   }, []);
+  // Comments, picks and replies change the plan without moving it along, so nothing in a snapshot
+  // says which of two is the later. Order is kept by how they are asked for instead. Only the
+  // latest read counts. Writes go one at a time (`out`), so two replies can't cross. A read shown
+  // while a write is out (`passed`) may already be past it, so that write's reply then only
+  // counts if it is further along. And when a write comes back, every read still out is
+  // dropped (it may predate the write) and the plan is read once more.
+  const write = useRef({ out: false, passed: false });
+  const writes = useMemo<Writes>(() => ({
+    begin: () => {
+      if (write.current.out) return false;
+      write.current = { out: true, passed: false };
+      return true;
+    },
+    end: (p) => {
+      if (p) place(p, write.current.passed);
+      write.current = { out: false, passed: false };
+      seq.current++;
+      setAgain((n) => n + 1);
+    },
+  }), [place]);
   useEffect(() => {
     const mine = ++seq.current;
     client.plan(visual.id).then(
       (p) => {
         if (mine !== seq.current) return;
-        accept(p);
-        if (mine === seq.current) setError(null);
+        if (place(p) && write.current.out) write.current.passed = true;
+        setError(null);
       },
       (e) => {
         if (mine === seq.current) setError(message(e));
       },
     );
-  }, [client, visual.id, changed, accept, updates, again]);
+  }, [client, visual.id, changed, place, updates, again]);
   const shown = plan && plan.id === visual.id ? plan : null;
   const exportClient = client.exportVisual && client.exportDoc && client.docPolicy && client.docExportConfig ? (client as ExportClient) : undefined;
   // A decided plan is read, not edited; the engine takes a suggestion until it is approved.
@@ -144,7 +177,7 @@ export function PlanReader({ client, visual, repo, onBack, asking, onChanged }: 
             <Tasks plan={shown} shared={overlaps(shown)} />
           </section>
         )}
-        <DesignDoc key={shown.id} client={client} plan={shown} visual={visual} mode={current} onPlan={accept} onStale={() => setAgain((n) => n + 1)} />
+        <DesignDoc key={shown.id} client={client} plan={shown} visual={visual} mode={current} writes={writes} />
       </> : <p className="p-s3 text-sm text-ink-3">{error ?? "Loading…"}</p>}
     </div>
   );
@@ -166,13 +199,12 @@ const show = (el: Element | null | undefined, block: ScrollLogicalPosition = "st
 /* What a highlight offers, where it was made: a range of a section's text, or a diagram. */
 type Picked = { x: number; y: number } & ({ kind: "text"; section: string; start: number; quote: string } | { kind: "diagram"; section: string });
 
-function DesignDoc({ client, plan, visual, mode, onPlan, onStale }: {
+function DesignDoc({ client, plan, visual, mode, writes }: {
   client: Client;
   plan: Plan;
   visual: VisualDTO;
   mode: Mode;
-  onPlan(p: Plan, verdict?: boolean): void;
-  onStale(): void;
+  writes: Writes;
 }) {
   const open = plan.state === "open";
   const threads = useMemo(() => plan.threads ?? [], [plan.threads]);
@@ -185,10 +217,15 @@ function DesignDoc({ client, plan, visual, mode, onPlan, onStale }: {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [picked, setPicked] = useState<Picked | null>(null);
-  const [draft, setDraft] = useState<Draft | null>(null);
-  const [box, setEditing] = useState<{ section: string; text: string } | null>(null);
+  // What the person is writing belongs to the text it was started on (`source`): the doc stays
+  // open across revisions, and a draft begun on one must not be sent against another's text.
+  const [drafting, setDrafting] = useState<{ draft: Draft; source: string } | null>(null);
+  const draft = drafting?.draft ?? null;
+  const [box, setEditing] = useState<{ section: string; text: string; source: string } | null>(null);
   // A section's box belongs to Suggesting and Editing: back in Viewing (or decided), it is closed.
   const editing = mode === "viewing" ? null : box;
+  // The person replied on a thread and no verdict has carried it to the supervisor yet.
+  const [replied, setReplied] = useState(false);
   const [followed, setFollowed] = useState<{ thread: string } | null>(null);
   const [tab, setTab] = useState<ReviewTab>("review");
   const [collapsed, setCollapsed] = useState(storedCollapsed);
@@ -215,6 +252,21 @@ function DesignDoc({ client, plan, visual, mode, onPlan, onStale }: {
   const figures = new Map(plan.sections.filter((s) => s.kind === "mermaid" || s.kind === "svg").map((s, i): [string, number] => [s.id, i + 1]));
   const bodyOf = (section: string) => (section === LEDE ? plan.lede : plan.sections.find((s) => s.id === section)?.markdown) ?? "";
   const sectionName = (section: string) => (section === LEDE ? "overview" : `§${numbers.get(section) ?? "?"}`);
+  // What an anchor is on, as text: a draft is stale once this differs from what it was begun on.
+  const decisionSource = (id: string) => {
+    const d = plan.decisions.find((x) => x.id === id);
+    return d ? JSON.stringify([d.title, d.mine, d.challenge, d.options]) : "";
+  };
+  const sourceOf = (a: PlanAnchor): string => {
+    if (a.kind === "decision") return decisionSource(a.decision);
+    if (a.kind === "section" && a.section.startsWith("decision:")) return decisionSource(a.section.slice(9));
+    if (a.kind === "section" && a.section === "ask") return plan.ask ?? "";
+    if (a.kind === "section" && a.section === "split") return JSON.stringify(plan.split.map((w) => [w.id, w.title, w.files, w.after, w.test]));
+    return `${bodyOf(a.section)}\n${plan.sections.find((s) => s.id === a.section)?.caption ?? ""}`;
+  };
+  const anchorOf = (d: Draft): PlanAnchor => (d.kind === "suggest" ? { kind: "text", section: d.section, start: d.start, quote: d.before } : d.anchor);
+  const draftStale = !!drafting && sourceOf(anchorOf(drafting.draft)) !== drafting.source;
+  const editStale = !!editing && bodyOf(editing.section) !== editing.source;
 
   // A decision's pick: what the person sent once decided; else their draft, their confirmed
   // pick, then the supervisor's. It is settled once confirmed with no other draft over it.
@@ -243,40 +295,44 @@ function DesignDoc({ client, plan, visual, mode, onPlan, onStale }: {
   // and the text being commented on right now.
   const marksOf = (section: string): Mark[] => {
     const out: Mark[] = [];
+    const body = bodyOf(section);
     for (const t of openThreads) {
       const a = t.anchor;
       if (a.kind !== "text" || a.section !== section || a.state === "detached" || a.start == null || a.end == null) continue;
-      out.push(t.kind === "suggestion" ? { start: a.start, end: a.end, kind: "del", thread: t.id, ins: t.after ?? "" } : { start: a.start, end: a.end, kind: "anchor", thread: t.id });
+      // The engine's offsets count code points; the text on screen, UTF-16 units.
+      const range = { start: toUnits(body, a.start), end: toUnits(body, a.end), thread: t.id };
+      out.push(t.kind === "suggestion" ? { ...range, kind: "del", ins: t.after ?? "" } : { ...range, kind: "anchor" });
     }
-    if (draft?.kind === "suggest" && draft.section === section) out.push({ start: draft.start, end: draft.start + draft.before.length, kind: "sel" });
-    else if (draft && draft.kind !== "suggest" && draft.anchor.kind === "text" && draft.anchor.section === section) out.push({ start: draft.anchor.start, end: draft.anchor.start + draft.anchor.quote.length, kind: "sel" });
+    const on = draft && !draftStale ? anchorOf(draft) : null;
+    if (on?.kind === "text" && on.section === section) out.push({ start: on.start, end: on.start + on.quote.length, kind: "sel" });
     return out;
   };
 
-  /* One write to the doc: the engine answers with the plan as it is now. */
-  const write = async (work: () => Promise<Plan>, verdict = false): Promise<boolean> => {
+  /* One write to the doc, and only one at a time: the engine answers with the plan as it is now. */
+  const write = async (work: () => Promise<Plan>): Promise<boolean> => {
+    if (!writes.begin()) return false;
+    setBusy(true);
     setError(null);
     try {
-      onPlan(await work(), verdict);
+      writes.end(await work());
       return true;
     } catch (e) {
-      const stale = e instanceof DaemonError && e.status === 409;
-      if (stale) onStale();
-      if (alive.current) setError(stale ? "This design changed since you opened it (a new revision, or it was already decided). Read it again." : `Couldn't send: ${message(e)}`);
+      writes.end(null);
+      if (alive.current) setError(e instanceof DaemonError && e.status === 409 ? "This design changed since you opened it (a new revision, or it was already decided). It is being read again." : `Couldn't send: ${message(e)}`);
       return false;
+    } finally {
+      if (alive.current) setBusy(false);
     }
   };
-  const act = async (work: () => Promise<Plan>) => {
-    setBusy(true);
-    const ok = await write(work);
-    if (alive.current) setBusy(false);
-    return ok;
-  };
   const actions: ThreadActions = {
-    reply: (thread, text) => act(() => client.replyPlan(plan.id, thread, text)),
-    resolve: (thread, resolved) => act(() => client.resolvePlanThread(plan.id, thread, resolved)),
-    accept: (thread) => act(() => client.acceptPlanSuggestion(plan.id, thread, plan.rev)),
-    reject: (thread) => act(() => client.rejectPlanSuggestion(plan.id, thread)),
+    reply: async (thread, text) => {
+      const ok = await write(() => client.replyPlan(plan.id, thread, text));
+      if (ok && alive.current) setReplied(true);
+      return ok;
+    },
+    resolve: (thread, resolved) => write(() => client.resolvePlanThread(plan.id, thread, resolved)),
+    accept: (thread) => write(() => client.acceptPlanSuggestion(plan.id, thread, plan.rev)),
+    reject: (thread) => write(() => client.rejectPlanSuggestion(plan.id, thread)),
   };
 
   // A highlight in the doc: where it is in its section's own text, and where to offer the bar.
@@ -298,7 +354,7 @@ function DesignDoc({ client, plan, visual, mode, onPlan, onStale }: {
     setPicked(figure?.dataset.diagram ? { ...at, kind: "diagram", section: figure.dataset.diagram } : null);
   };
   const begin = (next: Draft) => {
-    setDraft(next);
+    setDrafting({ draft: next, source: sourceOf(anchorOf(next)) });
     setPicked(null);
     setTab("review");
     window.getSelection()?.removeAllRanges();
@@ -311,26 +367,27 @@ function DesignDoc({ client, plan, visual, mode, onPlan, onStale }: {
     begin({ kind, anchor: { kind: "text", section, start, quote }, where: `"${clip(quote, 28)}" · ${sectionName(section)}` });
   };
   const comment = (anchor: PlanAnchor, on: string) => begin({ kind: "comment", anchor, where: on });
+  const setDraft = (_: null) => setDrafting(null);
+  // The draft's offsets are the screen's (UTF-16); the engine is sent code points. A draft whose
+  // text changed under it (a newer revision) isn't sent: its range no longer says what was meant.
   const sendDraft = async (text: string, after: string) => {
-    if (!draft) return;
+    if (!draft || draftStale) return;
+    const on = anchorOf(draft);
+    const start = on.kind === "text" ? toPoints(bodyOf(on.section), on.start) : 0;
     const sent = draft.kind === "suggest"
-      ? () => client.suggestPlan(plan.id, plan.rev, { section: draft.section, start: draft.start, before: draft.before, after }, text)
-      : () => client.commentPlan(plan.id, plan.rev, draft.anchor, text);
-    if ((await act(sent)) && alive.current) setDraft(null);
+      ? () => client.suggestPlan(plan.id, plan.rev, { section: draft.section, start, before: draft.before, after }, text)
+      : () => client.commentPlan(plan.id, plan.rev, on.kind === "text" ? { ...on, start } : on, text);
+    if ((await write(sent)) && alive.current) setDraft(null);
   };
 
-  // A section's box, saved: only what changed between the text and the box is sent.
+  // A section's box, saved: only what changed between the text it was opened on and the box is
+  // sent. If that text has changed since (a newer revision), nothing is: the box's draft was
+  // written against the older text and would put it back.
   const saveEdit = async () => {
-    if (!editing) return;
-    const before = bodyOf(editing.section);
-    const after = editing.text;
-    let head = 0;
-    while (head < before.length && head < after.length && before[head] === after[head]) head++;
-    let tail = 0;
-    while (tail < before.length - head && tail < after.length - head && before[before.length - 1 - tail] === after[after.length - 1 - tail]) tail++;
-    const change: PlanChange = { section: editing.section, start: head, before: before.slice(head, before.length - tail), after: after.slice(head, after.length - tail) };
+    if (!editing || editStale) return;
+    const change: PlanChange = { section: editing.section, ...changeBetween(editing.source, editing.text) };
     const sent = mode === "editing" ? () => client.editPlan(plan.id, plan.rev, change) : () => client.suggestPlan(plan.id, plan.rev, change);
-    if ((await act(sent)) && alive.current) setEditing(null);
+    if ((await write(sent)) && alive.current) setEditing(null);
   };
 
   // Following a thread to its place in the doc, and an underlined anchor to its thread.
@@ -368,15 +425,20 @@ function DesignDoc({ client, plan, visual, mode, onPlan, onStale }: {
       if (alive.current) setUploading((n) => n - 1);
     }
   };
-  const pending = threads.some((t) => t.author === "person" && t.status === "open" && !t.sent);
-  const lastProposal = Math.max(0, ...(plan.revisions ?? []).filter((r) => r.author === "supervisor").map((r) => r.rev));
+  // What the supervisor hasn't had: the person's open threads, and their replies. A reply carries
+  // no "sent" of its own: one written after the supervisor's last revision hasn't been (every
+  // verdict that sent one was followed by a revision), nor has one written from this screen.
+  const proposals = (plan.revisions ?? []).filter((r) => r.author === "supervisor");
+  const proposedAt = Math.max(0, ...proposals.map((r) => r.at));
+  const pending = replied || threads.some((t) => (t.author === "person" && t.status === "open" && !t.sent) || !!t.replies?.some((r) => r.author === "person" && r.at > proposedAt));
+  const lastProposal = Math.max(0, ...proposals.map((r) => r.rev));
   const edited = (plan.revisions ?? []).some((r) => r.author === "person" && r.rev > lastProposal);
   const differs = plan.decisions.some((d) => (drafted(d) ?? d.confirmed ?? d.mine) !== d.mine);
   const canRequest = !!note.trim() || pending || edited || differs;
   const drafts = Object.fromEntries(plan.decisions.flatMap((d) => (drafted(d) ? [[d.id, drafted(d)!]] : [])));
   const decide = async (approved: boolean) => {
     setSending(approved ? "approve" : "changes");
-    const ok = await write(() => client.decidePlan(plan.id, { rev: plan.rev, approved, picks: drafts, comments: [], note: note.trim(), ...(attached.length ? { attachments: attached } : {}) }), true);
+    const ok = await write(() => client.decidePlan(plan.id, { rev: plan.rev, approved, picks: drafts, comments: [], note: note.trim(), ...(attached.length ? { attachments: attached } : {}) }));
     if (!alive.current) return;
     setSending(null);
     if (ok) {
@@ -384,6 +446,7 @@ function DesignDoc({ client, plan, visual, mode, onPlan, onStale }: {
       setNote("");
       setAttached([]);
       setPicks({});
+      setReplied(false);
     }
   };
   const confirm = async () => {
@@ -404,16 +467,17 @@ function DesignDoc({ client, plan, visual, mode, onPlan, onStale }: {
   // A text section: its text with the threads' ranges drawn in, or, being edited, its markdown in a box.
   const editable = mode !== "viewing";
   const editControl = (section: string, title: string) => editable && editing?.section !== section && (
-    <button type="button" className={`${quiet} -my-0.5 text-xs`} aria-label={`${mode === "editing" ? "Edit" : "Suggest an edit to"} ${title}`} disabled={!!editing} onClick={() => setEditing({ section, text: bodyOf(section) })}>
+    <button type="button" className={`${quiet} -my-0.5 text-xs`} aria-label={`${mode === "editing" ? "Edit" : "Suggest an edit to"} ${title}`} disabled={!!editing} onClick={() => setEditing({ section, text: bodyOf(section), source: bodyOf(section) })}>
       {mode === "editing" ? "Edit" : "Suggest an edit"}
     </button>
   );
   const textBody = (section: string, title: string) => editing?.section === section ? (
-    <div className="grid gap-2 font-sans">
+    <div className="grid gap-2 font-sans" data-testid="plan-edit-box" data-stale={editStale || undefined}>
       <textarea className={`${field} w-full resize-y font-mono text-[12.5px] leading-[1.6]`} aria-label={`Text of ${title}`} autoFocus rows={Math.min(24, editing.text.split("\n").length + 2)}
-        value={editing.text} onChange={(e) => setEditing({ section, text: e.target.value })} />
+        value={editing.text} onChange={(e) => setEditing({ ...editing, text: e.target.value })} />
+      {editStale && <p role="alert" className="text-xs text-sap">This section changed in a newer revision, so this draft can't be saved over it. Copy what you need, cancel, and edit the new text.</p>}
       <div className="flex items-center gap-1.5">
-        <LoadingButton className={`${button} text-xs`} busy={busy} disabled={busy || editing.text === bodyOf(section)} onClick={() => void saveEdit()}>
+        <LoadingButton className={`${button} text-xs`} busy={busy} disabled={busy || editStale || editing.text === editing.source} onClick={() => void saveEdit()}>
           {mode === "editing" ? "Save" : "Suggest this change"}
         </LoadingButton>
         <button type="button" className={`${quiet} text-xs`} onClick={() => setEditing(null)}>Cancel</button>
@@ -514,7 +578,7 @@ function DesignDoc({ client, plan, visual, mode, onPlan, onStale }: {
           )}
         </div>
         {columnOpen ? (
-          <Review plan={plan} tab={draft ? "review" : tab} onTab={setTab} todo={todo} decided={decided} onJump={jump} where={where} draft={draft} busy={busy}
+          <Review plan={plan} tab={draft ? "review" : tab} onTab={setTab} todo={todo} decided={decided} onJump={jump} where={where} draft={draft} draftStale={draftStale} busy={busy}
             onDraftSend={(text, after) => void sendDraft(text, after)} onDraftCancel={() => setDraft(null)} actions={actions} onShow={showThread} shared={shared} onCollapse={() => { setDraft(null); collapse(true); }} />
         ) : (
           <ReviewStrip comments={openThreads.length} decisions={plan.decisions.length - decided} onOpen={() => collapse(false)} />
@@ -535,17 +599,17 @@ function DesignDoc({ client, plan, visual, mode, onPlan, onStale }: {
             </div>
             <div className="flex items-center gap-2">
               {next && <button type="button" className={quiet} onClick={() => jump(next.id)}>Jump to it</button>}
-              <LoadingButton className={button} busy={sending === "changes"} disabled={!!sending || !canRequest || uploading > 0}
+              <LoadingButton className={button} busy={sending === "changes"} disabled={busy || !canRequest || uploading > 0}
                 title={canRequest ? "Send it back to the supervisor for a new revision, with your notes" : "Comment, add a note or pick differently first"} onClick={() => void decide(false)}>
                 Request changes
               </LoadingButton>
               {/* One main action at a time: the next decision's confirmation, then the sign-off. */}
               {next ? (
-                <LoadingButton className={`${main} max-w-64`} busy={sending === "confirm"} disabled={!!sending || !nextOption} title={nextOption ? `Confirm ${nextOption.label} for "${next.title}"` : "Pick one of its options first"} onClick={() => void confirm()}>
+                <LoadingButton className={`${main} max-w-64`} busy={sending === "confirm"} disabled={busy || !nextOption} title={nextOption ? `Confirm ${nextOption.label} for "${next.title}"` : "Pick one of its options first"} onClick={() => void confirm()}>
                   <span className="truncate">{nextOption ? `Confirm ${shortName(nextOption.label)}` : "Confirm"}</span>
                 </LoadingButton>
               ) : (
-                <LoadingButton className={main} busy={sending === "approve"} disabled={!!sending || uploading > 0} onClick={() => void decide(true)}>
+                <LoadingButton className={main} busy={sending === "approve"} disabled={busy || uploading > 0} onClick={() => void decide(true)}>
                   Sign off
                 </LoadingButton>
               )}

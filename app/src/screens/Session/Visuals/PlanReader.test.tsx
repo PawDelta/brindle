@@ -3,6 +3,7 @@ import { afterEach, expect, it } from "vitest";
 import type { Plan, VisualDTO } from "../../../api/client";
 import { createAppStore } from "../../../store/store";
 import { StoreContext } from "../../../store/useStore";
+import { changeBetween } from "./DocText";
 import { PlanReader, REVIEW_COLLAPSED_KEY } from "./PlanReader";
 import type { PlanDocClient, PlansClient, VisualsClient } from "./client";
 
@@ -56,9 +57,10 @@ it("keeps an approved plan board live from recorded worker events and drops stal
   expect(within(board()).getByTestId("task-schema").querySelector("[data-test-state]")?.className).toContain("text-fail");
   expect(screen.getByTestId("plan-board-progress").textContent).toContain("1 of 3 green");
   await act(async () => older({ ...plan, state: "approved" }));
+  // The verdict's own reply is older than what the events brought: it changes nothing, and the
+  // plan is read once more.
   await act(async () => decided({ ...plan, state: "approved" }));
   expect(screen.getByTestId("plan-board-progress").textContent).toContain("1 of 3 green");
-  event(4);
   await act(async () => reads.shift()!({ ...approved, split: approved.split.map((w) => ({ ...w, state: "merged", test_state: "passing" })) }));
   expect(screen.getByTestId("plan-board-progress").textContent).toContain("3 of 3 green");
   expect(within(board()).getByTestId("task-schema").textContent).toContain("merged");
@@ -66,12 +68,13 @@ it("keeps an approved plan board live from recorded worker events and drops stal
 });
 
 it("design doc reader", async () => {
-  const summary = "Workers run on a **machine** the customer controls.";
+  // An emoji leads each section: the engine's offsets count it as one character, the screen as two.
+  const summary = "🚀 Workers run on a **machine** the customer controls.";
   let plan: Plan = { id: visual.id, session: "boss", title: "Cloud workers", rev: 1, state: "open", markdown: "…", lede: "", queued: 0, created_at: 1, split: [],
-    sections: [{ id: "summary", title: "Summary", markdown: summary }, { id: "api", title: "API sketch", markdown: 'POST with a "token" in the body.' }],
+    sections: [{ id: "summary", title: "Summary", markdown: summary }, { id: "api", title: "API sketch", markdown: 'POST 🚀 with a "token" in the body.' }],
     decisions: [{ id: "where", title: "Where cloud workers run", mine: "own", options: [{ id: "own", label: "A · Your own server" }, { id: "hosted", label: "B · PawDelta-hosted" }] }],
     threads: [{ id: 1, kind: "suggestion", rev: 1, author: "supervisor", text: "Tokens end up in logs.", status: "open", at: 1, before: '"token"', after: '"lease"',
-      anchor: { kind: "text", section: "api", start: 12, end: 19, quote: '"token"', state: "current" } }] };
+      anchor: { kind: "text", section: "api", start: 14, end: 21, quote: '"token"', state: "current" } }] };
   const calls: unknown[][] = [];
   const client: PlansClient & PlanDocClient & VisualsClient = {
     ...visuals, ...docWrites(() => plan),
@@ -106,7 +109,7 @@ it("design doc reader", async () => {
   // A comment on a highlighted range: the highlight runs into bold text, and the comment is
   // anchored on that range of the section's own markdown.
   const range = document.createRange();
-  range.setStart(within(doc).getByText("Workers run on a").firstChild!, 0);
+  range.setStart(within(doc).getByText(/Workers run on a/).firstChild!, 3);
   range.setEnd(within(doc).getByText("machine").firstChild!, 7);
   window.getSelection()!.removeAllRanges();
   window.getSelection()!.addRange(range);
@@ -115,7 +118,7 @@ it("design doc reader", async () => {
   const draft = screen.getByTestId("thread-draft");
   fireEvent.change(within(draft).getByRole("textbox"), { target: { value: "Does this include a rented VM?" } });
   await act(async () => fireEvent.click(within(draft).getByRole("button", { name: "Comment" })));
-  expect(calls.pop()).toEqual(["comment", 1, { kind: "text", section: "summary", start: 0, quote: "Workers run on a **machine" }, "Does this include a rented VM?"]);
+  expect(calls.pop()).toEqual(["comment", 1, { kind: "text", section: "summary", start: 2, quote: "Workers run on a **machine" }, "Does this include a rented VM?"]);
   expect(screen.queryByTestId("thread-draft")).toBeNull();
   expect(screen.getByTestId("thread-2").getAttribute("data-kind")).toBe("comment");
   expect(doc.querySelectorAll('[data-thread="2"]').length).toBe(2);
@@ -138,7 +141,7 @@ it("design doc reader", async () => {
   fireEvent.click(screen.getByRole("button", { name: "Edit Summary" }));
   fireEvent.change(screen.getByLabelText("Text of Summary"), { target: { value: summary.replace("customer", "team") } });
   await act(async () => fireEvent.click(screen.getByRole("button", { name: "Save" })));
-  expect(calls.pop()).toEqual(["edit", 2, { section: "summary", start: 33, before: "customer", after: "team" }]);
+  expect(calls.pop()).toEqual(["edit", 2, { section: "summary", start: 35, before: "customer", after: "team" }]);
   expect(screen.queryByLabelText("Text of Summary")).toBeNull();
 
   // The column collapses to a strip that keeps both counts; the choice outlives the reader.
@@ -164,4 +167,88 @@ it("design doc reader", async () => {
   expect(within(section()).getByRole("radio", { name: "B · PawDelta-hosted" }).querySelector("[data-votes]")?.getAttribute("data-votes")).toBe("1");
   expect(within(screen.getByTestId("plan-todo")).getByRole("button").getAttribute("data-state")).toBe("done");
   expect(within(screen.getByTestId("plan-verdict")).getByRole("button", { name: "Sign off" })).toBeTruthy();
+});
+
+const doc = (rev: number, text: string, more: Partial<Plan> = {}): Plan => ({ id: visual.id, session: "boss", title: "Cloud workers", rev, state: "open", markdown: "…", lede: "", queued: 0, created_at: 1, split: [],
+  sections: [{ id: "summary", title: "Summary", markdown: text }], decisions: [], threads: [], ...more });
+
+it("design doc writes go one at a time, a read sent before one came back can't undo it, and a reply is feedback to send", async () => {
+  const base = doc(1, "Workers run on your machine.", {
+    decisions: [{ id: "where", title: "Where", mine: "own", options: [{ id: "own", label: "A · Own" }, { id: "hosted", label: "B · Hosted" }] }],
+    revisions: [{ rev: 1, author: "supervisor", source: "proposal", at: 10 }],
+    threads: [{ id: 1, kind: "comment", rev: 1, author: "supervisor", text: "Is a rented VM fine?", status: "open", at: 11, anchor: { kind: "section", section: "summary", state: "current" } }] });
+  const replied: Plan = { ...base, threads: [{ ...base.threads![0], replies: [{ id: 2, author: "person", text: "Yes, rented too.", at: 12 }] }] };
+  const reads: ((p: Plan) => void)[] = [];
+  let reply!: (p: Plan) => void;
+  const confirmed: string[] = [];
+  const sent: boolean[] = [];
+  const client: PlansClient & PlanDocClient & VisualsClient = {
+    ...visuals, ...docWrites(() => replied),
+    plan: () => new Promise<Plan>((resolve) => reads.push(resolve)),
+    decidePlan: async (_id, verdict) => { sent.push(verdict.approved); return { ...replied, state: "redirected" }; },
+    replyPlan: () => new Promise<Plan>((resolve) => { reply = resolve; }),
+    confirmPlan: async (_id, _rev, decision) => { confirmed.push(decision); return replied; },
+  };
+  const reader = (v: VisualDTO) => <PlanReader client={client} visual={v} onBack={() => {}} onChanged={() => {}} />;
+  const view = render(reader(visual));
+  await act(async () => reads[0](base));
+  const bar = () => within(screen.getByTestId("plan-verdict"));
+  expect((bar().getByRole("button", { name: "Request changes" }) as HTMLButtonElement).disabled).toBe(true);
+  // A read goes out (the session's row changed), then the person's reply.
+  view.rerender(reader({ ...visual, answer: { option: "x", note: "", at: 5 } }));
+  fireEvent.click(within(screen.getByTestId("thread-1")).getByRole("button", { name: "Reply" }));
+  fireEvent.change(within(screen.getByTestId("thread-1")).getByRole("textbox"), { target: { value: "Yes, rented too." } });
+  fireEvent.click(within(screen.getByTestId("thread-1")).getByRole("button", { name: "Send" }));
+  // While the reply is out no other write goes: the engine's two answers could cross.
+  fireEvent.click(bar().getByRole("button", { name: "Confirm A" }));
+  expect(confirmed).toEqual([]);
+  await act(async () => reply(replied));
+  // The read sent before the reply came back lands after it, without the reply: it is dropped.
+  await act(async () => reads[1](base));
+  expect(screen.getByTestId("thread-1").textContent).toContain("Yes, rented too.");
+  // The reply alone is something to send back to the supervisor.
+  await act(async () => fireEvent.click(bar().getByRole("button", { name: "Request changes" })));
+  expect(sent).toEqual([false]);
+});
+
+it("a design doc edit or comment begun on older text isn't sent over a newer revision's", async () => {
+  let now = doc(1, "Workers run on your machine.");
+  const calls: string[] = [];
+  const client: PlansClient & PlanDocClient & VisualsClient = {
+    ...visuals, ...docWrites(() => now), plan: async () => now, decidePlan: async () => now,
+    editPlan: async () => { calls.push("edit"); return now; },
+    commentPlan: async () => { calls.push("comment"); return now; },
+  };
+  const reader = (v: VisualDTO) => <PlanReader client={client} visual={v} onBack={() => {}} onChanged={() => {}} />;
+  const view = render(reader(visual));
+  // On revision 1: a comment begun on a highlight, and the section opened for editing.
+  const text = (await screen.findByText("Workers run on your machine.")).firstChild!;
+  const range = document.createRange();
+  range.setStart(text, 0);
+  range.setEnd(text, 7);
+  window.getSelection()!.removeAllRanges();
+  window.getSelection()!.addRange(range);
+  fireEvent.mouseUp(screen.getByTestId("plan-doc"));
+  fireEvent.click(within(screen.getByRole("toolbar")).getByRole("button", { name: "Comment" }));
+  fireEvent.change(within(screen.getByTestId("thread-draft")).getByRole("textbox"), { target: { value: "Whose?" } });
+  fireEvent.click(screen.getByRole("radio", { name: "Editing" }));
+  fireEvent.click(screen.getByRole("button", { name: "Edit Summary" }));
+  fireEvent.change(screen.getByLabelText("Text of Summary"), { target: { value: "Workers run on my machine." } });
+  // The supervisor's revision 2 rewrites the section under both.
+  now = doc(2, "Workers run on a machine the customer controls.");
+  await act(async () => view.rerender(reader({ ...visual, rev: 2 })));
+  expect(screen.getByTestId("plan-rev").textContent).toBe("rev 2");
+  expect(screen.getByTestId("plan-edit-box").getAttribute("data-stale")).toBe("true");
+  expect(screen.getByTestId("thread-draft").getAttribute("data-stale")).toBe("true");
+  await act(async () => fireEvent.click(screen.getByRole("button", { name: "Save" })));
+  await act(async () => fireEvent.submit(screen.getByTestId("thread-draft")));
+  expect(calls).toEqual([]);
+});
+
+it.each([
+  ["an insertion after an emoji is placed in the engine's code points", "🚀 abc", "🚀X abc", { start: 1, before: "", after: "X" }],
+  ["two emoji alike in their first half are swapped whole", "a🚀b", "a🚁b", { start: 1, before: "🚀", after: "🚁" }],
+  ["two emoji alike in their second half are swapped whole", "a😀", "a🈀", { start: 1, before: "😀", after: "🈀" }],
+])("a design doc edit sends only what changed: %s", (_case, source, next, change) => {
+  expect(changeBetween(source, next)).toEqual(change);
 });
