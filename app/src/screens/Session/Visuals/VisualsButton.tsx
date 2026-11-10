@@ -45,6 +45,9 @@ export function VisualsButton({ visuals, onOpen }: { visuals: VisualDTO[] | null
           <path d="M14 3v6h6" />
           <path d="M8 17l3-4 2 2 3-4" />
         </svg>
+        {visuals.some((v) => v.unread) && (
+          <span className="absolute -right-1 -top-1 size-2.5 rounded-full bg-sap ring-2 ring-canvas" aria-label="unread" />
+        )}
       </button>
       {open && (
         <div className={`${panel} absolute right-0 top-full z-20 mt-1 flex w-80 flex-col gap-px p-1`} role="group" aria-label="Visuals" data-testid="visuals-panel">
