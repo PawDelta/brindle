@@ -1,17 +1,21 @@
 """A plan shared through the Library (brindle.pro.shared_docs), against a fake
 of the API in pawdelta-web's docs/shared-designs-api.md."""
 
+import asyncio
 import copy
 import time
 
 import pytest
+from starlette.testclient import TestClient
 
 from brindle import plan_docs, plans, visual_offers
+from brindle.daemon.app import build_app
+from brindle.pro import analysis_docs as ad
 from brindle.pro import auth, credentials
 from brindle.pro import shared_docs as sd
 from brindle.service.errors import ServiceError
 from pro_fixtures import backend, fixed_identity, pro_env, signing_key  # noqa: F401 - fixtures
-from test_plans import DECISIONS, messages, session  # noqa: F401 - fixture
+from test_plans import AUTH, DECISIONS, TOKEN, messages, session  # noqa: F401 - fixture
 from test_pro_remote_learning import login_as
 
 DOC = "doc_1"
@@ -31,7 +35,9 @@ class Library:
         self.rev, self.content, self.threads, self.votes = 0, None, [], {}
         self.permissions, self.reviewers, self.create_status, self.share_status = {}, [], 200, 200
         self.lose_answer, self.lose_create, self.list_status, self.plan = False, False, 200, None
+        self.sign_offs = []
         remote.routes.update({
+            f"POST {DESIGN}/sign-offs": self.sign_off,
             "POST /analysis-docs": self.create, f"POST {BASE}/share": self.share, f"GET {LIST}": self.list,
             f"GET {DESIGN}": lambda f, h: (200, self.view()), f"POST {DESIGN}/revisions": self.revise,
             f"PUT {DESIGN}/permissions": self.set_permissions, f"PUT {DESIGN}/reviewers": self.set_reviewers,
@@ -40,8 +46,10 @@ class Library:
 
     def view(self):
         out = {**copy.deepcopy(self.content), "rev": self.rev, "threads": copy.deepcopy(self.threads),
-               "permissions": dict(self.permissions), "reviewers": list(self.reviewers), "sign_offs": [],
-               "pending_reviewers": [r["sub"] for r in self.reviewers if r["required"]]}
+               "permissions": dict(self.permissions), "reviewers": list(self.reviewers),
+               "sign_offs": list(self.sign_offs),
+               "pending_reviewers": [r["sub"] for r in self.reviewers if r["required"] and not any(
+                   s["sub"] == r["sub"] and s["rev"] == self.rev for s in self.sign_offs)]}
         for d in out["decisions"]:
             d["votes"] = self.votes.get(d["id"], {})
         return {**out, "ready": not out["pending_reviewers"]}
@@ -80,6 +88,10 @@ class Library:
         self.reviewers = list(form["reviewers"])
         return 200, self.view()
 
+    def sign_off(self, form, headers):
+        self.sign_offs.append({"rev": form["rev"], "sub": "user_1", "at": 9.0})
+        return 200, self.view()
+
 
 @pytest.fixture
 def parts(db, session, tmp_path, backend):
@@ -95,6 +107,58 @@ def parts(db, session, tmp_path, backend):
 
 def sent(backend, key):
     return [form for k, form, _ in backend.calls if k == key]
+
+
+def test_required_reviewers_share_sign_off_and_build_through_the_daemon_routes(db, parts, monkeypatch):
+    """Sharing, editing reviewers, a teammate's sign-off and the build, as the app drives them."""
+    pid, lib, net = parts
+    monkeypatch.setattr(ad, "_session", lambda client=None, store=None: (net["client"], net["store"]))
+    with TestClient(build_app(TOKEN), headers=AUTH) as app:
+        post = lambda tail, **body: app.post(f"/v1/plans/{pid}/{tail}", json=body)  # noqa: E731
+        got = post("share", scope=TEAM, reviewers=[{"sub": "u_a", "required": True}, {"sub": "user_1", "required": True}])
+        assert got.status_code == 200, got.json()
+        assert (got.json()["gate"]["state"], got.json()["gate"]["required"]) == ("waiting", 2)
+        assert post("decide", rev=1, approved=True).json()["error"]["code"] == "gate_closed"
+
+        # The owner signs from the doc; a teammate signs in the Library and the sync brings it back.
+        assert post("sign-off", rev=1).json()["gate"]["signed"] == 1
+        lib.sign_offs.append({"rev": 1, "sub": "u_a", "at": 9.0})
+        assert post("sync").json()["gate"]["state"] == "ready"
+
+        # A required reviewer added in the Library since the last sync: the approval finds out.
+        lib.reviewers = [*lib.reviewers, {"sub": "u_b", "required": True}]
+        assert post("decide", rev=1, approved=True).status_code == 409
+        assert sd.sync_open(db, **net) == 1
+        assert plans.get(db, pid)["state"] == "open"
+
+        assert post("reviewers", reviewers=[{"sub": "u_a", "required": True}]).json()["gate"]["required"] == 1
+        assert post("decide", rev=1, approved=True).json()["state"] == "approved"
+        assert post("reviewers", reviewers=[]).json()["error"]["code"] == "review_closed"
+        assert sd.sync_open(db, **net) == 0                         # review closed: nothing more to bring back
+
+
+def test_required_reviewers_are_synced_in_the_background(monkeypatch):
+    from brindle.daemon import lifecycle
+    from brindle.daemon.session_review import ReadinessWatch
+
+    now, synced = [0.0], []
+
+    class Server:
+        should_exit = False
+
+    async def elapse(seconds):
+        now[0] += lifecycle.SHARED_DOCS_EVERY + 1
+        await asyncio.to_thread(int)            # lets the sync's own task run
+        if synced:
+            Server.should_exit = True
+
+    monkeypatch.setattr(lifecycle, "_sync_shared_docs", lambda: synced.append(True))
+    monkeypatch.setattr(ReadinessWatch, "sweep_safely", lambda self: None)
+    monkeypatch.setattr(lifecycle, "_purge_typed_words", lambda: None)
+    monkeypatch.setattr(lifecycle, "_keep_codex_hook", lambda settle=0.0: None)
+    asyncio.run(lifecycle._watch(Server(), lifecycle.Activity(build_app(TOKEN, port=8123)), False, wait=elapse,
+                                 clock=lambda: now[0]))
+    assert synced
 
 
 def test_a_shared_plan_goes_to_the_library_and_what_teammates_write_comes_back(db, parts, backend):

@@ -54,6 +54,8 @@ export interface ApiSchema {
   PlanCommentDTO: PlanCommentDTO;
   PlanDTO: PlanDTO;
   PlanDecisionDTO: PlanDecisionDTO;
+  PlanGateDTO: PlanGateDTO;
+  PlanGateRowDTO: PlanGateRowDTO;
   PlanOfferDTO: PlanOfferDTO;
   PlanOfferMilestoneDTO: PlanOfferMilestoneDTO;
   PlanOptionDTO: PlanOptionDTO;
@@ -868,6 +870,7 @@ export interface PlanDTO {
   can_edit?: boolean;
   created_at: number;
   decisions: PlanDecisionDTO[];
+  gate?: PlanGateDTO | null;
   id: string;
   lede: string;
   markdown: string;
@@ -913,6 +916,40 @@ export interface PlanOptionDTO {
   label: string;
   pros?: string[];
   touches?: string[];
+}
+/**
+ * A shared plan's build gate (brindle.plans.gate). ``reason``: why it
+ * can't build now; ``signed`` of ``required`` sign-offs are in.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PlanGateDTO".
+ */
+export interface PlanGateDTO {
+  reason?: string | null;
+  required: number;
+  reviewers?: PlanGateRowDTO[];
+  signed: number;
+  state: "waiting" | "changes_requested" | "ready" | "closed";
+  waiting_on?: string[];
+}
+/**
+ * One row of a plan's build gate: a reviewer (``sub``) or an org review
+ * rule no one on the list meets (``name``). ``meets``: the rules this
+ * reviewer's sign-off also counts for. ``met_by``: who met a rule.
+ * ``changes_by``: the rule's signers who have since asked for changes.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PlanGateRowDTO".
+ */
+export interface PlanGateRowDTO {
+  changes_by?: string[];
+  meets?: string[];
+  met_by?: string[];
+  name?: string | null;
+  required: boolean;
+  status: "signed_off" | "changes_requested" | "waiting" | "waived";
+  sub?: string | null;
+  you?: boolean;
 }
 /**
  * One revision of a plan: the supervisor's proposal, or the person's

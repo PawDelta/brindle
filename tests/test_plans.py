@@ -461,6 +461,127 @@ def test_design_doc_round_trip_comment_reply_and_next_revision(db, session):
     assert plans.get(db, pid)["state"] == "open"
 
 
+def _shared(db, pid, review, local_rev=1, remote_rev=1):
+    """A plan as a sync leaves it: linked to the Library, with its last review state."""
+    with db.tx() as c:
+        c.execute("INSERT INTO plan_shares (plan_id, doc_id, owner, remote_rev, local_rev, review) VALUES (?,'doc','me',?,?,?)"
+                  " ON CONFLICT(plan_id) DO UPDATE SET remote_rev=excluded.remote_rev, local_rev=excluded.local_rev,"
+                  " review=excluded.review", (pid, remote_rev, local_rev, json.dumps(review)))
+
+
+def _signed_off(*subs, rev=1):
+    return [{"sub": s, "rev": rev, "at": 5.0} for s in subs]
+
+
+TWO = [{"sub": "a", "required": True}, {"sub": "b", "required": True}, {"sub": "c", "required": False}]
+ONE = [{"sub": "a", "required": True}]
+RULE = {"policy": "staff", "name": "Staff sign-off", "approvals": 1, "on_list": ["a"], "met_by": ["a"], "status": "met"}
+
+
+@pytest.fixture
+def library(monkeypatch):
+    from brindle.pro import shared_docs
+
+    monkeypatch.setattr(shared_docs, "sync", lambda db, plan_id: {})
+    return shared_docs
+
+
+@pytest.mark.parametrize("review, local_rev, teammate, state, signed", [
+    pytest.param({"rev": 1, "reviewers": TWO, "sign_offs": _signed_off("a", "b")}, 1, None, "ready", (2, 2), id="all-signed"),
+    pytest.param({"rev": 1, "reviewers": TWO, "sign_offs": _signed_off("a", "c")}, 1, None, "waiting", (1, 2), id="optional-doesnt-count"),
+    pytest.param({"rev": 1, "reviewers": ONE, "sign_offs": _signed_off("a"),
+                  "policy_reviewers": [RULE, {**RULE, "policy": "security", "name": "Security"}]},
+                 1, None, "ready", (1, 1), id="one-sign-off-meets-every-rule"),
+    pytest.param({"rev": 1, "reviewers": ONE, "sign_offs": _signed_off("a"),
+                  "policy_reviewers": [{**RULE, "on_list": [], "met_by": [], "status": "waiting"}]},
+                 1, None, "waiting", (1, 2), id="a-rule-nobody-met"),
+    pytest.param({"rev": 1, "reviewers": ONE, "sign_offs": _signed_off("a", rev=0)}, 1, None, "waiting", (0, 1),
+                 id="sign-off-on-an-older-revision",
+                 marks=pytest.mark.variant("a stale sign-off must never open the gate on text the reviewer hasn't read")),
+    pytest.param({"rev": 1, "reviewers": ONE, "sign_offs": _signed_off("a")}, 0, None, "waiting", (0, 1), id="revision-not-sent-yet"),
+    pytest.param({"rev": 1, "reviewers": ONE, "sign_offs": _signed_off("a")}, 1, "a", "changes_requested", (0, 1), id="changes-after-sign-off"),
+    pytest.param({"rev": 1, "reviewers": [], "sign_offs": _signed_off("a"), "policy_reviewers": [{**RULE, "on_list": []}]},
+                 1, "a", "changes_requested", (0, 1), id="changes-from-a-signer-only-a-rule-counts"),
+    pytest.param({}, 1, None, "waiting", (0, 0), id="library-not-heard-from"),
+    pytest.param({"rev": 1, "reviewers": [], "policy_reviewers": ["unreadable"]}, 1, None, "waiting", (0, 0), id="unreadable-rule"),
+])
+def test_required_reviewers_gate(db, session, library, monkeypatch, review, local_rev, teammate, state, signed):
+    from brindle import plan_docs
+
+    boss, started = session
+    visual_offers.person_spoke(db, boss, "Make a planning doc.")
+    pid = mcp_server.propose_plan(PLAN).split()[2]
+    _shared(db, pid, review, local_rev=local_rev)
+    if teammate:
+        plan_docs.comment(db, pid, 1, {"kind": "section", "section": "s1"}, "Not like this.",
+                          author=plan_docs.TEAMMATE + teammate)
+    gate = plans.to_dto(db, plans.get(db, pid))["gate"]
+    assert (gate["state"], (gate["signed"], gate["required"])) == (state, signed)
+    if teammate:                                                    # the person it waits on is named
+        assert any(r["sub"] == teammate or teammate in r["changes_by"] for r in gate["reviewers"])
+    if state == "ready":
+        # All signed, and still only the approval starts it: losing the app can't skip that step.
+        monkeypatch.setattr(holds, "app_connected", lambda: False)
+        asyncio.run(mcp_server.assign("developer", "build it"))
+        assert started == [] and tasks.sweep(db) == 0 and started == []
+        assert plans.decide(db, pid, 1, True, person=True)["state"] == "approved" and started == ["build it"]
+        assert plans.gate(db, plans.get(db, pid))["state"] == "closed"
+        return
+    # Refused outright, even with no app connected: teammates sign off from their own machines.
+    monkeypatch.setattr(holds, "app_connected", lambda: False)
+    asyncio.run(mcp_server.assign("developer", "build it"))
+    assert db.list_tasks() == [] and started == []
+    with pytest.raises(ServiceError) as e:
+        plans.decide(db, pid, 1, True, person=True)
+    assert e.value.code == "gate_closed" and plans.get(db, pid)["state"] == "open" and messages(db) == []
+
+
+def test_required_reviewers_request_changes_blocks_and_building_closes_the_review(db, session, library):
+    boss, started = session
+    visual_offers.person_spoke(db, boss, "Make a planning doc.")
+    pid = mcp_server.propose_plan(PLAN).split()[2]
+    _shared(db, pid, {"rev": 1, "reviewers": ONE, "sign_offs": _signed_off("a")})
+    asyncio.run(mcp_server.assign("developer", "queued before it was blocked"))
+
+    # Request changes works with reviewers still out, and holds the build whatever was signed.
+    assert plans.decide(db, pid, 1, False, note="Rework it.", person=True)["state"] == "redirected"
+    assert plans.gate(db, plans.get(db, pid))["state"] == "changes_requested"
+    assert tasks.sweep(db) == 0 and started == []
+
+    # The new revision needs its own sign-off, which the earlier one doesn't carry over to.
+    mcp_server.propose_plan(PLAN + "\n\nRevised.", plan_id=pid)
+    _shared(db, pid, {"rev": 2, "reviewers": ONE, "sign_offs": _signed_off("a", rev=1)}, local_rev=2, remote_rev=2)
+    assert plans.gate(db, plans.get(db, pid))["state"] == "waiting"
+    _shared(db, pid, {"rev": 2, "reviewers": ONE, "sign_offs": _signed_off("a", rev=2)}, local_rev=2, remote_rev=2)
+    assert plans.decide(db, pid, 2, True, person=True)["state"] == "approved"
+    assert started == ["queued before it was blocked"]
+
+    assert plans.gate(db, plans.get(db, pid))["state"] == "closed"
+    for attempt in (lambda: library.set_reviewers(db, pid, ONE), lambda: library.sign_off(db, pid, 2)):
+        with pytest.raises(ServiceError) as e:
+            attempt()
+        assert e.value.code == "review_closed"
+
+
+@pytest.mark.parametrize("reviewers", [
+    ONE,
+    pytest.param([], marks=pytest.mark.variant(
+        "an empty cached list can't prove nobody was added since: a first required reviewer may be waiting remotely")),
+])
+def test_required_reviewers_approval_needs_the_library(db, session, library, monkeypatch, reviewers):
+    boss, _ = session
+    visual_offers.person_spoke(db, boss, "Make a planning doc.")
+    pid = mcp_server.propose_plan(PLAN).split()[2]
+    _shared(db, pid, {"rev": 1, "reviewers": reviewers, "sign_offs": _signed_off("a")})
+
+    def offline(db_, plan_id):
+        raise RuntimeError("the Library can't be reached")
+    monkeypatch.setattr(library, "sync", offline)
+    with pytest.raises(ServiceError) as e:
+        plans.decide(db, pid, 1, True, person=True)
+    assert e.value.code == "gate_unverified" and plans.get(db, pid)["state"] == "open"
+
+
 def test_only_the_person_decides_and_only_when_they_asked(db, session):
     boss, started = session
     with pytest.raises(ToolError, match="ask for one"):

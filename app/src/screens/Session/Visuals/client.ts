@@ -11,6 +11,9 @@ export type PlansClient = Pick<DaemonClient, "plan" | "decidePlan">;
    suggestions and their answers, direct edits, and their pick on a decision. */
 export type PlanDocClient = Pick<DaemonClient, "commentPlan" | "replyPlan" | "resolvePlanThread" | "suggestPlan" | "acceptPlanSuggestion" | "rejectPlanSuggestion" | "editPlan" | "confirmPlan">;
 
+/* Team review through the Library (brindle/pro/shared_docs.py). Not every build of the screen has it. */
+export type PlanSharingClient = Pick<DaemonClient, "sharePlan" | "setPlanReviewers" | "syncPlan" | "signOffPlan" | "libraryPeople" | "docScopes">;
+
 export type KeptVisualsClient = Pick<DaemonClient, "keptVisuals">;
 
 /* An id as the engine makes them (v_8f2c): letters, digits, _ and -, nothing a path could use. */

@@ -50,6 +50,7 @@ HOST = "127.0.0.1"
 IDLE_SECONDS = 600.0
 WATCH_INTERVAL = 5.0     # seconds between the idle / upgrade checks
 CODEX_HOOK_EVERY = 60.0  # seconds between looks at the Codex hook's trust (codex_hook.keep_trusted)
+SHARED_DOCS_EVERY = 30.0  # seconds between bringing back what teammates wrote on shared plans
 CODEX_HOOK_SETTLE = 120.0    # and how long another install's fresh trust is left alone
 STOP_GRACE = 5.0         # seconds `daemon stop` waits before SIGKILL
 SHUTDOWN_GRACE = 1.0     # seconds for requests on shutdown, within the app's replacement budget
@@ -832,6 +833,8 @@ async def _watch(server, activity: Activity, idle_exit: bool, *,
     ready = ReadinessWatch()
     monitor = health.Monitor(clock)
     hook_due = clock() + CODEX_HOOK_EVERY
+    shared_due = clock() + SHARED_DOCS_EVERY
+    sharing: asyncio.Task | None = None     # on its own task: a slow Library never holds up these checks
     while not server.should_exit:
         due = clock() + WATCH_INTERVAL      # the wait's deadline, before any maintenance below
         await wait(WATCH_INTERVAL)
@@ -848,6 +851,9 @@ async def _watch(server, activity: Activity, idle_exit: bool, *,
         if clock() >= hook_due:
             hook_due = clock() + CODEX_HOOK_EVERY
             await asyncio.to_thread(_keep_codex_hook, CODEX_HOOK_SETTLE)
+        if clock() >= shared_due and (sharing is None or sharing.done()):
+            shared_due = clock() + SHARED_DOCS_EVERY
+            sharing = asyncio.create_task(asyncio.to_thread(_sync_shared_docs))
         if install.changed():
             server.should_exit = True
         elif (idle_exit and activity.open == 0
@@ -869,6 +875,21 @@ def _purge_typed_words() -> None:
             db.conn.close()
     except Exception:  # noqa: BLE001 - a purge must never stop the watch
         log.debug("brindle: couldn't purge old typed words", exc_info=True)
+
+
+def _sync_shared_docs() -> None:
+    """shared_docs.sync_open, off the daemon's way: a failure is only logged."""
+    from brindle.db import DB
+    from brindle.pro import shared_docs
+
+    try:
+        db = DB()
+        try:
+            shared_docs.sync_open(db)
+        finally:
+            db.conn.close()
+    except Exception:  # noqa: BLE001 - a sync must never stop the watch
+        log.debug("brindle: couldn't sync shared plans", exc_info=True)
 
 
 def _reset_window_sizes() -> None:

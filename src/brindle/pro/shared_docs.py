@@ -34,6 +34,7 @@ from brindle import plan_docs
 from brindle.db import DB
 from brindle.pro import analysis_docs as ad
 from brindle.redact import mask, mask_data
+from brindle.service.errors import ServiceError
 
 log = logging.getLogger(__name__)
 
@@ -41,7 +42,7 @@ TEAM_FEATURE = "analysis_docs_team"
 SCOPE_KINDS = ("group", "org")
 CLAIM_FOR = 60.0             # seconds a create or push in flight holds the plan; then it is presumed dead
 FIRST_REVISION = 1           # what the Library numbers a new document's head
-REVIEW = ("rev", "reviewers", "sign_offs", "pending_reviewers", "ready")
+REVIEW = ("rev", "reviewers", "sign_offs", "pending_reviewers", "ready", "policy_reviewers", "pending_policies")
 STATUSES = ("open", "resolved", "accepted", "rejected")
 REVIEWER_GRANT = {"can_suggest": True, "can_comment": True}   # a reviewer must be able to answer
 
@@ -75,6 +76,12 @@ def _shared(db: DB, plan_id: str, store) -> dict:
 def _own(share: dict, ent) -> None:
     if share["owner"] != ent.sub:
         raise RuntimeError("this plan was shared from another brindle account: log in to that one")
+
+
+def _review_open(p: dict) -> None:
+    """Review closes once building starts: reviewers and sign-offs are settled."""
+    if p["state"] == "approved":
+        raise ServiceError("review_closed", "this plan is building, so its review is closed", 409)
 
 
 def _content(rev: dict) -> dict:
@@ -196,6 +203,8 @@ def share(db: DB, plan_id: str, scope: Any, *, reviewers: Any = None, permission
     can_comment}}`` for other teammates; ``folder``: ``{scope, id}`` instead
     of the default ``Designs`` folder. Returns the link."""
     p = plan_docs._plan(db, plan_id)
+    if reviewers is not None:
+        _review_open(p)
     client, store = ad._session(client, store)
     ent = _require_team(store)
     scope = _scope(scope)
@@ -220,6 +229,7 @@ def share(db: DB, plan_id: str, scope: Any, *, reviewers: Any = None, permission
 def set_reviewers(db: DB, plan_id: str, reviewers: Any, *, client=None, store=None) -> dict:
     """Replace the required and optional reviewers of a shared plan. Returns the link."""
     p = plan_docs._plan(db, plan_id)
+    _review_open(p)
     client, store = ad._session(client, store)
     share_ = _shared(db, p["id"], store)
     people = _reviewers(reviewers)
@@ -397,3 +407,40 @@ def sync(db: DB, plan_id: str, *, client=None, store=None, now: float | None = N
     if pushed:
         plan_docs._changed(db, p, p["rev"])
     return {**link(db, p["id"]), "pulled": pulled, "pushed": pushed}
+
+
+def sign_off(db: DB, plan_id: str, rev: Any, *, client=None, store=None) -> dict:
+    """The person's own sign-off on the revision on screen (``rev``), for when
+    they are one of its reviewers. The revision is sent first if the Library
+    doesn't have it, so what they read is what they sign. Returns the link."""
+    p = plan_docs._plan(db, plan_id)
+    _review_open(p)
+    plan_docs._on_screen(p, rev)
+    client, store = ad._session(client, store)
+    share_ = sync(db, p["id"], client=client, store=store)
+    if share_["local_rev"] != p["rev"]:
+        raise RuntimeError(f"r{p['rev']} hasn't reached the Library yet, so it can't be signed off")
+    if _remember(db, p["id"], ad.api("POST", _path(share_["doc_id"], "/sign-offs"), {"rev": share_["remote_rev"]},
+                                     client=client, store=store)):
+        plan_docs._changed(db, p, p["rev"])
+    return link(db, p["id"])
+
+
+def sync_open(db: DB, *, client=None, store=None) -> int:
+    """Sync every shared plan still in review, for the daemon's background
+    pass (a building plan's review is closed). One plan's failure doesn't
+    stop the rest. Returns how many synced."""
+    client, store = ad._session(client, store)
+    try:
+        _require_team(store)
+    except Exception:  # noqa: BLE001 - logged out, air-gapped or no Team plan: nothing to bring back
+        return 0
+    done = 0
+    for row in db.conn.execute("SELECT s.plan_id FROM plan_shares s JOIN plans p ON p.id=s.plan_id"
+                               " WHERE s.doc_id IS NOT NULL AND p.state IN ('open','redirected')").fetchall():
+        try:
+            sync(db, row["plan_id"], client=client, store=store)
+            done += 1
+        except Exception:  # noqa: BLE001 - offline, another account's plan: the next pass tries again
+            log.debug("brindle: couldn't sync shared plan %s", row["plan_id"], exc_info=True)
+    return done

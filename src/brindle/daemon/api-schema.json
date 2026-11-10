@@ -5852,6 +5852,142 @@
           "title": "PlanDecisionDTO",
           "type": "object"
         },
+        "PlanGateDTO": {
+          "description": "A shared plan's build gate (brindle.plans.gate). ``reason``: why it\ncan't build now; ``signed`` of ``required`` sign-offs are in.",
+          "properties": {
+            "reason": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Reason"
+            },
+            "required": {
+              "title": "Required",
+              "type": "integer"
+            },
+            "reviewers": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/PlanGateRowDTO"
+              },
+              "title": "Reviewers",
+              "type": "array"
+            },
+            "signed": {
+              "title": "Signed",
+              "type": "integer"
+            },
+            "state": {
+              "enum": [
+                "waiting",
+                "changes_requested",
+                "ready",
+                "closed"
+              ],
+              "title": "State",
+              "type": "string"
+            },
+            "waiting_on": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Waiting On",
+              "type": "array"
+            }
+          },
+          "required": [
+            "state",
+            "required",
+            "signed"
+          ],
+          "title": "PlanGateDTO",
+          "type": "object"
+        },
+        "PlanGateRowDTO": {
+          "description": "One row of a plan's build gate: a reviewer (``sub``) or an org review\nrule no one on the list meets (``name``). ``meets``: the rules this\nreviewer's sign-off also counts for. ``met_by``: who met a rule.\n``changes_by``: the rule's signers who have since asked for changes.",
+          "properties": {
+            "changes_by": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Changes By",
+              "type": "array"
+            },
+            "meets": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Meets",
+              "type": "array"
+            },
+            "met_by": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Met By",
+              "type": "array"
+            },
+            "name": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Name"
+            },
+            "required": {
+              "title": "Required",
+              "type": "boolean"
+            },
+            "status": {
+              "enum": [
+                "signed_off",
+                "changes_requested",
+                "waiting",
+                "waived"
+              ],
+              "title": "Status",
+              "type": "string"
+            },
+            "sub": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Sub"
+            },
+            "you": {
+              "default": false,
+              "title": "You",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "required",
+            "status"
+          ],
+          "title": "PlanGateRowDTO",
+          "type": "object"
+        },
         "PlanOptionDTO": {
           "description": "One alternative of a plan's decision, as its card shows it: trade-offs\nas + (``pros``) and \u2212 (``cons``) lines, and the files it ``touches``.",
           "properties": {
@@ -6326,6 +6462,17 @@
           "title": "Decisions",
           "type": "array"
         },
+        "gate": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PlanGateDTO"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "id": {
           "title": "Id",
           "type": "string"
@@ -6551,6 +6698,222 @@
         "options"
       ],
       "title": "PlanDecisionDTO",
+      "type": "object"
+    },
+    "PlanGateDTO": {
+      "$defs": {
+        "PlanGateRowDTO": {
+          "description": "One row of a plan's build gate: a reviewer (``sub``) or an org review\nrule no one on the list meets (``name``). ``meets``: the rules this\nreviewer's sign-off also counts for. ``met_by``: who met a rule.\n``changes_by``: the rule's signers who have since asked for changes.",
+          "properties": {
+            "changes_by": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Changes By",
+              "type": "array"
+            },
+            "meets": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Meets",
+              "type": "array"
+            },
+            "met_by": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Met By",
+              "type": "array"
+            },
+            "name": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Name"
+            },
+            "required": {
+              "title": "Required",
+              "type": "boolean"
+            },
+            "status": {
+              "enum": [
+                "signed_off",
+                "changes_requested",
+                "waiting",
+                "waived"
+              ],
+              "title": "Status",
+              "type": "string"
+            },
+            "sub": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Sub"
+            },
+            "you": {
+              "default": false,
+              "title": "You",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "required",
+            "status"
+          ],
+          "title": "PlanGateRowDTO",
+          "type": "object"
+        }
+      },
+      "description": "A shared plan's build gate (brindle.plans.gate). ``reason``: why it\ncan't build now; ``signed`` of ``required`` sign-offs are in.",
+      "properties": {
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reason"
+        },
+        "required": {
+          "title": "Required",
+          "type": "integer"
+        },
+        "reviewers": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PlanGateRowDTO"
+          },
+          "title": "Reviewers",
+          "type": "array"
+        },
+        "signed": {
+          "title": "Signed",
+          "type": "integer"
+        },
+        "state": {
+          "enum": [
+            "waiting",
+            "changes_requested",
+            "ready",
+            "closed"
+          ],
+          "title": "State",
+          "type": "string"
+        },
+        "waiting_on": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Waiting On",
+          "type": "array"
+        }
+      },
+      "required": [
+        "state",
+        "required",
+        "signed"
+      ],
+      "title": "PlanGateDTO",
+      "type": "object"
+    },
+    "PlanGateRowDTO": {
+      "description": "One row of a plan's build gate: a reviewer (``sub``) or an org review\nrule no one on the list meets (``name``). ``meets``: the rules this\nreviewer's sign-off also counts for. ``met_by``: who met a rule.\n``changes_by``: the rule's signers who have since asked for changes.",
+      "properties": {
+        "changes_by": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Changes By",
+          "type": "array"
+        },
+        "meets": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Meets",
+          "type": "array"
+        },
+        "met_by": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Met By",
+          "type": "array"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Name"
+        },
+        "required": {
+          "title": "Required",
+          "type": "boolean"
+        },
+        "status": {
+          "enum": [
+            "signed_off",
+            "changes_requested",
+            "waiting",
+            "waived"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "sub": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Sub"
+        },
+        "you": {
+          "default": false,
+          "title": "You",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "required",
+        "status"
+      ],
+      "title": "PlanGateRowDTO",
       "type": "object"
     },
     "PlanOfferDTO": {
@@ -10320,6 +10683,10 @@
     },
     {
       "method": "GET",
+      "path": "/v1/library/people"
+    },
+    {
+      "method": "GET",
       "path": "/v1/meta"
     },
     {
@@ -10427,12 +10794,28 @@
       "path": "/v1/plans/{id}/edit"
     },
     {
+      "method": "POST",
+      "path": "/v1/plans/{id}/reviewers"
+    },
+    {
       "method": "GET",
       "path": "/v1/plans/{id}/revisions/{n}"
     },
     {
       "method": "POST",
+      "path": "/v1/plans/{id}/share"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/plans/{id}/sign-off"
+    },
+    {
+      "method": "POST",
       "path": "/v1/plans/{id}/suggestions"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/plans/{id}/sync"
     },
     {
       "method": "POST",

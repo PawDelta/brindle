@@ -238,6 +238,53 @@ def plan_confirm(db: DB, params: dict, body: dict) -> Any:
     return _plan_now(db, params["id"])
 
 
+# Team review through the Library (brindle.pro.shared_docs). Each answers with
+# the plan as it is now, its build gate included.
+
+
+def _library(db: DB, plan_id: str, work: Callable[[Any], Any]) -> Any:
+    from brindle import redact
+    from brindle.pro import auth, shared_docs
+
+    try:
+        work(shared_docs)
+    except (RuntimeError, auth.TransportError) as e:    # unreachable or refused: not signed out
+        raise ServiceError("upstream", redact.mask(str(e)), 502) from e
+    return _plan_now(db, plan_id)
+
+
+def plan_share(db: DB, params: dict, body: dict) -> Any:
+    return _library(db, params["id"], lambda sd: sd.share(db, params["id"], body.get("scope"),
+                                                          reviewers=body.get("reviewers")))
+
+
+def plan_reviewers(db: DB, params: dict, body: dict) -> Any:
+    return _library(db, params["id"], lambda sd: sd.set_reviewers(db, params["id"], body.get("reviewers")))
+
+
+def plan_sync(db: DB, params: dict, body: dict) -> Any:
+    return _library(db, params["id"], lambda sd: sd.sync(db, params["id"]))
+
+
+def plan_sign_off(db: DB, params: dict, body: dict) -> Any:
+    return _library(db, params["id"], lambda sd: sd.sign_off(db, params["id"], body.get("rev")))
+
+
+@_json
+def library_people(db: DB, request: Request) -> Any:
+    """The people of the person's org, to pick reviewers from."""
+    from urllib.parse import quote
+
+    from brindle.daemon import routes_actions as actions
+
+    ent = actions._docs_entitlement(request.query_params.get("repo") or None)
+    if not ent.org_id:
+        return {"people": []}
+    members = actions.docs_api("GET", f"/orgs/{quote(ent.org_id, safe='')}/members").get("members")
+    return {"people": [{"sub": m["sub"], "email": m.get("email") or ""} for m in members or []
+                       if isinstance(m, dict) and isinstance(m.get("sub"), str) and m["sub"] != ent.sub]}
+
+
 @_json
 def kept_list(db: DB, request: Request) -> Any:
     visuals.require_enabled()
@@ -277,6 +324,11 @@ ROUTES = [
     Route("/v1/plans/{id}/threads/{tid:int}/resolve", _endpoint(plan_resolve), methods=["POST"]),
     Route("/v1/plans/{id}/threads/{tid:int}/accept", _endpoint(plan_accept), methods=["POST"]),
     Route("/v1/plans/{id}/threads/{tid:int}/reject", _endpoint(plan_reject), methods=["POST"]),
+    Route("/v1/plans/{id}/share", _endpoint(plan_share), methods=["POST"]),
+    Route("/v1/plans/{id}/reviewers", _endpoint(plan_reviewers), methods=["POST"]),
+    Route("/v1/plans/{id}/sync", _endpoint(plan_sync), methods=["POST"]),
+    Route("/v1/plans/{id}/sign-off", _endpoint(plan_sign_off), methods=["POST"]),
+    Route("/v1/library/people", library_people),
     Route("/v1/kept-visuals", kept_list),
     Route("/v1/kept-visuals/{id}", kept_one),
     Route("/v1/kept-visuals/{id}/html", kept_page),

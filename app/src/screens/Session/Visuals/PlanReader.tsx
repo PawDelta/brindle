@@ -20,22 +20,23 @@
    who publishes a new revision. A write names the revision on screen: a newer one is a 409. */
 
 import { useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type MouseEvent, type ReactNode } from "react";
-import { DaemonError, type DaemonClient, type Plan, type PlanAnchor, type PlanChange, type VisualDTO } from "../../../api/client";
+import { DaemonError, type DaemonClient, type DocScope, type LibraryPerson, type Plan, type PlanAnchor, type PlanChange, type VisualDTO } from "../../../api/client";
 import type { PlanDecisionDTO, PlanSectionDTO, PlanThreadDTO } from "../../../api/schema";
 import { LoadingButton } from "../../../components/LoadingButton";
 import { PaperclipIcon } from "../../../components/icons";
 import { button, field, label, main, pill, quiet } from "../../../components/ui";
 import type { ExportClient } from "../../Knowledge/ExportMenu";
-import type { PlanDocClient, PlansClient, VisualsClient } from "./client";
+import type { PlanDocClient, PlanSharingClient, PlansClient, VisualsClient } from "./client";
 import { BackButton, KeepButton, fileAttachment, fileName, message, useEscBack } from "./chrome";
 import { Diagram } from "./DocDiagram";
 import { Review, ReviewStrip, type Draft, type ReviewTab, type ThreadActions, type TodoItem } from "./DocReview";
+import { Reviewers } from "./DocReviewers";
 import { DocText, changeBetween, selectedRange, toPoints, toUnits, type Mark } from "./DocText";
 import { ExportButton } from "./ExportButton";
 import { Avatar, Decision, Tasks, overlaps, passChip, personName } from "./PlanCards";
 import { StoreContext } from "../../../store/useStore";
 
-type Client = VisualsClient & PlansClient & PlanDocClient & Partial<ExportClient> & Partial<Pick<DaemonClient, "attach">>;
+type Client = VisualsClient & PlansClient & PlanDocClient & Partial<ExportClient> & Partial<Pick<DaemonClient, "attach">> & Partial<PlanSharingClient>;
 
 /* How far along a plan is: its revision, then decided or not. Revisions only grow and a decided
    revision never reopens, so a response with less progress than the one on screen is stale. */
@@ -208,7 +209,7 @@ function DesignDoc({ client, plan, visual, mode, writes }: {
 }) {
   const open = plan.state === "open";
   const threads = useMemo(() => plan.threads ?? [], [plan.threads]);
-  const shared = useMemo(() => overlaps(plan), [plan]);
+  const sharedFiles = useMemo(() => overlaps(plan), [plan]);
   const [picks, setPicks] = useState<Record<string, string>>({});
   const [note, setNote] = useState("");
   const [attached, setAttached] = useState<string[]>([]);
@@ -236,6 +237,27 @@ function DesignDoc({ client, plan, visual, mode, writes }: {
       alive.current = false;
     };
   }, []);
+  // Team review: who can be asked, and where the doc can be shared. Absent (not on a Team plan,
+  // or offline), the doc simply offers no sharing.
+  const sharing: PlanSharingClient | undefined = client.sharePlan && client.setPlanReviewers && client.syncPlan && client.signOffPlan && client.libraryPeople && client.docScopes ? (client as PlanSharingClient) : undefined;
+  const [directory, setDirectory] = useState<LibraryPerson[]>([]);
+  const [scopes, setScopes] = useState<DocScope[]>([]);
+  useEffect(() => {
+    if (!sharing) return;
+    sharing.libraryPeople().then((got) => { if (alive.current) setDirectory(got.people); }, () => {});
+    sharing.docScopes().then((got) => { if (alive.current) setScopes(got.scopes); }, () => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- once for this doc: the reader is keyed by plan
+  }, []);
+  const gate = plan.gate ?? null;
+  const shared = !!gate;
+  // Opening a doc in review brings back what teammates wrote; what changed arrives as an event.
+  // Failing says nothing new: the gate shows what was last heard, and an approval asks again.
+  useEffect(() => {
+    if (shared && plan.state !== "approved") sharing?.syncPlan(plan.id).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- once per doc, when it is known to be shared
+  }, [plan.id, shared]);
+  const nameOf = (sub: string) => directory.find((p) => p.sub === sub)?.email || sub;
+  const gateWhy = [...(gate?.waiting_on ?? []), ...(gate?.reviewers ?? []).flatMap((r) => r.changes_by ?? [])].reduce((text, who) => text.split(who).join(nameOf(who)), gate?.reason ?? "");
   const collapse = (to: boolean) => {
     setCollapsed(to);
     try {
@@ -318,7 +340,7 @@ function DesignDoc({ client, plan, visual, mode, writes }: {
     } catch (e) {
       writes.end(null);
       refused?.(e);
-      if (alive.current) setError(e instanceof DaemonError && e.status === 409 ? "This design changed since you opened it (a new revision, or it was already decided). It is being read again." : `Couldn't send: ${message(e)}`);
+      if (alive.current) setError(e instanceof DaemonError && e.status === 409 && e.code !== "gate_closed" && e.code !== "review_closed" ? "This design changed since you opened it (a new revision, or it was already decided). It is being read again." : `Couldn't send: ${message(e)}`);
       return null;
     } finally {
       if (alive.current) setBusy(false);
@@ -454,6 +476,7 @@ function DesignDoc({ client, plan, visual, mode, writes }: {
   };
   const nextOption = next?.options.find((o) => o.id === chosen(next));
   const summary = [
+    gate && gate.required > 0 && `${gate.signed} of ${plural(gate.required, "required sign-off")}`,
     plan.decisions.length > 0 && `${decided} of ${plan.decisions.length} decided`,
     suggestions > 0 && `${plural(suggestions, "suggestion")} to accept`,
     openThreads.length - suggestions > 0 && `${plural(openThreads.length - suggestions, "comment")} open`,
@@ -523,11 +546,12 @@ function DesignDoc({ client, plan, visual, mode, writes }: {
               <dl className="m-0 grid grid-cols-[72px_minmax(0,1fr)] gap-x-3 gap-y-[5px] text-[12.5px] leading-[1.6] text-ink-2">
                 <dt className="text-ink-3">Status</dt>
                 <dd className="m-0 flex flex-wrap items-center gap-x-3.5 gap-y-0.5" data-testid="plan-status" data-state={plan.state}>
-                  <span className={`${pill} ${plan.state === "approved" ? "text-pass" : "text-sap"}`}>{open ? "Needs your sign-off" : plan.state === "approved" ? "Signed off" : "Changes requested"}</span>
-                  <span>{open ? "Nothing is built until you sign off" : plan.state === "approved" ? "Its workers are building it" : "The supervisor is revising it"}</span>
+                  <span className={`${pill} ${plan.state === "approved" || gate?.state === "ready" ? "text-pass" : "text-sap"}`}>{!open ? (plan.state === "approved" ? (gate ? "Review closed" : "Signed off") : "Changes requested") : gate ? (gate.state === "ready" ? "Ready to build" : gate.state === "changes_requested" ? "Changes requested" : "In team review") : "Needs your sign-off"}</span>
+                  <span>{!open ? (plan.state === "approved" ? "Its workers are building it" : "The supervisor is revising it") : gate ? "Build starts when every required reviewer signs off" : "Nothing is built until you sign off"}</span>
                 </dd>
                 <dt className="text-ink-3">Authors</dt>
                 <dd className="m-0">You and the supervisor</dd>
+                <Reviewers plan={plan} client={sharing} directory={directory} scopes={scopes} busy={busy} nameOf={nameOf} write={write} />
                 {plan.ask && (
                   <>
                     <dt className="text-ink-3">Understood</dt>
@@ -575,7 +599,7 @@ function DesignDoc({ client, plan, visual, mode, writes }: {
         </div>
         {columnOpen ? (
           <Review plan={plan} tab={draft ? "review" : tab} onTab={setTab} todo={todo} decided={decided} onJump={jump} where={where} draft={draft} draftStale={draftStale} busy={busy}
-            onDraftSend={(text, after) => void sendDraft(text, after)} onDraftCancel={() => setDraft(null)} actions={actions} onShow={showThread} shared={shared} onCollapse={() => { setDraft(null); collapse(true); }} />
+            onDraftSend={(text, after) => void sendDraft(text, after)} onDraftCancel={() => setDraft(null)} actions={actions} onShow={showThread} shared={sharedFiles} onCollapse={() => { setDraft(null); collapse(true); }} />
         ) : (
           <ReviewStrip comments={openThreads.length} decisions={plan.decisions.length - decided} onOpen={() => collapse(false)} />
         )}
@@ -586,11 +610,11 @@ function DesignDoc({ client, plan, visual, mode, writes }: {
             <div className="grid min-w-0 gap-0.5" data-testid="plan-next">
               <span className="flex items-center gap-2.5 text-sm font-semibold text-ink">
                 <span className={`${label} text-[11px]`}>Next</span>
-                <span className="truncate">{next ? next.title : "Sign off this design"}</span>
+                <span className="truncate">{next ? next.title : gate ? (gate.state === "ready" ? "Ready to build" : gateWhy) : "Sign off this design"}</span>
               </span>
               <span className="text-xs text-ink-3">
                 {summary}
-                {shared.size > 0 && <span className="text-sap">{`${summary ? " · " : ""}${plural(shared.size, "file is", "files are")} in more than one worker`}</span>}
+                {sharedFiles.size > 0 && <span className="text-sap">{`${summary ? " · " : ""}${plural(sharedFiles.size, "file is", "files are")} in more than one worker`}</span>}
               </span>
             </div>
             <div className="flex items-center gap-2">
@@ -605,8 +629,9 @@ function DesignDoc({ client, plan, visual, mode, writes }: {
                   <span className="truncate">{nextOption ? `Confirm ${shortName(nextOption.label)}` : "Confirm"}</span>
                 </LoadingButton>
               ) : (
-                <LoadingButton className={main} busy={sending === "approve"} disabled={busy || uploading > 0} onClick={() => void decide(true)}>
-                  Sign off
+                <LoadingButton className={main} busy={sending === "approve"} disabled={busy || uploading > 0 || (!!gate && gate.state !== "ready")} title={gate && gate.state !== "ready" ? gateWhy : undefined}
+                  data-testid="plan-build" data-gate={gate?.state} onClick={() => void decide(true)}>
+                  {gate ? "Start building" : "Sign off"}
                 </LoadingButton>
               )}
             </div>
