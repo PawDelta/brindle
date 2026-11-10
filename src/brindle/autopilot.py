@@ -2376,6 +2376,26 @@ def usage_sweep(db: DB, now: float | None = None) -> list[str]:
 # -- the Stop hook -------------------------------------------------------------------
 
 
+def claim_nudge(db: DB, ap: Autopilot, now: float) -> bool:
+    """Spend one Stop reminder from the shared budget, if it is due.
+
+    Open worker items and ordinary goal nudges must both back off and stop
+    after the same number of reminders without progress.
+    """
+    if ap.state == "stalled":
+        return False
+    if (ap.nudged_at == ap.progress and ap.nudged_time is not None
+            and now - ap.nudged_time < NUDGE_BACKOFF):
+        return False
+    nudges = ap.nudges if ap.nudged_at == ap.progress else 0
+    if nudges >= MAX_NUDGES:
+        db.update_autopilot(ap.root_id, state="stalled", nudges=0,
+                            note=f"no progress after {MAX_NUDGES} reminders to keep going")
+        return False
+    db.update_autopilot(ap.root_id, nudges=nudges + 1, nudged_at=ap.progress, nudged_time=now)
+    return True
+
+
 def on_stop(db: DB, agent: Agent, payload: dict) -> dict | None:
     """The supervisor is about to stop. Returns a "block" decision telling it
     to keep going, or None to let it stop."""
@@ -2464,16 +2484,8 @@ def on_stop(db: DB, agent: Agent, payload: dict) -> dict | None:
     if (db.outstanding(agent.id, NUDGE_HEAD) or db.outstanding(agent.id, WAIT_ENDED_HEAD)
             or db.outstanding(agent.id, QUESTION_REMINDER_HEAD)):
         return None  # (#209) the last reminder is still queued or unread: never pile up another
-    now = time.time()
-    if (ap.nudged_at == ap.progress and ap.nudged_time is not None
-            and now - ap.nudged_time < NUDGE_BACKOFF):
-        return None  # (#177) already reminded since the last step: it's legitimately waiting
-    nudges = ap.nudges if ap.nudged_at == ap.progress else 0
-    if nudges >= MAX_NUDGES:
-        db.update_autopilot(agent.id, state="stalled", nudges=0,
-                            note=f"no progress after {MAX_NUDGES} reminders to keep going")
+    if not claim_nudge(db, ap, time.time()):
         return None
-    db.update_autopilot(agent.id, nudges=nudges + 1, nudged_at=ap.progress, nudged_time=now)
     return {"decision": "block", "reason": nudge(db, ap, cfg, working, stalled)}
 
 

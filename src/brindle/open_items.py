@@ -6,13 +6,14 @@ sat 14 hours under some 80 copies of it). So the first notice opens an item:
 
 - It closes when the supervisor messages the worker, requeues its task or
   removes its workspace, and by itself when the worker reports or works again.
-- While it is open the supervisor can't end its turn (``stop_block``), until
-  the hour is up and brindle's takeover needs it idle.
+- While it is open the supervisor is reminded at Stop (``stop_block``), within
+  the ordinary nudge budget, until the hour is up and takeover needs it idle.
 - It is never repeated: each later notice says something new (``sweep``).
 - An hour on, with the supervisor idle, brindle takes the work over itself
   (``reassign``): a fresh worker from the supervisor's branch, and the stuck
   one retired, its branch kept and its uncommitted changes in the trash. If
-  brindle can't, the item is the supervisor's again, and so are its stops.
+  brindle can't, the supervisor is told once and the item stays open without
+  blocking its stops.
 
 Reviewers aren't tracked: the pipeline restarts or replaces its own.
 """
@@ -124,25 +125,21 @@ def _named(db: DB, item: OpenItem, worker: Agent) -> str:
     return f"Worker {worker.id}{where} {said}: {item.detail}"
 
 
-def _cannot_close(db: DB, item: OpenItem, worker: Agent) -> bool:
-    """Nothing the supervisor has would close this: brindle gave up taking
-    it over, its process is gone so no message reaches it, and it has no
-    worktree of its own to remove (a shared checkout isn't the worker's)."""
-    if item.level < GAVE_UP or agents.is_alive(worker):
-        return False
-    ws = db.get_workspace(worker.workspace_id)
-    return ws is None or ws.kind != "worktree"
-
-
 def stop_block(db: DB, supervisor: Agent) -> dict | None:
     """The Stop hook's "block" while ``supervisor`` has open items, naming the
     first of them in the one line the chat shows. An item whose takeover is
     due doesn't block: that waits for this supervisor to be idle. Nor does
-    one it has no way to close."""
+    one whose takeover failed: the supervisor has already been told. Other
+    items share the ordinary nudge cap and back-off, reset by progress."""
+    from brindle import autopilot
+
     now = time.time()
     items = [(i, w) for i, w in _live(db, supervisor.id)
-             if not _takeover_due(i, now) and not _cannot_close(db, i, w)]
+             if i.level < GAVE_UP and not _takeover_due(i, now)]
     if not items:
+        return None
+    ap = db.get_autopilot(supervisor.id)
+    if ap is None or not autopilot.claim_nudge(db, ap, now):
         return None
     named = "\n".join(_named(db, i, w) for i, w in items)
     return {"decision": "block", "reason": (
