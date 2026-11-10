@@ -196,6 +196,8 @@ def test_removed_worktree_goes_to_trash(db, repo, monkeypatch, action):
                  marks=pytest.mark.variant("fail closed: the fallback never deletes uncommitted work unforced")),
     ("no-rename", True, False),  # no exclusive rename on this platform
     ("mount", True, False),      # same device, but rename crosses a mount (EXDEV)
+    pytest.param("no-syscall", True, False,   # libc has renameat2, the kernel or sandbox doesn't (ENOSYS)
+                 marks=pytest.mark.variant("older kernels and sandboxes answer ENOSYS, not EXDEV")),
 ])
 def test_removal_across_volumes(db, repo, monkeypatch, why, force, dirty):
     """A checkout the trash can't take is removed as 0.6.2 did, not kept forever."""
@@ -219,8 +221,11 @@ def test_removal_across_volumes(db, repo, monkeypatch, why, force, dirty):
         def refuse(*args):
             return -1
         libc = types.SimpleNamespace(renamex_np=refuse, renameat2=refuse)
+        error = errno.EXDEV if why == "mount" else errno.ENOSYS
         monkeypatch.setattr(trash, "ctypes", types.SimpleNamespace(
-            CDLL=lambda *a, **k: libc, c_char_p=None, c_int=None, c_uint=None, get_errno=lambda: errno.EXDEV))
+            CDLL=lambda *a, **k: libc, c_char_p=None, c_int=None, c_uint=None, get_errno=lambda: error))
+        if why == "no-syscall":
+            monkeypatch.setattr(trash, "sys", types.SimpleNamespace(platform="linux"))
     if dirty and not force:
         with pytest.raises(git.GitError):
             git.remove_worktree(repo, path)

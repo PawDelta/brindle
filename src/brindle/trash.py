@@ -36,7 +36,7 @@ class TrashUnavailable(TrashError):
 
 
 # Errors of an exclusive rename that mean "not possible here", not "refused".
-_UNSUPPORTED = {errno.EXDEV, errno.ENOTSUP, errno.EOPNOTSUPP, errno.EINVAL}
+_UNSUPPORTED = {errno.EXDEV, errno.ENOTSUP, errno.EOPNOTSUPP, errno.EINVAL, errno.ENOSYS}
 
 
 def directory() -> Path:
