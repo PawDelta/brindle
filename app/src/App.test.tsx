@@ -696,7 +696,8 @@ describe("App", () => {
   it("library sidebar: the foot's button opens the Library with the sidebar as its navigation, ← Sessions and ⌘L go back, and Settings keeps Agents", async () => {
     const plan = { kind: "plan", reason: "plan awaiting approval", agent_id: "sup1", workspace_id: "proj", detail: "1. Keep the plan." };
     const decided = { id: "a".repeat(32), repo_key: "proj", topic: "storage", body: "use sqlite", rationale: "", scope: [], status: "accepted", created_at: 1 };
-    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root], inbox: [plan], decisions: [decided] });
+    const OTHER = "/home/u/other";
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }, { repo_root: OTHER, name: "other" }], sessions: [session], workspaces: [root], inbox: [plan], decisions: [decided] });
     const store = createAppStore();
     const client = daemon.client();
     const sync = startSync({ client, store, connect: daemon.connect });
@@ -719,11 +720,19 @@ describe("App", () => {
     expect([...rail.querySelectorAll("button")].map((row) => row.textContent?.replace(/^\W+/, "").replace(/\s*\d*$/, ""))).toEqual(["Needs you", "Map", "Imported docs", "Decisions", "Kept visuals"]);
     expect(within(rail).getByRole("button", { name: /^Needs you/ }).textContent).toContain("1");
     expect(within(screen.getByRole("main")).queryByRole("tablist")).toBeNull();
+    // The repo picked on the page stays picked as the sidebar moves between a stage and a Source.
+    const picked = () => screen.getByRole<HTMLSelectElement>("combobox", { name: "Repo" }).value;
+    fireEvent.change(screen.getByRole("combobox", { name: "Repo" }), { target: { value: OTHER } });
+    fireEvent.click(within(rail).getByRole("button", { name: /^Needs you/ }));
+    expect(within(rail).getByRole("button", { name: /^Needs you/ }).getAttribute("aria-current")).toBe("page");
+    expect(picked()).toBe(OTHER);
     // A Source's row counts what it holds, opens today's view of it, and is marked.
     await waitFor(() => expect(within(rail).getByRole("button", { name: /^Decisions/ }).textContent).toContain("1"));
     fireEvent.click(within(rail).getByRole("button", { name: /^Decisions/ }));
     expect(await screen.findByTestId("decisions")).toBeTruthy();
     expect(within(rail).getByRole("button", { name: /^Decisions/ }).getAttribute("aria-current")).toBe("page");
+    expect(picked()).toBe(OTHER);
+    expect(daemon.requests.filter((r) => r.path === "/decisions").at(-1)?.query).toEqual({ repo: OTHER });
 
     // ← Sessions: the session as it was left, and the sessions list again.
     fireEvent.click(link("← Sessions"));

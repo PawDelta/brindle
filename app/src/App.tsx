@@ -162,10 +162,11 @@ function Screen({ route, visit, navigate, client, refresh, store, openUrl, pickF
     case "knowledge":
       return (
         <KnowledgeScreen
-          key={`${route.stage ?? ""}|${route.doc ?? ""}|${route.session ?? ""}`}
+          key={`${route.doc ?? ""}|${route.session ?? ""}`}
           client={client}
           pickFolder={pickFolder}
           view={route.view}
+          stage={route.stage}
           onView={(view) => navigate({ ...route, view })}
           onCounts={onLibraryCounts}
           doc={route.doc}

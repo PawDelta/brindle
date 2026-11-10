@@ -33,7 +33,7 @@ import type { LibraryCounts } from "../../components/LibraryRail";
 import { PageHeader } from "../../components/PageHeader";
 import { NO_REPO, RepoSelect, useRepo } from "../../components/RepoSelect";
 import { alert, button, card, field, h2, main, mono, notice, pill, quiet } from "../../components/ui";
-import type { KnowledgeView } from "../../routes";
+import type { KnowledgeView, LibraryStage } from "../../routes";
 import { formatAge } from "../../store/overview";
 import { StoreContext, useAppState } from "../../store/useStore";
 import { DocsView } from "./DocsView";
@@ -48,6 +48,9 @@ export interface KnowledgeScreenProps {
   /* The view shown (default Docs; an imported doc's number opens Imported): the Library's
      sidebar picks it, and the screen follows when it changes. */
   view?: KnowledgeView;
+  /* The Stage row picked in the sidebar: picking one shows the docs list again (a doc open in
+     the reader closes). The repo picked here stays: the screen isn't remounted for it. */
+  stage?: LibraryStage;
   /* The screen moved to a view itself (the empty state's buttons): the sidebar follows. */
   onView?(view: KnowledgeView): void;
   /* What the repo on screen holds, for the sidebar's counts. */
@@ -399,7 +402,7 @@ function EmptyState({ onRecord, onAddFolder }: { onRecord(): void; onAddFolder()
   );
 }
 
-export function KnowledgeScreen({ client, pickFolder, view, onView, onCounts, doc, session, onBackToSession, fromRepo }: KnowledgeScreenProps) {
+export function KnowledgeScreen({ client, pickFolder, view, stage, onView, onCounts, doc, session, onBackToSession, fromRepo }: KnowledgeScreenProps) {
   const pick = useRepo(fromRepo);
   const { repo, repos } = pick;
   const [tab, setTab] = useState<KnowledgeView>(view ?? (typeof doc === "number" ? "imported" : "docs"));
@@ -572,7 +575,7 @@ export function KnowledgeScreen({ client, pickFolder, view, onView, onCounts, do
       </PageHeader>
       {tab === "map" && <MapView key={repo} client={client} repo={repo ?? undefined} decisions={decisions ?? []} sources={sources ?? []} />}
       {tab === "kept" && <KeptVisuals client={client} />}
-      {tab === "docs" && <DocsView client={client} repo={repo ?? undefined} session={session} onBack={onBackToSession} doc={typeof doc === "string" ? doc : undefined} pickFolder={pickFolder} />}
+      {tab === "docs" && <DocsView key={stage ?? ""} client={client} repo={repo ?? undefined} session={session} onBack={onBackToSession} doc={typeof doc === "string" ? doc : undefined} pickFolder={pickFolder} />}
       {local && repos && repos.length === 0 && <p className="text-ink-3">{NO_REPO}</p>}
       {local && loadError && (
         <div role="alert" className={`${alert} flex items-center justify-between gap-s2`}>
