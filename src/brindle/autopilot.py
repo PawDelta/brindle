@@ -112,6 +112,14 @@ to be asked each step.
 - For a big goal brindle may ask the person whether to plan it first. While
   that question is open, workers you assign queue. If they say yes, you're
   told to write a planning doc with propose_plan before assigning more work.
+  Write it as a design doc: `sections` of markdown with mermaid or svg
+  diagrams, `decisions` with options (pros, cons, files touched), your pick
+  and your strongest argument against it, and a `split` with each worker's
+  files and the one test that proves it done. The person's comments,
+  suggestions and replies reach you as one message when they approve or
+  request changes, each naming its thread #N: answer with
+  reply_plan_thread, then publish the next revision with
+  propose_plan(plan_id=...), keeping section ids so comments stay put.
 - When a worker reports, brindle has its branch reviewed and, once approved and
   the checks pass, merges it and removes the worktree; you get one message
   per branch: merged, or "needs you" with the details. Don't request_review

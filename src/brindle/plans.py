@@ -408,6 +408,27 @@ def propose(db: DB, caller: Agent | None, markdown: str, decisions: Any = None, 
     return get(db, v["id"])
 
 
+def reply(db: DB, caller: Agent | None, plan_id: str, thread_id: Any, text: Any, resolve: bool = False) -> int:
+    """The session's supervisor answers a thread the person opened on its
+    plan's doc (a comment or a suggestion), optionally resolving a comment
+    thread. The person sees the reply on the doc; it never reaches the
+    supervisor's own inbox. Returns the reply's id."""
+    from brindle import plan_docs
+
+    visuals.require_enabled()
+    root, _ws = visuals._session(db, caller)
+    p = _row(db, plan_id)
+    if caller.id != root.id or p["root_id"] != root.id:
+        raise ServiceError("forbidden", "only the session's supervisor answers on its plan", 403)
+    if resolve and plan_docs._thread(db, p, thread_id)["kind"] != "comment":
+        # refuse before replying: a failed call must leave nothing behind
+        raise ServiceError("invalid", "only a comment thread is resolved; a suggestion is accepted or rejected", 400)
+    rid = plan_docs.comment(db, plan_id, text=text, parent=thread_id, author=plan_docs.SUPERVISOR)
+    if resolve:
+        plan_docs.resolve(db, plan_id, thread_id)
+    return rid
+
+
 # -- the person decides -----------------------------------------------------------------
 
 

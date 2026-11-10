@@ -108,7 +108,8 @@ class _Server(MCPServer):
                 if coordinator.refusal(agent, t.name) is None and t.name not in hidden]
 
 
-VISUAL_TOOLS = ("publish_visual", "list_visuals", "offer_visual", "propose_plan")   # hidden while the capability is off
+VISUAL_TOOLS = ("publish_visual", "list_visuals", "offer_visual", "propose_plan",
+                "reply_plan_thread")   # hidden while the capability is off
 
 
 mcp = _Server(
@@ -261,19 +262,37 @@ class PlanWorker(BaseModel):
     test: str | None = Field(default=None, description="the one test that proves its task done")
 
 
+class PlanSection(BaseModel):
+    id: str | None = Field(default=None, description="1-32 letters, digits, _ or -; keep it across revisions so "
+                           "comments stay on the section (default s1, s2, ...)")
+    title: str
+    kind: str = Field(default="markdown", description="markdown, mermaid (the source of a diagram) or svg (an "
+                      "inline <svg> picture)")
+    markdown: str = Field(description="the section's text, or its diagram source")
+    caption: str | None = None
+
+
 @mcp.tool()
 def propose_plan(markdown: str, decisions: list[PlanDecision] | None = None,
                  split: list[PlanWorker] | None = None, title: str | None = None,
-                 plan_id: str | None = None, ask: str | None = None) -> str:
-    """Supervisors: show the person a planning doc, ONLY when they explicitly
-    asked for one (never on your own because a request is large). markdown:
-    the plan (goal, split, decisions with your challenge to each, what's hard
-    to undo, open questions), one ## heading per section: the person comments
-    per section. brindle renders it itself. While it's open, every assign in
-    this session is queued and starts only once the person approves; their
-    approval or redirect (their picks and comments) arrives as a message from
-    them. plan_id: publish the revision a redirect asked for. ask: their
-    request restated in your own words, which they confirm or correct."""
+                 plan_id: str | None = None, ask: str | None = None,
+                 sections: list[PlanSection] | None = None) -> str:
+    """Supervisors: show the person a design doc, ONLY when they explicitly
+    asked for one (never on your own because a request is large). Pass
+    `sections` (each markdown, mermaid or svg; the person comments, suggests
+    edits and confirms decisions on them) and then `markdown` is only the
+    title and lede; or pass the whole doc as `markdown`, one ## heading per
+    section. Put the goal, the design with diagrams, what's hard to undo and
+    the open questions in sections; `decisions` carry options (pros, cons, the
+    files each touches), your pick (`mine`) and your strongest argument
+    against it (`challenge`); `split` has each worker's files and the one test
+    that proves it done. brindle renders it itself. While it's open, every
+    assign in this session is queued and starts only once the person
+    approves. What they wrote since your last revision (each comment,
+    suggestion and reply, naming its thread #N) arrives in one message when
+    they Approve or Request changes. Answer a thread with reply_plan_thread;
+    publish the next revision with plan_id. ask: their request restated in
+    your own words, which they confirm or correct."""
     from brindle import plans
     from brindle.service.errors import ServiceError
 
@@ -281,13 +300,32 @@ def propose_plan(markdown: str, decisions: list[PlanDecision] | None = None,
     caller, _ = _caller(db)
     dump = lambda items: [i.model_dump() if isinstance(i, BaseModel) else i for i in items or []]  # noqa: E731
     try:
-        p = plans.propose(db, caller, markdown, dump(decisions), dump(split), title, plan_id, ask)
+        p = plans.propose(db, caller, markdown, dump(decisions), dump(split), title, plan_id, ask,
+                          sections=dump(sections) if sections is not None else None)
     except ServiceError as e:
         raise ToolError(e.message) from e
     return (f"Proposed plan {p['id']} r{p['rev']} (brindle://visual/{p['id']}). Assign calls queue behind it "
             "until the person approves; their decision arrives as a message. "
             f"For each split card, pass plan_worker=\"{p['id']}:<split-id>\" to assign or handoff; "
             "use the exact proving check command as its test.")
+
+
+@mcp.tool()
+def reply_plan_thread(plan_id: str, thread_id: int, text: str, resolve: bool = False) -> str:
+    """Supervisors: answer a comment or suggestion thread (#N in the message
+    you got) on your planning doc; the person sees it on the doc. resolve=true
+    also resolves a comment thread you have dealt with. Revisions go through
+    propose_plan(plan_id=...)."""
+    from brindle import plans
+    from brindle.service.errors import ServiceError
+
+    db = DB()
+    caller, _ = _caller(db)
+    try:
+        rid = plans.reply(db, caller, plan_id, thread_id, text, resolve)
+    except ServiceError as e:
+        raise ToolError(e.message) from e
+    return f"Replied in thread #{thread_id} of plan {plan_id} (reply #{rid})."
 
 
 @mcp.tool()
