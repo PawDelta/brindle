@@ -348,6 +348,16 @@ def test_asked_quote_accepts_what_the_person_typed(db, session, typed, asked, te
     assert visuals.publish(db, boss, "Asked", "<p>yes</p>", asked=asked)["rev"] == 1
 
 
+def test_typed_words_reach_the_engine(db, session, monkeypatch):
+    """A vouch landing after its own prompt's hook is refused, and the debug log says why, not what."""
+    monkeypatch.setattr(offers.debuglog, "enabled", lambda: True)
+    submitted_at = offers.time.time()
+    agents.handle_hook(db, session[0].id, "prompt-submit", {"prompt": "show me again"})
+    assert app_vouches(session[0], "show me again", offers.time.time() + 60, submitted_at).status_code == 409
+    log = offers.debuglog.log_path().read_text()
+    assert "typed words refused: this submission predates" in log and "show me again" not in log
+
+
 def _report_came_late(db, boss, worker):
     assert app_vouches(boss, "render first", offers.time.time() - 1).status_code == 409
     typed_into_cli(db, boss, "render first", vouched=False)
