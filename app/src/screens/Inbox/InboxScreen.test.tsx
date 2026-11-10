@@ -172,10 +172,13 @@ describe("inbox", () => {
     const visualItem: InboxItemDTO = { kind: "visual", agent_id: "sup1", root_id: "sup1", workspace_id: "proj", visual_id: "v_8f2c", reason: "visual is ready", detail: "Flow A" };
     const visualB = { ...visualItem, visual_id: "v_b", detail: "Flow B" };
     const decision = { ...visualItem, visual_id: "v_question", reason: "asks you to choose", detail: "Pick a flow" };
-    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], inbox: [decision, visualItem, visualB, question] });
+    const finishedDoc = { ...visualItem, kind: "analysis_doc", visual_id: "v_doc", reason: "analysis doc is ready", detail: "Cache TTL" };
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root, worker], inbox: [decision, visualItem, visualB, finishedDoc, question] });
     const { sync, onOpen } = mount(daemon);
     await screen.findByRole("region", { name: "Ship ls --json" });
     expect(within(card("visual")).queryByRole("button", { name: "Go to session ›" })).toBeNull();
+    fireEvent.click(within(screen.getByText("Cache TTL").closest("article")!).getByRole("button", { name: "Open doc" }));
+    expect(onOpen).toHaveBeenLastCalledWith("sup1", REPO, "sup1", { kind: "visual", id: "v_doc" });
     fireEvent.click(within(screen.getByText("Flow A").closest("article")!).getByRole("button", { name: "Open visual" }));
     expect(onOpen).toHaveBeenLastCalledWith("sup1", REPO, "sup1", { kind: "visual", id: "v_8f2c" });
     expect(within(card("question")).getByRole("button", { name: "Go to session ›" }).className).toContain("btn-secondary");
