@@ -46,6 +46,7 @@ import secrets
 import subprocess
 import time
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 from brindle.config import CONFIG_DIR, WEIGHTS, RepoConfig, config_root, load_repo_config, workspace_config
@@ -1979,6 +1980,14 @@ def _goal_eta(db: DB, tree: list[Agent], live: list[Agent], now: float) -> float
     return max(remaining.values()) + sum(statistics.median(s) for s in overhead.values() if len(s) >= ESTIMATE_RUNS)
 
 
+@lru_cache(maxsize=256)
+def _goal_commit_log(path: str, head: str, since: int) -> str:
+    """History is immutable at a commit; ages are recomputed by the reader."""
+    from brindle import git
+
+    return git.out(["log", f"--since=@{since}", "--format=%H %ct", "-n", "500", head], path)
+
+
 def goal_activity(db: DB, root_id: str, now: float | None = None) -> dict:
     """What session ``root_id`` is doing now, for the sidebar's goal summary.
 
@@ -1990,7 +1999,7 @@ def goal_activity(db: DB, root_id: str, now: float | None = None) -> dict:
     the slowest live branch's remaining build and report-to-merge time,
     including queued dependencies and known final check/audit overhead;
     None with fewer than ``ESTIMATE_RUNS`` runs for a required duration."""
-    from brindle import agents, git
+    from brindle import agents, git, status_cache
 
     now = time.time() if now is None else now
     ap = db.get_autopilot(root_id)
@@ -2031,7 +2040,11 @@ def goal_activity(db: DB, root_id: str, now: float | None = None) -> dict:
     commits: dict[str, float] = {}
     for path in paths:
         try:
-            log = git.out(["log", f"--since=@{int(boss.created_at)}", "--format=%H %ct", "-n", "500", "HEAD"], path)
+            head = status_cache.read_head(path)
+            since = int(boss.created_at)
+            # An unreadable ref is unknown: never reuse a previous checkout's history.
+            log = (_goal_commit_log(path, head, since) if head else
+                   _goal_commit_log.__wrapped__(path, "HEAD", since))
         except (git.GitError, OSError):
             continue
         for line in log.splitlines():

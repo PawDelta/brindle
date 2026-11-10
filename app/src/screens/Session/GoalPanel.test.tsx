@@ -11,7 +11,7 @@ import { startSync } from "../../store/sync";
 import { BASE_URL, FakeDaemon, TOKEN, flush } from "../../test/fakeDaemon";
 import { REPO, root } from "../../test/fixtures";
 import { standInViews } from "../../test/panes";
-import { GoalPanel, goalPhase } from "./GoalPanel";
+import { GoalPanel, goalPhase, useGoal } from "./GoalPanel";
 import { UNKNOWN, type Readiness } from "./review";
 
 vi.mock("../../components/PtyTerminal", () => import("../../test/panes"));
@@ -84,6 +84,30 @@ function holdingClient(daemon: FakeDaemon, path: string) {
 const unfold = () => fireEvent.click(screen.getByRole("button", { name: /^Milestones \(/ }));
 
 describe("GoalPanel", () => {
+  it("shares one session read between rows and panels, including event refreshes", async () => {
+    const daemon = new FakeDaemon({ goal: structuredClone(goal) });
+    const client = daemon.client();
+    const store = createAppStore();
+    const sync = startSync({ client, store, connect: daemon.connect });
+    function Row() {
+      const value = useGoal(client, REPO, ROOT, store);
+      return <span data-testid="row-goal">{value?.goal}</span>;
+    }
+    const reads = () => daemon.requests.filter((r) => r.path === "/goal").length;
+    try {
+      const view = render(<><Row /><Row /><GoalPanel client={client} repo={REPO} root={ROOT} store={store} /></>);
+      await waitFor(() => expect(screen.getAllByTestId("row-goal").map((el) => el.textContent)).toEqual([goal.goal, goal.goal]));
+      expect(reads()).toBe(1);
+      daemon.data.goal = { ...structuredClone(goal), goal: "Updated shared goal" };
+      act(() => daemon.publish("autopilot.progress", { root_id: ROOT }));
+      await waitFor(() => expect(screen.getAllByText("Updated shared goal").length).toBe(3));
+      expect(reads()).toBe(2);
+      view.unmount();
+    } finally {
+      sync.stop();
+    }
+  });
+
   it.each([true, false])("shows the phase line only after its heading scrolls out of view (compact: %s)", async (compact) => {
     const phased = structuredClone(goal);
     phased.milestones![0].phase_name = "Planned work";
@@ -290,7 +314,7 @@ describe("GoalPanel", () => {
     sync.stop();
   });
 
-  it("does not let an older goal response overwrite a newer one", async () => {
+  it("discards an invalidated goal response and coalesces updates during its read", async () => {
     const daemon = new FakeDaemon({ goal: structuredClone(goal) });
     const { client, state, held } = holdingClient(daemon, "/v1/goal");
     const store = createAppStore();
@@ -298,24 +322,27 @@ describe("GoalPanel", () => {
     render(<GoalPanel client={client} repo={REPO} root={ROOT} store={store} />);
     await waitFor(() => expect(screen.getByText("1 of 2 milestones complete")).toBeTruthy());
 
-    // An autopilot event starts a refresh (an event also marks the store stale, so there
-    // can be a second); their responses are held, so they carry the old goal.
+    const reads = () => daemon.requests.filter((r) => r.path === "/goal").length;
+    const before = reads();
+    // Hold one read with an obsolete goal, then change the goal during it.
     state.hold = true;
+    daemon.data.goal = { ...structuredClone(goal), goal: "Obsolete goal" };
     daemon.publish("autopilot.progress", { repo_root: REPO, root_id: ROOT });
     await waitFor(() => expect(held.length).toBeGreaterThan(0));
 
-    // A newer refresh, after the goal finished, answers first.
-    state.hold = false;
-    const finished = structuredClone(daemon.data.goal!);
+    const finished = structuredClone(goal);
     finished.milestones!.forEach((m) => (m.status = "passed"));
     daemon.data.goal = finished;
     daemon.publish("autopilot.progress", { repo_root: REPO, root_id: ROOT });
-    await waitFor(() => expect(screen.getByText("2 of 2 milestones complete")).toBeTruthy());
-
-    // The older response arrives last; it must not win.
-    held.forEach((release) => release());
+    daemon.publish("autopilot.progress", { repo_root: REPO, root_id: ROOT });
     await flush();
-    expect(screen.getByText("2 of 2 milestones complete")).toBeTruthy();
+    expect(reads()).toBe(before + 1);
+    held[0]();
+    await waitFor(() => expect(held.length).toBe(2));
+    expect(screen.queryByText("Obsolete goal")).toBeNull();
+    held[1]();
+    await waitFor(() => expect(screen.getByText("2 of 2 milestones complete")).toBeTruthy());
+    expect(reads()).toBe(before + 2);
     sync.stop();
   });
 
