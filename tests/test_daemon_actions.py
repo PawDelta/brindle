@@ -1744,6 +1744,7 @@ def test_session_review_readiness_says_what_is_missing(db, lead, monkeypatch):
     db.update_agent("wf", merge_failed="conflict in a.py")     # as the pipeline records it
     real_head = gates.head
     monkeypatch.setattr(gates, "head", lambda ws: head if ws.id == "proj/w-f" else real_head(ws))
+    monkeypatch.setattr(session_review, "_pr_open_state", lambda *a: False)    # readiness is under test, not GitHub
     assert missing() == 5 and _send("GET", "/v1/sessions/lead/pr/draft")[0] == 409
     assert watch.sweep(db) == []
     db.set_merged("proj/w-f", head)

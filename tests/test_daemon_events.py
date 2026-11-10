@@ -21,6 +21,7 @@ def _open_readiness_prs(db, count):
 
 
 def _readiness_reuses_unchanged_sessions(db, tmp_path, monkeypatch, gitlink):
+    import time
     from types import SimpleNamespace
     from brindle import git, spawn
     from brindle.daemon import routes_actions, session_review as review
@@ -60,10 +61,16 @@ def _readiness_reuses_unchanged_sessions(db, tmp_path, monkeypatch, gitlink):
     watch.sweep(db)
     assert watch.ready == {"s": False}
     tracked.write_text("original")
-    looks = iter([None, False])     # GitHub's first look still on its way, then: no PR is open
-    monkeypatch.setattr(review, "_pr_open_state", lambda *a: next(looks))
+    # GitHub's look is held: first pending, then failed (unknown, not "none"), and only then "none open".
+    monkeypatch.setattr(review._pr_pool, "submit", lambda *a: SimpleNamespace(done=lambda: False))
+    review._head_cache.clear()
+    key = ("a" * 40, str(tmp_path))
     assert watch.sweep(db) == ["s"]
     assert bus.tail(db, kinds=("session.pr_ready",)) == []     # not announced on a guess
+    review._head_cache[key] = (time.monotonic(), None)
+    watch.sweep(db)
+    assert bus.tail(db, kinds=("session.pr_ready",)) == []
+    review._head_cache[key] = (time.monotonic(), {})
     watch.sweep(db)
     assert [e["agent_id"] for e in bus.tail(db, kinds=("session.pr_ready",))] == ["s"]   # said once the look answered
     reads.clear()
@@ -71,6 +78,29 @@ def _readiness_reuses_unchanged_sessions(db, tmp_path, monkeypatch, gitlink):
     monkeypatch.setattr(review, "_merge_polled", 0)
     watch.sweep(db)
     assert reads == [] and watch.ready == {"s": True} and review._merge_polled == 0
+
+
+@pytest.mark.parametrize("cached, recorded, expected", [
+    (None, False, None),                                  # the first look is on its way
+    ((0, None), False, None),                             # GitHub couldn't say, nothing recorded: unknown
+    ((0, None), True, True),                              # ... but brindle's own PR stands
+    ((0, {"url": "https://github.com/o/r/pull/8"}), False, True),   # a supervisor's, found
+    ((0, {}), True, False),                               # GitHub says none open, whatever was recorded
+])
+def test_pr_open_state_reads_one_snapshot_of_the_lookup(db, monkeypatch, cached, recorded, expected):
+    import time
+    from types import SimpleNamespace
+    from brindle import status_cache
+    from brindle.daemon import session_review as review
+    monkeypatch.setattr(review, "session", lambda db, root: (None, SimpleNamespace(path="/p")))
+    monkeypatch.setattr(status_cache, "read_head", lambda path: "h")
+    monkeypatch.setattr(review._pr_pool, "submit", lambda *a: SimpleNamespace(done=lambda: False))
+    review._head_cache.clear()
+    if cached:
+        review._head_cache[("h", "/p")] = (time.monotonic(), cached[1])
+    if recorded:
+        db.conn.execute("INSERT INTO session_prs (root_id, branch, url, opened_at) VALUES ('s', 'b', 'https://x/pull/1', 0)")
+    assert review._pr_open_state(db, "s") is expected
 
 
 def _readiness_slow_gh_is_parallel_and_bounded(db, monkeypatch):

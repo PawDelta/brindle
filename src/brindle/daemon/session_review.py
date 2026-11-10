@@ -371,9 +371,10 @@ def head_pr_known_none(sha: str, cwd: str) -> bool:
 
 
 def _pr_open_state(db: DB, root_id: str) -> bool | None:
-    """Whether the session has an open PR: True (one GitHub found on its HEAD, or brindle's recorded
-    one while GitHub hasn't said otherwise), False (GitHub says none is open, or can't be asked), or
-    None while the first look is still on its way."""
+    """Whether the session has an open PR: True (GitHub found one on its HEAD, or brindle recorded
+    one and GitHub hasn't said otherwise), False (GitHub says none is open), or None while that
+    isn't known (the first look is on its way, or GitHub couldn't be asked and nothing recorded says).
+    One snapshot of the lookup decides, so a read finishing meanwhile can't split the answer."""
     try:
         _, ws = session(db, root_id)
         head = status_cache.read_head(ws.path)
@@ -381,18 +382,18 @@ def _pr_open_state(db: DB, root_id: str) -> bool | None:
         return False
     if not head:
         return False
-    found = open_pr_for_head(head, ws.path, root_id)
-    if found:
-        return True
+    open_pr_for_head(head, ws.path, root_id)     # starts a read when none is fresh
     with _pr_lock:
         cached = _head_cache.get((head, ws.path))
     if cached is None:
-        return None     # asked just now
+        return None
+    if cached[1]:
+        return True
     if cached[1] == {}:
         return False
     recorded = db.conn.execute("SELECT 1 FROM session_prs WHERE root_id = ? AND url IS NOT NULL AND merged_at IS NULL",
                                (root_id,)).fetchone()
-    return bool(recorded)
+    return True if recorded else None
 
 
 def refresh_pr_states(db: DB) -> None:
