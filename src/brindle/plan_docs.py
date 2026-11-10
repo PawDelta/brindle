@@ -74,7 +74,15 @@ _SVG_ATTRIBUTES = frozenset({
     "clip-path", "clip-rule", "clipPathUnits", "mask", "maskUnits", "maskContentUnits", "patternUnits",
     "patternContentUnits", "patternTransform", "visibility", "display", "version", "role", "aria-label",
     "aria-hidden", "vector-effect", "paint-order", "startOffset", "href"})
-_URL = re.compile(r"url\s*\(", re.I)
+# Attribute values a renderer may read as CSS: a strict grammar, so nothing
+# can be spelled in a way the check doesn't see. No backslash (CSS escapes),
+# no slash (CSS comments), no colon or semicolon; the only functions are
+# colours, transforms and url(), and url() names something in the drawing.
+_SVG_VALUE = re.compile(r"[A-Za-z0-9#%.,+\-\s()'\"_]*")
+_SVG_FUNCTION = re.compile(r"([A-Za-z_-]*)\s*\(")
+_SVG_FUNCTIONS = frozenset({"url", "rgb", "rgba", "hsl", "hsla", "matrix", "translate", "scale", "rotate",
+                            "skewx", "skewy"})
+_SVG_FREE_TEXT = frozenset({"aria-label"})   # read as text, never as CSS
 
 
 # -- revisions --------------------------------------------------------------------------
@@ -137,8 +145,20 @@ def _svg(body: str, where: str) -> None:
             attr = local(name, ("", _XLINK_NS))
             if attr not in _SVG_ATTRIBUTES or (attr == "href" and not value.strip().startswith("#")):
                 raise refused
-            if any(not m.string[m.end():].lstrip().lstrip("'\"").startswith("#") for m in _URL.finditer(value)):
+            if attr not in _SVG_FREE_TEXT and not _svg_value_ok(value):
                 raise refused
+
+
+def _svg_value_ok(value: str) -> bool:
+    if not _SVG_VALUE.fullmatch(value):
+        return False
+    for m in _SVG_FUNCTION.finditer(value):
+        name = m.group(1).lower()
+        if name not in _SVG_FUNCTIONS:
+            return False
+        if name == "url" and not value[m.end():].lstrip().lstrip("'\"").startswith("#"):
+            return False
+    return True
 
 
 def _body_text(value: Any, name: str, limit: int, required: bool = False) -> str:

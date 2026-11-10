@@ -50,9 +50,11 @@ def test_the_person_reviews_a_design_doc_through_the_routes(db, session, tmp_pat
         for probe in ('<svg xmlns="http://www.w3.org/2000/svg"><image><set attributeName="href" '
                       'to="https://example.invalid/pixel.png"/></image></svg>',
                       '<svg><a><animate attributeName="href" to="&#106;avascript:alert(1)"/></a></svg>',
-                      '<svg><rect fill="u&#114;l(https://example.invalid/x)"/></svg>'):
+                      '<svg><rect fill="u&#114;l(https://example.invalid/x)"/></svg>',
+                      r'<svg><rect fill="u\72l(https://example.invalid/paint.svg#g)"/></svg>'):   # a CSS escape
             r = post("/edit", rev=1, section="flow", before=drawing, after=probe)
             assert r.status_code == 400, probe
+        assert [r["rev"] for r in client.get(f"/v1/plans/{pid}").json()["revisions"]] == [1]
 
         # Comments on a text range, a diagram and a decision (with a file); a quote not in the text is refused.
         start = SUMMARY.index(QUOTE)
