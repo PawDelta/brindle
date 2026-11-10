@@ -24,7 +24,13 @@ import { formatAge } from "../../store/overview";
 import { askKey, describeItem, itemKey, permissionAnswer, permissionLine, seenAt } from "./items";
 import type { useInboxActions } from "./useInboxActions";
 
-const message = (e: unknown) => plain(e instanceof Error ? e.message : String(e));
+const message = (e: unknown) => {
+  const text = e instanceof Error ? e.message : String(e);
+  if (/nothing in this scope can be approved|this can't be saved/i.test(text)) {
+    return "This approval no longer applies. Choose Allow once for this request, or refresh the Inbox to see the available choices.";
+  }
+  return plain(text);
+};
 const requests = (n: number) => `${n} request${n === 1 ? "" : "s"}`;
 const workers = (n: number) => `${n} worker${n === 1 ? "" : "s"}`;
 const distinct = (list: { agent_id: string }[]) => new Set(list.map((a) => a.agent_id)).size;
@@ -268,8 +274,11 @@ function OrgWhy({ org, blocked }: { org: OrgControlViewDTO; blocked?: boolean })
 
 /* A request brindle's hook holds, with the others like it. */
 function AskCard({ client, g, groups, isNew, busy, run, onOpenRule }: { client: DaemonClient; g: AskGroupDTO; groups: AskGroupDTO[]; isNew: boolean; busy: boolean; run: Run; onOpenRule?(rule?: string): void }) {
-  const fits = (value: string) => scopeWithin(g.scopes.find((s) => s.value === value)!, g.limits);
-  const [scope, setScope] = useState(fits(g.general.value) ? g.general.value : (g.scopes.find((s) => scopeWithin(s, g.limits))?.value ?? g.general.value));
+  const fits = (value: string) => {
+    const candidate = g.scopes.find((s) => s.value === value);
+    return !!candidate && (candidate.modes != null ? candidate.modes.length > 0 : scopeWithin(candidate, g.limits));
+  };
+  const [scope, setScope] = useState(fits(g.general.value) ? g.general.value : (g.scopes.find((s) => fits(s.value))?.value ?? g.general.value));
   const cap = g.limits?.life === "time" ? (g.limits.minutes ?? null) : null;
   const start = splitMinutes(cap !== null && cap < 30 ? cap : 30);
   const [amount, setAmount] = useState(String(start.value));
@@ -277,7 +286,7 @@ function AskCard({ client, g, groups, isNew, busy, run, onOpenRule }: { client: 
   const [timing, setTiming] = useState(false);
   const [help, setHelp] = useState<string | null>(null);
   const picked = g.scopes.find((s) => s.value === scope) ?? g.general;
-  const modes = g.modes ?? [];
+  const modes = picked.modes ?? g.modes ?? [];
   const rep = g.items[0];
   const exact = g.scopes.find((s) => s.value === "exact");
   const minutes = toMinutes(Number(amount), unit);
@@ -325,6 +334,7 @@ function AskCard({ client, g, groups, isNew, busy, run, onOpenRule }: { client: 
       what={`asks to allow ${subject}`}
       chip={slot?.label ?? null}
       age={`waiting ${ago(Math.min(...g.items.map((a) => a.waiting_since))).replace(/ ago$/, "")}`}
+      note={g.save_reason}
       why={
         g.org ? (
           <OrgWhy org={g.org} blocked={g.blocked} />
@@ -359,7 +369,7 @@ function AskCard({ client, g, groups, isNew, busy, run, onOpenRule }: { client: 
                   Apply to
                   <select className={`${field} max-w-full py-0.5 text-xs`} aria-label="Approval scope" value={scope} onChange={(e) => setScope(e.target.value)}>
                     {g.scopes.map((s) => (
-                      <option key={s.value} value={s.value} disabled={!scopeWithin(s, g.limits)}>
+                      <option key={s.value} value={s.value} disabled={!fits(s.value)}>
                         {s.label}
                       </option>
                     ))}
@@ -414,8 +424,8 @@ function AskCard({ client, g, groups, isNew, busy, run, onOpenRule }: { client: 
                       </button>
                     </div>
                   )}
-                  {slot && <MenuItem disabled={busy} title={`Always for ${slot.label}`} hint="Saved as an override in Settings" onClick={alwaysForItem} />}
-                  {modes.includes("forever") && exact && fits("exact") && <MenuItem disabled={busy} title="Always allow this exact request" hint="Kept in Saved actions" onClick={() => decide("forever", minutes, "exact")} />}
+                  {slot && (picked.modes == null || modes.includes("forever")) && <MenuItem disabled={busy} title={`Always for ${slot.label}`} hint="Saved as an override in Settings" onClick={alwaysForItem} />}
+                  {exact && fits("exact") && (exact.modes ?? g.modes ?? []).includes("forever") && <MenuItem disabled={busy} title="Always allow this exact request" hint="Kept in Saved actions" onClick={() => decide("forever", minutes, "exact")} />}
                 </>
               )}
             </AllowSplit>
