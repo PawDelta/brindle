@@ -728,3 +728,27 @@ def test_stores_resolved_at_run_time(tmp_path, monkeypatch):
     assert answer("curl --unix-socket d.sock -d '{}' http://localhost/v1/github/credential") == "deny"
     assert answer("cat ../other/.env") == "deny"
     assert answer("cat ~/notes.txt") == "allow"
+
+
+@pytest.mark.parametrize("bare, wrapped", [
+    ("git push --force origin main", "find . -maxdepth 0 -exec git push --force origin main \\;"),
+    ("git push --force origin main", "arch -arm64 git push --force origin main"),
+    ("git push --force origin main", "script -q /dev/null git push --force origin main"),
+    ("git reset --hard", "xargs git reset --hard"),
+    ("git push --force origin main", "uv run git push --force origin main"),
+    ("git push --force origin main", "npm exec -- git push --force origin main"),
+    ("git push origin main", "uv run git push origin main"),   # the default-branch ask, behind an allowed `uv `
+])
+def test_wrapped_git_still_guarded(tmp_path, bare, wrapped):
+    """Git behind a program brindle doesn't know as a wrapper is still git to a
+    deny or ask rule: it answers as the git command alone does, on the default
+    preset and on one with `uv ` and `npm ` allows (review 0.6.3, finding 1)."""
+    from brindle import permissions
+
+    here = str(tmp_path)
+    answer = lambda command: permissions.decide(permissions.Request("claude", "bash", "Bash", here, here, here,
+                                                                    command=command)).decision
+    for preset in ("autonomous", "standard"):
+        permissions.apply_preset(preset)
+        assert answer(bare) in ("deny", "ask"), preset
+        assert answer(wrapped) == answer(bare), preset

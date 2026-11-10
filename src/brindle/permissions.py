@@ -1527,13 +1527,24 @@ def _segments(command: str) -> list[list[str]]:
     return out
 
 
-def _git_calls(command: str) -> list[tuple[str, list[str]]]:
-    """(subcommand, its arguments) for every git invocation in ``command``."""
-    return [(sub, args) for _, sub, args in _git_invocations(command)]
+def _git_calls(command: str, loose: bool = False) -> list[tuple[str, list[str]]]:
+    """(subcommand, its arguments) for every git invocation in ``command`` (see _git_invocations)."""
+    return [(sub, args) for _, sub, args in _git_invocations(command, loose)]
 
 
-def _git_invocations(command: str) -> list[tuple[list[str], str, list[str]]]:
-    """(its -C folders, subcommand, its arguments) for every git invocation in ``command``."""
+def _runs_no_command(words: list[str]) -> bool:
+    """Whether ``words`` is a READONLY_PROGRAMS program without an option that
+    runs another: its arguments are text (echo git push --force), never a command."""
+    audited = READONLY_PROGRAMS.get(words[0]) if words and "/" not in words[0] else None
+    return audited is not None and not _has_option(words[1:], *audited)
+
+
+def _git_invocations(command: str, loose: bool = False) -> list[tuple[list[str], str, list[str]]]:
+    """(its -C folders, subcommand, its arguments) for every git invocation in
+    ``command``: git as a part's first word or behind a plain wrapper. With
+    ``loose`` (a deny or an ask), a part whose program is neither may run its
+    arguments (uv run, find -exec, xargs), so its first word named git counts
+    too, unless the program only prints or reads its arguments (_runs_no_command)."""
     argv = simple_argv(command)
     if argv is not None:
         while argv and _ASSIGNMENT.match(argv[0]):
@@ -1550,17 +1561,20 @@ def _git_invocations(command: str) -> list[tuple[list[str], str, list[str]]]:
         segments = [part.words for part in reader.parts]
     calls = []
     for segment in segments:
-        for words in _wrapped_forms(segment):
-            if not words or os.path.basename(words[0]) != "git":
-                continue
-            rest, j, folders = words[1:], 0, []
-            while j < len(rest) and rest[j].startswith("-"):
-                if rest[j] == "-C" and j + 1 < len(rest):
-                    folders.append(rest[j + 1])
-                j += 2 if rest[j] in ("-C", "-c") else 1  # global options
-            if j < len(rest):
-                calls.append((folders, rest[j], rest[j + 1:]))
-            break
+        forms = _wrapped_forms(segment)
+        words = next((w for w in forms if w and os.path.basename(w[0]) == "git"), None)
+        if words is None and loose and not _runs_no_command(forms[-1]):
+            at = next((i for i, w in enumerate(forms[-1]) if os.path.basename(w) == "git"), None)
+            words = forms[-1][at:] if at is not None else None
+        if words is None:
+            continue
+        rest, j, folders = words[1:], 0, []
+        while j < len(rest) and rest[j].startswith("-"):
+            if rest[j] == "-C" and j + 1 < len(rest):
+                folders.append(rest[j + 1])
+            j += 2 if rest[j] in ("-C", "-c") else 1  # global options
+        if j < len(rest):
+            calls.append((folders, rest[j], rest[j + 1:]))
     return calls
 
 
@@ -1661,15 +1675,15 @@ def _branch_name(ref: str) -> str:
     return ref
 
 
-def push_calls(command: str) -> list[Push]:
-    """Every ``git push`` in ``command``, one per refspec."""
-    return [push for _, push in _pushes_with_folders(command)]
+def push_calls(command: str, loose: bool = False) -> list[Push]:
+    """Every ``git push`` in ``command``, one per refspec (``loose``: see _git_invocations)."""
+    return [push for _, push in _pushes_with_folders(command, loose)]
 
 
-def _pushes_with_folders(command: str) -> list[tuple[list[str], Push]]:
+def _pushes_with_folders(command: str, loose: bool = False) -> list[tuple[list[str], Push]]:
     """push_calls, each with the -C folders of its git invocation."""
     out = []
-    for folders, sub, args in _git_invocations(command):
+    for folders, sub, args in _git_invocations(command, loose):
         if sub != "push":
             continue
         positional, delete, force, everything, i = [], False, False, False, 0
@@ -1762,10 +1776,11 @@ def push_fits(match: str, push: Push, repo_root: str, loose: bool) -> bool:
 
 
 def push_matches(match: str, req: Request, loose: bool) -> bool:
-    """Whether any git push in ``req``'s command fits push pattern ``match``."""
+    """Whether any git push in ``req``'s command fits push pattern ``match``
+    (``loose``, a deny or ask: also the git a program may run, _git_invocations)."""
     if not req.command:
         return False
-    return any(push_fits(match, push, repo, loose) for push, repo in pushes_in_repos(req))
+    return any(push_fits(match, push, repo, loose) for push, repo in pushes_in_repos(req, loose))
 
 
 _PUSH_READS: ContextVar[dict | None] = ContextVar("permission_push_reads", default=None)
@@ -1925,14 +1940,14 @@ def _resolve_push(req: Request, push: Push, folder: str) -> list[Push]:
     return _push_targets(folder, [replace(push, remote=remote, source=branch, destination=destination)], config)
 
 
-def pushes_in_repos(req: Request) -> list[tuple[Push, str]]:
+def pushes_in_repos(req: Request, loose: bool = False) -> list[tuple[Push, str]]:
     """Each push in ``req``'s command with the repo it runs in, where a push
     pattern's default branch is read: its folder's (its Cwd, then git -C), not
-    only the session's. The session's when git can't tell."""
+    only the session's. The session's when git can't tell. ``loose``: see _git_invocations."""
     from brindle import git
 
     cache = _PUSH_READS.get()
-    key = ("pushes", req)
+    key = ("pushes", req, loose)
     if cache is not None and key in cache:
         return cache[key]
 
@@ -1944,7 +1959,7 @@ def pushes_in_repos(req: Request) -> list[tuple[Push, str]]:
             return req.repo_root
 
     out = []
-    for folders, push in _pushes_with_folders(req.command or ""):
+    for folders, push in _pushes_with_folders(req.command or "", loose):
         folder = os.path.join(req.cwd or req.worktree or "", *map(os.path.expanduser, folders))
         repo = repo_of(folders)
         out.extend((resolved, repo) for resolved in _resolve_push(req, push, folder))
@@ -2539,9 +2554,9 @@ def _plain_rm(words: list[str]) -> bool:
     return True
 
 
-def forced_push(command: str) -> bool:
+def forced_push(command: str, loose: bool = False) -> bool:
     """A push that forces (a flag, or a ``+refspec``) or deletes a branch."""
-    return any(p.force or p.delete for p in push_calls(command))
+    return any(p.force or p.delete for p in push_calls(command, loose))
 
 
 # git commands a force flag can't make discard work: those that only read,
@@ -2580,11 +2595,12 @@ def _git_options(sub: str, args: list[str]) -> list[str]:
     return out
 
 
-def destructive_git(command: str) -> bool:
+def destructive_git(command: str, loose: bool = False) -> bool:
     """A git command that discards work: a push that forces or deletes, branch
     -D, reset --hard, switch --discard-changes, or a force flag on any command
-    but those in _GIT_UNFORCED and a worktree command other than remove."""
-    for sub, args in _git_calls(command):
+    but those in _GIT_UNFORCED and a worktree command other than remove.
+    ``loose``: see _git_invocations."""
+    for sub, args in _git_calls(command, loose):
         if sub == "reset" and "--hard" in args:
             return True
         if sub == "branch" and any(re.fullmatch(r"-[A-Za-z]*D[A-Za-z]*", a) for a in args):
@@ -2595,7 +2611,7 @@ def destructive_git(command: str) -> bool:
             continue
         if any(_is_force(a) for a in _git_options(sub, args)):
             return True
-    return forced_push(command)
+    return forced_push(command, loose)
 
 
 def _in_worktree(req: Request) -> bool:
@@ -2623,8 +2639,10 @@ def _builtin_matches(rule: Rule, req: Request, checks: list[str]) -> bool:
     if rule.match_type == "git-readonly":
         argv = simple_argv(command)
         return bool(argv and _readonly_git(req, argv))
+    # A deny or ask also sees the git a program may run (uv run git push): _git_invocations.
+    loose = rule.decision != "allow"
     if rule.match_type == "git-push":
-        return any(sub == "push" for sub, _ in _git_calls(command))
+        return any(sub == "push" for sub, _ in _git_calls(command, loose))
     if rule.match_type == "push":
         if rule.decision != "allow":
             return push_matches(rule.match, req, loose=True)
@@ -2632,7 +2650,7 @@ def _builtin_matches(rule: Rule, req: Request, checks: list[str]) -> bool:
         pushes = pushes_in_repos(req) if simple_argv(command) is not None else []
         return bool(pushes) and all(push_fits(rule.match, push, repo, loose=False) for push, repo in pushes)
     if rule.match_type == "git-force":
-        return destructive_git(command) or any(p.force or p.delete for p, _ in pushes_in_repos(req))
+        return destructive_git(command, loose) or any(p.force or p.delete for p, _ in pushes_in_repos(req, loose))
     if rule.match_type == "rm-destructive":
         return destructive_rm(command)
     if rule.match_type == "readonly-pipeline":
