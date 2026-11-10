@@ -386,6 +386,7 @@ def test_an_accept_the_library_refuses_goes_up_in_the_revision_and_never_again(d
     assert len(sent(backend, f"POST {DESIGN}/threads/1")) == 1
 
 
+@pytest.mark.variant("other approvals run these lines but none checks the upload, so an inverted guard would pass")
 def test_a_plan_that_isnt_shared_still_files_its_approval_record(db, parts, monkeypatch):
     pid, _, _ = parts
     uploads = []
