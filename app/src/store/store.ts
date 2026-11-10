@@ -37,6 +37,9 @@ export interface AppState {
   synced: boolean;
   /* Advances only when a successful snapshot is applied, not when a refresh settles. */
   snapshotVersion: number;
+  /* When the read whose rows are applied began (snapshotTicket): a read begun before it,
+     ending later (the panes gate's, overtaken by sync's), never puts older rows over them. */
+  snapshotBegan: number;
   /* The newest bus events, oldest first (for notifications). */
   recent: BusEvent[];
   error: string | null;
@@ -48,7 +51,7 @@ export type Action =
   | { type: "account"; account: AccountDTO }
   | { type: "app_update"; status: AppUpdateStatus }
   | { type: "connection"; state: StreamState }
-  | { type: "snapshot"; workspaces: WorkspaceDTO[]; inbox?: InboxItemDTO[] }
+  | { type: "snapshot"; workspaces: WorkspaceDTO[]; inbox?: InboxItemDTO[]; began?: number }
   | { type: "stream"; message: StreamMessage }
   | { type: "error"; message: string };
 
@@ -66,10 +69,18 @@ export const initialState: AppState = {
   stale: false,
   synced: false,
   snapshotVersion: 0,
+  snapshotBegan: 0,
   recent: [],
   error: null,
   appUpdate: null,
 };
+
+let tickets = 0;
+
+/* A snapshot read's place among all of them, taken as it begins (sync's and the panes gate's alike). */
+export function snapshotTicket(): number {
+  return ++tickets;
+}
 
 export function reduce(state: AppState, action: Action): AppState {
   switch (action.type) {
@@ -81,11 +92,12 @@ export function reduce(state: AppState, action: Action): AppState {
       return { ...state, connection: action.state,
         connectionGeneration: state.connectionGeneration + Number(state.connection !== action.state) };
     case "snapshot":
+      if (action.began !== undefined && action.began < state.snapshotBegan) return state;
       // The pane gate can apply ready rows before inbox answers. Keep the
       // inbox's contents and initial-sync status until that read arrives.
       return { ...state, ...liveSnapshot(action.workspaces, action.inbox ?? state.inbox, state.pastWorkers), stale: false,
         synced: state.synced || action.inbox !== undefined, error: null,
-        snapshotVersion: state.snapshotVersion + 1 };
+        snapshotVersion: state.snapshotVersion + 1, snapshotBegan: Math.max(state.snapshotBegan, action.began ?? 0) };
     case "error":
       return { ...state, error: action.message };
     case "stream": {

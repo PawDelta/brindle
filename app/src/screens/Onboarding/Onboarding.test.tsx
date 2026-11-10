@@ -390,7 +390,8 @@ describe("Onboarding", () => {
     expect(screen.queryByTestId("onboarding")).toBeNull();
     // The gate asked nothing; provider status stays out of the sidebar.
     expect(screen.queryByTestId("provider-problem")).toBeNull();
-    expect(daemon.requests.filter((r) => r.path === "/providers/installed").length).toBe(asked + 1);
+    // The feed's own ask comes from an effect, which may run after the sidebar has painted.
+    await waitFor(() => expect(daemon.requests.filter((r) => r.path === "/providers/installed").length).toBe(asked + 1));
   });
 
   /* The way out of a sign-in step: Try again, and on a provider's, Skip for now. */
