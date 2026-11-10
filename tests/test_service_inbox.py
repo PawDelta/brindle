@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
-from brindle import identity_lock, workspaces
+from brindle import bus, identity_lock, workspaces
 from brindle.db import DB, Agent, Workspace
 from brindle.pro import status as org_status
 from brindle.service import inbox
@@ -154,9 +154,15 @@ def test_pr_not_now(db, tmp_path, monkeypatch):
     with patch("brindle.autopilot.add_checks", side_effect=OSError("disk full")), pytest.raises(OSError):
         inbox_action(db, {"id": "r1", "action": "accept"}, {})
     assert db.get_autopilot("r1").proposal == proposal
-    with patch("brindle.autopilot.add_checks", return_value="written"):
+    replacement = proposal.replace("pytest -q", "pytest -x")
+    with patch("brindle.autopilot.add_checks", side_effect=lambda *args: db.update_autopilot("r1", proposal=replacement)):
         inbox_action(db, {"id": "r1", "action": "accept"}, {})
+    assert db.get_autopilot("r1").proposal == replacement
+    [_, replaced] = bus.tail(db, kinds=("checks.changed",))
+    inbox_action(db, {"id": "r1", "action": "decline"}, {})
     assert db.get_autopilot("r1").proposal is None
+    [cleared] = bus.tail(db, since_id=replaced["id"], kinds=("checks.changed",))
+    assert (cleared["repo_root"], cleared["agent_id"], cleared["root_id"]) == (ws.repo_root, "r1", "r1")
     db.conn.execute("INSERT INTO session_pr_prep (root_id, branch, sha, state, prepared_at) VALUES (?, ?, ?, ?, ?)",
                     ("r1", ws.branch, "head1", "passed", time.time()))
     head = "head1"

@@ -492,8 +492,14 @@ def inbox_action(db: DB, params: dict, body: Body) -> Any:
         message = ("nothing was written" if action == "decline" else
                    autopilot.add_checks(_workspace(db, a.workspace_id).repo_root, checks,
                                         _get(body, "allow_commands", bool, False)))
-        db.conn.execute("UPDATE autopilot SET proposal = NULL WHERE root_id = ? AND proposal = ?",
-                        (a.id, ap.proposal))
+        with db.tx() as c:
+            cleared = c.execute("UPDATE autopilot SET proposal = NULL WHERE root_id = ? AND proposal = ?",
+                                (a.id, ap.proposal)).rowcount
+
+        # Other connected views need the same notification as update_autopilot.
+        # A replacement's publisher already announces its new decision.
+        if cleared:
+            bus.publish_agent(db, "checks.changed", a.id)
         return {"message": message}
     if action == "answer":
         return {"status": svc.send(db, a.id, _get(body, "text", required=True))}
