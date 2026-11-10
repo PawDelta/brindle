@@ -300,21 +300,52 @@ def test_refreshers_with_different_homes_spend_the_keychain_sign_in_once(tmp_pat
     assert external.load()["refresh_token"] == "cpr_2"
 
 
-def _signing_in(db, store, backend, monkeypatch, on_url=lambda url: None):
+class FakeCallbackServer:
+    """``loopback.CallbackServer`` without a socket: the browser's redirect is
+    ``answer`` (None: none comes until the sign-in is finished from outside)."""
+
+    answer = None
+    redirect_uri = "http://127.0.0.1:49152/callback"
+
+    def __init__(self, state):
+        self.result, self.answered = None, threading.Event()
+
+    def __enter__(self):
+        if self.answer is not None:
+            self.finish(self.answer)
+        return self
+
+    def __exit__(self, *exc):
+        pass
+
+    def finish(self, result):
+        if not self.answered.is_set():
+            self.result = result
+            self.answered.set()
+
+    def wait(self, limit):
+        self.answered.wait(limit)
+        return self.result
+
+
+def _signing_in(db, store, backend, monkeypatch, on_progress=lambda fields: None, answer=None):
     """The daemon's real sign-in route against the fake backend: ``login(**body)``
     posts it; the jobs it starts are held (run one with ``held[i]()``);
-    ``on_url`` sees each authorize URL the job publishes."""
+    ``on_progress`` sees each job.progress published (after it is); the
+    browser's redirect is ``answer`` (see FakeCallbackServer)."""
     from brindle import bus
     from brindle.daemon import routes_actions
+    from brindle.pro import loopback
 
     held, real_publish = [], bus.publish
 
     def publish(db, kind, **fields):
         got = real_publish(db, kind, **fields)
-        if kind == "job.progress" and "url" in fields:
-            on_url(fields["url"])
+        if kind == "job.progress":
+            on_progress(fields)
         return got
 
+    monkeypatch.setattr(loopback, "CallbackServer", type("Server", (FakeCallbackServer,), {"answer": answer}))
     monkeypatch.setattr(bus, "publish", publish)
     monkeypatch.setattr(routes_actions, "_spawn", held.append)
     monkeypatch.setattr(routes_actions, "_SIGN_IN", [])
@@ -330,7 +361,8 @@ def test_a_second_sign_in_request_joins_the_one_waiting_on_the_browser(db, store
     from brindle import bus
 
     urls = threading.Event()
-    login, held = _signing_in(db, store, backend, monkeypatch, on_url=lambda url: urls.set())
+    login, held = _signing_in(db, store, backend, monkeypatch,
+                              on_progress=lambda fields: "url" in fields and urls.set())
     first = login()
     flow = threading.Thread(target=held[0], daemon=True)
     flow.start()
@@ -347,24 +379,27 @@ def test_a_second_sign_in_request_joins_the_one_waiting_on_the_browser(db, store
     assert "POST /cli/token" not in backend.paths()
 
 
-@pytest.mark.parametrize("stage", ["before listening", "code exchange"])
+@pytest.mark.parametrize("stage", ["before listening", "before the URL", "code exchange"])
 def test_a_replaced_browser_sign_in_shows_and_stores_nothing(db, store, backend, monkeypatch, stage):
     """Try again replaces a browser sign-in at any stage: replaced before it
-    listens, it never publishes a URL to open; replaced while its code is
-    exchanged, the tokens it got are revoked, not saved over the new sign-in."""
-    import urllib.parse
-    import urllib.request
+    listens, or while its first progress line is being published, it never
+    publishes a URL to open; replaced while its code is exchanged, the tokens
+    it got are revoked, not saved over the new sign-in."""
     from brindle import bus
+    from brindle.pro import loopback
 
-    def approve_in_browser(url):     # the redirect reaches the loopback with a code
-        q = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(url).query))
-        urllib.request.urlopen(f"{q['redirect_uri']}?code=cac_{'g' * 43}&state={q['state']}").close()
+    replaced = []
 
-    login, held = _signing_in(db, store, backend, monkeypatch, on_url=approve_in_browser)
+    def on_progress(fields):     # the line before the URL: "Opening your browser…"
+        if stage == "before the URL" and "text" in fields and not replaced:
+            replaced.append(login(restart=True))
+
+    login, held = _signing_in(db, store, backend, monkeypatch, on_progress=on_progress,
+                              answer=loopback.CallbackResult(code="cac_" + "g" * 43))
     first = login()
     if stage == "before listening":
         login(restart=True)
-    else:
+    elif stage == "code exchange":
         def exchange(form, headers):
             login(restart=True)
             return 200, backend.issue()
@@ -374,7 +409,7 @@ def test_a_replaced_browser_sign_in_shows_and_stores_nothing(db, store, backend,
     mine = [e for e in bus.tail(db) if e["payload"].get("job") == first.id]
     assert [e["kind"] for e in mine if e["kind"] != "job.progress"] == ["job.failed"]
     assert any("url" in e["payload"] for e in mine) == (stage == "code exchange")
-    assert store.load() is None
+    assert store.load() is None and "POST /device/authorize" not in backend.paths()
     assert ("POST /token/revoke" in backend.paths()) == (stage == "code exchange")
 
 
