@@ -14,7 +14,7 @@ import { BASE_URL, FakeDaemon, TOKEN } from "../../test/fakeDaemon";
 import { REPO, permission, permissionInTerminal, question, root, waiting, worker } from "../../test/fixtures";
 import { Permissions } from "../Settings/Permissions";
 import { InboxScreen, type InboxScreenProps } from "./InboxScreen";
-import { watchInbox } from "./notify";
+import { tauriSink, watchInbox } from "./notify";
 import { usePermissionAsks } from "./PermissionAsks";
 
 afterEach(cleanup);
@@ -230,6 +230,22 @@ describe("inbox", () => {
     act(() => store.dispatch({ type: "snapshot", workspaces: [], inbox: [prReady, prOpened] }));
     expect(notes).toEqual(["Pull request|sup1: PR opened: #408 Ship ls --json · https://github.com/o/r/pull/408|https://github.com/o/r/pull/408"]);
     stop();
+
+    // The real sink: the link rides in the notification, and the Open on GitHub action opens it in the browser.
+    let performed: ((e: { actionId: string; notification: { extra?: Record<string, unknown> } | null }) => void) | undefined;
+    const shown: unknown[] = [];
+    const opened = vi.fn(async () => {});
+    const sink = tauriSink({
+      isPermissionGranted: async () => true,
+      requestPermission: async () => "granted",
+      sendNotification: (o) => shown.push(o),
+      registerActionTypes: async () => {},
+      onAction: async (cb) => { performed = cb; },
+    }, opened);
+    sink.notify("Pull request", "PR opened", "https://github.com/o/r/pull/408");
+    await waitFor(() => expect(shown).toEqual([{ title: "Pull request", body: "PR opened", actionTypeId: "pr-opened", extra: { url: "https://github.com/o/r/pull/408" } }]));
+    performed!({ actionId: "open-github", notification: { extra: { url: "https://github.com/o/r/pull/408" } } });
+    expect(opened).toHaveBeenCalledWith("https://github.com/o/r/pull/408");
   });
 
   it("visual ready card opens the reader and dismisses independently on a read refresh", async () => {

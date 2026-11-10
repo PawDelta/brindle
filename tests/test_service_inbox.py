@@ -232,7 +232,7 @@ def test_pr_opened_by_supervisor_replaces_the_ready_card(db, tmp_path, monkeypat
     # GitHub answering "none open" (closed unmerged) is not "no answer": the recorded PR stops standing.
     pr = {}
     session_review._head_cache.clear()
-    assert cards() == []
+    assert [i.kind for i in cards()] == ["pr_ready"]     # the passed preparation can be opened again
 
 
 class _Done:

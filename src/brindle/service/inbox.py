@@ -219,7 +219,7 @@ def _pr_items(db: DB, root_id: str, branch: str, path: str, link: dict) -> list[
     rows = db.conn.execute(
         "SELECT state, title, check_cmd, output FROM session_pr_prep p WHERE root_id = ? AND branch = ?"
         " AND state IN ('passed', 'failed') AND NOT EXISTS (SELECT 1 FROM session_prs s WHERE"
-        " s.root_id = p.root_id AND s.branch = p.branch AND s.url IS NOT NULL)", (root_id, branch)).fetchall()
+        " s.root_id = p.root_id AND s.branch = p.branch AND s.url IS NOT NULL AND s.merged_at IS NOT NULL)", (root_id, branch)).fetchall()
     declined = db.conn.execute("SELECT sha FROM session_pr_declined WHERE root_id = ? AND branch = ?",
                                (root_id, branch)).fetchone()
     if declined and any(r["state"] == "passed" for r in rows):

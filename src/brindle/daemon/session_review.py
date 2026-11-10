@@ -370,17 +370,29 @@ def head_pr_known_none(sha: str, cwd: str) -> bool:
     return cached is not None and cached[1] == {}
 
 
-def _pr_already_open(db: DB, root_id: str) -> bool:
-    """A recorded, unmerged session PR, or one GitHub's last answer found on the session's HEAD."""
-    if db.conn.execute("SELECT 1 FROM session_prs WHERE root_id = ? AND url IS NOT NULL AND merged_at IS NULL",
-                       (root_id,)).fetchone():
-        return True
+def _pr_open_state(db: DB, root_id: str) -> bool | None:
+    """Whether the session has an open PR: True (one GitHub found on its HEAD, or brindle's recorded
+    one while GitHub hasn't said otherwise), False (GitHub says none is open, or can't be asked), or
+    None while the first look is still on its way."""
     try:
         _, ws = session(db, root_id)
         head = status_cache.read_head(ws.path)
     except (ServiceError, git.GitError, workspaces.WorkspaceError, OSError):
         return False
-    return bool(head and open_pr_for_head(head, ws.path, root_id))
+    if not head:
+        return False
+    found = open_pr_for_head(head, ws.path, root_id)
+    if found:
+        return True
+    with _pr_lock:
+        cached = _head_cache.get((head, ws.path))
+    if cached is None:
+        return None     # asked just now
+    if cached[1] == {}:
+        return False
+    recorded = db.conn.execute("SELECT 1 FROM session_prs WHERE root_id = ? AND url IS NOT NULL AND merged_at IS NULL",
+                               (root_id,)).fetchone()
+    return bool(recorded)
 
 
 def refresh_pr_states(db: DB) -> None:
@@ -1038,6 +1050,7 @@ class ReadinessWatch:
         self.ready: dict[str, bool] | None = None
         self.fingerprints: dict[str, tuple] = {}
         self._tracked: dict[str, tuple[tuple[str, int], list[str] | None]] = {}
+        self.announce: set[str] = set()    # became ready while GitHub's first look at its PR was pending
 
     def _working_tree(self, ws: Workspace, fp: _Fingerprint) -> tuple | None:
         """Stat only tracked paths, including files below nested directories.
@@ -1134,8 +1147,13 @@ class ReadinessWatch:
         if was is None:
             return []
         flipped = [r for r, ok in now.items() if ok and not was.get(r)]
-        for r in flipped:
-            if not _pr_already_open(db, r):     # "open the PR" would be stale advice
+        self.announce = {r for r in self.announce | set(flipped) if now.get(r)}
+        for r in sorted(self.announce):
+            opened = _pr_open_state(db, r)
+            if opened is None:
+                continue        # asked again next sweep: "open the PR" would be stale advice if one exists
+            self.announce.discard(r)
+            if not opened:
                 bus.publish_agent(db, "session.pr_ready", r)
         from brindle.daemon import routes_actions
 

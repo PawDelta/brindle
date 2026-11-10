@@ -60,7 +60,12 @@ def _readiness_reuses_unchanged_sessions(db, tmp_path, monkeypatch, gitlink):
     watch.sweep(db)
     assert watch.ready == {"s": False}
     tracked.write_text("original")
+    looks = iter([None, False])     # GitHub's first look still on its way, then: no PR is open
+    monkeypatch.setattr(review, "_pr_open_state", lambda *a: next(looks))
     assert watch.sweep(db) == ["s"]
+    assert bus.tail(db, kinds=("session.pr_ready",)) == []     # not announced on a guess
+    watch.sweep(db)
+    assert [e["agent_id"] for e in bus.tail(db, kinds=("session.pr_ready",))] == ["s"]   # said once the look answered
     reads.clear()
     monkeypatch.setattr(spawn, "room", lambda: 0)
     monkeypatch.setattr(review, "_merge_polled", 0)
