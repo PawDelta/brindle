@@ -31,7 +31,6 @@ it("an older read that succeeds or fails after a newer one never replaces the ne
   expect(names(result)).toEqual(["previous"]);
 
   rerender({ active: true });
-  await act(async () => reads[2].ok(group("current")));
   act(() => { void result.current.create("user", "a", "private", "owner"); });
   act(() => { void result.current.create("user", "b", "private", "owner"); });
   await act(async () => creates.forEach((done) => done()));
