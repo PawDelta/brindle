@@ -7,6 +7,9 @@ export type VisualsClient = Pick<DaemonClient, "visuals" | "answerVisual" | "dis
 
 /* A planning doc's reads and the person's verdict (brindle/plans.py). */
 export type PlansClient = Pick<DaemonClient, "plan" | "decidePlan">;
+/* What the person writes on the design doc (brindle/plan_docs.py): comments and replies,
+   suggestions and their answers, direct edits, and their pick on a decision. */
+export type PlanDocClient = Pick<DaemonClient, "commentPlan" | "replyPlan" | "resolvePlanThread" | "suggestPlan" | "acceptPlanSuggestion" | "rejectPlanSuggestion" | "editPlan" | "confirmPlan">;
 
 export type KeptVisualsClient = Pick<DaemonClient, "keptVisuals">;
 
