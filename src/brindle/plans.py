@@ -523,6 +523,12 @@ def _record(p: dict, picks: dict, comments: list[dict], note: str | None, titles
         out.append(f"- Decision {d['id']} ({d['title']}): {label}")
     for s in p["split"] or []:
         out.append(f"- Worker {s['id']}: {s['title']}")
+        if s.get("after"):
+            out.append(f"  - after: {', '.join(s['after'])}")
+        if s.get("files"):
+            out.append(f"  - files: {', '.join(s['files'])}")
+        if s.get("test"):
+            out.append(f"  - finish line (test): {s['test']}")
     out += [f"- On \"{titles[c['section']]}\": {c['text']}" for c in comments]
     if note:
         out.append(f"- Their note: {note}")

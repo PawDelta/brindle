@@ -152,7 +152,8 @@ def test_plan_board_links_dispatch_and_reads_recorded_checks(db, session, monkey
     assert (board()[0]["state"], board()[0]["test_state"]) == ("merged", "passing")
 
 
-@pytest.mark.parametrize("status", [200, 500])
+@pytest.mark.parametrize("status", [
+    200, pytest.param(500, marks=pytest.mark.variant("approved-plan integration with an HTTP upload failure"))])
 def test_approved_plan_goes_to_the_library(status, db, session, tmp_path, monkeypatch, backend, fixed_identity):
     from brindle.pro import analysis_docs as ad
     from brindle.pro import auth, credentials
@@ -170,17 +171,18 @@ def test_approved_plan_goes_to_the_library(status, db, session, tmp_path, monkey
     monkeypatch.setattr(ad, "_instances", {str(tmp_path): up})
 
     visual_offers.person_spoke(db, boss, "Make a planning doc.")
-    pid = mcp_server.propose_plan(PLAN, DECISIONS).split()[2]
+    split = [{"id": "w1", "title": "Schema", "files": ["src/brindle/db.py"], "test": "tests/test_x.py::test_a"},
+             {"id": "w2", "title": "UI", "after": ["w1"]}]
+    pid = mcp_server.propose_plan(PLAN, DECISIONS, split).split()[2]
     out = plans.decide(db, pid, 1, True, picks={"d1": "repo"},
                        comments=[{"section": "s1", "text": "Keep it small."}], person=True)
-    assert out["state"] == "approved"             # the upload's outcome never changes the approval
     assert up.flush()
-    if status != 200:
-        return
-    [sent] = backend.docs
+    [sent] = backend.docs                         # exactly one attempt, whatever the answer
+    assert plans.get(db, pid)["state"] == "approved" and out["state"] == "approved"
     assert sent["source"] == {"kind": "goal", "ref": pid, "session": "boss"}
     md = sent["files"][0]["md"]
     assert PLAN in md and "A file in each repo" in md and "Keep it small." in md
+    assert "after: w1" in md and "src/brindle/db.py" in md and "tests/test_x.py::test_a" in md
 
 
 def test_assign_queues_behind_open_plan_until_the_person_approves(db, session, monkeypatch):

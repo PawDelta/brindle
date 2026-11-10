@@ -290,7 +290,7 @@ export function Reader({ client, repo, id, targets, titles, pickFolder, onBack, 
     <section className="flex flex-col gap-s2" aria-label="Doc" data-testid="reader">
       <div className="flex flex-wrap items-center justify-between gap-s1">
         <button type="button" className={quiet} onClick={onBack}>
-          ← Docs
+          ← Plan library
         </button>
         {!local && <div className="relative flex flex-wrap gap-1">
           <button type="button" className={button} disabled={!doc || busy} aria-expanded={menu === "share"} onClick={() => setMenu(menu === "share" ? null : "share")}>
@@ -556,7 +556,7 @@ export function DocsView({ client, repo, session: initialSession, doc, pickFolde
   );
 
   return (
-    <section className="flex flex-col gap-s2" aria-label="Docs" data-testid="docs">
+    <section className="flex flex-col gap-s2" aria-label="Plan library" data-testid="docs">
       <ResultsPanel results={results} error={resultsError} docs={docs} />
       {(session || onBack) && (
         <div className="flex flex-wrap items-center gap-s1" data-testid="session-filter">
@@ -578,7 +578,7 @@ export function DocsView({ client, repo, session: initialSession, doc, pickFolde
         </div>
       )}
       <div className="flex flex-wrap items-center justify-between gap-s1">
-        <input type="search" className={`${field} min-w-56 flex-1`} aria-label="Search docs" placeholder="Search docs: titles, summaries, topics…" value={query} onChange={(e) => setQuery(e.target.value)} />
+        <input type="search" className={`${field} min-w-56 flex-1`} aria-label="Search the plan library" placeholder="Search the plan library: titles, summaries, topics…" value={query} onChange={(e) => setQuery(e.target.value)} />
         <div className="flex flex-wrap gap-1" role="group" aria-label="Scope">
           {chips.map(([spec, name]) => (
             <button key={spec || "all"} type="button" aria-pressed={scope === spec} className={`rounded-full border px-s1 py-0.5 text-xs ${scope === spec ? "border-transparent bg-fawn-soft font-medium text-ink" : "border-line text-ink-2 hover:bg-surface-2"}`} onClick={() => setScope(spec)}>
