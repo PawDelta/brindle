@@ -84,13 +84,17 @@ def forget_refused() -> None:
 # through a file: a restart asks `security` only about names that may be stored (each
 # missing one cost a `security` call). Names only, never values. Nothing is assumed: a
 # name is listed only after a read saw it missing, so an install without the index reads
-# everything once, as before. A save drops its name before and after writing the item and
-# bumps "version"; a read records a miss only if the version is still the one it saw
-# before asking, so a save racing it (in any process) is never hidden. A key stored by
-# other means (an older brindle, Keychain Access) stays unseen until its name leaves the index.
+# everything once, as before. The misses hold only while the keychain files are exactly
+# as they were before those reads (identity, mtime, size: a read leaves them as they are,
+# any write changes them), so a key stored by anything at all (another brindle process,
+# an older brindle that never heard of the index, Keychain Access, a save that died
+# halfway) makes every listed miss read again. brindle's own save and delete carry the
+# misses over to the keychain as they leave it, holding the index lock throughout so no
+# other brindle process writes meanwhile.
 KEYCHAIN_INDEX_FILE = "keychain-index.json"
-_index_lock = threading.RLock()
+_index_lock = threading.RLock()     # held across brindle's own keychain writes
 _index_seen: dict[str, tuple[tuple[int, int, int], dict]] = {}   # path: (file identity, parsed)
+_index_seen_lock = threading.Lock()     # never held for long: lookups don't wait for writes
 
 
 def _index_path() -> Path:
@@ -99,9 +103,34 @@ def _index_path() -> Path:
     return brindle_home() / KEYCHAIN_INDEX_FILE
 
 
+def _keychain_files() -> list[Path]:
+    """The keychain files ``security`` searches by default: the user's keychains and System's."""
+    user = Path.home() / "Library" / "Keychains"
+    try:
+        found = [p for p in user.iterdir() if p.suffix in (".keychain-db", ".keychain")]
+    except OSError:
+        return []
+    return sorted(found) + [Path("/Library/Keychains/System.keychain")]
+
+
+def _keychain_state() -> list | None:
+    """The keychain files' identities, or None when they can't be seen (then no miss is trusted)."""
+    state = []
+    for path in _keychain_files():
+        try:
+            st = os.stat(path)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return None
+        state.append([str(path), st.st_ino, st.st_mtime_ns, st.st_size])
+    return state or None
+
+
 def _index_read() -> dict:
-    """``{"version": int, "absent": {service: [account, ...]}}``; empty when missing or unreadable."""
-    empty = {"version": 0, "absent": {}}
+    """``{"keychain": state | None, "absent": {service: [account, ...]}}``: the misses seen while
+    the keychain files were in ``state``. Empty when missing or unreadable."""
+    empty = {"keychain": None, "absent": {}}
     path = _index_path()
     try:
         fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
@@ -110,7 +139,7 @@ def _index_read() -> dict:
     with os.fdopen(fd, "r", encoding="utf-8", errors="replace") as fh:
         st = os.fstat(fh.fileno())
         sig = (st.st_ino, st.st_mtime_ns, st.st_size)   # replaced whole, so a new file each write
-        with _index_lock:
+        with _index_seen_lock:
             seen = _index_seen.get(str(path))
         if seen is not None and seen[0] == sig:
             return seen[1]
@@ -119,62 +148,91 @@ def _index_read() -> dict:
         except ValueError:
             return empty
     absent = data.get("absent") if isinstance(data, dict) else None
-    if not (isinstance(absent, dict) and isinstance(data.get("version"), int)
+    if not (isinstance(absent, dict) and isinstance(data.get("keychain"), list)
             and all(isinstance(v, list) and all(isinstance(a, str) for a in v) for v in absent.values())):
         return empty
-    with _index_lock:
+    with _index_seen_lock:
         _index_seen[str(path)] = (sig, data)
     return data
 
 
-def _index_update(change) -> None:
-    """Rewrite the index with ``change(index)``, serialized across threads and processes.
-    Raises OSError when it can't."""
-    path = _index_path()
+def _index_misses(service: str) -> tuple[list | None, tuple]:
+    """The keychain's state now, and the misses under ``service`` that still hold in it."""
+    state, index = _keychain_state(), _index_read()
+    return state, (tuple(index["absent"].get(service, ())) if state is not None and index["keychain"] == state else ())
+
+
+@contextlib.contextmanager
+def _index_locked() -> Iterator[bool]:
+    """The index's lock, across threads and processes; False when it couldn't be taken."""
     with _index_lock:
-        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        fd = os.open(path.parent / "keychain-index.lock", os.O_RDWR | os.O_CREAT, 0o600)
-        try:
-            if fcntl is not None:
-                fcntl.flock(fd, fcntl.LOCK_EX)
-            index = _index_read()
-            new = change({"version": index["version"], "absent": {s: list(a) for s, a in index["absent"].items()}})
-            if new is None:
-                return
-            tmp_fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".keychain-index.", suffix=".tmp")
+        fd = None
+        with contextlib.suppress(OSError):
+            path = _index_path()
+            path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            fd = os.open(path.parent / "keychain-index.lock", os.O_RDWR | os.O_CREAT, 0o600)
             try:
-                with os.fdopen(tmp_fd, "w", encoding="utf-8") as fh:
-                    json.dump(new, fh, separators=(",", ":"))
-                    fh.flush()
-                    os.fsync(fh.fileno())
-                os.replace(tmp, path)
-            except BaseException:
-                with contextlib.suppress(FileNotFoundError):
-                    os.unlink(tmp)
-                raise
+                if fcntl is not None:
+                    fcntl.flock(fd, fcntl.LOCK_EX)
+            except OSError:
+                os.close(fd)
+                fd = None
+        try:
+            yield fd is not None
         finally:
-            os.close(fd)     # closing drops the flock
+            if fd is not None:
+                os.close(fd)     # closing drops the flock
 
 
-def _index_note_absent(service: str, account: str, version: int) -> None:
-    def change(index):
-        if index["version"] != version or account in index["absent"].get(service, ()):
-            return None     # a save since this read began: what it saw may be out of date
-        index["absent"].setdefault(service, []).append(account)
-        return index
+def _index_write(index: dict) -> None:
+    path = _index_path()
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".keychain-index.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(index, fh, separators=(",", ":"))
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(tmp)
+        raise
 
-    with contextlib.suppress(OSError):      # unrecorded just means it is read again next time
-        _index_update(change)
+
+def _index_note_absent(service: str, account: str, before: list | None) -> None:
+    """A read begun with the keychain in state ``before`` found the item missing."""
+    if before is None:
+        return
+    with _index_locked() as held:
+        if not held or _keychain_state() != before:
+            return      # written since the read began: a miss under `before` would never hold, and
+                        # writing it would replace misses that still do
+        index = _index_read()
+        absent = index["absent"] if index["keychain"] == before else {}
+        if account in absent.get(service, ()):
+            return
+        absent = {s: list(a) for s, a in absent.items()}
+        absent.setdefault(service, []).append(account)
+        with contextlib.suppress(OSError):      # unrecorded just means it is read again next time
+            _index_write({"keychain": before, "absent": absent})
 
 
-def _index_forget(service: str, account: str) -> None:
-    def change(index):
-        names = index["absent"].get(service, [])
-        index["absent"][service] = [a for a in names if a != account]
-        index["version"] += 1
-        return index
-
-    _index_update(change)
+@contextlib.contextmanager
+def _index_writing(service: str, account: str) -> Iterator[None]:
+    """Around brindle's own write of one item: keep the other misses past the change it makes.
+    Whatever goes wrong, the misses are at worst dropped (the keychain changed), never kept wrongly."""
+    with _index_locked() as held:
+        before = _keychain_state() if held else None
+        try:
+            yield
+        finally:
+            after = _keychain_state()
+            index = _index_read()
+            if before is not None and after is not None and index["keychain"] == before:
+                absent = {s: [a for a in names if (s, a) != (service, account)]
+                          for s, names in index["absent"].items()}
+                with contextlib.suppress(OSError):
+                    _index_write({"keychain": after, "absent": absent})
 
 
 @dataclass
@@ -270,8 +328,8 @@ class KeychainStore:
     A read refused at a dialog, or never answered, stops later reads until the
     person acts (KEYCHAIN_DIALOG_EXITS): polling never repeats a dialog.
     An item a read found missing is listed in the index of missing items
-    (KEYCHAIN_INDEX_FILE) until it is saved, so later lookups, in any process,
-    cost no ``security`` call.
+    (KEYCHAIN_INDEX_FILE) while the keychain files stay unchanged, so later
+    lookups, in any process, cost no ``security`` call.
     """
     name = "keychain"
 
@@ -307,8 +365,8 @@ class KeychainStore:
                 raise CredentialError("the keychain refused an earlier read (locked, or its dialog cancelled), and "
                                       "brindle won't raise that dialog again by itself: once it's unlocked, "
                                       "`brindle keys unblock` lets brindle read it")
-            index = _index_read()
-            if not _uncached_reads.get() and self.account in index["absent"].get(self.service, ()):
+            before, misses = _index_misses(self.service)
+            if not _uncached_reads.get() and self.account in misses:
                 if timing is not None:
                     timing.cached_reads += 1    # seen missing, and not saved since
                 self._read.expires = time.monotonic() + KEYCHAIN_READ_TTL
@@ -322,7 +380,7 @@ class KeychainStore:
                 raise CredentialError("keychain read timed out") from None
             if r.returncode == 44:   # errSecItemNotFound
                 blob, value = None, None
-                _index_note_absent(self.service, self.account, index["version"])
+                _index_note_absent(self.service, self.account, before)
             elif r.returncode != 0:
                 if r.returncode in KEYCHAIN_DIALOG_EXITS:
                     _note_refused()
@@ -343,27 +401,14 @@ class KeychainStore:
             # Invalidate even on failure: a command may have changed the store
             # before reporting an error. Never retain a possibly obsolete secret.
             self._read.invalidate()
-            # Drop the name from the index of missing items before writing (or the item
-            # could be stored but listed missing if this process dies), and again after,
-            # which also voids a miss another process saw while the write ran.
-            try:
-                _index_forget(self.service, self.account)
-            except OSError:
-                raise CredentialError("couldn't update the keychain index") from None
-            try:
+            with _index_writing(self.service, self.account):
                 r = self._run(["-i"], stdin=line)
-            finally:
-                try:
-                    _index_forget(self.service, self.account)
-                except OSError:     # then trust no recorded miss at all
-                    with contextlib.suppress(OSError):
-                        _index_path().unlink(missing_ok=True)
             if r.returncode != 0 or "error" in (r.stderr or "").lower():
                 raise CredentialError(f"keychain write failed (security exit {r.returncode})")
             forget_refused()
 
     def delete(self) -> None:
-        with self._read.lock:
+        with self._read.lock, _index_writing(self.service, self.account):
             self._read.invalidate()
             self._run(["delete-generic-password", "-a", self.account, "-s", self.service])
 
