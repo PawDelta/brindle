@@ -603,7 +603,15 @@ def test_shared_doc_inbox_cards_follow_the_review_and_clear_when_acted_on(db, se
     assert kinds() == [("signed_off", "doc")]
     plan_docs.comment(db, pid, 1, {"kind": "section", "section": "s1"}, "No.", author=plan_docs.TEAMMATE + "a")
     assert kinds() == [("changes_requested", "doc")]
-    me["sub"] = None                                       # logged out: no cards, no error
+    _shared(db, pid, {"rev": 1, "reviewers": ONE, "sign_offs": []})
+    me["sub"] = "a"
+    assert kinds() == []                                   # asking for changes answers the request too
+    me["sub"] = "me"
+    assert kinds() == [("changes_requested", "doc")]
+    with monkeypatch.context() as m:
+        m.setattr(inbox.identity_lock, "locked_by", lambda _id: True)
+        assert kinds() == []                               # another identity's session shows nothing
+    me["sub"] = None                                      # logged out: no cards, no error
     assert kinds() == []
 
 

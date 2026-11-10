@@ -413,7 +413,8 @@ def _review_items(db: DB, repo_root: str | None) -> list[InboxItemDTO]:
             continue
         root = db.get_agent(p["root_id"])
         ws = db.get_workspace(root.workspace_id) if root else None
-        if p["state"] not in plans.HOLDING or (repo_root and ws and ws.repo_root != repo_root):
+        if (p["state"] not in plans.HOLDING or (repo_root and ws and ws.repo_root != repo_root)
+                or (root and identity_lock.locked_by(root.id))):
             continue
         link = {"doc": r["doc_id"], "request_id": p["id"], "agent_id": root.id if root else None,
                 "workspace_id": ws.id if ws else None, "root_id": root.id if root else None}
@@ -426,7 +427,8 @@ def _review_items(db: DB, repo_root: str | None) -> list[InboxItemDTO]:
             elif state == "ready":
                 out.append(InboxItemDTO(kind="signed_off", reason="Signed off", detail=title, **link))
         elif any(x.get("sub") == me for x in review.get("reviewers") or [] if isinstance(x, dict)) \
-                and me not in plans._signed(review):
+                and me not in plans._signed(review) and not any(
+                    x["sub"] == me and x["status"] == plans.CHANGES for x in (plans.gate(db, p) or {}).get("reviewers", [])):
             out.append(InboxItemDTO(kind="review_requested", reason="Review requested", detail=title, **link))
     return out
 
