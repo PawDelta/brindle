@@ -20,15 +20,26 @@ const flush = () => act(async () => { await Promise.resolve(); });
 
 it("an older read that succeeds or fails after a newer one never replaces the newer list", async () => {
   const { client, reads, creates } = fake();
-  const { result } = renderHook(() => useLibraryFolders(client, true));
+  const { result, rerender } = renderHook(({ active }) => useLibraryFolders(client, active), { initialProps: { active: true } });
+  await act(async () => reads[0].ok(group("previous")));
+  expect(names(result)).toEqual(["previous"]);
+  rerender({ active: false });
+  rerender({ active: true });
+  expect(reads).toHaveLength(2);
+  rerender({ active: false });
+  await act(async () => reads[1].ok(group("after close")));
+  expect(names(result)).toEqual(["previous"]);
+
+  rerender({ active: true });
+  await act(async () => reads[2].ok(group("current")));
   act(() => { void result.current.create("user", "a", "private", "owner"); });
   act(() => { void result.current.create("user", "b", "private", "owner"); });
   await act(async () => creates.forEach((done) => done()));
   await flush();
-  expect(reads).toHaveLength(3); // the open read, and a refresh after each create
-  await act(async () => reads[2].ok(group("newest")));
-  await act(async () => reads[1].ok(group("stale success")));
-  await act(async () => reads[0].fail());
+  expect(reads).toHaveLength(5); // the open read, close/reopen read, and two create refreshes
+  await act(async () => reads[4].ok(group("newest")));
+  await act(async () => reads[3].ok(group("stale success")));
+  await act(async () => reads[2].fail());
   await flush();
   expect(names(result)).toEqual(["newest"]);
 });
