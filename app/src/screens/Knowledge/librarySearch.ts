@@ -46,10 +46,10 @@ export function useLibrarySearch(client: SearchClient & Pick<DaemonClient, "doc"
     // Fetch the corpus once, rather than on every keystroke.
   }, [client, docs, repo, Boolean(query)]);
   useEffect(() => {
-    if (!query || !whole || !repo) return;
+    if (!whole || !repo) return;
     let live = true;
     Promise.allSettled([
-      client.decisions?.(repo), client.kbSearch?.(repo, query), client.keptVisuals?.(),
+      client.decisions?.(repo), query ? client.kbSearch?.(repo, query) : undefined, client.keptVisuals?.(),
     ]).then(([decisions, imported, kept]) => {
       if (!live) return;
       const hits: LibraryHit[] = [];
@@ -62,8 +62,11 @@ export function useLibrarySearch(client: SearchClient & Pick<DaemonClient, "doc"
       if (imported.status === "fulfilled" && Array.isArray(imported.value)) {
         const seen = new Set<string>();
         for (const d of imported.value) {
-          if (seen.has(d.external_id)) continue;
-          seen.add(d.external_id);
+          // Relative paths are shared across sources. Without a URL the
+          // chunk id preserves distinct results rather than guessing a doc.
+          const identity = JSON.stringify(d.url ? ["url", d.url] : ["chunk", d.chunk_id]);
+          if (seen.has(identity)) continue;
+          seen.add(identity);
           hits.push({ id: `imported:${d.chunk_id}`, title: d.title || d.external_id, type: "imported", text: d.text, changed: d.updated_at ?? undefined });
         }
       }
@@ -80,7 +83,7 @@ export function useLibrarySearch(client: SearchClient & Pick<DaemonClient, "doc"
   return {
     details: details?.docs === docs ? details.values : undefined,
     hits: whole && sources?.query === query && sources.repo === repo ? sources.hits : [],
-    searching: !!query && ((docs.length > 0 && details?.docs !== docs) || (whole && !!repo && (sources?.query !== query || sources.repo !== repo))),
+    searching: (!!query && docs.length > 0 && details?.docs !== docs) || (whole && !!repo && (sources?.query !== query || sources.repo !== repo)),
     incomplete: failedDocs === docs || (whole && sources?.query === query && sources.repo === repo && sources.error),
   };
 }

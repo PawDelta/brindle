@@ -632,8 +632,8 @@ export function DocsView({ client, repo, session: initialSession, doc, pickFolde
         <label className="text-sm">Changed <select aria-label="Changed" className={field} value={changed} onChange={(e) => setChanged(e.target.value)}><option value="">Any time</option><option value="1">Last day</option><option value="7">Last week</option><option value="30">Last month</option></select></label>
         <button type="button" className={quiet} onClick={() => { setQuery(""); setType("all"); setScope(""); setTopic(""); setCategory(""); setAuthor(""); setChanged(""); setSession(undefined); }}>Clear</button>
       </div>
-      {q && <p role="status" className="text-xs text-ink-3">{search.searching ? "Searching…" : `${shown.length + sourceHits.length} matches`}{search.incomplete && " · Some sources could not be searched."}</p>}
-      {!q && type !== "all" && type !== "designs" && <p className="text-sm text-ink-2">Enter a search to find {type === "imported" ? "imported docs" : type === "kept" ? "kept visuals" : "decisions"}.</p>}
+      {(q || search.searching || search.incomplete) && <p role="status" className="text-xs text-ink-3">{search.searching ? "Searching…" : `${shown.length + sourceHits.length} matches`}{search.incomplete && " · Some sources could not be searched."}</p>}
+      {!q && type === "imported" && <p className="text-sm text-ink-2">Enter a search to find imported docs.</p>}
       {listing.state === "unavailable" && (
         <div className={`${card} flex flex-col gap-1 px-s2 py-s2 text-sm`} data-testid="docs-unavailable">
           <h2 className={h2}>No designs available</h2>
@@ -662,7 +662,7 @@ export function DocsView({ client, repo, session: initialSession, doc, pickFolde
           </nav>
           <div className="flex min-w-0 flex-col gap-s1">
             {listing.state === "loading" && <p className="text-sm text-ink-3">Loading…</p>}
-            {listing.state === "loaded" && docs.length === 0 && !q && <div data-testid="library-empty" className={`${card} flex flex-col gap-s1 px-s3 py-s3`}><h2 className={h2}>No designs saved yet</h2><p className="text-sm text-ink-2">Plans you approve and designs you share are saved here, with the record of what was agreed and why.</p><ol className="list-decimal pl-s2 text-sm text-ink-2"><li>Ask for a plan in a session.</li><li>Review it and approve the design.</li><li>Find it here when you need it again.</li></ol></div>}
+            {listing.state === "loaded" && docs.length === 0 && sourceHits.length === 0 && !search.searching && !q && <div data-testid="library-empty" className={`${card} flex flex-col gap-s1 px-s3 py-s3`}><h2 className={h2}>No designs saved yet</h2><p className="text-sm text-ink-2">Plans you approve and designs you share are saved here, with the record of what was agreed and why.</p><ol className="list-decimal pl-s2 text-sm text-ink-2"><li>Ask for a plan in a session.</li><li>Review it and approve the design.</li><li>Find it here when you need it again.</li></ol></div>}
             {listing.state === "loaded" && (docs.length > 0 || q) && shown.length === 0 && sourceHits.length === 0 && !search.searching && <p className="text-sm text-ink-2">No doc matches.</p>}
             {shown.length > 0 && <div className="grid grid-cols-[minmax(0,1fr)_7rem_6rem] gap-s2 border-b border-line px-s2 text-xs text-ink-3"><span>Design</span><span>Session</span><span className="text-right">Changed</span></div>}
             {shown.length > 0 && !shown.some((d) => d.category) && <ul className="flex flex-col">{shown.map(docRow)}</ul>}

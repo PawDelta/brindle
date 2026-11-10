@@ -83,7 +83,13 @@ describe("docs view", () => {
         : path === "/analysis-docs/topics" ? { topics: [] }
         : path === "/analysis-docs/scopes" ? { scopes: SCOPES }
         : path === "/decisions" ? [{ id: "dec", topic: "SQLite", body: "Use SQLite", rationale: "Atomic journal", created_at: 1760000000 }]
-        : path === "/kb/search" ? [{ chunk_id: "c1", external_id: "docs/runbook.md", title: "SQLite runbook", text: "SQLite recovery procedure", updated_at: 1760000000 }]
+        : path === "/kb/search" ? [
+          { chunk_id: "c1", external_id: "README.md", url: "file:///docs/a/README.md", title: "SQLite runbook", text: "SQLite recovery procedure", updated_at: 1760000000 },
+          { chunk_id: "c1b", external_id: "README.md", url: "file:///docs/a/README.md", title: "SQLite runbook", text: "Another SQLite passage", updated_at: 1760000000 },
+          { chunk_id: "c2", external_id: "README.md", url: "file:///docs/b/README.md", title: "SQLite operations", text: "SQLite maintenance", updated_at: 1760000000 },
+          { chunk_id: "c3", external_id: "README.md", url: null, title: "SQLite notes", text: "SQLite notes without a URL", updated_at: 1760000000 },
+          { chunk_id: "c4", external_id: "README.md", url: null, title: "SQLite checklist", text: "SQLite checklist without a URL", updated_at: 1760000000 },
+        ]
         : path === "/kept-visuals" ? [
           { id: "k1", title: "SQLite layout", repo: "/r", from_session_name: "Recovery", kept_at: 1760000000 },
           { id: "k2", title: "SQLite private layout", repo: "/other", from_session_name: "Other", kept_at: 1760000000 },
@@ -94,6 +100,13 @@ describe("docs view", () => {
     } });
     render(<DocsView client={api} repo="/r" />);
     await waitFor(() => expect(shown()).toEqual(["d1", "d2"]));
+    await waitFor(() => expect([...screen.getByTestId("docs").querySelectorAll("[data-library-hit]")].map((li) => li.getAttribute("data-library-hit"))).toEqual(["decision:dec", "kept:k1"]));
+    fireEvent.change(screen.getByRole("combobox", { name: "Type" }), { target: { value: "decisions" } });
+    expect(shown()).toEqual([]);
+    expect([...screen.getByTestId("docs").querySelectorAll("[data-library-hit]")].map((li) => li.getAttribute("data-library-hit"))).toEqual(["decision:dec"]);
+    fireEvent.change(screen.getByRole("combobox", { name: "Type" }), { target: { value: "kept" } });
+    expect([...screen.getByTestId("docs").querySelectorAll("[data-library-hit]")].map((li) => li.getAttribute("data-library-hit"))).toEqual(["kept:k1"]);
+    fireEvent.click(screen.getByRole("button", { name: "Clear" }));
     expect(screen.queryByTestId("results")).toBeNull();
     expect(screen.queryByRole("combobox", { name: "Reviewer" })).toBeNull();
     fireEvent.change(screen.getByRole("combobox", { name: "Author" }), { target: { value: "person" } });
@@ -108,15 +121,16 @@ describe("docs view", () => {
     await waitFor(() => expect(screen.getByTestId("docs").querySelector('[data-doc="d1"]')?.textContent).toContain("Store the journal in SQLite."));
     fireEvent.click(screen.getByRole("button", { name: "Clear" }));
     fireEvent.change(box, { target: { value: "sqlite" } });
-    await waitFor(() => expect(screen.getByTestId("docs").querySelectorAll("[data-library-hit]").length).toBe(3));
+    await waitFor(() => expect(screen.getByTestId("docs").querySelectorAll("[data-library-hit]").length).toBe(6));
+    expect([...screen.getByTestId("docs").querySelectorAll('[data-library-hit^="imported:"]')].map((li) => li.getAttribute("data-library-hit"))).toEqual(["imported:c1", "imported:c2", "imported:c3", "imported:c4"]);
     expect(screen.getByTestId("docs").querySelector('[data-library-hit="kept:k2"]')).toBeNull();
     fireEvent.change(screen.getByRole("combobox", { name: "Shared" }), { target: { value: "user" } });
     expect(screen.getByTestId("docs").querySelectorAll("[data-library-hit]").length).toBe(0);
     fireEvent.click(screen.getByRole("button", { name: "Search whole Library" }));
-    await waitFor(() => expect(screen.getByTestId("docs").querySelectorAll("[data-library-hit]").length).toBe(3));
+    await waitFor(() => expect(screen.getByTestId("docs").querySelectorAll("[data-library-hit]").length).toBe(6));
     fireEvent.change(screen.getByRole("combobox", { name: "Type" }), { target: { value: "imported" } });
     expect(shown()).toEqual([]);
-    fireEvent.click(within(screen.getByTestId("docs").querySelector<HTMLElement>("[data-library-hit]")!).getByRole("button"));
+    fireEvent.click(within(screen.getByTestId("docs").querySelector<HTMLElement>('[data-library-hit="imported:c1"]')!).getByRole("button"));
     expect((await screen.findByTestId("doc-body")).textContent).toContain("SQLite recovery procedure");
     fireEvent.click(screen.getByRole("button", { name: "← Library" }));
     fireEvent.change(screen.getByRole("combobox", { name: "Type" }), { target: { value: "decisions" } });
