@@ -1192,7 +1192,7 @@ export interface VisualDTO {
   created_at: number;
   id: string;
   kept: boolean;
-  kind: "visual" | "plan";
+  kind: "visual" | "plan" | "analysis_doc";
   options?: VisualOptionDTO[] | null;
   question?: string | null;
   rev: number;

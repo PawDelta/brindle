@@ -281,7 +281,7 @@ class VisualDTO(_DTO):
     accepts_files: bool
     title: str
     by: str
-    kind: Literal["visual", "plan"]
+    kind: Literal["visual", "plan", "analysis_doc"]
     rev: int
     question: str | None = None
     options: list[VisualOptionDTO] | None = None

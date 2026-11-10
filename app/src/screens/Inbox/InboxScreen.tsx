@@ -51,7 +51,7 @@ import { AppUpdateCard } from "./AppUpdateItem";
 import { ItemActions } from "./ItemActions";
 import { PermissionAsks, PermissionItemCard, usePermissionAsks } from "./PermissionAsks";
 import { StorageNudge } from "./StorageNudge";
-import { FIXES, KIND_SHORT, askKey, describeItem, fixable, forgetGone, itemKey, kindLabel, markShown, pruneShown, seenAt, seenKey, shownKeys, unseenKeys } from "./items";
+import { FIXES, KIND_SHORT, askKey, describeItem, fixable, forgetGone, itemKey, kindLabel, markShown, opensVisual, pruneShown, seenAt, seenKey, shownKeys, unseenKeys } from "./items";
 import { useInboxActions } from "./useInboxActions";
 
 export interface InboxScreenProps {
@@ -186,7 +186,7 @@ export function InboxScreen({ client, refresh, onOpen, onNavigate, session = nul
   /* A visual decision opens its reader; other items open the agent or the requested sheet. */
   const goTo = (item: InboxItemDTO, sheet?: SheetRef) => {
     const where = sessionOf(item);
-    if (!sheet && item.kind === "visual" && item.visual_id) {
+    if (!sheet && opensVisual(item) && item.visual_id) {
       sheet = { kind: "visual", id: item.visual_id };
     }
     if (where && onOpen) onOpen(where.root, where.repo, item.agent_id ?? undefined, ...(sheet ? [sheet] : []));
@@ -375,11 +375,11 @@ function Banner({ item, actions, who, branch, sessionTitle, repo, isNew, onDone,
         {item.kind === "pr_ready" && act("Not now", "pr-not-now", {}, GHOST)}
       </>
     );
-  } else if (item.kind === "visual") {
+  } else if (opensVisual(item)) {
     // A visual decision opens its reader (goTo), not the session it belongs to; disabled until that session has loaded.
     acts = (
       <button type="button" className={`${button} text-xs`} disabled={!onGo} onClick={onGo}>
-        Open visual
+        {item.kind === "analysis_doc" ? "Open doc" : "Open visual"}
       </button>
     );
   } else {
@@ -412,7 +412,7 @@ function Banner({ item, actions, who, branch, sessionTitle, repo, isNew, onDone,
       <div className="col-span-2 mt-1 flex flex-wrap items-center gap-1.5">
         {acts}
         <span className="flex-1" />
-        {onGo && item.kind !== "doc" && item.kind !== "visual" && (
+        {onGo && item.kind !== "doc" && !opensVisual(item) && (
           <button type="button" className={`${button} text-xs whitespace-nowrap`} onClick={onGo}>
             Go to session ›
           </button>
