@@ -358,19 +358,23 @@ def test_a_start_brings_sessions_back_at_once_most_recently_active_first(db, roo
     assert set(began[:2]) == {"recent", "older"} and set(began[2:]) == {"same-tmux", "oldest"}
 
 
-@pytest.mark.parametrize("hangs", [False, True], ids=["back", "hung"])
-def test_viewed_session_comes_back_first(db, root, monkeypatch, hangs):
+@pytest.mark.parametrize("case", ["back", "hung", "switched", pytest.param("unreadable", marks=pytest.mark.variant(
+    "a viewed-session file that isn't UTF-8 raised past the OSError handler and stopped every session coming back"))])
+def test_viewed_session_comes_back_first(db, root, monkeypatch, case):
     """The session the app showed last comes back first and alone, though it
     was the least recently at work; if it hangs, the others start once its
-    head start is over rather than wait on it."""
+    head start is over rather than wait on it, and at once if the person opens
+    another meanwhile. A record of it that can't be read loses nothing."""
     import threading
 
     from brindle.daemon import lifecycle
 
     _recorded_sessions(db, root, monkeypatch, [("recent", "a"), ("older", "b"), ("viewed", "c")])
     lifecycle.record_viewed("viewed")
-    if hangs:
-        monkeypatch.setattr(lifecycle, "VIEWED_HEAD_START", 0)
+    hangs = case in ("hung", "switched")
+    monkeypatch.setattr(lifecycle, "VIEWED_HEAD_START", 0 if case == "hung" else 60)
+    if case == "unreadable":
+        lifecycle._viewed_path().write_bytes(b"\xff\xfe")
     recovery, lock = lifecycle.Recovery(), threading.Lock()
     others_begun, viewed_done = threading.Event(), threading.Event()
     waiting, began = [], []
@@ -378,6 +382,8 @@ def test_viewed_session_comes_back_first(db, root, monkeypatch, hangs):
     def resume(db_, root_id, **kw):
         if root_id == "viewed":
             waiting.append(len(recovery.lanes))     # the others' lanes, not begun yet
+            if case == "switched":
+                recovery.prioritize("older")
             if hangs:
                 others_begun.wait(10)
             waiting.append(len(recovery.lanes))
@@ -392,7 +398,7 @@ def test_viewed_session_comes_back_first(db, root, monkeypatch, hangs):
     assert sorted(lifecycle.resume_after_start(recovery)) == ["older", "recent", "viewed"]
     if hangs:
         assert sorted(began) == [("older", False), ("recent", False)]  # begun while it hung
-    else:
+    elif case == "back":
         assert waiting == [2, 2] and all(done for _, done in began)     # none begun beside it
 
 
@@ -986,7 +992,8 @@ def test_resume_launch_step_timing(db, root, monkeypatch, caplog):
         "provider": "codex", "command_s": 4.0, "codex_trust_s": 0.25}
 
 
-def test_recovery_opened_session_first(db, root, monkeypatch):
+@pytest.mark.parametrize("early", [False, True], ids=["while-busy", "before-ordered"])
+def test_recovery_opened_session_first(db, root, monkeypatch, early):
     from starlette.applications import Starlette
     from starlette.routing import Route
     from starlette.testclient import TestClient
@@ -996,6 +1003,11 @@ def test_recovery_opened_session_first(db, root, monkeypatch):
     _recorded_sessions(db, root, monkeypatch, [("busy", "a"), ("second", "b"), ("opened", "c")])
     monkeypatch.setattr(lifecycle, "RESUME_PARALLEL", 1)
     recovery, inside, go, order = lifecycle.Recovery(), threading.Event(), threading.Event(), []
+    if early:   # opened while the start still puts its sessions in order (the app already lists them pending)
+        real_order = lifecycle._most_recent_first
+        monkeypatch.setattr(lifecycle, "_most_recent_first",
+                            lambda db_, entries: recovery.prioritize("opened") or real_order(db_, entries))
+        go.set()
 
     def resume(db_, root_id, **kw):
         order.append(root_id)
@@ -1014,7 +1026,7 @@ def test_recovery_opened_session_first(db, root, monkeypatch):
             assert client.post("/p", json={"root": opened}).status_code == 200
     go.set()
     start.join(10)
-    assert order == ["busy", "opened", "second"]
+    assert order == (["opened", "busy", "second"] if early else ["busy", "opened", "second"])
 
 
 @pytest.mark.variant("generated child shell must refuse to execute its payload when its tmux ownership write fails")
