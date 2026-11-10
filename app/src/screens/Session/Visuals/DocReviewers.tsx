@@ -9,6 +9,7 @@ import type { DocScope, LibraryPerson, Plan, PlanReviewerChoice } from "../../..
 import type { PlanGateRowDTO } from "../../../api/schema";
 import { button, field, main, quiet } from "../../../components/ui";
 import type { PlanSharingClient } from "./client";
+import { Policies } from "./DocPolicies";
 
 const STATUS: Record<PlanGateRowDTO["status"], { text: string; tone: string }> = {
   signed_off: { text: "✓ signed off", tone: "text-pass" },
@@ -20,10 +21,11 @@ const STATUS: Record<PlanGateRowDTO["status"], { text: string; tone: string }> =
 const people = (plan: Plan): PlanReviewerChoice[] =>
   (plan.gate?.reviewers ?? []).flatMap((r) => (r.sub ? [{ sub: r.sub, required: r.required }] : []));
 
-export function Reviewers({ plan, client, directory, scopes, busy, nameOf, write }: {
+export function Reviewers({ plan, client, directory, adminOrg, scopes, busy, nameOf, write }: {
   plan: Plan;
   client?: PlanSharingClient;
   directory: LibraryPerson[];
+  adminOrg: string | null;
   scopes: DocScope[];
   busy: boolean;
   nameOf(sub: string): string;
@@ -62,7 +64,8 @@ export function Reviewers({ plan, client, directory, scopes, busy, nameOf, write
       <dd className="m-0 grid gap-1.5" data-testid="plan-reviewers">
         {!draft && (
           <div className="flex flex-wrap items-center gap-x-3.5 gap-y-1">
-            {gate?.reviewers?.map((r) => {
+            {/* An org rule's own row is in the locked list below, so it isn't shown twice. */}
+            {gate?.reviewers?.filter((r) => r.sub || !gate.policies?.length).map((r) => {
               const key = r.sub ?? r.name ?? "";
               return (
                 <span key={key} className="inline-flex flex-wrap items-center gap-1.5" data-testid={`plan-reviewer-${key}`} data-status={r.status} data-required={r.required}>
@@ -81,6 +84,7 @@ export function Reviewers({ plan, client, directory, scopes, busy, nameOf, write
             )}
           </div>
         )}
+        <Policies plan={plan} client={client} directory={directory} adminOrg={adminOrg} busy={busy} nameOf={nameOf} write={write} />
         {draft && (
           <div className="grid max-w-[60ch] gap-2 rounded-md border border-line p-2.5" data-testid="plan-reviewers-edit" data-stale={stale || undefined}>
             {!gate && (

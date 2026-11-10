@@ -514,6 +514,17 @@ export interface LibraryPerson {
   email: string;
 }
 
+/* An org admin's waiver of a review rule for one revision, or a stand-in for it until `until` (Unix seconds). */
+export interface PlanPolicyOverride {
+  rev: number;
+  org_id: string;
+  policy: string;
+  action: "waive" | "stand_in";
+  reason: string;
+  stand_in?: string;
+  until?: number;
+}
+
 export interface DocScope {
   kind: string;
   id: string;
@@ -1783,9 +1794,14 @@ export class DaemonClient {
     return this.post<Plan>(`/plans/${encodeURIComponent(id)}/sign-off`, { rev });
   }
 
-  /* The people of the person's org, to pick reviewers from. */
+  /* An org admin's waiver of a review rule, or a stand-in for it. The Library checks they are an admin. */
+  overridePlanPolicy(id: string, override: PlanPolicyOverride) {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/policy-override`, override);
+  }
+
+  /* The people of the person's org, to pick reviewers from; admin_org, the org whose rules they can override. */
   libraryPeople() {
-    return this.get<{ people: LibraryPerson[] }>("/library/people");
+    return this.get<{ people: LibraryPerson[]; admin_org?: string | null }>("/library/people");
   }
 
   async keptVisuals(): Promise<KeptVisualDTO[]> {

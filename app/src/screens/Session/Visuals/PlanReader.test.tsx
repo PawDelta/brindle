@@ -299,6 +299,38 @@ it("a design doc's build button follows the gate: reviewers listed, disabled wit
   expect(decided).toEqual([true]);
 });
 
+it("org policies are locked rows that show a waiver, and only an admin of that org is offered an override", async () => {
+  const policy = (name: string, more = {}) => ({ org_id: "org_1", policy: name, name, approvals: 1, eligible: 6, needs_kind: "team", needs_name: "Security", when: "paths", matched: ["billing/meter.py"], status: "waiting" as const, ...more });
+  const signed = { sub: "u_b", required: true, status: "signed_off" as const };
+  const held = { sub: null, name: "security", required: true, status: "waiting" as const };
+  const plan = doc(1, "Workers run on your machine.", { gate: { state: "waiting", reason: "Waiting on security (1 of 2 required sign-offs).", required: 2, signed: 1, waiting_on: ["security"], reviewers: [signed, held],
+    policies: [policy("security"), policy("staff", { status: "waived", waiver: { by: "dana", reason: "Offsite" } })] } });
+  const overrides: unknown[] = [];
+  const sharing = (admin: string | null) => ({ sharePlan: async () => plan, setPlanReviewers: async () => plan, syncPlan: async () => plan, signOffPlan: async () => plan, docScopes: async () => ({ scopes: [] }),
+    libraryPeople: async () => ({ people: [{ sub: "sam", email: "sam@x" }], admin_org: admin }),
+    overridePlanPolicy: async (_id: string, body: unknown) => { overrides.push(body); return plan; } });
+  const open = (admin: string | null) => render(<PlanReader client={{ ...visuals, ...docWrites(() => plan), plan: async () => plan, decidePlan: async () => plan, ...sharing(admin) }} visual={visual} onBack={() => {}} onChanged={() => {}} />);
+
+  const member = open(null);
+  const row = await screen.findByTestId("plan-policy-security");
+  await screen.findByText("Blocked by org policy");
+  expect(screen.queryByTestId("plan-reviewer-security")).toBeNull();
+  expect(screen.getByTestId("plan-policy-staff").dataset.status).toBe("waived");
+  expect(screen.getByTestId("plan-policy-staff").textContent).toContain("Offsite");
+  await act(async () => {});
+  expect(within(row).queryByRole("button", { name: "Waive once" })).toBeNull();
+  member.unmount();
+
+  open("org_1");
+  const adminRow = await screen.findByTestId("plan-policy-security");
+  await within(adminRow).findByRole("button", { name: "Waive once" });
+  expect(within(screen.getByTestId("plan-policy-staff")).queryByRole("button", { name: "Waive once" })).toBeNull();
+  fireEvent.click(within(adminRow).getByRole("button", { name: "Waive once" }));
+  fireEvent.change(within(adminRow).getByRole("textbox", { name: "Reason" }), { target: { value: "Offsite" } });
+  await act(async () => fireEvent.click(within(screen.getByTestId("plan-policy-override-security")).getByRole("button", { name: "Waive once" })));
+  expect(overrides).toEqual([{ rev: 1, org_id: "org_1", policy: "security", action: "waive", reason: "Offsite" }]);
+});
+
 it("a design doc edit or comment begun on older text isn't sent over a newer revision's", async () => {
   let now = doc(1, "Workers run on your machine.");
   const calls: string[] = [];

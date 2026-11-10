@@ -270,9 +270,21 @@ def plan_sign_off(db: DB, params: dict, body: dict) -> Any:
     return _library(db, params["id"], lambda sd: sd.sign_off(db, params["id"], body.get("rev")))
 
 
+def plan_policy_override(db: DB, params: dict, body: dict) -> Any:
+    """An org admin's waiver of a review rule, or a stand-in for it. Like
+    decide, only the person reaches this; the Library checks they are an admin."""
+    from brindle.pro import review_policies
+
+    return _library(db, params["id"], lambda sd: review_policies.override(
+        db, params["id"], body.get("rev"), body.get("org_id"), body.get("policy"), body.get("action"),
+        body.get("reason"), stand_in=body.get("stand_in"), until=body.get("until")))
+
+
 @_json
 def library_people(db: DB, request: Request) -> Any:
-    """The people of the person's org, to pick reviewers from."""
+    """The people of the person's org, to pick reviewers from. ``admin_org``:
+    the org whose review rules the doc offers them an override of. Only what
+    to show: the Library decides who may."""
     from urllib.parse import quote
 
     from brindle.daemon import routes_actions as actions
@@ -282,7 +294,8 @@ def library_people(db: DB, request: Request) -> Any:
         return {"people": []}
     members = actions.docs_api("GET", f"/orgs/{quote(ent.org_id, safe='')}/members").get("members")
     return {"people": [{"sub": m["sub"], "email": m.get("email") or ""} for m in members or []
-                       if isinstance(m, dict) and isinstance(m.get("sub"), str) and m["sub"] != ent.sub]}
+                       if isinstance(m, dict) and isinstance(m.get("sub"), str) and m["sub"] != ent.sub],
+            "admin_org": ent.org_id if ent.role in ("owner", "admin") else None}
 
 
 @_json
@@ -328,6 +341,7 @@ ROUTES = [
     Route("/v1/plans/{id}/reviewers", _endpoint(plan_reviewers), methods=["POST"]),
     Route("/v1/plans/{id}/sync", _endpoint(plan_sync), methods=["POST"]),
     Route("/v1/plans/{id}/sign-off", _endpoint(plan_sign_off), methods=["POST"]),
+    Route("/v1/plans/{id}/policy-override", _endpoint(plan_policy_override), methods=["POST"]),
     Route("/v1/library/people", library_people),
     Route("/v1/kept-visuals", kept_list),
     Route("/v1/kept-visuals/{id}", kept_one),
