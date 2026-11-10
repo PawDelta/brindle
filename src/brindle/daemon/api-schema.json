@@ -5911,8 +5911,16 @@
           "type": "object"
         },
         "PlanGateRowDTO": {
-          "description": "One row of a plan's build gate: a reviewer (``sub``) or an org review\nrule no one on the list meets (``name``). ``meets``: the rules this\nreviewer's sign-off also counts for. ``met_by``: who met a rule.",
+          "description": "One row of a plan's build gate: a reviewer (``sub``) or an org review\nrule no one on the list meets (``name``). ``meets``: the rules this\nreviewer's sign-off also counts for. ``met_by``: who met a rule.\n``changes_by``: the rule's signers who have since asked for changes.",
           "properties": {
+            "changes_by": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Changes By",
+              "type": "array"
+            },
             "meets": {
               "default": [],
               "items": {
@@ -6690,8 +6698,16 @@
     "PlanGateDTO": {
       "$defs": {
         "PlanGateRowDTO": {
-          "description": "One row of a plan's build gate: a reviewer (``sub``) or an org review\nrule no one on the list meets (``name``). ``meets``: the rules this\nreviewer's sign-off also counts for. ``met_by``: who met a rule.",
+          "description": "One row of a plan's build gate: a reviewer (``sub``) or an org review\nrule no one on the list meets (``name``). ``meets``: the rules this\nreviewer's sign-off also counts for. ``met_by``: who met a rule.\n``changes_by``: the rule's signers who have since asked for changes.",
           "properties": {
+            "changes_by": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Changes By",
+              "type": "array"
+            },
             "meets": {
               "default": [],
               "items": {
@@ -6818,8 +6834,16 @@
       "type": "object"
     },
     "PlanGateRowDTO": {
-      "description": "One row of a plan's build gate: a reviewer (``sub``) or an org review\nrule no one on the list meets (``name``). ``meets``: the rules this\nreviewer's sign-off also counts for. ``met_by``: who met a rule.",
+      "description": "One row of a plan's build gate: a reviewer (``sub``) or an org review\nrule no one on the list meets (``name``). ``meets``: the rules this\nreviewer's sign-off also counts for. ``met_by``: who met a rule.\n``changes_by``: the rule's signers who have since asked for changes.",
       "properties": {
+        "changes_by": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Changes By",
+          "type": "array"
+        },
         "meets": {
           "default": [],
           "items": {

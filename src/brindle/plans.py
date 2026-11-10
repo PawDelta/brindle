@@ -25,12 +25,12 @@ Visuals setting: that only governs offers.
 A plan shared for team review (brindle.pro.shared_docs) has a build gate
 (``gate``): it opens when every required reviewer and org review rule has
 signed off the revision on screen. One sign-off counts for every rule it
-meets. A required reviewer's open comment or suggestion written after their
-sign-off is how they ask for changes (the Library has no verdict of its own),
-and blocks it too. While the gate is closed Approve is refused, assign is
-refused, and queued tasks stay queued, even with no app connected: teammates
-sign off from their own machines, so the wait isn't on a verdict nobody can
-give. Approving closes the review."""
+meets. A reviewer's or rule signer's open comment or suggestion written after
+their sign-off is how they ask for changes (the Library has no verdict of its
+own), and blocks it too. While the gate is closed Approve is refused and
+assign is refused. A shared plan's queued tasks wait for its approval even
+with no app connected: only that approval checks the Library, starts them and
+closes the review."""
 
 from __future__ import annotations
 
@@ -290,30 +290,42 @@ def _gate(c, p: dict) -> dict | None:
         "SELECT author, MAX(created_at) AS at FROM plan_threads WHERE plan_id=? AND parent_id IS NULL"
         " AND status='open' AND author LIKE ? GROUP BY author", (p["id"], TEAMMATE + "%"))}
 
+    def asked_since(sub: str) -> bool:
+        return sub in asked and asked[sub] > signed.get(sub, -1)
+
     def status(sub: str) -> str:
-        if sub in asked and asked[sub] > signed.get(sub, -1):
+        if asked_since(sub):
             return CHANGES
         return SIGNED if sub in signed else WAITING
 
-    rows = [{"sub": sub, "name": None, "required": required, "status": status(sub), "met_by": [], "meets": [],
-             "you": sub == row["owner"]} for sub, required in people.items()]
+    rows = [{"sub": sub, "name": None, "required": required, "status": status(sub), "met_by": [], "changes_by": [],
+             "meets": [], "you": sub == row["owner"]} for sub, required in people.items()]
     by_sub = {r["sub"]: r for r in rows}
     for rule in rules:
         name = str(rule.get("name") or rule.get("policy") or "An org review rule")
         state = _RULE_STATUS.get(rule.get("status"), WAITING) if current else WAITING
+        met_by = (rule.get("met_by") or []) if current else []
+        # A signer who has since asked for changes no longer counts towards the
+        # rule, even one who isn't on the reviewer list. A waiver stands.
+        withdrawn = [s for s in met_by if asked_since(s)] if state == SIGNED else []
+        approvals = rule.get("approvals") if isinstance(rule.get("approvals"), int) else 1
+        if withdrawn:
+            met_by = [s for s in met_by if s not in withdrawn]
+            if len(met_by) < approvals:
+                state = CHANGES
         listed = [by_sub[s] for s in rule.get("on_list") or [] if s in by_sub and by_sub[s]["required"]]
         # Someone already on the list adds no second sign-off, unless their
         # signing didn't meet the rule (an author can't sign for a team's).
-        if listed and rule.get("approvals", 1) == 1 and (state in _MET or any(r["status"] != SIGNED for r in listed)):
+        if listed and approvals == 1 and (state in _MET or any(r["status"] != SIGNED for r in listed)):
             for r in listed:
                 r["meets"].append(name)
         else:
-            rows.append({"sub": None, "name": name, "required": True, "status": state,
-                         "met_by": (rule.get("met_by") or []) if current else [], "meets": [], "you": False})
+            rows.append({"sub": None, "name": name, "required": True, "status": state, "met_by": met_by,
+                         "changes_by": withdrawn if state == CHANGES else [], "meets": [], "you": False})
     required = [r for r in rows if r["required"]]
     met = sum(r["status"] in _MET for r in required)
     unmet = [r["sub"] or r["name"] for r in required if r["status"] not in _MET]
-    changes = [r["sub"] for r in required if r["status"] == CHANGES]
+    changes = [who for r in required if r["status"] == CHANGES for who in ([r["sub"]] if r["sub"] else r["changes_by"])]
     if p["state"] == "approved":
         state, reason = "closed", "The review is closed: this plan is building."
     elif p["state"] == "redirected":
@@ -353,21 +365,23 @@ def gate_shut(db: DB, root_id: str) -> dict | None:
 
 def holding(db: DB, root_id: str) -> dict | None:
     """What session ``root_id``'s queued tasks wait on, if anything: its plan
-    while the build gate is shut or the person hasn't approved it yet or,
-    before one is proposed, brindle's offer to plan the goal first, unanswered
-    or accepted (``{"offer": state}``). Apart from a shut gate, None while the
-    visuals capability is off or the app is disconnected, so nothing waits on
-    a verdict nobody can give. This also releases work if the app disconnects
-    after opening an offer or redirecting a plan; the saved plan and its
-    decision remain available when it reconnects."""
+    the person hasn't approved yet or, before one is proposed, brindle's
+    offer to plan the goal first, unanswered or accepted (``{"offer": state}``).
+    None while the visuals capability is off or the app is disconnected, so
+    nothing waits on a verdict nobody can give. This also releases work if
+    the app disconnects after opening an offer or redirecting a plan; the
+    saved plan and its decision remain available when it reconnects. A plan
+    shared for review is held with or without the app: only the approval
+    checks the sign-offs with the Library and closes the review."""
     from brindle.daemon import holds
 
-    shut = gate_shut(db, root_id)
-    if shut is not None:
-        return shut
-    if not visuals.enabled() or not root_id or not holds.app_connected():
+    if not visuals.enabled() or not root_id:
         return None
     plan = open_plan(db, root_id)
+    if plan is not None and gate(db, plan) is not None:
+        return plan
+    if not holds.app_connected():
+        return None
     if plan is not None:
         return plan
     row = db.conn.execute("SELECT offer FROM goal_doc_requests WHERE root_id=? AND (offer LIKE ? OR offer=?)",
@@ -623,20 +637,19 @@ def _message(p: dict, approved: bool, picks: dict, comments: list[dict], note: s
 
 
 def _check_with_library(db: DB, p: dict) -> None:
-    """Before an approval of a shared plan: bring the Library's sign-offs up
-    to date. If it can't be asked and the plan has required reviewers, the
-    approval is refused: the last answer may be missing someone added since."""
+    """Before an approval of a shared plan: bring the Library's review state
+    up to date. If it can't be asked the approval is refused, even with no
+    required reviewers on record: the last answer can't say nobody was added since."""
     if gate(db, p) is None:
         return
     from brindle.pro import shared_docs
 
     try:
         shared_docs.sync(db, p["id"])
-    except Exception as e:  # noqa: BLE001 - whatever stopped it, the sign-offs are unconfirmed
+    except Exception as e:  # noqa: BLE001 - whatever stopped it, the review state is unconfirmed
         log.info("brindle: couldn't sync plan %s before its approval", p["id"], exc_info=True)
-        if gate(db, p)["required"]:
-            raise ServiceError("gate_unverified", "couldn't confirm the sign-offs with the Library: "
-                               f"{redact.mask(str(e))}", 503) from e
+        raise ServiceError("gate_unverified", "couldn't confirm the review with the Library: "
+                           f"{redact.mask(str(e))}", 503) from e
 
 
 def decide(db: DB, plan_id: str, rev: Any, approved: bool, picks: Any = None, comments: Any = None,

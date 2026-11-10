@@ -68,7 +68,7 @@ export function Reviewers({ plan, client, directory, scopes, busy, nameOf, write
                 <span key={key} className="inline-flex flex-wrap items-center gap-1.5" data-testid={`plan-reviewer-${key}`} data-status={r.status} data-required={r.required}>
                   <span className="text-ink">{r.sub ? (r.you ? "You" : nameOf(r.sub)) : r.name}</span>
                   <span className="text-[11px] text-ink-3">{r.required ? "required" : "optional"}</span>
-                  <span className={STATUS[r.status].tone}>{r.met_by?.length ? `✓ met by ${r.met_by.map(nameOf).join(", ")}` : STATUS[r.status].text}</span>
+                  <span className={STATUS[r.status].tone}>{r.changes_by?.length ? `changes requested by ${r.changes_by.map(nameOf).join(", ")}` : r.met_by?.length ? `✓ met by ${r.met_by.map(nameOf).join(", ")}` : STATUS[r.status].text}</span>
                   {(r.meets?.length ?? 0) > 0 && <span className="text-[11px] text-ink-3">{`also counts for ${r.meets!.join(", ")}`}</span>}
                   {r.you && r.status !== "signed_off" && !closed && client && (
                     <button type="button" className={`${quiet} -my-0.5 text-xs`} disabled={busy} onClick={() => void write(() => client.signOffPlan(plan.id, plan.rev))}>Sign off</button>

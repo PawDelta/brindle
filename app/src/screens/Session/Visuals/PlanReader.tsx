@@ -275,7 +275,7 @@ function DesignDoc({ client, plan, visual, mode, writes }: {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- once per doc, when it is known to be shared
   }, [plan.id, shared]);
   const nameOf = (sub: string) => directory.find((p) => p.sub === sub)?.email || sub;
-  const gateWhy = gate?.waiting_on?.reduce((text, who) => text.split(who).join(nameOf(who)), gate.reason ?? "") ?? gate?.reason ?? "";
+  const gateWhy = [...(gate?.waiting_on ?? []), ...(gate?.reviewers ?? []).flatMap((r) => r.changes_by ?? [])].reduce((text, who) => text.split(who).join(nameOf(who)), gate?.reason ?? "");
   const collapse = (to: boolean) => {
     setCollapsed(to);
     try {

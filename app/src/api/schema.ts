@@ -936,11 +936,13 @@ export interface PlanGateDTO {
  * One row of a plan's build gate: a reviewer (``sub``) or an org review
  * rule no one on the list meets (``name``). ``meets``: the rules this
  * reviewer's sign-off also counts for. ``met_by``: who met a rule.
+ * ``changes_by``: the rule's signers who have since asked for changes.
  *
  * This interface was referenced by `ApiSchema`'s JSON-Schema
  * via the `definition` "PlanGateRowDTO".
  */
 export interface PlanGateRowDTO {
+  changes_by?: string[];
   meets?: string[];
   met_by?: string[];
   name?: string | null;

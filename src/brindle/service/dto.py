@@ -426,13 +426,15 @@ class PlanRevisionDetailDTO(PlanRevisionDTO):
 class PlanGateRowDTO(_DTO):
     """One row of a plan's build gate: a reviewer (``sub``) or an org review
     rule no one on the list meets (``name``). ``meets``: the rules this
-    reviewer's sign-off also counts for. ``met_by``: who met a rule."""
+    reviewer's sign-off also counts for. ``met_by``: who met a rule.
+    ``changes_by``: the rule's signers who have since asked for changes."""
 
     sub: str | None = None
     name: str | None = None
     required: bool
     status: Literal["signed_off", "changes_requested", "waiting", "waived"]
     met_by: list[str] = []
+    changes_by: list[str] = []
     meets: list[str] = []
     you: bool = False
 

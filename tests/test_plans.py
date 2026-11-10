@@ -500,6 +500,8 @@ def library(monkeypatch):
                  marks=pytest.mark.variant("a stale sign-off must never open the gate on text the reviewer hasn't read")),
     pytest.param({"rev": 1, "reviewers": ONE, "sign_offs": _signed_off("a")}, 0, None, "waiting", (0, 1), id="revision-not-sent-yet"),
     pytest.param({"rev": 1, "reviewers": ONE, "sign_offs": _signed_off("a")}, 1, "a", "changes_requested", (0, 1), id="changes-after-sign-off"),
+    pytest.param({"rev": 1, "reviewers": [], "sign_offs": _signed_off("a"), "policy_reviewers": [{**RULE, "on_list": []}]},
+                 1, "a", "changes_requested", (0, 1), id="changes-from-a-signer-only-a-rule-counts"),
     pytest.param({}, 1, None, "waiting", (0, 0), id="library-not-heard-from"),
     pytest.param({"rev": 1, "reviewers": [], "policy_reviewers": ["unreadable"]}, 1, None, "waiting", (0, 0), id="unreadable-rule"),
 ])
@@ -515,9 +517,15 @@ def test_required_reviewers_gate(db, session, library, monkeypatch, review, loca
                           author=plan_docs.TEAMMATE + teammate)
     gate = plans.to_dto(db, plans.get(db, pid))["gate"]
     assert (gate["state"], (gate["signed"], gate["required"])) == (state, signed)
+    if teammate:                                                    # the person it waits on is named
+        assert any(r["sub"] == teammate or teammate in r["changes_by"] for r in gate["reviewers"])
     if state == "ready":
-        asyncio.run(mcp_server.assign("developer", "build it"))     # queued behind the person's own approval
+        # All signed, and still only the approval starts it: losing the app can't skip that step.
+        monkeypatch.setattr(holds, "app_connected", lambda: False)
+        asyncio.run(mcp_server.assign("developer", "build it"))
+        assert started == [] and tasks.sweep(db) == 0 and started == []
         assert plans.decide(db, pid, 1, True, person=True)["state"] == "approved" and started == ["build it"]
+        assert plans.gate(db, plans.get(db, pid))["state"] == "closed"
         return
     # Refused outright, even with no app connected: teammates sign off from their own machines.
     monkeypatch.setattr(holds, "app_connected", lambda: False)
@@ -555,9 +563,12 @@ def test_required_reviewers_request_changes_blocks_and_building_closes_the_revie
         assert e.value.code == "review_closed"
 
 
-@pytest.mark.parametrize("reviewers, outcome", [(ONE, "gate_unverified"), ([], "approved")])
-def test_required_reviewers_approval_needs_the_library_when_someone_must_sign(db, session, library, monkeypatch,
-                                                                              reviewers, outcome):
+@pytest.mark.parametrize("reviewers", [
+    ONE,
+    pytest.param([], marks=pytest.mark.variant(
+        "an empty cached list can't prove nobody was added since: a first required reviewer may be waiting remotely")),
+])
+def test_required_reviewers_approval_needs_the_library(db, session, library, monkeypatch, reviewers):
     boss, _ = session
     visual_offers.person_spoke(db, boss, "Make a planning doc.")
     pid = mcp_server.propose_plan(PLAN).split()[2]
@@ -566,12 +577,9 @@ def test_required_reviewers_approval_needs_the_library_when_someone_must_sign(db
     def offline(db_, plan_id):
         raise RuntimeError("the Library can't be reached")
     monkeypatch.setattr(library, "sync", offline)
-    if outcome == "approved":
-        assert plans.decide(db, pid, 1, True, person=True)["state"] == "approved"
-        return
     with pytest.raises(ServiceError) as e:
         plans.decide(db, pid, 1, True, person=True)
-    assert e.value.code == outcome and plans.get(db, pid)["state"] == "open"
+    assert e.value.code == "gate_unverified" and plans.get(db, pid)["state"] == "open"
 
 
 def test_only_the_person_decides_and_only_when_they_asked(db, session):
