@@ -3,10 +3,12 @@ abandoned ones reported, retention of brindle's own files, the free-disk
 guard, and dead branches."""
 
 import dataclasses
+import errno
 import json
 import os
 import subprocess
 import time
+import types
 from pathlib import Path
 
 import pytest
@@ -26,7 +28,7 @@ DAY = 86400
 
 
 @pytest.mark.parametrize("action", ["restore", "expiry", "refused", "path", "cap", "empty",
-                                  "registration-failure", "moved", "deleted", "cross-volume", "restore-race",
+                                  "registration-failure", "moved", "deleted", "restore-race",
                                   "path-race", "locked", "prune"])
 def test_removed_worktree_goes_to_trash(db, repo, monkeypatch, action):
     from brindle import trash
@@ -82,22 +84,13 @@ def test_removed_worktree_goes_to_trash(db, repo, monkeypatch, action):
     git.run(["add", "staged.txt"], path)
     (path / "staged.txt").write_text("working version")
     (path / "uncommitted.txt").write_text("precious work")
-    if action in {"registration-failure", "cross-volume"}:
+    if action == "registration-failure":
         move = trash._move
         def fail(source, dest):
             if dest.name != "admin":
                 return move(source, dest)
             raise OSError("move failed")
-        if action == "cross-volume":
-            stat = Path.stat
-            def other_volume(p, *args, **kwargs):
-                values = list(stat(p, *args, **kwargs))
-                if p == trash.directory():
-                    values[2] += 1
-                return os.stat_result(values)
-            monkeypatch.setattr(Path, "stat", other_volume)
-        else:
-            monkeypatch.setattr(trash, "_move", fail)
+        monkeypatch.setattr(trash, "_move", fail)
         with pytest.raises(workspaces.WorkspaceError):
             workspaces.remove(db, ws, force=True)
         assert (path / "uncommitted.txt").read_text() == "precious work"
@@ -152,8 +145,12 @@ def test_removed_worktree_goes_to_trash(db, repo, monkeypatch, action):
         if action == "empty":
             assert CliRunner().invoke(app, ["trash", "empty", "--yes"]).exit_code == 0
         else:
+            walked = []
+            size_of = disk.size_of
+            monkeypatch.setattr(disk, "size_of", lambda p: walked.append(p) or size_of(p))
             trash.retain(now=entry["removed_at"] + (trash.RETENTION + 1 if action == "expiry" else 0),
                          cap=0 if action == "cap" else trash.SIZE_CAP)
+            assert walked == []   # sized once, when it was trashed
         assert not trash.entries()
     else:
         if action == "deleted":
@@ -190,6 +187,49 @@ def test_removed_worktree_goes_to_trash(db, repo, monkeypatch, action):
             assert not trash.entries()
         if action == "deleted":
             assert "D\tmodule" in git.out(["diff", "--cached", "--name-status"], path).splitlines()
+
+
+@pytest.mark.parametrize("why, force, dirty", [
+    ("volume", True, True),      # forced: deleted in place, changes and all
+    ("volume", False, False),    # unforced and clean: git removes it
+    ("volume", False, True),     # unforced with changes: still refused
+    ("no-rename", True, False),  # no exclusive rename on this platform
+    ("mount", True, False),      # same device, but rename crosses a mount (EXDEV)
+])
+def test_removal_across_volumes(db, repo, monkeypatch, why, force, dirty):
+    """A checkout the trash can't take is removed as 0.6.2 did, not kept forever."""
+    from brindle import trash
+
+    ws = workspaces.create(db, str(repo), "elsewhere").workspace
+    path = Path(ws.path)
+    if dirty:
+        (path / "uncommitted.txt").write_text("work")
+    if why == "volume":   # the device check, faked: no real second volume
+        stat = Path.stat
+        def other_volume(p, *args, **kwargs):
+            values = list(stat(p, *args, **kwargs))
+            if p == trash.directory():
+                values[2] += 1
+            return os.stat_result(values)
+        monkeypatch.setattr(Path, "stat", other_volume)
+    elif why == "no-rename":
+        monkeypatch.setattr(trash, "sys", types.SimpleNamespace(platform="other"))
+    else:
+        def refuse(*args):
+            return -1
+        libc = types.SimpleNamespace(renamex_np=refuse, renameat2=refuse)
+        monkeypatch.setattr(trash, "ctypes", types.SimpleNamespace(
+            CDLL=lambda *a, **k: libc, c_char_p=None, c_int=None, c_uint=None, get_errno=lambda: errno.EXDEV))
+    if dirty and not force:
+        with pytest.raises(git.GitError):
+            git.remove_worktree(repo, path)
+        assert (path / "uncommitted.txt").read_text() == "work"
+        assert git.worktree_for_branch(repo, ws.branch) == str(path)
+        return
+    workspaces.remove(db, ws, force=force, delete_branch=False)
+    assert not path.exists()
+    assert git.worktree_for_branch(repo, ws.branch) is None
+    assert not trash.entries()
 
 
 def _settings(values: dict) -> None:

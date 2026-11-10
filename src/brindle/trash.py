@@ -1,4 +1,5 @@
-"""Recoverable worktree removal. Cross-device moves fail closed.
+"""Recoverable worktree removal. Cross-device moves fail closed here
+(TrashUnavailable); git.remove_worktree then removes the checkout in place.
 
 The checkout and its Git administration directory (including its
 index) travel together. A private ref protects its commit while it is here.
@@ -29,6 +30,15 @@ class TrashError(OSError):
     pass
 
 
+class TrashUnavailable(TrashError):
+    """The trash can't take this checkout at all (another volume or mount, or
+    no exclusive rename): nothing was moved."""
+
+
+# Errors of an exclusive rename that mean "not possible here", not "refused".
+_UNSUPPORTED = {errno.EXDEV, errno.ENOTSUP, errno.EOPNOTSUPP, errno.EINVAL}
+
+
 def directory() -> Path:
     return config.brindle_home() / "trash"
 
@@ -53,7 +63,8 @@ def entries() -> list[dict]:
             data = json.loads(p.read_text())
             if data["id"] != p.parent.name or not (p.parent / "tree").is_dir():
                 continue
-            result.append({**data, "size": size_of(p.parent)})
+            # Entries trashed before sizes were stored are measured here.
+            result.append({**data, "size": data["size"] if "size" in data else size_of(p.parent)})
         except (OSError, ValueError, KeyError):
             continue
     return sorted(result, key=lambda e: e["removed_at"])
@@ -72,11 +83,12 @@ def _move(source: Path, dest: Path) -> None:
         rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
         args = (-100, os.fsencode(source), -100, os.fsencode(dest), 1)  # AT_FDCWD, RENAME_NOREPLACE
     else:
-        raise TrashError(errno.ENOTSUP, "atomic exclusive rename unavailable", str(dest))
+        raise TrashUnavailable(errno.ENOTSUP, "atomic exclusive rename unavailable", str(dest))
     rename.restype = ctypes.c_int
     if rename(*args):
         error = ctypes.get_errno()
-        raise TrashError(error, os.strerror(error), str(dest))
+        kind = TrashUnavailable if error in _UNSUPPORTED else TrashError
+        raise kind(error, os.strerror(error), str(dest))
 
 
 def _plain_path(root: Path, path: Path) -> bool:
@@ -149,14 +161,14 @@ def _unpin(root: str | Path, ident: str) -> None:
 
 
 def put(root: str | Path, path: str | Path, *, force: bool = False) -> None:
-    from brindle.disk import _replace
+    from brindle.disk import _replace, size_of
 
     source = Path(path).absolute()
     with _locked():
         if source.is_symlink() or not source.is_dir():
             raise TrashError(f"not a worktree directory: {source}")
         if source.stat().st_dev != directory().stat().st_dev:
-            raise TrashError(f"trash is on another volume; original kept at {source}")
+            raise TrashUnavailable(f"trash is on another volume; original kept at {source}")
         original = source.stat()
         registered = next((w for w in git.list_worktrees(root)
                            if Path(w["worktree"]).resolve() == source.resolve()), None)
@@ -180,7 +192,7 @@ def put(root: str | Path, path: str | Path, *, force: bool = False) -> None:
                 if admin == common:
                     raise TrashError("the main checkout cannot be trashed")
                 if admin.stat().st_dev != directory().stat().st_dev:
-                    raise TrashError("Git metadata and trash are on different volumes; original kept")
+                    raise TrashUnavailable("Git metadata and trash are on different volumes; original kept")
                 data["common"] = str(common)
                 git.run(["update-ref", ref, data["sha"]], root)
                 # The index is no longer in a registered checkout, so GC will
@@ -195,6 +207,8 @@ def put(root: str | Path, path: str | Path, *, force: bool = False) -> None:
                     records.append(f"{mode} {kind} {oid}\t{i}\n")
                 tree = git.run(["mktree", "--missing"], source, input="".join(records)).stdout.strip()
                 git.run(["update-ref", f"refs/brindle-trash-index/{ident}", tree], root)
+            # Measured once here, so retention never walks the saved checkouts.
+            data["size"] = size_of(source) + (size_of(admin) if admin is not None else 0)
             _replace(dest / "entry.json", lambda out: out.write(json.dumps(data).encode()))
             current = source.stat()
             if (current.st_dev, current.st_ino) != (original.st_dev, original.st_ino):
@@ -314,15 +328,16 @@ def retain(*, now: float | None = None, cap: int = SIZE_CAP, empty: bool = False
     removed = []
     now = time.time() if now is None else now
     with _locked():
-        for candidate in entries():
-            # Re-read after each removal: restore and retention share this lock.
-            current = entries()
-            entry = next((e for e in current if e["id"] == candidate["id"]), None)
-            if entry is None or not (empty or now - entry["removed_at"] > RETENTION or
-                                     sum(e["size"] for e in current) > cap):
+        # Read once: put, restore and retention all hold this lock, so the
+        # entries can't change under us. Oldest first, until under the cap.
+        current = entries()
+        total = sum(e["size"] for e in current)
+        for entry in current:
+            if not (empty or now - entry["removed_at"] > RETENTION or total > cap):
                 continue
             shutil.rmtree(directory() / entry["id"])
             _unpin(entry["repo_root"], entry["id"])
+            total -= entry["size"]
             removed.append(entry["id"])
     return removed
 
