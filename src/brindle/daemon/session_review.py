@@ -183,12 +183,14 @@ def adopt_head_pr(db: DB, root_id: str) -> None:
     if found and found.get("url"):
         # head_ref: where the PR really lives, when that isn't the session's branch: a Push must not go to ws.branch.
         ref = found.get("headRefName")
-        db.conn.execute("INSERT INTO session_prs (root_id, branch, url, pushed_sha, opened_at, head_ref)"
-                        " VALUES (?, ?, ?, ?, ?, ?)"
+        db.conn.execute("INSERT INTO session_prs (root_id, branch, url, pushed_sha, opened_at) VALUES (?, ?, ?, ?, ?)"
                         " ON CONFLICT (root_id, branch) DO UPDATE SET url = excluded.url,"
-                        " pushed_sha = excluded.pushed_sha, opened_at = excluded.opened_at,"
-                        " head_ref = excluded.head_ref",
-                        (root_id, ws.branch, found["url"], head, time.time(), ref if ref and ref != ws.branch else None))
+                        " pushed_sha = excluded.pushed_sha, opened_at = excluded.opened_at",
+                        (root_id, ws.branch, found["url"], head, time.time()))
+        db.conn.execute("DELETE FROM session_pr_heads WHERE root_id = ? AND branch = ?", (root_id, ws.branch))
+        if ref and ref != ws.branch:
+            db.conn.execute("INSERT INTO session_pr_heads (root_id, branch, head_ref) VALUES (?, ?, ?)",
+                            (root_id, ws.branch, ref))
 
 
 def goal_phase(db: DB, root_id: str) -> tuple[str, str | None]:

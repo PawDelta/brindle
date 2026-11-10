@@ -635,7 +635,14 @@ CREATE TABLE IF NOT EXISTS session_prs (
     auto INTEGER NOT NULL DEFAULT 0,
     opened_at REAL NOT NULL,
     merged_at REAL,                 -- when gh first reported the PR merged (session_review.poll_merged)
-    head_ref TEXT,                  -- the PR's head branch when it isn't `branch` (a PR opened with gh): Push refuses
+    PRIMARY KEY (root_id, branch)
+);
+-- A session PR adopted from one opened with gh on another branch name: where it really lives,
+-- so a Push of the session branch is refused instead of missing it.
+CREATE TABLE IF NOT EXISTS session_pr_heads (
+    root_id TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    head_ref TEXT NOT NULL,
     PRIMARY KEY (root_id, branch)
 );
 -- A ready session's PR as brindle prepared it for the person's approval
@@ -1622,8 +1629,6 @@ class DB:
         self._move_task_wait_noted()
         if "merged_at" not in {r["name"] for r in self.conn.execute("PRAGMA table_info(session_prs)")}:
             self.conn.execute("ALTER TABLE session_prs ADD COLUMN merged_at REAL")
-        if "head_ref" not in {r["name"] for r in self.conn.execute("PRAGMA table_info(session_prs)")}:
-            self.conn.execute("ALTER TABLE session_prs ADD COLUMN head_ref TEXT")
         health_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(launch_health)")}
         if "token" not in health_cols:
             self.conn.execute("ALTER TABLE launch_health ADD COLUMN token TEXT NOT NULL DEFAULT ''")

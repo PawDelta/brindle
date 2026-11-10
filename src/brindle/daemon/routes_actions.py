@@ -978,7 +978,7 @@ def push_session_pr(db: DB, params: dict, body: Body) -> Any:
     if (pr := review.open_pr(db, root, ws)) is None:
         raise ServiceError("conflict", f"{ws.branch} has no PR to push to; open it first", 409)
     key = (root.id, ws.branch)
-    elsewhere = db.conn.execute(f"SELECT head_ref FROM session_prs WHERE {_SESSION_PR}", key).fetchone()
+    elsewhere = db.conn.execute(f"SELECT head_ref FROM session_pr_heads WHERE {_SESSION_PR}", key).fetchone()
     if elsewhere and elsewhere["head_ref"]:
         # A PR opened with gh from another branch name: pushing the session branch would not update it.
         raise ServiceError("conflict", f"its PR is on {elsewhere['head_ref']}: push the session's commits there yourself", 409)
@@ -1020,11 +1020,12 @@ def _end_pr_work(key: tuple[str, str]) -> None:
 def _record_pr(db: DB, key: tuple[str, str], url: str, pushed: str | None) -> None:
     db.conn.execute("INSERT INTO session_prs (root_id, branch, url, pushed_sha, opened_at)"
                     " VALUES (?, ?, ?, ?, ?) ON CONFLICT (root_id, branch) DO UPDATE SET"
-                    " url = excluded.url, pushed_sha = excluded.pushed_sha, head_ref = NULL,"
+                    " url = excluded.url, pushed_sha = excluded.pushed_sha,"
                     # a different PR on the branch starts afresh; the same one keeps its merge
                     " merged_at = CASE WHEN url = excluded.url THEN merged_at END,"
                     " opened_at = CASE WHEN url = excluded.url THEN opened_at ELSE excluded.opened_at END",
                     (*key, url, pushed, time.time()))
+    db.conn.execute(f"DELETE FROM session_pr_heads WHERE {_SESSION_PR}", key)    # brindle's own PR is on the session branch
     bus.publish_agent(db, "session.pr_opened", key[0], url=url)
 
 

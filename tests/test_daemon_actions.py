@@ -1974,7 +1974,7 @@ def test_pr_waits_for_approval(db, lead, tmp_path, monkeypatch, passed):
     _, ready = _send("GET", "/v1/sessions/lead/pr/readiness")
     assert (remote(), ready["pr"]["unpushed"], runs) == (newer, 0, ["validate", "lint", "validate", "lint"])
     # A PR gh opened from another branch name is adopted, but a Push to the session branch would not reach it.
-    db.conn.execute("UPDATE session_prs SET head_ref = 'stress/other'")
+    db.conn.execute("INSERT INTO session_pr_heads (root_id, branch, head_ref) SELECT root_id, branch, 'stress/other' FROM session_prs")
     code, refused = _send("POST", "/v1/sessions/lead/pr/push")
     assert code == 409 and "stress/other" in json.dumps(refused)
 

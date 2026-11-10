@@ -1032,7 +1032,7 @@ def test_goal_phase(db, root, monkeypatch, passed, checking, ready, pr, merged, 
     monkeypatch.setattr(session_review, "has_pr_target", lambda ws: target)
     assert session_review.goal_phase(db, "boss") == (expected, "https://x/pr/1" if pr else None)
     if pr == "gh":     # adopted with where it really lives: a Push to the session branch is refused
-        assert db.conn.execute("SELECT head_ref FROM session_prs WHERE root_id = 'boss'").fetchone()[0] == "other"
+        assert db.conn.execute("SELECT head_ref FROM session_pr_heads WHERE root_id = 'boss'").fetchone()[0] == "other"
 
 
 @pytest.mark.parametrize("flight, expected", [
