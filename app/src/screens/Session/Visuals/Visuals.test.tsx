@@ -490,11 +490,55 @@ describe("visuals", () => {
     }
   });
 
+  it("visuals unread dot clears on view while Inbox removes notices and keeps unanswered prompts", async () => {
+    const session: SessionDTO = { id: "sup1", workspace_id: "proj", profile: "supervisor", status: "idle", mode: "interactive", created_at: now };
+    const item: InboxItemDTO = { kind: "visual", agent_id: "sup1", root_id: "sup1", workspace_id: "proj", visual_id: "v_notice", reason: "visual is ready" };
+    const prompt: InboxItemDTO = { ...item, visual_id: visual.id, reason: "asks you to choose" };
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root], inbox: [item, prompt] });
+    const client = daemon.client();
+    let rows = [{ ...visual, id: "v_notice", question: undefined, options: undefined }, visual, answered];
+    vi.spyOn(client, "visuals").mockImplementation(async () => rows);
+    vi.spyOn(client, "markVisualRead").mockImplementation(async (id) => {
+      rows = rows.map((v) => v.id === id ? { ...v, unread: false } : v);
+      const row = rows.find((v) => v.id === id)!;
+      if (!row.options) daemon.data.inbox = daemon.data.inbox.filter((i) => i.visual_id !== id);
+      daemon.publish("visual.read", { repo_root: REPO, root_id: row.session, payload: { visual: row.id } });
+      return row;
+    });
+    const store = createAppStore();
+    const sync = startSync({ client, store, connect: daemon.connect });
+    try {
+      render(<PtyViewsProvider value={standInViews}><App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO }} /></PtyViewsProvider>);
+      const entry = await screen.findByTestId("visuals-button");
+      expect(within(entry).getByLabelText("unread")).toBeTruthy();
+      await waitFor(() => expect(screen.getByTestId("inbox-badge").textContent).toBe("2"));
+      fireEvent.click(entry);
+      fireEvent.click(screen.getByTestId("visual-row-v_notice"));
+      await screen.findByTestId("visual-reader");
+      await waitFor(() => expect(store.getState().inbox).toEqual([prompt]));
+      expect(within(entry).getByLabelText("unread")).toBeTruthy();
+      fireEvent.click(screen.getByTestId("visual-back"));
+      expect(screen.getByTestId("inbox-badge").textContent).toBe("1");
+      fireEvent.click(entry);
+      fireEvent.click(screen.getByTestId(`visual-row-${visual.id}`));
+      await screen.findByTestId("visual-reader");
+      await waitFor(() => expect(within(entry).queryByLabelText("unread")).toBeNull());
+      await act(async () => { await sync.idle(); });
+      expect(store.getState().inbox).toEqual([prompt]);
+      fireEvent.click(screen.getByTestId("visual-back"));
+      expect(screen.getByTestId("inbox-badge").textContent).toBe("1");
+      fireEvent.click(screen.getByTestId("inbox-link"));
+      const cards = await screen.findAllByTestId("inbox-card");
+      expect(cards).toHaveLength(1);
+      expect(cards[0].dataset.kind).toBe("visual");
+    } finally { sync.stop(); }
+  });
+
   it("opens from the header over the whole window with the sidebar hidden, and Esc or Back returns to the same sidebar and terminal", async () => {
     const session: SessionDTO = { id: "sup1", workspace_id: "proj", profile: "supervisor", status: "idle", mode: "interactive", created_at: now - 600, goal: "Ship it" };
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root] });
     const client = daemon.client();
-    // The engine's rows: marking read and keeping change them, as the daemon's store would (no bus event for a read).
+    // The engine's rows: marking read and keeping change them, as the daemon's store would.
     let rows = [visual, answered];
     const edit = (id: string, fields: Partial<VisualDTO>) => (rows = rows.map((v) => (v.id === id ? { ...v, ...fields } : v))).find((v) => v.id === id)!;
     vi.spyOn(client, "visuals").mockImplementation(async () => rows);
@@ -519,11 +563,11 @@ describe("visuals", () => {
       const aside = sidebar();
       // The person folds the open session's agents away; Back must find them still folded.
       fireEvent.click(await within(aside).findByRole("button", { name: "Hide sup1's agents" }));
-      // The header uses an icon without exposing the old count text or an unread dot.
+      // The header uses an icon with an unread dot and no count text.
       const entry = await screen.findByTestId("visuals-button");
       expect(entry.querySelector("svg")).toBeTruthy();
       expect(entry.textContent).toBe("");
-      expect(within(entry).queryByLabelText("unread")).toBeNull();
+      expect(within(entry).getByLabelText("unread")).toBeTruthy();
       needUser(1, "Which database should the cache use?");
       ask(supervisorAsks);
       fireEvent.click(entry);
