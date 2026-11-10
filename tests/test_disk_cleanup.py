@@ -724,6 +724,7 @@ def test_low_free_disk_holds_a_launch(repo, monkeypatch, held):
     assert tasks.room_wait(str(repo)) == why
 
 
+@pytest.mark.slow("end-to-end clean/doctor CLI workflow uses real Git worktrees and verifies archived branch tips")
 def test_clean_lists_then_removes_merged_and_archives_stale_branches(db, repo, monkeypatch):
     wt = _worktree(repo, "feat", merge="merge")
     when = f"{int(time.time() - 30 * DAY)} +0000"
