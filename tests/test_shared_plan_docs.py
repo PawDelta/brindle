@@ -392,6 +392,7 @@ def test_an_accept_the_library_refuses_holds_the_text_until_it_goes_through(db, 
     assert len(sent(backend, f"POST {DESIGN}/threads/1")) == 2
 
 
+@pytest.mark.variant("from review: identical text on another anchor was taken for the sent comment and resolved it")
 def test_the_same_words_elsewhere_from_this_account_are_another_thread(db, parts, backend):
     pid, lib, net = parts
     sd.share(db, pid, TEAM, **net)
