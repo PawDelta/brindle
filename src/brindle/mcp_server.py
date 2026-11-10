@@ -560,7 +560,8 @@ class _Request:
             self.plan_worker = plans.assignment(db, caller, ref)
         except ServiceError as e:
             return f"Not started: {e}"
-        row = db.conn.execute("SELECT task_id FROM plan_tasks WHERE plan_id=? AND worker_id=?",
+        row = db.conn.execute("SELECT task_id FROM plan_tasks p JOIN tasks t ON t.id=p.task_id "
+                              "WHERE plan_id=? AND worker_id=? AND t.state!='cancelled'",
                               self.plan_worker).fetchone()
         return f"Already linked to task {row['task_id']}; left it in place." if row else None
 
@@ -570,7 +571,9 @@ class _Request:
         t = tasks.enqueue(db, *args, unanswered=True, **kwargs)
         if self.plan_worker:
             with db.tx() as c:
-                linked = c.execute("INSERT OR IGNORE INTO plan_tasks (plan_id, worker_id, task_id) VALUES (?,?,?)",
+                linked = c.execute("INSERT INTO plan_tasks (plan_id, worker_id, task_id) VALUES (?,?,?) "
+                                   "ON CONFLICT(plan_id, worker_id) DO UPDATE SET task_id=excluded.task_id "
+                                   "WHERE EXISTS (SELECT 1 FROM tasks WHERE id=plan_tasks.task_id AND state='cancelled')",
                                    (*self.plan_worker, t.id)).rowcount
                 existing = c.execute("SELECT task_id FROM plan_tasks WHERE plan_id=? AND worker_id=?",
                                      self.plan_worker).fetchone()["task_id"]

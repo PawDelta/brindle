@@ -280,15 +280,14 @@ def _board(db: DB, p: dict) -> list[dict]:
             agent = db.get_agent(task.agent_id) if task.agent_id else None
             w.update(task_id=task.id, agent_id=task.agent_id)
             w["state"] = (task.state if task.state in ("merged", "cancelled") else
-                          "in review" if agent and (agent.pipeline in ("reviewing", "ready") or agent.result) else
+                          "in review" if agent and (agent.pipeline in ("reviewing", "ready") or
+                                                   (not agent.pipeline and agent.result)) else
                           "working" if agent else "queued")
             # Only results for the named proving command count; an unrelated passing
             # check or milestone must never turn this card green.
-            results = []
-            if agent and w.get("test"):
-                results = [(r["created_at"], bool(r["ok"])) for r in db.conn.execute(
-                    "SELECT created_at, ok FROM check_cache WHERE workspace_id=? AND command=? AND created_at>=?",
-                    (agent.workspace_id, w["test"], task.created_at))]
+            results = [(r["checked_at"], bool(r["ok"])) for r in db.conn.execute(
+                "SELECT checked_at, ok FROM task_check_outcomes WHERE task_id=? AND command=?",
+                (task.id, w.get("test")))]
             results.extend((m.checked_at, m.status == "passed") for m in milestones
                            if m.checked_at is not None and m.checked_at >= task.created_at
                            and m.title == db.task_milestone(task.id) and m.check_cmd == w.get("test"))

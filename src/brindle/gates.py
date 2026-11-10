@@ -57,6 +57,14 @@ Abandoned = autopilot.CheckCancelled   # raised when a run's ``cancel`` turns tr
 
 def run_checked(db: DB, ws: Workspace, cmd: str, env: dict[str, str], timeout: int,
                 cancel=None, full: bool = False) -> tuple[bool, str]:
+    """Run or reuse a check and retain its completed outcome for the worker task."""
+    ok, out = _run_checked(db, ws, cmd, env, timeout, cancel, full)
+    db.record_task_check(ws.id, cmd, ok)
+    return ok, out
+
+
+def _run_checked(db: DB, ws: Workspace, cmd: str, env: dict[str, str], timeout: int,
+                 cancel=None, full: bool = False) -> tuple[bool, str]:
     """Run ``cmd`` in ``ws``, or reuse the cached PASSING result for the same
     (repo, tree sha, command) if the tree was clean when that result was
     cached: an identical tree hits in any workspace, or the supervisor's
