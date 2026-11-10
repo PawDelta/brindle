@@ -26,7 +26,11 @@ def test_pool_cleanup_continues_after_a_failed_removal(db, tmp_path, monkeypatch
                for i, n in enumerate(("before", "blocked", "after"))]
     for entry in entries:
         Path(entry.path).mkdir()
+        Path(entry.path, "setup-artifact").touch()
         db.add_pool_entry(entry)
+    def teardown(commands, cwd, env):
+        Path(cwd, "setup-artifact").unlink(missing_ok=True)
+        return workspaces.SetupResult(True, "")
     def remove(root, path, force=False):
         if path == entries[1].path:
             raise git.GitError("disk full")
@@ -35,8 +39,13 @@ def test_pool_cleanup_continues_after_a_failed_removal(db, tmp_path, monkeypatch
     monkeypatch.setattr(git, "run", lambda *a, **k: None)
     monkeypatch.setattr(git, "list_branches", lambda *a: [])
     monkeypatch.setattr(git, "list_worktrees", lambda *a: [])
-    monkeypatch.setattr(pool, "load_repo_config", lambda *a: RepoConfig(base_branch="main", pool_size=0))
+    monkeypatch.setattr(workspaces, "run_commands", teardown)
+    monkeypatch.setattr(pool, "load_repo_config", lambda *a: RepoConfig(
+        base_branch="main", pool_size=0, teardown=["remove setup artifact"]))
     getattr(pool, cleanup)(db, str(tmp_path))
+    assert not Path(entries[1].path, "setup-artifact").exists()
+    assert pool.claim(db, str(tmp_path), "main") is None
+    entries[1].ready = 0
     assert db.pool_entries(str(tmp_path), ready_only=False) == [entries[1]]
     assert not Path(entries[0].path).exists() and not Path(entries[2].path).exists()
 

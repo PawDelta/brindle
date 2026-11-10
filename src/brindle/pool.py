@@ -235,12 +235,15 @@ def _discard_row(db: DB, repo_root: str, entry: PoolEntry, cfg: RepoConfig) -> b
     Deleting first is necessary: a claim that already took this row owns its
     checkout. If removal fails, restore the metadata so a later sweep still
     knows its teardown, and so the orphan pass leaves the folder alone.
+    Teardown may already have dismantled setup, so a retained entry must
+    remain cleanup-only rather than being offered to a new worker.
     """
     if db.delete_pool_entry(entry.path) != 1:
         return False
     try:
         discard(repo_root, entry, cfg)
     except git.GitError:
+        entry.ready = 0
         db.add_pool_entry(entry)
         return False
     return True
