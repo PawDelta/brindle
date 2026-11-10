@@ -124,6 +124,11 @@ function PlanBody({ client, plan, by, onDecided }: { client: PlansClient; plan: 
   const [error, setError] = useState<string | null>(null);
   const steps = useMemo(() => stepsOf(plan), [plan]);
   const [at, setAt] = useState(0);
+  // Each step opens at its top (its heading and the restated ask), not where the last one was scrolled to.
+  const pane = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (pane.current) pane.current.scrollTop = 0;
+  }, [at]);
   // Steps the person has moved past or answered; the summary step is the verdict itself.
   const [settled, setSettled] = useState<Set<string>>(new Set());
   const open = plan.state === "open";
@@ -196,7 +201,7 @@ function PlanBody({ client, plan, by, onDecided }: { client: PlansClient; plan: 
             </div>
           </div>
         </nav>
-        <div className="min-h-0 min-w-0 flex-1 overflow-auto px-s3 py-s3">
+        <div ref={pane} className="min-h-0 min-w-0 flex-1 overflow-auto px-s3 py-s3" data-testid="plan-step-pane">
           <article className="mx-auto flex max-w-[760px] flex-col gap-s2">
             <div>
               <p className={`${mono} text-[11px] text-ink-3`}>plan · rev {plan.rev}</p>

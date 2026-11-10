@@ -1080,7 +1080,12 @@ describe("visuals", () => {
     fireEvent.click(within(screen.getByRole("region", { name: "Where should cloud workers run?" })).getByRole("button", { name: "Comment" }));
     fireEvent.change(screen.getByLabelText("Comment on Where should cloud workers run?"), { target: { value: "Ask legal first." } });
     expect(progress()).toContain("2 of 4 settled");
+    // Scrolled down to Next, the next step still opens at its top.
+    const pane = screen.getByTestId("plan-step-pane");
+    pane.scrollTop = 400;
+    expect(pane.scrollTop).toBe(400);
     next();
+    expect(pane.scrollTop).toBe(0);
     expect(screen.getByRole("region", { name: "Risks" }).textContent).toContain("Sign-in rules.");
     expect(screen.getByTestId("plan-ask")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "← Back" }));
