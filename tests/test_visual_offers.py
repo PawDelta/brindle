@@ -1,4 +1,5 @@
 import threading
+from datetime import datetime, timezone
 
 import pytest
 from starlette.testclient import TestClient
@@ -369,20 +370,29 @@ def test_mid_turn_message_backs_a_visual(db, session, tmp_path):
     hook = {"transcript_path": str(transcript), "tool_name": "Read", "tool_input": {"file_path": str(transcript)}}
     agents.handle_hook(db, boss.id, "prompt-submit", {**hook, "prompt": "plan the reader"})
     agents.handle_hook(db, boss.id, "pre-tool", hook)
-    assert app_vouches(boss, ask, offers.time.time() + 60).status_code == 200   # keyed in mid-turn, before Enter
+    absorbed = []
 
-    def absorbed(origin, mode):
-        line = {"type": "attachment", "isSidechain": False, "attachment": {
-            "type": "queued_command", "prompt": ask, "commandMode": mode, "origin": {"kind": origin}}}
+    def typed_mid_turn(text, origin="human", mode="prompt"):
+        assert app_vouches(boss, text, offers.time.time() + 60).status_code == 200   # keyed in, before Enter
+        at = datetime.fromtimestamp(offers.time.time(), timezone.utc).isoformat(timespec="milliseconds")
+        absorbed.append({"type": "attachment", "isSidechain": False, "attachment": {
+            "type": "queued_command", "prompt": text, "commandMode": mode, "origin": {"kind": origin},
+            "timestamp": at.replace("+00:00", "Z")}})
+
+    def turn_takes_them_in():
         with transcript.open("a") as f:
-            f.write(offers.json.dumps(line) + "\n")
+            f.writelines(offers.json.dumps(line) + "\n" for line in absorbed)
+        absorbed.clear()
         agents.handle_hook(db, boss.id, "tool-done", hook)
         agents.handle_hook(db, boss.id, "pre-tool", {**hook, "tool_name": "mcp__brindle__publish_visual"})
 
-    absorbed("task-notification", "task-notification")
+    typed_mid_turn(ask, "task-notification", "task-notification")
+    turn_takes_them_in()
     with pytest.raises(ServiceError):
         visuals.publish(db, boss, "Not yet", "<p>no</p>", asked=ask)
-    absorbed("human", "prompt")
+    typed_mid_turn("never mind")   # one hook takes in both: the cancel ends only what came before it
+    typed_mid_turn(ask)
+    turn_takes_them_in()
     assert visuals.publish(db, boss, "Directions", "<p>yes</p>", asked=ask)["rev"] == 1
     agents.handle_hook(db, boss.id, "stop", hook)   # read again: the same message isn't counted twice
     with pytest.raises(ServiceError):
