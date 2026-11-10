@@ -8903,6 +8903,10 @@
     },
     {
       "method": "POST",
+      "path": "/v1/holds/app"
+    },
+    {
+      "method": "POST",
       "path": "/v1/holds/{id}/end"
     },
     {
