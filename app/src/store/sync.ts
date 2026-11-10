@@ -29,7 +29,8 @@ export function startSync({ client, store, repo, connect, backoff }: SyncOptions
   let again = false;
 
   const fetchOnce = async () => {
-    const { lifecycleVersion: version, snapshotVersion: applied } = store.getState();
+    // `since`: what the bus had said when these reads began (a visual settled after it stays out).
+    const { lifecycleVersion: version, snapshotVersion: applied, lastEventId: since } = store.getState();
     const acknowledged = client.inboxGeneration;
     try {
       const [workspaces, inbox] = await Promise.all([client.snapshot(repo), client.inbox(repo)]);
@@ -49,7 +50,7 @@ export function startSync({ client, store, repo, connect, backoff }: SyncOptions
         again = true;
         return;
       }
-      store.dispatch({ type: "snapshot", workspaces, inbox });
+      store.dispatch({ type: "snapshot", workspaces, inbox, since });
     } catch (e) {
       store.dispatch({ type: "error", message: e instanceof Error ? e.message : String(e) });
     }
