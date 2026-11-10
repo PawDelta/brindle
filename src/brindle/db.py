@@ -1015,6 +1015,53 @@ CREATE TABLE IF NOT EXISTS plans (
     ask TEXT                       -- the person's request restated by the supervisor, if given
 );
 CREATE INDEX IF NOT EXISTS plans_root ON plans(root_id, state);
+-- A plan as a design doc (brindle.plan_docs): every revision, the supervisor's
+-- and the person's own edits alike; the plans row holds the current one.
+CREATE TABLE IF NOT EXISTS plan_revisions (
+    plan_id TEXT NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
+    rev INTEGER NOT NULL,
+    author TEXT NOT NULL,          -- supervisor | person
+    source TEXT NOT NULL,          -- proposal | edit | suggestion
+    lede TEXT NOT NULL,
+    sections TEXT NOT NULL,        -- JSON [{id, title, kind, markdown, caption}]
+    markdown TEXT NOT NULL,
+    decisions TEXT NOT NULL,
+    split TEXT NOT NULL,
+    ask TEXT,
+    changed TEXT NOT NULL,         -- JSON: the section ids this revision changed
+    created_at REAL NOT NULL,
+    PRIMARY KEY (plan_id, rev)
+);
+-- Comment threads on a plan, anchored to a text range, a diagram, a decision
+-- or a whole section; a suggestion is a thread with a replacement; replies
+-- name their thread in parent_id.
+CREATE TABLE IF NOT EXISTS plan_threads (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    plan_id TEXT NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
+    parent_id INTEGER REFERENCES plan_threads(id) ON DELETE CASCADE,
+    rev INTEGER NOT NULL,          -- the revision it was written on
+    kind TEXT NOT NULL,            -- comment | suggestion | reply
+    anchor TEXT,                   -- JSON, see brindle.plan_docs
+    author TEXT NOT NULL,          -- person | supervisor
+    body TEXT NOT NULL,
+    after TEXT,                    -- a suggestion's replacement for the anchored text
+    attachments TEXT NOT NULL,     -- JSON [{name, ref}]
+    status TEXT NOT NULL,          -- open | resolved | accepted | rejected
+    sent_rev INTEGER,              -- the verdict that carried it to the supervisor
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS plan_threads_plan ON plan_threads(plan_id, parent_id);
+-- Votes on a plan's decisions (Confirm A): one per voter and decision.
+CREATE TABLE IF NOT EXISTS plan_votes (
+    plan_id TEXT NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
+    decision_id TEXT NOT NULL,
+    voter TEXT NOT NULL,
+    option_id TEXT NOT NULL,
+    rev INTEGER NOT NULL,
+    at REAL NOT NULL,
+    PRIMARY KEY (plan_id, decision_id, voter)
+);
 """
 
 

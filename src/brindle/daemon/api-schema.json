@@ -5437,6 +5437,108 @@
       "title": "PermissionRuleDTO",
       "type": "object"
     },
+    "PlanAnchorDTO": {
+      "description": "Where a thread is anchored (brindle.plan_docs): a text range of a\nsection (``text``: ``quote`` between ``start`` and ``end``), a diagram\nsection, a decision (optionally one option) or a whole section, the\nask, the lede or the split. ``state``: where it is in the current\nrevision: ``current``, ``moved`` (found elsewhere) or ``detached`` (gone).",
+      "properties": {
+        "decision": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Decision"
+        },
+        "end": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "End"
+        },
+        "kind": {
+          "enum": [
+            "text",
+            "diagram",
+            "decision",
+            "section"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "option": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Option"
+        },
+        "quote": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Quote"
+        },
+        "section": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Section"
+        },
+        "start": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Start"
+        },
+        "state": {
+          "default": "current",
+          "enum": [
+            "current",
+            "moved",
+            "detached"
+          ],
+          "title": "State",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "title": "PlanAnchorDTO",
+      "type": "object"
+    },
     "PlanCommentDTO": {
       "properties": {
         "section": {
@@ -5457,6 +5559,108 @@
     },
     "PlanDTO": {
       "$defs": {
+        "PlanAnchorDTO": {
+          "description": "Where a thread is anchored (brindle.plan_docs): a text range of a\nsection (``text``: ``quote`` between ``start`` and ``end``), a diagram\nsection, a decision (optionally one option) or a whole section, the\nask, the lede or the split. ``state``: where it is in the current\nrevision: ``current``, ``moved`` (found elsewhere) or ``detached`` (gone).",
+          "properties": {
+            "decision": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Decision"
+            },
+            "end": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "End"
+            },
+            "kind": {
+              "enum": [
+                "text",
+                "diagram",
+                "decision",
+                "section"
+              ],
+              "title": "Kind",
+              "type": "string"
+            },
+            "option": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Option"
+            },
+            "quote": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Quote"
+            },
+            "section": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Section"
+            },
+            "start": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Start"
+            },
+            "state": {
+              "default": "current",
+              "enum": [
+                "current",
+                "moved",
+                "detached"
+              ],
+              "title": "State",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "title": "PlanAnchorDTO",
+          "type": "object"
+        },
         "PlanCommentDTO": {
           "properties": {
             "section": {
@@ -5490,6 +5694,18 @@
               "default": null,
               "title": "Challenge"
             },
+            "confirmed": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Confirmed"
+            },
             "id": {
               "title": "Id",
               "type": "string"
@@ -5516,6 +5732,17 @@
             "title": {
               "title": "Title",
               "type": "string"
+            },
+            "votes": {
+              "additionalProperties": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "default": {},
+              "title": "Votes",
+              "type": "object"
             }
           },
           "required": [
@@ -5581,11 +5808,115 @@
           "title": "PlanOptionDTO",
           "type": "object"
         },
-        "PlanSectionDTO": {
-          "description": "One ``##`` section of a plan's markdown: what a comment anchors to.",
+        "PlanReplyDTO": {
           "properties": {
+            "at": {
+              "title": "At",
+              "type": "number"
+            },
+            "attachments": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Attachments",
+              "type": "array"
+            },
+            "author": {
+              "title": "Author",
+              "type": "string"
+            },
             "id": {
               "title": "Id",
+              "type": "integer"
+            },
+            "text": {
+              "title": "Text",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "author",
+            "text",
+            "at"
+          ],
+          "title": "PlanReplyDTO",
+          "type": "object"
+        },
+        "PlanRevisionDTO": {
+          "description": "One revision of a plan: the supervisor's proposal, or the person's\nedit or accepted suggestion; ``changed``, the sections it changed.",
+          "properties": {
+            "at": {
+              "title": "At",
+              "type": "number"
+            },
+            "author": {
+              "enum": [
+                "supervisor",
+                "person"
+              ],
+              "title": "Author",
+              "type": "string"
+            },
+            "changed": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Changed",
+              "type": "array"
+            },
+            "rev": {
+              "title": "Rev",
+              "type": "integer"
+            },
+            "source": {
+              "enum": [
+                "proposal",
+                "edit",
+                "suggestion"
+              ],
+              "title": "Source",
+              "type": "string"
+            }
+          },
+          "required": [
+            "rev",
+            "author",
+            "source",
+            "at"
+          ],
+          "title": "PlanRevisionDTO",
+          "type": "object"
+        },
+        "PlanSectionDTO": {
+          "description": "One section of a plan's revision: what a comment anchors to.\n``kind``: markdown, or a diagram (``markdown`` then holds its mermaid or\nSVG source, and ``caption`` its figure caption).",
+          "properties": {
+            "caption": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Caption"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "kind": {
+              "default": "markdown",
+              "enum": [
+                "markdown",
+                "mermaid",
+                "svg"
+              ],
+              "title": "Kind",
               "type": "string"
             },
             "markdown": {
@@ -5605,6 +5936,109 @@
           "title": "PlanSectionDTO",
           "type": "object"
         },
+        "PlanThreadDTO": {
+          "description": "A comment thread, or a suggestion (``before`` becomes ``after`` when\nthe author accepts it). ``sent``: a verdict carried it to the supervisor.",
+          "properties": {
+            "after": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "After"
+            },
+            "anchor": {
+              "$ref": "#/$defs/PlanAnchorDTO"
+            },
+            "at": {
+              "title": "At",
+              "type": "number"
+            },
+            "attachments": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Attachments",
+              "type": "array"
+            },
+            "author": {
+              "title": "Author",
+              "type": "string"
+            },
+            "before": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Before"
+            },
+            "id": {
+              "title": "Id",
+              "type": "integer"
+            },
+            "kind": {
+              "enum": [
+                "comment",
+                "suggestion"
+              ],
+              "title": "Kind",
+              "type": "string"
+            },
+            "replies": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/PlanReplyDTO"
+              },
+              "title": "Replies",
+              "type": "array"
+            },
+            "rev": {
+              "title": "Rev",
+              "type": "integer"
+            },
+            "sent": {
+              "default": false,
+              "title": "Sent",
+              "type": "boolean"
+            },
+            "status": {
+              "enum": [
+                "open",
+                "resolved",
+                "accepted",
+                "rejected"
+              ],
+              "title": "Status",
+              "type": "string"
+            },
+            "text": {
+              "title": "Text",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "kind",
+            "rev",
+            "author",
+            "text",
+            "anchor",
+            "status",
+            "at"
+          ],
+          "title": "PlanThreadDTO",
+          "type": "object"
+        },
         "PlanVerdictDTO": {
           "properties": {
             "approved": {
@@ -5614,6 +6048,14 @@
             "at": {
               "title": "At",
               "type": "number"
+            },
+            "attachments": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Attachments",
+              "type": "array"
             },
             "comments": {
               "default": [],
@@ -5764,6 +6206,11 @@
           "default": null,
           "title": "Ask"
         },
+        "can_edit": {
+          "default": false,
+          "title": "Can Edit",
+          "type": "boolean"
+        },
         "created_at": {
           "title": "Created At",
           "type": "number"
@@ -5795,6 +6242,14 @@
           "title": "Rev",
           "type": "integer"
         },
+        "revisions": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PlanRevisionDTO"
+          },
+          "title": "Revisions",
+          "type": "array"
+        },
         "sections": {
           "items": {
             "$ref": "#/$defs/PlanSectionDTO"
@@ -5821,6 +6276,14 @@
           ],
           "title": "State",
           "type": "string"
+        },
+        "threads": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PlanThreadDTO"
+          },
+          "title": "Threads",
+          "type": "array"
         },
         "title": {
           "title": "Title",
@@ -5927,6 +6390,18 @@
           "default": null,
           "title": "Challenge"
         },
+        "confirmed": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Confirmed"
+        },
         "id": {
           "title": "Id",
           "type": "string"
@@ -5953,6 +6428,17 @@
         "title": {
           "title": "Title",
           "type": "string"
+        },
+        "votes": {
+          "additionalProperties": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "default": {},
+          "title": "Votes",
+          "type": "object"
         }
       },
       "required": [
@@ -6113,11 +6599,477 @@
       "title": "PlanOptionDTO",
       "type": "object"
     },
-    "PlanSectionDTO": {
-      "description": "One ``##`` section of a plan's markdown: what a comment anchors to.",
+    "PlanReplyDTO": {
       "properties": {
+        "at": {
+          "title": "At",
+          "type": "number"
+        },
+        "attachments": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Attachments",
+          "type": "array"
+        },
+        "author": {
+          "title": "Author",
+          "type": "string"
+        },
         "id": {
           "title": "Id",
+          "type": "integer"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "author",
+        "text",
+        "at"
+      ],
+      "title": "PlanReplyDTO",
+      "type": "object"
+    },
+    "PlanRevisionDTO": {
+      "description": "One revision of a plan: the supervisor's proposal, or the person's\nedit or accepted suggestion; ``changed``, the sections it changed.",
+      "properties": {
+        "at": {
+          "title": "At",
+          "type": "number"
+        },
+        "author": {
+          "enum": [
+            "supervisor",
+            "person"
+          ],
+          "title": "Author",
+          "type": "string"
+        },
+        "changed": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Changed",
+          "type": "array"
+        },
+        "rev": {
+          "title": "Rev",
+          "type": "integer"
+        },
+        "source": {
+          "enum": [
+            "proposal",
+            "edit",
+            "suggestion"
+          ],
+          "title": "Source",
+          "type": "string"
+        }
+      },
+      "required": [
+        "rev",
+        "author",
+        "source",
+        "at"
+      ],
+      "title": "PlanRevisionDTO",
+      "type": "object"
+    },
+    "PlanRevisionDetailDTO": {
+      "$defs": {
+        "PlanDecisionDTO": {
+          "description": "A decision that shapes the plan: its alternatives and the supervisor's pick.",
+          "properties": {
+            "challenge": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Challenge"
+            },
+            "confirmed": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Confirmed"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "mine": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Mine"
+            },
+            "options": {
+              "items": {
+                "$ref": "#/$defs/PlanOptionDTO"
+              },
+              "title": "Options",
+              "type": "array"
+            },
+            "title": {
+              "title": "Title",
+              "type": "string"
+            },
+            "votes": {
+              "additionalProperties": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "default": {},
+              "title": "Votes",
+              "type": "object"
+            }
+          },
+          "required": [
+            "id",
+            "title",
+            "options"
+          ],
+          "title": "PlanDecisionDTO",
+          "type": "object"
+        },
+        "PlanOptionDTO": {
+          "description": "One alternative of a plan's decision, as its card shows it: trade-offs\nas + (``pros``) and \u2212 (``cons``) lines, and the files it ``touches``.",
+          "properties": {
+            "cons": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Cons",
+              "type": "array"
+            },
+            "detail": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Detail"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "label": {
+              "title": "Label",
+              "type": "string"
+            },
+            "pros": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Pros",
+              "type": "array"
+            },
+            "touches": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Touches",
+              "type": "array"
+            }
+          },
+          "required": [
+            "id",
+            "label"
+          ],
+          "title": "PlanOptionDTO",
+          "type": "object"
+        },
+        "PlanSectionDTO": {
+          "description": "One section of a plan's revision: what a comment anchors to.\n``kind``: markdown, or a diagram (``markdown`` then holds its mermaid or\nSVG source, and ``caption`` its figure caption).",
+          "properties": {
+            "caption": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Caption"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "kind": {
+              "default": "markdown",
+              "enum": [
+                "markdown",
+                "mermaid",
+                "svg"
+              ],
+              "title": "Kind",
+              "type": "string"
+            },
+            "markdown": {
+              "title": "Markdown",
+              "type": "string"
+            },
+            "title": {
+              "title": "Title",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "title",
+            "markdown"
+          ],
+          "title": "PlanSectionDTO",
+          "type": "object"
+        },
+        "PlanWorkerDTO": {
+          "description": "One worker of the proposed split: the files it expects to change and\nthe one test that proves its task done.",
+          "properties": {
+            "after": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "After",
+              "type": "array"
+            },
+            "agent_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Agent Id"
+            },
+            "files": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Files",
+              "type": "array"
+            },
+            "id": {
+              "title": "Id",
+              "type": "string"
+            },
+            "state": {
+              "default": "queued",
+              "enum": [
+                "queued",
+                "working",
+                "in review",
+                "merged",
+                "cancelled"
+              ],
+              "title": "State",
+              "type": "string"
+            },
+            "task_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Task Id"
+            },
+            "test": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Test"
+            },
+            "test_state": {
+              "default": "not run",
+              "enum": [
+                "not run",
+                "failing",
+                "passing"
+              ],
+              "title": "Test State",
+              "type": "string"
+            },
+            "title": {
+              "title": "Title",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "title"
+          ],
+          "title": "PlanWorkerDTO",
+          "type": "object"
+        }
+      },
+      "description": "An earlier revision's content: GET /v1/plans/{id}/revisions/{n}.",
+      "properties": {
+        "ask": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Ask"
+        },
+        "at": {
+          "title": "At",
+          "type": "number"
+        },
+        "author": {
+          "enum": [
+            "supervisor",
+            "person"
+          ],
+          "title": "Author",
+          "type": "string"
+        },
+        "changed": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Changed",
+          "type": "array"
+        },
+        "decisions": {
+          "items": {
+            "$ref": "#/$defs/PlanDecisionDTO"
+          },
+          "title": "Decisions",
+          "type": "array"
+        },
+        "lede": {
+          "title": "Lede",
+          "type": "string"
+        },
+        "markdown": {
+          "title": "Markdown",
+          "type": "string"
+        },
+        "rev": {
+          "title": "Rev",
+          "type": "integer"
+        },
+        "sections": {
+          "items": {
+            "$ref": "#/$defs/PlanSectionDTO"
+          },
+          "title": "Sections",
+          "type": "array"
+        },
+        "source": {
+          "enum": [
+            "proposal",
+            "edit",
+            "suggestion"
+          ],
+          "title": "Source",
+          "type": "string"
+        },
+        "split": {
+          "items": {
+            "$ref": "#/$defs/PlanWorkerDTO"
+          },
+          "title": "Split",
+          "type": "array"
+        }
+      },
+      "required": [
+        "rev",
+        "author",
+        "source",
+        "at",
+        "lede",
+        "sections",
+        "markdown",
+        "decisions",
+        "split"
+      ],
+      "title": "PlanRevisionDetailDTO",
+      "type": "object"
+    },
+    "PlanSectionDTO": {
+      "description": "One section of a plan's revision: what a comment anchors to.\n``kind``: markdown, or a diagram (``markdown`` then holds its mermaid or\nSVG source, and ``caption`` its figure caption).",
+      "properties": {
+        "caption": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Caption"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "kind": {
+          "default": "markdown",
+          "enum": [
+            "markdown",
+            "mermaid",
+            "svg"
+          ],
+          "title": "Kind",
           "type": "string"
         },
         "markdown": {
@@ -6135,6 +7087,249 @@
         "markdown"
       ],
       "title": "PlanSectionDTO",
+      "type": "object"
+    },
+    "PlanThreadDTO": {
+      "$defs": {
+        "PlanAnchorDTO": {
+          "description": "Where a thread is anchored (brindle.plan_docs): a text range of a\nsection (``text``: ``quote`` between ``start`` and ``end``), a diagram\nsection, a decision (optionally one option) or a whole section, the\nask, the lede or the split. ``state``: where it is in the current\nrevision: ``current``, ``moved`` (found elsewhere) or ``detached`` (gone).",
+          "properties": {
+            "decision": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Decision"
+            },
+            "end": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "End"
+            },
+            "kind": {
+              "enum": [
+                "text",
+                "diagram",
+                "decision",
+                "section"
+              ],
+              "title": "Kind",
+              "type": "string"
+            },
+            "option": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Option"
+            },
+            "quote": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Quote"
+            },
+            "section": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Section"
+            },
+            "start": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Start"
+            },
+            "state": {
+              "default": "current",
+              "enum": [
+                "current",
+                "moved",
+                "detached"
+              ],
+              "title": "State",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "title": "PlanAnchorDTO",
+          "type": "object"
+        },
+        "PlanReplyDTO": {
+          "properties": {
+            "at": {
+              "title": "At",
+              "type": "number"
+            },
+            "attachments": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Attachments",
+              "type": "array"
+            },
+            "author": {
+              "title": "Author",
+              "type": "string"
+            },
+            "id": {
+              "title": "Id",
+              "type": "integer"
+            },
+            "text": {
+              "title": "Text",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "author",
+            "text",
+            "at"
+          ],
+          "title": "PlanReplyDTO",
+          "type": "object"
+        }
+      },
+      "description": "A comment thread, or a suggestion (``before`` becomes ``after`` when\nthe author accepts it). ``sent``: a verdict carried it to the supervisor.",
+      "properties": {
+        "after": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "After"
+        },
+        "anchor": {
+          "$ref": "#/$defs/PlanAnchorDTO"
+        },
+        "at": {
+          "title": "At",
+          "type": "number"
+        },
+        "attachments": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Attachments",
+          "type": "array"
+        },
+        "author": {
+          "title": "Author",
+          "type": "string"
+        },
+        "before": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Before"
+        },
+        "id": {
+          "title": "Id",
+          "type": "integer"
+        },
+        "kind": {
+          "enum": [
+            "comment",
+            "suggestion"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "replies": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PlanReplyDTO"
+          },
+          "title": "Replies",
+          "type": "array"
+        },
+        "rev": {
+          "title": "Rev",
+          "type": "integer"
+        },
+        "sent": {
+          "default": false,
+          "title": "Sent",
+          "type": "boolean"
+        },
+        "status": {
+          "enum": [
+            "open",
+            "resolved",
+            "accepted",
+            "rejected"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "rev",
+        "author",
+        "text",
+        "anchor",
+        "status",
+        "at"
+      ],
+      "title": "PlanThreadDTO",
       "type": "object"
     },
     "PlanVerdictDTO": {
@@ -6166,6 +7361,14 @@
         "at": {
           "title": "At",
           "type": "number"
+        },
+        "attachments": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Attachments",
+          "type": "array"
         },
         "comments": {
           "default": [],
@@ -9083,7 +10286,39 @@
     },
     {
       "method": "POST",
+      "path": "/v1/plans/{id}/comments"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/plans/{id}/confirm"
+    },
+    {
+      "method": "POST",
       "path": "/v1/plans/{id}/decide"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/plans/{id}/edit"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/plans/{id}/revisions/{n}"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/plans/{id}/suggestions"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/plans/{id}/threads/{tid:int}/accept"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/plans/{id}/threads/{tid:int}/reject"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/plans/{id}/threads/{tid:int}/resolve"
     },
     {
       "method": "GET",

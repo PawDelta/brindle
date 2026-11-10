@@ -163,8 +163,79 @@ def decide_plan(db: DB, params: dict, body: dict) -> Any:
     from brindle import plans
 
     p = plans.decide(db, params["id"], body.get("rev"), _get(body, "approved", bool, required=True),
-                     body.get("picks"), body.get("comments"), _get(body, "note"), person=True)
+                     body.get("picks"), body.get("comments"), _get(body, "note"), person=True,
+                     attachments=_get(body, "attachments", list))
     return plans.to_dto(db, p)
+
+
+# The design doc (brindle.plan_docs). Like decide, only the person reaches
+# these: each answers with the plan as it is now.
+
+
+def _plan_now(db: DB, plan_id: str) -> Any:
+    from brindle import plans
+
+    return plans.to_dto(db, plans.get(db, plan_id))
+
+
+@_json
+def plan_revision(db: DB, request: Request) -> Any:
+    from brindle import plan_docs
+
+    return plan_docs.revision_dto(db, request.path_params["id"], request.path_params["n"])
+
+
+def plan_comment(db: DB, params: dict, body: dict) -> Any:
+    """A comment anchored on the revision on screen, or (``parent``) a reply."""
+    from brindle import plan_docs
+
+    plan_docs.comment(db, params["id"], body.get("rev"), _get(body, "anchor", dict), body.get("text"),
+                      _get(body, "attachments", list), parent=_get(body, "parent", int))
+    return _plan_now(db, params["id"])
+
+
+def plan_resolve(db: DB, params: dict, body: dict) -> Any:
+    from brindle import plan_docs
+
+    plan_docs.resolve(db, params["id"], params["tid"], _get(body, "resolved", bool, default=True))
+    return _plan_now(db, params["id"])
+
+
+def plan_suggest(db: DB, params: dict, body: dict) -> Any:
+    from brindle import plan_docs
+
+    plan_docs.suggest(db, params["id"], body.get("rev"), body.get("section"), body.get("start"),
+                      body.get("before"), body.get("after"), body.get("text"), _get(body, "attachments", list))
+    return _plan_now(db, params["id"])
+
+
+def plan_accept(db: DB, params: dict, body: dict) -> Any:
+    from brindle import plan_docs
+
+    plan_docs.accept(db, params["id"], params["tid"], body.get("rev"))
+    return _plan_now(db, params["id"])
+
+
+def plan_reject(db: DB, params: dict, body: dict) -> Any:
+    from brindle import plan_docs
+
+    plan_docs.reject(db, params["id"], params["tid"])
+    return _plan_now(db, params["id"])
+
+
+def plan_edit(db: DB, params: dict, body: dict) -> Any:
+    from brindle import plan_docs
+
+    plan_docs.edit(db, params["id"], body.get("rev"), body.get("section"), body.get("start"),
+                   body.get("before"), body.get("after"))
+    return _plan_now(db, params["id"])
+
+
+def plan_confirm(db: DB, params: dict, body: dict) -> Any:
+    from brindle import plan_docs
+
+    plan_docs.confirm(db, params["id"], body.get("rev"), body.get("decision"), body.get("option"))
+    return _plan_now(db, params["id"])
 
 
 @_json
@@ -198,6 +269,14 @@ ROUTES = [
     Route("/v1/visuals/{id}/snapshot", _endpoint(snapshot), methods=["POST"]),
     Route("/v1/plans/{id}", plan),
     Route("/v1/plans/{id}/decide", _endpoint(decide_plan), methods=["POST"]),
+    Route("/v1/plans/{id}/revisions/{n}", plan_revision),
+    Route("/v1/plans/{id}/comments", _endpoint(plan_comment), methods=["POST"]),
+    Route("/v1/plans/{id}/suggestions", _endpoint(plan_suggest), methods=["POST"]),
+    Route("/v1/plans/{id}/edit", _endpoint(plan_edit), methods=["POST"]),
+    Route("/v1/plans/{id}/confirm", _endpoint(plan_confirm), methods=["POST"]),
+    Route("/v1/plans/{id}/threads/{tid:int}/resolve", _endpoint(plan_resolve), methods=["POST"]),
+    Route("/v1/plans/{id}/threads/{tid:int}/accept", _endpoint(plan_accept), methods=["POST"]),
+    Route("/v1/plans/{id}/threads/{tid:int}/reject", _endpoint(plan_reject), methods=["POST"]),
     Route("/v1/kept-visuals", kept_list),
     Route("/v1/kept-visuals/{id}", kept_one),
     Route("/v1/kept-visuals/{id}/html", kept_page),

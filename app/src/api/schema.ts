@@ -50,13 +50,18 @@ export interface ApiSchema {
   PermissionPolicyDTO: PermissionPolicyDTO;
   PermissionPresetDTO: PermissionPresetDTO;
   PermissionRuleDTO: PermissionRuleDTO;
+  PlanAnchorDTO: PlanAnchorDTO;
   PlanCommentDTO: PlanCommentDTO;
   PlanDTO: PlanDTO;
   PlanDecisionDTO: PlanDecisionDTO;
   PlanOfferDTO: PlanOfferDTO;
   PlanOfferMilestoneDTO: PlanOfferMilestoneDTO;
   PlanOptionDTO: PlanOptionDTO;
+  PlanReplyDTO: PlanReplyDTO;
+  PlanRevisionDTO: PlanRevisionDTO;
+  PlanRevisionDetailDTO: PlanRevisionDetailDTO;
   PlanSectionDTO: PlanSectionDTO;
+  PlanThreadDTO: PlanThreadDTO;
   PlanVerdictDTO: PlanVerdictDTO;
   PlanWorkerDTO: PlanWorkerDTO;
   PrStateDTO: PrStateDTO;
@@ -818,6 +823,26 @@ export interface PermissionRuleDTO {
   source: string;
 }
 /**
+ * Where a thread is anchored (brindle.plan_docs): a text range of a
+ * section (``text``: ``quote`` between ``start`` and ``end``), a diagram
+ * section, a decision (optionally one option) or a whole section, the
+ * ask, the lede or the split. ``state``: where it is in the current
+ * revision: ``current``, ``moved`` (found elsewhere) or ``detached`` (gone).
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PlanAnchorDTO".
+ */
+export interface PlanAnchorDTO {
+  decision?: string | null;
+  end?: number | null;
+  kind: "text" | "diagram" | "decision" | "section";
+  option?: string | null;
+  quote?: string | null;
+  section?: string | null;
+  start?: number | null;
+  state?: "current" | "moved" | "detached";
+}
+/**
  * This interface was referenced by `ApiSchema`'s JSON-Schema
  * via the `definition` "PlanCommentDTO".
  */
@@ -836,6 +861,7 @@ export interface PlanCommentDTO {
  */
 export interface PlanDTO {
   ask?: string | null;
+  can_edit?: boolean;
   created_at: number;
   decisions: PlanDecisionDTO[];
   id: string;
@@ -843,10 +869,12 @@ export interface PlanDTO {
   markdown: string;
   queued: number;
   rev: number;
+  revisions?: PlanRevisionDTO[];
   sections: PlanSectionDTO[];
   session: string;
   split: PlanWorkerDTO[];
   state: "open" | "redirected" | "approved";
+  threads?: PlanThreadDTO[];
   title: string;
   verdict?: PlanVerdictDTO | null;
 }
@@ -858,10 +886,14 @@ export interface PlanDTO {
  */
 export interface PlanDecisionDTO {
   challenge?: string | null;
+  confirmed?: string | null;
   id: string;
   mine?: string | null;
   options: PlanOptionDTO[];
   title: string;
+  votes?: {
+    [k: string]: string[];
+  };
 }
 /**
  * One alternative of a plan's decision, as its card shows it: trade-offs
@@ -879,13 +911,31 @@ export interface PlanOptionDTO {
   touches?: string[];
 }
 /**
- * One ``##`` section of a plan's markdown: what a comment anchors to.
+ * One revision of a plan: the supervisor's proposal, or the person's
+ * edit or accepted suggestion; ``changed``, the sections it changed.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PlanRevisionDTO".
+ */
+export interface PlanRevisionDTO {
+  at: number;
+  author: "supervisor" | "person";
+  changed?: string[];
+  rev: number;
+  source: "proposal" | "edit" | "suggestion";
+}
+/**
+ * One section of a plan's revision: what a comment anchors to.
+ * ``kind``: markdown, or a diagram (``markdown`` then holds its mermaid or
+ * SVG source, and ``caption`` its figure caption).
  *
  * This interface was referenced by `ApiSchema`'s JSON-Schema
  * via the `definition` "PlanSectionDTO".
  */
 export interface PlanSectionDTO {
+  caption?: string | null;
   id: string;
+  kind?: "markdown" | "mermaid" | "svg";
   markdown: string;
   title: string;
 }
@@ -908,18 +958,71 @@ export interface PlanWorkerDTO {
   title: string;
 }
 /**
+ * A comment thread, or a suggestion (``before`` becomes ``after`` when
+ * the author accepts it). ``sent``: a verdict carried it to the supervisor.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PlanThreadDTO".
+ */
+export interface PlanThreadDTO {
+  after?: string | null;
+  anchor: PlanAnchorDTO;
+  at: number;
+  attachments?: string[];
+  author: string;
+  before?: string | null;
+  id: number;
+  kind: "comment" | "suggestion";
+  replies?: PlanReplyDTO[];
+  rev: number;
+  sent?: boolean;
+  status: "open" | "resolved" | "accepted" | "rejected";
+  text: string;
+}
+/**
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PlanReplyDTO".
+ */
+export interface PlanReplyDTO {
+  at: number;
+  attachments?: string[];
+  author: string;
+  id: number;
+  text: string;
+}
+/**
  * This interface was referenced by `ApiSchema`'s JSON-Schema
  * via the `definition` "PlanVerdictDTO".
  */
 export interface PlanVerdictDTO {
   approved: boolean;
   at: number;
+  attachments?: string[];
   comments?: PlanCommentDTO[];
   note?: string | null;
   picks?: {
     [k: string]: string;
   };
   rev: number;
+}
+/**
+ * An earlier revision's content: GET /v1/plans/{id}/revisions/{n}.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PlanRevisionDetailDTO".
+ */
+export interface PlanRevisionDetailDTO {
+  ask?: string | null;
+  at: number;
+  author: "supervisor" | "person";
+  changed?: string[];
+  decisions: PlanDecisionDTO[];
+  lede: string;
+  markdown: string;
+  rev: number;
+  sections: PlanSectionDTO[];
+  source: "proposal" | "edit" | "suggestion";
+  split: PlanWorkerDTO[];
 }
 /**
  * This interface was referenced by `ApiSchema`'s JSON-Schema
