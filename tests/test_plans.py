@@ -3,15 +3,19 @@ queued behind an open plan through the real dispatch, and only the person
 approves or redirects."""
 
 import asyncio
+import json
+import multiprocessing
 import sqlite3
 import time
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 from mcp.server.mcpserver.exceptions import ToolError
 from starlette.testclient import TestClient
 
 from brindle import agents, mcp_server, plans, tasks, visual_offers
-from brindle.daemon import events
+from brindle.daemon import holds
 from brindle.daemon.app import build_app
 from brindle.db import DB, Agent, Workspace
 from brindle.service.errors import ServiceError
@@ -20,6 +24,7 @@ from test_pro_remote_learning import login_as
 
 TOKEN = "t" * 43
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
+APP_CONNECTED = holds.app_connected
 PLAN = "# Org presets\n\nOne page.\n\n## Goal\n\nPresets per org.\n\n```\n## not a section\n```\n\n## Split\n\nTwo workers."
 DECISIONS = [{"id": "d1", "title": "Where presets live", "mine": "org",
               "options": [{"id": "org", "label": "Org policy"}, {"id": "repo", "label": "A file in each repo"}]}]
@@ -31,7 +36,7 @@ def session(db, tmp_path, monkeypatch):
     real queue and start (tasks.*), and agents.delegate makes the worker row."""
     monkeypatch.setenv("BRINDLE_VISUALS", "1")
     monkeypatch.setenv("BRINDLE_AGENT_ID", "boss")
-    monkeypatch.setattr(events, "connected", 1)
+    monkeypatch.setattr(holds, "app_connected", lambda: True)
     monkeypatch.setattr(agents, "is_alive", lambda agent, panes=None: True)
     ws = Workspace("ws1", str(tmp_path), "main", "main", "main", None, str(tmp_path), None, "brindle-ws1", time.time())
     db.add_workspace(ws)
@@ -53,6 +58,66 @@ def session(db, tmp_path, monkeypatch):
 
 def messages(db) -> list[str]:
     return [r["body"] for r in db.conn.execute("SELECT body FROM inbox WHERE agent_id='boss' ORDER BY id")]
+
+
+def _serve_connected_app(pipe):
+    """A separate daemon: only its event handler sees the app connection."""
+    from brindle.daemon import peer
+
+    app = build_app(TOKEN)
+
+    async def unix_app(scope, receive, send):
+        if scope["type"] == "http":
+            scope[peer.PEER_PID] = 310
+        await app(scope, receive, send)
+
+    feed = SimpleNamespace(start=lambda: [{"ready": True}], tick=lambda now: [])
+    with patch("brindle.daemon.events.Feed", return_value=feed), TestClient(unix_app) as client:
+        with client.websocket_connect("/v1/events") as ws:
+            ws.send_text(TOKEN)
+            ws.receive_json()
+            pipe.send("ready")
+            while (request := pipe.recv()) is not None:
+                response = client.post(request)
+                pipe.send((response.status_code, response.json()))
+        pipe.send(client.post("/v1/holds/app").json())
+
+
+@pytest.fixture
+def connected_app(session, monkeypatch):
+    """Keep the HTTP transport fake, but cross a real daemon process boundary."""
+    ctx = multiprocessing.get_context("spawn")
+    caller, daemon = ctx.Pipe()
+    process = ctx.Process(target=_serve_connected_app, args=(daemon,))
+    process.start()
+    daemon.close()
+
+    class Connection:
+        def __init__(self, *args):
+            pass
+
+        def request(self, method, path, body, headers):
+            caller.send(path)
+
+        def getresponse(self):
+            status, data = caller.recv()
+            return SimpleNamespace(status=status, read=lambda: json.dumps(data).encode())
+
+        def close(self):
+            pass
+
+    try:
+        assert caller.recv() == "ready"
+        monkeypatch.setattr(holds, "_UnixConnection", Connection)
+        monkeypatch.setattr(holds, "app_connected", APP_CONNECTED)
+        yield
+        caller.send(None)
+        assert caller.recv() == {"connected": False}
+    finally:
+        process.terminate()
+        process.join()
+        caller.close()
+        daemon.close()
 
 
 def test_plan_board_links_dispatch_and_reads_recorded_checks(db, session, monkeypatch):
@@ -200,7 +265,7 @@ def test_assign_queues_behind_open_plan_until_the_person_approves(db, session, m
     pid = out.split()[2]
     assert plans.sections(PLAN)[1][0]["title"] == "Goal" and len(plans.sections(PLAN)[1]) == 2
 
-    monkeypatch.setattr(events, "connected", app_connected)
+    monkeypatch.setattr(holds, "app_connected", lambda: bool(app_connected))
     reply = asyncio.run(mcp_server.assign("developer", "build the preset schema"))
     if not app_connected:
         plans.decide(db, pid, 1, False, note="Revise the split.", person=True)
@@ -267,7 +332,7 @@ def test_assign_queues_behind_open_plan_until_the_person_approves(db, session, m
     pytest.param("legacy", marks=pytest.mark.variant(
         "an upgraded row: the retired analysis-doc offer's 'accepted' must neither hold work nor allow a plan")),
 ])
-def test_big_goal_offers_a_planning_doc(accept, db, session, monkeypatch):
+def test_big_goal_offers_a_planning_doc(accept, db, session, monkeypatch, connected_app):
     """A big goal offers to plan it first. While that is open, assign queues;
     Yes grants the plan and keeps the task queued until the plan is approved,
     No starts it. An accepted analysis-doc offer from before does neither."""
@@ -321,7 +386,7 @@ def test_plan_offer_without_app(db, session, monkeypatch):
     from brindle import autopilot
 
     boss, started = session
-    monkeypatch.setattr(events, "connected", 0)
+    monkeypatch.setattr(holds, "app_connected", APP_CONNECTED)
     monkeypatch.setattr(autopilot, "_commit", lambda ws, tracked_only=False: "abc123")
     db.add_autopilot(boss.id)
     mcp_server.set_goal("Org presets", [{"title": f"M{i}", "check": "true"} for i in range(4)])

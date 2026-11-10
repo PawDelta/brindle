@@ -772,12 +772,12 @@ def consider_plan_offer(db: DB, root_id: str) -> None:
     changes and when a worker is assigned; never raises."""
     try:
         from brindle import plans, visuals
-        from brindle.daemon import events
+        from brindle.daemon import holds
         from brindle.pro import analysis_brief
 
         ap = db.get_autopilot(root_id)
         if ap is None or not ap.goal or ap.plan_offer is not None or not visuals.enabled() \
-                or not events.connected or plans.open_plan(db, root_id) is not None:
+                or not holds.app_connected() or plans.open_plan(db, root_id) is not None:
             return
         milestones, repos, workers, text = plan_offer_scope(db, root_id, ap)
         if analysis_brief.deserves_offer(len(milestones), repos, text, workers) \
