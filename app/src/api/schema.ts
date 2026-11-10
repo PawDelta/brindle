@@ -929,7 +929,7 @@ export interface PlanGateDTO {
   required: number;
   reviewers?: PlanGateRowDTO[];
   signed: number;
-  state: "waiting" | "changes_requested" | "ready" | "closed";
+  state: "waiting" | "changes_requested" | "conflict" | "ready" | "closed";
   waiting_on?: string[];
 }
 /**
@@ -952,15 +952,16 @@ export interface PlanGateRowDTO {
   you?: boolean;
 }
 /**
- * One revision of a plan: the supervisor's proposal, or the person's
- * edit or accepted suggestion; ``changed``, the sections it changed.
+ * One revision of a plan: the supervisor's proposal, the person's edit
+ * or accepted suggestion, or a teammate's text from the Library (``author``
+ * is teammate:<sub>); ``changed``, the sections it changed.
  *
  * This interface was referenced by `ApiSchema`'s JSON-Schema
  * via the `definition` "PlanRevisionDTO".
  */
 export interface PlanRevisionDTO {
   at: number;
-  author: "supervisor" | "person";
+  author: string;
   changed?: string[];
   rev: number;
   source: "proposal" | "edit" | "suggestion";
@@ -1056,7 +1057,7 @@ export interface PlanVerdictDTO {
 export interface PlanRevisionDetailDTO {
   ask?: string | null;
   at: number;
-  author: "supervisor" | "person";
+  author: string;
   changed?: string[];
   decisions: PlanDecisionDTO[];
   lede: string;

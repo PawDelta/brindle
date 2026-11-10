@@ -64,8 +64,9 @@ HOLDING = ("open", "redirected")
 SIGNED, CHANGES, WAITING, WAIVED = "signed_off", "changes_requested", "waiting", "waived"
 _MET = (SIGNED, WAIVED)
 _RULE_STATUS = {"met": SIGNED, "waived": WAIVED}   # the Library's policy_reviewers[].status; anything else waits
+CONFLICT = "conflict"       # the plan and the Library's copy both changed since they last matched
 # The gate's states that keep a build from starting.
-GATE_SHUT = (WAITING, CHANGES)
+GATE_SHUT = (WAITING, CHANGES, CONFLICT)
 # The offer to plan a goal first (goal_doc_requests.offer): plan:open:<id>
 # until answered, then plan:accepted (waiting for the plan), plan:planned (a
 # plan was proposed) or plan:dismissed. Open and accepted hold the session's
@@ -330,6 +331,10 @@ def _gate(c, p: dict) -> dict | None:
         state, reason = "closed", "The review is closed: this plan is building."
     elif p["state"] == "redirected":
         state, reason = CHANGES, "Changes were requested: the build waits for the supervisor's next revision."
+    elif (row["doc_id"] is not None and row["local_rev"] != p["rev"] and isinstance(review.get("rev"), int)
+          and review["rev"] != row["remote_rev"]):
+        state, reason = CONFLICT, (f"A teammate changed this plan in the Library (r{review['rev']}) and it changed "
+                                   f"here too, so r{p['rev']} wasn't sent. Neither copy was overwritten.")
     elif changes:
         state, reason = CHANGES, f"Changes requested by {', '.join(changes)}."
     elif row["doc_id"] is None:
@@ -349,7 +354,8 @@ def _gate(c, p: dict) -> dict | None:
 def gate(db: DB, p: dict) -> dict | None:
     """Plan ``p``'s build gate as ``{state, reason, required, signed,
     waiting_on, reviewers}``, or None if it isn't shared. ``state``: waiting,
-    changes_requested, ready, or closed once it is building."""
+    changes_requested, conflict (the plan and the Library's copy both changed),
+    ready, or closed once it is building."""
     return _gate(db.conn, p)
 
 
@@ -735,7 +741,8 @@ def decide(db: DB, plan_id: str, rev: Any, approved: bool, picks: Any = None, co
     bus.publish(db, "visual.answered", repo_root=p["visual"]["repo_root"], root_id=p["root_id"], visual=p["id"],
                 rev=rev, option=state)
     if approved:
-        _to_library(p, picks, comments, note, titles, doc_record)
+        if gate(db, p) is None:             # a shared plan's one Library entry is its document
+            _to_library(p, picks, comments, note, titles, doc_record)
         tasks.on_resumed(db, p["root_id"], why="the person's approval of the plan")
     return get(db, p["id"])
 

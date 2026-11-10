@@ -403,11 +403,12 @@ class PlanThreadDTO(_DTO):
 
 
 class PlanRevisionDTO(_DTO):
-    """One revision of a plan: the supervisor's proposal, or the person's
-    edit or accepted suggestion; ``changed``, the sections it changed."""
+    """One revision of a plan: the supervisor's proposal, the person's edit
+    or accepted suggestion, or a teammate's text from the Library (``author``
+    is teammate:<sub>); ``changed``, the sections it changed."""
 
     rev: int
-    author: Literal["supervisor", "person"]
+    author: str
     source: Literal["proposal", "edit", "suggestion"]
     changed: list[str] = []
     at: float
@@ -444,7 +445,7 @@ class PlanGateDTO(_DTO):
     """A shared plan's build gate (brindle.plans.gate). ``reason``: why it
     can't build now; ``signed`` of ``required`` sign-offs are in."""
 
-    state: Literal["waiting", "changes_requested", "ready", "closed"]
+    state: Literal["waiting", "changes_requested", "conflict", "ready", "closed"]
     reason: str | None = None
     required: int
     signed: int

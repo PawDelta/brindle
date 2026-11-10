@@ -5887,6 +5887,7 @@
               "enum": [
                 "waiting",
                 "changes_requested",
+                "conflict",
                 "ready",
                 "closed"
               ],
@@ -6085,17 +6086,13 @@
           "type": "object"
         },
         "PlanRevisionDTO": {
-          "description": "One revision of a plan: the supervisor's proposal, or the person's\nedit or accepted suggestion; ``changed``, the sections it changed.",
+          "description": "One revision of a plan: the supervisor's proposal, the person's edit\nor accepted suggestion, or a teammate's text from the Library (``author``\nis teammate:<sub>); ``changed``, the sections it changed.",
           "properties": {
             "at": {
               "title": "At",
               "type": "number"
             },
             "author": {
-              "enum": [
-                "supervisor",
-                "person"
-              ],
               "title": "Author",
               "type": "string"
             },
@@ -6815,6 +6812,7 @@
           "enum": [
             "waiting",
             "changes_requested",
+            "conflict",
             "ready",
             "closed"
           ],
@@ -7108,17 +7106,13 @@
       "type": "object"
     },
     "PlanRevisionDTO": {
-      "description": "One revision of a plan: the supervisor's proposal, or the person's\nedit or accepted suggestion; ``changed``, the sections it changed.",
+      "description": "One revision of a plan: the supervisor's proposal, the person's edit\nor accepted suggestion, or a teammate's text from the Library (``author``\nis teammate:<sub>); ``changed``, the sections it changed.",
       "properties": {
         "at": {
           "title": "At",
           "type": "number"
         },
         "author": {
-          "enum": [
-            "supervisor",
-            "person"
-          ],
           "title": "Author",
           "type": "string"
         },
@@ -7443,10 +7437,6 @@
           "type": "number"
         },
         "author": {
-          "enum": [
-            "supervisor",
-            "person"
-          ],
           "title": "Author",
           "type": "string"
         },

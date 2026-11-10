@@ -3,6 +3,7 @@ of the API in pawdelta-web's docs/shared-designs-api.md."""
 
 import asyncio
 import copy
+import functools
 import time
 
 import pytest
@@ -35,8 +36,11 @@ class Library:
         self.rev, self.content, self.threads, self.votes = 0, None, [], {}
         self.permissions, self.reviewers, self.create_status, self.share_status = {}, [], 200, 200
         self.lose_answer, self.lose_create, self.list_status, self.plan = False, False, 200, None
-        self.sign_offs = []
+        self.sign_offs, self.author, self.refuse_accept = [], "u_e", False
         remote.routes.update({
+            **{f"POST {DESIGN}/threads/{n}": functools.partial(self.act, n) for n in range(1, 12)},
+            f"POST {DESIGN}/comments": self.comment, f"POST {DESIGN}/suggestions": self.suggest,
+            f"POST {DESIGN}/votes": self.vote,
             f"POST {DESIGN}/sign-offs": self.sign_off,
             "POST /analysis-docs": self.create, f"POST {BASE}/share": self.share, f"GET {LIST}": self.list,
             f"GET {DESIGN}": lambda f, h: (200, self.view()), f"POST {DESIGN}/revisions": self.revise,
@@ -45,14 +49,71 @@ class Library:
         })
 
     def view(self):
-        out = {**copy.deepcopy(self.content), "rev": self.rev, "threads": copy.deepcopy(self.threads),
+        out = {**copy.deepcopy(self.content), "rev": self.rev, "author": self.author,
+               "threads": copy.deepcopy(self.threads),
                "permissions": dict(self.permissions), "reviewers": list(self.reviewers),
                "sign_offs": list(self.sign_offs),
                "pending_reviewers": [r["sub"] for r in self.reviewers if r["required"] and not any(
                    s["sub"] == r["sub"] and s["rev"] == self.rev for s in self.sign_offs)]}
         for d in out["decisions"]:
             d["votes"] = self.votes.get(d["id"], {})
+            d["confirmed"] = next((o for o, subs in d["votes"].items() if "user_1" in subs), None)
         return {**out, "ready": not out["pending_reviewers"]}
+
+    def answer(self):
+        if self.lose_answer:
+            raise auth.AuthError("offline", code="network")
+        return 200, self.view()
+
+    def next_id(self):
+        return max([t["id"] for t in self.threads] + [r["id"] for t in self.threads for r in t["replies"]],
+                   default=0) + 1
+
+    def comment(self, form, headers):
+        if form["rev"] != self.rev:
+            return 409, {"error": "stale", "rev": self.rev}
+        item = {"id": self.next_id(), "author": "user_1", "text": form["text"], "at": 9.0}
+        if "parent" in form:
+            next(t for t in self.threads if t["id"] == form["parent"])["replies"].append(item)
+        else:
+            self.threads.append({**item, "kind": "comment", "rev": form["rev"], "status": "open", "replies": [],
+                                 "anchor": {**form["anchor"], "state": "current"}})
+        return self.answer()
+
+    def suggest(self, form, headers):
+        self.threads.append({"id": self.next_id(), "author": "user_1", "text": form["text"], "kind": "suggestion",
+                             "rev": form["rev"], "status": "open", "replies": [], "after": form["after"], "at": 9.0,
+                             "anchor": {"kind": "text", "section": form["section"], "start": form["start"],
+                                        "end": form["start"] + len(form["before"]), "quote": form["before"],
+                                        "state": "current"}})
+        return self.answer()
+
+    def vote(self, form, headers):
+        options = self.votes.setdefault(form["decision"], {})
+        for subs in options.values():
+            subs[:] = [s for s in subs if s != "user_1"]
+        options.setdefault(form["option"], []).append("user_1")
+        return self.answer()
+
+    def act(self, thread_id, form, headers):
+        """As the server: only a comment is resolved, and an accept makes the revision itself."""
+        if form["rev"] != self.rev:
+            return 409, {"error": "stale", "rev": self.rev}
+        t, action = next(t for t in self.threads if t["id"] == thread_id), form["action"]
+        if action in ("resolve", "reopen"):
+            if t["kind"] != "comment":
+                return 422, {"error": "invalid_thread"}
+            t["status"] = "resolved" if action == "resolve" else "open"
+        elif action == "reject":
+            t["status"] = "rejected"
+        else:
+            if self.refuse_accept:
+                return 409, {"error": "stale", "rev": self.rev}
+            section, a = next(s for s in self.content["sections"] if s["id"] == t["anchor"]["section"]), t["anchor"]
+            body = section["markdown"]
+            section["markdown"] = body[:a["start"]] + t["after"] + body[a["start"] + len(a["quote"]):]
+            t["status"], self.rev, self.votes = "accepted", self.rev + 1, {}
+        return self.answer()
 
     def create(self, form, headers):
         if self.create_status != 200:
@@ -113,6 +174,8 @@ def test_required_reviewers_share_sign_off_and_build_through_the_daemon_routes(d
     """Sharing, editing reviewers, a teammate's sign-off and the build, as the app drives them."""
     pid, lib, net = parts
     monkeypatch.setattr(ad, "_session", lambda client=None, store=None: (net["client"], net["store"]))
+    uploads = []
+    monkeypatch.setattr(ad, "on_merged", lambda *a: uploads.append(a))
     with TestClient(build_app(TOKEN), headers=AUTH) as app:
         post = lambda tail, **body: app.post(f"/v1/plans/{pid}/{tail}", json=body)  # noqa: E731
         got = post("share", scope=TEAM, reviewers=[{"sub": "u_a", "required": True}, {"sub": "user_1", "required": True}])
@@ -133,6 +196,7 @@ def test_required_reviewers_share_sign_off_and_build_through_the_daemon_routes(d
 
         assert post("reviewers", reviewers=[{"sub": "u_a", "required": True}]).json()["gate"]["required"] == 1
         assert post("decide", rev=1, approved=True).json()["state"] == "approved"
+        assert not uploads                                          # its one Library entry is the shared document
         assert post("reviewers", reviewers=[]).json()["error"]["code"] == "review_closed"
         assert sd.sync_open(db, **net) == 0                         # review closed: nothing more to bring back
 
@@ -200,30 +264,134 @@ def test_a_shared_plan_goes_to_the_library_and_what_teammates_write_comes_back(d
     lib.threads[0]["status"] = "open"
     sd.sync(db, pid, **net)
 
-    # The person takes a teammate's insertion; the new revision goes up on the Library's head,
-    # and in that one sync the old revision's imported votes go, the person's own staying.
+    # The person takes a teammate's insertion: the Library's own accept makes the revision and closes
+    # the thread, and in that one sync the old revision's imported votes go, the person's own staying.
     plan_docs.confirm(db, pid, 1, "d1", "org")
     plan_docs.accept(db, pid, suggestion["id"], 1)
     assert sd.sync(db, pid, **net)["pushed"] is True
-    [pushed] = sent(backend, f"POST {DESIGN}/revisions")
-    assert pushed["rev"] == 1 and pushed["sections"][0]["markdown"] == "Today, " + SUMMARY
-    assert sd.link(db, pid)["remote_rev"] == 2
+    assert sent(backend, f"POST {DESIGN}/threads/3") == [{"rev": 1, "action": "accept"}]
+    assert not sent(backend, f"POST {DESIGN}/revisions")            # a second send would apply it twice
+    assert lib.content["sections"][0]["markdown"] == "Today, " + SUMMARY and lib.threads[1]["status"] == "accepted"
+    assert (sd.link(db, pid)["remote_rev"], sd.link(db, pid)["local_rev"]) == (2, 2)
     assert plan_docs.fields(db, plans.get(db, pid))["decisions"][0]["votes"] == {"org": ["person"]}
 
-    # The Library moved on without this plan: the send is refused, the comments still arrive.
+    # Both changed: nothing is sent, the screen can say why, and the comments still arrive.
     lib.rev += 1
     lib.threads.append({"id": 5, "kind": "comment", "rev": 3, "author": "u_a", "text": "Name the VM rule.",
                         "status": "open", "replies": [], "anchor": {"kind": "section", "section": "summary"}})
     plan_docs.edit(db, pid, 2, "summary", 0, "Today", "Now")
-    with pytest.raises(RuntimeError):
-        sd.sync(db, pid, **net)
-    assert sd.link(db, pid)["local_rev"] == 2
+    assert sd.sync(db, pid, **net)["pushed"] is False
+    assert not sent(backend, f"POST {DESIGN}/revisions") and sd.link(db, pid)["local_rev"] == 2
+    assert plans.to_dto(db, plans.get(db, pid))["gate"]["state"] == "conflict"
+    assert plans.gate_shut(db, plans.get(db, pid)["root_id"])
     assert plan_docs.fields(db, plans.get(db, pid))["threads"][-1]["text"] == "Name the VM rule."
 
     # Request changes carries teammates' open comments and replies to the supervisor.
     plans.decide(db, pid, 3, False, person=True)
     said = messages(db)[-1]
     assert "Name the VM rule." in said and "u_a" in said and "Yes." in said and "u_b" in said
+
+
+def test_a_teammates_edit_comes_in_as_a_revision_and_later_sends_go_on_it(db, parts, backend):
+    pid, lib, net = parts
+    sd.share(db, pid, TEAM, **net)
+    lib.rev = 2
+    lib.content["sections"][0]["markdown"] = "Workers run anywhere."
+    assert sd.sync(db, pid, **net)["pushed"] is False
+    got = plans.to_dto(db, plans.get(db, pid))
+    assert (got["rev"], got["sections"][0]["markdown"]) == (2, "Workers run anywhere.")
+    assert got["revisions"][-1]["author"] == "teammate:u_e"
+    assert (sd.link(db, pid)["remote_rev"], sd.link(db, pid)["local_rev"]) == (2, 2)
+
+    # The push that would have been left blocked goes up on the imported head.
+    plan_docs.edit(db, pid, 2, "summary", 0, "Workers", "Hosts")
+    assert sd.sync(db, pid, **net)["pushed"] is True
+    assert [p["rev"] for p in sent(backend, f"POST {DESIGN}/revisions")] == [2]
+
+    # A head that couldn't have been proposed here (it holds a script) isn't taken.
+    lib.rev += 1
+    lib.content["sections"][0].update(kind="svg", markdown="<svg><script>x</script></svg>")
+    with pytest.raises(RuntimeError):
+        sd.sync(db, pid, **net)
+    assert plans.get(db, pid)["rev"] == 3
+
+    # A redirected plan is the supervisor's to revise, who hears about the teammate's edit.
+    lib.content["sections"][0].update(kind="markdown", markdown="Back to text.")
+    plans.decide(db, pid, 3, False, note="Tighten it.", person=True)
+    assert "u_e" in messages(db)[-1]
+    sd.sync(db, pid, **net)
+    assert plans.get(db, pid)["rev"] == 3
+
+
+def test_what_the_person_does_on_the_doc_reaches_the_library_once(db, parts, backend):
+    pid, lib, net = parts
+    plan_docs.comment(db, pid, 1, {"kind": "section", "section": "summary"}, "Just for me.")
+    sd.share(db, pid, TEAM, **net)
+    lib.threads = [
+        {"id": 1, "kind": "comment", "rev": 1, "author": "u_a", "text": "Which VM?", "status": "open", "replies": [],
+         "anchor": {"kind": "section", "section": "summary"}},
+        {"id": 2, "kind": "suggestion", "rev": 1, "author": "u_b", "text": "", "after": "Agents", "status": "open",
+         "replies": [],
+         "anchor": {"kind": "text", "section": "summary", "start": 0, "end": 7, "quote": "Workers", "state": "current"}}]
+    sd.sync(db, pid, **net)
+    _, theirs, offer = plan_docs.fields(db, plans.get(db, pid))["threads"]
+
+    plan_docs.comment(db, pid, 1, {"kind": "text", "section": "summary", "start": 0, "quote": "Workers"}, "Which ones?")
+    plan_docs.comment(db, pid, text="Any VM.", parent=theirs["id"])
+    plan_docs.suggest(db, pid, 1, "summary", 0, "Workers", "Hosts")
+    plan_docs.resolve(db, pid, theirs["id"])
+    plan_docs.reject(db, pid, offer["id"])
+    plan_docs.confirm(db, pid, 1, "d1", "org")
+
+    # The first write lands but its answer is lost: the next sync recognises it instead of sending it again.
+    lib.lose_answer = True
+    with pytest.raises(auth.AuthError):
+        sd.sync(db, pid, **net)
+    lib.lose_answer = False
+    sd.sync(db, pid, **net)
+    sd.sync(db, pid, **net)
+
+    anchor = {"kind": "text", "section": "summary", "start": 0, "end": 7, "quote": "Workers"}
+    assert sent(backend, f"POST {DESIGN}/comments") == [{"rev": 1, "anchor": anchor, "text": "Which ones?"},
+                                                        {"rev": 1, "parent": 1, "text": "Any VM."}]
+    assert sent(backend, f"POST {DESIGN}/suggestions") == [{"rev": 1, "section": "summary", "start": 0,
+                                                            "before": "Workers", "after": "Hosts", "text": ""}]
+    assert sent(backend, f"POST {DESIGN}/threads/1") == [{"rev": 1, "action": "resolve"}]
+    assert sent(backend, f"POST {DESIGN}/threads/2") == [{"rev": 1, "action": "reject"}]
+    assert sent(backend, f"POST {DESIGN}/votes") == [{"rev": 1, "decision": "d1", "option": "org"}]
+
+    # What went up doesn't come back as a teammate's.
+    got = plan_docs.fields(db, plans.get(db, pid))
+    assert [t["author"] for t in got["threads"]] == ["person", "teammate:u_a", "teammate:u_b", "person", "person"]
+    assert [r["author"] for r in got["threads"][1]["replies"]] == ["person"]
+    assert got["decisions"][0]["votes"] == {"org": ["person"]}
+
+
+def test_an_accept_the_library_refuses_goes_up_in_the_revision_and_never_again(db, parts, backend):
+    pid, lib, net = parts
+    sd.share(db, pid, TEAM, **net)
+    lib.threads = [{"id": 1, "kind": "suggestion", "rev": 1, "author": "u_b", "text": "", "after": "Agents",
+                    "status": "open", "replies": [], "anchor": {"kind": "text", "section": "summary", "start": 0,
+                                                                "end": 7, "quote": "Workers", "state": "current"}}]
+    sd.sync(db, pid, **net)
+    plan_docs.accept(db, pid, plan_docs.fields(db, plans.get(db, pid))["threads"][0]["id"], 1)
+    lib.refuse_accept = True
+    assert sd.sync(db, pid, **net)["pushed"] is True
+    assert lib.content["sections"][0]["markdown"].startswith("Agents")
+
+    # Sent now, on text already holding the change, it would be applied a second time.
+    plan_docs.edit(db, pid, 2, "summary", 0, "Agents", "Hosts")
+    lib.refuse_accept = False
+    assert sd.sync(db, pid, **net)["pushed"] is True
+    assert len(sent(backend, f"POST {DESIGN}/threads/1")) == 1
+
+
+def test_a_plan_that_isnt_shared_still_files_its_approval_record(db, parts, monkeypatch):
+    pid, _, _ = parts
+    uploads = []
+    monkeypatch.setattr(ad, "on_merged", lambda *a: uploads.append(a))
+    plans.decide(db, pid, 1, True, person=True)
+    assert len(uploads) == 1
 
 
 def test_reviewers_change_after_sharing_and_a_folder_is_only_used_when_named(db, parts, backend):
@@ -312,12 +480,13 @@ def test_an_insertion_the_library_cant_place_here_stays_detached(db, parts):
         thread = plan_docs.fields(db, plans.get(db, pid))["threads"][-1]
         assert thread["anchor"]["state"] == "detached"
         with pytest.raises(ServiceError) as refused:
-            plan_docs.accept(db, pid, thread["id"], 1)
+            plan_docs.accept(db, pid, thread["id"], plans.get(db, pid)["rev"])
         assert refused.value.code == "stale"
 
     lib.threads = [insertion(1, "detached")]                # the Library says it is gone
     sd.sync(db, pid, **net)
     refused_last()
+    plan_docs.edit(db, pid, 1, "summary", 0, "Workers", "Hosts")
     lib.rev += 1                                            # placed, but on text this plan doesn't have
     lib.threads.append(insertion(2, "current"))
     sd.sync(db, pid, **net)
