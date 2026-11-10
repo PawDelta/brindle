@@ -77,13 +77,13 @@ describe("inbox", () => {
     sync.stop();
   });
 
-  it("inbox dismiss clears the PR card while a read from before Not now finishes", async () => {
+  it("inbox dismiss clears the PR card while a read from before Dismiss finishes", async () => {
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root], inbox: [prReady, { ...prReady, kind: "pr_failed" }] });
     const client = daemon.client(), reads: ((items: InboxItemDTO[]) => void)[] = [];
     const { sync } = mount(daemon, client);
     await screen.findByRole("region", { name: "Ship ls --json" }); await act(async () => sync.idle()); vi.spyOn(client, "inbox").mockImplementation(() => new Promise((resolve) => reads.push(resolve))); act(() => { void sync.refresh(); });
-    expect(within(card("pr_failed")).queryByRole("button", { name: "Not now" })).toBeNull();
-    fireEvent.click(within(card("pr_ready")).getByRole("button", { name: "Not now" }));
+    expect(within(card("pr_failed")).queryByRole("button", { name: "Dismiss" })).toBeNull();
+    fireEvent.click(within(card("pr_ready")).getByRole("button", { name: "Dismiss" }));
     await waitFor(() => expect(posts(daemon)).toEqual([{ method: "POST", path: "/inbox/sup1/pr-not-now", query: {}, body: {} }]));
     await waitFor(() => expect(card("pr_ready")).toBeNull());
     await act(async () => reads[0]([prReady, { ...prReady, kind: "pr_failed" }])); expect(card("pr_ready")).toBeNull(); await act(async () => { reads[1](daemon.data.inbox); await sync.idle(); });
@@ -160,13 +160,22 @@ describe("inbox", () => {
     expect(within(group).getAllByTestId("inbox-card")).toHaveLength(4);
     // A PR the supervisor opened itself: no Review & open PR, a link to the PR on GitHub.
     expect(card("pr_opened").textContent).toContain("#408 Ship ls --json");
+    expect(card("pr_opened").textContent).toContain("PR opened");
     expect(within(card("pr_opened")).queryByRole("button", { name: "Review & open PR" })).toBeNull();
+    expect(within(card("pr_opened")).getByRole("button", { name: "Dismiss" })).toBeTruthy();
     fireEvent.click(within(card("pr_opened")).getByRole("button", { name: "Open on GitHub" }));
     expect(openUrl).toHaveBeenCalledWith("https://github.com/o/r/pull/408");
-    // The PR brindle prepared (its checks passed, nothing pushed): Review & open PR opens the session's sheet.
-    expect(card("pr_ready").textContent).toContain("PR ready for your approval");
-    fireEvent.click(within(card("pr_ready")).getByRole("button", { name: "Review & open PR" }));
-    expect(onOpen).toHaveBeenLastCalledWith("sup1", REPO, "sup1", { kind: "review" });
+    // The PR brindle prepared (its checks passed, nothing pushed): one press of Open PR opens it, no review sheet.
+    expect(card("pr_ready").textContent).toContain("PR ready");
+    expect(card("pr_ready").textContent).toContain("Ship ls --json");
+    expect(within(card("pr_ready")).queryByRole("button", { name: "Review & open PR" })).toBeNull();
+    expect(within(card("pr_ready")).getByRole("button", { name: "Dismiss" })).toBeTruthy();
+    daemon.readyForPr("sup1");
+    fireEvent.click(within(card("pr_ready")).getByRole("button", { name: "Open PR" }));
+    expect(within(card("pr_ready")).getByRole("button", { name: "Opening…" })).toHaveProperty("disabled", true);
+    await waitFor(() => expect(daemon.prs).toHaveLength(1));
+    expect(daemon.prs[0].title).toBe("Ship ls --json");
+    expect(onOpen).not.toHaveBeenCalled();
     expect(group.textContent).toContain("sup1 · proj");
     fireEvent.click(within(group).getByRole("button", { name: "Open the session ›" }));
     expect(onOpen).toHaveBeenLastCalledWith("sup1", REPO);
@@ -191,7 +200,7 @@ describe("inbox", () => {
     expect(card("org_notice").textContent).toContain("from your org's admin");
     expect(within(card("org_notice")).queryByRole("button", { name: "Go to session ›" })).toBeNull();
     fireEvent.click(within(card("org_notice")).getByRole("button", { name: "Mark read" }));
-    await waitFor(() => expect(posts(daemon)).toEqual([{ method: "POST", path: "/inbox/n-18/read", query: {}, body: {} }]));
+    await waitFor(() => expect(posts(daemon).filter((p) => p.path.startsWith("/inbox/"))).toEqual([{ method: "POST", path: "/inbox/n-18/read", query: {}, body: {} }]));
     await waitFor(() => expect(screen.queryByRole("region", { name: "Your org" })).toBeNull());
     sync.stop();
   });

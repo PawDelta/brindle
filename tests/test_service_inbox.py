@@ -218,6 +218,10 @@ def test_pr_opened_by_supervisor_replaces_the_ready_card(db, tmp_path, monkeypat
     [card] = cards()
     assert (card.kind, card.reason, card.detail, card.url) == ("pr_opened", "PR opened", "#408 Fix things", pr["url"])
     assert len(asked) == 1   # cached: the second read didn't ask gh again
+    from brindle.daemon.routes_actions import inbox_action
+
+    inbox_action(db, {"id": "r1", "action": "pr-not-now"}, {})   # Dismiss on the opened card
+    assert cards() == []
     pr = None
     session_review._head_cache.clear()
     assert [i.kind for i in cards()] == ["pr_ready"]

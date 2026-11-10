@@ -174,6 +174,20 @@ def _sign_in(provider: str) -> InboxActionDTO | None:
     return InboxActionDTO(method="POST", path=f"/v1/providers/{provider}/login") if provider in CLI_NAMES else None
 
 
+def opened_marker(path: str) -> str | None:
+    """What dismissing the "PR opened" card records: HEAD and the open PR's URL
+    (a new commit or another PR brings the card back), or None when no PR is
+    open on HEAD."""
+    from brindle.daemon import session_review
+
+    try:
+        head = git.out(["rev-parse", "HEAD"], path)
+    except (git.GitError, OSError):
+        return None
+    found = session_review.open_pr_for_head(head, path)
+    return f"{head}|{found['url']}" if found and found.get("url") else None
+
+
 def _pr_items(db: DB, root_id: str, branch: str, path: str, link: dict) -> list[InboxItemDTO]:
     """The session's PR as brindle prepared it (routes_actions.prepare_pr),
     until the person opens it: ready for their approval, or its checks failed.
@@ -182,10 +196,15 @@ def _pr_items(db: DB, root_id: str, branch: str, path: str, link: dict) -> list[
     from brindle.daemon import session_review
 
     try:
-        opened = session_review.open_pr_for_head(git.out(["rev-parse", "HEAD"], path), path)
+        head = git.out(["rev-parse", "HEAD"], path)
+        opened = session_review.open_pr_for_head(head, path)
     except (git.GitError, OSError):
-        opened = None  # An unavailable checkout must not break the rest of the inbox.
+        head, opened = "", None  # An unavailable checkout must not break the rest of the inbox.
     if opened and opened.get("url"):
+        gone = db.conn.execute("SELECT 1 FROM session_pr_declined WHERE root_id = ? AND branch = ? AND sha = ?",
+                               (root_id, branch, f"{head}|{opened['url']}")).fetchone()
+        if gone:
+            return []
         return [InboxItemDTO(kind="pr_opened", reason="PR opened", detail=f"#{opened.get('number')} {opened.get('title') or ''}".strip(),
                              url=opened["url"], **link)]
     rows =db.conn.execute(

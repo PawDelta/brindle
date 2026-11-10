@@ -105,7 +105,7 @@ export function describeItem(item: InboxItemDTO): string {
       return item.reason;
     /* brindle prepared the session's PR (service/inbox._pr_items): the person's Open PR is the only push. */
     case "pr_ready":
-      return "PR ready for your approval";
+      return "PR ready";
     case "pr_failed":
     case "pr_opened":
       return item.reason;

@@ -371,19 +371,26 @@ function Banner({ item, actions, who, branch, sessionTitle, repo, isNew, onDone,
     // The supervisor already opened it: nothing for brindle to push.
     const url = item.url;
     acts = (
-      <button type="button" className={`${ACT} ${PLAIN}`} onClick={() => void openUrl(url)}>
-        Open on GitHub
-      </button>
+      <>
+        <button type="button" className={`${ACT} ${PLAIN}`} onClick={() => void openUrl(url)}>
+          Open on GitHub
+        </button>
+        {act("Dismiss", "pr-not-now", {}, GHOST)}
+      </>
     );
-  } else if ((item.kind === "pr_ready" || item.kind === "pr_failed") && onReview) {
-    // Nothing is pushed until the person's Open PR in the sheet.
+  } else if (item.kind === "pr_ready") {
+    // One press opens it (the sheet's open-PR call, no diffs); the person's press is still the only push.
     acts = (
       <>
-        <button type="button" className={`${ACT} ${PLAIN}`} onClick={onReview}>
-          Review &amp; open PR
-        </button>
-        {item.kind === "pr_ready" && act("Not now", "pr-not-now", {}, GHOST)}
+        <OpenPr item={item} actions={actions} onDone={onDone} />
+        {act("Dismiss", "pr-not-now", {}, GHOST)}
       </>
+    );
+  } else if (item.kind === "pr_failed" && onReview) {
+    acts = (
+      <button type="button" className={`${ACT} ${PLAIN}`} onClick={onReview}>
+        Review &amp; open PR
+      </button>
     );
   } else if (opensVisual(item)) {
     // A visual decision opens its reader (goTo), not the session it belongs to; disabled until that session has loaded.
@@ -490,6 +497,41 @@ function SetupFix({ item, actions, onDone }: { item: InboxItemDTO; actions: Retu
   return (
     <button type="button" className={`${ACT} ${PLAIN}`} disabled={job.busy} onClick={start} data-testid="setup-fix">
       {fix.label}
+    </button>
+  );
+}
+
+/* Open PR on a prepared PR's card: the review sheet's own call (POST /sessions/{root}/pr, a job) with the
+   draft's title and description, without its diffs. The button waits while the job runs; a refusal shows on the card. */
+function OpenPr({ item, actions, onDone }: { item: InboxItemDTO; actions: ReturnType<typeof useInboxActions>; onDone(): void }) {
+  const client = useDaemon();
+  const job = useJob();
+  const [drafting, setDrafting] = useState(false);
+  const status = job.job?.status;
+  const error = job.job?.error;
+  useEffect(() => {
+    if (status === "failed") actions.report(item, error ?? "couldn't open the PR", true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status, error]);
+  const root = item.root_id ?? item.agent_id ?? "";
+  const open = async () => {
+    setDrafting(true);
+    try {
+      const draft = await client.prDraft(root);
+      await job.start("Opening the PR", () => client.openSessionPr(root, { title: item.detail?.trim() || draft.title, body: draft.body }), () => {
+        actions.settle(item);
+        onDone();
+      });
+    } catch (e) {
+      actions.report(item, e instanceof Error ? e.message : String(e), true);
+    } finally {
+      setDrafting(false);
+    }
+  };
+  const busy = drafting || job.busy;
+  return (
+    <button type="button" className={`${ACT} ${PLAIN}`} disabled={busy} onClick={() => void open()}>
+      {busy ? "Opening…" : "Open PR"}
     </button>
   );
 }

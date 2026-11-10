@@ -469,12 +469,16 @@ def inbox_action(db: DB, params: dict, body: Body) -> Any:
         ws = _workspace(db, a.workspace_id)
         ready = db.conn.execute("SELECT sha FROM session_pr_prep WHERE root_id = ? AND branch = ?"
                                 " AND state = 'passed'", (a.id, ws.branch)).fetchone()
-        if not ready:
+        # A PR already open on HEAD (the "PR opened" card) is dismissed per commit and PR.
+        sha = inbox.opened_marker(ws.path)
+        if not sha and ready:
+            sha = ready["sha"]
+        if not sha:
             raise ServiceError("conflict", "no longer a PR ready for approval", 409)
         # The commit the card is about: a newer one's result still gets its own card.
         db.conn.execute("INSERT INTO session_pr_declined (root_id, branch, sha) VALUES (?, ?, ?)"
                         " ON CONFLICT(root_id, branch) DO UPDATE SET sha = excluded.sha",
-                        (a.id, ws.branch, ready["sha"]))
+                        (a.id, ws.branch, sha))
         bus.publish_agent(db, "session.pr_declined", a.id)
         return {"dismissed": a.id}
     if action in ("approve", "reject"):
