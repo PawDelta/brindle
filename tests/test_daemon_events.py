@@ -79,7 +79,7 @@ def _readiness_slow_gh_is_parallel_and_bounded(db, monkeypatch):
     # Only the merged-PR polling is under test: the checks refresh has its own pool.
     monkeypatch.setattr(review, "refresh_pr_states", lambda db: None)
     # Wait for both reads to start rather than for a 50ms deadline a loaded host can miss.
-    monkeypatch.setattr(review, "wait", lambda pending, timeout=None: both.wait(1))
+    monkeypatch.setattr(review, "wait", lambda pending, **_: both.wait(1))
     def slow(*args, **kwargs):
         assert spawn.current() is not None
         with lock:
