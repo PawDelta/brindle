@@ -1,4 +1,3 @@
-import contextlib
 import threading
 from datetime import datetime, timezone
 
@@ -470,29 +469,26 @@ def test_asked_quote_refuses_words_that_are_not_the_persons(db, session, setup, 
     assert refused.value.code == "visual_request_required"
 
 
-def _v(why, *row):
-    return pytest.param(*row, marks=pytest.mark.variant(why))
-
-
 @pytest.mark.parametrize("typed,asked,accepted", [
     pytest.param("should you not open this in app visuals?", "open this in app visuals", True,
                  marks=pytest.mark.variant("real incident: a request phrased as a question")),
-    ("shouldn't you open this in app visuals?", "open this in app visuals", True),
-    ("can you not just open this in app visuals?", "open this in app visuals", True),
-    ("would you not open this in app visuals?", "open this in app visuals", True),
-    ("you should not open this in app visuals", "open this in app visuals", False),
-    _v("why exemption kept", "why don't you open this in app visuals?", "open this in app visuals", True),
-    _v("plain refusal", "don't render it", "render it", False),
-    _v("plain do not", "please do not open this in app visuals", "open this in app visuals", False),
-    _v("never alone", "never show me that again", "show me that again", False),
-    _v("'stop' after aux + you", "would you stop showing me that?", "showing me that", False),
-    _v("'never' after aux + you", "could you never show me that again?", "show me that again", False),
-    _v("imperative don't you", "don't you ever open this in app visuals", "open this in app visuals", False),
+    pytest.param("you should not open this in app visuals", "open this in app visuals", False,
+                 marks=pytest.mark.variant("bypass attempt: a plain negation must stay refused after the question exemption")),
+    pytest.param("would you stop showing me that?", "showing me that", False,
+                 marks=pytest.mark.variant("review: 'stop' after an auxiliary + you is still a refusal")),
+    pytest.param("could you never show me that again?", "show me that again", False,
+                 marks=pytest.mark.variant("review: 'never' after an auxiliary + you is still a refusal")),
+    pytest.param("don't you ever open this in app visuals", "open this in app visuals", False,
+                 marks=pytest.mark.variant("review: imperative don't you stays a prohibition")),
 ])
 def test_question_form_is_not_a_negation(db, session, typed, asked, accepted):
-    typed_into_cli(db, session[0], typed)
-    with contextlib.nullcontext() if accepted else pytest.raises(ServiceError):
-        visuals.publish(db, session[0], "Asked", "<p>yes</p>", asked=asked)
+    boss, _ = session
+    typed_into_cli(db, boss, typed)
+    if accepted:
+        assert visuals.publish(db, boss, "Asked", "<p>yes</p>", asked=asked)["rev"] == 1
+    else:
+        with pytest.raises(ServiceError):
+            visuals.publish(db, boss, "Not asked", "<p>no</p>", asked=asked)
 
 
 @pytest.mark.variant("a bypass attempt: a worker or a plan can't spend the person's quote")

@@ -10,7 +10,7 @@ import type { ReactNode } from "react";
 import { mono } from "../../components/ui";
 
 /* `code`, ![alt](src), [text](href), **strong**, *em* or _em_, in that order of precedence. */
-const INLINE = /(`+)([\s\S]*?[^`])\1(?!`)|!\[([^\]]*)\]\(([^)\s]*)[^)]*\)|\[([^\]]+)\]\(([^)\s]*)[^)]*\)|\*\*([\s\S]+?)\*\*|__([\s\S]+?)__|\*([^*\s][^*]*?)\*|\b_([^_\s][^_]*?)_\b/g;
+export const INLINE = /(`+)([\s\S]*?[^`])\1(?!`)|!\[([^\]]*)\]\(([^)\s]*)[^)]*\)|\[([^\]]+)\]\(([^)\s]*)[^)]*\)|\*\*([\s\S]+?)\*\*|__([\s\S]+?)__|\*([^*\s][^*]*?)\*|\b_([^_\s][^_]*?)_\b/g;
 
 export function inline(text: string, key = "i"): ReactNode[] {
   const out: ReactNode[] = [];
@@ -55,12 +55,13 @@ const cells = (row: string) =>
     .split("|")
     .map((c) => c.trim());
 
-const HEADING = /^(#{1,6})\s+(.*?)\s*#*\s*$/;
-const FENCE = /^\s*(```|~~~)/;
-const BULLET = /^\s*[-*+]\s+(.*)$/;
-const NUMBERED = /^\s*\d+[.)]\s+(.*)$/;
-const RULE = /^\s*([-*_])(\s*\1){2,}\s*$/;
-const TABLE_SEP = /^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/;
+/* The block grammar, shared with the design doc's own renderer (Session/Visuals/DocText.tsx). */
+export const HEADING = /^(#{1,6})\s+(.*?)\s*#*\s*$/;
+export const FENCE = /^\s*(```|~~~)/;
+export const BULLET = /^\s*[-*+]\s+(.*)$/;
+export const NUMBERED = /^\s*\d+[.)]\s+(.*)$/;
+export const RULE = /^\s*([-*_])(\s*\1){2,}\s*$/;
+export const TABLE_SEP =/^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/;
 
 const headingClass = ["text-lg font-semibold text-ink", "text-base font-semibold text-ink", "text-sm font-semibold text-ink"];
 

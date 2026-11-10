@@ -1,4 +1,5 @@
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, renderHook, screen, waitFor, within } from "@testing-library/react";
+import { useReaderDoc } from "../../store/libraryReader";
 import { afterEach, describe, expect, it } from "vitest";
 import { DaemonClient, type DocResults } from "../../api/client";
 import { DocsView } from "./DocsView";
@@ -182,9 +183,15 @@ describe("docs view", () => {
     fireEvent.click(within(screen.getByTestId("docs").querySelector<HTMLElement>('li[data-doc="d1"]')!).getByRole("button"));
     const body = await screen.findByTestId("doc-body");
     expect(body.textContent).toContain("Body.");
+    const readerDoc = () => renderHook(() => useReaderDoc()).result.current;
+    expect(readerDoc()).toBe("d1");
     // A connected doc is named by its title and opens in turn.
     fireEvent.click(screen.getByRole("button", { name: "Stripe vs Adyen fees" }));
     await waitFor(() => expect(screen.getByTestId("doc-body").textContent).toContain("Stripe vs Adyen fees"));
+    // The Library rail moves whichever doc is open here: the row's, then the connected one, then none.
+    expect(readerDoc()).toBe("d2");
+    fireEvent.click(screen.getByRole("button", { name: /Library/ }));
+    await waitFor(() => expect(readerDoc()).toBeNull());
   });
 
   it("groups docs under their categories, largest first and uncategorised last, and remembers a collapsed one", async () => {

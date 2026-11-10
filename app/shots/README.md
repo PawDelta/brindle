@@ -75,12 +75,14 @@ own update, over a fake shell (not in the default list, so pass `--scene`):
 pill) and `update-session` (the strip over a session). Themes
 (`--theme`): `dark`, `light`.
 
-## The plan reader
+## The design doc
 
 `node shots/plan-shots.mjs --out <dir> [--channel chrome]` opens the plan in
-`visuals.tsx` and takes its overview, a decision's option cards, another
-option picked with the ask being corrected, the split's task cards and the
-approved live board, in both themes.
+`visuals.tsx` (a design doc with a diagram, three decisions, a suggestion
+and comment threads, over a small in-memory engine) and takes it with its
+review column open, the next decision's table, a highlight with its comment bar, the comment landed in
+the column, the column collapsed to its strip, Suggesting with a section in
+its box, and signed off under its live board, in both themes.
 
 ## Timing the wheel over a live Claude Code
 

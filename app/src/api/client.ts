@@ -399,6 +399,25 @@ export interface PlanVerdict {
   picks: Record<string, string>;
   comments: PlanComment[];
   note: string;
+  /* Paths of the files attached to the note. */
+  attachments?: string[];
+}
+
+/* Where a new comment on the design doc is anchored (brindle/plan_docs.py): a text range of a
+   section (`start` is a hint, `quote` the section's own text there), a diagram, a decision, or a
+   whole part of the doc (a section, "ask", "lede", "split"). */
+export type PlanAnchor =
+  | { kind: "text"; section: string; start: number; quote: string }
+  | { kind: "diagram"; section: string }
+  | { kind: "decision"; decision: string; option?: string }
+  | { kind: "section"; section: string };
+
+/* A change to a section's text: `before` at `start` becomes `after` (an empty `before` inserts). */
+export interface PlanChange {
+  section: string;
+  start: number;
+  before: string;
+  after: string;
 }
 
 export type Repo = RepoDTO;
@@ -491,6 +510,19 @@ export interface DocScope {
   /* From GET /analysis-docs/scopes only: the team's or org's name, and whether the person may share into it. */
   name?: string;
   can_share?: boolean;
+}
+
+/* A Library folder as the server lists it: private (its creator only) or shared (the scope's members). */
+export type FolderVisibility = "private" | "shared";
+export interface LibraryFolder {
+  id: string;
+  name: string;
+  visibility: FolderVisibility;
+}
+/* One scope's folders (GET /library/folders). */
+export interface FolderGroup {
+  scope: DocScope;
+  folders: LibraryFolder[];
 }
 
 export interface DocSource {
@@ -1684,6 +1716,44 @@ export class DaemonClient {
     return this.postInbox<Plan>(`/plans/${encodeURIComponent(id)}/decide`, verdict);
   }
 
+  /* The design doc's writes (brindle/plan_docs.py). Each names the revision on screen where the
+     engine checks it (a newer one is a 409) and answers with the plan as it is now. */
+  commentPlan(id: string, rev: number, anchor: PlanAnchor, text: string) {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/comments`, { rev, anchor, text });
+  }
+
+  replyPlan(id: string, thread: number, text: string) {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/comments`, { parent: thread, text });
+  }
+
+  /* Resolve a comment thread, or (resolved false) reopen it. */
+  resolvePlanThread(id: string, thread: number, resolved = true) {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/threads/${thread}/resolve`, { resolved });
+  }
+
+  suggestPlan(id: string, rev: number, change: PlanChange, text = "") {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/suggestions`, { rev, ...change, text });
+  }
+
+  /* Accepting a suggestion makes its change: a new revision. */
+  acceptPlanSuggestion(id: string, thread: number, rev: number) {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/threads/${thread}/accept`, { rev });
+  }
+
+  rejectPlanSuggestion(id: string, thread: number) {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/threads/${thread}/reject`, {});
+  }
+
+  /* The person's direct edit: a new revision. */
+  editPlan(id: string, rev: number, change: PlanChange) {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/edit`, { rev, ...change });
+  }
+
+  /* The person's pick on one decision (Confirm A); the verdict starts from these. */
+  confirmPlan(id: string, rev: number, decision: string, option: string) {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/confirm`, { rev, decision, option });
+  }
+
   async keptVisuals(): Promise<KeptVisualDTO[]> {
     const got = await this.get<KeptVisualDTO[] | { visuals?: KeptVisualDTO[] }>("/kept-visuals");
     return Array.isArray(got) ? got : (got.visuals ?? []);
@@ -1712,6 +1782,20 @@ export class DaemonClient {
   /* Every scope the person reads (their own, their teams', their org's), with or without docs. */
   docScopes(repo?: string) {
     return this.get<{ scopes: DocScope[] }>("/analysis-docs/scopes", { repo });
+  }
+
+  /* The folders the person can see, per scope they read (GET /library/folders). */
+  libraryFolders() {
+    return this.get<{ scopes: FolderGroup[] }>("/library/folders", {});
+  }
+
+  /* `scope` is the daemon's spelling: user, team:<id> or org:<id>. */
+  createLibraryFolder(scope: string, name: string, visibility: FolderVisibility, canAdd: "owner" | "members" = "owner") {
+    return this.post<LibraryFolder>("/library/folders", { scope, name, visibility, can_add: canAdd });
+  }
+
+  moveDocToFolder(id: string, scope: string, folder: string) {
+    return this.put<unknown>(`/analysis-docs/${encodeURIComponent(id)}/folder`, { scope, folder });
   }
 
   async knowledgeMap(repo: string, scope: DocScope, paths: string[] = []): Promise<KnowledgeMap> {
