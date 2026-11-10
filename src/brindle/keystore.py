@@ -100,12 +100,27 @@ class _KeychainRead:
 _keychain_reads: dict[tuple[str, str], _KeychainRead] = {}
 _keychain_lock = threading.RLock()
 # One metadata-only listing of the keychain search list (`security dump-keychain` without
-# -d: each item's attributes, never a secret) tells which items exist, so a lookup of an
-# item it doesn't show costs no `security` call. It is shared like the reads, for
-# KEYCHAIN_READ_TTL, under this entry of _keychain_reads (no real service is empty). A
-# listing that fails or isn't fully understood shows nothing: each lookup reads its item.
+# -d: each item's attributes, never a secret) tells which items exist, so within
+# listed_reads() a lookup of an item it doesn't show costs no `security` call. It is
+# shared like the reads, for KEYCHAIN_READ_TTL, under this entry of _keychain_reads (no
+# real service is empty). A listing that fails or isn't fully understood shows nothing:
+# each lookup reads its item.
 _LISTING = ("", "dump-keychain")
 _DUMP_ATTR = re.compile(r'\s+"(svce|acct)"<blob>=(?:"(.*)"|0x([0-9A-Fa-f]*)(?:\s.*)?|(<NULL>))\s*$')
+
+
+_listed_reads: contextvars.ContextVar[bool] = contextvars.ContextVar("keystore_listed_reads", default=False)
+
+
+@contextlib.contextmanager
+def listed_reads() -> Iterator[None]:
+    """Within this block a keychain lookup first asks the shared listing which items exist:
+    for a pass over many names, most never saved (a resume), each costs no `security` call."""
+    token = _listed_reads.set(True)
+    try:
+        yield
+    finally:
+        _listed_reads.reset(token)
 
 
 def _listing() -> _KeychainRead:
@@ -148,6 +163,8 @@ def _parse_listing(out: str) -> frozenset[tuple[str, str]] | None:
         if attrs["svce"] is not None and attrs["acct"] is not None:
             items.add((attrs["svce"], attrs["acct"]))
     return frozenset(items) if records else None
+
+
 _uncached_reads: contextvars.ContextVar[bool] = contextvars.ContextVar("keystore_uncached_reads", default=False)
 
 
@@ -223,8 +240,9 @@ class KeychainStore:
     Cached records are decoded afresh so callers can safely modify them.
     A read refused at a dialog, or never answered, stops later reads until the
     person acts (KEYCHAIN_DIALOG_EXITS): polling never repeats a dialog.
-    A lookup first consults one shared metadata-only listing of the search list
-    (_LISTING): an item it doesn't show is missing without a ``security`` call.
+    Within listed_reads(), a lookup first consults one shared metadata-only listing
+    of the search list (_LISTING): an item it doesn't show is missing without a
+    ``security`` call.
     """
     name = "keychain"
 
@@ -260,7 +278,7 @@ class KeychainStore:
                 raise CredentialError("the keychain refused an earlier read (locked, or its dialog cancelled), and "
                                       "brindle won't raise that dialog again by itself: once it's unlocked, "
                                       "`brindle keys unblock` lets brindle read it")
-            if not _uncached_reads.get():
+            if _listed_reads.get() and not _uncached_reads.get():
                 items, until = self._listed()
                 if items is not None and (self.service, self.account) not in items:
                     if timing is not None:

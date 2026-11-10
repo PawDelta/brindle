@@ -35,7 +35,6 @@ def test_keychain_read_cached(monkeypatch, record, external):
                                 keystore._encode(stored[0]) if stored[0] else "", "")
 
     monkeypatch.setattr(keystore.KeychainStore, "_run", run)
-    monkeypatch.setattr(keystore.KeychainStore, "_listed", lambda self: (None, 0.0))    # each item read
     monkeypatch.setattr(keystore.time, "monotonic", lambda: now[0])
     monkeypatch.setattr(keystore, "_keychain_reads", {}, raising=False)
     monkeypatch.setenv(keystore.FORCE_ENV, "keychain")
@@ -170,7 +169,8 @@ def test_resume_skips_keys_never_saved(monkeypatch):
     def resume() -> dict:
         now[0] += keystore.KEYCHAIN_READ_TTL
         calls.clear()
-        return {n: v for n in names if (v := keystore.get_key_info(n)[0])}
+        with keystore.listed_reads():    # as agents.resume reads them
+            return {n: v for n in names if (v := keystore.get_key_info(n)[0])}
 
     assert resume() == {"ANTHROPIC_API_KEY": FAKE}
     assert calls == ["<listing>", "ANTHROPIC_API_KEY"]     # one listing; only the saved key is read
