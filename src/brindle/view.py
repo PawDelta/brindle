@@ -396,16 +396,9 @@ def _autopilot_flags(db: DB, shown: list[Agent]) -> tuple[bool, str | None]:
     return on, asking
 
 
-def autopilot_entry(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None,
-                    root_id: str | None = None) -> dict | None:
-    """The goal and milestones for the sidebar: session ``root_id``'s (a
-    sidebar shows only its own session's goal), else the newest running
-    autopilot session's in ``repo_root`` that has a goal (any, if none does).
-    ``panes`` should be the same ``tmux.list_panes()`` result passed to
-    ``snapshot`` for this refresh, so liveness isn't checked with a second
-    tmux subprocess."""
-    from brindle import autopilot, quota
-
+def autopilot_root(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None,
+                   root_id: str | None = None) -> Agent | None:
+    """Select a goal's session without collecting the legacy dashboard's details."""
     if not repo_root:
         return None
     if root_id:
@@ -421,6 +414,20 @@ def autopilot_entry(db: DB, repo_root: str | None, panes: dict[str, bool] | None
         # A session with no goal yet mustn't hide another's recorded milestones.
         with_goal = [a for a in roots if db.get_autopilot(a.id).goal]
         root = max(with_goal or roots, key=lambda a: a.created_at)
+    return root
+
+
+def autopilot_entry(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None,
+                    root_id: str | None = None) -> dict | None:
+    """Legacy dashboard summary for the selected session or newest live goal.
+
+    Pass the snapshot's panes to share its liveness check.
+    """
+    from brindle import autopilot, quota
+
+    root = autopilot_root(db, repo_root, panes, root_id)
+    if root is None:
+        return None
     ap = db.get_autopilot(root.id)
     assert ap is not None
     ms = db.milestones(root.id)

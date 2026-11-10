@@ -1434,7 +1434,7 @@ export class DaemonClient {
   }
 
   resolvePlanOffer(root: string, offer: string, accept: boolean) {
-    return this.post<{ accepted: boolean }>("/goal/plan-offer", { root, offer, accept });
+    return this.postInbox<{ accepted: boolean }>("/goal/plan-offer", { root, offer, accept });
   }
 
   inbox(repo?: string) {
@@ -1444,12 +1444,10 @@ export class DaemonClient {
   /* `id` is the item's agent_id (an org notice's notice_id for "read"). A long
      action (merge) answers with a job, whose end arrives on the bus. */
   inboxAction(id: string, action: InboxAction, body: Record<string, unknown> = {}) {
-    return this.post<InboxActionResult>(
+    return this.postInbox<InboxActionResult>(
       `/inbox/${encodeURIComponent(id)}/${encodeURIComponent(action)}`,
       body,
-    ).finally(() => {
-      this.inboxAcknowledgements++;
-    });
+    );
   }
 
   agent(id: string) {
@@ -1644,12 +1642,12 @@ export class DaemonClient {
 
   /* The person's answer to the revision on screen; a newer revision makes this a 409. */
   answerVisual(id: string, rev: number, option: string | undefined, note: string, attachments?: string[]) {
-    return this.post<VisualDTO>(`/visuals/${encodeURIComponent(id)}/answer`, { rev, option, note, ...(attachments?.length ? { attachments } : {}) });
+    return this.postInbox<VisualDTO>(`/visuals/${encodeURIComponent(id)}/answer`, { rev, option, note, ...(attachments?.length ? { attachments } : {}) });
   }
 
   /* The person won't answer the revision on screen; the agent is told, the Inbox card clears. */
   dismissVisual(id: string, rev: number) {
-    return this.post<VisualDTO>(`/visuals/${encodeURIComponent(id)}/dismiss`, { rev });
+    return this.postInbox<VisualDTO>(`/visuals/${encodeURIComponent(id)}/dismiss`, { rev });
   }
 
   exportVisual(id: string, rev: number, html: string, destination: ExportDestination = "download", markdown?: string) {
@@ -1665,7 +1663,7 @@ export class DaemonClient {
   }
 
   markVisualRead(id: string, rev: number) {
-    return this.post<unknown>(`/visuals/${encodeURIComponent(id)}/read`, { rev });
+    return this.postInbox<unknown>(`/visuals/${encodeURIComponent(id)}/read`, { rev });
   }
 
   /* A planning doc: the visual of kind "plan" with the same id. */
@@ -1675,7 +1673,7 @@ export class DaemonClient {
 
   /* Approve or redirect the revision on screen; a newer revision, or a second verdict, is a 409. */
   decidePlan(id: string, verdict: PlanVerdict) {
-    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/decide`, verdict);
+    return this.postInbox<Plan>(`/plans/${encodeURIComponent(id)}/decide`, verdict);
   }
 
   async keptVisuals(): Promise<KeptVisualDTO[]> {
@@ -2151,6 +2149,14 @@ export class DaemonClient {
 
   private get<T>(path: string, query?: Query): Promise<T> {
     return this.request<T>(this.url(path, query), {});
+  }
+
+  /* All decisions that can remove an Inbox card invalidate older reads,
+     including refusals that say the request has already moved on. */
+  private postInbox<T>(path: string, body: unknown): Promise<T> {
+    return this.post<T>(path, body).finally(() => {
+      this.inboxAcknowledgements++;
+    });
   }
 
   private post<T>(path: string, body: unknown = {}): Promise<T> {
