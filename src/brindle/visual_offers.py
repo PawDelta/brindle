@@ -195,11 +195,10 @@ _ASKS_AGAIN = re.compile(r"(?:(?:please|just|then|instead|but|and|so|ok|okay|now
                          r"|(?:make|create|build|generate)\s+(?:(?:me|us|a|an|the|this|that)\s+)*" + _CANCEL_ARTIFACT + r")\b", re.I)
 _COURTESY = re.compile(r"(?:thanks|thank you|thx|please|sorry)\W*$", re.I)
 _CLAUSES = re.compile(r"(?<=[.!?,;:])\s+|[…。！？，；、]+\s*|\s+[-–—]+\s+|[–—]+\s*|\n+")
-_QUESTION_AUX = ("should", "shall", "can", "could", "would", "will", "do", "does", "did", "might", "may")
-# "should you not…", "can you not just…" ask why something hasn't been done: a request, not a negation.
-_NOT = (r"(?<!why )" + "".join(f"(?<!{a} you )" for a in _QUESTION_AUX)
-        + r"\b(?:not|never|cannot|without|avoid|stop|no need to|rather than|instead of|"
-        r"(?:do|does|did|should|must|need|ca|could|wo|would)n['’]?t(?! you))"
+# "should you not…" / "shouldn't you…" ask why something hasn't been done: a request, not a negation.
+_ASKING = "".join(f"(?<!{a} you )" for a in ("should", "can", "could", "would", "will"))
+_NOT = (r"(?<!why )\b(?:" + _ASKING + r"not|never|cannot|without|avoid|stop|no need to|rather than|instead of|"
+        r"(?:do|does|did|must|need)n['’]?t|(?:should|ca|could|wo|would)n['’]?t(?! you))"
         r"(?: (?:ever|even|bother|need|needed|want|wanted|have|ask|asked|try|go|to|you|i|me|us|just|really|please|actually|yet))*")
 _NEGATED = re.compile(_NOT + " $")     # just before a quote it takes the quote back: "don't ever <quote>"
 _NEGATES = re.compile(_NOT + r" \w")    # the quote carries its own "don't"
