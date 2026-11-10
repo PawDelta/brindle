@@ -51,6 +51,50 @@ def messages(db) -> list[str]:
     return [r["body"] for r in db.conn.execute("SELECT body FROM inbox WHERE agent_id='boss' ORDER BY id")]
 
 
+def test_plan_board_links_dispatch_and_reads_recorded_checks(db, session, monkeypatch):
+    boss, started = session
+    visual_offers.person_spoke(db, boss, "Make a planning doc.")
+    check = "uv run pytest tests/test_presets.py -q"
+    pid = mcp_server.propose_plan(PLAN, split=[
+        {"id": "schema", "title": "Schema", "test": check},
+        {"id": "ui", "title": "UI", "test": "npx vitest run presets"},
+    ]).split()[2]
+    asyncio.run(mcp_server.assign("developer", "schema", plan_worker=f"{pid}:schema"))
+    asyncio.run(mcp_server.handoff("developer", "UI", plan_worker=f"{pid}:ui"))
+    board = lambda: plans.to_dto(db, plans.get(db, pid))["split"]  # noqa: E731
+    first, second = board()
+    assert first["task_id"] != second["task_id"]
+    assert [(w["state"], w["test_state"]) for w in board()] == [("queued", "not run")] * 2
+    asyncio.run(mcp_server.assign("developer", "a second trigger", plan_worker=f"{pid}:schema"))
+    assert len(db.list_tasks()) == 2 and started == []
+    # A different session cannot attach its task to this board.
+    with monkeypatch.context() as identity:
+        identity.setattr("brindle.autopilot.root_of", lambda db_, aid: "other")
+        asyncio.run(mcp_server.assign("developer", "foreign", plan_worker=f"{pid}:schema"))
+    assert len(db.list_tasks()) == 2
+    plans.decide(db, pid, 1, True, person=True)
+    first, second = board()
+    assert len(started) == 2
+    assert first["agent_id"] == db.get_task(first["task_id"]).agent_id
+    assert first["state"] == second["state"] == "working"
+    asyncio.run(mcp_server.assign("developer", "duplicate while working", plan_worker=f"{pid}:schema"))
+    assert len(db.list_tasks()) == len(started) == 2
+    db.set_check(boss.workspace_id, "sha", "unrelated", True, "")
+    assert board()[0]["test_state"] == "not run"
+    db.set_check(boss.workspace_id, "sha", check, False, "failed")
+    assert board()[0]["test_state"] == "failing"
+    db.update_agent(first["agent_id"], pipeline="reviewing")
+    assert board()[0]["state"] == "in review"
+    db.set_check(boss.workspace_id, "sha", check, True, "passed")
+    assert board()[0]["test_state"] == "passing"
+    db.set_milestones(boss.id, [("UI", second["test"], None)])
+    db.set_task_milestone(second["task_id"], "UI")
+    db.record_check(db.milestones(boss.id)[0].id, True, "passed", "sha")
+    db.update_task(first["task_id"], state="merged")
+    assert [(w["state"], w["test_state"]) for w in board()] == [
+        ("merged", "passing"), ("working", "passing")]
+
+
 def test_assign_queues_behind_open_plan_until_the_person_approves(db, session, monkeypatch):
     boss, started = session
     visual_offers.person_spoke(db, boss, "Make a planning doc.")

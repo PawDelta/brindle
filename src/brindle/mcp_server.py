@@ -281,7 +281,9 @@ def propose_plan(markdown: str, decisions: list[PlanDecision] | None = None,
     except ServiceError as e:
         raise ToolError(e.message) from e
     return (f"Proposed plan {p['id']} r{p['rev']} (brindle://visual/{p['id']}). Assign calls queue behind it "
-            "until the person approves; their decision arrives as a message.")
+            "until the person approves; their decision arrives as a message. "
+            f"For each split card, pass plan_worker=\"{p['id']}:<split-id>\" to assign or handoff; "
+            "use the exact proving check command as its test.")
 
 
 @mcp.tool()
@@ -546,11 +548,35 @@ class _Request:
         self._gone = False
         self._queued: list[str] = []
         self._start: set[str] = set()
+        self.plan_worker: tuple[str, str] | None = None
+
+    def link_plan(self, db: DB, caller: Agent, ref: str | None) -> str | None:
+        from brindle import plans
+        from brindle.service.errors import ServiceError
+
+        if ref is None:
+            return None
+        try:
+            self.plan_worker = plans.assignment(db, caller, ref)
+        except ServiceError as e:
+            return f"Not started: {e}"
+        row = db.conn.execute("SELECT task_id FROM plan_tasks WHERE plan_id=? AND worker_id=?",
+                              self.plan_worker).fetchone()
+        return f"Already linked to task {row['task_id']}; left it in place." if row else None
 
     def enqueue(self, db: DB, *args, start: bool = False, **kwargs) -> Task:
         """``tasks.enqueue``, unanswered; ``start``: started (detached) as
         soon as the request replies, having nothing to wait on."""
         t = tasks.enqueue(db, *args, unanswered=True, **kwargs)
+        if self.plan_worker:
+            with db.tx() as c:
+                linked = c.execute("INSERT OR IGNORE INTO plan_tasks (plan_id, worker_id, task_id) VALUES (?,?,?)",
+                                   (*self.plan_worker, t.id)).rowcount
+                existing = c.execute("SELECT task_id FROM plan_tasks WHERE plan_id=? AND worker_id=?",
+                                     self.plan_worker).fetchone()["task_id"]
+            if not linked:
+                tasks.drop_unanswered(db, [t.id])
+                return db.get_task(existing)
         with self._lock:
             self._queued.append(t.id)
             if start:
@@ -758,9 +784,11 @@ async def handoff(
     wait_seconds: int = DEFAULT_WAIT_SECONDS, done_when: str | None = None,
     files: list[str] | None = None, depends_on: list[str] | None = None,
     plan_first: bool | None = None, weight: str | None = None, repo: str | None = None,
-    dry_run: bool = False, milestone: int | str | None = None,
+    dry_run: bool = False, milestone: int | str | None = None, plan_worker: str | None = None,
 ) -> str:
     """Give a task to a new worker agent and wait for its result.
+
+    plan_worker: plan-id:split-id from propose_plan, linking this task to its live board card.
 
     milestone: the goal milestone (its number or title) the worker works on;
     default the first unverified one. Shown as in progress while it runs.
@@ -842,6 +870,9 @@ async def handoff(
         if dry_run:
             return tasks.dry_run_text(db, ws, profile, why, files, depends_on,
                                       load_repo_config(ws.repo_root).overlap, caller.id)
+        linked = req.link_plan(db, caller, plan_worker)
+        if linked:
+            return linked
         repeated = _room_duplicate(db, caller, ws, task, branch)
         if repeated:
             return repeated
@@ -903,9 +934,11 @@ async def assign(
     done_when: str | None = None, files: list[str] | None = None,
     depends_on: list[str] | None = None, plan_first: bool | None = None,
     weight: str | None = None, repo: str | None = None, dry_run: bool = False,
-    milestone: int | str | None = None,
+    milestone: int | str | None = None, plan_worker: str | None = None,
 ) -> str:
     """Start a worker agent on a task and return immediately.
+
+    plan_worker: plan-id:split-id from propose_plan, linking this task to its live board card.
 
     milestone: the goal milestone (its number or title) the worker works on;
     default the first unverified one. Shown as in progress while it runs.
@@ -977,6 +1010,9 @@ async def assign(
         if dry_run:
             return tasks.dry_run_text(db, ws, profile, why, files, depends_on,
                                       load_repo_config(ws.repo_root).overlap, caller.id)
+        linked = req.link_plan(db, caller, plan_worker)
+        if linked:
+            return linked
         repeated = _room_duplicate(db, caller, ws, task, branch)
         if repeated:
             return repeated

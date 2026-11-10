@@ -327,6 +327,10 @@ class PlanWorkerDTO(_DTO):
     after: list[str] = []
     files: list[str] = []
     test: str | None = None
+    task_id: str | None = None
+    agent_id: str | None = None
+    state: Literal["queued", "working", "in review", "merged", "cancelled"] = "queued"
+    test_state: Literal["not run", "failing", "passing"] = "not run"
 
 
 class PlanCommentDTO(_DTO):

@@ -898,9 +898,13 @@ export interface PlanSectionDTO {
  */
 export interface PlanWorkerDTO {
   after?: string[];
+  agent_id?: string | null;
   files?: string[];
   id: string;
+  state?: "queued" | "working" | "in review" | "merged" | "cancelled";
+  task_id?: string | null;
   test?: string | null;
+  test_state?: "not run" | "failing" | "passing";
   title: string;
 }
 /**

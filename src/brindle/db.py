@@ -448,6 +448,12 @@ CREATE TABLE IF NOT EXISTS tasks (
     started_at REAL
 );
 CREATE INDEX IF NOT EXISTS tasks_repo_root ON tasks(repo_root);
+CREATE TABLE IF NOT EXISTS plan_tasks (
+    plan_id TEXT NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
+    worker_id TEXT NOT NULL,
+    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    PRIMARY KEY (plan_id, worker_id)
+);
 -- A session's cloud login (brindle.login_pause), keyed by its root: when it
 -- was last looked at, and while only the person can renew it (state
 -- 'auth_paused'), what they run and how they were told. Back at 'ok', the
