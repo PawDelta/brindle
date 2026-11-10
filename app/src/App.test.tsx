@@ -327,7 +327,7 @@ describe("App", () => {
     } finally { sync.stop(); vi.useRealTimers(); }
   });
 
-  it("keeps the pane waiting when a ready probe is followed by a failed store refresh", async () => {
+  it.each([false, true])("shows from the first read once recovery ends (daemon changed: %s)", async (changed) => {
     vi.useFakeTimers();
     const old = { ...root, agents: root.agents?.map((a) => ({ ...a, window: windowOf("old") })) };
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [old] });
@@ -338,19 +338,24 @@ describe("App", () => {
       await act(async () => { await vi.advanceTimersByTimeAsync(100); });
       await sync.idle();
       daemon.data.workspaces = [root];
-      // Recovery ended after sync began, but before the gate's first meta read.
       const meta = client.meta.bind(client);
-      vi.spyOn(client, "meta").mockImplementation(async () => ({ ...await meta(), recovered_at: client.createdAt + 1 }));
-      const failed = vi.spyOn(client, "inbox").mockRejectedValue(new Error("offline"));
+      let resuming = true;
+      let pidOffset = 0;
+      vi.spyOn(client, "meta").mockImplementation(async () => {
+        const got = await meta();
+        return { ...got, resuming, pid: got.pid + pidOffset };
+      });
       renderApp(<App store={store} client={client} refresh={sync.refresh} />);
-      await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+      await act(async () => { await vi.advanceTimersByTimeAsync(100); });
       expect(store.getState().workspaces).toEqual([old]);
-      // The old window is never shown: the pane waits on rows read after recovery.
       expect(paneWaits()).toBe(true);
-      failed.mockRestore();
-      await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
-      expect(paneWaits()).toBe(false);
-      expect(screen.getByTestId("terminal").dataset.target).toBe(windowOf("sup1"));
+      // Only the first post-recovery read returns; the inbox and subsequent reads never do.
+      vi.spyOn(client, "snapshot").mockImplementationOnce(async () => { if (changed) pidOffset = 1; return [root]; }).mockReturnValue(new Promise(() => {}));
+      vi.spyOn(client, "inbox").mockReturnValue(new Promise(() => {}));
+      resuming = false;
+      await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+      if (changed) expect(paneWaits()).toBe(true);
+      else expect(screen.getByTestId("terminal").dataset.target).toBe(windowOf("sup1"));
     } finally { sync.stop(); vi.useRealTimers(); }
   });
 
@@ -902,8 +907,8 @@ describe("App", () => {
       await advance(0);
       expect(daemon.requests.filter((r) => r.path === "/meta").length).toBeGreaterThan(asked);
 
-      // Back as a new process that finished recovery before reconnect: old sync rows still
-      // need the barrier. The overlay goes at once; only the pane waits for fresh rows.
+      // Back as a new process that finished recovery before reconnect: the gate's fresh
+      // rows release the pane even while sync's inbox remains pending.
       let resolveInbox!: (items: []) => void;
       vi.spyOn(client, "inbox").mockReturnValueOnce(new Promise((ok) => { resolveInbox = ok; }));
       daemon.revive();
@@ -912,7 +917,7 @@ describe("App", () => {
       expect(screen.queryByTestId("engine-banner")).toBeNull();
       // The focus goes back where it was.
       expect(document.activeElement).toBe(focused);
-      expect(paneWaits()).toBe(true);
+      expect(screen.getByTestId("terminal").textContent).toBe("sup1");
       resolveInbox([]);
       await advance(1000);
       expect(paneWaits()).toBe(false);
