@@ -2232,6 +2232,12 @@ class DB:
                       (agent_id, kind, value))
         return True, row["value"] if row else None
 
+    def add_mark(self, agent_id: str, kind: str, value: str) -> bool:
+        """Create the mark unless one exists already. Returns whether it did."""
+        with self.tx() as c:
+            return bool(c.execute("INSERT INTO agent_marks (agent_id, kind, value) VALUES (?,?,?) "
+                                  "ON CONFLICT(agent_id, kind) DO NOTHING", (agent_id, kind, value)).rowcount)
+
     def replace_mark(self, agent_id: str, kind: str, old: str, new: str) -> bool:
         """Set an existing mark from ``old`` to ``new``, never recreating one
         another process retired or changed meanwhile. Returns whether it did."""

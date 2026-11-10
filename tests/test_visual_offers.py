@@ -359,6 +359,36 @@ def test_typed_words_reach_the_engine(db, session, monkeypatch):
     assert "typed words refused: this submission predates" in log and "show me again" not in log
 
 
+def test_mid_turn_message_backs_a_visual(db, session, tmp_path):
+    """Claude Code takes a message typed while it works into the running turn: no prompt hook runs,
+    only its transcript records it. Its words back ``asked`` once; an agent's note with the same words doesn't."""
+    boss, _ = session
+    ask = "PLEASE RENDER FOR ME BEFORE YOU IMPLEMENT"
+    transcript = tmp_path / "session.jsonl"
+    transcript.write_text('{"type":"user","message":{"role":"user","content":"plan the reader"}}\n')
+    hook = {"transcript_path": str(transcript), "tool_name": "Read", "tool_input": {"file_path": str(transcript)}}
+    agents.handle_hook(db, boss.id, "prompt-submit", {**hook, "prompt": "plan the reader"})
+    agents.handle_hook(db, boss.id, "pre-tool", hook)
+    assert app_vouches(boss, ask, offers.time.time() + 60).status_code == 200   # keyed in mid-turn, before Enter
+
+    def absorbed(origin, mode):
+        line = {"type": "attachment", "isSidechain": False, "attachment": {
+            "type": "queued_command", "prompt": ask, "commandMode": mode, "origin": {"kind": origin}}}
+        with transcript.open("a") as f:
+            f.write(offers.json.dumps(line) + "\n")
+        agents.handle_hook(db, boss.id, "tool-done", hook)
+        agents.handle_hook(db, boss.id, "pre-tool", {**hook, "tool_name": "mcp__brindle__publish_visual"})
+
+    absorbed("task-notification", "task-notification")
+    with pytest.raises(ServiceError):
+        visuals.publish(db, boss, "Not yet", "<p>no</p>", asked=ask)
+    absorbed("human", "prompt")
+    assert visuals.publish(db, boss, "Directions", "<p>yes</p>", asked=ask)["rev"] == 1
+    agents.handle_hook(db, boss.id, "stop", hook)   # read again: the same message isn't counted twice
+    with pytest.raises(ServiceError):
+        visuals.publish(db, boss, "Twice", "<p>no</p>", asked=ask)
+
+
 def _report_came_late(db, boss, worker):
     assert app_vouches(boss, "render first", offers.time.time() - 1).status_code == 409
     typed_into_cli(db, boss, "render first", vouched=False)
