@@ -460,19 +460,25 @@ def _spend_quote(c, root: str, asked: str, now: float) -> bool:
 
 
 def authorize(c, root: str, kind: str, *, supervisor: bool, asked: str | None = None,
-              answered: str | None = None) -> None:
+              answered: str | None = None, consented: bool = False) -> bool:
     """Allow one publication or refuse it, in the publishing transaction.
+    Whether the person consented to this one (a quote or a grant).
 
     ``answered`` is the stored answer of the visual being revised. Revising
-    clears it, so an answer allows one revision. That and ``asked`` are the
-    supervisor's own to use, and neither reaches a planning document."""
+    clears it, so an answer allows one revision. ``consented``: the visual
+    being revised was published by this supervisor with the person's
+    consent, so it stays theirs to update. These and ``asked`` are the
+    supervisor's own to use, and none reaches a planning document."""
     now = time.time()
     if kind == "visual" and supervisor:
+        if consented:
+            return True
         if answered and now - json.loads(answered)["at"] < FOLD:
-            return
+            return False
         if asked is not None and _spend_quote(c, root, asked, now):
-            return
+            return True
     consume(c, root, kind)
+    return True
 
 
 def consume(c, root: str, kind: str = "visual") -> None:
