@@ -576,6 +576,9 @@ export interface AnalysisDoc {
   category?: string;
   version?: number;
   created_at?: number;
+  updated_at?: number;
+  created_by?: string;
+  source?: DocSource;
   used_in_briefs?: number;
   findings?: string[];
   open_questions?: string[];
@@ -593,6 +596,11 @@ export interface AnalysisDocDetail extends AnalysisDoc {
   mentions: string[];
   /* The scopes it is shared into besides its owner's. */
   shared_with: DocScope[];
+  /* Optional plan record fields, using the plan engine's DTO names. */
+  revisions?: { rev: number; author: string; source: string; changed: string[]; at: number }[];
+  threads?: { id: number; author: string; text: string; replies: { text: string }[] }[];
+  decisions?: { id: string; title: string; mine?: string | null; confirmed?: string | null; options: { id: string; label: string }[] }[];
+  verdict?: { approved: boolean; picks?: Record<string, string> } | null;
 }
 
 export interface DocTopic {
@@ -1712,7 +1720,17 @@ export class DaemonClient {
   }
 
   async doc(id: string, repo?: string): Promise<AnalysisDocDetail> {
-    return docDetail(await this.get<WireDoc>(`/analysis-docs/${encodeURIComponent(id)}`, { repo }));
+    const doc = docDetail(await this.get<WireDoc>(`/analysis-docs/${encodeURIComponent(id)}`, { repo }));
+    // Approved plans already link their local record through source.ref. The
+    // saved text stays readable when that session is no longer on this device.
+    if (doc.source?.kind === "goal" && doc.source.ref?.startsWith("v_")) {
+      const plan = await this.plan(doc.source.ref).catch(() => null);
+      if (plan?.state === "approved" && plan.session === doc.source.session && plan.markdown && doc.files.some((f) => f.md === plan.markdown || f.md.startsWith(`${plan.markdown.trimEnd()}\n\n## What the person approved (r${plan.rev})`))) {
+        const record = plan as Plan & Pick<AnalysisDocDetail, "revisions" | "threads">;
+        return { ...doc, revisions: record.revisions, threads: record.threads, decisions: plan.decisions, verdict: plan.verdict };
+      }
+    }
+    return doc;
   }
 
   /* Computed on this machine from its own records; needs no plan. */
