@@ -182,15 +182,14 @@ def adopt_head_pr(db: DB, root_id: str) -> None:
     found = open_pr_for_head(head, ws.path, root_id)
     if found and found.get("url"):
         # head_ref: where the PR really lives, when that isn't the session's branch: a Push must not go to ws.branch.
-        ref = found.get("headRefName")
         db.conn.execute("INSERT INTO session_prs (root_id, branch, url, pushed_sha, opened_at) VALUES (?, ?, ?, ?, ?)"
                         " ON CONFLICT (root_id, branch) DO UPDATE SET url = excluded.url,"
                         " pushed_sha = excluded.pushed_sha, opened_at = excluded.opened_at",
                         (root_id, ws.branch, found["url"], head, time.time()))
         db.conn.execute("DELETE FROM session_pr_heads WHERE root_id = ? AND branch = ?", (root_id, ws.branch))
-        if ref and ref != ws.branch:
-            db.conn.execute("INSERT INTO session_pr_heads (root_id, branch, head_ref) VALUES (?, ?, ?)",
-                            (root_id, ws.branch, ref))
+        # Every adopted PR is managed outside brindle (its head may be another branch or a fork): Push is refused.
+        db.conn.execute("INSERT INTO session_pr_heads (root_id, branch, head_ref) VALUES (?, ?, ?)",
+                        (root_id, ws.branch, found.get("headRefName") or ws.branch))
 
 
 def goal_phase(db: DB, root_id: str) -> tuple[str, str | None]:
@@ -361,7 +360,27 @@ def open_pr_for_head(sha: str, cwd: str, root_id: str | None = None) -> dict[str
             flight = _pr_pool.submit(_read_head_pr, key)
             if not flight.done():
                 _head_flights.add(key)
-    return cached[1] if cached else None
+    return (cached[1] or None) if cached else None
+
+
+def head_pr_known_none(sha: str, cwd: str) -> bool:
+    """GitHub answered that no PR is open on ``sha`` (not merely: no answer yet)."""
+    with _pr_lock:
+        cached = _head_cache.get((sha, cwd))
+    return cached is not None and cached[1] == {}
+
+
+def _pr_already_open(db: DB, root_id: str) -> bool:
+    """A recorded, unmerged session PR, or one GitHub's last answer found on the session's HEAD."""
+    if db.conn.execute("SELECT 1 FROM session_prs WHERE root_id = ? AND url IS NOT NULL AND merged_at IS NULL",
+                       (root_id,)).fetchone():
+        return True
+    try:
+        _, ws = session(db, root_id)
+        head = status_cache.read_head(ws.path)
+    except (ServiceError, git.GitError, workspaces.WorkspaceError, OSError):
+        return False
+    return bool(head and open_pr_for_head(head, ws.path, root_id))
 
 
 def refresh_pr_states(db: DB) -> None:
@@ -1116,7 +1135,8 @@ class ReadinessWatch:
             return []
         flipped = [r for r, ok in now.items() if ok and not was.get(r)]
         for r in flipped:
-            bus.publish_agent(db, "session.pr_ready", r)
+            if not _pr_already_open(db, r):     # "open the PR" would be stale advice
+                bus.publish_agent(db, "session.pr_ready", r)
         from brindle.daemon import routes_actions
 
         for r, ok in now.items():

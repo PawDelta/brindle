@@ -1025,14 +1025,14 @@ def test_goal_phase(db, root, monkeypatch, passed, checking, ready, pr, merged, 
                         " VALUES ('boss', 'feat', 'https://x/pr/1', 1, ?)", (2 if merged else None,))
     monkeypatch.setattr(session_review.status_cache, "read_head", lambda path: "head1")
     monkeypatch.setattr(session_review, "open_pr_for_head",
-                        lambda sha, cwd, root_id=None: {"url": "https://x/pr/1", "headRefName": "other"} if pr == "gh" else None)
+                        lambda sha, cwd, root_id=None: {"url": "https://x/pr/1", "headRefName": "feat"} if pr == "gh" else None)
     monkeypatch.setattr(session_review, "session",
                         lambda db, root_id: (None, SimpleNamespace(repo_root="r", path="r", branch="feat")))
     monkeypatch.setattr(session_review, "reasons", lambda db, root, ws: [] if ready else ["not yet"])
     monkeypatch.setattr(session_review, "has_pr_target", lambda ws: target)
     assert session_review.goal_phase(db, "boss") == (expected, "https://x/pr/1" if pr else None)
-    if pr == "gh":     # adopted with where it really lives: a Push to the session branch is refused
-        assert db.conn.execute("SELECT head_ref FROM session_pr_heads WHERE root_id = 'boss'").fetchone()[0] == "other"
+    if pr == "gh":     # adopted PRs are managed outside brindle, even one whose head name is the session's (a fork's)
+        assert db.conn.execute("SELECT head_ref FROM session_pr_heads WHERE root_id = 'boss'").fetchone()[0] == "feat"
 
 
 @pytest.mark.parametrize("flight, expected", [

@@ -17,7 +17,8 @@ import type { AppStore } from "../../store/store";
 import { itemKey, kindLabel } from "./items";
 
 export interface InboxSink {
-  notify(title: string, body: string): void;
+  /* `link`: the page the notification is about (an opened PR), for a sink that can offer it as an action. */
+  notify(title: string, body: string, link?: string): void;
   /* The tray / menu-bar badge (src-tauri set_inbox_count). */
   count(n: number): void;
 }
@@ -34,9 +35,8 @@ export function watchInbox(store: AppStore, sink: InboxSink): () => void {
     const state = store.getState();
     const { inbox, synced, recent, lastEventId } = state;
     if (lastEventId !== lastEvent) {
-      // Not for a session whose PR is already open: "open the PR" would be stale advice.
-      const opened = (root: string | null | undefined) => inbox.some((i) => i.kind === "pr_opened" && i.root_id === root);
-      for (const e of recent.filter((e) => e.id > lastEvent && e.kind === "session.pr_ready" && !opened(e.root_id ?? e.agent_id))) {
+      // (The engine doesn't publish session.pr_ready for a session whose PR is already open.)
+      for (const e of recent.filter((e) => e.id > lastEvent && e.kind === "session.pr_ready")) {
         sink.notify(READY_TITLE, `${e.root_id ?? e.agent_id ?? "a session"}: every milestone passed and nothing is running. Review its changes and open the PR.`);
       }
       lastEvent = lastEventId;
@@ -47,7 +47,7 @@ export function watchInbox(store: AppStore, sink: InboxSink): () => void {
       const keys = new Set(inbox.map(itemKey));
       if (seen) {
         for (const item of inbox) {
-          if (!seen.has(itemKey(item))) sink.notify(kindLabel(item), describe(item));
+          if (!seen.has(itemKey(item))) sink.notify(kindLabel(item), describe(item), item.kind === "pr_opened" ? (item.url ?? undefined) : undefined);
         }
       }
       seen = keys;

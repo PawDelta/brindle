@@ -223,14 +223,12 @@ describe("inbox", () => {
     fireEvent.click(within(card("pr_ready")).getByRole("button", { name: "Open on GitHub" }));
     expect(openUrl).toHaveBeenCalledWith(compare);
 
-    // The OS notification for an opened PR carries which one and its link, and the "ready" one is not sent for it.
+    // The OS notification for an opened PR carries which one and its link.
     const notes: string[] = [];
-    const stop = watchInbox(store, { notify: (title, body) => notes.push(`${title}|${body}`), count: () => undefined });
+    const stop = watchInbox(store, { notify: (title, body, link) => notes.push(`${title}|${body}|${link}`), count: () => undefined });
     act(() => store.dispatch({ type: "snapshot", workspaces: [], inbox: [prReady] }));
     act(() => store.dispatch({ type: "snapshot", workspaces: [], inbox: [prReady, prOpened] }));
-    expect(notes).toEqual(["Pull request|sup1: PR opened: #408 Ship ls --json · https://github.com/o/r/pull/408"]);
-    act(() => store.dispatch({ type: "stream", message: { type: "event", id: 99, ts: 99, kind: "session.pr_ready", root_id: "sup1", agent_id: "sup1", repo_root: null, workspace_id: null, task_id: null, payload: {} } }));
-    expect(notes).toHaveLength(1);
+    expect(notes).toEqual(["Pull request|sup1: PR opened: #408 Ship ls --json · https://github.com/o/r/pull/408|https://github.com/o/r/pull/408"]);
     stop();
   });
 

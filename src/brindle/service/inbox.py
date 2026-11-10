@@ -185,11 +185,13 @@ def _opened_pr(db: DB, root_id: str, branch: str, path: str) -> tuple[str, dict 
         opened = session_review.open_pr_for_head(head, path, root_id)
     except (git.GitError, OSError):
         head, opened = "", None  # An unavailable checkout must not break the rest of the inbox.
-    if not (opened and opened.get("url")):
+    if not (opened and opened.get("url")) and not session_review.head_pr_known_none(head, path):
         mine = db.conn.execute("SELECT url FROM session_prs WHERE root_id = ? AND branch = ? AND url IS NOT NULL"
                                " AND merged_at IS NULL", (root_id, branch)).fetchone()
         number = re.search(r"/pull/(\d+)$", mine["url"]) if mine else None
-        opened = {"url": mine["url"], "number": number.group(1), "title": ""} if number else None
+        prep = db.conn.execute("SELECT title FROM session_pr_prep WHERE root_id = ? AND branch = ?",
+                               (root_id, branch)).fetchone()
+        opened = {"url": mine["url"], "number": number.group(1), "title": (prep["title"] if prep else "") or ""} if number else None
     return head, opened
 
 

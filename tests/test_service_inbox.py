@@ -229,6 +229,10 @@ def test_pr_opened_by_supervisor_replaces_the_ready_card(db, tmp_path, monkeypat
     db.conn.execute("INSERT INTO session_prs (root_id, branch, url, opened_at) VALUES ('r1', ?, ?, 1)",
                     (ws.branch, "https://github.com/o/r/pull/7"))
     assert [(i.kind, i.detail) for i in cards()] == [("pr_opened", "#7")]
+    # GitHub answering "none open" (closed unmerged) is not "no answer": the recorded PR stops standing.
+    pr = {}
+    session_review._head_cache.clear()
+    assert cards() == []
 
 
 class _Done:
