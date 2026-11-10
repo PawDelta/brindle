@@ -610,33 +610,17 @@ function usePanesReady(client: DaemonClient | null, refresh?: () => Promise<void
           const workspaces = await client.snapshot();
           if (!unchanged()) return;
           if (!waitingForPanes(workspaces)) {
-            if (!recovering.current) {
-              // Already running on this connection: these rows can mount terminals
-              // immediately, independently of sync's inbox and any queued reads.
-              store.dispatch({ type: "snapshot", workspaces });
-              settle(meta.pid);
-              return;
+            if (recovering.current) {
+              // These rows were read after recovery ended. Validate their daemon
+              // before applying them, independently of sync's inbox and queued reads.
+              const latest = await client.meta();
+              if (!unchanged() || latest.resuming || latest.pid !== meta.pid) return;
             }
-            // A snapshot read before recovery may still be in flight in sync.
-            // Queue a fresh one before mounting terminals on the store's rows.
-            const version = store.getState().snapshotVersion;
-            if (refresh) await Promise.all([reload(), refresh()]);
-            else {
-              const inbox = await client.inbox();
-              if (!unchanged()) return;
-              store.dispatch({ type: "snapshot", workspaces, inbox });
-              await reload();
-            }
-            if (!unchanged()) return;
-            // Recovery can start in another daemon while the reads finish.
-            const latest = await client.meta();
-            if (!unchanged() || latest.resuming || latest.pid !== meta.pid) return;
-            const applied = store.getState();
-            // Sync reports failures in the store and still resolves its promise.
-            // Only newly applied, ready rows may be used to mount terminals.
-            if (applied.snapshotVersion === version || applied.error || applied.stale || waitingForPanes(applied.workspaces)) return;
+            // Applying this read also supersedes sync's in-flight pre-recovery rows.
+            store.dispatch({ type: "snapshot", workspaces });
             recovering.current = false;
             settle(meta.pid);
+            void Promise.all([reload(), refresh?.()]).catch(() => {});
             return;
           }
         }
