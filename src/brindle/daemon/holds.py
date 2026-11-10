@@ -369,8 +369,20 @@ async def supervise(request: Request) -> JSONResponse:
     return JSONResponse(out)
 
 
+async def app_presence(request: Request) -> JSONResponse:
+    """Whether an app can answer a hold, for MCP and detached task helpers.
+
+    Like the other hold routes this is Unix-socket-only and callable by an
+    agent's own process. It exposes no session data and cannot change state.
+    The event stream counter belongs to this daemon, never to the caller."""
+    from brindle.daemon import events
+
+    return JSONResponse({"connected": bool(events.connected)})
+
+
 ROUTES = [
     Route(PREFIX, register, methods=["POST"]),
+    Route(PREFIX + "/app", app_presence, methods=["POST"]),
     Route(PREFIX + "/{id}/wait", wait, methods=["POST"]),
     Route(PREFIX + "/{id}/end", end, methods=["POST"]),
     Route(PREFIX + "/{id}/supervise", supervise, methods=["POST"]),
@@ -413,6 +425,18 @@ def call(path: str, body: dict, timeout: float) -> dict | None:
     """``post``, None also when the daemon answers with an error."""
     got = post(path, body, timeout)
     return got[1] if got is not None and got[0] == 200 else None
+
+
+def app_connected() -> bool:
+    """Ask the daemon that owns the app's event stream, from any process.
+
+    Do not consult events.connected here: MCP servers and detached workers
+    each import their own zero-valued counter. An unreachable daemon means
+    no app can answer; no cached presence survives a disconnect or restart.
+    The daemon's synchronous task handlers also use this cheap async route,
+    which needs neither a database connection nor a worker thread."""
+    state = call(PREFIX + "/app", {}, CALL_SECONDS)
+    return state is not None and state.get("connected") is True
 
 
 class Holder:
