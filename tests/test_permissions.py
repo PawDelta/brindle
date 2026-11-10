@@ -732,11 +732,15 @@ def test_stores_resolved_at_run_time(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("bare, wrapped", [
     ("git push --force origin main", "find . -maxdepth 0 -exec git push --force origin main \\;"),
-    ("git push --force origin main", "arch -arm64 git push --force origin main"),
-    ("git push --force origin main", "script -q /dev/null git push --force origin main"),
+    pytest.param("git push --force origin main", "arch -arm64 git push --force origin main",
+                 marks=pytest.mark.variant("reported bypass: an architecture launcher (review 0.6.3, finding 1)")),
+    pytest.param("git push --force origin main", "script -q /dev/null git push --force origin main",
+                 marks=pytest.mark.variant("reported bypass: a terminal recorder with an output-file operand")),
     ("git reset --hard", "xargs git reset --hard"),
-    ("git push --force origin main", "uv run git push --force origin main"),
-    ("git push --force origin main", "npm exec -- git push --force origin main"),
+    pytest.param("git push --force origin main", "uv run git push --force origin main",
+                 marks=pytest.mark.variant("reported bypass: Standard's `uv ` allow turned the deny into an allow")),
+    pytest.param("git push --force origin main", "npm exec -- git push --force origin main",
+                 marks=pytest.mark.variant("reported bypass: Standard's `npm ` allow turned the deny into an allow")),
     ("git push origin main", "uv run git push origin main"),   # the default-branch ask, behind an allowed `uv `
 ])
 def test_wrapped_git_still_guarded(tmp_path, bare, wrapped):
