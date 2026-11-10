@@ -1873,7 +1873,7 @@ def account_switch_org(db: DB, params: dict, body: Body) -> Any:
     return {"messages": _said(account)}
 
 
-# -- analysis docs: brindle Pro's library, proxied (the reads are in routes_read) ----
+# -- library: brindle Pro, proxied (the reads are in routes_read) ----
 # Answers pass through as the server gave them, held in memory only; a file
 # reaches disk only on an export to a folder the person picked.
 
