@@ -354,7 +354,7 @@ function Banner({ item, actions, who, branch, sessionTitle, repo, isNew, onDone,
       </>
     );
   } else if (item.kind === "plan_offer") {
-    acts = <PlanOfferActions item={item} actions={actions} onDone={onDone} />;
+    acts = <PlanOfferActions item={item} actions={actions} onDone={onDone} onGo={onGo} />;
   } else if (item.kind === "org_notice") {
     acts = act("Mark read", "read", {}, PLAIN);
   } else if (item.kind === "org_blocked") {
@@ -425,7 +425,7 @@ function Banner({ item, actions, who, branch, sessionTitle, repo, isNew, onDone,
 /* brindle's one-time offer to plan a big goal first: Yes / Not now, answered through the goal
    route with the offer id the item carries (request_id). A refusal (the offer was replaced
    meanwhile) is the one line on the card; either way the inbox is read again. */
-function PlanOfferActions({ item, actions, onDone }: { item: InboxItemDTO; actions: ReturnType<typeof useInboxActions>; onDone(): void }) {
+function PlanOfferActions({ item, actions, onDone, onGo }: { item: InboxItemDTO; actions: ReturnType<typeof useInboxActions>; onDone(): void; onGo?(): void }) {
   const client = useDaemon();
   const [saving, setSaving] = useState(false);
   const answer = (accept: boolean) => {
@@ -433,7 +433,10 @@ function PlanOfferActions({ item, actions, onDone }: { item: InboxItemDTO; actio
     actions.dismiss(itemKey(item));
     void client
       .resolvePlanOffer(item.root_id ?? "", item.request_id ?? "", accept)
-      .then(() => actions.settle(item), (e: unknown) => actions.report(item, e instanceof Error ? e.message : String(e), true))
+      .then(() => {
+        actions.settle(item);
+        onGo?.();
+      }, (e: unknown) => actions.report(item, e instanceof Error ? e.message : String(e), true))
       .finally(() => {
         setSaving(false);
         onDone();

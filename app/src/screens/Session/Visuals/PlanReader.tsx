@@ -2,23 +2,27 @@
    it isn't the agent's HTML: brindle renders its markdown itself (Knowledge's Markdown: elements
    only, no raw HTML, no fetched images), so it needs no frame, and every control on it is the
    app's own. The person reads it one step at a time (the overview, each decision, each ## section,
-   the split, then a summary), with the supervisor's restating of their ask above every step for
-   them to correct. They pick among a decision's alternatives (cards with trade-offs, the files each
-   touches and the supervisor's pick marked Recommended), comment on any step, then Approve (the
-   session's queued workers start) or Redirect (their picks and comments go back to the supervisor,
-   who publishes a new revision). Drafts belong to the revision on screen: a new revision is a
-   fresh read, and a verdict on an older one is a 409. */
+   the split, then a summary): the steps down a left column (PlanSteps.tsx), the step itself in the
+   main pane under the supervisor's restating of their ask, and a bar along the bottom with what
+   they picked, a note, the way back and on, and the verdict. They pick among a decision's
+   alternatives (cards with trade-offs, the files each touches and the supervisor's pick marked
+   Recommended; PlanCards.tsx), comment on any step, then Approve (the session's queued workers
+   start, and the split's task cards stay on top as a live board) or Redirect (their picks and
+   comments go back to the supervisor, who publishes a new revision). Drafts belong to the revision
+   on screen: a new revision is a fresh read, and a verdict on an older one is a 409. */
 
 import { useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { DaemonError, type Plan, type VisualDTO } from "../../../api/client";
 import type { PlanDecisionDTO, PlanSectionDTO } from "../../../api/schema";
 import { LoadingButton } from "../../../components/LoadingButton";
-import { button, chip, field, label, main, mono, quiet } from "../../../components/ui";
+import { button, field, h2, label, main, quiet } from "../../../components/ui";
 import { Markdown } from "../../Knowledge/Markdown";
 import type { ExportClient } from "../../Knowledge/ExportMenu";
 import type { PlansClient, VisualsClient } from "./client";
 import { BackButton, KeepButton, message, useEscBack } from "./chrome";
 import { ExportButton } from "./ExportButton";
+import { Decision, Tasks, branchChip, overlaps, passChip } from "./PlanCards";
+import { PlanSteps, type StepRow } from "./PlanSteps";
 import { StoreContext } from "../../../store/useStore";
 
 type Client = VisualsClient & PlansClient & Partial<ExportClient>;
@@ -74,30 +78,33 @@ export function PlanReader({ client, visual, repo, onBack, asking, onChanged }: 
   const exportClient = client.exportVisual && client.exportDoc && client.docPolicy && client.docExportConfig ? (client as ExportClient) : undefined;
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col" data-testid="plan-reader">
-      <header className="flex flex-wrap items-center gap-x-2 gap-y-1 px-s2 pt-2.5">
+      {/* One toolbar, as a visual's: Back (Esc) and the title, then what this is and its actions. */}
+      <header className="flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-line px-s2 py-2">
         <BackButton onBack={onBack} asking={asking} />
         <span className="mx-1 h-5 w-px bg-line" aria-hidden />
         <h2 className="min-w-0 flex-1 truncate text-[15px] font-semibold tracking-[-0.01em]">{visual.title}</h2>
+        {shown?.state === "approved" && (
+          <span className={`${passChip} font-mono`} data-testid="plan-board-progress">
+            approved · {shown.split.filter((w) => w.test_state === "passing").length} of {shown.split.length} green
+          </span>
+        )}
+        <span className={`${branchChip} whitespace-pre font-mono`} title={`${visual.id} · rendered by brindle from the plan's markdown`}>
+          <span>{`plan · rev ${shown?.rev ?? visual.rev}`}</span>
+          <span>{` · ${visual.by}`}</span>
+        </span>
         <KeepButton client={client} visual={visual} onKept={onChanged} />
         {exportClient && shown && (
           <ExportButton key={`${shown.id}:${shown.rev}`} client={exportClient} repo={repo} open={exporting} onOpenChange={setExporting} source={{ kind: "plan", id: shown.id, rev: shown.rev, markdown: shown.markdown }} />
         )}
       </header>
-      <div className="flex min-h-0 flex-1 flex-col p-s2">
-        <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-line-strong">
-          <div className={`${mono} flex items-center justify-between gap-s2 border-b border-line px-s2 py-0.5 text-[11px] text-ink-3`}>
-            <span>rendered by brindle from the plan's markdown</span>
-            <span className="truncate">{`${visual.id} · r${shown?.rev ?? visual.rev} · ${visual.by}`}</span>
-          </div>
-          {shown ? <>
-            {shown.state === "approved" && <section aria-label="Plan board" className="overflow-auto border-b border-line p-s2">
-              <h3 className="mb-s1 text-sm font-semibold" data-testid="plan-board-progress">approved · {shown.split.filter((w) => w.test_state === "passing").length} of {shown.split.length} green</h3>
-              <Split plan={shown} shared={overlaps(shown)} />
-            </section>}
-            <PlanBody key={`${shown.id}:${shown.rev}`} client={client} plan={shown} by={visual.by} onDecided={(p) => accept(p, true)} />
-          </> : <p className="p-s3 text-sm text-ink-3">{error ?? "Loading…"}</p>}
-        </div>
-      </div>
+      {shown ? <>
+        {shown.state === "approved" && (
+          <section aria-label="Plan board" className="flex max-h-[50vh] shrink-0 flex-col gap-3.5 overflow-auto border-b border-line px-s3 py-5">
+            <Tasks plan={shown} shared={overlaps(shown)} />
+          </section>
+        )}
+        <PlanBody key={`${shown.id}:${shown.rev}`} client={client} plan={shown} onDecided={(p) => accept(p, true)} />
+      </> : <p className="p-s3 text-sm text-ink-3">{error ?? "Loading…"}</p>}
     </div>
   );
 }
@@ -120,16 +127,7 @@ function stepsOf(plan: Plan): Step[] {
   ];
 }
 
-/* Files more than one worker of the split expects to change, with the workers that do. */
-function overlaps(plan: Plan): Map<string, string[]> {
-  const by = new Map<string, string[]>();
-  for (const w of plan.split) for (const f of new Set(w.files ?? [])) by.set(f, [...(by.get(f) ?? []), w.id]);
-  return new Map([...by].filter(([, ws]) => ws.length > 1));
-}
-
-const fileChip = `${mono} rounded-sm border border-line bg-surface-2 px-1 text-[11px] text-ink-2`;
-
-function PlanBody({ client, plan, by, onDecided }: { client: PlansClient; plan: Plan; by: string; onDecided(p: Plan): void }) {
+function PlanBody({ client, plan, onDecided }: { client: PlansClient; plan: Plan; onDecided(p: Plan): void }) {
   const [picks, setPicks] = useState<Record<string, string>>({});
   const [comments, setComments] = useState<Record<string, string>>({});
   const [commenting, setCommenting] = useState<Set<string>>(new Set());
@@ -140,6 +138,7 @@ function PlanBody({ client, plan, by, onDecided }: { client: PlansClient; plan: 
   const [at, setAt] = useState(0);
   // Each step opens at its top (its heading and the restated ask), not where the last one was scrolled to.
   const pane = useRef<HTMLDivElement>(null);
+  const askStrip = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (pane.current) pane.current.scrollTop = 0;
   }, [at]);
@@ -171,120 +170,131 @@ function PlanBody({ client, plan, by, onDecided }: { client: PlansClient; plan: 
   const reading = steps.filter((s) => s.kind !== "summary");
   const done = open ? reading.filter((s) => settled.has(s.id)).length : reading.length;
   const step = steps[at];
+  const last = at === steps.length - 1;
   // What each comment anchor is called on screen.
   const titles = new Map<string, string>([...steps.map((s): [string, string] => [s.id, s.title]), ["ask", "What I understood"]]);
+  const rows: StepRow[] = steps.map((s) => ({
+    id: s.id,
+    title: s.title,
+    done: s.kind !== "summary" && (!open || settled.has(s.id)),
+    sub: s.kind === "decision" ? (chosen(s.decision) ? s.decision.options.find((o) => o.id === chosen(s.decision))?.label : "pick one")
+      : s.kind === "split" ? `${plan.split.length} ${plan.split.length === 1 ? "worker" : "workers"}`
+      : comments[s.id]?.trim() ? "commented" : undefined,
+  }));
+  // The restated ask: corrected once the person says so; confirmed once they read on without correcting it.
+  const corrected = open ? !!comments.ask?.trim() : !!plan.verdict?.comments?.some((c) => c.section === "ask");
+  const confirmed = !corrected && (!open || settled.size > 0);
+  const correctAsk = () => {
+    setCommenting((c) => new Set(c).add("ask"));
+    if (pane.current) pane.current.scrollTop = 0;
+    // Already open: back to it. Opening now: the box takes the focus as it mounts.
+    askStrip.current?.querySelector("textarea")?.focus();
+  };
+  const picked = step.kind === "decision" ? step.decision.options.find((o) => o.id === chosen(step.decision)) : undefined;
 
   const commentBox = (id: string, title: string) =>
     open && commenting.has(id) ? (
-      <textarea className={`${field} min-h-16`} aria-label={`Comment on ${title}`} placeholder="What should change here?" autoFocus
+      <textarea className={`${field} min-h-16 w-full`} aria-label={`Comment on ${title}`} placeholder="What should change here?" autoFocus
         value={comments[id] ?? ""} onChange={(e) => setComments((c) => ({ ...c, [id]: e.target.value }))} />
     ) : null;
   const commentButton = (id: string, text = "Comment") =>
     open && !commenting.has(id) ? (
-      <button type="button" className={`${quiet} text-xs`} onClick={() => setCommenting((c) => new Set(c).add(id))}>
+      <button type="button" className={`${quiet} -my-0.5 text-xs`} onClick={() => setCommenting((c) => new Set(c).add(id))}>
         {text}
       </button>
     ) : null;
+  // The way back and on lives in the bottom bar, decided or not.
+  const back = at > 0 && (
+    <button type="button" className={button} onClick={() => go(at - 1)}>
+      ← Back
+    </button>
+  );
+  const next = (tone: string) => !last && (
+    <button type="button" className={`${tone} max-w-80`} onClick={() => go(at + 1)}>
+      <span className="truncate">{`Next: ${steps[at + 1].title}`}</span>
+      <span aria-hidden>→</span>
+    </button>
+  );
 
   return (
     <>
       <div className="flex min-h-0 flex-1">
-        <nav aria-label="Plan steps" className="flex w-48 shrink-0 flex-col gap-0.5 overflow-auto border-r border-line bg-canvas-2 px-s1 py-s2">
-          {steps.map((s, i) => {
-            const isDone = s.kind !== "summary" && (!open || settled.has(s.id));
-            const sub = s.kind === "decision" ? (chosen(s.decision) ? s.decision.options.find((o) => o.id === chosen(s.decision))?.label : "pick one")
-              : s.kind === "split" ? `${plan.split.length} ${plan.split.length === 1 ? "worker" : "workers"}`
-              : comments[s.id]?.trim() ? "commented" : undefined;
-            return (
-              <button key={s.id} type="button" aria-current={i === at ? "step" : undefined} onClick={() => go(i)}
-                className={`grid grid-cols-[20px_1fr] items-start gap-2 rounded-md px-2 py-1.5 text-left text-[12.5px] ${i === at ? "bg-branch-soft font-semibold text-ink" : isDone ? "text-ink-2" : "text-ink-3"}`}>
-                <span aria-hidden className={`${mono} grid h-[18px] w-[18px] place-items-center rounded-full border text-[10.5px] ${i === at ? "border-branch bg-branch text-on-branch" : isDone ? "border-pass bg-pass text-canvas" : "border-line-strong"}`}>
-                  {isDone ? "✓" : i + 1}
-                </span>
-                <span className="min-w-0">
-                  <span className="block truncate">{s.title}</span>
-                  {sub && <span className="block truncate text-[11.5px] font-normal text-ink-3">{sub}</span>}
-                </span>
-              </button>
-            );
-          })}
-          <div className={`${mono} mt-auto border-t border-line px-2 pt-s1 text-[11.5px] text-ink-3`} data-testid="plan-progress">
-            {`${done} of ${reading.length} settled`}
-            <div className="mt-1.5 h-1 overflow-hidden rounded-sm bg-line" aria-hidden>
-              <span className="block h-full bg-pass" style={{ width: `${reading.length ? (done / reading.length) * 100 : 100}%` }} />
-            </div>
-          </div>
-        </nav>
-        <div ref={pane} className="min-h-0 min-w-0 flex-1 overflow-auto px-s3 py-s3" data-testid="plan-step-pane">
-          <article className="mx-auto flex max-w-[760px] flex-col gap-s2">
-            <div>
-              <p className={`${mono} text-[11px] text-ink-3`}>plan · rev {plan.rev}</p>
-              <h1 className="mt-1 text-[21px] font-semibold tracking-[-0.02em]">{plan.title}</h1>
-              <p className="text-xs text-ink-3">{by}</p>
-            </div>
+        <PlanSteps rows={rows} at={at} settled={done} total={reading.length} onGo={go} />
+        <div ref={pane} className="min-h-0 min-w-0 flex-1 overflow-auto px-s3 py-5" data-testid="plan-step-pane">
+          <article className="flex max-w-[1080px] flex-col gap-3.5">
             {plan.ask && (
-              <div className="flex flex-col gap-1 rounded-lg border border-line bg-canvas-2 px-s2 py-s1 text-[12.5px] text-ink-2" data-testid="plan-ask">
-                <div className="flex items-start gap-s2">
-                  <p className="flex-1">
+              <div ref={askStrip} className="flex flex-col gap-2 rounded-lg border border-line bg-canvas-2 px-3 py-2.5 text-[12.5px] text-ink-2" data-testid="plan-ask">
+                <div className="flex items-start gap-3">
+                  <p className="min-w-0 flex-1">
                     <b className="font-semibold text-ink">What I understood:</b> {plan.ask}
                   </p>
-                  {comments.ask?.trim() ? <span className="whitespace-nowrap text-[11px] text-sap">you corrected it</span> : commentButton("ask", "Correct it")}
+                  {corrected ? <span className="whitespace-nowrap font-mono text-[11px] leading-[19px] text-sap">you corrected it</span>
+                    : confirmed && <span className="whitespace-nowrap font-mono text-[11px] leading-[19px] text-pass">✓ you confirmed</span>}
+                  {!corrected && commentButton("ask", "Correct it")}
                 </div>
                 {commentBox("ask", "What I understood")}
               </div>
             )}
-            <section aria-labelledby={`plan-${step.id}`} className="flex flex-col gap-s1">
+            <section aria-labelledby={`plan-${step.id}`} className="flex flex-col gap-3.5">
               <div className="flex items-center gap-2">
-                <h3 id={`plan-${step.id}`} className="flex-1 text-base font-semibold">{step.title}</h3>
+                <h3 id={`plan-${step.id}`} className={`${h2} min-w-0 flex-1 text-ink`}>{step.title}</h3>
                 {step.kind !== "summary" && commentButton(step.id)}
               </div>
-              {step.kind === "lede" && <Markdown text={plan.lede} />}
-              {step.kind === "section" && <Markdown text={step.section.markdown} />}
+              {step.kind === "lede" && <div className="max-w-[72ch]"><Markdown text={plan.lede} /></div>}
+              {step.kind === "section" && <div className="max-w-[72ch]"><Markdown text={step.section.markdown} /></div>}
               {step.kind === "decision" && <Decision decision={step.decision} chosen={chosen(step.decision)} open={open}
                 onPick={(o) => { setPicks((p) => ({ ...p, [step.decision.id]: o })); settle(step.id); }} />}
-              {step.kind === "split" && plan.state !== "approved" && <Split plan={plan} shared={shared} />}
+              {step.kind === "split" && (plan.state === "approved" ? <p className="text-sm text-ink-3">Its tasks are the live board above.</p> : <Tasks plan={plan} shared={shared} />)}
               {step.kind === "summary" && <Summary plan={plan} chosen={chosen} said={said} titles={titles} shared={shared} />}
               {step.kind !== "summary" && commentBox(step.id, step.title)}
             </section>
-            <div className="flex items-center gap-s1 border-t border-line pt-s1">
-              {at > 0 && (
-                <button type="button" className={button} onClick={() => go(at - 1)}>
-                  ← Back
-                </button>
-              )}
-              <span className="flex-1" />
-              {at < steps.length - 1 && (
-                <button type="button" className={button} onClick={() => go(at + 1)}>
-                  {`Next: ${steps[at + 1].title} →`}
-                </button>
-              )}
-            </div>
           </article>
         </div>
       </div>
-      <footer className="flex flex-col gap-s1 border-t border-line px-s2 py-s1" data-testid="plan-verdict">
+      <footer className="flex flex-col gap-1.5 border-t border-line bg-canvas-2 px-s2 py-2" data-testid="plan-verdict">
         {open ? (
-          <div className="flex flex-wrap items-center gap-s1">
+          <div className="flex flex-wrap items-center gap-2">
+            {step.kind === "decision" && (
+              <span className="text-xs text-ink-2" data-testid="plan-picked">
+                {picked ? <>Picked <b className="font-semibold text-ink">{picked.label}</b></> : "Nothing picked yet"}
+              </span>
+            )}
             <input className={`${field} min-w-40 flex-1`} aria-label="Add a note" placeholder="Add a note (optional)" value={note} onChange={(e) => setNote(e.target.value)} />
-            {shared.size > 0 && <span className="text-xs text-sap">{`${shared.size} ${shared.size === 1 ? "file is" : "files are"} in more than one worker`}</span>}
-            {plan.queued > 0 && <span className="text-xs text-ink-3">{plan.queued} assigned {plan.queued === 1 ? "task waits" : "tasks wait"} on this plan</span>}
+            {plan.ask && (
+              <button type="button" className={quiet} onClick={correctAsk}>
+                Correct the ask
+              </button>
+            )}
+            {back}
             <LoadingButton className={button} busy={sending === "redirect"} disabled={!!sending || !canRedirect} title={canRedirect ? "Send your picks and comments back for a new revision" : "Comment, add a note or pick differently first"} onClick={() => void decide(false)}>
               Redirect
             </LoadingButton>
-            <LoadingButton className={main} busy={sending === "approve"} disabled={!!sending} onClick={() => void decide(true)}>
+            {/* One main action at a time: reading on, then, on the last step, the approval. */}
+            <LoadingButton className={last ? main : button} busy={sending === "approve"} disabled={!!sending} onClick={() => void decide(true)}>
               Approve
             </LoadingButton>
+            {next(main)}
           </div>
         ) : (
-          <div role="status" className="flex flex-col gap-0.5 text-sm" data-testid="plan-decided">
-            <p>{plan.state === "approved" ? `You approved r${plan.rev}. Its workers start now.` : "You asked for changes. The supervisor is revising the plan."}</p>
-            {plan.verdict?.comments?.map((c, i) => (
-              <p key={i} className="text-ink-2">
-                <span className="text-ink-3">on {titles.get(c.section) ?? c.section} · </span>
-                {c.text}
-              </p>
-            ))}
+          <div className="flex items-start gap-2">
+            <div role="status" className="flex min-w-0 flex-1 flex-col gap-0.5 text-sm" data-testid="plan-decided">
+              <p>{plan.state === "approved" ? `You approved r${plan.rev}. Its workers start now.` : "You asked for changes. The supervisor is revising the plan."}</p>
+              {plan.verdict?.comments?.map((c, i) => (
+                <p key={i} className="text-ink-2">
+                  <span className="text-ink-3">on {titles.get(c.section) ?? c.section} · </span>
+                  {c.text}
+                </p>
+              ))}
+            </div>
+            {back}
+            {next(button)}
           </div>
+        )}
+        {open && (shared.size > 0 || plan.queued > 0) && (
+          <p className="flex flex-wrap gap-x-3 text-xs">
+            {shared.size > 0 && <span className="text-sap">{`${shared.size} ${shared.size === 1 ? "file is" : "files are"} in more than one worker`}</span>}
+            {plan.queued > 0 && <span className="text-ink-3">{plan.queued} assigned {plan.queued === 1 ? "task waits" : "tasks wait"} on this plan</span>}
+          </p>
         )}
         {error && (
           <p role="alert" className="text-xs text-sap">
@@ -292,101 +302,6 @@ function PlanBody({ client, plan, by, onDecided }: { client: PlansClient; plan: 
           </p>
         )}
       </footer>
-    </>
-  );
-}
-
-/* A decision's alternatives as cards: the supervisor's pick marked Recommended, the trade-offs as
-   + and − lines, and the files each would touch. */
-function Decision({ decision: d, chosen, open, onPick }: { decision: PlanDecisionDTO; chosen: string | null; open: boolean; onPick(option: string): void }) {
-  return (
-    <>
-      {d.challenge && <p className="border-l-2 border-line-strong pl-s1 text-xs text-ink-2">{d.challenge}</p>}
-      <div role="radiogroup" aria-label={d.title} className="grid grid-cols-[repeat(auto-fill,minmax(200px,1fr))] gap-s1">
-        {d.options.map((o) => (
-          <button key={o.id} type="button" role="radio" aria-checked={chosen === o.id} aria-label={o.label} disabled={!open}
-            className={`flex flex-col gap-2 rounded-lg border bg-canvas p-s1 text-left text-[12.5px] text-ink-2 ${chosen === o.id ? "border-branch ring-2 ring-branch-soft" : "border-line-strong"}`}
-            onClick={() => onPick(o.id)}>
-            <span className="flex flex-wrap items-center gap-1.5 text-[13.5px] font-semibold text-ink">
-              {o.label}
-              {o.id === d.mine && <span className={`${chip} bg-pass-soft text-pass`}>Recommended</span>}
-            </span>
-            {o.detail && <span>{o.detail}</span>}
-            {(!!o.pros?.length || !!o.cons?.length) && (
-              <span className="flex flex-col gap-0.5 text-xs">
-                {o.pros?.map((t, i) => (
-                  <span key={`p${i}`}>
-                    <span className={`${mono} text-[12px] text-pass`}>+ </span>
-                    {t}
-                  </span>
-                ))}
-                {o.cons?.map((t, i) => (
-                  <span key={`c${i}`}>
-                    <span className={`${mono} text-[12px] text-sap`}>− </span>
-                    {t}
-                  </span>
-                ))}
-              </span>
-            )}
-            {!!o.touches?.length && (
-              <span className="mt-auto flex flex-wrap items-center gap-1 border-t border-line pt-s1 text-xs text-ink-3" data-testid={`touches-${o.id}`}>
-                Touches
-                {o.touches.map((f) => (
-                  <code key={f} className={fileChip}>{f}</code>
-                ))}
-              </span>
-            )}
-          </button>
-        ))}
-      </div>
-    </>
-  );
-}
-
-/* The proposed split as task cards: each worker, the files it changes (a file another worker
-   changes too is flagged) and the one test that proves it. */
-function Split({ plan, shared }: { plan: Plan; shared: Map<string, string[]> }) {
-  return (
-    <>
-      {shared.size > 0 && (
-        <p role="alert" className="rounded-md bg-sap-soft px-s2 py-s1 text-sm text-sap" data-testid="split-overlaps">
-          {[...shared].map(([f, ws]) => `${f} is in ${ws.join(" and ")}`).join("; ")}. Workers that change the same file can conflict: order them with after, or redirect.
-        </p>
-      )}
-      <ol aria-label="Proposed split" className="grid grid-cols-[repeat(auto-fill,minmax(210px,1fr))] gap-s1">
-        {plan.split.map((w) => (
-          <li key={w.id} className="flex min-w-0 flex-col gap-2 rounded-lg border border-line-strong bg-canvas p-s1 text-[12.5px]" data-testid={`task-${w.id}`}>
-            <span className="text-[13.5px] font-semibold text-ink">{w.title}</span>
-            {plan.state === "approved" && <span className="text-xs text-ink-2">
-              {w.state ?? "queued"}
-              {w.task_id && <span className={mono}> · task {w.task_id}</span>}
-              {w.agent_id && <span className={mono}> · worker {w.agent_id}</span>}
-            </span>}
-            <span className={`${mono} text-[11px] text-ink-3`}>
-              {`worker ${w.id}`}
-              {w.after?.length ? ` · after ${w.after.join(", ")}` : ""}
-            </span>
-            {!!w.files?.length && (
-              <span className="flex flex-wrap gap-1">
-                {w.files.map((f) => {
-                  const others = shared.get(f)?.filter((id) => id !== w.id);
-                  return others ? (
-                    <code key={f} className={`${mono} rounded-sm border border-sap bg-sap-soft px-1 text-[11px] text-sap`} title={`also in ${others.join(", ")}`} data-overlap="true">
-                      {`${f} ⚠ also ${others.join(", ")}`}
-                    </code>
-                  ) : (
-                    <code key={f} className={fileChip}>{f}</code>
-                  );
-                })}
-              </span>
-            )}
-            <span data-test-state={w.test_state ?? "not run"} className={`${mono} rounded-md px-1.5 py-1 text-[11px] ${w.test_state === "passing" ? "bg-pass-soft text-pass" : w.test_state === "failing" ? "bg-fail-soft text-fail" : "bg-surface-2 text-ink-3"}`}>
-              {w.test ? `proves it: ${w.test}` : "no test named"}
-              {plan.state === "approved" && ` · ${w.test_state ?? "not run"}`}
-            </span>
-          </li>
-        ))}
-      </ol>
     </>
   );
 }
@@ -400,11 +315,11 @@ function Summary({ plan, chosen, said, titles, shared }: {
   shared: Map<string, string[]>;
 }) {
   return (
-    <div className="flex flex-col gap-s1 text-sm">
+    <div className="flex max-w-[72ch] flex-col gap-3.5 text-sm">
       {plan.decisions.length > 0 && (
         <div>
           <h4 className={label}>Decisions</h4>
-          <ul className="mt-1 flex flex-col gap-0.5">
+          <ul className="mt-1.5 flex flex-col gap-1">
             {plan.decisions.map((d) => {
               const pick = d.options.find((o) => o.id === chosen(d));
               return (
@@ -421,7 +336,7 @@ function Summary({ plan, chosen, said, titles, shared }: {
       {said.length > 0 && (
         <div>
           <h4 className={label}>Your comments</h4>
-          <ul className="mt-1 flex flex-col gap-0.5">
+          <ul className="mt-1.5 flex flex-col gap-1">
             {said.map((c) => (
               <li key={c.section}>
                 <span className="text-ink-3">on {titles.get(c.section) ?? c.section} · </span>
