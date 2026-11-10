@@ -1868,19 +1868,82 @@ def _said(account) -> list[str]:
     return [line for line in account.out.getvalue().splitlines() if line.strip()]
 
 
+class _SignIn:
+    """The brindle Pro sign-in in flight. There is one at a time: each flow
+    has its own loopback listener and PKCE pair, and each one approved in the
+    browser would mint a token set, so a second POST must not start another."""
+
+    def __init__(self, job: Job, device: bool) -> None:
+        self.job, self.device = job, device
+        self.url: str | None = None
+        self.server = None          # its loopback.CallbackServer, once listening
+        self.ended = False
+
+    def listening(self, server) -> None:
+        with _SIGN_IN_LOCK:
+            self.server = server
+            ended = self.ended
+        if ended:                   # replaced before it got this far
+            self._stop(server)
+
+    def end(self) -> None:
+        """Replaced by a new sign-in: its listener stops waiting, its job fails as restarted."""
+        with _SIGN_IN_LOCK:
+            self.ended = True
+            server = self.server
+        if server is not None:
+            self._stop(server)
+
+    @staticmethod
+    def _stop(server) -> None:
+        from brindle.pro import auth, loopback
+
+        server.finish(loopback.CallbackResult(error=auth.RESTARTED))
+
+
+_SIGN_IN_LOCK = threading.Lock()
+_SIGN_IN: list[_SignIn] = []        # the one in flight, if any
+
+
 def account_login(db: DB, params: dict, body: Body) -> Any:
+    """Start a sign-in, or answer the one already waiting on the browser: a
+    second click, a remounted sign-in screen or another screen's button gets
+    its job (and its URL again), not a second flow. ``restart`` (Try again)
+    ends the one waiting and starts a fresh one."""
     device = _get(body, "device", bool, False)
+    restart = _get(body, "restart", bool, False)
+    with _SIGN_IN_LOCK:
+        cur = _SIGN_IN[0] if _SIGN_IN and not _SIGN_IN[0].ended else None
+        reuse = cur is not None and not restart and cur.device == device
+        if not reuse:
+            flow = _SignIn(Job(secrets.token_hex(8), "account.login"), device)
+            _SIGN_IN[:] = [flow]
+    if reuse:
+        if cur.url:   # the caller follows events from its request on: say the URL again
+            bus.publish(db, "job.progress", job=cur.job.id, url=cur.url)
+        return cur.job
+    if cur is not None:
+        cur.end()
 
     def work(db: DB, job: Job) -> Any:
         def open_url(url: str) -> bool:
             # The app opens it in the system browser; the daemon waits for the callback.
+            with _SIGN_IN_LOCK:
+                flow.url = url
             bus.publish(db, "job.progress", job=job.id, url=url)
             return True
 
-        _pro_account(_Progress(db, job)).cmd_login(None, device=device, open_url=open_url)
+        try:
+            _pro_account(_Progress(db, job)).cmd_login(None, device=device, open_url=open_url,
+                                                       listening=flow.listening)
+        finally:
+            with _SIGN_IN_LOCK:
+                flow.ended = True
+                if _SIGN_IN and _SIGN_IN[0] is flow:
+                    _SIGN_IN.clear()
         return {"signed_in": True}
 
-    return start_job("account.login", work)
+    return start_job("account.login", work, job=flow.job)
 
 
 def account_logout(db: DB, params: dict, body: Body) -> Any:

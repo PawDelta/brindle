@@ -174,9 +174,23 @@ def test_refresh_missing_new_refresh_token_is_refused(store, backend):
         auth.refresh(auth.Client(BASE, backend), store, seen)
 
 
-def test_reused_refresh_token_logs_out(store, backend):
+@pytest.mark.parametrize("saved_elsewhere", [False, True])
+def test_reused_refresh_token_logs_out(store, backend, saved_elsewhere):
+    """A refused refresh token signs out, unless the brindle that spent it
+    first saved its new pair while this request was out: that is the sign-in."""
     seen = seed(store, backend)
     backend.refresh_tokens["cpr_1"] = "used"    # someone else already spent it
+    if saved_elsewhere:
+        def refused_after_the_other_saved(form, headers):
+            other = backend.issue()
+            store.save({**seen, "access_token": other["access_token"],
+                        "refresh_token": other["refresh_token"], "access_expires_at": time.time() + 900})
+            return 400, {"error": "invalid_grant"}
+
+        backend.routes["POST /token/refresh"] = refused_after_the_other_saved
+        assert auth.refresh(auth.Client(BASE, backend), store, seen).plan == "pro"
+        assert store.load()["refresh_token"] == "cpr_2"
+        return
     with pytest.raises(AuthError) as e:
         auth.refresh(auth.Client(BASE, backend), store, seen)
     assert e.value.revoked and backend.revoked
@@ -219,6 +233,108 @@ def test_two_concurrent_refreshers_spend_the_refresh_token_once(tmp_path, backen
     assert backend.paths().count("POST /token/refresh") == 1
     assert not backend.revoked
     assert credentials.FileStore(tmp_path / "pro").load()["refresh_token"] == "cpr_2"
+
+
+def test_refreshers_with_different_homes_spend_the_keychain_sign_in_once(tmp_path, backend, monkeypatch):
+    """The keychain holds one sign-in per OS user, whatever BRINDLE_HOME a
+    process has (the app's engine, a CLI or worker with a home of its own), so
+    they share one refresh lock. A spends the token and holds the request
+    until B has either hit A's lock or spent the same token itself."""
+    import fcntl
+    from subprocess import CompletedProcess
+    from brindle import config, keystore
+
+    external = credentials.FileStore(tmp_path / "keychain")
+
+    def run(self, args, stdin=None):
+        if args[0] == "-i":
+            external.save(keystore._decode(stdin.split('"')[-2]))
+        record = external.load()
+        return CompletedProcess(args, 0 if record else 44, keystore._encode(record) if record else "", "")
+
+    monkeypatch.setenv(keystore.FORCE_ENV, "keychain")
+    monkeypatch.setattr(keystore, "_keychain_reads", {})
+    monkeypatch.setattr(keystore.KeychainStore, "_run", run)
+    homes, real_home = threading.local(), config.brindle_home
+    monkeypatch.setattr(config, "brindle_home", lambda: getattr(homes, "path", None) or real_home())
+    seen = seed(external, backend)
+    spent, a_spending, b_moved = [], threading.Event(), threading.Event()
+    real_refresh, real_flock = backend.routes["POST /token/refresh"], fcntl.flock
+
+    def refresh_route(form, headers):
+        spent.append(form["refresh_token"])
+        if len(spent) == 1:
+            a_spending.set()
+            b_moved.wait(5)
+        else:
+            b_moved.set()
+        return real_refresh(form, headers)
+
+    def flock(fd, op):
+        try:
+            return real_flock(fd, op)
+        except BlockingIOError:
+            b_moved.set()        # B is waiting on A's lock
+            raise
+
+    backend.routes["POST /token/refresh"] = refresh_route
+    monkeypatch.setattr(fcntl, "flock", flock)
+    results, errors = {}, []
+
+    def worker(home):
+        homes.path = tmp_path / home
+        try:
+            results[home] = auth.refresh(auth.Client(BASE, backend), credentials.default_store(), dict(seen))
+        except Exception as e:  # noqa: BLE001
+            errors.append(e)
+
+    a = threading.Thread(target=worker, args=("home-a",))
+    a.start()
+    a_spending.wait(5)
+    b = threading.Thread(target=worker, args=("home-b",))
+    b.start()
+    a.join(10)
+    b.join(10)
+    assert errors == [] and set(results) == {"home-a", "home-b"}
+    assert spent == ["cpr_1"] and not backend.revoked
+    assert external.load()["refresh_token"] == "cpr_2"
+
+
+def test_a_second_sign_in_request_joins_the_one_waiting_on_the_browser(db, store, backend, monkeypatch):
+    """One click that reaches the daemon twice (a remounted sign-in screen,
+    another screen's button) starts one browser flow; Try again (restart)
+    ends the waiting one, whose listener stops, and starts a fresh one."""
+    from brindle import bus
+    from brindle.daemon import routes_actions
+
+    held, urls = [], threading.Event()
+    real_publish = bus.publish
+
+    def publish(db, kind, **fields):
+        got = real_publish(db, kind, **fields)
+        if kind == "job.progress" and "url" in fields:
+            urls.set()
+        return got
+
+    monkeypatch.setattr(bus, "publish", publish)
+    monkeypatch.setattr(routes_actions, "_spawn", held.append)
+    monkeypatch.setattr(routes_actions, "_SIGN_IN", [])
+    monkeypatch.setattr(routes_actions, "_pro_account",
+                        lambda out=None: account.ProAccount(store=store, transport=backend, out=out))
+    first = routes_actions.account_login(db, {}, {})
+    flow = threading.Thread(target=held[0], daemon=True)
+    flow.start()
+    urls.wait(5)
+    since = bus.tail(db)[-1]["id"]
+    assert routes_actions.account_login(db, {}, {}) == first and len(held) == 1
+    again = [e["payload"] for e in bus.tail(db, since) if "url" in e["payload"]]
+    assert [(p["job"], p["url"].startswith(BASE + "/cli/authorize")) for p in again] == [(first.id, True)]
+    fresh = routes_actions.account_login(db, {}, {"restart": True})
+    flow.join(5)
+    assert fresh != first and len(held) == 2 and not flow.is_alive()
+    ended = [e["payload"] for e in bus.tail(db, since, kinds=("job.failed",))]
+    assert [p["job"] for p in ended] == [first.id]
+    assert "POST /cli/token" not in backend.paths()
 
 
 @pytest.mark.variant("credentials rotate between routing's initial read and refresh lock entry")

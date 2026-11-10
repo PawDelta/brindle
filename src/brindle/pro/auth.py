@@ -64,6 +64,7 @@ USER_AGENT = "brindle-pro"
 ACCESS_SLACK = 60          # treat an access token this close to expiry as expired
 MAX_ACCESS_TTL = 3600      # never trust a server-claimed access lifetime beyond this
 LOCK_TIMEOUT = 60.0
+RESTARTED = "restarted"    # a browser sign-in ended because a new one replaced it
 
 
 class AuthError(Exception):
@@ -417,11 +418,15 @@ def exchange_code(client: Client, code: str, verifier: str, redirect_uri: str, *
 def browser_login(client: Client, *, show: Callable[[str], None] = print,
                   open_url: Callable[[str], bool] | None = None,
                   timeout: float = BROWSER_TIMEOUT,
-                  clock: Callable[[], float] | None = None) -> dict | None:
+                  clock: Callable[[], float] | None = None,
+                  listening: Callable[[loopback.CallbackServer], None] | None = None) -> dict | None:
     """Sign in through the browser: a loopback redirect with PKCE. Returns the
     token set, or None (after saying why) when the browser flow couldn't run
     (no listener, no browser, no redirect within ``timeout``) and the caller
-    should fall back to the device flow. A denied sign-in raises."""
+    should fall back to the device flow. A denied sign-in raises.
+    ``listening`` is given the callback server before the browser opens, so
+    the caller can end this sign-in (``finish`` it with error ``restarted``)
+    when a new one replaces it."""
     open_url = open_url or loopback.open_browser
     verifier, challenge = loopback.pkce_pair()
     state = loopback.new_state()
@@ -431,6 +436,8 @@ def browser_login(client: Client, *, show: Callable[[str], None] = print,
         show(f"Couldn't listen for the browser sign-in ({_sanitize(e)}); using a device code instead.")
         return None
     with server:
+        if listening is not None:
+            listening(server)
         url = loopback.authorize_url(client.base, server.redirect_uri, state, challenge, CLIENT_ID)
         show("Opening your browser to sign in to brindle Pro...")
         try:
@@ -442,6 +449,8 @@ def browser_login(client: Client, *, show: Callable[[str], None] = print,
             return None
         show(f"If your browser didn't open, visit: {url}")
         result = server.wait(timeout)
+    if result is not None and result.error == RESTARTED:
+        raise AuthError("a new sign-in was started in its place", code=RESTARTED)
     if result is None:
         show("The browser didn't sign in within the time limit; using a device code instead.")
         return None
@@ -456,15 +465,17 @@ def login(client: Client, store, *, show: Callable[[str], None] = print,
           sleep: Callable[[float], None] | None = None,
           clock: Callable[[], float] | None = None, browser: bool = False,
           open_url: Callable[[str], bool] | None = None,
-          browser_timeout: float = BROWSER_TIMEOUT) -> license.Entitlement:
+          browser_timeout: float = BROWSER_TIMEOUT,
+          listening: Callable[[loopback.CallbackServer], None] | None = None) -> license.Entitlement:
     """Log in and store credentials and the entitlement. With ``browser``
-    the loopback+PKCE flow is tried first (see :func:`browser_login`) and
-    the device flow is the fallback; otherwise the device flow is used."""
+    the loopback+PKCE flow is tried first (see :func:`browser_login`, which
+    also takes ``listening``) and the device flow is the fallback; otherwise
+    the device flow is used."""
     clock = clock or time.time
     creds = None
     if browser:
         creds = browser_login(client, show=show, open_url=open_url, timeout=browser_timeout,
-                              clock=clock)
+                              clock=clock, listening=listening)
     if creds is None:
         auth = start_device_flow(client)
         show(f"To log in to brindle Pro, open {auth.verification_uri}\n"
@@ -490,10 +501,29 @@ def login(client: Client, store, *, show: Callable[[str], None] = print,
 # -- refresh ---------------------------------------------------------------------------------------
 
 
+def _user_home() -> Path:
+    """The account's own home directory, from the password database: not
+    ``$HOME``, which a sandboxed or test process may have pointed elsewhere."""
+    import pwd
+
+    return Path(pwd.getpwuid(os.getuid()).pw_dir)
+
+
 def lock_path() -> Path:
+    """The refresh lock sits beside the sign-in it guards. The keychain and the
+    Secret Service hold one sign-in per OS user, whatever ``$BRINDLE_HOME`` or
+    ``$HOME`` a process runs with, so their lock is the user's own
+    (``~/.brindle/pro/refresh.lock`` of the account): a lock under each home
+    let two brindles (the app's engine and a CLI or worker with another home)
+    spend the same refresh token, which the backend revokes as reuse. The file
+    store lives under ``$BRINDLE_HOME/pro``, and so does its lock."""
     from brindle.config import brindle_home
 
-    return brindle_home() / "pro" / "refresh.lock"
+    try:
+        per_user = keystore.backend_name() != "file"
+    except keystore.CredentialError:
+        per_user = False
+    return (_user_home() / ".brindle" if per_user else brindle_home()) / "pro" / "refresh.lock"
 
 
 @contextmanager
@@ -528,9 +558,15 @@ def refresh_lock(timeout: float = LOCK_TIMEOUT):
         os.close(fd)
 
 
-def _rotate(client: Client, store, cur: dict, now: float) -> dict:
+def _rotate(client: Client, store, cur: dict, now: float, *, adopt: bool = False) -> dict:
     """Spend the refresh token once and save the new pair immediately. Call
-    with the refresh lock held."""
+    with the refresh lock held.
+
+    A refusal (``invalid_grant``) signs out only if the store still holds the
+    token that was refused. If another brindle saved a newer pair meanwhile
+    (one that rotated without this lock), that pair is the sign-in now: with
+    ``adopt`` it is returned for the caller to use; otherwise nothing is
+    deleted and ``record_changed`` is raised."""
     old = cur.get("refresh_token")
     if not old:
         raise AuthError("not logged in", code="invalid_grant", revoked=True)
@@ -539,6 +575,17 @@ def _rotate(client: Client, store, cur: dict, now: float) -> dict:
     if status != 200:
         err = _error(status, body)
         if err.revoked:
+            try:
+                now_stored = store.load() or {}
+            except Exception:  # noqa: BLE001 - unreadable: don't destroy what can't be checked
+                raise err from None
+            newer = now_stored.get("refresh_token")
+            if newer and newer != old:
+                log.info("refresh token refused after another process rotated it; using the stored sign-in")
+                license.clear_cache()
+                if adopt:
+                    return now_stored
+                raise AuthError("the stored sign-in changed", code="record_changed") from None
             store.delete()
             license.clear_cache()
         raise err
@@ -576,11 +623,11 @@ def refresh(client: Client, store, seen: dict | None = None, *, now: float | Non
             float(cur.get("access_expires_at") or 0) > now + ACCESS_SLACK
         rotated = False
         if not fresh_access or (force and not elsewhere):
-            cur, rotated = _rotate(client, store, cur, now), True
+            cur, rotated = _rotate(client, store, cur, now, adopt=True), True
         org = cur.get("org_id")
         got = _fetch_entitlement(client, cur["access_token"], now, org)
         if got == 401 and not rotated:
-            cur = _rotate(client, store, cur, now)
+            cur = _rotate(client, store, cur, now, adopt=True)
             got = _fetch_entitlement(client, cur["access_token"], now, org)
         if got == 401:
             raise AuthError("backend refused a fresh access token", code="invalid_token")
