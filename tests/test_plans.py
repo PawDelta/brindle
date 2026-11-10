@@ -382,6 +382,7 @@ def test_big_goal_offers_a_planning_doc(accept, db, session, monkeypatch, connec
     assert started == ["build the preset schema"]
 
 
+@pytest.mark.variant("reported stall: a terminal-only session's workers held by an offer nobody can answer (review 0.6.3, finding 3)")
 def test_plan_offer_without_app(db, session, monkeypatch):
     from brindle import autopilot
 

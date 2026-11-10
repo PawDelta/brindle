@@ -190,12 +190,14 @@ def test_removed_worktree_goes_to_trash(db, repo, monkeypatch, action):
 
 
 @pytest.mark.parametrize("why, force, dirty", [
-    ("volume", True, True),      # forced: deleted in place, changes and all
+    pytest.param("volume", True, True,    # forced: deleted in place, changes and all
+                 marks=pytest.mark.variant("reported failure: a forced removal of a repo on another volume (review 0.6.3, finding 2)")),
     ("volume", False, False),    # unforced and clean: git removes it
     pytest.param("volume", False, True,   # unforced with changes: still refused
                  marks=pytest.mark.variant("fail closed: the fallback never deletes uncommitted work unforced")),
     ("no-rename", True, False),  # no exclusive rename on this platform
-    ("mount", True, False),      # same device, but rename crosses a mount (EXDEV)
+    pytest.param("mount", True, False,    # same device, but rename crosses a mount (EXDEV)
+                 marks=pytest.mark.variant("bind mounts and dev containers: same device, rename still answers EXDEV")),
     pytest.param("no-syscall", True, False,   # libc has renameat2, the kernel or sandbox doesn't (ENOSYS)
                  marks=pytest.mark.variant("older kernels and sandboxes answer ENOSYS, not EXDEV")),
 ])

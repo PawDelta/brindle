@@ -100,7 +100,8 @@ def test_snapshot_preserves_safe_class_styling(db, session, client, layout):
 
 @pytest.mark.parametrize("case,status", [
     ("answer", 200), ("answer_free_text", 200), ("answer_secret", 400), ("secret", 400), ("stale", 409), ("unknown", 404),
-    pytest.param("answer_without_note", 200, id="test_export_answer_without_note"),
+    pytest.param("answer_without_note", 200, id="test_export_answer_without_note",
+                 marks=pytest.mark.variant("reported crash: an option picked with no note (review 0.6.3, finding 6)")),
     ("disabled", 404), ("too_big", 400), ("invalid", 400), ("missing", 400),
     ("free", 402), ("denied", 403), ("google_docs", 200), ("sharepoint", 200),
     ("plan", 200), ("plan_disabled", 200), ("wrong_kind", 400),
