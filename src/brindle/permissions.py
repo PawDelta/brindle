@@ -1549,12 +1549,14 @@ def _runs_no_command(words: list[str]) -> bool:
     return audited is not None and not _has_option(words[1:], *audited)
 
 
-def _program_invocations(command: str, program: str, loose: bool = False) -> list[list[str]]:
+def _program_invocations(command: str, program: str, loose: bool = False, *,
+                         conservative: bool = False) -> list[list[str]]:
     """Commands headed by ``program``, including behind plain wrappers.
 
     Restrictions also inspect every matching word behind unknown launchers.
     An earlier operand with the same name must not hide the actual command.
     Audited readers' arguments remain data, and allows never use this fallback.
+    ``conservative`` retains rm's legacy deny scan alongside the structured reader.
     """
     argv = simple_argv(command)
     if argv is not None:
@@ -1563,13 +1565,16 @@ def _program_invocations(command: str, program: str, loose: bool = False) -> lis
         segments = [argv]
     else:
         reader = _PartReader(Request("", "bash", "", command=command))
+        # rm's deny scan also handles heredoc continuations and arithmetic that
+        # the structured reader may misinterpret or stop reading partway through.
+        segments = _segments(command) if loose and conservative else []
         try:
             reader.read(command)
         except ValueError:
             # Keep recognizable invocations even when another part cannot be read.
             # The parser's scan still distinguishes arguments and heredoc data from code.
             reader.scan(command)
-        segments = [part.words for part in reader.parts]
+        segments.extend(part.words for part in reader.parts)
     calls = []
     for segment in segments:
         forms = _wrapped_forms(segment)
@@ -2538,7 +2543,7 @@ def destructive_rm(command: str) -> bool:
     in any flag cluster or spelling) at the root, a top-level folder, the home
     directory or the working directory itself, or with ``--no-preserve-root``,
     itself or through a program that runs what it's given (sudo rm, xargs rm)."""
-    for run in _program_invocations(command, "rm", loose=True):
+    for run in _program_invocations(command, "rm", loose=True, conservative=True):
         flags, targets, options = [], [], True
         for word in run[1:]:
             if options and word == "--":
