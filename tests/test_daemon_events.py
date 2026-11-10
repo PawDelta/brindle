@@ -61,6 +61,8 @@ def _readiness_reuses_unchanged_sessions(db, tmp_path, monkeypatch, gitlink, out
     watch.sweep(db)
     assert watch.ready == {"s": False}
     tracked.write_text("original")
+    if outcome == "none":
+        db.conn.execute("INSERT INTO session_prs (root_id, branch, url, opened_at) VALUES ('s', 's', 'https://github.com/o/r/pull/7', 0)")
     # GitHub's look is held: first pending, then failed (unknown, not "none"), and only then "none open".
     monkeypatch.setattr(review._pr_pool, "submit", lambda *a: SimpleNamespace(done=lambda: False))
     review._head_cache.clear()
