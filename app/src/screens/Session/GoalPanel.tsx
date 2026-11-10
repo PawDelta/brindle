@@ -19,8 +19,8 @@
    goal_phase: the PR readiness (review.ts) and the milestones stand in for
    it. Nothing here ever says "failed".
 
-   Only the newest GET answers: a slower, older response is dropped, and so is
-   any response that arrives after the panel has moved to another session. */
+   Rows and panels share one read per session. Events during a read invalidate
+   its answer and queue one refresh; a closed session drops pending answers. */
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import type { BusEvent } from "../../api/events";
@@ -456,43 +456,109 @@ function Milestone({ milestone, finished, pending }: { milestone: MilestoneDTO; 
   );
 }
 
-/* The goal as the session bar reads it: fetched on mount and again after
-   any event that may have changed it (an action's ack, a check's end, a
-   resnapshot); null for a session without one, undefined while unknown
-   (or with no engine to ask). The panel above keeps its own, finer, copy. */
-export function useGoal(client: DaemonClient | null, repo: string, root: string, store: AppStore): GoalDTO | null | undefined {
-  const [goal, setGoal] = useState<GoalDTO | null | undefined>(undefined);
-  useEffect(() => {
-    if (!client) return;
-    let live = true;
-    let seq = 0;
-    const load = () => {
-      const mine = ++seq;
-      client.goal(repo, root).then(
-        (got) => live && mine === seq && setGoal(got),
-        () => undefined,
-      );
-    };
-    setGoal(undefined);
-    load();
+type GoalReadState = { goal: GoalDTO | null | undefined; error: string | null };
+const UNKNOWN_GOAL: GoalReadState = { goal: undefined, error: null };
+const goalReads = new WeakMap<AppStore, WeakMap<DaemonClient, Map<string, ReturnType<typeof createGoalRead>>>>();
+
+/* One subscription and request stream per session. Events arriving during a
+   read invalidate its answer and coalesce into one subsequent read. */
+function createGoalRead(client: DaemonClient, repo: string, root: string, store: AppStore) {
+  let state = UNKNOWN_GOAL;
+  const listeners = new Set<() => void>();
+  let generation = 0;
+  let pending = false;
+  let dirty = false;
+  let stop: (() => void) | undefined;
+  const publish = (next: GoalReadState) => {
+    state = next;
+    listeners.forEach((listener) => listener());
+  };
+  const refresh = () => {
+    if (!listeners.size) return;
+    if (pending) { dirty = true; return; }
+    pending = true;
+    dirty = false;
+    const mine = generation;
+    void client.goal(repo, root).then(
+      (goal) => { if (mine === generation && !dirty) publish({ goal, error: null }); },
+      (error: unknown) => { if (mine === generation && !dirty) publish({ ...state, error: message(error) }); },
+    ).finally(() => {
+      if (mine !== generation) return;
+      pending = false;
+      if (dirty) refresh();
+    });
+  };
+  const start = () => {
+    refresh();
     let seen = store.getState().lastEventId;
     let stale = store.getState().stale;
+    let workspaces = store.getState().workspaces;
+    let gitMark = sessionGitMark(workspaces, root);
     const unsubscribe = store.subscribe(() => {
       const s = store.getState();
+      let again = false;
       if (s.lastEventId !== seen) {
         const fresh = s.recent.filter((e) => e.id > seen);
         seen = s.lastEventId;
-        if (fresh.some((e) => concernsGoal(e, root))) load();
+        again ||= fresh.some((e) => concernsGoal(e, root));
       }
-      if (s.stale && !stale) load();
+      again ||= s.stale && !stale;
       stale = s.stale;
+      if (s.workspaces !== workspaces) {
+        workspaces = s.workspaces;
+        const mark = sessionGitMark(workspaces, root);
+        again ||= mark !== gitMark;
+        gitMark = mark;
+      }
+      if (again) refresh();
     });
+    const tick = window.setInterval(refresh, ACTIVITY_REFRESH_MS);
     return () => {
-      live = false;
       unsubscribe();
+      window.clearInterval(tick);
     };
+  };
+  return {
+    snapshot: () => state,
+    refresh,
+    subscribe: (listener: () => void) => {
+      listeners.add(listener);
+      if (listeners.size === 1) stop = start();
+      return () => {
+        listeners.delete(listener);
+        if (!listeners.size) {
+          stop?.();
+          generation++;
+          pending = dirty = false;
+          state = UNKNOWN_GOAL;
+        }
+      };
+    },
+  };
+}
+
+function useGoalRead(client: DaemonClient | null, repo: string, root: string, store: AppStore) {
+  const read = useMemo(() => {
+    if (!client) return null;
+    let clients = goalReads.get(store);
+    if (!clients) goalReads.set(store, clients = new WeakMap());
+    let reads = clients.get(client);
+    if (!reads) clients.set(client, reads = new Map());
+    const key = JSON.stringify([repo, root]);
+    let entry = reads.get(key);
+    if (!entry) reads.set(key, entry = createGoalRead(client, repo, root, store));
+    return entry;
   }, [client, repo, root, store]);
-  return goal;
+  const state = useSyncExternalStore(read?.subscribe ?? subscribeNoGoal, read?.snapshot ?? unknownGoal);
+  return { ...state, refresh: read?.refresh };
+}
+
+const subscribeNoGoal = () => () => undefined;
+const unknownGoal = () => UNKNOWN_GOAL;
+
+/* Shared by sidebar rows and the panel; undefined until the first answer. */
+export function useGoal(client: DaemonClient | null, repo: string, root: string, store: AppStore): GoalDTO | null | undefined {
+  return useGoalRead(client, repo, root, store).goal;
 }
 
 export interface GoalPanelProps {
@@ -522,13 +588,12 @@ export interface GoalPanelProps {
 }
 
 export function GoalPanel({ client, repo, root, store, compact = false, title, loadingTitle, request, onReview, openUrl = openExternal, onCloseSession, onOpenDocs }: GoalPanelProps) {
-  const [goal, setGoal] = useState<GoalDTO | null>(null);
+  const { goal, error: loadError, refresh } = useGoalRead(client, repo, root, store);
+  const loaded = goal !== undefined;
   // The docs this session wrote or used; null while unknown or unreachable (the line stays hidden).
   const [docSummary, setDocSummary] = useState<{ total: number; writing: number; updated: number; using: number } | null>(null);
   // An older engine's stand-in for goal_phase: its word on the session's PR.
   const readiness = usePrReadiness(client, root, store);
-  const [loaded, setLoaded] = useState(false);
-  const [loadError, setLoadError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   // Beside a terminal the milestones fold away by default (it wants the room); in the sidebar they show.
   const [open, setOpen] = useState(compact);
@@ -541,80 +606,28 @@ export function GoalPanel({ client, repo, root, store, compact = false, title, l
   const toggleFold = useCallback((key: number, next: boolean) => setFoldOpen((o) => ({ ...o, [key]: next })), []);
   const toggleDone = useCallback((key: number, next: boolean) => setDoneOpen((o) => ({ ...o, [key]: next })), []);
   const frame = compact ? "flex min-w-0 flex-1 flex-col gap-1.5 overflow-hidden px-1.5 pb-1.5 pt-1" : `${card} flex flex-col gap-1 px-s2 py-s1`;
-  /* This session: its client, repo and root. Every continuation (a GET, an action's
-     ack, its error or end) applies only while it is still the session on screen, so
-     one started for an earlier session can't touch this one. */
   const session = useMemo(() => ({ client, repo, root }), [client, repo, root]);
-  const activeSession = useRef<typeof session | null>(null);
-  /* The newest GET /goal asked for; only the newest response applies. */
-  const requestSeq = useRef(0);
-
-  const refresh = useCallback(() => {
-    // A refresh from an earlier session's closure does nothing; it must not bump the counter.
-    if (activeSession.current !== session) return Promise.resolve();
-    const seq = ++requestSeq.current;
-    const current = () => activeSession.current === session && seq === requestSeq.current;
-    void client.docSessionSummary(root).then(
-      (got) => current() && setDocSummary(got),
-      () => current() && setDocSummary(null),
-    );
-    return client
-      .goal(repo, root)
-      .then((next) => {
-        if (!current()) return;
-        setGoal(next);
-        setLoaded(true);
-        setLoadError(null);
-      })
-      .catch((e: unknown) => {
-        if (current()) setLoadError(message(e));
-      });
-  }, [session, client, repo, root]);
 
   useEffect(() => {
-    activeSession.current = session;
-    // Whatever was on screen belongs to an earlier session: this one starts afresh.
-    setGoal(null);
-    setLoaded(false);
-    setLoadError(null);
     setActionError(null);
     setDocSummary(null);
     setFullGoalOpen(false);
     setFoldOpen({});
     setPendingOpen({});
     setDoneOpen({});
-    void refresh();
-    let seen = store.getState().lastEventId;
-    let stale = store.getState().stale;
-    let workspaces = store.getState().workspaces;
-    let gitMark = sessionGitMark(workspaces, root);
-    const unsubscribe = store.subscribe(() => {
-      const s = store.getState();
-      let again = false;
-      if (s.lastEventId !== seen) {
-        const fresh = s.recent.filter((e) => e.id > seen);
-        seen = s.lastEventId;
-        again ||= fresh.some((e) => concernsGoal(e, root));
-      }
-      again ||= s.stale && !stale;
-      stale = s.stale;
-      // The sidebar counts the session's commits: a git sweep of one of its worktrees may have new ones.
-      if (compact && s.workspaces !== workspaces) {
-        workspaces = s.workspaces;
-        const mark = sessionGitMark(workspaces, root);
-        again ||= mark !== gitMark;
-        gitMark = mark;
-      }
-      if (again) void refresh();
-    });
-    // The activity line's last hour, ages and estimate move with the clock.
-    const tick = compact ? window.setInterval(() => void refresh(), ACTIVITY_REFRESH_MS) : undefined;
+  }, [session]);
+
+  useEffect(() => {
+    if (goal === undefined) return;
+    let live = true;
+    void client.docSessionSummary(root).then(
+      (got) => live && setDocSummary(got),
+      () => live && setDocSummary(null),
+    );
     return () => {
-      activeSession.current = null;
-      unsubscribe();
-      window.clearInterval(tick);
+      live = false;
     };
-  }, [session, store, refresh, root, compact]);
+  }, [client, repo, root, goal]);
 
   const storeWorkspaces = useSyncExternalStore(store.subscribe, () => store.getState().workspaces);
   const storeAlive = useSyncExternalStore(store.subscribe, () => store.getState().alive);
@@ -635,8 +648,7 @@ export function GoalPanel({ client, repo, root, store, compact = false, title, l
           type="button"
           className={button}
           onClick={() => {
-            setLoadError(null);
-            void refresh();
+            refresh?.();
           }}
         >
           Retry
