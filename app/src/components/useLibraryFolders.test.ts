@@ -4,34 +4,49 @@ import type { DaemonClient, FolderGroup } from "../api/client";
 import { useLibraryFolders } from "./useLibraryFolders";
 
 const group = (name: string): FolderGroup[] => [{ scope: { kind: "user", id: "u" }, folders: [{ id: name, name, visibility: "private" }] }];
+const names = (r: { current: { folders: FolderGroup[] } }) => r.current.folders.map((g) => g.folders[0].name);
 
-it("an older read finishing after a newer one, or failing after it, never replaces the newer list", async () => {
+/* A client whose reads and creates stay outstanding until the test settles them. */
+function fake() {
   const reads: { ok(v: FolderGroup[]): void; fail(): void }[] = [];
+  const creates: (() => void)[] = [];
   const client = {
     libraryFolders: () => new Promise((ok, fail) => reads.push({ ok: (scopes) => ok({ scopes }), fail: () => fail(new Error("x")) })),
-    createLibraryFolder: () => Promise.resolve({}),
+    createLibraryFolder: () => new Promise<void>((done) => creates.push(done)),
   } as unknown as DaemonClient;
-  const { result, rerender } = renderHook(({ active }) => useLibraryFolders(client, active), { initialProps: { active: true } });
-  let created!: Promise<void>;
-  act(() => {
-    created = result.current.create("user", "new", "private", "owner");
-  });
-  await act(async () => {
-    await Promise.resolve();
-  });
-  expect(reads).toHaveLength(2); // the open read, and the refresh after the create
-  await act(async () => {
-    reads[1].ok(group("new"));
-    await created;
-  });
-  await act(async () => reads[0].fail()); // the slow first read fails late
-  expect(result.current.folders[0].folders[0].name).toBe("new");
-  await act(async () => reads[0].ok(group("old")));
-  expect(result.current.folders[0].folders[0].name).toBe("new");
+  return { client, reads, creates };
+}
+const flush = () => act(async () => { await Promise.resolve(); });
 
-  rerender({ active: false }); // closing makes a read in flight obsolete
-  rerender({ active: true });
-  rerender({ active: false });
-  await act(async () => reads[2].ok(group("late")));
-  expect(result.current.folders[0].folders[0].name).toBe("new");
+it("an older read that succeeds or fails after a newer one never replaces the newer list", async () => {
+  const { client, reads, creates } = fake();
+  const { result } = renderHook(() => useLibraryFolders(client, true));
+  act(() => { void result.current.create("user", "a", "private", "owner"); });
+  act(() => { void result.current.create("user", "b", "private", "owner"); });
+  await act(async () => creates.forEach((done) => done()));
+  await flush();
+  expect(reads).toHaveLength(3); // the open read, and a refresh after each create
+  await act(async () => reads[2].ok(group("newest")));
+  await act(async () => reads[1].ok(group("stale success")));
+  await act(async () => reads[0].fail());
+  await flush();
+  expect(names(result)).toEqual(["newest"]);
+});
+
+it("a create finishing after the client changes or the Library closes refreshes nothing", async () => {
+  const a = fake();
+  const b = fake();
+  const { result, rerender } = renderHook(({ client, active }) => useLibraryFolders(client, active), { initialProps: { client: a.client, active: true } });
+  let pending!: Promise<void>;
+  act(() => { pending = result.current.create("user", "x", "private", "owner"); });
+  rerender({ client: b.client, active: true });
+  await act(async () => b.reads[0].ok(group("new client")));
+  await act(async () => { a.creates[0](); await pending; });
+  expect(a.reads).toHaveLength(1); // no refresh of the old client
+  expect(names(result)).toEqual(["new client"]);
+
+  act(() => { pending = result.current.create("user", "y", "private", "owner"); });
+  rerender({ client: b.client, active: false });
+  await act(async () => { b.creates[0](); await pending; });
+  expect(b.reads).toHaveLength(1); // nothing reads once closed
 });

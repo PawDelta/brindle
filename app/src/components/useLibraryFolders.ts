@@ -20,23 +20,29 @@ export function useLibraryFolders(client: DaemonClient | null | undefined, activ
       if (mine === latest.current) setFolders([]);
     }
   }, [client]);
+  // The lifecycle: bumped when the Library closes or the client changes, so a create or
+  // move started before then doesn't refresh (and overwrite) afterwards.
+  const epoch = useRef(0);
   useEffect(() => {
     if (active) void load();
     return () => {
       latest.current++;
+      epoch.current++;
     };
   }, [active, load]);
   const create = useCallback(
     async (scope: string, name: string, visibility: FolderVisibility, canAdd: CanAdd) => {
+      const started = epoch.current;
       await client!.createLibraryFolder(scope, name, visibility, canAdd);
-      await load();
+      if (started === epoch.current) await load();
     },
     [client, load],
   );
   const move = useCallback(
     async (doc: string, scope: string, folder: string) => {
+      const started = epoch.current;
       await client!.moveDocToFolder(doc, scope, folder);
-      await load();
+      if (started === epoch.current) await load();
     },
     [client, load],
   );
