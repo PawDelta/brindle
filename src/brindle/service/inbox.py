@@ -399,7 +399,7 @@ def _review_items(db: DB, repo_root: str | None) -> list[InboxItemDTO]:
     account is a listed reviewer who hasn't signed the head revision;
     "changes_requested" / "signed_off" for the author, until the plan is
     revised or approved. Each opens the doc (``doc`` = the Library's id)."""
-    from brindle import plans
+    from brindle import plan_docs, plans
 
     me = _my_sub()
     if me is None:
@@ -427,8 +427,9 @@ def _review_items(db: DB, repo_root: str | None) -> list[InboxItemDTO]:
             elif state == "ready":
                 out.append(InboxItemDTO(kind="signed_off", reason="Signed off", detail=title, **link))
         elif any(x.get("sub") == me for x in review.get("reviewers") or [] if isinstance(x, dict)) \
-                and me not in plans._signed(review) and not any(
-                    x["sub"] == me and x["status"] == plans.CHANGES for x in (plans.gate(db, p) or {}).get("reviewers", [])):
+                and me not in plans._signed(review) and not db.conn.execute(
+                    "SELECT 1 FROM plan_threads WHERE plan_id=? AND parent_id IS NULL AND status='open'"
+                    " AND author=? AND rev=?", (p["id"], plan_docs.TEAMMATE + me, p["rev"])).fetchone():
             out.append(InboxItemDTO(kind="review_requested", reason="Review requested", detail=title, **link))
     return out
 

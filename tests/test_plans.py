@@ -606,6 +606,10 @@ def test_shared_doc_inbox_cards_follow_the_review_and_clear_when_acted_on(db, se
     _shared(db, pid, {"rev": 1, "reviewers": ONE, "sign_offs": []})
     me["sub"] = "a"
     assert kinds() == []                                   # asking for changes answers the request too
+    visual_offers.person_spoke(db, boss, "Make a planning doc.")
+    mcp_server.propose_plan(PLAN + "\n\nRevised.", plan_id=pid)
+    _shared(db, pid, {"rev": 2, "reviewers": ONE, "sign_offs": []}, local_rev=2, remote_rev=2)
+    assert kinds() == [("review_requested", "doc")]        # the answer was to r1: r2 needs its own review
     me["sub"] = "me"
     assert kinds() == [("changes_requested", "doc")]
     with monkeypatch.context() as m:
