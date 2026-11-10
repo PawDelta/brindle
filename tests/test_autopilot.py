@@ -1008,6 +1008,7 @@ def test_goal_activity_eta_while_building(db, root, monkeypatch, runs, elapsed, 
     (2, False, True, True, True, True, "done", True),                   # PR merged
     (2, False, True, True, True, False, "pr_open", True),               # merged, milestones pass, audit hasn't approved
     (2, False, False, False, False, True, "done", False),               # reached, nothing to open a PR for
+    (2, False, True, "gh", False, False, "pr_open", True),              # the supervisor's own `gh pr create`, found by HEAD
 ])
 def test_goal_phase(db, root, monkeypatch, passed, checking, ready, pr, merged, goal_done, expected, target):
     from brindle.daemon import session_review
@@ -1019,10 +1020,14 @@ def test_goal_phase(db, root, monkeypatch, passed, checking, ready, pr, merged, 
         db.update_autopilot("boss", checking_since=time.time())
     if goal_done:
         db.update_autopilot("boss", state="done", audit_ok=1)
-    if pr:
+    if pr is True:
         db.conn.execute("INSERT INTO session_prs (root_id, branch, url, opened_at, merged_at)"
                         " VALUES ('boss', 'feat', 'https://x/pr/1', 1, ?)", (2 if merged else None,))
-    monkeypatch.setattr(session_review, "session", lambda db, root_id: (None, SimpleNamespace(repo_root="r")))
+    monkeypatch.setattr(session_review.git, "out", lambda args, path: "head1")
+    monkeypatch.setattr(session_review, "open_pr_for_head",
+                        lambda sha, cwd: {"url": "https://x/pr/1"} if pr == "gh" else None)
+    monkeypatch.setattr(session_review, "session",
+                        lambda db, root_id: (None, SimpleNamespace(repo_root="r", path="r", branch="feat")))
     monkeypatch.setattr(session_review, "reasons", lambda db, root, ws: [] if ready else ["not yet"])
     monkeypatch.setattr(session_review, "has_pr_target", lambda ws: target)
     assert session_review.goal_phase(db, "boss") == (expected, "https://x/pr/1" if pr else None)

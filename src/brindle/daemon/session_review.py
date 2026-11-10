@@ -165,6 +165,26 @@ def has_pr_target(ws: Workspace) -> bool:
         git.ahead_behind(ws.path, git.base_ref(ws.path, ws.base_branch))[1])
 
 
+def adopt_head_pr(db: DB, root_id: str) -> None:
+    """Record, as brindle's own Open PR does (``session_prs``), the open PR a
+    supervisor made with ``gh`` when it holds the session's HEAD, so the
+    sidebar's PR line, its checks and its merge are followed too. Never waits
+    on ``gh`` (``open_pr_for_head``); a session that has a PR already keeps it."""
+    if db.conn.execute("SELECT 1 FROM session_prs WHERE root_id = ? AND url IS NOT NULL", (root_id,)).fetchone():
+        return
+    try:
+        root, ws = session(db, root_id)
+        head = git.out(["rev-parse", "HEAD"], ws.path)
+    except (ServiceError, git.GitError, workspaces.WorkspaceError, OSError):
+        return
+    found = open_pr_for_head(head, ws.path)
+    if found and found.get("url"):
+        db.conn.execute("INSERT INTO session_prs (root_id, branch, url, pushed_sha, opened_at) VALUES (?, ?, ?, ?, ?)"
+                        " ON CONFLICT (root_id, branch) DO UPDATE SET url = excluded.url,"
+                        " pushed_sha = excluded.pushed_sha, opened_at = excluded.opened_at",
+                        (root_id, ws.branch, found["url"], head, time.time()))
+
+
 def goal_phase(db: DB, root_id: str) -> tuple[str, str | None]:
     """The session goal's one path: (``in_progress`` | ``in_review`` |
     ``ready_for_pr`` | ``pr_open`` | ``done``, the PR's URL or None).
@@ -176,6 +196,7 @@ def goal_phase(db: DB, root_id: str) -> tuple[str, str | None]:
     done on that decision alone; any other reached goal awaits its PR, however
     temporarily it isn't ready (dirty checkout, workers running)."""
     ap, ms = db.get_autopilot(root_id), db.milestones(root_id)
+    adopt_head_pr(db, root_id)
     pr = db.conn.execute("SELECT url, merged_at FROM session_prs WHERE root_id = ? AND url IS NOT NULL"
                          " ORDER BY opened_at DESC LIMIT 1", (root_id,)).fetchone()
     # Brindle's own decision that the goal is reached (the audit approved it, or
