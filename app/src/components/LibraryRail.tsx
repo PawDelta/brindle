@@ -98,7 +98,7 @@ function Folders({ folders, doc, onCreate, onMove }: { folders: FolderGroup[]; d
     <>
       <div className={`${HEADING} flex items-center justify-between`}>
         Folders
-        {onCreate && (
+        {onCreate && folders.length > 0 && (
           <button type="button" className="normal-case tracking-normal text-branch hover:underline" onClick={() => setAdding(!adding)}>
             + New
           </button>
