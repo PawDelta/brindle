@@ -89,7 +89,10 @@ def _readiness_reuses_unchanged_sessions(db, tmp_path, monkeypatch, gitlink, out
     assert reads == [] and watch.ready == {"s": True} and review._merge_polled == 0
 
 
-@pytest.mark.parametrize("recorded, expected", [(False, None), (True, True)])
+@pytest.mark.parametrize("recorded, expected", [
+    pytest.param(False, None, marks=pytest.mark.variant("review finding: a missing gh read as confirmed absence, so no PR")),
+    pytest.param(True, True, marks=pytest.mark.variant("review finding: a missing gh dropped the PR already recorded")),
+])
 def test_missing_gh_is_not_confirmed_absence(db, monkeypatch, recorded, expected):
     from types import SimpleNamespace
     from brindle import status_cache, workspaces
