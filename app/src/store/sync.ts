@@ -32,6 +32,11 @@ export function startSync({ client, store, repo, connect, backoff }: SyncOptions
     const { lifecycleVersion: version, snapshotVersion: applied } = store.getState();
     try {
       const [workspaces, inbox] = await Promise.all([client.snapshot(repo), client.inbox(repo)]);
+      // A refresh queued during this read can follow an acknowledged Inbox
+      // action. This response may still contain the dismissed card; applying
+      // it would also clear useInboxActions' settled state. Let the queued
+      // read supply the snapshot taken after that action instead.
+      if (again) return;
       // A close/rewind applied while these reads were pending is newer than
       // their rows. The queued fetch may resume an agent; this one cannot.
       if (version !== store.getState().lifecycleVersion) return;
