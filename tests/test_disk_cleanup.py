@@ -192,7 +192,8 @@ def test_removed_worktree_goes_to_trash(db, repo, monkeypatch, action):
 @pytest.mark.parametrize("why, force, dirty", [
     ("volume", True, True),      # forced: deleted in place, changes and all
     ("volume", False, False),    # unforced and clean: git removes it
-    ("volume", False, True),     # unforced with changes: still refused
+    pytest.param("volume", False, True,   # unforced with changes: still refused
+                 marks=pytest.mark.variant("fail closed: the fallback never deletes uncommitted work unforced")),
     ("no-rename", True, False),  # no exclusive rename on this platform
     ("mount", True, False),      # same device, but rename crosses a mount (EXDEV)
 ])
