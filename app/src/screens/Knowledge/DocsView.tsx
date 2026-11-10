@@ -556,7 +556,7 @@ export function DocsView({ client, repo, session: initialSession, doc, pickFolde
   );
 
   return (
-    <section className="flex flex-col gap-s2" aria-label="Library" data-testid="docs">
+    <section className="flex flex-col gap-s2" aria-label="Docs" data-testid="docs">
       <ResultsPanel results={results} error={resultsError} docs={docs} />
       {(session || onBack) && (
         <div className="flex flex-wrap items-center gap-s1" data-testid="session-filter">

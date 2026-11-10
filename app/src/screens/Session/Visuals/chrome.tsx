@@ -69,7 +69,7 @@ export function KeepButton({ client, visual, onKept }: { client: VisualsClient; 
   return (
     <>
       {keepError && <span className="text-xs text-sap">{keepError}</span>}
-      <LoadingButton className={`${button} pl-2.5 ${visual.kept ? "border-branch/45 bg-branch-soft" : ""}`} busy={keeping} disabled={keeping} aria-pressed={visual.kept} title={visual.kept ? "Kept in Knowledge › Kept visuals (click to remove)" : "Keep a copy in Knowledge › Kept visuals"} data-testid="visual-keep" onClick={() => void keep()}>
+      <LoadingButton className={`${button} pl-2.5 ${visual.kept ? "border-branch/45 bg-branch-soft" : ""}`} busy={keeping} disabled={keeping} aria-pressed={visual.kept} title={visual.kept ? "Kept in Library › Kept visuals (click to remove)" : "Keep a copy in Library › Kept visuals"} data-testid="visual-keep" onClick={() => void keep()}>
         <BookmarkIcon size={15} filled={visual.kept} className={visual.kept ? "text-branch" : "text-ink-2"} />
         {visual.kept ? "Kept" : "Keep"}
       </LoadingButton>
