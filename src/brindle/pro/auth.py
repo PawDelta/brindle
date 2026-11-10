@@ -42,6 +42,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Protocol
@@ -325,12 +326,14 @@ def poll_device_token(client: Client, auth: DeviceAuthorization, *,
                       clock: Callable[[], float] | None = None) -> dict:
     """Poll until the user approves, honouring ``interval``, ``slow_down``
     (the server's new ``interval``, else +5 s; RFC 8628 3.5) and
-    ``expired_token``. Returns the token set."""
+    ``expired_token``. Returns the token set. Within :func:`login`, stops
+    (code ``restarted``) once its watch says a newer sign-in replaced it."""
     sleep, clock = sleep or time.sleep, clock or time.time
     interval = auth.interval
     deadline = clock() + auth.expires_in
     while True:
         sleep(interval)
+        _check(_polling_for.get())
         if clock() > deadline:
             raise AuthError("the login code expired; run login again", code="expired_token")
         try:
@@ -415,18 +418,43 @@ def exchange_code(client: Client, code: str, verifier: str, redirect_uri: str, *
     return _token_set(body, (clock or time.time)())
 
 
+class SignInWatch(Protocol):
+    """Who started a sign-in and may replace it (the daemon's one sign-in in
+    flight). :func:`login` asks ``cancelled`` before each step that would
+    show instructions, ask the backend for tokens or save them, so a replaced
+    sign-in stops there and stores nothing."""
+
+    def listening(self, server: loopback.CallbackServer) -> None:
+        """The browser flow's callback server: ``finish`` it to stop its wait."""
+
+    def device(self) -> None:
+        """The device flow starts (the browser's instructions no longer apply)."""
+
+    def cancelled(self) -> bool:
+        """A newer sign-in replaced this one."""
+
+
+# The watch of the login whose device code is being polled (poll_device_token's callers
+# outside login poll without one).
+_polling_for: ContextVar[SignInWatch | None] = ContextVar("pro_device_poll_watch", default=None)
+
+
+def _check(watch: SignInWatch | None) -> None:
+    if watch is not None and watch.cancelled():
+        raise AuthError("a new sign-in was started in its place", code=RESTARTED)
+
+
 def browser_login(client: Client, *, show: Callable[[str], None] = print,
                   open_url: Callable[[str], bool] | None = None,
                   timeout: float = BROWSER_TIMEOUT,
                   clock: Callable[[], float] | None = None,
-                  listening: Callable[[loopback.CallbackServer], None] | None = None) -> dict | None:
+                  watch: SignInWatch | None = None) -> dict | None:
     """Sign in through the browser: a loopback redirect with PKCE. Returns the
     token set, or None (after saying why) when the browser flow couldn't run
     (no listener, no browser, no redirect within ``timeout``) and the caller
-    should fall back to the device flow. A denied sign-in raises.
-    ``listening`` is given the callback server before the browser opens, so
-    the caller can end this sign-in (``finish`` it with error ``restarted``)
-    when a new one replaces it."""
+    should fall back to the device flow. A denied sign-in raises, and so does
+    one ``watch`` says was replaced (code ``restarted``): before the browser
+    opens, and after the callback, before the code is exchanged."""
     open_url = open_url or loopback.open_browser
     verifier, challenge = loopback.pkce_pair()
     state = loopback.new_state()
@@ -436,8 +464,9 @@ def browser_login(client: Client, *, show: Callable[[str], None] = print,
         show(f"Couldn't listen for the browser sign-in ({_sanitize(e)}); using a device code instead.")
         return None
     with server:
-        if listening is not None:
-            listening(server)
+        if watch is not None:
+            watch.listening(server)
+        _check(watch)
         url = loopback.authorize_url(client.base, server.redirect_uri, state, challenge, CLIENT_ID)
         show("Opening your browser to sign in to brindle Pro...")
         try:
@@ -449,8 +478,7 @@ def browser_login(client: Client, *, show: Callable[[str], None] = print,
             return None
         show(f"If your browser didn't open, visit: {url}")
         result = server.wait(timeout)
-    if result is not None and result.error == RESTARTED:
-        raise AuthError("a new sign-in was started in its place", code=RESTARTED)
+    _check(watch)
     if result is None:
         show("The browser didn't sign in within the time limit; using a device code instead.")
         return None
@@ -466,23 +494,36 @@ def login(client: Client, store, *, show: Callable[[str], None] = print,
           clock: Callable[[], float] | None = None, browser: bool = False,
           open_url: Callable[[str], bool] | None = None,
           browser_timeout: float = BROWSER_TIMEOUT,
-          listening: Callable[[loopback.CallbackServer], None] | None = None) -> license.Entitlement:
+          watch: SignInWatch | None = None) -> license.Entitlement:
     """Log in and store credentials and the entitlement. With ``browser``
-    the loopback+PKCE flow is tried first (see :func:`browser_login`, which
-    also takes ``listening``) and the device flow is the fallback; otherwise
-    the device flow is used."""
+    the loopback+PKCE flow is tried first (see :func:`browser_login`) and
+    the device flow is the fallback; otherwise the device flow is used.
+    A sign-in ``watch`` says was replaced stops at its next step (code
+    ``restarted``), and never saves: checked under the refresh lock, so it
+    can't overwrite the sign-in that replaced it; tokens it already got are revoked."""
     clock = clock or time.time
     creds = None
     if browser:
         creds = browser_login(client, show=show, open_url=open_url, timeout=browser_timeout,
-                              clock=clock, listening=listening)
+                              clock=clock, watch=watch)
     if creds is None:
+        _check(watch)
+        if watch is not None:
+            watch.device()
         auth = start_device_flow(client)
+        _check(watch)
         show(f"To log in to brindle Pro, open {auth.verification_uri}\n"
              f"and enter the code: {auth.user_code}")
+        _polling_for.set(watch)      # each login sets its own before it polls
         creds = poll_device_token(client, auth, sleep=sleep, clock=clock)
+        _polling_for.set(None)
     creds["base_url"] = client.base
     with refresh_lock():
+        try:
+            _check(watch)
+        except AuthError:
+            _revoke_quietly(client, creds.get("refresh_token"))
+            raise
         store.save(creds)     # keep the refresh token before anything else can fail
         try:
             got = _fetch_entitlement(client, creds["access_token"], clock())

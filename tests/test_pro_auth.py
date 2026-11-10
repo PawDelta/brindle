@@ -66,10 +66,10 @@ def store(tmp_path):
     return credentials.FileStore(tmp_path / "pro")
 
 
-def login(transport, store, clock=None):
+def login(transport, store, clock=None, watch=None):
     clock = clock or Clock()
     shown = []
-    ent = auth.login(auth.Client(BASE, transport), store, show=shown.append,
+    ent = auth.login(auth.Client(BASE, transport), store, show=shown.append, watch=watch,
                      sleep=clock.sleep, clock=clock)
     return ent, shown, clock
 
@@ -300,20 +300,19 @@ def test_refreshers_with_different_homes_spend_the_keychain_sign_in_once(tmp_pat
     assert external.load()["refresh_token"] == "cpr_2"
 
 
-def test_a_second_sign_in_request_joins_the_one_waiting_on_the_browser(db, store, backend, monkeypatch):
-    """One click that reaches the daemon twice (a remounted sign-in screen,
-    another screen's button) starts one browser flow; Try again (restart)
-    ends the waiting one, whose listener stops, and starts a fresh one."""
+def _signing_in(db, store, backend, monkeypatch, on_url=lambda url: None):
+    """The daemon's real sign-in route against the fake backend: ``login(**body)``
+    posts it; the jobs it starts are held (run one with ``held[i]()``);
+    ``on_url`` sees each authorize URL the job publishes."""
     from brindle import bus
     from brindle.daemon import routes_actions
 
-    held, urls = [], threading.Event()
-    real_publish = bus.publish
+    held, real_publish = [], bus.publish
 
     def publish(db, kind, **fields):
         got = real_publish(db, kind, **fields)
         if kind == "job.progress" and "url" in fields:
-            urls.set()
+            on_url(fields["url"])
         return got
 
     monkeypatch.setattr(bus, "publish", publish)
@@ -321,20 +320,113 @@ def test_a_second_sign_in_request_joins_the_one_waiting_on_the_browser(db, store
     monkeypatch.setattr(routes_actions, "_SIGN_IN", [])
     monkeypatch.setattr(routes_actions, "_pro_account",
                         lambda out=None: account.ProAccount(store=store, transport=backend, out=out))
-    first = routes_actions.account_login(db, {}, {})
+    return (lambda **body: routes_actions.account_login(db, {}, body)), held
+
+
+def test_a_second_sign_in_request_joins_the_one_waiting_on_the_browser(db, store, backend, monkeypatch):
+    """One click that reaches the daemon twice (a remounted sign-in screen,
+    another screen's button) starts one browser flow; Try again (restart)
+    ends the waiting one, whose listener stops, and starts a fresh one."""
+    from brindle import bus
+
+    urls = threading.Event()
+    login, held = _signing_in(db, store, backend, monkeypatch, on_url=lambda url: urls.set())
+    first = login()
     flow = threading.Thread(target=held[0], daemon=True)
     flow.start()
     urls.wait(5)
     since = bus.tail(db)[-1]["id"]
-    assert routes_actions.account_login(db, {}, {}) == first and len(held) == 1
+    assert login() == first and len(held) == 1
     again = [e["payload"] for e in bus.tail(db, since) if "url" in e["payload"]]
     assert [(p["job"], p["url"].startswith(BASE + "/cli/authorize")) for p in again] == [(first.id, True)]
-    fresh = routes_actions.account_login(db, {}, {"restart": True})
+    fresh = login(restart=True)
     flow.join(5)
     assert fresh != first and len(held) == 2 and not flow.is_alive()
     ended = [e["payload"] for e in bus.tail(db, since, kinds=("job.failed",))]
     assert [p["job"] for p in ended] == [first.id]
     assert "POST /cli/token" not in backend.paths()
+
+
+@pytest.mark.parametrize("stage", ["before listening", "code exchange"])
+def test_a_replaced_browser_sign_in_shows_and_stores_nothing(db, store, backend, monkeypatch, stage):
+    """Try again replaces a browser sign-in at any stage: replaced before it
+    listens, it never publishes a URL to open; replaced while its code is
+    exchanged, the tokens it got are revoked, not saved over the new sign-in."""
+    import urllib.parse
+    import urllib.request
+    from brindle import bus
+
+    def approve_in_browser(url):     # the redirect reaches the loopback with a code
+        q = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(url).query))
+        urllib.request.urlopen(f"{q['redirect_uri']}?code=cac_{'g' * 43}&state={q['state']}").close()
+
+    login, held = _signing_in(db, store, backend, monkeypatch, on_url=approve_in_browser)
+    first = login()
+    if stage == "before listening":
+        login(restart=True)
+    else:
+        def exchange(form, headers):
+            login(restart=True)
+            return 200, backend.issue()
+
+        backend.routes["POST /cli/token"] = exchange
+    held[0]()
+    mine = [e for e in bus.tail(db) if e["payload"].get("job") == first.id]
+    assert [e["kind"] for e in mine if e["kind"] != "job.progress"] == ["job.failed"]
+    assert any("url" in e["payload"] for e in mine) == (stage == "code exchange")
+    assert store.load() is None
+    assert ("POST /token/revoke" in backend.paths()) == (stage == "code exchange")
+
+
+@pytest.mark.parametrize("approved", [False, True])
+def test_a_replaced_device_sign_in_stops_polling_and_stores_nothing(store, backend, approved):
+    """Replaced while its code is polled (the daemon's watch): a pending code
+    is not polled again; one approved anyway has its tokens revoked, unsaved."""
+    from brindle.daemon import routes_actions
+
+    watch = routes_actions._SignIn(routes_actions.Job("j1", "account.login"), True)
+
+    def device_token(form, headers):
+        watch.end()       # Try again, while this poll is out
+        return (200, backend.issue()) if approved else pending()
+
+    device_backend(backend, [])
+    backend.routes["POST /device/token"] = device_token
+    with pytest.raises(AuthError) as e:
+        login(backend, store, watch=watch)
+    assert e.value.code == auth.RESTARTED and store.load() is None
+    assert backend.paths().count("POST /device/token") == 1
+    assert ("POST /token/revoke" in backend.paths()) == approved
+
+
+def test_joining_a_device_sign_in_tells_its_code_again(db, store, backend, monkeypatch):
+    """A screen that joins a device sign-in already showing its code (after
+    navigating away and back) is told the code again, by the same job."""
+    from brindle import bus
+
+    class Joined(Exception):
+        pass
+
+    joined, joining = [], []
+    real_publish = bus.publish
+
+    def publish(db, kind, **fields):
+        got = real_publish(db, kind, **fields)
+        if "BCDF-GHJK" in str(fields.get("text")) and not joining:     # the code is on screen
+            joining.append(got)
+            joined.append((login(device=True), [e["payload"] for e in bus.tail(db, got)]))
+            raise Joined     # end the job here: what's checked is what the second request got
+        return got
+
+    login, held = _signing_in(db, store, backend, monkeypatch)
+    monkeypatch.setattr(bus, "publish", publish)
+    device_backend(backend, [])
+    first = login(device=True)
+    held[0]()
+    (job, told), = joined
+    assert job == first and len(held) == 1
+    assert {p["job"] for p in told} == {first.id} and not any("url" in p for p in told)
+    assert any("BCDF-GHJK" in p["text"] for p in told)
 
 
 @pytest.mark.variant("credentials rotate between routing's initial read and refresh lock entry")

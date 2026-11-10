@@ -1869,27 +1869,44 @@ def _said(account) -> list[str]:
 
 
 class _SignIn:
-    """The brindle Pro sign-in in flight. There is one at a time: each flow
-    has its own loopback listener and PKCE pair, and each one approved in the
-    browser would mint a token set, so a second POST must not start another."""
+    """The brindle Pro sign-in in flight (an ``auth.SignInWatch``). There is
+    one at a time: each flow has its own loopback listener and PKCE pair (or
+    device code), and each one approved would mint a token set, so a second
+    POST must not start another. It keeps what its current phase told the
+    person to do (the authorize URL, or the device code's lines), so a request
+    that joins it later can be told again."""
 
     def __init__(self, job: Job, device: bool) -> None:
-        self.job, self.device = job, device
-        self.url: str | None = None
+        self.job, self.by_device = job, device
+        self.told: list[dict[str, str]] = []   # the current phase's job.progress payloads
         self.server = None          # its loopback.CallbackServer, once listening
-        self.ended = False
+        self.ended = False          # its job finished
+        self.replaced = False       # a newer sign-in took its place
+
+    def live(self) -> bool:
+        return not (self.ended or self.replaced)
+
+    def tell(self, payload: dict[str, str], *, phase: bool = False) -> None:
+        with _SIGN_IN_LOCK:
+            self.told = [payload] if phase else [*self.told, payload]
 
     def listening(self, server) -> None:
         with _SIGN_IN_LOCK:
             self.server = server
-            ended = self.ended
-        if ended:                   # replaced before it got this far
-            self._stop(server)
+
+    def device(self) -> None:
+        with _SIGN_IN_LOCK:
+            self.told = []          # the browser's URL no longer applies
+
+    def cancelled(self) -> bool:
+        with _SIGN_IN_LOCK:
+            return self.replaced
 
     def end(self) -> None:
-        """Replaced by a new sign-in: its listener stops waiting, its job fails as restarted."""
+        """Replaced by a new sign-in: its listener stops waiting, and it stops at its
+        next step (auth.login checks ``cancelled``), its job failing as restarted."""
         with _SIGN_IN_LOCK:
-            self.ended = True
+            self.replaced = True
             server = self.server
         if server is not None:
             self._stop(server)
@@ -1908,34 +1925,41 @@ _SIGN_IN: list[_SignIn] = []        # the one in flight, if any
 def account_login(db: DB, params: dict, body: Body) -> Any:
     """Start a sign-in, or answer the one already waiting on the browser: a
     second click, a remounted sign-in screen or another screen's button gets
-    its job (and its URL again), not a second flow. ``restart`` (Try again)
-    ends the one waiting and starts a fresh one."""
+    its job (and what it said to do, again), not a second flow. ``restart``
+    (Try again) ends the one waiting and starts a fresh one."""
     device = _get(body, "device", bool, False)
     restart = _get(body, "restart", bool, False)
     with _SIGN_IN_LOCK:
-        cur = _SIGN_IN[0] if _SIGN_IN and not _SIGN_IN[0].ended else None
-        reuse = cur is not None and not restart and cur.device == device
-        if not reuse:
+        cur = _SIGN_IN[0] if _SIGN_IN and _SIGN_IN[0].live() else None
+        reuse = cur is not None and not restart and cur.by_device == device
+        if reuse:
+            told = list(cur.told)
+        else:
             flow = _SignIn(Job(secrets.token_hex(8), "account.login"), device)
             _SIGN_IN[:] = [flow]
     if reuse:
-        if cur.url:   # the caller follows events from its request on: say the URL again
-            bus.publish(db, "job.progress", job=cur.job.id, url=cur.url)
+        for payload in told:   # the caller follows events from its request on: say it again
+            bus.publish(db, "job.progress", job=cur.job.id, **payload)
         return cur.job
     if cur is not None:
         cur.end()
 
+    class Told(_Progress):
+        def write(self, s: str) -> int:
+            for line in s.splitlines():
+                if line.strip():
+                    flow.tell({"text": line})
+            return super().write(s)
+
     def work(db: DB, job: Job) -> Any:
         def open_url(url: str) -> bool:
             # The app opens it in the system browser; the daemon waits for the callback.
-            with _SIGN_IN_LOCK:
-                flow.url = url
+            flow.tell({"url": url}, phase=True)
             bus.publish(db, "job.progress", job=job.id, url=url)
             return True
 
         try:
-            _pro_account(_Progress(db, job)).cmd_login(None, device=device, open_url=open_url,
-                                                       listening=flow.listening)
+            _pro_account(Told(db, job)).cmd_login(None, device=device, open_url=open_url, watch=flow)
         finally:
             with _SIGN_IN_LOCK:
                 flow.ended = True
