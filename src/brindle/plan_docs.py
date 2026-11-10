@@ -42,6 +42,7 @@ from brindle.service.errors import ServiceError
 
 PERSON = "person"
 SUPERVISOR = "supervisor"
+TEAMMATE = "teammate:"       # + their account: comments and votes pulled from the Library (brindle.pro.shared_docs)
 KINDS = ("markdown", "mermaid", "svg")
 DIAGRAMS = ("mermaid", "svg")
 LEDE = "lede"
@@ -635,25 +636,29 @@ def _title(p: dict, cur: dict, anchor: dict) -> str:
 
 
 def pending(db: DB, p: dict) -> tuple[list[str], list[str], list[int]]:
-    """What the person wrote on the doc that hasn't reached the supervisor:
-    their open comments and suggestions, their replies, and the revisions
-    they made since the supervisor's last. Returns the message's lines (with
-    attachment references), the library record's lines (with file names) and
-    the threads to mark sent with the verdict."""
+    """What the person and their teammates wrote on the doc that hasn't
+    reached the supervisor: open comments and suggestions, replies, and the
+    revisions the person made since the supervisor's last. Returns the
+    message's lines (with attachment references), the library record's lines
+    (with file names) and the threads to mark sent with the verdict."""
     cur = revision(db, p["id"])
     message, record, ids = [], [], []
     rows = [dict(r) for r in db.conn.execute(
-        "SELECT * FROM plan_threads WHERE plan_id=? AND author=? AND sent_rev IS NULL AND status='open'"
-        " ORDER BY id", (p["id"], PERSON))]
+        "SELECT * FROM plan_threads WHERE plan_id=? AND author!=? AND sent_rev IS NULL AND status='open'"
+        " ORDER BY id", (p["id"], SUPERVISOR))]
     for t in rows:
         files = json.loads(t["attachments"])
+        teammate = t["author"][len(TEAMMATE):] if t["author"].startswith(TEAMMATE) else None
         if t["kind"] == "reply":
-            line = f"Their reply on thread #{t['parent_id']}: {t['body']}"
+            who = f"Teammate {teammate}'s" if teammate else "Their"
+            line = f"{who} reply on thread #{t['parent_id']}: {t['body']}"
         else:
             where = _where(cur, json.loads(t["anchor"]))
             head = f"On \"{_title(p, cur, where)}\""
             if where["kind"] == "text":
                 head += f" at \"{_snip(where['quote'])}\""
+            if teammate:
+                head += f" (from teammate {teammate})"
             if t["kind"] == "suggestion":
                 line = f"{head}: they suggest \"{_snip(t['after'])}\"" + (f" ({t['body']})" if t["body"] else "")
             else:

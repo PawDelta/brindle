@@ -1050,7 +1050,7 @@ CREATE TABLE IF NOT EXISTS plan_threads (
     rev INTEGER NOT NULL,          -- the revision it was written on
     kind TEXT NOT NULL,            -- comment | suggestion | reply
     anchor TEXT,                   -- JSON, see brindle.plan_docs
-    author TEXT NOT NULL,          -- person | supervisor
+    author TEXT NOT NULL,          -- person | supervisor | teammate:<sub> (from the Library)
     body TEXT NOT NULL,
     after TEXT,                    -- a suggestion's replacement for the anchored text
     attachments TEXT NOT NULL,     -- JSON [{name, ref}]
@@ -1069,6 +1069,26 @@ CREATE TABLE IF NOT EXISTS plan_votes (
     rev INTEGER NOT NULL,
     at REAL NOT NULL,
     PRIMARY KEY (plan_id, decision_id, voter)
+);
+-- A plan shared through the Library (brindle.pro.shared_docs): its document,
+-- which local revision the Library's head holds, and the last review state.
+CREATE TABLE IF NOT EXISTS plan_shares (
+    plan_id TEXT PRIMARY KEY REFERENCES plans(id) ON DELETE CASCADE,
+    doc_id TEXT,                   -- NULL while the document is being created
+    owner TEXT NOT NULL,           -- the account that shared it
+    remote_rev INTEGER NOT NULL DEFAULT 0,
+    local_rev INTEGER NOT NULL DEFAULT 0,
+    review TEXT NOT NULL DEFAULT '{}',   -- JSON: reviewers, sign-offs, who is pending, ready
+    claimed_at REAL                -- set while a create or a push is under way
+);
+-- Which local thread or reply each Library thread or reply became, so a pull
+-- adds it once; status is the Library's as last seen.
+CREATE TABLE IF NOT EXISTS plan_share_threads (
+    plan_id TEXT NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
+    remote_id INTEGER NOT NULL,
+    local_id INTEGER NOT NULL REFERENCES plan_threads(id) ON DELETE CASCADE,
+    status TEXT NOT NULL,
+    PRIMARY KEY (plan_id, remote_id)
 );
 """
 
