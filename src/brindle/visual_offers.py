@@ -355,19 +355,34 @@ def keep_typed(db: DB, agent: Agent, text: str, expires_at: float, submitted_at:
     that fails, comes late or predates newer person input leaves nothing. What
     it leaves is staged: only that prompt's own hook makes the words quotable,
     in the transaction that raises any grant, so a message can't be spent twice."""
+    # Each refusal goes to the debug log (why and how late, never the words), so a real one can be seen.
     if not visuals.enabled():
-        return
+        return _typed_refused(agent, "visuals are off")
     root, _ = visuals._session(db, agent)
     if root.id != agent.id:
-        return
-    with db.tx() as c:
-        if time.time() >= expires_at:
-            raise ServiceError("stale", "this input observation expired", 409)
-        state = c.execute("SELECT invalidated_at FROM visual_input_state WHERE root_id=?", (root.id,)).fetchone()
-        if state and submitted_at <= state["invalidated_at"]:
-            raise ServiceError("stale", "this submission predates a direct person message", 409)
-        if not _cancels(text):
-            _keep_words(c, root.id, text, staged=True)
+        return _typed_refused(agent, "not a session's root")
+    now = time.time()
+    try:
+        with db.tx() as c:
+            now = time.time()
+            if now >= expires_at:
+                raise ServiceError("stale", "this input observation expired", 409)
+            state = c.execute("SELECT invalidated_at FROM visual_input_state WHERE root_id=?", (root.id,)).fetchone()
+            if state and submitted_at <= state["invalidated_at"]:
+                raise ServiceError("stale", "this submission predates a direct person message", 409)
+            if _cancels(text):
+                kept = "it cancels a request"
+            else:
+                kept = _keep_words(c, root.id, text, staged=True)
+    except ServiceError as e:
+        _typed_refused(agent, e.message, late_by=round(now - submitted_at, 3))
+        raise
+    if kept is not None:
+        _typed_refused(agent, kept)
+
+
+def _typed_refused(agent: Agent, why: str, **detail) -> None:
+    debuglog.record("visuals", "warning", f"typed words refused: {why}", {"agent": agent.id, **detail})
 
 
 def purge_words(db: DB) -> None:
@@ -388,18 +403,20 @@ def _word_count(words: str) -> int:
     return sum(len(_IDEOGRAPH.findall(w)) or any(ch.isalnum() for ch in w) for w in words.split())
 
 
-def _keep_words(c, root: str, text: str, staged: bool = False) -> None:
-    """Keep a typed message for ``asked`` to be checked against, briefly."""
+def _keep_words(c, root: str, text: str, staged: bool = False) -> str | None:
+    """Keep a typed message for ``asked`` to be checked against, briefly. Why it wasn't kept, if it wasn't."""
     now = time.time()
     words = _words(text)
-    if (_word_count(words) >= MIN_QUOTE_WORDS and len(words) <= MAX_KEPT_CHARS
-            and not visuals.secret_finding(text, "the message")):
+    unkept = ("too few words" if _word_count(words) < MIN_QUOTE_WORDS else "too long" if len(words) > MAX_KEPT_CHARS
+              else "it looks like a secret" if visuals.secret_finding(text, "the message") else None)
+    if unkept is None:
         c.execute("INSERT INTO visual_person_words (root_id, words, staged, created_at) VALUES (?,?,?,?)",
                   (root, words, int(staged), now))
     c.execute("DELETE FROM visual_person_words WHERE created_at<=?", (now - FOLD,))
     c.execute("DELETE FROM visual_person_words WHERE root_id=? AND id NOT IN "
               "(SELECT id FROM visual_person_words WHERE root_id=? ORDER BY id DESC LIMIT ?)",
               (root, root, MAX_KEPT_MESSAGES))
+    return unkept
 
 
 def _says_it_themselves(words: str, span: tuple[int, int], mentioned: list[tuple[int, int]]) -> bool:

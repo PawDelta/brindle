@@ -1,10 +1,19 @@
 import type { DaemonClient } from "../../../api/client";
 import type { PtyViewOpener } from "../../../api/ptyView";
+import { logDebug } from "../../../api/debug";
 
 const RECORD_WINDOW = 250;
 
 /* Several characters in one write are a paste the terminal didn't bracket: keys arrive one at a time. */
 const isBurst = (data: string) => data.length > 4 && !data.startsWith("\x1b");
+
+/* xterm.js answering what the pane's tmux client asks its terminal as it attaches (and again later): device
+   attributes (DA1/DA2/DA3), status and cursor reports, a mode report (DECRPM, `$y`), window reports, and
+   colour or version strings (OSC, DCS). Each comes as one write of its own, and none is the person editing:
+   taken for one, the draft was marked unknown and the next message never reported (tmux 3.8 asks DA2,
+   DECRQM 2026 and OSC 10/11 on every attach). */
+const REPLY = /^(?:\x1b\[[?>=]?[0-9;]*[cnRt]|\x1b\[\??[0-9;]*\$y|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1bP[^\x1b]*\x1b\\)+$/;
+const isReply = (data: string) => REPLY.test(data);
 
 type Submission = { text: string; typed: boolean; sequence: number };
 type Recorder = (messages: Submission[], at: { submittedAt: number; expiresAt: number; signal: AbortSignal }) => Promise<void>;
@@ -23,6 +32,8 @@ function observed(open: PtyViewOpener, enabled: () => boolean, recorder: () => R
     let held: { release(): void } | null = null;
     let sequence = 0;
     const submitted = (data: string): { text: string; typed: boolean }[] => {
+      // Not the person's: the draft (and anything held over from before) stays as it is.
+      if (isReply(data)) return [];
       pending += data;
       const burst = isBurst(data);
       if (burst) pasted = true;
@@ -168,6 +179,9 @@ export function withTypedWords(client: Pick<DaemonClient, "visualTypedWords">, a
         if (signal.aborted) break;
         await client.visualTypedWords(agent, message.text, expiresAt, submittedAt, signal);
       }
-    } catch { /* not vouched for: the Enter still goes through */ }
+    } catch (error) {
+      // Not vouched for: the Enter still goes through. Why, never the words, to the debug log while it's on.
+      logDebug("visuals", "warning", "typed words not vouched for", { agent, why: error instanceof Error ? error.message : String(error) });
+    }
   }, message => message.typed);
 }
