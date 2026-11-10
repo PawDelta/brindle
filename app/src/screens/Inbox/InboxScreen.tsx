@@ -93,6 +93,7 @@ const TONE: Record<string, { bar: string; ink: string }> = {
   review: { bar: "before:bg-branch", ink: "text-branch" },
   pr_ready: { bar: "before:bg-branch", ink: "text-branch" },
   pr_failed: { bar: "before:bg-fail", ink: "text-fail" },
+  pr_opened: { bar: "before:bg-branch", ink: "text-branch" },
   org_notice: { bar: "before:bg-line-strong", ink: "text-ink-3" },
   org_blocked: { bar: "before:bg-line-strong", ink: "text-ink-3" },
   setup: { bar: "before:bg-fail", ink: "text-fail" },
@@ -265,7 +266,7 @@ export function InboxScreen({ client, refresh, onOpen, onNavigate, session = nul
               item.kind === "permission" ? (
                 <PermissionItemCard key={itemKey(item)} item={item} isNew={fresh.has(seenKey(item))} actions={actions} who={item.agent_id ? agentName(workspaces, item.agent_id) : "An agent"} onGo={sessionOf(item) && onOpen ? () => goTo(item) : undefined} />
               ) : (
-              <Banner key={itemKey(item)} item={item} actions={actions} who={item.agent_id ? agentName(workspaces, item.agent_id) : null} branch={workspaces.find((ws) => ws.id === item.workspace_id)?.branch ?? item.workspace_id ?? null} sessionTitle={group.root ? group.title : null} repo={group.repo ?? repos?.[0]?.repo_root ?? null} isNew={fresh.has(seenKey(item))} onDone={() => void refresh()} onGo={sessionOf(item) && onOpen ? () => goTo(item) : undefined} onReview={sessionOf(item) && onOpen ? () => goTo(item, { kind: "review" }) : undefined} onNavigate={onNavigate} />
+              <Banner key={itemKey(item)} item={item} actions={actions} who={item.agent_id ? agentName(workspaces, item.agent_id) : null} branch={workspaces.find((ws) => ws.id === item.workspace_id)?.branch ?? item.workspace_id ?? null} sessionTitle={group.root ? group.title : null} repo={group.repo ?? repos?.[0]?.repo_root ?? null} isNew={fresh.has(seenKey(item))} onDone={() => void refresh()} onGo={sessionOf(item) && onOpen ? () => goTo(item) : undefined} onReview={sessionOf(item) && onOpen ? () => goTo(item, { kind: "review" }) : undefined} onNavigate={onNavigate} openUrl={openUrl} />
               ),
             )}
           </section>
@@ -276,8 +277,9 @@ export function InboxScreen({ client, refresh, onOpen, onNavigate, session = nul
 }
 
 /* One banner card. */
-function Banner({ item, actions, who, branch, sessionTitle, repo, isNew, onDone, onGo, onReview, onNavigate }: {
+function Banner({ item, actions, who, branch, sessionTitle, repo, isNew, onDone, onGo, onReview, onNavigate, openUrl }: {
   item: InboxItemDTO;
+  openUrl?: OpenUrl;
   actions: ReturnType<typeof useInboxActions>;
   who: string | null;
   branch: string | null;
@@ -365,15 +367,30 @@ function Banner({ item, actions, who, branch, sessionTitle, repo, isNew, onDone,
     acts = <span className="text-[11px] text-ink-3">fixed from a terminal: brindle doctor says how</span>;
   } else if (item.kind === "credentials" || item.kind === "login" || item.kind === "doc") {
     acts = <ItemActions item={item} actions={actions} repo={repo} onDone={onDone} onGo={item.kind === "doc" ? onGo : undefined} onNavigate={onNavigate} compact />;
-  } else if ((item.kind === "pr_ready" || item.kind === "pr_failed") && onReview) {
-    // Nothing is pushed until the person's Open PR in the sheet.
+  } else if (item.kind === "pr_opened" && item.url && openUrl) {
+    // The supervisor already opened it: nothing for brindle to push.
+    const url = item.url;
     acts = (
       <>
-        <button type="button" className={`${ACT} ${PLAIN}`} onClick={onReview}>
-          Review &amp; open PR
+        <button type="button" className={`${ACT} ${PLAIN}`} onClick={() => void openUrl(url)}>
+          Open on GitHub
         </button>
-        {item.kind === "pr_ready" && act("Not now", "pr-not-now", {}, GHOST)}
+        {act("Dismiss", "pr-not-now", {}, GHOST)}
       </>
+    );
+  } else if (item.kind === "pr_ready") {
+    // One press opens it (the sheet's open-PR call, no diffs); the person's press is still the only push.
+    acts = (
+      <>
+        <OpenPr item={item} actions={actions} onDone={onDone} openUrl={openUrl} />
+        {act("Dismiss", "pr-not-now", {}, GHOST)}
+      </>
+    );
+  } else if (item.kind === "pr_failed" && onReview) {
+    acts = (
+      <button type="button" className={`${ACT} ${PLAIN}`} onClick={onReview}>
+        Review &amp; open PR
+      </button>
     );
   } else if (opensVisual(item)) {
     // A visual decision opens its reader (goTo), not the session it belongs to; disabled until that session has loaded.
@@ -481,6 +498,57 @@ function SetupFix({ item, actions, onDone }: { item: InboxItemDTO; actions: Retu
     <button type="button" className={`${ACT} ${PLAIN}`} disabled={job.busy} onClick={start} data-testid="setup-fix">
       {fix.label}
     </button>
+  );
+}
+
+/* Open PR on a prepared PR's card: the review sheet's own call (POST /sessions/{root}/pr, a job) with the
+   draft's title and description, without its diffs. The button waits while the job runs; a refusal shows on the card. */
+function OpenPr({ item, actions, onDone, openUrl }: { item: InboxItemDTO; actions: ReturnType<typeof useInboxActions>; onDone(): void; openUrl?: OpenUrl }) {
+  const client = useDaemon();
+  const job = useJob();
+  const [drafting, setDrafting] = useState(false);
+  /* gh couldn't open it: the compare page, where the person finishes by hand (no PR exists yet). */
+  const [compare, setCompare] = useState<string | null>(null);
+  const status = job.job?.status;
+  const error = job.job?.error;
+  useEffect(() => {
+    if (status === "failed") actions.report(item, error ?? "couldn't open the PR", true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status, error]);
+  const root = item.root_id ?? item.agent_id ?? "";
+  const open = async () => {
+    setDrafting(true);
+    try {
+      const draft = await client.prDraft(root);
+      await job.start("Opening the PR", () => client.openSessionPr(root, { title: item.detail?.trim() || draft.title, body: draft.body }), (result) => {
+        const url = (result as { url?: string } | undefined)?.url;
+        if (url && !/\/pull\/\d+/.test(url)) {
+          // No PR was created: nothing settles; the compare page is the way on.
+          setCompare(url);
+          actions.report(item, "GitHub's CLI couldn't open the PR; open it from the compare page.", true);
+          return;
+        }
+        actions.settle(item);
+        onDone();
+      });
+    } catch (e) {
+      actions.report(item, e instanceof Error ? e.message : String(e), true);
+    } finally {
+      setDrafting(false);
+    }
+  };
+  const busy = drafting || job.busy;
+  return (
+    <>
+      <button type="button" className={`${ACT} ${PLAIN}`} disabled={busy} onClick={() => void open()}>
+        {busy ? "Opening…" : "Open PR"}
+      </button>
+      {compare && openUrl && (
+        <button type="button" className={`${ACT} ${PLAIN}`} onClick={() => void openUrl(compare)}>
+          Open on GitHub
+        </button>
+      )}
+    </>
   );
 }
 

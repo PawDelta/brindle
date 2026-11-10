@@ -469,12 +469,16 @@ def inbox_action(db: DB, params: dict, body: Body) -> Any:
         ws = _workspace(db, a.workspace_id)
         ready = db.conn.execute("SELECT sha FROM session_pr_prep WHERE root_id = ? AND branch = ?"
                                 " AND state = 'passed'", (a.id, ws.branch)).fetchone()
-        if not ready:
+        # A PR already open on HEAD (the "PR opened" card) is dismissed per commit and PR.
+        sha = inbox.opened_marker(db, a.id, ws.branch, ws.path)
+        if not sha and ready:
+            sha = ready["sha"]
+        if not sha:
             raise ServiceError("conflict", "no longer a PR ready for approval", 409)
         # The commit the card is about: a newer one's result still gets its own card.
         db.conn.execute("INSERT INTO session_pr_declined (root_id, branch, sha) VALUES (?, ?, ?)"
                         " ON CONFLICT(root_id, branch) DO UPDATE SET sha = excluded.sha",
-                        (a.id, ws.branch, ready["sha"]))
+                        (a.id, ws.branch, sha))
         bus.publish_agent(db, "session.pr_declined", a.id)
         return {"dismissed": a.id}
     if action in ("approve", "reject"):
@@ -954,6 +958,10 @@ def open_session_pr(db: DB, params: dict, body: Body) -> Any:
             url = workspaces.compare_url(ws)
         else:
             _record_pr(db, key, url, head)
+            # The Inbox's next read already knows it (its look at GitHub may be older than the PR).
+            number = re.search(r"/pull/(\d+)", url)
+            review.note_head_pr(head, ws.path, {"number": int(number.group(1)) if number else None,
+                                                "title": title or "", "url": url, "headRefName": ws.branch})
         return {"url": url, "keeps_merged_branches": workspaces.keeps_merged_branches(ws.repo_root)}
 
     return start_job("session.pr", work, root_id=root.id, repo_root=ws.repo_root)
@@ -970,6 +978,10 @@ def push_session_pr(db: DB, params: dict, body: Body) -> Any:
     if (pr := review.open_pr(db, root, ws)) is None:
         raise ServiceError("conflict", f"{ws.branch} has no PR to push to; open it first", 409)
     key = (root.id, ws.branch)
+    elsewhere = db.conn.execute(f"SELECT head_ref FROM session_pr_heads WHERE {_SESSION_PR}", key).fetchone()
+    if elsewhere and elsewhere["head_ref"]:
+        # A PR opened with gh from another branch name: pushing the session branch would not update it.
+        raise ServiceError("conflict", f"its PR is on {elsewhere['head_ref']}: push the session's commits there yourself", 409)
 
     def work(db: DB, job: Job) -> Any:
         identity_lock.ensure(root)
@@ -1013,6 +1025,7 @@ def _record_pr(db: DB, key: tuple[str, str], url: str, pushed: str | None) -> No
                     " merged_at = CASE WHEN url = excluded.url THEN merged_at END,"
                     " opened_at = CASE WHEN url = excluded.url THEN opened_at ELSE excluded.opened_at END",
                     (*key, url, pushed, time.time()))
+    db.conn.execute(f"DELETE FROM session_pr_heads WHERE {_SESSION_PR}", key)    # brindle's own PR is on the session branch
     bus.publish_agent(db, "session.pr_opened", key[0], url=url)
 
 

@@ -31,6 +31,7 @@ export const KIND_LABEL: Record<string, string> = {
   merge_failed: "Merge failed",
   pr_ready: "Pull request",
   pr_failed: "Pull request",
+  pr_opened: "Pull request",
   proposed_checks: "Proposed checks",
   credentials: "Credentials",
   login: "Cloud login",
@@ -69,6 +70,7 @@ export const KIND_SHORT: Record<string, string> = {
   merge_failed: "merge",
   pr_ready: "PR",
   pr_failed: "PR",
+  pr_opened: "PR",
   proposed_checks: "checks",
   credentials: "login",
   login: "login",
@@ -103,8 +105,9 @@ export function describeItem(item: InboxItemDTO): string {
       return item.reason;
     /* brindle prepared the session's PR (service/inbox._pr_items): the person's Open PR is the only push. */
     case "pr_ready":
-      return "PR ready for your approval";
+      return "PR ready";
     case "pr_failed":
+    case "pr_opened":
       return item.reason;
     case "proposed_checks": {
       const n = (item.detail ?? "").split("\n").filter(Boolean).length;
