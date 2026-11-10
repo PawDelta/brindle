@@ -270,11 +270,17 @@ def publish(db: DB, caller: Agent | None, title: str, html: str, question: str |
         now = time.time()
         from brindle import visual_offers
 
-        row = c.execute("SELECT root_id, rev, kind, answer FROM visuals WHERE id=?", (visual_id,)).fetchone() \
+        row = c.execute("SELECT root_id, rev, kind, answer, consented_by FROM visuals WHERE id=?",
+                        (visual_id,)).fetchone() \
             if isinstance(visual_id, str) and ID.fullmatch(visual_id) else None
-        visual_offers.authorize(c, root.id, kind, supervisor=caller.id == root.id, asked=asked,
-                                answered=row["answer"] if row and row["root_id"] == root.id
-                                and row["kind"] == kind else None)
+        supervisor = caller.id == root.id
+        same = row is not None and row["root_id"] == root.id and row["kind"] == kind
+        consented = visual_offers.authorize(
+            c, root.id, kind, supervisor=supervisor, asked=asked,
+            answered=row["answer"] if same else None,
+            consented=same and supervisor and row["consented_by"] == caller.id)
+        # Only the session's supervisor earns a visual it may keep updating.
+        consented_by = caller.id if consented and supervisor and kind == "visual" else None
         if visual_id is None:
             vid, rev = "v_" + secrets.token_hex(6), 1
         else:
@@ -289,12 +295,13 @@ def publish(db: DB, caller: Agent | None, title: str, html: str, question: str |
         try:
             if rev == 1:
                 c.execute("INSERT INTO visuals (id, root_id, repo_root, by_agent, kind, title, rev, question,"
-                          " options, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                          (vid, root.id, ws.repo_root, caller.id, kind, title, rev, question, opts, now, now))
+                          " options, consented_by, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                          (vid, root.id, ws.repo_root, caller.id, kind, title, rev, question, opts,
+                           consented_by, now, now))
             else:
                 c.execute("UPDATE visuals SET title=?, rev=?, question=?, options=?, answer=NULL,"
-                          " by_agent=?, updated_at=? WHERE id=?",
-                          (title, rev, question, opts, caller.id, now, vid))
+                          " by_agent=?, consented_by=COALESCE(consented_by, ?), updated_at=? WHERE id=?",
+                          (title, rev, question, opts, caller.id, consented_by, now, vid))
             if extra is not None:
                 extra(c, vid, rev)
         except BaseException:

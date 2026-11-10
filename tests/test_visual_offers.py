@@ -537,11 +537,13 @@ def test_asked_quote_words_are_purged_without_more_input(db, session, monkeypatc
     assert db.conn.execute("SELECT COUNT(*) FROM visual_person_words").fetchone()[0] == 0
 
 
-def test_asked_quote_answered_visual_allows_one_revision(db, session, monkeypatch):
+def test_answered_visual_allows_one_revision(db, session, monkeypatch):
     boss, worker = session
-    typed_into_cli(db, boss, "render first")
+    # A worker's visual, on an accepted card: not the supervisor's to keep updating.
+    typed_into_cli(db, boss, "Please render a mockup of the new session button")
+    offers.resolve(db, boss.id, offers.current(db, boss.id)["id"], True)
     choices = [{"id": "more", "label": "None, keep exploring"}, {"id": "a", "label": "A"}]
-    v = visuals.publish(db, boss, "Options", "<p>1</p>", "Which?", choices, asked="render first")
+    v = visuals.publish(db, worker, "Options", "<p>1</p>", "Which?", choices)
     with pytest.raises(ServiceError):
         visuals.publish(db, boss, "Unanswered", "<p>no</p>", visual_id=v["id"])
     visuals.answer(db, v["id"], 1, "more", "you didnt render anything")
