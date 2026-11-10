@@ -392,6 +392,28 @@ describe("inbox", () => {
     sync.stop();
   });
 
+  it("a bare push offers only Allow once and Deny, explains why, and translates a stale refusal", async () => {
+    const reason = "This push doesn't name its branch, so it can only be allowed once.";
+    const exact = { ...pushes.scopes[0], pattern: "? → ? @ ?", modes: ["once", "deny"] };
+    const bare: AskGroupDTO = {
+      ...pushes, general: exact, scopes: [exact], modes: ["once", "deny"], limits: null,
+      save_reason: reason, items: [{ ...pushes.items[0], summary: "git push", exact: exact.pattern }],
+    };
+    const daemon = new FakeDaemon({ sessions: [session], workspaces: [root, worker], inbox: [permission], asks: [bare] });
+    const client = daemon.client();
+    vi.spyOn(client, "decidePermissionAsks").mockRejectedValue(new Error("nothing in this scope can be approved: pushes outside this scope"));
+    const { sync } = mount(daemon, client);
+    const held = await screen.findByRole("article", { name: bare.title });
+    expect(within(within(held).getByRole("group", { name: "Decision" })).getAllByRole("button").map((b) => b.textContent)).toEqual(["Deny", "Allow once"]);
+    expect(within(held).getByText(reason)).toBeTruthy();
+    fireEvent.click(within(held).getByRole("button", { name: "Allow once" }));
+    const refusal = await screen.findByRole("alert");
+    expect(refusal.textContent).not.toContain("nothing in this scope can be approved");
+    expect(refusal.textContent).not.toContain("pushes outside this scope");
+    expect(refusal.textContent).toContain("Allow once");
+    sync.stop();
+  });
+
   it.each([
     ["the groups entry's reason", null, "the shell/unchecked baseline is ask"],
     ["the engine's d-shell-syntax rule", "d-shell-syntax", "shell syntax cannot be checked safely"],

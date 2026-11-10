@@ -836,11 +836,13 @@ class PermissionPolicyDTO(_DTO):
 
 class AskScopeDTO(_DTO):
     """One rung of an ask's scope ladder: ``value`` exact | general |
-    repository | remote | server | all, ``pattern`` what a grant of it covers."""
+    repository | remote | server | all, ``pattern`` what a grant of it covers.
+    ``modes`` lists the decisions this request accepts at this scope."""
     value: str
     pattern: str
     label: str
     level: str | None = None
+    modes: list[str] | None = None
 
 
 class AskResultDTO(_DTO):
@@ -900,6 +902,8 @@ class AskGroupDTO(_DTO):
     rule: str | None = None
     limits: PermissionLimitsDTO | None = None
     modes: list[str] = []
+    # Why the card offers no saved approval, when its own request cannot take one.
+    save_reason: str | None = None
     org: OrgControlViewDTO | None = None
 
 

@@ -74,7 +74,8 @@ def policy_dto(store: permissions.Store | None = None, repo_root: str | None = N
 
 
 def scope_dto(scope: dict) -> AskScopeDTO:
-    return AskScopeDTO(value=scope["value"], pattern=scope["pattern"], label=scope["label"], level=scope.get("level"))
+    return AskScopeDTO(value=scope["value"], pattern=scope["pattern"], label=scope["label"], level=scope.get("level"),
+                       modes=scope.get("modes"))
 
 
 def ask_dto(a: grants.PendingAsk) -> AskDTO:
@@ -120,21 +121,31 @@ def _modes(g: grants.Group) -> list[str]:
     return out
 
 
-def _org_offer(g: grants.Group) -> tuple[list[dict], list[str], dict | None]:
-    """What an org Ask's item offers: the scopes, modes and limits a saved
+def _offer(g: grants.Group) -> tuple[list[dict], list[str], dict | None]:
+    """What an Ask's item offers: the scopes, modes and limits a saved
     approval may take, held to the same check a decision is
     (grants.eligible): every ask rule that applies and the org's limits.
-    Allow once always; with nothing savable, the request's own form for it."""
+    Each scope carries its own modes; a request that cannot be remembered
+    keeps only scopes at which it can be allowed once."""
     rep = g.rep
-    rules = [r for r in (*rep.policy.asks, rep.rule) if r is not None]
+    rules = [r for a in g.items for r in (*a.policy.asks, a.rule) if r is not None]
     caps = [r.limits["minutes"] for r in rules if (r.limits or {}).get("life") == "time" and r.limits.get("minutes")]
     cap = min(caps) if caps else None
     modes = _modes(g)
-    reach = {m: [s for s in rep.ask.scopes if grants.eligible(rep, s, m, cap if m == "timed" else None) is None]
-             for m in modes if m in SAVED_LIFE}
-    modes = [m for m in modes if m not in SAVED_LIFE or reach[m]]
-    scopes = ([s for s in rep.ask.scopes if any(s in found for found in reach.values())]
-              or [rep.ask.scope(grants.EXACT) or rep.ask.scopes[0]])
+    scopes = []
+    for s in rep.ask.scopes:
+        offered = [m for m in modes if all(
+            grants.eligible(a, s, m, cap if m == "timed" else None) is None
+            for a in ([rep] if s["value"] == grants.EXACT else g.items))]
+        if any(m not in ("always-deny", "deny") for m in offered):
+            scopes.append({**s, "modes": offered})
+    if not scopes:
+        scopes = [{**rep.ask.scopes[0], "modes": []}]
+    if any(m in SAVED_LIFE for s in scopes for m in s["modes"]):
+        scopes = [s for s in scopes if any(m in SAVED_LIFE for m in s["modes"])]
+    elif len(scopes) == 1 and scopes[0]["value"] == grants.EXACT:
+        scopes = [{**s, "modes": [m for m in s["modes"] if m != "always-deny"]} for s in scopes]
+    modes = [m for m in modes if any(m in s["modes"] for s in scopes)]
     limits = {"life": "time", "minutes": cap} if "timed" in modes else (rep.rule.limits if rep.rule else None)
     return scopes, modes, limits
 
@@ -143,15 +154,15 @@ def group_dto(g: grants.Group) -> AskGroupDTO:
     rule = g.policy.rule
     lim = grants.org_limits(g.repo_root) if rule is not None and rule.source == "org" else None
     org = grants.org_control_view(lim, rule)
-    scopes, general, modes = g.rep.ask.scopes, g.rep.ask.general, None
-    limits = rule.limits if rule else None
-    if org:
-        scopes, modes, limits = _org_offer(g)
-        general = general if general in scopes else scopes[0]
+    scopes, modes, limits = _offer(g)
+    general = next((s for s in scopes if s["value"] == g.rep.ask.general["value"]), scopes[0])
+    save_reason = None
+    if not g.rep.blocked and not any(m in SAVED_LIFE for m in modes):
+        save_reason = grants.eligible(g.rep, general, "session", None)
     return AskGroupDTO(key=g.key, repo=g.repo_root, kind=g.kind, title=_title(g), general=scope_dto(general),
                        scopes=[scope_dto(s) for s in scopes], items=[ask_dto(a) for a in g.items],
                        blocked=g.policy.decision == "deny", rule=rule.id if rule else None,
-                       limits=limits_dto(limits), modes=modes if modes is not None else _modes(g),
+                       limits=limits_dto(limits), modes=modes, save_reason=save_reason,
                        org=OrgControlViewDTO(**org, decision=g.policy.decision) if org else None)
 
 

@@ -20,6 +20,7 @@ from brindle.db import Agent
 from brindle.permissions import Request, decide
 from brindle.service import inbox
 from brindle.service import permissions as svc
+from brindle.service.errors import ServiceError
 from workspace_template import copy_workspace, workspace_template  # noqa: F401 (a fixture)
 
 
@@ -166,6 +167,36 @@ def worker(db, ws, agent_id, parent="boss"):
     return a
 
 
+def test_bare_push_offers_only_its_eligible_scope_and_lifetime():
+    req = Request("claude", "bash", "Bash", "/worktrees/task", "/worktrees/task", "/repo", command="git push")
+    pending = grants.PendingAsk("boss", "boss", "push", "digest", "/repo", req, grants.generalize(req),
+                                0, permissions.Decision("ask", ""))
+    [group] = grants.groups([pending])
+    offered = svc.group_dto(group)
+    assert [s.value for s in offered.scopes] == ["exact"]
+    assert set(offered.modes) == {"once", "deny"}
+    assert set(offered.scopes[0].modes) == {"once", "deny"}
+    assert offered.general.value == "exact"
+    assert offered.save_reason == "This push doesn't name its branch, so it can only be allowed once."
+    for scope in pending.ask.scopes:
+        for mode in ("session", "timed", "forever"):
+            why = grants.eligible(pending, scope, mode, 5 if mode == "timed" else None)
+            assert why and "outside this scope" not in why
+    with pytest.raises(ServiceError, match="This push doesn't name its branch"):
+        grants.decide_group(None, group.key, "general", "session", asks=[pending])
+
+    # HEAD hides only the source here: the named destination is safe to remember.
+    named = replace(req, command="git push origin HEAD:main")
+    pending = replace(pending, request=named, ask=grants.generalize(named))
+    [group] = grants.groups([pending])
+    offered = svc.group_dto(group)
+    assert offered.general.value == "general"
+    assert "session" in offered.general.modes
+    assert offered.save_reason is None
+    assert grants.eligible(pending, pending.ask.general, "session", None) is None
+    assert grants.eligible(pending, pending.ask.scope("exact"), "session", None) is not None
+
+
 def test_pending_asks_group_by_general_form_and_one_decision_resolves_the_group(db, ws, monkeypatch):
     # All pushes use this checkout; repository discovery is outside the
     # grouping and hold-delivery behavior exercised below.
@@ -216,8 +247,9 @@ def test_pending_asks_group_by_general_form_and_one_decision_resolves_the_group(
 
     # Forever is outside the push rule's 30-minute limit; "once" at the exact scope saves nothing.
     pushes = next(g for g in grants.groups(grants.pending_asks(db, ws.repo_root)) if g.kind == "push")
-    with pytest.raises(Exception, match="nothing in this scope can be approved: not permitted until revoked"):
+    with pytest.raises(ServiceError) as refused:
         grants.decide_group(db, pushes.key, "general", "forever")
+    assert refused.value.code == "conflict"
     out = grants.decide_group(db, pushes.key, "general", "once")
     assert out["grant"] is None and len(out["resumed"]) == 1 and hooks[2].done.wait(5) and hooks[2].answer == "allow_once"
     assert not hooks[6].done.is_set()                                   # the two-destination push waits on its own
@@ -232,8 +264,10 @@ def test_pending_asks_group_by_general_form_and_one_decision_resolves_the_group(
     assert decide(bash(ws, "git push origin fix:main fix:dev")).decision == "ask"
     # A push whose branch only git knows is approved once by its own identity; nothing saved covers it.
     head = next(g for g in grants.groups(grants.pending_asks(db, ws.repo_root)) if g.rep.agent_id == "w2" and g.kind == "push")
-    with pytest.raises(Exception, match="approve it once"):
+    assert [s.value for s in svc.group_dto(head).scopes] == ["exact"]
+    with pytest.raises(ServiceError) as refused:
         grants.decide_group(db, head.key, "exact", "session")
+    assert refused.value.code == "conflict"
     out = grants.decide_group(db, head.key, "exact", "once")
     assert out["grant"] is None and len(out["resumed"]) == 1 and hooks[7].done.wait(5) and hooks[7].answer == "allow_once"
     assert decide(bash(ws, "git push origin HEAD")).decision == "ask"
