@@ -87,16 +87,22 @@ describe("startSync", () => {
     expect(store.getState()).toMatchObject({ stale: false, inbox: [], lastEventId: 2 });
   });
 
-  it("runs a refresh requested during a fetch after that fetch ends", async () => {
+  it("applies successful reads during stream traffic and runs each queued refresh", async () => {
     const { daemon, client, store, sync } = setup();
     await flush();
     await sync.idle();
-    let finish!: (items: typeof daemon.data.inbox) => void;
-    vi.spyOn(client, "inbox").mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    const reads: ((items: typeof daemon.data.inbox) => void)[] = [];
+    vi.spyOn(client, "inbox").mockImplementation(() => new Promise((resolve) => reads.push(resolve)));
     const first = sync.refresh();
-    daemon.data.inbox = [];
-    void sync.refresh();
-    finish([question]);
+    for (let i = 0; i < 3; i++) {
+      daemon.publish("message.queued", { repo_root: REPO, agent_id: "sup1" });
+      await flush();
+      daemon.sockets[0].deliver({ type: "liveness", agents: { sup1: true } });
+      await flush();
+      reads[i]([waiting]); await flush();
+      expect(store.getState()).toMatchObject({ snapshotVersion: i + 2, inbox: [waiting] });
+    }
+    reads[3]([]);
     await first;
     await sync.idle();
     expect(store.getState().inbox).toEqual([]);

@@ -1247,6 +1247,13 @@ export class DaemonClient {
   readonly baseUrl: string;
   readonly token: string;
   private readonly fetchImpl: typeof fetch;
+  private inboxAcknowledgements = 0;
+
+  /* Sync reads begun before an action settled cannot restore its old card.
+     Ordinary stream traffic leaves this generation alone. */
+  get inboxGeneration(): number {
+    return this.inboxAcknowledgements;
+  }
 
   constructor(config: DaemonConfig) {
     this.baseUrl = config.baseUrl.replace(/\/+$/, "");
@@ -1440,7 +1447,9 @@ export class DaemonClient {
     return this.post<InboxActionResult>(
       `/inbox/${encodeURIComponent(id)}/${encodeURIComponent(action)}`,
       body,
-    );
+    ).finally(() => {
+      this.inboxAcknowledgements++;
+    });
   }
 
   agent(id: string) {
