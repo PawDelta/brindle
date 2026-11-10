@@ -370,6 +370,44 @@ describe("App", () => {
     } finally { sync.stop(); vi.useRealTimers(); }
   });
 
+  it("shows once its session is back from the first read after it, though other sessions come back while that read is out", async () => {
+    vi.useFakeTimers();
+    const at = (id: string, proj: string, window: string | null) => ({ ...root, id: proj, agents: root.agents?.map((a) => ({ ...a, id, window })) });
+    const daemon = new FakeDaemon({
+      repos: [{ repo_root: REPO, name: "proj" }],
+      sessions: [session, { ...session, id: "sup2" }, { ...session, id: "sup3" }],
+      workspaces: [root, at("sup2", "proj2", null), at("sup3", "proj3", null)],
+    });
+    const client = daemon.client();
+    const store = createAppStore();
+    const SLOW = 4000;
+    let pending = ["sup2", "sup3"];
+    const meta = client.meta.bind(client);
+    vi.spyOn(client, "meta").mockImplementation(async () => ({ ...await meta(), resuming: true, recovery: { done: 3 - pending.length, total: 3, pending } }));
+    const read = client.snapshot.bind(client);
+    let reads = 0;
+    vi.spyOn(client, "snapshot").mockImplementation(async () => {
+      reads++;
+      const rows = await read();
+      return new Promise((ok) => setTimeout(() => ok(rows), SLOW));
+    });
+    const sync = startSync({ client, store, connect: daemon.connect });
+    try {
+      renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO }} />);
+      // sup1 is back from the start: the gate's first read (after the sync's own) is the one that can show it.
+      while (reads < 2) await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+      // The others come back one by one while that read is out.
+      await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+      daemon.data.workspaces = [root, at("sup2", "proj2", windowOf("sup2")), at("sup3", "proj3", null)];
+      pending = ["sup3"];
+      await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+      daemon.data.workspaces = [root, at("sup2", "proj2", windowOf("sup2")), at("sup3", "proj3", windowOf("sup3"))];
+      pending = [];
+      await act(async () => { await vi.advanceTimersByTimeAsync(SLOW - 2100); });
+      expect(screen.getByTestId("terminal").textContent).toBe("sup1");
+    } finally { sync.stop(); vi.useRealTimers(); }
+  });
+
   it("recovery progress line: counts sessions on the waiting pane and goes once it is ready", async () => {
     vi.useFakeTimers();
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root] });
