@@ -238,6 +238,36 @@ describe("App", () => {
     } finally { sync.stop(); vi.useRealTimers(); }
   });
 
+  it("the viewed session shows first: its terminal mounts while other sessions are still pending and their events keep the store stale", async () => {
+    vi.useFakeTimers();
+    const rootB = { ...root, id: "proj2", agents: root.agents?.map((a) => ({ ...a, id: "sup2", window: null })) };
+    const daemon = new FakeDaemon({
+      repos: [{ repo_root: REPO, name: "proj" }],
+      sessions: [session, { ...session, id: "sup2" }],
+      workspaces: [root, rootB],
+    });
+    const client = daemon.client();
+    const store = createAppStore();
+    const meta = client.meta.bind(client);
+    // The other session coming back says so on the stream while the app asks the engine about it.
+    vi.spyOn(client, "meta").mockImplementation(async () => {
+      const got = await meta();
+      daemon.publish("agent.status", { repo_root: REPO, agent_id: "sup2", payload: { status: "starting" } });
+      return { ...got, resuming: true, recovery: { done: 1, total: 2, pending: ["sup2"] } };
+    });
+    // The refreshes those events ask for are slow, as on a busy restart: after sync's first, their inbox never answers.
+    const inbox = client.inbox.bind(client);
+    vi.spyOn(client, "inbox").mockImplementationOnce(inbox).mockReturnValue(new Promise(() => {}));
+    const sync = startSync({ client, store, connect: daemon.connect });
+    try {
+      renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO }} />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
+      expect(screen.getByTestId("terminal").textContent).toBe("sup1");
+      // And the engine knows it is on screen, for the next restart to bring it back first.
+      expect(daemon.viewed).toEqual(["sup1"]);
+    } finally { sync.stop(); vi.useRealTimers(); }
+  });
+
   it("panes per session: a session that finishes coming back while its rows are being read is not shown from the old rows", async () => {
     vi.useFakeTimers();
     const at = (id: string, proj: string, window: string | null) => ({ ...root, id: proj, agents: root.agents?.map((a) => ({ ...a, id, window })) });
@@ -304,6 +334,77 @@ describe("App", () => {
       await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
       expect(store.getState().workspaces.find((w) => w.id === "proj3")?.agents?.[0].window).toBe(windowOf("sup3"));
       expect(screen.getByTestId("terminal")).toBe(pane);
+    } finally { sync.stop(); vi.useRealTimers(); }
+  });
+
+  it("shows once its session is back: one slow read after it, not after a read begun while it was pending and another behind that", async () => {
+    vi.useFakeTimers();
+    const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root] });
+    const client = daemon.client();
+    const store = createAppStore();
+    // As on a real restart: the engine names the session pending, brings it back, and ends
+    // recovery a moment later, while every snapshot (cold git status, sessions launching) takes seconds.
+    const SLOW = 4000;
+    let live = { resuming: true, pending: ["sup1"] };
+    const meta = client.meta.bind(client);
+    vi.spyOn(client, "meta").mockImplementation(async () => ({ ...await meta(), resuming: live.resuming, recovery: live.resuming ? { done: 1 - live.pending.length, total: 1, pending: live.pending } : undefined }));
+    const read = client.snapshot.bind(client);
+    vi.spyOn(client, "snapshot").mockImplementation(async () => {
+      const rows = await read();
+      return new Promise((ok) => setTimeout(() => ok(rows), SLOW));
+    });
+    daemon.data.workspaces = [{ ...root, agents: root.agents?.map((a) => ({ ...a, window: null })) }];
+    const sync = startSync({ client, store, connect: daemon.connect });
+    try {
+      renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO }} />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+      expect(screen.queryByTestId("terminal")).toBeNull();
+      // Back (its window in the rows from now on); recovery ends during the read that releases it.
+      daemon.data.workspaces = [root];
+      live = { resuming: true, pending: [] };
+      await act(async () => { await vi.advanceTimersByTimeAsync(600); });
+      live = { resuming: false, pending: [] };
+      // A poll and one slow read after it came back; not the read in flight, nor another after this one.
+      await act(async () => { await vi.advanceTimersByTimeAsync(SLOW + 500); });
+      expect(screen.getByTestId("terminal").textContent).toBe("sup1");
+    } finally { sync.stop(); vi.useRealTimers(); }
+  });
+
+  it("shows once its session is back from the first read after it, though other sessions come back while that read is out", async () => {
+    vi.useFakeTimers();
+    const at = (id: string, proj: string, window: string | null) => ({ ...root, id: proj, agents: root.agents?.map((a) => ({ ...a, id, window })) });
+    const daemon = new FakeDaemon({
+      repos: [{ repo_root: REPO, name: "proj" }],
+      sessions: [session, { ...session, id: "sup2" }, { ...session, id: "sup3" }],
+      workspaces: [root, at("sup2", "proj2", null), at("sup3", "proj3", null)],
+    });
+    const client = daemon.client();
+    const store = createAppStore();
+    const SLOW = 4000;
+    let pending = ["sup2", "sup3"];
+    const meta = client.meta.bind(client);
+    vi.spyOn(client, "meta").mockImplementation(async () => ({ ...await meta(), resuming: true, recovery: { done: 3 - pending.length, total: 3, pending } }));
+    const read = client.snapshot.bind(client);
+    let reads = 0;
+    vi.spyOn(client, "snapshot").mockImplementation(async () => {
+      reads++;
+      const rows = await read();
+      return new Promise((ok) => setTimeout(() => ok(rows), SLOW));
+    });
+    const sync = startSync({ client, store, connect: daemon.connect });
+    try {
+      renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup1", repo: REPO }} />);
+      // sup1 is back from the start: the gate's first read (after the sync's own) is the one that can show it.
+      while (reads < 2) await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+      // The others come back one by one while that read is out.
+      await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+      daemon.data.workspaces = [root, at("sup2", "proj2", windowOf("sup2")), at("sup3", "proj3", null)];
+      pending = ["sup3"];
+      await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
+      daemon.data.workspaces = [root, at("sup2", "proj2", windowOf("sup2")), at("sup3", "proj3", windowOf("sup3"))];
+      pending = [];
+      await act(async () => { await vi.advanceTimersByTimeAsync(SLOW - 2100); });
+      expect(screen.getByTestId("terminal").textContent).toBe("sup1");
     } finally { sync.stop(); vi.useRealTimers(); }
   });
 
@@ -697,29 +798,50 @@ describe("App", () => {
     sync.stop();
   });
 
-  it("a session whose status beat its window into the snapshot still opens running, not paused (#216)", async () => {
+  it.each(["before", "after"])("a session whose status beat its window into the snapshot still opens running, not paused (#216), read %s launch completes", async (readWhen) => {
     // The engine publishes the new chat's status before it records the chat's window: the snapshot that
     // status asks for lists it "exited" with no window, and nothing on the bus says when the window lands.
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [], workspaces: [{ ...root, agents: [] }] });
     daemon.holdLaunch = true;
     const store = createAppStore();
     const client = daemon.client();
+    const snapshot = client.snapshot.bind(client);
+    let readStarted!: () => void;
+    const reading = new Promise<void>((resolve) => { readStarted = resolve; });
+    let releaseRead!: () => void;
+    const held = new Promise<void>((resolve) => { releaseRead = resolve; });
+    vi.spyOn(client, "snapshot").mockImplementation(async (...args) => {
+      if (daemon.data.sessions.some((s) => s.id === "new1")) {
+        readStarted();
+        await held;
+      }
+      return snapshot(...args);
+    });
     const sync = startSync({ client, store, connect: daemon.connect });
-    renderApp(<App store={store} client={client} refresh={sync.refresh} />);
-    fireEvent.change(await screen.findByLabelText("What should brindle work on?"), { target: { value: "Fix the flaky test" } });
-    fireEvent.click(screen.getByRole("button", { name: "Start" }));
-    const early = () => store.getState().workspaces.flatMap((ws) => ws.agents ?? []).find((a) => a.id === "new1");
-    await waitFor(() => expect(early()).toMatchObject({ status: "exited", window: null }));
-    await sync.idle();
-    daemon.finishLaunch();
+    try {
+      renderApp(<App store={store} client={client} refresh={sync.refresh} />);
+      fireEvent.change(await screen.findByLabelText("What should brindle work on?"), { target: { value: "Fix the flaky test" } });
+      await act(async () => { await sync.idle(); });
+      fireEvent.click(screen.getByRole("button", { name: "Start" }));
+      await reading;
+      // A slow read can miss the early row altogether. Exercise both orders without waiting
+      // for that transient row in the store: only the running session after the ack matters.
+      await act(async () => {
+        if (readWhen === "after") daemon.finishLaunch();
+        releaseRead();
+        await sync.idle();
+        if (readWhen === "before") daemon.finishLaunch();
+      });
 
-    expect(await screen.findByRole("region", { name: "Session" })).toBeTruthy();
-    await waitFor(() => expect(screen.getByTestId("terminal").textContent).toBe("new1"));
-    const bar = screen.getByTestId("session-bar");
-    expect(bar.textContent).not.toContain("paused");
-    expect(within(bar).getByRole("button", { name: "Pause" })).toBeTruthy();
-    expect(screen.queryByTestId("state-card")).toBeNull();
-    sync.stop();
+      expect(await screen.findByRole("region", { name: "Session" })).toBeTruthy();
+      await waitFor(() => expect(screen.getByTestId("terminal").textContent).toBe("new1"));
+      const bar = screen.getByTestId("session-bar");
+      expect(bar.textContent).not.toContain("paused");
+      expect(within(bar).queryByRole("button", { name: "Continue" })).toBeNull();
+      expect(within(bar).getByRole("button", { name: "Pause" })).toBeTruthy();
+      expect(screen.queryByTestId("state-card")).toBeNull();
+      expect(daemon.requests.some((r) => r.path.endsWith("/pause"))).toBe(false);
+    } finally { releaseRead(); daemon.finishLaunch(); sync.stop(); }
   });
 
   it("says where the sessions failed to load, with a retry, instead of a blank main area", async () => {

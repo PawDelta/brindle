@@ -8903,6 +8903,10 @@
     },
     {
       "method": "POST",
+      "path": "/v1/holds/app"
+    },
+    {
+      "method": "POST",
       "path": "/v1/holds/{id}/end"
     },
     {
@@ -9160,6 +9164,10 @@
     {
       "method": "POST",
       "path": "/v1/recovery/prioritize"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/recovery/viewed"
     },
     {
       "method": "GET",

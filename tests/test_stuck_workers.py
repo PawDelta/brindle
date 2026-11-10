@@ -76,23 +76,30 @@ def test_the_supervisor_cannot_stop_until_it_deals_with_the_worker(db, boss, wor
     assert "w1" not in (autopilot.on_stop(db, boss, {}) or {"reason": ""})["reason"]
 
 
-def test_stops_are_refused_until_the_takeover_is_due_and_again_if_it_fails(db, boss, worker, told, monkeypatch):
-    """Within the hour every stop is refused. Past it the supervisor may go
-    idle, which is what brindle's takeover waits for; a takeover that can't
-    happen leaves the item the supervisor's alone, so stops are refused again."""
-    open_items.track(db, worker, "stopped without calling report_result", time.time())
-    for _ in range(8):
-        assert "w1" in autopilot.on_stop(db, boss, {})["reason"]
-
-    db.close_open_item("w1")
-    open_items.track(db, worker, "stopped without calling report_result", time.time() - open_items.AUTO_REASSIGN_AFTER)
-    assert "w1" not in (autopilot.on_stop(db, boss, {}) or {"reason": ""})["reason"]
-
-    monkeypatch.setattr(disk, "live_in", lambda *a, **k: True)   # someone is attached to its worktree
-    open_items.sweep(db, time.time(), panes())
-    assert "didn't reassign" in told[-1][1]
-    for _ in range(3):
-        assert "w1" in autopilot.on_stop(db, boss, {})["reason"]
+@pytest.mark.parametrize("case", ["gave_up", "budget"])
+def test_gave_up_stops_blocking(db, boss, worker, told, monkeypatch, case):
+    now = T0
+    monkeypatch.setattr(open_items.time, "time", lambda: now)
+    open_items.track(db, worker, "stopped without calling report_result", now)
+    if case == "gave_up":
+        monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.id == boss.id)
+        now += open_items.AUTO_REASSIGN_AFTER
+        assert open_items.stop_block(db, boss) is None
+        monkeypatch.setattr(disk, "live_in", lambda *a, **k: True)
+        open_items.sweep(db, now, panes())
+        assert db.get_open_item(worker.id).level == open_items.GAVE_UP
+        assert open_items.stop_block(db, boss) is None
+        now += 2 * 86400
+        assert open_items.stop_block(db, boss) is None
+        return
+    for _ in range(autopilot.MAX_NUDGES):
+        assert open_items.stop_block(db, boss)["decision"] == "block"
+        assert open_items.stop_block(db, boss) is None
+        now += autopilot.NUDGE_BACKOFF
+    assert open_items.stop_block(db, boss) is None
+    assert open_items.stop_block(db, boss) is None
+    db.update_autopilot(boss.id, state="running", progress=1)
+    assert open_items.stop_block(db, boss)["decision"] == "block"
 
 
 def test_a_worker_that_died_in_a_fix_round_stays_open(db, boss, worker, told, monkeypatch):

@@ -30,8 +30,15 @@ export function startSync({ client, store, repo, connect, backoff }: SyncOptions
 
   const fetchOnce = async () => {
     const { lifecycleVersion: version, snapshotVersion: applied } = store.getState();
+    const acknowledged = client.inboxGeneration;
     try {
       const [workspaces, inbox] = await Promise.all([client.snapshot(repo), client.inbox(repo)]);
+      // Only action completions invalidate reads: ordinary queued refreshes
+      // must still apply, even when stream traffic never becomes quiet.
+      if (acknowledged !== client.inboxGeneration) {
+        again = true;
+        return;
+      }
       // A close/rewind applied while these reads were pending is newer than
       // their rows. The queued fetch may resume an agent; this one cannot.
       if (version !== store.getState().lifecycleVersion) return;
