@@ -195,23 +195,10 @@ describe("GoalPanel", () => {
     expect(screen.getByText("2. Screen renders")).toBeTruthy();
     expect(screen.getByText("npm run build")).toBeTruthy();
     expect(daemon.requests.find((r) => r.path === "/goal")?.query).toMatchObject({ repo: REPO, root: ROOT });
-    // No raw checkbox, and no offer for a goal brindle did not flag.
+    // No raw checkbox.
     expect(screen.queryByRole("checkbox")).toBeNull();
-    expect(screen.queryByTestId("analysis-offer")).toBeNull();
 
     expect(screen.queryByRole("switch")).toBeNull();
-    sync.stop();
-  });
-
-  it("shows no analysis-doc button for an offered goal: the offer lives in the Inbox", async () => {
-    const daemon = new FakeDaemon({ goal: { ...structuredClone(goal), analysis_offer: "o1" } });
-    const store = createAppStore();
-    const sync = startSync({ client: daemon.client(), store, connect: daemon.connect });
-    render(<GoalPanel client={daemon.client()} repo={REPO} root={ROOT} store={store} />);
-
-    await waitFor(() => expect(screen.getByText("Ship the Goal screen")).toBeTruthy());
-    expect(screen.queryByTestId("analysis-offer")).toBeNull();
-    expect(screen.queryByRole("button", { name: "Not now" })).toBeNull();
     sync.stop();
   });
 

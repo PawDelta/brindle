@@ -1064,8 +1064,6 @@ def _tell_supervisors_about_delegation(db: DB) -> None:
 @app.command("autopilot", hidden=True)
 def autopilot_cmd(
     action: Optional[str] = typer.Argument(None, help="check runs the milestone checks now. Omit to show progress."),
-    analysis_doc: Optional[bool] = typer.Option(None, "--analysis-doc/--no-analysis-doc",
-                                               help="Request or cancel an analysis doc for this goal."),
 ) -> None:
     """Show the goal's progress or run its milestone checks."""
     from brindle import autopilot as pilot
@@ -1073,11 +1071,6 @@ def autopilot_cmd(
     db = DB()
     root_id = _session_root(db)
     root = db.get_agent(root_id)
-    if analysis_doc is not None:
-        try:
-            pilot.set_goal_analysis_doc(db, root_id, analysis_doc)
-        except pilot.AutopilotError as e:
-            _fail(str(e))
     if action in ("on", "off"):
         typer.echo("brindle's goal driver is always on; on/off is deprecated and ignored. Pause the session to stop it.")
         return

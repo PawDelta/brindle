@@ -368,7 +368,7 @@ export interface VisualDTO {
   title: string;
   /* The agent that published it. */
   by: string;
-  kind: "visual" | "plan" | "analysis_doc";
+  kind: "visual" | "plan";
   rev: number;
   question?: string;
   options?: VisualOption[];
@@ -1421,8 +1421,8 @@ export class DaemonClient {
     return this.post<GoalEnabledAck>("/goal/enabled", { root, enabled });
   }
 
-  resolveAnalysisOffer(root: string, offer: string, accept: boolean) {
-    return this.post<{ accepted: boolean }>("/goal/analysis-offer", { root, offer, accept });
+  resolvePlanOffer(root: string, offer: string, accept: boolean) {
+    return this.post<{ accepted: boolean }>("/goal/plan-offer", { root, offer, accept });
   }
 
   inbox(repo?: string) {

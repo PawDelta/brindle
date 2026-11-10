@@ -670,7 +670,7 @@ def enqueue(
     db: DB, caller: Agent | None, caller_ws: Workspace, profile: str, task_text: str, mode: str,
     *, isolate: bool, branch: str | None, done_when: str | None,
     files: list[str] | None, depends_on: list[str] | None, plan_first: bool | None = None,
-    weight: str | None = None, analysis_doc: bool = False, waiting: str | None = None,
+    weight: str | None = None, waiting: str | None = None,
     pipeline: str | None = None, unanswered: bool = False, milestone: str | None = None,
 ) -> Task:
     """Record a task that can't start yet: no worker, no workspace, just what
@@ -685,13 +685,11 @@ def enqueue(
         profile=profile, task_text=task_text, mode=mode, isolate=int(isolate),
         branch=branch, done_when=done_when, files=_dumps(files),
         depends_on=_dumps(depends_on), state=UNANSWERED if unanswered else "pending",
-        created_at=time.time(), weight=weight, analysis_doc=1 if analysis_doc else None,
+        created_at=time.time(), weight=weight,
     )
     db.add_task(t)
     if plan_first is not None:
         db.update_task(t.id, plan_first=int(plan_first))
-    if analysis_doc:
-        db.update_task(t.id, analysis_doc=1)   # add_task writes the original columns only
     if milestone:
         db.set_task_milestone(t.id, milestone)
     if pipeline:
@@ -845,7 +843,8 @@ def start_now(db: DB, caller: Agent | None, task_id: str) -> str:
     if not caller_ws or session_paused(db, t):
         raise ValueError(f"Task {task_id} can't start now (its session is paused or gone).")
     if plan_holds(db, t):
-        raise ValueError(f"Task {task_id} waits on the session's plan: it starts when the person approves it.")
+        raise ValueError(f"Task {task_id} waits on the session's plan: it starts when the person approves it "
+                         "(or chooses not to plan first).")
     try:
         unmet = unmet_dependencies(db, caller_ws, _loads(t.depends_on), caller_id=t.caller_id,
                                    dependent_task_id=t.id)
@@ -945,9 +944,10 @@ def session_paused(db: DB, t: Task) -> bool:
 
 
 def plan_holds(db: DB, t: Task) -> bool:
-    """Whether ``t`` waits on its session's planning doc (brindle.plans):
-    while the person hasn't approved it, nothing the session assigned
-    starts, whatever wakes the task; their approval starts it (``on_resumed``)."""
+    """Whether ``t`` waits on its session's planning doc (brindle.plans), or
+    on brindle's offer to plan the goal first: while the person hasn't
+    approved the plan (or answered No to the offer), nothing the session
+    assigned starts, whatever wakes the task; that answer starts it (``on_resumed``)."""
     if not t.caller_id:
         return False
     from brindle import autopilot, plans
@@ -1085,7 +1085,7 @@ def start_queued(db: DB, task: Task) -> Agent:
         isolate=bool(task.isolate), branch=task.branch, done_when=task.done_when,
         plan_first=None if task.plan_first is None else bool(task.plan_first),
         start=_holder_start(db, caller_ws, _loads(task.depends_on)), files=_loads(task.files),
-        weight=launch_weight, analysis_doc=bool(task.analysis_doc), milestone=db.task_milestone(task.id),
+        weight=launch_weight, milestone=db.task_milestone(task.id),
         admit=False,   # every caller has just looked for room (_start_if_ready, requeue)
         # Nobody waits on a queued handoff (its reply said "queued" long ago):
         # detached from its first row, so even a result it reports before this
@@ -1469,7 +1469,7 @@ def requeue(db: DB, caller: Agent | None, caller_ws: Workspace, task_id: str,
         db, caller, ws, old.profile, old.task_text, old.mode, isolate=bool(old.isolate),
         branch=old.branch, done_when=old.done_when, files=_loads(old.files), depends_on=deps,
         plan_first=None if old.plan_first is None else bool(old.plan_first), weight=old.weight,
-        analysis_doc=bool(old.analysis_doc), milestone=db.task_milestone(old.id),
+        milestone=db.task_milestone(old.id),
     )
     if unmet:
         return f"Requeued task {old.id} as {new.id}, waiting on {', '.join(unmet)}."

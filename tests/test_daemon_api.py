@@ -982,7 +982,7 @@ def test_doc_map_includes_live_local_documents_only_in_their_repo_and_personal_s
 
 
 def test_analysis_doc_session_summary_counts_local_session_records(db, seeded, monkeypatch):
-    from brindle import agents, knowledge
+    from brindle import knowledge
     from brindle.pro import analysis_brief
     from brindle.pro import analysis_docs
 
@@ -994,22 +994,17 @@ def test_analysis_doc_session_summary_counts_local_session_records(db, seeded, m
     def docs_api(method, path, body=None, **kw):
         if path == "/analysis-docs/manual-only":
             return {"doc_id": "manual-only", "version": 3}
-        if path == "/me/analysis-docs/settings":
-            return {"switches": {"store": "on", "assist": "on"}}   # doc analysis is opt-in
-        assert path == "/analysis-docs/brief"
-        return {"block": "A brief", "cited": [{"doc_id": "worker-cited", "version": 4}]}
+        assert path == "/me/analysis-docs/settings"
+        return {"switches": {"store": "on", "assist": "on"}}   # doc analysis is opt-in
 
     monkeypatch.setattr(analysis_docs, "require_entitlement",
                         lambda store=None: SimpleNamespace(sub="u1", features=(), org_id="o1", plan="pro"))
     monkeypatch.setattr(analysis_docs, "api", docs_api)
     analysis_docs.read_doc(db, "r1", "manual-only")
     knowledge.record_receipt(db, "r1", [(analysis_docs.UPDATED_ITEM, "overlap-doc", "published")])
-    monkeypatch.setattr("brindle.identity_lock.ensure_workspace", lambda *a: None)
-    monkeypatch.setattr(agents, "_launch", lambda *a, **kw: None)
-    monkeypatch.setattr(agents, "model_problem", lambda *a, **kw: None)
-    worker = agents.spawn(db, db.get_workspace(seeded["ws"]), "developer", prompt="task", mode="assign",
-                          parent_id="r1", weight="heavy", analysis_doc=True)
-    assert (analysis_brief.DOC_ITEM, "worker-cited", "4") in knowledge.receipt(db, worker.id)
+    # A reviewer's brief cited a doc: the session uses it (agents.request_review).
+    analysis_brief.record_session_citations(db, "rev1", [(analysis_brief.DOC_ITEM, "review-cited", "4")],
+                                            session_id="r1")
     knowledge.record_receipt(db, "other-session", [(analysis_brief.DOC_ITEM, "other-doc", "1")])
 
     code, body = _get("/v1/analysis-docs/session-summary", AUTH, "session=r1")

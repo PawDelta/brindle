@@ -235,10 +235,16 @@ def publish_visual(title: str, html: str, question: str | None = None,
     return f"Published {v['id']} r{v['rev']} (brindle://visual/{v['id']}).{asks}"
 
 
+class PlanOption(VisualOption):
+    pros: list[str] = Field(default_factory=list, description="what speaks for it, a short line each")
+    cons: list[str] = Field(default_factory=list, description="what it costs, a short line each")
+    touches: list[str] = Field(default_factory=list, description="the files it would change")
+
+
 class PlanDecision(BaseModel):
     id: str = Field(description="1-32 letters, digits, _ or -")
     title: str = Field(description="the decision, in a line")
-    options: list[VisualOption] = Field(description="2-12 alternatives you weighed, yours among them")
+    options: list[PlanOption] = Field(description="2-12 alternatives you weighed, yours among them")
     mine: str | None = Field(default=None, description="the option id you'd pick")
     challenge: str | None = Field(default=None, description="your own strongest argument against your pick")
 
@@ -247,12 +253,14 @@ class PlanWorker(BaseModel):
     id: str = Field(description="1-32 letters, digits, _ or -, e.g. w1")
     title: str
     after: list[str] = Field(default_factory=list, description="ids of workers listed earlier that must merge first")
+    files: list[str] = Field(default_factory=list, description="the files this worker expects to change")
+    test: str | None = Field(default=None, description="the one test that proves its task done")
 
 
 @mcp.tool()
 def propose_plan(markdown: str, decisions: list[PlanDecision] | None = None,
                  split: list[PlanWorker] | None = None, title: str | None = None,
-                 plan_id: str | None = None) -> str:
+                 plan_id: str | None = None, ask: str | None = None) -> str:
     """Supervisors: show the person a planning doc, ONLY when they explicitly
     asked for one (never on your own because a request is large). markdown:
     the plan (goal, split, decisions with your challenge to each, what's hard
@@ -260,7 +268,8 @@ def propose_plan(markdown: str, decisions: list[PlanDecision] | None = None,
     per section. brindle renders it itself. While it's open, every assign in
     this session is queued and starts only once the person approves; their
     approval or redirect (their picks and comments) arrives as a message from
-    them. plan_id: publish the revision a redirect asked for."""
+    them. plan_id: publish the revision a redirect asked for. ask: their
+    request restated in your own words, which they confirm or correct."""
     from brindle import plans
     from brindle.service.errors import ServiceError
 
@@ -268,11 +277,13 @@ def propose_plan(markdown: str, decisions: list[PlanDecision] | None = None,
     caller, _ = _caller(db)
     dump = lambda items: [i.model_dump() if isinstance(i, BaseModel) else i for i in items or []]  # noqa: E731
     try:
-        p = plans.propose(db, caller, markdown, dump(decisions), dump(split), title, plan_id)
+        p = plans.propose(db, caller, markdown, dump(decisions), dump(split), title, plan_id, ask)
     except ServiceError as e:
         raise ToolError(e.message) from e
     return (f"Proposed plan {p['id']} r{p['rev']} (brindle://visual/{p['id']}). Assign calls queue behind it "
-            "until the person approves; their decision arrives as a message.")
+            "until the person approves; their decision arrives as a message. "
+            f"For each split card, pass plan_worker=\"{p['id']}:<split-id>\" to assign or handoff; "
+            "use the exact proving check command as its test.")
 
 
 @mcp.tool()
@@ -537,11 +548,38 @@ class _Request:
         self._gone = False
         self._queued: list[str] = []
         self._start: set[str] = set()
+        self.plan_worker: tuple[str, str] | None = None
+
+    def link_plan(self, db: DB, caller: Agent, ref: str | None) -> str | None:
+        from brindle import plans
+        from brindle.service.errors import ServiceError
+
+        if ref is None:
+            return None
+        try:
+            self.plan_worker = plans.assignment(db, caller, ref)
+        except ServiceError as e:
+            return f"Not started: {e}"
+        row = db.conn.execute("SELECT task_id FROM plan_tasks p JOIN tasks t ON t.id=p.task_id "
+                              "WHERE plan_id=? AND worker_id=? AND t.state!='cancelled'",
+                              self.plan_worker).fetchone()
+        return f"Already linked to task {row['task_id']}; left it in place." if row else None
 
     def enqueue(self, db: DB, *args, start: bool = False, **kwargs) -> Task:
         """``tasks.enqueue``, unanswered; ``start``: started (detached) as
         soon as the request replies, having nothing to wait on."""
         t = tasks.enqueue(db, *args, unanswered=True, **kwargs)
+        if self.plan_worker:
+            with db.tx() as c:
+                linked = c.execute("INSERT INTO plan_tasks (plan_id, worker_id, task_id) VALUES (?,?,?) "
+                                   "ON CONFLICT(plan_id, worker_id) DO UPDATE SET task_id=excluded.task_id "
+                                   "WHERE EXISTS (SELECT 1 FROM tasks WHERE id=plan_tasks.task_id AND state='cancelled')",
+                                   (*self.plan_worker, t.id)).rowcount
+                existing = c.execute("SELECT task_id FROM plan_tasks WHERE plan_id=? AND worker_id=?",
+                                     self.plan_worker).fetchone()["task_id"]
+            if not linked:
+                tasks.drop_unanswered(db, [t.id])
+                return db.get_task(existing)
         with self._lock:
             self._queued.append(t.id)
             if start:
@@ -675,8 +713,7 @@ def _await_task(db: DB, task_id: str, wait_seconds: int) -> str:
 def _route_clash(req: _Request, db: DB, caller: Agent, ws: Workspace, profile: str, task: str, mode: str, *,
                  isolate: bool, branch: str | None, done_when: str | None, files: list[str] | None,
                  depends_on: list[str] | None, plan_first: bool | None, weight: str | None,
-                 decision: dict, why: list[str], analysis_doc: bool = False,
-                 milestone: str | None = None) -> tuple[str | None, str | None]:
+                 decision: dict, why: list[str], milestone: str | None = None) -> tuple[str | None, str | None]:
     """Handle a new task's overlap with running work by the repo's ``overlap``
     setting (``tasks.overlap_mode``): (a reply to return instead of starting,
     a warning for the started reply). Queueing waits on the holder's worker;
@@ -698,7 +735,7 @@ def _route_clash(req: _Request, db: DB, caller: Agent, ws: Workspace, profile: s
         t = req.enqueue(
             db, caller, ws, profile, task, mode, isolate=isolate, branch=branch,
             done_when=done_when, files=files, depends_on=[*(depends_on or []), clash.holder],
-            plan_first=plan_first, weight=weight, analysis_doc=analysis_doc, milestone=milestone,
+            plan_first=plan_first, weight=weight, milestone=milestone,
         )
         savings.record(db, ws.repo_root, decision, task_id=t.id)
         outcome = f"queued as task {t.id} until {clash.holder} merges"
@@ -736,7 +773,7 @@ def _room_duplicate(db: DB, caller: Agent, ws: Workspace, task: str, branch: str
     elif t.state != "pending":
         state = "being started right now"
     elif tasks.plan_holds(db, t):
-        state = "waiting for the person to approve the session's plan"
+        state = "waiting on the session's plan, or on brindle's offer to plan first"
     elif deps:
         state = f"waiting on {', '.join(deps)}"
     else:
@@ -750,9 +787,11 @@ async def handoff(
     wait_seconds: int = DEFAULT_WAIT_SECONDS, done_when: str | None = None,
     files: list[str] | None = None, depends_on: list[str] | None = None,
     plan_first: bool | None = None, weight: str | None = None, repo: str | None = None,
-    dry_run: bool = False, analysis_doc: bool = False, milestone: int | str | None = None,
+    dry_run: bool = False, milestone: int | str | None = None, plan_worker: str | None = None,
 ) -> str:
     """Give a task to a new worker agent and wait for its result.
+
+    plan_worker: plan-id:split-id from propose_plan, linking this task to its live board card.
 
     milestone: the goal milestone (its number or title) the worker works on;
     default the first unverified one. Shown as in progress while it runs.
@@ -807,10 +846,6 @@ async def handoff(
     plan_first: the worker must first send a plan with submit_plan and wait
     for your approve_plan before it may edit files (default: the repo's
     `plan_first` config). Use it for large or risky tasks.
-
-    analysis_doc: the worker leaves an analysis doc of its work. Off by
-    default whatever the weight; pass true only when the person explicitly
-    requested a doc for this task (never for merge or sync chores).
     """
     def run(req: _Request):
         db = DB()
@@ -838,6 +873,9 @@ async def handoff(
         if dry_run:
             return tasks.dry_run_text(db, ws, profile, why, files, depends_on,
                                       load_repo_config(ws.repo_root).overlap, caller.id)
+        linked = req.link_plan(db, caller, plan_worker)
+        if linked:
+            return linked
         repeated = _room_duplicate(db, caller, ws, task, branch)
         if repeated:
             return repeated
@@ -851,7 +889,7 @@ async def handoff(
             t = req.enqueue(
                 db, caller, ws, profile, task,"handoff", isolate=isolate, branch=branch,
                 done_when=done_when, files=files, depends_on=depends_on, plan_first=plan_first,
-                weight=effective_weight, analysis_doc=analysis_doc, milestone=ms_title,
+                weight=effective_weight, milestone=ms_title,
             )
             savings.record(db, ws.repo_root, decision, task_id=t.id)
             return _remind_goal(db, caller,
@@ -860,7 +898,7 @@ async def handoff(
         reply, warning = _route_clash(
             req, db, caller, ws, profile, task, "handoff", isolate=isolate, branch=branch,
             done_when=done_when, files=files, depends_on=depends_on, plan_first=plan_first,
-            weight=effective_weight, decision=decision, why=why, analysis_doc=analysis_doc,
+            weight=effective_weight, decision=decision, why=why,
             milestone=ms_title)
         if reply:
             return reply
@@ -869,7 +907,7 @@ async def handoff(
         t = req.enqueue(
             db, caller, ws, profile, task, "handoff", isolate=isolate, branch=branch,
             done_when=done_when, files=files, depends_on=depends_on, plan_first=plan_first,
-            weight=effective_weight, analysis_doc=analysis_doc, milestone=ms_title, start=True,
+            weight=effective_weight, milestone=ms_title, start=True,
         )
         savings.record(db, ws.repo_root, decision, task_id=t.id)
         notes = "".join(f"\nprofile: {w}" for w in why)
@@ -899,9 +937,11 @@ async def assign(
     done_when: str | None = None, files: list[str] | None = None,
     depends_on: list[str] | None = None, plan_first: bool | None = None,
     weight: str | None = None, repo: str | None = None, dry_run: bool = False,
-    analysis_doc: bool = False, milestone: int | str | None = None,
+    milestone: int | str | None = None, plan_worker: str | None = None,
 ) -> str:
     """Start a worker agent on a task and return immediately.
+
+    plan_worker: plan-id:split-id from propose_plan, linking this task to its live board card.
 
     milestone: the goal milestone (its number or title) the worker works on;
     default the first unverified one. Shown as in progress while it runs.
@@ -946,10 +986,6 @@ async def assign(
     plan_first: the worker must first send a plan with submit_plan and wait
     for your approve_plan before it may edit files (default: the repo's
     `plan_first` config). Use it for large or risky tasks.
-
-    analysis_doc: the worker leaves an analysis doc of its work. Off by
-    default whatever the weight; pass true only when the person explicitly
-    requested a doc for this task (never for merge or sync chores).
     """
     def run(req: _Request):
         db = DB()
@@ -977,6 +1013,9 @@ async def assign(
         if dry_run:
             return tasks.dry_run_text(db, ws, profile, why, files, depends_on,
                                       load_repo_config(ws.repo_root).overlap, caller.id)
+        linked = req.link_plan(db, caller, plan_worker)
+        if linked:
+            return linked
         repeated = _room_duplicate(db, caller, ws, task, branch)
         if repeated:
             return repeated
@@ -990,7 +1029,7 @@ async def assign(
             t = req.enqueue(
                 db, caller, ws, profile, task,"assign", isolate=isolate, branch=branch,
                 done_when=done_when, files=files, depends_on=depends_on, plan_first=plan_first,
-                weight=effective_weight, analysis_doc=analysis_doc, milestone=ms_title,
+                weight=effective_weight, milestone=ms_title,
             )
             savings.record(db, ws.repo_root, decision, task_id=t.id)
             return _remind_goal(db, caller,
@@ -1006,16 +1045,18 @@ async def assign(
             t = req.enqueue(
                 db, caller, ws, profile, task, "assign", isolate=isolate, branch=branch,
                 done_when=done_when, files=files, depends_on=depends_on, plan_first=plan_first,
-                weight=effective_weight, analysis_doc=analysis_doc, milestone=ms_title, start=True,
+                weight=effective_weight, milestone=ms_title, start=True,
             )
             savings.record(db, ws.repo_root, decision, task_id=t.id)
-            return _remind_goal(db, caller, f"Queued task {t.id} behind plan {plan['id']}: it starts when the "
-                                "person approves the plan. Don't assign it again."
+            behind = (f"behind plan {plan['id']}: it starts when the person approves the plan" if "id" in plan
+                      else "behind brindle's offer to plan this goal first: it starts once the person chooses "
+                      "not to, or approves the plan")
+            return _remind_goal(db, caller, f"Queued task {t.id} {behind}. Don't assign it again."
                                 + "".join(f"\nprofile: {w}" for w in why))
         reply, warning = _route_clash(
             req, db, caller, ws, profile, task, "assign", isolate=isolate, branch=branch,
             done_when=done_when, files=files, depends_on=depends_on, plan_first=plan_first,
-            weight=effective_weight, decision=decision, why=why, analysis_doc=analysis_doc,
+            weight=effective_weight, decision=decision, why=why,
             milestone=ms_title)
         if reply:
             return reply
@@ -1025,7 +1066,7 @@ async def assign(
         t = req.enqueue(
             db, caller, ws, profile, task, "assign", isolate=isolate, branch=branch,
             done_when=done_when, files=files, depends_on=depends_on, plan_first=plan_first,
-            weight=effective_weight, analysis_doc=analysis_doc, milestone=ms_title, start=True,
+            weight=effective_weight, milestone=ms_title, start=True,
         )
         savings.record(db, ws.repo_root, decision, task_id=t.id)
         notes = "".join(f"\nprofile: {w}" for w in why)
@@ -1717,7 +1758,7 @@ def _session(db: DB) -> tuple[str, Workspace] | str:
 
 @mcp.tool()
 def set_goal(goal: str, milestones: list[dict[str, str]], detail: str | None = None,
-             analysis_doc: bool | None = None, summary: str | None = None) -> str:
+             summary: str | None = None) -> str:
     """Autopilot: record what we're building. milestones is an ordered list of
     {"title": ..., "check": ..., "detail": ..., "profile": ..., "repo": ...}. Include
     summary: a few words (at most 30 characters) naming the goal for the sidebar's single-line session label. The optional
@@ -1730,9 +1771,9 @@ def set_goal(goal: str, milestones: list[dict[str, str]], detail: str | None = N
     "phase" names the phase a milestone belongs to; the app folds consecutive
     milestones of one phase together.
     Replaces any earlier goal; milestones that keep their title and check keep
-    their last result. Pass analysis_doc=true only when the person explicitly
-    asked for a doc for this goal. Omission preserves the choice for the same
-    goal; a new goal defaults to no doc, regardless of milestone count."""
+    their last result. For a big goal brindle may ask the person whether to
+    plan it first; the reply says so, and workers you assign queue until
+    they answer."""
     try:
         db = DB()
         found = _session(db)
@@ -1740,8 +1781,13 @@ def set_goal(goal: str, milestones: list[dict[str, str]], detail: str | None = N
             return found
         root_id, _ = found
         items = autopilot.milestone_items(db, root_id, milestones)
-        autopilot.set_goal(db, root_id, goal, items, detail, analysis_doc=analysis_doc, summary=summary)
+        autopilot.set_goal(db, root_id, goal, items, detail, summary=summary)
         text = autopilot.progress(db, root_id)
+        from brindle import plans
+
+        if (plans.holding(db, root_id) or {}).get("offer"):
+            text += ("\n\nThis goal looks big, so brindle asked the person whether to plan it first. "
+                     "Workers you assign queue until they answer; you'll get a message either way.")
         repo_root = found[1].repo_root
         default = load_repo_config(repo_root).default_agent
         # milestone_items includes an optional sixth field for the phase.
