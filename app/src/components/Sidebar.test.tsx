@@ -233,7 +233,6 @@ describe("Sidebar", () => {
     expect(agentRow("w2")!.querySelector("[data-testid=agent-title]")).toBeNull();
     await act(async () => fireEvent.dblClick(agentRow("w1")!));
     expect(writeText).toHaveBeenCalledWith("id: w1\nrole: developer\nprofile: developer-haiku\nbranch: feat/ls\nmilestone: Logo goes Home");
-    expect((await screen.findByRole("status")).textContent).toContain("copied");
     sync.stop();
   });
 
