@@ -76,6 +76,8 @@ def _readiness_reuses_unchanged_sessions(db, tmp_path, monkeypatch, gitlink, out
             review._head_cache[key] = (time.monotonic(), {"url": "https://github.com/o/r/pull/8", "number": 8})
         monkeypatch.setattr(review, "open_pr_for_head", finishes_meanwhile)
     else:
+        if outcome == "none":
+            db.conn.execute("INSERT INTO session_prs (root_id, branch, url, opened_at) VALUES ('s', 's', 'https://github.com/o/r/pull/7', 0)")
         review._head_cache[key] = (time.monotonic(), {})
     watch.sweep(db)
     said = [e["agent_id"] for e in bus.tail(db, kinds=("session.pr_ready",))]
