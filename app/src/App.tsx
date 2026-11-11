@@ -570,7 +570,8 @@ function usePanesReady(client: DaemonClient | null, refresh?: () => Promise<void
       clearTimeout(poll);
       clearTimeout(deadline);
       if (pid !== null) shownFrom.current = pid;
-      setPanes((p) => (p.ready ? p : { ready: true, epoch: p.epoch + 1, recovery: null }));
+      // `back` stays: a session released ahead of the rest already has its fresh view.
+      setPanes((p) => (p.ready ? p : { ready: true, epoch: p.epoch + 1, recovery: null, back: p.back }));
     };
     // Per session (an engine that names the sessions still to come back): each one whose own agents have
     // windows in rows read after it came back is released at once, whatever the others are doing.

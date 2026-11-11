@@ -16,7 +16,8 @@ export interface PanesReady {
   recovery?: { done: number; total: number } | null;
   /* Session roots the engine has yet to bring back; absent from an engine that doesn't say. */
   pending?: string[] | null;
-  /* Session roots back and read after it, whose panes may show before the rest are. */
+  /* Session roots back and read after it, whose panes may show before the rest are; kept once all
+     are ready, as those panes' views stay open (only another daemon's start empties it). */
   back?: string[];
 }
 
