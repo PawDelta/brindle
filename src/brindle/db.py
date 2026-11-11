@@ -1095,8 +1095,20 @@ CREATE TABLE IF NOT EXISTS plan_shares (
     review TEXT NOT NULL DEFAULT '{}',   -- JSON: reviewers, sign-offs, who is pending, ready
     claimed_at REAL,               -- set while a create or a push is under way
     org_id TEXT,                   -- the org it was shared from; NULL on a share older than this column
-    lapsed_at REAL                 -- when the server last confirmed that account and org have no Team plan;
+    lapsed_at REAL,                -- when the server last confirmed that account and org have no Team plan;
                                    -- NULL once a check fails. Honoured while recent (shared_docs.lapse_stands)
+    unconfirmed TEXT,              -- why the Library couldn't confirm the review (plans.UNCONFIRMED); NULL once it answers
+    approve_wanted TEXT,           -- JSON: the person's Approve, held until the Library answers (plans.settle_held_approval)
+    approve_refused TEXT,          -- why a held Approve wasn't applied, for the person
+    access_refused TEXT,           -- the Library refused this account access; NULL once it next gives a whole answer
+    review_asked INTEGER NOT NULL DEFAULT 0   -- 1 once any review state seen here had required reviewers or org rules
+);
+-- Documents whose owner chose Stop sharing while the Library was out of reach:
+-- their teams and org lose access at the next pass that reaches it.
+CREATE TABLE IF NOT EXISTS plan_unshares (
+    doc_id TEXT PRIMARY KEY,
+    owner TEXT NOT NULL,
+    created_at REAL NOT NULL
 );
 -- Which local thread or reply each Library thread or reply became, so a pull
 -- adds it once; status is the Library's as last seen. A negative remote_id is
@@ -1570,9 +1582,14 @@ class DB:
         if "ask" not in {r["name"] for r in self.conn.execute("PRAGMA table_info(plans)")}:
             self.conn.execute("ALTER TABLE plans ADD COLUMN ask TEXT")
         share_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(plan_shares)")}
-        for col, kind in (("org_id", "TEXT"), ("lapsed_at", "REAL")):
+        for col, kind in (("org_id", "TEXT"), ("lapsed_at", "REAL"), ("unconfirmed", "TEXT"),
+                          ("approve_wanted", "TEXT"), ("approve_refused", "TEXT"), ("access_refused", "TEXT")):
             if col not in share_cols:
                 self.conn.execute(f"ALTER TABLE plan_shares ADD COLUMN {col} {kind}")
+        if "review_asked" not in share_cols:
+            self.conn.execute("ALTER TABLE plan_shares ADD COLUMN review_asked INTEGER NOT NULL DEFAULT 0")
+            # What these shares saw before it was kept is unknown: nothing may be assumed unreviewed.
+            self.conn.execute("UPDATE plan_shares SET review_asked=1")
         review_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(reviews)")}
         for col, kind in (("review_slot", "TEXT"), ("reviewer_created_at", "REAL")):
             if col not in review_cols:
