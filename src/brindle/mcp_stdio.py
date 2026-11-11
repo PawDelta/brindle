@@ -105,15 +105,21 @@ class StallWatchdog:
     it does can raise into serving. ``clock`` is injectable for tests."""
 
     def __init__(self, conn: Connection, *, after: float = STALL_AFTER, poll: float = _STALL_POLL,
-                 clock: Callable[[], float] = time.monotonic) -> None:
-        self._conn, self._after, self._poll, self._clock = conn, after, poll, clock
+                 clock: Callable[[], float] | None = None) -> None:
+        self._conn, self._after, self._poll = conn, after, poll
+        self._clock = clock or conn._clock
         self._reported: set = set()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
-    def start(self) -> None:
-        self._thread = threading.Thread(target=self._run, name="brindle-mcp-watchdog", daemon=True)
-        self._thread.start()
+    def start(self) -> bool:
+        """Best-effort: serving goes on without a watchdog if no thread can start."""
+        try:
+            self._thread = threading.Thread(target=self._run, name="brindle-mcp-watchdog", daemon=True)
+            self._thread.start()
+            return True
+        except Exception:  # noqa: BLE001
+            return False
 
     def stop(self) -> None:
         self._stop.set()
@@ -150,10 +156,20 @@ class StallWatchdog:
             return 0
 
 
+_STACK_FRAMES = 8       # innermost frames kept per thread
+_STACK_THREADS = 24     # debuglog drops a detail past MAX_ENTRY, and cuts any one string at MAX_TEXT
+
+
 def _thread_stacks() -> dict:
+    """Each thread's innermost frames, innermost first, one short string per
+    frame: so the blocking call survives debuglog's per-string cut."""
     names = {t.ident: t.name for t in threading.enumerate()}
-    return {f"{names.get(ident, '?')}:{ident}": "".join(traceback.format_stack(frame))
-            for ident, frame in sys._current_frames().items()}
+    out: dict = {}
+    for ident, frame in list(sys._current_frames().items())[:_STACK_THREADS]:
+        frames = traceback.extract_stack(frame)[::-1][:_STACK_FRAMES]
+        out[f"{names.get(ident, '?')}:{ident}"] = [
+            f"{os.path.basename(f.filename)}:{f.lineno} {f.name}: {(f.line or '')[:60]}" for f in frames]
+    return out
 
 
 @dataclass
@@ -234,7 +250,8 @@ class Connection:
         self._hold_until = 0.0          # when held requests stop waiting for the hand over
         self._deferred = False          # held requests outwaited the hold: reload once idle
         self.replaced = False
-        self._pending: dict = {}        # tools/call request id -> (tool name, monotonic start)
+        self._pending: dict = {}        # tools/call request id -> (tool name, first seen)
+        self._clock: Callable[[], float] = time.monotonic
 
     def state(self) -> dict:
         """A read-only snapshot of the connection, for the stall watchdog."""
@@ -242,6 +259,11 @@ class Connection:
                 "deferred_reload": self._deferred,
                 "held_for_reload": self._hold_until > time.monotonic(),    # anyio's clock is the loop's monotonic
                 "writer_busy": not self._wrote.is_set(), "reloaded": self.reloaded}
+
+    def _track(self, message) -> None:
+        """Note a tools/call for the stall watchdog, keeping the time it was first seen."""
+        if isinstance(message, types.JSONRPCRequest) and message.method == "tools/call":
+            self._pending.setdefault(message.id, (str((message.params or {}).get("name", "?")), self._clock()))
 
     def wake(self) -> None:
         """Check for a reload now, without waiting for the client's next request."""
@@ -255,8 +277,8 @@ class Connection:
         write_send, write_recv = anyio.create_memory_object_stream(0)
         _serving += 1
         watchdog = StallWatchdog(self)
-        watchdog.start()
         try:
+            watchdog.start()
             async with anyio.create_task_group() as tg:
                 tg.start_soon(self._write_all, write_recv)
                 tg.start_soon(run, read_recv, write_send)
@@ -325,6 +347,7 @@ class Connection:
                 _settle_all()   # the client closed stdin: no reply still to come reaches it
                 return
             message = _parse(line)
+            self._track(message)    # from the moment it's read: a hung reload check or hand over counts
             if held is not None:
                 if _answers_old_work(message, self._in_flight | self._listens.keys()):
                     await self._dispatch(send, line)
@@ -398,8 +421,7 @@ class Connection:
             else:
                 self._in_flight.add(message.id)
                 self._idle = anyio.Event()
-                if message.method == "tools/call":
-                    self._pending[message.id] = (str((message.params or {}).get("name", "?")), time.monotonic())
+                self._track(message)
             # A request the client cancelled is never answered: it ends here.
             metadata = ServerMessageMetadata(on_request_unanswered=lambda rid=message.id: self._unanswered(rid))
         elif isinstance(message, types.JSONRPCNotification) and message.method == "notifications/initialized":
