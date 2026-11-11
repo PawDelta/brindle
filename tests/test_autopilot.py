@@ -829,8 +829,23 @@ def test_goal_activity_stage(db, root, boss, checking, workers, expected):
 
 
 @pytest.mark.parametrize("scenario", [
-    "unstarted", "chain", "parallel", "limited", "overdue", "no_history",
-    "global_history", "review_rounds", "load",
+    pytest.param("unstarted", marks=pytest.mark.variant(
+        "A live milestone must not hide an unclaimed sibling, including while paused")),
+    pytest.param("chain", marks=pytest.mark.variant(
+        "Queued milestone dependencies must gate launches even with an idle supervisor")),
+    pytest.param("parallel", marks=pytest.mark.variant(
+        "Independent queued milestones must be counted once rather than summed")),
+    pytest.param("limited", marks=pytest.mark.variant(
+        "The same queued milestone graph must respect a single execution slot")),
+    pytest.param("overdue", marks=pytest.mark.variant(
+        "An overdue branch must extend its estimate as observed effort grows")),
+    pytest.param("no_history", marks=pytest.mark.variant(
+        "A goal with no measurements must still estimate its unstarted work")),
+    pytest.param("global_history", marks=pytest.mark.variant(
+        "A new repository must use other repos' measured times before fixed defaults")),
+    pytest.param("review_rounds", marks=pytest.mark.variant(
+        "A branch past two review rounds must not budget the full review duration again")),
+    "load",
 ])
 def test_goal_eta_counts_unstarted_milestones(db, root, monkeypatch, scenario):
     from brindle import fair_share
