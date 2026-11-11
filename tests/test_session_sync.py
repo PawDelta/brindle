@@ -139,6 +139,11 @@ def drift_flag_repo(tmp_path_factory, _repo_template):
         (path / f"file-{i}").write_text("work\n")
     git.run(["add", "-A"], str(path))
     with pytest.MonkeyPatch.context() as patch:
+        # Module scope runs before the per-test identity in conftest: CI has no global git user.
+        for key in ("GIT_AUTHOR_NAME", "GIT_COMMITTER_NAME"):
+            patch.setenv(key, "t")
+        for key in ("GIT_AUTHOR_EMAIL", "GIT_COMMITTER_EMAIL"):
+            patch.setenv(key, "t@example.com")
         patch.setenv("GIT_COMMITTER_DATE", "1700000000 +0000")
         git.run(["commit", "-m", "session work"], str(path))
         (path / "file-0").write_text("more work\n")
