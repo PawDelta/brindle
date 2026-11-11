@@ -890,6 +890,17 @@ def _sync_shared_docs() -> None:
             db.conn.close()
     except Exception:  # noqa: BLE001 - a sync must never stop the watch
         log.debug("brindle: couldn't sync shared plans", exc_info=True)
+    _poll_review_queue()
+
+
+def _poll_review_queue() -> None:
+    """review_queue.poll for the signed-in account; a failure is only logged."""
+    from brindle.pro import review_queue
+
+    try:
+        review_queue.poll()
+    except Exception:  # noqa: BLE001 - a poll must never stop the watch
+        log.debug("brindle: couldn't poll the review queue", exc_info=True)
 
 
 def _reset_window_sizes() -> None:
