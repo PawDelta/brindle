@@ -586,6 +586,8 @@ def brindle_home(tmp_path, monkeypatch, ambient_brindle_env):
     # brindle's own Pro plugins are always installed: keep them off the real
     # keychain and network (a file store under the temporary home, no login).
     monkeypatch.setenv("BRINDLE_PRO_CREDENTIAL_STORE", "file")
+    # A test that forces the keychain backend takes the per-user refresh lock: in the test's dir.
+    monkeypatch.setattr("brindle.pro.auth._user_home", lambda: tmp_path / "user-home")
     monkeypatch.delenv("BRINDLE_PRO_DEV", raising=False)
     # No machine-wide Claude Code managed settings, and no ambient Claude credential.
     monkeypatch.setenv("BRINDLE_CLAUDE_MANAGED_SETTINGS", "")
