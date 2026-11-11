@@ -381,7 +381,16 @@ def test_cross_session_wait_released_when_other_session_lands(db, cross_session_
     if event == "landed":   # b's PR merged on main; its branch hasn't synced yet
         _land(db, "unrelated")   # a PR from another of b's branches releases nothing
         assert tasks.sweep(db) == 0
+        # Session c, which never landed, holds the file too: b's landing doesn't hide it.
+        w.coordination.workspace("c", "session-c")
+        db.add_agent(Agent("c", "c", "developer", "claude", None, "interactive", "processing", "", None, 0))
+        w.refs["refs/heads/session-c"] = "cw-c"
         _land(db)
+        assert tasks.sweep(db) == 0
+        assert tasks._loads(db.get_task("new").depends_on) == ["workspace:c"] and w.starts == []
+        assert sorted(w.told) == ["a", "c"]   # the new wait's supervisors
+        w.told.clear()
+        w.refs["refs/heads/session-c"] = "cw-c-synced"
     else:   # b synced main back in: its branch no longer holds the file
         w.refs["refs/heads/session"] = "cw-b-synced"
     assert tasks.sweep(db) == 1
@@ -403,16 +412,6 @@ def test_cross_session_wait_requeues_on_new_work_after_release(db, cross_session
     w.room["why"] = None
     assert tasks.sweep(db) == 0
     assert tasks._loads(db.get_task("new").depends_on) == ["workspace:b"] and w.starts == []
-
-
-def test_cross_session_wait_landing_does_not_hide_other_holders(db, cross_session_wait):
-    w = cross_session_wait
-    w.coordination.workspace("c", "session-c")
-    db.add_agent(Agent("c", "c", "developer", "claude", None, "interactive", "processing", "", None, 0))
-    w.refs["refs/heads/session-c"] = "cw-c"
-    _land(db)   # b landed, its branch unsynced; c, which never landed, holds the file too
-    assert tasks.sweep(db) == 0
-    assert tasks._loads(db.get_task("new").depends_on) == ["workspace:c"] and w.starts == []
 
 
 def test_cross_session_wait_falls_back_after_drift_limit(db, cross_session_wait):
