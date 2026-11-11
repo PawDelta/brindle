@@ -381,6 +381,7 @@ class PlanReplyDTO(_DTO):
     attachments: list[str] = []
     at: float
     sent: bool = False
+    from_supervisor: bool = False
 
 
 class PlanThreadDTO(_DTO):
@@ -400,6 +401,7 @@ class PlanThreadDTO(_DTO):
     sent: bool = False
     at: float
     replies: list[PlanReplyDTO] = []
+    question: bool = False
 
 
 class PlanRevisionDTO(_DTO):

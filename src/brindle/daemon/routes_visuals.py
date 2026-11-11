@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from starlette.requests import Request
+from starlette.background import BackgroundTask
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
@@ -189,9 +190,30 @@ def plan_comment(db: DB, params: dict, body: dict) -> Any:
     """A comment anchored on the revision on screen, or (``parent``) a reply."""
     from brindle import plan_docs
 
-    plan_docs.comment(db, params["id"], body.get("rev"), _get(body, "anchor", dict), body.get("text"),
-                      _get(body, "attachments", list), parent=_get(body, "parent", int))
+    question = _get(body, "question", bool, default=False)
+    tid = plan_docs.comment(db, params["id"], body.get("rev"), _get(body, "anchor", dict), body.get("text"),
+                           _get(body, "attachments", list), parent=_get(body, "parent", int), question=question)
+    if question:
+        from brindle.pro import doc_questions
+
+        return JSONResponse(_plan_now(db, params["id"]), background=BackgroundTask(
+            doc_questions.after_reply, plan_id=params["id"], thread_id=tid))
     return _plan_now(db, params["id"])
+
+
+def doc_question(db: DB, params: dict, body: dict) -> Any:
+    """The remote doc reader has saved a question; route it on this machine."""
+    from brindle.pro import doc_questions
+
+    from brindle.pro import shared_docs
+
+    owner = shared_docs._require_team(None).sub
+    if not owner:
+        raise ServiceError("forbidden", "sign in to ask your supervisor", 403)
+    thread = _get(body, "thread", int, required=True)
+    return JSONResponse({"state": "queued"}, background=BackgroundTask(
+        doc_questions.after_reply, doc_id=params["id"], thread_id=thread, owner=owner,
+        repo_root=_get(body, "repo")))
 
 
 def plan_resolve(db: DB, params: dict, body: dict) -> Any:
@@ -371,6 +393,7 @@ def kept_page(db: DB, request: Request) -> Path:
 
 
 ROUTES = [
+    Route("/v1/library/designs/{id}/question", _endpoint(doc_question), methods=["POST"]),
     Route("/v1/sessions/{id:path}/visual-input", _endpoint(visual_input), methods=["POST"]),
     Route("/v1/sessions/{id:path}/visual-offer", session_offer),
     Route("/v1/sessions/{id:path}/visual-offer", _endpoint(resolve_offer), methods=["POST"]),
