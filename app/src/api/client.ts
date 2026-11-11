@@ -708,6 +708,9 @@ export interface AnalysisDocDetail extends AnalysisDoc {
   threads?: { id: number; author: string; text: string; replies: { text: string }[] }[];
   decisions?: { id: string; title: string; mine?: string | null; confirmed?: string | null; options: { id: string; label: string }[] }[];
   verdict?: { approved: boolean; picks?: Record<string, string> } | null;
+  /* A shared design's review state (shared-designs-api.md: GET /analysis-docs/{id} `design`):
+     the revision on screen, who is asked to review (`required` or optional) and who has signed it. */
+  design?: { rev?: number; reviewers?: { sub: string; required?: boolean }[]; sign_offs?: { sub: string; rev?: number }[]; pending_reviewers?: unknown[]; pending_policies?: unknown[]; ready?: boolean } | null;
 }
 
 export interface DocTopic {

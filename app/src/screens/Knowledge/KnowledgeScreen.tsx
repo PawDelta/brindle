@@ -37,6 +37,7 @@ import type { KnowledgeView, LibraryStage } from "../../routes";
 import { formatAge } from "../../store/overview";
 import { StoreContext, useAppState } from "../../store/useStore";
 import { DocsView } from "./DocsView";
+import { docStages } from "./libraryStages";
 import { ImportedLibrary } from "./ImportedLibrary";
 import { KeptVisuals } from "./KeptVisuals";
 import { MapView } from "./MapView";
@@ -432,6 +433,7 @@ export function KnowledgeScreen({ client, pickFolder, view, stage, onView, onCou
   // Decisions are recorded by sessions too (decision.recorded on the bus): refetch on every event.
   const lastEventId = useAppState((s) => s.lastEventId);
   const recent = useAppState((s) => s.recent);
+  const inbox = useAppState((s) => s.inbox);
   const store = useContext(StoreContext);
   if (!store) throw new Error("KnowledgeScreen needs a <StoreContext.Provider>");
 
@@ -575,7 +577,7 @@ export function KnowledgeScreen({ client, pickFolder, view, stage, onView, onCou
       </PageHeader>
       {tab === "map" && <MapView key={repo} client={client} repo={repo ?? undefined} decisions={decisions ?? []} sources={sources ?? []} />}
       {tab === "kept" && <KeptVisuals client={client} />}
-      {tab === "docs" && <DocsView key={stage ?? ""} client={client} repo={repo ?? undefined} session={session} onBack={onBackToSession} doc={typeof doc === "string" ? doc : undefined} pickFolder={pickFolder} />}
+      {tab === "docs" && <DocsView key={stage ?? ""} stage={stage} stages={docStages(inbox)} client={client} repo={repo ?? undefined} session={session} onBack={onBackToSession} doc={typeof doc === "string" ? doc : undefined} pickFolder={pickFolder} />}
       {local && repos && repos.length === 0 && <p className="text-ink-3">{NO_REPO}</p>}
       {local && loadError && (
         <div role="alert" className={`${alert} flex items-center justify-between gap-s2`}>

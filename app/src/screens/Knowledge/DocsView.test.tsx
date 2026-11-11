@@ -72,7 +72,7 @@ describe("docs view", () => {
     const details = docs.map((d, i) => view(d, {
       files: [{ name: "design.md", md: i ? "Use hosted machines." : "Store the journal in SQLite." }],
       source: i ? d.source : { kind: "goal", ref: "v_recovery", session: "root1" },
-      ...(i ? record : {}),
+      ...(i ? { ...record, design: { rev: 1, reviewers: [{ sub: "sam", required: true }], sign_offs: [] } } : {}),
     }));
     let finishOld: ((r: Response) => void) | undefined;
     const api = new DaemonClient({ baseUrl: "http://daemon.test", token: "t", fetch: async (input) => {
@@ -102,6 +102,14 @@ describe("docs view", () => {
     render(<DocsView client={api} repo="/r" />);
     await waitFor(() => expect(shown()).toEqual(["d1", "d2"]));
     await waitFor(() => expect([...screen.getByTestId("docs").querySelectorAll("[data-library-hit]")].map((li) => li.getAttribute("data-library-hit"))).toEqual(["decision:dec", "kept:k1"]));
+    // A reviewer narrows designs, and drops the sources that have no reviewer; clearing restores everything.
+    const hits = () => [...screen.getByTestId("docs").querySelectorAll("[data-library-hit]")].map((li) => li.getAttribute("data-library-hit"));
+    fireEvent.change(await screen.findByRole("combobox", { name: "Reviewer" }), { target: { value: "sam" } });
+    expect(shown()).toEqual(["d2"]);
+    expect(hits()).toEqual([]);
+    fireEvent.change(screen.getByRole("combobox", { name: "Reviewer" }), { target: { value: "" } });
+    expect(shown()).toEqual(["d1", "d2"]);
+    expect(hits()).toEqual(["decision:dec", "kept:k1"]);
     fireEvent.change(screen.getByRole("combobox", { name: "Type" }), { target: { value: "decisions" } });
     expect(shown()).toEqual([]);
     expect([...screen.getByTestId("docs").querySelectorAll("[data-library-hit]")].map((li) => li.getAttribute("data-library-hit"))).toEqual(["decision:dec"]);
@@ -109,7 +117,6 @@ describe("docs view", () => {
     expect([...screen.getByTestId("docs").querySelectorAll("[data-library-hit]")].map((li) => li.getAttribute("data-library-hit"))).toEqual(["kept:k1"]);
     fireEvent.click(screen.getByRole("button", { name: "Clear" }));
     expect(screen.queryByTestId("results")).toBeNull();
-    expect(screen.queryByRole("combobox", { name: "Reviewer" })).toBeNull();
     fireEvent.change(screen.getByRole("combobox", { name: "Author" }), { target: { value: "person" } });
     expect(shown()).toEqual(["d1"]);
     fireEvent.change(screen.getByRole("combobox", { name: "Changed" }), { target: { value: "7" } });
@@ -162,6 +169,35 @@ describe("docs view", () => {
     render(<DocsView client={client(() => ({}), RESULTS, [])} repo="/r" />);
     expect(await screen.findByTestId("library-empty")).toBeTruthy();
     expect(screen.getByRole("combobox", { name: "Type" })).toBeTruthy();
+  });
+
+  it("library search stage and reviewer: stages come from each shared design's review state, Reviewer selects and clears, and the record lists every signer", async () => {
+    const designs: Record<string, object> = {
+      d1: { rev: 2, ready: false, reviewers: [{ sub: "sam", required: true }, { sub: "dana", required: false }], sign_offs: [{ sub: "sam", rev: 2 }, { sub: "dana", rev: 1 }, { sub: "ops", rev: 1 }, { sub: "ops", rev: 2 }] },
+      d2: { rev: 1, ready: true, reviewers: [{ sub: "dana", required: true }], sign_offs: [{ sub: "dana", rev: 1 }] },
+      d3: { rev: 1, ready: false, reviewers: [{ sub: "sam", required: true }], sign_offs: [] },
+    };
+    // d3 is in the person's queue; d1 and d2 have no Inbox card at all. d4 is a personal design.
+    const queue = new Map<string, "needs-you">([["d3", "needs-you"]]);
+    const api = client((id) => view(DOCS.find((d) => d.doc_id === id)!, designs[id] ? { design: designs[id] } : {}));
+    render(<DocsView client={api} stage="in-review" stages={queue} />);
+    await waitFor(() => expect(shown()).toEqual(["d1"]));
+    const pick = (name: string, value: string) => fireEvent.change(screen.getByRole("combobox", { name }), { target: { value } });
+    pick("Stage", "approved");
+    expect(shown()).toEqual(["d2"]);
+    pick("Stage", "needs-you");
+    expect(shown()).toEqual(["d3"]);
+    pick("Stage", "");
+    expect(shown()).toHaveLength(4);
+    pick("Reviewer", "sam");
+    expect(shown().sort()).toEqual(["d1", "d3"]);
+    pick("Reviewer", "");
+    expect(shown()).toHaveLength(4);
+    fireEvent.click(screen.getByTestId("docs").querySelector("li[data-doc='d1'] button")!);
+    const record = await screen.findByRole("complementary", { name: "Design record" });
+    const rows = [...record.querySelectorAll("[data-signoff]")].map((r) => `${r.getAttribute("data-signoff")}@${r.getAttribute("data-rev") || "waiting"}:${r.getAttribute("data-signed")}`);
+    // Every recorded signature keeps its revision (ops, outside the roster, signed two); dana signed rev 1 only, so she is also waiting.
+    expect(rows).toEqual(["sam@2:yes", "dana@1:no", "ops@1:no", "ops@2:yes", "dana@waiting:no"]);
   });
 
   it("lists one session's docs as cards, narrows them by category and search, and opens one in the reader", async () => {
