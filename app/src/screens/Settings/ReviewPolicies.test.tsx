@@ -109,18 +109,29 @@ it("shows what saving would do only for the draft on the form, and holds saves a
   await waitFor(() => expect(lib.puts.at(-1)).toMatchObject({ version: 5 }));
 });
 
-it("removes a rule in its row after a confirmation that shows the list without it, saving the whole list at the version read", async () => {
+it("removes a rule only once the list-without-rule impact is shown, and a removal opened for one org is dropped when another loads", async () => {
   const { lib, client } = library();
   await open(client);
+  const confirm = () => screen.getByRole("button", { name: "Confirm remove Security review" }) as HTMLButtonElement;
   fireEvent.click(screen.getByRole("button", { name: "Remove Security review" }));
   await waitFor(() => expect(lib.impacts).toHaveLength(1));
-  // The impact asked of the Library is the list without the removed rule.
+  // The impact asked of the Library is the list without the removed rule. Confirm waits for its answer.
   expect(lib.impacts[0].names).toEqual(["Staff sign-off"]);
-  await act(async () => lib.impacts[0].reply(2));
-  expect(screen.getByTestId("review-policy-remove-applies").dataset.count).toBe("2");
-  fireEvent.click(screen.getByRole("button", { name: "Confirm remove Security review" }));
+  expect(confirm().disabled).toBe(true);
+  fireEvent.click(confirm());
+  expect(lib.puts).toHaveLength(0);
+  // Another org loads with the same rule id: the removal opened under org_1 is gone, not carried over.
+  lib.org = "org_2";
+  fireEvent.click(screen.getByRole("button", { name: "Reload policies" }));
+  await waitFor(() => expect(screen.queryByTestId("review-policy-remove-security")).toBeNull());
+  // Removing again under org_2: after the count, the save goes to org_2 at the version read.
+  fireEvent.click(screen.getByRole("button", { name: "Remove Security review" }));
+  await waitFor(() => expect(lib.impacts).toHaveLength(2));
+  await act(async () => lib.impacts[1].reply(2));
+  await waitFor(() => expect(confirm().disabled).toBe(false));
+  fireEvent.click(confirm());
   await waitFor(() => expect(lib.puts).toHaveLength(1));
-  expect(lib.puts[0]).toMatchObject({ org_id: "org_1", version: 4, policies: [{ id: "staff" }] });
+  expect(lib.puts[0]).toMatchObject({ org_id: "org_2", version: 4, policies: [{ id: "staff" }] });
   expect(lib.puts[0].policies).toHaveLength(1);
 });
 

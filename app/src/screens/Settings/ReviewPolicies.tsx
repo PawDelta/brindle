@@ -90,9 +90,10 @@ function Policies({ client }: { client: DaemonClient }) {
   const [busy, setBusy] = useState(false);
   /* Another admin saved (or the org changed) since this was read: saving waits for a reload. */
   const [stale, setStale] = useState(false);
-  /* The rule whose removal is awaiting confirmation in its row, and what the list without it would cover. */
-  const [removing, setRemoving] = useState<string | null>(null);
-  const [removeImpact, setRemoveImpact] = useState<{ key: string; result: DraftImpact } | null>(null);
+  /* The rule whose removal is awaiting confirmation in its row, bound to the org it was opened under, and
+     what the list without it would cover (result null when that count failed). */
+  const [removing, setRemoving] = useState<{ id: string; org: string } | null>(null);
+  const [removeImpact, setRemoveImpact] = useState<{ key: string; result: DraftImpact | null } | null>(null);
 
   /* Reading again keeps the draft, unless it was written for another org's rules. */
   /* Reads can overlap (Reload while a save's reload is out): the newest one started wins and an older
@@ -107,7 +108,7 @@ function Policies({ client }: { client: DaemonClient }) {
       if (mine !== reads.current.latest) return;
       const another = reads.current.org !== null && reads.current.org !== read.org_id;
       reads.current.org = read.org_id;
-      if (another) setDraft(blank);
+      if (another) { setDraft(blank); setRemoving(null); setRemoveImpact(null); }
       setState(read);
       setPeople([...(directory.me ? [{ sub: directory.me, email: "You" }] : []), ...directory.people]);
       setStale(false);
@@ -164,15 +165,18 @@ function Policies({ client }: { client: DaemonClient }) {
   const shown = impact && impact.key === shownKey ? impact.result : null;
 
   /* Removing a rule asks for the whole list without it, of the org loaded, once per confirmation. */
-  const removeKey = state && removing ? JSON.stringify([state.org_id, removing, state.policies.filter((r) => r.id !== removing)]) : null;
+  const removeKey = state && removing && removing.org === state.org_id
+    ? JSON.stringify([state.org_id, removing.id, state.policies.filter((r) => r.id !== removing.id)]) : null;
   useEffect(() => {
     if (!state || !removing || !removeKey) return;
     let live = true;
-    client.reviewPolicyImpact(state.org_id, state.policies.filter((r) => r.id !== removing)).then((result) => { if (live) setRemoveImpact({ key: removeKey, result }); }, () => { if (live) setRemoveImpact(null); });
+    client.reviewPolicyImpact(state.org_id, state.policies.filter((r) => r.id !== removing.id)).then((result) => { if (live) setRemoveImpact({ key: removeKey, result }); }, () => { if (live) setRemoveImpact({ key: removeKey, result: null }); });
     return () => { live = false; };
   // eslint-disable-next-line react-hooks/exhaustive-deps -- removeKey is the whole of the request
   }, [client, removeKey]);
-  const removal = removeImpact && removeImpact.key === removeKey ? removeImpact.result : null;
+  /* Null while the count is pending or failed: Remove is only offered once the count is shown. */
+  const removalAnswer = removeImpact && removeImpact.key === removeKey ? removeImpact : null;
+  const removal = removalAnswer?.result ?? null;
 
   if (!state) {
     return (
@@ -219,7 +223,11 @@ function Policies({ client }: { client: DaemonClient }) {
     await write(list, () => setDraft(blank));
   };
 
-  const remove = (rule: ReviewPolicyRule) => write(rules.filter((r) => r.id !== rule.id), () => setRemoving(null));
+  /* Only a removal whose count is shown, opened under the org still loaded, can be saved. */
+  const remove = (rule: ReviewPolicyRule) => {
+    if (!removal || removing?.id !== rule.id || removing.org !== state.org_id) return;
+    void write(rules.filter((r) => r.id !== rule.id), () => setRemoving(null));
+  };
 
   return (
     <section className="space-y-s3" aria-label="Review policies" data-testid="review-policies">
@@ -241,12 +249,14 @@ function Policies({ client }: { client: DaemonClient }) {
                 <span>{n === 0 ? "None right now" : `${n} design${n === 1 ? "" : "s"} in review`}</span>
                 <span className="flex justify-self-end gap-s1">
                   <button type="button" className={quiet} aria-label={`Edit ${rule.name}`} onClick={() => edit(rule)}>Edit</button>
-                  <button type="button" className={quiet} aria-label={`Remove ${rule.name}`} onClick={() => setRemoving(rule.id)}>Remove</button>
+                  <button type="button" className={quiet} aria-label={`Remove ${rule.name}`} onClick={() => setRemoving({ id: rule.id, org: state.org_id })}>Remove</button>
                 </span>
               </div>
-              {removing === rule.id && (
+              {removing?.id === rule.id && (
                 <div className="space-y-1 border-b border-line pb-s1 text-sm text-ink-2" data-testid={`review-policy-remove-${rule.id}`}>
                   <p>{`Remove ${rule.name}?`}</p>
+                  {!removalAnswer && <p role="status" className="text-xs text-ink-3">Counting the designs the rest would cover…</p>}
+                  {removalAnswer && !removalAnswer.result && <p role="alert" className={alert}>Couldn't count the designs, so nothing can be removed yet. Keep, then Remove again to retry.</p>}
                   {removal && (
                     <p className={notice} data-testid="review-policy-remove-applies" data-count={removal.count} data-truncated={removal.truncated || undefined}>
                       {`Without it, ${removal.truncated ? "at least " : ""}${removal.count} design${removal.count === 1 ? "" : "s"} in review ${removal.count === 1 ? "is" : "are"} still covered by the policies left`}
@@ -254,7 +264,7 @@ function Policies({ client }: { client: DaemonClient }) {
                   )}
                   <div className="flex justify-end gap-s1">
                     <button type="button" className={quiet} onClick={() => setRemoving(null)}>Keep</button>
-                    <button type="button" className={quiet} aria-label={`Confirm remove ${rule.name}`} disabled={busy || stale} onClick={() => void remove(rule)}>Confirm remove</button>
+                    <button type="button" className={quiet} aria-label={`Confirm remove ${rule.name}`} disabled={!removal || busy || stale} onClick={() => remove(rule)}>Confirm remove</button>
                   </div>
                 </div>
               )}
