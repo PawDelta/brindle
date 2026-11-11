@@ -173,7 +173,7 @@ def new_since_merge(db: DB, ws: Workspace, pushed_sha: str | None) -> bool:
     from the base (a squash of that PR included) doesn't count, nor does a
     merge that only joins its parents: git's own clean merge of them, the
     incoming side taken whole over a conflict, or the sync's ``-s ours``
-    record of a squash (``session_squashes``). A merge whose resolution adds
+    record of a squash (``session_squashes``, its tree the branch's own). A merge whose resolution adds
     anything else does. An unknown or vanished ``pushed_sha`` counts as nothing new."""
     if not pushed_sha:
         return False
@@ -198,9 +198,11 @@ def _merge_adds(ws: Workspace, shas: list[str], squashes: set[str]) -> bool:
     merge, parents = shas[0], shas[1:]
     if len(parents) != 2:
         return True
-    if parents[1] in squashes:
-        return False
     tree = git.out(["rev-parse", f"{merge}^{{tree}}"], ws.path)
+    # The sync's `-s ours` record of a squash keeps the branch's tree; a squash with forge-side
+    # edits is merged the plain way instead, and its resolution is judged like any other.
+    if parents[1] in squashes and tree == git.out(["rev-parse", f"{parents[0]}^{{tree}}"], ws.path):
+        return False
     joined = git.run(["merge-tree", "--write-tree", *parents], ws.path, check=False)
     if joined.returncode == 0:
         return joined.stdout.split("\n", 1)[0].strip() != tree
