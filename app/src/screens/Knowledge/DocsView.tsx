@@ -15,6 +15,7 @@ import { Markdown } from "./Markdown";
 import { docMatch, useLibrarySearch, type LibraryHit, type LibraryType, type SearchClient } from "./librarySearch";
 import { ReaderChrome } from "../Session/Visuals/VisualReader";
 import { setReaderDoc } from "../../store/libraryReader";
+import { LIBRARY_STAGES, type LibraryStage } from "../../routes";
 
 export type DocsClient = Pick<DaemonClient, "docs" | "docTopics" | "docScopes" | "doc" | "docResults" | "shareDoc" | "unshareDoc" | "deleteDoc"> & ExportClient & SearchClient;
 
@@ -26,6 +27,10 @@ export interface DocsViewProps {
   /* A doc to open in the reader on arrival. */
   doc?: string;
   pickFolder?: PickFolder;
+  /* The stage the sidebar chose (the Stage filter starts there), and the stage of each design the
+     Inbox places (libraryStages.docStages); a design not in the map has no stage. */
+  stage?: LibraryStage;
+  stages?: Map<string, LibraryStage>;
   /* Back to the session the person came from; the filter's chip clears only the filter. */
   onBack?(): void;
 }
@@ -367,6 +372,10 @@ export function Reader({ client, repo, id, targets, titles, pickFolder, onBack, 
               <h3 className={label}>Decisions taken</h3>
               {taken.map(({ decision: d, pick }) => <div key={d.id} data-decision={d.id}><b>{d.title}</b><p>{d.options.find((o) => o.id === pick)?.label ?? pick}</p></div>)}
             </section>}
+            {!!doc.design?.reviewers?.length && <section className={`${card} flex flex-col gap-1 px-s2 py-s1`} aria-label="Sign-offs">
+              <h3 className={label}>Sign-offs</h3>
+              {doc.design.reviewers.map((r) => { const signed = doc.design!.sign_offs?.some((s) => s.sub === r.sub && (s.rev === undefined || s.rev === doc.design!.rev)); return <div key={r.sub} data-signoff={r.sub} data-signed={signed ? "yes" : "no"}><b>{r.sub}</b><span className="text-ink-3"> · {r.required === false ? "optional" : "required"} · {signed ? "signed" : "waiting"}</span></div>; })}
+            </section>}
             {!!doc.threads?.length && <section className={`${card} flex flex-col gap-1 px-s2 py-s1`} aria-label="Comments">
               <h3 className={label}>Comments</h3>
               {doc.threads.map((t) => <div key={t.id}><b>{t.author}</b><p>{t.text}</p>{t.replies.map((r, i) => <p key={i} className="pl-s2 text-ink-2">{r.text}</p>)}</div>)}
@@ -432,7 +441,8 @@ export function Reader({ client, repo, id, targets, titles, pickFolder, onBack, 
 type Listing = { state: "loading" } | { state: "loaded"; docs: AnalysisDoc[] } | { state: "unavailable"; error: string } | { state: "failed"; error: string };
 const EMPTY_DOCS: AnalysisDoc[] = [];
 
-export function DocsView({ client, repo, session: initialSession, doc, pickFolder, onBack }: DocsViewProps) {
+export function DocsView({ client, repo, session: initialSession, doc, pickFolder, stage: initialStage, stages, onBack }: DocsViewProps) {
+  const [stage, setStage] = useState<LibraryStage | "">(initialStage ?? "");
   const [scope, setScope] = useState("");
   const [topic, setTopic] = useState("");
   const [category, setCategory] = useState("");
@@ -544,9 +554,9 @@ export function DocsView({ client, repo, session: initialSession, doc, pickFolde
   useEffect(() => {
     if (listing.state === "loaded" && category && !picked) setCategory("");
   }, [listing.state, category, picked]);
-  const shown = docs.filter((d) => (type === "all" || type === "designs") && (!author || d.created_by === author) && recent(d.updated_at ?? d.created_at) && (!picked || (d.category ?? UNCATEGORISED) === picked) && docMatch(d, search.details?.get(d.id), q) !== null)
+  const shown = docs.filter((d) => (type === "all" || type === "designs") && (!author || d.created_by === author) && (!stage || stages?.get(d.id) === stage) && recent(d.updated_at ?? d.created_at) && (!picked || (d.category ?? UNCATEGORISED) === picked) && docMatch(d, search.details?.get(d.id), q) !== null)
     .sort((a, b) => (b.updated_at ?? b.created_at ?? 0) - (a.updated_at ?? a.created_at ?? 0));
-  const sourceHits = search.hits.filter((d) => (type === "all" || type === d.type) && (!author || author === d.author) && recent(d.changed));
+  const sourceHits = search.hits.filter((d) => (type === "all" || type === d.type) && !stage && (!author || author === d.author) && recent(d.changed));
   const docRow = (d: AnalysisDoc) => (
     <DocRow key={d.id} d={d} match={docMatch(d, search.details?.get(d.id), q)} scope={d.scope && (scopes.find((s) => scopeSpec(s) === scopeSpec(d.scope!)) ?? d.scope)} onOpen={() => setOpen(d.id)} />
   );
@@ -634,9 +644,10 @@ export function DocsView({ client, repo, session: initialSession, doc, pickFolde
           {client.keptVisuals && <option value="kept">Kept visuals</option>}
         </select></label>
         <label className="text-sm">Shared <select aria-label="Shared" className={field} value={scope} onChange={(e) => setScope(e.target.value)}>{chips.map(([id, name]) => <option key={id} value={id}>{name}</option>)}</select></label>
+        <label className="text-sm">Stage <select aria-label="Stage" className={field} value={stage} onChange={(e) => setStage(e.target.value as LibraryStage | "")}><option value="">Any stage</option>{LIBRARY_STAGES.map((s) => <option key={s.id} value={s.id}>{s.label}</option>)}</select></label>
         {authors.length > 0 && <label className="text-sm">Author <select aria-label="Author" className={field} value={author} onChange={(e) => setAuthor(e.target.value)}><option value="">Anyone</option>{authors.map((a) => <option key={a}>{a}</option>)}</select></label>}
         <label className="text-sm">Changed <select aria-label="Changed" className={field} value={changed} onChange={(e) => setChanged(e.target.value)}><option value="">Any time</option><option value="1">Last day</option><option value="7">Last week</option><option value="30">Last month</option></select></label>
-        <button type="button" className={quiet} onClick={() => { setQuery(""); setType("all"); setScope(""); setTopic(""); setCategory(""); setAuthor(""); setChanged(""); setSession(undefined); }}>Clear</button>
+        <button type="button" className={quiet} onClick={() => { setQuery(""); setType("all"); setStage(""); setScope(""); setTopic(""); setCategory(""); setAuthor(""); setChanged(""); setSession(undefined); }}>Clear</button>
       </div>
       {(q || search.searching || search.incomplete) && <p role="status" className="text-xs text-ink-3">{search.searching ? "Searching…" : `${shown.length + sourceHits.length} matches`}{search.incomplete && " · Some sources could not be searched."}</p>}
       {!q && type === "imported" && <p className="text-sm text-ink-2">Enter a search to find imported docs.</p>}

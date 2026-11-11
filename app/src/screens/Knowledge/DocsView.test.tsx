@@ -164,6 +164,22 @@ describe("docs view", () => {
     expect(screen.getByRole("combobox", { name: "Type" })).toBeTruthy();
   });
 
+  it("library search stage and reviewer: the sidebar's stage narrows the list and the Stage filter changes it, and a design's record lists who signed", async () => {
+    const stages = new Map<string, "needs-you" | "approved">([["d1", "needs-you"], ["d2", "approved"]]);
+    const design = { rev: 2, reviewers: [{ sub: "sam", required: true }, { sub: "dana", required: false }], sign_offs: [{ sub: "sam", rev: 2 }, { sub: "dana", rev: 1 }] };
+    const api = client((id) => view(DOCS.find((d) => d.doc_id === id)!, { design }));
+    render(<DocsView client={api} stage="needs-you" stages={stages} />);
+    await waitFor(() => expect(shown()).toEqual(["d1"]));
+    fireEvent.change(screen.getByRole("combobox", { name: "Stage" }), { target: { value: "approved" } });
+    expect(shown()).toEqual(["d2"]);
+    fireEvent.change(screen.getByRole("combobox", { name: "Stage" }), { target: { value: "" } });
+    expect(shown()).toHaveLength(4);
+    fireEvent.click(screen.getByTestId("docs").querySelector("li[data-doc='d1'] button")!);
+    const record = await screen.findByRole("complementary", { name: "Design record" });
+    const signed = (sub: string) => record.querySelector(`[data-signoff="${sub}"]`)?.getAttribute("data-signed");
+    expect([signed("sam"), signed("dana")]).toEqual(["yes", "no"]);     // dana signed an earlier revision
+  });
+
   it("lists one session's docs as cards, narrows them by category and search, and opens one in the reader", async () => {
     const docs = DOCS.map((d) => ({ ...d, category: d.doc_id === "d2" ? "Fees" : "Checkout" }));
     render(<DocsView client={client((id) => view(DOCS.find((d) => d.doc_id === id)!), RESULTS, docs)} repo="/r" session="root1" />);
