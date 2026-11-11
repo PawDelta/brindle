@@ -258,10 +258,10 @@ def session_tree(db: DB, request: Request) -> Any:
             "files": [p for p in git.run(["ls-files", "-z"], ws.path).stdout.split("\0") if p]}
 
 
-@_heavy_json
+@_json
 def session_pr_draft(db: DB, request: Request) -> Any:
+    """Draft text from the goal; readiness is enforced when opening the PR."""
     root, ws = session_review.session(db, request.path_params["root"])
-    session_review.require_ready(db, root, ws)
     return session_review.draft(db, root, ws)
 
 
