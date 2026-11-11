@@ -29,6 +29,7 @@ import type {
   ProfileDTO,
   ProviderConnectionDTO,
   RepoDTO,
+  SharedDesignDTO,
   RoutingDTO,
   SavedActionDTO,
   SessionDTO,
@@ -391,6 +392,7 @@ export interface KeptVisualDTO {
 /* A planning doc (brindle/plans.py): markdown the app renders itself, by section. */
 export type Plan = PlanDTO;
 export type PlanComment = PlanCommentDTO;
+export type SharedDesign = SharedDesignDTO;
 
 /* The person's verdict on the plan revision on screen: approve, or redirect with what to change. */
 export interface PlanVerdict {
@@ -1864,6 +1866,16 @@ export class DaemonClient {
   /* The org rules that would cover the plan once it is shared. */
   previewPlanPolicies(id: string) {
     return this.post<{ policies: PolicyPreviewRow[] }>(`/plans/${encodeURIComponent(id)}/policy-preview`, {});
+  }
+
+  /* A design someone else shared (brindle/pro/shared_reader.py), by its Library doc id: read from the
+     Library each time and held only in memory. A write answers with the design as it is now. */
+  sharedDesign(doc: string, repo?: string) {
+    return this.get<SharedDesign>(`/shared-designs/${encodeURIComponent(doc)}`, { repo });
+  }
+
+  writeSharedDesign(doc: string, tail: string, body: Record<string, unknown>) {
+    return this.post<SharedDesign>(`/shared-designs/${encodeURIComponent(doc)}/${tail}`, body);
   }
 
   /* An org admin's review rules, with the teams and roles they can name and the designs each covers now. */

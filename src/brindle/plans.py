@@ -293,32 +293,13 @@ def _signed(review: dict) -> dict[str, float]:
             if isinstance(s, dict) and isinstance(s.get("sub"), str) and s.get("rev") == review.get("rev")}
 
 
-def _gate(c, p: dict) -> dict | None:
-    """Plan ``p``'s build gate, read on connection ``c``; None if it isn't
-    shared, or its Team plan has ended and that still holds for whoever is
-    signed in (shared_docs.lapse_stands). Sign-offs and rules count only
-    while the Library's head is the revision on screen: until a new revision
-    is sent they say nothing about it."""
-    from brindle.plan_docs import TEAMMATE
-
-    row = c.execute("SELECT * FROM plan_shares WHERE plan_id=?", (p["id"],)).fetchone()
-    if row is None:
-        return None
-    from brindle.pro import review_policies, shared_docs
-
-    if shared_docs.lapse_stands(row, p):
-        return None
-
-    review = json.loads(row["review"])
-    read = _review_rows(review)
-    people, rules = read or ({}, [])
-    refusal = review.get(review_policies.REFUSED)
-    current = (read is not None and not refusal and row["doc_id"] is not None and row["local_rev"] == p["rev"]
-               and review.get("rev") == row["remote_rev"])
-    signed = _signed(review) if current else {}
-    asked = {r["author"][len(TEAMMATE):]: r["at"] for r in c.execute(
-        "SELECT author, MAX(created_at) AS at FROM plan_threads WHERE plan_id=? AND parent_id IS NULL"
-        " AND status='open' AND question=0 AND author LIKE ? GROUP BY author", (p["id"], TEAMMATE + "%"))}
+def tally(people: dict[str, bool], rules: list[dict], signed: dict[str, float], asked: dict[str, float],
+          current: bool, you: str | None) -> tuple[list[dict], list[dict], list[dict], int, list[str], list[str]]:
+    """Count a design's reviewers and org rules: ``(rows, policies, required,
+    met, unmet, changes)``. ``signed`` and ``asked`` say when each person
+    signed the head revision and last left an open comment or suggestion;
+    ``current``: whether rule results describe the revision on screen."""
+    from brindle.pro import review_policies
 
     def asked_since(sub: str) -> bool:
         return sub in asked and asked[sub] > signed.get(sub, -1)
@@ -329,7 +310,7 @@ def _gate(c, p: dict) -> dict | None:
         return SIGNED if sub in signed else WAITING
 
     rows = [{"sub": sub, "name": None, "required": required, "status": status(sub), "met_by": [], "changes_by": [],
-             "meets": [], "you": sub == row["owner"]} for sub, required in people.items()]
+             "meets": [], "you": sub == you} for sub, required in people.items()]
     by_sub = {r["sub"]: r for r in rows}
     policies = []
     for rule in rules:
@@ -358,6 +339,36 @@ def _gate(c, p: dict) -> dict | None:
     met = sum(r["status"] in _MET for r in required)
     unmet = [r["sub"] or r["name"] for r in required if r["status"] not in _MET]
     changes = [who for r in required if r["status"] == CHANGES for who in ([r["sub"]] if r["sub"] else r["changes_by"])]
+    return rows, policies, required, met, unmet, changes
+
+
+def _gate(c, p: dict) -> dict | None:
+    """Plan ``p``'s build gate, read on connection ``c``; None if it isn't
+    shared, or its Team plan has ended and that still holds for whoever is
+    signed in (shared_docs.lapse_stands). Sign-offs and rules count only
+    while the Library's head is the revision on screen: until a new revision
+    is sent they say nothing about it."""
+    from brindle.plan_docs import TEAMMATE
+
+    row = c.execute("SELECT * FROM plan_shares WHERE plan_id=?", (p["id"],)).fetchone()
+    if row is None:
+        return None
+    from brindle.pro import review_policies, shared_docs
+
+    if shared_docs.lapse_stands(row, p):
+        return None
+
+    review = json.loads(row["review"])
+    read = _review_rows(review)
+    people, rules = read or ({}, [])
+    refusal = review.get(review_policies.REFUSED)
+    current = (read is not None and not refusal and row["doc_id"] is not None and row["local_rev"] == p["rev"]
+               and review.get("rev") == row["remote_rev"])
+    signed = _signed(review) if current else {}
+    asked = {r["author"][len(TEAMMATE):]: r["at"] for r in c.execute(
+        "SELECT author, MAX(created_at) AS at FROM plan_threads WHERE plan_id=? AND parent_id IS NULL"
+        " AND status='open' AND question=0 AND author LIKE ? GROUP BY author", (p["id"], TEAMMATE + "%"))}
+    rows, policies, required, met, unmet, changes = tally(people, rules, signed, asked, current, row["owner"])
     if p["state"] == "approved":
         state, reason = "closed", "The review is closed: this plan is building."
     elif p["state"] == "redirected":
