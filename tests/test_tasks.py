@@ -327,14 +327,18 @@ def cross_session_wait(db, coordination, monkeypatch):
     db.conn.execute("UPDATE workspaces SET branch='session-a' WHERE id='a'")
     refs = {"refs/heads/main": "cw-main", "refs/heads/session-a": "cw-main", "refs/heads/session": "cw-b"}
     monkeypatch.setattr(git, "ref_shas", lambda root: refs)
-    # After a sync b's head moves and its diff no longer has the file.
+    # What each head's diff touches: b synced off the file, then edited it again.
+    diffs = {"cw-b": ["src/shared.py"], "cw-b-synced": [], "cw-b-new": ["src/shared.py"], "cw-c": ["src/shared.py"]}
     monkeypatch.setattr(git, "paths", lambda args, root:
-                        ["src/shared.py"] if args[0] == "diff" and args[-1].endswith("cw-b") else [])
+                        diffs.get(args[-1].split("...")[-1], []) if args[0] == "diff" else [])
     monkeypatch.setattr(git, "ok", lambda args, root: False)   # a never inherits b's branch
     monkeypatch.setattr(identity_lock, "ensure_workspace", lambda *args: None)
     monkeypatch.setattr(config, "load_repo_config",
                         lambda root: SimpleNamespace(overlap=None, max_weight=None, merge_into=None))
-    monkeypatch.setattr(tasks, "task_wait", lambda db, t: None)
+    room = {"why": None}
+    monkeypatch.setattr(tasks, "task_wait", lambda db, t: room["why"])
+    monkeypatch.setattr(tasks, "_wait_in_background", lambda task_id: None)
+    monkeypatch.setattr(tasks, "_note_long_wait", lambda *args: None)
     monkeypatch.setattr(tasks, "_claim_fair", lambda db, t: (db.claim_task(t.id), None, None))
     monkeypatch.setattr(tasks, "_launch_warnings", lambda *args: [])
     monkeypatch.setattr(tasks.agents, "send_message", lambda *args, **kwargs: None)
@@ -358,7 +362,12 @@ def cross_session_wait(db, coordination, monkeypatch):
     assert tasks.room_duplicate(db, "a", "/repo", "new work", c.held.branch).id == "new"
     assert starts == [] and db.get_task("new").state == "pending"
     told.clear()
-    return SimpleNamespace(refs=refs, starts=starts, told=told)
+    return SimpleNamespace(refs=refs, starts=starts, told=told, room=room, coordination=c)
+
+
+def _land(db, branch="session"):
+    db.conn.execute("INSERT INTO session_prs (root_id, branch, url, pushed_sha, opened_at, merged_at)"
+                    " VALUES ('b', ?, ?, 'x', 0, ?)", (branch, f"u-{branch}", tasks.time.time()))
 
 
 @pytest.mark.parametrize("event", [
@@ -370,13 +379,40 @@ def cross_session_wait(db, coordination, monkeypatch):
 def test_cross_session_wait_released_when_other_session_lands(db, cross_session_wait, event):
     w = cross_session_wait
     if event == "landed":   # b's PR merged on main; its branch hasn't synced yet
-        db.conn.execute("INSERT INTO session_prs (root_id, branch, url, pushed_sha, opened_at, merged_at)"
-                        " VALUES ('b', 'session', 'u', 'x', 0, ?)", (tasks.time.time(),))
+        _land(db, "unrelated")   # a PR from another of b's branches releases nothing
+        assert tasks.sweep(db) == 0
+        _land(db)
     else:   # b synced main back in: its branch no longer holds the file
         w.refs["refs/heads/session"] = "cw-b-synced"
     assert tasks.sweep(db) == 1
     assert db.get_task("new").state == "started" and len(w.starts) == 1
     assert w.told == []   # a release tells nobody beyond the caller's start note
+
+
+@pytest.mark.parametrize("event", ["landed", "synced"])
+def test_cross_session_wait_requeues_on_new_work_after_release(db, cross_session_wait, event):
+    w = cross_session_wait
+    if event == "landed":
+        _land(db)
+    else:
+        w.refs["refs/heads/session"] = "cw-b-synced"
+    w.room["why"] = "machine busy"   # released, but no room to start yet
+    assert tasks.sweep(db) == 0
+    assert tasks._loads(db.get_task("new").depends_on) == []
+    w.refs["refs/heads/session"] = "cw-b-new"   # b edits the file again before there's room
+    w.room["why"] = None
+    assert tasks.sweep(db) == 0
+    assert tasks._loads(db.get_task("new").depends_on) == ["workspace:b"] and w.starts == []
+
+
+def test_cross_session_wait_landing_does_not_hide_other_holders(db, cross_session_wait):
+    w = cross_session_wait
+    w.coordination.workspace("c", "session-c")
+    db.add_agent(Agent("c", "c", "developer", "claude", None, "interactive", "processing", "", None, 0))
+    w.refs["refs/heads/session-c"] = "cw-c"
+    _land(db)   # b landed, its branch unsynced; c, which never landed, holds the file too
+    assert tasks.sweep(db) == 0
+    assert tasks._loads(db.get_task("new").depends_on) == ["workspace:c"] and w.starts == []
 
 
 def test_cross_session_wait_falls_back_after_drift_limit(db, cross_session_wait):
