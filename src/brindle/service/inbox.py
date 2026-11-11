@@ -431,6 +431,13 @@ def _review_items(db: DB, repo_root: str | None) -> list[InboxItemDTO]:
                     "SELECT 1 FROM plan_threads WHERE plan_id=? AND parent_id IS NULL AND status='open'"
                     " AND author=? AND rev=?", (p["id"], plan_docs.TEAMMATE + me, p["rev"])).fetchone():
             out.append(InboxItemDTO(kind="review_requested", reason="Review requested", detail=title, **link))
+    # The Library's queue reaches people with no local copy of the plan; a doc
+    # this machine has a plan for is judged from that plan above.
+    local = {r["doc_id"] for r in db.conn.execute("SELECT doc_id FROM plan_shares WHERE doc_id IS NOT NULL")}
+    from brindle.pro import review_queue
+
+    out += [InboxItemDTO(kind="review_requested", reason="Review requested", detail=q["title"], doc=q["doc_id"])
+            for q in review_queue.waiting(me) if q["doc_id"] not in local]
     return out
 
 

@@ -452,6 +452,32 @@ def test_required_reviewers_are_synced_in_the_background(monkeypatch):
     assert synced
 
 
+def test_a_teammate_with_no_local_plan_gets_the_review_requested_card_from_the_library_queue(
+        db, parts, backend, monkeypatch):
+    """The card comes from the Library's queue (no plan here), clears when the item leaves it, and a
+    failed poll keeps it without an error."""
+    from brindle.daemon import lifecycle
+    from brindle.pro import review_queue as rq
+    from brindle.service import inbox
+
+    pid, lib, net = parts
+    queue = {"status": 200, "requests": [{"doc_id": "ad_9", "title": "Cloud workers for Pro", "rev": 3}]}
+    backend.routes["GET /me/analysis-docs/review-requests"] = lambda f, h: (queue["status"], dict(queue))
+    monkeypatch.setattr(inbox, "_my_sub", lambda: "u_me")
+    monkeypatch.setattr(ad, "_session", lambda client=None, store=None: (net["client"], net["store"]))
+    rq.clear()
+    cards = lambda: [(i.kind, i.doc, i.detail) for i in inbox._review_items(db, None)]  # noqa: E731
+    assert cards() == []                                     # nothing polled yet
+    lifecycle._poll_review_queue()
+    assert cards() == [("review_requested", "ad_9", "Cloud workers for Pro")]
+    queue["status"] = 503
+    lifecycle._poll_review_queue()
+    assert len(cards()) == 1                                 # a failed poll keeps the card
+    queue.update(status=200, requests=[])
+    lifecycle._poll_review_queue()
+    assert cards() == []                                     # it left the queue
+
+
 def test_a_shared_plan_goes_to_the_library_and_what_teammates_write_comes_back(db, parts, backend):
     pid, lib, net = parts
     grant = {"u_c": {"can_edit": False, "can_suggest": False, "can_comment": True}}
