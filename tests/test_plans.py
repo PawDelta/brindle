@@ -701,6 +701,43 @@ def test_required_reviewers_approval_needs_the_library(db, session, library, mon
     assert e.value.code == "gate_unverified" and plans.get(db, pid)["state"] == "open"
 
 
+def test_shared_doc_inbox_cards_follow_the_review_and_clear_when_acted_on(db, session, monkeypatch):
+    from brindle import plan_docs
+    from brindle.service import inbox
+
+    boss, _ = session
+    visual_offers.person_spoke(db, boss, "Make a planning doc.")
+    pid = mcp_server.propose_plan(PLAN).split()[2]
+    me = {"sub": "me"}
+    monkeypatch.setattr(inbox, "_my_sub", lambda: me["sub"])
+    kinds = lambda: [(i.kind, i.doc) for i in inbox._review_items(db, None)]  # noqa: E731
+
+    _shared(db, pid, {"rev": 1, "reviewers": ONE, "sign_offs": []})
+    assert kinds() == []                                   # the author waits: no card yet
+    me["sub"] = "a"
+    assert kinds() == [("review_requested", "doc")]        # the reviewer is asked, and it opens the doc
+    _shared(db, pid, {"rev": 1, "reviewers": ONE, "sign_offs": _signed_off("a")})
+    assert kinds() == []                                   # signing clears it
+    me["sub"] = "me"
+    assert kinds() == [("signed_off", "doc")]
+    plan_docs.comment(db, pid, 1, {"kind": "section", "section": "s1"}, "No.", author=plan_docs.TEAMMATE + "a")
+    assert kinds() == [("changes_requested", "doc")]
+    _shared(db, pid, {"rev": 1, "reviewers": ONE, "sign_offs": []})
+    me["sub"] = "a"
+    assert kinds() == []                                   # asking for changes answers the request too
+    visual_offers.person_spoke(db, boss, "Make a planning doc.")
+    mcp_server.propose_plan(PLAN + "\n\nRevised.", plan_id=pid)
+    _shared(db, pid, {"rev": 2, "reviewers": ONE, "sign_offs": []}, local_rev=2, remote_rev=2)
+    assert kinds() == [("review_requested", "doc")]        # the answer was to r1: r2 needs its own review
+    me["sub"] = "me"
+    assert kinds() == [("changes_requested", "doc")]
+    with monkeypatch.context() as m:
+        m.setattr(inbox.identity_lock, "locked_by", lambda _id: True)
+        assert kinds() == []                               # another identity's session shows nothing
+    me["sub"] = None                                      # logged out: no cards, no error
+    assert kinds() == []
+
+
 def test_only_the_person_decides_and_only_when_they_asked(db, session):
     boss, started = session
     with pytest.raises(ToolError, match="ask for one"):
