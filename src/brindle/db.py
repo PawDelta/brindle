@@ -168,6 +168,13 @@ CREATE TABLE IF NOT EXISTS milestone_phases (
     milestone_id INTEGER PRIMARY KEY REFERENCES milestones(id) ON DELETE CASCADE,
     phase TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS phase_landings (
+    root_id TEXT NOT NULL REFERENCES autopilot(root_id) ON DELETE CASCADE,
+    phase TEXT NOT NULL,           -- empty for a goal without phases
+    notified_at REAL,
+    pending INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (root_id, phase)
+);
 -- Short goal labels live outside the released autopilot table.
 CREATE TABLE IF NOT EXISTS goal_summaries (
     root_id TEXT PRIMARY KEY REFERENCES autopilot(root_id) ON DELETE CASCADE,

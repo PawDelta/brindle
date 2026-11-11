@@ -707,6 +707,8 @@ def set_goal(db: DB, root_id: str, goal: str,
         short = prefix.rsplit(" ", 1)[0] if " " in prefix else short[:30]
     fields["summary"] = short
     if ap is None or ap.goal != goal.strip():
+        with db.tx() as c:
+            c.execute("DELETE FROM phase_landings WHERE root_id=?", (root_id,))
         fields["audit_history"] = None
         fields["plan_offer"] = None     # a new goal gets its own, single offer
         fields["offer_goal_at"] = time.time()
@@ -1524,6 +1526,7 @@ def check_milestones(db: DB, root_id: str, ws: Workspace, position: int | None =
         db.update_autopilot(root_id, state="running")
     elif ap and ap.state in ("done", "auditing"):
         db.update_autopilot(root_id, state="running")
+    phase_landing(db, root_id, newly_passed=newly_passed)
     bus.publish_agent(db, "autopilot.checked", root_id, position=position,
                       passed=sum(m.status == "passed" for m in ms), total=len(ms),
                       regressed=[m.position for m in regressed], done=done)
@@ -1765,6 +1768,56 @@ def record_audit(db: DB, root_id: str, approved: bool, summary: str) -> str:
 
 
 # -- progress -----------------------------------------------------------------
+
+
+def phase_landing(db: DB, root_id: str, now: float | None = None, *,
+                  newly_passed: bool = False) -> None:
+    """Queue a landing once per completed goal phase, or daily after progress.
+
+    The claim and inbox message commit together. Unphased progress during
+    the cooldown stays pending until a later check or sweep can announce it.
+    """
+    from brindle import agents
+
+    now = time.time() if now is None else now
+    root = db.get_agent(root_id)
+    if root is None:
+        return
+    held = agents._holds_for(db, root)
+    queued = []
+    with db.tx() as c:
+        ms = db.milestones(root_id)
+        phases = {m.phase_name for m in ms if m.phase_name}
+        complete = [phase for phase in sorted(phases)
+                    if all(m.status == "passed" for m in ms if m.phase_name == phase)]
+        if not phases and ms:
+            c.execute("INSERT INTO phase_landings (root_id, phase, pending) VALUES (?, '', ?) "
+                      "ON CONFLICT(root_id, phase) DO UPDATE SET pending=MAX(pending, excluded.pending)",
+                      (root_id, int(newly_passed)))
+            complete = [""]
+        for phase in complete:
+            previous = c.execute("SELECT notified_at, pending FROM phase_landings "
+                                 "WHERE root_id=? AND phase=?", (root_id, phase)).fetchone()
+            if phase:
+                if previous is not None:
+                    continue
+            elif not previous["pending"] or (previous["notified_at"] is not None
+                                             and now - previous["notified_at"] < 86400):
+                continue
+            subject = (f"Every milestone in phase {phase!r} has passed." if phase
+                       else "Milestones have passed since the last landing notice.")
+            message = f"[brindle autopilot] {subject} Open or push the session PR now."
+            c.execute("INSERT INTO phase_landings (root_id, phase, notified_at, pending) VALUES (?,?,?,0) "
+                      "ON CONFLICT(root_id, phase) DO UPDATE SET notified_at=excluded.notified_at, pending=0",
+                      (root_id, phase, now))
+            cur = c.execute("INSERT INTO inbox (agent_id, body, created_at, held) VALUES (?,?,?,?)",
+                            (root_id, message, now, int(held)))
+            queued.append(cur.lastrowid)
+    for message_id in queued:
+        bus.publish_agent(db, "message.queued", root_id, message_id=message_id, sender_id=None, held=held)
+    if queued:
+        agents._notify_supervisor(db, root)
+
 
 MARK = {"passed": "✓", "failed": "✗", "not_done": "○", "regressed": "✗", "pending": "○",
         "working": "◐", "waiting": "◌", "checking": "◌"}
@@ -2360,6 +2413,8 @@ def usage_sweep(db: DB, now: float | None = None) -> list[str]:
         ap = db.get_autopilot(root.id)
         if ap is None:
             continue
+        if ap.goal:
+            phase_landing(db, root.id, now)
         if ap.state == "running" and ap.goal:
             ws = db.get_workspace(root.workspace_id)
             cfg = load_repo_config(ws.repo_root) if ws else RepoConfig()
