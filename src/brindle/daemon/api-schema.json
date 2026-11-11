@@ -5853,8 +5853,16 @@
           "type": "object"
         },
         "PlanGateDTO": {
-          "description": "A shared plan's build gate (brindle.plans.gate). ``reason``: why it\ncan't build now; ``signed`` of ``required`` sign-offs are in.",
+          "description": "A shared plan's build gate (brindle.plans.gate). ``reason``: why it\ncan't build now; ``signed`` of ``required`` sign-offs are in. ``policies``:\nevery org review rule covering it, including those a listed reviewer meets.",
           "properties": {
+            "policies": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/PlanGatePolicyDTO"
+              },
+              "title": "Policies",
+              "type": "array"
+            },
             "reason": {
               "anyOf": [
                 {
@@ -5909,6 +5917,193 @@
             "signed"
           ],
           "title": "PlanGateDTO",
+          "type": "object"
+        },
+        "PlanGatePolicyDTO": {
+          "description": "An org review rule covering a shared plan, which nobody on the doc can\nremove. ``when``: paths, label or any; ``matched``: what in this revision\nset it off; ``needs_kind``: team, role or person; ``eligible``: how many\npeople can meet it today.",
+          "properties": {
+            "approvals": {
+              "title": "Approvals",
+              "type": "integer"
+            },
+            "changes_by": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Changes By",
+              "type": "array"
+            },
+            "eligible": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Eligible"
+            },
+            "label": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Label"
+            },
+            "matched": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Matched",
+              "type": "array"
+            },
+            "met_by": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Met By",
+              "type": "array"
+            },
+            "name": {
+              "title": "Name",
+              "type": "string"
+            },
+            "needs_kind": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Needs Kind"
+            },
+            "needs_name": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Needs Name"
+            },
+            "note": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Note"
+            },
+            "org_id": {
+              "title": "Org Id",
+              "type": "string"
+            },
+            "paths": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Paths",
+              "type": "array"
+            },
+            "policy": {
+              "title": "Policy",
+              "type": "string"
+            },
+            "set_at": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Set At"
+            },
+            "set_by": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Set By"
+            },
+            "stand_ins": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/PlanPolicyStandInDTO"
+              },
+              "title": "Stand Ins",
+              "type": "array"
+            },
+            "status": {
+              "enum": [
+                "signed_off",
+                "changes_requested",
+                "waiting",
+                "waived"
+              ],
+              "title": "Status",
+              "type": "string"
+            },
+            "waiver": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PlanPolicyWaiverDTO"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "when": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "When"
+            }
+          },
+          "required": [
+            "org_id",
+            "policy",
+            "name",
+            "approvals",
+            "status"
+          ],
+          "title": "PlanGatePolicyDTO",
           "type": "object"
         },
         "PlanGateRowDTO": {
@@ -6042,6 +6237,80 @@
             "label"
           ],
           "title": "PlanOptionDTO",
+          "type": "object"
+        },
+        "PlanPolicyStandInDTO": {
+          "description": "Someone an org admin named to sign for a review rule until ``until``.",
+          "properties": {
+            "at": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "At"
+            },
+            "by": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "By"
+            },
+            "stand_in": {
+              "title": "Stand In",
+              "type": "string"
+            },
+            "until": {
+              "title": "Until",
+              "type": "number"
+            }
+          },
+          "required": [
+            "stand_in",
+            "until"
+          ],
+          "title": "PlanPolicyStandInDTO",
+          "type": "object"
+        },
+        "PlanPolicyWaiverDTO": {
+          "description": "An org admin's waiver of a review rule, for the revision on screen.",
+          "properties": {
+            "at": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "At"
+            },
+            "by": {
+              "title": "By",
+              "type": "string"
+            },
+            "reason": {
+              "title": "Reason",
+              "type": "string"
+            }
+          },
+          "required": [
+            "by",
+            "reason"
+          ],
+          "title": "PlanPolicyWaiverDTO",
           "type": "object"
         },
         "PlanReplyDTO": {
@@ -6699,6 +6968,193 @@
     },
     "PlanGateDTO": {
       "$defs": {
+        "PlanGatePolicyDTO": {
+          "description": "An org review rule covering a shared plan, which nobody on the doc can\nremove. ``when``: paths, label or any; ``matched``: what in this revision\nset it off; ``needs_kind``: team, role or person; ``eligible``: how many\npeople can meet it today.",
+          "properties": {
+            "approvals": {
+              "title": "Approvals",
+              "type": "integer"
+            },
+            "changes_by": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Changes By",
+              "type": "array"
+            },
+            "eligible": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Eligible"
+            },
+            "label": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Label"
+            },
+            "matched": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Matched",
+              "type": "array"
+            },
+            "met_by": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Met By",
+              "type": "array"
+            },
+            "name": {
+              "title": "Name",
+              "type": "string"
+            },
+            "needs_kind": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Needs Kind"
+            },
+            "needs_name": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Needs Name"
+            },
+            "note": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Note"
+            },
+            "org_id": {
+              "title": "Org Id",
+              "type": "string"
+            },
+            "paths": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Paths",
+              "type": "array"
+            },
+            "policy": {
+              "title": "Policy",
+              "type": "string"
+            },
+            "set_at": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Set At"
+            },
+            "set_by": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Set By"
+            },
+            "stand_ins": {
+              "default": [],
+              "items": {
+                "$ref": "#/$defs/PlanPolicyStandInDTO"
+              },
+              "title": "Stand Ins",
+              "type": "array"
+            },
+            "status": {
+              "enum": [
+                "signed_off",
+                "changes_requested",
+                "waiting",
+                "waived"
+              ],
+              "title": "Status",
+              "type": "string"
+            },
+            "waiver": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PlanPolicyWaiverDTO"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
+            "when": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "When"
+            }
+          },
+          "required": [
+            "org_id",
+            "policy",
+            "name",
+            "approvals",
+            "status"
+          ],
+          "title": "PlanGatePolicyDTO",
+          "type": "object"
+        },
         "PlanGateRowDTO": {
           "description": "One row of a plan's build gate: a reviewer (``sub``) or an org review\nrule no one on the list meets (``name``). ``meets``: the rules this\nreviewer's sign-off also counts for. ``met_by``: who met a rule.\n``changes_by``: the rule's signers who have since asked for changes.",
           "properties": {
@@ -6776,10 +7232,92 @@
           ],
           "title": "PlanGateRowDTO",
           "type": "object"
+        },
+        "PlanPolicyStandInDTO": {
+          "description": "Someone an org admin named to sign for a review rule until ``until``.",
+          "properties": {
+            "at": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "At"
+            },
+            "by": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "By"
+            },
+            "stand_in": {
+              "title": "Stand In",
+              "type": "string"
+            },
+            "until": {
+              "title": "Until",
+              "type": "number"
+            }
+          },
+          "required": [
+            "stand_in",
+            "until"
+          ],
+          "title": "PlanPolicyStandInDTO",
+          "type": "object"
+        },
+        "PlanPolicyWaiverDTO": {
+          "description": "An org admin's waiver of a review rule, for the revision on screen.",
+          "properties": {
+            "at": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "At"
+            },
+            "by": {
+              "title": "By",
+              "type": "string"
+            },
+            "reason": {
+              "title": "Reason",
+              "type": "string"
+            }
+          },
+          "required": [
+            "by",
+            "reason"
+          ],
+          "title": "PlanPolicyWaiverDTO",
+          "type": "object"
         }
       },
-      "description": "A shared plan's build gate (brindle.plans.gate). ``reason``: why it\ncan't build now; ``signed`` of ``required`` sign-offs are in.",
+      "description": "A shared plan's build gate (brindle.plans.gate). ``reason``: why it\ncan't build now; ``signed`` of ``required`` sign-offs are in. ``policies``:\nevery org review rule covering it, including those a listed reviewer meets.",
       "properties": {
+        "policies": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PlanGatePolicyDTO"
+          },
+          "title": "Policies",
+          "type": "array"
+        },
         "reason": {
           "anyOf": [
             {
@@ -6834,6 +7372,269 @@
         "signed"
       ],
       "title": "PlanGateDTO",
+      "type": "object"
+    },
+    "PlanGatePolicyDTO": {
+      "$defs": {
+        "PlanPolicyStandInDTO": {
+          "description": "Someone an org admin named to sign for a review rule until ``until``.",
+          "properties": {
+            "at": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "At"
+            },
+            "by": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "By"
+            },
+            "stand_in": {
+              "title": "Stand In",
+              "type": "string"
+            },
+            "until": {
+              "title": "Until",
+              "type": "number"
+            }
+          },
+          "required": [
+            "stand_in",
+            "until"
+          ],
+          "title": "PlanPolicyStandInDTO",
+          "type": "object"
+        },
+        "PlanPolicyWaiverDTO": {
+          "description": "An org admin's waiver of a review rule, for the revision on screen.",
+          "properties": {
+            "at": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "At"
+            },
+            "by": {
+              "title": "By",
+              "type": "string"
+            },
+            "reason": {
+              "title": "Reason",
+              "type": "string"
+            }
+          },
+          "required": [
+            "by",
+            "reason"
+          ],
+          "title": "PlanPolicyWaiverDTO",
+          "type": "object"
+        }
+      },
+      "description": "An org review rule covering a shared plan, which nobody on the doc can\nremove. ``when``: paths, label or any; ``matched``: what in this revision\nset it off; ``needs_kind``: team, role or person; ``eligible``: how many\npeople can meet it today.",
+      "properties": {
+        "approvals": {
+          "title": "Approvals",
+          "type": "integer"
+        },
+        "changes_by": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Changes By",
+          "type": "array"
+        },
+        "eligible": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Eligible"
+        },
+        "label": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Label"
+        },
+        "matched": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Matched",
+          "type": "array"
+        },
+        "met_by": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Met By",
+          "type": "array"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "needs_kind": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Needs Kind"
+        },
+        "needs_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Needs Name"
+        },
+        "note": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Note"
+        },
+        "org_id": {
+          "title": "Org Id",
+          "type": "string"
+        },
+        "paths": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Paths",
+          "type": "array"
+        },
+        "policy": {
+          "title": "Policy",
+          "type": "string"
+        },
+        "set_at": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Set At"
+        },
+        "set_by": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Set By"
+        },
+        "stand_ins": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PlanPolicyStandInDTO"
+          },
+          "title": "Stand Ins",
+          "type": "array"
+        },
+        "status": {
+          "enum": [
+            "signed_off",
+            "changes_requested",
+            "waiting",
+            "waived"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "waiver": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PlanPolicyWaiverDTO"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "when": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "When"
+        }
+      },
+      "required": [
+        "org_id",
+        "policy",
+        "name",
+        "approvals",
+        "status"
+      ],
+      "title": "PlanGatePolicyDTO",
       "type": "object"
     },
     "PlanGateRowDTO": {
@@ -7062,6 +7863,80 @@
         "label"
       ],
       "title": "PlanOptionDTO",
+      "type": "object"
+    },
+    "PlanPolicyStandInDTO": {
+      "description": "Someone an org admin named to sign for a review rule until ``until``.",
+      "properties": {
+        "at": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "At"
+        },
+        "by": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "By"
+        },
+        "stand_in": {
+          "title": "Stand In",
+          "type": "string"
+        },
+        "until": {
+          "title": "Until",
+          "type": "number"
+        }
+      },
+      "required": [
+        "stand_in",
+        "until"
+      ],
+      "title": "PlanPolicyStandInDTO",
+      "type": "object"
+    },
+    "PlanPolicyWaiverDTO": {
+      "description": "An org admin's waiver of a review rule, for the revision on screen.",
+      "properties": {
+        "at": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "At"
+        },
+        "by": {
+          "title": "By",
+          "type": "string"
+        },
+        "reason": {
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "by",
+        "reason"
+      ],
+      "title": "PlanPolicyWaiverDTO",
       "type": "object"
     },
     "PlanReplyDTO": {
@@ -10782,6 +11657,10 @@
     {
       "method": "POST",
       "path": "/v1/plans/{id}/edit"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/plans/{id}/policy-override"
     },
     {
       "method": "POST",

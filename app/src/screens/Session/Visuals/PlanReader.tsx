@@ -239,12 +239,14 @@ function DesignDoc({ client, plan, visual, mode, writes }: {
   }, []);
   // Team review: who can be asked, and where the doc can be shared. Absent (not on a Team plan,
   // or offline), the doc simply offers no sharing.
-  const sharing: PlanSharingClient | undefined = client.sharePlan && client.setPlanReviewers && client.syncPlan && client.signOffPlan && client.libraryPeople && client.docScopes ? (client as PlanSharingClient) : undefined;
+  const sharing: PlanSharingClient | undefined = client.sharePlan && client.setPlanReviewers && client.syncPlan && client.signOffPlan && client.overridePlanPolicy && client.libraryPeople && client.docScopes ? (client as PlanSharingClient) : undefined;
   const [directory, setDirectory] = useState<LibraryPerson[]>([]);
+  const [adminOrg, setAdminOrg] = useState<string | null>(null);
+  const [me, setMe] = useState<string | null>(null);
   const [scopes, setScopes] = useState<DocScope[]>([]);
   useEffect(() => {
     if (!sharing) return;
-    sharing.libraryPeople().then((got) => { if (alive.current) setDirectory(got.people); }, () => {});
+    sharing.libraryPeople().then((got) => { if (alive.current) { setDirectory(got.people); setAdminOrg(got.admin_org ?? null); setMe(got.me ?? null); } }, () => {});
     sharing.docScopes().then((got) => { if (alive.current) setScopes(got.scopes); }, () => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps -- once for this doc: the reader is keyed by plan
   }, []);
@@ -258,6 +260,9 @@ function DesignDoc({ client, plan, visual, mode, writes }: {
   }, [plan.id, shared]);
   const nameOf = (sub: string) => directory.find((p) => p.sub === sub)?.email || sub;
   const gateWhy = [...(gate?.waiting_on ?? []), ...(gate?.reviewers ?? []).flatMap((r) => r.changes_by ?? [])].reduce((text, who) => text.split(who).join(nameOf(who)), gate?.reason ?? "");
+  // Everyone the author chose has signed and only org rules are left.
+  const unsigned = (gate?.reviewers ?? []).filter((r) => r.required && r.status !== "signed_off" && r.status !== "waived");
+  const policyHeld = gate?.state === "waiting" && unsigned.length > 0 && unsigned.every((r) => !r.sub);
   const collapse = (to: boolean) => {
     setCollapsed(to);
     try {
@@ -545,13 +550,13 @@ function DesignDoc({ client, plan, visual, mode, writes }: {
               <h1 className="m-0 font-serif text-[28px] font-semibold leading-[1.2] tracking-[-0.01em] text-ink">{plan.title}</h1>
               <dl className="m-0 grid grid-cols-[72px_minmax(0,1fr)] gap-x-3 gap-y-[5px] text-[12.5px] leading-[1.6] text-ink-2">
                 <dt className="text-ink-3">Status</dt>
-                <dd className="m-0 flex flex-wrap items-center gap-x-3.5 gap-y-0.5" data-testid="plan-status" data-state={plan.state}>
-                  <span className={`${pill} ${plan.state === "approved" || gate?.state === "ready" ? "text-pass" : "text-sap"}`}>{!open ? (plan.state === "approved" ? (gate ? "Review closed" : "Signed off") : "Changes requested") : gate ? (gate.state === "ready" ? "Ready to build" : gate.state === "changes_requested" ? "Changes requested" : "In team review") : "Needs your sign-off"}</span>
+                <dd className="m-0 flex flex-wrap items-center gap-x-3.5 gap-y-0.5" data-testid="plan-status" data-state={plan.state} data-held={policyHeld ? "policy" : undefined}>
+                  <span className={`${pill} ${plan.state === "approved" || gate?.state === "ready" ? "text-pass" : "text-sap"}`}>{!open ? (plan.state === "approved" ? (gate ? "Review closed" : "Signed off") : "Changes requested") : gate ? (gate.state === "ready" ? "Ready to build" : gate.state === "changes_requested" ? "Changes requested" : policyHeld ? "Blocked by org policy" : "In team review") : "Needs your sign-off"}</span>
                   <span>{!open ? (plan.state === "approved" ? "Its workers are building it" : "The supervisor is revising it") : gate ? "Build starts when every required reviewer signs off" : "Nothing is built until you sign off"}</span>
                 </dd>
                 <dt className="text-ink-3">Authors</dt>
                 <dd className="m-0">You and the supervisor</dd>
-                <Reviewers plan={plan} client={sharing} directory={directory} scopes={scopes} busy={busy} nameOf={nameOf} write={write} />
+                <Reviewers plan={plan} client={sharing} directory={directory} adminOrg={adminOrg} me={me} scopes={scopes} busy={busy} nameOf={nameOf} write={write} />
                 {plan.ask && (
                   <>
                     <dt className="text-ink-3">Understood</dt>

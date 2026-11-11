@@ -248,8 +248,11 @@ def open_plan(db: DB, root_id: str) -> dict | None:
 def _review_rows(review: dict) -> tuple[dict[str, bool], list[dict]] | None:
     """The Library's reviewers as ``{sub: required}`` and its policy rules, or
     None when it hasn't answered or a row can't be read: an unreadable rule
-    must keep the gate shut, never drop out of it."""
-    people, rules = review.get("reviewers"), review.get("policy_reviewers") or []
+    must keep the gate shut, never drop out of it. The Library always sends
+    the rules, an empty list when there are none: no list is no answer."""
+    from brindle.pro import review_policies
+
+    people, rules = review.get("reviewers"), review.get("policy_reviewers")
     if not isinstance(people, list) or not isinstance(rules, list):
         return None
     out: dict[str, bool] = {}
@@ -257,10 +260,10 @@ def _review_rows(review: dict) -> tuple[dict[str, bool], list[dict]] | None:
         if not isinstance(r, dict) or not isinstance(r.get("sub"), str) or not r["sub"]:
             return None
         out[r["sub"]] = out.get(r["sub"], False) or bool(r.get("required"))
-    for r in rules:
-        names = [] if not isinstance(r, dict) else [r.get("on_list") or [], r.get("met_by") or []]
-        if not names or not all(isinstance(n, list) and all(isinstance(s, str) for s in n) for n in names):
-            return None
+    if not all(review_policies.readable(r) for r in rules):
+        return None
+    if not review_policies.pending_agrees(review.get("pending_policies"), rules):
+        return None
     return out, rules
 
 
@@ -281,10 +284,13 @@ def _gate(c, p: dict) -> dict | None:
     row = c.execute("SELECT * FROM plan_shares WHERE plan_id=?", (p["id"],)).fetchone()
     if row is None:
         return None
+    from brindle.pro import review_policies
+
     review = json.loads(row["review"])
     read = _review_rows(review)
     people, rules = read or ({}, [])
-    current = (read is not None and row["doc_id"] is not None and row["local_rev"] == p["rev"]
+    refusal = review.get(review_policies.REFUSED)
+    current = (read is not None and not refusal and row["doc_id"] is not None and row["local_rev"] == p["rev"]
                and review.get("rev") == row["remote_rev"])
     signed = _signed(review) if current else {}
     asked = {r["author"][len(TEAMMATE):]: r["at"] for r in c.execute(
@@ -302,19 +308,21 @@ def _gate(c, p: dict) -> dict | None:
     rows = [{"sub": sub, "name": None, "required": required, "status": status(sub), "met_by": [], "changes_by": [],
              "meets": [], "you": sub == row["owner"]} for sub, required in people.items()]
     by_sub = {r["sub"]: r for r in rows}
+    policies = []
     for rule in rules:
-        name = str(rule.get("name") or rule.get("policy") or "An org review rule")
-        state = _RULE_STATUS.get(rule.get("status"), WAITING) if current else WAITING
-        met_by = (rule.get("met_by") or []) if current else []
+        name = review_policies.name(rule)
+        state = _RULE_STATUS.get(rule.get("status"), WAITING) if current and review_policies.backed(rule) else WAITING
+        met_by = rule["met_by"] if current else []
         # A signer who has since asked for changes no longer counts towards the
         # rule, even one who isn't on the reviewer list. A waiver stands.
         withdrawn = [s for s in met_by if asked_since(s)] if state == SIGNED else []
-        approvals = rule.get("approvals") if isinstance(rule.get("approvals"), int) else 1
+        approvals = rule["approvals"]
         if withdrawn:
             met_by = [s for s in met_by if s not in withdrawn]
             if len(met_by) < approvals:
                 state = CHANGES
-        listed = [by_sub[s] for s in rule.get("on_list") or [] if s in by_sub and by_sub[s]["required"]]
+        policies.append(review_policies.row(rule, state, met_by, withdrawn if state == CHANGES else []))
+        listed = [by_sub[s] for s in rule["on_list"] if s in by_sub and by_sub[s]["required"]]
         # Someone already on the list adds no second sign-off, unless their
         # signing didn't meet the rule (an author can't sign for a team's).
         if listed and approvals == 1 and (state in _MET or any(r["status"] != SIGNED for r in listed)):
@@ -335,10 +343,14 @@ def _gate(c, p: dict) -> dict | None:
           and review["rev"] != row["remote_rev"]):
         state, reason = CONFLICT, (f"A teammate changed this plan in the Library (r{review['rev']}) and it changed "
                                    f"here too, so r{p['rev']} wasn't sent. Neither copy was overwritten.")
+    elif refusal:
+        state, reason = WAITING, review_policies.refusal_reason(refusal)
     elif changes:
         state, reason = CHANGES, f"Changes requested by {', '.join(changes)}."
     elif row["doc_id"] is None:
         state, reason = WAITING, "This plan is still being saved to the Library."
+    elif read is None and isinstance(review.get("reviewers"), list):
+        state, reason = WAITING, "brindle can't read this plan's org review rules, so the build stays closed."
     elif read is None:
         state, reason = WAITING, "brindle hasn't heard back from the Library about this plan's review yet."
     elif not current:
@@ -348,7 +360,7 @@ def _gate(c, p: dict) -> dict | None:
     else:
         state, reason = "ready", None
     return {"state": state, "reason": reason, "required": len(required), "signed": met, "waiting_on": unmet,
-            "reviewers": rows}
+            "reviewers": rows, "policies": policies}
 
 
 def gate(db: DB, p: dict) -> dict | None:

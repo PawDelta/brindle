@@ -53,7 +53,7 @@ class Library:
         out = {**copy.deepcopy(self.content), "rev": self.rev, "author": self.author,
                "threads": copy.deepcopy(self.threads),
                "permissions": dict(self.permissions), "reviewers": list(self.reviewers),
-               "sign_offs": list(self.sign_offs),
+               "sign_offs": list(self.sign_offs), "policy_reviewers": [],
                "pending_reviewers": [r["sub"] for r in self.reviewers if r["required"] and not any(
                    s["sub"] == r["sub"] and s["rev"] == self.rev for s in self.sign_offs)]}
         for d in out["decisions"]:
