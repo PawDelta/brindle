@@ -1252,10 +1252,15 @@ def _land_phase(db: DB, root: Agent, ws: Workspace, key: tuple[str, str], phase:
             raise workspaces.WorkspaceError(f"its PR is on {head}, which isn't a branch on origin")
         # A claim on the PR's merge slot (session_pr_merges, as the automatic merge takes it): no merge
         # is submitted while the push is under way, and none under way is pushed over.
+        # The commit it pushes is kept with the claim: should this process go before the record below is
+        # written, the merge reconciles the PR's head with it first (session_review._reconcile_push).
         owner = secrets.token_hex(16)
         with gates.marker("session-pr-merge", owner):
-            claimed = db.conn.execute("INSERT OR IGNORE INTO session_pr_merges (url, state, owner)"
-                                      " VALUES (?, 'pushing', ?)", (url, owner)).rowcount
+            with db.tx() as c:
+                claimed = c.execute("INSERT OR IGNORE INTO session_pr_merges (url, state, owner)"
+                                    " VALUES (?, 'pushing', ?)", (url, owner)).rowcount
+                if claimed:
+                    c.execute("INSERT OR REPLACE INTO session_pr_pushes (url, sha) VALUES (?, ?)", (url, sha))
             # A failed merge's row keeps the automatic merge away too: the PR is still open.
             attempt = None if claimed else db.conn.execute(
                 "SELECT state FROM session_pr_merges WHERE url = ?", (url,)).fetchone()
@@ -1270,8 +1275,10 @@ def _land_phase(db: DB, root: Agent, ws: Workspace, key: tuple[str, str], phase:
                                 (sha, *key, url))
             finally:
                 if claimed:
-                    db.conn.execute("DELETE FROM session_pr_merges WHERE url = ? AND state = 'pushing' AND owner = ?",
-                                    (url, owner))
+                    with db.tx() as c:
+                        c.execute("DELETE FROM session_pr_pushes WHERE url = ?", (url,))
+                        c.execute("DELETE FROM session_pr_merges WHERE url = ? AND state = 'pushing' AND owner = ?",
+                                  (url, owner))
         bus.publish_agent(db, "session.pr_pushed", root.id, url=url, commit=sha)
         return url
     ap = db.get_autopilot(root.id)

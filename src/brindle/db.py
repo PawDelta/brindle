@@ -665,6 +665,12 @@ CREATE TABLE IF NOT EXISTS session_pr_merges (
     owner TEXT,                    -- unique token whose session-pr-merge marker is held while acting
     error TEXT
 );
+-- What a phase landing's push (session_pr_merges state 'pushing') sends to the PR at url: kept with
+-- the claim, so a push whose owner went away is reconciled against the PR's head before any merge.
+CREATE TABLE IF NOT EXISTS session_pr_pushes (
+    url TEXT PRIMARY KEY,
+    sha TEXT NOT NULL
+);
 -- A session PR adopted from one opened with gh on another branch name: where it really lives,
 -- so a Push of the session branch is refused instead of missing it.
 CREATE TABLE IF NOT EXISTS session_pr_heads (

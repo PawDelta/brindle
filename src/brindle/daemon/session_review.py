@@ -513,12 +513,9 @@ def _reconcile_pr_merge(db: DB, row, ws: Workspace) -> bool:
     if attempt is None:
         return False
     if attempt["state"] == "pushing":     # a phase landing's push (routes_actions._land_phase)
-        if attempt["owner"] and gates.marked("session-pr-merge", attempt["owner"]):
-            return True
-        # Its owner is gone: the push's outcome is the PR's head, which the merge reads afresh.
-        db.conn.execute("DELETE FROM session_pr_merges WHERE url = ? AND state = 'pushing' AND owner IS ?",
-                        (url, attempt["owner"]))
-        return False
+        if not (attempt["owner"] and gates.marked("session-pr-merge", attempt["owner"])):
+            _reconcile_push(db, row, ws, attempt["owner"])
+        return True
     if attempt["state"] != "merging" or (attempt["owner"] and gates.marked("session-pr-merge", attempt["owner"])):
         return True
     owner = uuid4().hex
@@ -534,6 +531,42 @@ def _reconcile_pr_merge(db: DB, row, ws: Workspace) -> bool:
                         ("submitted" if finished else "failed", error, url, owner))
         bus.publish_agent(db, "session.pr_checks", row["root_id"], url=url)
     return True
+
+
+INTERRUPTED_PUSH = ("A push to the PR was interrupted and its head isn't a commit brindle recorded."
+                    " Check the PR on GitHub before merging it.")
+
+
+def _reconcile_push(db: DB, row, ws: Workspace, departed: str | None) -> None:
+    """A phase landing's push to the PR ``row`` whose owner went away: the
+    merge stays blocked until the PR's head says how the push ended. Its
+    intended commit (``session_pr_pushes``) on the PR: that is what the PR
+    carries now (``pushed_sha``, which its merge's landing is judged by). The
+    commit recorded before: it never got there. Anything else, or no head:
+    the person checks the PR (a failed attempt, in the Inbox); no answer from
+    GitHub: asked again next round."""
+    url = row["url"]
+    owner = uuid4().hex
+    with gates.marker("session-pr-merge", owner):
+        if not db.conn.execute("UPDATE session_pr_merges SET owner = ? WHERE url = ? AND state = 'pushing'"
+                               " AND owner IS ?", (owner, url, departed)).rowcount:
+            return
+        intent = db.conn.execute("SELECT sha FROM session_pr_pushes WHERE url = ?", (url,)).fetchone()
+        payload = workspaces.pull_request_checks(url, ws.repo_root)
+        if payload is None:
+            db.conn.execute("UPDATE session_pr_merges SET owner = NULL WHERE url = ? AND owner = ?", (url, owner))
+            return
+        head = payload.get("headRefOid")
+        with db.tx() as c:
+            if head and intent and head == intent["sha"]:
+                c.execute("UPDATE session_prs SET pushed_sha = ? WHERE url = ? AND merged_at IS NULL", (head, url))
+            if head and (intent and head == intent["sha"] or head == row["pushed_sha"]):
+                c.execute("DELETE FROM session_pr_merges WHERE url = ? AND owner = ?", (url, owner))
+            else:
+                c.execute("UPDATE session_pr_merges SET state = 'failed', error = ? WHERE url = ? AND owner = ?",
+                          (INTERRUPTED_PUSH, url, owner))
+            c.execute("DELETE FROM session_pr_pushes WHERE url = ?", (url,))
+    bus.publish_agent(db, "session.pr_checks", row["root_id"], url=url)
 
 
 def _auto_merge_session_pr(db: DB, row, ws: Workspace) -> None:
