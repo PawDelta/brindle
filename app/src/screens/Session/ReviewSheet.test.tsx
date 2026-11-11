@@ -559,10 +559,10 @@ describe("review", () => {
     // Past the sign-in gate's account read: the app.
     await screen.findByRole("complementary", { name: "Sidebar" });
     const back = await within(nav()).findByTestId("goal-pr-review");
-    expect(back.textContent).not.toContain("not on the PR");
+    expect(back.dataset.unpushed).toBe("0");
     later.daemon.data.sessionReview.sup1.pr = { url: "https://github.com/example/proj/pull/7", unpushed: 2 };
     later.daemon.send({ type: "git", workspace_id: root.id, status: { branch: "dev/ls", base: "main", ahead: 3, behind: 0, dirty_files: [], unpushed: 2 } });
-    await waitFor(() => expect(within(nav()).getByTestId("goal-pr-review").textContent).toContain("2 not on the PR"));
+    await waitFor(() => expect(within(nav()).getByTestId("goal-pr-review").dataset.unpushed).toBe("2"));
     fireEvent.click(within(nav()).getByTestId("goal-pr-review"));
     await screen.findByRole("dialog", { name: "Review & open PR" });
     const notice = await within(sheet()).findByTestId("pr-opened");
