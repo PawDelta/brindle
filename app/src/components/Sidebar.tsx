@@ -154,7 +154,7 @@ function LibraryButton({ open, waiting, onToggle }: { open: boolean; waiting: nu
       onClick={onToggle}
     >
       <LibraryIcon size={14} />
-      {needs && <span className="absolute -right-1 -top-1 size-[7px] rounded-full bg-branch ring-2 ring-canvas-2" data-testid="library-dot" aria-hidden />}
+      {needs && <span className="absolute right-0.5 top-0.5 size-[7px] rounded-full bg-branch ring-2 ring-canvas-2" data-testid="library-dot" aria-hidden />}
     </button>
   );
 }
