@@ -30,7 +30,7 @@ import { useCallback, useContext, useEffect, useMemo, useRef, useState, type Key
 import type { DaemonClient, ProviderUsage } from "../api/client";
 import { DaemonContext } from "../api/context";
 import { openExternal, type OpenUrl } from "../api/open";
-import type { GoalDTO, SessionDTO } from "../api/schema";
+import type { AgentDTO, GoalDTO, SessionDTO } from "../api/schema";
 import { inProfileRail, railPage, readLastSession, routeSession, settingsTab, type Route, type SessionRef } from "../routes";
 import { AccountAvatar, SettingsRail } from "./SettingsRail";
 import { pruneShown, seenKey } from "../screens/Inbox/items";
@@ -338,6 +338,12 @@ function RowClose({ root, done, onClose, list }: { root: string; done: boolean; 
 /* What an agent at rest is: through with its turn, stopped, or gone. */
 const AT_REST = new Set(["idle", "done", "paused", "exited"]);
 
+function sessionWorking(session: SessionDTO, agents: AgentDTO[], alive: Record<string, boolean>) {
+  const busy = (status: string) => status === "processing" || status === "starting";
+  return (alive[session.id] !== false && busy(session.status))
+    || agents.some((a) => alive[a.id] !== false && busy(a.status));
+}
+
 /* A row's session's goal (GET /goal): undefined while unknown, null when it has none. */
 function useRowGoal(repo: string, root: string) {
   return useGoal(useContext(DaemonContext), repo, root, useStore());
@@ -384,25 +390,29 @@ const PR_LINE: Record<string, { word: string; tone: string }> = {
   ci: { word: "In CI", tone: "text-sap" },
   ready: { word: "Ready to merge", tone: "text-pass" },
   failed: { word: "CI failed", tone: "text-fail" },
+  fixing: { word: "Fixing CI", tone: "text-sap" },
+  pushing: { word: "Fix ready, pushing", tone: "text-sap" },
 };
 
 /* A session with an open PR: a small line under its goal, "PR #391 · In CI, 14 of 18". Unknown
    (or unread) state is just "PR #391", never a guess. Its own button: it opens the PR, not the session. */
-function PrLine({ goal, openUrl }: { goal: GoalDTO | null | undefined; openUrl: OpenUrl }) {
+function PrLine({ goal, working = false, openUrl }: { goal: GoalDTO | null | undefined; working?: boolean; openUrl: OpenUrl }) {
   const pr = goal?.pr_state;
   if (!pr || !goal?.pr_url) return null;
   const url = goal.pr_url;
-  const known = PR_LINE[pr.state];
+  const state = pr.state === "failed" ? ((pr.unpushed ?? 0) > 0 ? "pushing" : working ? "fixing" : "failed") : pr.state;
+  const known = PR_LINE[state];
   const text = known ? `PR #${pr.number} · ${known.word}${pr.state === "ci" && pr.total ? `, ${pr.done} of ${pr.total}` : ""}` : `PR #${pr.number}`;
   return (
     <button
       type="button"
       className={`block max-w-full truncate py-px pb-[5px] pl-[34px] pr-s1 text-left text-[11.5px] hover:underline ${known?.tone ?? "text-ink-3"}`}
       data-testid="session-pr"
-      title={`Open ${url}`}
+      data-state={state}
+      title={`${pr.state === "failed" && pr.failed_checks?.length ? `Failed: ${pr.failed_checks.join(", ")} · ` : ""}Open ${url}`}
       onClick={() => void openUrl(url).catch(() => undefined)}
     >
-      {text}
+      {state === "fixing" && <span aria-hidden="true" data-pr-pulse className="mr-1 inline-block size-1.5 rounded-full bg-current motion-safe:animate-pulse" />}{text}
     </button>
   );
 }
@@ -422,6 +432,7 @@ function SessionRows({ session, repo, index, route, navigate, cursor, setCursor,
   // Through: its goal Done, or no goal and every agent in it at rest (the supervisor among them).
   const mine = workspaces.flatMap((ws) => ws.agents ?? []).filter((a) => members.has(a.id));
   const idle = mine.some((a) => a.id === root) && mine.every((a) => AT_REST.has(a.status) || alive[a.id] === false);
+  const working = sessionWorking(session, mine, alive);
   const done = goalDone(goal) || (goal === null && idle);
   return (
     <li className="flex flex-col gap-px" data-testid={`tree-session-${root}`} data-session={root}>
@@ -452,7 +463,7 @@ function SessionRows({ session, repo, index, route, navigate, cursor, setCursor,
         </SessionGoal>
         <RowClose root={root} done={done} onClose={onClose} list={list} />
       </div>
-      <PrLine goal={goal} openUrl={openUrl} />
+      <PrLine goal={goal} working={working} openUrl={openUrl} />
       {folded ? null : tree ? (
         <ul className="session-tree mb-1">
           {tree.children.map((child) => <AgentRow key={child.agent.id} node={child} route={route} navigate={navigate} repo={repo} root={root} cursor={cursor} setCursor={setCursor} />)}
@@ -507,6 +518,11 @@ function ResumeButton({ client, root, repo, navigate, refresh }: { client: Daemo
 /* A paused or failed session, dimmed at the foot of its repo's group: its goal, and how long ago it stopped; Resume; a close on hover or focus, "Done · Close" once its goal is Done. */
 function PausedRow({ session, repo, route, navigate, refresh, cursor, setCursor, onClose, list, openUrl }: { session: SessionDTO; repo: string; refresh: () => Promise<void>; cursor: string | null; setCursor(key: string): void; onClose: CloseRow; list: RefObject<HTMLElement | null>; openUrl: OpenUrl } & Pick<SidebarProps, "route" | "navigate">) {
   const root = session.id;
+  const workspaces = useAppState((s) => s.workspaces);
+  const alive = useAppState((s) => s.alive);
+  const { hidden } = useSessions();
+  const members = agentIds(sessionTree(workspaces, root, hidden));
+  const mine = workspaces.flatMap((ws) => ws.agents ?? []).filter((a) => members.has(a.id));
   const client = useContext(DaemonContext);
   const open = route.screen === "session" && route.root === root;
   const key = `session:${root}`;
@@ -539,7 +555,7 @@ function PausedRow({ session, repo, route, navigate, refresh, cursor, setCursor,
       </button>
       {client && <ResumeButton client={client} root={root} repo={repo} navigate={navigate} refresh={refresh} />}
       <RowClose root={root} done={done} onClose={onClose} list={list} />
-      <div className="basis-full"><PrLine goal={goal} openUrl={openUrl} /></div>
+      <div className="basis-full"><PrLine goal={goal} working={sessionWorking(session, mine, alive)} openUrl={openUrl} /></div>
     </li>
   );
 }
