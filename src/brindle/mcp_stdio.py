@@ -156,19 +156,22 @@ class StallWatchdog:
             return 0
 
 
-_STACK_FRAMES = 8       # innermost frames kept per thread
-_STACK_THREADS = 24     # debuglog drops a detail past MAX_ENTRY, and cuts any one string at MAX_TEXT
+_STACK_FRAMES = 8       # innermost frames kept per thread, at most
+_FRAME_BUDGET = 160     # frames in all: debuglog drops a detail past MAX_ENTRY, and cuts any one string at MAX_TEXT
 
 
 def _thread_stacks() -> dict:
-    """Each thread's innermost frames, innermost first, one short string per
-    frame: so the blocking call survives debuglog's per-string cut."""
+    """Every thread's innermost frames, innermost first, one short string per
+    frame: so the blocking call survives debuglog's per-string cut. With many
+    threads each gets fewer frames (never fewer than one), not dropped."""
     names = {t.ident: t.name for t in threading.enumerate()}
+    current = list(sys._current_frames().items())
+    depth = max(1, min(_STACK_FRAMES, _FRAME_BUDGET // max(1, len(current))))
     out: dict = {}
-    for ident, frame in list(sys._current_frames().items())[:_STACK_THREADS]:
-        frames = traceback.extract_stack(frame)[::-1][:_STACK_FRAMES]
-        out[f"{names.get(ident, '?')}:{ident}"] = [
-            f"{os.path.basename(f.filename)}:{f.lineno} {f.name}: {(f.line or '')[:60]}" for f in frames]
+    for ident, frame in current:
+        frames = traceback.extract_stack(frame)[::-1][:depth]
+        out[f"{names.get(ident, '?')}:{ident}"[:48]] = [
+            f"{os.path.basename(f.filename)}:{f.lineno} {f.name}" for f in frames]
     return out
 
 

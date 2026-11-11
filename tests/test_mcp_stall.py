@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import threading
 
 import anyio
@@ -78,6 +79,14 @@ def test_hung_reload_check_is_logged_through_real_read_and_serialization(monkeyp
     assert entry["detail"]["tool"] == "assign"
     frames = [f for stack in entry["detail"]["threads"].values() for f in stack]
     assert any("wants_reload" in f for f in frames)
+
+
+def test_many_threads_all_keep_their_innermost_frame_within_the_entry_limit(monkeypatch):
+    frame = sys._getframe()
+    monkeypatch.setattr(sys, "_current_frames", lambda: {i: frame for i in range(300)})
+    stacks = mcp_stdio._thread_stacks()
+    assert len(stacks) == 300 and all(stacks.values())      # the 300th thread is there too
+    assert len(json.dumps(debuglog.scrub(stacks))) < debuglog.MAX_ENTRY
 
 
 def test_watchdog_that_cannot_start_does_not_stop_serving(monkeypatch):
