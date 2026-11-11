@@ -565,6 +565,18 @@ def _send_revision(db: DB, plan_id: str, head: _Head, rev: int) -> bool:
     return True
 
 
+def _pending_accepts(db: DB, plan_id: str, local_rev: int) -> list:
+    """The suggestions accepted here in revisions after ``local_rev`` that the
+    Library hasn't closed, oldest first, each with the revision it made."""
+    return db.conn.execute(
+        "SELECT r.rev AS made_rev, s.remote_id, t.* FROM plan_revisions r JOIN plan_threads t ON t.plan_id=r.plan_id"
+        " AND t.updated_at=r.created_at AND t.kind='suggestion' AND t.status='accepted'"
+        " LEFT JOIN plan_share_threads s ON s.plan_id=t.plan_id AND s.local_id=t.id AND s.remote_id>0"
+        " WHERE r.plan_id=? AND r.source='suggestion' AND r.rev>? AND (s.remote_id IS NULL OR s.status='open')"
+        " AND t.id NOT IN (SELECT local_id FROM plan_share_threads WHERE plan_id=? AND remote_id<0 AND status<>?)"
+        " ORDER BY r.rev", (plan_id, local_rev, plan_id, SENDING)).fetchall()
+
+
 def _send_revisions(db: DB, plan_id: str, owner: str, head: _Head, newest: int) -> bool:
     """Bring the Library's head up to revision ``newest``, in as few revisions
     as the suggestions accepted here allow. Each acceptance is replayed on
@@ -576,14 +588,7 @@ def _send_revisions(db: DB, plan_id: str, owner: str, head: _Head, newest: int) 
     step that fails stops the rest (raised) and the text waits for it.
     Returns whether the head holds a new revision from here."""
     local, moved = link(db, plan_id)["local_rev"], False
-    rows = db.conn.execute(
-        "SELECT r.rev AS made_rev, s.remote_id, t.* FROM plan_revisions r JOIN plan_threads t ON t.plan_id=r.plan_id"
-        " AND t.updated_at=r.created_at AND t.kind='suggestion' AND t.status='accepted'"
-        " LEFT JOIN plan_share_threads s ON s.plan_id=t.plan_id AND s.local_id=t.id AND s.remote_id>0"
-        " WHERE r.plan_id=? AND r.source='suggestion' AND r.rev>? AND (s.remote_id IS NULL OR s.status='open')"
-        " AND t.id NOT IN (SELECT local_id FROM plan_share_threads WHERE plan_id=? AND remote_id<0 AND status<>?)"
-        " ORDER BY r.rev", (plan_id, local, plan_id, SENDING)).fetchall()
-    for t in rows:
+    for t in _pending_accepts(db, plan_id, local):
         before = t["made_rev"] - 1
         if local != before:
             if not _send_revision(db, plan_id, head, before):
@@ -620,7 +625,11 @@ def _send_text(db: DB, plan_id: str, head: _Head) -> bool:
     share_, cur = link(db, plan_id), plan_docs.revision(db, plan_id)
     moved = False
     if head.rev != share_["remote_rev"]:
-        held = _landed(db, plan_id, share_["local_rev"], cur["rev"], head.view)
+        # Equal text can't prove an acceptance happened (a later revision may repeat an earlier one's
+        # words), but the Library's thread status can: never read the head as past one it hasn't closed.
+        pending = _pending_accepts(db, plan_id, share_["local_rev"])
+        ceiling = pending[0]["made_rev"] - 1 if pending else cur["rev"]
+        held = _landed(db, plan_id, share_["local_rev"], ceiling, head.view)
         if held is None:
             return False
         with db.tx() as c:        # an earlier send landed and only its answer was lost

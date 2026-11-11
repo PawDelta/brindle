@@ -427,6 +427,35 @@ def test_acceptances_replay_in_order_on_the_text_each_was_made_on(db, parts, bac
     assert lib.content["sections"][0]["markdown"] == SUMMARY.replace("Workers", "Boxes", 1)
     assert sd.link(db, pid)["local_rev"] == 5
 
+    # That edit lands but its answer is lost, and a later revision repeats its words: recovery
+    # takes the head as the edit, not as the acceptances after it, which still go up and close once.
+    plan_docs.edit(db, pid, 5, "summary", 0, "Boxes", "Hosts")
+    plan_docs.accept(db, pid, plan_docs.suggest(db, pid, 6, "summary", 0, "Hosts", "Agents"), 6)
+    plan_docs.accept(db, pid, plan_docs.suggest(db, pid, 7, "summary", 0, "Agents", "Hosts"), 7)
+    lib.lose_answer = True
+    with pytest.raises(auth.AuthError):
+        sd.sync(db, pid, **net)
+    lib.lose_answer = False
+    assert sd.sync(db, pid, **net)["pushed"] is True
+    assert len(sent(backend, f"POST {DESIGN}/revisions")) == 2
+    assert [t["status"] for t in lib.threads] == ["accepted"] * 5
+    assert lib.content["sections"][0]["markdown"] == SUMMARY.replace("Workers", "Hosts", 1)
+    assert sd.link(db, pid)["local_rev"] == 8
+    assert all(len(sent(backend, f"POST {DESIGN}/threads/{n}")) == 1 for n in (4, 5))
+
+    # An accept that lands with its answer lost is known by the thread the Library closed.
+    lib.threads.append({"id": 6, "kind": "suggestion", "rev": 8, "author": "u_b", "text": "", "after": "Nodes",
+                        "status": "open", "replies": [], "anchor": {"kind": "text", "section": "summary", "start": 0,
+                                                                    "end": 5, "quote": "Hosts", "state": "current"}})
+    sd.sync(db, pid, **net)
+    plan_docs.accept(db, pid, plan_docs.fields(db, plans.get(db, pid))["threads"][-1]["id"], 8)
+    lib.lose_answer = True
+    with pytest.raises(auth.AuthError):
+        sd.sync(db, pid, **net)
+    lib.lose_answer = False
+    assert sd.sync(db, pid, **net)["pushed"] is True
+    assert len(sent(backend, f"POST {DESIGN}/threads/6")) == 1 and sd.link(db, pid)["local_rev"] == 9
+
 
 @pytest.mark.variant("from review: a write the Library committed before a 500 was pulled as a teammate's and resent")
 def test_a_comment_the_library_committed_before_a_server_error_stays_one_thread(db, parts, backend):
