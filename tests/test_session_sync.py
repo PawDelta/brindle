@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from conftest import sh
-from brindle import agents, autopilot, bus, config, gates, git, pipeline, session_sync, workspaces
+from brindle import agents, autopilot, bus, config, gates, git, pipeline, session_sync, tasks, workspaces
 from brindle.daemon import session_review
 from brindle.db import Agent, Workspace
 from brindle.service import inbox
@@ -220,24 +220,183 @@ def test_a_clean_sync_merges_main_in_and_checks_what_it_brought(db, repo, sess, 
     assert session_sync.run_checks(db, args[-2], args[-1]).startswith("The checks passed")
 
 
-def test_drift_flag_conflicting_sync_blocks_merges_until_a_branch_resolves_it(db, repo, sess, other, told):
+def test_drift_flag_sync_resolver_once_only(db, repo, sess, other, told, monkeypatch):
+    monkeypatch.setattr(autopilot, "choose_profile", lambda *a, **kw: ("developer", False))
     commit(Path(sess.path), "app.py", "session\n")
     main = commit(other, "app.py", "main\n", push=True)
     feat = worker(db, repo, "feat")
+    approved = Agent("approved", feat.id, "developer", "claude", "lead", "assign", "done", "%12",
+                     "Ready for merge", time.time())
+    db.add_agent(approved)
+    db.update_agent(approved.id, pipeline="ready")
+    db.add_review(feat.id, gates.head(feat), "reviewer", True, "Approved")
 
-    out = pipeline.merge(db, None, feat)
+    out = pipeline._finish_locked(db, db.get_agent(approved.id), feat, None)
 
     assert out.startswith("Not merged: sess must be synced with origin/main") and "app.py" in out
     assert not contains(sess.path, main) and sh("git status --porcelain", Path(sess.path)) == ""
     [event] = bus.tail(db, kinds=("conflict",))
     assert event["workspace_id"] == sess.id and event["payload"]["files"] == ["app.py"]
-    [item] = [i for i in inbox.items(db, str(repo), panes={}) if i.kind == "sync_conflict"]
-    assert item.root_id == "lead" and "app.py" in item.detail
+    [resolver] = db.list_tasks()
+    assert resolver.caller_id == "lead" and resolver.caller_ws_id == sess.id
+    assert resolver.isolate and resolver.state == "pending"
+    assert not inbox.items(db, str(repo), panes={})
+    assert session_sync._quiet(db, sess)       # the blocked merge must not hold its resolver off
+    session_sync.sync(db, sess)
+    assert [t.id for t in db.list_tasks()] == [resolver.id]
+    # Only the refusal caused by session sync waits; unrelated failures still surface.
+    waiting = db.get_agent(approved.id).pipeline
+    db.update_agent(approved.id, pipeline=None, merge_failed="Unrelated merge failure")
+    assert any(i.agent_id == approved.id and i.kind == "merge_failed"
+               for i in inbox.items(db, str(repo), panes={}))
+    db.update_agent(approved.id, pipeline=waiting, merge_failed=None)
     fix = workspaces.create(db, str(repo), "fix", base="sess", fetch=False).workspace   # sess isn't on origin
     sh("git merge -q origin/main || true", Path(fix.path))
     commit(Path(fix.path), "app.py", "both\n")
+    db.add_agent(Agent("resolver", fix.id, "developer", "claude", "lead", "assign", "done", "%10",
+                       "Resolved", time.time()))
+    db.update_task(resolver.id, agent_id="resolver", state="started")
     assert pipeline.merge(db, None, fix).startswith("Merged")
     assert contains(sess.path, main) and session_sync.merge_block(db, feat) is None
+    assert db.get_task(resolver.id).state == "merged"
+    assert session_sync.needs_you(db, sess) is None
+    assert any(a.id == approved.id for a, _ws in pipeline.ready_branches(db, str(repo), "sess"))
+    monkeypatch.setattr(pipeline, "_still_in_use", lambda *args: "fixture")
+    assert pipeline._finish(db, db.get_agent(approved.id), feat, None).startswith("Merged")
+    assert db.merged_sha(feat.id)
+
+
+@pytest.fixture
+def sync_resolver_session(db, monkeypatch, told):
+    ws = Workspace("session", "/repo", "session", "worktree", "sess", "main", "/repo/session", None, "", 0)
+    db.add_workspace(ws)
+    db.add_agent(Agent("lead", ws.id, "supervisor", "claude", None, "interactive", "idle", "%9", None, 0))
+    monkeypatch.setattr(session_sync, "upstream", lambda ws: "main")
+    monkeypatch.setattr(session_sync, "fetch", lambda *a: True)
+    monkeypatch.setattr(session_sync, "default_branch", lambda *a: "main")
+    monkeypatch.setattr(session_sync, "drift", lambda *a: session_sync.Drift("origin/main", "origin-sha", 1, []))
+    monkeypatch.setattr(git, "dirty_files", lambda *a, **kw: [])
+    monkeypatch.setattr(git, "out", lambda *a: "head-sha")
+    monkeypatch.setattr(git, "ok", lambda *a: False)
+    monkeypatch.setattr(git, "merge_local_base", lambda *a, **kw: (None, ["app.py"]))
+    monkeypatch.setattr(pipeline, "base_lock", lambda *a, **kw: nullcontext())
+    monkeypatch.setattr(git, "checkout_lock", lambda *a, **kw: nullcontext())
+    monkeypatch.setattr(autopilot, "choose_profile", lambda *a, **kw: ("developer", False))
+    monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.status != "done")
+    return ws
+
+
+def test_sync_resolver_no_inbox_while_resolving(db, sync_resolver_session, monkeypatch):
+    ws = sync_resolver_session
+    db.add_agent(Agent("busy", ws.id, "developer", "claude", "lead", "assign", "working", "%10", None, 0))
+    historical = tasks.enqueue(db, db.get_agent("lead"), ws, "developer",
+                               "Merge origin/main and resolve app.py", "assign", isolate=True,
+                               branch=None, done_when=None, files=["app.py"], depends_on=None)
+    db.update_task(historical.id, state="merged")
+    older = tasks.enqueue(db, db.get_agent("lead"), ws, "developer",
+                          f"Merge origin/main and resolve app.py at {'a' * 40}", "assign", isolate=True,
+                          branch=None, done_when=None, files=["app.py"], depends_on=None)
+    db.update_task(older.id, state="held")
+    enqueue = tasks.enqueue
+
+    def enqueue_during_sweep(*args, **kwargs):
+        task = enqueue(*args, **kwargs)
+        assert tasks.sweep(db) == 0       # no dispatch before its quietness constraint is attached
+        return task
+
+    monkeypatch.setattr(tasks, "enqueue", enqueue_during_sweep)
+    session_sync.sync(db, ws)
+    [resolver] = [t for t in db.list_tasks() if t.id not in (historical.id, older.id)]
+    monkeypatch.setattr(tasks, "task_wait", lambda *a: None)
+    monkeypatch.setattr(tasks, "_launch_overlap", lambda *a: (True, None))
+    monkeypatch.setattr(tasks, "_claim_fair", lambda db, t: (tasks.move(db, t.id, "pending", "starting"), None, None))
+    monkeypatch.setattr(tasks, "_launch_warnings", lambda *a: [])
+    launched = []
+
+    def delegate(db, caller, caller_ws, profile, text, mode, **kw):
+        launched.append((caller.id, caller_ws.branch, kw["isolate"]))
+        worker = Agent("resolver", ws.id, profile, "claude", caller.id, mode, "working", "%11", None, 1)
+        db.add_agent(worker)
+        return worker, ws
+
+    monkeypatch.setattr(agents, "delegate", delegate)
+    db.update_task(resolver.id, waiting="load")
+    with pytest.raises(ValueError):
+        tasks.start_now(db, db.get_agent("lead"), resolver.id)
+    assert tasks.sweep(db) == 0
+    assert not [i for i in inbox.items(db, ws.repo_root, panes={}) if i.kind == "sync_conflict"]
+    db.set_status("busy", "done")
+    db.set_status("lead", "processing")
+    assert tasks.sweep(db) == 0
+    db.set_status("lead", "idle")
+    assert tasks.sweep(db) == 1
+    assert launched == [("lead", "sess", True)]
+    assert db.get_task(resolver.id).state == "started"
+    assert not inbox.items(db, ws.repo_root, panes={})
+    session_sync.sync(db, ws)
+    assert len(db.list_tasks()) == 3
+
+
+def test_sync_resolver_inbox_after_failure(db, sync_resolver_session, monkeypatch):
+    ws = sync_resolver_session
+    # A supervisor's own resolver must be reused, including after it fails.
+    resolver = tasks.enqueue(db, db.get_agent("lead"), ws, "developer",
+                             "Resolve the conflict by merging `origin/main` into the session branch",
+                             "assign", isolate=True, branch=None, done_when=None, files=["app.py"], depends_on=None)
+    db.add_agent(Agent("resolver", ws.id, "developer", "claude", "lead", "assign", "working", "%10", None, 1))
+    db.update_task(resolver.id, agent_id="resolver", state="started")
+    session_sync.sync(db, ws)
+    assert len(db.list_tasks()) == 1
+    assert session_sync.needs_you(db, ws) is None
+    db.update_agent("resolver", status="done", result="Resolved; awaiting review")
+    assert session_sync.needs_you(db, ws) is None
+    db.update_agent("resolver", pipeline="reviewing")
+    pipeline._send_back(db, ws, db.get_agent("resolver"), config.RepoConfig(), "Unresolved conflict",
+                        True, subject="Review", verb="requested changes", what="review", sender_id=None)
+    assert any(i.kind == "sync_conflict" and i.root_id == "lead"
+               for i in inbox.items(db, ws.repo_root, panes={}))
+    monkeypatch.setattr(git, "ahead_behind", lambda *a: (0, 1))
+    monkeypatch.setattr(pipeline, "_start_review", lambda *a: None)
+    agents.report_result(db, "resolver", "New resolution ready for review")
+    assert db.get_agent("resolver").pipeline == "reviewing"
+    assert not [i for i in inbox.items(db, ws.repo_root, panes={}) if i.kind == "sync_conflict"]
+
+    def failed_review(db, cfg, parent, worker, workspace, result, report):
+        pipeline._send_back(db, workspace, worker, cfg, "Unresolved conflict", True,
+                            subject="Review", verb="requested changes", what="review", sender_id=None)
+
+    monkeypatch.setattr(pipeline, "_start_review", failed_review)
+    agents.report_result(db, "resolver", "Another resolution ready for review")
+    assert session_sync.needs_you(db, ws)
+    agents.report_result(db, "resolver", "Another resolution ready for review")
+    assert session_sync.needs_you(db, ws)      # replaying an accepted report cannot undo its escalation
+    db.set_status("resolver", "failed")
+    [item] = [i for i in inbox.items(db, ws.repo_root, panes={}) if i.kind == "sync_conflict"]
+    assert item.root_id == "lead"
+    db.update_task(resolver.id, state="cancelled")
+    assert session_sync.needs_you(db, ws)
+    session_sync.sync(db, ws)
+    assert len(db.list_tasks()) == 1
+    monkeypatch.setattr(session_sync, "drift", lambda *a: session_sync.Drift("origin/main", "next-sha", 1, []))
+    session_sync.sync(db, ws)
+    assert len(db.list_tasks()) == 2
+    assert session_sync.needs_you(db, ws) is None
+
+    def refuse_profile(*args, **kwargs):
+        raise autopilot.AutopilotError("No permitted profile")
+
+    monkeypatch.setattr(autopilot, "choose_profile", refuse_profile)
+    monkeypatch.setattr(session_sync, "drift", lambda *a: session_sync.Drift("origin/main", "refused-sha", 1, []))
+    session_sync.sync(db, ws)
+    assert len(db.list_tasks()) == 2
+    assert session_sync.needs_you(db, ws)
+    session_sync.sync(db, ws)
+    assert len(db.list_tasks()) == 2
+    # Without an owner, nothing can be queued and the conflict needs a person.
+    db.update_agent("lead", status="done")
+    monkeypatch.setattr(session_sync, "drift", lambda *a: session_sync.Drift("origin/main", "ownerless-sha", 1, []))
+    session_sync.sync(db, ws)
+    assert session_sync.needs_you(db, ws)
 
 
 @pytest.fixture(scope="module")

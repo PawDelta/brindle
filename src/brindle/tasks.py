@@ -948,7 +948,7 @@ def start_now(db: DB, caller: Agent | None, task_id: str) -> str:
     behalf of ``caller`` (its caller or session root). Only a worker start can
     be forced, and only one forced start may be in flight (a forced worker
     still starting): else ``ValueError`` says why."""
-    from brindle import autopilot
+    from brindle import autopilot, session_sync
 
     t = db.get_task(task_id)
     if t is None:
@@ -960,6 +960,8 @@ def start_now(db: DB, caller: Agent | None, task_id: str) -> str:
         raise ValueError(f"Task {task_id} isn't yours to start: only its caller or its session root can.")
     if t.state != "pending" or t.waiting is None:
         raise ValueError(f"Task {task_id} is {t.state}, not waiting for room: nothing to force.")
+    if session_sync.resolver_wait(db, t.id):
+        raise ValueError(f"Task {task_id} waits for its session to be quiet.")
     caller_ws = db.get_workspace(t.caller_ws_id)
     if not caller_ws or session_paused(db, t):
         raise ValueError(f"Task {task_id} can't start now (its session is paused or gone).")
@@ -1431,6 +1433,10 @@ def _start_if_ready(db: DB, t: Task, dep_ref: str, check_room: bool = True) -> b
     merge) finds it taken. A dependency that can never merge cancels it; a
     start that fails cancels it too, with the reason sent to its caller
     (``requeue`` makes a new one). Returns whether it started."""
+    from brindle import session_sync
+
+    if session_sync.resolver_wait(db, t.id):
+        return False
     caller_ws = db.get_workspace(t.caller_ws_id)
     if not caller_ws or held(db, t):
         # A paused session's tasks stay queued, and so do those behind its
