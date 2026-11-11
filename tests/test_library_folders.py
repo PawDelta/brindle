@@ -45,10 +45,10 @@ def test_daemon_routes_resolve_the_scope_and_turn_bad_input_into_400(monkeypatch
     monkeypatch.setattr(actions, "_docs_entitlement", lambda repo: SimpleNamespace(sub="u1"))
     monkeypatch.setattr(actions, "docs_api", lambda m, p, b=None, repo=None: api(m, p, b))
     actions.create_library_folder(None, {}, {"scope": "team:t1", "name": "Cloud", "visibility": "shared"})
-    actions.move_doc_to_folder(None, {"id": "d1"}, {"scope": "user", "folder": "fld_1"})
+    actions.move_doc_to_folder(None, {"id": "doc/1"}, {"scope": "user", "folder": "fld_1"})
     assert api.calls[0][2]["scope"] == {"kind": "group", "id": "t1"}
-    assert api.calls[1][2]["folder"]["scope"] == {"kind": "user", "id": "u1"}
-    assert api.calls[1][:2] == ("PUT", "/analysis-docs/d1/design/folder") and api.calls[1][2]["folder"]["id"] == "fld_1"
+    assert api.calls[1] == ("PUT", "/analysis-docs/doc%2F1/design/folder",
+                            {"folder": {"scope": {"kind": "user", "id": "u1"}, "id": "fld_1"}})
     with pytest.raises(ServiceError) as err:
         actions.create_library_folder(None, {}, {"scope": "user", "name": " "})
     assert err.value.http_status == 400
