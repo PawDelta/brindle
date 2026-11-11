@@ -448,6 +448,9 @@ def answer(db: DB, visual_id: str, rev: Any, option: Any = None, note: Any = Non
                       (v["id"], rev, record))
         raise
     with db.tx() as c:
+        # Delivered: only now can the answer exempt a goal from planning (until then it may still roll back).
+        c.execute("UPDATE visuals SET answer=json_set(answer, '$.delivered', 1) WHERE id=? AND answer=?",
+                  (v["id"], record))
         # Only a kept copy of this same revision takes the answer: a copy of
         # an earlier revision keeps what it was saved with until Keep again.
         c.execute("UPDATE kept_visuals SET answer=? WHERE id=? AND rev=?", (record, v["id"], rev))
@@ -476,11 +479,12 @@ def has_approved_design(db: DB, root_id: str, goal: str) -> bool:
     """Whether the person approved a design for ``goal``: chose, on one of
     session ``root_id``'s visuals, an option its publisher marked ``approves``
     while that goal was the work in progress, with no note. A viewed visual,
-    a redirect, any other choice, and an option bound to another goal aren't."""
+    a redirect, any other choice, an option bound to another goal, and an
+    answer still being delivered (it may roll back) aren't."""
     for row in db.conn.execute("SELECT options, answer FROM visuals WHERE root_id=? AND kind='visual' "
                                "AND answer IS NOT NULL AND options IS NOT NULL", (root_id,)):
         answer = json.loads(row["answer"])
-        if not answer.get("note") and any(o["id"] == answer.get("option") and o.get("approves")
+        if answer.get("delivered") and not answer.get("note") and any(o["id"] == answer.get("option") and o.get("approves")
                                           and o.get("goal") == goal for o in json.loads(row["options"])):
             return True
     return False

@@ -444,7 +444,7 @@ def test_approval_stays_with_the_goal_the_design_was_shown_for(db, session, monk
 def test_failed_answer_delivery_leaves_no_approval_behind(db, session, monkeypatch):
     from brindle import autopilot, visuals
 
-    boss, _started = session
+    boss, started = session
     monkeypatch.setattr(autopilot, "_commit", lambda ws, tracked_only=False: "abc123")
     with db.tx() as c:
         visual_offers._grant(c, "boss")
@@ -452,14 +452,16 @@ def test_failed_answer_delivery_leaves_no_approval_behind(db, session, monkeypat
     shown = visuals.publish(db, boss, "Build plan", "<p>design</p>", "Build it?",
                             [{"id": "build", "label": "Build", "approves": True}, {"id": "back", "label": "Back"}])
 
-    def fail(*a, **k):      # the first goal arrives while the answer is being delivered
-        mcp_server.set_goal("Org presets", [{"title": "A", "check": "true"}])
+    def fail(*a, **k):      # a big goal and an assign arrive while the answer is being delivered
+        mcp_server.set_goal("Org presets", [{"title": f"M{i}", "check": "true"} for i in range(4)])
+        asyncio.run(mcp_server.assign("developer", "build the preset schema"))
         raise RuntimeError("not delivered")
     monkeypatch.setattr(agents, "send_message", fail)
     with pytest.raises(RuntimeError):
         visuals.answer(db, shown["id"], 1, option="build")
     assert visuals.get(db, shown["id"])["answer"] is None
     assert not visuals.has_approved_design(db, "boss", "Org presets")
+    assert started == [] and plans.holding(db, "boss") is not None      # the undelivered answer exempted nothing
 
 
 @pytest.mark.variant("reported stall: a terminal-only session's workers held by an offer nobody can answer (review 0.6.3, finding 3)")
