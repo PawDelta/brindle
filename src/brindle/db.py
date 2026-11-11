@@ -683,6 +683,15 @@ CREATE TABLE IF NOT EXISTS session_sync (
     updated_at REAL NOT NULL,
     PRIMARY KEY (repo_root, branch)
 );
+-- Unlanded session work, independent of whether origin has been merged in.
+CREATE TABLE IF NOT EXISTS session_drift (
+    repo_root TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    oldest_at REAL,
+    file_count INTEGER NOT NULL,
+    drifting INTEGER NOT NULL,
+    PRIMARY KEY (repo_root, branch)
+);
 -- The supervisors told that a repo no longer refreshes on its own: origin wants
 -- credentials (session_sync.tell_refused_fetches). Goes once origin answers again.
 CREATE TABLE IF NOT EXISTS fetch_refused_notices (

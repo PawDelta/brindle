@@ -37,7 +37,7 @@ import re
 import threading
 import time
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import PurePath
 
 from brindle import agents, bus, conflicts, git, savings, spawn
@@ -163,6 +163,7 @@ class Clash:
     holder: str | None = None
     holder_root: str | None = None
     cross_session: bool = False
+    files: list[str] = field(default_factory=list)
 
 
 def _own_roots(db: DB, ws: Workspace, caller_id: str | None) -> set[str]:
@@ -172,10 +173,15 @@ def _own_roots(db: DB, ws: Workspace, caller_id: str | None) -> set[str]:
     return {autopilot.root_of(db, a.id) for a in db.list_agents(ws.id)}
 
 
-def _held(db: DB, own: set[str], warning: str, holder: str | None) -> Clash:
+def _held(db: DB, own: set[str], warning: str, holder: str | None,
+          files: list[str] | None = None) -> Clash:
     from brindle import autopilot
     root = autopilot.root_of(db, holder) if holder else None
-    return Clash(warning, holder, root, root is not None and root not in own)
+    return Clash(warning, holder, root, root is not None and root not in own, files or [])
+
+
+def _overlapping(files: list[str], candidates: list[str]) -> list[str]:
+    return sorted({theirs for theirs in candidates if any(_glob_match(mine, theirs) for mine in files)})
 
 
 def _intent_overlap(db: DB, ws: Workspace, files: list[str], own: set[str]) -> Clash | None:
@@ -192,7 +198,7 @@ def _intent_overlap(db: DB, ws: Workspace, files: list[str], own: set[str]) -> C
                     return Clash(f"overlaps with session {intent['session_root']}'s intent on {theirs}"
                                  + (f" ({goal})" if goal else "")
                                  + "; consider depends_on or merging first",
-                                 None, intent["session_root"], True)
+                                 None, intent["session_root"], True, _overlapping(files, intent["paths"]))
     return None
 
 
@@ -211,7 +217,8 @@ def _queued_overlap(db: DB, ws: Workspace, files: list[str], own: set[str]) -> C
                     root = autopilot.root_of(db, t.caller_id) if t.caller_id else None
                     return Clash(f"overlaps with queued task {t.id} ({t.branch or 'branch not cut yet'}) on "
                                  f"{theirs}; consider depends_on or merging first",
-                                 f"task:{t.id}", root, root is not None and root not in own)
+                                 f"task:{t.id}", root, root is not None and root not in own,
+                                 _overlapping(files, _loads(t.files)))
     return None
 
 
@@ -237,7 +244,7 @@ def _running_overlap(db: DB, ws: Workspace, files: list[str], own: set[str], cha
                 if _glob_match(mine, theirs):
                     branch = other_ws.branch if other_ws else "?"
                     return _held(db, own, f"overlaps with {t.agent_id} ({branch}) on {theirs}; "
-                                 "consider depends_on or merging first", t.agent_id)
+                                 "consider depends_on or merging first", t.agent_id, _overlapping(files, candidates))
     return None
 
 
@@ -273,7 +280,7 @@ def inspected_clash(db: DB, ws: Workspace, files: list[str] | None, task_text: s
             for theirs in candidates:
                 if _glob_match(mine, theirs):
                     return _held(db, own, f"overlaps with {where}, reported but not yet merged, on {theirs}; "
-                                 "consider depends_on or merging first", t.agent_id)
+                                 "consider depends_on or merging first", t.agent_id, _overlapping(files, candidates))
         shared = mine_issues & _issue_numbers(t.task_text)
         if shared:
             return _held(db, own, f"names issue #{min(shared, key=int)} like {where}, reported but not yet "
@@ -315,6 +322,8 @@ def notify_clash(db: DB, caller_root: str, clash: Clash, outcome: str) -> None:
     from brindle import gates, knowledge
     if not clash.holder_root:
         return
+    bus.publish_agent(db, "overlap", caller_root, files=clash.files, holder=clash.holder,
+                      holder_root=clash.holder_root, outcome=outcome)
     # The event a repo's coordinator wakes on (brindle.coordinator).
     knowledge.note(db, caller_root, knowledge.CLASH,
                    {"warning": clash.warning, "holder": clash.holder,
