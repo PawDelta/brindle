@@ -139,10 +139,20 @@ describe("Sidebar", () => {
   });
 
   it("no drift mark: a drifting session has none with or without a PR", async () => {
-    const { sync } = mount({ workspaces: [root, worker], sessions: [live], goal: { ...goal, drifting: true, pr_url: "https://github.com/o/r/pull/390", pr_state: { number: 390, state: "ready", done: 2, total: 2 } } as typeof goal });
+    const { sync } = mount({ workspaces: [root, worker], sessions: [live], goal: { ...goal, drifting: true } as typeof goal });
     onTestFinished(() => sync.stop());
     const row = await screen.findByTestId("tree-session-sup1");
+    await waitFor(() => expect(row.querySelector("[data-testid='session-status']")).toBeTruthy());
     expect(row.querySelector('[data-state="drifting"]')).toBeNull();
+    expect(screen.queryByTestId("session-pr")).toBeNull();
+
+    sync.stop();
+    cleanup();
+    const withPr = mount({ workspaces: [root, worker], sessions: [live], goal: { ...goal, drifting: true, pr_url: "https://github.com/o/r/pull/390", pr_state: { number: 390, state: "ready", done: 2, total: 2 } } as typeof goal });
+    onTestFinished(() => withPr.sync.stop());
+    const prRow = await screen.findByTestId("tree-session-sup1");
+    await screen.findByTestId("session-pr");
+    expect(prRow.querySelector('[data-state="drifting"]')).toBeNull();
   });
 
   it.each([
