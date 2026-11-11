@@ -175,7 +175,34 @@ def _thread_stacks() -> dict:
                [f"{os.path.basename(f.filename)}:{f.lineno} {f.name}"[:text_len] for f in frames[:depth]]
                for ident, frames in current}
         if len(json.dumps(out)) <= _STACK_BYTES:
-            break
+            return out
+    return _grouped(current)
+
+
+def _grouped(current: list) -> dict:
+    """Last resort, for thousands of threads: thread ids grouped under their
+    shared innermost frame, in chunks short enough to survive debuglog's string
+    cut. Ids that still don't fit the byte budget are counted, not logged, so
+    the rest of the entry (tool, age, connection) is never lost to it."""
+    groups: dict = {}
+    for ident, frames in current:
+        top = frames[0] if frames else None
+        groups.setdefault(f"{os.path.basename(top.filename)}:{top.lineno} {top.name}"[:60] if top else "?",
+                          []).append(str(ident))
+    out: dict = {}
+    used = omitted = 0
+    for text, ids in groups.items():
+        kept = []
+        for i in ids:
+            if used + len(i) + 1 > _STACK_BYTES - 1024:
+                omitted += 1
+                continue
+            used += len(i) + 1
+            kept.append(i)
+        out[text] = [",".join(kept[n:n + 100]) for n in range(0, len(kept), 100)]
+        used += len(text)
+    if omitted:
+        out["ids omitted"] = omitted
     return out
 
 

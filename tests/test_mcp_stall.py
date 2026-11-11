@@ -9,6 +9,7 @@ import threading
 import types
 
 import anyio
+import pytest
 
 from brindle import debuglog, mcp_stdio
 
@@ -82,11 +83,12 @@ def test_hung_reload_check_is_logged_through_real_read_and_serialization(monkeyp
     assert any("wants_reload" in f for f in frames)
 
 
-def test_many_realistic_threads_still_log_the_whole_entry(monkeypatch):
+@pytest.mark.parametrize("count, grouped", [(300, False), (3000, True)])
+def test_many_realistic_threads_still_log_the_whole_entry(monkeypatch, count, grouped):
     """300 threads with real-looking ids and one long shared name: every thread
     keeps its own key and a frame, and the entry isn't replaced by a truncation marker."""
     frame = sys._getframe()
-    ids = [140_000_000_000_000 + i for i in range(300)]
+    ids = [140_000_000_000_000 + i for i in range(count)]
     monkeypatch.setattr(sys, "_current_frames", lambda: {i: frame for i in ids})
     fake = [types.SimpleNamespace(ident=i, name="AnyIO worker thread " + "x" * 40) for i in ids]
     monkeypatch.setattr(threading, "enumerate", lambda: fake)
@@ -98,7 +100,11 @@ def test_many_realistic_threads_still_log_the_whole_entry(monkeypatch):
     assert mcp_stdio.StallWatchdog(conn, after=120).check() == 1
     detail = json.loads(debuglog.log_path().read_text().splitlines()[-1])["detail"]
     assert "truncated" not in detail and detail["tool"] == "handoff" and "idle" in detail["connection"]
-    assert len(detail["threads"]) == 300 and all(detail["threads"].values())
+    if grouped:     # past every per-thread level: ids under their frame, overflow counted
+        assert detail["threads"]["ids omitted"] > 0
+        assert any("test_many_realistic" in k for k in detail["threads"])
+    else:
+        assert len(detail["threads"]) == count and all(detail["threads"].values())
 
 
 def test_watchdog_that_cannot_start_does_not_stop_serving(monkeypatch):
