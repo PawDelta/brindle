@@ -432,6 +432,7 @@ def test_phase_landing_once_per_completed_phase(db, phase_landing_session, monke
         other.conn.close()
 
 
+@pytest.mark.variant("gap 2: the PR carries the commit the phase passed on, not the branch tip with later work")
 def test_phase_pr_pins_the_commit_the_phase_passed_on(db, phase_landing_session, monkeypatch):
     """A completed phase with later milestones left is queued for brindle to land at the commit
     its checks passed on, however far later checks move its milestones; the goal's last phase isn't."""

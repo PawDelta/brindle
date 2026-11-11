@@ -2353,7 +2353,7 @@ def test_phase_pr_waits_out_a_merge_of_its_pr_then_opens_the_next(db, phase_pr_f
     assert forge.states() == [("api", "pushed"), ("db", "pushed")]
 
 
-@pytest.mark.parametrize("outcome", ["reached", "lost", "unknown"])
+@pytest.mark.parametrize("outcome", ["reached", pytest.param("lost", marks=pytest.mark.variant("a race: the push was cut short and never reached the forge")), "unknown"])
 def test_phase_pr_push_cut_short_is_reconciled_before_its_pr_merges(db, phase_pr_forge, monkeypatch, outcome):
     """A phase landing's process goes away mid push, before it records the commit pushed: the automatic
     merge first reads the PR's head. The push's commit there (reached) becomes what the PR carries, so
