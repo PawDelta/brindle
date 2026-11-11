@@ -1982,6 +1982,7 @@ def _readiness_prepares_after_startup_and_recovers(db, lead, monkeypatch, obstac
     from brindle import gates, git, identity_lock
     from brindle.daemon import session_review
     monkeypatch.setattr(session_review.session_sync, "refresh_drift_flags", lambda db: None)
+    monkeypatch.setattr(session_review.session_sync, "refresh_idle_sessions", lambda db, fetched_at: None)
     head = _commit(Path(lead.path), "a.py", "a\n")
     config.set_local(lead.repo_root, "checks", ["validate"])
     held = []
