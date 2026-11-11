@@ -6,6 +6,7 @@ import json
 import os
 import sys
 import threading
+import types
 
 import anyio
 
@@ -81,12 +82,23 @@ def test_hung_reload_check_is_logged_through_real_read_and_serialization(monkeyp
     assert any("wants_reload" in f for f in frames)
 
 
-def test_many_threads_all_keep_their_innermost_frame_within_the_entry_limit(monkeypatch):
+def test_many_realistic_threads_still_log_the_whole_entry(monkeypatch):
+    """300 threads with real-looking ids and one long shared name: every thread
+    keeps its own key and a frame, and the entry isn't replaced by a truncation marker."""
     frame = sys._getframe()
-    monkeypatch.setattr(sys, "_current_frames", lambda: {i: frame for i in range(300)})
-    stacks = mcp_stdio._thread_stacks()
-    assert len(stacks) == 300 and all(stacks.values())      # the 300th thread is there too
-    assert len(json.dumps(debuglog.scrub(stacks))) < debuglog.MAX_ENTRY
+    ids = [140_000_000_000_000 + i for i in range(300)]
+    monkeypatch.setattr(sys, "_current_frames", lambda: {i: frame for i in ids})
+    fake = [types.SimpleNamespace(ident=i, name="AnyIO worker thread " + "x" * 40) for i in ids]
+    monkeypatch.setattr(threading, "enumerate", lambda: fake)
+    monkeypatch.setattr(debuglog, "enabled", lambda: True)
+    clock = _Clock()
+    conn = mcp_stdio.Connection(-1, -1, wants_reload=lambda _: False, replace=lambda: False)
+    conn._clock = clock
+    conn._pending["9"] = ("handoff", clock.now - 500)
+    assert mcp_stdio.StallWatchdog(conn, after=120).check() == 1
+    detail = json.loads(debuglog.log_path().read_text().splitlines()[-1])["detail"]
+    assert "truncated" not in detail and detail["tool"] == "handoff" and "idle" in detail["connection"]
+    assert len(detail["threads"]) == 300 and all(detail["threads"].values())
 
 
 def test_watchdog_that_cannot_start_does_not_stop_serving(monkeypatch):
