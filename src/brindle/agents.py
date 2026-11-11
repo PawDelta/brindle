@@ -5082,6 +5082,10 @@ def codex_pre_tool_decision(db: DB, agent: Agent, payload: dict) -> dict | None:
     call it gets no answer for, so a check that can't finish denies it."""
     from brindle import permissions
 
+    if agent.mode == "doc_question":
+        from brindle.pro import doc_questions
+
+        return permissions.codex_pre_tool_output(doc_questions.codex_decision(payload))
     try:
         from brindle.config import load_repo_config
         from brindle.profiles import profile_rules_for
@@ -5156,6 +5160,11 @@ def permission_request_decision(db: DB, agent: Agent, payload: dict,
     agent with nothing of its own to ask (opencode.Launch.unasked)."""
     from brindle import opencode
 
+    if provider == "codex" and agent.mode == "doc_question":
+        from brindle import permissions
+        from brindle.pro import doc_questions
+
+        return permissions.codex_output(doc_questions.codex_decision(payload))
     opencode_unasked = provider == "opencode" and os.environ.get(opencode.UNASKED_ENV) == "1"
     try:
         from brindle import permissions

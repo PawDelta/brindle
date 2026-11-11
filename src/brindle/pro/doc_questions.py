@@ -234,3 +234,16 @@ def after_reply(*, thread_id: int, plan_id: str | None = None, doc_id: str | Non
 def tool_allowed(agent: Agent | None, name: str) -> bool:
     return not agent or agent.mode != "doc_question" or name in (
         "reply_doc_question", "mcp__brindle__reply_doc_question", "brindle_reply_doc_question")
+
+
+def codex_decision(payload: dict):
+    """No shell, file, external MCP or escalation capability in a doc helper.
+
+    The question is delivered in full; only its reply needs a tool. This
+    boundary applies before user policy, saved grants and supervisor profiles.
+    """
+    from brindle.permissions import Decision
+
+    allowed = payload.get("tool_name") == "mcp__brindle__reply_doc_question"
+    return Decision("allow" if allowed else "deny",
+                    "a document supervisor can only answer its assigned question")

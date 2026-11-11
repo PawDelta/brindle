@@ -211,7 +211,7 @@ def test_ask_the_supervisor_routes_to_the_teammates_session(db, parts, monkeypat
     (None, False), ("claude", True), ("claude", "blocked"),
 ])
 def test_ask_the_supervisor_without_a_session(db, parts, monkeypatch, provider, failed):
-    from brindle import agents, antigravity, mcp_server, opencode, preflight, provider_homes, providers
+    from brindle import agents, antigravity, codex_hook, mcp_server, opencode, preflight, provider_homes, providers
     from brindle.pro import doc_questions as dq
     from brindle.service import sessions
 
@@ -224,6 +224,12 @@ def test_ask_the_supervisor_without_a_session(db, parts, monkeypatch, provider, 
     monkeypatch.setattr(agents, "model_problem", lambda *a, **kw: None)
     monkeypatch.setattr(preflight, "turned_off", lambda *a: None)
     monkeypatch.setattr(provider_homes, "decide", lambda *a: "my-provider-home")
+    if provider == "codex":
+        monkeypatch.setattr(providers, "_codex_layers", lambda cwd: [])
+        monkeypatch.setattr(codex_hook, "hook_command", lambda: "brindle _hook codex-permission-request")
+        monkeypatch.setattr(codex_hook, "status", lambda *a: codex_hook.TRUSTED)
+        monkeypatch.setattr(codex_hook, "ensure", lambda **kw: codex_hook.TRUSTED)
+        monkeypatch.setattr(codex_hook, "policy_on", lambda cwd: False)
     launches = []
 
     def launch(db_, a, ws, **kw):
@@ -231,8 +237,17 @@ def test_ask_the_supervisor_without_a_session(db, parts, monkeypatch, provider, 
         profile = agents._profile_for(db_, a, ws)
         assert profile.permission_mode == "plan" and profile.strict_mcp and not profile.add_dirs
         if a.provider == "codex":
+            import json
+            import tomllib
+
             ctx = providers.LaunchContext(a.id, profile, None, cwd=ws.path, mode=a.mode)
-            assert providers._codex_sandbox(ctx) == ["--sandbox", "read-only"]
+            command = providers.get_provider("codex").command(ctx)
+            flags = dict(arg.split("=", 1) for arg in command if arg.startswith(("default_permissions=", "permissions.")))
+            name = json.loads(flags["default_permissions"])
+            assert json.loads(flags[f"permissions.{name}.extends"]) == ":read-only"
+            files = tomllib.loads(f"t = {flags[f'permissions.{name}.filesystem']}")["t"]
+            assert files["~/.aws"] == "deny" and "write" not in files.values()
+            assert codex_hook.config_flags()[1] in command and codex_hook.config_flags()[3] in command
         elif a.provider == "claude":
             ctx = providers.LaunchContext(a.id, profile, None, cwd=ws.path, mode=a.mode)
             command = providers.get_provider("claude").command(ctx)
@@ -259,6 +274,42 @@ def test_ask_the_supervisor_without_a_session(db, parts, monkeypatch, provider, 
         assert got["agent_id"] == a.id
         assert a.mode == "doc_question" and a.provider == provider and a.config_home == "my-provider-home"
         assert ws.path != db.get_workspace("ws1").path
+        if provider == "codex":
+            from dataclasses import replace
+            from brindle import config
+
+            cfg = config.load_repo_config(ws.repo_root)
+            # Stock supervisor allowances and saved rules cannot grant this
+            # helper shell, credential reads, edits or another MCP's tools.
+            for policy in ("on", "off"):
+                monkeypatch.setattr(config, "load_repo_config", lambda *args, **kwargs: replace(cfg, permission_policy=policy))
+                for payload in (
+                    {"tool_name": "Bash", "tool_input": {"command": "git add ."}, "cwd": ws.path},
+                    {"tool_name": "Bash", "tool_input": {"command": "cat ~/.aws/credentials"}},
+                    {"tool_name": "apply_patch", "tool_input": {"command": "*** Begin Patch\n*** Add File: x\n+x\n*** End Patch"}},
+                    {"tool_name": "write_stdin", "tool_input": {"chars": "git add .\n"}},
+                    {"tool_name": "mcp__other__write"}, {},
+                ):
+                    answer = agents.permission_request_decision(db, a, payload, provider="codex")
+                    assert answer["hookSpecificOutput"]["decision"]["behavior"] == "deny"
+                    assert agents.codex_pre_tool_decision(db, a, payload)["hookSpecificOutput"]["permissionDecision"] == "deny"
+                reply = {"tool_name": "mcp__brindle__reply_doc_question"}
+                assert agents.codex_pre_tool_decision(db, a, reply) is None
+                assert agents.permission_request_decision(db, a, reply, provider="codex")["hookSpecificOutput"]["decision"]["behavior"] == "allow"
+
+            ctx = providers.LaunchContext(a.id, agents._profile_for(db, a, ws), None, cwd=ws.path, mode=a.mode)
+            with monkeypatch.context() as guard:
+                guard.setattr(codex_hook, "status", lambda *a: codex_hook.REMOVED)
+                with pytest.raises(codex_hook.CodexHookError):
+                    providers.get_provider("codex").command(ctx)
+            with monkeypatch.context() as guard:
+                guard.setattr(codex_hook, "ensure", lambda **kw: codex_hook.MOVED)
+                with pytest.raises(codex_hook.CodexHookError):
+                    providers.get_provider("codex").command(ctx)
+            with monkeypatch.context() as guard:
+                guard.setattr(providers, "_codex_layers", lambda cwd: [("user", {"sandbox_mode": "workspace-write"})])
+                with pytest.raises(providers.CodexSandboxRefused):
+                    providers.get_provider("codex").command(ctx)
         assert dq.dispatch(db, DOC, 1, **net) == got and len(launches) == 1
         monkeypatch.setattr(mcp_server, "_calling_agent", lambda: a)
         with pytest.raises(mcp_server.ToolError):
