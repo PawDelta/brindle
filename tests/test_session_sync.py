@@ -75,8 +75,11 @@ def test_idle_sync_quiet_session(db, repo, sess, other, told, monkeypatch):
     feat = worker(db, repo, "feat")
     db.add_agent(Agent("worker", feat.id, "developer", "claude", "lead", "assign", "working", "%10", None, 0))
     sibling = worktree(db, repo, "another", base="main")
-    db.add_agent(Agent("other-lead", sibling.id, "supervisor", "claude", None, "interactive", "processing",
+    owner = Workspace("owner", "/elsewhere", "owner", "root", "main", None, "/elsewhere", None, "", 0)
+    db.add_workspace(owner)
+    db.add_agent(Agent("other-lead", owner.id, "supervisor", "claude", None, "interactive", "processing",
                        "%11", None, 0))
+    db.add_session_repo("other-lead", "attached", sibling.repo_root, sibling.branch)
     watch = session_review.ReadinessWatch()
     fetched = []
     fetch = session_sync.fetch
@@ -118,18 +121,27 @@ def test_idle_sync_quiet_session(db, repo, sess, other, told, monkeypatch):
     assert contains(sess.path, main)
     assert len([m for m in told if m[0] == "lead"]) == 1
     assert len([m for m in told if m[0] == "detached"]) == 1
+    assert not contains(sibling.path, main)   # its owner is busy in another repo
+    db.set_status("other-lead", "idle")
     watch.sweep(db)
+    assert contains(sibling.path, main)       # attached checkouts have no local root agent
+    assert len([m for m in told if m[0] == "other-lead"]) == 1
+    assert len([m for m in told if m[0] == "detached"]) == 2
     assert len(fetched) == 1
     clock[0] += 301
     watch.sweep(db)
     assert len(fetched) == 2
     assert len([m for m in told if m[0] == "lead"]) == 1
+    assert len([m for m in told if m[0] == "other-lead"]) == 1
 
 
 def test_idle_sync_worker_goes_live_before_merge(db, told, monkeypatch):
     sess = Workspace("session", "/repo", "session", "worktree", "sess", "main", "/repo/session", None, "", 0)
+    owner = Workspace("owner", "/primary", "owner", "root", "main", None, "/primary", None, "", 0)
     db.add_workspace(sess)
-    db.add_agent(Agent("lead", sess.id, "supervisor", "claude", None, "interactive", "idle", "%9", None, 0))
+    db.add_workspace(owner)
+    db.add_agent(Agent("lead", owner.id, "supervisor", "claude", None, "interactive", "idle", "%9", None, 0))
+    db.add_session_repo("lead", "attached", sess.repo_root, sess.branch)
     db.add_agent(Agent("worker", sess.id, "developer", "claude", "lead", "assign", "done", "%10", None, 0))
     monkeypatch.setattr(session_sync.time, "monotonic", lambda: 1000.0)
     monkeypatch.setattr(agents, "is_alive", lambda a, panes=None: a.status != "done")
@@ -142,11 +154,12 @@ def test_idle_sync_worker_goes_live_before_merge(db, told, monkeypatch):
     merged = []
     monkeypatch.setattr(git, "merge_local_base", lambda *args, **kwargs: merged.append(args) or ("new-sha", []))
     entered = []
+    waking = ["worker"]
 
     @contextmanager
     def starting_worker(path, **kwargs):
         entered.append(path)
-        db.set_status("worker", "processing")
+        db.set_status(waking[0], "processing")
         yield
 
     monkeypatch.setattr(git, "checkout_lock", starting_worker)
@@ -154,6 +167,11 @@ def test_idle_sync_worker_goes_live_before_merge(db, told, monkeypatch):
     assert entered == [sess.path]
     assert merged == []
     assert not told
+    db.set_status("worker", "done")
+    waking[0] = "lead"                      # its remote owner can also begin a turn after planning
+    session_sync.refresh_idle_sessions(db, {})
+    assert entered == [sess.path, sess.path]
+    assert merged == [] and not told
 
 
 def test_a_merge_into_the_session_tells_the_supervisor_how_far_behind_main_it_is(db, repo, sess, other, told):

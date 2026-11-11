@@ -37,7 +37,7 @@ from dataclasses import dataclass, field
 
 from brindle import agents, bus, git, spawn
 from brindle.config import load_repo_config
-from brindle.db import DB, Workspace
+from brindle.db import DB, Agent, Workspace
 
 log = logging.getLogger(__name__)
 
@@ -170,6 +170,11 @@ def refresh_idle_sessions(db: DB, fetched_at: dict[str, float]) -> None:
     rows = db.conn.execute(
         "SELECT DISTINCT w.id FROM workspaces w JOIN agents a ON a.workspace_id = w.id"
         " WHERE w.base_branch IS NOT NULL AND a.parent_id IS NULL"
+        " AND a.status != 'done' AND a.dismissed_at IS NULL"
+        " UNION SELECT w.id FROM workspaces w JOIN session_repos r ON r.repo_root = w.repo_root"
+        " JOIN session_repo_branches b ON b.root_id = r.root_id AND b.alias = r.alias AND b.branch = w.branch"
+        " JOIN agents a ON a.id = r.root_id"
+        " WHERE w.base_branch IS NOT NULL AND a.parent_id IS NULL"
         " AND a.status != 'done' AND a.dismissed_at IS NULL").fetchall()
     for row in rows:
         ws = db.get_workspace(row["id"])
@@ -194,8 +199,7 @@ def _quiet(db: DB, ws: Workspace) -> bool:
     current = db.get_workspace(ws.id)
     if current is None or current != ws or not current.base_branch:
         return False
-    roots = [a for a in db.list_agents(ws.id)
-             if a.parent_id is None and a.status != "done" and a.dismissed_at is None]
+    roots = _supervisors(db, ws)
     if not roots or any(a.status in autopilot.BUSY for a in roots):
         return False
     if pipeline.ready_branches(db, ws.repo_root, ws.branch):
@@ -239,10 +243,21 @@ def drifting(db: DB, root_id: str) -> bool:
         " WHERE a.id = ? AND d.drifting = 1", (root_id,)).fetchone() is not None
 
 
+def _supervisors(db: DB, ws: Workspace) -> list[Agent]:
+    """Live session owners, including supervisors in another attached repo."""
+    roots = {a.id: a for a in db.list_agents(ws.id) if a.parent_id is None}
+    for attached in db.session_repos():
+        if attached.repo_root == ws.repo_root and attached.branch == ws.branch:
+            if root := db.get_agent(attached.root_id):
+                roots[root.id] = root
+    return sorted((a for a in roots.values()
+                   if a.parent_id is None and a.status != "done" and a.dismissed_at is None),
+                  key=lambda a: a.created_at)
+
+
 def _tell(db: DB, ws: Workspace, text: str) -> None:
-    """The session's supervisor in ``ws`` (the newest, with several), if one is there yet."""
-    roots = [a for a in db.list_agents(ws.id)
-             if a.parent_id is None and a.status != "done" and a.dismissed_at is None]
+    """Tell the session's newest supervisor, including an attached checkout's owner."""
+    roots = _supervisors(db, ws)
     if roots:
         try:
             agents.send_message(db, roots[-1].id, text)
