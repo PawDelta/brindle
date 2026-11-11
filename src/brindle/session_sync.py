@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from collections.abc import Iterator
 from contextlib import ExitStack
 from dataclasses import dataclass, field
 
@@ -142,8 +143,8 @@ def refresh_drift_flags(db: DB) -> None:
     """Measure live sessions against origin as last fetched, once per sweep.
 
     A notice is armed again only after the branch falls below both limits.
-    Commit timestamps come only from commits origin doesn't contain, so
-    merging main into a session never makes its unlanded work younger.
+    Commit timestamps come from unlanded work, excluding integration merges
+    and history carried by verified squash/rebase landings on origin.
     """
     rows = db.conn.execute(
         "SELECT DISTINCT w.id FROM workspaces w JOIN agents a ON a.workspace_id = w.id"
@@ -160,7 +161,8 @@ def refresh_drift_flags(db: DB) -> None:
 
 def _record_drift(db: DB, ws: Workspace, default: str) -> None:
     ref = f"origin/{default}"
-    stamps = git.out(["log", "--format=%ct", f"{ref}..HEAD"], ws.path).splitlines()
+    covered = [f"^{covers}" for _squash, covers in _verified_squashes(db, ws, ref)]
+    stamps = git.out(["log", "--no-merges", "--format=%ct", f"{ref}..HEAD", *covered], ws.path).splitlines()
     oldest = min(map(int, stamps)) if stamps else None
     count = len(git.paths(["diff", "--name-only", "--no-renames", ref, "HEAD"], ws.path))
     drifting = (oldest is not None and time.time() - oldest > 48 * 3600) or count > 60
@@ -345,22 +347,30 @@ def record_squash(db: DB, ws: Workspace, squash_sha: str, covers_sha: str) -> bo
     return True
 
 
-def _replay_squashes(db: DB, ws: Workspace, ref: str) -> list[str]:
-    """Merge each recorded squash on ``ref`` the branch lacks as already
-    merged: its parent the usual way, then the squash itself with ``-s ours``,
-    but only when the squash is exactly the covered commit's changes (anything
-    else, e.g. edits made on the forge, is left to the plain merge). The
-    conflicting files of a parent's merge, else []."""
+def _verified_squashes(db: DB, ws: Workspace, ref: str) -> Iterator[tuple[str, str]]:
+    """Landings on ``ref`` proven to carry the recorded session history.
+
+    A record alone isn't proof: edits on the forge may differ from the
+    session's changes. Replay and drift must agree on which history landed.
+    """
     rows = db.conn.execute("SELECT squash_sha, covers_sha FROM session_squashes WHERE repo_root = ?"
                            " AND branch = ? ORDER BY recorded_at", (ws.repo_root, ws.branch)).fetchall()
     for row in rows:
         squash, covers = row["squash_sha"], row["covers_sha"]
         if (not git.ok(["merge-base", "--is-ancestor", squash, ref], ws.path)
-                or git.ok(["merge-base", "--is-ancestor", squash, "HEAD"], ws.path)
                 or not git.ok(["merge-base", "--is-ancestor", covers, "HEAD"], ws.path)):
             continue
         merged = git.run(["merge-tree", "--write-tree", f"{squash}^1", covers], ws.path, check=False)
         if merged.returncode != 0 or merged.stdout.split()[:1] != [git.out(["rev-parse", f"{squash}^{{tree}}"], ws.path)]:
+            continue
+        yield squash, covers
+
+
+def _replay_squashes(db: DB, ws: Workspace, ref: str) -> list[str]:
+    """Merge each verified landing the branch lacks: its parent normally,
+    then the squash with ``-s ours``. Return conflicting files, else []."""
+    for squash, covers in _verified_squashes(db, ws, ref):
+        if git.ok(["merge-base", "--is-ancestor", squash, "HEAD"], ws.path):
             continue
         _new, files = git.merge_local_base(ws.path, f"{squash}^1", no_ff=True)
         if files:

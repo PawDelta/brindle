@@ -187,6 +187,62 @@ def test_drift_flag_crossings_and_goal_dto(db, drift_flag_repo, tmp_path, told, 
     assert [e["payload"]["drifting"] for e in bus.tail(db, kinds=("session.pr_drift",))] == [True, False, True]
 
 
+def test_drift_flag_squash_landing_clears_covered_history_and_rearms(db, drift_flag_repo, tmp_path, told,
+                                                                  monkeypatch):
+    path = tmp_path / "repo"
+    shutil.copytree(drift_flag_repo, path)
+    ws = workspaces.adopt_root(db, str(path))
+    db.add_agent(Agent("lead", ws.id, "supervisor", "claude", None, "interactive", "idle", "%9", None, 0))
+    clock = [1700000000 + 48 * 3600 + 1]
+    monkeypatch.setattr(session_sync.time, "time", lambda: clock[0])
+
+    def landing(covers):
+        squash = git.out(["commit-tree", f"{covers}^{{tree}}", "-p", "origin/main", "-m", "squash"], ws.path)
+        git.run(["update-ref", "refs/remotes/origin/main", squash], ws.path)
+        assert session_sync.record_squash(db, ws, squash, covers)
+        assert session_sync._sync_locked(db, ws, "main").state == "synced"
+
+    def oldest():
+        session_sync.refresh_drift_flags(db)
+        return db.conn.execute("SELECT oldest_at FROM session_drift").fetchone()[0]
+
+    assert oldest() == 1700000000 and session_sync.drifting(db, "lead")
+    covers = git.out(["rev-parse", "HEAD"], ws.path)
+    # A recorded landing whose tree doesn't carry the work cannot clear it.
+    unrelated = git.out(["commit-tree", "origin/main^{tree}", "-p", "origin/main", "-m", "unrelated"], ws.path)
+    git.run(["update-ref", "refs/remotes/origin/main", unrelated], ws.path)
+    assert session_sync.record_squash(db, ws, unrelated, covers)
+    assert oldest() == 1700000000 and session_sync.drifting(db, "lead")
+    landing(covers)
+    assert git.out(["diff", "origin/main", "HEAD"], ws.path) == ""
+    assert oldest() is None and not session_sync.drifting(db, "lead")
+
+    # Fresh work after landing ages from its own commit, then notifies again.
+    with monkeypatch.context() as patch:
+        patch.setenv("GIT_COMMITTER_DATE", "1700200000 +0000")
+        first = commit(path, "file-0", "next PR\n")
+    clock[0] = 1700200000 + 48 * 3600
+    assert oldest() == 1700200000 and not session_sync.drifting(db, "lead")
+    notices = len(told)
+    clock[0] += 1
+    assert oldest() == 1700200000 and session_sync.drifting(db, "lead")
+    assert len(told) == notices + 1
+    oldest()
+    assert len(told) == notices + 1
+
+    # A second landing covers only that PR, preserving work made before sync.
+    with monkeypatch.context() as patch:
+        patch.setenv("GIT_COMMITTER_DATE", "1700400000 +0000")
+        commit(path, "file-0", "later unlanded work\n")
+    landing(first)
+    clock[0] = 1700400000 + 48 * 3600
+    assert oldest() == 1700400000 and not session_sync.drifting(db, "lead")
+    notices = len(told)
+    clock[0] += 1
+    assert oldest() == 1700400000 and session_sync.drifting(db, "lead")
+    assert len(told) == notices + 1
+
+
 def test_drift_flag_pipeline_conflict_event(db, repo, monkeypatch):
     from brindle.workspaces import SyncResult
 
