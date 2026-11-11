@@ -129,7 +129,8 @@ def _branch_files(repo_root: str, base_sha: str, head_sha: str) -> tuple[str, ..
 
 
 def _session_changes(db: DB, ws: Workspace, own: set[str],
-                     start: str | None = None) -> Iterator[tuple[str, str, str, tuple[str, ...]]]:
+                     start: str | None = None, caller: Agent | None = None,
+                     isolate: bool = True) -> Iterator[tuple[str, str, str, tuple[str, ...]]]:
     """Other sessions' accumulated work, including after their workers are removed.
 
     Yield (session root, dependency holder, branch, changed files). Attached
@@ -148,16 +149,18 @@ def _session_changes(db: DB, ws: Workspace, own: set[str],
         return
     try:
         refs = git.ref_shas(ws.repo_root)
+        if not refs:
+            return
         base = git.default_branch(ws.repo_root)
-        # Without a dependency-supplied start, workers inherit the caller's
-        # current branch, which may already contain another session's work
-        # even while main is unchanged. Key the diff by that commit too.
-        base_sha = (start or refs.get(git._full_ref(ws.branch))
-                    or refs.get(git._full_ref(base)) or refs.get(f"refs/remotes/origin/{base}"))
+        launch_base = agents.delegation_base(db, caller, ws) if isolate else ws.branch
+        # Use delegate's base policy, including merge_into and its session
+        # exceptions. An explicit dependency start takes precedence; when
+        # the chosen local branch is absent, delegate falls back to HEAD.
+        base_sha = start or refs.get(git._full_ref(launch_base)) or git.out(["rev-parse", "HEAD"], ws.path).strip()
         if not base_sha:
             return
         for (root, branch), holder in branches.items():
-            if branch in (ws.branch, base):
+            if branch == base:
                 continue
             head = refs.get(git._full_ref(branch))
             if head:
@@ -170,12 +173,14 @@ def _session_changes(db: DB, ws: Workspace, own: set[str],
 
 
 def _session_overlap(db: DB, ws: Workspace, files: list[str], own: set[str],
-                     task_id: str | None = None) -> Clash | None:
+                     task_id: str | None = None, caller_id: str | None = None) -> Clash | None:
     pending = db.get_task(task_id) if task_id else None
+    isolate = bool(pending.isolate) if pending else True
     # A satisfied cross-session dependency can supply the new branch's
     # starting commit. Its inherited changes must not hold the task again.
-    start = _holder_start(db, ws, _loads(pending.depends_on)) if pending else None
-    for root, holder, branch, changed in _session_changes(db, ws, own, start):
+    start = _holder_start(db, ws, _loads(pending.depends_on)) if pending and isolate else None
+    caller = db.get_agent(caller_id) if caller_id else None
+    for root, holder, branch, changed in _session_changes(db, ws, own, start, caller, isolate):
         shared = _overlap_files(files, [], list(changed))
         if shared:
             return Clash(f"overlaps with session {root} ({branch}) on {', '.join(shared)}; "
@@ -365,7 +370,7 @@ def inspected_clash(db: DB, ws: Workspace, files: list[str] | None, task_text: s
     if files:
         clash = (_running_overlap(db, ws, files, own, changed=True)
                  or _queued_overlap(db, ws, files, own, inspect=True, task_id=task_id)
-                 or _session_overlap(db, ws, files, own, task_id) or _intent_overlap(db, ws, files, own))
+                 or _session_overlap(db, ws, files, own, task_id, caller_id) or _intent_overlap(db, ws, files, own))
         if clash:
             return clash
     mine_issues = _issue_numbers(task_text)

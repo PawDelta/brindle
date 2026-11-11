@@ -99,6 +99,84 @@ def test_session_branch_forecast_keeps_reported_unmerged(db, coordination, monke
     assert tasks.conflict_forecast(db, c.a, db.get_agent("a")) == []
 
 
+@pytest.mark.variant("Review probe: merge_into=main differs from the caller's inherited session work")
+def test_session_branch_overlap_uses_delegate_merge_into_base(db, coordination, monkeypatch):
+    from contextlib import nullcontext
+
+    from brindle import agents, identity_lock, pipeline, workspaces
+
+    c = coordination
+    db.update_task("held", state="merged")
+    db.conn.execute("UPDATE workspaces SET branch='session-a' WHERE id='a'")
+    caller_ws = db.get_workspace("a")
+    refs = {"refs/heads/main": "main-head", "refs/heads/session-a": "a-merged",
+            "refs/heads/session": "b-head"}
+    monkeypatch.setattr(config, "load_repo_config", lambda root: config.RepoConfig(merge_into="main"))
+    monkeypatch.setattr(git, "ref_shas", lambda root: refs)
+    monkeypatch.setattr(git, "paths", lambda args, root:
+                        [] if args[-1] == "a-merged...b-head" else ["src/shared.py"])
+    monkeypatch.setattr(git, "branch_exists", lambda root, branch: f"refs/heads/{branch}" in refs)
+    monkeypatch.setattr(identity_lock, "ensure_workspace", lambda *args: None)
+    monkeypatch.setattr(agents, "model_problem", lambda *args: None)
+    monkeypatch.setattr(agents, "_check_branch_owner", lambda *args: None)
+    monkeypatch.setattr(pipeline, "branch_start_lock", lambda *args: nullcontext())
+    monkeypatch.setattr(workspaces, "branch_name", lambda root, branch: branch)
+    monkeypatch.setattr(workspaces, "refresh_branch", lambda db, ws: ws)
+
+    class CreateReached(Exception):
+        pass
+
+    def create(db, path, branch, base, *, start, **kwargs):
+        raise CreateReached(base, start)
+
+    monkeypatch.setattr(workspaces, "create", create)
+    # The supervisor starts from configured main, which lacks B's work;
+    # sub-workers and workers in an attached session inherit A instead.
+    for kind, expected_base in (("supervisor", "main"), ("worker", "session-a"), ("attached", "session-a")):
+        if kind == "worker":
+            db.add_agent(replace(db.get_agent("a"), id="child", parent_id="a", mode="assign"))
+        elif kind == "attached":
+            outside = c.workspace("outside", "main", repo="/other-repo")
+            db.update_agent("a", workspace_id=outside.id)
+            db.add_session_repo("a", "attached", caller_ws.repo_root, caller_ws.branch)
+        caller = db.get_agent("child" if kind == "worker" else "a")
+        with pytest.raises(CreateReached) as actual:
+            agents.delegate(db, caller, caller_ws, "developer", "work", "assign",
+                            branch="new", plan_first=False, admit=False)
+        assert actual.value.args == (expected_base, expected_base)
+        clash = tasks.inspected_clash(db, caller_ws, ["src/shared.py"], caller_id=caller.id)
+        if kind == "supervisor":
+            assert clash is not None and clash.holder == "workspace:b"
+            # An absent configured branch makes delegate use this checkout's
+            # HEAD; inspection must use that commit rather than invent a base.
+            del refs["refs/heads/main"]
+            monkeypatch.setattr(git, "out", lambda args, root: "a-merged")
+            with pytest.raises(CreateReached) as fallback:
+                agents.delegate(db, caller, caller_ws, "developer", "work", "assign",
+                                branch="new", plan_first=False, admit=False)
+            assert fallback.value.args == ("main", "HEAD")
+            assert tasks.inspected_clash(db, caller_ws, ["src/shared.py"], caller_id=caller.id) is None
+            refs["refs/heads/main"] = "main-head"
+            # Non-isolated work stays in the caller's checkout regardless of
+            # merge_into, as the real delegation path confirms.
+            def spawn(db, ws, *args, **kwargs):
+                raise CreateReached(ws.id, ws.branch)
+
+            monkeypatch.setattr(agents, "spawn", spawn)
+            with pytest.raises(CreateReached) as in_place:
+                agents.delegate(db, caller, caller_ws, "developer", "work", "assign",
+                                isolate=False, plan_first=False, admit=False)
+            assert in_place.value.args == (caller_ws.id, caller_ws.branch)
+            pending = replace(c.held, id="in-place", agent_id=None, caller_id=caller.id,
+                              caller_ws_id=caller_ws.id, state="pending", isolate=0)
+            db.add_task(pending)
+            assert tasks.inspected_clash(db, caller_ws, ["src/shared.py"], caller_id=caller.id,
+                                         task_id=pending.id) is None
+            db.update_task(pending.id, state="cancelled")
+        else:
+            assert clash is None
+
+
 def test_broad_glob_requires_real_shared_files(db, coordination):
     from brindle import knowledge
 
@@ -201,7 +279,7 @@ def test_broad_glob_launch_deduplicates_and_preserves_modes(db, coordination, mo
 
         monkeypatch.setattr(git, "ok", ancestry)
         monkeypatch.setattr(identity_lock, "ensure_workspace", lambda *args: None)
-        launch_config = SimpleNamespace(overlap="queue", max_weight=None)
+        launch_config = SimpleNamespace(overlap="queue", max_weight=None, merge_into=None)
         monkeypatch.setattr(config, "load_repo_config", lambda root: launch_config)
         monkeypatch.setattr(tasks, "_claim_fair", lambda db, t: (db.claim_task(t.id), None, None))
         monkeypatch.setattr(tasks, "_launch_warnings", lambda *args: [])
