@@ -292,7 +292,8 @@ def items(db: DB, repo_root: str | None, panes: dict[str, bool] | None = None) -
                 out.append(InboxItemDTO(kind="login", reason="cloud login expired",
                                         **{**link, "agent_id": login.agent_id or a["id"]},
                                         detail=login.refresh_cmd))
-    all_items = (out + _idle_items(db, repo_root) + _doc_items(db, repo_root, shown) + _visual_items(db, repo_root)
+    all_items = (out + _idle_items(db, repo_root) + _doc_items(db, repo_root, shown) + _review_items(db, repo_root)
+                 + _visual_items(db, repo_root)
                  + _plan_offer_items(db, repo_root) + _setup_items()
                  + _org_blocks(db, repo_root) + _org_notices())
     # Requests can outlive the live snapshot (notably document requests).
@@ -387,6 +388,63 @@ def _doc_items(db: DB, repo_root: str | None, shown: set[str]) -> list[InboxItem
                                     request_id=r["id"], doc=r["doc_id"], section=r["section"],
                                     agent_id=r["agent_id"], workspace_id=ws.id,
                                     root_id=autopilot.root_of(db, r["agent_id"])))
+    return out
+
+
+def _my_sub() -> str | None:
+    """The signed-in account, or None offline, logged out or air-gapped: no review cards, never an error."""
+    from brindle.pro import license
+
+    try:
+        return license.current(refresh=False).sub
+    except Exception:  # noqa: BLE001 - the inbox must still load without Pro
+        return None
+
+
+def _review_items(db: DB, repo_root: str | None) -> list[InboxItemDTO]:
+    """Cards for shared design docs, derived from the stored review state so
+    they clear on their own once acted on: "review_requested" while the
+    Library's queue asks this account (pro/review_queue);
+    "changes_requested" / "signed_off" for the author, until the plan is
+    revised or approved. Each opens the doc (``doc`` = the Library's id)."""
+    from brindle import plans
+
+    me = _my_sub()
+    if me is None:
+        return []
+    out = []
+    links: dict[str, dict] = {}     # a doc this machine has a live plan for: what enriches its queue card
+    for r in db.conn.execute("SELECT plan_id, doc_id, owner FROM plan_shares WHERE doc_id IS NOT NULL"):
+        try:
+            p = plans._row(db, r["plan_id"])
+        except Exception:  # noqa: BLE001 - a plan that went away or a bad row is skipped, not shown raw
+            continue
+        root = db.get_agent(p["root_id"])
+        ws = db.get_workspace(root.workspace_id) if root else None
+        if root and identity_lock.locked_by(root.id):
+            continue        # another identity's session: no local link or feedback (the queue is the person's own)
+        if p["state"] not in plans.HOLDING or (repo_root and ws and ws.repo_root != repo_root):
+            continue
+        link = {"doc": r["doc_id"], "request_id": p["id"], "agent_id": root.id if root else None,
+                "workspace_id": ws.id if ws else None, "root_id": root.id if root else None}
+        links[r["doc_id"]] = {**link, "title": plans._title(p["markdown"])}
+        if r["owner"] == me:
+            found = plans.gate(db, p)
+            state = found and found["state"]
+            if state == plans.CHANGES:
+                out.append(InboxItemDTO(kind="changes_requested", reason="Changes requested",
+                                        detail=links[r["doc_id"]]["title"], **link))
+            elif state == "ready":
+                out.append(InboxItemDTO(kind="signed_off", reason="Signed off",
+                                        detail=links[r["doc_id"]]["title"], **link))
+    # Who is asked to review is the Library's per-person queue, for every doc
+    # (a plan here only adds the session link): it clears when the item leaves.
+    from brindle.pro import review_queue
+
+    for q in review_queue.waiting(me):
+        link = links.get(q["doc_id"]) or {"doc": q["doc_id"]}
+        out.append(InboxItemDTO(kind="review_requested", reason="Review requested",
+                                detail=link.get("title") or q["title"], **{k: v for k, v in link.items() if k != "title"}))
     return out
 
 

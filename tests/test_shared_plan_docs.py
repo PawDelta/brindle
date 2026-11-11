@@ -455,6 +455,81 @@ def test_required_reviewers_are_synced_in_the_background(monkeypatch):
     assert synced
 
 
+def test_a_teammate_with_no_local_plan_gets_the_review_requested_card_from_the_library_queue(
+        db, parts, backend, monkeypatch):
+    """The card comes from the Library's queue (no plan here), clears when the item leaves it, and a
+    failed poll keeps it without an error."""
+    from brindle.daemon import lifecycle
+    from brindle.pro import review_queue as rq
+    from brindle.service import inbox
+
+    pid, lib, net = parts
+    queue = {"status": 200, "requests": [{"doc_id": "ad_9", "title": "Cloud workers for Pro", "rev": 3}]}
+    from brindle.pro import license
+    from pro_fixtures import claims, sign
+
+    store, alice = net["store"], net["store"].load()
+    bob = {**alice, "access_token": "bob_access", "refresh_token": "bob_refresh",
+           "entitlement": sign(backend.key, claims(sub="u_bob", features=list(TEAM_LOGIN)))}
+    signed_in = lambda: license.verify(store.load()["entitlement"], issuer=None, grace=0).sub  # noqa: E731
+    during = []                                              # what happens to the stored sign-in mid-request
+
+    def answer(form, headers):
+        for record in during:
+            store.save(record)
+        if headers.get("Authorization") != f"Bearer {alice['access_token']}":
+            return 200, {"requests": [{"doc_id": "ad_bob", "title": "Bob's private design"}]}
+        return queue["status"], dict(queue)
+    backend.routes["GET /me/analysis-docs/review-requests"] = answer
+    monkeypatch.setattr(inbox, "_my_sub", signed_in)
+    monkeypatch.setattr(ad, "_session", lambda client=None, store=None: (net["client"], net["store"]))
+    rq.clear()
+    cards = lambda: [(i.kind, i.doc, i.detail) for i in inbox._review_items(db, None)]  # noqa: E731
+    assert cards() == []                                     # nothing polled yet
+    lifecycle._poll_review_queue()
+    assert cards() == [("review_requested", "ad_9", "Cloud workers for Pro")]
+    queue["status"] = 503
+    lifecycle._poll_review_queue()
+    assert len(cards()) == 1                                 # a failed poll keeps the card
+    queue.update(status=200, requests=[])
+    lifecycle._poll_review_queue()
+    assert cards() == []                                     # it left the queue
+
+    # A doc this machine has a plan for follows the queue too, and the plan only adds the session link.
+    sd.share(db, pid, TEAM, **net)
+    queue["requests"] = [{"doc_id": DOC, "title": "Remote title"}]
+    lifecycle._poll_review_queue()
+    assert [(i.kind, i.doc, i.request_id) for i in inbox._review_items(db, None)] == [("review_requested", DOC, pid)]
+    queue["requests"] = []
+    lifecycle._poll_review_queue()
+    assert cards() == []
+
+    # The stored sign-in changes while the request runs (Alice -> Bob -> Alice, or ending as Bob): the request
+    # still carries Alice's own token and the answer is filed under Alice, never under whoever is signed in after.
+    queue["requests"] = [{"doc_id": "ad_alice", "title": "Alice's"}]
+    for switches, end in (([bob, alice], "user_1"), ([bob], "u_bob")):
+        rq.clear()
+        during[:] = switches
+        store.save(alice)
+        lifecycle._poll_review_queue()
+        assert [q["doc_id"] for q in rq.waiting("user_1")] == ["ad_alice"]
+        assert rq.waiting("u_bob") == [] and signed_in() == end
+    during.clear()
+
+    # An expired token is refreshed from the captured record itself, and the request carries the new token.
+    store.save({**alice, "access_expires_at": 0})
+    backend.routes["GET /entitlement"] = lambda f, h: (200, {
+        "entitlement": sign(backend.key, claims(features=list(TEAM_LOGIN))), "plan": "pro", "status": "active",
+        "features": list(TEAM_LOGIN), "seats": 5, "expires_at": int(time.time()) + 3600})
+    queue["requests"] = [{"doc_id": "ad_fresh", "title": "After refresh"}]
+    seen_token = []
+    backend.routes["GET /me/analysis-docs/review-requests"] = lambda f, h: (
+        seen_token.append(h["Authorization"]), (200, dict(queue)))[1]
+    lifecycle._poll_review_queue()
+    assert cards() == [("review_requested", "ad_fresh", "After refresh")]
+    assert seen_token == [f"Bearer {store.load()['access_token']}"] != [f"Bearer {alice['access_token']}"]
+
+
 def test_a_shared_plan_goes_to_the_library_and_what_teammates_write_comes_back(db, parts, backend):
     pid, lib, net = parts
     grant = {"u_c": {"can_edit": False, "can_suggest": False, "can_comment": True}}
