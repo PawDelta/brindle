@@ -449,12 +449,24 @@ def answer(db: DB, visual_id: str, rev: Any, option: Any = None, note: Any = Non
     return get(db, v["id"])
 
 
-def has_approved_design(db: DB, root_id: str) -> bool:
-    """Whether the person chose an option on one of session ``root_id``'s
-    visuals. A viewed visual, or one answered with only a note (a redirect),
-    isn't an approval."""
-    return db.conn.execute("SELECT 1 FROM visuals WHERE root_id=? AND kind='visual' AND answer IS NOT NULL "
-                           "AND json_extract(answer, '$.option') IS NOT NULL", (root_id,)).fetchone() is not None
+_APPROVES = re.compile(r"^\s*(?:approve[ds]?|yes|ok(?:ay)?|build|go|ship|proceed|accept(?:ed)?|looks good)\b", re.I)
+
+
+def has_approved_design(db: DB, root_id: str, since: float = 0) -> bool:
+    """Whether, after ``since``, the person approved one of session
+    ``root_id``'s visuals: chose an option that says to go ahead (its id or
+    label) with no note. A viewed visual, a redirect (a note, or no option),
+    and any other choice, such as "No", aren't approvals."""
+    for row in db.conn.execute("SELECT options, answer FROM visuals WHERE root_id=? AND kind='visual' "
+                               "AND answer IS NOT NULL", (root_id,)):
+        answer = json.loads(row["answer"])
+        if answer.get("note") or not isinstance(answer.get("at"), (int, float)) or answer["at"] <= since:
+            continue
+        labels = {o["id"]: o.get("label", "") for o in json.loads(row["options"] or "[]")}
+        chosen = answer.get("option")
+        if chosen in labels and (_APPROVES.match(str(chosen)) or _APPROVES.match(labels[chosen])):
+            return True
+    return False
 
 
 def dismiss(db: DB, visual_id: str, rev: Any) -> dict:

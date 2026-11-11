@@ -384,10 +384,12 @@ def test_big_goal_offers_a_planning_doc(accept, db, session, monkeypatch, connec
 
 @pytest.mark.parametrize("answer", [
     {"option": "build"},
-    pytest.param({"note": "change the split first"}, marks=pytest.mark.variant(
-        "a redirect is not an approval: the offer must still open")),
+    pytest.param({"option": "no"}, marks=pytest.mark.variant(
+        "choosing the visual's 'No' is a rejection, not an approval: the offer must still open")),
+    pytest.param({"option": "build", "note": "change the split first"}, marks=pytest.mark.variant(
+        "an option with a redirect note is not an approval: the offer must still open")),
 ])
-def test_approved_design_counts_as_the_plan(answer, db, session, monkeypatch, connected_app):
+def test_approved_design_counts_as_the_plan(answer, db, session, monkeypatch):
     from brindle import autopilot, visuals
     from brindle.service import inbox
 
@@ -404,8 +406,11 @@ def test_approved_design_counts_as_the_plan(answer, db, session, monkeypatch, co
     mcp_server.set_goal("Org presets", [{"title": f"M{i}", "check": "true"} for i in range(4)])
     offers = [i for i in inbox.items(db, None) if i.kind == "plan_offer"]
     asyncio.run(mcp_server.assign("developer", "build the preset schema"))
-    if "option" in answer:
+    if answer == {"option": "build"}:
         assert offers == [] and started == ["build the preset schema"] and plans.holding(db, "boss") is None
+        # The approval belonged to that goal: a later, unrelated goal gets the normal offer.
+        mcp_server.set_goal("Billing export", [{"title": f"B{i}", "check": "true"} for i in range(4)])
+        assert [i for i in inbox.items(db, None) if i.kind == "plan_offer"]
     else:
         assert len(offers) == 1 and started == []
 
