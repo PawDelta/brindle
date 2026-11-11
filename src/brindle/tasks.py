@@ -525,10 +525,12 @@ def _cross_wait_over(db: DB, t: Task, caller_ws: Workspace, dep: str, since: flo
     caller = db.get_agent(t.caller_id) if t.caller_id else None
     own = _own_roots(db, caller_ws, t.caller_id)
     for _root, holder, _branch, changed in _session_changes(db, caller_ws, own, start, caller, isolate):
-        if holder == dep:
-            # Only a branch actually read releases it: one git couldn't read keeps waiting.
-            return None if _overlap_files(files, [], list(changed)) else "synced"
-    return None
+        if holder != dep:
+            continue
+        if _overlap_files(files, [], list(changed)):
+            return None
+        return "synced"
+    return None   # only a branch actually read releases it: one git couldn't read keeps waiting
 
 
 def _release_cross_waits(db: DB, t: Task, caller_ws: Workspace) -> Task:
