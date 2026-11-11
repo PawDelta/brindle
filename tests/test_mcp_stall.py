@@ -6,6 +6,7 @@ import json
 import os
 import sys
 import threading
+import traceback
 import types
 
 import anyio
@@ -83,11 +84,15 @@ def test_hung_reload_check_is_logged_through_real_read_and_serialization(monkeyp
     assert any("wants_reload" in f for f in frames)
 
 
-@pytest.mark.parametrize("count, grouped", [(300, False), (3000, True)])
-def test_many_realistic_threads_still_log_the_whole_entry(monkeypatch, count, grouped):
-    """300 threads with real-looking ids and one long shared name: every thread
-    keeps its own key and a frame, and the entry isn't replaced by a truncation marker."""
+@pytest.mark.parametrize("count, grouped, distinct", [(300, False, False), (3000, True, False), (1500, True, True)])
+def test_many_realistic_threads_still_log_the_whole_entry(monkeypatch, count, grouped, distinct):
+    """Threads with real-looking ids and one long shared name: the entry isn't
+    replaced by a truncation marker, however many threads and innermost locations."""
     frame = sys._getframe()
+    if distinct:    # every thread blocked somewhere different: one group per thread
+        counter = iter(range(10**6))
+        monkeypatch.setattr(traceback, "extract_stack", lambda f: [
+            traceback.FrameSummary(f"/site-packages/pkg/module_{(n := next(counter))}.py", n, f"function_{n}")])
     ids = [140_000_000_000_000 + i for i in range(count)]
     monkeypatch.setattr(sys, "_current_frames", lambda: {i: frame for i in ids})
     fake = [types.SimpleNamespace(ident=i, name="AnyIO worker thread " + "x" * 40) for i in ids]
@@ -102,7 +107,7 @@ def test_many_realistic_threads_still_log_the_whole_entry(monkeypatch, count, gr
     assert "truncated" not in detail and detail["tool"] == "handoff" and "idle" in detail["connection"]
     if grouped:     # past every per-thread level: ids under their frame, overflow counted
         assert detail["threads"]["ids omitted"] > 0
-        assert any("test_many_realistic" in k for k in detail["threads"])
+        assert distinct or any("test_many_realistic" in k for k in detail["threads"])
     else:
         assert len(detail["threads"]) == count and all(detail["threads"].values())
 

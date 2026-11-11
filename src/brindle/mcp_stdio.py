@@ -190,17 +190,22 @@ def _grouped(current: list) -> dict:
         groups.setdefault(f"{os.path.basename(top.filename)}:{top.lineno} {top.name}"[:60] if top else "?",
                           []).append(str(ident))
     out: dict = {}
-    used = omitted = 0
-    for text, ids in groups.items():
+    room = _STACK_BYTES - 1024      # every key, id and bit of JSON structure is charged against it
+    omitted = 0
+    for text, ids in sorted(groups.items(), key=lambda kv: -len(kv[1])):
+        cost = 2 * len(json.dumps(text)) + 16       # key, doubled for escaping by the scrubber, plus structure
+        if cost + len(ids[0]) + 4 > room:
+            omitted += len(ids)                     # not even its key and one id fit
+            continue
+        room -= cost
         kept = []
         for i in ids:
-            if used + len(i) + 1 > _STACK_BYTES - 1024:
+            if len(i) + 4 > room:
                 omitted += 1
                 continue
-            used += len(i) + 1
+            room -= len(i) + 4
             kept.append(i)
         out[text] = [",".join(kept[n:n + 100]) for n in range(0, len(kept), 100)]
-        used += len(text)
     if omitted:
         out["ids omitted"] = omitted
     return out
