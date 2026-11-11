@@ -288,7 +288,7 @@ def _gate(c, p: dict) -> dict | None:
         return None
     from brindle.pro import review_policies, shared_docs
 
-    if shared_docs.lapse_stands(row):
+    if shared_docs.lapse_stands(row, p):
         return None
 
     review = json.loads(row["review"])
@@ -380,7 +380,7 @@ def _team_ended(db: DB, p: dict) -> bool:
     from brindle.pro import shared_docs
 
     row = db.conn.execute("SELECT * FROM plan_shares WHERE plan_id=?", (p["id"],)).fetchone()
-    return row is not None and shared_docs.lapse_stands(row)
+    return row is not None and shared_docs.lapse_stands(row, p)
 
 
 def gate_shut(db: DB, root_id: str) -> dict | None:

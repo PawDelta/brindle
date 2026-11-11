@@ -29,7 +29,9 @@ the revision and closes the thread together.
 When the Team plan the doc was shared under ends, it becomes a personal doc: no
 build gate and no sync, what teammates wrote stays readable, and resubscribing
 picks the same Library document back up. Only an entitlement the server issues
-now, for the account and org that shared it, can say so (:func:`_note_ended`).
+now, for the account and org that shared it, can say so (:func:`_note_ended`),
+and only while that answer is recent and they are still signed in
+(:func:`lapse_stands`).
 
 Calls raise ``RuntimeError`` with a readable reason, as ``brindle docs`` does.
 """
@@ -53,6 +55,8 @@ log = logging.getLogger(__name__)
 
 TEAM_FEATURE = "analysis_docs_team"
 NO_FEATURE = "entitlement_required"     # the Library's refusal when the plan lacks a feature
+LAPSE_GOOD_FOR = 300.0       # seconds the server's word that a Team plan ended lets work go with no gate
+LAPSE_CHECK_AFTER = 120.0    # the background pass asks again once that word is this old
 SCOPE_KINDS = ("group", "org")
 CLAIM_FOR = 60.0             # seconds a create or push in flight holds the plan; then it is presumed dead
 FIRST_REVISION = 1           # what the Library numbers a new document's head
@@ -121,13 +125,23 @@ def _ended_for(share_, ent) -> bool:
     return TEAM_FEATURE not in ent.features and (ent.sub, ent.org_id) == (share_["owner"], share_["org_id"])
 
 
-def lapse_stands(share_) -> bool:
-    """Whether a lapse on record applies to whoever is signed in now, which
-    every look at the gate asks (plans._gate). The record says the server
-    confirmed it once; this reads the signed entitlement held here, so
-    signing out, switching account or org, or the entitlement running out
-    shuts the gate again at once, whatever path wants the work released."""
+def _confirmed(share_) -> bool:
+    """Whether the server said recently that the plan's Team plan has ended."""
+    return share_["lapsed_at"] is not None and time.time() - share_["lapsed_at"] < LAPSE_GOOD_FOR
+
+
+def lapse_stands(share_, p: dict) -> bool:
+    """Whether a lapse on record lets plan ``p`` go without its gate now, which
+    every look at the gate asks (plans._gate), so no path releases work on
+    an old answer. It takes a recent confirmation from the server (a failed
+    check withdraws it, and one nobody renews runs out) and that account and
+    org still signed in, per the signed entitlement held here. A plan already
+    building got there on a confirmation of its own, and has nothing to release."""
     if share_["lapsed_at"] is None:
+        return False
+    if p["state"] == "approved":
+        return True
+    if not _confirmed(share_):
         return False
     from brindle.pro import license
 
@@ -139,17 +153,19 @@ def lapse_stands(share_) -> bool:
 
 
 def _note_ended(db: DB, p: dict, ent) -> bool:
-    """Whether ``ent`` (from :func:`_issued`, or None) says the plan's Team
-    plan has ended, recording it if so. Anything else leaves the gate as it is."""
+    """Record the server's latest word on plan ``p``: whether ``ent`` (from
+    :func:`_issued`, or None when it couldn't be had) says its Team plan has
+    ended. Anything short of that withdraws an earlier confirmation, so the
+    gate is back until the server says so again. Returns whether it has ended."""
     share_ = link(db, p["id"])
-    if ent is None or share_ is None or not _ended_for(share_, ent):
+    if share_ is None:
         return False
+    ended = ent is not None and _ended_for(share_, ent)
     with db.tx() as c:
-        noted = c.execute("UPDATE plan_shares SET lapsed_at=? WHERE plan_id=? AND lapsed_at IS NULL",
-                          (time.time(), p["id"])).rowcount
-    if noted:
+        c.execute("UPDATE plan_shares SET lapsed_at=? WHERE plan_id=?", (time.time() if ended else None, p["id"]))
+    if ended != _confirmed(share_):
         plan_docs._changed(db, p, p["rev"])
-    return True
+    return ended
 
 
 def _team_active(db: DB, p: dict, store) -> None:
@@ -829,18 +845,20 @@ def sign_off(db: DB, plan_id: str, rev: Any, *, client=None, store=None) -> dict
 
 
 def _note_lapses(db: DB, client, store) -> None:
-    """Without Team, turn this account's plans in review into personal docs
-    if the server confirms it has ended. Asked only while one is still marked
-    as shared and it is this account's, so a pass doesn't ask for nothing."""
+    """Without Team, get the server's word on this account's plans in review:
+    one it hasn't confirmed ended, or confirmed a while ago. A pass with none
+    of those doesn't ask."""
     from brindle.pro import license
 
     try:
         stored = license.current(refresh=False, store=store)
     except Exception:  # noqa: BLE001 - logged out: no account whose plan could be said to have ended
         return
+    due_before = time.time() - LAPSE_CHECK_AFTER
     rows = db.conn.execute("SELECT s.plan_id FROM plan_shares s JOIN plans p ON p.id=s.plan_id"
-                           " WHERE s.doc_id IS NOT NULL AND s.lapsed_at IS NULL AND s.owner=? AND s.org_id=?"
-                           " AND p.state IN ('open','redirected')", (stored.sub, stored.org_id)).fetchall()
+                           " WHERE s.doc_id IS NOT NULL AND (s.lapsed_at IS NULL OR s.lapsed_at<?) AND s.owner=?"
+                           " AND s.org_id=? AND p.state IN ('open','redirected')",
+                           (due_before, stored.sub, stored.org_id)).fetchall()
     ent = _issued(client, store) if rows else None
     for row in rows:
         _note_ended(db, plan_docs._plan(db, row["plan_id"]), ent)

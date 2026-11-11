@@ -1081,8 +1081,8 @@ CREATE TABLE IF NOT EXISTS plan_shares (
     review TEXT NOT NULL DEFAULT '{}',   -- JSON: reviewers, sign-offs, who is pending, ready
     claimed_at REAL,               -- set while a create or a push is under way
     org_id TEXT,                   -- the org it was shared from; NULL on a share older than this column
-    lapsed_at REAL                 -- when the server confirmed that account and org have no Team plan;
-                                   -- honoured only while they are who is signed in (shared_docs.lapse_stands)
+    lapsed_at REAL                 -- when the server last confirmed that account and org have no Team plan;
+                                   -- NULL once a check fails. Honoured while recent (shared_docs.lapse_stands)
 );
 -- Which local thread or reply each Library thread or reply became, so a pull
 -- adds it once; status is the Library's as last seen. A negative remote_id is

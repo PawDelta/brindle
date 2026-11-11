@@ -10,7 +10,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from starlette.testclient import TestClient
 
-from brindle import plan_docs, plans, tasks, visual_offers
+from brindle import mcp_server, plan_docs, plans, tasks, visual_offers
 from brindle.daemon import holds
 from brindle.daemon.app import build_app
 from brindle.pro import analysis_docs as ad
@@ -625,7 +625,7 @@ def _bypass(arrange, why):
 ])
 def test_lapsed_plan_becomes_a_personal_doc(db, parts, session, backend, monkeypatch, arrange):
     pid, lib, net = parts
-    boss, _ = session
+    boss, started = session
     monkeypatch.setattr(ad, "_session", lambda client=None, store=None: (net["client"], net["store"]))
     monkeypatch.setattr(credentials, "default_store", lambda: net["store"])
     monkeypatch.setattr(ad, "on_merged", lambda *a: None)
@@ -655,21 +655,55 @@ def test_lapsed_plan_becomes_a_personal_doc(db, parts, session, backend, monkeyp
         assert got["gate"] is None and got["team_ended"] is True and plans.gate_shut(db, root) is None
         assert got["threads"][0]["text"] == "Which VM?"
 
-        # A lapse on record isn't enough for an approval: the server has to confirm it now.
-        backend.routes["GET /entitlement"] = [auth.AuthError("offline", code="network")]
-        assert approve().json()["error"]["code"] == "gate_unverified"
-
-        # It stands only for the account it was confirmed for: with the app away, nothing else releases the work.
+        # Work queued behind the doc, then the app goes away: only a current confirmation may release it.
+        assert "behind plan" in asyncio.run(mcp_server.assign("developer", "build it")) and started == []
         monkeypatch.setattr(holds, "app_connected", lambda: False)
-        assert plans.holding(db, root) is None and tasks.build_gate_refusal(db, boss.id) is None
+
+        def offline():
+            backend.routes["GET /entitlement"] = [auth.AuthError("offline", code="network")]
+
+        def age(seconds):
+            db.conn.execute("UPDATE plan_shares SET lapsed_at=? WHERE plan_id=?", (time.time() - seconds, pid))
+
+        def released():
+            assert plans.holding(db, root) is None and tasks.build_gate_refusal(db, boss.id) is None
+
+        def held():
+            assert plans.holding(db, root) and plans.gate_shut(db, root) and tasks.build_gate_refusal(db, boss.id)
+            assert tasks.sweep(db) == 0 and started == []
+            assert plans.to_dto(db, plans.get(db, pid))["team_ended"] is False
+
+        def confirmed_again():
+            _server_says(backend, **NO_TEAM)
+            sd.sync_open(db, **net)
+            released()
+
+        released()
+
+        # A refused approval takes the confirmation back: the server has to say it again.
+        offline()
+        assert approve().json()["error"]["code"] == "gate_unverified"
+        held()
+        confirmed_again()
+
+        # A re-check that fails takes it back too, and one nobody renews runs out by itself.
+        age(sd.LAPSE_CHECK_AFTER + 1)
+        offline()
+        sd.sync_open(db, **net)
+        held()
+        confirmed_again()
+        age(sd.LAPSE_GOOD_FOR + 1)
+        held()
+        confirmed_again()
+
+        # It stands only for the account it was confirmed for.
         now = int(time.time())
         for changed in (lambda: _signed_in(backend, net["store"], **ANOTHER_ACCOUNT),
                         lambda: _signed_in(backend, net["store"], **NO_TEAM, iat=now - 7200, exp=now - 1800),
                         lambda: _no_sign_in(db, pid, backend, net["store"])):
             changed()
             sd.sync_open(db, **net)
-            assert plans.holding(db, root) and plans.gate_shut(db, root) and tasks.build_gate_refusal(db, boss.id)
-            assert plans.to_dto(db, plans.get(db, pid))["team_ended"] is False
+            held()
 
         # Resubscribing picks the same document back up, with its review.
         _signed_in(backend, net["store"], features=list(TEAM_LOGIN))
@@ -681,7 +715,12 @@ def test_lapsed_plan_becomes_a_personal_doc(db, parts, session, backend, monkeyp
 
         # Lapsed again, the approval itself finds out and goes through with no reviewers to wait for.
         _lapsed(db, pid, backend, net["store"])
-        assert approve().json()["state"] == "approved"
+        assert approve().json()["state"] == "approved" and started == ["build it"]
+
+        # Built on an approval the server confirmed: the doc keeps saying what it is, however long ago.
+        age(sd.LAPSE_GOOD_FOR + 1)
+        built = plans.to_dto(db, plans.get(db, pid))
+        assert built["gate"] is None and built["team_ended"] is True
 
 
 def test_reviewers_change_after_sharing_and_a_folder_is_only_used_when_named(db, parts, backend):
