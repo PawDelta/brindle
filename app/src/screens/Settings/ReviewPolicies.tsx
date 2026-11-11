@@ -4,7 +4,7 @@
    and roles they can name, the designs each covers) and saved as the whole list at the version read
    (PUT /v1/review-policies). Nothing is read until the person opens it. The Library decides who may. */
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { DaemonError, type DaemonClient, type DraftImpact, type LibraryPerson, type ReviewPoliciesState, type ReviewPolicyRule } from "../../api/client";
 import { LoadingButton } from "../../components/LoadingButton";
 import { alert, button, field, main, notice, quiet } from "../../components/ui";
@@ -92,30 +92,38 @@ function Policies({ client }: { client: DaemonClient }) {
   const [stale, setStale] = useState(false);
 
   /* Reading again keeps the draft, unless it was written for another org's rules. */
+  /* Reads can overlap (Reload while a save's reload is out): the newest one started wins and an older
+     answer is dropped, and whether the draft is another org's is decided against the org last accepted,
+     not the one the request began under. */
+  const reads = useRef({ latest: 0, org: null as string | null });
   const load = async () => {
+    const mine = ++reads.current.latest;
     setError(null);
     try {
       const [read, directory] = await Promise.all([client.reviewPolicies(), client.libraryPeople().catch(() => ({ people: [] as LibraryPerson[], me: undefined as string | undefined }))]);
-      setDraft((d) => (state && state.org_id !== read.org_id ? blank : d));
+      if (mine !== reads.current.latest) return;
+      const another = reads.current.org !== null && reads.current.org !== read.org_id;
+      reads.current.org = read.org_id;
+      if (another) setDraft(blank);
       setState(read);
       setPeople([...(directory.me ? [{ sub: directory.me, email: "You" }] : []), ...directory.people]);
       setStale(false);
     } catch (failure) {
-      setError(failureMessage(failure));
+      if (mine === reads.current.latest) setError(failureMessage(failure));
     }
   };
   // eslint-disable-next-line react-hooks/exhaustive-deps -- read once when opened; Reload is the button
   useEffect(() => { void load(); }, [client]);
 
-  /* The whole list as saving would leave it, or null while the form isn't a complete rule. */
-  const candidate = (d: Draft): ReviewPolicyRule[] | null => {
+  /* The rule the form describes, or null while it isn't complete. */
+  const ruleOf = (d: Draft): ReviewPolicyRule | null => {
     if (!state) return null;
     const rules = state.policies;
     const list = d.paths.split(",").map((p) => p.trim()).filter(Boolean);
     const complete = !!d.name.trim() && !!d.needs && (d.kind === "any" || (d.kind === "paths" ? list.length > 0 : !!d.label.trim()));
     if (!complete || (d.editing && !rules.some((r) => r.id === d.editing))) return null;
     const kind = d.needs.slice(0, d.needs.indexOf(":")) as ReviewPolicyRule["needs"]["kind"];
-    const next: ReviewPolicyRule = {
+    return {
       ...rules.find((r) => r.id === d.editing),
       id: d.editing ?? slug(d.name, rules.map((r) => r.id)),
       name: d.name.trim(),
@@ -124,7 +132,12 @@ function Policies({ client }: { client: DaemonClient }) {
       approvals: kind === "person" ? 1 : d.approvals,
       note: d.note.trim() || null,
     };
-    return d.editing ? rules.map((r) => (r.id === d.editing ? next : r)) : [...rules, next];
+  };
+  /* The whole list as saving would leave it. */
+  const candidate = (d: Draft): ReviewPolicyRule[] | null => {
+    const next = ruleOf(d);
+    if (!state || !next) return null;
+    return d.editing ? state.policies.map((r) => (r.id === d.editing ? next : r)) : [...state.policies, next];
   };
 
   /* What saving would do to the designs in review, asked of the Library once the person leaves a field
@@ -132,7 +145,8 @@ function Policies({ client }: { client: DaemonClient }) {
      still what's on the form, so a slow reply never describes a draft since changed. */
   const [settled, setSettled] = useState<Draft>(blank);
   useEffect(() => setSettled(draft), [draft.kind, draft.needs, draft.approvals, draft.editing]); // eslint-disable-line react-hooks/exhaustive-deps
-  const asking = candidate(settled);
+  // The rule alone: the Library counts designs any listed rule covers, so the rest of the list would be counted too.
+  const asking = (r => (r ? [r] : null))(ruleOf(settled));
   const askKey = state && asking ? JSON.stringify([state.org_id, asking]) : null;
   const [impact, setImpact] = useState<{ key: string; result: DraftImpact } | null>(null);
   useEffect(() => {
@@ -142,7 +156,8 @@ function Policies({ client }: { client: DaemonClient }) {
     return () => { live = false; };
   // eslint-disable-next-line react-hooks/exhaustive-deps -- askKey is the whole of asking and state.org_id
   }, [client, askKey]);
-  const shownKey = state && candidate(draft) ? JSON.stringify([state.org_id, candidate(draft)]) : null;
+  const drafted = ruleOf(draft);
+  const shownKey = state && drafted ? JSON.stringify([state.org_id, [drafted]]) : null;
   const shown = impact && impact.key === shownKey ? impact.result : null;
 
   if (!state) {

@@ -87,6 +87,8 @@ it("shows what saving would do only for the draft on the form, and holds saves a
   type("Name", "Finance 2");
   fireEvent.blur(screen.getByLabelText("Name"));
   await waitFor(() => expect(lib.impacts).toHaveLength(2));
+  // Only the draft rule is evaluated: the org's other rules (one covers every design) would be counted into it.
+  expect(lib.impacts.map((i) => i.names)).toEqual([["Finance"], ["Finance 2"]]);
   await act(async () => lib.impacts[0].reply(9));
   expect(screen.queryByTestId("review-policy-applies")).toBeNull();
   await act(async () => lib.impacts[1].reply(5, true));
@@ -105,4 +107,28 @@ it("shows what saving would do only for the draft on the form, and holds saves a
   expect((screen.getByLabelText("Name") as HTMLInputElement).value).toBe("Finance 2");
   save();
   await waitFor(() => expect(lib.puts.at(-1)).toMatchObject({ version: 5 }));
+});
+
+it("overlapping reloads keep the newest read, and a draft for the org just loaded survives the older one finishing", async () => {
+  const reads: { answer(r: Response): void }[] = [];
+  const client = new DaemonClient({ baseUrl: BASE_URL, token: TOKEN, fetch: async (input) => {
+    if (String(input).includes("library/people")) return Response.json({ people: [] });
+    return new Promise<Response>((resolve) => reads.push({ answer: resolve }));
+  } });
+  const answer = (i: number, org: string) => reads[i].answer(Response.json(
+    { org_id: org, version: 1, policies: [], directory: { teams: [{ id: "t_1", name: "Security" }], roles: [] }, in_review: { policies: [] } }));
+  render(<ReviewPolicies client={client} />);
+  fireEvent.click(screen.getByRole("button", { name: "Review policies" }));
+  await waitFor(() => expect(reads).toHaveLength(1));
+  await act(async () => answer(0, "org_a"));
+  await screen.findByRole("form", { name: "New policy" });
+
+  fireEvent.click(screen.getByRole("button", { name: "Reload policies" }));
+  fireEvent.click(screen.getByRole("button", { name: "Reload policies" }));
+  await waitFor(() => expect(reads).toHaveLength(3));
+  // The first reload is superseded by the second: its answer is dropped, not applied over newer state.
+  await act(async () => answer(2, "org_b"));
+  type("Name", "B draft");
+  await act(async () => answer(1, "org_a"));
+  expect((screen.getByLabelText("Name") as HTMLInputElement).value).toBe("B draft");
 });
