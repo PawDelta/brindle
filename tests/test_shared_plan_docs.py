@@ -462,8 +462,14 @@ def test_a_teammate_with_no_local_plan_gets_the_review_requested_card_from_the_l
 
     pid, lib, net = parts
     queue = {"status": 200, "requests": [{"doc_id": "ad_9", "title": "Cloud workers for Pro", "rev": 3}]}
-    backend.routes["GET /me/analysis-docs/review-requests"] = lambda f, h: (queue["status"], dict(queue))
-    monkeypatch.setattr(inbox, "_my_sub", lambda: "u_me")
+    who = {"sub": "u_me", "switch_to": None}
+
+    def answer(form, headers):
+        if who["switch_to"]:                                 # the account changes while the request is in flight
+            who["sub"] = who["switch_to"]
+        return queue["status"], dict(queue)
+    backend.routes["GET /me/analysis-docs/review-requests"] = answer
+    monkeypatch.setattr(inbox, "_my_sub", lambda: who["sub"])
     monkeypatch.setattr(ad, "_session", lambda client=None, store=None: (net["client"], net["store"]))
     rq.clear()
     cards = lambda: [(i.kind, i.doc, i.detail) for i in inbox._review_items(db, None)]  # noqa: E731
@@ -476,6 +482,22 @@ def test_a_teammate_with_no_local_plan_gets_the_review_requested_card_from_the_l
     queue.update(status=200, requests=[])
     lifecycle._poll_review_queue()
     assert cards() == []                                     # it left the queue
+
+    # A doc this machine has a plan for follows the queue too, and the plan only adds the session link.
+    sd.share(db, pid, TEAM, **net)
+    queue["requests"] = [{"doc_id": DOC, "title": "Remote title"}]
+    lifecycle._poll_review_queue()
+    assert [(i.kind, i.doc, i.request_id) for i in inbox._review_items(db, None)] == [("review_requested", DOC, pid)]
+    queue["requests"] = []
+    lifecycle._poll_review_queue()
+    assert cards() == []
+
+    # An account switch during the request never files the answer under the account that asked.
+    queue["requests"] = [{"doc_id": "ad_other", "title": "Bob's"}]
+    who["switch_to"] = "u_bob"
+    lifecycle._poll_review_queue()
+    who["sub"], who["switch_to"] = "u_me", None
+    assert cards() == []
 
 
 def test_a_shared_plan_goes_to_the_library_and_what_teammates_write_comes_back(db, parts, backend):

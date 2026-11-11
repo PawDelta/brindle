@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from collections.abc import Callable
 
 log = logging.getLogger(__name__)
 
@@ -30,17 +31,24 @@ def _items(raw: object) -> list[dict]:
     return out
 
 
-def poll(sub: str | None, *, client=None, store=None) -> bool:
-    """Read the queue for ``sub`` and remember it. False (nothing changed) when
-    logged out, offline or refused."""
+def poll(who: Callable[[], str | None], *, client=None, store=None) -> bool:
+    """Read the queue for the signed-in account (``who`` names it) and remember
+    it. The account is read before and after the request, and the answer is
+    dropped unless both agree: the request authenticates with whatever
+    credentials are current, so an account switch in between would otherwise
+    file another person's queue under this one. False (nothing changed) when
+    logged out, offline, refused or switched."""
     from brindle.pro import analysis_docs as ad
 
+    sub = who()
     if not sub:
         return False
     try:
         got = _items(ad.api("GET", PATH, client=client, store=store))
     except Exception:  # noqa: BLE001 - keep the cards we have; the next pass tries again
         log.debug("brindle: couldn't read the review queue", exc_info=True)
+        return False
+    if who() != sub:
         return False
     with _lock:
         _seen[sub] = got

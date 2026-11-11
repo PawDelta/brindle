@@ -714,10 +714,15 @@ def test_shared_doc_inbox_cards_follow_the_review_and_clear_when_acted_on(db, se
 
     _shared(db, pid, {"rev": 1, "reviewers": ONE, "sign_offs": []})
     assert kinds() == []                                   # the author waits: no card yet
+    from brindle.pro import review_queue
+
+    asked = lambda on: review_queue._seen.__setitem__("a", [{"doc_id": "doc", "title": "t"}] if on else [])  # noqa: E731
     me["sub"] = "a"
-    assert kinds() == [("review_requested", "doc")]        # the reviewer is asked, and it opens the doc
+    asked(True)
+    assert kinds() == [("review_requested", "doc")]        # the Library asks the reviewer, and it opens the doc
     _shared(db, pid, {"rev": 1, "reviewers": ONE, "sign_offs": _signed_off("a")})
-    assert kinds() == []                                   # signing clears it
+    asked(False)
+    assert kinds() == []                                   # signing takes it off the queue
     me["sub"] = "me"
     assert kinds() == [("signed_off", "doc")]
     plan_docs.comment(db, pid, 1, {"kind": "section", "section": "s1"}, "No.", author=plan_docs.TEAMMATE + "a")
@@ -728,7 +733,12 @@ def test_shared_doc_inbox_cards_follow_the_review_and_clear_when_acted_on(db, se
     visual_offers.person_spoke(db, boss, "Make a planning doc.")
     mcp_server.propose_plan(PLAN + "\n\nRevised.", plan_id=pid)
     _shared(db, pid, {"rev": 2, "reviewers": ONE, "sign_offs": []}, local_rev=2, remote_rev=2)
+    asked(True)
     assert kinds() == [("review_requested", "doc")]        # the answer was to r1: r2 needs its own review
+    with monkeypatch.context() as m:
+        m.setattr(inbox.identity_lock, "locked_by", lambda _id: True)
+        assert kinds() == []                               # another identity's session shows nothing
+    asked(False)
     me["sub"] = "me"
     assert kinds() == [("changes_requested", "doc")]
     with monkeypatch.context() as m:
