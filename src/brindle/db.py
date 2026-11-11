@@ -13,7 +13,7 @@ import re
 import signal
 import sqlite3
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, fields
 from typing import Callable, Iterator
 
@@ -2945,12 +2945,13 @@ class DB:
             )
 
     def update_autopilot(self, root_id: str, **fields: object) -> None:
+        """Update goal fields, joining a caller's goal-replacement transaction."""
         has_summary = "summary" in fields
         summary = fields.pop("summary", None)
         offer = fields.pop("plan_offer", "keep")
         goal_at = fields.pop("offer_goal_at", None)
         cols = ", ".join(f"{k}=?" for k in fields)
-        with self.tx() as c:
+        with (nullcontext(self.conn) if self.conn.in_transaction else self.tx()) as c:
             if has_summary:
                 if summary is None:
                     c.execute("DELETE FROM goal_summaries WHERE root_id=?", (root_id,))
@@ -3000,12 +3001,12 @@ class DB:
             return bool(changed)
 
     def bump_progress(self, root_id: str) -> None:
-        with self.tx() as c:
+        with (nullcontext(self.conn) if self.conn.in_transaction else self.tx()) as c:
             c.execute("UPDATE autopilot SET progress=progress+1, nudges=0 WHERE root_id=?", (root_id,))
 
     def set_milestones(self, root_id: str, items: list[tuple]) -> None:
         """Replace the session's milestones with ``(title, check_cmd, detail[, profile[, repo[, phase]]])`` items."""
-        with self.tx() as c:
+        with (nullcontext(self.conn) if self.conn.in_transaction else self.tx()) as c:
             c.execute("DELETE FROM milestones WHERE root_id=?", (root_id,))
             for i, (title, check, detail, *rest) in enumerate(items, start=1):
                 cur = c.execute(
@@ -3036,7 +3037,7 @@ class DB:
         the milestone is done."""
         if state is None:
             state, state_why = check_state(passed, output, False)
-        with self.tx() as c:
+        with (nullcontext(self.conn) if self.conn.in_transaction else self.tx()) as c:
             c.execute(
                 "UPDATE milestones SET status=?, checked_at=?, output=?, checked_sha=?, "
                 "passed_sha=COALESCE(?, passed_sha), state=?, state_why=?, "

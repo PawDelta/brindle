@@ -707,8 +707,6 @@ def set_goal(db: DB, root_id: str, goal: str,
         short = prefix.rsplit(" ", 1)[0] if " " in prefix else short[:30]
     fields["summary"] = short
     if ap is None or ap.goal != goal.strip():
-        with db.tx() as c:
-            c.execute("DELETE FROM phase_landings WHERE root_id=?", (root_id,))
         fields["audit_history"] = None
         fields["plan_offer"] = None     # a new goal gets its own, single offer
         fields["offer_goal_at"] = time.time()
@@ -716,17 +714,22 @@ def set_goal(db: DB, root_id: str, goal: str,
         root = db.get_agent(root_id)
         ws = db.get_workspace(root.workspace_id) if root else None
         fields["goal_sha"] = _commit(ws, tracked_only=True)
-    # Changed milestones need a fresh audit.
-    db.update_autopilot(root_id, goal=goal.strip(), detail=detail, state="running", note=None,
-                        auditor_id=None, audit_sha=None, audit_ok=None, **fields)
-    db.set_milestones(root_id, milestones)
-    for m in db.milestones(root_id):
-        prev = old.get((m.title, m.check_cmd))
-        if prev and prev.status != "pending":
-            db.record_check(m.id, prev.status == "passed", prev.output or "", prev.checked_sha,
-                            passed_sha=prev.passed_sha, state=prev.state, state_why=prev.state_why,
-                            ever_passed=prev.ever_passed)
-    db.bump_progress(root_id)
+    # Sweeps must see the old goal and its landing claims, or the complete
+    # replacement. Preserved check results belong to the same transaction.
+    with db.tx() as c:
+        if ap is None or ap.goal != goal.strip():
+            c.execute("DELETE FROM phase_landings WHERE root_id=?", (root_id,))
+        # Changed milestones need a fresh audit.
+        db.update_autopilot(root_id, goal=goal.strip(), detail=detail, state="running", note=None,
+                            auditor_id=None, audit_sha=None, audit_ok=None, **fields)
+        db.set_milestones(root_id, milestones)
+        for m in db.milestones(root_id):
+            prev = old.get((m.title, m.check_cmd))
+            if prev and prev.status != "pending":
+                db.record_check(m.id, prev.status == "passed", prev.output or "", prev.checked_sha,
+                                passed_sha=prev.passed_sha, state=prev.state, state_why=prev.state_why,
+                                ever_passed=prev.ever_passed)
+        db.bump_progress(root_id)
     bus.publish_agent(db, "autopilot.goal", root_id, goal=goal.strip(), milestones=len(milestones))
     write_goals_file(db, root_id)
     knowledge.note(db, root_id, knowledge.INTENT,

@@ -370,7 +370,7 @@ def phase_landing_session(db, tmp_path, monkeypatch):
     return ws, passing
 
 
-def test_phase_landing_once_per_completed_phase(db, phase_landing_session):
+def test_phase_landing_once_per_completed_phase(db, phase_landing_session, monkeypatch):
     from brindle.db import DB
 
     ws, passing = phase_landing_session
@@ -404,6 +404,30 @@ def test_phase_landing_once_per_completed_phase(db, phase_landing_session):
         autopilot.set_goal(other, "boss", "another goal", items)
         autopilot.check_milestones(other, "boss", ws, cfg=cfg)
         assert db.pending_count("boss") == 4
+
+        def sweep_during_replacement(*a, **k):
+            autopilot.usage_sweep(db, now=100001.0)
+            assert db.pending_count("boss") == 4
+            return "head"
+
+        replace = other.set_milestones
+
+        def observe_replacement(root_id, milestones):
+            # A second connection still sees the complete old goal until
+            # the replacement fields, claims and milestones commit together.
+            assert db.get_autopilot("boss").goal == "another goal"
+            assert [m.title for m in db.milestones("boss")] == ["a", "b", "c"]
+            assert db.conn.execute("SELECT COUNT(*) FROM phase_landings WHERE root_id='boss'").fetchone()[0] == 2
+            replace(root_id, milestones)
+
+        monkeypatch.setattr(autopilot, "_commit", sweep_during_replacement)
+        monkeypatch.setattr(other, "set_milestones", observe_replacement)
+        autopilot.set_goal(other, "boss", "replacement", [("d", "d", None, None, None, "API")])
+        assert db.pending_count("boss") == 4
+        assert db.milestones("boss")[0].status == "pending"
+        passing.add("d")
+        autopilot.check_milestones(other, "boss", ws, cfg=cfg)
+        assert db.pending_count("boss") == 5
     finally:
         other.conn.close()
 
