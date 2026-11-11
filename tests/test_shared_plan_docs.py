@@ -3,19 +3,22 @@ of the API in pawdelta-web's docs/shared-designs-api.md."""
 
 import asyncio
 import copy
+import dataclasses
 import functools
 import time
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from starlette.testclient import TestClient
 
-from brindle import plan_docs, plans, visual_offers
+from brindle import identity_lock, mcp_server, plan_docs, plans, tasks, visual_offers
+from brindle.daemon import holds
 from brindle.daemon.app import build_app
 from brindle.pro import analysis_docs as ad
-from brindle.pro import auth, credentials
+from brindle.pro import auth, credentials, license
 from brindle.pro import shared_docs as sd
 from brindle.service.errors import ServiceError
-from pro_fixtures import backend, fixed_identity, pro_env, signing_key  # noqa: F401 - fixtures
+from pro_fixtures import BASE as BASE_URL, backend, claims, fixed_identity, pro_env, sign, signing_key  # noqa: F401
 from test_plans import AUTH, DECISIONS, TOKEN, messages, session  # noqa: F401 - fixture
 from test_pro_remote_learning import login_as
 
@@ -748,6 +751,211 @@ def test_a_plan_that_isnt_shared_still_files_its_approval_record(db, parts, monk
     monkeypatch.setattr(ad, "on_merged", lambda *a: uploads.append(a))
     plans.decide(db, pid, 1, True, person=True)
     assert len(uploads) == 1
+
+
+def _signed_in(backend, store, **over):
+    t = backend.issue()
+    store.save({"access_token": t["access_token"], "refresh_token": t["refresh_token"],
+                "access_expires_at": time.time() + 900, "base_url": BASE_URL,
+                "entitlement": sign(backend.key, claims(**over))})
+    license.clear_cache()
+
+
+def _server_says(backend, key=None, **over):
+    """What ``GET /entitlement`` issues from now on."""
+    backend.routes["GET /entitlement"] = lambda f, h: (200, {"entitlement": sign(key or backend.key, claims(**over))})
+
+
+NO_TEAM = {"features": ["analysis_docs"]}
+ANOTHER_ACCOUNT = {**NO_TEAM, "sub": "user_2"}
+ANOTHER_ORG = {**NO_TEAM, "org_id": "org_2"}
+
+
+def _lapsed(db, pid, backend, store):
+    _signed_in(backend, store, **NO_TEAM)
+    _server_says(backend, **NO_TEAM)
+
+
+def _no_network(db, pid, backend, store):
+    _signed_in(backend, store, **NO_TEAM)
+    backend.routes["GET /entitlement"] = [auth.AuthError("offline", code="network")]
+
+
+def _sign_in_expired(db, pid, backend, store):
+    _signed_in(backend, store, **NO_TEAM)
+    backend.revoked = True
+
+
+def _no_sign_in(db, pid, backend, store):
+    store.delete()
+    license.clear_cache()
+
+
+def _unverifiable(db, pid, backend, store):
+    _signed_in(backend, store, **NO_TEAM)
+    _server_says(backend, key=Ed25519PrivateKey.generate(), **NO_TEAM)
+
+
+def _no_entitlement(db, pid, backend, store):
+    _signed_in(backend, store, **NO_TEAM)
+    backend.routes["GET /entitlement"] = lambda f, h: (200, {})
+
+
+def _library_down(db, pid, backend, store):
+    _server_says(backend, **NO_TEAM)                # even so: only the Library's own refusal asks the question
+    backend.routes[f"GET {DESIGN}"] = lambda f, h: (503, {"error": "unavailable"})
+
+
+def _keys_unavailable(db, pid, backend, store):
+    _server_says(backend, **NO_TEAM)
+    backend.routes[f"GET {DESIGN}"] = lambda f, h: (403, {"error": "key_unavailable"})
+
+
+def _other_account(db, pid, backend, store):
+    _signed_in(backend, store, **ANOTHER_ACCOUNT)
+    _server_says(backend, **ANOTHER_ACCOUNT)
+
+
+def _other_org(db, pid, backend, store):
+    _signed_in(backend, store, **ANOTHER_ORG)
+    _server_says(backend, **ANOTHER_ORG)
+
+
+def _no_org_on_record(db, pid, backend, store):
+    db.conn.execute("UPDATE plan_shares SET org_id=NULL WHERE plan_id=?", (pid,))
+    _lapsed(db, pid, backend, store)
+
+
+def _bypass(arrange, why):
+    return pytest.param(arrange, marks=pytest.mark.variant(f"bypass attempt: {why}"), id=arrange.__name__.strip("_"))
+
+
+@pytest.mark.parametrize("arrange", [
+    pytest.param(_lapsed, id="lapsed"),
+    _bypass(_no_network, "a stored entitlement without Team, and no way to ask the server"),
+    _bypass(_sign_in_expired, "the session is revoked, so nothing verified says the plan ended"),
+    _bypass(_no_sign_in, "nobody is signed in"),
+    _bypass(_unverifiable, "the server's answer carries a signature that doesn't check out"),
+    _bypass(_no_entitlement, "the server answers without an entitlement"),
+    _bypass(_library_down, "an outage is not a lapse"),
+    _bypass(_keys_unavailable, "an org rule's 403 is not a lapse"),
+    _bypass(_other_account, "switching to an account without Team must not dodge the review"),
+    _bypass(_other_org, "the same person in an org without Team says nothing about the org that shared it"),
+    _bypass(_no_org_on_record, "a missing identity never matches"),
+])
+def test_lapsed_plan_becomes_a_personal_doc(db, parts, session, backend, monkeypatch, arrange):
+    pid, lib, net = parts
+    boss, started = session
+    monkeypatch.setattr(ad, "_session", lambda client=None, store=None: (net["client"], net["store"]))
+    monkeypatch.setattr(credentials, "default_store", lambda: net["store"])
+    monkeypatch.setattr(ad, "on_merged", lambda *a: None)
+    sd.share(db, pid, TEAM, reviewers=[{"sub": "u_a"}, {"sub": "u_b"}], **net)
+    lib.sign_offs.append({"rev": 1, "sub": "u_a", "at": 9.0})
+    lib.threads = [{"id": 1, "kind": "comment", "rev": 1, "author": "u_a", "text": "Which VM?", "status": "open",
+                    "at": 5.0, "replies": [], "anchor": {"kind": "section", "section": "summary"}}]
+    sd.sync(db, pid, **net)
+    root = plans.get(db, pid)["root_id"]
+    arrange(db, pid, backend, net["store"])
+
+    with TestClient(build_app(TOKEN), headers=AUTH) as app:
+        approve = lambda: app.post(f"/v1/plans/{pid}/decide", json={"rev": 1, "approved": True})  # noqa: E731
+        if arrange is not _lapsed:
+            refused = approve()
+            assert refused.json()["error"]["code"] in ("gate_unverified", "gate_closed"), refused.json()
+            sd.sync_open(db, **net)
+            now = plans.to_dto(db, plans.get(db, pid))
+            assert (now["state"], now["team_ended"]) == ("open", False) and now["gate"]["state"] != "ready"
+            assert plans.gate_shut(db, root)
+            return
+
+        # The background pass finds out; nothing more is asked of the Library.
+        before = len(sent(backend, f"GET {DESIGN}"))
+        assert sd.sync_open(db, **net) == 0 and len(sent(backend, f"GET {DESIGN}")) == before
+        got = plans.to_dto(db, plans.get(db, pid))
+        assert got["gate"] is None and got["team_ended"] is True and plans.gate_shut(db, root) is None
+        assert got["threads"][0]["text"] == "Which VM?"
+
+        # Work queued behind the doc, then the app goes away: only a current confirmation may release it.
+        assert "behind plan" in asyncio.run(mcp_server.assign("developer", "build it")) and started == []
+        monkeypatch.setattr(holds, "app_connected", lambda: False)
+
+        def offline():
+            backend.routes["GET /entitlement"] = [auth.AuthError("offline", code="network")]
+
+        def age(seconds, plan=pid):
+            db.conn.execute("UPDATE plan_shares SET lapsed_at=? WHERE plan_id=?", (time.time() - seconds, plan))
+
+        def released():
+            assert plans.holding(db, root) is None and tasks.build_gate_refusal(db, boss.id) is None
+
+        def held():
+            assert plans.holding(db, root) and plans.gate_shut(db, root) and tasks.build_gate_refusal(db, boss.id)
+            assert tasks.sweep(db) == 0 and started == []
+            assert plans.to_dto(db, plans.get(db, pid))["team_ended"] is False
+
+        def confirmed_again():
+            _server_says(backend, **NO_TEAM)
+            sd.sync_open(db, **net)
+            released()
+
+        released()
+
+        # The same account's plan in another session, locked to another provider identity: the server's
+        # answer is about the brindle account, so it goes for both, and the lock doesn't get in its way.
+        boss2 = dataclasses.replace(boss, id="boss2", tmux_window="%2")
+        db.add_agent(boss2)
+        visual_offers.person_spoke(db, boss2, "Make a planning doc.")
+        other = plans.propose(db, boss2, "# Other", DECISIONS, sections=[{"id": "s", "title": "S", "markdown": "T"}])["id"]
+        db.conn.execute("INSERT INTO plan_shares (plan_id, doc_id, owner, org_id, remote_rev, local_rev)"
+                        " VALUES (?, 'doc_2', 'user_1', 'org_1', 1, 1)", (other,))
+        monkeypatch.setattr(identity_lock, "locked_by", lambda a: "another identity" if a == "boss2" else None)
+        confirmed_again()
+        assert sd.link(db, other)["lapsed_at"] is not None
+
+        # A refused approval takes the confirmation back: the server has to say it again.
+        offline()
+        assert approve().json()["error"]["code"] == "gate_unverified"
+        held()
+        assert sd.link(db, other)["lapsed_at"] is None
+        confirmed_again()
+
+        # A re-check that fails takes it back too, even from a plan confirmed a moment ago.
+        age(sd.LAPSE_CHECK_AFTER + 1, other)
+        offline()
+        sd.sync_open(db, **net)
+        held()
+        confirmed_again()
+
+        # And one nobody renews runs out by itself.
+        age(sd.LAPSE_GOOD_FOR + 1)
+        held()
+        confirmed_again()
+
+        # It stands only for the account it was confirmed for.
+        now = int(time.time())
+        for changed in (lambda: _signed_in(backend, net["store"], **ANOTHER_ACCOUNT),
+                        lambda: _signed_in(backend, net["store"], **NO_TEAM, iat=now - 7200, exp=now - 1800),
+                        lambda: _no_sign_in(db, pid, backend, net["store"])):
+            changed()
+            sd.sync_open(db, **net)
+            held()
+
+        # Resubscribing picks the same document back up, with its review.
+        _signed_in(backend, net["store"], features=list(TEAM_LOGIN))
+        _server_says(backend, features=list(TEAM_LOGIN))
+        assert sd.sync_open(db, **net) == 1
+        back = plans.to_dto(db, plans.get(db, pid))
+        assert back["gate"]["waiting_on"] == ["u_b"] and back["team_ended"] is False
+        assert sd.link(db, pid)["doc_id"] == DOC and len(sent(backend, "POST /analysis-docs")) == 1
+
+        # Lapsed again, the approval itself finds out and goes through with no reviewers to wait for.
+        _lapsed(db, pid, backend, net["store"])
+        assert approve().json()["state"] == "approved" and started == ["build it"]
+
+        # Built on an approval the server confirmed: the doc keeps saying what it is, however long ago.
+        age(sd.LAPSE_GOOD_FOR + 1)
+        built = plans.to_dto(db, plans.get(db, pid))
+        assert built["gate"] is None and built["team_ended"] is True
 
 
 def test_reviewers_change_after_sharing_and_a_folder_is_only_used_when_named(db, parts, backend):
