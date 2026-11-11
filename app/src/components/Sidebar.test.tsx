@@ -153,6 +153,13 @@ describe("Sidebar", () => {
     await waitFor(() => expect(line.querySelector('[data-state="drifting"]')).toBeNull());
   });
 
+  it("drift without a PR: a drifting session with no open PR still marks its row, once", async () => {
+    const { sync } = mount({ workspaces: [root, worker], sessions: [live], goal: { ...goal, drifting: true } });
+    onTestFinished(() => sync.stop());
+    await waitFor(() => expect(sessionRow("sup1")!.closest("li")!.querySelectorAll('[data-state="drifting"]')).toHaveLength(1));
+    expect(screen.queryByTestId("session-pr")).toBeNull();
+  });
+
   it.each([
     [{ number: 391, state: "ci", done: 14, total: 18 }, "PR #391 · In CI, 14 of 18", "text-sap"],
     [{ number: 387, state: "ready", done: 4, total: 4 }, "PR #387 · Ready to merge", "text-pass"],
