@@ -3,6 +3,7 @@ of the API in pawdelta-web's docs/shared-designs-api.md."""
 
 import asyncio
 import copy
+import dataclasses
 import functools
 import time
 
@@ -662,8 +663,8 @@ def test_lapsed_plan_becomes_a_personal_doc(db, parts, session, backend, monkeyp
         def offline():
             backend.routes["GET /entitlement"] = [auth.AuthError("offline", code="network")]
 
-        def age(seconds):
-            db.conn.execute("UPDATE plan_shares SET lapsed_at=? WHERE plan_id=?", (time.time() - seconds, pid))
+        def age(seconds, plan=pid):
+            db.conn.execute("UPDATE plan_shares SET lapsed_at=? WHERE plan_id=?", (time.time() - seconds, plan))
 
         def released():
             assert plans.holding(db, root) is None and tasks.build_gate_refusal(db, boss.id) is None
@@ -680,18 +681,31 @@ def test_lapsed_plan_becomes_a_personal_doc(db, parts, session, backend, monkeyp
 
         released()
 
+        # The same account's plan in another session: the server's answer is about the account, so it goes for both.
+        boss2 = dataclasses.replace(boss, id="boss2", tmux_window="%2")
+        db.add_agent(boss2)
+        visual_offers.person_spoke(db, boss2, "Make a planning doc.")
+        other = plans.propose(db, boss2, "# Other", DECISIONS, sections=[{"id": "s", "title": "S", "markdown": "T"}])["id"]
+        db.conn.execute("INSERT INTO plan_shares (plan_id, doc_id, owner, org_id, remote_rev, local_rev)"
+                        " VALUES (?, 'doc_2', 'user_1', 'org_1', 1, 1)", (other,))
+        confirmed_again()
+        assert sd.link(db, other)["lapsed_at"] is not None
+
         # A refused approval takes the confirmation back: the server has to say it again.
         offline()
         assert approve().json()["error"]["code"] == "gate_unverified"
         held()
+        assert sd.link(db, other)["lapsed_at"] is None
         confirmed_again()
 
-        # A re-check that fails takes it back too, and one nobody renews runs out by itself.
-        age(sd.LAPSE_CHECK_AFTER + 1)
+        # A re-check that fails takes it back too, even from a plan confirmed a moment ago.
+        age(sd.LAPSE_CHECK_AFTER + 1, other)
         offline()
         sd.sync_open(db, **net)
         held()
         confirmed_again()
+
+        # And one nobody renews runs out by itself.
         age(sd.LAPSE_GOOD_FOR + 1)
         held()
         confirmed_again()
@@ -706,6 +720,7 @@ def test_lapsed_plan_becomes_a_personal_doc(db, parts, session, backend, monkeyp
             held()
 
         # Resubscribing picks the same document back up, with its review.
+        db.conn.execute("UPDATE plans SET state='approved' WHERE id=?", (other,))
         _signed_in(backend, net["store"], features=list(TEAM_LOGIN))
         _server_says(backend, features=list(TEAM_LOGIN))
         assert sd.sync_open(db, **net) == 1

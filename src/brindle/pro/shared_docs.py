@@ -153,19 +153,23 @@ def lapse_stands(share_, p: dict) -> bool:
 
 
 def _note_ended(db: DB, p: dict, ent) -> bool:
-    """Record the server's latest word on plan ``p``: whether ``ent`` (from
-    :func:`_issued`, or None when it couldn't be had) says its Team plan has
-    ended. Anything short of that withdraws an earlier confirmation, so the
-    gate is back until the server says so again. Returns whether it has ended."""
-    share_ = link(db, p["id"])
-    if share_ is None:
-        return False
-    ended = ent is not None and _ended_for(share_, ent)
+    """Record the server's latest word: whether ``ent`` (from :func:`_issued`,
+    or None when it couldn't be had) says the Team plan behind a share has
+    ended. It is an answer about an account and org, not one document, so it
+    goes for ``p`` and every plan in review: anything short of ended withdraws
+    an earlier confirmation, and those gates are back until the server says
+    so again. Returns whether ``p``'s Team plan has ended."""
+    rows = db.conn.execute("SELECT s.* FROM plan_shares s JOIN plans p ON p.id=s.plan_id"
+                           " WHERE s.plan_id=? OR p.state IN ('open','redirected')", (p["id"],)).fetchall()
+    now, verdicts = time.time(), [(r, ent is not None and _ended_for(r, ent)) for r in rows]
     with db.tx() as c:
-        c.execute("UPDATE plan_shares SET lapsed_at=? WHERE plan_id=?", (time.time() if ended else None, p["id"]))
-    if ended != _confirmed(share_):
-        plan_docs._changed(db, p, p["rev"])
-    return ended
+        c.executemany("UPDATE plan_shares SET lapsed_at=? WHERE plan_id=?",
+                      [(now if ended else None, r["plan_id"]) for r, ended in verdicts])
+    for r, ended in verdicts:
+        if ended != _confirmed(r):
+            changed = plan_docs._plan(db, r["plan_id"])
+            plan_docs._changed(db, changed, changed["rev"])
+    return any(ended for r, ended in verdicts if r["plan_id"] == p["id"])
 
 
 def _team_active(db: DB, p: dict, store) -> None:
@@ -845,23 +849,21 @@ def sign_off(db: DB, plan_id: str, rev: Any, *, client=None, store=None) -> dict
 
 
 def _note_lapses(db: DB, client, store) -> None:
-    """Without Team, get the server's word on this account's plans in review:
-    one it hasn't confirmed ended, or confirmed a while ago. A pass with none
-    of those doesn't ask."""
+    """Without Team, get the server's word if any of this account's plans in
+    review needs it: one it hasn't confirmed ended, or confirmed a while ago.
+    A pass with none of those doesn't ask."""
     from brindle.pro import license
 
     try:
         stored = license.current(refresh=False, store=store)
     except Exception:  # noqa: BLE001 - logged out: no account whose plan could be said to have ended
         return
-    due_before = time.time() - LAPSE_CHECK_AFTER
-    rows = db.conn.execute("SELECT s.plan_id FROM plan_shares s JOIN plans p ON p.id=s.plan_id"
-                           " WHERE s.doc_id IS NOT NULL AND (s.lapsed_at IS NULL OR s.lapsed_at<?) AND s.owner=?"
-                           " AND s.org_id=? AND p.state IN ('open','redirected')",
-                           (due_before, stored.sub, stored.org_id)).fetchall()
-    ent = _issued(client, store) if rows else None
-    for row in rows:
-        _note_ended(db, plan_docs._plan(db, row["plan_id"]), ent)
+    due = db.conn.execute("SELECT s.plan_id FROM plan_shares s JOIN plans p ON p.id=s.plan_id"
+                          " WHERE s.doc_id IS NOT NULL AND (s.lapsed_at IS NULL OR s.lapsed_at<?) AND s.owner=?"
+                          " AND s.org_id=? AND p.state IN ('open','redirected')",
+                          (time.time() - LAPSE_CHECK_AFTER, stored.sub, stored.org_id)).fetchone()
+    if due is not None:
+        _note_ended(db, plan_docs._plan(db, due["plan_id"]), _issued(client, store))
 
 
 def sync_open(db: DB, *, client=None, store=None) -> int:
