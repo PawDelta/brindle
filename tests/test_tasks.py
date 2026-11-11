@@ -361,7 +361,12 @@ def cross_session_wait(db, coordination, monkeypatch):
     return SimpleNamespace(refs=refs, starts=starts, told=told)
 
 
-@pytest.mark.parametrize("event", ["landed", "synced"])
+@pytest.mark.parametrize("event", [
+    "landed",
+    pytest.param("synced", marks=pytest.mark.variant(
+        "b's own sync moves its head off the files while a never inherits it: the landing seen "
+        "from git when gh's merge record is missing; the queue row above reaches it only via a's inheritance")),
+])
 def test_cross_session_wait_released_when_other_session_lands(db, cross_session_wait, event):
     w = cross_session_wait
     if event == "landed":   # b's PR merged on main; its branch hasn't synced yet
