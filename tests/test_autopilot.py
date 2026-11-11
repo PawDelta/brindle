@@ -854,10 +854,12 @@ def test_goal_activity_stage(db, root, boss, checking, workers, expected):
 def test_goal_eta_counts_unstarted_milestones(db, root, monkeypatch, scenario):
     from brindle import fair_share
     from dataclasses import replace
+    from datetime import datetime, timezone
     from brindle.db import Task
 
     _, ws = root
-    now = time.time()
+    now = datetime(2026, 11, 10, 12, tzinfo=timezone.utc).timestamp()
+    monkeypatch.setattr(autopilot.time, "time", lambda: now)
     monkeypatch.setattr(git, "out", lambda *args: "")
     monkeypatch.setattr(fair_share, "limit", lambda: 1 if scenario == "limited" else
                         16 if scenario == "session_limited" else 2)
