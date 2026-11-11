@@ -543,6 +543,21 @@ class PlanDTO(_DTO):
     team_ended: bool = False
 
 
+class SharedDesignDTO(PlanDTO):
+    """A design someone else shared, as the person reviewing it reads it
+    (brindle.pro.shared_reader): ``id`` is its Library doc id and it has no
+    plan on this machine. ``can_*``: what the Library lets this account do,
+    ``can_sign_off`` false only when it can't be one of the signers.
+    ``author``: who wrote it, ``person`` if that is this account."""
+
+    me: str
+    author: str | None = None
+    can_comment: bool = False
+    can_suggest: bool = False
+    can_sign_off: bool = False
+    signed_off: bool = False
+
+
 class KeptVisualDTO(_DTO):
     """A kept visual: outlives its session. Its page: /v1/kept-visuals/{id}/html."""
 

@@ -59,6 +59,7 @@ import { escapeOwned } from "./escape";
 import { HOME, inLibrary, inProfileRail, inRail, readLastSession, settingsTab, writeLastSession, type Route, type SessionRef, type SheetRef } from "./routes";
 import { InboxScreen } from "./screens/Inbox";
 import { KnowledgeScreen } from "./screens/Knowledge";
+import { SharedDesignReader } from "./screens/Session/Visuals/SharedDesignReader";
 import { NewSession } from "./screens/New";
 import { BrindleSignIn, Onboarding, Permissions, Starting, markOnboarded, onboarded, readOnboarded } from "./screens/Onboarding";
 import { AgentsScreen } from "./screens/Agents";
@@ -175,6 +176,8 @@ function Screen({ route, visit, navigate, client, refresh, store, openUrl, pickF
           onBackToSession={docsFrom && (() => navigate({ screen: "session", root: docsFrom.root, repo: docsFrom.repo, agent: docsFrom.root }))}
         />
       );
+    case "shared-design":
+      return <SharedDesignReader key={route.doc} client={client} docId={route.doc} title={route.title} repo={route.repo} onBack={() => navigate({ screen: "inbox" })} />;
     case "agents":
       return <AgentsScreen client={client} onNavigate={(to) => navigate(to === "providers" ? { screen: "settings", section: "providers", ask: ++providerAsks } : { screen: "knowledge" })} />;
     /* One Settings, in tabs: the older Account and Project settings routes open it on their tab. */

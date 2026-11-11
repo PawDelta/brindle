@@ -88,6 +88,7 @@ export interface ApiSchema {
   RuleDTO: RuleDTO;
   SavedActionDTO: SavedActionDTO;
   SessionDTO: SessionDTO;
+  SharedDesignDTO: SharedDesignDTO;
   StoppedAgentDTO: StoppedAgentDTO;
   VisualAnswerDTO: VisualAnswerDTO;
   VisualDTO: VisualDTO;
@@ -1412,6 +1413,43 @@ export interface SessionDTO {
   status: string;
   status_since?: number | null;
   workspace_id: string;
+}
+/**
+ * A design someone else shared, as the person reviewing it reads it
+ * (brindle.pro.shared_reader): ``id`` is its Library doc id and it has no
+ * plan on this machine. ``can_*``: what the Library lets this account do,
+ * ``can_sign_off`` false only when it can't be one of the signers.
+ * ``author``: who wrote it, ``person`` if that is this account.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "SharedDesignDTO".
+ */
+export interface SharedDesignDTO {
+  ask?: string | null;
+  author?: string | null;
+  can_comment?: boolean;
+  can_edit?: boolean;
+  can_sign_off?: boolean;
+  can_suggest?: boolean;
+  created_at: number;
+  decisions: PlanDecisionDTO[];
+  gate?: PlanGateDTO | null;
+  id: string;
+  lede: string;
+  markdown: string;
+  me: string;
+  queued: number;
+  rev: number;
+  revisions?: PlanRevisionDTO[];
+  sections: PlanSectionDTO[];
+  session: string;
+  signed_off?: boolean;
+  split: PlanWorkerDTO[];
+  state: "open" | "redirected" | "approved";
+  team_ended?: boolean;
+  threads?: PlanThreadDTO[];
+  title: string;
+  verdict?: PlanVerdictDTO | null;
 }
 /**
  * A visual in a session (brindle.visuals). ``rev``: its current revision,

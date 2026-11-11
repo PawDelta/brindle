@@ -156,7 +156,7 @@ describe("inbox", () => {
     await waitFor(() => expect(card("review_requested")).toBeTruthy());
     expect(card("changes_requested")).toBeTruthy();
     fireEvent.click(within(card("review_requested")).getByRole("button", { name: "Open" }));
-    expect(onNavigate).toHaveBeenLastCalledWith({ screen: "knowledge", view: "docs", doc: "lib-1" });
+    expect(onNavigate).toHaveBeenLastCalledWith({ screen: "shared-design", doc: "lib-1", title: "Org presets", repo: REPO });
     fireEvent.click(within(card("changes_requested")).getByRole("button", { name: "Open" }));
     expect(onNavigate).toHaveBeenLastCalledWith({ screen: "knowledge", view: "docs", doc: "lib-2" });
     sync.stop();

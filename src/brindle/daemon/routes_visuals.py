@@ -357,6 +357,72 @@ def review_policies_impact(db: DB, params: dict, body: dict) -> Any:
                                 repo=body.get("repo"), org_id=body["org_id"])
 
 
+# A design shared by someone else (brindle.pro.shared_reader), by its Library
+# doc id. Only the person reaches these; each answers with the design as the
+# Library has it now, and nothing is kept here.
+
+
+def _shared_design(repo: str | None, work: Callable[[Any], Any]) -> Any:
+    from brindle import redact
+    from brindle.daemon import routes_actions as actions
+    from brindle.pro import analysis_docs, auth, shared_reader
+
+    actions._docs_entitlement(repo, analysis_docs._session()[1])   # signed out or not entitled: a 402, and the app drops the doc
+    try:
+        return work(shared_reader)
+    except (RuntimeError, auth.TransportError) as e:    # unreachable or refused: not signed out
+        if isinstance(e, analysis_docs.Refused) and e.code == "key_unavailable":
+            raise ServiceError(e.code, redact.mask(str(e)), 503) from e   # the org's key is revoked: the doc is gone for now
+        err = actions.upstream_error(e)
+        raise ServiceError(err.code, redact.mask(str(e)), err.http_status) from e
+
+
+@_json
+def shared_design(db: DB, request: Request) -> Any:
+    doc = request.path_params["doc_id"]
+    return _shared_design(request.query_params.get("repo") or None, lambda r: r.read(doc))
+
+
+def shared_design_comment(db: DB, params: dict, body: dict) -> Any:
+    """A comment, a reply (``parent``), or a question for the person's own
+    supervisor, which starts it only once this answer has been written."""
+    doc, repo, parent = params["doc_id"], _get(body, "repo"), _get(body, "parent", int)
+    if parent is not None:
+        return _shared_design(repo, lambda r: r.reply(doc, body.get("rev"), parent, body.get("text")))
+    question = _get(body, "question", bool, default=False)
+    design = _shared_design(repo, lambda r: r.comment(doc, body.get("rev"), _get(body, "anchor", dict), body.get("text"),
+                                                      question=question))
+    if not question:
+        return design
+    from brindle.pro import doc_questions, shared_reader
+
+    thread = shared_reader.asked_thread(design, body.get("text"))
+    if thread is None:
+        log.warning("brindle: a question saved on design %s wasn't found in the Library's answer", doc)
+        return design
+    return JSONResponse(design, background=BackgroundTask(
+        doc_questions.after_reply, doc_id=doc, thread_id=thread, owner=design["me"], repo_root=repo))
+
+
+def shared_design_suggest(db: DB, params: dict, body: dict) -> Any:
+    return _shared_design(_get(body, "repo"), lambda r: r.suggest(
+        params["doc_id"], body.get("rev"), body.get("section"), body.get("start"), body.get("before"), body.get("after"),
+        body.get("text", "")))
+
+
+def shared_design_thread(db: DB, params: dict, body: dict) -> Any:
+    return _shared_design(_get(body, "repo"), lambda r: r.act(params["doc_id"], params["tid"], body.get("rev"), body.get("action")))
+
+
+def shared_design_vote(db: DB, params: dict, body: dict) -> Any:
+    return _shared_design(_get(body, "repo"), lambda r: r.vote(params["doc_id"], body.get("rev"), body.get("decision"),
+                                                               body.get("option")))
+
+
+def shared_design_sign_off(db: DB, params: dict, body: dict) -> Any:
+    return _shared_design(_get(body, "repo"), lambda r: r.sign_off(params["doc_id"], body.get("rev")))
+
+
 @_json
 def library_people(db: DB, request: Request) -> Any:
     """The people of the person's org, to pick reviewers from, leaving out
@@ -426,6 +492,12 @@ ROUTES = [
     Route("/v1/review-policies", _endpoint(review_policies_save), methods=["PUT"]),
     Route("/v1/review-policies/draft-impact", _endpoint(review_policies_impact), methods=["POST"]),
     Route("/v1/library/people", library_people),
+    Route("/v1/shared-designs/{doc_id}", shared_design),
+    Route("/v1/shared-designs/{doc_id}/comments", _endpoint(shared_design_comment), methods=["POST"]),
+    Route("/v1/shared-designs/{doc_id}/suggestions", _endpoint(shared_design_suggest), methods=["POST"]),
+    Route("/v1/shared-designs/{doc_id}/threads/{tid:int}", _endpoint(shared_design_thread), methods=["POST"]),
+    Route("/v1/shared-designs/{doc_id}/votes", _endpoint(shared_design_vote), methods=["POST"]),
+    Route("/v1/shared-designs/{doc_id}/sign-offs", _endpoint(shared_design_sign_off), methods=["POST"]),
     Route("/v1/kept-visuals", kept_list),
     Route("/v1/kept-visuals/{id}", kept_one),
     Route("/v1/kept-visuals/{id}/html", kept_page),
