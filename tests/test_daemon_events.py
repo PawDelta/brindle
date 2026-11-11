@@ -46,6 +46,7 @@ def _readiness_reuses_unchanged_sessions(db, tmp_path, monkeypatch, gitlink, out
         return SimpleNamespace(stdout=files if args[0] == "ls-files" else "s", returncode=0)
     monkeypatch.setattr(spawn, "room", lambda: 1)
     monkeypatch.setattr(review.session_sync, "refresh_drift_flags", lambda db: None)
+    monkeypatch.setattr(review.session_sync, "refresh_idle_sessions", lambda db, fetched_at: None)
     monkeypatch.setattr(git, "run", git_read)
     monkeypatch.setattr(git, "dirty_files", lambda *a, **kw: reads.append("dirty") or (
         [] if tracked.read_text() == "original" else ["src/file.py"]))

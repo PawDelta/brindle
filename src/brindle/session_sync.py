@@ -10,6 +10,7 @@ a force):
 - a session PR merging on the forge (session_review.poll_merged);
 - a PR opening or being pushed from the checkout (gates.pr_checked);
 - the session starting or resuming (service.sessions).
+- the daemon's periodic sweep, while the session is quiet.
 
 A clean merge is reported to the supervisor, and the checks run on the files
 it brought in (a detached helper, ``brindle _session-sync-checks``). A
@@ -36,12 +37,13 @@ from dataclasses import dataclass, field
 
 from brindle import agents, bus, git, spawn
 from brindle.config import load_repo_config
-from brindle.db import DB, Workspace
+from brindle.db import DB, Agent, Workspace
 
 log = logging.getLogger(__name__)
 
 FETCH_SECONDS = 30.0
 MAX_LANDING_LOOKUPS = 5      # failed lookups of how a merged PR landed before a sync stops waiting on it
+IDLE_FETCH_SECONDS = 300.0
 
 
 @dataclass
@@ -159,6 +161,56 @@ def refresh_drift_flags(db: DB) -> None:
             log.debug("brindle: couldn't measure drift for %s", ws.branch, exc_info=True)
 
 
+def refresh_idle_sessions(db: DB, fetched_at: dict[str, float]) -> None:
+    """Refresh origin once per repo every few minutes, then sync quiet sessions.
+
+    The daemon watch owns the fetch clock; a busy checkout can become quiet
+    on the next sweep without waiting for another fetch.
+    """
+    rows = db.conn.execute(
+        "SELECT DISTINCT w.id FROM workspaces w JOIN agents a ON a.workspace_id = w.id"
+        " WHERE w.base_branch IS NOT NULL AND a.parent_id IS NULL"
+        " AND a.status != 'done' AND a.dismissed_at IS NULL"
+        " UNION SELECT w.id FROM workspaces w JOIN session_repos r ON r.repo_root = w.repo_root"
+        " JOIN session_repo_branches b ON b.root_id = r.root_id AND b.alias = r.alias AND b.branch = w.branch"
+        " JOIN agents a ON a.id = r.root_id"
+        " WHERE w.base_branch IS NOT NULL AND a.parent_id IS NULL"
+        " AND a.status != 'done' AND a.dismissed_at IS NULL").fetchall()
+    for row in rows:
+        ws = db.get_workspace(row["id"])
+        try:
+            if (default := upstream(ws)) is None:
+                continue
+            now = time.monotonic()
+            last = fetched_at.get(ws.repo_root)
+            if last is None or now - last >= IDLE_FETCH_SECONDS:
+                fetched_at[ws.repo_root] = now
+                fetch(ws.repo_root, default)
+            if _quiet(db, ws):
+                sync(db, ws, idle=True)
+        except git.GitError:
+            log.debug("brindle: couldn't sync idle session %s", ws.branch, exc_info=True)
+
+
+def _quiet(db: DB, ws: Workspace) -> bool:
+    """Read current activity, merge queue and checkout state, never a snapshot."""
+    from brindle import autopilot, pipeline
+
+    current = db.get_workspace(ws.id)
+    if current is None or current != ws or not current.base_branch:
+        return False
+    roots = _supervisors(db, ws)
+    if not roots or any(a.status in autopilot.BUSY for a in roots):
+        return False
+    if pipeline.ready_branches(db, ws.repo_root, ws.branch):
+        return False
+    for root in roots:
+        if any(a.dismissed_at is None and a.status not in ("paused", "done") and agents.is_alive(a)
+               for a in agents.tree(db, root.id)[1:]):
+            return False
+    return not git.dirty_files(ws.path)
+
+
 def _record_drift(db: DB, ws: Workspace, default: str) -> None:
     ref = f"origin/{default}"
     covered = [f"^{covers}" for _squash, covers in _verified_squashes(db, ws, ref)]
@@ -191,10 +243,21 @@ def drifting(db: DB, root_id: str) -> bool:
         " WHERE a.id = ? AND d.drifting = 1", (root_id,)).fetchone() is not None
 
 
+def _supervisors(db: DB, ws: Workspace) -> list[Agent]:
+    """Live session owners, including supervisors in another attached repo."""
+    roots = {a.id: a for a in db.list_agents(ws.id) if a.parent_id is None}
+    for attached in db.session_repos():
+        if attached.repo_root == ws.repo_root and attached.branch == ws.branch:
+            if root := db.get_agent(attached.root_id):
+                roots[root.id] = root
+    return sorted((a for a in roots.values()
+                   if a.parent_id is None and a.status != "done" and a.dismissed_at is None),
+                  key=lambda a: a.created_at)
+
+
 def _tell(db: DB, ws: Workspace, text: str) -> None:
-    """The session's supervisor in ``ws`` (the newest, with several), if one is there yet."""
-    roots = [a for a in db.list_agents(ws.id)
-             if a.parent_id is None and a.status != "done" and a.dismissed_at is None]
+    """Tell the session's newest supervisor, including an attached checkout's owner."""
+    roots = _supervisors(db, ws)
     if roots:
         try:
             agents.send_message(db, roots[-1].id, text)
@@ -266,15 +329,17 @@ def session_checkout(db: DB, ws: Workspace) -> Workspace | None:
     return None
 
 
-def sync(db: DB, ws: Workspace, *, checks: bool = True) -> Outcome | None:
+def sync(db: DB, ws: Workspace, *, checks: bool = True, idle: bool = False) -> Outcome | None:
     """Fetch ``origin/<default>`` and merge it into the session checkout
     ``ws`` (see the module doc). None when ``ws`` keeps up with nothing or
     git failed; ``busy`` while another merge into the branch holds it. With
-    ``checks``, a clean merge starts the checks on the files it brought in."""
+    ``checks``, a clean merge starts the checks on the files it brought in.
+    ``idle`` uses the sweep's fetched ref and rechecks quietness under the locks."""
     default = upstream(ws)
     if default is None:
         return None
-    fetch(ws.repo_root, default)
+    if not idle:
+        fetch(ws.repo_root, default)
     _land_merged_prs(db, ws)
     if _awaiting_landing(db, ws):
         # A merged PR's landing commit isn't known yet: merging now could
@@ -286,7 +351,7 @@ def sync(db: DB, ws: Workspace, *, checks: bool = True) -> Outcome | None:
         with ExitStack() as held:
             held.enter_context(pipeline.base_lock(ws.repo_root, ws.branch, wait=False))
             held.enter_context(git.checkout_lock(ws.path))
-            out = _sync_locked(db, ws, default)
+            out = _sync_locked(db, ws, default, idle=True) if idle else _sync_locked(db, ws, default)
     except BlockingIOError:
         return Outcome("busy", f"a merge into {ws.branch} is under way; brindle syncs it with "
                                f"origin/{default} at the next merge")
@@ -298,13 +363,15 @@ def sync(db: DB, ws: Workspace, *, checks: bool = True) -> Outcome | None:
     return out
 
 
-def _sync_locked(db: DB, ws: Workspace, default: str) -> Outcome:
+def _sync_locked(db: DB, ws: Workspace, default: str, *, idle: bool = False) -> Outcome:
     d = drift(ws, default)
     if d is None:
         return Outcome("up_to_date")
     if not d.behind:
         _record(db, ws, d.sha, "synced")
         return Outcome("up_to_date")
+    if idle and not _quiet(db, ws):
+        return Outcome("busy")
     if git.dirty_files(ws.path, tracked_only=True):
         text = (f"origin/{default} has {d.behind} commit(s) {ws.branch} lacks{_both(d)}. Its checkout has "
                 "uncommitted changes, so brindle didn't merge it in: commit them, and brindle syncs "
@@ -327,7 +394,7 @@ def _sync_locked(db: DB, ws: Workspace, default: str) -> Outcome:
     text = (f"brindle merged origin/{default} into {ws.branch} ({d.behind} new commit(s), "
             f"now at {new[:8]}){_both(d)}. The checks run on the files it brought in; "
             "their result arrives as a message.")
-    _record(db, ws, d.sha, "synced", tell=text, always=True)
+    _record(db, ws, d.sha, "synced", tell=text, always=not idle)
     return Outcome("synced", text, before, new)
 
 
