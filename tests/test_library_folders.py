@@ -40,13 +40,6 @@ def test_create_sends_the_scope_and_settings_and_refuses_bad_input():
     assert len(api.calls) == 1
 
 
-def test_move_doc_puts_the_single_folder_reference():
-    api = FakeApi()
-    folders.move_doc("doc/1", "org", "o1", "fld_1", api=api)
-    assert api.calls == [("PUT", "/analysis-docs/doc%2F1/design/folder",
-                          {"folder": {"scope": {"kind": "org", "id": "o1"}, "id": "fld_1"}})]
-
-
 def test_daemon_routes_resolve_the_scope_and_turn_bad_input_into_400(monkeypatch):
     api = FakeApi()
     monkeypatch.setattr(actions, "_docs_entitlement", lambda repo: SimpleNamespace(sub="u1"))
@@ -55,6 +48,7 @@ def test_daemon_routes_resolve_the_scope_and_turn_bad_input_into_400(monkeypatch
     actions.move_doc_to_folder(None, {"id": "d1"}, {"scope": "user", "folder": "fld_1"})
     assert api.calls[0][2]["scope"] == {"kind": "group", "id": "t1"}
     assert api.calls[1][2]["folder"]["scope"] == {"kind": "user", "id": "u1"}
+    assert api.calls[1][:2] == ("PUT", "/analysis-docs/d1/design/folder") and api.calls[1][2]["folder"]["id"] == "fld_1"
     with pytest.raises(ServiceError) as err:
         actions.create_library_folder(None, {}, {"scope": "user", "name": " "})
     assert err.value.http_status == 400

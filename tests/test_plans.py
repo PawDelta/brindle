@@ -383,7 +383,8 @@ def test_big_goal_offers_a_planning_doc(accept, db, session, monkeypatch, connec
 
 
 @pytest.mark.parametrize("answer, goal_first", [
-    ({"option": "build"}, True),
+    pytest.param({"option": "build"}, True, marks=pytest.mark.variant(
+        "the ordinary approval: goal first, then an approving option starts the plan")),
     pytest.param({"option": "build"}, False, marks=pytest.mark.variant(
         "the design is approved before the session has a goal: the goal that follows claims it")),
     pytest.param({"option": "back"}, True, marks=pytest.mark.variant(
@@ -606,22 +607,27 @@ def library(monkeypatch):
 
 
 @pytest.mark.parametrize("review, local_rev, teammate, state, signed", [
-    pytest.param({"rev": 1, "reviewers": TWO, "sign_offs": _signed_off("a", "b")}, 1, None, "ready", (2, 2), id="all-signed"),
-    pytest.param({"rev": 1, "reviewers": TWO, "sign_offs": _signed_off("a", "c")}, 1, None, "waiting", (1, 2), id="optional-doesnt-count"),
+    pytest.param({"rev": 1, "reviewers": TWO, "sign_offs": _signed_off("a", "b")}, 1, None, "ready", (2, 2), id="all-signed",
+                 marks=pytest.mark.variant("every required reviewer on a plain list (no rules) has signed: the gate opens at 2 of 2")),
+    pytest.param({"rev": 1, "reviewers": TWO, "sign_offs": _signed_off("a", "c")}, 1, None, "waiting", (1, 2), id="optional-doesnt-count",
+                 marks=pytest.mark.variant("an optional reviewer's sign-off must not stand in for a missing required one")),
     pytest.param({"rev": 1, "reviewers": ONE, "sign_offs": _signed_off("a"),
                   "policy_reviewers": [RULE, {**RULE, "policy": "security", "name": "Security"}]},
                  1, None, "ready", (1, 1), id="one-sign-off-meets-every-rule"),
     pytest.param({"rev": 1, "reviewers": ONE, "sign_offs": _signed_off("a"),
                   "policy_reviewers": [{**RULE, "on_list": [], "met_by": [], "status": "waiting"}]},
-                 1, None, "waiting", (1, 2), id="a-rule-nobody-met"),
+                 1, None, "waiting", (1, 2), id="a-rule-nobody-met",
+                 marks=pytest.mark.variant("a rule nobody on its list has met holds the gate even though the required list is signed")),
     pytest.param({"rev": 1, "reviewers": ONE, "sign_offs": _signed_off("a", rev=0)}, 1, None, "waiting", (0, 1),
                  id="sign-off-on-an-older-revision",
                  marks=pytest.mark.variant("a stale sign-off must never open the gate on text the reviewer hasn't read")),
     pytest.param({"rev": 1, "reviewers": ONE, "sign_offs": _signed_off("a")}, 0, None, "waiting", (0, 1), id="revision-not-sent-yet"),
-    pytest.param({"rev": 1, "reviewers": ONE, "sign_offs": _signed_off("a")}, 1, "a", "changes_requested", (0, 1), id="changes-after-sign-off"),
+    pytest.param({"rev": 1, "reviewers": ONE, "sign_offs": _signed_off("a")}, 1, "a", "changes_requested", (0, 1), id="changes-after-sign-off",
+                 marks=pytest.mark.variant("a reviewer who signed and then asked for changes closes the gate they had signed")),
     pytest.param({"rev": 1, "reviewers": [], "sign_offs": _signed_off("a"), "policy_reviewers": [{**RULE, "on_list": []}]},
                  1, "a", "changes_requested", (0, 1), id="changes-from-a-signer-only-a-rule-counts"),
-    pytest.param({}, 1, None, "waiting", (0, 0), id="library-not-heard-from"),
+    pytest.param({}, 1, None, "waiting", (0, 0), id="library-not-heard-from",
+                 marks=pytest.mark.variant("no review data from the Library at all must wait, not read as nobody required")),
     pytest.param({"rev": 1, "reviewers": [], "policy_reviewers": ["unreadable"]}, 1, None, "waiting", (0, 0), id="unreadable-rule"),
 ])
 def test_required_reviewers_gate(db, session, library, monkeypatch, review, local_rev, teammate, state, signed):
@@ -683,7 +689,8 @@ def test_required_reviewers_request_changes_blocks_and_building_closes_the_revie
 
 
 @pytest.mark.parametrize("reviewers", [
-    ONE,
+    pytest.param(ONE, marks=pytest.mark.variant(
+        "a cached required list that is fully signed still can't open the gate while the Library is unreachable")),
     pytest.param([], marks=pytest.mark.variant(
         "an empty cached list can't prove nobody was added since: a first required reviewer may be waiting remotely")),
 ])

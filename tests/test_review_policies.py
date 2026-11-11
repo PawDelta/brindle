@@ -116,6 +116,7 @@ def gate(db, pid):
     return plans.to_dto(db, plans.get(db, pid))["gate"]
 
 
+@pytest.mark.variant("the whole journey a rule puts a ready plan through: held, explained, then released when one sign-off meets every rule")
 def test_a_rule_holds_the_build_and_shows_why_until_one_sign_off_meets_all_of_them(db, shared):
     pid, lib, net = shared
     assert gate(db, pid)["state"] == "ready"
@@ -135,7 +136,8 @@ def test_a_rule_holds_the_build_and_shows_why_until_one_sign_off_meets_all_of_th
 
 
 @pytest.mark.parametrize("review", [
-    pytest.param({"policy_reviewers": None}, id="no-rules-list"),
+    pytest.param({"policy_reviewers": None}, id="no-rules-list", marks=pytest.mark.variant(
+        "a Library reply with no rules list at all must hold the gate, not read as no rules apply")),
     pytest.param({"policy_reviewers": [rule(status="met", met_by=["u_s"], approvals="1")]}, id="approvals-unreadable"),
     pytest.param({"policy_reviewers": [rule(status="met", met_by=["u_s"])], "pending_policies": "security"}, id="pending-unreadable"),
     pytest.param({"policy_reviewers": [rule(status="met", met_by=["u_s"])], "pending_policies": [{"org_id": ORG, "policy": "security"}]},
@@ -161,12 +163,15 @@ UNREADABLE = (503, "key_unavailable")
 
 
 @pytest.mark.parametrize("route, answer, act", [
-    pytest.param(f"GET {DESIGN}", UNREADABLE, lambda db, pid, net: sd.sync(db, pid, **net), id="rules-unreadable"),
+    pytest.param(f"GET {DESIGN}", UNREADABLE, lambda db, pid, net: sd.sync(db, pid, **net), id="rules-unreadable",
+                 marks=pytest.mark.variant("the rules read failing during a plain sync must close a gate that was ready")),
     pytest.param(f"GET {DESIGN}", UNREADABLE, lambda db, pid, net: sd.set_reviewers(db, pid, [ME], **net), id="unreadable-before-a-reviewer-edit"),
     pytest.param(f"PUT {DESIGN}/permissions", UNREADABLE, lambda db, pid, net: sd.set_reviewers(db, pid, [ME, {"sub": "u_new", "required": True}], **net),
-                 id="unreadable-while-granting"),
+                 id="unreadable-while-granting", marks=pytest.mark.variant(
+                     "the rules turning unreadable while access is being granted must close the gate, not leave it ready")),
     pytest.param(f"PUT {DESIGN}/reviewers", (403, "policy_denied"), lambda db, pid, net: sd.set_reviewers(db, pid, [ME], **net), id="rule-denies"),
-    pytest.param(f"POST {BASE}/share", UNREADABLE, lambda db, pid, net: sd.share(db, pid, TEAM, **net), id="unreadable-while-sharing"),
+    pytest.param(f"POST {BASE}/share", UNREADABLE, lambda db, pid, net: sd.share(db, pid, TEAM, **net), id="unreadable-while-sharing",
+                 marks=pytest.mark.variant("the rules turning unreadable while sharing a plan must close the gate, not leave it ready")),
     pytest.param(f"PUT {DESIGN}/folder", UNREADABLE, lambda db, pid, net: sd.share(db, pid, TEAM, folder={"scope": TEAM, "id": "f_1"}, **net),
                  id="unreadable-while-filing"),
 ])
@@ -185,7 +190,7 @@ def test_a_refusal_closes_a_ready_gate_until_the_library_answers_whole(db, share
 
 
 @pytest.mark.parametrize("role, offered", [
-    ("owner", ORG),
+    pytest.param("owner", ORG, marks=pytest.mark.variant("an org owner is offered the override for their own org")),
     pytest.param("member", None, marks=pytest.mark.variant("a member must not be offered what only an admin can do")),
 ])
 def test_only_an_org_admin_is_offered_an_override(monkeypatch, role, offered):
