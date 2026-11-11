@@ -159,7 +159,7 @@ describe("Sidebar", () => {
   ])("pr line: %j reads %s", async (pr_state, text, tone) => {
     const openUrl = vi.fn(async () => undefined);
     const url = "https://github.com/o/r/pull/391";
-    const { sync, navigate } = mount({ workspaces: [root, worker], sessions: [live], goal: { ...goal, goal_phase: "pr_open", pr_url: url, pr_state } }, undefined, undefined, openUrl);
+    const { sync, navigate } = mount({ workspaces: [root, { ...worker, agents: [{ ...worker.agents![0], status: "done" }] }], sessions: [live], goal: { ...goal, goal_phase: "pr_open", pr_url: url, pr_state } }, undefined, undefined, openUrl);
     onTestFinished(() => sync.stop());
     await waitFor(() => expect(within(sessionRow("sup1")!).getByTestId("session-status").textContent).toBe("Idle"));
     if (text === null) {
@@ -174,6 +174,34 @@ describe("Sidebar", () => {
     fireEvent.click(line);
     expect(openUrl).toHaveBeenCalledWith(url);
     expect(navigate).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["processing", "done", true, "failed", 0, "fixing", "text-sap"],
+    ["idle", "processing", true, "failed", 0, "fixing", "text-sap"],
+    ["paused", "processing", true, "failed", 0, "fixing", "text-sap"],
+    ["idle", "processing", false, "failed", 0, "failed", "text-fail"],
+    ["processing", "done", true, "failed", 2, "pushing", "text-sap"],
+    ["processing", "processing", true, "ci", 2, "ci", "text-sap"],
+  ])("Fixing CI follows session activity and PR progress: %s / %s / %s / %s / %s", async (status, workerStatus, workerAlive, state, unpushed, expected, tone) => {
+    const { sync, store } = mount({
+      workspaces: [{ ...root, agents: [{ ...root.agents![0], status }] }, { ...worker, agents: [{ ...worker.agents![0], status: workerStatus }] }],
+      sessions: [{ ...live, status }],
+      goal: { ...goal, pr_url: "https://github.com/o/r/pull/413", pr_state: { number: 413, state, done: 1, total: 2, unpushed, failed_checks: ["build"] } },
+    });
+    onTestFinished(() => sync.stop());
+    await act(async () => {});
+    act(() => store.dispatch({ type: "stream", message: { type: "liveness", agents: { w1: workerAlive } } }));
+    const fold = screen.queryByRole("button", { name: "Hide sup1's agents" });
+    if (fold) fireEvent.click(fold);
+    const line = await screen.findByTestId("session-pr");
+    expect(line.dataset.state).toBe(expected);
+    expect(line.className).toContain(tone);
+    expect(line.querySelector("[data-pr-pulse]") !== null).toBe(expected === "fixing");
+    if (expected === "fixing") {
+      expect(line.querySelector("[data-pr-pulse]")!.className).toContain("motion-safe:animate-pulse");
+      expect(line.title).toContain("build");
+    }
   });
 
   it("names the selected session in its context at once, while its goal is still loading", async () => {
