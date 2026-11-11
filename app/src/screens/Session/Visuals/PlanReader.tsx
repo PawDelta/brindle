@@ -400,7 +400,7 @@ function DesignDoc({ client, plan, visual, mode, writes }: {
     const start = on.kind === "text" ? toPoints(bodyOf(on.section), on.start) : 0;
     const sent = draft.kind === "suggest"
       ? () => client.suggestPlan(plan.id, plan.rev, { section: draft.section, start, before: draft.before, after }, text)
-      : () => client.commentPlan(plan.id, plan.rev, on.kind === "text" ? { ...on, start } : on, text);
+      : () => client.commentPlan(plan.id, plan.rev, on.kind === "text" ? { ...on, start } : on, text, draft.kind === "ask");
     if ((await write(sent)) && alive.current) setDraft(null);
   };
 
@@ -452,8 +452,9 @@ function DesignDoc({ client, plan, visual, mode, writes }: {
   // What the supervisor hasn't had: the person's open threads, and their replies, each of which
   // the engine marks `sent` once a verdict has carried it.
   const proposals = (plan.revisions ?? []).filter((r) => r.author === "supervisor");
-  const myReplies = threads.flatMap((t) => t.replies ?? []).filter((r) => r.author === "person");
-  const pending = threads.some((t) => t.author === "person" && t.status === "open" && !t.sent) || myReplies.some((r) => !r.sent);
+  const feedback = threads.filter((t) => !t.question);
+  const myReplies = feedback.flatMap((t) => t.replies ?? []).filter((r) => r.author === "person");
+  const pending = feedback.some((t) => t.author === "person" && t.status === "open" && !t.sent) || myReplies.some((r) => !r.sent);
   const lastProposal = Math.max(0, ...proposals.map((r) => r.rev));
   const edited = (plan.revisions ?? []).some((r) => r.author === "person" && r.rev > lastProposal);
   const differs = plan.decisions.some((d) => (drafted(d) ?? d.confirmed ?? d.mine) !== d.mine);
@@ -554,6 +555,12 @@ function DesignDoc({ client, plan, visual, mode, writes }: {
                   <span className={`${pill} ${plan.state === "approved" || gate?.state === "ready" ? "text-pass" : "text-sap"}`}>{!open ? (plan.state === "approved" ? (gate ? "Review closed" : "Signed off") : "Changes requested") : gate ? (gate.state === "ready" ? "Ready to build" : gate.state === "changes_requested" ? "Changes requested" : policyHeld ? "Blocked by org policy" : "In team review") : "Needs your sign-off"}</span>
                   <span>{!open ? (plan.state === "approved" ? "Its workers are building it" : "The supervisor is revising it") : gate ? "Build starts when every required reviewer signs off" : "Nothing is built until you sign off"}</span>
                 </dd>
+                {plan.team_ended && (
+                  <>
+                    <dt className="text-ink-3">Sharing</dt>
+                    <dd className="m-0" data-testid="plan-team-ended">Your Team plan ended, so this is now a personal design doc.</dd>
+                  </>
+                )}
                 <dt className="text-ink-3">Authors</dt>
                 <dd className="m-0">You and the supervisor</dd>
                 <Reviewers plan={plan} client={sharing} directory={directory} adminOrg={adminOrg} me={me} scopes={scopes} busy={busy} nameOf={nameOf} write={write} />

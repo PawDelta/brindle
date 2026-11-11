@@ -67,6 +67,35 @@ it("keeps an approved plan board live from recorded worker events and drops stal
   view.unmount();
 });
 
+it("asks immediately in the thread without turning the question into a change request", async () => {
+  let plan = doc(1, "Workers run on your machine.");
+  const client: PlansClient & PlanDocClient & VisualsClient = {
+    ...visuals, ...docWrites(() => plan), plan: async () => plan, decidePlan: async () => plan,
+    commentPlan: async (_id, rev, anchor, text, question) => (plan = { ...plan, threads: [
+      { id: 1, kind: "comment", rev, anchor: { ...anchor, state: "current" }, author: "person", text,
+        question, status: "open", at: 1, replies: [
+          { id: 2, author: "person", text: "On your own machine.", at: 2, from_supervisor: true },
+        ] },
+    ] }),
+  };
+  render(<PlanReader client={client} visual={visual} onBack={() => {}} onChanged={() => {}} />);
+  const text = (await screen.findByText("Workers run on your machine.")).firstChild!;
+  const range = document.createRange();
+  range.setStart(text, 0);
+  range.setEnd(text, 7);
+  window.getSelection()!.removeAllRanges();
+  window.getSelection()!.addRange(range);
+  fireEvent.mouseUp(screen.getByTestId("plan-doc"));
+  fireEvent.click(within(screen.getByRole("toolbar")).getByRole("button", { name: "Ask the supervisor" }));
+  fireEvent.change(within(screen.getByTestId("thread-draft")).getByRole("textbox"), { target: { value: "Where?" } });
+  await act(async () => fireEvent.submit(screen.getByTestId("thread-draft")));
+  const thread = screen.getByTestId("thread-1");
+  expect(thread.dataset.question).toBe("true");
+  expect(thread.querySelector('[data-from-supervisor="true"]')).toBeTruthy();
+  expect((screen.getByRole("button", { name: "Request changes" }) as HTMLButtonElement).disabled).toBe(true);
+  expect((screen.getByRole("button", { name: "Sign off" }) as HTMLButtonElement).disabled).toBe(false);
+});
+
 it("design doc reader", async () => {
   // An emoji leads each section: the engine's offsets count it as one character, the screen as two.
   const summary = "🚀 Workers run on a **machine** the customer controls.";
@@ -297,6 +326,16 @@ it("a design doc's build button follows the gate: reviewers listed, disabled wit
   expect(screen.getByTestId("plan-build").dataset.gate).toBe("ready");
   await act(async () => fireEvent.click(screen.getByTestId("plan-build")));
   expect(decided).toEqual([true]);
+});
+
+it("a design doc whose Team plan ended says so, once, and only then", async () => {
+  const open = (plan: Plan) => render(<PlanReader client={{ ...visuals, ...docWrites(() => plan), plan: async () => plan, decidePlan: async () => plan }} visual={visual} onBack={() => {}} onChanged={() => {}} />);
+  const shared = open(doc(1, "Workers run on your machine."));
+  await screen.findByTestId("plan-build");
+  expect(screen.queryByTestId("plan-team-ended")).toBeNull();
+  shared.unmount();
+  open(doc(1, "Workers run on your machine.", { team_ended: true }));
+  expect(await screen.findAllByTestId("plan-team-ended")).toHaveLength(1);
 });
 
 /* A design doc held by one org rule, "security", and a fake Library whose answers carry what was written. */

@@ -1060,6 +1060,20 @@ CREATE TABLE IF NOT EXISTS plan_threads (
     updated_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS plan_threads_plan ON plan_threads(plan_id, parent_id);
+-- Exact Brindle account ownership, recorded at supervisor launch. Unknown is
+-- deliberately absent, never a wildcard when routing a shared-doc question.
+CREATE TABLE IF NOT EXISTS supervisor_accounts (
+    agent_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
+    owner TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS doc_questions (
+    doc_id TEXT NOT NULL,
+    thread_id INTEGER NOT NULL,
+    owner TEXT NOT NULL,
+    agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
+    state TEXT NOT NULL,
+    PRIMARY KEY (doc_id, thread_id, owner)
+);
 -- Votes on a plan's decisions (Confirm A): one per voter and decision.
 CREATE TABLE IF NOT EXISTS plan_votes (
     plan_id TEXT NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
@@ -1079,7 +1093,10 @@ CREATE TABLE IF NOT EXISTS plan_shares (
     remote_rev INTEGER NOT NULL DEFAULT 0,
     local_rev INTEGER NOT NULL DEFAULT 0,
     review TEXT NOT NULL DEFAULT '{}',   -- JSON: reviewers, sign-offs, who is pending, ready
-    claimed_at REAL                -- set while a create or a push is under way
+    claimed_at REAL,               -- set while a create or a push is under way
+    org_id TEXT,                   -- the org it was shared from; NULL on a share older than this column
+    lapsed_at REAL                 -- when the server last confirmed that account and org have no Team plan;
+                                   -- NULL once a check fails. Honoured while recent (shared_docs.lapse_stands)
 );
 -- Which local thread or reply each Library thread or reply became, so a pull
 -- adds it once; status is the Library's as last seen. A negative remote_id is
@@ -1530,6 +1547,10 @@ class DB:
 
     def _migrate(self) -> None:
         """Bring databases created by older versions up to the current schema."""
+        thread_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(plan_threads)")}
+        for flag in ("question", "from_supervisor"):
+            if flag not in thread_cols:
+                self.conn.execute(f"ALTER TABLE plan_threads ADD COLUMN {flag} INTEGER NOT NULL DEFAULT 0")
         input_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(visual_input_state)")}
         if "observer" not in input_cols:
             self.conn.execute("ALTER TABLE visual_input_state ADD COLUMN observer INTEGER NOT NULL DEFAULT 0")
@@ -1548,6 +1569,10 @@ class DB:
             self.conn.execute("ALTER TABLE visuals ADD COLUMN consented_by TEXT")
         if "ask" not in {r["name"] for r in self.conn.execute("PRAGMA table_info(plans)")}:
             self.conn.execute("ALTER TABLE plans ADD COLUMN ask TEXT")
+        share_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(plan_shares)")}
+        for col, kind in (("org_id", "TEXT"), ("lapsed_at", "REAL")):
+            if col not in share_cols:
+                self.conn.execute(f"ALTER TABLE plan_shares ADD COLUMN {col} {kind}")
         review_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(reviews)")}
         for col, kind in (("review_slot", "TEXT"), ("reviewer_created_at", "REAL")):
             if col not in review_cols:

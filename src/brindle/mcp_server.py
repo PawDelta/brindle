@@ -68,6 +68,10 @@ class _Server(MCPServer):
             request_id = None
         _reply_to.set(request_id)   # this call's own task: nothing else sees it
         try:
+            from brindle.pro import doc_questions
+
+            if not doc_questions.tool_allowed(_calling_agent(), name):
+                raise ToolError("This read-only supervisor can only answer its design question.")
             refused = coordinator.refusal(_calling_agent(), name)
             if refused:
                 raise ToolError(refused)
@@ -101,11 +105,13 @@ class _Server(MCPServer):
 
     async def list_tools(self):
         from brindle import visuals
+        from brindle.pro import doc_questions
 
         agent = _calling_agent()
         hidden = () if visuals.enabled() else VISUAL_TOOLS
         return [t for t in await super().list_tools()
-                if coordinator.refusal(agent, t.name) is None and t.name not in hidden]
+                if coordinator.refusal(agent, t.name) is None and t.name not in hidden
+                and doc_questions.tool_allowed(agent, t.name)]
 
 
 VISUAL_TOOLS = ("publish_visual", "list_visuals", "offer_visual", "propose_plan",
@@ -175,6 +181,8 @@ class VisualOption(BaseModel):
     id: str = Field(description="1-32 letters, digits, _ or -; what the person's answer names")
     label: str
     detail: str | None = None
+    approves: bool = Field(False, description="true on the one option that approves building the design shown; "
+                           "choosing it (with no note) lets the session's goal go ahead without a planning offer")
 
 
 @mcp.tool()
@@ -335,6 +343,23 @@ def propose_plan(markdown: str, decisions: list[PlanDecision] | None = None,
             "until the person approves; their decision arrives as a message. "
             f"For each split card, pass plan_worker=\"{p['id']}:<split-id>\" to assign or handoff; "
             "use the exact proving check command as its test.")
+
+
+@mcp.tool()
+def reply_doc_question(doc_id: str, thread_id: int, text: str) -> str:
+    """Answer your person's assigned Library design question in its thread.
+    Use the document and thread IDs delivered with the question."""
+    from brindle.pro import doc_questions
+
+    db = DB()
+    try:
+        caller, _ = _caller(db)
+        doc_questions.reply(db, caller, doc_id, thread_id, text)
+        return "Your answer is on the design's question thread."
+    except Exception:  # provider and transport errors must not expose credentials
+        return "The answer could not be posted. Check the question and your account sign-in."
+    finally:
+        db.conn.close()
 
 
 @mcp.tool()

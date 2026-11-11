@@ -885,6 +885,7 @@ export interface PlanDTO {
   session: string;
   split: PlanWorkerDTO[];
   state: "open" | "redirected" | "approved";
+  team_ended?: boolean;
   threads?: PlanThreadDTO[];
   title: string;
   verdict?: PlanVerdictDTO | null;
@@ -1087,6 +1088,7 @@ export interface PlanThreadDTO {
   before?: string | null;
   id: number;
   kind: "comment" | "suggestion";
+  question?: boolean;
   replies?: PlanReplyDTO[];
   rev: number;
   sent?: boolean;
@@ -1101,6 +1103,7 @@ export interface PlanReplyDTO {
   at: number;
   attachments?: string[];
   author: string;
+  from_supervisor?: boolean;
   id: number;
   sent?: boolean;
   text: string;

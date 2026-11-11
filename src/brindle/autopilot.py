@@ -726,6 +726,9 @@ def set_goal(db: DB, root_id: str, goal: str,
     db.update_autopilot(root_id, goal=goal.strip(), detail=detail, state="running", note=None,
                         auditor_id=None, audit_sha=None, audit_ok=None, **fields)
     db.set_milestones(root_id, milestones)
+    from brindle import visuals
+
+    visuals.claim_approvals(db, root_id, goal.strip())   # a design approved before this goal is its plan
     for m in db.milestones(root_id):
         prev = old.get((m.title, m.check_cmd))
         if prev and prev.status != "pending":
@@ -774,7 +777,8 @@ def consider_plan_offer(db: DB, root_id: str) -> None:
     """Open the one offer to plan this goal first if it now deserves it: large,
     by milestones, repos (an omitted repo is the root checkout) or workers, or
     design-heavy (brindle.pro.analysis_brief.offer_reasons). Never re-offers a
-    goal already offered or answered, and never while a plan is already open
+    goal already offered or answered, never for a goal whose design the person
+    approved in Visuals (``visuals.has_approved_design``), and never while a plan is already open
     or plans can't be answered (visuals off or no app connected). While the
     offer is open the session's tasks queue behind it (brindle.plans.holding); the person
     answers it from the Inbox (brindle.plans.answer_offer). Run when the goal
@@ -786,12 +790,14 @@ def consider_plan_offer(db: DB, root_id: str) -> None:
 
         ap = db.get_autopilot(root_id)
         if ap is None or not ap.goal or ap.plan_offer is not None or not visuals.enabled() \
-                or not holds.app_connected() or plans.open_plan(db, root_id) is not None:
+                or not holds.app_connected() or plans.open_plan(db, root_id) is not None \
+                or visuals.has_approved_design(db, root_id, ap.goal):
             return
         milestones, repos, workers, text = plan_offer_scope(db, root_id, ap)
         if analysis_brief.deserves_offer(len(milestones), repos, text, workers) \
                 and db.open_plan_offer(root_id, ap.goal, plans.OFFER_OPEN + secrets.token_hex(4)):
             bus.publish_agent(db, "autopilot.goal", root_id)
+            visuals.settle_offer_for_approval(db, root_id)   # an approval delivered while this was evaluated
     except Exception:  # noqa: BLE001 - an offer is never a reason to fail a goal or a spawn
         log.info("plan offer not evaluated", exc_info=True)
 

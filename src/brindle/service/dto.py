@@ -381,6 +381,7 @@ class PlanReplyDTO(_DTO):
     attachments: list[str] = []
     at: float
     sent: bool = False
+    from_supervisor: bool = False
 
 
 class PlanThreadDTO(_DTO):
@@ -400,6 +401,7 @@ class PlanThreadDTO(_DTO):
     sent: bool = False
     at: float
     replies: list[PlanReplyDTO] = []
+    question: bool = False
 
 
 class PlanRevisionDTO(_DTO):
@@ -537,6 +539,8 @@ class PlanDTO(_DTO):
     can_edit: bool = False
     # Set once the plan is shared for team review (brindle.pro.shared_docs).
     gate: PlanGateDTO | None = None
+    # The Team plan it was shared under has ended: a personal doc, with no gate, until it comes back.
+    team_ended: bool = False
 
 
 class KeptVisualDTO(_DTO):
