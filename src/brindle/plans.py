@@ -300,7 +300,7 @@ def _gate(c, p: dict) -> dict | None:
     signed = _signed(review) if current else {}
     asked = {r["author"][len(TEAMMATE):]: r["at"] for r in c.execute(
         "SELECT author, MAX(created_at) AS at FROM plan_threads WHERE plan_id=? AND parent_id IS NULL"
-        " AND status='open' AND author LIKE ? GROUP BY author", (p["id"], TEAMMATE + "%"))}
+        " AND status='open' AND question=0 AND author LIKE ? GROUP BY author", (p["id"], TEAMMATE + "%"))}
 
     def asked_since(sub: str) -> bool:
         return sub in asked and asked[sub] > signed.get(sub, -1)
@@ -592,10 +592,24 @@ def reply(db: DB, caller: Agent | None, plan_id: str, thread_id: Any, text: Any,
     p = _row(db, plan_id)
     if caller.id != root.id or p["root_id"] != root.id:
         raise ServiceError("forbidden", "only the session's supervisor answers on its plan", 403)
+    thread = plan_docs._thread(db, p, thread_id)
+    if thread["question"]:
+        from brindle.pro import doc_questions, shared_docs
+
+        shared = shared_docs.link(db, plan_id)
+        remote = db.conn.execute("SELECT remote_id FROM plan_share_threads WHERE plan_id=? AND local_id=?"
+                                 " AND remote_id>0", (plan_id, thread_id)).fetchone()
+        if shared and remote:
+            doc_questions.reply(db, caller, shared["doc_id"], remote["remote_id"], text)
+            return thread_id
+        if thread["author"] != plan_docs.PERSON or shared:
+            raise ServiceError("forbidden", "only the asker's supervisor answers a question", 403)
     if resolve and plan_docs._thread(db, p, thread_id)["kind"] != "comment":
         # refuse before replying: a failed call must leave nothing behind
         raise ServiceError("invalid", "only a comment thread is resolved; a suggestion is accepted or rejected", 400)
     rid = plan_docs.comment(db, plan_id, text=text, parent=thread_id, author=plan_docs.SUPERVISOR)
+    if thread["question"]:
+        db.conn.execute("UPDATE plan_threads SET from_supervisor=1 WHERE id=?", (rid,))
     if resolve:
         plan_docs.resolve(db, plan_id, thread_id)
     return rid

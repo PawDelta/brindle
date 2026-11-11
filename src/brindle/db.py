@@ -1060,6 +1060,20 @@ CREATE TABLE IF NOT EXISTS plan_threads (
     updated_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS plan_threads_plan ON plan_threads(plan_id, parent_id);
+-- Exact Brindle account ownership, recorded at supervisor launch. Unknown is
+-- deliberately absent, never a wildcard when routing a shared-doc question.
+CREATE TABLE IF NOT EXISTS supervisor_accounts (
+    agent_id TEXT PRIMARY KEY REFERENCES agents(id) ON DELETE CASCADE,
+    owner TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS doc_questions (
+    doc_id TEXT NOT NULL,
+    thread_id INTEGER NOT NULL,
+    owner TEXT NOT NULL,
+    agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
+    state TEXT NOT NULL,
+    PRIMARY KEY (doc_id, thread_id, owner)
+);
 -- Votes on a plan's decisions (Confirm A): one per voter and decision.
 CREATE TABLE IF NOT EXISTS plan_votes (
     plan_id TEXT NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
@@ -1533,6 +1547,10 @@ class DB:
 
     def _migrate(self) -> None:
         """Bring databases created by older versions up to the current schema."""
+        thread_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(plan_threads)")}
+        for flag in ("question", "from_supervisor"):
+            if flag not in thread_cols:
+                self.conn.execute(f"ALTER TABLE plan_threads ADD COLUMN {flag} INTEGER NOT NULL DEFAULT 0")
         input_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(visual_input_state)")}
         if "observer" not in input_cols:
             self.conn.execute("ALTER TABLE visual_input_state ADD COLUMN observer INTEGER NOT NULL DEFAULT 0")

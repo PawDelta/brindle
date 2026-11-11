@@ -6377,6 +6377,11 @@
               "title": "Author",
               "type": "string"
             },
+            "from_supervisor": {
+              "default": false,
+              "title": "From Supervisor",
+              "type": "boolean"
+            },
             "id": {
               "title": "Id",
               "type": "integer"
@@ -6545,6 +6550,11 @@
               ],
               "title": "Kind",
               "type": "string"
+            },
+            "question": {
+              "default": false,
+              "title": "Question",
+              "type": "boolean"
             },
             "replies": {
               "default": [],
@@ -8126,6 +8136,11 @@
           "title": "Author",
           "type": "string"
         },
+        "from_supervisor": {
+          "default": false,
+          "title": "From Supervisor",
+          "type": "boolean"
+        },
         "id": {
           "title": "Id",
           "type": "integer"
@@ -8717,6 +8732,11 @@
               "title": "Author",
               "type": "string"
             },
+            "from_supervisor": {
+              "default": false,
+              "title": "From Supervisor",
+              "type": "boolean"
+            },
             "id": {
               "title": "Id",
               "type": "integer"
@@ -8797,6 +8817,11 @@
           ],
           "title": "Kind",
           "type": "string"
+        },
+        "question": {
+          "default": false,
+          "title": "Question",
+          "type": "boolean"
         },
         "replies": {
           "default": [],
@@ -11706,6 +11731,10 @@
     {
       "method": "POST",
       "path": "/v1/keys/{name}/test"
+    },
+    {
+      "method": "POST",
+      "path": "/v1/library/designs/{id}/question"
     },
     {
       "method": "GET",

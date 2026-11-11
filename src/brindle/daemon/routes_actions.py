@@ -153,6 +153,8 @@ def _endpoint(fn: Action):
             return JSONResponse(got.to_json(), 409)
         if isinstance(got, Job):
             return JSONResponse(got.to_json(), 202)
+        if isinstance(got, JSONResponse):
+            return got
         return JSONResponse(got)
 
     endpoint.__name__ = fn.__name__
