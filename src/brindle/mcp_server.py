@@ -2104,19 +2104,47 @@ async def _serve_stdio(handover) -> None:
 
 
 INSTALL_WATCH_INTERVAL = 5.0   # seconds between an idle server's looks at its install
+async def _tools_changed_sent() -> bool:
+    """Whether the visuals capability's tools/list_changed was handed to the
+    transport. One that raised is dropped (False), so the next look sends it
+    again, and the server goes on serving.
+
+    It needs no deadline: the notice only waits for the one writer every
+    response goes through, so it waits exactly as long as a response would,
+    and ends when that writer moves on."""
+    try:
+        return await mcp.notify_tools_changed()
+    except Exception:  # noqa: BLE001 - a failed notice must not end the connection
+        logging.getLogger(__name__).warning("brindle mcp: tools/list_changed failed", exc_info=True)
+        return False
+
+
+def _visuals_now(shown: bool) -> bool:
+    """The visuals capability, or ``shown`` while the setting can't be read
+    (a config.json that isn't valid JSON, mid-edit, say)."""
+    from brindle import visuals
+
+    try:
+        return visuals.enabled()
+    except Exception:  # noqa: BLE001 - an unreadable setting must not end the connection
+        logging.getLogger(__name__).warning("brindle mcp: visuals setting unreadable", exc_info=True)
+        return shown
 
 
 async def _watch_visuals(wait) -> None:
     """Each INSTALL_WATCH_INTERVAL, send tools/list_changed when the visuals
     capability flipped (the person's setting changed in the app) so the client
-    re-lists tools: publish_visual and the rest appear or go without a reconnect."""
-    from brindle import visuals
+    re-lists tools: publish_visual and the rest appear or go without a reconnect.
 
-    shown = visuals.enabled()
+    This task shares ``_serve``'s task group with the connection, so nothing
+    in it may raise: that would cancel the connection. An unreadable setting
+    keeps the last one seen, and a notice that fails is dropped
+    (``_tools_changed_sent``) and sent again on the next look."""
+    shown = _visuals_now(True)
     while True:
         await wait(INSTALL_WATCH_INTERVAL)
-        now = visuals.enabled()
-        if now != shown and await mcp.notify_tools_changed():
+        now = _visuals_now(shown)
+        if now != shown and await _tools_changed_sent():
             shown = now
 
 
