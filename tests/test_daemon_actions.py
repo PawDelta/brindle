@@ -2005,8 +2005,10 @@ def test_next_session_pr_opens_from_the_same_branch_after_one_merges(db, repo, l
     sh("git merge -q --no-ff main -m sync", sess)       # a sync brings main in: nothing new of its own
     ready, pr, phase = readiness()
     assert (ready, pr, phase) == (False, None, ("done", first))
-    # Main changes the PR's file; the next sync's conflict is resolved with new content in the merge alone.
-    _commit(repo, "a.py", "z\n")
+    # Main changes the PR's file in a squash brindle recorded (one edited on the forge, so not replayed
+    # `-s ours`); the next sync's conflict is resolved with new content in the merge alone.
+    from brindle import session_sync
+    assert session_sync.record_squash(db, lead, _commit(repo, "a.py", "z\n"), pushed)
     sh("git merge -q main || true", sess)
     (sess / "a.py").write_text("resolved\n")
     sh("git add a.py && git commit -q --no-edit", sess)
