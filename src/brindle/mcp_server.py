@@ -181,6 +181,8 @@ class VisualOption(BaseModel):
     id: str = Field(description="1-32 letters, digits, _ or -; what the person's answer names")
     label: str
     detail: str | None = None
+    approves: bool = Field(False, description="true on the one option that approves building the design shown; "
+                           "choosing it (with no note) lets the session's goal go ahead without a planning offer")
 
 
 @mcp.tool()

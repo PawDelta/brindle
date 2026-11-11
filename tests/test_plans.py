@@ -382,6 +382,123 @@ def test_big_goal_offers_a_planning_doc(accept, db, session, monkeypatch, connec
     assert started == ["build the preset schema"]
 
 
+@pytest.mark.parametrize("answer, goal_first", [
+    ({"option": "build"}, True),
+    pytest.param({"option": "build"}, False, marks=pytest.mark.variant(
+        "the design is approved before the session has a goal: the goal that follows claims it")),
+    pytest.param({"option": "back"}, True, marks=pytest.mark.variant(
+        "a redirect option ('Go back and revise') is not an approval, whatever its words: the offer must still open")),
+    pytest.param({"option": "build", "note": "change the split first"}, True, marks=pytest.mark.variant(
+        "an approving option with a redirect note is not an approval: the offer must still open")),
+])
+def test_approved_design_counts_as_the_plan(answer, goal_first, db, session, monkeypatch):
+    from brindle import autopilot, visuals
+    from brindle.service import inbox
+
+    boss, started = session
+    monkeypatch.setattr(autopilot, "_commit", lambda ws, tracked_only=False: "abc123")
+    db.add_autopilot("boss")
+    with db.tx() as c:
+        visual_offers._grant(c, "boss")
+    if goal_first:      # goal A starts small, so it has no offer yet; its design is approved while it runs
+        mcp_server.set_goal("Org presets", [{"title": "M0", "check": "true"}])
+    shown = visuals.publish(db, boss, "Build plan", "<p>design</p>", "Build it?",
+                            [{"id": "build", "label": "Build", "approves": True},
+                             {"id": "back", "label": "Go back and revise"}])
+    monkeypatch.setattr(agents, "send_message", lambda *a, **k: None)
+    visuals.answer(db, shown["id"], 1, **answer)
+
+    mcp_server.set_goal("Org presets", [{"title": f"M{i}", "check": "true"} for i in range(4)])
+    offers = [i for i in inbox.items(db, None) if i.kind == "plan_offer"]
+    asyncio.run(mcp_server.assign("developer", "build the preset schema"))
+    if answer == {"option": "build"}:
+        assert offers == [] and started == ["build the preset schema"] and plans.holding(db, "boss") is None
+        # The approval belonged to that goal: a later, unrelated goal gets the normal offer.
+        mcp_server.set_goal("Billing export", [{"title": f"B{i}", "check": "true"} for i in range(4)])
+        assert [i for i in inbox.items(db, None) if i.kind == "plan_offer"]
+    else:
+        assert len(offers) == 1 and started == []
+
+
+@pytest.mark.variant("review: a design approved after the session moved on belongs to the goal it was shown for")
+def test_approval_stays_with_the_goal_the_design_was_shown_for(db, session, monkeypatch):
+    from brindle import autopilot, visuals
+    from brindle.service import inbox
+
+    boss, started = session
+    monkeypatch.setattr(autopilot, "_commit", lambda ws, tracked_only=False: "abc123")
+    monkeypatch.setattr(agents, "send_message", lambda *a, **k: None)
+    db.add_autopilot("boss")
+    with db.tx() as c:
+        visual_offers._grant(c, "boss")
+    mcp_server.set_goal("Org presets", [{"title": "A", "check": "true"}])
+    shown = visuals.publish(db, boss, "Build plan", "<p>design</p>", "Build it?",
+                            [{"id": "build", "label": "Build", "approves": True}, {"id": "back", "label": "Back"}])
+    mcp_server.set_goal("Billing export", [{"title": "B", "check": "true"}])
+    visuals.answer(db, shown["id"], 1, option="build")        # A's design, answered while B is the goal
+    mcp_server.set_goal("Billing export", [{"title": f"B{i}", "check": "true"} for i in range(4)])
+    assert [i for i in inbox.items(db, None) if i.kind == "plan_offer"]
+
+
+@pytest.mark.parametrize("delivered", [
+    False,
+    pytest.param(True, marks=pytest.mark.variant(
+        "a delivery that succeeds after the offer opened must release the held worker")),
+])
+@pytest.mark.variant("review: a delivery that fails after a goal claimed the approval must still undo the answer")
+def test_failed_answer_delivery_leaves_no_approval_behind(delivered, db, session, monkeypatch):
+    from brindle import autopilot, visuals
+
+    boss, started = session
+    monkeypatch.setattr(autopilot, "_commit", lambda ws, tracked_only=False: "abc123")
+    with db.tx() as c:
+        visual_offers._grant(c, "boss")
+    db.add_autopilot("boss")
+    shown = visuals.publish(db, boss, "Build plan", "<p>design</p>", "Build it?",
+                            [{"id": "build", "label": "Build", "approves": True}, {"id": "back", "label": "Back"}])
+
+    def fail(*a, **k):      # a big goal and an assign arrive while the answer is being delivered
+        monkeypatch.setattr(agents, "send_message", lambda *a, **k: None)   # starting a task also messages
+        mcp_server.set_goal("Org presets", [{"title": f"M{i}", "check": "true"} for i in range(4)])
+        asyncio.run(mcp_server.assign("developer", "build the preset schema"))
+        if not delivered:
+            raise RuntimeError("not delivered")
+    monkeypatch.setattr(agents, "send_message", fail)
+    if delivered:
+        visuals.answer(db, shown["id"], 1, option="build")
+        assert plans.holding(db, "boss") is None and started == ["build the preset schema"]
+        return
+    with pytest.raises(RuntimeError):
+        visuals.answer(db, shown["id"], 1, option="build")
+    assert visuals.get(db, shown["id"])["answer"] is None
+    assert not visuals.has_approved_design(db, "boss", "Org presets")
+    assert started == [] and plans.holding(db, "boss") is not None      # the undelivered answer exempted nothing
+
+
+@pytest.mark.variant("review: the answer is delivered between the offer's evaluation and its insertion")
+def test_approval_delivered_while_the_offer_is_being_opened(db, session, monkeypatch):
+    from brindle import autopilot, visuals
+    from brindle.db import DB as DBClass
+
+    boss, started = session
+    monkeypatch.setattr(autopilot, "_commit", lambda ws, tracked_only=False: "abc123")
+    monkeypatch.setattr(agents, "send_message", lambda *a, **k: None)
+    db.add_autopilot("boss")
+    with db.tx() as c:
+        visual_offers._grant(c, "boss")
+    shown = visuals.publish(db, boss, "Build plan", "<p>design</p>", "Build it?",
+                            [{"id": "build", "label": "Build", "approves": True}, {"id": "back", "label": "Back"}])
+    real = DBClass.open_plan_offer
+
+    def late(self, *args):      # the approval lands after the evaluation saw none, before the offer is written
+        visuals.answer(db, shown["id"], 1, option="build")
+        return real(self, *args)
+    monkeypatch.setattr(DBClass, "open_plan_offer", late)
+    mcp_server.set_goal("Org presets", [{"title": f"M{i}", "check": "true"} for i in range(4)])
+    asyncio.run(mcp_server.assign("developer", "build the preset schema"))
+    assert plans.holding(db, "boss") is None and started == ["build the preset schema"]
+
+
 @pytest.mark.variant("reported stall: a terminal-only session's workers held by an offer nobody can answer (review 0.6.3, finding 3)")
 def test_plan_offer_without_app(db, session, monkeypatch):
     from brindle import autopilot
