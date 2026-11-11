@@ -32,6 +32,13 @@ export interface ThreadActions {
   reject(thread: number): Promise<boolean>;
 }
 
+/* What someone reviewing another person's design may do to a thread, as the Library says.
+   Absent for the doc's author: everything. */
+export interface ThreadLimits {
+  reply: boolean;
+  resolve(thread: PlanThreadDTO): boolean;
+}
+
 const card = "grid gap-1.5 border-b border-line px-3.5 py-3 text-ink-2";
 const onLine = "font-mono text-[11px] text-ink-3";
 const act = "cursor-pointer text-xs text-ink-3 hover:text-ink disabled:cursor-not-allowed disabled:opacity-45";
@@ -58,12 +65,13 @@ function Who({ who, supervisor = false }: { who: string; supervisor?: boolean })
   );
 }
 
-function Thread({ thread: t, where, busy, can, actions, onShow }: {
+function Thread({ thread: t, where, busy, can, limits, actions, onShow }: {
   thread: PlanThreadDTO;
   where: string;
   busy: boolean;
   /* Whether a suggestion can still be accepted (the plan is open). */
   can: boolean;
+  limits?: ThreadLimits;
   actions: ThreadActions;
   onShow(): void;
 }) {
@@ -71,6 +79,8 @@ function Thread({ thread: t, where, busy, can, actions, onShow }: {
   const [text, setText] = useState("");
   const open = t.status === "open";
   const suggestion = t.kind === "suggestion";
+  const canJudge = !limits;
+  const canResolve = !limits || limits.resolve(t);
   const send = async (e: FormEvent) => {
     e.preventDefault();
     if (!text.trim() || !(await actions.reply(t.id, text.trim()))) return;
@@ -108,11 +118,11 @@ function Thread({ thread: t, where, busy, can, actions, onShow }: {
         </form>
       )}
       <div className="mt-0.5 flex gap-3.5">
-        {open && suggestion && <button type="button" className={`${act} font-medium !text-pass`} disabled={busy || !can || t.anchor.state === "detached"} onClick={() => void actions.accept(t.id)}>Accept</button>}
-        {open && suggestion && <button type="button" className={act} disabled={busy} onClick={() => void actions.reject(t.id)}>Reject</button>}
-        {open && <button type="button" className={act} onClick={() => setReplying((r) => !r)}>Reply</button>}
-        {open && !suggestion && <button type="button" className={act} disabled={busy} onClick={() => void actions.resolve(t.id, true)}>Resolve</button>}
-        {t.status === "resolved" && <button type="button" className={act} disabled={busy} onClick={() => void actions.resolve(t.id, false)}>Reopen</button>}
+        {open && suggestion && canJudge && <button type="button" className={`${act} font-medium !text-pass`} disabled={busy || !can || t.anchor.state === "detached"} onClick={() => void actions.accept(t.id)}>Accept</button>}
+        {open && suggestion && canJudge && <button type="button" className={act} disabled={busy} onClick={() => void actions.reject(t.id)}>Reject</button>}
+        {open && (!limits || limits.reply) && <button type="button" className={act} onClick={() => setReplying((r) => !r)}>Reply</button>}
+        {open && !suggestion && canResolve && <button type="button" className={act} disabled={busy} onClick={() => void actions.resolve(t.id, true)}>Resolve</button>}
+        {t.status === "resolved" && canResolve && <button type="button" className={act} disabled={busy} onClick={() => void actions.resolve(t.id, false)}>Reopen</button>}
       </div>
     </article>
   );
@@ -156,8 +166,9 @@ function DraftCard({ draft, stale, busy, onSend, onCancel }: { draft: Draft; sta
   );
 }
 
-export function Review({ plan, tab, onTab, todo, decided, onJump, where, draft, draftStale, busy, onDraftSend, onDraftCancel, actions, onShow, shared, onCollapse }: {
+export function Review({ plan, tab, onTab, todo, decided, onJump, where, draft, draftStale, busy, onDraftSend, onDraftCancel, actions, limits, onShow, shared, onCollapse }: {
   plan: Plan;
+  limits?: ThreadLimits;
   tab: ReviewTab;
   onTab(tab: ReviewTab): void;
   todo: TodoItem[];
@@ -228,7 +239,7 @@ export function Review({ plan, tab, onTab, todo, decided, onJump, where, draft, 
           </div>
         )}
         {tab === "review" && draft && <DraftCard key={`${draft.kind}:${draft.where}`} draft={draft} stale={draftStale} busy={busy} onSend={onDraftSend} onCancel={onDraftCancel} />}
-        {shown.map((t) => <Thread key={t.id} thread={t} where={where(t)} busy={busy} can={plan.state === "open"} actions={actions} onShow={() => onShow(t)} />)}
+        {shown.map((t) => <Thread key={t.id} thread={t} where={where(t)} busy={busy} can={plan.state === "open"} limits={limits} actions={actions} onShow={() => onShow(t)} />)}
         {body}
       </div>
     </aside>

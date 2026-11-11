@@ -56,7 +56,8 @@ export function ItemActions({ item, actions, onGo, onNavigate, repo, onDone, com
           </>
         )}
         {REVIEW_KINDS.includes(item.kind) && (
-          <button type="button" className={`${button} ${size}`} disabled={item.doc == null || !onNavigate} onClick={() => onNavigate?.({ screen: "knowledge", view: "docs", doc: item.doc! })}>Open</button>
+          <button type="button" className={`${button} ${size}`} disabled={item.doc == null || !onNavigate}
+            onClick={() => onNavigate?.(item.kind === "review_requested" ? { screen: "shared-design", doc: String(item.doc), title: item.detail ?? undefined, repo: repo ?? undefined } : { screen: "knowledge", view: "docs", doc: item.doc! })}>Open</button>
         )}
         {item.kind === "credentials" && (
           <ProviderSignIn

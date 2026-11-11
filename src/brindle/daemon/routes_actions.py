@@ -1906,14 +1906,14 @@ EXPORT_FORMATS = ("md", "docx", "zip")
 EXPORT_DESTINATIONS = ("download", "google_docs", "sharepoint")
 
 
-def _docs_entitlement(repo: str | None):
+def _docs_entitlement(repo: str | None, store=None):
     from brindle import config
     from brindle.pro import analysis_docs
 
     if repo:
         config.load_repo_config(repo)        # its air-gap setting applies first
     try:
-        return analysis_docs.require_entitlement()
+        return analysis_docs.require_entitlement(store)
     except RuntimeError as e:
         raise ServiceError("not_entitled", str(e), 402) from e
 

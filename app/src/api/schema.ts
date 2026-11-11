@@ -68,6 +68,7 @@ export interface ApiSchema {
   PlanRevisionDetailDTO: PlanRevisionDetailDTO;
   PlanSectionDTO: PlanSectionDTO;
   PlanThreadDTO: PlanThreadDTO;
+  PlanUnconfirmedDTO: PlanUnconfirmedDTO;
   PlanVerdictDTO: PlanVerdictDTO;
   PlanWorkerDTO: PlanWorkerDTO;
   PrStateDTO: PrStateDTO;
@@ -88,6 +89,7 @@ export interface ApiSchema {
   RuleDTO: RuleDTO;
   SavedActionDTO: SavedActionDTO;
   SessionDTO: SessionDTO;
+  SharedDesignDTO: SharedDesignDTO;
   StoppedAgentDTO: StoppedAgentDTO;
   VisualAnswerDTO: VisualAnswerDTO;
   VisualDTO: VisualDTO;
@@ -926,17 +928,20 @@ export interface PlanOptionDTO {
  * A shared plan's build gate (brindle.plans.gate). ``reason``: why it
  * can't build now; ``signed`` of ``required`` sign-offs are in. ``policies``:
  * every org review rule covering it, including those a listed reviewer meets.
+ * ``approval_refused``: why an Approve held for the Library wasn't applied.
  *
  * This interface was referenced by `ApiSchema`'s JSON-Schema
  * via the `definition` "PlanGateDTO".
  */
 export interface PlanGateDTO {
+  approval_refused?: string | null;
   policies?: PlanGatePolicyDTO[];
   reason?: string | null;
   required: number;
   reviewers?: PlanGateRowDTO[];
   signed: number;
   state: "waiting" | "changes_requested" | "conflict" | "ready" | "closed";
+  unconfirmed?: PlanUnconfirmedDTO | null;
   waiting_on?: string[];
 }
 /**
@@ -1023,6 +1028,20 @@ export interface PlanGateRowDTO {
   status: "signed_off" | "changes_requested" | "waiting" | "waived";
   sub?: string | null;
   you?: boolean;
+}
+/**
+ * Why the Library couldn't confirm a shared plan's review when the person
+ * tried to approve it. ``approval_held``: their Approve applies by itself
+ * once it can; ``can_stop_sharing``: they may make it a personal doc instead.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "PlanUnconfirmedDTO".
+ */
+export interface PlanUnconfirmedDTO {
+  approval_held?: boolean;
+  can_stop_sharing?: boolean;
+  message: string;
+  reason: "offline" | "sign_in" | "key_unavailable" | "library_error" | "other_account";
 }
 /**
  * One revision of a plan: the supervisor's proposal, the person's edit
@@ -1412,6 +1431,43 @@ export interface SessionDTO {
   status: string;
   status_since?: number | null;
   workspace_id: string;
+}
+/**
+ * A design someone else shared, as the person reviewing it reads it
+ * (brindle.pro.shared_reader): ``id`` is its Library doc id and it has no
+ * plan on this machine. ``can_*``: what the Library lets this account do,
+ * ``can_sign_off`` false only when it can't be one of the signers.
+ * ``author``: who wrote it, ``person`` if that is this account.
+ *
+ * This interface was referenced by `ApiSchema`'s JSON-Schema
+ * via the `definition` "SharedDesignDTO".
+ */
+export interface SharedDesignDTO {
+  ask?: string | null;
+  author?: string | null;
+  can_comment?: boolean;
+  can_edit?: boolean;
+  can_sign_off?: boolean;
+  can_suggest?: boolean;
+  created_at: number;
+  decisions: PlanDecisionDTO[];
+  gate?: PlanGateDTO | null;
+  id: string;
+  lede: string;
+  markdown: string;
+  me: string;
+  queued: number;
+  rev: number;
+  revisions?: PlanRevisionDTO[];
+  sections: PlanSectionDTO[];
+  session: string;
+  signed_off?: boolean;
+  split: PlanWorkerDTO[];
+  state: "open" | "redirected" | "approved";
+  team_ended?: boolean;
+  threads?: PlanThreadDTO[];
+  title: string;
+  verdict?: PlanVerdictDTO | null;
 }
 /**
  * A visual in a session (brindle.visuals). ``rev``: its current revision,

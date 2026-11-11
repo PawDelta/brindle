@@ -359,6 +359,31 @@ describe("App", () => {
     } finally { sync.stop(); vi.useRealTimers(); }
   });
 
+  it("test_update_relaunch: a session's pane shown during recovery is not reopened when the recovery ends", async () => {
+    vi.useFakeTimers();
+    const sup2 = { ...root, id: "proj2", agents: root.agents?.map((a) => ({ ...a, id: "sup2", window: windowOf("sup2") })) };
+    const daemon = new FakeDaemon({
+      repos: [{ repo_root: REPO, name: "proj" }],
+      sessions: [session, { ...session, id: "sup2" }],
+      workspaces: [root, sup2],
+    });
+    const client = daemon.client();
+    const store = createAppStore();
+    const sync = startSync({ client, store, connect: daemon.connect });
+    let resuming = true;
+    const meta = client.meta.bind(client);
+    vi.spyOn(client, "meta").mockImplementation(async () => ({ ...await meta(), resuming, ...(resuming ? { recovery: { done: 1, total: 2, pending: ["sup1"] } } : {}) }));
+    try {
+      renderApp(<App store={store} client={client} refresh={sync.refresh} initialRoute={{ screen: "session", root: "sup2", repo: REPO }} />);
+      await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
+      const pane = screen.getByTestId("terminal");
+      expect(pane.textContent).toBe("sup2");
+      resuming = false;
+      await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
+      expect(screen.getByTestId("terminal")).toBe(pane);
+    } finally { sync.stop(); vi.useRealTimers(); }
+  });
+
   it("shows once its session is back: one slow read after it, not after a read begun while it was pending and another behind that", async () => {
     vi.useFakeTimers();
     const daemon = new FakeDaemon({ repos: [{ repo_root: REPO, name: "proj" }], sessions: [session], workspaces: [root] });
