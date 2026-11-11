@@ -7,7 +7,7 @@ docs/shared-designs-api.md in pawdelta-web.
 folder, unless a folder is named) and shares it with a team or the org.
 :func:`set_reviewers` edits the required and optional reviewers afterwards.
 :func:`sync` brings comments, suggestions, votes and the review state back,
-then sends the plan's newest revision if the Library doesn't have it.
+then sends the plan's newest revision and what the person did on the doc.
 
 The Library numbers its own revisions, so ``plan_shares`` keeps which local
 revision its head holds. Everything pulled is stored under ``teammate:<sub>``,
@@ -16,8 +16,15 @@ Library can't become their confirmed pick. A teammate's open comments and
 suggestions are how they ask for changes (the API has no verdict of its own):
 Request changes carries them to the supervisor (:func:`plan_docs.pending`).
 
-The Library's head moving on without this plan (a teammate with edit rights
-changed the text) isn't merged: the next send is refused as stale and says so.
+When a teammate with edit rights changes the text, an open plan that hasn't
+changed here takes the Library's head as a new revision. If the plan changed
+here too nothing is merged or sent: the build gate's state is ``conflict``
+(:func:`plans._gate`) until the Library's head is a revision this plan has.
+
+What the person writes after sharing goes up as theirs: comments, replies,
+suggestions, thread actions and votes. What they wrote before stays here. A
+suggestion they accepted goes up as the Library's own ``accept``, which makes
+the revision and closes the thread together.
 
 Calls raise ``RuntimeError`` with a readable reason, as ``brindle docs`` does.
 """
@@ -30,7 +37,7 @@ import time
 from typing import Any
 from urllib.parse import urlencode
 
-from brindle import plan_docs
+from brindle import plan_docs, plans, visuals
 from brindle.db import DB
 from brindle.pro import analysis_docs as ad
 from brindle.pro import review_policies
@@ -46,6 +53,11 @@ FIRST_REVISION = 1           # what the Library numbers a new document's head
 REVIEW = ("rev", "reviewers", "sign_offs", "pending_reviewers", "ready", "policy_reviewers", "pending_policies")
 STATUSES = ("open", "resolved", "accepted", "rejected")
 REVIEWER_GRANT = {"can_suggest": True, "can_comment": True}   # a reviewer must be able to answer
+SENDING = "sending"          # plan_share_threads.status of a write sent, its answer not yet back (remote_id: -local)
+# What the person's change to a thread is called in the Library. Not an accept:
+# that is sent only on the text it was made on (_send_revisions).
+THREAD_ACTIONS = {("comment", "resolved"): "resolve", ("comment", "open"): "reopen",
+                  ("suggestion", "rejected"): "reject"}
 
 
 def link(db: DB, plan_id: str) -> dict | None:
@@ -172,6 +184,9 @@ def _linked(db: DB, plan_id: str, doc_id: str, remote_rev: int, local_rev: int) 
     with db.tx() as c:
         c.execute("UPDATE plan_shares SET doc_id=?, remote_rev=?, local_rev=?, claimed_at=NULL WHERE plan_id=?",
                   (doc_id, remote_rev, local_rev, plan_id))
+        # Written before there was anyone to read it: linked to no Library thread, so it is never sent.
+        c.execute("INSERT OR IGNORE INTO plan_share_threads (plan_id, remote_id, local_id, status)"
+                  " SELECT plan_id, -id, id, status FROM plan_threads WHERE plan_id=?", (plan_id,))
     return doc_id
 
 
@@ -323,11 +338,15 @@ def _pull_thread(c, plan_id: str, rev: int, cur: dict | None, known: dict, t: An
     return changes
 
 
-def _pull_votes(c, plan_id: str, rev: int, decisions: list, now: float) -> int:
+def _pull_votes(c, plan_id: str, owner: str, rev: int, decisions: list, now: float) -> int:
     """Make the teammates' votes the Library's current ones (it answers with
-    the head revision's only, so a vote from an older revision goes)."""
+    the head revision's only, so a vote from an older revision goes). The
+    owner's vote on a decision the person picked here is that pick coming back."""
+    mine = {r["decision_id"] for r in c.execute("SELECT decision_id FROM plan_votes WHERE plan_id=? AND voter=?",
+                                                (plan_id, plan_docs.PERSON))}
     wanted = {(d["id"], plan_docs.TEAMMATE + sub): option for d in decisions
-              for option, subs in (d.get("votes") or {}).items() for sub in subs}
+              for option, subs in (d.get("votes") or {}).items() for sub in subs
+              if sub != owner or d["id"] not in mine}
     pattern = plan_docs.TEAMMATE + "%"
     held = {(r["decision_id"], r["voter"]): r["option_id"] for r in c.execute(
         "SELECT decision_id, voter, option_id FROM plan_votes WHERE plan_id=? AND voter LIKE ?", (plan_id, pattern))}
@@ -339,75 +358,373 @@ def _pull_votes(c, plan_id: str, rev: int, decisions: list, now: float) -> int:
     return 1
 
 
+def _known(c, plan_id: str) -> dict:
+    return {r["remote_id"]: {"local_id": r["local_id"], "status": r["status"]} for r in c.execute(
+        "SELECT remote_id, local_id, status FROM plan_share_threads WHERE plan_id=?", (plan_id,))}
+
+
+def _place(anchor: Any) -> tuple | None:
+    """Where a thread is, in the terms both sides keep: anchored text can move
+    between sections, so it is known by its quote."""
+    if not isinstance(anchor, dict):
+        return None
+    where = anchor.get("quote") if anchor.get("kind") == "text" else anchor.get("section")
+    return anchor.get("kind"), where, anchor.get("decision"), anchor.get("option")
+
+
+def _link_own(c, plan_id: str, owner: str, known: dict, threads: Any) -> None:
+    """Pair what the Library holds from this account with what was sent from
+    here and not linked yet, oldest first, so it comes back as itself instead
+    of as a teammate's, and an answer that was lost doesn't send it twice.
+    Only a write actually sent can pair: the same words from this account
+    elsewhere are another thread. Text is compared as sent, secrets masked."""
+    waiting: dict[tuple, list[int]] = {}
+    for r in c.execute("SELECT t.id, t.parent_id, t.kind, t.body, t.after, t.anchor FROM plan_threads t"
+                       " JOIN plan_share_threads s ON s.plan_id=t.plan_id AND s.local_id=t.id"
+                       " WHERE t.plan_id=? AND s.remote_id<0 AND s.status=? ORDER BY t.id", (plan_id, SENDING)):
+        place = _place(json.loads(r["anchor"]) if r["anchor"] else None)
+        waiting.setdefault((r["parent_id"], r["kind"], mask(r["body"]), mask(r["after"]), place), []).append(r["id"])
+
+    def pair(remote_id: int, key: tuple, status: Any) -> None:
+        if waiting.get(key) and remote_id not in known:
+            local = waiting[key].pop(0)
+            c.execute("DELETE FROM plan_share_threads WHERE plan_id=? AND remote_id=?", (plan_id, -local))
+            c.execute("INSERT INTO plan_share_threads (plan_id, remote_id, local_id, status) VALUES (?,?,?,?)",
+                      (plan_id, remote_id, local, status))
+            known[remote_id] = {"local_id": local, "status": status}
+
+    for t in threads or []:
+        if not isinstance(t, dict) or not isinstance(t.get("id"), int):
+            continue
+        if t.get("author") == owner:
+            pair(t["id"], (None, t.get("kind"), t.get("text") or "", t.get("after"), _place(t.get("anchor"))),
+                 t.get("status"))
+        parent = known.get(t["id"])
+        for r in (t.get("replies") or []) if parent else []:
+            if isinstance(r, dict) and isinstance(r.get("id"), int) and r.get("author") == owner:
+                pair(r["id"], (parent["local_id"], "reply", r.get("text") or "", None, None), "open")
+
+
 def _pull(db: DB, p: dict, share_: dict, view: dict) -> int:
     rev, now = share_["local_rev"], time.time()
     cur = plan_docs.revision(db, p["id"], rev) if view.get("rev") == share_["remote_rev"] else None
     changes = 0
     with db.tx() as c:
-        known = {r["remote_id"]: {"local_id": r["local_id"], "status": r["status"]} for r in c.execute(
-            "SELECT remote_id, local_id, status FROM plan_share_threads WHERE plan_id=?", (p["id"],))}
+        known = _known(c, p["id"])
+        _link_own(c, p["id"], share_["owner"], known, view.get("threads"))
         for t in view.get("threads") or []:
             changes += _pull_thread(c, p["id"], rev, cur, known, t, now)
-        changes += _pull_votes(c, p["id"], rev, view.get("decisions") or [], now)
+        changes += _pull_votes(c, p["id"], share_["owner"], rev, view.get("decisions") or [], now)
     changes += _remember(db, p["id"], view)
     if changes:
         plan_docs._changed(db, p, p["rev"])
     return changes
 
 
-# -- sending the newest revision ---------------------------------------------------------
+def _readable(view: dict) -> dict:
+    """The Library's head as a revision of this plan: held to what a
+    supervisor's proposal must be, because it is drawn and shown here, and
+    with secrets masked. Raises ``RuntimeError`` if it can't be one."""
+    try:
+        content = mask_data(_content(view))
+        sections = plan_docs.parse_sections(content["sections"])
+        lede = plan_docs._body_text(content["lede"], "the overview", plans.MAX_MARKDOWN).strip()
+        out = {"lede": lede, "sections": sections, "decisions": plans._decisions(content["decisions"]),
+               "split": plans._split(content["split"]), "ask": visuals._text(content["ask"], "ask", visuals.MAX_NOTE),
+               "markdown": plan_docs.render(lede, sections)}
+    except (ServiceError, KeyError, TypeError, AttributeError) as e:
+        raise RuntimeError(f"the Library's r{view.get('rev')} can't be read here: {mask(str(e))}") from e
+    if len(out["markdown"].encode("utf-8")) > plans.MAX_MARKDOWN:
+        raise RuntimeError(f"the Library's r{view.get('rev')} is too big to read here")
+    return out
 
 
-def _push(db: DB, p: dict, view: dict, client, store, now: float) -> bool:
-    """Send the plan's newest revision, on the head this plan last saw. One
-    send at a time: while another holds the plan this one leaves it alone.
-    Returns whether the Library took a new revision."""
+def _import(db: DB, p: dict, share_: dict, view: dict) -> int:
+    """Take the Library's head as a new revision, when a teammate moved it and
+    the plan hasn't changed here. Only an open plan changes: a redirected one
+    is the supervisor's to revise and an approved one is building. Returns
+    how many revisions it added: claimed from the revision read here, so a
+    concurrent edit or import leaves this one out."""
+    if view.get("rev") == share_["remote_rev"] or share_["local_rev"] != p["rev"] or p["state"] != "open":
+        return 0
+    cur = plan_docs.revision(db, p["id"])
+    if _content(view) == mask_data(_content(cur)):       # moved, but the same text: nothing to read
+        with db.tx() as c:
+            c.execute("UPDATE plan_shares SET remote_rev=? WHERE plan_id=?", (view["rev"], p["id"]))
+        return 0
+    new = _readable(view)
+    before = {s["id"]: s for s in cur["sections"]}
+    after = {s["id"]: s for s in new["sections"]}
+    changed = [sid for sid in dict.fromkeys([*before, *after]) if before.get(sid) != after.get(sid)]
+    changed += [field for field in ("lede", "decisions", "split", "ask") if cur[field] != new[field]]
+    author, rev, at = _author(view.get("author")) or plan_docs.TEAMMATE + "unknown", p["rev"] + 1, time.time()
+    with db.tx() as c:
+        claimed = c.execute("UPDATE plans SET rev=?, markdown=?, decisions=?, split=?, ask=?, updated_at=?"
+                            " WHERE id=? AND rev=? AND state='open'",
+                            (rev, new["markdown"], json.dumps(new["decisions"]), json.dumps(new["split"]), new["ask"],
+                             at, p["id"], p["rev"])).rowcount == 1
+        if claimed:
+            plan_docs.keep(c, cur)
+            plan_docs.insert_revision(c, p["id"], rev, author, "edit", new["lede"], new["sections"], new["markdown"],
+                                      new["decisions"], new["split"], new["ask"], changed, at)
+            c.execute("UPDATE plan_shares SET remote_rev=?, local_rev=? WHERE plan_id=?", (view["rev"], rev, p["id"]))
+    return int(claimed)
+
+
+# -- sending what was done here -----------------------------------------------------------
+
+
+class _Head:
+    """The Library's head as this send knows it: every write is made on it,
+    and answers with the whole view after it. A refusal by an org review
+    rule is kept on the plan, whichever write it was."""
+
+    def __init__(self, db: DB, p: dict, doc_id: str, view: dict, client, store):
+        self.db, self.p, self.doc_id, self.view, self.client, self.store = db, p, doc_id, view, client, store
+        self.refused = False            # the Library's latest verdict on a write here was an org rule's refusal
+
+    @property
+    def rev(self) -> Any:
+        return self.view.get("rev")
+
+    def write(self, tail: str, body: dict) -> tuple[int, dict]:
+        status, resp = ad._call("POST", _path(self.doc_id, tail), {"rev": self.rev, **body},
+                                client=self.client, store=self.store)
+        if status == 200:
+            self.view, self.refused = resp, False
+        else:
+            review_policies.refused(self.db, self.p, resp)
+            self.refused = self.refused or resp.get("error") in review_policies.REFUSALS
+        return status, resp
+
+    def send(self, tail: str, body: dict) -> bool:
+        """A write that may be refused on its own (the text it names isn't on
+        the Library's head, say): it stays unsent and the rest still go."""
+        status, resp = self.write(tail, body)
+        if status != 200:
+            log.info("shared doc %s: %s refused (%s), kept for the next sync", self.doc_id, tail, resp.get("error"))
+        return status == 200
+
+
+def _landed(db: DB, plan_id: str, since: int, newest: int, view: dict) -> int | None:
+    """Which local revision after ``since`` the Library's head holds, or None."""
+    theirs = _content(view)
+    return next((n for n in range(newest, since, -1)
+                 if mask_data(_content(plan_docs.revision(db, plan_id, n))) == theirs), None)
+
+
+def _set_head(c, plan_id: str, remote_rev: int, local_rev: int) -> None:
+    c.execute("UPDATE plan_shares SET remote_rev=?, local_rev=? WHERE plan_id=?", (remote_rev, local_rev, plan_id))
+
+
+def _unsent(db: DB, plan_id: str) -> list:
+    """The person's threads and replies with no Library thread yet, oldest
+    first: never sent, or sent and the answer never came back."""
+    return db.conn.execute(
+        "SELECT * FROM plan_threads WHERE plan_id=? AND author=? AND id NOT IN (SELECT local_id FROM plan_share_threads"
+        " WHERE plan_id=? AND NOT (remote_id<0 AND status=?)) ORDER BY id",
+        (plan_id, plan_docs.PERSON, plan_id, SENDING)).fetchall()
+
+
+def _send_thread(db: DB, plan_id: str, owner: str, head: _Head, t: Any, on: dict) -> None:
+    """Make thread or reply ``t`` in the Library, placed by revision ``on``.
+    Marked first, so an answer that never comes can be recognised later."""
+    if t["parent_id"] is not None:
+        parent = db.conn.execute("SELECT remote_id FROM plan_share_threads WHERE plan_id=? AND local_id=?"
+                                 " AND remote_id>0", (plan_id, t["parent_id"])).fetchone()
+        if parent is None:
+            return
+        tail, body = "/comments", {"parent": parent["remote_id"], "text": t["body"]}
+    else:
+        where = plan_docs._where(on, json.loads(t["anchor"]))
+        if where["state"] == "detached":
+            return
+        if t["kind"] == "comment":
+            anchor = {k: v for k, v in where.items() if k not in ("state", "prefix", "suffix")}
+            tail, body = "/comments", {"anchor": anchor, "text": t["body"]}
+        else:
+            tail, body = "/suggestions", {"section": where["section"], "start": where["start"],
+                                          "before": where["quote"], "after": t["after"], "text": t["body"]}
+    with db.tx() as c:
+        c.execute("INSERT OR REPLACE INTO plan_share_threads (plan_id, remote_id, local_id, status) VALUES (?,?,?,?)",
+                  (plan_id, -t["id"], t["id"], SENDING))
+    status, resp = head.write(tail, body)
+    with db.tx() as c:
+        if status == 200:
+            _link_own(c, plan_id, owner, _known(c, plan_id), head.view.get("threads"))
+        elif status < 500:      # refused outright. After a server error it may have landed: the next pull will say
+            c.execute("DELETE FROM plan_share_threads WHERE plan_id=? AND remote_id=?", (plan_id, -t["id"]))
+    if status != 200:
+        log.info("shared doc %s: %s refused (%s), kept for the next sync", head.doc_id, tail, resp.get("error"))
+
+
+def _send_revision(db: DB, plan_id: str, head: _Head, rev: int) -> bool:
+    """Put local revision ``rev`` on the Library's head. False if the head
+    moved since it was read: a conflict for now, the next sync looks again."""
+    status, resp = head.write("/revisions", _content(plan_docs.revision(db, plan_id, rev)))
+    if status == 409 and resp.get("error") == "stale":
+        head.view = {**head.view, "rev": resp.get("rev")}
+        return False
+    if status != 200:
+        raise RuntimeError(resp.get("error") or f"HTTP {status}")
+    with db.tx() as c:
+        _set_head(c, plan_id, head.rev, rev)
+    return True
+
+
+def _pending_accepts(db: DB, plan_id: str, local_rev: int) -> list:
+    """The suggestions accepted here in revisions after ``local_rev`` that the
+    Library hasn't closed, oldest first, each with the revision it made."""
+    return db.conn.execute(
+        "SELECT r.rev AS made_rev, s.remote_id, t.* FROM plan_revisions r JOIN plan_threads t ON t.plan_id=r.plan_id"
+        " AND t.updated_at=r.created_at AND t.kind='suggestion' AND t.status='accepted'"
+        " LEFT JOIN plan_share_threads s ON s.plan_id=t.plan_id AND s.local_id=t.id AND s.remote_id>0"
+        " WHERE r.plan_id=? AND r.source='suggestion' AND r.rev>? AND (s.remote_id IS NULL OR s.status='open')"
+        " AND t.id NOT IN (SELECT local_id FROM plan_share_threads WHERE plan_id=? AND remote_id<0 AND status<>?)"
+        " ORDER BY r.rev", (plan_id, local_rev, plan_id, SENDING)).fetchall()
+
+
+def _send_revisions(db: DB, plan_id: str, owner: str, head: _Head, newest: int) -> bool:
+    """Bring the Library's head up to revision ``newest``, in as few revisions
+    as the suggestions accepted here allow. Each acceptance is replayed on
+    the exact text it was made on: the revision before it goes up first if
+    the head doesn't hold it, the suggestion is made there if it never went
+    up, and the Library's own accept then makes the revision and closes the
+    thread. It can't be sent later (on text already holding the change it
+    would apply it again, and ``resolve`` is refused on a suggestion), so a
+    step that fails stops the rest (raised) and the text waits for it.
+    Returns whether the head holds a new revision from here."""
+    local, moved = link(db, plan_id)["local_rev"], False
+    for t in _pending_accepts(db, plan_id, local):
+        before = t["made_rev"] - 1
+        if local != before:
+            if not _send_revision(db, plan_id, head, before):
+                return moved
+            local, moved = before, True
+        remote = t["remote_id"]
+        if remote is None:
+            _send_thread(db, plan_id, owner, head, t, plan_docs.revision(db, plan_id, before))
+            found = db.conn.execute("SELECT remote_id FROM plan_share_threads WHERE plan_id=? AND local_id=?"
+                                    " AND remote_id>0", (plan_id, t["id"])).fetchone()
+            if found is None:
+                raise RuntimeError(f"the Library didn't take a suggestion accepted here, so r{newest} wasn't sent")
+            remote = found["remote_id"]
+        status, resp = head.write(f"/threads/{remote}", {"action": "accept"})
+        if status != 200:
+            raise RuntimeError(f"the Library refused an accepted suggestion ({resp.get('error') or status}), "
+                               f"so r{newest} wasn't sent")
+        moved = True
+        local = _landed(db, plan_id, before, t["made_rev"], head.view) or local
+        with db.tx() as c:
+            c.execute("UPDATE plan_share_threads SET status='accepted' WHERE plan_id=? AND remote_id=?",
+                      (plan_id, remote))
+            _set_head(c, plan_id, head.rev, local)
+    if local == newest:
+        return moved
+    return _send_revision(db, plan_id, head, newest) or moved
+
+
+def _send_text(db: DB, plan_id: str, head: _Head) -> bool:
+    """Bring the Library's head up to the plan's newest revision, on the head
+    this plan last saw. If the head moved without this plan it is left alone:
+    that is the gate's ``conflict`` (or a redirected plan's text, which isn't
+    imported). Returns whether the head holds a new revision from here."""
+    share_, cur = link(db, plan_id), plan_docs.revision(db, plan_id)
+    moved = False
+    if head.rev != share_["remote_rev"]:
+        # Equal text can't prove an acceptance happened (a later revision may repeat an earlier one's
+        # words), but the Library's thread status can: never read the head as past one it hasn't closed.
+        pending = _pending_accepts(db, plan_id, share_["local_rev"])
+        ceiling = pending[0]["made_rev"] - 1 if pending else cur["rev"]
+        held = _landed(db, plan_id, share_["local_rev"], ceiling, head.view)
+        if held is None:
+            return False
+        with db.tx() as c:        # an earlier send landed and only its answer was lost
+            _set_head(c, plan_id, head.rev, held)
+        share_, moved = link(db, plan_id), True
+    if share_["local_rev"] == cur["rev"]:
+        return moved
+    return _send_revisions(db, plan_id, share_["owner"], head, cur["rev"]) or moved
+
+
+def _send_threads(db: DB, plan_id: str, owner: str, head: _Head) -> None:
+    """Send the person's new comments, suggestions and replies, whatever has
+    happened to them since: a thread closed before its first send goes up,
+    then _send_actions closes it. A reply waits for its thread to be in the
+    Library (a supervisor's never will be). An accepted suggestion goes up
+    with its revision (_send_revisions), never here on text that holds it."""
+    cur = plan_docs.revision(db, plan_id)
+    for t in _unsent(db, plan_id):
+        if t["status"] != "accepted":
+            _send_thread(db, plan_id, owner, head, t, cur)
+
+
+def _send_actions(db: DB, plan_id: str, head: _Head) -> None:
+    """Send what the person did to threads the Library has: resolved, reopened, rejected."""
+    rows = db.conn.execute(
+        "SELECT t.kind, t.status, s.remote_id FROM plan_threads t JOIN plan_share_threads s"
+        " ON s.plan_id=t.plan_id AND s.local_id=t.id"
+        " WHERE t.plan_id=? AND t.parent_id IS NULL AND s.remote_id>0 AND t.status<>s.status", (plan_id,)).fetchall()
+    for r in rows:
+        action = THREAD_ACTIONS.get((r["kind"], r["status"]))
+        if action and head.send(f"/threads/{r['remote_id']}", {"action": action}):
+            with db.tx() as c:
+                c.execute("UPDATE plan_share_threads SET status=? WHERE plan_id=? AND remote_id=?",
+                          (r["status"], plan_id, r["remote_id"]))
+
+
+def _send_votes(db: DB, plan_id: str, head: _Head) -> None:
+    """Send the person's picks the head doesn't have: a new head starts with no votes."""
+    theirs = {d["id"]: d.get("confirmed") for d in head.view.get("decisions") or []}
+    for decision, option in plan_docs.confirmed(db, plans._row(db, plan_id)).items():
+        if decision in theirs and theirs[decision] != option:
+            head.send("/votes", {"decision": decision, "option": option})
+
+
+def _send(db: DB, p: dict, view: dict, client, store, now: float) -> bool:
+    """Send what was done here: the text first, so what the person wrote on it
+    can be placed. One send at a time: while another holds the plan this one
+    leaves it alone. Returns whether the Library took a new revision."""
     with db.tx() as c:
         held = c.execute("UPDATE plan_shares SET claimed_at=? WHERE plan_id=? AND (claimed_at IS NULL OR claimed_at<?)",
                          (now, p["id"], now - CLAIM_FOR)).rowcount
     if not held:
         return False
     try:
-        share_, cur = link(db, p["id"]), plan_docs.revision(db, p["id"])
-        if share_["local_rev"] == cur["rev"]:
-            return False
-        content = _content(cur)
-        if view.get("rev") != share_["remote_rev"] and _content(view) == mask_data(content):
-            remote = view["rev"]      # an earlier send landed and only its answer was lost
-        else:
-            status, resp = ad._call("POST", _path(share_["doc_id"], "/revisions"),
-                                    {"rev": share_["remote_rev"], **content}, client=client, store=store)
-            if status == 409 and resp.get("error") == "stale":
-                raise RuntimeError(f"the Library's copy has a newer revision (r{resp.get('rev')}) that this plan "
-                                   f"doesn't have, so r{cur['rev']} wasn't sent")
-            if status != 200:
-                review_policies.refused(db, p, resp)
-                raise RuntimeError(resp.get("error") or f"HTTP {status}")
-            remote = resp["rev"]
-            _remember(db, p["id"], resp)
-        with db.tx() as c:
-            c.execute("UPDATE plan_shares SET remote_rev=?, local_rev=? WHERE plan_id=?", (remote, cur["rev"], p["id"]))
-            if remote != view.get("rev"):       # a new head: votes on the old one no longer count
-                _pull_votes(c, p["id"], cur["rev"], resp.get("decisions") or [], now)
-        return True
+        share_ = link(db, p["id"])
+        head = _Head(db, p, share_["doc_id"], view, client, store)
+        pushed = _send_text(db, p["id"], head)
+        _send_threads(db, p["id"], share_["owner"], head)
+        _send_actions(db, p["id"], head)
+        _send_votes(db, p["id"], head)
+        if head.rev != view.get("rev"):        # a new head: votes on the old one no longer count
+            local_rev = link(db, p["id"])["local_rev"]
+            with db.tx() as c:
+                _pull_votes(c, p["id"], share_["owner"], local_rev, head.view.get("decisions") or [], now)
+        if head.view is not view and not head.refused:      # an answer older than a refusal can't clear it
+            _remember(db, p["id"], head.view)
+        return pushed
     finally:
         with db.tx() as c:
             c.execute("UPDATE plan_shares SET claimed_at=NULL WHERE plan_id=?", (p["id"],))
 
 
 def sync(db: DB, plan_id: str, *, client=None, store=None, now: float | None = None) -> dict:
-    """Bring back what teammates wrote, then send the plan's newest revision
-    if the Library doesn't have it. Pulled first, so a refused send still
-    leaves their comments here. Returns the link, plus ``pulled`` (how many
-    things changed here) and ``pushed``."""
+    """Take a teammate's new text if the plan hasn't changed here, bring back
+    what teammates wrote, then send what was done here. Pulled first, so a
+    refused send still leaves their comments here. Returns the link, plus
+    ``pulled`` (how many things changed here) and ``pushed``."""
     p = plan_docs._plan(db, plan_id)
     client, store = ad._session(client, store)
     share_ = _shared(db, p["id"], store)
     view = review_policies.ask(db, p, "GET", _path(share_["doc_id"]), client=client, store=store)
-    pulled = _pull(db, p, share_, view)
-    pushed = share_["local_rev"] != p["rev"] and _push(db, p, view, client, store,
-                                                       time.time() if now is None else now)
-    if pushed:
+    imported = _import(db, p, share_, view)
+    share_ = link(db, p["id"])
+    if imported:
+        p = plan_docs._plan(db, p["id"])
+    pulled = imported + _pull(db, p, share_, view)
+    pushed = _send(db, p, view, client, store, time.time() if now is None else now)
+    if pushed or imported:
         plan_docs._changed(db, p, p["rev"])
     return {**link(db, p["id"]), "pulled": pulled, "pushed": pushed}
 
@@ -422,7 +739,7 @@ def sign_off(db: DB, plan_id: str, rev: Any, *, client=None, store=None) -> dict
     client, store = ad._session(client, store)
     share_ = sync(db, p["id"], client=client, store=store)
     if share_["local_rev"] != p["rev"]:
-        raise RuntimeError(f"r{p['rev']} hasn't reached the Library yet, so it can't be signed off")
+        raise RuntimeError(f"r{p['rev']} isn't the Library's current revision, so it can't be signed off")
     if _remember(db, p["id"], review_policies.ask(db, p, "POST", _path(share_["doc_id"], "/sign-offs"),
                                                   {"rev": share_["remote_rev"]}, client=client, store=store)):
         plan_docs._changed(db, p, p["rev"])
