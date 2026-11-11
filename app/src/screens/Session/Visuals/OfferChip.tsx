@@ -34,7 +34,8 @@ export function OfferChip({ client, root }: { client: Client; root: string }) {
     }, () => { if (mine === seq.current) setState(null); });
     return () => { ++seq.current; };
   }, [client, root, changed]);
-  const offer = state?.root === root ? state.offer : null;
+  // A person's own request needs no second press: an older engine's "request" card is never shown.
+  const offer = state?.root === root && state.offer?.kind !== "request" ? state.offer : null;
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout>;
     const delay = () => {
@@ -79,10 +80,10 @@ export function OfferChip({ client, root }: { client: Client; root: string }) {
   };
   if (!offer || !quiet) return null;
   return <div className="inline-flex items-center gap-s1 rounded-full border border-dashed border-line px-s2 text-sm">
-    <button type="button" disabled={busy} onClick={() => void resolve(true)}>{offer.confirmation === "plan" ? "Create the planning document now?" : offer.confirmation ? "Create the visual now?" : "Make a visual?"}</button>
-    <span className="text-ink-3">{offer.confirmation ? "Confirm your request" : detail(offer)}</span>
+    <button type="button" disabled={busy} onClick={() => void resolve(true)}>Make a visual?</button>
+    <span className="text-ink-3">{detail(offer)}</span>
     <button type="button" aria-label="Not now" disabled={busy} onClick={() => void resolve(false)}>×</button>
-    <span className="sr-only" role="status">{offer.confirmation ? "Confirm whether to create your requested artifact now" : "brindle can show this choice as a visual"}</span>
+    <span className="sr-only" role="status">brindle can show this choice as a visual</span>
     {error && <span role="alert">{error}</span>}
   </div>;
 }
