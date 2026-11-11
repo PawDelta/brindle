@@ -459,6 +459,7 @@ def test_the_same_words_elsewhere_from_this_account_are_another_thread(db, parts
     assert [t["status"] for t in lib.threads] == ["open", "resolved"]
 
 
+@pytest.mark.variant("from review: a thread resolved or rejected before its first sync never reached the Library")
 def test_a_thread_closed_before_its_first_send_still_goes_up_then_closes(db, parts, backend):
     pid, lib, net = parts
     sd.share(db, pid, TEAM, **net)
