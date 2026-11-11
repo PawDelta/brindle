@@ -347,6 +347,8 @@ describe("settings screen", () => {
     fireEvent.change(within(editor).getByRole("spinbutton", { name: "Saved action duration" }), { target: { value: "2" } });
     fireEvent.click(within(editor).getByRole("button", { name: "Save changes" }));
     await waitFor(() => expect(daemon.data.policy.saved[0]).toMatchObject({ pattern: "src/**", scope: "general", life: "time", minutes: 120 }));
+    // The daemon changes before the policy read commits the updated row and its Delete handler.
+    await waitFor(() => expect(within(screen.getByTestId("saved")).getByText(/src\/\*\*/)).toBeTruthy());
     fireEvent.click(screen.getByRole("button", { name: "Delete Write files saved action" }));
     await waitFor(() => expect(daemon.data.policy.saved).toHaveLength(0));
     fireEvent.click(screen.getByRole("button", { name: "Undo" }));

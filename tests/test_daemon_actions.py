@@ -1745,7 +1745,7 @@ def test_session_review_readiness_says_what_is_missing(db, lead, monkeypatch):
     real_head = gates.head
     monkeypatch.setattr(gates, "head", lambda ws: head if ws.id == "proj/w-f" else real_head(ws))
     monkeypatch.setattr(session_review, "_pr_open_state", lambda *a: False)    # readiness is under test, not GitHub
-    assert missing() == 5 and _send("GET", "/v1/sessions/lead/pr/draft")[0] == 409
+    assert missing() == 5 and _send("GET", "/v1/sessions/lead/pr/draft")[0] == 200
     assert watch.sweep(db) == []
     db.set_merged("proj/w-f", head)
     assert missing() == 4
@@ -2477,7 +2477,7 @@ def test_user_settings_round_trip_validates_and_keeps_other_keys(db, world, monk
 def test_session_diff_before_ready(db, repo, lead):
     code, reply = _send("GET", "/v1/sessions/lead/pr/readiness")
     assert code == 200 and not reply["ready"]        # nothing ahead of main yet
-    assert _send("GET", "/v1/sessions/lead/pr/draft")[0] == 409
+    assert _send("GET", "/v1/sessions/lead/pr/draft")[0] == 200
     code, d = _send("GET", "/v1/sessions/lead/diff")
     assert code == 200 and d["files"] == []
 

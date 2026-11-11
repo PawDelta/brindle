@@ -180,6 +180,11 @@ export function activeMilestoneStages(workspaces: WorkspaceDTO[], alive: Record<
 const ACTIVITY_REFRESH_MS = 60_000;
 
 export type GoalPhase ="in_progress" | "in_review" | "ready_for_pr" | "pr_open" | "done";
+/* A pull request URL's number (…/pull/413 → "413"); null for a URL without one. */
+export function prNumber(url: string): string | null {
+  return /\/pull\/(\d+)(?:[/?#]|$)/.exec(url)?.[1] ?? null;
+}
+
 export const GOAL_PHASE_LABEL: Record<GoalPhase, string> = {
   in_progress: "In progress",
   in_review: "In review",
@@ -713,27 +718,36 @@ export function GoalPanel({ client, repo, root, store, compact = false, title, l
   const unpushed = readiness.pr?.unpushed ?? 0;
   const step =
     phase === "pr_open" && prUrl ? (
-      <div className={`flex flex-col gap-0.5 ${compact ? "mx-0.5" : ""}`}>
+      <div className={`flex items-center gap-1.5 ${compact ? "mx-0.5" : ""}`}>
+        {/* The PR as a chip: its number (from the URL) and ↗; the URL itself only on hover. */}
         <button
           type="button"
-          className="flex items-center gap-s1 rounded-md bg-pass-soft px-s1 py-1 text-left text-xs font-medium text-pass hover:opacity-90"
+          className="inline-flex shrink-0 items-center gap-1 rounded-full bg-pass-soft px-2 py-0.5 text-[11.5px] font-medium text-pass hover:opacity-90"
           data-testid="goal-pr"
           title={prUrl}
+          aria-label="Open the PR"
           onClick={() => void openUrl(prUrl).catch((e: unknown) => setActionError(message(e)))}
         >
-          <span className="min-w-0 truncate">{prUrl.replace(/^https?:\/\//, "")}</span>
-          <span className="flex-1" />
-          Open the PR ↗
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" aria-hidden="true">
+            <circle cx="4" cy="3.5" r="1.8" />
+            <circle cx="4" cy="12.5" r="1.8" />
+            <circle cx="12" cy="12.5" r="1.8" />
+            <path d="M4 5.3v5.4M12 10.7V6.5a2 2 0 0 0-2-2H7.5" />
+            <path d="M9 3l-1.5 1.5L9 6" />
+          </svg>
+          <span className="font-mono">{prNumber(prUrl) ? `#${prNumber(prUrl)}` : "PR"}</span> ↗
         </button>
         {onReview && (
           <button
             type="button"
-            className="flex items-center gap-s1 rounded-md px-s1 py-0.5 text-left text-xs text-ink-2 hover:bg-surface-2"
+            className="flex min-w-0 flex-1 items-center gap-s1 rounded-md px-1.5 py-0.5 text-left text-xs text-ink-2 hover:bg-surface-2"
             data-testid="goal-pr-review"
+            data-unpushed={unpushed}
+            title={unpushed > 0 ? `${unpushed} not on the PR yet` : undefined}
             onClick={onReview}
           >
-            Review changes
-            {unpushed > 0 && <span className="text-sap">· {unpushed} not on the PR</span>}
+            <span className="truncate">Review changes</span>
+            {unpushed > 0 && <span className="shrink-0 text-sap">· {unpushed}</span>}
             <span className="flex-1" />›
           </button>
         )}

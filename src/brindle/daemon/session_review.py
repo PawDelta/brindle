@@ -256,6 +256,8 @@ def pr_state_of(url: str, payload: dict | None) -> dict[str, Any] | None:
             continue
         verdict = str(check.get("conclusion") or check.get("state") or "").upper()
         marks.append("fail" if verdict in _PR_FAILED else "pass" if verdict in _PR_PASSED else "wait")
+        if marks[-1] == "fail" and (name := check.get("name") or check.get("context")):
+            out.setdefault("failed_checks", []).append(name)
     out["total"] = len(marks)
     out["done"] = marks.count("pass") + marks.count("fail")
     if "fail" in marks:
@@ -313,7 +315,14 @@ def session_pr_state(db: DB, root_id: str, url: str | None) -> dict[str, Any] | 
             _ask_pr_state(url, ws.repo_root)
             with _pr_lock:
                 cached = _pr_cache.get(url)
-    return cached[1] if cached else pr_state_of(url, None)
+    state = cached[1] if cached else pr_state_of(url, None)
+    if state and state["state"] == "failed":
+        root = db.get_agent(root_id)
+        ws = db.get_workspace(root.workspace_id) if root else None
+        local = open_pr(db, root, ws) if root and ws else None
+        if local and local["url"] == url:
+            return {**state, "unpushed": local["unpushed"]}
+    return state
 
 
 _head_cache: dict[tuple[str, str], tuple[float, dict[str, Any] | None]] = {}
