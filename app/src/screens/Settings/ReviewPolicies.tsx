@@ -256,7 +256,7 @@ function Policies({ client }: { client: DaemonClient }) {
                 <div className="space-y-1 border-b border-line pb-s1 text-sm text-ink-2" data-testid={`review-policy-remove-${rule.id}`}>
                   <p>{`Remove ${rule.name}?`}</p>
                   {!removalAnswer && <p role="status" className="text-xs text-ink-3">Counting the designs the rest would cover…</p>}
-                  {removalAnswer && !removalAnswer.result && <p role="alert" className={alert}>Couldn't count the designs, so nothing can be removed yet. Keep, then Remove again to retry.</p>}
+                  {removalAnswer && !removalAnswer.result && <p role="alert" className={alert}>Couldn't count the designs, so nothing can be removed yet. Keep it, then choose Remove again.</p>}
                   {removal && (
                     <p className={notice} data-testid="review-policy-remove-applies" data-count={removal.count} data-truncated={removal.truncated || undefined}>
                       {`Without it, ${removal.truncated ? "at least " : ""}${removal.count} design${removal.count === 1 ? "" : "s"} in review ${removal.count === 1 ? "is" : "are"} still covered by the policies left`}
