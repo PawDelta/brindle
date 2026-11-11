@@ -288,7 +288,7 @@ describe("visuals", () => {
     let oldRead: (value: typeof offer) => void = () => undefined;
     const decisions: boolean[] = [];
     const client = {
-      visualOffer: async (root: string) => root === "old" ? new Promise<typeof offer>(ok => { oldRead = ok; }) : root === "empty" ? null : root === "confirm" ? { ...offer, id: "r_1", confirmation: "plan" as const, expires_at: Date.now() / 1000 + 1800 } : offer,
+      visualOffer: async (root: string) => root === "old" ? new Promise<typeof offer>(ok => { oldRead = ok; }) : root === "empty" ? null : root === "confirm" ? { ...offer, id: "r_1", kind: "request", confirmation: "plan", expires_at: Date.now() / 1000 + 1800 } : offer,
       resolveVisualOffer: async (_root: string, _id: string, accept: boolean) => { decisions.push(accept); return { accepted: accept }; },
     };
     const chip = (root: string) => <StoreContext.Provider value={store}><OfferChip client={client} root={root} /></StoreContext.Provider>;
@@ -307,12 +307,12 @@ describe("visuals", () => {
       await act(async () => undefined);
       await act(async () => vi.advanceTimersByTime(2000));
       expect(screen.queryByRole("button")).toBeNull();
+      // The person's own request needs no confirmation: an older engine's request card renders nothing.
       view.rerender(chip("confirm"));
       await act(async () => undefined);
       await act(async () => vi.advanceTimersByTime(2000));
-      await act(async () => fireEvent.click(screen.getByRole("button", { name: "Create the planning document now?" })));
-      expect(decisions).toEqual([false, true]);
       expect(screen.queryByRole("button")).toBeNull();
+      expect(decisions).toEqual([false]);
     } finally { vi.useRealTimers(); }
   });
 

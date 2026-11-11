@@ -1283,3 +1283,26 @@ def test_session_pr_state_is_one_shared_cached_read(db, root, monkeypatch):
 
     assert session_review.session_pr_state(Held(db), "boss", url)["state"] == "ready"
     assert not pool.queue and not answers
+
+
+def test_session_pr_state_carries_local_fix_without_changing_shared_checks(db, monkeypatch):
+    from brindle.daemon import session_review
+    from brindle.db import Workspace
+    from brindle.service.dto import PrStateDTO
+
+    ws = Workspace(id="fix", repo_root="/fake/repo", name="fix", kind="worktree", branch="feat",
+                   base_branch="main", path="/fake/fix", port_base=None, tmux_session="fix", created_at=0)
+    db.add_workspace(ws)
+    agent = add_agent(db, ws, "fixer")
+    url = "https://github.com/o/r/pull/413"
+    payload = _rollup("FAILURE", "SUCCESS")
+    payload["statusCheckRollup"][0]["name"] = "build"
+    state = session_review.pr_state_of(url, payload)
+    monkeypatch.setattr(session_review, "_pr_cache", {url: (time.monotonic(), state)})
+    db.conn.execute("INSERT INTO session_prs (root_id, branch, url, pushed_sha, opened_at) VALUES (?, ?, ?, 'old', 1)",
+                    (agent.id, ws.branch, url))
+    monkeypatch.setattr(git, "out", lambda *args: "2")
+    result = PrStateDTO.model_validate(session_review.session_pr_state(db, agent.id, url))
+    assert (result.unpushed, result.failed_checks) == (2, ["build"])
+    assert "unpushed" not in state
+    assert session_review.session_pr_state(db, "missing", url).get("unpushed", 0) == 0

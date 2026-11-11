@@ -895,7 +895,6 @@ export class FakeDaemon {
       }));
       return json({ root_id: root, branch: review.branch, base: review.base, base_sha: "b".repeat(40), head: `h${this.nextId}`.padEnd(40, "0"), files, workers: [] });
     }
-    if (!review.ready) return json({ error: { code: "not_ready", message: `the session isn't ready for a PR: ${review.reasons.join("; ")}` }, reasons: review.reasons }, 409);
     if (what === "pr/draft") {
       const goal = d.goal?.root_id === root ? d.goal : null;
       const titles = goal?.milestones?.map((m) => `- ${m.title}`) ?? [];

@@ -614,6 +614,8 @@ class PrStateDTO(_DTO):
     state: str
     done: int = 0
     total: int = 0
+    unpushed: int = 0
+    failed_checks: list[str] = []
 
 
 class GoalDTO(_DTO):

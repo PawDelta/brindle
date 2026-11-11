@@ -616,17 +616,24 @@ def update_user(key: str, change) -> Path:
     with _USER_WRITE:   # daemon actions run in threads: one read-modify-replace at a time
         data = _read_json(path)
         data[key] = change(data.get(key))
-        # A unique temp file replaced into place, so a reader never sees half a file.
-        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(json.dumps(data, indent=2) + "\n")
-            os.replace(tmp, path)
-        except BaseException:
-            Path(tmp).unlink(missing_ok=True)
-            raise
+        _replace_json(path, data)
     _sync_setting(key)
     return path
+
+
+def _replace_json(path: Path, data: dict) -> None:
+    """Write ``data`` to ``path`` through a unique temp file in the same
+    directory, replaced into place: a reader (every MCP server looks at the
+    user config every few seconds) never sees half a file, and a failed
+    write leaves the old one."""
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(json.dumps(data, indent=2) + "\n")
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 def forget_user(key: str) -> bool:
@@ -636,11 +643,12 @@ def forget_user(key: str) -> bool:
     being applied, so unlike :func:`set_user` this also runs in an agent's
     CLI call (``brindle doctor`` from a session)."""
     path = user_config_path()
-    data = _read_json(path)
-    if key not in data:
-        return False
-    del data[key]
-    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    with _USER_WRITE:
+        data = _read_json(path)
+        if key not in data:
+            return False
+        del data[key]
+        _replace_json(path, data)
     _sync_setting(key)
     return key not in _read_json(path)
 
@@ -667,14 +675,7 @@ def _change_json(path: Path, change) -> None:
     with _REPO_WRITE:
         data = _read_json(path)
         change(data)
-        fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(json.dumps(data, indent=2) + "\n")
-            os.replace(tmp, path)
-        except BaseException:
-            Path(tmp).unlink(missing_ok=True)
-            raise
+        _replace_json(path, data)
 
 
 def set_local(repo_root: str | Path, key: str, value: object) -> Path:

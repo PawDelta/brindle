@@ -2346,6 +2346,14 @@
               "title": "Done",
               "type": "integer"
             },
+            "failed_checks": {
+              "default": [],
+              "items": {
+                "type": "string"
+              },
+              "title": "Failed Checks",
+              "type": "array"
+            },
             "number": {
               "title": "Number",
               "type": "integer"
@@ -2357,6 +2365,11 @@
             "total": {
               "default": 0,
               "title": "Total",
+              "type": "integer"
+            },
+            "unpushed": {
+              "default": 0,
+              "title": "Unpushed",
               "type": "integer"
             }
           },
@@ -9202,6 +9215,14 @@
           "title": "Done",
           "type": "integer"
         },
+        "failed_checks": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Failed Checks",
+          "type": "array"
+        },
         "number": {
           "title": "Number",
           "type": "integer"
@@ -9213,6 +9234,11 @@
         "total": {
           "default": 0,
           "title": "Total",
+          "type": "integer"
+        },
+        "unpushed": {
+          "default": 0,
+          "title": "Unpushed",
           "type": "integer"
         }
       },

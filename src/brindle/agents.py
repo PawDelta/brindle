@@ -3869,6 +3869,23 @@ def launches_process(profile: str, repo_root: str) -> bool:
     return provider is None or provider.launches_process
 
 
+def delegation_base(db: DB, caller: Agent | None, caller_ws: Workspace) -> str:
+    """The branch a new isolated worker branches from and merges into.
+
+    A supervisor's merge_into setting applies unless this is its attached
+    session branch. A worker's sub-workers always use that worker's branch.
+    Keep inspection and actual delegation on the same policy.
+    """
+    from brindle import autopilot as pilot, repos
+    from brindle.config import load_repo_config
+
+    merge_into = load_repo_config(caller_ws.repo_root).merge_into
+    root = pilot.root_of(db, caller.id) if caller else None
+    if root and caller_ws.branch and repos.session_branch(db, root, caller_ws.repo_root) == caller_ws.branch:
+        merge_into = None
+    return merge_into if merge_into and not (caller and caller.parent_id) else caller_ws.branch
+
+
 def delegate(
     db: DB,
     caller: Agent | None,
@@ -3961,15 +3978,7 @@ def delegate(
         with held:   # until the worker's row says whose worktree this is
             _check_branch_owner(db, caller, caller_ws.repo_root, branch)
             caller_ws = workspaces.refresh_branch(db, caller_ws)
-            # merge_into applies to the supervisor's workers; a worker's own
-            # sub-workers still branch from (and merge back into) its branch,
-            # and a session's workers in a repo it attached use the session's
-            # own branch there (repos.attach), whatever that repo's merge_into.
-            merge_into = load_repo_config(caller_ws.repo_root).merge_into
-            root = pilot.root_of(db, caller.id) if caller else None
-            if root and caller_ws.branch and repos.session_branch(db, root, caller_ws.repo_root) == caller_ws.branch:
-                merge_into = None
-            base = merge_into if merge_into and not (caller and caller.parent_id) else caller_ws.branch
+            base = delegation_base(db, caller, caller_ws)
             start = start or (base if git.branch_exists(caller_ws.repo_root, base) else "HEAD")
             created = workspaces.create(
                 db, caller_ws.path, branch, base, fetch=False, start=start,

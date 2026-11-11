@@ -958,7 +958,6 @@ export interface VisualOffer {
   kind: string;
   counts: Record<string, number>;
   expires_at: number;
-  confirmation?: "visual" | "plan";
 }
 
 export interface UserSettings {

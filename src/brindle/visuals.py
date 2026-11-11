@@ -316,7 +316,6 @@ def publish(db: DB, caller: Agent | None, title: str, html: str, question: str |
             raise
     bus.publish(db, "visual.published", repo_root=ws.repo_root, root_id=root.id, agent_id=caller.id,
                 visual=vid, rev=rev)
-    bus.publish(db, "visual.offer_resolved", repo_root=ws.repo_root, root_id=root.id)   # a quote may have spent a confirmation card
     return get(db, vid)
 
 
