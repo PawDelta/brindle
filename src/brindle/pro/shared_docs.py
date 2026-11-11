@@ -335,6 +335,9 @@ def _pull_thread(c, plan_id: str, rev: int, cur: dict | None, known: dict, t: An
             _insert(c, plan_id, r["id"], known, parent=row["local_id"], rev=rev, kind="reply", anchor=None,
                     author=author, text=text, after=None, status="open", at=_when(r.get("at"), now))
             changes += 1
+    from brindle.pro import doc_questions
+
+    doc_questions.pull_flags(c, t, known)
     return changes
 
 
@@ -379,11 +382,11 @@ def _link_own(c, plan_id: str, owner: str, known: dict, threads: Any) -> None:
     Only a write actually sent can pair: the same words from this account
     elsewhere are another thread. Text is compared as sent, secrets masked."""
     waiting: dict[tuple, list[int]] = {}
-    for r in c.execute("SELECT t.id, t.parent_id, t.kind, t.body, t.after, t.anchor FROM plan_threads t"
+    for r in c.execute("SELECT t.id, t.parent_id, t.kind, t.body, t.after, t.anchor, t.question FROM plan_threads t"
                        " JOIN plan_share_threads s ON s.plan_id=t.plan_id AND s.local_id=t.id"
                        " WHERE t.plan_id=? AND s.remote_id<0 AND s.status=? ORDER BY t.id", (plan_id, SENDING)):
         place = _place(json.loads(r["anchor"]) if r["anchor"] else None)
-        waiting.setdefault((r["parent_id"], r["kind"], mask(r["body"]), mask(r["after"]), place), []).append(r["id"])
+        waiting.setdefault((r["parent_id"], r["kind"], mask(r["body"]), mask(r["after"]), place, bool(r["question"])), []).append(r["id"])
 
     def pair(remote_id: int, key: tuple, status: Any) -> None:
         if waiting.get(key) and remote_id not in known:
@@ -397,12 +400,12 @@ def _link_own(c, plan_id: str, owner: str, known: dict, threads: Any) -> None:
         if not isinstance(t, dict) or not isinstance(t.get("id"), int):
             continue
         if t.get("author") == owner:
-            pair(t["id"], (None, t.get("kind"), t.get("text") or "", t.get("after"), _place(t.get("anchor"))),
+            pair(t["id"], (None, t.get("kind"), t.get("text") or "", t.get("after"), _place(t.get("anchor")), bool(t.get("question"))),
                  t.get("status"))
         parent = known.get(t["id"])
         for r in (t.get("replies") or []) if parent else []:
             if isinstance(r, dict) and isinstance(r.get("id"), int) and r.get("author") == owner:
-                pair(r["id"], (parent["local_id"], "reply", r.get("text") or "", None, None), "open")
+                pair(r["id"], (parent["local_id"], "reply", r.get("text") or "", None, None, False), "open")
 
 
 def _pull(db: DB, p: dict, share_: dict, view: dict) -> int:
@@ -548,6 +551,8 @@ def _send_thread(db: DB, plan_id: str, owner: str, head: _Head, t: Any, on: dict
     with db.tx() as c:
         c.execute("INSERT OR REPLACE INTO plan_share_threads (plan_id, remote_id, local_id, status) VALUES (?,?,?,?)",
                   (plan_id, -t["id"], t["id"], SENDING))
+    if t["question"]:
+        body["question"] = True
     status, resp = head.write(tail, body)
     with db.tx() as c:
         if status == 200:

@@ -49,11 +49,11 @@ function Change({ before, after }: { before: string; after: string }) {
   );
 }
 
-function Who({ who }: { who: string }) {
+function Who({ who, supervisor = false }: { who: string; supervisor?: boolean }) {
   return (
     <div className="flex items-center gap-1.5">
-      <Avatar who={who} />
-      <b className="font-medium text-ink">{personName(who)}</b>
+      <Avatar who={supervisor ? "supervisor" : who} />
+      <b className="font-medium text-ink">{supervisor ? (who === "person" ? "Your supervisor" : `${personName(who)}’s supervisor`) : personName(who)}</b>
     </div>
   );
 }
@@ -78,7 +78,7 @@ function Thread({ thread: t, where, busy, can, actions, onShow }: {
     setReplying(false);
   };
   return (
-    <article className={`${card} ${open ? "" : "opacity-55"}`} data-testid={`thread-${t.id}`} data-status={t.status} data-kind={t.kind}>
+    <article className={`${card} ${open ? "" : "opacity-55"}`} data-testid={`thread-${t.id}`} data-status={t.status} data-kind={t.kind} data-question={t.question || undefined}>
       <button type="button" className={`${onLine} cursor-pointer text-left hover:text-ink-2`} title="Show it in the doc" onClick={onShow}>
         {suggestion && <b className="font-medium uppercase tracking-[0.06em] text-ink-2">Suggestion</b>}
         {suggestion ? ` · ${where}` : `on ${where}`}
@@ -94,8 +94,8 @@ function Thread({ thread: t, where, busy, can, actions, onShow }: {
       {!!t.replies?.length && (
         <div className="ml-[9px] grid gap-1.5 border-l border-line-strong pl-2.5">
           {t.replies.map((r) => (
-            <div key={r.id} className="grid gap-1.5">
-              <Who who={r.author} />
+            <div key={r.id} className="grid gap-1.5" data-from-supervisor={r.from_supervisor || undefined}>
+              <Who who={r.from_supervisor ? t.author : r.author} supervisor={r.from_supervisor} />
               <span className="whitespace-pre-wrap break-words">{r.text}</span>
             </div>
           ))}

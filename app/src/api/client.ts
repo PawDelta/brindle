@@ -1791,8 +1791,8 @@ export class DaemonClient {
 
   /* The design doc's writes (brindle/plan_docs.py). Each names the revision on screen where the
      engine checks it (a newer one is a 409) and answers with the plan as it is now. */
-  commentPlan(id: string, rev: number, anchor: PlanAnchor, text: string) {
-    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/comments`, { rev, anchor, text });
+  commentPlan(id: string, rev: number, anchor: PlanAnchor, text: string, question = false) {
+    return this.post<Plan>(`/plans/${encodeURIComponent(id)}/comments`, { rev, anchor, text, ...(question ? { question } : {}) });
   }
 
   replyPlan(id: string, thread: number, text: string) {

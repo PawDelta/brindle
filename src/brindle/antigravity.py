@@ -426,6 +426,12 @@ def pre_tool_decision(db, agent_id: str | None, payload: object, strict: bool = 
     ws = db.get_workspace(agent.workspace_id) if agent else None
     if ws is None or not isinstance(payload, dict):
         return output(None)
+    if agent.mode == "doc_question":
+        from brindle.pro import doc_questions
+
+        req = permissions.from_agy(payload, worktree=ws.path, repo_root=ws.repo_root, agent=agent.id)
+        allowed = req is not None and doc_questions.tool_allowed(agent, req.tool)
+        return {"decision": "allow" if allowed else "deny", "reason": "This session only answers its design question."}
     cfg = load_repo_config(ws.repo_root)
     if cfg.permission_policy != "on" and not strict:
         return output(None)

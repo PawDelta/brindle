@@ -448,7 +448,8 @@ def spawn(
     agent_id = new_id()
     # Headless is a Claude Code mode; other CLIs ignore the profile field.
     # brindle's own loop (native) has no TUI at all, so it always runs that way.
-    headless = bool(profile.headless and provider.name == "claude") or provider.name == "native"
+    headless = (bool(profile.headless and provider.name == "claude") or provider.name == "native") \
+        and mode != "doc_question"
 
     # Stored as the agent's task: the raw text for a handoff/assign worker (so
     # a reviewer reading it later isn't given WORKER_FOOTER or the /goal
@@ -503,6 +504,10 @@ def spawn(
     if why:
         raise AgentError(why)
     db.add_agent(agent)
+    if agent.parent_id is None and agent.profile == SUPERVISOR:
+        from brindle.pro import doc_questions
+
+        doc_questions.remember_session(db, agent)
     if session_root and mode in ("handoff", "assign"):
         # Background launches can overlap after admission: reserve a milestone
         # before another process looks for an unclaimed one in this session.
@@ -669,6 +674,12 @@ def _profile_for(db: DB, agent: Agent, ws: Workspace, m=_UNREAD):
     from brindle.profiles import load_rule_packs, rules_prompt
 
     profile = guardrails.effective(load_profile(agent.profile, ws.repo_root))
+    if agent.mode == "doc_question":
+        return replace(profile, provider=agent.provider, permission_mode="plan", headless=False,
+                       strict_mcp=True, add_dirs=[], read_dirs=[], allowed_tools=[],
+                       prompt="Answer only the supplied design question using reply_doc_question. "
+                       "This session is read-only and scoped to that document. Do not build, "
+                       "edit, delegate, or request broader permissions.")
     if agent.profile == SUPERVISOR and agent.mode == "interactive":
         profile = _with_supervisor_choice(profile, agent.provider, ws.repo_root)
     profile = _with_kind_overrides(db, profile, agent, ws.repo_root)

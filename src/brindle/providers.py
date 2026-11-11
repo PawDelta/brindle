@@ -257,6 +257,8 @@ def _codex_sandbox(ctx: LaunchContext) -> list[str]:
     config files changes."""
     from brindle import codex_hook
 
+    if ctx.mode == "doc_question":
+        return ["--sandbox", "read-only"]
     roots = _codex_writable_roots(ctx)
     plain = ["-c", f"sandbox_workspace_write.writable_roots={json.dumps(roots)}"] if roots else []
     codex_hook.skip_policy(ctx.cwd, None)   # decided afresh each launch: the config may have changed
@@ -1080,6 +1082,8 @@ class ClaudeCode(Provider):
         # keeps the --mcp-config servers (brindle) and ignores all others.
         if p.strict_mcp:
             argv.append("--strict-mcp-config")
+        if ctx.mode == "doc_question":
+            argv += ["--tools", ""]
         if p.setting_sources:
             argv += ["--setting-sources", ",".join(p.setting_sources)]
         if p.effort:
@@ -2133,7 +2137,7 @@ class Antigravity(Provider):
             # agy has no mode that refuses instead of prompting, so under
             # dontAsk (nobody watches, e.g. a reviewer) brindle's hook decides
             # every call, as under agy_approvals "brindle" (unset, for workers).
-            strict = ctx.profile.permission_mode == "dontAsk" or antigravity.strict_on(ctx.cwd, ctx.mode)
+            strict = ctx.mode == "doc_question" or ctx.profile.permission_mode == "dontAsk" or antigravity.strict_on(ctx.cwd, ctx.mode)
             antigravity.install(ctx.cwd, permission_policy=policy is not None, strict=strict)
             antigravity.sync_for_launch(ctx.cwd, policy)
         argv = [antigravity.binary()]
