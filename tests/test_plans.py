@@ -440,8 +440,13 @@ def test_approval_stays_with_the_goal_the_design_was_shown_for(db, session, monk
     assert [i for i in inbox.items(db, None) if i.kind == "plan_offer"]
 
 
+@pytest.mark.parametrize("delivered", [
+    False,
+    pytest.param(True, marks=pytest.mark.variant(
+        "a delivery that succeeds after the offer opened must release the held worker")),
+])
 @pytest.mark.variant("review: a delivery that fails after a goal claimed the approval must still undo the answer")
-def test_failed_answer_delivery_leaves_no_approval_behind(db, session, monkeypatch):
+def test_failed_answer_delivery_leaves_no_approval_behind(delivered, db, session, monkeypatch):
     from brindle import autopilot, visuals
 
     boss, started = session
@@ -453,10 +458,16 @@ def test_failed_answer_delivery_leaves_no_approval_behind(db, session, monkeypat
                             [{"id": "build", "label": "Build", "approves": True}, {"id": "back", "label": "Back"}])
 
     def fail(*a, **k):      # a big goal and an assign arrive while the answer is being delivered
+        monkeypatch.setattr(agents, "send_message", lambda *a, **k: None)   # starting a task also messages
         mcp_server.set_goal("Org presets", [{"title": f"M{i}", "check": "true"} for i in range(4)])
         asyncio.run(mcp_server.assign("developer", "build the preset schema"))
-        raise RuntimeError("not delivered")
+        if not delivered:
+            raise RuntimeError("not delivered")
     monkeypatch.setattr(agents, "send_message", fail)
+    if delivered:
+        visuals.answer(db, shown["id"], 1, option="build")
+        assert plans.holding(db, "boss") is None and started == ["build the preset schema"]
+        return
     with pytest.raises(RuntimeError):
         visuals.answer(db, shown["id"], 1, option="build")
     assert visuals.get(db, shown["id"])["answer"] is None

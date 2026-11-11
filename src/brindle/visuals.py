@@ -454,9 +454,28 @@ def answer(db: DB, visual_id: str, rev: Any, option: Any = None, note: Any = Non
         # Only a kept copy of this same revision takes the answer: a copy of
         # an earlier revision keeps what it was saved with until Keep again.
         c.execute("UPDATE kept_visuals SET answer=? WHERE id=? AND rev=?", (record, v["id"], rev))
+    _settle_offer_for_approval(db, v["root_id"])
     bus.publish(db, "visual.answered", repo_root=v["repo_root"], root_id=v["root_id"], visual=v["id"],
                 rev=rev, option=option)
     return get(db, v["id"])
+
+
+def _settle_offer_for_approval(db: DB, root_id: str) -> None:
+    """A goal's planning offer opened while its approving answer was still
+    being delivered is settled now and its queued tasks released. Only an
+    unanswered offer: an accepted one, a plan or a review hold stays."""
+    from brindle import plans, tasks
+
+    ap = db.get_autopilot(root_id)
+    if ap is None or not ap.goal or not ap.plan_offer or not ap.plan_offer.startswith(plans.OFFER_OPEN) \
+            or not has_approved_design(db, root_id, ap.goal):
+        return
+    with db.tx() as c:
+        settled = c.execute("UPDATE goal_doc_requests SET offer=? WHERE root_id=? AND offer=?",
+                            (plans.OFFER_PLANNED, root_id, ap.plan_offer)).rowcount == 1
+    if settled:
+        bus.publish_agent(db, "autopilot.goal", root_id)
+        tasks.on_resumed(db, root_id, why="the person's approval of the design")
 
 
 def claim_approvals(db: DB, root_id: str, goal: str) -> None:
