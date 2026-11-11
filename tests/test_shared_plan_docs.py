@@ -76,12 +76,14 @@ class Library:
     def comment(self, form, headers):
         if form["rev"] != self.rev:
             return 409, {"error": "stale", "rev": self.rev}
-        item = {"id": self.next_id(), "author": "user_1", "text": form["text"], "at": 9.0}
+        item = {"id": self.next_id(), "author": "user_1", "text": form["text"], "at": 9.0,
+                "from_supervisor": form.get("from_supervisor", False)}
         if "parent" in form:
             next(t for t in self.threads if t["id"] == form["parent"])["replies"].append(item)
         else:
             self.threads.append({**item, "kind": "comment", "rev": form["rev"], "status": "open", "replies": [],
-                                 "anchor": {**form["anchor"], "state": "current"}})
+                                 "anchor": {**form["anchor"], "state": "current"},
+                                 "question": form.get("question", False)})
         return self.answer()
 
     def suggest(self, form, headers):
@@ -176,6 +178,223 @@ def parts(db, session, tmp_path, backend):
 
 def sent(backend, key):
     return [form for k, form, _ in backend.calls if k == key]
+
+
+def test_ask_the_supervisor_routes_to_the_teammates_session(db, parts, monkeypatch):
+    from dataclasses import replace
+    from brindle.pro import doc_questions as dq
+
+    pid, lib, net = parts
+    sd.share(db, pid, TEAM, **net)
+    boss = db.get_agent("boss")
+    own = replace(boss, id="my-supervisor", provider="codex")
+    db.add_agent(own)
+    dq.remember_session(db, own, owner="user_1")
+    dq.remember_session(db, boss, owner="author")
+    lib.author = "author"
+    lib.comment({"rev": 1, "anchor": {"kind": "section", "section": "summary"},
+                 "text": "Why these workers?", "question": True}, {})
+    repo = db.get_workspace(own.workspace_id).repo_root
+    first = dq.dispatch(db, DOC, 1, repo_root=repo, **net)
+    assert first["agent_id"] == own.id
+    assert dq.dispatch(db, DOC, 1, repo_root=repo, **net) == first
+    assert db.pending_count(own.id) == 1 and not messages(db)
+    with pytest.raises(ServiceError):
+        dq.reply(db, boss, DOC, 1, "Not my question.", **net)
+    dq.reply(db, own, DOC, 1, "They keep execution on your machines.", **net)
+    assert lib.threads[0]["replies"][0]["from_supervisor"] is True
+    assert lib.threads[0]["replies"][0]["author"] == "user_1"
+
+
+@pytest.mark.parametrize("provider,failed", [
+    ("codex", False), ("claude", False), ("antigravity", False), ("opencode", False),
+    (None, False), ("claude", True), ("claude", "blocked"),
+])
+def test_ask_the_supervisor_without_a_session(db, parts, monkeypatch, provider, failed):
+    from brindle import agents, antigravity, codex_hook, mcp_server, opencode, preflight, provider_homes, providers
+    from brindle.pro import doc_questions as dq
+    from brindle.service import sessions
+
+    pid, lib, net = parts
+    sd.share(db, pid, TEAM, **net)
+    lib.author = "author"
+    lib.comment({"rev": 1, "anchor": {"kind": "section", "section": "summary"},
+                 "text": "Why these workers?", "question": True}, {})
+    monkeypatch.setattr(sessions, "default_provider", lambda repo: provider)
+    monkeypatch.setattr(agents, "model_problem", lambda *a, **kw: None)
+    monkeypatch.setattr(preflight, "turned_off", lambda *a: None)
+    monkeypatch.setattr(provider_homes, "decide", lambda *a: "my-provider-home")
+    if provider == "codex":
+        monkeypatch.setattr(providers, "_codex_layers", lambda cwd: [])
+        monkeypatch.setattr(codex_hook, "hook_command", lambda: "brindle _hook codex-permission-request")
+        monkeypatch.setattr(codex_hook, "status", lambda *a: codex_hook.TRUSTED)
+        monkeypatch.setattr(codex_hook, "ensure", lambda **kw: codex_hook.TRUSTED)
+        monkeypatch.setattr(codex_hook, "policy_on", lambda cwd: False)
+    launches = []
+
+    def launch(db_, a, ws, **kw):
+        launches.append((a, ws))
+        profile = agents._profile_for(db_, a, ws)
+        assert profile.permission_mode == "plan" and profile.strict_mcp and not profile.add_dirs
+        if a.provider == "codex":
+            import json
+            import tomllib
+
+            ctx = providers.LaunchContext(a.id, profile, None, cwd=ws.path, mode=a.mode)
+            command = providers.get_provider("codex").command(ctx)
+            flags = dict(arg.split("=", 1) for arg in command if arg.startswith(("default_permissions=", "permissions.")))
+            name = json.loads(flags["default_permissions"])
+            assert json.loads(flags[f"permissions.{name}.extends"]) == ":read-only"
+            files = tomllib.loads(f"t = {flags[f'permissions.{name}.filesystem']}")["t"]
+            assert files["~/.aws"] == "deny" and "write" not in files.values()
+            assert codex_hook.config_flags()[1] in command and codex_hook.config_flags()[3] in command
+        elif a.provider == "claude":
+            ctx = providers.LaunchContext(a.id, profile, None, cwd=ws.path, mode=a.mode)
+            command = providers.get_provider("claude").command(ctx)
+            assert command[command.index("--tools") + 1] == ""
+        elif a.provider == "antigravity":
+            assert antigravity.pre_tool_decision(db_, a.id, {"toolCall": {"name": "write_to_file"}})["decision"] == "deny"
+            assert antigravity.pre_tool_decision(db_, a.id, {"toolCall": {"name": "call_mcp_tool", "args": {
+                "ServerName": "brindle", "ToolName": "reply_doc_question"}}})["decision"] == "allow"
+        elif a.provider == "opencode":
+            ctx = providers.LaunchContext(a.id, profile, None, cwd=ws.path, mode=a.mode)
+            assert opencode.config(ctx, opencode.launch_for(profile, ws.path))["permission"]["*"] == "deny"
+        if failed is True:
+            raise RuntimeError("private credential must never reach the thread")
+        db_.update_agent(a.id, headless=1)
+        db_.set_status(a.id, "idle")
+        if failed == "blocked":
+            db_.conn.execute("INSERT INTO startup_prompts (agent_id, pane, launched_at) VALUES (?,'pane',1)", (a.id,))
+
+    monkeypatch.setattr(agents, "_launch", launch)
+    got = dq.dispatch(db, DOC, 1, **net)
+    assert not messages(db)
+    if provider and not failed:
+        a, ws = launches[0]
+        assert got["agent_id"] == a.id
+        assert a.mode == "doc_question" and a.provider == provider and a.config_home == "my-provider-home"
+        assert ws.path != db.get_workspace("ws1").path
+        if provider == "codex":
+            from dataclasses import replace
+            from brindle import config
+
+            cfg = config.load_repo_config(ws.repo_root)
+            # Stock supervisor allowances and saved rules cannot grant this
+            # helper shell, credential reads, edits or another MCP's tools.
+            for policy in ("on", "off"):
+                monkeypatch.setattr(config, "load_repo_config", lambda *args, **kwargs: replace(cfg, permission_policy=policy))
+                for payload in (
+                    {"tool_name": "Bash", "tool_input": {"command": "git add ."}, "cwd": ws.path},
+                    {"tool_name": "Bash", "tool_input": {"command": "cat ~/.aws/credentials"}},
+                    {"tool_name": "apply_patch", "tool_input": {"command": "*** Begin Patch\n*** Add File: x\n+x\n*** End Patch"}},
+                    {"tool_name": "write_stdin", "tool_input": {"chars": "git add .\n"}},
+                    {"tool_name": "mcp__other__write"}, {},
+                ):
+                    answer = agents.permission_request_decision(db, a, payload, provider="codex")
+                    assert answer["hookSpecificOutput"]["decision"]["behavior"] == "deny"
+                    assert agents.codex_pre_tool_decision(db, a, payload)["hookSpecificOutput"]["permissionDecision"] == "deny"
+                reply = {"tool_name": "mcp__brindle__reply_doc_question"}
+                assert agents.codex_pre_tool_decision(db, a, reply) is None
+                assert agents.permission_request_decision(db, a, reply, provider="codex")["hookSpecificOutput"]["decision"]["behavior"] == "allow"
+
+            ctx = providers.LaunchContext(a.id, agents._profile_for(db, a, ws), None, cwd=ws.path, mode=a.mode)
+            with monkeypatch.context() as guard:
+                guard.setattr(codex_hook, "status", lambda *a: codex_hook.REMOVED)
+                with pytest.raises(codex_hook.CodexHookError):
+                    providers.get_provider("codex").command(ctx)
+            with monkeypatch.context() as guard:
+                guard.setattr(codex_hook, "ensure", lambda **kw: codex_hook.MOVED)
+                with pytest.raises(codex_hook.CodexHookError):
+                    providers.get_provider("codex").command(ctx)
+            with monkeypatch.context() as guard:
+                guard.setattr(providers, "_codex_layers", lambda cwd: [("user", {"sandbox_mode": "workspace-write"})])
+                with pytest.raises(providers.CodexSandboxRefused):
+                    providers.get_provider("codex").command(ctx)
+        assert dq.dispatch(db, DOC, 1, **net) == got and len(launches) == 1
+        monkeypatch.setattr(mcp_server, "_calling_agent", lambda: a)
+        with pytest.raises(mcp_server.ToolError):
+            asyncio.run(mcp_server.mcp.call_tool("assign", {"task": "change the repo"}))
+        dq.reply(db, db.get_agent(a.id), DOC, 1, "An answer.", **net)
+        assert lib.threads[0]["replies"][0]["from_supervisor"]
+        db.delete_agent(a.id)
+    else:
+        assert got["state"] == "unavailable"
+        assert bool(launches) == bool(failed)
+        assert lib.threads[0]["replies"]
+        assert "private credential" not in str(lib.threads)
+
+
+def test_ask_the_supervisor_author_gets_immediate_answer_and_questions_are_not_feedback(db, parts, monkeypatch):
+    import json
+    from brindle.daemon.routes_visuals import plan_comment
+
+    pid, lib, net = parts
+    sd.share(db, pid, TEAM, **net)
+    lib.author = "user_1"
+    monkeypatch.setattr(ad, "_session", lambda client=None, store=None: (net["client"], net["store"]))
+    original = sd._require_team
+    monkeypatch.setattr(sd, "_require_team", lambda store: original(net["store"]))
+    response = plan_comment(db, {"id": pid}, {"rev": 1, "anchor": {"kind": "section", "section": "summary"},
+                                             "text": "Why these workers?", "question": True})
+    assert not messages(db)
+
+    async def transport():
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def send(message):
+            if message["type"] == "http.response.body":
+                entered.set()
+                await release.wait()
+
+        task = asyncio.create_task(response({"type": "http"}, None, send))
+        await entered.wait()
+        assert not messages(db)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert not messages(db)
+        # A new request whose body reaches the person releases the dispatch.
+        release.set()
+        await response({"type": "http"}, None, send)
+
+    asyncio.run(transport())
+    got = json.loads(response.body)
+    assert messages(db) and got["threads"][0]["question"]
+    from brindle.pro import doc_questions as dq
+    dq.reply(db, db.get_agent("boss"), DOC, lib.threads[0]["id"], "An answer.", **net)
+    lib.threads.append({"id": 99, "kind": "comment", "rev": 1, "author": "teammate", "question": True,
+                        "text": "Teammate private question", "status": "open", "replies": [],
+                        "anchor": {"kind": "section", "section": "summary"}})
+    lib.reviewers = [{"sub": "teammate", "required": True}]
+    lib.sign_offs = [{"sub": "teammate", "rev": 1, "at": 1.0}]
+    before = messages(db)
+    sd.sync(db, pid, **net)
+    assert messages(db) == before
+    assert plan_docs.pending(db, plans.get(db, pid)) == ([], [], [])
+    threads = plans.to_dto(db, plans.get(db, pid))["threads"]
+    assert threads[0]["replies"][0]["from_supervisor"]
+    with pytest.raises(ServiceError):
+        plans.reply(db, db.get_agent("boss"), pid, threads[-1]["id"], "Not mine to answer.")
+    sd.sign_off(db, pid, 1, **net)
+    assert plans.to_dto(db, plans.get(db, pid))["gate"]["state"] == "ready"
+
+
+def test_ask_the_supervisor_on_a_local_doc(db, parts):
+    from brindle.pro import doc_questions as dq
+
+    pid, _, _ = parts
+    tid = plan_docs.comment(db, pid, 1, {"kind": "section", "section": "summary"}, "Why?", question=True)
+    dq.ask_plan(db, pid, tid)
+    assert db.pending_count("boss") == 1
+    before = messages(db)
+    plans.reply(db, db.get_agent("boss"), pid, tid, "To keep execution local.")
+    assert plans.to_dto(db, plans.get(db, pid))["threads"][0]["replies"][0]["from_supervisor"]
+    assert plan_docs.pending(db, plans.get(db, pid)) == ([], [], [])
+    db.set_status("boss", "paused")
+    other = plan_docs.comment(db, pid, 1, {"kind": "section", "section": "summary"}, "More?", question=True)
+    dq.ask_plan(db, pid, other)
+    assert messages(db) == before
+    assert plans.to_dto(db, plans.get(db, pid))["threads"][-1]["replies"][0]["author"] == "system"
 
 
 def test_required_reviewers_share_sign_off_and_build_through_the_daemon_routes(db, parts, monkeypatch):

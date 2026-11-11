@@ -400,7 +400,7 @@ function DesignDoc({ client, plan, visual, mode, writes }: {
     const start = on.kind === "text" ? toPoints(bodyOf(on.section), on.start) : 0;
     const sent = draft.kind === "suggest"
       ? () => client.suggestPlan(plan.id, plan.rev, { section: draft.section, start, before: draft.before, after }, text)
-      : () => client.commentPlan(plan.id, plan.rev, on.kind === "text" ? { ...on, start } : on, text);
+      : () => client.commentPlan(plan.id, plan.rev, on.kind === "text" ? { ...on, start } : on, text, draft.kind === "ask");
     if ((await write(sent)) && alive.current) setDraft(null);
   };
 
@@ -452,8 +452,9 @@ function DesignDoc({ client, plan, visual, mode, writes }: {
   // What the supervisor hasn't had: the person's open threads, and their replies, each of which
   // the engine marks `sent` once a verdict has carried it.
   const proposals = (plan.revisions ?? []).filter((r) => r.author === "supervisor");
-  const myReplies = threads.flatMap((t) => t.replies ?? []).filter((r) => r.author === "person");
-  const pending = threads.some((t) => t.author === "person" && t.status === "open" && !t.sent) || myReplies.some((r) => !r.sent);
+  const feedback = threads.filter((t) => !t.question);
+  const myReplies = feedback.flatMap((t) => t.replies ?? []).filter((r) => r.author === "person");
+  const pending = feedback.some((t) => t.author === "person" && t.status === "open" && !t.sent) || myReplies.some((r) => !r.sent);
   const lastProposal = Math.max(0, ...proposals.map((r) => r.rev));
   const edited = (plan.revisions ?? []).some((r) => r.author === "person" && r.rev > lastProposal);
   const differs = plan.decisions.some((d) => (drafted(d) ?? d.confirmed ?? d.mine) !== d.mine);
