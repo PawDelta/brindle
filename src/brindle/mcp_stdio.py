@@ -36,6 +36,9 @@ import os
 import select
 import sys
 import tempfile
+import threading
+import time
+import traceback
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
@@ -89,6 +92,68 @@ def _settle(request_id, written: bool) -> None:
 def _settle_all() -> None:
     for request_id in list(_after):
         _settle(request_id, False)
+
+
+STALL_AFTER = 120.0     # seconds a tools/call may go unanswered before it's logged
+_STALL_POLL = 10.0
+
+
+class StallWatchdog:
+    """A daemon thread that records one debug-log entry per tools/call left
+    unanswered past ``after`` seconds: the tool, its age, every thread's stack
+    and the connection's state. It never touches the event loop, and nothing
+    it does can raise into serving. ``clock`` is injectable for tests."""
+
+    def __init__(self, conn: Connection, *, after: float = STALL_AFTER, poll: float = _STALL_POLL,
+                 clock: Callable[[], float] = time.monotonic) -> None:
+        self._conn, self._after, self._poll, self._clock = conn, after, poll, clock
+        self._reported: set = set()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        self._thread = threading.Thread(target=self._run, name="brindle-mcp-watchdog", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def _run(self) -> None:
+        while not self._stop.wait(self._poll):
+            self.check()
+
+    def check(self) -> int:
+        """Record each newly stalled call; how many were recorded."""
+        try:
+            now = self._clock()
+            pending = list(self._conn._pending.items())
+            self._reported &= {rid for rid, _ in pending}
+            stalled = [(rid, tool, now - started) for rid, (tool, started) in pending
+                       if now - started >= self._after and rid not in self._reported]
+            if not stalled:
+                return 0
+            from brindle import debuglog
+
+            if not debuglog.enabled():
+                return 0
+            state = self._conn.state()
+            stacks = _thread_stacks()
+            done = 0
+            for rid, tool, age in stalled:
+                self._reported.add(rid)
+                done += bool(debuglog.record(
+                    "mcp", "warning", f"tools/call {tool} unanswered for {age:.0f}s",
+                    {"tool": tool, "request_id": str(rid), "age_s": round(age, 1),
+                     "connection": state, "threads": stacks}))
+            return done
+        except Exception:  # noqa: BLE001 - a watchdog must never break serving
+            return 0
+
+
+def _thread_stacks() -> dict:
+    names = {t.ident: t.name for t in threading.enumerate()}
+    return {f"{names.get(ident, '?')}:{ident}": "".join(traceback.format_stack(frame))
+            for ident, frame in sys._current_frames().items()}
 
 
 @dataclass
@@ -169,6 +234,14 @@ class Connection:
         self._hold_until = 0.0          # when held requests stop waiting for the hand over
         self._deferred = False          # held requests outwaited the hold: reload once idle
         self.replaced = False
+        self._pending: dict = {}        # tools/call request id -> (tool name, monotonic start)
+
+    def state(self) -> dict:
+        """A read-only snapshot of the connection, for the stall watchdog."""
+        return {"idle": self._idle.is_set(), "in_flight": len(self._in_flight),
+                "deferred_reload": self._deferred,
+                "held_for_reload": self._hold_until > time.monotonic(),    # anyio's clock is the loop's monotonic
+                "writer_busy": not self._wrote.is_set(), "reloaded": self.reloaded}
 
     def wake(self) -> None:
         """Check for a reload now, without waiting for the client's next request."""
@@ -181,6 +254,8 @@ class Connection:
         read_send, read_recv = anyio.create_memory_object_stream(0)
         write_send, write_recv = anyio.create_memory_object_stream(0)
         _serving += 1
+        watchdog = StallWatchdog(self)
+        watchdog.start()
         try:
             async with anyio.create_task_group() as tg:
                 tg.start_soon(self._write_all, write_recv)
@@ -191,6 +266,7 @@ class Connection:
                 if self.replaced:
                     tg.cancel_scope.cancel()
         finally:
+            watchdog.stop()
             _serving -= 1
             if not _serving:
                 _settle_all()   # whatever is still unwritten never will be
@@ -322,6 +398,8 @@ class Connection:
             else:
                 self._in_flight.add(message.id)
                 self._idle = anyio.Event()
+                if message.method == "tools/call":
+                    self._pending[message.id] = (str((message.params or {}).get("name", "?")), time.monotonic())
             # A request the client cancelled is never answered: it ends here.
             metadata = ServerMessageMetadata(on_request_unanswered=lambda rid=message.id: self._unanswered(rid))
         elif isinstance(message, types.JSONRPCNotification) and message.method == "notifications/initialized":
@@ -378,6 +456,7 @@ class Connection:
 
     async def _settled(self, request_id) -> None:
         self._in_flight.discard(request_id)
+        self._pending.pop(request_id, None)
         self._listens.pop(request_id, None)     # a stream that ended isn't handed over
         self._acked.discard(request_id)
         if not self._in_flight:
