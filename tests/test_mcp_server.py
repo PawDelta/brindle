@@ -39,10 +39,11 @@ class _FakeConnection:
                 return out
 
 
-@pytest.mark.parametrize("trouble", ["setting unreadable", "notice raised"])
+@pytest.mark.parametrize("trouble", ["config.json mid-write", "notice raised"])
 def test_a_tools_changed_watch_that_fails_never_stops_the_server(monkeypatch, trouble):
     """0.6.3's visuals watch shares _serve's task group with the connection:
-    a look at the setting that raised (config.json mid-edit), or a
+    a look at the setting that raised (config.json caught mid-write, as a
+    truncate-then-write left it for a reader), or a
     tools/list_changed that raised, cancelled the connection, so the next
     tools/call was never answered. Now the call is answered, and a notice
     that failed is sent on the next look."""
@@ -80,9 +81,9 @@ def test_a_tools_changed_watch_that_fails_never_stops_the_server(monkeypatch, tr
         await conn.send(method="notifications/initialized")
         await conn.send(id=1, method="tools/list")
         await conn.answer(1)
-        if trouble == "setting unreadable":
+        if trouble == "config.json mid-write":
             config.user_config_path().parent.mkdir(parents=True, exist_ok=True)
-            config.user_config_path().write_text("{not json")
+            config.user_config_path().write_text('{\n  "visuals_enabled": "o')    # cut off mid-write
             await tick()
         else:
             config.set_user("visuals_enabled", "off")
