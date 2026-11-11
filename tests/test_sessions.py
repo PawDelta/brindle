@@ -371,7 +371,11 @@ class _NoClientTmux:
         return subprocess.CompletedProcess(args, code, out, "")
 
 
-@pytest.mark.parametrize("session_survives", [True, False])
+@pytest.mark.parametrize("session_survives", [
+    True,
+    pytest.param(False, marks=pytest.mark.variant(
+        "the update also takes the tmux session down: the windows must be rebuilt at the remembered size, not tmux's 80x24")),
+])
 def test_update_relaunch_recovered_windows_start_at_the_size_the_app_left_them(db, root, monkeypatch, session_survives):
     # The daemon has no terminal and no view is attached yet when it recovers, so each
     # window came back at tmux's 80x24 (a 49-column chat beside the sidebar) and the

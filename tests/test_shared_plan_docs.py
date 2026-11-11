@@ -210,7 +210,10 @@ def test_ask_the_supervisor_routes_to_the_teammates_session(db, parts, monkeypat
 
 
 @pytest.mark.parametrize("provider,failed", [
-    ("codex", False), ("claude", False), ("antigravity", False), ("opencode", False),
+    ("codex", False),
+    pytest.param("claude", False, marks=pytest.mark.variant(
+        "claude is the default provider: its resume path must be taken, not another provider's")),
+    ("antigravity", False), ("opencode", False),
     (None, False), ("claude", True), ("claude", "blocked"),
 ])
 def test_ask_the_supervisor_without_a_session(db, parts, monkeypatch, provider, failed):
