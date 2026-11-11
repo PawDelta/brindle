@@ -4,7 +4,7 @@
    and roles they can name, the designs each covers) and saved as the whole list at the version read
    (PUT /v1/review-policies). Nothing is read until the person opens it. The Library decides who may. */
 
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { DaemonError, type DaemonClient, type DraftImpact, type LibraryPerson, type ReviewPoliciesState, type ReviewPolicyRule } from "../../api/client";
 import { LoadingButton } from "../../components/LoadingButton";
 import { alert, button, field, main, notice, quiet } from "../../components/ui";
@@ -90,6 +90,12 @@ function Policies({ client }: { client: DaemonClient }) {
   const [busy, setBusy] = useState(false);
   /* Another admin saved (or the org changed) since this was read: saving waits for a reload. */
   const [stale, setStale] = useState(false);
+  /* The rule whose removal is awaiting confirmation in its row, bound to the org it was opened under, and
+     what the list without it would cover (result null when that count failed). */
+  const [removing, setRemoving] = useState<{ id: string; org: string; opening: number } | null>(null);
+  /* Each opening of a removal gets its own number, so a count from an earlier opening never answers this one. */
+  const openings = useRef(0);
+  const [removeImpact, setRemoveImpact] = useState<{ key: string; result: DraftImpact | null } | null>(null);
 
   /* Reading again keeps the draft, unless it was written for another org's rules. */
   /* Reads can overlap (Reload while a save's reload is out): the newest one started wins and an older
@@ -104,7 +110,7 @@ function Policies({ client }: { client: DaemonClient }) {
       if (mine !== reads.current.latest) return;
       const another = reads.current.org !== null && reads.current.org !== read.org_id;
       reads.current.org = read.org_id;
-      if (another) setDraft(blank);
+      if (another) { setDraft(blank); setRemoving(null); setRemoveImpact(null); }
       setState(read);
       setPeople([...(directory.me ? [{ sub: directory.me, email: "You" }] : []), ...directory.people]);
       setStale(false);
@@ -160,6 +166,20 @@ function Policies({ client }: { client: DaemonClient }) {
   const shownKey = state && drafted ? JSON.stringify([state.org_id, [drafted]]) : null;
   const shown = impact && impact.key === shownKey ? impact.result : null;
 
+  /* Removing a rule asks for the whole list without it, of the org loaded, once per confirmation. */
+  const removeKey = state && removing && removing.org === state.org_id
+    ? JSON.stringify([state.org_id, removing.id, removing.opening, state.policies.filter((r) => r.id !== removing.id)]) : null;
+  useEffect(() => {
+    if (!state || !removing || !removeKey) return;
+    let live = true;
+    client.reviewPolicyImpact(state.org_id, state.policies.filter((r) => r.id !== removing.id)).then((result) => { if (live) setRemoveImpact({ key: removeKey, result }); }, () => { if (live) setRemoveImpact({ key: removeKey, result: null }); });
+    return () => { live = false; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- removeKey is the whole of the request
+  }, [client, removeKey]);
+  /* Null while the count is pending or failed: Remove is only offered once the count is shown. */
+  const removalAnswer = removeImpact && removeImpact.key === removeKey ? removeImpact : null;
+  const removal = removalAnswer?.result ?? null;
+
   if (!state) {
     return (
       <section className="space-y-s2" aria-label="Review policies">
@@ -180,14 +200,14 @@ function Policies({ client }: { client: DaemonClient }) {
     approvals: rule.approvals, needs: `${rule.needs.kind}:${rule.needs.id}`, note: rule.note ?? "",
   });
 
-  const save = async () => {
-    const list = candidate(draft);
-    if (!list || busy) return;
+  /* The whole list, saved at the version read. */
+  const write = async (list: ReviewPolicyRule[], saved: () => void) => {
+    if (busy) return;
     setBusy(true);
     setError(null);
     try {
       await client.saveReviewPolicies(state.org_id, state.version, list);
-      setDraft(blank);
+      saved();
       await load();
     } catch (failure) {
       // A 409 is another admin's save, or another active org: nothing was written, and the draft stays
@@ -199,6 +219,18 @@ function Policies({ client }: { client: DaemonClient }) {
     }
   };
 
+  const save = async () => {
+    const list = candidate(draft);
+    if (!list) return;
+    await write(list, () => setDraft(blank));
+  };
+
+  /* Only a removal whose count is shown, opened under the org still loaded, can be saved. */
+  const remove = (rule: ReviewPolicyRule) => {
+    if (!removal || removing?.id !== rule.id || removing.org !== state.org_id) return;
+    void write(rules.filter((r) => r.id !== rule.id), () => setRemoving(null));
+  };
+
   return (
     <section className="space-y-s3" aria-label="Review policies" data-testid="review-policies">
       <div className="space-y-1">
@@ -206,18 +238,39 @@ function Policies({ client }: { client: DaemonClient }) {
         <p className="text-sm text-ink-2">Who must approve a design before brindle builds it. Members can add reviewers on top, but can't remove these. A policy is checked against the files a design says it will change, and again on every revision.</p>
       </div>
       <div role="table" aria-label="Policies">
-        <div role="row" className="grid grid-cols-[minmax(0,1.35fr)_minmax(0,1.25fr)_minmax(0,.9fr)_64px] gap-s2 pb-1 text-[11px] font-medium uppercase tracking-wider text-ink-3">
+        <div role="row" className="grid grid-cols-[minmax(0,1.35fr)_minmax(0,1.25fr)_minmax(0,.9fr)_max-content] gap-s2 pb-1 text-[11px] font-medium uppercase tracking-wider text-ink-3">
           <span role="columnheader">When a design</span><span role="columnheader">It needs</span><span role="columnheader">Applies now</span><span role="columnheader" />
         </div>
         {rules.map((rule) => {
           const n = covered(rule.id)?.count ?? 0;
           return (
-            <div key={rule.id} role="row" data-testid={`review-policy-${rule.id}`} data-count={n} className="grid grid-cols-[minmax(0,1.35fr)_minmax(0,1.25fr)_minmax(0,.9fr)_64px] items-center gap-s2 border-t border-line py-s1 text-sm text-ink-2">
-              <WhenCell rule={rule} />
-              <NeedsCell rule={rule} />
-              <span>{n === 0 ? "None right now" : `${n} design${n === 1 ? "" : "s"} in review`}</span>
-              <button type="button" className={`${quiet} justify-self-end`} aria-label={`Edit ${rule.name}`} onClick={() => edit(rule)}>Edit</button>
-            </div>
+            <Fragment key={rule.id}>
+              <div role="row" data-testid={`review-policy-${rule.id}`} data-count={n} className="grid grid-cols-[minmax(0,1.35fr)_minmax(0,1.25fr)_minmax(0,.9fr)_max-content] items-center gap-s2 border-t border-line py-s1 text-sm text-ink-2">
+                <WhenCell rule={rule} />
+                <NeedsCell rule={rule} />
+                <span>{n === 0 ? "None right now" : `${n} design${n === 1 ? "" : "s"} in review`}</span>
+                <span className="flex justify-self-end gap-s1">
+                  <button type="button" className={quiet} aria-label={`Edit ${rule.name}`} onClick={() => edit(rule)}>Edit</button>
+                  <button type="button" className={quiet} aria-label={`Remove ${rule.name}`} onClick={() => setRemoving({ id: rule.id, org: state.org_id, opening: ++openings.current })}>Remove</button>
+                </span>
+              </div>
+              {removing?.id === rule.id && (
+                <div className="space-y-1 border-b border-line pb-s1 text-sm text-ink-2" data-testid={`review-policy-remove-${rule.id}`}>
+                  <p>{`Remove ${rule.name}?`}</p>
+                  {!removalAnswer && <p role="status" className="text-xs text-ink-3">Counting the designs the rest would cover…</p>}
+                  {removalAnswer && !removalAnswer.result && <p role="alert" className={alert}>Couldn't count the designs, so nothing can be removed yet. Keep it, then choose Remove again.</p>}
+                  {removal && (
+                    <p className={notice} data-testid="review-policy-remove-applies" data-count={removal.count} data-truncated={removal.truncated || undefined}>
+                      {`Without it, ${removal.truncated ? "at least " : ""}${removal.count} design${removal.count === 1 ? "" : "s"} in review ${removal.count === 1 ? "is" : "are"} still covered by the policies left`}
+                    </p>
+                  )}
+                  <div className="flex justify-end gap-s1">
+                    <button type="button" className={quiet} onClick={() => setRemoving(null)}>Keep</button>
+                    <button type="button" className={quiet} aria-label={`Confirm remove ${rule.name}`} disabled={!removal || busy || stale} onClick={() => remove(rule)}>Confirm remove</button>
+                  </div>
+                </div>
+              )}
+            </Fragment>
           );
         })}
         {rules.length === 0 && <p className="border-t border-line py-s1 text-sm text-ink-3">No policies yet.</p>}
