@@ -153,6 +153,7 @@ def drift_flag_repo(tmp_path_factory, _repo_template):
     return path
 
 
+@pytest.mark.variant("the boundary: exactly 48 h and 60 files is not drift; read through the goal route the sidebar uses")
 def test_drift_flag_crossings_and_goal_dto(db, drift_flag_repo, tmp_path, told, monkeypatch):
     from starlette.requests import Request
     from brindle.daemon import routes_read
@@ -248,6 +249,7 @@ def test_drift_flag_squash_landing_clears_covered_history_and_rearms(db, drift_f
     assert len(told) == notices + 1
 
 
+@pytest.mark.variant("a conflict in the pipeline's own merge (not session sync) still records a conflict event")
 def test_drift_flag_pipeline_conflict_event(db, repo, monkeypatch):
     from brindle.workspaces import SyncResult
 
