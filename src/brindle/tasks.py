@@ -149,7 +149,11 @@ def _session_changes(db: DB, ws: Workspace, own: set[str],
     try:
         refs = git.ref_shas(ws.repo_root)
         base = git.default_branch(ws.repo_root)
-        base_sha = start or refs.get(git._full_ref(base)) or refs.get(f"refs/remotes/origin/{base}")
+        # Without a dependency-supplied start, workers inherit the caller's
+        # current branch, which may already contain another session's work
+        # even while main is unchanged. Key the diff by that commit too.
+        base_sha = (start or refs.get(git._full_ref(ws.branch))
+                    or refs.get(git._full_ref(base)) or refs.get(f"refs/remotes/origin/{base}"))
         if not base_sha:
             return
         for (root, branch), holder in branches.items():
