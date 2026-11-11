@@ -2193,8 +2193,8 @@ def test_pr_waits_for_approval(db, lead, tmp_path, monkeypatch, passed):
 
 def test_next_session_pr_opens_from_the_same_branch_after_one_merges(db, repo, lead, tmp_path, monkeypatch):
     """A merged session PR stays the session's until its branch has changes of its own beyond it (a
-    sync's clean merge from main doesn't count, a merge resolved with new content does); then the next PR opens from the same branch and the
-    merged one is kept in session_pr_history."""
+    sync's clean merge from main doesn't count, a merge resolved with new content does); then the next PR opens
+    from the same branch, replacing the merged one's row."""
     from brindle.daemon import session_review
 
     sess, first, second = Path(lead.path), "https://github.com/o/r/pull/7", "https://github.com/o/r/pull/8"
@@ -2227,8 +2227,51 @@ def test_next_session_pr_opens_from_the_same_branch_after_one_merges(db, repo, l
     code, reply = _send("POST", "/v1/sessions/lead/pr", {"title": "Next"})
     assert code == 202, reply
     assert readiness() == (True, {"url": second, "unpushed": 0}, ("pr_open", second))
-    assert [tuple(r) for r in db.conn.execute("SELECT url, pushed_sha, merged_at FROM session_pr_history")] == [
-        (first, pushed, 2)]
+
+
+def test_phase_pr_lands_each_phase_at_its_passed_commit_mid_goal(db, repo, lead, tmp_path, monkeypatch):
+    """While a later phase's milestone still fails, brindle lands a completed phase itself: it opens the
+    session PR at the commit the phase passed on, then pushes the next phase's commit to that PR, never
+    the branch's tip and never moving the local branch. A dirty checkout refuses the landing."""
+    from brindle import gates
+    from brindle.config import RepoConfig
+    from brindle.daemon import session_review
+
+    sess, origin, url = Path(lead.path), repo.parent / "origin.git", "https://github.com/o/r/pull/9"
+    calls = tmp_path / "gh-calls"
+    fake = tmp_path / "bin" / "gh"
+    fake.parent.mkdir()
+    fake.write_text(f"#!/bin/sh\necho \"$1 $2\" >> {calls}\necho {url}\n")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake.parent}:{os.environ['PATH']}")
+    monkeypatch.setattr(session_review, "open_pr_for_head", lambda *a, **kw: None)    # GitHub isn't under test
+    monkeypatch.setattr(agents, "_notify_supervisor", lambda *a: None)
+    passing: set[str] = set()
+    monkeypatch.setattr(gates, "run_checked", lambda db, ws, cmd, *a, **kw: (cmd in passing, ""))
+    autopilot.set_goal(db, "lead", "Ship it", [(p, p, None, None, None, p) for p in ("api", "db", "docs", "ui")])
+
+    def land(phase: str, dirty: bool = False) -> tuple:
+        passing.add(phase)
+        autopilot.check_milestones(db, "lead", lead, cfg=RepoConfig(goal_audit=False))
+        tip = _commit(sess, f"after-{phase}.py", "next\n")     # the next phase's work, not yet passed
+        if dirty:
+            (sess / "a.py").write_text("uncommitted\n")
+        routes_actions.land_phase_prs(db)
+        assert sh("git rev-parse HEAD", sess) == tip
+        return (sh("git rev-parse sess", origin), db.conn.execute(
+            "SELECT url, pushed_sha FROM session_prs WHERE root_id = 'lead'").fetchone()), tip
+
+    first = _commit(sess, "a.py", "a\n")
+    assert session_review.reasons(db, *session_review.session(db, "lead"))    # brindle's own Open PR is refused
+    (pushed, pr), tip = land("api")
+    assert (pushed, tuple(pr)) == (first, (url, first))
+    (pushed, pr), tip2 = land("db")
+    assert (pushed, tuple(pr)) == (tip, (url, tip))
+    assert calls.read_text().splitlines() == ["pr create"]       # pushed to the open PR, no second one
+    (pushed, pr), _ = land("docs", dirty=True)
+    assert pushed == tip
+    assert [tuple(r) for r in db.conn.execute("SELECT phase, state FROM phase_prs ORDER BY rowid")] == [
+        ("api", "pushed"), ("db", "pushed"), ("docs", "refused")]
 
 
 def _provider_setup(tmp_path, monkeypatch, onboarded: bool = True) -> tuple:

@@ -719,6 +719,7 @@ def set_goal(db: DB, root_id: str, goal: str,
     with db.tx() as c:
         if ap is None or ap.goal != goal.strip():
             c.execute("DELETE FROM phase_landings WHERE root_id=?", (root_id,))
+            c.execute("DELETE FROM phase_prs WHERE root_id=?", (root_id,))
         # Changed milestones need a fresh audit.
         db.update_autopilot(root_id, goal=goal.strip(), detail=detail, state="running", note=None,
                             auditor_id=None, audit_sha=None, audit_ok=None, **fields)
@@ -1773,12 +1774,25 @@ def record_audit(db: DB, root_id: str, approved: bool, summary: str) -> str:
 # -- progress -----------------------------------------------------------------
 
 
+def phase_commit(ms: list[Milestone], phase: str) -> str | None:
+    """The commit every milestone of ``phase`` checked in the session's own
+    checkout last passed on, or None when they didn't pass on one (a dirty
+    checkout records no commit)."""
+    own = [m for m in ms if m.phase_name == phase and not m.repo]
+    shas = {m.passed_sha for m in own} | {m.checked_sha for m in own}
+    return shas.pop() if len(shas) == 1 and None not in shas else None
+
+
 def phase_landing(db: DB, root_id: str, now: float | None = None, *,
                   newly_passed: bool = False) -> None:
     """Queue a landing once per completed goal phase, or daily after progress.
 
     The claim and inbox message commit together. Unphased progress during
     the cooldown stays pending until a later check or sweep can announce it.
+    A completed phase while later milestones remain is landed by brindle
+    itself (``phase_prs``, routes_actions.land_phase_prs), pinned to the
+    commit its checks passed on; the goal's last one goes to the end-of-goal
+    PR the person opens.
     """
     from brindle import agents
 
@@ -1810,6 +1824,13 @@ def phase_landing(db: DB, root_id: str, now: float | None = None, *,
             subject = (f"Every milestone in phase {phase!r} has passed." if phase
                        else "Milestones have passed since the last landing notice.")
             message = f"[brindle autopilot] {subject} Open or push the session PR now."
+            pin = phase_commit(ms, phase) if phase else None
+            if pin and any(m.status != "passed" for m in ms):
+                c.execute("INSERT OR IGNORE INTO phase_prs (root_id, phase, sha) VALUES (?,?,?)",
+                          (root_id, phase, pin))
+                message = (f"[brindle autopilot] {subject} brindle is landing it: opening the session PR, "
+                           f"or pushing to the open one, at {pin[:12]}, the commit the phase's checks passed "
+                           "on. You're told if it can't.")
             c.execute("INSERT INTO phase_landings (root_id, phase, notified_at, pending) VALUES (?,?,?,0) "
                       "ON CONFLICT(root_id, phase) DO UPDATE SET notified_at=excluded.notified_at, pending=0",
                       (root_id, phase, now))

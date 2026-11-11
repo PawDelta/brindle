@@ -432,6 +432,24 @@ def test_phase_landing_once_per_completed_phase(db, phase_landing_session, monke
         other.conn.close()
 
 
+def test_phase_pr_pins_the_commit_the_phase_passed_on(db, phase_landing_session, monkeypatch):
+    """A completed phase with later milestones left is queued for brindle to land at the commit
+    its checks passed on, however far later checks move its milestones; the goal's last phase isn't."""
+    ws, passing = phase_landing_session
+    head = ["sha1"]
+    monkeypatch.setattr(git, "out", lambda *a: head[0])
+    autopilot.set_goal(db, "boss", "g", [("a", "a", None, None, None, "API"), ("c", "c", None, None, None, "UI")])
+    cfg = RepoConfig(goal_audit=False)
+    passing.add("a")
+    autopilot.check_milestones(db, "boss", ws, cfg=cfg)
+    head[0] = "sha2"                 # the next phase's work lands on the branch
+    autopilot.check_milestones(db, "boss", ws, cfg=cfg)
+    assert db.milestones("boss")[0].passed_sha == "sha2"
+    passing.add("c")
+    autopilot.check_milestones(db, "boss", ws, cfg=cfg)
+    assert [tuple(r) for r in db.conn.execute("SELECT phase, sha, state FROM phase_prs")] == [("API", "sha1", "pending")]
+
+
 def test_phase_landing_unphased_daily_requires_new_pass(db, phase_landing_session, monkeypatch):
     from brindle.db import DB
 

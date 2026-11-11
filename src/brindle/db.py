@@ -175,6 +175,19 @@ CREATE TABLE IF NOT EXISTS phase_landings (
     pending INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (root_id, phase)
 );
+-- A completed goal phase brindle lands itself while later milestones remain
+-- (autopilot.phase_landing; routes_actions.land_phase_prs opens the session PR
+-- or pushes to the open one). sha: the commit the phase's milestone checks
+-- passed on, the one pushed (never the branch's tip). state: pending | pushed |
+-- refused | failed; why: what refused or failed it.
+CREATE TABLE IF NOT EXISTS phase_prs (
+    root_id TEXT NOT NULL REFERENCES autopilot(root_id) ON DELETE CASCADE,
+    phase TEXT NOT NULL,
+    sha TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'pending',
+    why TEXT,
+    PRIMARY KEY (root_id, phase)
+);
 -- Short goal labels live outside the released autopilot table.
 CREATE TABLE IF NOT EXISTS goal_summaries (
     root_id TEXT PRIMARY KEY REFERENCES autopilot(root_id) ON DELETE CASCADE,
@@ -651,17 +664,6 @@ CREATE TABLE IF NOT EXISTS session_pr_merges (
     state TEXT NOT NULL,            -- merging | submitted | failed
     owner TEXT,                    -- unique token whose session-pr-merge marker is held while acting
     error TEXT
-);
--- The session PRs that merged before the branch's next PR replaced them in
--- session_prs (session_review.keep_merged_pr): a branch can have several.
-CREATE TABLE IF NOT EXISTS session_pr_history (
-    root_id TEXT NOT NULL,
-    branch TEXT NOT NULL,
-    url TEXT NOT NULL,
-    pushed_sha TEXT,
-    opened_at REAL NOT NULL,
-    merged_at REAL NOT NULL,
-    PRIMARY KEY (root_id, branch, url)
 );
 -- A session PR adopted from one opened with gh on another branch name: where it really lives,
 -- so a Push of the session branch is refused instead of missing it.
